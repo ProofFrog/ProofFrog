@@ -1,0 +1,24 @@
+import 'Primitives/SymEnc.primitive';
+
+Game Left(SymEnc E) {
+	E.Key k;
+	void Initialize() {
+		k = E.KeyGen();
+	}
+	E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
+	
+		return E.Enc(k, mL);
+	}
+}
+
+Game Right(SymEnc E) {
+	E.Key k;
+	void Initialize() {
+		k = E.KeyGen();
+	}
+	E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
+		return E.Enc(k, mR);
+	}
+}
+
+export (Left, Right) as CPA;

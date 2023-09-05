@@ -1,0 +1,6 @@
+Primitive Hash(int lambda, int outputLen) {
+	int lambda = lambda;
+	int outputLen = outputLen;
+
+	BitString<outputLen> evaluate(BitString<lambda> seed, BitString input);
+}

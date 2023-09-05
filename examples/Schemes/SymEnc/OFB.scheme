@@ -1,0 +1,38 @@
+import 'Primitives/SymEnc.primitive';
+
+Scheme OFB(int lambda, int blocks, PRF F) extends SymEnc {
+	requires F.lambda == lambda && F.in == lambda && F.out == lambda;
+
+	Set Key = BitString<lambda>;
+	Set Message = Array<BitString<lambda>, blocks>;
+	Set Ciphertext = Array<BitString<lambda>, blocks + 1>;
+	PRF F = F;
+
+	Key KeyGen() {
+		Key k <- BitString<lambda>;
+		return k;
+	}
+
+	Ciphertext Enc(Key k, Message m) {
+		Ciphertext c;
+
+		BitString<lambda> r <- BitString<lambda>;
+
+		c[0] = r;
+		for (Int i = 1 to blocks) {
+			r = F.Evaluate(k, r);
+			c[i] = r + m[i-1];
+		}
+		return c;
+	}
+
+	Message Dec(Key k, Ciphertext c) {
+		Array<BitString<lambda>, blocks> m;
+		BitString<lambda> r = c[0];
+		for (Int i = 0 to blocks - 1) {
+			r = F.Evaluate(k, r);
+			m[i] = r + c[i + 1];
+		}
+		return m;
+	}
+}

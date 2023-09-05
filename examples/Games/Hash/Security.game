@@ -1,0 +1,29 @@
+import 'Primitives/Hash.primitive';
+
+Game Real(Hash H) {
+	BitString<H.lambda> seed;
+
+	BitString<H.lambda> Initialize() {
+		seed <- BitString<H.lambda>;
+		return seed;
+	}
+
+	bool Test(BitString x, BitString xPrime) {
+		return x != xPrime && H.evaluate(s, x) == H.evaluate(s, xPrime);
+	}
+}
+
+Game Fake(Hash H) {
+	BitString<H.lambda> seed;
+
+	BitString<H.lambda> Initialize() {
+		seed <- BitString<H.lambda>;
+		return seed;
+	}
+
+	bool Test(BitString x, BitString xPrime) {
+		return false;
+	}
+}
+
+export (Real, Fake) as Security;

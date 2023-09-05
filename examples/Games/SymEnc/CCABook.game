@@ -1,0 +1,49 @@
+import 'Primitives/SymEnc.primitive';
+
+Game Left(SymEnc E) {
+	E.Key k;
+	Set<E.Ciphertext> S;
+
+	void Initialize() {
+		S = {};
+		k = E.KeyGen();
+	}
+
+	E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
+		E.Ciphertext c = E.Enc(k, mL);
+		S = S + c;
+		return c;
+	}
+
+	E.Message? Decrypt(E.Ciphertext c) {
+		if (c in S) {
+			return None;
+		}
+		return E.Dec(k, c);
+	}
+}
+
+Game Right(SymEnc E) {
+	E.Key k;
+	Set<E.Ciphertext> S;
+
+	void Initialize() {
+		S = {};
+		k = E.KeyGen();
+	}
+
+	E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
+		E.Ciphertext c = E.Enc(k, mR);
+		S = S + c;
+		return c;
+	}
+
+	E.Message? Decrypt(E.Ciphertext c) {
+		if (c in S) {
+			return None;
+		}
+		return E.Dec(k, c);
+	}
+}
+
+export (CCABookL, CCABookR) as CCA;

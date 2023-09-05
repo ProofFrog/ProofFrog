@@ -1,0 +1,73 @@
+import 'Primitives/SymEnc.primitive';
+
+Game Left(SymEnc E) {
+	E.Key k;
+	E.Ciphertext cStar;
+
+	E.Ciphertext Enc(E.Message m) {
+		return E.Enc(k, m);
+	}
+
+	E.Message Dec(E.Ciphertext c) {
+		return E.Dec(k, c);
+	}
+
+	E.Message? restrainedDec(E.Ciphertext c) {
+		if (cStar == c) {
+			return None;
+		}
+		return E.Dec(k, c);
+	}
+
+	Phase {
+		void Initialize() {
+			k = E.KeyGen();
+		}
+		oracles: [Enc, Dec];
+	}
+
+	Phase {
+		E.Ciphertext Initialize(E.Message mL, E.message mR) {
+			cStar = E.Enc(mL);
+			return cStar;
+		}
+		oracles: [Enc, restrainedDec];
+	}
+}
+
+Game Right(SymEnc E) {
+	E.Key k;
+	E.Ciphertext cStar;
+
+	E.Ciphertext Enc(E.Message m) {
+		return E.Enc(k, m);
+	}
+
+	E.Message Dec(E.Ciphertext c) {
+		return E.Dec(k, c);
+	}
+
+	E.Message? restrainedDec(E.Ciphertext c) {
+		if (cStar == c) {
+			return None;
+		}
+		return E.Dec(k, c);
+	}
+
+	Phase {
+		void Initialize() {
+			k = E.KeyGen();
+		}
+		oracles: [Enc, Dec];
+	}
+
+	Phase {
+		E.Ciphertext Initialize(E.Message mL, E.message mR) {
+			cStar = E.Enc(mR);
+			return cStar;
+		}
+		oracles: [Enc, restrainedDec];
+	}
+}
+
+export (Left, Right) as CCA;

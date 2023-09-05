@@ -1,6 +1,6 @@
 #!/bin/bash
 
-for primitive in ../Draft4/Primitives/*; do
+for primitive in examples/Primitives/*; do
 	parsedOutput=$(mktemp)
 	parsedOutput2=$(mktemp)
 	trimmedPrimitive=$(mktemp)

@@ -1,0 +1,17 @@
+import 'Primitives/PRG.primitive';
+
+Game Real(PRG G) {
+	BitString<G.lambda + G.stretch> Query() {
+		BitString<G.lambda> s <- BitString<G.Lambda>;
+		return G.evaluate(s);
+	}
+}
+
+Game Random(PRG G) {
+	BitString<G.lambda + G.stretch> Query() {
+		BitString<G.lambda + G.stretch> r <- BitString<G.lambda + G.stretch>;
+		return r;
+	}
+}
+
+export (Real, Random) as Security;

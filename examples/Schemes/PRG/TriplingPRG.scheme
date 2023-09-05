@@ -1,0 +1,17 @@
+import 'Primitives/PRG.primitive';
+
+Scheme TriplingPRG(PRG G) extends PRG {
+	requires G.lambda == G.stretch;
+
+	int lambda = G.lambda;
+	int stretch = 2 * G.lambda;
+
+	BitString<lambda + stretch> evaluate(BitString<lambda> s) {
+		BitString<2 * lambda> result1 = G.evaluate(s);	
+		BitString<lambda> x = result1[0 : lambda];
+		BitString<lambda> y = result1[lambda : 2*lambda];
+		BitString<2 * lambda> result2 = G.evaluate(y);
+
+		return x || result2;
+	}
+}

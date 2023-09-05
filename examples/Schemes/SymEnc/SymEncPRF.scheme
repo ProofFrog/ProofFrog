@@ -1,0 +1,26 @@
+import 'Primitives/SymEnc.primitive';
+import 'Primitives/PRF.primitive';
+
+// Construction 7.4 from book
+
+Scheme SymEncPRF(PRF F) extends SymEnc {
+	Set Key = BitString<F.lambda>;
+	Set Message = BitString<F.out>;
+	Set Ciphertext = BitString<F.lambda> * BitString<F.out>;
+
+	Key KeyGen() {
+		Key k <- BitString<F.lambda>;
+		return k;
+	}
+
+	Ciphertext Enc(Key k, Message m) {
+		BitString<F.lambda> r <- BitString<F.lambda>;
+		BitString<F.out> x = F.evaluate(k, r) + m;
+		return [r, x]; 
+	}
+
+	Message Dec(Key k, Ciphertext c) {
+		Message m = F.evaluate(k, c[0]) + c[1];
+		return m;
+	}
+}

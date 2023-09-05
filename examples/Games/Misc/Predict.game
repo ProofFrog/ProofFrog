@@ -1,0 +1,14 @@
+Game Real(Set S) {
+	bool Predict(S input) {
+		S sampled <- S;
+		return input == sampled;
+	}
+}
+
+Game Fake(Set S) {
+	bool Predict(S input) {
+		return false;
+	}
+}
+
+export (Real, Fake) as Predict;

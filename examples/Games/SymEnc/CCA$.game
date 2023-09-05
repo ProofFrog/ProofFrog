@@ -1,0 +1,49 @@
+import 'Primitives/SymEnc.primitive';
+
+Game Real(SymEnc E) {
+	E.Key k;
+	Set<E.Ciphertext> S;
+
+	void Initialize() {
+		S = {};
+		k = E.KeyGen();
+	}
+
+	E.Ciphertext CTXT(E.Message m) {
+		E.Ciphertext c = E.Enc(k, m);
+		S = S + c;
+		return c;
+	}
+
+	E.Message? Decrypt(E.Ciphertext c) {
+		if (c in S) {
+			return None;
+		}
+		return E.Dec(k, c);
+	}
+}
+
+Game Random(SymEnc E) {
+	E.Key k;
+	Set<E.Ciphertext> S;
+
+	void Initialize() {
+		S = {};
+		k = E.KeyGen();
+	}
+
+	E.Ciphertext CTXT(E.Message m) {
+		E.Ciphertext c <- E.Ciphertext;
+		S = S + c;
+		return c;
+	}
+
+	E.Message? Decrypt(E.Ciphertext c) {
+		if (c in S) {
+			return None;
+		}
+		return E.Dec(k, c);
+	}
+}
+
+export (Real, Random) as CCA$;

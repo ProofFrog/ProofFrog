@@ -1,0 +1,6 @@
+Primitive KeyAgreement(Set KeySpace, Set TranscriptSpace) {
+	Set Key = KeySpace;
+	Set Transcript = TranscriptSpace;
+
+	Transcript * Key Execute();
+}

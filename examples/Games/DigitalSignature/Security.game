@@ -1,0 +1,47 @@
+import 'Primitives/DigitalSignature.primitive';
+
+Game Real(DigitalSignature E) {
+	E.SigningKey sk;
+	E.VerificationKey vk;
+
+	E.VerificationKey Initialize() {
+		E.SigningKey * E.VerificationKey k = E.KeyGen();
+		sk = k[0];
+		vk = k[1];
+		return k[1];
+	}
+
+	E.Signature GetSig(E.Message m) {
+		return E.Sign(sk, m);
+	}
+
+	bool VerifySig(E.Message m, E.Signature s) {
+		return E.Verify(vk, m, s);
+	}
+}
+
+Game Fake(DigitalSignature E) {
+	E.SigningKey sk;
+	E.VerificationKey vk;
+	Set<E.Message * E.Signature> S;
+
+	E.VerificationKey Initialize() {
+		S = {};
+		E.SigningKey * E.VerificationKey k = E.KeyGen();
+		sk = k[0];
+		vk = k[1];
+		return k[1];
+	}
+
+	E.Signature GetSig(E.Message m) {
+		E.Signature s = E.Sign(sk, m);
+		S = S + [m, s];
+		return s;
+	}
+
+	bool VerifySig(E.Message m, E.Signature s) {
+		return [m, s] in S;
+	}
+}
+
+export (Real, Fake) as Security;

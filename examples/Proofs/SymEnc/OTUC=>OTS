@@ -1,0 +1,51 @@
+import 'Primitives/SymEnc.primitive';
+import 'Games/SymEnc/OneTimeSecrecy.game';
+import 'Games/SymEnc/OneTimeUniformCiphertexts';
+
+Reduction R1(SymEnc E) compose OneTimeUniformCiphertexts(E) against OneTimeSecrecy(E).Adversary {
+	E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
+		return challenger.CTXT(mL);
+	}
+}
+
+Reduction R2(SymEnc E) compose OneTimeUniformCiphertexts(E) against OneTimeSecrecy(E).Adversary {
+	E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
+		return challenger.CTXT(mR);
+	}
+}
+
+proof:
+
+let:
+
+	Set MessageSpace;
+	Set CiphertextSpace;
+	Set KeySpace;
+
+	SymEnc E = SymEnc(MessageSpace, CiphertextSpace, KeySpace);
+
+assume:
+
+	OneTimeUniformCiphertexts(E);
+
+theorem:
+	OneTimeSecrecy(E);
+
+games:
+
+	OneTimeSecrecy(E).Left against OneTimeSecrecy(E).Adversary;
+
+	// Codewise-equivalency
+	OneTimeUniformCiphertexts(E).Real compose R1(E) against OneTimeSecrecy(E).Adversary;
+
+	// By assumption
+	OneTimeUniformCiphertexts(E).Random compose R1(E) against OneTimeSecrecy(E).Adversary;
+
+	// mL argument is not used in R
+	OneTimeUniformCiphertexts(E).Random compose R2(E) against OneTimeSecrecy(E).Adversary;
+
+	// By assumption
+	OneTimeUniformCiphertexts(E).Real compose R2(E) against OneTimeSecrecy(E).Adversary;
+
+	// Codewise equivalency
+	OneTimeSecrecy(E).Right against OneTimeSecrecy(E).Adversary;

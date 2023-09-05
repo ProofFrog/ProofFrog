@@ -1,0 +1,15 @@
+Game Left(int lambda) {
+	BitString<lambda> Eavesdrop(BitString<lambda> mL, BitString<lambda> mR) {
+		BitString<lambda> k <- BitString<lambda>;
+		return k + mL;
+	}
+}
+
+Game Right(int lambda) {
+	BitString<lambda> Eavesdrop(BitString<lambda> mL, BitString<lambda> mR) {
+		BitString<lambda> k <- BitString<lambda>;
+		return k + mR;
+	}
+}
+
+export (Left, Right) as OTPOTS;

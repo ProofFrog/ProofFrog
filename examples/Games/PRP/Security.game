@@ -1,0 +1,26 @@
+import 'Primitives/PRP.primitive';
+
+Game Real(PRP F) {
+	BitString<F.lambda> k;
+
+	void Initialize() {
+		k <- BitString<F.lambda>;
+	}
+
+	BitString<F.blen> Lookup(BitString<F.blen> x) {
+		return F.evaluate(k, x);
+	}
+}
+
+Game Random(PRP F) {
+	Map<F.blen, F.blen> T;
+
+	BitString<F.blen> Lookup(BitString<F.blen> x) {
+		if (!(x in T)) {
+			T[x] <- BitString<F.blen> \ T.values;
+		}
+		return T[x];
+	}
+}
+
+export (Real, Random) as Security;

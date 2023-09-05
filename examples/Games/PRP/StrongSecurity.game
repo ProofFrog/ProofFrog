@@ -1,0 +1,42 @@
+import 'Primitives/PRP.primitive';
+
+Game Real(PRP F) {
+	BitString<F.lambda> k;
+
+	void Initialize() {
+		k <- BitString<F.lambda>;
+	}
+
+	BitString<F.blen> Lookup(BitString<F.blen> x) {
+		return F.evaluate(k, x);
+	}
+
+	BitString<F.blen> LookupInverse(BitString<F.blen> y) {
+		return F.evaluateInverse(k, y);
+	}
+}
+
+Game Random(PRP F) {
+	Map<BitString<F.blen>, BitString<F.blen>> T;
+	Map<BitString<F.blen>, BitString<F.blen>> TInv;
+
+	BitString<F.blen> Lookup(BitString<F.blen> x) {
+		if (!(x in T)) {
+			BitString<F.blen> y <- BitString<F.blen> \ T.values;
+			T[x] = y;
+			TInv[y] = x;
+		}
+		return T[x];
+	}
+
+	BitString<F.blen> LookupInverse(BitString<F.blen> y) {
+		if (!(y in TInv)) {
+			BitString<F.blen> x <- BitString<F.blen> \ TInv.values;
+			TInv[y] = x;
+			TInv[x] = y;
+		}
+		return TInv[y];
+	}
+}
+
+export (Real, Random) as StrongSecurity;

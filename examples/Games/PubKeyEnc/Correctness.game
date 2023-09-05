@@ -1,0 +1,37 @@
+import 'Primitives/PubKeyEnc.primitive';
+
+Game Real(PubKeyEnc E) {
+	E.PublicKey pk;
+	E.SecretKey sk;
+
+	E.PublicKey * E.SecretKey Initialize() {
+		E.PublicKey * E.SecretKey k = E.KeyGen();
+		pk = k[0];
+		sk = k[1];
+		return k;
+	}
+
+	bool Test(E.Message m) {
+		E.Ciphertext c = E.Enc(pk, m);
+		E.Message mPrime = E.Dec(sk, c);
+		return m == mPrime;
+	}
+}
+
+Game Fake(PubKeyEnc E) {
+	E.PublicKey pk;
+	E.SecretKey sk;
+
+	E.PublicKey * E.SecretKey Initialize() {
+		E.PublicKey * E.SecretKey k = E.KeyGen();
+		pk = k[0];
+		sk = k[1];
+		return k;
+	}
+
+	bool Test(E.Message m) {
+		return true;
+	}
+}
+
+export (Real, Fake) as Correctness;

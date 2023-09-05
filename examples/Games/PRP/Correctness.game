@@ -1,0 +1,17 @@
+import 'Primitives/PRP.primitive';
+
+Game Real(PRP F) {
+	bool test(BitString<F.lambda> seed, BitString<F.blen> input) {
+		BitString<F.blen> output = F.evaluate(seed, input);
+		BitString<F.blen> invertedOutput = F.evaluateInverse(seed, output);
+		return input == invertedOutput;
+	}
+}
+
+Game Fake(PRP F) {
+	bool test(BitString<F.lambda> seed, BitString<F.blen> input) {
+		return true;
+	}
+}
+
+export (Real, Fake) as Correctness;

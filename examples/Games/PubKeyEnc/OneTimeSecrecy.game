@@ -1,0 +1,47 @@
+import 'Primitives/PubKeyEnc.primitive';
+
+Game Left(PubKeyEnc E) {
+	E.PublicKey pk;
+	E.SecretKey sk;
+	int count;
+
+	E.PublicKey initialize() {
+		E.PublicKey * E.SecretKey k = E.KeyGen();
+		pk = k[0];
+		sk = k[1];
+		count = 0;
+		return pk;
+	}
+
+	E.Ciphertext? Challenge(E.Message mL, E.message mR) {
+		count = count + 1;
+		if (count > 1) {
+			return None;
+		}
+		return E.Enc(pk, mL);
+	}
+}
+
+Game Right(PubKeyEnc E) {
+	E.PublicKey pk;
+	E.SecretKey sk;
+	int count;
+
+	E.PublicKey initialize() {
+		E.PublicKey * E.SecretKey k = E.KeyGen();
+		pk = k[0];
+		sk = k[1];
+		count = 0;
+		return pk;
+	}
+
+	E.Ciphertext? Challenge(E.Message mL, E.message mR) {
+		count = count + 1;
+		if (count > 1) {
+			return None;
+		}
+		return E.Enc(pk, mR);
+	}
+}
+
+export (Left, Right) as OneTimeSecrecy;

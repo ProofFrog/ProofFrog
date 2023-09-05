@@ -1,0 +1,39 @@
+import 'Primitives/SecretSharing.primitive';
+
+Game Left(SecretSharing E) {
+	Array<E.Share, E.shareCount>? Share(E.Message mL, E.message mR, Set<Int> U) {
+		if (|U| >= E.threshold) {
+			return None;
+		}
+		Array<E.Share, E.shareCount> s = E.Share(mL);
+
+		Array<E.Share, E.shareCount> toReturn = [];
+		for (Int index in U) {
+			if (index >= 0 && index <= |s|) {
+				toReturn.push(s[index]);
+			}
+		}
+
+		return toReturn;
+	}
+}
+
+Game Right(SecretSharing E) {
+	Array<E.Share, E.shareCount>? Share(E.Message mL, E.message mR, Set<Int> U) {
+		if (|U| >= E.threshold) {
+			return None;
+		}
+		Array<E.Share, E.shareCount> s = E.Share(mR);
+
+		Array<E.Share, E.shareCount> toReturn = [];
+		for (Int index in U) {
+			if (index >= 0 && index <= |s|) {
+				toReturn.push(s[index]);
+			}
+		}
+
+		return toReturn;
+	}
+}
+
+export (Left, Right) as Security;

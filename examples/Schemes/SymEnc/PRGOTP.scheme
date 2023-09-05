@@ -1,0 +1,21 @@
+import 'Primitives/PRG.primitive';
+import 'Primitives/SymEnc.primitive';
+
+Scheme PRGOTP(PRG G) extends SymEnc {
+	Set Key = BitString<G.lambda>;
+	Set Message = BitString<G.lambda + G.stretch>;
+	Set Ciphertext = BitString<G.lambda + G.stretch>;
+
+	Key KeyGen() {
+		Key k <- Key;
+		return k;
+	}
+
+	Ciphertext Enc(Key k, Message m) {
+		return G.evaluate(k) + m;
+	}
+
+	Message Dec(Key k, Ciphertext c) {
+		return G.evaluate(k) + c;
+	}
+}

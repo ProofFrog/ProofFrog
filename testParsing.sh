@@ -4,12 +4,12 @@ function filter() {
 	$1 | egrep -v "Could not get latest version number, attempting to fall back to latest downloaded version...|Found version '4.13.0', this version may be out of date"
 }
 
-hopFiles=../Draft4/
+hopFiles=examples
 antlrFiles=src/antlr/
 
 for primitive in $hopFiles/Primitives/*; do
 	echo "Parsing Primitive $primitive"
-	
+
 	filter "antlr4-parse $antlrFiles/Primitive.g4 program $primitive"
 done
 

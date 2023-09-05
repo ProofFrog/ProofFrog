@@ -1,0 +1,27 @@
+import 'Primitives/SymEnc.primitive';
+
+Scheme DoubleSymEnc(SymEnc s) extends SymEnc {
+	requires s.Message == s.Ciphertext;
+
+	Set Message = s.Message;
+	Set Ciphertext = s.Message;
+	Set Key = s.Key * s.Key;
+
+	Key KeyGen() {
+		s.Key key1 = s.KeyGen();
+		s.Key key2 = s.KeyGen();
+		return [key1, key2];
+	}
+
+	Ciphertext Enc(Key k, Message m) {
+		Ciphertext c1 = s.Enc(k[0], m);
+		Ciphertext c2 = s.Enc(k[1], c1);
+		return c2;
+	}
+
+	Message Dec(Ciphertext c) {
+		Ciphertext c2 = s.Dec(k[1], c);
+		Message m = s.Dec(k[0], c2);
+		return m;
+	}
+}

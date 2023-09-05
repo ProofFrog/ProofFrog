@@ -1,0 +1,37 @@
+import 'Primitives/SymEnc.primitive';
+import 'Games/SymEnc/CPA.game';
+import 'Games/SymEnc/CPA$.game';
+
+Reduction R1(SymEnc E) compose CPA$(E) against CPA(E).Adversary {
+	void Eavesdrop(E.Message mL, E.Message mR) {
+		return challenger.CTXT(mL);
+	}
+}
+
+Reduction R2(SymEnc E) compose CPA$(E) against CPA(E).Adversary {
+	void Eavesdrop(E.Message mL, E.Message mR) {
+		return challenger.CTXT(mR);
+	}
+}
+
+proof:
+
+let:
+	Set MessageSpace;
+	Set CiphertextSpace;
+	Set KeySpace;
+	SymEnc E = SymEnc(MessageSpace, CiphertextSpace, KeySpace);
+
+assume:
+	CPA$(E);
+
+theorem:
+	CPA(E);
+
+games:
+	CPA(E).Left against CPA(E).Adversary;
+	CPA$(E).Real compose R1(E) against CPA$(E).Adversary;
+	CPA$(E).Random compose R1(E) against CPA$(E).Adversary;
+	CPA$(E).Random compose R2(E) against CPA$(E).Adversary;
+	CPA$(E).Real compose R2(E) against CPA$(E).Adversary;
+	CPA(E).Right against CPA(E).Adversary;

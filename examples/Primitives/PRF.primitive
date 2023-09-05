@@ -1,0 +1,7 @@
+Primitive PRF(int lambda, int in, int out) {
+	int lambda = lambda;
+	int in = in;
+	int out = out;
+	
+	BitString<out> evaluate(BitString<lambda> seed, BitString<in> input);
+}

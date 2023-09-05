@@ -1,0 +1,36 @@
+import 'Primitives/PubKeyEnc.primitive';
+
+Game Real(PubKeyEnc E) {
+	E.PublicKey pk;
+	E.SecretKey sk;
+
+	E.PublicKey Initialize() {
+		E.PublicKey * E.SecretKey k = E.KeyGen();
+		pk = k[0];
+		sk = k[1];
+		return pk;
+	}
+
+	E.Ciphertext Challenge(E.Message m) {
+		return E.Enc(pk, m);
+	}
+}
+
+Game Random(PubKeyEnc E) {
+	E.PublicKey pk;
+	E.SecretKey sk;
+
+	E.PublicKey Initialize() {
+		E.PublicKey * E.SecretKey k = E.KeyGen();
+		pk = k[0];
+		sk = k[1];
+		return pk;
+	}
+
+	E.Ciphertext Challenge(E.Message m) {
+		E.Ciphertext c <- E.Ciphertext;
+		return c;
+	}
+}
+
+export (Real, Random) as CPA;

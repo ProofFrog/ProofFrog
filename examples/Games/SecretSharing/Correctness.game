@@ -1,0 +1,32 @@
+import 'Primitives/SecretSharing.primitive';
+
+Game Real(SecretSharing E) {
+	bool? Test(Set<Int> U, E.Message m) {
+		if (|U| < E.threshold) {
+			return None;
+		}
+		for (Int index in U) {
+			if (index < 0 || index >= E.shareCount) {
+				return None;
+			}
+		}
+		Array<E.Share, E.shareCount> s = E.Share(m);
+		return m == E.Reconstruct(s);
+	}
+}
+
+Game Fake(SecretSharing E) {
+	bool? Test(Set<int> U, E.Message m) {
+		if (|U| < E.threshold) {
+			return None;
+		}
+		for (Int index in U) {
+			if (index < 0 || index >= E.shareCount) {
+				return None;
+			}
+		}
+		return true;
+	}
+}
+
+export (Real, Fake) as Correctness;

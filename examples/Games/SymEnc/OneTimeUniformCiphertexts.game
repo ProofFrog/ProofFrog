@@ -1,0 +1,18 @@
+import 'Primitives/SymEnc.primitive';
+
+Game Real(SymEnc E) {
+	E.Ciphertext CTXT(E.Message m) {
+		E.Key k = E.KeyGen();
+		E.Ciphertext c = E.Enc(k, m);
+		return c;
+	}
+}
+
+Game Random(SymEnc E) {
+	E.Ciphertext CTXT(E.Message m) {
+		E.Ciphertext c <- E.Ciphertext;
+		return c;
+	}
+}
+
+export (Real, Random) as OneTimeUniformCiphertexts;

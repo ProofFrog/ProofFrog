@@ -1,0 +1,18 @@
+import 'Primitives/SecretSharing.primitive';
+
+Scheme OTP(int l) extends SecretSharing {
+	Set Message = BitString<l>;
+	Set Shares = BitString<l>;
+	int shareCount = 2;
+	int threshold = 2;
+
+	Array<Shares, shareCount> Share(Message m) {
+		BitString<l> s0 <- BitString<l>;
+		BitString<l> s1 = s1 + m;
+		return [s0, s1];
+	}
+
+	Message Reconstruct(Array<Shares, shareCount> s) {
+		return s[0] + s[1];
+	}
+}

@@ -1,0 +1,39 @@
+import 'Primitives/MAC.primitive';
+
+Game Real(MAC E) {
+	E.Key k;
+
+	void Initialize() {
+		k = E.KeyGen();
+	}
+
+	E.Tag GetTag(E.Message m) {
+		return E.MAC(k, m);
+	}
+
+	bool CheckTag(E.Message m, E.Tag t) {
+		return t == E.MAC(k, m);
+	}
+}
+
+Game Random(MAC E) {
+	E.Key k;
+	Set<E.Message * E.Tag> T;
+
+	void Initialize() {
+		k = E.KeyGen();
+		T = {};
+	}
+
+	E.Tag GetTag(E.Message m) {
+		E.Tag t = E.MAC(k, m);
+		T = T + [m, t];
+		return t;
+	}
+
+	bool CheckTag(E.Message m, E.Tag t) {
+		return [m, t] in T;
+	}
+}
+
+export (Real, Random) as Security;

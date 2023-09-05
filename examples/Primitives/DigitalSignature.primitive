@@ -1,0 +1,10 @@
+Primitive DigitalSignature(Set SigningKeySpace, Set VerificationKeySpace, Set MessageSpace, Set SignatureSpace) {
+	Set SigningKey = SigningKeySpace;
+	Set VerificationKey = VerificationKeySpace;
+	Set Message = MessageSpace;
+	Set Signature = SignatureSpace;
+	
+	SigningKey * VerificationKey KeyGen();
+	Signature Sign(SigningKey sk, Message m);
+	Bool Verify(VerificationKey vk, Message m, Signature s);
+}

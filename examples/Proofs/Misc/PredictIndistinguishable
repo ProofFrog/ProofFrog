@@ -1,0 +1,50 @@
+import 'Games/Misc/PredictBitString.game';
+
+Game PredictBitStringIntermdiate1(int lambda) {
+	bool bad;
+
+	void Initialize() {
+		bad = false;
+	}
+
+	bool Predict(BitString<lambda> x) {
+		BitString<lambda> s <- BitString<lambda>;
+		if (x == s) {
+			bad = true;
+			return true;
+		}
+		return false;
+	}
+}
+
+Game PredictBitStringItermediate2(int lambda) {
+	bool bad;
+
+	void Initialize() {
+		bad = false;
+	}
+
+	bool Predict(BitString<lambda> x) {
+		BitString<lambda> s <- BitString<lambda>;
+		if (x == s) {
+			bad = true;
+		}
+		return false;
+	}
+}
+
+proof:
+
+let:
+	int lambda;
+
+assume:
+
+theorem:
+	Predict(lambda);
+
+games:
+	Predict(lambda).Real against PredictBitString(lambda).Adversary;
+	PredictBitStringIntermediate1(lambda) against PredictBitString(lambda).Adversary;
+	PredictBitStringIntermediate2(lambda) against PredictBitString(lambda).Adversary;
+	Predict(lambda).Random against PredictBitString(lambda).Adversary;

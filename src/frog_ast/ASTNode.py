@@ -1,2 +1,2 @@
 class ASTNode():
-	pass
+    pass

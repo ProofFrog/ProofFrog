@@ -2,7 +2,7 @@ import sys
 from antlr4 import FileStream, CommonTokenStream
 from parsing.PrimitiveLexer import PrimitiveLexer
 from parsing.PrimitiveParser import PrimitiveParser
-from PrimitiveASTGenerator import PrimitiveASTGenerator
+from primitive_ast_generator import PrimitiveASTGenerator
 
 
 def main(argv):
@@ -10,8 +10,8 @@ def main(argv):
     lexer = PrimitiveLexer(input_stream)
     parser = PrimitiveParser(CommonTokenStream(lexer))
     tree = parser.program()
-    myAST = PrimitiveASTGenerator().visit(tree)
-    print(myAST)
+    my_ast = PrimitiveASTGenerator().visit(tree)
+    print(my_ast)
 
 
 if __name__ == '__main__':

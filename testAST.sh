@@ -5,7 +5,7 @@ for primitive in examples/Primitives/*; do
 	parsedOutput2=$(mktemp)
 	trimmedPrimitive=$(mktemp)
 
-	python3 src/main.py $primitive > $parsedOutput
+	python3 proof_frog $primitive > $parsedOutput
 
 	if [ $# -gt 1 ]; then
 		echo "Original File:"

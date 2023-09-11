@@ -5,7 +5,7 @@ from parsing.PrimitiveParser import PrimitiveParser
 from primitive_ast_generator import PrimitiveASTGenerator
 
 
-def main(argv):
+def main(argv: list[str]) -> None:
     input_stream = FileStream(argv[1])
     lexer = PrimitiveLexer(input_stream)
     parser = PrimitiveParser(CommonTokenStream(lexer))

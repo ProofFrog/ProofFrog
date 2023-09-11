@@ -5,7 +5,7 @@ function filter() {
 }
 
 hopFiles=examples
-antlrFiles=src/antlr/
+antlrFiles=proof_frog/antlr/
 
 for primitive in $hopFiles/Primitives/*; do
 	echo "Parsing Primitive $primitive"

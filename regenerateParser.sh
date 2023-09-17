@@ -1,6 +1,7 @@
 #!/bin/bash
 
-rm -r proof_frog/parsing/*
+rm -r proof_frog/parsing
+mkdir proof_frog/parsing
 touch proof_frog/parsing/__init__.py
 
 for grammar in Game.g4 Primitive.g4 Proof.g4 Scheme.g4; do

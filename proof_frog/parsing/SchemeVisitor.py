@@ -1,4 +1,4 @@
-# Generated from src/antlr/Scheme.g4 by ANTLR 4.13.0
+# Generated from proof_frog/antlr/Scheme.g4 by ANTLR 4.13.1
 from antlr4 import *
 if "." in __name__:
     from .SchemeParser import SchemeParser
@@ -54,13 +54,63 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SchemeParser#simpleStatement.
-    def visitSimpleStatement(self, ctx:SchemeParser.SimpleStatementContext):
+    # Visit a parse tree produced by SchemeParser#method.
+    def visitMethod(self, ctx:SchemeParser.MethodContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SchemeParser#statement.
-    def visitStatement(self, ctx:SchemeParser.StatementContext):
+    # Visit a parse tree produced by SchemeParser#block.
+    def visitBlock(self, ctx:SchemeParser.BlockContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#varDeclStatement.
+    def visitVarDeclStatement(self, ctx:SchemeParser.VarDeclStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#varDeclWithValueStatement.
+    def visitVarDeclWithValueStatement(self, ctx:SchemeParser.VarDeclWithValueStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#varDeclWithSampleStatement.
+    def visitVarDeclWithSampleStatement(self, ctx:SchemeParser.VarDeclWithSampleStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#assignmentStatement.
+    def visitAssignmentStatement(self, ctx:SchemeParser.AssignmentStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#sampleStatement.
+    def visitSampleStatement(self, ctx:SchemeParser.SampleStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#functionCallStatement.
+    def visitFunctionCallStatement(self, ctx:SchemeParser.FunctionCallStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#returnStatement.
+    def visitReturnStatement(self, ctx:SchemeParser.ReturnStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#ifStatement.
+    def visitIfStatement(self, ctx:SchemeParser.IfStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#numericForStatement.
+    def visitNumericForStatement(self, ctx:SchemeParser.NumericForStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#genericForStatement.
+    def visitGenericForStatement(self, ctx:SchemeParser.GenericForStatementContext):
         return self.visitChildren(ctx)
 
 
@@ -99,6 +149,11 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SchemeParser#lvalueExp.
+    def visitLvalueExp(self, ctx:SchemeParser.LvalueExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SchemeParser#notEqualsExp.
     def visitNotEqualsExp(self, ctx:SchemeParser.NotEqualsExpContext):
         return self.visitChildren(ctx)
@@ -111,11 +166,6 @@ class SchemeVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SchemeParser#geqExp.
     def visitGeqExp(self, ctx:SchemeParser.GeqExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SchemeParser#createArrayExp.
-    def visitCreateArrayExp(self, ctx:SchemeParser.CreateArrayExpContext):
         return self.visitChildren(ctx)
 
 
@@ -174,18 +224,18 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SchemeParser#concatenateExp.
-    def visitConcatenateExp(self, ctx:SchemeParser.ConcatenateExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SchemeParser#variableExp.
-    def visitVariableExp(self, ctx:SchemeParser.VariableExpContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by SchemeParser#leqExp.
     def visitLeqExp(self, ctx:SchemeParser.LeqExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#orExp.
+    def visitOrExp(self, ctx:SchemeParser.OrExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#createTupleExp.
+    def visitCreateTupleExp(self, ctx:SchemeParser.CreateTupleExpContext):
         return self.visitChildren(ctx)
 
 
@@ -214,11 +264,6 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SchemeParser#arrayAccessExp.
-    def visitArrayAccessExp(self, ctx:SchemeParser.ArrayAccessExpContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by SchemeParser#argList.
     def visitArgList(self, ctx:SchemeParser.ArgListContext):
         return self.visitChildren(ctx)
@@ -239,11 +284,6 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SchemeParser#lvalueType.
-    def visitLvalueType(self, ctx:SchemeParser.LvalueTypeContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by SchemeParser#optionalType.
     def visitOptionalType(self, ctx:SchemeParser.OptionalTypeContext):
         return self.visitChildren(ctx)
@@ -251,6 +291,11 @@ class SchemeVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SchemeParser#mapType.
     def visitMapType(self, ctx:SchemeParser.MapTypeContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#userType.
+    def visitUserType(self, ctx:SchemeParser.UserTypeContext):
         return self.visitChildren(ctx)
 
 

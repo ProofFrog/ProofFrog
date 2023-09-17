@@ -1,4 +1,4 @@
-# Generated from src/antlr/Game.g4 by ANTLR 4.13.0
+# Generated from proof_frog/antlr/Game.g4 by ANTLR 4.13.1
 from antlr4 import *
 if "." in __name__:
     from .GameParser import GameParser
@@ -44,13 +44,63 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by GameParser#simpleStatement.
-    def visitSimpleStatement(self, ctx:GameParser.SimpleStatementContext):
+    # Visit a parse tree produced by GameParser#method.
+    def visitMethod(self, ctx:GameParser.MethodContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by GameParser#statement.
-    def visitStatement(self, ctx:GameParser.StatementContext):
+    # Visit a parse tree produced by GameParser#block.
+    def visitBlock(self, ctx:GameParser.BlockContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#varDeclStatement.
+    def visitVarDeclStatement(self, ctx:GameParser.VarDeclStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#varDeclWithValueStatement.
+    def visitVarDeclWithValueStatement(self, ctx:GameParser.VarDeclWithValueStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#varDeclWithSampleStatement.
+    def visitVarDeclWithSampleStatement(self, ctx:GameParser.VarDeclWithSampleStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#assignmentStatement.
+    def visitAssignmentStatement(self, ctx:GameParser.AssignmentStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#sampleStatement.
+    def visitSampleStatement(self, ctx:GameParser.SampleStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#functionCallStatement.
+    def visitFunctionCallStatement(self, ctx:GameParser.FunctionCallStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#returnStatement.
+    def visitReturnStatement(self, ctx:GameParser.ReturnStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#ifStatement.
+    def visitIfStatement(self, ctx:GameParser.IfStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#numericForStatement.
+    def visitNumericForStatement(self, ctx:GameParser.NumericForStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#genericForStatement.
+    def visitGenericForStatement(self, ctx:GameParser.GenericForStatementContext):
         return self.visitChildren(ctx)
 
 
@@ -89,6 +139,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#lvalueExp.
+    def visitLvalueExp(self, ctx:GameParser.LvalueExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#notEqualsExp.
     def visitNotEqualsExp(self, ctx:GameParser.NotEqualsExpContext):
         return self.visitChildren(ctx)
@@ -101,11 +156,6 @@ class GameVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by GameParser#geqExp.
     def visitGeqExp(self, ctx:GameParser.GeqExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#createArrayExp.
-    def visitCreateArrayExp(self, ctx:GameParser.CreateArrayExpContext):
         return self.visitChildren(ctx)
 
 
@@ -164,18 +214,18 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by GameParser#concatenateExp.
-    def visitConcatenateExp(self, ctx:GameParser.ConcatenateExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#variableExp.
-    def visitVariableExp(self, ctx:GameParser.VariableExpContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by GameParser#leqExp.
     def visitLeqExp(self, ctx:GameParser.LeqExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#orExp.
+    def visitOrExp(self, ctx:GameParser.OrExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#createTupleExp.
+    def visitCreateTupleExp(self, ctx:GameParser.CreateTupleExpContext):
         return self.visitChildren(ctx)
 
 
@@ -204,11 +254,6 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by GameParser#arrayAccessExp.
-    def visitArrayAccessExp(self, ctx:GameParser.ArrayAccessExpContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by GameParser#argList.
     def visitArgList(self, ctx:GameParser.ArgListContext):
         return self.visitChildren(ctx)
@@ -229,11 +274,6 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by GameParser#lvalueType.
-    def visitLvalueType(self, ctx:GameParser.LvalueTypeContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by GameParser#optionalType.
     def visitOptionalType(self, ctx:GameParser.OptionalTypeContext):
         return self.visitChildren(ctx)
@@ -241,6 +281,11 @@ class GameVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by GameParser#mapType.
     def visitMapType(self, ctx:GameParser.MapTypeContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#userType.
+    def visitUserType(self, ctx:GameParser.UserTypeContext):
         return self.visitChildren(ctx)
 
 

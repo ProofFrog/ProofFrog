@@ -10,6 +10,10 @@ class Expression(ASTNode):
     pass
 
 
+class Statement(ASTNode):
+    pass
+
+
 class BasicTypes(Enum):
     SET = 'Set'
     BOOL = 'Bool'
@@ -83,7 +87,7 @@ class BitStringType(Type):
 
 
 class Field(ASTNode):
-    def __init__(self, the_type: ASTNode, name: str, value: Expression) -> None:
+    def __init__(self, the_type: ASTNode, name: str, value: Optional[Expression]) -> None:
         self.type = the_type
         self.name = name
         self.value = value
@@ -110,7 +114,7 @@ class MethodSignature(ASTNode):
     def __str__(self) -> str:
         parameter_list_string = ', '.join(
             str(param) for param in self.parameters) if self.parameters else ''
-        return f'{self.return_type} {self.name}({parameter_list_string});'
+        return f'{self.return_type} {self.name}({parameter_list_string})'
 
 
 class Primitive(ASTNode):
@@ -131,7 +135,7 @@ class Primitive(ASTNode):
             output_string += f'  {field}\n'
         output_string += '\n'
         for method in self.methods:
-            output_string += f'  {method}\n'
+            output_string += f'  {method};\n'
         output_string += "}"
         return output_string
 
@@ -146,17 +150,212 @@ class ProductType(Type):
 
 
 class UserType(Type):
-    def __init__(self, name: str) -> None:
+    def __init__(self, names: list[str]) -> None:
         super().__init__(BasicTypes.OTHER)
-        self.name = name
+        self.names = names
 
     def _get_string_description(self) -> str:
-        return self.name
+        return '.'.join(name for name in self.names)
 
 
-class VariableExpression(Expression):
+class FuncCall(Expression):
+    def __init__(self, func: Expression, args: list[Expression]) -> None:
+        self.func = func
+        self.args = args
+
+    def __str__(self) -> str:
+        arg_str = ', '.join(str(arg) for arg in self.args)
+        return f'{self.func}({arg_str})'
+
+
+class Variable(Expression):
     def __init__(self, name: str) -> None:
         self.name = name
 
     def __str__(self) -> str:
-        return str(self.name)
+        return self.name
+
+
+class Tuple(Expression):
+    def __init__(self, values: list[Expression]) -> None:
+        self.values = values
+
+    def __str__(self) -> str:
+        return f'[{", ".join(str(value) for value in self.values)}]'
+
+
+class ReturnStatement(Statement):
+    def __init__(self, expression: Expression):
+        self.expression = expression
+
+    def __str__(self) -> str:
+        return f'return {self.expression};'
+
+
+class IfStatement(Statement):
+    def __init__(self, conditions: list[Expression], blocks: list[list[Statement]]):
+        self.conditions = conditions
+        self.blocks = blocks
+
+    def __str__(self) -> str:
+        output_string = ''
+        for i, condition in enumerate(self.conditions):
+            if i == 0:
+                output_string += f'if ({condition}) {{\n'
+            else:
+                output_string += f'  }} else if ({condition}) {{\n'
+            for statement in self.blocks[i]:
+                output_string += f'      {statement}\n'
+
+        if self.has_else_block():
+            output_string += '} else {\n'
+            for statement in self.blocks[-1]:
+                output_string += f'{statement}\n'
+
+        output_string += '    }\n'
+
+        return output_string
+
+    def has_else_block(self) -> bool:
+        return len(self.blocks) > len(self.conditions)
+
+
+class FieldAccess(Expression):
+    def __init__(self, the_object: Expression, name: str) -> None:
+        self.the_object = the_object
+        self.name = name
+
+    def __str__(self) -> str:
+        return f'{self.the_object}.{self.name}'
+
+
+class ArrayAccess(Expression):
+    def __init__(self, the_array: Expression, index: Expression) -> None:
+        self.the_array = the_array
+        self.index = index
+
+    def __str__(self) -> str:
+        return f'{self.the_array}[{self.index}]'
+
+
+class Slice(Expression):
+    def __init__(self, the_array: Expression, start: Expression, end: Expression) -> None:
+        self.the_array = the_array
+        self.start = start
+        self.end = end
+
+    def __str__(self) -> str:
+        return f'{self.the_array}[{self.start}:{self.end}]'
+
+
+class VariableDeclaration(Statement):
+    def __init__(self, the_type: Type, name: str) -> None:
+        self.the_type = the_type
+        self.name = name
+
+    def __str__(self) -> str:
+        return f'{self.the_type} {self.name};'
+
+
+class NumericFor(Statement):
+    def __init__(self, name: str, start: Expression, end: Expression, statements: list[Statement]):
+        self.name = name
+        self.start = start
+        self.end = end
+        self.statements = statements
+
+    def __str__(self) -> str:
+        output_string = f'for ({BasicTypes.INT.value} {self.name} = {self.start} to {self.end}) {{\n'
+        for statement in self.statements:
+            output_string += f'      {statement}\n'
+        output_string += '    }'
+        return output_string
+
+
+class Sample(Statement):
+    def __init__(self, the_type: Optional[Type], var: Expression, sampled_from: Expression) -> None:
+        self.the_type = the_type
+        self.var = var
+        self.sampled_from = sampled_from
+
+    def __str__(self) -> str:
+        return (f'{self.the_type} ' if self.the_type else '') + f'{self.var} <- {self.sampled_from};'
+
+
+class Assignment(Statement):
+    def __init__(self, the_type: Optional[Type], var: Expression, value: Expression) -> None:
+        self.the_type = the_type
+        self.var = var
+        self.value = value
+
+    def __str__(self) -> str:
+        return (f'{self.the_type} ' if self.the_type else '') + f'{self.var} = {self.value};'
+
+
+class Integer(Expression):
+    def __init__(self, num: int):
+        self.num = num
+
+    def __str__(self) -> str:
+        return str(self.num)
+
+
+class BinaryNum(Expression):
+    def __init__(self, num: int):
+        self.num = num
+
+    def __str__(self) -> str:
+        return bin(self.num)
+
+
+class Method(Expression):
+    def __init__(self, signature: MethodSignature, statements: list[Statement]) -> None:
+        self.signature = signature
+        self.statements = statements
+
+    def __str__(self) -> str:
+        output_string = f'{self.signature} {{\n'
+        for statement in self.statements:
+            output_string += f'    {statement}\n'
+        output_string += '  }\n'
+        return output_string
+
+
+class Import(ASTNode):
+    def __init__(self, filename: str, rename: Optional[str]) -> None:
+        self.filename = filename
+        self.rename = rename
+
+    def __str__(self) -> str:
+        return f"import '{self.filename}'" + (f' as {self.rename}' if self.rename else '') + ';'
+
+
+class Scheme(ASTNode):
+    # pylint: disable=too-many-arguments
+    def __init__(self, imports: list[Import], name: str, parameters: list[Parameter],
+                 primitive_name: str, fields: list[Field],
+                 requirements: list[Expression], methods: list[Method]) -> None:
+        self.name = name
+        self.parameters = parameters
+        self.primitive_name = primitive_name
+        self.fields = fields
+        self.requirements = requirements
+        self.methods = methods
+        self.imports = imports
+
+    def __str__(self) -> str:
+        imports_string = ('\n'.join(str(im) for im in self.imports)) + '\n\n'
+        parameter_list_string = ', '.join(
+            str(param) for param in self.parameters) if self.parameters else ''
+        output_string = imports_string + \
+            f'Scheme {self.name}({parameter_list_string}) extends {self.primitive_name} {{\n'
+        for requirement in self.requirements:
+            output_string += f'  requires {requirement};\n'
+        output_string += '\n'
+        for field in self.fields:
+            output_string += f'  {field}\n'
+        output_string += '\n'
+        for method in self.methods:
+            output_string += f'  {method}\n'
+        output_string += '}'
+        return output_string

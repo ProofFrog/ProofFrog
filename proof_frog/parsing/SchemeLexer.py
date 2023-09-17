@@ -1,4 +1,4 @@
-# Generated from src/antlr/Scheme.g4 by ANTLR 4.13.0
+# Generated from proof_frog/antlr/Scheme.g4 by ANTLR 4.13.1
 from antlr4 import *
 from io import StringIO
 import sys
@@ -175,7 +175,7 @@ class SchemeLexer(Lexer):
     NOTEQUALS = 23
     GEQ = 24
     LEQ = 25
-    CONCATENATE = 26
+    OR = 26
     SAMPLES = 27
     AND = 28
     BACKSLASH = 29
@@ -228,28 +228,28 @@ class SchemeLexer(Lexer):
             "R_SQUARE", "L_PAREN", "R_PAREN", "L_ANGLE", "R_ANGLE", "SEMI", 
             "COLON", "COMMA", "PERIOD", "TIMES", "EQUALS", "PLUS", "SUBTRACT", 
             "DIVIDE", "QUESTION", "EQUALSCOMPARE", "NOTEQUALS", "GEQ", "LEQ", 
-            "CONCATENATE", "SAMPLES", "AND", "BACKSLASH", "NOT", "VBAR", 
-            "SET", "BOOL", "INTTYPE", "MAP", "RETURN", "IMPORT", "BITSTRING", 
-            "ARRAY", "PRIMITIVE", "SUBSETS", "IF", "FOR", "TO", "IN", "UNION", 
-            "GAME", "EXPORT", "AS", "PHASE", "ORACLES", "ELSE", "BINARYNUM", 
-            "INT", "ID", "WS", "LINE_COMMENT", "FILESTRING" ]
+            "OR", "SAMPLES", "AND", "BACKSLASH", "NOT", "VBAR", "SET", "BOOL", 
+            "INTTYPE", "MAP", "RETURN", "IMPORT", "BITSTRING", "ARRAY", 
+            "PRIMITIVE", "SUBSETS", "IF", "FOR", "TO", "IN", "UNION", "GAME", 
+            "EXPORT", "AS", "PHASE", "ORACLES", "ELSE", "BINARYNUM", "INT", 
+            "ID", "WS", "LINE_COMMENT", "FILESTRING" ]
 
     ruleNames = [ "REQUIRES", "SCHEME", "EXTENDS", "L_CURLY", "R_CURLY", 
                   "L_SQUARE", "R_SQUARE", "L_PAREN", "R_PAREN", "L_ANGLE", 
                   "R_ANGLE", "SEMI", "COLON", "COMMA", "PERIOD", "TIMES", 
                   "EQUALS", "PLUS", "SUBTRACT", "DIVIDE", "QUESTION", "EQUALSCOMPARE", 
-                  "NOTEQUALS", "GEQ", "LEQ", "CONCATENATE", "SAMPLES", "AND", 
-                  "BACKSLASH", "NOT", "VBAR", "SET", "BOOL", "INTTYPE", 
-                  "MAP", "RETURN", "IMPORT", "BITSTRING", "ARRAY", "PRIMITIVE", 
-                  "SUBSETS", "IF", "FOR", "TO", "IN", "UNION", "GAME", "EXPORT", 
-                  "AS", "PHASE", "ORACLES", "ELSE", "BINARYNUM", "INT", 
-                  "ID", "WS", "LINE_COMMENT", "FILESTRING" ]
+                  "NOTEQUALS", "GEQ", "LEQ", "OR", "SAMPLES", "AND", "BACKSLASH", 
+                  "NOT", "VBAR", "SET", "BOOL", "INTTYPE", "MAP", "RETURN", 
+                  "IMPORT", "BITSTRING", "ARRAY", "PRIMITIVE", "SUBSETS", 
+                  "IF", "FOR", "TO", "IN", "UNION", "GAME", "EXPORT", "AS", 
+                  "PHASE", "ORACLES", "ELSE", "BINARYNUM", "INT", "ID", 
+                  "WS", "LINE_COMMENT", "FILESTRING" ]
 
     grammarFileName = "Scheme.g4"
 
     def __init__(self, input=None, output:TextIO = sys.stdout):
         super().__init__(input, output)
-        self.checkVersion("4.13.0")
+        self.checkVersion("4.13.1")
         self._interp = LexerATNSimulator(self, self.atn, self.decisionsToDFA, PredictionContextCache())
         self._actions = None
         self._predicates = None

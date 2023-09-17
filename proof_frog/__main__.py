@@ -2,15 +2,31 @@ import sys
 from antlr4 import FileStream, CommonTokenStream
 from parsing.PrimitiveLexer import PrimitiveLexer
 from parsing.PrimitiveParser import PrimitiveParser
-from primitive_ast_generator import PrimitiveASTGenerator
+from parsing.SchemeLexer import SchemeLexer
+from parsing.SchemeParser import SchemeParser
+from ast_generation import SchemeASTGenerator, PrimitiveASTGenerator
 
 
 def main(argv: list[str]) -> None:
-    input_stream = FileStream(argv[1])
-    lexer = PrimitiveLexer(input_stream)
-    parser = PrimitiveParser(CommonTokenStream(lexer))
+    my_ast = None
+    input_stream = FileStream(argv[2])
+    lexer_functor: type[PrimitiveLexer] | type[SchemeLexer]
+    parser_functor: type[PrimitiveParser] | type[SchemeParser]
+    ast_generator: type[PrimitiveASTGenerator] | type[SchemeASTGenerator]
+
+    if argv[1] == 'primitive':
+        lexer_functor = PrimitiveLexer
+        parser_functor = PrimitiveParser
+        ast_generator = PrimitiveASTGenerator
+    elif argv[1] == 'scheme':
+        lexer_functor = SchemeLexer
+        parser_functor = SchemeParser
+        ast_generator = SchemeASTGenerator
+
+    lexer = lexer_functor(input_stream)
+    parser = parser_functor(CommonTokenStream(lexer))
     tree = parser.program()
-    my_ast = PrimitiveASTGenerator().visit(tree)
+    my_ast = ast_generator().visit(tree)
     print(my_ast)
 
 

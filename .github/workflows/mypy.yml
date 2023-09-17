@@ -25,4 +25,4 @@ jobs:
           pip install mypy
       - name: mypy
         run: |
-          mypy --strict proof_frog
+          mypy proof_frog

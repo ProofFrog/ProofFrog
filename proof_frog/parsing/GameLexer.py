@@ -1,4 +1,4 @@
-# Generated from src/antlr/Game.g4 by ANTLR 4.13.0
+# Generated from proof_frog/antlr/Game.g4 by ANTLR 4.13.1
 from antlr4 import *
 from io import StringIO
 import sys
@@ -161,7 +161,7 @@ class GameLexer(Lexer):
     NOTEQUALS = 20
     GEQ = 21
     LEQ = 22
-    CONCATENATE = 23
+    OR = 23
     SAMPLES = 24
     AND = 25
     BACKSLASH = 26
@@ -212,19 +212,18 @@ class GameLexer(Lexer):
             "L_CURLY", "R_CURLY", "L_SQUARE", "R_SQUARE", "L_PAREN", "R_PAREN", 
             "L_ANGLE", "R_ANGLE", "SEMI", "COLON", "COMMA", "PERIOD", "TIMES", 
             "EQUALS", "PLUS", "SUBTRACT", "DIVIDE", "QUESTION", "EQUALSCOMPARE", 
-            "NOTEQUALS", "GEQ", "LEQ", "CONCATENATE", "SAMPLES", "AND", 
-            "BACKSLASH", "NOT", "VBAR", "SET", "BOOL", "INTTYPE", "MAP", 
-            "RETURN", "IMPORT", "BITSTRING", "ARRAY", "PRIMITIVE", "SUBSETS", 
-            "IF", "FOR", "TO", "IN", "UNION", "GAME", "EXPORT", "AS", "PHASE", 
-            "ORACLES", "ELSE", "BINARYNUM", "INT", "ID", "WS", "LINE_COMMENT", 
-            "FILESTRING" ]
+            "NOTEQUALS", "GEQ", "LEQ", "OR", "SAMPLES", "AND", "BACKSLASH", 
+            "NOT", "VBAR", "SET", "BOOL", "INTTYPE", "MAP", "RETURN", "IMPORT", 
+            "BITSTRING", "ARRAY", "PRIMITIVE", "SUBSETS", "IF", "FOR", "TO", 
+            "IN", "UNION", "GAME", "EXPORT", "AS", "PHASE", "ORACLES", "ELSE", 
+            "BINARYNUM", "INT", "ID", "WS", "LINE_COMMENT", "FILESTRING" ]
 
     ruleNames = [ "L_CURLY", "R_CURLY", "L_SQUARE", "R_SQUARE", "L_PAREN", 
                   "R_PAREN", "L_ANGLE", "R_ANGLE", "SEMI", "COLON", "COMMA", 
                   "PERIOD", "TIMES", "EQUALS", "PLUS", "SUBTRACT", "DIVIDE", 
                   "QUESTION", "EQUALSCOMPARE", "NOTEQUALS", "GEQ", "LEQ", 
-                  "CONCATENATE", "SAMPLES", "AND", "BACKSLASH", "NOT", "VBAR", 
-                  "SET", "BOOL", "INTTYPE", "MAP", "RETURN", "IMPORT", "BITSTRING", 
+                  "OR", "SAMPLES", "AND", "BACKSLASH", "NOT", "VBAR", "SET", 
+                  "BOOL", "INTTYPE", "MAP", "RETURN", "IMPORT", "BITSTRING", 
                   "ARRAY", "PRIMITIVE", "SUBSETS", "IF", "FOR", "TO", "IN", 
                   "UNION", "GAME", "EXPORT", "AS", "PHASE", "ORACLES", "ELSE", 
                   "BINARYNUM", "INT", "ID", "WS", "LINE_COMMENT", "FILESTRING" ]
@@ -233,7 +232,7 @@ class GameLexer(Lexer):
 
     def __init__(self, input=None, output:TextIO = sys.stdout):
         super().__init__(input, output)
-        self.checkVersion("4.13.0")
+        self.checkVersion("4.13.1")
         self._interp = LexerATNSimulator(self, self.atn, self.decisionsToDFA, PredictionContextCache())
         self._actions = None
         self._predicates = None

@@ -1,4 +1,4 @@
-# Generated from src/antlr/Proof.g4 by ANTLR 4.13.0
+# Generated from proof_frog/antlr/Proof.g4 by ANTLR 4.13.1
 from antlr4 import *
 if "." in __name__:
     from .ProofParser import ProofParser
@@ -99,13 +99,63 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#simpleStatement.
-    def visitSimpleStatement(self, ctx:ProofParser.SimpleStatementContext):
+    # Visit a parse tree produced by ProofParser#method.
+    def visitMethod(self, ctx:ProofParser.MethodContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#statement.
-    def visitStatement(self, ctx:ProofParser.StatementContext):
+    # Visit a parse tree produced by ProofParser#block.
+    def visitBlock(self, ctx:ProofParser.BlockContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#varDeclStatement.
+    def visitVarDeclStatement(self, ctx:ProofParser.VarDeclStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#varDeclWithValueStatement.
+    def visitVarDeclWithValueStatement(self, ctx:ProofParser.VarDeclWithValueStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#varDeclWithSampleStatement.
+    def visitVarDeclWithSampleStatement(self, ctx:ProofParser.VarDeclWithSampleStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#assignmentStatement.
+    def visitAssignmentStatement(self, ctx:ProofParser.AssignmentStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#sampleStatement.
+    def visitSampleStatement(self, ctx:ProofParser.SampleStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#functionCallStatement.
+    def visitFunctionCallStatement(self, ctx:ProofParser.FunctionCallStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#returnStatement.
+    def visitReturnStatement(self, ctx:ProofParser.ReturnStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#ifStatement.
+    def visitIfStatement(self, ctx:ProofParser.IfStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#numericForStatement.
+    def visitNumericForStatement(self, ctx:ProofParser.NumericForStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#genericForStatement.
+    def visitGenericForStatement(self, ctx:ProofParser.GenericForStatementContext):
         return self.visitChildren(ctx)
 
 
@@ -144,6 +194,11 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#lvalueExp.
+    def visitLvalueExp(self, ctx:ProofParser.LvalueExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#notEqualsExp.
     def visitNotEqualsExp(self, ctx:ProofParser.NotEqualsExpContext):
         return self.visitChildren(ctx)
@@ -156,11 +211,6 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#geqExp.
     def visitGeqExp(self, ctx:ProofParser.GeqExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#createArrayExp.
-    def visitCreateArrayExp(self, ctx:ProofParser.CreateArrayExpContext):
         return self.visitChildren(ctx)
 
 
@@ -219,18 +269,18 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#concatenateExp.
-    def visitConcatenateExp(self, ctx:ProofParser.ConcatenateExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#variableExp.
-    def visitVariableExp(self, ctx:ProofParser.VariableExpContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by ProofParser#leqExp.
     def visitLeqExp(self, ctx:ProofParser.LeqExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#orExp.
+    def visitOrExp(self, ctx:ProofParser.OrExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#createTupleExp.
+    def visitCreateTupleExp(self, ctx:ProofParser.CreateTupleExpContext):
         return self.visitChildren(ctx)
 
 
@@ -259,11 +309,6 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#arrayAccessExp.
-    def visitArrayAccessExp(self, ctx:ProofParser.ArrayAccessExpContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by ProofParser#argList.
     def visitArgList(self, ctx:ProofParser.ArgListContext):
         return self.visitChildren(ctx)
@@ -284,11 +329,6 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#lvalueType.
-    def visitLvalueType(self, ctx:ProofParser.LvalueTypeContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by ProofParser#optionalType.
     def visitOptionalType(self, ctx:ProofParser.OptionalTypeContext):
         return self.visitChildren(ctx)
@@ -296,6 +336,11 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#mapType.
     def visitMapType(self, ctx:ProofParser.MapTypeContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#userType.
+    def visitUserType(self, ctx:ProofParser.UserTypeContext):
         return self.visitChildren(ctx)
 
 

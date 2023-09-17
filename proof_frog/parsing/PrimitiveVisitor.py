@@ -1,4 +1,4 @@
-# Generated from src/antlr/Primitive.g4 by ANTLR 4.13.0
+# Generated from proof_frog/antlr/Primitive.g4 by ANTLR 4.13.1
 from antlr4 import *
 if "." in __name__:
     from .PrimitiveParser import PrimitiveParser
@@ -49,13 +49,63 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by PrimitiveParser#simpleStatement.
-    def visitSimpleStatement(self, ctx:PrimitiveParser.SimpleStatementContext):
+    # Visit a parse tree produced by PrimitiveParser#method.
+    def visitMethod(self, ctx:PrimitiveParser.MethodContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by PrimitiveParser#statement.
-    def visitStatement(self, ctx:PrimitiveParser.StatementContext):
+    # Visit a parse tree produced by PrimitiveParser#block.
+    def visitBlock(self, ctx:PrimitiveParser.BlockContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#varDeclStatement.
+    def visitVarDeclStatement(self, ctx:PrimitiveParser.VarDeclStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#varDeclWithValueStatement.
+    def visitVarDeclWithValueStatement(self, ctx:PrimitiveParser.VarDeclWithValueStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#varDeclWithSampleStatement.
+    def visitVarDeclWithSampleStatement(self, ctx:PrimitiveParser.VarDeclWithSampleStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#assignmentStatement.
+    def visitAssignmentStatement(self, ctx:PrimitiveParser.AssignmentStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#sampleStatement.
+    def visitSampleStatement(self, ctx:PrimitiveParser.SampleStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#functionCallStatement.
+    def visitFunctionCallStatement(self, ctx:PrimitiveParser.FunctionCallStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#returnStatement.
+    def visitReturnStatement(self, ctx:PrimitiveParser.ReturnStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#ifStatement.
+    def visitIfStatement(self, ctx:PrimitiveParser.IfStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#numericForStatement.
+    def visitNumericForStatement(self, ctx:PrimitiveParser.NumericForStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#genericForStatement.
+    def visitGenericForStatement(self, ctx:PrimitiveParser.GenericForStatementContext):
         return self.visitChildren(ctx)
 
 
@@ -94,6 +144,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#lvalueExp.
+    def visitLvalueExp(self, ctx:PrimitiveParser.LvalueExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#notEqualsExp.
     def visitNotEqualsExp(self, ctx:PrimitiveParser.NotEqualsExpContext):
         return self.visitChildren(ctx)
@@ -106,11 +161,6 @@ class PrimitiveVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by PrimitiveParser#geqExp.
     def visitGeqExp(self, ctx:PrimitiveParser.GeqExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#createArrayExp.
-    def visitCreateArrayExp(self, ctx:PrimitiveParser.CreateArrayExpContext):
         return self.visitChildren(ctx)
 
 
@@ -169,18 +219,18 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by PrimitiveParser#concatenateExp.
-    def visitConcatenateExp(self, ctx:PrimitiveParser.ConcatenateExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#variableExp.
-    def visitVariableExp(self, ctx:PrimitiveParser.VariableExpContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by PrimitiveParser#leqExp.
     def visitLeqExp(self, ctx:PrimitiveParser.LeqExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#orExp.
+    def visitOrExp(self, ctx:PrimitiveParser.OrExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#createTupleExp.
+    def visitCreateTupleExp(self, ctx:PrimitiveParser.CreateTupleExpContext):
         return self.visitChildren(ctx)
 
 
@@ -209,11 +259,6 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by PrimitiveParser#arrayAccessExp.
-    def visitArrayAccessExp(self, ctx:PrimitiveParser.ArrayAccessExpContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by PrimitiveParser#argList.
     def visitArgList(self, ctx:PrimitiveParser.ArgListContext):
         return self.visitChildren(ctx)
@@ -234,11 +279,6 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by PrimitiveParser#lvalueType.
-    def visitLvalueType(self, ctx:PrimitiveParser.LvalueTypeContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by PrimitiveParser#optionalType.
     def visitOptionalType(self, ctx:PrimitiveParser.OptionalTypeContext):
         return self.visitChildren(ctx)
@@ -246,6 +286,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by PrimitiveParser#mapType.
     def visitMapType(self, ctx:PrimitiveParser.MapTypeContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#userType.
+    def visitUserType(self, ctx:PrimitiveParser.UserTypeContext):
         return self.visitChildren(ctx)
 
 

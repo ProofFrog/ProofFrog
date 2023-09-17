@@ -2,10 +2,10 @@ grammar Shared;
 
 game: GAME ID L_PAREN paramList? R_PAREN L_CURLY gameBody R_CURLY;
 
-gameBody: (field SEMI)* (methodSignature methodBody)+
-	| (field SEMI)* (methodSignature methodBody)* gamePhase+;
+gameBody: (field SEMI)* method+
+	| (field SEMI)* method* gamePhase+;
 
-gamePhase: PHASE L_CURLY (methodSignature methodBody)+ ORACLES COLON L_SQUARE id (COMMA id)* R_SQUARE SEMI R_CURLY;
+gamePhase: PHASE L_CURLY (method)+ ORACLES COLON L_SQUARE id (COMMA id)* R_SQUARE SEMI R_CURLY;
 
 gameExport: EXPORT L_PAREN ID COMMA ID R_PAREN AS ID SEMI;
 
@@ -13,20 +13,21 @@ field: variable (EQUALS expression)?;
 
 initializedField: variable EQUALS expression;
 
-simpleStatement:
-	type id SEMI |
-	type lvalue EQUALS expression SEMI |
-	type lvalue SAMPLES expression SEMI | 
-	lvalue EQUALS expression SEMI |
-	lvalue SAMPLES expression SEMI |
-	expression L_PAREN argList? R_PAREN SEMI;
+method: methodSignature methodBody;
 
-statement:
-	simpleStatement
-	| RETURN expression SEMI
-	| IF L_PAREN expression R_PAREN L_CURLY (statement)* R_CURLY (ELSE IF L_PAREN expression R_PAREN L_CURLY (statement)* R_CURLY)* (ELSE L_CURLY (statement)* R_CURLY)?
-	| FOR L_PAREN INTTYPE id EQUALS expression TO expression R_PAREN L_CURLY (statement)* R_CURLY
-	| FOR L_PAREN type id IN expression R_PAREN L_CURLY (statement)* R_CURLY;
+block: statement*;
+
+statement: type id SEMI #varDeclStatement
+	| type lvalue EQUALS expression SEMI #varDeclWithValueStatement
+	| type lvalue SAMPLES expression SEMI #varDeclWithSampleStatement
+	| lvalue EQUALS expression SEMI #assignmentStatement
+	| lvalue SAMPLES expression SEMI #sampleStatement
+	| expression L_PAREN argList? R_PAREN SEMI #functionCallStatement
+	| RETURN expression SEMI #returnStatement
+	| IF L_PAREN expression R_PAREN L_CURLY block R_CURLY (ELSE IF L_PAREN expression R_PAREN L_CURLY block R_CURLY)* (ELSE L_CURLY block R_CURLY)? #ifStatement
+	| FOR L_PAREN INTTYPE id EQUALS expression TO expression R_PAREN L_CURLY block R_CURLY #numericForStatement
+	| FOR L_PAREN type id IN expression R_PAREN L_CURLY block R_CURLY #genericForStatement
+	;
 
 lvalue:
 	id (PERIOD id | L_SQUARE integerExpression R_SQUARE)*;
@@ -44,24 +45,23 @@ expression: expression EQUALSCOMPARE expression #equalsExp
 	| expression AND expression #andExp
 	| expression SUBSETS expression #subsetsExp
 	| expression IN expression #inExp
-	| expression CONCATENATE expression #concatenateExp
+	| expression OR expression #orExp
 	| expression UNION expression #unionExp
 	| expression BACKSLASH expression #setMinusExp
 	| expression PLUS expression #addExp
 	| expression SUBTRACT expression #subtractExp
 	| expression TIMES expression #multiplyExp
 	| expression DIVIDE expression #divideExp
-	
-	| ID (PERIOD ID)* #variableExp
+
+	| lvalue # lvalueExp
 	| VBAR expression VBAR #sizeExp
 	| expression L_PAREN argList? R_PAREN #fnCallExp
 	| expression L_SQUARE integerExpression COLON integerExpression R_SQUARE #sliceExp
-	| expression L_SQUARE integerExpression R_SQUARE #arrayAccessExp
-	| L_SQUARE (expression (COMMA expression)*)? R_SQUARE #createArrayExp
+	| L_SQUARE (expression (COMMA expression)*)? R_SQUARE #createTupleExp
 	| L_CURLY (expression (COMMA expression)*)? R_CURLY #createSetExp
 	| type #typeExp
 	| BINARYNUM #binaryNumExp
-	| INT #intExp 
+	| INT #intExp
 	| NOT expression #notExp
 	| L_PAREN expression R_PAREN #parenExp
 	;
@@ -77,7 +77,7 @@ type: type QUESTION #optionalType
 	| ARRAY L_ANGLE type COMMA integerExpression R_ANGLE #arrayType
 	| INTTYPE #intType
 	| type (TIMES type)+ #productType
-	| lvalue #lvalueType
+	| id (PERIOD id)* #userType
 	| bitstring #bitStringType
 	;
 
@@ -121,7 +121,7 @@ EQUALSCOMPARE: '==';
 NOTEQUALS: '!=';
 GEQ: '>=';
 LEQ: '<=';
-CONCATENATE: '||';
+OR: '||';
 SAMPLES: '<-';
 AND: '&&';
 BACKSLASH: '\\';

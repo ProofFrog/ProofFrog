@@ -1,4 +1,4 @@
-# Generated from src/antlr/Proof.g4 by ANTLR 4.13.0
+# Generated from proof_frog/antlr/Proof.g4 by ANTLR 4.13.1
 from antlr4 import *
 from io import StringIO
 import sys
@@ -212,7 +212,7 @@ class ProofLexer(Lexer):
     NOTEQUALS = 32
     GEQ = 33
     LEQ = 34
-    CONCATENATE = 35
+    OR = 35
     SAMPLES = 36
     AND = 37
     BACKSLASH = 38
@@ -267,11 +267,11 @@ class ProofLexer(Lexer):
             "R_CURLY", "L_SQUARE", "R_SQUARE", "L_PAREN", "R_PAREN", "L_ANGLE", 
             "R_ANGLE", "SEMI", "COLON", "COMMA", "PERIOD", "TIMES", "EQUALS", 
             "PLUS", "SUBTRACT", "DIVIDE", "QUESTION", "EQUALSCOMPARE", "NOTEQUALS", 
-            "GEQ", "LEQ", "CONCATENATE", "SAMPLES", "AND", "BACKSLASH", 
-            "NOT", "VBAR", "SET", "BOOL", "INTTYPE", "MAP", "RETURN", "IMPORT", 
-            "BITSTRING", "ARRAY", "PRIMITIVE", "SUBSETS", "IF", "FOR", "TO", 
-            "IN", "UNION", "GAME", "EXPORT", "AS", "PHASE", "ORACLES", "ELSE", 
-            "BINARYNUM", "INT", "ID", "WS", "LINE_COMMENT", "FILESTRING" ]
+            "GEQ", "LEQ", "OR", "SAMPLES", "AND", "BACKSLASH", "NOT", "VBAR", 
+            "SET", "BOOL", "INTTYPE", "MAP", "RETURN", "IMPORT", "BITSTRING", 
+            "ARRAY", "PRIMITIVE", "SUBSETS", "IF", "FOR", "TO", "IN", "UNION", 
+            "GAME", "EXPORT", "AS", "PHASE", "ORACLES", "ELSE", "BINARYNUM", 
+            "INT", "ID", "WS", "LINE_COMMENT", "FILESTRING" ]
 
     ruleNames = [ "REDUCTION", "AGAINST", "ADVERSARY", "COMPOSE", "PROOF", 
                   "ASSUME", "THEOREM", "GAMES", "LET", "CALLS", "INDUCTION", 
@@ -279,18 +279,17 @@ class ProofLexer(Lexer):
                   "L_PAREN", "R_PAREN", "L_ANGLE", "R_ANGLE", "SEMI", "COLON", 
                   "COMMA", "PERIOD", "TIMES", "EQUALS", "PLUS", "SUBTRACT", 
                   "DIVIDE", "QUESTION", "EQUALSCOMPARE", "NOTEQUALS", "GEQ", 
-                  "LEQ", "CONCATENATE", "SAMPLES", "AND", "BACKSLASH", "NOT", 
-                  "VBAR", "SET", "BOOL", "INTTYPE", "MAP", "RETURN", "IMPORT", 
-                  "BITSTRING", "ARRAY", "PRIMITIVE", "SUBSETS", "IF", "FOR", 
-                  "TO", "IN", "UNION", "GAME", "EXPORT", "AS", "PHASE", 
-                  "ORACLES", "ELSE", "BINARYNUM", "INT", "ID", "WS", "LINE_COMMENT", 
-                  "FILESTRING" ]
+                  "LEQ", "OR", "SAMPLES", "AND", "BACKSLASH", "NOT", "VBAR", 
+                  "SET", "BOOL", "INTTYPE", "MAP", "RETURN", "IMPORT", "BITSTRING", 
+                  "ARRAY", "PRIMITIVE", "SUBSETS", "IF", "FOR", "TO", "IN", 
+                  "UNION", "GAME", "EXPORT", "AS", "PHASE", "ORACLES", "ELSE", 
+                  "BINARYNUM", "INT", "ID", "WS", "LINE_COMMENT", "FILESTRING" ]
 
     grammarFileName = "Proof.g4"
 
     def __init__(self, input=None, output:TextIO = sys.stdout):
         super().__init__(input, output)
-        self.checkVersion("4.13.0")
+        self.checkVersion("4.13.1")
         self._interp = LexerATNSimulator(self, self.atn, self.decisionsToDFA, PredictionContextCache())
         self._actions = None
         self._predicates = None

@@ -14,4 +14,4 @@ Game Fake(PRP F) {
 	}
 }
 
-export (Real, Fake) as Correctness;
+export as Correctness;

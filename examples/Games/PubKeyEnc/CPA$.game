@@ -33,4 +33,4 @@ Game Random(PubKeyEnc E) {
 	}
 }
 
-export (Real, Random) as CPA;
+export as CPA$;

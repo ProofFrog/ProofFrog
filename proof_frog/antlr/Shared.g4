@@ -7,8 +7,6 @@ gameBody: (field SEMI)* method+
 
 gamePhase: PHASE L_CURLY (method)+ ORACLES COLON L_SQUARE id (COMMA id)* R_SQUARE SEMI R_CURLY;
 
-gameExport: EXPORT L_PAREN ID COMMA ID R_PAREN AS ID SEMI;
-
 field: variable (EQUALS expression)?;
 
 initializedField: variable EQUALS expression;
@@ -54,6 +52,7 @@ expression: expression EQUALSCOMPARE expression #equalsExp
 	| expression DIVIDE expression #divideExp
 
 	| lvalue # lvalueExp
+	| NOT expression #notExp
 	| VBAR expression VBAR #sizeExp
 	| expression L_PAREN argList? R_PAREN #fnCallExp
 	| expression L_SQUARE integerExpression COLON integerExpression R_SQUARE #sliceExp
@@ -62,7 +61,7 @@ expression: expression EQUALSCOMPARE expression #equalsExp
 	| type #typeExp
 	| BINARYNUM #binaryNumExp
 	| INT #intExp
-	| NOT expression #notExp
+	| NONE #noneExp
 	| L_PAREN expression R_PAREN #parenExp
 	;
 
@@ -149,6 +148,7 @@ AS: 'as';
 PHASE: 'Phase';
 ORACLES: 'oracles';
 ELSE: 'else';
+NONE: 'None';
 
 BINARYNUM: '0b'[01]+ ;
 INT: [0-9]+ ;

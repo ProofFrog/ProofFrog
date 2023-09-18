@@ -34,4 +34,4 @@ Game Random(SymEnc E) {
 	}
 }
 
-export (Real, Random) as AE;
+export as AE;

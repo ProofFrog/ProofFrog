@@ -14,6 +14,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#gameExport.
+    def visitGameExport(self, ctx:GameParser.GameExportContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#game.
     def visitGame(self, ctx:GameParser.GameContext):
         return self.visitChildren(ctx)
@@ -26,11 +31,6 @@ class GameVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by GameParser#gamePhase.
     def visitGamePhase(self, ctx:GameParser.GamePhaseContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#gameExport.
-    def visitGameExport(self, ctx:GameParser.GameExportContext):
         return self.visitChildren(ctx)
 
 
@@ -161,6 +161,11 @@ class GameVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by GameParser#notExp.
     def visitNotExp(self, ctx:GameParser.NotExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#noneExp.
+    def visitNoneExp(self, ctx:GameParser.NoneExpContext):
         return self.visitChildren(ctx)
 
 

@@ -10,7 +10,7 @@ Game Left(SecretSharing E) {
 		Array<E.Share, E.shareCount> toReturn = [];
 		for (Int index in U) {
 			if (index >= 0 && index <= |s|) {
-				toReturn.push(s[index]);
+				push(toReturn, s[index]);
 			}
 		}
 
@@ -28,7 +28,7 @@ Game Right(SecretSharing E) {
 		Array<E.Share, E.shareCount> toReturn = [];
 		for (Int index in U) {
 			if (index >= 0 && index <= |s|) {
-				toReturn.push(s[index]);
+				push(toReturn, s[index]);
 			}
 		}
 
@@ -36,4 +36,4 @@ Game Right(SecretSharing E) {
 	}
 }
 
-export (Left, Right) as Security;
+export as Security;

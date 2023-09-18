@@ -84,11 +84,6 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#gameExport.
-    def visitGameExport(self, ctx:ProofParser.GameExportContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by ProofParser#field.
     def visitField(self, ctx:ProofParser.FieldContext):
         return self.visitChildren(ctx)
@@ -216,6 +211,11 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#notExp.
     def visitNotExp(self, ctx:ProofParser.NotExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#noneExp.
+    def visitNoneExp(self, ctx:ProofParser.NoneExpContext):
         return self.visitChildren(ctx)
 
 

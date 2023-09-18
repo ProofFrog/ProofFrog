@@ -16,4 +16,4 @@ Game Right(SymEnc E) {
 	}
 }
 
-export (Left, Right) as OneTimeSecrecy;
+export as OneTimeSecrecy;

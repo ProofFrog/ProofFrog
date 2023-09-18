@@ -34,6 +34,12 @@ for primitive in examples/Primitives/*; do
 	runTest primitive $primitive
 done
 
-for scheme in examples/Schemes/SymEnc/* examples/Schemes/SecretSharing/* examples/Schemes/PRG/*; do
+for scheme in examples/Schemes/**/*; do
 	runTest scheme $scheme
+done
+
+for game in examples/Games/DigitalSignature/* examples/Games/Hash/* examples/Games/KeyAgreement/* \
+	examples/Games/MAC/* examples/Games/Misc/* examples/Games/PRF/* examples/Games/PRG/* examples/Games/PRP/* \
+	examples/Games/PubKeyEnc/* examples/Games/SecretSharing/* examples/Games/SymEnc/*; do
+	runTest game $game
 done

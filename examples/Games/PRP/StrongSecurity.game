@@ -39,4 +39,4 @@ Game Random(PRP F) {
 	}
 }
 
-export (Real, Random) as StrongSecurity;
+export as StrongSecurity;

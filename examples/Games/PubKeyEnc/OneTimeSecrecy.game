@@ -44,4 +44,4 @@ Game Right(PubKeyEnc E) {
 	}
 }
 
-export (Left, Right) as OneTimeSecrecy;
+export as OneTimeSecrecy;

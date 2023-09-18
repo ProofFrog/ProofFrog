@@ -22,4 +22,4 @@ Game Random(PRF F) {
 	}
 }
 
-export (Real, Random) as Security;
+export as Security;

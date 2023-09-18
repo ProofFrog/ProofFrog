@@ -15,4 +15,4 @@ Game Random(SymEnc E) {
 	}
 }
 
-export (Real, Random) as OneTimeUniformCiphertexts;
+export as OneTimeUniformCiphertexts;

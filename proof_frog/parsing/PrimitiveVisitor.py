@@ -34,11 +34,6 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by PrimitiveParser#gameExport.
-    def visitGameExport(self, ctx:PrimitiveParser.GameExportContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by PrimitiveParser#field.
     def visitField(self, ctx:PrimitiveParser.FieldContext):
         return self.visitChildren(ctx)
@@ -166,6 +161,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by PrimitiveParser#notExp.
     def visitNotExp(self, ctx:PrimitiveParser.NotExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#noneExp.
+    def visitNoneExp(self, ctx:PrimitiveParser.NoneExpContext):
         return self.visitChildren(ctx)
 
 

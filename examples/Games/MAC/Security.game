@@ -36,4 +36,4 @@ Game Random(MAC E) {
 	}
 }
 
-export (Real, Random) as Security;
+export as Security;

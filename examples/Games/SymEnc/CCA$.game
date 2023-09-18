@@ -46,4 +46,4 @@ Game Random(SymEnc E) {
 	}
 }
 
-export (Real, Random) as CCA$;
+export as CCA$;

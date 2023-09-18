@@ -70,4 +70,4 @@ Game Right(SymEnc E) {
 	}
 }
 
-export (Left, Right) as CCA;
+export as CCA;

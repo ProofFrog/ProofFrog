@@ -15,7 +15,6 @@ class Statement(ASTNode):
 
 
 class BasicTypes(Enum):
-    SET = 'Set'
     BOOL = 'Bool'
     INT = 'Int'
     OTHER = 'Other'
@@ -46,6 +45,16 @@ class ArrayType(Type):
         return f'Array<{self.element_type}, {self.count}>'
 
 
+class MapType(Type):
+    def __init__(self, key_type: Type, value_type: Type) -> None:
+        super().__init__(BasicTypes.OTHER)
+        self.key_type = key_type
+        self.value_type = value_type
+
+    def _get_string_description(self) -> str:
+        return f'Map<{self.key_type}, {self.value_type}>'
+
+
 class BinaryOperators(Enum):
     EQUALS = '=='
     NOTEQUALS = '!='
@@ -67,6 +76,11 @@ class BinaryOperators(Enum):
     DIVIDE = '/'
 
 
+class UnaryOperators(Enum):
+    NOT = '!'
+    SIZE = '|'
+
+
 class BinaryOperation(Expression):
     def __init__(self, operator: BinaryOperators, left_expression: Expression, right_expression: Expression) -> None:
         self.operator = operator
@@ -75,6 +89,37 @@ class BinaryOperation(Expression):
 
     def __str__(self) -> str:
         return f'{self.left_expression} {self.operator.value} {self.right_expression}'
+
+
+class UnaryOperation(Expression):
+    def __init__(self, operator: UnaryOperators, expression: Expression) -> None:
+        self.operator = operator
+        self.expression = expression
+
+    def __str__(self) -> str:
+        if self.operator == UnaryOperators.NOT:
+            return f'!({self.expression})'
+        if self.operator == UnaryOperators.SIZE:
+            return f'|{self.expression}|'
+        return 'UNDEFINED UNARY OPERATOR'
+
+
+class SetType(Type):
+    def __init__(self, parameterization: Optional[Expression] = None) -> None:
+        super().__init__(BasicTypes.OTHER)
+        self.parameterization = parameterization
+
+    def _get_string_description(self) -> str:
+        return f'Set{"" if not self.parameterization else f"<{self.parameterization}>"}'
+
+
+class Set(Expression):
+    def __init__(self, elements: list[Expression]) -> None:
+        self.elements = elements
+
+    def __str__(self) -> str:
+        elements_string = ', '.join(str(element) for element in self.elements) if self.elements else ''
+        return f'{{{elements_string}}}'
 
 
 class BitStringType(Type):
@@ -93,7 +138,9 @@ class Field(ASTNode):
         self.value = value
 
     def __str__(self) -> str:
-        return f'{self.type} {self.name} = {self.value};'
+        if self.value:
+            return f'{self.type} {self.name} = {self.value};'
+        return f'{self.type} {self.name};'
 
 
 class Parameter(ASTNode):
@@ -112,9 +159,8 @@ class MethodSignature(ASTNode):
         self.parameters = parameters
 
     def __str__(self) -> str:
-        parameter_list_string = ', '.join(
-            str(param) for param in self.parameters) if self.parameters else ''
-        return f'{self.return_type} {self.name}({parameter_list_string})'
+
+        return f'{self.return_type} {self.name}({_parameter_list_string(self.parameters)})'
 
 
 class Primitive(ASTNode):
@@ -127,10 +173,7 @@ class Primitive(ASTNode):
         self.methods = methods or []
 
     def __str__(self) -> str:
-        parameter_list_string = ', '.join(
-            str(param) for param in self.parameters) if self.parameters else ''
-
-        output_string = f"Primitive {self.name}({parameter_list_string}) {{\n"
+        output_string = f"Primitive {self.name}({_parameter_list_string(self.parameters)}) {{\n"
         for field in self.fields:
             output_string += f'  {field}\n'
         output_string += '\n'
@@ -158,7 +201,7 @@ class UserType(Type):
         return '.'.join(name for name in self.names)
 
 
-class FuncCall(Expression):
+class FuncCallExpression(Expression):
     def __init__(self, func: Expression, args: list[Expression]) -> None:
         self.func = func
         self.args = args
@@ -166,6 +209,16 @@ class FuncCall(Expression):
     def __str__(self) -> str:
         arg_str = ', '.join(str(arg) for arg in self.args)
         return f'{self.func}({arg_str})'
+
+
+class FuncCallStatement(Statement):
+    def __init__(self, func: Expression, args: list[Expression]) -> None:
+        self.func = func
+        self.args = args
+
+    def __str__(self) -> str:
+        arg_str = ', '.join(str(arg) for arg in self.args)
+        return f'{self.func}({arg_str});'
 
 
 class Variable(Expression):
@@ -272,6 +325,21 @@ class NumericFor(Statement):
         return output_string
 
 
+class GenericFor(Statement):
+    def __init__(self, var_type: Type, var_name: str, over: Expression, statements: list[Statement]):
+        self.var_type = var_type
+        self.var_name = var_name
+        self.over = over
+        self.statements = statements
+
+    def __str__(self) -> str:
+        output_string = f'for ({self.var_type} {self.var_name} in {self.over}) {{\n'
+        for statement in self.statements:
+            output_string += f'      {statement}\n'
+        output_string += '    }'
+        return output_string
+
+
 class Sample(Statement):
     def __init__(self, the_type: Optional[Type], var: Expression, sampled_from: Expression) -> None:
         self.the_type = the_type
@@ -298,6 +366,14 @@ class Integer(Expression):
 
     def __str__(self) -> str:
         return str(self.num)
+
+
+class ASTNone(Expression):
+    def __init__(self) -> None:
+        pass
+
+    def __str__(self) -> str:
+        return 'None'
 
 
 class BinaryNum(Expression):
@@ -345,10 +421,8 @@ class Scheme(ASTNode):
 
     def __str__(self) -> str:
         imports_string = ('\n'.join(str(im) for im in self.imports)) + '\n\n'
-        parameter_list_string = ', '.join(
-            str(param) for param in self.parameters) if self.parameters else ''
         output_string = imports_string + \
-            f'Scheme {self.name}({parameter_list_string}) extends {self.primitive_name} {{\n'
+            f'Scheme {self.name}({_parameter_list_string(self.parameters)}) extends {self.primitive_name} {{\n'
         for requirement in self.requirements:
             output_string += f'  requires {requirement};\n'
         output_string += '\n'
@@ -359,3 +433,38 @@ class Scheme(ASTNode):
             output_string += f'  {method}\n'
         output_string += '}'
         return output_string
+
+
+class Game(ASTNode):
+    def __init__(self, name: str, parameters: list[Parameter], fields: list[Field], methods: list[Method]) -> None:
+        self.name = name
+        self.parameters = parameters
+        self.fields = fields
+        self.methods = methods
+
+    def __str__(self) -> str:
+        output_string = f'Game {self.name}({_parameter_list_string(self.parameters)}) {{\n'
+        for field in self.fields:
+            output_string += f'  {field}\n'
+        output_string += '\n'
+        for method in self.methods:
+            output_string += f'  {method}\n'
+        output_string += '}'
+        return output_string
+
+
+class GameFile(ASTNode):
+    def __init__(self, imports: list[Import], games: tuple[Game, Game], name: str) -> None:
+        self.imports = imports
+        self.games = games
+        self.name = name
+
+    def __str__(self) -> str:
+        output_string = ('\n'.join(str(im) for im in self.imports)) + '\n\n'
+        output_string += f'{self.games[0]}\n\n{self.games[1]}\n\n'
+        output_string += f'export as {self.name};'
+        return output_string
+
+
+def _parameter_list_string(parameters: list[Parameter]) -> str:
+    return ', '.join(str(param) for param in parameters) if parameters else ''

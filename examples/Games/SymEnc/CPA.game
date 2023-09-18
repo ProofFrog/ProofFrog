@@ -6,7 +6,7 @@ Game Left(SymEnc E) {
 		k = E.KeyGen();
 	}
 	E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
-	
+
 		return E.Enc(k, mL);
 	}
 }
@@ -21,4 +21,4 @@ Game Right(SymEnc E) {
 	}
 }
 
-export (Left, Right) as CPA;
+export as CPA;

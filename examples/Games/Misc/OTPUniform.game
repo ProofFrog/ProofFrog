@@ -12,4 +12,4 @@ Game Random(int lambda) {
 	}
 }
 
-export (Real, Random) as OTPUniform;
+export as OTPUniform;

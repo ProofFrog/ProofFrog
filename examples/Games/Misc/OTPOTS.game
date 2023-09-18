@@ -12,4 +12,4 @@ Game Right(int lambda) {
 	}
 }
 
-export (Left, Right) as OTPOTS;
+export as OTPOTS;

@@ -3,6 +3,8 @@ from parsing.PrimitiveVisitor import PrimitiveVisitor
 from parsing.PrimitiveParser import PrimitiveParser
 from parsing.SchemeVisitor import SchemeVisitor
 from parsing.SchemeParser import SchemeParser
+from parsing.GameVisitor import GameVisitor
+from parsing.GameParser import GameParser
 import frog_ast
 
 
@@ -44,8 +46,8 @@ class SharedAST(PrimitiveVisitor, SchemeVisitor):  # type: ignore[misc] # pylint
     def visitProductType(self, ctx: PrimitiveParser.ProductTypeContext) -> frog_ast.ProductType:
         return frog_ast.ProductType(list(self.visit(individualType) for individualType in ctx.type_()))
 
-    def visitSetType(self, __: PrimitiveParser.SetTypeContext) -> frog_ast.Type:
-        return frog_ast.Type(frog_ast.BasicTypes.SET)
+    def visitSetType(self, ctx: PrimitiveParser.SetTypeContext) -> frog_ast.SetType:
+        return frog_ast.SetType(self.visit(ctx.set_().type_()) if ctx.set_().type_() else None)
 
     def visitField(self, ctx: PrimitiveParser.FieldContext) -> frog_ast.Field:
         return frog_ast.Field(
@@ -59,29 +61,56 @@ class SharedAST(PrimitiveVisitor, SchemeVisitor):  # type: ignore[misc] # pylint
             ctx.variable().id_().getText(),
             self.visit(ctx.expression()))
 
-    def visitAndExp(self, ctx: PrimitiveParser.AndExpContext) -> frog_ast.BinaryOperation:
-        return _binary_operation(frog_ast.BinaryOperators.AND, self.visit, ctx)
-
     def visitEqualsExp(self, ctx: PrimitiveParser.EqualsExpContext) -> frog_ast.BinaryOperation:
         return _binary_operation(frog_ast.BinaryOperators.EQUALS, self.visit, ctx)
-
-    def visitMultiplyExp(self, ctx: PrimitiveParser.MultiplyExpContext) -> frog_ast.BinaryOperation:
-        return _binary_operation(frog_ast.BinaryOperators.MULTIPLY, self.visit, ctx)
 
     def visitNotEqualsExp(self, ctx: PrimitiveParser.NotEqualsExpContext) -> frog_ast.BinaryOperation:
         return _binary_operation(frog_ast.BinaryOperators.NOTEQUALS, self.visit, ctx)
 
+    def visitGtExp(self, ctx: PrimitiveParser.GtExpContext) -> frog_ast.BinaryOperation:
+        return _binary_operation(frog_ast.BinaryOperators.GT, self.visit, ctx)
+
+    def visitLtExp(self, ctx: PrimitiveParser.LtExpContext) -> frog_ast.BinaryOperation:
+        return _binary_operation(frog_ast.BinaryOperators.LT, self.visit, ctx)
+
+    def visitGeqExp(self, ctx: PrimitiveParser.GeqExpContext) -> frog_ast.BinaryOperation:
+        return _binary_operation(frog_ast.BinaryOperators.GEQ, self.visit, ctx)
+
+    def visitLeqExp(self, ctx: PrimitiveParser.LeqExpContext) -> frog_ast.BinaryOperation:
+        return _binary_operation(frog_ast.BinaryOperators.LEQ, self.visit, ctx)
+
+    def visitAndExp(self, ctx: PrimitiveParser.AndExpContext) -> frog_ast.BinaryOperation:
+        return _binary_operation(frog_ast.BinaryOperators.AND, self.visit, ctx)
+
     def visitSubsetsExp(self, ctx: PrimitiveParser.SubsetsExpContext) -> frog_ast.BinaryOperation:
         return _binary_operation(frog_ast.BinaryOperators.SUBSETS, self.visit, ctx)
 
-    def visitSubtractExp(self, ctx: PrimitiveParser.SubtractExpContext) -> frog_ast.BinaryOperation:
-        return _binary_operation(frog_ast.BinaryOperators.SUBTRACT, self.visit, ctx)
+    def visitInExp(self, ctx: PrimitiveParser.InExpContext) -> frog_ast.BinaryOperation:
+        return _binary_operation(frog_ast.BinaryOperators.IN, self.visit, ctx)
+
+    def visitOrExp(self, ctx: PrimitiveParser.OrExpContext) -> frog_ast.BinaryOperation:
+        return _binary_operation(frog_ast.BinaryOperators.OR, self.visit, ctx)
+
+    def visitUnionExp(self, ctx: PrimitiveParser.UnionExpContext) -> frog_ast.BinaryOperation:
+        return _binary_operation(frog_ast.BinaryOperators.UNION, self.visit, ctx)
+
+    def visitSetMinusExp(self, ctx: PrimitiveParser.SetMinusExpContext) -> frog_ast.BinaryOperation:
+        return _binary_operation(frog_ast.BinaryOperators.SETMINUS, self.visit, ctx)
 
     def visitAddExp(self, ctx: PrimitiveParser.AddExpContext) -> frog_ast.BinaryOperation:
         return _binary_operation(frog_ast.BinaryOperators.ADD, self.visit, ctx)
 
-    def visitOrExp(self, ctx: PrimitiveParser.OrExpContext) -> frog_ast.BinaryOperation:
-        return _binary_operation(frog_ast.BinaryOperators.OR, self.visit, ctx)
+    def visitSubtractExp(self, ctx: PrimitiveParser.SubtractExpContext) -> frog_ast.BinaryOperation:
+        return _binary_operation(frog_ast.BinaryOperators.SUBTRACT, self.visit, ctx)
+
+    def visitMultiplyExp(self, ctx: PrimitiveParser.MultiplyExpContext) -> frog_ast.BinaryOperation:
+        return _binary_operation(frog_ast.BinaryOperators.MULTIPLY, self.visit, ctx)
+
+    def visitDivideExp(self, ctx: PrimitiveParser.DivideExpContext) -> frog_ast.BinaryOperation:
+        return _binary_operation(frog_ast.BinaryOperators.DIVIDE, self.visit, ctx)
+
+    def visitCreateSetExp(self, ctx: PrimitiveParser.CreateSetExpContext) -> frog_ast.Set:
+        return frog_ast.Set([self.visit(element) for element in ctx.expression()] if ctx.expression() else [])
 
     def visitMethod(self, ctx: PrimitiveParser.MethodContext) -> frog_ast.Method:
         statements = [self.visit(statement) for statement in ctx.methodBody().statement()]
@@ -127,6 +156,13 @@ class SharedAST(PrimitiveVisitor, SchemeVisitor):  # type: ignore[misc] # pylint
             self.visit(ctx.expression())
         )
 
+    def visitSampleStatement(self, ctx: PrimitiveParser.SampleStatementContext) -> frog_ast.Sample:
+        return frog_ast.Sample(
+            None,
+            self.visit(ctx.lvalue()),
+            self.visit(ctx.expression())
+        )
+
     def visitNumericForStatement(self, ctx: PrimitiveParser.NumericForStatementContext) -> frog_ast.NumericFor:
         return frog_ast.NumericFor(
             ctx.id_().getText(),
@@ -134,6 +170,13 @@ class SharedAST(PrimitiveVisitor, SchemeVisitor):  # type: ignore[misc] # pylint
             self.visit(ctx.expression()[1]),
             self.visit(ctx.block())
         )
+
+    def visitGenericForStatement(self, ctx: PrimitiveParser.GenericForStatementContext) -> frog_ast.GenericFor:
+        return frog_ast.GenericFor(
+            self.visit(ctx.type_()),
+            ctx.id_().getText(),
+            self.visit(ctx.expression()),
+            self.visit(ctx.block()))
 
     def visitIntExp(self, ctx: PrimitiveParser.IntExpContext) -> frog_ast.Integer:
         return frog_ast.Integer(int(ctx.INT().getText()))
@@ -158,6 +201,31 @@ class SharedAST(PrimitiveVisitor, SchemeVisitor):  # type: ignore[misc] # pylint
     def visitArrayType(self, ctx: PrimitiveParser.ArrayTypeContext) -> frog_ast.ArrayType:
         return frog_ast.ArrayType(self.visit(ctx.type_()), self.visit(ctx.integerExpression()))
 
+    def visitMapType(self, ctx: PrimitiveParser.MapTypeContext) -> frog_ast.MapType:
+        return frog_ast.MapType(self.visit(ctx.type_()[0]), self.visit(ctx.type_()[1]))
+
+    def visitNotExp(self, ctx: PrimitiveParser.NotExpContext) -> frog_ast.UnaryOperation:
+        return frog_ast.UnaryOperation(
+            frog_ast.UnaryOperators.NOT,
+            self.visit(ctx.expression())
+        )
+
+    def visitIntType(self, ctx: PrimitiveParser.IntTypeContext) -> frog_ast.Type:
+        return frog_ast.Type(frog_ast.BasicTypes.INT)
+
+    def visitSizeExp(self, ctx: PrimitiveParser.SizeExpContext) -> frog_ast.UnaryOperation:
+        return frog_ast.UnaryOperation(
+            frog_ast.UnaryOperators.SIZE,
+            self.visit(ctx.expression())
+        )
+
+    def visitNoneExp(self, __: PrimitiveParser.NoneExpContext) -> frog_ast.ASTNone:
+        return frog_ast.ASTNone()
+
+    def visitParenExp(self, ctx: PrimitiveParser.ParenExpContext) -> frog_ast.Expression:
+        exp: frog_ast.Expression = self.visit(ctx.expression())
+        return exp
+
     def visitLvalue(self, ctx: PrimitiveParser.LvalueExpContext) -> frog_ast.Expression:
         expression: frog_ast.Expression = frog_ast.Variable(ctx.id_()[0].getText())
 
@@ -179,8 +247,17 @@ class SharedAST(PrimitiveVisitor, SchemeVisitor):  # type: ignore[misc] # pylint
     def visitReturnStatement(self, ctx: PrimitiveParser.ReturnStatementContext) -> frog_ast.ReturnStatement:
         return frog_ast.ReturnStatement(self.visit(ctx.expression()))
 
-    def visitFnCallExp(self, ctx: PrimitiveParser.FnCallExpContext) -> frog_ast.FuncCall:
-        return frog_ast.FuncCall(self.visit(ctx.expression()), self.visit(ctx.argList()) if ctx.argList() else [])
+    def visitFunctionCallStatement(
+            self, ctx: PrimitiveParser.FunctionCallStatementContext) -> frog_ast.FuncCallStatement:
+        return frog_ast.FuncCallStatement(
+            self.visit(ctx.expression()),
+            self.visit(ctx.argList()) if ctx.argList() else []
+        )
+
+    def visitFnCallExp(self, ctx: PrimitiveParser.FnCallExpContext) -> frog_ast.FuncCallExpression:
+        return frog_ast.FuncCallExpression(
+            self.visit(ctx.expression()),
+            self.visit(ctx.argList()) if ctx.argList() else [])
 
     def visitSliceExp(self, ctx: PrimitiveParser.SliceExpContext) -> frog_ast.Slice:
         return frog_ast.Slice(
@@ -210,6 +287,20 @@ class SharedAST(PrimitiveVisitor, SchemeVisitor):  # type: ignore[misc] # pylint
     def visitIfStatement(self, ctx: PrimitiveParser.IfStatementContext) -> frog_ast.IfStatement:
         return frog_ast.IfStatement([self.visit(exp) for exp in ctx.expression()],
                                     [self.visit(block) for block in ctx.block()])
+
+    def visitGame(self, ctx: PrimitiveParser.GameContext) -> frog_ast.Game:
+        name = ctx.ID().getText()
+        param_list = self.visit(ctx.paramList()) if ctx.paramList() else []
+        field_list = []
+        if ctx.gameBody().field():
+            for field in ctx.gameBody().field():
+                field_list.append(self.visit(field))
+        methods = []
+        if ctx.gameBody().method():
+            for method in ctx.gameBody().method():
+                methods.append(self.visit(method))
+
+        return frog_ast.Game(name, param_list, field_list, methods)
 
 
 class PrimitiveASTGenerator(SharedAST, PrimitiveVisitor):  # type: ignore[misc]
@@ -252,3 +343,11 @@ class SchemeASTGenerator(SharedAST, SchemeVisitor):  # type: ignore[misc]
             method_list.append(self.visit(method))
 
         return frog_ast.Scheme(imports, name, param_list, primitive_name, field_list, requirement_list, method_list)
+
+
+class GameASTGenerator(SharedAST, GameVisitor):  # type: ignore[misc]
+    def visitProgram(self, ctx: GameParser.ProgramContext) -> frog_ast.GameFile:
+        imports = [self.visit(im) for im in ctx.moduleImport()]
+        game1: frog_ast.Game = self.visit(ctx.game()[0])
+        game2: frog_ast.Game = self.visit(ctx.game()[1])
+        return frog_ast.GameFile(imports, (game1, game2), ctx.gameExport().ID().getText())

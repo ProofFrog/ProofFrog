@@ -15,4 +15,4 @@ Game NoReplacement(int lambda) {
 	}
 }
 
-export (Replacement, NoReplacement) as Sample;
+export as Sample;

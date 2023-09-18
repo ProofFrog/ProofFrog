@@ -21,4 +21,4 @@ Game Random(SymEnc E) {
 	}
 }
 
-export (Real, Random) as CPA$;
+export as CPA$;

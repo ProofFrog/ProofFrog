@@ -14,4 +14,4 @@ Game Random(PRG G) {
 	}
 }
 
-export (Real, Random) as Security;
+export as Security;

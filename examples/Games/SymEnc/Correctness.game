@@ -14,4 +14,4 @@ Game Fake(SymEnc E) {
 	}
 }
 
-export (Real, Fake) as Correctness;
+export as Correctness;

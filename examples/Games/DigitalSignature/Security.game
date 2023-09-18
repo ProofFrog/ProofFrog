@@ -35,7 +35,7 @@ Game Fake(DigitalSignature E) {
 
 	E.Signature GetSig(E.Message m) {
 		E.Signature s = E.Sign(sk, m);
-		S = S + [m, s];
+		S = S union {[m, s]};
 		return s;
 	}
 
@@ -44,4 +44,4 @@ Game Fake(DigitalSignature E) {
 	}
 }
 
-export (Real, Fake) as Security;
+export as Security;

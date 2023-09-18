@@ -34,4 +34,4 @@ Game Fake(PubKeyEnc E) {
 	}
 }
 
-export (Real, Fake) as Correctness;
+export as Correctness;

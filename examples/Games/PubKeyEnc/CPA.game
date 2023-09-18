@@ -32,4 +32,4 @@ Game Right(PubKeyEnc E) {
 	}
 }
 
-export (Left, Right) as CPA;
+export as CPA;

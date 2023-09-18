@@ -39,11 +39,6 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SchemeParser#gameExport.
-    def visitGameExport(self, ctx:SchemeParser.GameExportContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by SchemeParser#field.
     def visitField(self, ctx:SchemeParser.FieldContext):
         return self.visitChildren(ctx)
@@ -171,6 +166,11 @@ class SchemeVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SchemeParser#notExp.
     def visitNotExp(self, ctx:SchemeParser.NotExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#noneExp.
+    def visitNoneExp(self, ctx:SchemeParser.NoneExpContext):
         return self.visitChildren(ctx)
 
 

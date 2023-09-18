@@ -26,4 +26,4 @@ Game Fake(Hash H) {
 	}
 }
 
-export (Real, Fake) as Security;
+export as Security;

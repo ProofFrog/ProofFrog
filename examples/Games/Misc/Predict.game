@@ -11,4 +11,4 @@ Game Fake(Set S) {
 	}
 }
 
-export (Real, Fake) as Predict;
+export as Predict;

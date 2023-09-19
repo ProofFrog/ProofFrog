@@ -38,8 +38,6 @@ for scheme in examples/Schemes/**/*; do
 	runTest scheme $scheme
 done
 
-for game in examples/Games/DigitalSignature/* examples/Games/Hash/* examples/Games/KeyAgreement/* \
-	examples/Games/MAC/* examples/Games/Misc/* examples/Games/PRF/* examples/Games/PRG/* examples/Games/PRP/* \
-	examples/Games/PubKeyEnc/* examples/Games/SecretSharing/* examples/Games/SymEnc/*; do
+for game in examples/Games/**/*; do
 	runTest game $game
 done

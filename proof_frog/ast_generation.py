@@ -288,6 +288,13 @@ class SharedAST(PrimitiveVisitor, SchemeVisitor):  # type: ignore[misc] # pylint
         return frog_ast.IfStatement([self.visit(exp) for exp in ctx.expression()],
                                     [self.visit(block) for block in ctx.block()])
 
+    def visitGamePhase(self, ctx: PrimitiveParser.GamePhaseContext) -> frog_ast.Phase:
+        oracles = [oracle.getText() for oracle in ctx.id_()]
+        method_list = []
+        for method in ctx.method():
+            method_list.append(self.visit(method))
+        return frog_ast.Phase(oracles, method_list)
+
     def visitGame(self, ctx: PrimitiveParser.GameContext) -> frog_ast.Game:
         name = ctx.ID().getText()
         param_list = self.visit(ctx.paramList()) if ctx.paramList() else []
@@ -300,7 +307,12 @@ class SharedAST(PrimitiveVisitor, SchemeVisitor):  # type: ignore[misc] # pylint
             for method in ctx.gameBody().method():
                 methods.append(self.visit(method))
 
-        return frog_ast.Game(name, param_list, field_list, methods)
+        phase_list = []
+        if ctx.gameBody().gamePhase():
+            for phase in ctx.gameBody().gamePhase():
+                phase_list.append(self.visit(phase))
+
+        return frog_ast.Game(name, param_list, field_list, methods, phase_list)
 
 
 class PrimitiveASTGenerator(SharedAST, PrimitiveVisitor):  # type: ignore[misc]

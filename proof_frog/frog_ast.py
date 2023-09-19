@@ -435,12 +435,32 @@ class Scheme(ASTNode):
         return output_string
 
 
+class Phase(ASTNode):
+    def __init__(self, oracles: list[str], methods: list[Method]):
+        self.oracles = oracles
+        self.methods = methods
+
+    def __str__(self) -> str:
+        output_string = 'Phase {\n'
+        output_string += '\n'.join(f'    {method}' for method in self.methods)
+        oracle_list_str = ', '.join(self.oracles) if self.oracles else ''
+        output_string += f'  oracles: [{oracle_list_str}];'
+        output_string += '}'
+        return output_string
+
+
 class Game(ASTNode):
-    def __init__(self, name: str, parameters: list[Parameter], fields: list[Field], methods: list[Method]) -> None:
+    # pylint: disable=too-many-arguments
+    def __init__(
+            self, name: str, parameters: list[Parameter],
+            fields: list[Field],
+            methods: list[Method],
+            phases: list[Phase]) -> None:
         self.name = name
         self.parameters = parameters
         self.fields = fields
         self.methods = methods
+        self.phases = phases
 
     def __str__(self) -> str:
         output_string = f'Game {self.name}({_parameter_list_string(self.parameters)}) {{\n'
@@ -449,6 +469,9 @@ class Game(ASTNode):
         output_string += '\n'
         for method in self.methods:
             output_string += f'  {method}\n'
+        if self.phases:
+            for phase in self.phases:
+                output_string += f'  {phase}\n'
         output_string += '}'
         return output_string
 

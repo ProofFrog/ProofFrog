@@ -1,5 +1,6 @@
+from __future__ import annotations
 from enum import Enum
-from typing import Optional
+from typing import Optional, TypeAlias
 
 
 class ASTNode():
@@ -449,21 +450,20 @@ class Phase(ASTNode):
         return output_string
 
 
+GameBody: TypeAlias = tuple[str, list[Parameter], list[Field], list[Method], list[Phase]]
+
+
 class Game(ASTNode):
     # pylint: disable=too-many-arguments
-    def __init__(
-            self, name: str, parameters: list[Parameter],
-            fields: list[Field],
-            methods: list[Method],
-            phases: list[Phase]) -> None:
-        self.name = name
-        self.parameters = parameters
-        self.fields = fields
-        self.methods = methods
-        self.phases = phases
+    def __init__(self, body: GameBody) -> None:
+        self.name = body[0]
+        self.parameters = body[1]
+        self.fields = body[2]
+        self.methods = body[3]
+        self.phases = body[4]
 
     def __str__(self) -> str:
-        output_string = f'Game {self.name}({_parameter_list_string(self.parameters)}) {{\n'
+        output_string = f'{self._get_signature()}\n'
         for field in self.fields:
             output_string += f'  {field}\n'
         output_string += '\n'
@@ -474,6 +474,41 @@ class Game(ASTNode):
                 output_string += f'  {phase}\n'
         output_string += '}'
         return output_string
+
+    def _get_signature(self) -> str:
+        return f'Game {self.name}({_parameter_list_string(self.parameters)}) {{'
+
+
+class ParameterizedGame(ASTNode):
+    def __init__(self, name: str, args: list[Expression]):
+        self.name = name
+        self.args = args
+
+    def __str__(self) -> str:
+        arg_str = ', '.join(str(arg) for arg in self.args)
+        return f'{self.name}({arg_str})'
+
+
+class ConcreteGame(ASTNode):
+    def __init__(self, game: ParameterizedGame, which: str):
+        self.game = game
+        self.which = which
+
+    def __str__(self) -> str:
+        return f'{self.game}.{self.which}'
+
+
+class Reduction(Game):
+    def __init__(self, body: GameBody, to_use: ParameterizedGame, play_against: ParameterizedGame) -> None:
+        super().__init__(body)
+        self.to_use = to_use
+        self.play_against = play_against
+
+    def _get_signature(self) -> str:
+        return (f'Reduction {self.name}('
+                f'{_parameter_list_string(self.parameters)}'
+                f') compose {self.to_use} against {self.play_against}.Adversary {{'
+                )
 
 
 class GameFile(ASTNode):
@@ -486,6 +521,75 @@ class GameFile(ASTNode):
         output_string = ('\n'.join(str(im) for im in self.imports)) + '\n\n'
         output_string += f'{self.games[0]}\n\n{self.games[1]}\n\n'
         output_string += f'export as {self.name};'
+        return output_string
+
+
+class Step(ASTNode):
+    def __init__(
+            self, challenger: ConcreteGame | ParameterizedGame, reduction: Optional[ParameterizedGame],
+            adversary: ParameterizedGame):
+        self.challenger = challenger
+        self.reduction = reduction
+        self.adversary = adversary
+
+    def __str__(self) -> str:
+        if self.reduction:
+            return f'{self.challenger} compose {self.reduction} against {self.adversary}.Adversary;'
+        return f'{self.challenger} against {self.adversary}.Adversary;'
+
+
+class Induction(ASTNode):
+    def __init__(self, name: str, start: Expression, end: Expression, steps: list[Step | Induction]):
+        self.name = name
+        self.start = start
+        self.end = end
+        self.steps = steps
+
+    def __str__(self) -> str:
+        output_string = f'induction({self.name} from {self.start} to {self.end}) {{\n'
+        output_string += '\n'.join(f'{  step}' for step in self.steps)
+        output_string += '\n}\n'
+        return output_string
+
+
+ProofStep: TypeAlias = Step | Induction
+
+
+class ProofFile(ASTNode):
+    # pylint: disable=too-many-arguments
+    def __init__(
+            self, imports: list[Import],
+            helpers: list[Game],
+            lets: list[Field],
+            assumptions: list[ParameterizedGame], max_calls: Optional[Variable],
+            theorem: ParameterizedGame, steps: list[ProofStep]) -> None:
+        self.imports = imports
+        self.helpers = helpers
+        self.lets = lets
+        self.max_calls = max_calls
+        self.assumptions = assumptions
+        self.theorem = theorem
+        self.steps = steps
+
+    def __str__(self) -> str:
+        output_string = ('\n'.join(str(im) for im in self.imports)) + '\n\n'
+        output_string += ('\n'.join(str(game) for game in self.helpers)) + '\n\n'
+
+        output_string += 'proof:\n'
+        output_string += 'let:\n'
+        for let in self.lets:
+            output_string += f'  {let}\n'
+
+        output_string += '\nassume:\n'
+        for assumption in self.assumptions:
+            output_string += f'  {assumption};\n'
+
+        if self.max_calls:
+            output_string += f'  calls <= {self.max_calls};\n'
+        output_string += f'theorem:\n  {self.theorem};\n'
+        output_string += 'games:\n'
+        for step in self.steps:
+            output_string += f'  {step}\n'
         return output_string
 
 

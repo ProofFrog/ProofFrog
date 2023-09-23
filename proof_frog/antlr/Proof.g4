@@ -2,28 +2,33 @@ grammar Proof;
 
 import Shared;
 
-program: moduleImport* (reduction|game)* proof EOF;
+program: moduleImport* proofHelpers proof EOF;
 
-reduction: REDUCTION ID L_PAREN paramList? R_PAREN COMPOSE gameModule AGAINST gameAdversary L_CURLY gameBody R_CURLY;
+proofHelpers: (reduction | game)*;
+
+reduction: REDUCTION ID L_PAREN paramList? R_PAREN COMPOSE parameterizedGame AGAINST gameAdversary L_CURLY gameBody R_CURLY;
 
 proof: PROOF COLON (LET COLON lets)? (ASSUME COLON assumptions)? THEOREM COLON theorem  GAMES COLON gameList;
 
 lets: (field SEMI)*;
 
-assumptions: (gameModule SEMI)* (CALLS (LEQ|L_ANGLE) expression SEMI)? (gameModule SEMI)*;
+assumptions: (parameterizedGame SEMI)* (CALLS (LEQ|L_ANGLE) expression SEMI)?;
 
-theorem: gameModule SEMI;
+theorem: parameterizedGame SEMI;
 
 gameList: (gameStep SEMI|induction)+;
 
-gameStep: concreteGame COMPOSE gameModule AGAINST gameAdversary
-	| (concreteGame|gameModule) AGAINST gameAdversary;
+gameStep: concreteGame COMPOSE parameterizedGame AGAINST gameAdversary # reductionStep
+	| (concreteGame|parameterizedGame) AGAINST gameAdversary # regularStep
+	;
 
-induction: INDUCTION L_PAREN ID FROM expression TO expression R_PAREN L_CURLY (gameStep SEMI)+ R_CURLY;
+induction: INDUCTION L_PAREN ID FROM integerExpression TO integerExpression R_PAREN L_CURLY (gameStep SEMI)+ R_CURLY;
 
-gameModule: ID L_PAREN argList? R_PAREN;
-gameAdversary: gameModule PERIOD ADVERSARY;
-concreteGame: gameModule PERIOD ID;
+varOrField: id (PERIOD id)*;
+
+parameterizedGame: ID L_PAREN argList? R_PAREN;
+gameAdversary: parameterizedGame PERIOD ADVERSARY;
+concreteGame: parameterizedGame PERIOD ID;
 
 REDUCTION: 'Reduction';
 AGAINST: 'against';

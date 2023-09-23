@@ -30,8 +30,8 @@ theorem:
 
 games:
 	CPA(E).Left against CPA(E).Adversary;
-	CPA$(E).Real compose R1(E) against CPA$(E).Adversary;
-	CPA$(E).Random compose R1(E) against CPA$(E).Adversary;
-	CPA$(E).Random compose R2(E) against CPA$(E).Adversary;
-	CPA$(E).Real compose R2(E) against CPA$(E).Adversary;
+	CPA$(E).Real compose R1(E) against CPA(E).Adversary;
+	CPA$(E).Random compose R1(E) against CPA(E).Adversary;
+	CPA$(E).Random compose R2(E) against CPA(E).Adversary;
+	CPA$(E).Real compose R2(E) against CPA(E).Adversary;
 	CPA(E).Right against CPA(E).Adversary;

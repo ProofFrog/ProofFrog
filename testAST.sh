@@ -41,3 +41,7 @@ done
 for game in examples/Games/**/*; do
 	runTest game $game
 done
+
+for proof in examples/Proofs/**/*; do
+	runTest proof $proof
+done

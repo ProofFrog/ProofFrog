@@ -5,6 +5,8 @@ from parsing.SchemeVisitor import SchemeVisitor
 from parsing.SchemeParser import SchemeParser
 from parsing.GameVisitor import GameVisitor
 from parsing.GameParser import GameParser
+from parsing.ProofVisitor import ProofVisitor
+from parsing.ProofParser import ProofParser
 import frog_ast
 
 
@@ -121,6 +123,9 @@ class SharedAST(PrimitiveVisitor, SchemeVisitor):  # type: ignore[misc] # pylint
 
         if ctx.INT():
             return frog_ast.Integer(int(ctx.INT().getText()))
+        if ctx.BINARYNUM():
+            return frog_ast.BinaryNum(int(ctx.BINARYNUM().getText(), 2))
+
         if ctx.lvalue():
             exp: frog_ast.Expression = self.visit(ctx.lvalue())
             return exp
@@ -296,23 +301,7 @@ class SharedAST(PrimitiveVisitor, SchemeVisitor):  # type: ignore[misc] # pylint
         return frog_ast.Phase(oracles, method_list)
 
     def visitGame(self, ctx: PrimitiveParser.GameContext) -> frog_ast.Game:
-        name = ctx.ID().getText()
-        param_list = self.visit(ctx.paramList()) if ctx.paramList() else []
-        field_list = []
-        if ctx.gameBody().field():
-            for field in ctx.gameBody().field():
-                field_list.append(self.visit(field))
-        methods = []
-        if ctx.gameBody().method():
-            for method in ctx.gameBody().method():
-                methods.append(self.visit(method))
-
-        phase_list = []
-        if ctx.gameBody().gamePhase():
-            for phase in ctx.gameBody().gamePhase():
-                phase_list.append(self.visit(phase))
-
-        return frog_ast.Game(name, param_list, field_list, methods, phase_list)
+        return frog_ast.Game(_parse_game_body(self.visit, ctx))
 
 
 class PrimitiveASTGenerator(SharedAST, PrimitiveVisitor):  # type: ignore[misc]
@@ -363,3 +352,94 @@ class GameASTGenerator(SharedAST, GameVisitor):  # type: ignore[misc]
         game1: frog_ast.Game = self.visit(ctx.game()[0])
         game2: frog_ast.Game = self.visit(ctx.game()[1])
         return frog_ast.GameFile(imports, (game1, game2), ctx.gameExport().ID().getText())
+
+
+class ProofASTGenerator(SharedAST, ProofVisitor):  # type: ignore[misc]
+    def visitProgram(self, ctx: ProofParser.ProgramContext) -> frog_ast.ProofFile:
+        game_list = []
+        for i in range(ctx.proofHelpers().getChildCount()):
+            game_list.append(self.visit(ctx.proofHelpers().getChild(i)))
+
+        proof = ctx.proof()
+        lets = []
+        if proof.lets():
+            for let in proof.lets().field():
+                lets.append(self.visit(let))
+
+        assumptions = []
+        max_calls = None
+        if proof.assumptions():
+            for assumption in proof.assumptions().parameterizedGame():
+                assumptions.append(self.visit(assumption))
+            if proof.assumptions().CALLS():
+                max_calls = self.visit(proof.assumptions().expression())
+        return frog_ast.ProofFile(
+            [self.visit(im) for im in ctx.moduleImport()],
+            game_list,
+            lets,
+            assumptions,
+            max_calls,
+            self.visit(proof.theorem().parameterizedGame()),
+            self.visit(proof.gameList())
+        )
+
+    def visitParameterizedGame(self, ctx: ProofParser.ParameterizedGameContext) -> frog_ast.ParameterizedGame:
+        return frog_ast.ParameterizedGame(ctx.ID().getText(), self.visit(ctx.argList()) if ctx.argList() else [])
+
+    def visitReduction(self, ctx: ProofParser.ReductionContext) -> frog_ast.Reduction:
+        return frog_ast.Reduction(
+            _parse_game_body(self.visit, ctx),
+            self.visit(ctx.parameterizedGame()),
+            self.visit(ctx.gameAdversary().parameterizedGame()))
+
+    def visitGameList(self, ctx: ProofParser.GameListContext) -> list[frog_ast.ProofStep]:
+        steps = []
+        for child in ctx.getChildren():
+            if child.getText() == ';':
+                continue
+            steps.append(self.visit(child))
+        return steps
+
+    def visitReductionStep(self, ctx: ProofParser.ReductionStepContext) -> frog_ast.ProofStep:
+        return frog_ast.Step(
+            self.visit(ctx.concreteGame()),
+            self.visit(ctx.parameterizedGame()),
+            self.visit(ctx.gameAdversary().parameterizedGame()))
+
+    def visitConcreteGame(self, ctx: ProofParser.ConcreteGameContext) -> frog_ast.ConcreteGame:
+        return frog_ast.ConcreteGame(self.visit(ctx.parameterizedGame()), ctx.ID().getText())
+
+    def visitRegularStep(self, ctx: ProofParser.RegularStepContext) -> frog_ast.ProofStep:
+        return frog_ast.Step(
+            self.visit(ctx.getChild(0)),
+            None,
+            self.visit(ctx.gameAdversary().parameterizedGame())
+        )
+
+    def visitInduction(self, ctx: ProofParser.InductionContext) -> frog_ast.Induction:
+        return frog_ast.Induction(
+            ctx.ID().getText(),
+            self.visit(ctx.integerExpression()[0]),
+            self.visit(ctx.integerExpression()[1]),
+            [self.visit(step) for step in ctx.gameStep()]
+        )
+
+
+def _parse_game_body(visit: Type[PrimitiveVisitor.visit], ctx: ProofParser.GameContext) -> frog_ast.GameBody:
+    name: str = ctx.ID().getText()
+    param_list: list[frog_ast.Parameter] = visit(ctx.paramList()) if ctx.paramList() else []
+    field_list: list[frog_ast.Field] = []
+    if ctx.gameBody().field():
+        for field in ctx.gameBody().field():
+            field_list.append(visit(field))
+    methods: list[frog_ast.Method] = []
+    if ctx.gameBody().method():
+        for method in ctx.gameBody().method():
+            methods.append(visit(method))
+
+    phase_list: list[frog_ast.Phase] = []
+    if ctx.gameBody().gamePhase():
+        for phase in ctx.gameBody().gamePhase():
+            phase_list.append(visit(phase))
+
+    return (name, param_list, field_list, methods, phase_list)

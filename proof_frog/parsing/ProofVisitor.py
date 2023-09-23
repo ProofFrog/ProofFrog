@@ -14,6 +14,11 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#proofHelpers.
+    def visitProofHelpers(self, ctx:ProofParser.ProofHelpersContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#reduction.
     def visitReduction(self, ctx:ProofParser.ReductionContext):
         return self.visitChildren(ctx)
@@ -44,8 +49,13 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#gameStep.
-    def visitGameStep(self, ctx:ProofParser.GameStepContext):
+    # Visit a parse tree produced by ProofParser#reductionStep.
+    def visitReductionStep(self, ctx:ProofParser.ReductionStepContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#regularStep.
+    def visitRegularStep(self, ctx:ProofParser.RegularStepContext):
         return self.visitChildren(ctx)
 
 
@@ -54,8 +64,13 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#gameModule.
-    def visitGameModule(self, ctx:ProofParser.GameModuleContext):
+    # Visit a parse tree produced by ProofParser#varOrField.
+    def visitVarOrField(self, ctx:ProofParser.VarOrFieldContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#parameterizedGame.
+    def visitParameterizedGame(self, ctx:ProofParser.ParameterizedGameContext):
         return self.visitChildren(ctx)
 
 

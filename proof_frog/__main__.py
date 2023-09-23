@@ -6,7 +6,9 @@ from parsing.SchemeLexer import SchemeLexer
 from parsing.SchemeParser import SchemeParser
 from parsing.GameLexer import GameLexer
 from parsing.GameParser import GameParser
-from ast_generation import SchemeASTGenerator, PrimitiveASTGenerator, GameASTGenerator
+from parsing.ProofLexer import ProofLexer
+from parsing.ProofParser import ProofParser
+from ast_generation import SchemeASTGenerator, PrimitiveASTGenerator, GameASTGenerator, ProofASTGenerator
 
 
 def main(argv: list[str]) -> None:
@@ -28,6 +30,10 @@ def main(argv: list[str]) -> None:
         lexer_functor = GameLexer
         parser_functor = GameParser
         ast_generator = GameASTGenerator
+    elif argv[1] == 'proof':
+        lexer_functor = ProofLexer
+        parser_functor = ProofParser
+        ast_generator = ProofASTGenerator
 
     lexer = lexer_functor(input_stream)
     parser = parser_functor(CommonTokenStream(lexer))

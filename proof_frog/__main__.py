@@ -1,50 +1,34 @@
 import sys
-from antlr4 import FileStream, CommonTokenStream
-from parsing.PrimitiveLexer import PrimitiveLexer
-from parsing.PrimitiveParser import PrimitiveParser
-from parsing.SchemeLexer import SchemeLexer
-from parsing.SchemeParser import SchemeParser
-from parsing.GameLexer import GameLexer
-from parsing.GameParser import GameParser
-from parsing.ProofLexer import ProofLexer
-from parsing.ProofParser import ProofParser
-from ast_generation import SchemeASTGenerator, PrimitiveASTGenerator, GameASTGenerator, ProofASTGenerator
+import frog_parser
+import proof_engine
 
 
-def parse(file_type: str, file_name: str) -> None:
-    input_stream = FileStream(file_name)
-    lexer_functor: type[PrimitiveLexer] | type[SchemeLexer]
-    parser_functor: type[PrimitiveParser] | type[SchemeParser]
-    ast_generator: type[PrimitiveASTGenerator] | type[SchemeASTGenerator]
-
-    match file_type:
-        case 'primitive':
-            lexer_functor = PrimitiveLexer
-            parser_functor = PrimitiveParser
-            ast_generator = PrimitiveASTGenerator
-        case 'scheme':
-            lexer_functor = SchemeLexer
-            parser_functor = SchemeParser
-            ast_generator = SchemeASTGenerator
-        case 'game':
-            lexer_functor = GameLexer
-            parser_functor = GameParser
-            ast_generator = GameASTGenerator
-        case 'proof':
-            lexer_functor = ProofLexer
-            parser_functor = ProofParser
-            ast_generator = ProofASTGenerator
-
-    lexer = lexer_functor(input_stream)
-    parser = parser_functor(CommonTokenStream(lexer))
-    tree = parser.program()
-    my_ast = ast_generator().visit(tree)
-    print(my_ast)
+def usage(module_name: str) -> None:
+    print("Incorrect Arguments", file=sys.stderr)
+    print(f'Usage: {module_name} parse [primitive|game|scheme|proof] <file>')
+    print(f'Usage: {module_name} prove <file.proof>')
+    sys.exit(1)
 
 
 def main(argv: list[str]) -> None:
     if argv[1] == 'parse':
-        parse(argv[2], argv[3])
+        ast_type = argv[2]
+        file = argv[3]
+        match ast_type:
+            case 'primitive':
+                print(frog_parser.parse_primitive(file))
+            case 'scheme':
+                print(frog_parser.parse_scheme(file))
+            case 'game':
+                print(frog_parser.parse_game(file))
+            case 'proof':
+                print(frog_parser.parse_proof(file))
+            case _:
+                usage(argv[0])
+    elif argv[1] == 'prove':
+        proof_engine.prove(argv[2])
+    else:
+        usage(argv[0])
 
 
 if __name__ == '__main__':

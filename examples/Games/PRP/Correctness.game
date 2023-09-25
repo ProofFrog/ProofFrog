@@ -1,4 +1,4 @@
-import 'Primitives/PRP.primitive';
+import 'examples/Primitives/PRP.primitive';
 
 Game Real(PRP F) {
 	bool test(BitString<F.lambda> seed, BitString<F.blen> input) {

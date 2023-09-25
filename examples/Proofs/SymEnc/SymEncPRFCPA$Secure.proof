@@ -1,6 +1,6 @@
-import 'Schemes/SymEnc/SymEncPRF.scheme';
-import 'Primitives/PRF.primitive';
-import 'Games/PRF/Security.game';
+import 'examples/Schemes/SymEnc/SymEncPRF.scheme';
+import 'examples/Primitives/PRF.primitive';
+import 'examples/Games/PRF/Security.game';
 import 'Games/Misc/Sample.game';
 import 'Games/SymEnc/CPA$.game';
 import 'Games/Misc/OTPUniform.game';

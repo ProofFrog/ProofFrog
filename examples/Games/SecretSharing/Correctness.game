@@ -1,4 +1,4 @@
-import 'Primitives/SecretSharing.primitive';
+import 'examples/Primitives/SecretSharing.primitive';
 
 Game Real(SecretSharing E) {
 	bool? Test(Set<Int> U, E.Message m) {

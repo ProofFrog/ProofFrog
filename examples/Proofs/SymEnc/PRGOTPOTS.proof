@@ -1,7 +1,7 @@
-import 'Schemes/SymEnc/PRGOTP.scheme';
-import 'Games/PRG/Security.game';
-import 'Games/SymEnc/OneTimeSecrecy.game';
-import 'Games/Misc/OTPOTS.game';
+import 'examples/Schemes/SymEnc/PRGOTP.scheme';
+import 'examples/Games/PRG/Security.game';
+import 'examples/Games/SymEnc/OneTimeSecrecy.game';
+import 'examples/Games/Misc/OTPOTS.game';
 
 Reduction R1(PRGOTP E, PRG G) compose Security(G) against OneTimeSecrecy(E).Adversary {
 	E.Ciphertext Eavesdrop(E.message mL, E.message mR) {
@@ -17,7 +17,7 @@ Reduction R2(PRGOTP E, PRG G) compose Security(G) against OneTimeSecrecy(E).Adve
 		E.Ciphertext c = z + mR;
 		return c;
 	}
-} 
+}
 
 proof:
 
@@ -58,4 +58,4 @@ games:
 	// By assumption
 	Security(G).Real compose R2(E, G) against OneTimeSecrecy(E).Adversary;
 
-	OneTimeSecrecy(E).Right against OneTimeSecrecy(E).Adversary; 
+	OneTimeSecrecy(E).Right against OneTimeSecrecy(E).Adversary;

@@ -1,4 +1,4 @@
-import 'Primitives/PRG.primitive';
+import 'examples/Primitives/PRG.primitive';
 
 Game Real(PRG G) {
 	BitString<G.lambda + G.stretch> Query() {

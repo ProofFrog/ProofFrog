@@ -1,4 +1,4 @@
-import 'Primitives/SecretSharing.primitive';
+import 'examples/Primitives/SecretSharing.primitive';
 
 Game Left(SecretSharing E) {
 	Array<E.Share, E.shareCount>? Share(E.Message mL, E.message mR, Set<Int> U) {

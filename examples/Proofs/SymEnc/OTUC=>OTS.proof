@@ -1,6 +1,6 @@
-import 'Primitives/SymEnc.primitive';
-import 'Games/SymEnc/OneTimeSecrecy.game';
-import 'Games/SymEnc/OneTimeUniformCiphertexts';
+import 'examples/Primitives/SymEnc.primitive';
+import 'examples/Games/SymEnc/OneTimeSecrecy.game';
+import 'examples/Games/SymEnc/OneTimeUniformCiphertexts';
 
 Reduction R1(SymEnc E) compose OneTimeUniformCiphertexts(E) against OneTimeSecrecy(E).Adversary {
 	E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {

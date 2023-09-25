@@ -1,4 +1,4 @@
-import 'Primitives/PRP.primitive';
+import 'examples/Primitives/PRP.primitive';
 
 Game Real(PRP F) {
 	BitString<F.lambda> k;

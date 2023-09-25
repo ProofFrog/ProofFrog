@@ -1,5 +1,5 @@
-import 'Primitives/SymEnc.primitive';
-import 'Primitives/MAC.primitive';
+import 'examples/Primitives/SymEnc.primitive';
+import 'examples/Primitives/MAC.primitive';
 
 // Specify some precondition that E.Ciphertext subsets M.Message
 Scheme EncryptThenMAC(SymEnc E, MAC M) extends SymEnc {

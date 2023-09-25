@@ -1,6 +1,6 @@
-import 'Primitives/SymEnc.primitive';
-import 'Games/SymEnc/CPA.game';
-import 'Games/SymEnc/CPA$.game';
+import 'examples/Primitives/SymEnc.primitive';
+import 'examples/Games/SymEnc/CPA.game';
+import 'examples/Games/SymEnc/CPA$.game';
 
 Reduction R1(SymEnc E) compose CPA$(E) against CPA(E).Adversary {
 	void Eavesdrop(E.Message mL, E.Message mR) {

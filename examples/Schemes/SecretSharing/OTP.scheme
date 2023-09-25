@@ -1,4 +1,4 @@
-import 'Primitives/SecretSharing.primitive';
+import 'examples/Primitives/SecretSharing.primitive';
 
 Scheme OTP(int l) extends SecretSharing {
 	Set Message = BitString<l>;

@@ -1,4 +1,4 @@
-from typing import Type, TypeAlias
+from typing import Type
 from antlr4 import FileStream, CommonTokenStream
 from parsing.PrimitiveVisitor import PrimitiveVisitor
 from parsing.PrimitiveParser import PrimitiveParser
@@ -450,18 +450,15 @@ def _parse_game_body(visit: Type[PrimitiveVisitor.visit], ctx: ProofParser.GameC
     return (name, param_list, field_list, methods, phase_list)
 
 
-_ParsedAst: TypeAlias = frog_ast.Primitive | frog_ast.Scheme | frog_ast.GameFile | frog_ast.ProofFile
-
-
 def _parse_general(
         file_name: str, lexer_functor: type[PrimitiveLexer],
         parser_functor: type[PrimitiveParser],
-        ast_generator: type[_PrimitiveASTGenerator]) -> _ParsedAst:
+        ast_generator: type[_PrimitiveASTGenerator]) -> frog_ast.Root:
     input_stream = FileStream(file_name)
     lexer = lexer_functor(input_stream)
     parser = parser_functor(CommonTokenStream(lexer))
     tree = parser.program()
-    ast: _ParsedAst = ast_generator().visit(tree)
+    ast: frog_ast.Root = ast_generator().visit(tree)
     return ast
 
 

@@ -1,10 +1,24 @@
 from __future__ import annotations
 from enum import Enum
+from abc import ABC, abstractmethod
 from typing import Optional, TypeAlias
+
+
+class FileType(Enum):
+    PRIMITIVE = 'primitive'
+    SCHEME = 'scheme'
+    GAME = 'game'
+    PROOF = 'proof'
 
 
 class ASTNode():
     pass
+
+
+class Root(ABC):
+    @abstractmethod
+    def get_export_name(self) -> str:
+        pass
 
 
 class Expression(ASTNode):
@@ -164,7 +178,7 @@ class MethodSignature(ASTNode):
         return f'{self.return_type} {self.name}({_parameter_list_string(self.parameters)})'
 
 
-class Primitive(ASTNode):
+class Primitive(ASTNode, Root):
     def __init__(
             self, name: str, parameters: list[Parameter],
             fields: Optional[list[Field]] = None, methods: Optional[list[MethodSignature]] = None) -> None:
@@ -182,6 +196,9 @@ class Primitive(ASTNode):
             output_string += f'  {method};\n'
         output_string += "}"
         return output_string
+
+    def get_export_name(self) -> str:
+        return self.name
 
 
 class ProductType(Type):
@@ -407,7 +424,7 @@ class Import(ASTNode):
         return f"import '{self.filename}'" + (f' as {self.rename}' if self.rename else '') + ';'
 
 
-class Scheme(ASTNode):
+class Scheme(ASTNode, Root):
     # pylint: disable=too-many-arguments
     def __init__(self, imports: list[Import], name: str, parameters: list[Parameter],
                  primitive_name: str, fields: list[Field],
@@ -434,6 +451,9 @@ class Scheme(ASTNode):
             output_string += f'  {method}\n'
         output_string += '}'
         return output_string
+
+    def get_export_name(self) -> str:
+        return self.name
 
 
 class Phase(ASTNode):
@@ -511,7 +531,7 @@ class Reduction(Game):
                 )
 
 
-class GameFile(ASTNode):
+class GameFile(Root, ASTNode):
     def __init__(self, imports: list[Import], games: tuple[Game, Game], name: str) -> None:
         self.imports = imports
         self.games = games
@@ -522,6 +542,9 @@ class GameFile(ASTNode):
         output_string += f'{self.games[0]}\n\n{self.games[1]}\n\n'
         output_string += f'export as {self.name};'
         return output_string
+
+    def get_export_name(self) -> str:
+        return self.name
 
 
 class Step(ASTNode):
@@ -555,7 +578,7 @@ class Induction(ASTNode):
 ProofStep: TypeAlias = Step | Induction
 
 
-class ProofFile(ASTNode):
+class ProofFile(ASTNode, Root):
     # pylint: disable=too-many-arguments
     def __init__(
             self, imports: list[Import],
@@ -591,6 +614,10 @@ class ProofFile(ASTNode):
         for step in self.steps:
             output_string += f'  {step}\n'
         return output_string
+
+    def get_export_name(self) -> str:
+        # We should never be proving more than one thing, so this doesn't need to be unique.
+        return 'Proof'
 
 
 def _parameter_list_string(parameters: list[Parameter]) -> str:

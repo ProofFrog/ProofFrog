@@ -1,6 +1,6 @@
-import 'Scheme/PRG/CounterPRG.scheme';
-import 'Games/PRG/Security.game' as PRGSecurity;
-import 'Games/PRF/Security.game' as PRFSecurity;
+import 'examples/Scheme/PRG/CounterPRG.scheme';
+import 'examples/Games/PRG/Security.game' as PRGSecurity;
+import 'examples/Games/PRF/Security.game' as PRFSecurity;
 
 Game SecurityIntermediate1(CounterPRG G, int hybridNum) {
 	int count;

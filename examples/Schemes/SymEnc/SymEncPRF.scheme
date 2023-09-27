@@ -1,5 +1,5 @@
-import 'Primitives/SymEnc.primitive';
-import 'Primitives/PRF.primitive';
+import 'examples/Primitives/SymEnc.primitive';
+import 'examples/Primitives/PRF.primitive';
 
 // Construction 7.4 from book
 
@@ -16,7 +16,7 @@ Scheme SymEncPRF(PRF F) extends SymEnc {
 	Ciphertext Enc(Key k, Message m) {
 		BitString<F.lambda> r <- BitString<F.lambda>;
 		BitString<F.out> x = F.evaluate(k, r) + m;
-		return [r, x]; 
+		return [r, x];
 	}
 
 	Message Dec(Key k, Ciphertext c) {

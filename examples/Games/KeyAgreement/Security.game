@@ -1,4 +1,4 @@
-import 'Primitives/KeyAgreement.primitive';
+import 'examples/Primitives/KeyAgreement.primitive';
 
 Game Real(KeyAgreement E) {
 	E.Transcript * E.Key Query() {

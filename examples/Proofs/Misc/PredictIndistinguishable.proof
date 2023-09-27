@@ -1,4 +1,4 @@
-import 'Games/Misc/PredictBitString.game';
+import 'examples/Games/Misc/PredictBitString.game';
 
 Game PredictBitStringIntermdiate1(int lambda) {
 	bool bad;

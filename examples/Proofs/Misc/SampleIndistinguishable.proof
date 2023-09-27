@@ -1,4 +1,4 @@
-import 'Games/Misc/Sample.game';
+import 'examples/Games/Misc/Sample.game';
 
 Game SampleIntermediate1(int lambda) {
 	Set<BitString<lambda>> R;

@@ -1,6 +1,6 @@
-import 'Primitives/SymEnc.primitive';
-import 'Schemes/SymEnc/DoubleSymEnc.scheme';
-import 'Games/SymEnc/OneTimeUniformCiphertexts.game';
+import 'examples/Primitives/SymEnc.primitive';
+import 'examples/Schemes/SymEnc/DoubleSymEnc.scheme';
+import 'examples/Games/SymEnc/OneTimeUniformCiphertexts.game';
 
 Reduction R1(DoubleSymEnc D, SymEnc E) compose OneTimeUniformCiphertexts(E) against OneTimeUniformCiphertexts(D).Adversary {
 	D.Ciphertext CTXT(D.Message m) {
@@ -36,4 +36,3 @@ games:
 
 	// By codewise equivalency
 	OneTimeUniformCiphertexts(D).Random against OneTimeUniformCiphertexts(D).Adversary;
-

@@ -11,7 +11,7 @@ function runTest {
 	parsedOutput2=$(mktemp)
 	trimmedOriginal=$(mktemp)
 
-	python3 proof_frog $parseType $fileName > $parsedOutput
+	python3 proof_frog parse $parseType $fileName > $parsedOutput
 
 	cat $parsedOutput | tr -d "[:space:]" > $parsedOutput2
 	cat $fileName | egrep -v '//' | tr -d "[:space:]" > $trimmedOriginal

@@ -1,4 +1,4 @@
-import 'Primitives/SymEnc.primitive';
+import 'examples/Primitives/SymEnc.primitive';
 
 Game Left(SymEnc E) {
 	E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {

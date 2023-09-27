@@ -3,13 +3,13 @@ import 'examples/Games/SymEnc/CPA.game';
 import 'examples/Games/SymEnc/CPA$.game';
 
 Reduction R1(SymEnc E) compose CPA$(E) against CPA(E).Adversary {
-	void Eavesdrop(E.Message mL, E.Message mR) {
+	E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
 		return challenger.CTXT(mL);
 	}
 }
 
 Reduction R2(SymEnc E) compose CPA$(E) against CPA(E).Adversary {
-	void Eavesdrop(E.Message mL, E.Message mR) {
+	E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
 		return challenger.CTXT(mR);
 	}
 }

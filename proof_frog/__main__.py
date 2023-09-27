@@ -1,6 +1,7 @@
 import sys
 import frog_parser
 import proof_engine
+from colorama import init
 
 
 def usage(module_name: str) -> None:
@@ -32,4 +33,5 @@ def main(argv: list[str]) -> None:
 
 
 if __name__ == '__main__':
+    init(autoreset=True)
     main(sys.argv)

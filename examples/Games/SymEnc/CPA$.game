@@ -15,7 +15,7 @@ Game Random(SymEnc E) {
 	void Initialize() {
 		k = E.KeyGen();
 	}
-	E.Ciphertext Eavesdrop(E.Message m) {
+	E.Ciphertext CTXT(E.Message m) {
 		E.Ciphertext c <- E.Ciphertext;
 		return c;
 	}

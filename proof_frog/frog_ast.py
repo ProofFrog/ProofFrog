@@ -708,6 +708,9 @@ class Game(ASTNode):
 
         raise ValueError(f"No method with name {name} for game {self.name}")
 
+    def has_method(self, name: str) -> bool:
+        return any(method.signature.name == name for method in self.methods)
+
     def accept(self, v: Visitor) -> None:
         v.visit_game(self)
         for param in self.parameters:

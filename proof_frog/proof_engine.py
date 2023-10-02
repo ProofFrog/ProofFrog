@@ -83,7 +83,7 @@ def inline(challenger: frog_ast.Game, reduction: frog_ast.Reduction) -> frog_ast
     print(challenger)
     name = 'Inlined'
     parameters = challenger.parameters
-    fields = challenger.fields
+    fields = copy.deepcopy(challenger.fields) + copy.deepcopy(reduction.fields)
     phases = challenger.phases
     methods = copy.deepcopy(reduction.methods)
     inlined_game = frog_ast.Game((name, parameters, fields, methods, phases))
@@ -94,6 +94,8 @@ def inline(challenger: frog_ast.Game, reduction: frog_ast.Reduction) -> frog_ast
 
 
 def apply_reduction(challenger: frog_ast.Game, reduced_game: frog_ast.Game) -> None:
+    if challenger.has_method('Initialize') and not reduced_game.has_method('Initialize'):
+        reduced_game.methods.insert(0, challenger.get_method('Initialize'))
     for method in reduced_game.methods:
         return_stmt = method.statements[-1]
         if isinstance(return_stmt, frog_ast.ReturnStatement) and _is_challenger_call(return_stmt.expression):

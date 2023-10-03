@@ -1,3 +1,4 @@
 mypy
 pylint
 types-colorama
+pytest

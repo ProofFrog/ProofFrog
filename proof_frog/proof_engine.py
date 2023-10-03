@@ -3,14 +3,14 @@ import sys
 import copy
 from typing import TypeAlias
 from colorama import Fore
-import frog_parser
-import frog_ast
+from . import frog_parser
+from .import frog_ast
 
 ProofNamespace: TypeAlias = dict[str, frog_ast.ASTNode]
 
 
 def prove(proof_file_name: str) -> None:
-    proof_file = frog_parser.parse_proof(proof_file_name)
+    proof_file = frog_parser.parse_proof_file(proof_file_name)
     proof_namespace: ProofNamespace = {}
 
     for imp in proof_file.imports:
@@ -18,11 +18,11 @@ def prove(proof_file_name: str) -> None:
         root: frog_ast.Root
         match file_type:
             case frog_ast.FileType.PRIMITIVE:
-                root = frog_parser.parse_primitive(imp.filename)
+                root = frog_parser.parse_primitive_file(imp.filename)
             case frog_ast.FileType.SCHEME:
-                root = frog_parser.parse_scheme(imp.filename)
+                root = frog_parser.parse_scheme_file(imp.filename)
             case frog_ast.FileType.GAME:
-                root = frog_parser.parse_game(imp.filename)
+                root = frog_parser.parse_game_file(imp.filename)
             case frog_ast.FileType.PROOF:
                 raise TypeError("Cannot import proofs")
 
@@ -53,13 +53,13 @@ def prove(proof_file_name: str) -> None:
         if current_step.reduction:
             reduction = _get_game_ast(proof_namespace, current_step.reduction)
             assert isinstance(reduction, frog_ast.Reduction)
-            current_game_ast = inline(current_game_ast, reduction)
+            current_game_ast = apply_reduction(current_game_ast, reduction, proof_namespace)
 
         next_game_ast = _get_game_ast(proof_namespace, next_step.challenger)
         if next_step.reduction:
             reduction = _get_game_ast(proof_namespace, next_step.reduction)
             assert isinstance(reduction, frog_ast.Reduction)
-            next_game_ast = inline(next_game_ast, reduction)
+            next_game_ast = apply_reduction(next_game_ast, reduction, proof_namespace)
 
         print("Current Game:")
         print(current_game_ast)
@@ -75,8 +75,11 @@ def prove(proof_file_name: str) -> None:
 
     print(Fore.GREEN + "Proof Suceeded!")
 
+# pylint: disable-next=unused-argument
 
-def inline(challenger: frog_ast.Game, reduction: frog_ast.Reduction) -> frog_ast.Game:
+
+def apply_reduction(
+        challenger: frog_ast.Game, reduction: frog_ast.Reduction, _namespace: ProofNamespace) -> frog_ast.Game:
     print("Reduction to apply:")
     print(reduction)
     print("Challenger:")
@@ -87,16 +90,10 @@ def inline(challenger: frog_ast.Game, reduction: frog_ast.Reduction) -> frog_ast
     phases = challenger.phases
     methods = copy.deepcopy(reduction.methods)
     inlined_game = frog_ast.Game((name, parameters, fields, methods, phases))
-    apply_reduction(challenger, inlined_game)
-    print("After Inlining:")
-    print(inlined_game)
-    return inlined_game
 
-
-def apply_reduction(challenger: frog_ast.Game, reduced_game: frog_ast.Game) -> None:
-    if challenger.has_method('Initialize') and not reduced_game.has_method('Initialize'):
-        reduced_game.methods.insert(0, challenger.get_method('Initialize'))
-    for method in reduced_game.methods:
+    if challenger.has_method('Initialize') and not inlined_game.has_method('Initialize'):
+        inlined_game.methods.insert(0, challenger.get_method('Initialize'))
+    for method in inlined_game.methods:
         return_stmt = method.statements[-1]
         if isinstance(return_stmt, frog_ast.ReturnStatement) and _is_challenger_call(return_stmt.expression):
             assert isinstance(return_stmt.expression, frog_ast.FuncCallExpression)
@@ -109,6 +106,9 @@ def apply_reduction(challenger: frog_ast.Game, reduced_game: frog_ast.Game) -> N
             called_method.accept(v)
             method.statements.pop()
             method.statements = method.statements + called_method.statements
+    print("After Inlining:")
+    print(inlined_game)
+    return inlined_game
 
 
 def _get_game_ast(

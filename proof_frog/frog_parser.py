@@ -1,18 +1,19 @@
+import os
 from typing import Type
-from antlr4 import FileStream, CommonTokenStream
-from parsing.PrimitiveVisitor import PrimitiveVisitor
-from parsing.PrimitiveParser import PrimitiveParser
-from parsing.PrimitiveLexer import PrimitiveLexer
-from parsing.SchemeVisitor import SchemeVisitor
-from parsing.SchemeParser import SchemeParser
-from parsing.SchemeLexer import SchemeLexer
-from parsing.GameVisitor import GameVisitor
-from parsing.GameParser import GameParser
-from parsing.GameLexer import GameLexer
-from parsing.ProofVisitor import ProofVisitor
-from parsing.ProofParser import ProofParser
-from parsing.ProofLexer import ProofLexer
-import frog_ast
+from antlr4 import FileStream, InputStream, CommonTokenStream
+from .parsing.PrimitiveVisitor import PrimitiveVisitor
+from .parsing.PrimitiveParser import PrimitiveParser
+from .parsing.PrimitiveLexer import PrimitiveLexer
+from .parsing.SchemeVisitor import SchemeVisitor
+from .parsing.SchemeParser import SchemeParser
+from .parsing.SchemeLexer import SchemeLexer
+from .parsing.GameVisitor import GameVisitor
+from .parsing.GameParser import GameParser
+from .parsing.GameLexer import GameLexer
+from .parsing.ProofVisitor import ProofVisitor
+from .parsing.ProofParser import ProofParser
+from .parsing.ProofLexer import ProofLexer
+from . import frog_ast
 
 
 def _binary_operation(
@@ -25,7 +26,8 @@ def _binary_operation(
     )
 
 
-class _SharedAST(PrimitiveVisitor, SchemeVisitor):  # type: ignore[misc] # pylint: disable=too-many-public-methods
+# pylint: disable-next=too-many-public-methods
+class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  # type: ignore[misc]
 
     def visitParamList(self, ctx: PrimitiveParser.ParamListContext) -> list[frog_ast.Parameter]:
         result = []
@@ -450,37 +452,43 @@ def _parse_game_body(visit: Type[PrimitiveVisitor.visit], ctx: ProofParser.GameC
     return (name, param_list, field_list, methods, phase_list)
 
 
-def _parse_general(
-        file_name: str, lexer_functor: type[PrimitiveLexer],
-        parser_functor: type[PrimitiveParser],
-        ast_generator: type[_PrimitiveASTGenerator]) -> frog_ast.Root:
-    input_stream = FileStream(file_name)
-    lexer = lexer_functor(input_stream)
-    parser = parser_functor(CommonTokenStream(lexer))
-    tree = parser.program()
-    ast: frog_ast.Root = ast_generator().visit(tree)
+def _get_parser(input_: str, lexer_functor: type[PrimitiveLexer],
+                parser_functor: type[PrimitiveParser]) -> PrimitiveParser:
+    input_stream: InputStream | FileStream
+    if os.path.isfile(input_):
+        input_stream = FileStream
+    else:
+        input_stream = InputStream
+    lexer = lexer_functor(input_stream(input_))
+    return parser_functor(CommonTokenStream(lexer))
+
+
+def parse_primitive_file(primitive: str) -> frog_ast.Primitive:
+    ast: frog_ast.Primitive = _PrimitiveASTGenerator().visit(
+        _get_parser(primitive, PrimitiveLexer, PrimitiveParser).program())
     return ast
 
 
-def parse_primitive(file_name: str) -> frog_ast.Primitive:
-    ast = _parse_general(file_name, PrimitiveLexer, PrimitiveParser, _PrimitiveASTGenerator)
-    assert isinstance(ast, frog_ast.Primitive)
+def parse_scheme_file(scheme: str) -> frog_ast.Scheme:
+    ast: frog_ast.Scheme = _SchemeASTGenerator().visit(_get_parser(scheme, SchemeLexer, SchemeParser).program())
     return ast
 
 
-def parse_scheme(file_name: str) -> frog_ast.Scheme:
-    ast = _parse_general(file_name, SchemeLexer, SchemeParser, _SchemeASTGenerator)
-    assert isinstance(ast, frog_ast.Scheme)
+def parse_game_file(game_file: str) -> frog_ast.GameFile:
+    ast: frog_ast.GameFile = _GameASTGenerator().visit(_get_parser(game_file, GameLexer, GameParser).program())
     return ast
 
 
-def parse_game(file_name: str) -> frog_ast.GameFile:
-    ast = _parse_general(file_name, GameLexer, GameParser, _GameASTGenerator)
-    assert isinstance(ast, frog_ast.GameFile)
+def parse_proof_file(proof_file: str) -> frog_ast.ProofFile:
+    ast: frog_ast.ProofFile = _ProofASTGenerator().visit(_get_parser(proof_file, ProofLexer, ProofParser).program())
     return ast
 
 
-def parse_proof(file_name: str) -> frog_ast.ProofFile:
-    ast = _parse_general(file_name, ProofLexer, ProofParser, _ProofASTGenerator)
-    assert isinstance(ast, frog_ast.ProofFile)
+def parse_game(game: str) -> frog_ast.Game:
+    ast: frog_ast.Game = _SharedAST().visit(_get_parser(game, GameLexer, GameParser).game())
+    return ast
+
+
+def parse_reduction(reduction: str) -> frog_ast.Reduction:
+    ast: frog_ast.Reduction = _ProofASTGenerator().visit(_get_parser(reduction, ProofLexer, ProofParser).reduction())
     return ast

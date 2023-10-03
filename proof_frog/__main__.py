@@ -1,7 +1,7 @@
 import sys
-import frog_parser
-import proof_engine
 from colorama import init
+from . import frog_parser
+from . import proof_engine
 
 
 def usage(module_name: str) -> None:
@@ -17,13 +17,13 @@ def main(argv: list[str]) -> None:
         file = argv[3]
         match ast_type:
             case 'primitive':
-                print(frog_parser.parse_primitive(file))
+                print(frog_parser.parse_primitive_file(file))
             case 'scheme':
-                print(frog_parser.parse_scheme(file))
+                print(frog_parser.parse_scheme_file(file))
             case 'game':
-                print(frog_parser.parse_game(file))
+                print(frog_parser.parse_game_file(file))
             case 'proof':
-                print(frog_parser.parse_proof(file))
+                print(frog_parser.parse_proof_file(file))
             case _:
                 usage(argv[0])
     elif argv[1] == 'prove':

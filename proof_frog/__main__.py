@@ -1,7 +1,7 @@
 import sys
 from colorama import init
-from . import frog_parser
-from . import proof_engine
+import frog_parser
+import proof_engine
 
 
 def usage(module_name: str) -> None:

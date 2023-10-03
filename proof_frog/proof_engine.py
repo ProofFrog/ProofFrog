@@ -3,8 +3,8 @@ import sys
 import copy
 from typing import TypeAlias
 from colorama import Fore
-from . import frog_parser
-from .import frog_ast
+import frog_parser
+import frog_ast
 
 ProofNamespace: TypeAlias = dict[str, frog_ast.ASTNode]
 

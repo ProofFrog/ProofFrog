@@ -1,19 +1,19 @@
 import os
 from typing import Type
 from antlr4 import FileStream, InputStream, CommonTokenStream
-from parsing.PrimitiveVisitor import PrimitiveVisitor
-from parsing.PrimitiveParser import PrimitiveParser
-from parsing.PrimitiveLexer import PrimitiveLexer
-from parsing.SchemeVisitor import SchemeVisitor
-from parsing.SchemeParser import SchemeParser
-from parsing.SchemeLexer import SchemeLexer
-from parsing.GameVisitor import GameVisitor
-from parsing.GameParser import GameParser
-from parsing.GameLexer import GameLexer
-from parsing.ProofVisitor import ProofVisitor
-from parsing.ProofParser import ProofParser
-from parsing.ProofLexer import ProofLexer
-import frog_ast
+from .parsing.PrimitiveVisitor import PrimitiveVisitor
+from .parsing.PrimitiveParser import PrimitiveParser
+from .parsing.PrimitiveLexer import PrimitiveLexer
+from .parsing.SchemeVisitor import SchemeVisitor
+from .parsing.SchemeParser import SchemeParser
+from .parsing.SchemeLexer import SchemeLexer
+from .parsing.GameVisitor import GameVisitor
+from .parsing.GameParser import GameParser
+from .parsing.GameLexer import GameLexer
+from .parsing.ProofVisitor import ProofVisitor
+from .parsing.ProofParser import ProofParser
+from .parsing.ProofLexer import ProofLexer
+from . import frog_ast
 
 
 def _binary_operation(

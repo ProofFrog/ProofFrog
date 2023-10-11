@@ -1,11 +1,14 @@
 import 'examples/Primitives/SymEnc.primitive';
 
-Scheme DoubleSymEnc(SymEnc S, SymEnc T) extends SymEnc {
+Scheme GeneralDoubleSymEnc(SymEnc S, SymEnc T) extends SymEnc {
 	requires S.Ciphertext == T.Message;
 
 	Set Message = S.Message;
 	Set Ciphertext = T.Ciphertext;
-	Set Key = s.Key * T.Key;
+	Set Key = S.Key * T.Key;
+
+	SymEnc S = S;
+	SymEnc T = T;
 
 	Key KeyGen() {
 		S.Key key1 = S.KeyGen();

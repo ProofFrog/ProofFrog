@@ -2,7 +2,7 @@ from __future__ import annotations
 import copy
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Optional, TypeAlias
+from typing import Self, Any, Optional, TypeAlias
 
 
 class FileType(Enum):
@@ -36,25 +36,25 @@ class ASTNode(ABC):
                     for item in child:
                         visit_children(item)
 
-            for attr_name in dir(self):
+            for attr_name in vars(self):
                 visit_children(getattr(self, attr_name))
 
-    def transform(self, transformer: Transformer) -> ASTNode:
+    def transform(self, transformer: Transformer) -> Self:
         method_name = "transform_" + _to_snake_case(type(self).__name__)
         if hasattr(transformer, method_name):
-            node: ASTNode = getattr(transformer, method_name)(self)
+            node: Self = getattr(transformer, method_name)(self)
             return node
         self_copy = copy.deepcopy(self)
 
-        def visit_children(child):  # type: ignore[no-untyped-def]
+        def visit_children(child: Any) -> Any:
             if isinstance(child, ASTNode):
                 return child.transform(transformer)
             if isinstance(child, list):
-                return [visit_children(item) for item in child]  # type: ignore[no-untyped-call]
-            return None
+                return [visit_children(item) for item in child]
+            return child
 
-        for attr in dir(self):
-            setattr(self_copy, attr, visit_children(getattr(self, attr)))  # type: ignore[no-untyped-call]
+        for attr in vars(self):
+            setattr(self_copy, attr, visit_children(getattr(self, attr)))
         return self_copy
 
     def __eq__(self, other: object) -> bool:
@@ -789,3 +789,13 @@ class VariableSubstitution(Visitor):
     def visit_variable(self, v: Variable) -> None:
         if v.name == self.find_name:
             v.name = self.replace_name
+
+
+class SubstitutionTransformer(Transformer):
+    def __init__(self, replace_map: dict[str, ASTNode]):
+        self.replace_map = replace_map
+
+    def transform_variable(self, v: Variable) -> ASTNode:
+        if v.name in self.replace_map:
+            return self.replace_map[v.name]
+        return v

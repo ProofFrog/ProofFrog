@@ -131,6 +131,7 @@ def _get_game_ast(
     if isinstance(challenger, frog_ast.ConcreteGame):
         game = proof_namespace[challenger.game.name]
         assert isinstance(game, frog_ast.GameFile)
+        game.get_game(challenger.which)
         return game.get_game(challenger.which)
     game = proof_namespace[challenger.name]
     assert isinstance(game, frog_ast.Game)
@@ -167,3 +168,19 @@ def _is_challenger_call(exp: frog_ast.Expression) -> bool:
         and isinstance(exp.func.the_object, frog_ast.Variable)
         and exp.func.the_object.name == "challenger"
     )
+
+
+# Replace a game's parameter list with empty, and instantiate the game with
+# the parameterized value
+def instantiate_game(
+    game: frog_ast.Game, parameters: list[frog_ast.ASTNode]
+) -> frog_ast.Game:
+    game_copy = copy.deepcopy(game)
+    replace_map: dict[str, frog_ast.ASTNode] = {}
+    for index, parameter in enumerate(game.parameters):
+        replace_map[parameter.name] = parameters[index]
+
+    game_copy.parameters = []
+
+    transformer = frog_ast.SubstitutionTransformer(replace_map)
+    return game_copy.transform(transformer)

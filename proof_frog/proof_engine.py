@@ -99,6 +99,7 @@ def apply_reduction(
         "Initialize"
     ):
         inlined_game.methods.insert(0, challenger.get_method("Initialize"))
+
     for method in inlined_game.methods:
         return_stmt = method.statements[-1]
         if isinstance(return_stmt, frog_ast.ReturnStatement) and _is_challenger_call(

@@ -286,12 +286,12 @@ class ProductType(Type):
 
 
 class UserType(Type):
-    def __init__(self, names: list[str]) -> None:
+    def __init__(self, names: list[Variable]) -> None:
         super().__init__(BasicTypes.OTHER)
         self.names = names
 
     def _get_string_description(self) -> str:
-        return ".".join(name for name in self.names)
+        return ".".join(str(name) for name in self.names)
 
 
 class FuncCallExpression(Expression):
@@ -789,3 +789,12 @@ class SubstitutionTransformer(Transformer):
         if v.name in self.replace_map:
             return self.replace_map[v.name]
         return v
+
+    def transform_user_type(self, user_type: UserType) -> ASTNode:
+        # For user types, only want to change the first name. Others are considered fields.
+        if user_type.names[0].name in self.replace_map:
+            assert isinstance(self.replace_map[user_type.names[0].name], Variable)
+            return UserType(
+                [self.replace_map[user_type.names[0].name]] + user_type.names[1:]
+            )
+        return user_type

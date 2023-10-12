@@ -41,7 +41,7 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         return result
 
     def visitUserType(self, ctx: PrimitiveParser.UserTypeContext) -> frog_ast.UserType:
-        return frog_ast.UserType([id.getText() for id in ctx.id_()])
+        return frog_ast.UserType([frog_ast.Variable(id.getText()) for id in ctx.id_()])
 
     def visitOptionalType(
         self, ctx: PrimitiveParser.OptionalTypeContext

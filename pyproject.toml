@@ -1,0 +1,32 @@
+[tool.black]
+exclude = 'proof_frog/parsing/'
+
+[tool.pytest.ini_options]
+pythonpath = 'proof_frog'
+
+[tool.mypy]
+exclude = 'parsing'
+strict = 'True'
+files = '**/*.py'
+mypy_path = 'proof_frog'
+[[tool.mypy.overrides]]
+module='proof_frog.parsing.*'
+follow_imports = 'skip'
+[[tool.mypy.overrides]]
+module='parsing.*'
+follow_imports = 'skip'
+[[tool.mypy.overrides]]
+module='antlr4.*'
+ignore_missing_imports = 'True'
+
+[tool.pylint.MASTER]
+disable = '''missing-module-docstring,
+    missing-class-docstring,
+    missing-function-docstring,
+    too-few-public-methods,
+    too-many-public-methods,
+    too-many-lines
+'''
+max-line-length='120'
+ignore='parsing'
+good-names='i,j,k,v'

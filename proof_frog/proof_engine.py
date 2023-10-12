@@ -35,9 +35,9 @@ def prove(proof_file_name: str) -> None:
     current_step: frog_ast.ProofStep
     next_step: frog_ast.ProofStep
 
-    for i in range(0, len(proof_file.steps)-1):
+    for i in range(0, len(proof_file.steps) - 1):
         current_step = proof_file.steps[i]
-        next_step = proof_file.steps[i+1]
+        next_step = proof_file.steps[i + 1]
         assert isinstance(current_step, frog_ast.Step)
         assert isinstance(next_step, frog_ast.Step)
 
@@ -53,7 +53,9 @@ def prove(proof_file_name: str) -> None:
         if current_step.reduction:
             reduction = _get_game_ast(proof_namespace, current_step.reduction)
             assert isinstance(reduction, frog_ast.Reduction)
-            current_game_ast = apply_reduction(current_game_ast, reduction, proof_namespace)
+            current_game_ast = apply_reduction(
+                current_game_ast, reduction, proof_namespace
+            )
 
         next_game_ast = _get_game_ast(proof_namespace, next_step.challenger)
         if next_step.reduction:
@@ -70,39 +72,49 @@ def prove(proof_file_name: str) -> None:
             continue
 
         print("Step failed!")
-        print(Fore.RED + 'Proof Failed!')
+        print(Fore.RED + "Proof Failed!")
         sys.exit(1)
 
     print(Fore.GREEN + "Proof Suceeded!")
+
 
 # pylint: disable-next=unused-argument
 
 
 def apply_reduction(
-        challenger: frog_ast.Game, reduction: frog_ast.Reduction, _namespace: ProofNamespace) -> frog_ast.Game:
+    challenger: frog_ast.Game, reduction: frog_ast.Reduction, _namespace: ProofNamespace
+) -> frog_ast.Game:
     print("Reduction to apply:")
     print(reduction)
     print("Challenger:")
     print(challenger)
-    name = 'Inlined'
+    name = "Inlined"
     parameters = challenger.parameters
     fields = copy.deepcopy(challenger.fields) + copy.deepcopy(reduction.fields)
     phases = challenger.phases
     methods = copy.deepcopy(reduction.methods)
     inlined_game = frog_ast.Game((name, parameters, fields, methods, phases))
 
-    if challenger.has_method('Initialize') and not inlined_game.has_method('Initialize'):
-        inlined_game.methods.insert(0, challenger.get_method('Initialize'))
+    if challenger.has_method("Initialize") and not inlined_game.has_method(
+        "Initialize"
+    ):
+        inlined_game.methods.insert(0, challenger.get_method("Initialize"))
     for method in inlined_game.methods:
         return_stmt = method.statements[-1]
-        if isinstance(return_stmt, frog_ast.ReturnStatement) and _is_challenger_call(return_stmt.expression):
+        if isinstance(return_stmt, frog_ast.ReturnStatement) and _is_challenger_call(
+            return_stmt.expression
+        ):
             assert isinstance(return_stmt.expression, frog_ast.FuncCallExpression)
             assert isinstance(return_stmt.expression.func, frog_ast.FieldAccess)
             assert isinstance(return_stmt.expression.args[0], frog_ast.Variable)
 
-            called_method = copy.deepcopy(challenger.get_method(return_stmt.expression.func.name))
+            called_method = copy.deepcopy(
+                challenger.get_method(return_stmt.expression.func.name)
+            )
             v = frog_ast.VariableSubstitution(
-                called_method.signature.parameters[0].name, return_stmt.expression.args[0].name)
+                called_method.signature.parameters[0].name,
+                return_stmt.expression.args[0].name,
+            )
             called_method.accept(v)
             method.statements.pop()
             method.statements = method.statements + called_method.statements
@@ -114,7 +126,7 @@ def apply_reduction(
 def _get_game_ast(
     # Takes in a game from a proof step, and returns the AST associated with that game
     proof_namespace: ProofNamespace,
-    challenger: frog_ast.ParameterizedGame | frog_ast.ConcreteGame
+    challenger: frog_ast.ParameterizedGame | frog_ast.ConcreteGame,
 ) -> frog_ast.Game:
     if isinstance(challenger, frog_ast.ConcreteGame):
         game = proof_namespace[challenger.game.name]
@@ -126,24 +138,32 @@ def _get_game_ast(
 
 
 def _get_file_type(file_name: str) -> frog_ast.FileType:
-    extension: str = os.path.splitext(file_name)[1].strip('.')
+    extension: str = os.path.splitext(file_name)[1].strip(".")
     return frog_ast.FileType(extension)
 
 
 def _is_by_assumption(
-        proof_file: frog_ast.ProofFile, current_step: frog_ast.Step, next_step: frog_ast.Step) -> bool:
-    if not isinstance(
-            current_step.challenger, frog_ast.ConcreteGame) or not isinstance(
-            next_step.challenger, frog_ast.ConcreteGame):
+    proof_file: frog_ast.ProofFile,
+    current_step: frog_ast.Step,
+    next_step: frog_ast.Step,
+) -> bool:
+    if not isinstance(current_step.challenger, frog_ast.ConcreteGame) or not isinstance(
+        next_step.challenger, frog_ast.ConcreteGame
+    ):
         return False
     return bool(
-        current_step.challenger.game == next_step.challenger.game and current_step.reduction and current_step.reduction
-        == next_step.reduction and current_step.adversary == next_step.
-        adversary and current_step.challenger.game in proof_file.assumptions)
+        current_step.challenger.game == next_step.challenger.game
+        and current_step.reduction
+        and current_step.reduction == next_step.reduction
+        and current_step.adversary == next_step.adversary
+        and current_step.challenger.game in proof_file.assumptions
+    )
 
 
 def _is_challenger_call(exp: frog_ast.Expression) -> bool:
-    return isinstance(
-        exp, frog_ast.FuncCallExpression) and isinstance(
-        exp.func, frog_ast.FieldAccess) and isinstance(
-        exp.func.the_object, frog_ast.Variable) and exp.func.the_object.name == 'challenger'
+    return (
+        isinstance(exp, frog_ast.FuncCallExpression)
+        and isinstance(exp.func, frog_ast.FieldAccess)
+        and isinstance(exp.func.the_object, frog_ast.Variable)
+        and exp.func.the_object.name == "challenger"
+    )

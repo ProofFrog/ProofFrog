@@ -106,18 +106,20 @@ def apply_reduction(
         ):
             assert isinstance(return_stmt.expression, frog_ast.FuncCallExpression)
             assert isinstance(return_stmt.expression.func, frog_ast.FieldAccess)
-            assert isinstance(return_stmt.expression.args[0], frog_ast.Variable)
 
-            called_method = copy.deepcopy(
-                challenger.get_method(return_stmt.expression.func.name)
+            called_method = challenger.get_method(return_stmt.expression.func.name)
+            transformer = frog_ast.SubstitutionTransformer(
+                dict(
+                    zip(
+                        (param.name for param in called_method.signature.parameters),
+                        (arg for arg in return_stmt.expression.args),
+                    )
+                )
             )
-            v = frog_ast.VariableSubstitution(
-                called_method.signature.parameters[0].name,
-                return_stmt.expression.args[0].name,
-            )
-            called_method.accept(v)
             method.statements.pop()
-            method.statements = method.statements + called_method.statements
+            method.statements = (
+                method.statements + called_method.transform(transformer).statements
+            )
     print("After Inlining:")
     print(inlined_game)
     return inlined_game

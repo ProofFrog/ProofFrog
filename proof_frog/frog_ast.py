@@ -781,16 +781,6 @@ class Visitor:
     pass
 
 
-class VariableSubstitution(Visitor):
-    def __init__(self, find_name: str, replace_name: str) -> None:
-        self.find_name = find_name
-        self.replace_name = replace_name
-
-    def visit_variable(self, v: Variable) -> None:
-        if v.name == self.find_name:
-            v.name = self.replace_name
-
-
 class SubstitutionTransformer(Transformer):
     def __init__(self, replace_map: dict[str, ASTNode]):
         self.replace_map = replace_map

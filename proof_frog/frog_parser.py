@@ -636,5 +636,7 @@ def parse_reduction(reduction: str) -> frog_ast.Reduction:
 
 
 def parse_method(method: str) -> frog_ast.Method:
-    ast: frog_ast.Method = _SharedAST().visit(_get_parser(method, GameLexer, GameParser).method())
+    ast: frog_ast.Method = _SharedAST().visit(
+        _get_parser(method, GameLexer, GameParser).method()
+    )
     return ast

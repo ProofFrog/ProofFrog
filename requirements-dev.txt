@@ -2,3 +2,4 @@ mypy
 pylint
 types-colorama
 pytest
+black

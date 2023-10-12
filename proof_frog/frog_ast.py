@@ -13,7 +13,7 @@ class FileType(Enum):
 
 
 def _to_snake_case(camel_case: str) -> str:
-    return "".join(["_" + i.lower() if i.isupper() else i for i in camel_case]).lstrip(
+    return ''.join(["_" + i.lower() if i.isupper() else i for i in camel_case]).lstrip(
         "_"
     )
 

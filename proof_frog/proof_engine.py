@@ -132,13 +132,13 @@ def _get_game_ast(
     challenger: frog_ast.ParameterizedGame | frog_ast.ConcreteGame,
 ) -> frog_ast.Game:
     if isinstance(challenger, frog_ast.ConcreteGame):
-        game = proof_namespace[challenger.game.name]
-        assert isinstance(game, frog_ast.GameFile)
-        game.get_game(challenger.which)
-        return game.get_game(challenger.which)
-    game = proof_namespace[challenger.name]
-    assert isinstance(game, frog_ast.Game)
-    return game
+        game_file = proof_namespace[challenger.game.name]
+        assert isinstance(game_file, frog_ast.GameFile)
+        game = game_file.get_game(challenger.which)
+        return instantiate_game(game, challenger.game.args)
+    else:
+        game = proof_namespace[challenger.name]
+        return instantiate_game(game, challenger.args)
 
 
 def _get_file_type(file_name: str) -> frog_ast.FileType:

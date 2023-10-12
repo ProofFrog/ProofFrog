@@ -45,9 +45,16 @@ class ASTNode(ABC):
             node: ASTNode = getattr(transformer, method_name)(self)
             return node
         self_copy = copy.deepcopy(self)
+
+        def visit_children(child):  # type: ignore[no-untyped-def]
+            if isinstance(child, ASTNode):
+                return child.transform(transformer)
+            if isinstance(child, list):
+                return [visit_children(item) for item in child]  # type: ignore[no-untyped-call]
+            return None
+
         for attr in dir(self):
-            if isinstance(attr, ASTNode):
-                setattr(self_copy, attr, getattr(self, attr).transform(transformer))
+            setattr(self_copy, attr, visit_children(getattr(self, attr)))  # type: ignore[no-untyped-call]
         return self_copy
 
     def __eq__(self, other: object) -> bool:

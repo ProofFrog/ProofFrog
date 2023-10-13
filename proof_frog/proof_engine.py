@@ -38,6 +38,7 @@ def prove(proof_file_name: str) -> None:
     for i in range(0, len(proof_file.steps) - 1):
         current_step = proof_file.steps[i]
         next_step = proof_file.steps[i + 1]
+        # Right now, cannot handle induction.
         assert isinstance(current_step, frog_ast.Step)
         assert isinstance(next_step, frog_ast.Step)
 
@@ -109,18 +110,16 @@ def apply_reduction(
             assert isinstance(return_stmt.expression.func, frog_ast.FieldAccess)
 
             called_method = challenger.get_method(return_stmt.expression.func.name)
-            transformer = frog_ast.SubstitutionTransformer(
+            transformed_method = frog_ast.SubstitutionTransformer(
                 dict(
                     zip(
                         (param.name for param in called_method.signature.parameters),
                         (arg for arg in return_stmt.expression.args),
                     )
                 )
-            )
+            ).transform(called_method)
             method.statements.pop()
-            method.statements = (
-                method.statements + called_method.transform(transformer).statements
-            )
+            method.statements = method.statements + transformed_method.statements
     print("After Inlining:")
     print(inlined_game)
     return inlined_game
@@ -185,5 +184,4 @@ def instantiate_game(
 
     game_copy.parameters = []
 
-    transformer = frog_ast.SubstitutionTransformer(replace_map)
-    return game_copy.transform(transformer)
+    return frog_ast.SubstitutionTransformer(replace_map).transform(game_copy)

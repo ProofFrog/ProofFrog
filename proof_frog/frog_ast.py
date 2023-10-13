@@ -2,7 +2,7 @@ from __future__ import annotations
 import copy
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Self, Any, Optional, TypeAlias
+from typing import Self, Any, Optional, TypeAlias, TypeVar
 
 
 class FileType(Enum):
@@ -18,8 +18,27 @@ def _to_snake_case(camel_case: str) -> str:
     )
 
 
+T = TypeVar("T", bound="ASTNode")
+
+
 class Transformer(ABC):
-    pass
+    def transform(self, node: T) -> T:
+        method_name = "transform_" + _to_snake_case(type(node).__name__)
+        if hasattr(self, method_name):
+            node: T = getattr(self, method_name)(node)
+            return node
+        node_copy = copy.deepcopy(node)
+
+        def visit_children(child: Any) -> Any:
+            if isinstance(child, ASTNode):
+                return self.transform(child)
+            if isinstance(child, list):
+                return [visit_children(item) for item in child]
+            return child
+
+        for attr in vars(node_copy):
+            setattr(node_copy, attr, visit_children(getattr(node, attr)))
+        return node_copy
 
 
 class ASTNode(ABC):
@@ -38,24 +57,6 @@ class ASTNode(ABC):
 
             for attr_name in vars(self):
                 visit_children(getattr(self, attr_name))
-
-    def transform(self, transformer: Transformer) -> Self:
-        method_name = "transform_" + _to_snake_case(type(self).__name__)
-        if hasattr(transformer, method_name):
-            node: Self = getattr(transformer, method_name)(self)
-            return node
-        self_copy = copy.deepcopy(self)
-
-        def visit_children(child: Any) -> Any:
-            if isinstance(child, ASTNode):
-                return child.transform(transformer)
-            if isinstance(child, list):
-                return [visit_children(item) for item in child]
-            return child
-
-        for attr in vars(self):
-            setattr(self_copy, attr, visit_children(getattr(self, attr)))
-        return self_copy
 
     def __eq__(self, other: object) -> bool:
         if self is other:

@@ -2,7 +2,7 @@ from __future__ import annotations
 import copy
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Self, Any, Optional, TypeAlias, TypeVar
+from typing import Any, Optional, TypeAlias, TypeVar, Generic
 
 
 class FileType(Enum):
@@ -27,8 +27,8 @@ class Transformer(ABC):
     def transform(self, node: T) -> T:
         method_name = "transform_" + _to_snake_case(type(node).__name__)
         if hasattr(self, method_name):
-            node: T = getattr(self, method_name)(node)
-            return node
+            returned: T = getattr(self, method_name)(node)
+            return returned
         node_copy = copy.deepcopy(node)
 
         def visit_children(child: Any) -> Any:
@@ -47,7 +47,7 @@ class Transformer(ABC):
 U = TypeVar("U")
 
 
-class Visitor(ABC):
+class Visitor(ABC, Generic[U]):
     @abstractmethod
     def result(self) -> U:
         pass
@@ -71,22 +71,6 @@ class Visitor(ABC):
 
 
 class ASTNode(ABC):
-    def accept(self, v: Visitor) -> None:
-        method_name = "visit_" + _to_snake_case(type(self).__name__)
-        if hasattr(v, method_name):
-            getattr(v, method_name)(self)
-        else:
-
-            def visit_children(child) -> None:  # type: ignore[no-untyped-def]
-                if isinstance(child, ASTNode):
-                    child.accept(v)
-                elif isinstance(child, list):
-                    for item in child:
-                        visit_children(item)
-
-            for attr_name in vars(self):
-                visit_children(getattr(self, attr_name))
-
     def __eq__(self, other: object) -> bool:
         if self is other:
             return True
@@ -819,14 +803,13 @@ class SubstitutionTransformer(Transformer):
     def transform_user_type(self, user_type: UserType) -> ASTNode:
         # For user types, only want to change the first name. Others are considered fields.
         if user_type.names[0].name in self.replace_map:
-            assert isinstance(self.replace_map[user_type.names[0].name], Variable)
-            return UserType(
-                [self.replace_map[user_type.names[0].name]] + user_type.names[1:]
-            )
+            replaced_var = self.replace_map[user_type.names[0].name]
+            assert isinstance(replaced_var, Variable)
+            return UserType([replaced_var] + user_type.names[1:])
         return user_type
 
 
-class ContainsChallengerCallVisitor(Visitor):
+class ContainsChallengerCallVisitor(Visitor[bool]):
     def __init__(self) -> None:
         self.contains_call = False
 

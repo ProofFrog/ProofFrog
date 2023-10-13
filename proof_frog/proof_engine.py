@@ -1,7 +1,7 @@
 import os
 import sys
 import copy
-from typing import TypeAlias
+from typing import TypeAlias, Sequence
 from colorama import Fore
 from . import frog_parser
 from . import frog_ast
@@ -135,9 +135,10 @@ def _get_game_ast(
         assert isinstance(game_file, frog_ast.GameFile)
         game = game_file.get_game(challenger.which)
         return instantiate_game(game, challenger.game.args)
-    else:
-        game = proof_namespace[challenger.name]
-        return instantiate_game(game, challenger.args)
+
+    game_node = proof_namespace[challenger.name]
+    assert isinstance(game_node, frog_ast.Game)
+    return instantiate_game(game_node, challenger.args)
 
 
 def _get_file_type(file_name: str) -> frog_ast.FileType:
@@ -166,7 +167,7 @@ def _is_by_assumption(
 # Replace a game's parameter list with empty, and instantiate the game with
 # the parameterized value
 def instantiate_game(
-    game: frog_ast.Game, parameters: list[frog_ast.ASTNode]
+    game: frog_ast.Game, parameters: Sequence[frog_ast.ASTNode]
 ) -> frog_ast.Game:
     game_copy = copy.deepcopy(game)
     replace_map: dict[str, frog_ast.ASTNode] = {}

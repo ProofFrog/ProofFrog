@@ -103,9 +103,9 @@ def apply_reduction(
 
     for method in inlined_game.methods:
         return_stmt = method.statements[-1]
-        if isinstance(return_stmt, frog_ast.ReturnStatement) and _is_challenger_call(
-            return_stmt.expression
-        ):
+        if isinstance(
+            return_stmt, frog_ast.ReturnStatement
+        ) and frog_ast.is_challenger_call(return_stmt.expression):
             assert isinstance(return_stmt.expression, frog_ast.FuncCallExpression)
             assert isinstance(return_stmt.expression.func, frog_ast.FieldAccess)
 
@@ -160,15 +160,6 @@ def _is_by_assumption(
         and current_step.reduction == next_step.reduction
         and current_step.adversary == next_step.adversary
         and current_step.challenger.game in proof_file.assumptions
-    )
-
-
-def _is_challenger_call(exp: frog_ast.Expression) -> bool:
-    return (
-        isinstance(exp, frog_ast.FuncCallExpression)
-        and isinstance(exp.func, frog_ast.FieldAccess)
-        and isinstance(exp.func.the_object, frog_ast.Variable)
-        and exp.func.the_object.name == "challenger"
     )
 
 

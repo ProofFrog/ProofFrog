@@ -18,6 +18,8 @@ def _to_snake_case(camel_case: str) -> str:
     )
 
 
+# Used to represent the type of Node that is being transformed
+
 T = TypeVar("T", bound="ASTNode")
 
 
@@ -39,6 +41,33 @@ class Transformer(ABC):
         for attr in vars(node_copy):
             setattr(node_copy, attr, visit_children(getattr(node, attr)))
         return node_copy
+
+
+# Used to represent the return value of our generic visitor
+U = TypeVar("U")
+
+
+class Visitor(ABC):
+    @abstractmethod
+    def result(self) -> U:
+        pass
+
+    def visit(self, node: ASTNode) -> U:
+        method_name = "visit" + _to_snake_case(type(node).__name__)
+        if hasattr(self, method_name):
+            getattr(self, method_name)(node)
+
+        def visit_children(child: Any) -> Any:
+            if isinstance(child, ASTNode):
+                self.visit(child)
+            if isinstance(child, list):
+                for item in child:
+                    visit_children(item)
+
+        for attr in vars(node):
+            visit_children(getattr(node, attr))
+
+        return self.result()
 
 
 class ASTNode(ABC):
@@ -778,10 +807,6 @@ def _parameter_list_string(parameters: list[Parameter]) -> str:
     return ", ".join(str(param) for param in parameters) if parameters else ""
 
 
-class Visitor:
-    pass
-
-
 class SubstitutionTransformer(Transformer):
     def __init__(self, replace_map: dict[str, ASTNode]):
         self.replace_map = replace_map
@@ -799,3 +824,24 @@ class SubstitutionTransformer(Transformer):
                 [self.replace_map[user_type.names[0].name]] + user_type.names[1:]
             )
         return user_type
+
+
+class ContainsChallengerCallVisitor(Visitor):
+    def __init__(self) -> None:
+        self.contains_call = False
+
+    def result(self) -> bool:
+        return self.contains_call
+
+    def visit_func_call_expression(self, exp: FuncCallExpression) -> None:
+        if is_challenger_call(exp):
+            self.contains_call = True
+
+
+def is_challenger_call(exp: Expression) -> bool:
+    return (
+        isinstance(exp, FuncCallExpression)
+        and isinstance(exp.func, FieldAccess)
+        and isinstance(exp.func.the_object, Variable)
+        and exp.func.the_object.name == "challenger"
+    )

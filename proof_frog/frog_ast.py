@@ -53,9 +53,9 @@ class Visitor(ABC, Generic[U]):
         pass
 
     def visit(self, node: ASTNode) -> U:
-        method_name = "visit" + _to_snake_case(type(node).__name__)
-        if hasattr(self, method_name):
-            getattr(self, method_name)(node)
+        visit_name = "visit_" + _to_snake_case(type(node).__name__)
+        if hasattr(self, visit_name):
+            getattr(self, visit_name)(node)
 
         def visit_children(child: Any) -> Any:
             if isinstance(child, ASTNode):
@@ -66,6 +66,10 @@ class Visitor(ABC, Generic[U]):
 
         for attr in vars(node):
             visit_children(getattr(node, attr))
+
+        leave_name = "leave_" + _to_snake_case(type(node).__name__)
+        if hasattr(self, leave_name):
+            getattr(self, leave_name)(node)
 
         return self.result()
 
@@ -809,16 +813,29 @@ class SubstitutionTransformer(Transformer):
         return user_type
 
 
-class ContainsChallengerCallVisitor(Visitor[bool]):
+class ReplaceChallengerCallTransformer(Transformer):
+    def __init__(
+        self, search_for: FuncCallExpression, replace_with: Expression
+    ) -> None:
+        self.search_for = search_for
+        self.replace_with = replace_with
+
+    def transform_func_call_expression(self, exp: FuncCallExpression) -> Expression:
+        if exp is self.search_for:
+            return self.replace_with
+        return exp
+
+
+class GetChallengerCallVisitor(Visitor[Optional[FuncCallExpression]]):
     def __init__(self) -> None:
-        self.contains_call = False
+        self.expression: Optional[FuncCallExpression] = None
 
-    def result(self) -> bool:
-        return self.contains_call
+    def result(self) -> Optional[FuncCallExpression]:
+        return self.expression
 
-    def visit_func_call_expression(self, exp: FuncCallExpression) -> None:
-        if is_challenger_call(exp):
-            self.contains_call = True
+    def leave_func_call_expression(self, exp: FuncCallExpression) -> None:
+        if not self.expression and is_challenger_call(exp):
+            self.expression = exp
 
 
 def is_challenger_call(exp: Expression) -> bool:

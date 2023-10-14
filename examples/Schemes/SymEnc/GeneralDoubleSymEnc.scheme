@@ -7,9 +7,6 @@ Scheme GeneralDoubleSymEnc(SymEnc S, SymEnc T) extends SymEnc {
 	Set Ciphertext = T.Ciphertext;
 	Set Key = S.Key * T.Key;
 
-	SymEnc S = S;
-	SymEnc T = T;
-
 	Key KeyGen() {
 		S.Key key1 = S.KeyGen();
 		T.Key key2 = T.KeyGen();

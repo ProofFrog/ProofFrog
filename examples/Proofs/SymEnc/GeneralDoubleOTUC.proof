@@ -2,11 +2,11 @@ import 'examples/Primitives/SymEnc.primitive';
 import 'examples/Schemes/SymEnc/GeneralDoubleSymEnc.scheme';
 import 'examples/Games/SymEnc/OneTimeUniformCiphertexts.game';
 
-Reduction R1(DoubleSymEnc D) compose OneTimeUniformCiphertexts(D.T) against OneTimeUniformCiphertexts(D).Adversary {
+Reduction R1(DoubleSymEnc D, SymEnc S, SymEnc T) compose OneTimeUniformCiphertexts(T) against OneTimeUniformCiphertexts(D).Adversary {
 	D.Ciphertext CTXT(D.Message m) {
-		D.S.Key k1 = D.S.KeyGen();
-		D.S.Ciphertext c1 = D.S.Enc(k1, m);
-		D.T.Ciphertext c2 = challenger.CTXT(c1);
+		S.Key k1 = S.KeyGen();
+		S.Ciphertext c1 = S.Enc(k1, m);
+		T.Ciphertext c2 = challenger.CTXT(c1);
 		return c2;
 	}
 }
@@ -35,10 +35,10 @@ games:
 	OneTimeUniformCiphertexts(D).Real against OneTimeUniformCiphertexts(D).Adversary;
 
 	// By codewise equivalency
-	OneTimeUniformCiphertexts(T).Real compose R1(D) against OneTimeUniformCiphertexts(D).Adversary;
+	OneTimeUniformCiphertexts(T).Real compose R1(D, S, T) against OneTimeUniformCiphertexts(D).Adversary;
 
 	// By assumption
-	OneTimeUniformCiphertexts(T).Random compose R1(D) against OneTimeUniformCiphertexts(D).Adversary;
+	OneTimeUniformCiphertexts(T).Random compose R1(D, S, T) against OneTimeUniformCiphertexts(D).Adversary;
 
 	// By codewise equivalency
 	OneTimeUniformCiphertexts(D).Random against OneTimeUniformCiphertexts(D).Adversary;

@@ -6,12 +6,14 @@ from colorama import Fore
 from . import frog_parser
 from . import frog_ast
 
-ProofNamespace: TypeAlias = dict[str, frog_ast.ASTNode]
+Namespace: TypeAlias = dict[str, frog_ast.ASTNode]
+MethodLookup: TypeAlias = Dict[Tuple[str, str], frog_ast.Method]
 
 
 def prove(proof_file_name: str) -> None:
     proof_file = frog_parser.parse_proof_file(proof_file_name)
-    proof_namespace: ProofNamespace = {}
+    definition_namespace: Namespace = {}
+    proof_namespace: Namespace = {}
 
     for imp in proof_file.imports:
         file_type = _get_file_type(imp.filename)
@@ -27,10 +29,21 @@ def prove(proof_file_name: str) -> None:
                 raise TypeError("Cannot import proofs")
 
         name = imp.rename if imp.rename else root.get_export_name()
-        proof_namespace[name] = root
+        definition_namespace[name] = root
 
     for game in proof_file.helpers:
-        proof_namespace[game.name] = game
+        definition_namespace[game.name] = game
+
+    # Hack for lets right now. Should substitute parameters, but I'm not. Do that later
+
+    for let in proof_file.lets:
+        if isinstance(let.value, frog_ast.FuncCallExpression) and isinstance(
+            let.value.func, frog_ast.Variable
+        ):
+            print(let.name, let.value.func.name)
+            proof_namespace[let.name] = definition_namespace[let.value.func.name]
+
+    method_lookup: MethodLookup = get_method_lookup(proof_namespace)
 
     current_step: frog_ast.ProofStep
     next_step: frog_ast.ProofStep
@@ -50,19 +63,28 @@ def prove(proof_file_name: str) -> None:
             print("Valid by assumption")
             continue
 
-        current_game_ast = _get_game_ast(proof_namespace, current_step.challenger)
+        current_game_ast = _get_game_ast(definition_namespace, current_step.challenger)
+        current_game_lookup = copy.deepcopy(method_lookup)
         if current_step.reduction:
-            reduction = _get_game_ast(proof_namespace, current_step.reduction)
+            reduction = _get_game_ast(definition_namespace, current_step.reduction)
             assert isinstance(reduction, frog_ast.Reduction)
+            current_game_lookup.update(get_challenger_method_lookup(current_game_ast))
             current_game_ast = apply_reduction(
-                current_game_ast, reduction, proof_namespace
+                current_game_ast, reduction, definition_namespace
             )
 
-        next_game_ast = _get_game_ast(proof_namespace, next_step.challenger)
+        next_game_lookup = copy.deepcopy(method_lookup)
+        next_game_ast = _get_game_ast(definition_namespace, next_step.challenger)
         if next_step.reduction:
-            reduction = _get_game_ast(proof_namespace, next_step.reduction)
+            reduction = _get_game_ast(definition_namespace, next_step.reduction)
             assert isinstance(reduction, frog_ast.Reduction)
-            next_game_ast = apply_reduction(next_game_ast, reduction, proof_namespace)
+            next_game_lookup.update(get_challenger_method_lookup(next_game_ast))
+            next_game_ast = apply_reduction(
+                next_game_ast, reduction, definition_namespace
+            )
+
+        current_game_ast = inline_calls(current_game_lookup, current_game_ast)
+        next_game_ast = inline_calls(next_game_lookup, next_game_ast)
 
         print("Current Game:")
         print(current_game_ast)
@@ -79,11 +101,23 @@ def prove(proof_file_name: str) -> None:
     print(Fore.GREEN + "Proof Suceeded!")
 
 
+def get_method_lookup(definition_namespace: Namespace) -> MethodLookup:
+    method_lookup: MethodLookup = {}
+
+    for name, node in definition_namespace.items():
+        print("NAME IS", name)
+        if isinstance(node, frog_ast.Scheme):
+            for method in node.methods:
+                method_lookup[(name, method.signature.name)] = method
+
+    return method_lookup
+
+
 # pylint: disable-next=unused-argument
 
 
 def apply_reduction(
-    challenger: frog_ast.Game, reduction: frog_ast.Reduction, _namespace: ProofNamespace
+    challenger: frog_ast.Game, reduction: frog_ast.Reduction, _namespace: Namespace
 ) -> frog_ast.Game:
     print("Reduction to apply:")
     print(reduction)
@@ -94,34 +128,28 @@ def apply_reduction(
     fields = copy.deepcopy(challenger.fields) + copy.deepcopy(reduction.fields)
     phases = challenger.phases
     methods = copy.deepcopy(reduction.methods)
-    inlined_game = frog_ast.Game((name, parameters, fields, methods, phases))
+    reduced_game = frog_ast.Game((name, parameters, fields, methods, phases))
 
-    if challenger.has_method("Initialize") and not inlined_game.has_method(
+    if challenger.has_method("Initialize") and not reduced_game.has_method(
         "Initialize"
     ):
-        inlined_game.methods.insert(0, challenger.get_method("Initialize"))
+        reduced_game.methods.insert(0, challenger.get_method("Initialize"))
 
-    for method in inlined_game.methods:
-        new_statements = inline_challenger_calls(challenger, method.statements)
-        method.statements = new_statements
-
-    print("After Inlining:")
-    print(inlined_game)
-    return inlined_game
+    return reduced_game
 
 
 def _get_game_ast(
     # Takes in a game from a proof step, and returns the AST associated with that game
-    proof_namespace: ProofNamespace,
+    definition_namespace: Namespace,
     challenger: frog_ast.ParameterizedGame | frog_ast.ConcreteGame,
 ) -> frog_ast.Game:
     if isinstance(challenger, frog_ast.ConcreteGame):
-        game_file = proof_namespace[challenger.game.name]
+        game_file = definition_namespace[challenger.game.name]
         assert isinstance(game_file, frog_ast.GameFile)
         game = game_file.get_game(challenger.which)
         return instantiate_game(game, challenger.game.args)
 
-    game_node = proof_namespace[challenger.name]
+    game_node = definition_namespace[challenger.name]
     assert isinstance(game_node, frog_ast.Game)
     return instantiate_game(game_node, challenger.args)
 
@@ -164,30 +192,27 @@ def instantiate_game(
     return frog_ast.SubstitutionTransformer(replace_map).transform(game_copy)
 
 
-def inline_challenger_calls(
-    challenger: frog_ast.Game, statements: list[frog_ast.Statement]
-) -> list[frog_ast.Statement]:
-    # We have to go top to bottom, evaluate inner most first.
-    # Start at first statement. Use a visitor to extract the innermost challenger call expression
-    # Make it a variable and substitute. Then continue (have to reevaluate first statement again)
-
-    method_look_up = dict(
+def get_challenger_method_lookup(challenger: frog_ast.Game) -> MethodLookup:
+    return dict(
         zip(
             (("challenger", method.signature.name) for method in challenger.methods),
             challenger.methods,
         )
     )
-    new_statements = inline_call(method_look_up, statements)
-    if new_statements != statements:
-        return inline_call(method_look_up, new_statements)
-
-    return new_statements
 
 
-# Inline a single challenger call. Goes through statements and first challenger call (as well as innermost)
+def inline_calls(lookup: MethodLookup, game: frog_ast.Game) -> frog_ast.Game:
+    new_game = copy.deepcopy(game)
+    for method in new_game.methods:
+        new_statements = inline_call(lookup, method.statements)
+        if new_statements != method.statements:
+            method.statements = new_statements
+            return inline_calls(lookup, new_game)
+    return new_game
+
+
+# Inline a single call. Goes through statements and first challenger call (as well as innermost)
 # will be inlined.
-
-
 # For each statement, we know what we to substitute the call with: it's going to be the return value
 # So then just write a transformer that navigates
 # to the first challenger call and returns the expression that is an ASTNode of the return value of the oracle
@@ -195,7 +220,7 @@ def inline_challenger_calls(
 
 
 def inline_call(
-    method_lookup: Dict[Tuple[str, str], frog_ast.Method],
+    method_lookup: MethodLookup,
     statements: list[frog_ast.Statement],
 ) -> list[frog_ast.Statement]:
     new_statements: list[frog_ast.Statement] = []

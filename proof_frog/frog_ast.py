@@ -848,12 +848,3 @@ class SearchVisitor(Generic[W], Visitor[Optional[W]]):
         if not self.node and self.search_predicate(node):
             # If it matches the search predicate, it must have type W
             self.node = cast(W, node)
-
-
-def is_challenger_call(exp: ASTNode) -> bool:
-    return (
-        isinstance(exp, FuncCallExpression)
-        and isinstance(exp.func, FieldAccess)
-        and isinstance(exp.func.the_object, Variable)
-        and exp.func.the_object.name == "challenger"
-    )

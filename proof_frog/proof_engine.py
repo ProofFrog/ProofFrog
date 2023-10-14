@@ -1,7 +1,7 @@
 import os
 import sys
 import copy
-from typing import TypeAlias, Sequence
+from typing import TypeAlias, Sequence, Tuple, Dict
 from colorama import Fore
 from . import frog_parser
 from . import frog_ast
@@ -171,9 +171,15 @@ def inline_challenger_calls(
     # Start at first statement. Use a visitor to extract the innermost challenger call expression
     # Make it a variable and substitute. Then continue (have to reevaluate first statement again)
 
-    new_statements = inline_challenger_call(challenger, statements)
+    method_look_up = dict(
+        zip(
+            (("challenger", method.signature.name) for method in challenger.methods),
+            challenger.methods,
+        )
+    )
+    new_statements = inline_call(method_look_up, statements)
     if new_statements != statements:
-        return inline_challenger_call(challenger, new_statements)
+        return inline_call(method_look_up, new_statements)
 
     return new_statements
 
@@ -188,13 +194,23 @@ def inline_challenger_calls(
 # And then just recursively do that over and over again until you have a list of statements with no challenger calls
 
 
-def inline_challenger_call(
-    challenger: frog_ast.Game, statements: list[frog_ast.Statement]
+def inline_call(
+    method_lookup: Dict[Tuple[str, str], frog_ast.Method],
+    statements: list[frog_ast.Statement],
 ) -> list[frog_ast.Statement]:
     new_statements: list[frog_ast.Statement] = []
     for index, statement in enumerate(statements):
+
+        def is_inlinable_call(exp: frog_ast.ASTNode) -> bool:
+            return (
+                isinstance(exp, frog_ast.FuncCallExpression)
+                and isinstance(exp.func, frog_ast.FieldAccess)
+                and isinstance(exp.func.the_object, frog_ast.Variable)
+                and (exp.func.the_object.name, exp.func.name) in method_lookup
+            )
+
         func_call_exp = frog_ast.SearchVisitor[frog_ast.FuncCallExpression](
-            frog_ast.is_challenger_call
+            is_inlinable_call
         ).visit(statement)
 
         if not func_call_exp:
@@ -202,7 +218,10 @@ def inline_challenger_call(
             continue
 
         assert isinstance(func_call_exp.func, frog_ast.FieldAccess)
-        called_method = challenger.get_method(func_call_exp.func.name)
+        assert isinstance(func_call_exp.func.the_object, frog_ast.Variable)
+        called_method = method_lookup[
+            (func_call_exp.func.the_object.name, func_call_exp.func.name)
+        ]
 
         transformed_method = frog_ast.SubstitutionTransformer(
             dict(

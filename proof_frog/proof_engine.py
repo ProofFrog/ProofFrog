@@ -1,7 +1,7 @@
 import os
 import sys
 import copy
-from typing import TypeAlias, Sequence, Optional
+from typing import TypeAlias, Sequence
 from colorama import Fore
 from . import frog_parser
 from . import frog_ast
@@ -170,7 +170,6 @@ def inline_challenger_calls(
     # We have to go top to bottom, evaluate inner most first.
     # Start at first statement. Use a visitor to extract the innermost challenger call expression
     # Make it a variable and substitute. Then continue (have to reevaluate first statement again)
-    # Special case for return, can just merge return values.
 
     new_statements = inline_challenger_call(challenger, statements)
     if new_statements != statements:
@@ -184,19 +183,20 @@ def inline_challenger_calls(
 
 
 # For each statement, we know what we to substitute the call with: it's going to be the return value
-# So then just write a transformer that navigates to the first challenger call and returns the expression that is an ASTNode of the return value of the oracle
+# So then just write a transformer that navigates
+# to the first challenger call and returns the expression that is an ASTNode of the return value of the oracle
 # And then just recursively do that over and over again until you have a list of statements with no challenger calls
-#
 
 
 def inline_challenger_call(
     challenger: frog_ast.Game, statements: list[frog_ast.Statement]
-):
+) -> list[frog_ast.Statement]:
     new_statements: list[frog_ast.Statement] = []
     for index, statement in enumerate(statements):
-        func_call_exp: Optional[
-            frog_ast.FuncCallExpression
-        ] = frog_ast.GetChallengerCallVisitor().visit(statement)
+        func_call_exp = frog_ast.SearchVisitor[frog_ast.FuncCallExpression](
+            frog_ast.is_challenger_call
+        ).visit(statement)
+
         if not func_call_exp:
             new_statements.append(copy.deepcopy(statement))
             continue
@@ -217,7 +217,7 @@ def inline_challenger_call(
         assert isinstance(final_statement, frog_ast.ReturnStatement)
         returned_exp = final_statement.expression
 
-        changed_statement = frog_ast.ReplaceChallengerCallTransformer(
+        changed_statement = frog_ast.ReplaceTransformer(
             func_call_exp, returned_exp
         ).transform(statement)
         new_statements.append(changed_statement)

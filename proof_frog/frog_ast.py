@@ -2,7 +2,7 @@ from __future__ import annotations
 import copy
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Any, Optional, TypeAlias, TypeVar, Generic
+from typing import Any, Optional, TypeAlias, TypeVar, Generic, Callable, cast
 
 
 class FileType(Enum):
@@ -29,6 +29,11 @@ class Transformer(ABC):
         if hasattr(self, method_name):
             returned: T = getattr(self, method_name)(node)
             return returned
+        if hasattr(self, "transform_ast_node"):
+            returned = getattr(self, "transform_ast_node")(node)
+            if returned:
+                return returned
+
         node_copy = copy.deepcopy(node)
 
         def visit_children(child: Any) -> Any:
@@ -56,6 +61,8 @@ class Visitor(ABC, Generic[U]):
         visit_name = "visit_" + _to_snake_case(type(node).__name__)
         if hasattr(self, visit_name):
             getattr(self, visit_name)(node)
+        elif hasattr(self, "visit_ast_node"):
+            getattr(self, "visit_ast_node")(node)
 
         def visit_children(child: Any) -> Any:
             if isinstance(child, ASTNode):
@@ -70,6 +77,8 @@ class Visitor(ABC, Generic[U]):
         leave_name = "leave_" + _to_snake_case(type(node).__name__)
         if hasattr(self, leave_name):
             getattr(self, leave_name)(node)
+        elif hasattr(self, "leave_ast_node"):
+            getattr(self, "leave_ast_node")(node)
 
         return self.result()
 
@@ -813,32 +822,35 @@ class SubstitutionTransformer(Transformer):
         return user_type
 
 
-class ReplaceChallengerCallTransformer(Transformer):
-    def __init__(
-        self, search_for: FuncCallExpression, replace_with: Expression
-    ) -> None:
+class ReplaceTransformer(Transformer):
+    def __init__(self, search_for: ASTNode, replace_with: ASTNode) -> None:
         self.search_for = search_for
         self.replace_with = replace_with
 
-    def transform_func_call_expression(self, exp: FuncCallExpression) -> Expression:
+    def transform_ast_node(self, exp: ASTNode) -> Optional[ASTNode]:
         if exp is self.search_for:
             return self.replace_with
-        return exp
+        return None
 
 
-class GetChallengerCallVisitor(Visitor[Optional[FuncCallExpression]]):
-    def __init__(self) -> None:
-        self.expression: Optional[FuncCallExpression] = None
-
-    def result(self) -> Optional[FuncCallExpression]:
-        return self.expression
-
-    def leave_func_call_expression(self, exp: FuncCallExpression) -> None:
-        if not self.expression and is_challenger_call(exp):
-            self.expression = exp
+W = TypeVar("W", bound="ASTNode")
 
 
-def is_challenger_call(exp: Expression) -> bool:
+class SearchVisitor(Generic[W], Visitor[Optional[W]]):
+    def __init__(self, search_predicate: Callable[[ASTNode], bool]) -> None:
+        self.node: Optional[W] = None
+        self.search_predicate = search_predicate
+
+    def result(self) -> Optional[W]:
+        return self.node
+
+    def leave_ast_node(self, node: ASTNode) -> None:
+        if not self.node and self.search_predicate(node):
+            # If it matches the search predicate, it must have type W
+            self.node = cast(W, node)
+
+
+def is_challenger_call(exp: ASTNode) -> bool:
     return (
         isinstance(exp, FuncCallExpression)
         and isinstance(exp.func, FieldAccess)

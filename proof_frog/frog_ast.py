@@ -25,6 +25,9 @@ T = TypeVar("T", bound="ASTNode")
 
 class Transformer(ABC):
     def transform(self, node: T) -> T:
+        if isinstance(node, list):
+            return [self.transform(item) for item in node]
+
         method_name = "transform_" + _to_snake_case(type(node).__name__)
         if hasattr(self, method_name):
             returned: T = getattr(self, method_name)(node)
@@ -57,7 +60,12 @@ class Visitor(ABC, Generic[U]):
     def result(self) -> U:
         pass
 
-    def visit(self, node: ASTNode) -> U:
+    def visit(self, node: ASTNode | list[ASTNode]) -> U:
+        if isinstance(node, list):
+            for item in node:
+                self.visit(item)
+            return self.result()
+
         visit_name = "visit_" + _to_snake_case(type(node).__name__)
         if hasattr(self, visit_name):
             getattr(self, visit_name)(node)

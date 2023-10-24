@@ -40,7 +40,6 @@ def prove(proof_file_name: str) -> None:
         if isinstance(let.value, frog_ast.FuncCallExpression) and isinstance(
             let.value.func, frog_ast.Variable
         ):
-            print(let.name, let.value.func.name)
             proof_namespace[let.name] = definition_namespace[let.value.func.name]
 
     method_lookup: MethodLookup = get_method_lookup(proof_namespace)
@@ -105,7 +104,6 @@ def get_method_lookup(definition_namespace: Namespace) -> MethodLookup:
     method_lookup: MethodLookup = {}
 
     for name, node in definition_namespace.items():
-        print("NAME IS", name)
         if isinstance(node, frog_ast.Scheme):
             for method in node.methods:
                 method_lookup[(name, method.signature.name)] = method

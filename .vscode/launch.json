@@ -8,9 +8,10 @@
             "name": "Python: proof_frog.py",
             "type": "python",
             "request": "launch",
-            "program": "${workspaceFolder}/proof_frog",
-            "args": ["prove", "examples/Proofs/SymEnc/OTUC=>OTS.proof"],
+            "module": "proof_frog",
+            "args": ["prove", "examples/Proofs/SymEnc/GeneralDoubleOTUC.proof"],
             "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
             "justMyCode": true
         }
     ]

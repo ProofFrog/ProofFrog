@@ -5,6 +5,7 @@ from typing import TypeAlias, Sequence, Tuple, Dict
 from colorama import Fore
 from . import frog_parser
 from . import frog_ast
+from . import redundant_copy
 
 Namespace: TypeAlias = dict[str, frog_ast.ASTNode]
 MethodLookup: TypeAlias = Dict[Tuple[str, str], frog_ast.Method]
@@ -85,10 +86,22 @@ def prove(proof_file_name: str) -> None:
         current_game_ast = inline_calls(current_game_lookup, current_game_ast)
         next_game_ast = inline_calls(next_game_lookup, next_game_ast)
 
-        print("Current Game:")
+        print("Current Game (useless):")
         print(current_game_ast)
-        print("Next Game:")
+        print("Next Game (useless):")
         print(next_game_ast)
+        current_game_ast = redundant_copy.RedundantCopyTransformer().transform(
+            current_game_ast
+        )
+        next_game_ast = redundant_copy.RedundantCopyTransformer().transform(
+            next_game_ast
+        )
+
+        print("Current Game (non-useless):")
+        print(current_game_ast)
+        print("Next Game (non-useless):")
+        print(next_game_ast)
+
         if current_game_ast == next_game_ast:
             print("Inline Success!")
             continue

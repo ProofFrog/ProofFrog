@@ -1,5 +1,5 @@
 import pytest
-from proof_frog import redundant_copy, frog_parser
+from proof_frog import visitors, frog_parser
 
 
 @pytest.mark.parametrize(
@@ -120,6 +120,6 @@ def test_redundant_copies(
     game_ast = frog_parser.parse_method(method)
     expected_ast = frog_parser.parse_method(expected)
 
-    transformed_ast = redundant_copy.RedundantCopyTransformer().transform(game_ast)
+    transformed_ast = visitors.RedundantCopyTransformer().transform(game_ast)
     print(transformed_ast)
     assert expected_ast == transformed_ast

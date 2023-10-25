@@ -5,7 +5,7 @@ from typing import TypeAlias, Sequence, Tuple, Dict
 from colorama import Fore
 from . import frog_parser
 from . import frog_ast
-from . import redundant_copy
+from . import visitors
 
 Namespace: TypeAlias = dict[str, frog_ast.ASTNode]
 MethodLookup: TypeAlias = Dict[Tuple[str, str], frog_ast.Method]
@@ -90,12 +90,10 @@ def prove(proof_file_name: str) -> None:
         print(current_game_ast)
         print("Next Game (useless):")
         print(next_game_ast)
-        current_game_ast = redundant_copy.RedundantCopyTransformer().transform(
+        current_game_ast = visitors.RedundantCopyTransformer().transform(
             current_game_ast
         )
-        next_game_ast = redundant_copy.RedundantCopyTransformer().transform(
-            next_game_ast
-        )
+        next_game_ast = visitors.RedundantCopyTransformer().transform(next_game_ast)
 
         print("Current Game (non-useless):")
         print(current_game_ast)
@@ -200,7 +198,7 @@ def instantiate_game(
 
     game_copy.parameters = []
 
-    return frog_ast.SubstitutionTransformer(replace_map).transform(game_copy)
+    return visitors.SubstitutionTransformer(replace_map).transform(game_copy)
 
 
 def get_challenger_method_lookup(challenger: frog_ast.Game) -> MethodLookup:
@@ -245,7 +243,7 @@ def inline_call(
                 and (exp.func.the_object.name, exp.func.name) in method_lookup
             )
 
-        func_call_exp = frog_ast.SearchVisitor[frog_ast.FuncCallExpression](
+        func_call_exp = visitors.SearchVisitor[frog_ast.FuncCallExpression](
             is_inlinable_call
         ).visit(statement)
 
@@ -259,7 +257,7 @@ def inline_call(
             (func_call_exp.func.the_object.name, func_call_exp.func.name)
         ]
 
-        transformed_method = frog_ast.SubstitutionTransformer(
+        transformed_method = visitors.SubstitutionTransformer(
             dict(
                 zip(
                     (param.name for param in called_method.signature.parameters),
@@ -272,7 +270,7 @@ def inline_call(
         assert isinstance(final_statement, frog_ast.ReturnStatement)
         returned_exp = final_statement.expression
 
-        changed_statement = frog_ast.ReplaceTransformer(
+        changed_statement = visitors.ReplaceTransformer(
             func_call_exp, returned_exp
         ).transform(statement)
         new_statements.append(changed_statement)

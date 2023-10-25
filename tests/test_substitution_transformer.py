@@ -1,5 +1,5 @@
 import pytest
-from proof_frog import frog_ast, frog_parser
+from proof_frog import visitors, frog_parser, frog_ast
 
 
 @pytest.mark.parametrize(
@@ -64,7 +64,7 @@ def test_substitution(
     game_ast = frog_parser.parse_method(method)
     expected_ast = frog_parser.parse_method(expected)
 
-    transformed_ast = frog_ast.SubstitutionTransformer(substitution_map).transform(
+    transformed_ast = visitors.SubstitutionTransformer(substitution_map).transform(
         game_ast
     )
     print(transformed_ast)

@@ -1,8 +1,7 @@
 from __future__ import annotations
-import copy
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Any, Optional, TypeAlias, TypeVar, Generic, Callable, cast
+from typing import Optional, TypeAlias
 
 
 class FileType(Enum):
@@ -10,85 +9,6 @@ class FileType(Enum):
     SCHEME = "scheme"
     GAME = "game"
     PROOF = "proof"
-
-
-def _to_snake_case(camel_case: str) -> str:
-    return "".join(["_" + i.lower() if i.isupper() else i for i in camel_case]).lstrip(
-        "_"
-    )
-
-
-# Used to represent the type of Node that is being transformed
-
-T = TypeVar("T", bound="ASTNode")
-
-
-class Transformer(ABC):
-    def transform(self, node: T) -> T:
-        if isinstance(node, list):
-            return [self.transform(item) for item in node]
-
-        method_name = "transform_" + _to_snake_case(type(node).__name__)
-        if hasattr(self, method_name):
-            returned: T = getattr(self, method_name)(node)
-            return returned
-        if hasattr(self, "transform_ast_node"):
-            returned = getattr(self, "transform_ast_node")(node)
-            if returned:
-                return returned
-
-        node_copy = copy.deepcopy(node)
-
-        def visit_children(child: Any) -> Any:
-            if isinstance(child, ASTNode):
-                return self.transform(child)
-            if isinstance(child, list):
-                return [visit_children(item) for item in child]
-            return child
-
-        for attr in vars(node_copy):
-            setattr(node_copy, attr, visit_children(getattr(node, attr)))
-        return node_copy
-
-
-# Used to represent the return value of our generic visitor
-U = TypeVar("U")
-
-
-class Visitor(ABC, Generic[U]):
-    @abstractmethod
-    def result(self) -> U:
-        pass
-
-    def visit(self, node: ASTNode | list[ASTNode]) -> U:
-        if isinstance(node, list):
-            for item in node:
-                self.visit(item)
-            return self.result()
-
-        visit_name = "visit_" + _to_snake_case(type(node).__name__)
-        if hasattr(self, visit_name):
-            getattr(self, visit_name)(node)
-        elif hasattr(self, "visit_ast_node"):
-            getattr(self, "visit_ast_node")(node)
-
-        def visit_children(child: Any) -> Any:
-            if isinstance(child, ASTNode):
-                self.visit(child)
-            if isinstance(child, list):
-                for item in child:
-                    visit_children(item)
-
-        for attr in vars(node):
-            visit_children(getattr(node, attr))
-
-        leave_name = "leave_" + _to_snake_case(type(node).__name__)
-        if hasattr(self, leave_name):
-            getattr(self, leave_name)(node)
-        elif hasattr(self, "leave_ast_node"):
-            getattr(self, "leave_ast_node")(node)
-
-        return self.result()
 
 
 class ASTNode(ABC):
@@ -810,49 +730,3 @@ class ProofFile(Root):
 
 def _parameter_list_string(parameters: list[Parameter]) -> str:
     return ", ".join(str(param) for param in parameters) if parameters else ""
-
-
-class SubstitutionTransformer(Transformer):
-    def __init__(self, replace_map: dict[str, ASTNode]):
-        self.replace_map = replace_map
-
-    def transform_variable(self, v: Variable) -> ASTNode:
-        if v.name in self.replace_map:
-            return self.replace_map[v.name]
-        return v
-
-    def transform_user_type(self, user_type: UserType) -> ASTNode:
-        # For user types, only want to change the first name. Others are considered fields.
-        if user_type.names[0].name in self.replace_map:
-            replaced_var = self.replace_map[user_type.names[0].name]
-            assert isinstance(replaced_var, Variable)
-            return UserType([replaced_var] + user_type.names[1:])
-        return user_type
-
-
-class ReplaceTransformer(Transformer):
-    def __init__(self, search_for: ASTNode, replace_with: ASTNode) -> None:
-        self.search_for = search_for
-        self.replace_with = replace_with
-
-    def transform_ast_node(self, exp: ASTNode) -> Optional[ASTNode]:
-        if exp is self.search_for:
-            return self.replace_with
-        return None
-
-
-W = TypeVar("W", bound="ASTNode")
-
-
-class SearchVisitor(Generic[W], Visitor[Optional[W]]):
-    def __init__(self, search_predicate: Callable[[ASTNode], bool]) -> None:
-        self.node: Optional[W] = None
-        self.search_predicate = search_predicate
-
-    def result(self) -> Optional[W]:
-        return self.node
-
-    def leave_ast_node(self, node: ASTNode) -> None:
-        if not self.node and self.search_predicate(node):
-            # If it matches the search predicate, it must have type W
-            self.node = cast(W, node)

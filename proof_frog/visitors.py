@@ -114,8 +114,54 @@ class SearchVisitor(Generic[W], Visitor[Optional[W]]):
             self.node = cast(W, node)
 
 
-class RedundantCopyTransformer(Transformer):
-    def _remove_redundant_copies(
+class BlockTransformer(Transformer, ABC):
+    @abstractmethod
+    def _transform_block(
+        self, statements: list[frog_ast.Statement]
+    ) -> list[frog_ast.Statement]:
+        pass
+
+    def _transform_block_wrapper(
+        self, statements: list[frog_ast.Statement]
+    ) -> list[frog_ast.Statement]:
+        statements = self._transform_block(statements)
+        return [self.transform(statement) for statement in statements]
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        new_method = copy.deepcopy(method)
+        new_method.statements = self._transform_block_wrapper(method.statements)
+        return new_method
+
+    def transform_if_statement(
+        self, statement: frog_ast.IfStatement
+    ) -> frog_ast.IfStatement:
+        new_if = copy.deepcopy(statement)
+        new_if.blocks = [
+            self._transform_block_wrapper(block) for block in new_if.blocks
+        ]
+        return new_if
+
+    def transform_generic_for(
+        self, statement: frog_ast.GenericFor
+    ) -> frog_ast.GenericFor:
+        new_statement = copy.deepcopy(statement)
+        new_statement.statements = self._transform_block_wrapper(
+            new_statement.statements
+        )
+        return new_statement
+
+    def transform_numeric_for(
+        self, statement: frog_ast.NumericFor
+    ) -> frog_ast.NumericFor:
+        new_statement = copy.deepcopy(statement)
+        new_statement.statements = self._transform_block_wrapper(
+            new_statement.statements
+        )
+        return new_statement
+
+
+class RedundantCopyTransformer(BlockTransformer):
+    def _transform_block(
         self,
         statements: list[frog_ast.Statement],
     ) -> list[frog_ast.Statement]:
@@ -160,43 +206,10 @@ class RedundantCopyTransformer(Transformer):
                         copy_found, frog_ast.Variable(original_name)
                     ).transform(remaining_statements)
 
-                return self._remove_redundant_copies(
+                return self._transform_block(
                     copy.deepcopy(statements[:index]) + remaining_statements
                 )
-
-        return [self.transform(statement) for statement in statements]
-
-    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
-        new_method = copy.deepcopy(method)
-        new_method.statements = self._remove_redundant_copies(method.statements)
-        return new_method
-
-    def transform_if_statement(
-        self, statement: frog_ast.IfStatement
-    ) -> frog_ast.IfStatement:
-        new_if = copy.deepcopy(statement)
-        new_if.blocks = [
-            self._remove_redundant_copies(block) for block in new_if.blocks
-        ]
-        return new_if
-
-    def transform_generic_for(
-        self, statement: frog_ast.GenericFor
-    ) -> frog_ast.GenericFor:
-        new_statement = copy.deepcopy(statement)
-        new_statement.statements = self._remove_redundant_copies(
-            new_statement.statements
-        )
-        return new_statement
-
-    def transform_numeric_for(
-        self, statement: frog_ast.NumericFor
-    ) -> frog_ast.NumericFor:
-        new_statement = copy.deepcopy(statement)
-        new_statement.statements = self._remove_redundant_copies(
-            new_statement.statements
-        )
-        return new_statement
+        return statements
 
 
 class SubstitutionTransformer(Transformer):

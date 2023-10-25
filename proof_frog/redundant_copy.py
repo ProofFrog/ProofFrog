@@ -49,9 +49,11 @@ class RedundantCopyTransformer(frog_ast.Transformer):
                         copy_found, frog_ast.Variable(original_name)
                     ).transform(remaining_statements)
 
-                return copy.deepcopy(statements[:index]) + remaining_statements
+                return self._remove_redundant_copies(
+                    copy.deepcopy(statements[:index]) + remaining_statements
+                )
 
-        return statements
+        return [self.transform(statement) for statement in statements]
 
     def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
         new_method = copy.deepcopy(method)
@@ -62,8 +64,9 @@ class RedundantCopyTransformer(frog_ast.Transformer):
         self, statement: frog_ast.IfStatement
     ) -> frog_ast.IfStatement:
         new_if = copy.deepcopy(statement)
-        for block in new_if.blocks:
-            block = self._remove_redundant_copies(block)
+        new_if.blocks = [
+            self._remove_redundant_copies(block) for block in new_if.blocks
+        ]
         return new_if
 
     def transform_generic_for(

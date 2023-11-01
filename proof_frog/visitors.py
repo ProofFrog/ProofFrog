@@ -2,6 +2,8 @@ import copy
 import functools
 from abc import ABC, abstractmethod
 from typing import Any, Optional, TypeVar, Generic, Callable, cast
+
+from proof_frog import frog_ast
 from . import frog_ast
 
 
@@ -114,6 +116,17 @@ class SearchVisitor(Generic[W], Visitor[Optional[W]]):
             self.node = cast(W, node)
 
 
+class VariableCollectionVisitor(Visitor[list[frog_ast.Variable]]):
+    def __init__(self) -> None:
+        self.variables: list[frog_ast.Variable] = []
+
+    def result(self) -> list[frog_ast.Variable]:
+        return self.variables
+
+    def visit_variable(self, node: frog_ast.Variable):
+        self.variables.append(node)
+
+
 class BlockTransformer(Transformer, ABC):
     @abstractmethod
     def _transform_block(
@@ -209,6 +222,72 @@ class RedundantCopyTransformer(BlockTransformer):
                 return self._transform_block(
                     copy.deepcopy(statements[:index]) + remaining_statements
                 )
+        return statements
+
+
+class RemoveTupleTransformer(BlockTransformer):
+    def _transform_block(
+        self, statements: list[frog_ast.Statement]
+    ) -> list[frog_ast.Statement]:
+        for index, statement in enumerate(statements):
+            if not isinstance(statement, frog_ast.Assignment):
+                continue
+            if not isinstance(statement.value, frog_ast.Tuple):
+                continue
+
+            def is_func_call(node: frog_ast.ASTNode):
+                return isinstance(node, frog_ast.FuncCallExpression)
+
+            has_func_call = SearchVisitor[frog_ast.FuncCallExpression](
+                is_func_call
+            ).visit(statement)
+
+            # We must be careful not to perform replacements with function calls,
+            # because expanding it could have side effects.
+            if has_func_call is not None:
+                continue
+
+            # But otherwise we have a tuple that's made up of values
+            # so we can replace them. We do need to be careful though:
+            # if any variable that is used inside of a tuple has changed, then we cannot
+            # do a substitution. Or if the tuple itself changes, either directly or by a field access.
+
+            remaining_statements = statements[index + 1 :]
+
+            def use_or_reassignment(
+                the_array: frog_ast.Expression, node: frog_ast.ASTNode
+            ) -> bool:
+                return (
+                    isinstance(node, frog_ast.ArrayAccess)
+                    and isinstance(node.the_array, frog_ast.Variable)
+                    and node.the_array == the_array
+                ) or (isinstance(node, frog_ast.Assignment) and node.var == the_array)
+
+            while True:
+                to_transform = SearchVisitor[
+                    frog_ast.ArrayAccess | frog_ast.Assignment
+                ](functools.partial(use_or_reassignment, statement.var)).visit(
+                    remaining_statements
+                )
+
+                if (
+                    isinstance(to_transform, frog_ast.Assignment)
+                    or to_transform is None
+                ):
+                    break
+
+                # For right now, can only replace if indexed with a direct Integer. Maybe later we
+                # can look at determining the type/value of a particular variable
+                if not isinstance(to_transform.index, frog_ast.Integer):
+                    break
+
+                remaining_statements = ReplaceTransformer(
+                    to_transform, statement.value.values[to_transform.index.num]
+                ).transform(remaining_statements)
+            return self._transform_block(
+                copy.deepcopy(statements[:index]) + remaining_statements
+            )
+
         return statements
 
 

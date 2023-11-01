@@ -86,18 +86,17 @@ def prove(proof_file_name: str) -> None:
         current_game_ast = inline_calls(current_game_lookup, current_game_ast)
         next_game_ast = inline_calls(next_game_lookup, next_game_ast)
 
-        print("Current Game (useless):")
-        print(current_game_ast)
-        print("Next Game (useless):")
-        print(next_game_ast)
         current_game_ast = visitors.RedundantCopyTransformer().transform(
             current_game_ast
         )
         next_game_ast = visitors.RedundantCopyTransformer().transform(next_game_ast)
 
-        print("Current Game (non-useless):")
+        current_game_ast = visitors.RemoveTupleTransformer().transform(current_game_ast)
+        next_game_ast = visitors.RemoveTupleTransformer().transform(next_game_ast)
+
+        print("Current Game:")
         print(current_game_ast)
-        print("Next Game (non-useless):")
+        print("Next Game:")
         print(next_game_ast)
 
         if current_game_ast == next_game_ast:

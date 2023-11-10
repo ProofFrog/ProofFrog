@@ -1,7 +1,7 @@
 from __future__ import annotations
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Optional, TypeAlias
+from typing import Optional, TypeAlias, Sequence
 
 
 class FileType(Enum):
@@ -293,8 +293,19 @@ class ReturnStatement(Statement):
         return f"return {self.expression};"
 
 
+class Block(Statement):
+    def __init__(self, statements: Sequence[Statement]):
+        self.statements = statements
+
+    def __str__(self) -> str:
+        return "  \n".join(str(statement) for statement in self.statements)
+
+    def __add__(self, other: Block) -> Block:
+        return Block(list(self.statements) + list(other.statements))
+
+
 class IfStatement(Statement):
-    def __init__(self, conditions: list[Expression], blocks: list[list[Statement]]):
+    def __init__(self, conditions: list[Expression], blocks: list[Block]):
         self.conditions = conditions
         self.blocks = blocks
 
@@ -305,13 +316,10 @@ class IfStatement(Statement):
                 output_string += f"if ({condition}) {{\n"
             else:
                 output_string += f"  }} else if ({condition}) {{\n"
-            for statement in self.blocks[i]:
-                output_string += f"      {statement}\n"
+            output_string += str(self.blocks[i])
 
         if self.has_else_block():
-            output_string += "} else {\n"
-            for statement in self.blocks[-1]:
-                output_string += f"{statement}\n"
+            output_string += f"}} else {{\n {self.blocks[-1]}"
 
         output_string += "    }\n"
 
@@ -361,39 +369,26 @@ class VariableDeclaration(Statement):
 
 
 class NumericFor(Statement):
-    def __init__(
-        self, name: str, start: Expression, end: Expression, statements: list[Statement]
-    ):
+    def __init__(self, name: str, start: Expression, end: Expression, block: Block):
         self.name = name
         self.start = start
         self.end = end
-        self.statements = statements
+        self.block = block
 
     def __str__(self) -> str:
-        output_string = f"for ({BasicTypes.INT.value} {self.name} = {self.start} to {self.end}) {{\n"
-        for statement in self.statements:
-            output_string += f"      {statement}\n"
-        output_string += "    }"
-        return output_string
+        return f"for ({BasicTypes.INT.value} {self.name} = {self.start} to {self.end}) {{\n {self.block} \n }}"
 
 
 class GenericFor(Statement):
-    def __init__(
-        self,
-        var_type: Type,
-        var_name: str,
-        over: Expression,
-        statements: list[Statement],
-    ):
+    def __init__(self, var_type: Type, var_name: str, over: Expression, block: Block):
         self.var_type = var_type
         self.var_name = var_name
         self.over = over
-        self.statements = statements
+        self.block = block
 
     def __str__(self) -> str:
         output_string = f"for ({self.var_type} {self.var_name} in {self.over}) {{\n"
-        for statement in self.statements:
-            output_string += f"      {statement}\n"
+        output_string += str(self.block)
         output_string += "    }"
         return output_string
 
@@ -450,17 +445,15 @@ class BinaryNum(Expression):
         return bin(self.num)
 
 
-class Method(Expression):
-    def __init__(self, signature: MethodSignature, statements: list[Statement]) -> None:
+class Method(ASTNode):
+    def __init__(self, signature: MethodSignature, block: Block) -> None:
         self.signature = signature
-        self.statements = statements
+        self.block = block
 
     def __str__(self) -> str:
         output_string = f"{self.signature} {{\n"
-        for statement in self.statements:
-            output_string += f"    {statement}\n"
         output_string += "  }\n"
-        return output_string
+        return f"{self.signature} {{ \n {self.block} \n }}"
 
 
 class Import(ASTNode):

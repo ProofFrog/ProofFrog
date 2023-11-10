@@ -1,7 +1,9 @@
+from __future__ import annotations
 import os
 import sys
 import copy
-from typing import TypeAlias, Sequence, Tuple, Dict
+import functools
+from typing import TypeAlias, Sequence, Tuple, Dict, Optional, Callable
 from colorama import Fore
 from . import frog_parser
 from . import frog_ast
@@ -41,7 +43,15 @@ def prove(proof_file_name: str) -> None:
         if isinstance(let.value, frog_ast.FuncCallExpression) and isinstance(
             let.value.func, frog_ast.Variable
         ):
-            proof_namespace[let.name] = definition_namespace[let.value.func.name]
+            field_definition = copy.deepcopy(definition_namespace[let.value.func.name])
+            assert isinstance(field_definition, (frog_ast.Scheme, frog_ast.Primitive))
+            replace_map: dict[str, frog_ast.ASTNode] = {}
+            for index, parameter in enumerate(field_definition.parameters):
+                replace_map[parameter.name] = let.value.args[index]
+            field_definition = visitors.SubstitutionTransformer(replace_map).transform(
+                field_definition
+            )
+            proof_namespace[let.name] = field_definition
 
     method_lookup: MethodLookup = get_method_lookup(proof_namespace)
 
@@ -93,6 +103,19 @@ def prove(proof_file_name: str) -> None:
 
         current_game_ast = visitors.RemoveTupleTransformer().transform(current_game_ast)
         next_game_ast = visitors.RemoveTupleTransformer().transform(next_game_ast)
+
+        current_game_ast = sort_game(current_game_ast)
+        next_game_ast = sort_game(next_game_ast)
+
+        current_game_ast = visitors.VariableStandardizingTransformer().transform(
+            current_game_ast
+        )
+        next_game_ast = visitors.VariableStandardizingTransformer().transform(
+            next_game_ast
+        )
+
+        current_game_ast = replace_user_types(current_game_ast, proof_namespace)
+        next_game_ast = replace_user_types(next_game_ast, proof_namespace)
 
         print("Current Game:")
         print(current_game_ast)
@@ -212,9 +235,9 @@ def get_challenger_method_lookup(challenger: frog_ast.Game) -> MethodLookup:
 def inline_calls(lookup: MethodLookup, game: frog_ast.Game) -> frog_ast.Game:
     new_game = copy.deepcopy(game)
     for method in new_game.methods:
-        new_statements = inline_call(lookup, method.statements)
-        if new_statements != method.statements:
-            method.statements = new_statements
+        new_block = inline_call(lookup, method.block)
+        if new_block != method.block:
+            method.block = new_block
             return inline_calls(lookup, new_game)
     return new_game
 
@@ -229,10 +252,10 @@ def inline_calls(lookup: MethodLookup, game: frog_ast.Game) -> frog_ast.Game:
 
 def inline_call(
     method_lookup: MethodLookup,
-    statements: list[frog_ast.Statement],
-) -> list[frog_ast.Statement]:
+    block: frog_ast.Block,
+) -> frog_ast.Block:
     new_statements: list[frog_ast.Statement] = []
-    for index, statement in enumerate(statements):
+    for index, statement in enumerate(block.statements):
 
         def is_inlinable_call(exp: frog_ast.ASTNode) -> bool:
             return (
@@ -264,8 +287,8 @@ def inline_call(
                 )
             )
         ).transform(called_method)
-        final_statement = transformed_method.statements[-1]
-        new_statements += transformed_method.statements[:-1]
+        final_statement = transformed_method.block.statements[-1]
+        new_statements += transformed_method.block.statements[:-1]
         assert isinstance(final_statement, frog_ast.ReturnStatement)
         returned_exp = final_statement.expression
 
@@ -273,7 +296,200 @@ def inline_call(
             func_call_exp, returned_exp
         ).transform(statement)
         new_statements.append(changed_statement)
-        new_statements += statements[index + 1 :]
+        new_statements += block.statements[index + 1 :]
         break
 
-    return new_statements
+    return frog_ast.Block(new_statements)
+
+
+class Node:
+    def __init__(self, statement: frog_ast.Statement) -> None:
+        self.in_neighbours: list[Node] = []
+        self.statement = statement
+
+    def __eq__(self, __value: object) -> bool:
+        if not isinstance(__value, Node):
+            return False
+        return (
+            self.in_neighbours == __value.in_neighbours
+            and self.statement == __value.statement
+        )
+
+    def add_neighbour(self, neighbour: Node) -> None:
+        if not neighbour in self.in_neighbours:
+            self.in_neighbours.append(neighbour)
+
+
+class DependencyGraph:
+    def __init__(self, nodes: Optional[list[Node]] = None) -> None:
+        self.nodes: list[Node] = nodes if nodes else []
+
+    def add_node(self, new_node: Node) -> None:
+        self.nodes.append(new_node)
+
+    def get_node(self, statement: frog_ast.Statement) -> Optional[Node]:
+        for potential_node in self.nodes:
+            if potential_node.statement == statement:
+                return potential_node
+        return None
+
+    def find_node(
+        self, predicate: Callable[[frog_ast.Statement], bool]
+    ) -> Optional[Node]:
+        for node in self.nodes:
+            if predicate(node.statement):
+                return node
+        return None
+
+    def __str__(self) -> str:
+        result = ""
+        for node in self.nodes:
+            result += f'{node.statement} depends on: {"nothing" if not node.in_neighbours else ""}\n'
+            for neighbour in node.in_neighbours:
+                result += f"  - {neighbour.statement}\n"
+        return result
+
+    def __eq__(self, __value: object) -> bool:
+        if not isinstance(__value, DependencyGraph):
+            return False
+        return self.nodes == __value.nodes
+
+
+def generate_dependency_graph(
+    block: frog_ast.Block,
+) -> DependencyGraph:
+    dependency_graph = DependencyGraph()
+    for statement in block.statements:
+        dependency_graph.add_node(Node(statement))
+
+    def add_dependency(node_in_graph: Node, node: frog_ast.Statement) -> None:
+        other_node = dependency_graph.get_node(node)
+        assert other_node is not None
+        node_in_graph.add_neighbour(other_node)
+
+    for index, statement in enumerate(block.statements):
+        node_in_graph = dependency_graph.get_node(statement)
+        assert node_in_graph is not None
+        earlier_statements = list(block.statements[:index])
+        earlier_statements.reverse()
+
+        if isinstance(statement, frog_ast.ReturnStatement):
+            for depends_on in earlier_statements:
+
+                def search_for_return(node: frog_ast.ASTNode) -> bool:
+                    return isinstance(node, frog_ast.ReturnStatement)
+
+                contains_return = visitors.SearchVisitor(search_for_return).visit(
+                    depends_on
+                )
+                if contains_return is not None:
+                    add_dependency(node_in_graph, depends_on)
+
+        variables = visitors.VariableCollectionVisitor().visit(statement)
+        for variable in variables:
+            for depends_on in earlier_statements:
+
+                def search_for_assignment(
+                    variable: frog_ast.Variable, node: frog_ast.ASTNode
+                ) -> bool:
+                    return node == variable
+
+                if (
+                    visitors.SearchVisitor(
+                        functools.partial(search_for_assignment, variable)
+                    ).visit(depends_on)
+                    is not None
+                ):
+                    add_dependency(node_in_graph, depends_on)
+                    break
+
+    return dependency_graph
+
+
+def sort_game(game: frog_ast.Game) -> frog_ast.Game:
+    new_game = copy.deepcopy(game)
+    for method in new_game.methods:
+        method.block = sort_block(method.block)
+    return new_game
+
+
+def sort_block(block: frog_ast.Block) -> frog_ast.Block:
+    new_statement_list: list[frog_ast.Statement] = []
+    graph = generate_dependency_graph(block)
+    final_statement = block.statements[-1]
+    final_node = graph.get_node(final_statement)
+    assert final_node is not None
+    queue: list[Node] = [final_node]
+    visited: list[bool] = [False] * len(block.statements)
+    visited[-1] = True
+    while queue:
+        node = queue.pop(0)
+        new_statement_list.append(node.statement)
+        for neighbour in node.in_neighbours:
+            if not visited[block.statements.index(neighbour.statement)]:
+                visited[block.statements.index(neighbour.statement)] = True
+                queue.append(neighbour)
+    new_statement_list.reverse()
+    return frog_ast.Block(new_statement_list)
+
+
+def replace_user_types(
+    game: frog_ast.Game, proof_namespace: Namespace
+) -> frog_ast.Game:
+    new_game = copy.deepcopy(game)
+
+    ignore: list[frog_ast.ASTNode] = []
+
+    def is_replaceable(node: frog_ast.ASTNode) -> bool:
+        return (
+            (
+                isinstance(node, frog_ast.UserType)
+                and node.names[0].name in proof_namespace.keys()
+            )
+            or (
+                isinstance(node, frog_ast.FieldAccess)
+                and isinstance(node.the_object, frog_ast.Variable)
+                and node.the_object.name in proof_namespace.keys()
+            )
+        ) and node not in ignore
+
+    while True:
+        found_node = visitors.SearchVisitor[frog_ast.UserType | frog_ast.FieldAccess](
+            is_replaceable
+        ).visit(new_game)
+        if found_node is None:
+            break
+
+        primitive: frog_ast.Primitive | frog_ast.Scheme
+        searched_name: str
+        if isinstance(found_node, frog_ast.UserType):
+            node = proof_namespace[found_node.names[0].name]
+            assert isinstance(
+                node,
+                (frog_ast.Primitive, frog_ast.Scheme),
+            )
+            primitive = node
+            searched_name = found_node.names[1].name
+        else:
+            assert isinstance(found_node.the_object, frog_ast.Variable)
+            node = proof_namespace[found_node.the_object.name]
+            assert isinstance(
+                node,
+                (frog_ast.Primitive, frog_ast.Scheme),
+            )
+            primitive = node
+            searched_name = found_node.name
+
+        to_replace_with: frog_ast.Expression | None = None
+        for field in primitive.fields:
+            if field.name == searched_name:
+                to_replace_with = field.value
+
+        if to_replace_with is None:
+            ignore.append(found_node)
+            continue
+        new_game = visitors.ReplaceTransformer(
+            found_node, copy.deepcopy(to_replace_with)
+        ).transform(new_game)
+
+    return new_game

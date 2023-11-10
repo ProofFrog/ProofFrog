@@ -170,10 +170,9 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         )
 
     def visitMethod(self, ctx: PrimitiveParser.MethodContext) -> frog_ast.Method:
-        statements = [
-            self.visit(statement) for statement in ctx.methodBody().statement()
-        ]
-        return frog_ast.Method(self.visit(ctx.methodSignature()), statements)
+        return frog_ast.Method(
+            self.visit(ctx.methodSignature()), self.visit(ctx.block())
+        )
 
     def visitIntegerExpression(
         self, ctx: PrimitiveParser.IntegerExpressionContext
@@ -225,6 +224,9 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         return frog_ast.Sample(
             None, self.visit(ctx.lvalue()), self.visit(ctx.expression())
         )
+
+    def visitBlock(self, ctx: PrimitiveParser.BlockContext) -> frog_ast.Block:
+        return frog_ast.Block([self.visit(statement) for statement in ctx.statement()])
 
     def visitNumericForStatement(
         self, ctx: PrimitiveParser.NumericForStatementContext
@@ -383,9 +385,6 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             ctx.FILESTRING().getText().strip("'"),
             ctx.ID().getText() if ctx.ID() else "",
         )
-
-    def visitBlock(self, ctx: PrimitiveParser.BlockContext) -> list[frog_ast.Statement]:
-        return [self.visit(statement) for statement in ctx.statement()]
 
     def visitIfStatement(
         self, ctx: PrimitiveParser.IfStatementContext

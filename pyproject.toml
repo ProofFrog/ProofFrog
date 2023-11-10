@@ -25,7 +25,9 @@ disable = '''missing-module-docstring,
     missing-function-docstring,
     too-few-public-methods,
     too-many-public-methods,
-    too-many-lines
+    too-many-lines,
+    too-many-locals,
+    too-many-statements
 '''
 max-line-length='120'
 ignore='parsing'

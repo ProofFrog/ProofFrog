@@ -1,7 +1,7 @@
 import copy
 import functools
 from abc import ABC, abstractmethod
-from typing import Any, Optional, TypeVar, Generic, Callable, cast
+from typing import Any, Optional, TypeVar, Generic, Callable, cast, final
 
 from proof_frog import frog_ast
 from . import frog_ast
@@ -22,12 +22,7 @@ class Visitor(ABC, Generic[U]):
     def result(self) -> U:
         pass
 
-    def visit(self, node: frog_ast.ASTNode | list[frog_ast.ASTNode]) -> U:
-        if isinstance(node, list):
-            for item in node:
-                self.visit(item)
-            return self.result()
-
+    def visit(self, node: frog_ast.ASTNode) -> U:
         visit_name = "visit_" + _to_snake_case(type(node).__name__)
         if hasattr(self, visit_name):
             getattr(self, visit_name)(node)
@@ -60,9 +55,6 @@ T = TypeVar("T", bound=frog_ast.ASTNode)
 
 class Transformer(ABC):
     def transform(self, node: T) -> T:
-        if isinstance(node, list):
-            return [self.transform(item) for item in node]
-
         method_name = "transform_" + _to_snake_case(type(node).__name__)
         if hasattr(self, method_name):
             returned: T = getattr(self, method_name)(node)
@@ -119,66 +111,43 @@ class SearchVisitor(Generic[W], Visitor[Optional[W]]):
 class VariableCollectionVisitor(Visitor[list[frog_ast.Variable]]):
     def __init__(self) -> None:
         self.variables: list[frog_ast.Variable] = []
+        self.enabled = True
 
     def result(self) -> list[frog_ast.Variable]:
         return self.variables
 
-    def visit_variable(self, node: frog_ast.Variable):
-        self.variables.append(node)
+    def visit_user_type(self, user_type: frog_ast.UserType) -> None:
+        if user_type.names[0] not in self.variables:
+            self.variables.append(user_type.names[0])
+        self.enabled = False
+
+    def leave_user_type(self, _: frog_ast.UserType) -> None:
+        self.enabled = True
+
+    def visit_variable(self, node: frog_ast.Variable) -> None:
+        if node not in self.variables and self.enabled:
+            self.variables.append(node)
 
 
 class BlockTransformer(Transformer, ABC):
+    @final
+    def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
+        new_block = self._transform_block_wrapper(block)
+        return frog_ast.Block(
+            [self.transform(statement) for statement in new_block.statements]
+        )
+
     @abstractmethod
-    def _transform_block(
-        self, statements: list[frog_ast.Statement]
-    ) -> list[frog_ast.Statement]:
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         pass
-
-    def _transform_block_wrapper(
-        self, statements: list[frog_ast.Statement]
-    ) -> list[frog_ast.Statement]:
-        statements = self._transform_block(statements)
-        return [self.transform(statement) for statement in statements]
-
-    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
-        new_method = copy.deepcopy(method)
-        new_method.statements = self._transform_block_wrapper(method.statements)
-        return new_method
-
-    def transform_if_statement(
-        self, statement: frog_ast.IfStatement
-    ) -> frog_ast.IfStatement:
-        new_if = copy.deepcopy(statement)
-        new_if.blocks = [
-            self._transform_block_wrapper(block) for block in new_if.blocks
-        ]
-        return new_if
-
-    def transform_generic_for(
-        self, statement: frog_ast.GenericFor
-    ) -> frog_ast.GenericFor:
-        new_statement = copy.deepcopy(statement)
-        new_statement.statements = self._transform_block_wrapper(
-            new_statement.statements
-        )
-        return new_statement
-
-    def transform_numeric_for(
-        self, statement: frog_ast.NumericFor
-    ) -> frog_ast.NumericFor:
-        new_statement = copy.deepcopy(statement)
-        new_statement.statements = self._transform_block_wrapper(
-            new_statement.statements
-        )
-        return new_statement
 
 
 class RedundantCopyTransformer(BlockTransformer):
-    def _transform_block(
+    def _transform_block_wrapper(
         self,
-        statements: list[frog_ast.Statement],
-    ) -> list[frog_ast.Statement]:
-        for index, statement in enumerate(statements):
+        block: frog_ast.Block,
+    ) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
             # Potentially, could be a redundant copy
             if (
                 isinstance(statement, frog_ast.Assignment)
@@ -188,23 +157,27 @@ class RedundantCopyTransformer(BlockTransformer):
                 # Search through the remaining statements to see if the variable was ever used again.
                 original_name = statement.value.name
 
-                def original_used(original_name: str, node: frog_ast.ASTNode):
+                def original_used(original_name: str, node: frog_ast.ASTNode) -> bool:
                     return (
                         isinstance(node, frog_ast.Variable)
                         and node.name == original_name
                     )
 
-                remaining_statements = copy.deepcopy(statements[index + 1 :])
+                remaining_block = frog_ast.Block(
+                    copy.deepcopy(block.statements[index + 1 :])
+                )
                 used_again = SearchVisitor[frog_ast.Variable](
                     functools.partial(original_used, original_name)
-                ).visit(remaining_statements)
+                ).visit(remaining_block)
                 # If it was used again, just move on. This ain't gonna work.
                 if used_again:
                     continue
 
+                assert isinstance(statement.var, frog_ast.Variable)
+
                 copy_name = statement.var.name
 
-                def copy_used(copy_name: str, node: frog_ast.ASTNode):
+                def copy_used(copy_name: str, node: frog_ast.ASTNode) -> bool:
                     return (
                         isinstance(node, frog_ast.Variable) and node.name == copy_name
                     )
@@ -212,30 +185,29 @@ class RedundantCopyTransformer(BlockTransformer):
                 while True:
                     copy_found = SearchVisitor[frog_ast.Variable](
                         functools.partial(copy_used, copy_name)
-                    ).visit(remaining_statements)
+                    ).visit(remaining_block)
                     if copy_found is None:
                         break
-                    remaining_statements = ReplaceTransformer(
+                    remaining_block = ReplaceTransformer(
                         copy_found, frog_ast.Variable(original_name)
-                    ).transform(remaining_statements)
+                    ).transform(remaining_block)
 
-                return self._transform_block(
-                    copy.deepcopy(statements[:index]) + remaining_statements
+                return self.transform_block(
+                    frog_ast.Block(copy.deepcopy(block.statements[:index]))
+                    + remaining_block
                 )
-        return statements
+        return block
 
 
 class RemoveTupleTransformer(BlockTransformer):
-    def _transform_block(
-        self, statements: list[frog_ast.Statement]
-    ) -> list[frog_ast.Statement]:
-        for index, statement in enumerate(statements):
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
             if not isinstance(statement, frog_ast.Assignment):
                 continue
             if not isinstance(statement.value, frog_ast.Tuple):
                 continue
 
-            def is_func_call(node: frog_ast.ASTNode):
+            def is_func_call(node: frog_ast.ASTNode) -> bool:
                 return isinstance(node, frog_ast.FuncCallExpression)
 
             has_func_call = SearchVisitor[frog_ast.FuncCallExpression](
@@ -252,7 +224,7 @@ class RemoveTupleTransformer(BlockTransformer):
             # if any variable that is used inside of a tuple has changed, then we cannot
             # do a substitution. Or if the tuple itself changes, either directly or by a field access.
 
-            remaining_statements = statements[index + 1 :]
+            remaining_block = frog_ast.Block(block.statements[index + 1 :])
 
             def use_or_reassignment(
                 the_array: frog_ast.Expression, node: frog_ast.ASTNode
@@ -267,7 +239,7 @@ class RemoveTupleTransformer(BlockTransformer):
                 to_transform = SearchVisitor[
                     frog_ast.ArrayAccess | frog_ast.Assignment
                 ](functools.partial(use_or_reassignment, statement.var)).visit(
-                    remaining_statements
+                    remaining_block
                 )
 
                 if (
@@ -281,14 +253,53 @@ class RemoveTupleTransformer(BlockTransformer):
                 if not isinstance(to_transform.index, frog_ast.Integer):
                     break
 
-                remaining_statements = ReplaceTransformer(
+                remaining_block = ReplaceTransformer(
                     to_transform, statement.value.values[to_transform.index.num]
-                ).transform(remaining_statements)
-            return self._transform_block(
-                copy.deepcopy(statements[:index]) + remaining_statements
+                ).transform(remaining_block)
+            return self.transform_block(
+                frog_ast.Block(copy.deepcopy(block.statements[:index]))
+                + remaining_block
             )
 
-        return statements
+        return block
+
+
+class VariableStandardizingTransformer(BlockTransformer):
+    def __init__(self) -> None:
+        self.variable_counter = 0
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        new_block = copy.deepcopy(block)
+        for statement in new_block.statements:
+            if not isinstance(statement, frog_ast.Assignment):
+                continue
+            if not isinstance(statement.var, frog_ast.Variable):
+                continue
+
+            if statement.the_type is None:
+                continue
+
+            self.variable_counter += 1
+            expected_name = f"v{self.variable_counter}"
+            if statement.var.name == expected_name:
+                continue
+
+            def var_used(var: frog_ast.Variable, node: frog_ast.ASTNode) -> bool:
+                return node == var
+
+            while True:
+                to_transform = SearchVisitor[frog_ast.Variable](
+                    functools.partial(var_used, statement.var)
+                ).visit(new_block)
+
+                if to_transform is None:
+                    break
+
+                new_block = ReplaceTransformer(
+                    to_transform, frog_ast.Variable(expected_name)
+                ).transform(new_block)
+
+        return new_block
 
 
 class SubstitutionTransformer(Transformer):

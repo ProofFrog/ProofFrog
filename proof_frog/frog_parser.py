@@ -41,7 +41,7 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         return result
 
     def visitUserType(self, ctx: PrimitiveParser.UserTypeContext) -> frog_ast.UserType:
-        return frog_ast.UserType([id.getText() for id in ctx.id_()])
+        return frog_ast.UserType([frog_ast.Variable(id.getText()) for id in ctx.id_()])
 
     def visitOptionalType(
         self, ctx: PrimitiveParser.OptionalTypeContext
@@ -170,10 +170,9 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         )
 
     def visitMethod(self, ctx: PrimitiveParser.MethodContext) -> frog_ast.Method:
-        statements = [
-            self.visit(statement) for statement in ctx.methodBody().statement()
-        ]
-        return frog_ast.Method(self.visit(ctx.methodSignature()), statements)
+        return frog_ast.Method(
+            self.visit(ctx.methodSignature()), self.visit(ctx.block())
+        )
 
     def visitIntegerExpression(
         self, ctx: PrimitiveParser.IntegerExpressionContext
@@ -225,6 +224,9 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         return frog_ast.Sample(
             None, self.visit(ctx.lvalue()), self.visit(ctx.expression())
         )
+
+    def visitBlock(self, ctx: PrimitiveParser.BlockContext) -> frog_ast.Block:
+        return frog_ast.Block([self.visit(statement) for statement in ctx.statement()])
 
     def visitNumericForStatement(
         self, ctx: PrimitiveParser.NumericForStatementContext
@@ -383,9 +385,6 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             ctx.FILESTRING().getText().strip("'"),
             ctx.ID().getText() if ctx.ID() else "",
         )
-
-    def visitBlock(self, ctx: PrimitiveParser.BlockContext) -> list[frog_ast.Statement]:
-        return [self.visit(statement) for statement in ctx.statement()]
 
     def visitIfStatement(
         self, ctx: PrimitiveParser.IfStatementContext
@@ -631,5 +630,12 @@ def parse_game(game: str) -> frog_ast.Game:
 def parse_reduction(reduction: str) -> frog_ast.Reduction:
     ast: frog_ast.Reduction = _ProofASTGenerator().visit(
         _get_parser(reduction, ProofLexer, ProofParser).reduction()
+    )
+    return ast
+
+
+def parse_method(method: str) -> frog_ast.Method:
+    ast: frog_ast.Method = _SharedAST().visit(
+        _get_parser(method, GameLexer, GameParser).method()
     )
     return ast

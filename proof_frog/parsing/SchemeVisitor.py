@@ -339,11 +339,6 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SchemeParser#methodBody.
-    def visitMethodBody(self, ctx:SchemeParser.MethodBodyContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by SchemeParser#id.
     def visitId(self, ctx:SchemeParser.IdContext):
         return self.visitChildren(ctx)

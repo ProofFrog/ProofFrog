@@ -2,14 +2,14 @@ import 'examples/Primitives/SymEnc.primitive';
 import 'examples/Games/SymEnc/OneTimeSecrecy.game';
 import 'examples/Games/SymEnc/OneTimeUniformCiphertexts.game';
 
-Reduction R1(SymEnc E) compose OneTimeUniformCiphertexts(E) against OneTimeSecrecy(E).Adversary {
-	E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
+Reduction R1(SymEnc se) compose OneTimeUniformCiphertexts(se) against OneTimeSecrecy(se).Adversary {
+	se.Ciphertext Eavesdrop(se.Message mL, se.Message mR) {
 		return challenger.CTXT(mL);
 	}
 }
 
-Reduction R2(SymEnc E) compose OneTimeUniformCiphertexts(E) against OneTimeSecrecy(E).Adversary {
-	E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
+Reduction R2(SymEnc se2) compose OneTimeUniformCiphertexts(se2) against OneTimeSecrecy(se2).Adversary {
+	se2.Ciphertext Eavesdrop(se2.Message mL, se2.Message mR) {
 		return challenger.CTXT(mR);
 	}
 }
@@ -22,30 +22,30 @@ let:
 	Set CiphertextSpace;
 	Set KeySpace;
 
-	SymEnc E = SymEnc(MessageSpace, CiphertextSpace, KeySpace);
+	SymEnc proofE = SymEnc(MessageSpace, CiphertextSpace, KeySpace);
 
 assume:
 
-	OneTimeUniformCiphertexts(E);
+	OneTimeUniformCiphertexts(proofE);
 
 theorem:
-	OneTimeSecrecy(E);
+	OneTimeSecrecy(proofE);
 
 games:
 
-	OneTimeSecrecy(E).Left against OneTimeSecrecy(E).Adversary;
+	OneTimeSecrecy(proofE).Left against OneTimeSecrecy(proofE).Adversary;
 
 	// Codewise-equivalency
-	OneTimeUniformCiphertexts(E).Real compose R1(E) against OneTimeSecrecy(E).Adversary;
+	OneTimeUniformCiphertexts(proofE).Real compose R1(proofE) against OneTimeSecrecy(proofE).Adversary;
 
 	// By assumption
-	OneTimeUniformCiphertexts(E).Random compose R1(E) against OneTimeSecrecy(E).Adversary;
+	OneTimeUniformCiphertexts(proofE).Random compose R1(proofE) against OneTimeSecrecy(proofE).Adversary;
 
 	// mL argument is not used in R
-	OneTimeUniformCiphertexts(E).Random compose R2(E) against OneTimeSecrecy(E).Adversary;
+	OneTimeUniformCiphertexts(proofE).Random compose R2(proofE) against OneTimeSecrecy(proofE).Adversary;
 
 	// By assumption
-	OneTimeUniformCiphertexts(E).Real compose R2(E) against OneTimeSecrecy(E).Adversary;
+	OneTimeUniformCiphertexts(proofE).Real compose R2(proofE) against OneTimeSecrecy(proofE).Adversary;
 
 	// Codewise equivalency
-	OneTimeSecrecy(E).Right against OneTimeSecrecy(E).Adversary;
+	OneTimeSecrecy(proofE).Right against OneTimeSecrecy(proofE).Adversary;

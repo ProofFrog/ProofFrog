@@ -1,8 +1,7 @@
 from __future__ import annotations
-import copy
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Optional, TypeAlias
+from typing import Optional, TypeAlias, Sequence
 
 
 class FileType(Enum):
@@ -12,44 +11,7 @@ class FileType(Enum):
     PROOF = "proof"
 
 
-def _to_snake_case(camel_case: str) -> str:
-    return "".join(["_" + i.lower() if i.isupper() else i for i in camel_case]).lstrip(
-        "_"
-    )
-
-
-class Transformer(ABC):
-    pass
-
-
 class ASTNode(ABC):
-    def accept(self, v: Visitor) -> None:
-        method_name = "visit_" + _to_snake_case(type(self).__name__)
-        if hasattr(v, method_name):
-            getattr(v, method_name)(self)
-        else:
-
-            def visit_children(child) -> None:  # type: ignore[no-untyped-def]
-                if isinstance(child, ASTNode):
-                    child.accept(v)
-                elif isinstance(child, list):
-                    for item in child:
-                        visit_children(item)
-
-            for attr_name in dir(self):
-                visit_children(getattr(self, attr_name))
-
-    def transform(self, transformer: Transformer) -> ASTNode:
-        method_name = "transform_" + _to_snake_case(type(self).__name__)
-        if hasattr(transformer, method_name):
-            node: ASTNode = getattr(transformer, method_name)(self)
-            return node
-        self_copy = copy.deepcopy(self)
-        for attr in dir(self):
-            if isinstance(attr, ASTNode):
-                setattr(self_copy, attr, getattr(self, attr).transform(transformer))
-        return self_copy
-
     def __eq__(self, other: object) -> bool:
         if self is other:
             return True
@@ -279,12 +241,12 @@ class ProductType(Type):
 
 
 class UserType(Type):
-    def __init__(self, names: list[str]) -> None:
+    def __init__(self, names: list[Variable]) -> None:
         super().__init__(BasicTypes.OTHER)
         self.names = names
 
     def _get_string_description(self) -> str:
-        return ".".join(name for name in self.names)
+        return ".".join(str(name) for name in self.names)
 
 
 class FuncCallExpression(Expression):
@@ -331,8 +293,19 @@ class ReturnStatement(Statement):
         return f"return {self.expression};"
 
 
+class Block(Statement):
+    def __init__(self, statements: Sequence[Statement]):
+        self.statements = statements
+
+    def __str__(self) -> str:
+        return "  \n".join(str(statement) for statement in self.statements)
+
+    def __add__(self, other: Block) -> Block:
+        return Block(list(self.statements) + list(other.statements))
+
+
 class IfStatement(Statement):
-    def __init__(self, conditions: list[Expression], blocks: list[list[Statement]]):
+    def __init__(self, conditions: list[Expression], blocks: list[Block]):
         self.conditions = conditions
         self.blocks = blocks
 
@@ -343,13 +316,10 @@ class IfStatement(Statement):
                 output_string += f"if ({condition}) {{\n"
             else:
                 output_string += f"  }} else if ({condition}) {{\n"
-            for statement in self.blocks[i]:
-                output_string += f"      {statement}\n"
+            output_string += str(self.blocks[i])
 
         if self.has_else_block():
-            output_string += "} else {\n"
-            for statement in self.blocks[-1]:
-                output_string += f"{statement}\n"
+            output_string += f"}} else {{\n {self.blocks[-1]}"
 
         output_string += "    }\n"
 
@@ -399,39 +369,26 @@ class VariableDeclaration(Statement):
 
 
 class NumericFor(Statement):
-    def __init__(
-        self, name: str, start: Expression, end: Expression, statements: list[Statement]
-    ):
+    def __init__(self, name: str, start: Expression, end: Expression, block: Block):
         self.name = name
         self.start = start
         self.end = end
-        self.statements = statements
+        self.block = block
 
     def __str__(self) -> str:
-        output_string = f"for ({BasicTypes.INT.value} {self.name} = {self.start} to {self.end}) {{\n"
-        for statement in self.statements:
-            output_string += f"      {statement}\n"
-        output_string += "    }"
-        return output_string
+        return f"for ({BasicTypes.INT.value} {self.name} = {self.start} to {self.end}) {{\n {self.block} \n }}"
 
 
 class GenericFor(Statement):
-    def __init__(
-        self,
-        var_type: Type,
-        var_name: str,
-        over: Expression,
-        statements: list[Statement],
-    ):
+    def __init__(self, var_type: Type, var_name: str, over: Expression, block: Block):
         self.var_type = var_type
         self.var_name = var_name
         self.over = over
-        self.statements = statements
+        self.block = block
 
     def __str__(self) -> str:
         output_string = f"for ({self.var_type} {self.var_name} in {self.over}) {{\n"
-        for statement in self.statements:
-            output_string += f"      {statement}\n"
+        output_string += str(self.block)
         output_string += "    }"
         return output_string
 
@@ -488,17 +445,15 @@ class BinaryNum(Expression):
         return bin(self.num)
 
 
-class Method(Expression):
-    def __init__(self, signature: MethodSignature, statements: list[Statement]) -> None:
+class Method(ASTNode):
+    def __init__(self, signature: MethodSignature, block: Block) -> None:
         self.signature = signature
-        self.statements = statements
+        self.block = block
 
     def __str__(self) -> str:
         output_string = f"{self.signature} {{\n"
-        for statement in self.statements:
-            output_string += f"    {statement}\n"
         output_string += "  }\n"
-        return output_string
+        return f"{self.signature} {{ \n {self.block} \n }}"
 
 
 class Import(ASTNode):
@@ -768,17 +723,3 @@ class ProofFile(Root):
 
 def _parameter_list_string(parameters: list[Parameter]) -> str:
     return ", ".join(str(param) for param in parameters) if parameters else ""
-
-
-class Visitor:
-    pass
-
-
-class VariableSubstitution(Visitor):
-    def __init__(self, find_name: str, replace_name: str) -> None:
-        self.find_name = find_name
-        self.replace_name = replace_name
-
-    def visit_variable(self, v: Variable) -> None:
-        if v.name == self.find_name:
-            v.name = self.replace_name

@@ -334,11 +334,6 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by GameParser#methodBody.
-    def visitMethodBody(self, ctx:GameParser.MethodBodyContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by GameParser#id.
     def visitId(self, ctx:GameParser.IdContext):
         return self.visitChildren(ctx)

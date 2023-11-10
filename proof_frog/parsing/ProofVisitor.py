@@ -399,11 +399,6 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#methodBody.
-    def visitMethodBody(self, ctx:ProofParser.MethodBodyContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by ProofParser#id.
     def visitId(self, ctx:ProofParser.IdContext):
         return self.visitChildren(ctx)

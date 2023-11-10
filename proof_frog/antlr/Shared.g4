@@ -11,9 +11,9 @@ field: variable (EQUALS expression)?;
 
 initializedField: variable EQUALS expression;
 
-method: methodSignature methodBody;
+method: methodSignature block;
 
-block: statement*;
+block: L_CURLY statement* R_CURLY;
 
 statement: type id SEMI #varDeclStatement
 	| type lvalue EQUALS expression SEMI #varDeclWithValueStatement
@@ -22,9 +22,9 @@ statement: type id SEMI #varDeclStatement
 	| lvalue SAMPLES expression SEMI #sampleStatement
 	| expression L_PAREN argList? R_PAREN SEMI #functionCallStatement
 	| RETURN expression SEMI #returnStatement
-	| IF L_PAREN expression R_PAREN L_CURLY block R_CURLY (ELSE IF L_PAREN expression R_PAREN L_CURLY block R_CURLY)* (ELSE L_CURLY block R_CURLY)? #ifStatement
-	| FOR L_PAREN INTTYPE id EQUALS expression TO expression R_PAREN L_CURLY block R_CURLY #numericForStatement
-	| FOR L_PAREN type id IN expression R_PAREN L_CURLY block R_CURLY #genericForStatement
+	| IF L_PAREN expression R_PAREN block (ELSE IF L_PAREN expression R_PAREN block )* (ELSE block )? #ifStatement
+	| FOR L_PAREN INTTYPE id EQUALS expression TO expression R_PAREN block #numericForStatement
+	| FOR L_PAREN type id IN expression R_PAREN block #genericForStatement
 	;
 
 lvalue:
@@ -93,8 +93,6 @@ bitstring: BITSTRING | BITSTRING L_ANGLE integerExpression R_ANGLE;
 set: SET L_ANGLE type R_ANGLE | SET;
 
 moduleImport: IMPORT FILESTRING (AS ID)? SEMI;
-
-methodBody: L_CURLY (statement)+ R_CURLY;
 
 id: ID | IN;
 

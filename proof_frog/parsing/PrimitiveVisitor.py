@@ -334,11 +334,6 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by PrimitiveParser#methodBody.
-    def visitMethodBody(self, ctx:PrimitiveParser.MethodBodyContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by PrimitiveParser#id.
     def visitId(self, ctx:PrimitiveParser.IdContext):
         return self.visitChildren(ctx)

@@ -12,6 +12,8 @@ from . import visitors
 Namespace: TypeAlias = dict[str, frog_ast.ASTNode]
 MethodLookup: TypeAlias = Dict[Tuple[str, str], frog_ast.Method]
 
+inline_counter: int = 0
+
 
 def prove(proof_file_name: str) -> None:
     proof_file = frog_parser.parse_proof_file(proof_file_name)
@@ -37,21 +39,22 @@ def prove(proof_file_name: str) -> None:
     for game in proof_file.helpers:
         definition_namespace[game.name] = game
 
-    # Hack for lets right now. Should substitute parameters, but I'm not. Do that later
-
+    # Here, we are substituting the lets with the parameters they are given
     for let in proof_file.lets:
         if isinstance(let.value, frog_ast.FuncCallExpression) and isinstance(
             let.value.func, frog_ast.Variable
         ):
-            field_definition = copy.deepcopy(definition_namespace[let.value.func.name])
-            assert isinstance(field_definition, (frog_ast.Scheme, frog_ast.Primitive))
-            replace_map: dict[str, frog_ast.ASTNode] = {}
-            for index, parameter in enumerate(field_definition.parameters):
-                replace_map[parameter.name] = let.value.args[index]
-            field_definition = visitors.SubstitutionTransformer(replace_map).transform(
-                field_definition
-            )
-            proof_namespace[let.name] = field_definition
+            definition = copy.deepcopy(definition_namespace[let.value.func.name])
+            if isinstance(definition, frog_ast.Scheme):
+                proof_namespace[let.name] = instantiate_scheme(
+                    proof_namespace, definition, let.value.args
+                )
+            elif isinstance(definition, frog_ast.Primitive):
+                proof_namespace[let.name] = instantiate_primitive(
+                    proof_namespace, definition, let.value.args
+                )
+            else:
+                raise TypeError("Must instantiate either a Primitive or Scheme ")
 
     method_lookup: MethodLookup = get_method_lookup(proof_namespace)
 
@@ -145,8 +148,6 @@ def get_method_lookup(definition_namespace: Namespace) -> MethodLookup:
 
 
 # pylint: disable-next=unused-argument
-
-
 def apply_reduction(
     challenger: frog_ast.Game, reduction: frog_ast.Reduction, _namespace: Namespace
 ) -> frog_ast.Game:
@@ -214,9 +215,9 @@ def instantiate_game(
     game: frog_ast.Game, parameters: Sequence[frog_ast.ASTNode]
 ) -> frog_ast.Game:
     game_copy = copy.deepcopy(game)
-    replace_map: dict[str, frog_ast.ASTNode] = {}
+    replace_map: list[(frog_ast.ASTNode, frog_ast.ASTNode)] = []
     for index, parameter in enumerate(game.parameters):
-        replace_map[parameter.name] = parameters[index]
+        replace_map.append((frog_ast.Variable(parameter.name), parameters[index]))
 
     game_copy.parameters = []
 
@@ -254,6 +255,8 @@ def inline_call(
     method_lookup: MethodLookup,
     block: frog_ast.Block,
 ) -> frog_ast.Block:
+    global inline_counter
+    inline_counter += 1
     new_statements: list[frog_ast.Statement] = []
     for index, statement in enumerate(block.statements):
 
@@ -275,14 +278,37 @@ def inline_call(
 
         assert isinstance(func_call_exp.func, frog_ast.FieldAccess)
         assert isinstance(func_call_exp.func.the_object, frog_ast.Variable)
-        called_method = method_lookup[
-            (func_call_exp.func.the_object.name, func_call_exp.func.name)
-        ]
+        called_method = copy.deepcopy(
+            method_lookup[(func_call_exp.func.the_object.name, func_call_exp.func.name)]
+        )
+
+        for var_statement in called_method.block.statements:
+            if (
+                (
+                    isinstance(var_statement, frog_ast.Assignment)
+                    or isinstance(var_statement, frog_ast.Sample)
+                )
+                and var_statement.the_type is not None
+                and isinstance(var_statement.var, frog_ast.Variable)
+            ):
+                called_method = visitors.SubstitutionTransformer(
+                    [
+                        (
+                            var_statement.var,
+                            frog_ast.Variable(
+                                str(inline_counter) + var_statement.var.name
+                            ),
+                        )
+                    ]
+                ).transform(called_method)
 
         transformed_method = visitors.SubstitutionTransformer(
-            dict(
+            list(
                 zip(
-                    (param.name for param in called_method.signature.parameters),
+                    (
+                        frog_ast.Variable(param.name)
+                        for param in called_method.signature.parameters
+                    ),
                     (arg for arg in func_call_exp.args),
                 )
             )
@@ -298,7 +324,6 @@ def inline_call(
         new_statements.append(changed_statement)
         new_statements += block.statements[index + 1 :]
         break
-
     return frog_ast.Block(new_statements)
 
 
@@ -488,8 +513,75 @@ def replace_user_types(
         if to_replace_with is None:
             ignore.append(found_node)
             continue
+
+        if isinstance(found_node, frog_ast.UserType) and isinstance(
+            to_replace_with, frog_ast.Variable
+        ):
+            to_replace_with = frog_ast.UserType(
+                [frog_ast.Variable(to_replace_with.name)]
+            )
+        if isinstance(found_node, frog_ast.UserType) and isinstance(
+            to_replace_with, frog_ast.FieldAccess
+        ):
+            variables = []
+            while isinstance(to_replace_with, frog_ast.FieldAccess):
+                variables.append(frog_ast.Variable(to_replace_with.name))
+                to_replace_with = to_replace_with.the_object
+            assert isinstance(to_replace_with, frog_ast.Variable)
+            variables.append(copy.deepcopy(to_replace_with))
+            variables.reverse()
+            to_replace_with = frog_ast.UserType(variables)
+
         new_game = visitors.ReplaceTransformer(
             found_node, copy.deepcopy(to_replace_with)
         ).transform(new_game)
 
     return new_game
+
+
+# I want to be able to instantiate primitives and schemes
+# What does this entail? For primitives, all I have are fields and
+# method signatures. So I'd like to:
+# 1 - Set fields to values gotten from the proof namespace
+# 2 - Change method signatures: either those that rely on external values,
+#     or those that refer to the fields
+# 3 - For schemes, might need to change things in the method bodies.
+
+
+def instantiate_primitive(
+    let_namespace: Namespace,
+    primitive: frog_ast.Primitive,
+    args: list[frog_ast.Expression],
+) -> frog_ast.Primitive:
+    replace_map: list[(frog_ast.ASTNode, frog_ast.ASTNode)] = []
+    for index, parameter in enumerate(primitive.parameters):
+        replace_map.append(
+            (frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
+        )
+    new_primitive = visitors.SubstitutionTransformer(replace_map).transform(primitive)
+    return new_primitive
+
+
+def instantiate_scheme(
+    let_namespace: Namespace,
+    scheme: frog_ast.Scheme,
+    args: list[frog_ast.Expression],
+) -> frog_ast.Scheme:
+    replace_map: list[(frog_ast.ASTNode, frog_ast.ASTNode)] = []
+    for index, parameter in enumerate(scheme.parameters):
+        replace_map.append(
+            (frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
+        )
+    new_scheme = visitors.SubstitutionTransformer(replace_map).transform(scheme)
+    new_scheme.parameters.clear()
+    replace_map.clear()
+    for field in new_scheme.fields:
+        if isinstance(field.type, frog_ast.SetType):
+            replace_map.append(
+                (
+                    frog_ast.UserType([frog_ast.Variable(field.name)]),
+                    frog_ast.UserType([field.value]),
+                )
+            )
+    new_scheme = visitors.SubstitutionTransformer(replace_map).transform(new_scheme)
+    return new_scheme

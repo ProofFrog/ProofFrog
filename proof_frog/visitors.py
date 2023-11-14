@@ -116,9 +116,13 @@ class VariableCollectionVisitor(Visitor[list[frog_ast.Variable]]):
     def result(self) -> list[frog_ast.Variable]:
         return self.variables
 
+    def visit_field_access(self, _) -> None:
+        self.enabled = False
+
+    def leave_field_access(self, _) -> None:
+        self.enabled = True
+
     def visit_user_type(self, user_type: frog_ast.UserType) -> None:
-        if user_type.names[0] not in self.variables:
-            self.variables.append(user_type.names[0])
         self.enabled = False
 
     def leave_user_type(self, _: frog_ast.UserType) -> None:
@@ -271,7 +275,9 @@ class VariableStandardizingTransformer(BlockTransformer):
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         new_block = copy.deepcopy(block)
         for statement in new_block.statements:
-            if not isinstance(statement, frog_ast.Assignment):
+            if not isinstance(statement, frog_ast.Assignment) and not isinstance(
+                statement, frog_ast.Sample
+            ):
                 continue
             if not isinstance(statement.var, frog_ast.Variable):
                 continue
@@ -303,18 +309,40 @@ class VariableStandardizingTransformer(BlockTransformer):
 
 
 class SubstitutionTransformer(Transformer):
-    def __init__(self, replace_map: dict[str, frog_ast.ASTNode]):
+    def __init__(self, replace_map: list[(frog_ast.ASTNode, frog_ast.ASTNode)]) -> None:
         self.replace_map = replace_map
 
+    def _find(self, v: frog_ast.ASTNode) -> Optional[frog_ast.ASTNode]:
+        the_list = [item for item in self.replace_map if item[0] == v]
+        if the_list:
+            return the_list[0][1]
+        return None
+
     def transform_variable(self, v: frog_ast.Variable) -> frog_ast.ASTNode:
-        if v.name in self.replace_map:
-            return self.replace_map[v.name]
+        found = self._find(v)
+        if found:
+            return found
         return v
 
+    def transform_field_access(
+        self, field_access: frog_ast.FieldAccess
+    ) -> frog_ast.FieldAccess:
+        found = self._find(field_access)
+        if found:
+            return found
+        return frog_ast.FieldAccess(
+            self.transform(field_access.the_object), field_access.name
+        )
+
     def transform_user_type(self, user_type: frog_ast.UserType) -> frog_ast.ASTNode:
+        if len(user_type.names) == 1:
+            found = self._find(user_type)
+            if found:
+                return found
+            return user_type
         # For user types, only want to change the first name. Others are considered fields.
-        if user_type.names[0].name in self.replace_map:
-            replaced_var = self.replace_map[user_type.names[0].name]
-            assert isinstance(replaced_var, frog_ast.Variable)
-            return frog_ast.UserType([replaced_var] + user_type.names[1:])
+        found = self._find(user_type.names[0])
+        if found:
+            assert isinstance(found, frog_ast.Variable)
+            return frog_ast.UserType([found] + user_type.names[1:])
         return user_type

@@ -27,7 +27,7 @@ from proof_frog import visitors, frog_parser, frog_ast
             return 100;
         }
         """,
-            {"a": frog_ast.Integer(100)},
+            [(frog_ast.Variable("a"), frog_ast.Integer(100))],
         ),
         # Substitution shouldn't change field names
         (
@@ -41,7 +41,7 @@ from proof_frog import visitors, frog_parser, frog_ast
             A.a x = bla;
         }
         """,
-            {"a": frog_ast.Integer(100)},
+            [(frog_ast.Variable("a"), frog_ast.Integer(100))],
         ),
         (
             """
@@ -54,12 +54,14 @@ from proof_frog import visitors, frog_parser, frog_ast
             Sigma.Ciphertext x = a;
         }
         """,
-            {"E": frog_ast.Variable("Sigma")},
+            [(frog_ast.Variable("E"), frog_ast.Variable("Sigma"))],
         ),
     ],
 )
 def test_substitution(
-    method: str, expected: str, substitution_map: dict[str, frog_ast.ASTNode]
+    method: str,
+    expected: str,
+    substitution_map: list[(frog_ast.ASTNode, frog_ast.ASTNode)],
 ) -> None:
     game_ast = frog_parser.parse_method(method)
     expected_ast = frog_parser.parse_method(expected)

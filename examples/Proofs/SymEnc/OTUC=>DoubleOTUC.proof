@@ -4,8 +4,8 @@ import 'examples/Games/SymEnc/OneTimeUniformCiphertexts.game';
 
 Reduction R1(DoubleSymEnc D, SymEnc E) compose OneTimeUniformCiphertexts(E) against OneTimeUniformCiphertexts(D).Adversary {
 	D.Ciphertext CTXT(D.Message m) {
-		D.key k = D.KeyGen();
-		D.Ciphertext c = D.Enc(k[0], m);
+		E.Key k = E.KeyGen();
+		E.Ciphertext c = E.Enc(k, m);
 		return challenger.CTXT(c);
 	}
 }

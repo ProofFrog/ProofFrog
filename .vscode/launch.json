@@ -9,7 +9,7 @@
             "type": "python",
             "request": "launch",
             "module": "proof_frog",
-            "args": ["prove", "examples/Proofs/SymEnc/GeneralDoubleOTUC.proof"],
+            "args": ["prove", "examples/Proofs/SymEnc/OTUC=>DoubleOTUC.proof"],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "justMyCode": true

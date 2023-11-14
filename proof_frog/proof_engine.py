@@ -215,7 +215,7 @@ def instantiate_game(
     game: frog_ast.Game, parameters: Sequence[frog_ast.ASTNode]
 ) -> frog_ast.Game:
     game_copy = copy.deepcopy(game)
-    replace_map: list[(frog_ast.ASTNode, frog_ast.ASTNode)] = []
+    replace_map: list[Tuple[frog_ast.ASTNode, frog_ast.ASTNode]] = []
     for index, parameter in enumerate(game.parameters):
         replace_map.append((frog_ast.Variable(parameter.name), parameters[index]))
 
@@ -255,6 +255,7 @@ def inline_call(
     method_lookup: MethodLookup,
     block: frog_ast.Block,
 ) -> frog_ast.Block:
+    # pylint: disable-next=global-statement
     global inline_counter
     inline_counter += 1
     new_statements: list[frog_ast.Statement] = []
@@ -284,10 +285,7 @@ def inline_call(
 
         for var_statement in called_method.block.statements:
             if (
-                (
-                    isinstance(var_statement, frog_ast.Assignment)
-                    or isinstance(var_statement, frog_ast.Sample)
-                )
+                isinstance(var_statement, (frog_ast.Assignment, frog_ast.Sample))
                 and var_statement.the_type is not None
                 and isinstance(var_statement.var, frog_ast.Variable)
             ):
@@ -505,7 +503,7 @@ def replace_user_types(
             primitive = node
             searched_name = found_node.name
 
-        to_replace_with: frog_ast.Expression | None = None
+        to_replace_with: frog_ast.Expression | frog_ast.UserType | None = None
         for field in primitive.fields:
             if field.name == searched_name:
                 to_replace_with = field.value
@@ -549,11 +547,11 @@ def replace_user_types(
 
 
 def instantiate_primitive(
-    let_namespace: Namespace,
+    _: Namespace,
     primitive: frog_ast.Primitive,
     args: list[frog_ast.Expression],
 ) -> frog_ast.Primitive:
-    replace_map: list[(frog_ast.ASTNode, frog_ast.ASTNode)] = []
+    replace_map: list[Tuple[frog_ast.ASTNode, frog_ast.ASTNode]] = []
     for index, parameter in enumerate(primitive.parameters):
         replace_map.append(
             (frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
@@ -563,11 +561,11 @@ def instantiate_primitive(
 
 
 def instantiate_scheme(
-    let_namespace: Namespace,
+    _: Namespace,
     scheme: frog_ast.Scheme,
     args: list[frog_ast.Expression],
 ) -> frog_ast.Scheme:
-    replace_map: list[(frog_ast.ASTNode, frog_ast.ASTNode)] = []
+    replace_map: list[Tuple[frog_ast.ASTNode, frog_ast.ASTNode]] = []
     for index, parameter in enumerate(scheme.parameters):
         replace_map.append(
             (frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
@@ -580,7 +578,7 @@ def instantiate_scheme(
             replace_map.append(
                 (
                     frog_ast.UserType([frog_ast.Variable(field.name)]),
-                    frog_ast.UserType([field.value]),
+                    frog_ast.UserType([field.value]),  # type: ignore[list-item]
                 )
             )
     new_scheme = visitors.SubstitutionTransformer(replace_map).transform(new_scheme)

@@ -1,7 +1,7 @@
 import copy
 import functools
 from abc import ABC, abstractmethod
-from typing import Any, Optional, TypeVar, Generic, Callable, cast, final
+from typing import Any, Optional, TypeVar, Generic, Callable, cast, final, Tuple
 
 from proof_frog import frog_ast
 from . import frog_ast
@@ -116,13 +116,13 @@ class VariableCollectionVisitor(Visitor[list[frog_ast.Variable]]):
     def result(self) -> list[frog_ast.Variable]:
         return self.variables
 
-    def visit_field_access(self, _) -> None:
+    def visit_field_access(self, _: frog_ast.FieldAccess) -> None:
         self.enabled = False
 
-    def leave_field_access(self, _) -> None:
+    def leave_field_access(self, _: frog_ast.FieldAccess) -> None:
         self.enabled = True
 
-    def visit_user_type(self, user_type: frog_ast.UserType) -> None:
+    def visit_user_type(self, _: frog_ast.UserType) -> None:
         self.enabled = False
 
     def leave_user_type(self, _: frog_ast.UserType) -> None:
@@ -309,7 +309,9 @@ class VariableStandardizingTransformer(BlockTransformer):
 
 
 class SubstitutionTransformer(Transformer):
-    def __init__(self, replace_map: list[(frog_ast.ASTNode, frog_ast.ASTNode)]) -> None:
+    def __init__(
+        self, replace_map: list[Tuple[frog_ast.ASTNode, frog_ast.ASTNode]]
+    ) -> None:
         self.replace_map = replace_map
 
     def _find(self, v: frog_ast.ASTNode) -> Optional[frog_ast.ASTNode]:
@@ -326,7 +328,7 @@ class SubstitutionTransformer(Transformer):
 
     def transform_field_access(
         self, field_access: frog_ast.FieldAccess
-    ) -> frog_ast.FieldAccess:
+    ) -> frog_ast.ASTNode:
         found = self._find(field_access)
         if found:
             return found

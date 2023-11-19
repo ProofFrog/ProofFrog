@@ -25,6 +25,9 @@ class ASTNode(ABC):
         )
 
 
+Namespace: TypeAlias = dict[str, Optional[ASTNode]]
+
+
 class Root(ASTNode):
     @abstractmethod
     def get_export_name(self) -> str:

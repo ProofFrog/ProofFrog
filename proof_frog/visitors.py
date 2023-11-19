@@ -55,8 +55,6 @@ T = TypeVar("T", bound=frog_ast.ASTNode)
 
 class Transformer(ABC):
     def transform(self, node: T) -> T:
-        if node is None:
-            return None
         method_name = "transform_" + _to_snake_case(type(node).__name__)
         if hasattr(self, method_name):
             returned: T = getattr(self, method_name)(node)
@@ -334,28 +332,31 @@ class SubstitutionTransformer(Transformer):
 
 
 class InstantiationTransformer(Transformer):
-    def __init__(self, namespace: dict[str, frog_ast.ASTNode]) -> None:
+    def __init__(self, namespace: frog_ast.Namespace) -> None:
         self.namespace = copy.deepcopy(namespace)
 
-    def transform_field(self, field: frog_ast.Field):
+    def transform_field(self, field: frog_ast.Field) -> frog_ast.ASTNode:
         new_field = frog_ast.Field(
-            self.transform(field.type), field.name, self.transform(field.value)
+            self.transform(field.type),
+            field.name,
+            self.transform(field.value) if field.value else None,
         )
         self.namespace[field.name] = new_field.value
         return new_field
 
-    def transform_variable(self, variable: frog_ast.Variable):
-        if (
-            variable.name in self.namespace
-            and not isinstance(
-                self.namespace[variable.name], (frog_ast.Scheme, frog_ast.Primitive)
-            )
-            and self.namespace[variable.name] is not None
-        ):
-            return copy.deepcopy(self.namespace[variable.name])
+    def transform_variable(self, variable: frog_ast.Variable) -> frog_ast.ASTNode:
+        if variable.name in self.namespace:
+            value = self.namespace[variable.name]
+            if (
+                not isinstance(value, (frog_ast.Scheme, frog_ast.Primitive))
+                and value is not None
+            ):
+                return copy.deepcopy(value)
         return variable
 
-    def transform_field_access(self, field_access: frog_ast.FieldAccess):
+    def transform_field_access(
+        self, field_access: frog_ast.FieldAccess
+    ) -> frog_ast.ASTNode:
         if (
             isinstance(field_access.the_object, frog_ast.Variable)
             and field_access.the_object.name in self.namespace

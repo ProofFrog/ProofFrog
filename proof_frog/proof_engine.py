@@ -9,7 +9,6 @@ from . import frog_parser
 from . import frog_ast
 from . import visitors
 
-Namespace: TypeAlias = dict[str, frog_ast.ASTNode]
 MethodLookup: TypeAlias = Dict[Tuple[str, str], frog_ast.Method]
 
 inline_counter: int = 0
@@ -17,8 +16,8 @@ inline_counter: int = 0
 
 def prove(proof_file_name: str) -> None:
     proof_file = frog_parser.parse_proof_file(proof_file_name)
-    definition_namespace: Namespace = {}
-    proof_namespace: Namespace = {}
+    definition_namespace: frog_ast.Namespace = {}
+    proof_namespace: frog_ast.Namespace = {}
 
     for imp in proof_file.imports:
         file_type = _get_file_type(imp.filename)
@@ -117,7 +116,6 @@ def prove(proof_file_name: str) -> None:
         current_game_ast = visitors.RemoveTupleTransformer().transform(current_game_ast)
         next_game_ast = visitors.RemoveTupleTransformer().transform(next_game_ast)
 
-
         current_game_ast = sort_game(current_game_ast, proof_namespace)
         next_game_ast = sort_game(next_game_ast, proof_namespace)
 
@@ -144,7 +142,7 @@ def prove(proof_file_name: str) -> None:
     print(Fore.GREEN + "Proof Suceeded!")
 
 
-def get_method_lookup(definition_namespace: Namespace) -> MethodLookup:
+def get_method_lookup(definition_namespace: frog_ast.Namespace) -> MethodLookup:
     method_lookup: MethodLookup = {}
 
     for name, node in definition_namespace.items():
@@ -157,7 +155,9 @@ def get_method_lookup(definition_namespace: Namespace) -> MethodLookup:
 
 # pylint: disable-next=unused-argument
 def apply_reduction(
-    challenger: frog_ast.Game, reduction: frog_ast.Reduction, _namespace: Namespace
+    challenger: frog_ast.Game,
+    reduction: frog_ast.Reduction,
+    _namespace: frog_ast.Namespace,
 ) -> frog_ast.Game:
     print("Reduction to apply:")
     print(reduction)
@@ -180,8 +180,8 @@ def apply_reduction(
 
 def _get_game_ast(
     # Takes in a game from a proof step, and returns the AST associated with that game
-    definition_namespace: Namespace,
-    proof_namespace: Namespace,
+    definition_namespace: frog_ast.Namespace,
+    proof_namespace: frog_ast.Namespace,
     challenger: frog_ast.ParameterizedGame | frog_ast.ConcreteGame,
 ) -> frog_ast.Game:
     if isinstance(challenger, frog_ast.ConcreteGame):
@@ -223,7 +223,7 @@ def _is_by_assumption(
 def instantiate_game(
     game: frog_ast.Game,
     parameters: Sequence[frog_ast.ASTNode],
-    proof_namespace: Namespace,
+    proof_namespace: frog_ast.Namespace,
 ) -> frog_ast.Game:
     game_copy = copy.deepcopy(game)
     replace_map: list[Tuple[frog_ast.ASTNode, frog_ast.ASTNode]] = []
@@ -394,7 +394,7 @@ class DependencyGraph:
 
 
 def generate_dependency_graph(
-    block: frog_ast.Block, proof_namespace: Namespace
+    block: frog_ast.Block, proof_namespace: frog_ast.Namespace
 ) -> DependencyGraph:
     dependency_graph = DependencyGraph()
     for statement in block.statements:
@@ -446,14 +446,18 @@ def generate_dependency_graph(
     return dependency_graph
 
 
-def sort_game(game: frog_ast.Game, proof_namespace: Namespace) -> frog_ast.Game:
+def sort_game(
+    game: frog_ast.Game, proof_namespace: frog_ast.Namespace
+) -> frog_ast.Game:
     new_game = copy.deepcopy(game)
     for method in new_game.methods:
         method.block = sort_block(method.block, proof_namespace)
     return new_game
 
 
-def sort_block(block: frog_ast.Block, proof_namespace: Namespace) -> frog_ast.Block:
+def sort_block(
+    block: frog_ast.Block, proof_namespace: frog_ast.Namespace
+) -> frog_ast.Block:
     new_statement_list: list[frog_ast.Statement] = []
     graph = generate_dependency_graph(block, proof_namespace)
     final_statement = block.statements[-1]
@@ -483,7 +487,7 @@ def sort_block(block: frog_ast.Block, proof_namespace: Namespace) -> frog_ast.Bl
 
 
 def instantiate_primitive(
-    proof_namespace: Namespace,
+    proof_namespace: frog_ast.Namespace,
     primitive: frog_ast.Primitive,
     args: list[frog_ast.Expression],
 ) -> frog_ast.Primitive:
@@ -498,7 +502,7 @@ def instantiate_primitive(
 
 
 def instantiate_scheme(
-    proof_namespace: Namespace,
+    proof_namespace: frog_ast.Namespace,
     scheme: frog_ast.Scheme,
     args: list[frog_ast.Expression],
 ) -> frog_ast.Scheme:

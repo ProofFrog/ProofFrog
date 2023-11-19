@@ -279,6 +279,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#lvalueType.
+    def visitLvalueType(self, ctx:GameParser.LvalueTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#optionalType.
     def visitOptionalType(self, ctx:GameParser.OptionalTypeContext):
         return self.visitChildren(ctx)
@@ -286,11 +291,6 @@ class GameVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by GameParser#mapType.
     def visitMapType(self, ctx:GameParser.MapTypeContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#userType.
-    def visitUserType(self, ctx:GameParser.UserTypeContext):
         return self.visitChildren(ctx)
 
 

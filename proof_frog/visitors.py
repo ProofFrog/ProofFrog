@@ -122,12 +122,6 @@ class VariableCollectionVisitor(Visitor[list[frog_ast.Variable]]):
     def leave_field_access(self, _: frog_ast.FieldAccess) -> None:
         self.enabled = True
 
-    def visit_user_type(self, _: frog_ast.UserType) -> None:
-        self.enabled = False
-
-    def leave_user_type(self, _: frog_ast.UserType) -> None:
-        self.enabled = True
-
     def visit_variable(self, node: frog_ast.Variable) -> None:
         if node not in self.variables and self.enabled:
             self.variables.append(node)
@@ -336,15 +330,47 @@ class SubstitutionTransformer(Transformer):
             self.transform(field_access.the_object), field_access.name
         )
 
-    def transform_user_type(self, user_type: frog_ast.UserType) -> frog_ast.ASTNode:
-        if len(user_type.names) == 1:
-            found = self._find(user_type)
-            if found:
-                return found
-            return user_type
-        # For user types, only want to change the first name. Others are considered fields.
-        found = self._find(user_type.names[0])
-        if found:
-            assert isinstance(found, frog_ast.Variable)
-            return frog_ast.UserType([found] + user_type.names[1:])
-        return user_type
+
+class InstantiationTransformer(Transformer):
+    def __init__(self, namespace: frog_ast.Namespace) -> None:
+        self.namespace = copy.deepcopy(namespace)
+
+    def transform_field(self, field: frog_ast.Field) -> frog_ast.ASTNode:
+        new_field = frog_ast.Field(
+            self.transform(field.type),
+            field.name,
+            self.transform(field.value) if field.value else None,
+        )
+        self.namespace[field.name] = new_field.value
+        return new_field
+
+    def transform_variable(self, variable: frog_ast.Variable) -> frog_ast.ASTNode:
+        if variable.name in self.namespace:
+            value = self.namespace[variable.name]
+            if (
+                not isinstance(value, (frog_ast.Scheme, frog_ast.Primitive))
+                and value is not None
+            ):
+                return copy.deepcopy(value)
+        return variable
+
+    def transform_field_access(
+        self, field_access: frog_ast.FieldAccess
+    ) -> frog_ast.ASTNode:
+        if (
+            isinstance(field_access.the_object, frog_ast.Variable)
+            and field_access.the_object.name in self.namespace
+        ):
+            value = self.namespace[field_access.the_object.name]
+            assert isinstance(value, (frog_ast.Scheme, frog_ast.Primitive))
+            the_field = next(
+                (
+                    field.value
+                    for field in value.fields
+                    if field.name == field_access.name
+                ),
+                None,
+            )
+            if the_field is not None:
+                return copy.deepcopy(the_field)
+        return field_access

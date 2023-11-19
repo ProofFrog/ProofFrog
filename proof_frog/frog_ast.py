@@ -25,6 +25,9 @@ class ASTNode(ABC):
         )
 
 
+Namespace: TypeAlias = dict[str, Optional[ASTNode]]
+
+
 class Root(ASTNode):
     @abstractmethod
     def get_export_name(self) -> str:
@@ -39,45 +42,74 @@ class Statement(ASTNode):
     pass
 
 
-class BasicTypes(Enum):
-    BOOL = "Bool"
-    INT = "Int"
-    OTHER = "Other"
+class Type(ASTNode, ABC):
+    pass
 
 
-class Type(ASTNode):
-    def __init__(self, basic_type: BasicTypes) -> None:
-        self.optional = False  # May be modified when AST is being generated
-        self.basic_type = basic_type
+class IntType(Type):
+    def __init__(self) -> None:
+        pass
 
     def __str__(self) -> str:
-        type_name = self._get_string_description()
-        if self.optional:
-            type_name += "?"
-        return type_name
+        return "Int"
 
-    def _get_string_description(self) -> str:
-        return str(self.basic_type.value)
+
+class Bool(Type):
+    def __init__(self) -> None:
+        pass
+
+    def __str__(self) -> str:
+        return "Bool"
+
+
+class Void(Type):
+    def __init__(self) -> None:
+        pass
+
+    def __str__(self) -> str:
+        return "Void"
 
 
 class ArrayType(Type):
-    def __init__(self, element_type: BasicTypes, count: int) -> None:
-        super().__init__(BasicTypes.OTHER)
+    def __init__(self, element_type: Type, count: Expression) -> None:
         self.element_type = element_type
         self.count = count
 
-    def _get_string_description(self) -> str:
+    def __str__(self) -> str:
         return f"Array<{self.element_type}, {self.count}>"
 
 
 class MapType(Type):
     def __init__(self, key_type: Type, value_type: Type) -> None:
-        super().__init__(BasicTypes.OTHER)
         self.key_type = key_type
         self.value_type = value_type
 
-    def _get_string_description(self) -> str:
+    def __str__(self) -> str:
         return f"Map<{self.key_type}, {self.value_type}>"
+
+
+class SetType(Type):
+    def __init__(self, parameterization: Optional[Expression] = None) -> None:
+        self.parameterization = parameterization
+
+    def __str__(self) -> str:
+        return f'Set{"" if not self.parameterization else f"<{self.parameterization}>"}'
+
+
+class BitStringType(Type):
+    def __init__(self, parameterization: Optional[Expression] = None) -> None:
+        self.parameterization = parameterization
+
+    def __str__(self) -> str:
+        return f'BitString{"" if not self.parameterization else f"<{self.parameterization}>"}'
+
+
+class OptionalType(Type):
+    def __init__(self, the_type: Type) -> None:
+        self.the_type = the_type
+
+    def __str__(self) -> str:
+        return f"{self.the_type}?"
 
 
 class BinaryOperators(Enum):
@@ -134,15 +166,6 @@ class UnaryOperation(Expression):
         return "UNDEFINED UNARY OPERATOR"
 
 
-class SetType(Type):
-    def __init__(self, parameterization: Optional[Expression] = None) -> None:
-        super().__init__(BasicTypes.OTHER)
-        self.parameterization = parameterization
-
-    def _get_string_description(self) -> str:
-        return f'Set{"" if not self.parameterization else f"<{self.parameterization}>"}'
-
-
 class Set(Expression):
     def __init__(self, elements: list[Expression]) -> None:
         self.elements = elements
@@ -154,15 +177,6 @@ class Set(Expression):
             else ""
         )
         return f"{{{elements_string}}}"
-
-
-class BitStringType(Type):
-    def __init__(self, parameterization: Optional[Expression] = None) -> None:
-        super().__init__(BasicTypes.OTHER)
-        self.parameterization = parameterization
-
-    def _get_string_description(self) -> str:
-        return f'BitString{"" if not self.parameterization else f"<{self.parameterization}>"}'
 
 
 class Field(ASTNode):
@@ -231,24 +245,6 @@ class Primitive(Root):
         return self.name
 
 
-class ProductType(Type):
-    def __init__(self, types: list[Type]) -> None:
-        super().__init__(BasicTypes.OTHER)
-        self.types = types
-
-    def _get_string_description(self) -> str:
-        return " * ".join(str(individualType) for individualType in self.types)
-
-
-class UserType(Type):
-    def __init__(self, names: list[Variable]) -> None:
-        super().__init__(BasicTypes.OTHER)
-        self.names = names
-
-    def _get_string_description(self) -> str:
-        return ".".join(str(name) for name in self.names)
-
-
 class FuncCallExpression(Expression):
     def __init__(self, func: Expression, args: list[Expression]) -> None:
         self.func = func
@@ -269,7 +265,7 @@ class FuncCallStatement(Statement):
         return f"{self.func}({arg_str});"
 
 
-class Variable(Expression):
+class Variable(Expression, Type):
     def __init__(self, name: str) -> None:
         self.name = name
 
@@ -329,7 +325,7 @@ class IfStatement(Statement):
         return len(self.blocks) > len(self.conditions)
 
 
-class FieldAccess(Expression):
+class FieldAccess(Expression, Type):
     def __init__(self, the_object: Expression, name: str) -> None:
         self.the_object = the_object
         self.name = name
@@ -376,7 +372,7 @@ class NumericFor(Statement):
         self.block = block
 
     def __str__(self) -> str:
-        return f"for ({BasicTypes.INT.value} {self.name} = {self.start} to {self.end}) {{\n {self.block} \n }}"
+        return f"for (Int {self.name} = {self.start} to {self.end}) {{\n {self.block} \n }}"
 
 
 class GenericFor(Statement):

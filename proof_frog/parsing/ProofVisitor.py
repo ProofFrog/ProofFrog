@@ -344,6 +344,11 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#lvalueType.
+    def visitLvalueType(self, ctx:ProofParser.LvalueTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#optionalType.
     def visitOptionalType(self, ctx:ProofParser.OptionalTypeContext):
         return self.visitChildren(ctx)
@@ -351,11 +356,6 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#mapType.
     def visitMapType(self, ctx:ProofParser.MapTypeContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#userType.
-    def visitUserType(self, ctx:ProofParser.UserTypeContext):
         return self.visitChildren(ctx)
 
 

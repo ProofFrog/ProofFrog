@@ -76,8 +76,8 @@ type: type QUESTION #optionalType
 	| ARRAY L_ANGLE type COMMA integerExpression R_ANGLE #arrayType
 	| INTTYPE #intType
 	| type (TIMES type)+ #productType
-	| id (PERIOD id)* #userType
 	| bitstring #bitStringType
+	| lvalue # lvalueType
 	;
 
 integerExpression: lvalue

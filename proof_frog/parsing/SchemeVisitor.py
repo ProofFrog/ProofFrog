@@ -284,6 +284,11 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SchemeParser#lvalueType.
+    def visitLvalueType(self, ctx:SchemeParser.LvalueTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SchemeParser#optionalType.
     def visitOptionalType(self, ctx:SchemeParser.OptionalTypeContext):
         return self.visitChildren(ctx)
@@ -291,11 +296,6 @@ class SchemeVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SchemeParser#mapType.
     def visitMapType(self, ctx:SchemeParser.MapTypeContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SchemeParser#userType.
-    def visitUserType(self, ctx:SchemeParser.UserTypeContext):
         return self.visitChildren(ctx)
 
 

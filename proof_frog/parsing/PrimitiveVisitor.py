@@ -279,6 +279,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#lvalueType.
+    def visitLvalueType(self, ctx:PrimitiveParser.LvalueTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#optionalType.
     def visitOptionalType(self, ctx:PrimitiveParser.OptionalTypeContext):
         return self.visitChildren(ctx)
@@ -286,11 +291,6 @@ class PrimitiveVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by PrimitiveParser#mapType.
     def visitMapType(self, ctx:PrimitiveParser.MapTypeContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#userType.
-    def visitUserType(self, ctx:PrimitiveParser.UserTypeContext):
         return self.visitChildren(ctx)
 
 

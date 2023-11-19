@@ -40,18 +40,13 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             )
         return result
 
-    def visitUserType(self, ctx: PrimitiveParser.UserTypeContext) -> frog_ast.UserType:
-        return frog_ast.UserType([frog_ast.Variable(id.getText()) for id in ctx.id_()])
-
     def visitOptionalType(
         self, ctx: PrimitiveParser.OptionalTypeContext
     ) -> frog_ast.Type:
-        the_type: frog_ast.Type = self.visit(ctx.type_())
-        the_type.optional = True
-        return the_type
+        return frog_ast.OptionalType(self.visit(ctx.type_()))
 
     def visitBoolType(self, __: PrimitiveParser.BoolTypeContext) -> frog_ast.Type:
-        return frog_ast.Type(frog_ast.BasicTypes.BOOL)
+        return frog_ast.Bool()
 
     def visitBitStringType(
         self, ctx: PrimitiveParser.BitStringTypeContext
@@ -62,10 +57,16 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
 
     def visitProductType(
         self, ctx: PrimitiveParser.ProductTypeContext
-    ) -> frog_ast.ProductType:
-        return frog_ast.ProductType(
-            list(self.visit(individualType) for individualType in ctx.type_())
-        )
+    ) -> frog_ast.BinaryOperation:
+        expression = self.visit(ctx.type_()[-1])
+        reversed_list = ctx.type_().copy()[:-1]
+        reversed_list.reverse()
+        for the_type in reversed_list:
+            expression = frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.MULTIPLY, self.visit(the_type), expression
+            )
+        assert isinstance(expression, frog_ast.BinaryOperation)
+        return expression
 
     def visitSetType(self, ctx: PrimitiveParser.SetTypeContext) -> frog_ast.SetType:
         return frog_ast.SetType(
@@ -290,7 +291,7 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         )
 
     def visitIntType(self, ctx: PrimitiveParser.IntTypeContext) -> frog_ast.Type:
-        return frog_ast.Type(frog_ast.BasicTypes.INT)
+        return frog_ast.IntType()
 
     def visitSizeExp(
         self, ctx: PrimitiveParser.SizeExpContext

@@ -1,6 +1,6 @@
 Primitive PRG(int lambda, int stretch) {
-	int lambda = lambda;
-	int stretch = stretch;
-	
-	BitString<lambda + stretch> evaluate(BitString<lambda> x);
+    int lambda = lambda;
+    int stretch = stretch;
+    
+    BitString<lambda + stretch> evaluate(BitString<lambda> x);
 }

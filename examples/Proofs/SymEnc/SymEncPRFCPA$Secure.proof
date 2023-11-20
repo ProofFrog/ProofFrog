@@ -6,147 +6,147 @@ import 'Games/SymEnc/CPA$.game';
 import 'Games/Misc/OTPUniform.game';
 
 Reduction R1(SymEncPRF E, PRF F) compose Security(F) against CPA$(E).Adversary {
-	E.Ciphertext CTXT(E.Message m) {
-		BitString<lambda> r <- BitString<lambda>;
-		BitString<out> z = g.Lookup(r);
-		BitString<out> x = z + m;
-		return [r, x];
-	}
+    E.Ciphertext CTXT(E.Message m) {
+        BitString<lambda> r <- BitString<lambda>;
+        BitString<out> z = g.Lookup(r);
+        BitString<out> x = z + m;
+        return [r, x];
+    }
 }
 
 Game CPAIntermediate1(SymEncPRF E) {
-	Map<BitString<lambda>, BitString<out>> T;
+    Map<BitString<lambda>, BitString<out>> T;
 
-	E.Ciphertext CTXT(E.Message m) {
-		BitString<lambda> r <- BitString<lambda>;
-		if (! (r in T)) {
-			T[r] <- BitString<out>;
-		}
-		BitString<out> x = T[r] + m;
-		return [r, x];
-	}
+    E.Ciphertext CTXT(E.Message m) {
+        BitString<lambda> r <- BitString<lambda>;
+        if (! (r in T)) {
+            T[r] <- BitString<out>;
+        }
+        BitString<out> x = T[r] + m;
+        return [r, x];
+    }
 }
 
 Reduction R2(SymEncPRF E, PRF F) compose Sample(F.lambda) against CPA$(E).Adversary {
-	Map<BitString<lambda>, BitString<out>> T;
+    Map<BitString<lambda>, BitString<out>> T;
 
-	E.Ciphertext CTXT(E.Message m) {
-		BitString<lambda> r = g.Samp();
-		if (! (r in T)) {
-			T[r] <- BitString<out>;
-		}
-		BitString<out> x = T[r] + m;
-		return [r, x];
-	}
+    E.Ciphertext CTXT(E.Message m) {
+        BitString<lambda> r = g.Samp();
+        if (! (r in T)) {
+            T[r] <- BitString<out>;
+        }
+        BitString<out> x = T[r] + m;
+        return [r, x];
+    }
 }
 
 Game CPAIntermediate2(SymEncPRF E) {
-	Map<BitString<lambda>, BitString<out>> T;
-	Set<BitString<lambda>> R;
+    Map<BitString<lambda>, BitString<out>> T;
+    Set<BitString<lambda>> R;
 
-	E.Ciphertext CTXT(E.Message m) {
-		BitString<lambda> r <- BitString<lambda> \ R;
-		R = R + r;
-		if (!(r in T)) {
-			T[r] <- BitString<out>;
-		}
-		BitString<out> x = T[r] + m;
-		return [r, x];
-	}
+    E.Ciphertext CTXT(E.Message m) {
+        BitString<lambda> r <- BitString<lambda> \ R;
+        R = R + r;
+        if (!(r in T)) {
+            T[r] <- BitString<out>;
+        }
+        BitString<out> x = T[r] + m;
+        return [r, x];
+    }
 }
 
 Game CPAIntermediate3(SymEncPRF E) {
-	Set<BitString<lambda>> R;
+    Set<BitString<lambda>> R;
 
-	E.Ciphertext CTXT(E.Message m) {
-		BitString<lambda> r <- BitString<lambda> \ R;
-		R = R + r;
-		BitString<out> z <- BitString<out>;
-		BitString<out> x = z + m;
-		return [r, x];
-	}
+    E.Ciphertext CTXT(E.Message m) {
+        BitString<lambda> r <- BitString<lambda> \ R;
+        R = R + r;
+        BitString<out> z <- BitString<out>;
+        BitString<out> x = z + m;
+        return [r, x];
+    }
 }
 
 Reduction R3(SymEncPRF E, PRF F) compose Sample(F.lambda) against CPA$(E).Adversary {
-	E.Ciphertext CTXT(E.Message m) {
-		BitString<lambda> r <- Samp();
-		BitString<out> z <- BitString<out>;
-		BitString<out> x = z + m;
-		return [r, x];
-	}
+    E.Ciphertext CTXT(E.Message m) {
+        BitString<lambda> r <- Samp();
+        BitString<out> z <- BitString<out>;
+        BitString<out> x = z + m;
+        return [r, x];
+    }
 }
 
 Game CPAIntermediate4(SymEncPRF E) {
-	E.Ciphertext CTXT(E.Message m) {
-		BitString<lambda> r <- BitString<lambda>;
-		BitString<lambda> z <- BitString<lambda>;
-		BitString<out> x = z + m;
-		return [r, x];
-	}
+    E.Ciphertext CTXT(E.Message m) {
+        BitString<lambda> r <- BitString<lambda>;
+        BitString<lambda> z <- BitString<lambda>;
+        BitString<out> x = z + m;
+        return [r, x];
+    }
 }
 
 Reduction R4(SymEncPRF E, PRF F) compose OTPUniform(F.lambda) against CPA$(E).Adversary {
-	E.Ciphertext CTXT(E.Message m) {
-		BitString<lambda> r <- BitString<lambda>;
-		BitString<out> x = g.Eavesdrop(m);
-		return [r, x];
-	}
+    E.Ciphertext CTXT(E.Message m) {
+        BitString<lambda> r <- BitString<lambda>;
+        BitString<out> x = g.Eavesdrop(m);
+        return [r, x];
+    }
 }
 
 proof:
 
 let:
-	int lambda;
-	int out;
-	PRF F = PRF(lambda, lambda, out);
-	SymEncPRF E = SymEncPRF(F);
+    int lambda;
+    int out;
+    PRF F = PRF(lambda, lambda, out);
+    SymEncPRF E = SymEncPRF(F);
 
 assume:
-	Security(F);
-	Sample(lambda);
-	OTPUniform(out);
+    Security(F);
+    Sample(lambda);
+    OTPUniform(out);
 
 theorem:
-	CPA$(E);
+    CPA$(E);
 
 games:
-	CPA$(E).Real against CPA$(E).Adversary;
+    CPA$(E).Real against CPA$(E).Adversary;
 
-	// By codewise equivalency
-	Security(F).Real compose R1(E, F) against CPA$(E).Adversary;
+    // By codewise equivalency
+    Security(F).Real compose R1(E, F) against CPA$(E).Adversary;
 
-	// By assumption
-	Security(F).Random compose R1(E, F) against CPA$(E).Adversary;
+    // By assumption
+    Security(F).Random compose R1(E, F) against CPA$(E).Adversary;
 
-	// By codewise equivalency
-	CPAIntermediate1(E) against CPA$(E).Adversary;
+    // By codewise equivalency
+    CPAIntermediate1(E) against CPA$(E).Adversary;
 
-	// By codewise equivalency
-	Sample(lambda).Replacement compose R2(E, F) against CPA$(E).Adversary;
+    // By codewise equivalency
+    Sample(lambda).Replacement compose R2(E, F) against CPA$(E).Adversary;
 
-	// By assumption
-	Sample(lambda).NoReplacement compose R2(E, F) against CPA$(E).Adversary;
+    // By assumption
+    Sample(lambda).NoReplacement compose R2(E, F) against CPA$(E).Adversary;
 
-	// By codewise equivalency
-	CPAIntermediate2(E) against CPA$(E).Adversary;
+    // By codewise equivalency
+    CPAIntermediate2(E) against CPA$(E).Adversary;
 
-	// By codewise equivalency
-	CPAIntermediate3(E) against CPA$(E).Adversary;
+    // By codewise equivalency
+    CPAIntermediate3(E) against CPA$(E).Adversary;
 
-	// By codewise equivalency
-	Sample(lambda).NoReplacement compose R3(E, F) against CPA$(E).Adversary;
+    // By codewise equivalency
+    Sample(lambda).NoReplacement compose R3(E, F) against CPA$(E).Adversary;
 
-	// By assumption
-	Sample(lambda).Replacement compose R3(E, F) against CPA$(E).Adversary;
+    // By assumption
+    Sample(lambda).Replacement compose R3(E, F) against CPA$(E).Adversary;
 
-	// By codewise-equivalence
-	CPAIntermediate4(E) against CPA$(E).Adversary;
+    // By codewise-equivalence
+    CPAIntermediate4(E) against CPA$(E).Adversary;
 
-	// By codewise-equivalence
-	OTP(out).Real compose R4(E, F) against CPA$(E).Adversary;
+    // By codewise-equivalence
+    OTP(out).Real compose R4(E, F) against CPA$(E).Adversary;
 
-	// By assumptio
-	OTP(out).Random compose R4(E, F) against CPA$(E).Adversary;
+    // By assumptio
+    OTP(out).Random compose R4(E, F) against CPA$(E).Adversary;
 
-	// By codewise-equivalency
-	CPA$(E).Random against CPA$(E).Adversary;
+    // By codewise-equivalency
+    CPA$(E).Random against CPA$(E).Adversary;

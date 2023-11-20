@@ -15,19 +15,19 @@ proof:
 
 let:
     Int lambda;
-	DoubleOTP D = DoubleOTP(lambda);
+    DoubleOTP D = DoubleOTP(lambda);
 
 assume:
-	OTPUniform(lambda);
+    OTPUniform(lambda);
 
 theorem:
-	OneTimeUniformCiphertexts(D);
+    OneTimeUniformCiphertexts(D);
 
 games:
-	OneTimeUniformCiphertexts(D).Real against OneTimeUniformCiphertexts(D).Adversary;
+    OneTimeUniformCiphertexts(D).Real against OneTimeUniformCiphertexts(D).Adversary;
 
     OTPUniform(lambda).Real compose R1(D, lambda) against OneTimeUniformCiphertexts(D).Adversary;
 
     OTPUniform(lambda).Random compose R1(D, lambda) against OneTimeUniformCiphertexts(D).Adversary;
 
-	OneTimeUniformCiphertexts(D).Random against OneTimeUniformCiphertexts(D).Adversary;
+    OneTimeUniformCiphertexts(D).Random against OneTimeUniformCiphertexts(D).Adversary;

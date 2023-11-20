@@ -2,20 +2,20 @@ import 'examples/Primitives/PRG.primitive';
 import 'examples/Primitives/SymEnc.primitive';
 
 Scheme PRGOTP(PRG G) extends SymEnc {
-	Set Key = BitString<G.lambda>;
-	Set Message = BitString<G.lambda + G.stretch>;
-	Set Ciphertext = BitString<G.lambda + G.stretch>;
+    Set Key = BitString<G.lambda>;
+    Set Message = BitString<G.lambda + G.stretch>;
+    Set Ciphertext = BitString<G.lambda + G.stretch>;
 
-	Key KeyGen() {
-		Key k <- Key;
-		return k;
-	}
+    Key KeyGen() {
+        Key k <- Key;
+        return k;
+    }
 
-	Ciphertext Enc(Key k, Message m) {
-		return G.evaluate(k) + m;
-	}
+    Ciphertext Enc(Key k, Message m) {
+        return G.evaluate(k) + m;
+    }
 
-	Message Dec(Key k, Ciphertext c) {
-		return G.evaluate(k) + c;
-	}
+    Message Dec(Key k, Ciphertext c) {
+        return G.evaluate(k) + c;
+    }
 }

@@ -1,25 +1,25 @@
 import 'examples/Primitives/PRF.primitive';
 
 Game Real(PRF F) {
-	BitString<F.lambda> k;
-	void Initialize() {
-		k <- BitString<F.lambda>;
-	}
+    BitString<F.lambda> k;
+    void Initialize() {
+        k <- BitString<F.lambda>;
+    }
 
-	BitString<F.out> Lookup(BitString<F.in> x) {
-		return F.evaluate(k, x);
-	}
+    BitString<F.out> Lookup(BitString<F.in> x) {
+        return F.evaluate(k, x);
+    }
 }
 
 Game Random(PRF F) {
-	Map<BitString<F.in>, BitString<F.out>> T;
+    Map<BitString<F.in>, BitString<F.out>> T;
 
-	BitString<F.out> Lookup(BitString<F.in> x) {
-		if (!(x in T)) {
-			T[x] <- BitString<F.out>;
-		}
-		return T[x];
-	}
+    BitString<F.out> Lookup(BitString<F.in> x) {
+        if (!(x in T)) {
+            T[x] <- BitString<F.out>;
+        }
+        return T[x];
+    }
 }
 
 export as Security;

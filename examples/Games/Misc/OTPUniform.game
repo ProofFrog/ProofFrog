@@ -1,15 +1,15 @@
 Game Real(Int lambda) {
-	BitString<lambda> CTXT(BitString<lambda> m) {
-		BitString<lambda> k <- BitString<lambda>;
-		return k + m;
-	}
+    BitString<lambda> CTXT(BitString<lambda> m) {
+        BitString<lambda> k <- BitString<lambda>;
+        return k + m;
+    }
 }
 
 Game Random(Int lambda) {
-	BitString<lambda> CTXT(BitString<lambda> m) {
-		BitString<lambda> c <- BitString<lambda>;
-		return c;
-	}
+    BitString<lambda> CTXT(BitString<lambda> m) {
+        BitString<lambda> c <- BitString<lambda>;
+        return c;
+    }
 }
 
 export as OTPUniform;

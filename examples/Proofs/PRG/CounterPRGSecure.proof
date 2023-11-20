@@ -3,186 +3,186 @@ import 'examples/Games/PRG/Security.game' as PRGSecurity;
 import 'examples/Games/PRF/Security.game' as PRFSecurity;
 
 Game SecurityIntermediate1(CounterPRG G, int hybridNum) {
-	int count;
+    int count;
 
-	void Initialize() {
-		count = 0;
-	}
+    void Initialize() {
+        count = 0;
+    }
 
-	BitString<G.lambda + G.stretch> Query() {
-		count = count + 1;
-		if (count <= hybridNum) {
-			BitString<G.lambda + G.stretch> r <- BitString<G.lambda + G.stretch>;
-			return r;
-		} else {
-			BitString<G.lambda> s <- BitString<G.lambda>;
-			BitString<G.lambda> x = G.F.evaluate(s, 0b0);
-			BitString<G.lambda> y = G.F.evaluate(s, 0b1);
-			return x || y;
-		}
-	}
+    BitString<G.lambda + G.stretch> Query() {
+        count = count + 1;
+        if (count <= hybridNum) {
+            BitString<G.lambda + G.stretch> r <- BitString<G.lambda + G.stretch>;
+            return r;
+        } else {
+            BitString<G.lambda> s <- BitString<G.lambda>;
+            BitString<G.lambda> x = G.F.evaluate(s, 0b0);
+            BitString<G.lambda> y = G.F.evaluate(s, 0b1);
+            return x || y;
+        }
+    }
 }
 
 Game SecurityIntermediate2(CounterPRG G, int hybridNum) {
-	int count;
+    int count;
 
-	void Initialize() {
-		count = 0;
-	}
+    void Initialize() {
+        count = 0;
+    }
 
-	BitString<G.lambda + G.stretch> Query() {
-		count = count + 1;
-		if (count < hybridNum) {
-			BitString<G.lambda + G.stretch> r <- BitString<G.lambda + G.stretch>;
-			return r;
-		} else if (count == hybridNum) {
-			BitString<G.lambda> s <- BitString<G.lambda>;
-			BitString<G.lambda> x = G.F.evaluate(s, 0b0);
-			BitString<G.lambda> y = G.F.evaluate(s, 0b1);
-			return x || y;
-		} else {
-			BitString<G.lambda> s <- BitString<G.lambda>;
-			BitString<G.lambda> x = G.F.evaluate(s, 0b0);
-			BitString<G.lambda> y = G.F.evaluate(s, 0b1);
-			return x || y;
-		}
-	}
+    BitString<G.lambda + G.stretch> Query() {
+        count = count + 1;
+        if (count < hybridNum) {
+            BitString<G.lambda + G.stretch> r <- BitString<G.lambda + G.stretch>;
+            return r;
+        } else if (count == hybridNum) {
+            BitString<G.lambda> s <- BitString<G.lambda>;
+            BitString<G.lambda> x = G.F.evaluate(s, 0b0);
+            BitString<G.lambda> y = G.F.evaluate(s, 0b1);
+            return x || y;
+        } else {
+            BitString<G.lambda> s <- BitString<G.lambda>;
+            BitString<G.lambda> x = G.F.evaluate(s, 0b0);
+            BitString<G.lambda> y = G.F.evaluate(s, 0b1);
+            return x || y;
+        }
+    }
 }
 
 Reduction R1(CounterPRG G, PRF F, int hybridNum) compose PRFSecurity(F) against PRGSecurity(G).Adversary {
-	int count;
+    int count;
 
-	void Initialize() {
-		count = 0;
-	}
+    void Initialize() {
+        count = 0;
+    }
 
-	BitString<G.lambda + G.stretch> Query() {
-		count = count + 1;
-		if (count < hybridNum) {
-			BitString<G.lambda + G.stretch> r <- BitString<G.lambda + G.stretch>;
-			return r;
-		} else if (count == hybridNum) {
-			BitString<G.lambda> x = challenger.Lookup(0b0);
-			BitString<G.lambda> y = challenger.Lookup(0b1);
-			return x || y;
-		} else {
-			BitString<G.lambda> s <- BitString<G.lambda>;
-			BitString<G.lambda> x = G.F.evaluate(s, 0b0);
-			BitString<G.lambda> y = G.F.evaluate(s, 0b1);
-			return x || y;
-		}
-	}
+    BitString<G.lambda + G.stretch> Query() {
+        count = count + 1;
+        if (count < hybridNum) {
+            BitString<G.lambda + G.stretch> r <- BitString<G.lambda + G.stretch>;
+            return r;
+        } else if (count == hybridNum) {
+            BitString<G.lambda> x = challenger.Lookup(0b0);
+            BitString<G.lambda> y = challenger.Lookup(0b1);
+            return x || y;
+        } else {
+            BitString<G.lambda> s <- BitString<G.lambda>;
+            BitString<G.lambda> x = G.F.evaluate(s, 0b0);
+            BitString<G.lambda> y = G.F.evaluate(s, 0b1);
+            return x || y;
+        }
+    }
 }
 
 Game SecurityIntermediate3(CounterPRG G, int hybridNum) {
-	int count;
-	Map<BitString<lambda>, BitString<lambda>> T;
+    int count;
+    Map<BitString<lambda>, BitString<lambda>> T;
 
-	void Initialize() {
-		count = 0;
-		T = {};
-	}
+    void Initialize() {
+        count = 0;
+        T = {};
+    }
 
-	BitString<G.lambda + G.stretch> Query() {
-		count = count + 1;
-		if (count < hybridNum) {
-			BitString<G.lambda + G.stretch> r <- BitString<G.lambda + G.stretch>;
-			return r;
-		} else if (count == hybridNum) {
-			if (!(0b0 in T)) {
-				T[0b0] <- BitString<G.lambda>;
-			}
-			BitString<G.lambda> x = T[0b0];
-			if (!(0b1 in T)) {
-				T[0b1] <- BitString<G.lambda>;
-			}
-			BitString<G.lambda> y = T[0b1];
-			return x || y;
-		} else {
-			BitString<G.lambda> s <- BitString<G.lambda>;
-			BitString<G.lambda> x = G.F.evaluate(s, 0b0);
-			BitString<G.lambda> y = G.F.evaluate(s, 0b1);
-			return x || y;
-		}
-	}
+    BitString<G.lambda + G.stretch> Query() {
+        count = count + 1;
+        if (count < hybridNum) {
+            BitString<G.lambda + G.stretch> r <- BitString<G.lambda + G.stretch>;
+            return r;
+        } else if (count == hybridNum) {
+            if (!(0b0 in T)) {
+                T[0b0] <- BitString<G.lambda>;
+            }
+            BitString<G.lambda> x = T[0b0];
+            if (!(0b1 in T)) {
+                T[0b1] <- BitString<G.lambda>;
+            }
+            BitString<G.lambda> y = T[0b1];
+            return x || y;
+        } else {
+            BitString<G.lambda> s <- BitString<G.lambda>;
+            BitString<G.lambda> x = G.F.evaluate(s, 0b0);
+            BitString<G.lambda> y = G.F.evaluate(s, 0b1);
+            return x || y;
+        }
+    }
 }
 
 Game SecurityIntermediate4(CounterPRG G, int hybridNum) {
-	int count;
+    int count;
 
-	void Initialize() {
-		count = 0;
-	}
+    void Initialize() {
+        count = 0;
+    }
 
-	BitString<G.lambda + G.stretch> Query() {
-		count = count + 1;
-		if (count < hybridNum) {
-			BitString<G.lambda + G.stretch> r <- BitString<G.lambda + G.stretch>;
-			return r;
-		} else if (count == hybridNum) {
-			BitString<G.lambda> x <- BitString<G.lambda>;
-			BitString<G.lambda> y <- BitString<G.lambda>;
-			return x || y;
-		} else {
-			BitString<G.lambda> s <- BitString<G.lambda>;
-			BitString<G.lambda> x = G.F.evaluate(s, 0b0);
-			BitString<G.lambda> y = G.F.evaluate(s, 0b1);
-			return x || y;
-		}
-	}
+    BitString<G.lambda + G.stretch> Query() {
+        count = count + 1;
+        if (count < hybridNum) {
+            BitString<G.lambda + G.stretch> r <- BitString<G.lambda + G.stretch>;
+            return r;
+        } else if (count == hybridNum) {
+            BitString<G.lambda> x <- BitString<G.lambda>;
+            BitString<G.lambda> y <- BitString<G.lambda>;
+            return x || y;
+        } else {
+            BitString<G.lambda> s <- BitString<G.lambda>;
+            BitString<G.lambda> x = G.F.evaluate(s, 0b0);
+            BitString<G.lambda> y = G.F.evaluate(s, 0b1);
+            return x || y;
+        }
+    }
 }
 
 Game SecurityIntermediate5(CounterPRG G, int hybridNum) {
-	int count;
+    int count;
 
-	void Initialize() {
-		count = 0;
-	}
+    void Initialize() {
+        count = 0;
+    }
 
-	BitString<G.lambda + G.stretch> Query() {
-		count = count + 1;
-		if (count < hybridNum) {
-			BitString<G.lambda + G.stretch> r <- BitString<G.lambda + G.stretch>;
-			return r;
-		} else if (count == hybridNum) {
-			BitString<G.lambda + G.stretch> r <- BitString<G.lambda + G.stretch>;
-			return r;
-		} else {
-			BitString<G.lambda> s <- BitString<G.lambda>;
-			BitString<G.lambda> x = G.F.evaluate(s, 0b0);
-			BitString<G.lambda> y = G.F.evaluate(s, 0b1);
-			return x || y;
-		}
-	}
+    BitString<G.lambda + G.stretch> Query() {
+        count = count + 1;
+        if (count < hybridNum) {
+            BitString<G.lambda + G.stretch> r <- BitString<G.lambda + G.stretch>;
+            return r;
+        } else if (count == hybridNum) {
+            BitString<G.lambda + G.stretch> r <- BitString<G.lambda + G.stretch>;
+            return r;
+        } else {
+            BitString<G.lambda> s <- BitString<G.lambda>;
+            BitString<G.lambda> x = G.F.evaluate(s, 0b0);
+            BitString<G.lambda> y = G.F.evaluate(s, 0b1);
+            return x || y;
+        }
+    }
 }
 
 proof:
 
 let:
-	int lambda;
-	int q;
-	PRF F = PRF(lambda, lambda, lambda);
-	CounterPRG G = CounterPRG(security);
+    int lambda;
+    int q;
+    PRF F = PRF(lambda, lambda, lambda);
+    CounterPRG G = CounterPRG(security);
 
 assume:
-	PRFSecurity(F);
-	calls <= q;
+    PRFSecurity(F);
+    calls <= q;
 
 theorem:
-	PRGSecurity(G);
+    PRGSecurity(G);
 
 games:
 
-	PRGSecurity(G).Real against PRGSecurity(G).Adversary;
+    PRGSecurity(G).Real against PRGSecurity(G).Adversary;
 
-	induction(i from 0 to q) {
-		SecurityIntermediate1(G, i) against PRGSecurity(G).Adversary;
-		SecurityIntermediate2(G, i) against PRGSecurity(G).Adversary;
-		PRFSecurity(G).Real compose R1(G, i) against PRGSecurity(G).Adversary;
-		PRFSecurity(G).Random compose R1(G, i) against PRGSecurity(G).Adversary;
-		SecurityIntermediate3(G, i) against PRGSecurity(G).Adversary;
-		SecurityIntermediate4(G, i) against PRGSecurity(G).Adversary;
-		SecurityIntermediate5(G, i) against PRGSecurity(G).Adversary;
-	}
+    induction(i from 0 to q) {
+        SecurityIntermediate1(G, i) against PRGSecurity(G).Adversary;
+        SecurityIntermediate2(G, i) against PRGSecurity(G).Adversary;
+        PRFSecurity(G).Real compose R1(G, i) against PRGSecurity(G).Adversary;
+        PRFSecurity(G).Random compose R1(G, i) against PRGSecurity(G).Adversary;
+        SecurityIntermediate3(G, i) against PRGSecurity(G).Adversary;
+        SecurityIntermediate4(G, i) against PRGSecurity(G).Adversary;
+        SecurityIntermediate5(G, i) against PRGSecurity(G).Adversary;
+    }
 
-	PRGSecurity(G).Random against PRGSecurity(G).Adversary;
+    PRGSecurity(G).Random against PRGSecurity(G).Adversary;

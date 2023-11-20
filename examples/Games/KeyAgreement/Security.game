@@ -1,17 +1,17 @@
 import 'examples/Primitives/KeyAgreement.primitive';
 
 Game Real(KeyAgreement E) {
-	E.Transcript * E.Key Query() {
-		return E.Execute();
-	}
+    E.Transcript * E.Key Query() {
+        return E.Execute();
+    }
 }
 
 Game Random() {
-	E.Transcript * E.Key Query() {
-		E.Transcript * E.Key tk = E.Execute();
-		E.Key kPrime <- E.Key;
-		return [tk[0], kPrime];
-	}
+    E.Transcript * E.Key Query() {
+        E.Transcript * E.Key tk = E.Execute();
+        E.Key kPrime <- E.Key;
+        return [tk[0], kPrime];
+    }
 }
 
 export as Security;

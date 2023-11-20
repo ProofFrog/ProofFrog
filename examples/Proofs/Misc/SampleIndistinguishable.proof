@@ -1,56 +1,56 @@
 import 'examples/Games/Misc/Sample.game';
 
 Game SampleIntermediate1(int lambda) {
-	Set<BitString<lambda>> R;
-	bool bad;
+    Set<BitString<lambda>> R;
+    bool bad;
 
-	void Initialize() {
-		R = {};
-		bad = false;
-	}
+    void Initialize() {
+        R = {};
+        bad = false;
+    }
 
-	BitString<lambda> Samp() {
-		BitString<lambda> r <- BitString<lambda>;
-		if (r in R) {
-			bad = true;
-		}
-		R = R + r;
-		return r;
-	}
+    BitString<lambda> Samp() {
+        BitString<lambda> r <- BitString<lambda>;
+        if (r in R) {
+            bad = true;
+        }
+        R = R + r;
+        return r;
+    }
 }
 
 Game SampleIntermediate2(int lambda) {
-	Set<BitString<lambda>> R;
-	bool bad;
+    Set<BitString<lambda>> R;
+    bool bad;
 
-	void Initialize() {
-		R = {};
-		bad = false;
-	}
+    void Initialize() {
+        R = {};
+        bad = false;
+    }
 
-	BitString<lambda> Samp() {
-		BitString<lambda> r <- BitString<lambda>;
-		if (r in R) {
-			bad = true;
-			r <- BitString<lambda> \ R;
-		}
-		R = R + r;
-		return r;
-	}
+    BitString<lambda> Samp() {
+        BitString<lambda> r <- BitString<lambda>;
+        if (r in R) {
+            bad = true;
+            r <- BitString<lambda> \ R;
+        }
+        R = R + r;
+        return r;
+    }
 }
 
 proof:
 
 let:
-	int lambda;
+    int lambda;
 
 assume:
 
 theorem:
-	Sample(lambda);
+    Sample(lambda);
 
 games:
-	Sample(lambda).Replacement against Sample(lambda).Adversary;
-	SampleIntermediate1(lambda) against Sample(lambda).Adversary;
-	SampleIntermediate2(lambda) against Sample(lambda).Adversary;
-	Sample(lambda).NoReplacement against Sample(lambda).Adversary;
+    Sample(lambda).Replacement against Sample(lambda).Adversary;
+    SampleIntermediate1(lambda) against Sample(lambda).Adversary;
+    SampleIntermediate2(lambda) against Sample(lambda).Adversary;
+    Sample(lambda).NoReplacement against Sample(lambda).Adversary;

@@ -1,12 +1,12 @@
-Game Real(int lambda) {
-	BitString<lambda> Eavesdrop(BitString<lambda> m) {
+Game Real(Int lambda) {
+	BitString<lambda> CTXT(BitString<lambda> m) {
 		BitString<lambda> k <- BitString<lambda>;
 		return k + m;
 	}
 }
 
-Game Random(int lambda) {
-	BitString<lambda> Eavesdrop(BitString<lambda> m) {
+Game Random(Int lambda) {
+	BitString<lambda> CTXT(BitString<lambda> m) {
 		BitString<lambda> c <- BitString<lambda>;
 		return c;
 	}

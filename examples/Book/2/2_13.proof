@@ -1,0 +1,33 @@
+import 'examples/Book/2/2_12_DoubleOTP.scheme';
+import 'examples/Games/Misc/OTPUniform.game';
+import 'examples/Games/SymEnc/OneTimeUniformCiphertexts.game';
+
+Reduction R1(DoubleOTP D, Int lambda) compose OTPUniform(lambda) against OneTimeUniformCiphertexts(D).Adversary {
+    D.Ciphertext CTXT(D.Message m) {
+        BitString<lambda> k <- BitString<lambda>;
+        D.Ciphertext c1 = k + m;
+        BitString<lambda> c2 = challenger.CTXT(c1);
+        return c2;
+    }
+}
+
+proof:
+
+let:
+    Int lambda;
+    DoubleOTP D = DoubleOTP(lambda);
+
+assume:
+    OTPUniform(lambda);
+
+theorem:
+    OneTimeUniformCiphertexts(D);
+
+games:
+    OneTimeUniformCiphertexts(D).Real against OneTimeUniformCiphertexts(D).Adversary;
+
+    OTPUniform(lambda).Real compose R1(D, lambda) against OneTimeUniformCiphertexts(D).Adversary;
+
+    OTPUniform(lambda).Random compose R1(D, lambda) against OneTimeUniformCiphertexts(D).Adversary;
+
+    OneTimeUniformCiphertexts(D).Random against OneTimeUniformCiphertexts(D).Adversary;

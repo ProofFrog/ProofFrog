@@ -1,37 +1,37 @@
 import 'examples/Primitives/SymEnc.primitive';
 
 Game Real(SymEnc E) {
-	E.Key k;
-	Set<E.Ciphertext> S;
+    E.Key k;
+    Set<E.Ciphertext> S;
 
-	void Initialize() {
-		k = E.KeyGen();
-		S = {};
-	}
+    void Initialize() {
+        k = E.KeyGen();
+        S = {};
+    }
 
-	E.Ciphertext CTXT(E.Message m) {
-		E.Ciphertext c = E.Enc(k, m);
-		S = S + c;
-		return c;
-	}
+    E.Ciphertext CTXT(E.Message m) {
+        E.Ciphertext c = E.Enc(k, m);
+        S = S + c;
+        return c;
+    }
 
-	E.Message? Decrypt(E.Ciphertext c) {
-		if (c in S) {
-			return None;
-		}
-		return E.Dec(k, c);
-	}
+    E.Message? Decrypt(E.Ciphertext c) {
+        if (c in S) {
+            return None;
+        }
+        return E.Dec(k, c);
+    }
 }
 
 Game Random(SymEnc E) {
-	E.Ciphertext CTXT(E.Message m) {
-		E.Ciphertext c <- E.Ciphertext;
-		return c;
-	}
+    E.Ciphertext CTXT(E.Message m) {
+        E.Ciphertext c <- E.Ciphertext;
+        return c;
+    }
 
-	E.Message? Decrypt(E.Ciphertext c) {
-		return None;
-	}
+    E.Message? Decrypt(E.Ciphertext c) {
+        return None;
+    }
 }
 
 export as AE;

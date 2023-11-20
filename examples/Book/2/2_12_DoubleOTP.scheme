@@ -1,0 +1,25 @@
+import 'examples/Primitives/SymEnc.primitive';
+
+Scheme DoubleOTP(Int lambda) extends SymEnc {
+    Set Message = BitString<lambda>;
+    Set Ciphertext = BitString<lambda>;
+    Set Key = BitString<lambda> * BitString<lambda>;
+
+    Key KeyGen() {
+        BitString<lambda> key1 <- BitString<lambda>;
+        BitString<lambda> key2 <- BitString<lambda>;
+        return [key1, key2];
+    }
+
+    Ciphertext Enc(Key k, Message m) {
+        Ciphertext c1 = k[0] + m;
+        Ciphertext c2 = k[1] + c1;
+        return c2;
+    }
+
+    Message Dec(Ciphertext c) {
+        Ciphertext c1 = k[1] + c;
+        Message m = k[0] + c1;
+        return m;
+    }
+}

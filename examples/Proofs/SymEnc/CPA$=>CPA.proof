@@ -3,35 +3,35 @@ import 'examples/Games/SymEnc/CPA.game';
 import 'examples/Games/SymEnc/CPA$.game';
 
 Reduction R1(SymEnc E) compose CPA$(E) against CPA(E).Adversary {
-	E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
-		return challenger.CTXT(mL);
-	}
+    E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
+        return challenger.CTXT(mL);
+    }
 }
 
 Reduction R2(SymEnc E) compose CPA$(E) against CPA(E).Adversary {
-	E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
-		return challenger.CTXT(mR);
-	}
+    E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
+        return challenger.CTXT(mR);
+    }
 }
 
 proof:
 
 let:
-	Set MessageSpace;
-	Set CiphertextSpace;
-	Set KeySpace;
-	SymEnc E = SymEnc(MessageSpace, CiphertextSpace, KeySpace);
+    Set MessageSpace;
+    Set CiphertextSpace;
+    Set KeySpace;
+    SymEnc E = SymEnc(MessageSpace, CiphertextSpace, KeySpace);
 
 assume:
-	CPA$(E);
+    CPA$(E);
 
 theorem:
-	CPA(E);
+    CPA(E);
 
 games:
-	CPA(E).Left against CPA(E).Adversary;
-	CPA$(E).Real compose R1(E) against CPA(E).Adversary;
-	CPA$(E).Random compose R1(E) against CPA(E).Adversary;
-	CPA$(E).Random compose R2(E) against CPA(E).Adversary;
-	CPA$(E).Real compose R2(E) against CPA(E).Adversary;
-	CPA(E).Right against CPA(E).Adversary;
+    CPA(E).Left against CPA(E).Adversary;
+    CPA$(E).Real compose R1(E) against CPA(E).Adversary;
+    CPA$(E).Random compose R1(E) against CPA(E).Adversary;
+    CPA$(E).Random compose R2(E) against CPA(E).Adversary;
+    CPA$(E).Real compose R2(E) against CPA(E).Adversary;
+    CPA(E).Right against CPA(E).Adversary;

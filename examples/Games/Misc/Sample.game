@@ -1,18 +1,18 @@
 Game Replacement(int lambda) {
-	BitString<lambda> Samp() {
-		BitString<lambda> r <- BitString<lambda>;
-		return r;
-	}
+    BitString<lambda> Samp() {
+        BitString<lambda> r <- BitString<lambda>;
+        return r;
+    }
 }
 
 Game NoReplacement(int lambda) {
-	Set<BitString<lambda>> R;
+    Set<BitString<lambda>> R;
 
-	BitString<lambda> Samp() {
-		BitString<lambda> r <- BitString<lambda> \ R;
-		R = R union {r};
-		return r;
-	}
+    BitString<lambda> Samp() {
+        BitString<lambda> r <- BitString<lambda> \ R;
+        R = R union {r};
+        return r;
+    }
 }
 
 export as Sample;

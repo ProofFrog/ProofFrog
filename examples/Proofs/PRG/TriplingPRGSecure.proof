@@ -2,86 +2,86 @@ import 'Games/PRG/Security.game';
 import 'Schemes/PRG/TriplingPRG.scheme';
 
 Reduction R1(TriplingPRG H, PRG G) compose Security(G) against Security(H).Adversary {
-	BitString<H.lambda + H.stretch> Query() {
-		BitString<2 * lambda> result1 = challenger.Query();
-		BitString<lambda> x = result1[0:lambda];
-		BitString<lambda> y = result1[lambda:2*lambda];
-		BitString<2 * lambda> result2 = G.evaluate(y);
+    BitString<H.lambda + H.stretch> Query() {
+        BitString<2 * lambda> result1 = challenger.Query();
+        BitString<lambda> x = result1[0:lambda];
+        BitString<lambda> y = result1[lambda:2*lambda];
+        BitString<2 * lambda> result2 = G.evaluate(y);
 
-		return x || result2;
-	}
+        return x || result2;
+    }
 }
 
 Game SecurityIntermediate1(TriplingPRG H) {
-	BitString<H.lambda + H.stretch> Query() {
-		BitString<2*lambda> result1 <- BitString<2*lambda>;
-		BitString<lambda> x = result1[0:lambda];
-		BitString<lambda> y = result1[lambda:2*lambda];
-		BitString<2 * lambda> result2 = H.evaluate(y);
-		return x || result2;
-	}
+    BitString<H.lambda + H.stretch> Query() {
+        BitString<2*lambda> result1 <- BitString<2*lambda>;
+        BitString<lambda> x = result1[0:lambda];
+        BitString<lambda> y = result1[lambda:2*lambda];
+        BitString<2 * lambda> result2 = H.evaluate(y);
+        return x || result2;
+    }
 }
 
 Game SecurityIntermediate2(TriplingPRG H) {
-	BitString<H.lambda + H.stretch> Query() {
-		BitString<lambda> x <- BitString<lambda>;
-		BitString<lambda> y <- BitString<lambda>;
-		BitString<2 * lambda> result2 = H.evaluate(y);
-		return x || result2;
-	}
+    BitString<H.lambda + H.stretch> Query() {
+        BitString<lambda> x <- BitString<lambda>;
+        BitString<lambda> y <- BitString<lambda>;
+        BitString<2 * lambda> result2 = H.evaluate(y);
+        return x || result2;
+    }
 }
 
 Reduction R2(TriplingPRG H, PRG G) compose Security(G) against Security(H).Adversary {
-	BitString<H.lambda + H.stretch> Query() {
-		BitString<lambda> x <- BitString<lambda>;
-		BitString<2 * lambda> result2 = challenger.Query();
-		return x || result2;
-	}
+    BitString<H.lambda + H.stretch> Query() {
+        BitString<lambda> x <- BitString<lambda>;
+        BitString<2 * lambda> result2 = challenger.Query();
+        return x || result2;
+    }
 }
 
 Game SecurityIntermediate3(TriplingPRG H) {
-	BitString<H.lambda + H.stretch> Query() {
-		BitString<lambda> x <- BitString<lambda>;
-		BitString<2 * lambda> result2 <- BitString<2 * lambda>;
-		return x || result2;
-	}
+    BitString<H.lambda + H.stretch> Query() {
+        BitString<lambda> x <- BitString<lambda>;
+        BitString<2 * lambda> result2 <- BitString<2 * lambda>;
+        return x || result2;
+    }
 }
 
 proof:
 
 let:
-	int lambda;
-	PRG G = PRG(lambda, lambda);
-	TriplingPRG H = TriplingPRG(G);
+    int lambda;
+    PRG G = PRG(lambda, lambda);
+    TriplingPRG H = TriplingPRG(G);
 
 assume:
-	Security(G);
+    Security(G);
 
 theorem:
-	Security(H);
+    Security(H);
 
 games:
-	Security(H).Real against Security(H).Adversary;
+    Security(H).Real against Security(H).Adversary;
 
-	// Codewise-equivalent
+    // Codewise-equivalent
 
-	Security(G).Real compose R1(H, G) against Security(H).Adversary;
+    Security(G).Real compose R1(H, G) against Security(H).Adversary;
 
-	// Assumption
+    // Assumption
 
-	Security(G).Random compose R1(H, G) against Security(H).Adversary;
+    Security(G).Random compose R1(H, G) against Security(H).Adversary;
 
-	// Codewise-equivalence
+    // Codewise-equivalence
 
-	SecurityIntermediate1(H) against Security(H).Adversary;
+    SecurityIntermediate1(H) against Security(H).Adversary;
 
-	SecurityIntermediate2(H) against Security(H).Adversary;
+    SecurityIntermediate2(H) against Security(H).Adversary;
 
-	Security(G).Real compose R1(H, G) against Security(H).Adversary;
+    Security(G).Real compose R1(H, G) against Security(H).Adversary;
 
-	Security(G).Random compose R1(H, G) against Security(H).Adversary;
+    Security(G).Random compose R1(H, G) against Security(H).Adversary;
 
-	SecurityIntermediate3(H) against Security(H).Adversary;
+    SecurityIntermediate3(H) against Security(H).Adversary;
 
-	Security(H).Random against Security(H).Adversary;
+    Security(H).Random against Security(H).Adversary;
 

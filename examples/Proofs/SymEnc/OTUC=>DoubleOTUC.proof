@@ -3,36 +3,36 @@ import 'examples/Schemes/SymEnc/DoubleSymEnc.scheme';
 import 'examples/Games/SymEnc/OneTimeUniformCiphertexts.game';
 
 Reduction R1(DoubleSymEnc D, SymEnc E) compose OneTimeUniformCiphertexts(E) against OneTimeUniformCiphertexts(D).Adversary {
-	D.Ciphertext CTXT(D.Message m) {
-		E.Key k = E.KeyGen();
-		E.Ciphertext c = E.Enc(k, m);
-		return challenger.CTXT(c);
-	}
+    D.Ciphertext CTXT(D.Message m) {
+        E.Key k = E.KeyGen();
+        E.Ciphertext c = E.Enc(k, m);
+        return challenger.CTXT(c);
+    }
 }
 
 proof:
 
 let:
-	Set MessageSpace;
-	Set KeySpace;
+    Set MessageSpace;
+    Set KeySpace;
 
-	SymEnc E = SymEnc(MessageSpace, MessageSpace, KeySpace);
-	DoubleSymEnc D = DoubleSymEnc(E);
+    SymEnc E = SymEnc(MessageSpace, MessageSpace, KeySpace);
+    DoubleSymEnc D = DoubleSymEnc(E);
 
 assume:
-	OneTimeUniformCiphertexts(E);
+    OneTimeUniformCiphertexts(E);
 
 theorem:
-	OneTimeUniformCiphertexts(D);
+    OneTimeUniformCiphertexts(D);
 
 games:
-	OneTimeUniformCiphertexts(D).Real against OneTimeUniformCiphertexts(D).Adversary;
+    OneTimeUniformCiphertexts(D).Real against OneTimeUniformCiphertexts(D).Adversary;
 
-	// By codewise equivalency
-	OneTimeUniformCiphertexts(E).Real compose R1(D, E) against OneTimeUniformCiphertexts(D).Adversary;
+    // By codewise equivalency
+    OneTimeUniformCiphertexts(E).Real compose R1(D, E) against OneTimeUniformCiphertexts(D).Adversary;
 
-	// By assumption
-	OneTimeUniformCiphertexts(E).Random compose R1(D, E) against OneTimeUniformCiphertexts(D).Adversary;
+    // By assumption
+    OneTimeUniformCiphertexts(E).Random compose R1(D, E) against OneTimeUniformCiphertexts(D).Adversary;
 
-	// By codewise equivalency
-	OneTimeUniformCiphertexts(D).Random against OneTimeUniformCiphertexts(D).Adversary;
+    // By codewise equivalency
+    OneTimeUniformCiphertexts(D).Random against OneTimeUniformCiphertexts(D).Adversary;

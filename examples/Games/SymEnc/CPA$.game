@@ -1,24 +1,24 @@
 import 'examples/Primitives/SymEnc.primitive';
 
 Game Real(SymEnc E) {
-	E.Key k;
-	void Initialize() {
-		k = E.KeyGen();
-	}
-	E.Ciphertext CTXT(E.Message m) {
-		return E.Enc(k, m);
-	}
+    E.Key k;
+    void Initialize() {
+        k = E.KeyGen();
+    }
+    E.Ciphertext CTXT(E.Message m) {
+        return E.Enc(k, m);
+    }
 }
 
 Game Random(SymEnc E) {
-	E.Key k;
-	void Initialize() {
-		k = E.KeyGen();
-	}
-	E.Ciphertext CTXT(E.Message m) {
-		E.Ciphertext c <- E.Ciphertext;
-		return c;
-	}
+    E.Key k;
+    void Initialize() {
+        k = E.KeyGen();
+    }
+    E.Ciphertext CTXT(E.Message m) {
+        E.Ciphertext c <- E.Ciphertext;
+        return c;
+    }
 }
 
 export as CPA$;

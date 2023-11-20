@@ -3,29 +3,29 @@ import 'examples/Primitives/MAC.primitive';
 
 // Specify some precondition that E.Ciphertext subsets M.Message
 Scheme EncryptThenMAC(SymEnc E, MAC M) extends SymEnc {
-	requires E.Ciphertext subsets M.Message;
+    requires E.Ciphertext subsets M.Message;
 
-	Set Key = E.Key * M.Key;
-	Set Message = E.Message;
-	Set Ciphertext = E.Ciphertext * M.Tag;
+    Set Key = E.Key * M.Key;
+    Set Message = E.Message;
+    Set Ciphertext = E.Ciphertext * M.Tag;
 
-	Key KeyGen() {
-		E.Key ke = E.KeyGen();
-		M.Key me = M.KeyGen();
-		return [ke, me];
-	}
+    Key KeyGen() {
+        E.Key ke = E.KeyGen();
+        M.Key me = M.KeyGen();
+        return [ke, me];
+    }
 
-	Ciphertext Enc(Key k, Message m) {
-		E.Ciphertext c = E.Enc(k[0], m);
-		M.Tag t = M.MAC(k[1], c);
-		return [c, t];
-	}
+    Ciphertext Enc(Key k, Message m) {
+        E.Ciphertext c = E.Enc(k[0], m);
+        M.Tag t = M.MAC(k[1], c);
+        return [c, t];
+    }
 
-	// Should optional return type match??
-	Message? Dec(Key k, Ciphertext c) {
-		if (c[1] != M.MAC(k[1], c[0])) {
-			return None;
-		}
-		return E.Dec(k[0], c[0]);
-	}
+    // Should optional return type match??
+    Message? Dec(Key k, Ciphertext c) {
+        if (c[1] != M.MAC(k[1], c[0])) {
+            return None;
+        }
+        return E.Dec(k[0], c[0]);
+    }
 }

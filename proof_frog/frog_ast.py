@@ -234,12 +234,12 @@ class Primitive(Root):
             f"Primitive {self.name}({_parameter_list_string(self.parameters)}) {{\n"
         )
         for field in self.fields:
-            output_string += f"  {field}\n"
+            output_string += f"{field}\n"
         output_string += "\n"
         for method in self.methods:
-            output_string += f"  {method};\n"
+            output_string += f"{method};\n"
         output_string += "}"
-        return output_string
+        return pretty_print(output_string)
 
     def get_export_name(self) -> str:
         return self.name
@@ -294,7 +294,7 @@ class Block(Statement):
         self.statements = statements
 
     def __str__(self) -> str:
-        return "  \n".join(str(statement) for statement in self.statements)
+        return "\n".join(str(statement) for statement in self.statements)
 
     def __add__(self, other: Block) -> Block:
         return Block(list(self.statements) + list(other.statements))
@@ -311,13 +311,13 @@ class IfStatement(Statement):
             if i == 0:
                 output_string += f"if ({condition}) {{\n"
             else:
-                output_string += f"  }} else if ({condition}) {{\n"
+                output_string += f"}} else if ({condition}) {{\n"
             output_string += str(self.blocks[i])
 
         if self.has_else_block():
             output_string += f"}} else {{\n {self.blocks[-1]}"
 
-        output_string += "    }\n"
+        output_string += "}\n"
 
         return output_string
 
@@ -372,7 +372,9 @@ class NumericFor(Statement):
         self.block = block
 
     def __str__(self) -> str:
-        return f"for (Int {self.name} = {self.start} to {self.end}) {{\n {self.block} \n }}"
+        return (
+            f"for (Int {self.name} = {self.start} to {self.end}) {{\n{self.block}\n}}"
+        )
 
 
 class GenericFor(Statement):
@@ -385,7 +387,7 @@ class GenericFor(Statement):
     def __str__(self) -> str:
         output_string = f"for ({self.var_type} {self.var_name} in {self.over}) {{\n"
         output_string += str(self.block)
-        output_string += "    }"
+        output_string += "}"
         return output_string
 
 
@@ -448,8 +450,8 @@ class Method(ASTNode):
 
     def __str__(self) -> str:
         output_string = f"{self.signature} {{\n"
-        output_string += "  }\n"
-        return f"{self.signature} {{ \n {self.block} \n }}"
+        output_string += "}\n"
+        return f"{self.signature} {{ \n{self.block}\n}}"
 
 
 class Import(ASTNode):
@@ -492,15 +494,15 @@ class Scheme(Root):
             + f"Scheme {self.name}({_parameter_list_string(self.parameters)}) extends {self.primitive_name} {{\n"
         )
         for requirement in self.requirements:
-            output_string += f"  requires {requirement};\n"
+            output_string += f"requires {requirement};\n"
         output_string += "\n"
         for field in self.fields:
-            output_string += f"  {field}\n"
+            output_string += f"{field}\n"
         output_string += "\n"
         for method in self.methods:
-            output_string += f"  {method}\n"
+            output_string += f"{method}\n"
         output_string += "}"
-        return output_string
+        return pretty_print(output_string)
 
     def get_export_name(self) -> str:
         return self.name
@@ -513,9 +515,9 @@ class Phase(ASTNode):
 
     def __str__(self) -> str:
         output_string = "Phase {\n"
-        output_string += "\n".join(f"    {method}" for method in self.methods)
+        output_string += "\n".join(f"{method}" for method in self.methods)
         oracle_list_str = ", ".join(self.oracles) if self.oracles else ""
-        output_string += f"  oracles: [{oracle_list_str}];"
+        output_string += f"oracles: [{oracle_list_str}];"
         output_string += "}"
         return output_string
 
@@ -547,15 +549,15 @@ class Game(ASTNode):
     def __str__(self) -> str:
         output_string = f"{self._get_signature()}\n"
         for field in self.fields:
-            output_string += f"  {field}\n"
+            output_string += f"{field}\n"
         output_string += "\n"
         for method in self.methods:
-            output_string += f"  {method}\n"
+            output_string += f"{method}\n"
         if self.phases:
             for phase in self.phases:
-                output_string += f"  {phase}\n"
+                output_string += f"{phase}\n"
         output_string += "}"
-        return output_string
+        return pretty_print(output_string)
 
     def _get_signature(self) -> str:
         return f"Game {self.name}({_parameter_list_string(self.parameters)}) {{"
@@ -599,7 +601,7 @@ class Reduction(Game):
         self.play_against = play_against
 
     def _get_signature(self) -> str:
-        return (
+        return pretty_print(
             f"Reduction {self.name}("
             f"{_parameter_list_string(self.parameters)}"
             f") compose {self.to_use} against {self.play_against}.Adversary {{"
@@ -719,3 +721,16 @@ class ProofFile(Root):
 
 def _parameter_list_string(parameters: list[Parameter]) -> str:
     return ", ".join(str(param) for param in parameters) if parameters else ""
+
+
+def pretty_print(program: str) -> str:
+    lines = program.split("\n")
+    indent = 0
+    output_string = ""
+    for line in lines:
+        if line.count("{") < line.count("}"):
+            indent -= 1
+        output_string += ("  " * indent) + line + "\n"
+        if line.count("{") > line.count("}"):
+            indent += 1
+    return output_string

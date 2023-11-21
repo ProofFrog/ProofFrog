@@ -2,7 +2,7 @@ import 'examples/Primitives/PRG.primitive';
 
 Game Real(PRG G) {
     BitString<G.lambda + G.stretch> Query() {
-        BitString<G.lambda> s <- BitString<G.Lambda>;
+        BitString<G.lambda> s <- BitString<G.lambda>;
         return G.evaluate(s);
     }
 }

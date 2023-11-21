@@ -6,36 +6,37 @@ import 'examples/Games/Misc/OTPOTS.game';
 
 Reduction R1(PseudoOTP P, PRG G) compose Security(G) against OneTimeSecrecy(P).Adversary {
     P.Ciphertext Eavesdrop(P.Message mL, P.Message mR) {
-        BitString<lambda + stretch> z = challenger.Query();
-        BitString<lambda + stretch> c = z + mL;
+        BitString<lambda + stretch> c = challenger.Query() + mL;
         return c;
     }
 }
 
 Game Intermediate1(PseudoOTP P, PRG G) {
-    P.Ciphertext Eavesdrop(P.Message mL, P.message mR) {
+    P.Ciphertext Eavesdrop(P.Message mL, P.Message mR) {
         BitString<lambda + stretch> z <- BitString<lambda + stretch>;
         BitString<lambda + stretch> c = z + mL;
+        return c;
     }
 }
 
 Reduction R2(PseudoOTP P, Int size) compose OTPOTS(size) against OneTimeSecrecy(P).Adversary {
     P.Ciphertext Eavesdrop(P.Message mL, P.Message mR) {
-        return challenger.Eavesdrop(mL, mR);
+        BitString<lambda + stretch> c = challenger.Eavesdrop(mL, mR);
+        return c;
     }
 }
 
 Game Intermediate2(PseudoOTP P, PRG G) {
-    P.Ciphertext Eavesdrop(P.Message mL, P.message mR) {
+    P.Ciphertext Eavesdrop(P.Message mL, P.Message mR) {
         BitString<lambda + stretch> z <- BitString<lambda + stretch>;
         BitString<lambda + stretch> c = z + mR;
+        return c;
     }
 }
 
 Reduction R3(PseudoOTP P, PRG G) compose Security(G) against OneTimeSecrecy(P).Adversary {
     P.Ciphertext Eavesdrop(P.Message mL, P.Message mR) {
-        BitString<lambda + stretch> z = challenger.Query();
-        BitString<lambda + stretch> c = z + mR;
+        BitString<lambda + stretch> c = challenger.Query() + mR;
         return c;
     }
 }
@@ -62,13 +63,13 @@ games:
 
     Security(G).Random compose R1(P, G) against OneTimeSecrecy(P).Adversary;
 
-    Intermediate1(P) against OneTimeSecrecy(P).Adversary;
+    Intermediate1(P, G) against OneTimeSecrecy(P).Adversary;
 
     OTPOTS(lambda + stretch).Left compose R2(P, lambda + stretch) against OneTimeSecrecy(P).Adversary;
 
     OTPOTS(lambda + stretch).Right compose R2(P, lambda + stretch) against OneTimeSecrecy(P).Adversary;
 
-    Intermediate2(P) against OneTimeSecrecy(P).Adversary;
+    Intermediate2(P, G) against OneTimeSecrecy(P).Adversary;
 
     Security(G).Random compose R3(P, G) against OneTimeSecrecy(P).Adversary;
 

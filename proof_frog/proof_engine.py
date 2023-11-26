@@ -14,7 +14,7 @@ MethodLookup: TypeAlias = Dict[Tuple[str, str], frog_ast.Method]
 inline_counter: int = 0
 
 
-def prove(proof_file_name: str) -> None:
+def prove(proof_file_name: str, verbose: bool) -> None:
     proof_file = frog_parser.parse_proof_file(proof_file_name)
     definition_namespace: frog_ast.Namespace = {}
     proof_namespace: frog_ast.Namespace = {}
@@ -105,19 +105,43 @@ def prove(proof_file_name: str) -> None:
                 next_game_ast, reduction, definition_namespace
             )
 
+        if verbose:
+            print("BASIC GAMES")
+            print(current_game_ast)
+            print(next_game_ast)
         current_game_ast = inline_calls(current_game_lookup, current_game_ast)
         next_game_ast = inline_calls(next_game_lookup, next_game_ast)
+
+        if verbose:
+            print("INLINED GAMES")
+            print(current_game_ast)
+            print(next_game_ast)
 
         current_game_ast = visitors.RedundantCopyTransformer().transform(
             current_game_ast
         )
         next_game_ast = visitors.RedundantCopyTransformer().transform(next_game_ast)
 
+        if verbose:
+            print("REDUNDANCY REMOVED")
+            print(current_game_ast)
+            print(next_game_ast)
+
         current_game_ast = visitors.RemoveTupleTransformer().transform(current_game_ast)
         next_game_ast = visitors.RemoveTupleTransformer().transform(next_game_ast)
 
+        if verbose:
+            print("REMOVED TUPLES")
+            print(current_game_ast)
+            print(next_game_ast)
+
         current_game_ast = sort_game(current_game_ast, proof_namespace)
         next_game_ast = sort_game(next_game_ast, proof_namespace)
+
+        if verbose:
+            print("SORTED")
+            print(current_game_ast)
+            print(next_game_ast)
 
         current_game_ast = visitors.VariableStandardizingTransformer().transform(
             current_game_ast
@@ -365,11 +389,11 @@ class DependencyGraph:
     def add_node(self, new_node: Node) -> None:
         self.nodes.append(new_node)
 
-    def get_node(self, statement: frog_ast.Statement) -> Optional[Node]:
+    def get_node(self, statement: frog_ast.Statement) -> Node:
         for potential_node in self.nodes:
             if potential_node.statement == statement:
                 return potential_node
-        return None
+        raise ValueError("Statement not found in graph")
 
     def find_node(
         self, predicate: Callable[[frog_ast.Statement], bool]
@@ -401,13 +425,10 @@ def generate_dependency_graph(
         dependency_graph.add_node(Node(statement))
 
     def add_dependency(node_in_graph: Node, node: frog_ast.Statement) -> None:
-        other_node = dependency_graph.get_node(node)
-        assert other_node is not None
-        node_in_graph.add_neighbour(other_node)
+        node_in_graph.add_neighbour(dependency_graph.get_node(node))
 
     for index, statement in enumerate(block.statements):
         node_in_graph = dependency_graph.get_node(statement)
-        assert node_in_graph is not None
         earlier_statements = list(block.statements[:index])
         earlier_statements.reverse()
 
@@ -458,23 +479,41 @@ def sort_game(
 def sort_block(
     block: frog_ast.Block, proof_namespace: frog_ast.Namespace
 ) -> frog_ast.Block:
-    new_statement_list: list[frog_ast.Statement] = []
     graph = generate_dependency_graph(block, proof_namespace)
-    final_statement = block.statements[-1]
-    final_node = graph.get_node(final_statement)
-    assert final_node is not None
-    queue: list[Node] = [final_node]
-    visited: list[bool] = [False] * len(block.statements)
-    visited[-1] = True
-    while queue:
-        node = queue.pop(0)
-        new_statement_list.append(node.statement)
-        for neighbour in node.in_neighbours:
-            if not visited[block.statements.index(neighbour.statement)]:
-                visited[block.statements.index(neighbour.statement)] = True
-                queue.append(neighbour)
-    new_statement_list.reverse()
-    return frog_ast.Block(new_statement_list)
+    sorted_statements: list[frog_ast.Statement] = []
+    stack: list[Node] = []
+
+    for statement in block.statements:
+        if not graph.get_node(statement).in_neighbours:
+            stack.append(graph.get_node(statement))
+    while stack:
+        node = stack.pop()
+        sorted_statements.append(node.statement)
+        for other_node in graph.nodes:
+            if node in other_node.in_neighbours:
+                other_node.in_neighbours.remove(node)
+                if not other_node.in_neighbours:
+                    stack.append(other_node)
+    # Regenerate the graph so we can remove dead statements
+    graph = generate_dependency_graph(
+        frog_ast.Block(sorted_statements), proof_namespace
+    )
+    visited = [False] * len(sorted_statements)
+    for node in graph.nodes:
+        if isinstance(node.statement, frog_ast.ReturnStatement):
+            queue: list[Node] = [node]
+            visited[sorted_statements.index(node.statement)] = True
+            while queue:
+                cur_node = queue.pop(0)
+                for neighbour in cur_node.in_neighbours:
+                    if not visited[sorted_statements.index(neighbour.statement)]:
+                        visited[sorted_statements.index(neighbour.statement)] = True
+                        queue.append(neighbour)
+    for i in range(len(visited) - 1, 0, -1):
+        if not visited[i]:
+            del sorted_statements[i]
+
+    return frog_ast.Block(sorted_statements)
 
 
 # I want to be able to instantiate primitives and schemes

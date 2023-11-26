@@ -27,7 +27,7 @@ def main(argv: list[str]) -> None:
             case _:
                 usage(argv[0])
     elif argv[1] == "prove":
-        proof_engine.prove(argv[2])
+        proof_engine.prove(argv[2], len(argv) > 3 and argv[3] == "-v")
     else:
         usage(argv[0])
 

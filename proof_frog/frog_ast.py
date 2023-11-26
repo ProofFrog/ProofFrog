@@ -352,7 +352,7 @@ class Slice(Expression):
         self.end = end
 
     def __str__(self) -> str:
-        return f"{self.the_array}[{self.start}:{self.end}]"
+        return f"{self.the_array}[{self.start} : {self.end}]"
 
 
 class VariableDeclaration(Statement):

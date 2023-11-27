@@ -5,6 +5,7 @@ import copy
 import functools
 from typing import TypeAlias, Sequence, Tuple, Dict, Optional, Callable
 from colorama import Fore
+from sympy import symbols
 from . import frog_parser
 from . import frog_ast
 from . import visitors
@@ -38,6 +39,8 @@ def prove(proof_file_name: str, verbose: bool) -> None:
     for game in proof_file.helpers:
         definition_namespace[game.name] = game
 
+    variables: dict[str, symbols] = {}
+
     # Here, we are substituting the lets with the parameters they are given
     for let in proof_file.lets:
         if isinstance(let.value, frog_ast.FuncCallExpression) and isinstance(
@@ -55,7 +58,13 @@ def prove(proof_file_name: str, verbose: bool) -> None:
             else:
                 raise TypeError("Must instantiate either a Primitive or Scheme ")
         else:
+            print(let.name)
             proof_namespace[let.name] = copy.deepcopy(let.value)
+            print(let, let.type)
+            if isinstance(let.type, frog_ast.IntType):
+                variables[let.name] = (
+                    symbols(let.name) if let.value is None else let.value
+                )
 
     method_lookup: MethodLookup = get_method_lookup(proof_namespace)
 
@@ -117,6 +126,41 @@ def prove(proof_file_name: str, verbose: bool) -> None:
             print(current_game_ast)
             print(next_game_ast)
 
+        current_game_ast = visitors.RemoveTupleTransformer().transform(current_game_ast)
+        next_game_ast = visitors.RemoveTupleTransformer().transform(next_game_ast)
+
+        if verbose:
+            print("REMOVED TUPLES")
+            print(current_game_ast)
+            print(next_game_ast)
+
+        current_game_ast = visitors.SymbolicComputationTransformer(variables).transform(
+            current_game_ast
+        )
+        next_game_ast = visitors.SymbolicComputationTransformer(variables).transform(
+            next_game_ast
+        )
+
+        if verbose:
+            print("SYMBOLIC COMPUTATION")
+            print(current_game_ast)
+            print(next_game_ast)
+
+        current_game_ast = visitors.SimplifySpliceTransformer(variables).transform(
+            current_game_ast
+        )
+        next_game_ast = visitors.SimplifySpliceTransformer(variables).transform(
+            next_game_ast
+        )
+
+        if verbose:
+            print("SIMPLIFIED SPLICES")
+            print(current_game_ast)
+            print(next_game_ast)
+
+        current_game_ast = sort_game(current_game_ast, proof_namespace)
+        next_game_ast = sort_game(next_game_ast, proof_namespace)
+
         current_game_ast = visitors.RedundantCopyTransformer().transform(
             current_game_ast
         )
@@ -126,17 +170,6 @@ def prove(proof_file_name: str, verbose: bool) -> None:
             print("REDUNDANCY REMOVED")
             print(current_game_ast)
             print(next_game_ast)
-
-        current_game_ast = visitors.RemoveTupleTransformer().transform(current_game_ast)
-        next_game_ast = visitors.RemoveTupleTransformer().transform(next_game_ast)
-
-        if verbose:
-            print("REMOVED TUPLES")
-            print(current_game_ast)
-            print(next_game_ast)
-
-        current_game_ast = sort_game(current_game_ast, proof_namespace)
-        next_game_ast = sort_game(next_game_ast, proof_namespace)
 
         if verbose:
             print("SORTED")

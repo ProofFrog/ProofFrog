@@ -166,24 +166,23 @@ def serializedATN():
         410,411,1,0,0,0,411,409,1,0,0,0,411,412,1,0,0,0,412,414,1,0,0,0,
         413,404,1,0,0,0,413,406,1,0,0,0,414,417,1,0,0,0,415,413,1,0,0,0,
         415,416,1,0,0,0,416,33,1,0,0,0,417,415,1,0,0,0,418,419,6,17,-1,0,
-        419,423,3,20,10,0,420,423,5,51,0,0,421,423,5,52,0,0,422,418,1,0,
-        0,0,422,420,1,0,0,0,422,421,1,0,0,0,423,438,1,0,0,0,424,425,10,4,
-        0,0,425,426,5,15,0,0,426,437,3,34,17,5,427,428,10,3,0,0,428,429,
-        5,13,0,0,429,437,3,34,17,4,430,431,10,2,0,0,431,432,5,16,0,0,432,
-        437,3,34,17,3,433,434,10,1,0,0,434,435,5,17,0,0,435,437,3,34,17,
-        2,436,424,1,0,0,0,436,427,1,0,0,0,436,430,1,0,0,0,436,433,1,0,0,
+        419,423,3,20,10,0,420,423,5,52,0,0,421,423,5,51,0,0,422,418,1,0,
+        0,0,422,420,1,0,0,0,422,421,1,0,0,0,423,438,1,0,0,0,424,425,10,7,
+        0,0,425,426,5,13,0,0,426,437,3,34,17,8,427,428,10,6,0,0,428,429,
+        5,17,0,0,429,437,3,34,17,7,430,431,10,5,0,0,431,432,5,15,0,0,432,
+        437,3,34,17,6,433,434,10,4,0,0,434,435,5,16,0,0,435,437,3,34,17,
+        5,436,424,1,0,0,0,436,427,1,0,0,0,436,430,1,0,0,0,436,433,1,0,0,
         0,437,440,1,0,0,0,438,436,1,0,0,0,438,439,1,0,0,0,439,35,1,0,0,0,
-        440,438,1,0,0,0,441,448,5,35,0,0,442,443,5,35,0,0,443,444,5,7,0,
-        0,444,445,3,34,17,0,445,446,5,8,0,0,446,448,1,0,0,0,447,441,1,0,
-        0,0,447,442,1,0,0,0,448,37,1,0,0,0,449,450,5,29,0,0,450,451,5,7,
-        0,0,451,452,3,32,16,0,452,453,5,8,0,0,453,456,1,0,0,0,454,456,5,
-        29,0,0,455,449,1,0,0,0,455,454,1,0,0,0,456,39,1,0,0,0,457,458,5,
-        34,0,0,458,461,5,56,0,0,459,460,5,46,0,0,460,462,5,53,0,0,461,459,
-        1,0,0,0,461,462,1,0,0,0,462,463,1,0,0,0,463,464,5,9,0,0,464,41,1,
-        0,0,0,465,466,7,0,0,0,466,43,1,0,0,0,41,48,58,64,70,82,88,95,101,
-        107,109,116,126,136,149,183,206,211,233,242,244,251,260,277,280,
-        289,292,303,356,366,368,376,402,411,413,415,422,436,438,447,455,
-        461
+        440,438,1,0,0,0,441,442,5,35,0,0,442,443,5,7,0,0,443,444,3,34,17,
+        0,444,445,5,8,0,0,445,448,1,0,0,0,446,448,5,35,0,0,447,441,1,0,0,
+        0,447,446,1,0,0,0,448,37,1,0,0,0,449,450,5,29,0,0,450,451,5,7,0,
+        0,451,452,3,32,16,0,452,453,5,8,0,0,453,456,1,0,0,0,454,456,5,29,
+        0,0,455,449,1,0,0,0,455,454,1,0,0,0,456,39,1,0,0,0,457,458,5,34,
+        0,0,458,461,5,56,0,0,459,460,5,46,0,0,460,462,5,53,0,0,461,459,1,
+        0,0,0,461,462,1,0,0,0,462,463,1,0,0,0,463,464,5,9,0,0,464,41,1,0,
+        0,0,465,466,7,0,0,0,466,43,1,0,0,0,41,48,58,64,70,82,88,95,101,107,
+        109,116,126,136,149,183,206,211,233,242,244,251,260,277,280,289,
+        292,303,356,366,368,376,402,411,413,415,422,436,438,447,455,461
     ]
 
 class PrimitiveParser ( Parser ):
@@ -3294,11 +3293,11 @@ class PrimitiveParser ( Parser ):
             return self.getTypedRuleContext(PrimitiveParser.LvalueContext,0)
 
 
-        def BINARYNUM(self):
-            return self.getToken(PrimitiveParser.BINARYNUM, 0)
-
         def INT(self):
             return self.getToken(PrimitiveParser.INT, 0)
+
+        def BINARYNUM(self):
+            return self.getToken(PrimitiveParser.BINARYNUM, 0)
 
         def integerExpression(self, i:int=None):
             if i is None:
@@ -3307,17 +3306,17 @@ class PrimitiveParser ( Parser ):
                 return self.getTypedRuleContext(PrimitiveParser.IntegerExpressionContext,i)
 
 
-        def PLUS(self):
-            return self.getToken(PrimitiveParser.PLUS, 0)
-
         def TIMES(self):
             return self.getToken(PrimitiveParser.TIMES, 0)
 
-        def SUBTRACT(self):
-            return self.getToken(PrimitiveParser.SUBTRACT, 0)
-
         def DIVIDE(self):
             return self.getToken(PrimitiveParser.DIVIDE, 0)
+
+        def PLUS(self):
+            return self.getToken(PrimitiveParser.PLUS, 0)
+
+        def SUBTRACT(self):
+            return self.getToken(PrimitiveParser.SUBTRACT, 0)
 
         def getRuleIndex(self):
             return PrimitiveParser.RULE_integerExpression
@@ -3346,13 +3345,13 @@ class PrimitiveParser ( Parser ):
                 self.state = 419
                 self.lvalue()
                 pass
-            elif token in [51]:
-                self.state = 420
-                self.match(PrimitiveParser.BINARYNUM)
-                pass
             elif token in [52]:
-                self.state = 421
+                self.state = 420
                 self.match(PrimitiveParser.INT)
+                pass
+            elif token in [51]:
+                self.state = 421
+                self.match(PrimitiveParser.BINARYNUM)
                 pass
             else:
                 raise NoViableAltException(self)
@@ -3373,52 +3372,52 @@ class PrimitiveParser ( Parser ):
                         localctx = PrimitiveParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
                         self.state = 424
-                        if not self.precpred(self._ctx, 4):
+                        if not self.precpred(self._ctx, 7):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 4)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 7)")
                         self.state = 425
-                        self.match(PrimitiveParser.PLUS)
+                        self.match(PrimitiveParser.TIMES)
                         self.state = 426
-                        self.integerExpression(5)
+                        self.integerExpression(8)
                         pass
 
                     elif la_ == 2:
                         localctx = PrimitiveParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
                         self.state = 427
-                        if not self.precpred(self._ctx, 3):
+                        if not self.precpred(self._ctx, 6):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 3)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 6)")
                         self.state = 428
-                        self.match(PrimitiveParser.TIMES)
+                        self.match(PrimitiveParser.DIVIDE)
                         self.state = 429
-                        self.integerExpression(4)
+                        self.integerExpression(7)
                         pass
 
                     elif la_ == 3:
                         localctx = PrimitiveParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
                         self.state = 430
-                        if not self.precpred(self._ctx, 2):
+                        if not self.precpred(self._ctx, 5):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 2)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 5)")
                         self.state = 431
-                        self.match(PrimitiveParser.SUBTRACT)
+                        self.match(PrimitiveParser.PLUS)
                         self.state = 432
-                        self.integerExpression(3)
+                        self.integerExpression(6)
                         pass
 
                     elif la_ == 4:
                         localctx = PrimitiveParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
                         self.state = 433
-                        if not self.precpred(self._ctx, 1):
+                        if not self.precpred(self._ctx, 4):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 1)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 4)")
                         self.state = 434
-                        self.match(PrimitiveParser.DIVIDE)
+                        self.match(PrimitiveParser.SUBTRACT)
                         self.state = 435
-                        self.integerExpression(2)
+                        self.integerExpression(5)
                         pass
 
              
@@ -3479,18 +3478,18 @@ class PrimitiveParser ( Parser ):
                 self.enterOuterAlt(localctx, 1)
                 self.state = 441
                 self.match(PrimitiveParser.BITSTRING)
+                self.state = 442
+                self.match(PrimitiveParser.L_ANGLE)
+                self.state = 443
+                self.integerExpression(0)
+                self.state = 444
+                self.match(PrimitiveParser.R_ANGLE)
                 pass
 
             elif la_ == 2:
                 self.enterOuterAlt(localctx, 2)
-                self.state = 442
+                self.state = 446
                 self.match(PrimitiveParser.BITSTRING)
-                self.state = 443
-                self.match(PrimitiveParser.L_ANGLE)
-                self.state = 444
-                self.integerExpression(0)
-                self.state = 445
-                self.match(PrimitiveParser.R_ANGLE)
                 pass
 
 
@@ -3782,19 +3781,19 @@ class PrimitiveParser ( Parser ):
 
     def integerExpression_sempred(self, localctx:IntegerExpressionContext, predIndex:int):
             if predIndex == 20:
-                return self.precpred(self._ctx, 4)
+                return self.precpred(self._ctx, 7)
          
 
             if predIndex == 21:
-                return self.precpred(self._ctx, 3)
+                return self.precpred(self._ctx, 6)
          
 
             if predIndex == 22:
-                return self.precpred(self._ctx, 2)
+                return self.precpred(self._ctx, 5)
          
 
             if predIndex == 23:
-                return self.precpred(self._ctx, 1)
+                return self.precpred(self._ctx, 4)
          
 
 

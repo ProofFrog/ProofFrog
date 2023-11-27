@@ -2,8 +2,11 @@ import copy
 import functools
 from abc import ABC, abstractmethod
 from typing import Any, Optional, TypeVar, Generic, Callable, cast, final, Tuple
+from sympy import symbols, parsing
+import operator
 
 from proof_frog import frog_ast
+from proof_frog import frog_parser
 from . import frog_ast
 
 
@@ -262,6 +265,132 @@ class RemoveTupleTransformer(BlockTransformer):
         return block
 
 
+class SimplifySpliceTransformer(BlockTransformer):
+    def __init__(self, variables):
+        self.variables = variables
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if not isinstance(statement, frog_ast.Assignment):
+                continue
+            if not isinstance(statement.value, frog_ast.BinaryOperation):
+                continue
+            if not isinstance(
+                statement.value.left_expression, frog_ast.Variable
+            ) or not isinstance(statement.value.right_expression, frog_ast.Variable):
+                continue
+            # Concatenate in this context
+            if statement.value.operator is not frog_ast.BinaryOperators.OR:
+                continue
+
+            # Step 1, find type of variables (to get length)
+            # Step 2, determine lengths
+            # Step 3, replace, so long as statement and left/right are not changed
+
+            def find_declaration(variable: str, node: frog_ast.ASTNode):
+                return (
+                    isinstance(node, (frog_ast.Assignment, frog_ast.Sample))
+                    and isinstance(node.var, frog_ast.Variable)
+                    and node.var.name == variable
+                    and isinstance(node.the_type, frog_ast.BitStringType)
+                    and node.the_type.parameterization is not None
+                )
+
+            left_declaration = SearchVisitor(
+                functools.partial(
+                    find_declaration, statement.value.left_expression.name
+                )
+            ).visit(block)
+            right_declaration = SearchVisitor(
+                functools.partial(
+                    find_declaration, statement.value.right_expression.name
+                )
+            ).visit(block)
+            if left_declaration is None or right_declaration is None:
+                continue
+
+            assert isinstance(left_declaration, (frog_ast.Assignment, frog_ast.Sample))
+            assert isinstance(right_declaration, (frog_ast.Assignment, frog_ast.Sample))
+            assert isinstance(
+                left_declaration.the_type, frog_ast.BitStringType
+            ) and isinstance(right_declaration.the_type, frog_ast.BitStringType)
+            assert (
+                left_declaration.the_type.parameterization is not None
+                and right_declaration.the_type.parameterization is not None
+            )
+            left_len = left_declaration.the_type.parameterization
+            right_len = left_declaration.the_type.parameterization
+
+            if not isinstance(left_len, frog_ast.Variable) or not isinstance(
+                right_len, frog_ast.Variable
+            ):
+                continue
+            if (
+                not left_len.name in self.variables
+                or not right_len.name in self.variables
+            ):
+                continue
+            end_length = self.variables[left_len.name] + self.variables[right_len.name]
+
+            left_slice = frog_ast.Slice(
+                frog_ast.Variable(statement.var.name), frog_ast.Integer(0), left_len
+            )
+            right_slice = frog_ast.Slice(
+                frog_ast.Variable(statement.var.name),
+                left_len,
+                frog_parser.parse_expression(str(end_length)),
+            )
+
+            remaining_block = frog_ast.Block(block.statements[index + 1 :])
+
+            def use_or_reassignment(
+                no_touch_vars: list[frog_ast.Variable],
+                slices: list[frog_ast.Slice],
+                node: frog_ast.ASTNode,
+            ) -> bool:
+                return (
+                    isinstance(node, (frog_ast.Assignment, frog_ast.Sample))
+                    and (node.var in no_touch_vars)
+                ) or node in slices
+
+            made_transformation = False
+            while True:
+                to_transform = SearchVisitor[
+                    frog_ast.Assignment | frog_ast.Sample | frog_ast.Slice
+                ](
+                    functools.partial(
+                        use_or_reassignment,
+                        [statement.var, left_declaration.var, right_declaration.var],
+                        [left_slice, right_slice],
+                    )
+                ).visit(
+                    remaining_block
+                )
+
+                if (
+                    isinstance(to_transform, (frog_ast.Assignment, frog_ast.Sample))
+                    or to_transform is None
+                ):
+                    break
+
+                made_transformation = True
+
+                remaining_block = ReplaceTransformer(
+                    to_transform,
+                    left_declaration.var
+                    if to_transform == left_slice
+                    else right_declaration.var,
+                ).transform(remaining_block)
+            if not made_transformation:
+                continue
+            return self.transform_block(
+                frog_ast.Block(copy.deepcopy(block.statements[:index]))
+                + remaining_block
+            )
+
+        return block
+
+
 class VariableStandardizingTransformer(BlockTransformer):
     def __init__(self) -> None:
         self.variable_counter = 0
@@ -374,3 +503,46 @@ class InstantiationTransformer(Transformer):
             if the_field is not None:
                 return copy.deepcopy(the_field)
         return field_access
+
+
+class SymbolicComputationTransformer(Transformer):
+    def __init__(self, variables: dict[str, symbols]) -> None:
+        self.variables = variables
+        self.computation_stack = []
+
+    def transform_variable(self, variable: frog_ast.Variable) -> frog_ast.Variable:
+        if variable.name in self.variables:
+            self.computation_stack.append(self.variables[variable.name])
+        return variable
+
+    def transform_integer(self, integer: frog_ast.Integer) -> frog_ast.Integer:
+        self.computation_stack.append(integer.num)
+        return integer
+
+    def transform_binary_operation(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> frog_ast.ASTNode:
+        old_len = len(self.computation_stack)
+        transformed_left = self.transform(binary_operation.left_expression)
+        transformed_right = self.transform(binary_operation.right_expression)
+        if len(self.computation_stack) == 2 + old_len:
+            simplified_expression = None
+            operators = {
+                frog_ast.BinaryOperators.ADD: operator.add,
+                frog_ast.BinaryOperators.SUBTRACT: operator.sub,
+                frog_ast.BinaryOperators.MULTIPLY: operator.mul,
+                frog_ast.BinaryOperators.DIVIDE: operator.truediv,
+            }
+            if binary_operation.operator in operators:
+                simplified_expression = operators[binary_operation.operator](
+                    self.computation_stack[-1], self.computation_stack[-2]
+                )
+            if simplified_expression is not None:
+                self.computation_stack.pop()
+                self.computation_stack.pop()
+                self.computation_stack.append(simplified_expression)
+                return frog_parser.parse_expression(str(simplified_expression))
+
+        return frog_ast.BinaryOperation(
+            binary_operation.operator, transformed_left, transformed_right
+        )

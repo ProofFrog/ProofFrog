@@ -1,0 +1,16 @@
+Game Concatenate(Int len1, Int len2) {
+    BitString<len1 + len2> Query() {
+        BitString<len1> x <- BitString<len1>;
+        BitString<len2> y <- BitString<len2>;
+        return x || y;
+    }
+}
+
+Game SampleDirectly(Int len1, Int len2) {
+    BitString<len1 + len2> Query() {
+        BitString<len1 + len2> value <- BitString<len1 + len2>;
+        return value;
+    }
+}
+
+export as BitStringSampling;

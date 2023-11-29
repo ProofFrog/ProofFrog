@@ -80,15 +80,17 @@ type: type QUESTION #optionalType
 	| lvalue # lvalueType
 	;
 
-integerExpression: lvalue
-	| BINARYNUM
-	| INT
+integerExpression
+	: integerExpression TIMES integerExpression
+	| integerExpression DIVIDE integerExpression
 	| integerExpression PLUS integerExpression
-	| integerExpression TIMES integerExpression
 	| integerExpression SUBTRACT integerExpression
-	| integerExpression DIVIDE integerExpression;
+	| lvalue
+	| INT
+	| BINARYNUM
+	;
 
-bitstring: BITSTRING | BITSTRING L_ANGLE integerExpression R_ANGLE;
+bitstring: BITSTRING L_ANGLE integerExpression R_ANGLE | BITSTRING;
 
 set: SET L_ANGLE type R_ANGLE | SET;
 

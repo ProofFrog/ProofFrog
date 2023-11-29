@@ -218,16 +218,16 @@ def serializedATN():
         28,0,552,550,1,0,0,0,553,554,1,0,0,0,554,552,1,0,0,0,554,555,1,0,
         0,0,555,557,1,0,0,0,556,547,1,0,0,0,556,549,1,0,0,0,557,560,1,0,
         0,0,558,556,1,0,0,0,558,559,1,0,0,0,559,57,1,0,0,0,560,558,1,0,0,
-        0,561,562,6,29,-1,0,562,566,3,44,22,0,563,566,5,63,0,0,564,566,5,
-        64,0,0,565,561,1,0,0,0,565,563,1,0,0,0,565,564,1,0,0,0,566,581,1,
-        0,0,0,567,568,10,4,0,0,568,569,5,27,0,0,569,580,3,58,29,5,570,571,
-        10,3,0,0,571,572,5,25,0,0,572,580,3,58,29,4,573,574,10,2,0,0,574,
-        575,5,28,0,0,575,580,3,58,29,3,576,577,10,1,0,0,577,578,5,29,0,0,
-        578,580,3,58,29,2,579,567,1,0,0,0,579,570,1,0,0,0,579,573,1,0,0,
+        0,561,562,6,29,-1,0,562,566,3,44,22,0,563,566,5,64,0,0,564,566,5,
+        63,0,0,565,561,1,0,0,0,565,563,1,0,0,0,565,564,1,0,0,0,566,581,1,
+        0,0,0,567,568,10,7,0,0,568,569,5,25,0,0,569,580,3,58,29,8,570,571,
+        10,6,0,0,571,572,5,29,0,0,572,580,3,58,29,7,573,574,10,5,0,0,574,
+        575,5,27,0,0,575,580,3,58,29,6,576,577,10,4,0,0,577,578,5,28,0,0,
+        578,580,3,58,29,5,579,567,1,0,0,0,579,570,1,0,0,0,579,573,1,0,0,
         0,579,576,1,0,0,0,580,583,1,0,0,0,581,579,1,0,0,0,581,582,1,0,0,
-        0,582,59,1,0,0,0,583,581,1,0,0,0,584,591,5,47,0,0,585,586,5,47,0,
-        0,586,587,5,19,0,0,587,588,3,58,29,0,588,589,5,20,0,0,589,591,1,
-        0,0,0,590,584,1,0,0,0,590,585,1,0,0,0,591,61,1,0,0,0,592,593,5,41,
+        0,582,59,1,0,0,0,583,581,1,0,0,0,584,585,5,47,0,0,585,586,5,19,0,
+        0,586,587,3,58,29,0,587,588,5,20,0,0,588,591,1,0,0,0,589,591,5,47,
+        0,0,590,584,1,0,0,0,590,589,1,0,0,0,591,61,1,0,0,0,592,593,5,41,
         0,0,593,594,5,19,0,0,594,595,3,56,28,0,595,596,5,20,0,0,596,599,
         1,0,0,0,597,599,5,41,0,0,598,592,1,0,0,0,598,597,1,0,0,0,599,63,
         1,0,0,0,600,601,5,46,0,0,601,604,5,68,0,0,602,603,5,58,0,0,603,605,
@@ -4308,11 +4308,11 @@ class ProofParser ( Parser ):
             return self.getTypedRuleContext(ProofParser.LvalueContext,0)
 
 
-        def BINARYNUM(self):
-            return self.getToken(ProofParser.BINARYNUM, 0)
-
         def INT(self):
             return self.getToken(ProofParser.INT, 0)
+
+        def BINARYNUM(self):
+            return self.getToken(ProofParser.BINARYNUM, 0)
 
         def integerExpression(self, i:int=None):
             if i is None:
@@ -4321,17 +4321,17 @@ class ProofParser ( Parser ):
                 return self.getTypedRuleContext(ProofParser.IntegerExpressionContext,i)
 
 
-        def PLUS(self):
-            return self.getToken(ProofParser.PLUS, 0)
-
         def TIMES(self):
             return self.getToken(ProofParser.TIMES, 0)
 
-        def SUBTRACT(self):
-            return self.getToken(ProofParser.SUBTRACT, 0)
-
         def DIVIDE(self):
             return self.getToken(ProofParser.DIVIDE, 0)
+
+        def PLUS(self):
+            return self.getToken(ProofParser.PLUS, 0)
+
+        def SUBTRACT(self):
+            return self.getToken(ProofParser.SUBTRACT, 0)
 
         def getRuleIndex(self):
             return ProofParser.RULE_integerExpression
@@ -4360,13 +4360,13 @@ class ProofParser ( Parser ):
                 self.state = 562
                 self.lvalue()
                 pass
-            elif token in [63]:
-                self.state = 563
-                self.match(ProofParser.BINARYNUM)
-                pass
             elif token in [64]:
-                self.state = 564
+                self.state = 563
                 self.match(ProofParser.INT)
+                pass
+            elif token in [63]:
+                self.state = 564
+                self.match(ProofParser.BINARYNUM)
                 pass
             else:
                 raise NoViableAltException(self)
@@ -4387,52 +4387,52 @@ class ProofParser ( Parser ):
                         localctx = ProofParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
                         self.state = 567
-                        if not self.precpred(self._ctx, 4):
+                        if not self.precpred(self._ctx, 7):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 4)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 7)")
                         self.state = 568
-                        self.match(ProofParser.PLUS)
+                        self.match(ProofParser.TIMES)
                         self.state = 569
-                        self.integerExpression(5)
+                        self.integerExpression(8)
                         pass
 
                     elif la_ == 2:
                         localctx = ProofParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
                         self.state = 570
-                        if not self.precpred(self._ctx, 3):
+                        if not self.precpred(self._ctx, 6):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 3)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 6)")
                         self.state = 571
-                        self.match(ProofParser.TIMES)
+                        self.match(ProofParser.DIVIDE)
                         self.state = 572
-                        self.integerExpression(4)
+                        self.integerExpression(7)
                         pass
 
                     elif la_ == 3:
                         localctx = ProofParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
                         self.state = 573
-                        if not self.precpred(self._ctx, 2):
+                        if not self.precpred(self._ctx, 5):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 2)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 5)")
                         self.state = 574
-                        self.match(ProofParser.SUBTRACT)
+                        self.match(ProofParser.PLUS)
                         self.state = 575
-                        self.integerExpression(3)
+                        self.integerExpression(6)
                         pass
 
                     elif la_ == 4:
                         localctx = ProofParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
                         self.state = 576
-                        if not self.precpred(self._ctx, 1):
+                        if not self.precpred(self._ctx, 4):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 1)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 4)")
                         self.state = 577
-                        self.match(ProofParser.DIVIDE)
+                        self.match(ProofParser.SUBTRACT)
                         self.state = 578
-                        self.integerExpression(2)
+                        self.integerExpression(5)
                         pass
 
              
@@ -4493,18 +4493,18 @@ class ProofParser ( Parser ):
                 self.enterOuterAlt(localctx, 1)
                 self.state = 584
                 self.match(ProofParser.BITSTRING)
+                self.state = 585
+                self.match(ProofParser.L_ANGLE)
+                self.state = 586
+                self.integerExpression(0)
+                self.state = 587
+                self.match(ProofParser.R_ANGLE)
                 pass
 
             elif la_ == 2:
                 self.enterOuterAlt(localctx, 2)
-                self.state = 585
+                self.state = 589
                 self.match(ProofParser.BITSTRING)
-                self.state = 586
-                self.match(ProofParser.L_ANGLE)
-                self.state = 587
-                self.integerExpression(0)
-                self.state = 588
-                self.match(ProofParser.R_ANGLE)
                 pass
 
 
@@ -4796,19 +4796,19 @@ class ProofParser ( Parser ):
 
     def integerExpression_sempred(self, localctx:IntegerExpressionContext, predIndex:int):
             if predIndex == 20:
-                return self.precpred(self._ctx, 4)
+                return self.precpred(self._ctx, 7)
          
 
             if predIndex == 21:
-                return self.precpred(self._ctx, 3)
+                return self.precpred(self._ctx, 6)
          
 
             if predIndex == 22:
-                return self.precpred(self._ctx, 2)
+                return self.precpred(self._ctx, 5)
          
 
             if predIndex == 23:
-                return self.precpred(self._ctx, 1)
+                return self.precpred(self._ctx, 4)
          
 
 

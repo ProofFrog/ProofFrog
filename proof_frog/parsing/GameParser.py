@@ -164,23 +164,23 @@ def serializedATN():
         1,0,0,0,405,406,1,0,0,0,406,408,1,0,0,0,407,398,1,0,0,0,407,400,
         1,0,0,0,408,411,1,0,0,0,409,407,1,0,0,0,409,410,1,0,0,0,410,33,1,
         0,0,0,411,409,1,0,0,0,412,413,6,17,-1,0,413,417,3,20,10,0,414,417,
-        5,51,0,0,415,417,5,52,0,0,416,412,1,0,0,0,416,414,1,0,0,0,416,415,
-        1,0,0,0,417,432,1,0,0,0,418,419,10,4,0,0,419,420,5,15,0,0,420,431,
-        3,34,17,5,421,422,10,3,0,0,422,423,5,13,0,0,423,431,3,34,17,4,424,
-        425,10,2,0,0,425,426,5,16,0,0,426,431,3,34,17,3,427,428,10,1,0,0,
-        428,429,5,17,0,0,429,431,3,34,17,2,430,418,1,0,0,0,430,421,1,0,0,
+        5,52,0,0,415,417,5,51,0,0,416,412,1,0,0,0,416,414,1,0,0,0,416,415,
+        1,0,0,0,417,432,1,0,0,0,418,419,10,7,0,0,419,420,5,13,0,0,420,431,
+        3,34,17,8,421,422,10,6,0,0,422,423,5,17,0,0,423,431,3,34,17,7,424,
+        425,10,5,0,0,425,426,5,15,0,0,426,431,3,34,17,6,427,428,10,4,0,0,
+        428,429,5,16,0,0,429,431,3,34,17,5,430,418,1,0,0,0,430,421,1,0,0,
         0,430,424,1,0,0,0,430,427,1,0,0,0,431,434,1,0,0,0,432,430,1,0,0,
-        0,432,433,1,0,0,0,433,35,1,0,0,0,434,432,1,0,0,0,435,442,5,35,0,
-        0,436,437,5,35,0,0,437,438,5,7,0,0,438,439,3,34,17,0,439,440,5,8,
-        0,0,440,442,1,0,0,0,441,435,1,0,0,0,441,436,1,0,0,0,442,37,1,0,0,
-        0,443,444,5,29,0,0,444,445,5,7,0,0,445,446,3,32,16,0,446,447,5,8,
-        0,0,447,450,1,0,0,0,448,450,5,29,0,0,449,443,1,0,0,0,449,448,1,0,
-        0,0,450,39,1,0,0,0,451,452,5,34,0,0,452,455,5,56,0,0,453,454,5,46,
-        0,0,454,456,5,53,0,0,455,453,1,0,0,0,455,456,1,0,0,0,456,457,1,0,
-        0,0,457,458,5,9,0,0,458,41,1,0,0,0,459,460,7,0,0,0,460,43,1,0,0,
-        0,39,47,64,76,82,89,95,101,103,110,120,130,143,177,200,205,227,236,
-        238,245,254,271,274,283,286,297,350,360,362,370,396,405,407,409,
-        416,430,432,441,449,455
+        0,432,433,1,0,0,0,433,35,1,0,0,0,434,432,1,0,0,0,435,436,5,35,0,
+        0,436,437,5,7,0,0,437,438,3,34,17,0,438,439,5,8,0,0,439,442,1,0,
+        0,0,440,442,5,35,0,0,441,435,1,0,0,0,441,440,1,0,0,0,442,37,1,0,
+        0,0,443,444,5,29,0,0,444,445,5,7,0,0,445,446,3,32,16,0,446,447,5,
+        8,0,0,447,450,1,0,0,0,448,450,5,29,0,0,449,443,1,0,0,0,449,448,1,
+        0,0,0,450,39,1,0,0,0,451,452,5,34,0,0,452,455,5,56,0,0,453,454,5,
+        46,0,0,454,456,5,53,0,0,455,453,1,0,0,0,455,456,1,0,0,0,456,457,
+        1,0,0,0,457,458,5,9,0,0,458,41,1,0,0,0,459,460,7,0,0,0,460,43,1,
+        0,0,0,39,47,64,76,82,89,95,101,103,110,120,130,143,177,200,205,227,
+        236,238,245,254,271,274,283,286,297,350,360,362,370,396,405,407,
+        409,416,430,432,441,449,455
     ]
 
 class GameParser ( Parser ):
@@ -3250,11 +3250,11 @@ class GameParser ( Parser ):
             return self.getTypedRuleContext(GameParser.LvalueContext,0)
 
 
-        def BINARYNUM(self):
-            return self.getToken(GameParser.BINARYNUM, 0)
-
         def INT(self):
             return self.getToken(GameParser.INT, 0)
+
+        def BINARYNUM(self):
+            return self.getToken(GameParser.BINARYNUM, 0)
 
         def integerExpression(self, i:int=None):
             if i is None:
@@ -3263,17 +3263,17 @@ class GameParser ( Parser ):
                 return self.getTypedRuleContext(GameParser.IntegerExpressionContext,i)
 
 
-        def PLUS(self):
-            return self.getToken(GameParser.PLUS, 0)
-
         def TIMES(self):
             return self.getToken(GameParser.TIMES, 0)
 
-        def SUBTRACT(self):
-            return self.getToken(GameParser.SUBTRACT, 0)
-
         def DIVIDE(self):
             return self.getToken(GameParser.DIVIDE, 0)
+
+        def PLUS(self):
+            return self.getToken(GameParser.PLUS, 0)
+
+        def SUBTRACT(self):
+            return self.getToken(GameParser.SUBTRACT, 0)
 
         def getRuleIndex(self):
             return GameParser.RULE_integerExpression
@@ -3302,13 +3302,13 @@ class GameParser ( Parser ):
                 self.state = 413
                 self.lvalue()
                 pass
-            elif token in [51]:
-                self.state = 414
-                self.match(GameParser.BINARYNUM)
-                pass
             elif token in [52]:
-                self.state = 415
+                self.state = 414
                 self.match(GameParser.INT)
+                pass
+            elif token in [51]:
+                self.state = 415
+                self.match(GameParser.BINARYNUM)
                 pass
             else:
                 raise NoViableAltException(self)
@@ -3329,52 +3329,52 @@ class GameParser ( Parser ):
                         localctx = GameParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
                         self.state = 418
-                        if not self.precpred(self._ctx, 4):
+                        if not self.precpred(self._ctx, 7):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 4)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 7)")
                         self.state = 419
-                        self.match(GameParser.PLUS)
+                        self.match(GameParser.TIMES)
                         self.state = 420
-                        self.integerExpression(5)
+                        self.integerExpression(8)
                         pass
 
                     elif la_ == 2:
                         localctx = GameParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
                         self.state = 421
-                        if not self.precpred(self._ctx, 3):
+                        if not self.precpred(self._ctx, 6):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 3)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 6)")
                         self.state = 422
-                        self.match(GameParser.TIMES)
+                        self.match(GameParser.DIVIDE)
                         self.state = 423
-                        self.integerExpression(4)
+                        self.integerExpression(7)
                         pass
 
                     elif la_ == 3:
                         localctx = GameParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
                         self.state = 424
-                        if not self.precpred(self._ctx, 2):
+                        if not self.precpred(self._ctx, 5):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 2)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 5)")
                         self.state = 425
-                        self.match(GameParser.SUBTRACT)
+                        self.match(GameParser.PLUS)
                         self.state = 426
-                        self.integerExpression(3)
+                        self.integerExpression(6)
                         pass
 
                     elif la_ == 4:
                         localctx = GameParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
                         self.state = 427
-                        if not self.precpred(self._ctx, 1):
+                        if not self.precpred(self._ctx, 4):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 1)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 4)")
                         self.state = 428
-                        self.match(GameParser.DIVIDE)
+                        self.match(GameParser.SUBTRACT)
                         self.state = 429
-                        self.integerExpression(2)
+                        self.integerExpression(5)
                         pass
 
              
@@ -3435,18 +3435,18 @@ class GameParser ( Parser ):
                 self.enterOuterAlt(localctx, 1)
                 self.state = 435
                 self.match(GameParser.BITSTRING)
+                self.state = 436
+                self.match(GameParser.L_ANGLE)
+                self.state = 437
+                self.integerExpression(0)
+                self.state = 438
+                self.match(GameParser.R_ANGLE)
                 pass
 
             elif la_ == 2:
                 self.enterOuterAlt(localctx, 2)
-                self.state = 436
+                self.state = 440
                 self.match(GameParser.BITSTRING)
-                self.state = 437
-                self.match(GameParser.L_ANGLE)
-                self.state = 438
-                self.integerExpression(0)
-                self.state = 439
-                self.match(GameParser.R_ANGLE)
                 pass
 
 
@@ -3738,19 +3738,19 @@ class GameParser ( Parser ):
 
     def integerExpression_sempred(self, localctx:IntegerExpressionContext, predIndex:int):
             if predIndex == 20:
-                return self.precpred(self._ctx, 4)
+                return self.precpred(self._ctx, 7)
          
 
             if predIndex == 21:
-                return self.precpred(self._ctx, 3)
+                return self.precpred(self._ctx, 6)
          
 
             if predIndex == 22:
-                return self.precpred(self._ctx, 2)
+                return self.precpred(self._ctx, 5)
          
 
             if predIndex == 23:
-                return self.precpred(self._ctx, 1)
+                return self.precpred(self._ctx, 4)
          
 
 

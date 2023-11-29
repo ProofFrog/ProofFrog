@@ -607,6 +607,13 @@ def parse_scheme_file(scheme: str) -> frog_ast.Scheme:
     return ast
 
 
+def parse_expression(expression: str) -> frog_ast.Expression:
+    ast: frog_ast.Expression = _SharedAST().visit(
+        _get_parser(expression, GameLexer, GameParser).expression()
+    )
+    return ast
+
+
 def parse_game_file(game_file: str) -> frog_ast.GameFile:
     ast: frog_ast.GameFile = _GameASTGenerator().visit(
         _get_parser(game_file, GameLexer, GameParser).program()

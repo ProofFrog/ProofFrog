@@ -174,16 +174,16 @@ def serializedATN():
         426,1,0,0,0,429,430,1,0,0,0,430,428,1,0,0,0,430,431,1,0,0,0,431,
         433,1,0,0,0,432,423,1,0,0,0,432,425,1,0,0,0,433,436,1,0,0,0,434,
         432,1,0,0,0,434,435,1,0,0,0,435,35,1,0,0,0,436,434,1,0,0,0,437,438,
-        6,18,-1,0,438,442,3,22,11,0,439,442,5,54,0,0,440,442,5,55,0,0,441,
+        6,18,-1,0,438,442,3,22,11,0,439,442,5,55,0,0,440,442,5,54,0,0,441,
         437,1,0,0,0,441,439,1,0,0,0,441,440,1,0,0,0,442,457,1,0,0,0,443,
-        444,10,4,0,0,444,445,5,18,0,0,445,456,3,36,18,5,446,447,10,3,0,0,
-        447,448,5,16,0,0,448,456,3,36,18,4,449,450,10,2,0,0,450,451,5,19,
-        0,0,451,456,3,36,18,3,452,453,10,1,0,0,453,454,5,20,0,0,454,456,
-        3,36,18,2,455,443,1,0,0,0,455,446,1,0,0,0,455,449,1,0,0,0,455,452,
+        444,10,7,0,0,444,445,5,16,0,0,445,456,3,36,18,8,446,447,10,6,0,0,
+        447,448,5,20,0,0,448,456,3,36,18,7,449,450,10,5,0,0,450,451,5,18,
+        0,0,451,456,3,36,18,6,452,453,10,4,0,0,453,454,5,19,0,0,454,456,
+        3,36,18,5,455,443,1,0,0,0,455,446,1,0,0,0,455,449,1,0,0,0,455,452,
         1,0,0,0,456,459,1,0,0,0,457,455,1,0,0,0,457,458,1,0,0,0,458,37,1,
-        0,0,0,459,457,1,0,0,0,460,467,5,38,0,0,461,462,5,38,0,0,462,463,
-        5,10,0,0,463,464,3,36,18,0,464,465,5,11,0,0,465,467,1,0,0,0,466,
-        460,1,0,0,0,466,461,1,0,0,0,467,39,1,0,0,0,468,469,5,32,0,0,469,
+        0,0,0,459,457,1,0,0,0,460,461,5,38,0,0,461,462,5,10,0,0,462,463,
+        3,36,18,0,463,464,5,11,0,0,464,467,1,0,0,0,465,467,5,38,0,0,466,
+        460,1,0,0,0,466,465,1,0,0,0,467,39,1,0,0,0,468,469,5,32,0,0,469,
         470,5,10,0,0,470,471,3,34,17,0,471,472,5,11,0,0,472,475,1,0,0,0,
         473,475,5,32,0,0,474,468,1,0,0,0,474,473,1,0,0,0,475,41,1,0,0,0,
         476,477,5,37,0,0,477,480,5,59,0,0,478,479,5,49,0,0,479,481,5,56,
@@ -3402,11 +3402,11 @@ class SchemeParser ( Parser ):
             return self.getTypedRuleContext(SchemeParser.LvalueContext,0)
 
 
-        def BINARYNUM(self):
-            return self.getToken(SchemeParser.BINARYNUM, 0)
-
         def INT(self):
             return self.getToken(SchemeParser.INT, 0)
+
+        def BINARYNUM(self):
+            return self.getToken(SchemeParser.BINARYNUM, 0)
 
         def integerExpression(self, i:int=None):
             if i is None:
@@ -3415,17 +3415,17 @@ class SchemeParser ( Parser ):
                 return self.getTypedRuleContext(SchemeParser.IntegerExpressionContext,i)
 
 
-        def PLUS(self):
-            return self.getToken(SchemeParser.PLUS, 0)
-
         def TIMES(self):
             return self.getToken(SchemeParser.TIMES, 0)
 
-        def SUBTRACT(self):
-            return self.getToken(SchemeParser.SUBTRACT, 0)
-
         def DIVIDE(self):
             return self.getToken(SchemeParser.DIVIDE, 0)
+
+        def PLUS(self):
+            return self.getToken(SchemeParser.PLUS, 0)
+
+        def SUBTRACT(self):
+            return self.getToken(SchemeParser.SUBTRACT, 0)
 
         def getRuleIndex(self):
             return SchemeParser.RULE_integerExpression
@@ -3454,13 +3454,13 @@ class SchemeParser ( Parser ):
                 self.state = 438
                 self.lvalue()
                 pass
-            elif token in [54]:
-                self.state = 439
-                self.match(SchemeParser.BINARYNUM)
-                pass
             elif token in [55]:
-                self.state = 440
+                self.state = 439
                 self.match(SchemeParser.INT)
+                pass
+            elif token in [54]:
+                self.state = 440
+                self.match(SchemeParser.BINARYNUM)
                 pass
             else:
                 raise NoViableAltException(self)
@@ -3481,52 +3481,52 @@ class SchemeParser ( Parser ):
                         localctx = SchemeParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
                         self.state = 443
-                        if not self.precpred(self._ctx, 4):
+                        if not self.precpred(self._ctx, 7):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 4)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 7)")
                         self.state = 444
-                        self.match(SchemeParser.PLUS)
+                        self.match(SchemeParser.TIMES)
                         self.state = 445
-                        self.integerExpression(5)
+                        self.integerExpression(8)
                         pass
 
                     elif la_ == 2:
                         localctx = SchemeParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
                         self.state = 446
-                        if not self.precpred(self._ctx, 3):
+                        if not self.precpred(self._ctx, 6):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 3)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 6)")
                         self.state = 447
-                        self.match(SchemeParser.TIMES)
+                        self.match(SchemeParser.DIVIDE)
                         self.state = 448
-                        self.integerExpression(4)
+                        self.integerExpression(7)
                         pass
 
                     elif la_ == 3:
                         localctx = SchemeParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
                         self.state = 449
-                        if not self.precpred(self._ctx, 2):
+                        if not self.precpred(self._ctx, 5):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 2)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 5)")
                         self.state = 450
-                        self.match(SchemeParser.SUBTRACT)
+                        self.match(SchemeParser.PLUS)
                         self.state = 451
-                        self.integerExpression(3)
+                        self.integerExpression(6)
                         pass
 
                     elif la_ == 4:
                         localctx = SchemeParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
                         self.state = 452
-                        if not self.precpred(self._ctx, 1):
+                        if not self.precpred(self._ctx, 4):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 1)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 4)")
                         self.state = 453
-                        self.match(SchemeParser.DIVIDE)
+                        self.match(SchemeParser.SUBTRACT)
                         self.state = 454
-                        self.integerExpression(2)
+                        self.integerExpression(5)
                         pass
 
              
@@ -3587,18 +3587,18 @@ class SchemeParser ( Parser ):
                 self.enterOuterAlt(localctx, 1)
                 self.state = 460
                 self.match(SchemeParser.BITSTRING)
+                self.state = 461
+                self.match(SchemeParser.L_ANGLE)
+                self.state = 462
+                self.integerExpression(0)
+                self.state = 463
+                self.match(SchemeParser.R_ANGLE)
                 pass
 
             elif la_ == 2:
                 self.enterOuterAlt(localctx, 2)
-                self.state = 461
+                self.state = 465
                 self.match(SchemeParser.BITSTRING)
-                self.state = 462
-                self.match(SchemeParser.L_ANGLE)
-                self.state = 463
-                self.integerExpression(0)
-                self.state = 464
-                self.match(SchemeParser.R_ANGLE)
                 pass
 
 
@@ -3890,19 +3890,19 @@ class SchemeParser ( Parser ):
 
     def integerExpression_sempred(self, localctx:IntegerExpressionContext, predIndex:int):
             if predIndex == 20:
-                return self.precpred(self._ctx, 4)
+                return self.precpred(self._ctx, 7)
          
 
             if predIndex == 21:
-                return self.precpred(self._ctx, 3)
+                return self.precpred(self._ctx, 6)
          
 
             if predIndex == 22:
-                return self.precpred(self._ctx, 2)
+                return self.precpred(self._ctx, 5)
          
 
             if predIndex == 23:
-                return self.precpred(self._ctx, 1)
+                return self.precpred(self._ctx, 4)
          
 
 

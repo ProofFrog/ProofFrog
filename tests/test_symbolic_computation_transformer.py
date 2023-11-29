@@ -33,6 +33,19 @@ from sympy import symbols
         """,
             {"lambda": symbols("lambda")},
         ),
+        (
+            """
+        void f() {
+            return 3 + 5;
+        }
+        """,
+            """
+        void f() {
+            return 8;
+        }
+        """,
+            {},
+        ),
     ],
 )
 def test_symbolic_computation_transformer(

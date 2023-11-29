@@ -5,7 +5,7 @@ import copy
 import functools
 from typing import TypeAlias, Sequence, Tuple, Dict, Optional, Callable
 from colorama import Fore
-from sympy import symbols
+from sympy import Symbol
 from . import frog_parser
 from . import frog_ast
 from . import visitors
@@ -39,7 +39,7 @@ def prove(proof_file_name: str, verbose: bool) -> None:
     for game in proof_file.helpers:
         definition_namespace[game.name] = game
 
-    variables: dict[str, symbols] = {}
+    variables: dict[str, Symbol | frog_ast.Expression] = {}
 
     # Here, we are substituting the lets with the parameters they are given
     for let in proof_file.lets:
@@ -62,9 +62,11 @@ def prove(proof_file_name: str, verbose: bool) -> None:
             proof_namespace[let.name] = copy.deepcopy(let.value)
             print(let, let.type)
             if isinstance(let.type, frog_ast.IntType):
-                variables[let.name] = (
-                    symbols(let.name) if let.value is None else let.value
-                )
+                if let.value is not None:
+                    variables[let.name] = let.value
+                else:
+                    sympy_symbol: Symbol = Symbol(let.name)  # type: ignore
+                    variables[let.name] = sympy_symbol
 
     method_lookup: MethodLookup = get_method_lookup(proof_namespace)
 

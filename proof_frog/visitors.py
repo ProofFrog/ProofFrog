@@ -1,9 +1,9 @@
 import copy
 import functools
-from abc import ABC, abstractmethod
-from typing import Any, Optional, TypeVar, Generic, Callable, cast, final, Tuple
-from sympy import symbols, parsing
 import operator
+from abc import ABC, abstractmethod
+from typing import Any, Optional, TypeVar, Generic, Callable, cast, final, Tuple, List
+from sympy import Symbol
 
 from proof_frog import frog_ast
 from proof_frog import frog_parser
@@ -266,7 +266,7 @@ class RemoveTupleTransformer(BlockTransformer):
 
 
 class SimplifySpliceTransformer(BlockTransformer):
-    def __init__(self, variables):
+    def __init__(self, variables: dict[str, Symbol | frog_ast.Expression]) -> None:
         self.variables = variables
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
@@ -287,7 +287,7 @@ class SimplifySpliceTransformer(BlockTransformer):
             # Step 2, determine lengths
             # Step 3, replace, so long as statement and left/right are not changed
 
-            def find_declaration(variable: str, node: frog_ast.ASTNode):
+            def find_declaration(variable: str, node: frog_ast.ASTNode) -> bool:
                 return (
                     isinstance(node, (frog_ast.Assignment, frog_ast.Sample))
                     and isinstance(node.var, frog_ast.Variable)
@@ -506,13 +506,15 @@ class InstantiationTransformer(Transformer):
 
 
 class SymbolicComputationTransformer(Transformer):
-    def __init__(self, variables: dict[str, symbols]) -> None:
+    def __init__(self, variables: dict[str, Symbol | frog_ast.Expression]) -> None:
         self.variables = variables
-        self.computation_stack = []
+        self.computation_stack: List[Symbol | int] = []
 
     def transform_variable(self, variable: frog_ast.Variable) -> frog_ast.Variable:
         if variable.name in self.variables:
-            self.computation_stack.append(self.variables[variable.name])
+            val = self.variables[variable.name]
+            assert isinstance(val, Symbol)
+            self.computation_stack.append(val)
         return variable
 
     def transform_integer(self, integer: frog_ast.Integer) -> frog_ast.Integer:

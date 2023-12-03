@@ -1,0 +1,53 @@
+import 'examples/Primitives/PubKeyEnc.primitive';
+import 'examples/Games/PubKeyEnc/CPA.game';
+import 'examples/Games/PubKeyEnc/OneTimeSecrecy.game';
+
+Reduction R(PubKeyEnc E, Int h) compose OneTimeSecrecy(E) against CPA(E).Adversary {
+    Int count;
+    E.PublicKey pk;
+
+    E.PublicKey Initialize(E.PublicKey one_time_pk) {
+        pk = one_time_pk;
+        count = 0;
+    }
+
+    E.Ciphertext Challenge(E.Message mL, E.Message mR) {
+        count = count + 1;
+        if (count < h) {
+            return E.Enc(pk, mR);
+        } else if (count == h) {
+            return challenger.Challenge(mL, mR);
+        } else {
+            return E.Enc(pk, mL);
+        }
+    }
+}
+
+proof:
+
+let:
+    Set MessageSpace;
+    Set CiphertextSpace;
+    Set PubKeySpace;
+    Set SecretKeySpace;
+
+    Int q;
+
+    PubKeyEnc E = PubKeyEnc(MessageSpace, CiphertextSpace, PubKeySpace, SecretKeySpace);
+
+assume:
+    OneTimeSecrecy(E);
+    calls <= q;
+
+theorem:
+    CPA(E);
+
+games:
+    CPA(E).Left against CPA(E).Adversary;
+
+    induction(i from 0 to q) {
+        OneTimeSecrecy(E).Left compose R(E, i) against CPA(E).Adversary;
+        OneTimeSecrecy(E).Right compose R(E, i) against CPA(E).Adversary;
+    }
+
+    CPA(E).Right against CPA(E).Adversary;

@@ -11,7 +11,7 @@ Game Left(PubKeyEnc E) {
         return pk;
     }
 
-    E.Ciphertext Challenge(E.Message mL, E.message mR) {
+    E.Ciphertext Challenge(E.Message mL, E.Message mR) {
         return E.Enc(pk, mL);
     }
 }
@@ -27,7 +27,7 @@ Game Right(PubKeyEnc E) {
         return pk;
     }
 
-    E.Ciphertext Challenge(E.Message mL, E.message mR) {
+    E.Ciphertext Challenge(E.Message mL, E.Message mR) {
         return E.Enc(pk, mR);
     }
 }

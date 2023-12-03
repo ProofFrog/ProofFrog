@@ -548,3 +548,32 @@ class SymbolicComputationTransformer(Transformer):
         return frog_ast.BinaryOperation(
             binary_operation.operator, transformed_left, transformed_right
         )
+
+
+class SimplifyIfTransformer(Transformer):
+    def transform_if_statement(
+        self, if_statement: frog_ast.IfStatement
+    ) -> frog_ast.IfStatement:
+        new_blocks: list[frog_ast.Block] = copy.deepcopy(if_statement.blocks)
+        new_conditions = copy.deepcopy(if_statement.conditions)
+        index = 0
+        while index < len(new_blocks) - (1 if not if_statement.has_else_block() else 2):
+            if new_blocks[index] == new_blocks[index + 1]:
+                del new_blocks[index]
+                new_conditions[index] = frog_ast.BinaryOperation(
+                    frog_ast.BinaryOperators.OR,
+                    copy.deepcopy(new_conditions[index]),
+                    copy.deepcopy(new_conditions[index + 1]),
+                )
+                del new_conditions[index + 1]
+            else:
+                index += 1
+
+        if if_statement.has_else_block():
+            if new_blocks[-1] == new_blocks[-2]:
+                del new_blocks[-1]
+                del new_conditions[-1]
+
+            if not new_conditions:
+                new_conditions = [frog_ast.Boolean(True)]
+        return frog_ast.IfStatement(new_conditions, new_blocks)

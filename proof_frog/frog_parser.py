@@ -46,7 +46,7 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         return frog_ast.OptionalType(self.visit(ctx.type_()))
 
     def visitBoolType(self, __: PrimitiveParser.BoolTypeContext) -> frog_ast.Type:
-        return frog_ast.Bool()
+        return frog_ast.BoolType()
 
     def visitBitStringType(
         self, ctx: PrimitiveParser.BitStringTypeContext
@@ -251,6 +251,9 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
 
     def visitIntExp(self, ctx: PrimitiveParser.IntExpContext) -> frog_ast.Integer:
         return frog_ast.Integer(int(ctx.INT().getText()))
+
+    def visitBoolExp(self, ctx: PrimitiveParser.BoolExpContext) -> frog_ast.Boolean:
+        return frog_ast.Boolean(bool(ctx.bool_().getText()))
 
     def visitBinaryNumExp(
         self, ctx: PrimitiveParser.BinaryNumExpContext

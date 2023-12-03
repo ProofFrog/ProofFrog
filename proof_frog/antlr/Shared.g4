@@ -61,6 +61,7 @@ expression: expression EQUALSCOMPARE expression #equalsExp
 	| type #typeExp
 	| BINARYNUM #binaryNumExp
 	| INT #intExp
+	| bool #boolExp
 	| NONE #noneExp
 	| L_PAREN expression R_PAREN #parenExp
 	;
@@ -93,6 +94,8 @@ integerExpression
 bitstring: BITSTRING L_ANGLE integerExpression R_ANGLE | BITSTRING;
 
 set: SET L_ANGLE type R_ANGLE | SET;
+
+bool: TRUE | FALSE;
 
 moduleImport: IMPORT FILESTRING (AS ID)? SEMI;
 
@@ -149,6 +152,9 @@ PHASE: 'Phase';
 ORACLES: 'oracles';
 ELSE: 'else';
 NONE: 'None';
+
+TRUE: 'true';
+FALSE: 'false';
 
 BINARYNUM: '0b'[01]+ ;
 INT: [0-9]+ ;

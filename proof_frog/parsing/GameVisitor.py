@@ -144,6 +144,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#boolExp.
+    def visitBoolExp(self, ctx:GameParser.BoolExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#notEqualsExp.
     def visitNotEqualsExp(self, ctx:GameParser.NotEqualsExpContext):
         return self.visitChildren(ctx)
@@ -326,6 +331,11 @@ class GameVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by GameParser#set.
     def visitSet(self, ctx:GameParser.SetContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#bool.
+    def visitBool(self, ctx:GameParser.BoolContext):
         return self.visitChildren(ctx)
 
 

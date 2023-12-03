@@ -54,7 +54,7 @@ class IntType(Type):
         return "Int"
 
 
-class Bool(Type):
+class BoolType(Type):
     def __init__(self) -> None:
         pass
 
@@ -420,11 +420,19 @@ class Assignment(Statement):
 
 
 class Integer(Expression):
-    def __init__(self, num: int):
+    def __init__(self, num: int) -> None:
         self.num = num
 
     def __str__(self) -> str:
         return str(self.num)
+
+
+class Boolean(Expression):
+    def __init__(self, the_bool: bool) -> None:
+        self.bool = the_bool
+
+    def __str__(self) -> str:
+        return str(self.bool).lower()
 
 
 class ASTNone(Expression):

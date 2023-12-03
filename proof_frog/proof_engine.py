@@ -58,9 +58,7 @@ def prove(proof_file_name: str, verbose: bool) -> None:
             else:
                 raise TypeError("Must instantiate either a Primitive or Scheme ")
         else:
-            print(let.name)
             proof_namespace[let.name] = copy.deepcopy(let.value)
-            print(let, let.type)
             if isinstance(let.type, frog_ast.IntType):
                 if let.value is not None:
                     variables[let.name] = let.value
@@ -79,135 +77,34 @@ def prove(proof_file_name: str, verbose: bool) -> None:
     assert isinstance(first_step, frog_ast.Step)
     assert isinstance(final_step, frog_ast.Step)
 
-    if first_step.challenger != proof_file.theorem:
+    if first_step.challenger.game != proof_file.theorem:
         print(Fore.RED + "Proof must start with a game matching theorem")
         print(Fore.RED + f"Theorem: {proof_file.theorem}")
         print(Fore.RED + f"First Game: {first_step.challenger}")
 
     for i in range(0, len(proof_file.steps) - 1):
+        print(f"===STEP {i}===")
         current_step = proof_file.steps[i]
         next_step = proof_file.steps[i + 1]
-        # Right now, cannot handle induction.
-        assert isinstance(current_step, frog_ast.Step)
-        assert isinstance(next_step, frog_ast.Step)
-
-        print(f"===STEP {i}===")
         print(f"Current: {current_step}")
         print(f"Hop To: {next_step}\n")
+
+        assert isinstance(current_step, frog_ast.Step)
+        assert isinstance(next_step, frog_ast.Step)
 
         if _is_by_assumption(proof_file, current_step, next_step):
             print("Valid by assumption")
             continue
 
-        current_game_ast = _get_game_ast(
-            definition_namespace, proof_namespace, current_step.challenger
+        prove_step(
+            current_step,
+            next_step,
+            definition_namespace,
+            proof_namespace,
+            method_lookup,
+            variables,
+            verbose,
         )
-        current_game_lookup = copy.deepcopy(method_lookup)
-        if current_step.reduction:
-            reduction = _get_game_ast(
-                definition_namespace, proof_namespace, current_step.reduction
-            )
-            assert isinstance(reduction, frog_ast.Reduction)
-            current_game_lookup.update(get_challenger_method_lookup(current_game_ast))
-            current_game_ast = apply_reduction(
-                current_game_ast, reduction, definition_namespace
-            )
-
-        next_game_lookup = copy.deepcopy(method_lookup)
-        next_game_ast = _get_game_ast(
-            definition_namespace, proof_namespace, next_step.challenger
-        )
-        if next_step.reduction:
-            reduction = _get_game_ast(
-                definition_namespace, proof_namespace, next_step.reduction
-            )
-            assert isinstance(reduction, frog_ast.Reduction)
-            next_game_lookup.update(get_challenger_method_lookup(next_game_ast))
-            next_game_ast = apply_reduction(
-                next_game_ast, reduction, definition_namespace
-            )
-
-        if verbose:
-            print("BASIC GAMES")
-            print(current_game_ast)
-            print(next_game_ast)
-        current_game_ast = inline_calls(current_game_lookup, current_game_ast)
-        next_game_ast = inline_calls(next_game_lookup, next_game_ast)
-
-        if verbose:
-            print("INLINED GAMES")
-            print(current_game_ast)
-            print(next_game_ast)
-
-        current_game_ast = visitors.RemoveTupleTransformer().transform(current_game_ast)
-        next_game_ast = visitors.RemoveTupleTransformer().transform(next_game_ast)
-
-        if verbose:
-            print("REMOVED TUPLES")
-            print(current_game_ast)
-            print(next_game_ast)
-
-        current_game_ast = visitors.SymbolicComputationTransformer(variables).transform(
-            current_game_ast
-        )
-        next_game_ast = visitors.SymbolicComputationTransformer(variables).transform(
-            next_game_ast
-        )
-
-        if verbose:
-            print("SYMBOLIC COMPUTATION")
-            print(current_game_ast)
-            print(next_game_ast)
-
-        current_game_ast = visitors.SimplifySpliceTransformer(variables).transform(
-            current_game_ast
-        )
-        next_game_ast = visitors.SimplifySpliceTransformer(variables).transform(
-            next_game_ast
-        )
-
-        if verbose:
-            print("SIMPLIFIED SPLICES")
-            print(current_game_ast)
-            print(next_game_ast)
-
-        current_game_ast = sort_game(current_game_ast, proof_namespace)
-        next_game_ast = sort_game(next_game_ast, proof_namespace)
-
-        current_game_ast = visitors.RedundantCopyTransformer().transform(
-            current_game_ast
-        )
-        next_game_ast = visitors.RedundantCopyTransformer().transform(next_game_ast)
-
-        if verbose:
-            print("REDUNDANCY REMOVED")
-            print(current_game_ast)
-            print(next_game_ast)
-
-        if verbose:
-            print("SORTED")
-            print(current_game_ast)
-            print(next_game_ast)
-
-        current_game_ast = visitors.VariableStandardizingTransformer().transform(
-            current_game_ast
-        )
-        next_game_ast = visitors.VariableStandardizingTransformer().transform(
-            next_game_ast
-        )
-
-        print("Current Game:")
-        print(current_game_ast)
-        print("Next Game:")
-        print(next_game_ast)
-
-        if current_game_ast == next_game_ast:
-            print("Inline Success!")
-            continue
-
-        print("Step failed!")
-        print(Fore.RED + "Proof Failed!")
-        sys.exit(1)
 
     assert isinstance(first_step.challenger, frog_ast.ConcreteGame)
     assert isinstance(final_step.challenger, frog_ast.ConcreteGame)
@@ -219,6 +116,128 @@ def prove(proof_file_name: str, verbose: bool) -> None:
         print(Fore.GREEN + "Proof Suceeded!")
         return
     print(Fore.YELLOW + "Proof Succeeded, but is incomplete")
+    sys.exit(1)
+
+
+def prove_step(
+    current_step: frog_ast.Step,
+    next_step: frog_ast.Step,
+    definition_namespace: frog_ast.Namespace,
+    proof_namespace: frog_ast.Namespace,
+    method_lookup: MethodLookup,
+    variables: dict[str, Symbol | frog_ast.Expression],
+    verbose: bool,
+) -> None:
+    current_game_ast = _get_game_ast(
+        definition_namespace, proof_namespace, current_step.challenger
+    )
+    current_game_lookup = copy.deepcopy(method_lookup)
+    if current_step.reduction:
+        reduction = _get_game_ast(
+            definition_namespace, proof_namespace, current_step.reduction
+        )
+        assert isinstance(reduction, frog_ast.Reduction)
+        current_game_lookup.update(get_challenger_method_lookup(current_game_ast))
+        current_game_ast = apply_reduction(
+            current_game_ast, reduction, definition_namespace
+        )
+
+    next_game_lookup = copy.deepcopy(method_lookup)
+    next_game_ast = _get_game_ast(
+        definition_namespace, proof_namespace, next_step.challenger
+    )
+    if next_step.reduction:
+        reduction = _get_game_ast(
+            definition_namespace, proof_namespace, next_step.reduction
+        )
+        assert isinstance(reduction, frog_ast.Reduction)
+        next_game_lookup.update(get_challenger_method_lookup(next_game_ast))
+        next_game_ast = apply_reduction(next_game_ast, reduction, definition_namespace)
+
+    if verbose:
+        print("BASIC GAMES")
+        print(current_game_ast)
+        print(next_game_ast)
+    current_game_ast = inline_calls(current_game_lookup, current_game_ast)
+    next_game_ast = inline_calls(next_game_lookup, next_game_ast)
+
+    if verbose:
+        print("INLINED GAMES")
+        print(current_game_ast)
+        print(next_game_ast)
+
+    repeatable_ast_manipulators = [
+        {
+            "fn": lambda ast: visitors.RemoveTupleTransformer().transform(ast),
+            "name": "Remove Tuples",
+        },
+        {
+            "fn": lambda ast: visitors.SymbolicComputationTransformer(
+                variables
+            ).transform(ast),
+            "name": "Symbolic Computation",
+        },
+        {
+            "fn": lambda ast: visitors.SimplifySpliceTransformer(variables).transform(
+                ast
+            ),
+            "name": "Simplifying Splices",
+        },
+        {
+            "fn": lambda ast: visitors.RedundantCopyTransformer().transform(ast),
+            "name": "Remove Redundant Copies",
+        },
+        {
+            "fn": lambda ast: sort_game(ast, proof_namespace),
+            "name": "Topological Sorting",
+        },
+        {
+            "fn": lambda ast: visitors.VariableStandardizingTransformer().transform(
+                ast
+            ),
+            "name": "Variable Standardizing",
+        },
+    ]
+
+    for index, game in enumerate((current_game_ast, next_game_ast)):
+        if index == 0:
+            print("SIMPLIFYING CURRENT GAME")
+            print(current_game_ast)
+        else:
+            print("SIMPLIFYING NEXT GAME")
+            print(next_game_ast)
+
+        while True:
+
+            def apply_manipulators(game: frog_ast.Game) -> frog_ast.Game:
+                for manipulator in repeatable_ast_manipulators:
+                    new_game = manipulator["fn"](game)
+                    if verbose and game != new_game:
+                        print(f"APPLIED {manipulator['name']}")
+                        print(new_game)
+                    game = new_game
+                return game
+
+            new_game = apply_manipulators(game)
+            if new_game != game:
+                if index == 0:
+                    current_game_ast = new_game
+                else:
+                    next_game_ast = new_game
+                game = new_game
+            else:
+                break
+    print("CURRENT")
+    print(current_game_ast)
+    print("NEXT")
+    print(next_game_ast)
+
+    if current_game_ast == next_game_ast:
+        print("Inline Success!")
+        return
+
+    print("Step failed!")
+    print(Fore.RED + "Proof Failed!")
     sys.exit(1)
 
 
@@ -536,10 +555,23 @@ def sort_block(
     block: frog_ast.Block, proof_namespace: frog_ast.Namespace
 ) -> frog_ast.Block:
     graph = generate_dependency_graph(block, proof_namespace)
+
+    dfs_stack: list[Node] = [graph.get_node(block.statements[-1])]
+    dfs_stack_visited = [False] * len(block.statements)
+    dfs_sorted_statements: list[frog_ast.Statement] = []
+    while dfs_stack:
+        node = dfs_stack.pop()
+        dfs_sorted_statements.append(node.statement)
+        if not dfs_stack_visited[block.statements.index(node.statement)]:
+            dfs_stack_visited[block.statements.index(node.statement)] = True
+            for neighbour in node.in_neighbours:
+                dfs_stack.append(neighbour)
+    dfs_sorted_statements.reverse()
+
     sorted_statements: list[frog_ast.Statement] = []
     stack: list[Node] = []
 
-    for statement in block.statements:
+    for statement in dfs_sorted_statements:
         if not graph.get_node(statement).in_neighbours:
             stack.append(graph.get_node(statement))
     while stack:
@@ -550,24 +582,6 @@ def sort_block(
                 other_node.in_neighbours.remove(node)
                 if not other_node.in_neighbours:
                     stack.append(other_node)
-    # Regenerate the graph so we can remove dead statements
-    graph = generate_dependency_graph(
-        frog_ast.Block(sorted_statements), proof_namespace
-    )
-    visited = [False] * len(sorted_statements)
-    for node in graph.nodes:
-        if isinstance(node.statement, frog_ast.ReturnStatement):
-            queue: list[Node] = [node]
-            visited[sorted_statements.index(node.statement)] = True
-            while queue:
-                cur_node = queue.pop(0)
-                for neighbour in cur_node.in_neighbours:
-                    if not visited[sorted_statements.index(neighbour.statement)]:
-                        visited[sorted_statements.index(neighbour.statement)] = True
-                        queue.append(neighbour)
-    for i in range(len(visited) - 1, 0, -1):
-        if not visited[i]:
-            del sorted_statements[i]
 
     return frog_ast.Block(sorted_statements)
 

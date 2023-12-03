@@ -73,6 +73,17 @@ def prove(proof_file_name: str, verbose: bool) -> None:
     current_step: frog_ast.ProofStep
     next_step: frog_ast.ProofStep
 
+    first_step = proof_file.steps[0]
+    final_step = proof_file.steps[-1]
+
+    assert isinstance(first_step, frog_ast.Step)
+    assert isinstance(final_step, frog_ast.Step)
+
+    if first_step.challenger != proof_file.theorem:
+        print(Fore.RED + "Proof must start with a game matching theorem")
+        print(Fore.RED + f"Theorem: {proof_file.theorem}")
+        print(Fore.RED + f"First Game: {first_step.challenger}")
+
     for i in range(0, len(proof_file.steps) - 1):
         current_step = proof_file.steps[i]
         next_step = proof_file.steps[i + 1]
@@ -198,7 +209,17 @@ def prove(proof_file_name: str, verbose: bool) -> None:
         print(Fore.RED + "Proof Failed!")
         sys.exit(1)
 
-    print(Fore.GREEN + "Proof Suceeded!")
+    assert isinstance(first_step.challenger, frog_ast.ConcreteGame)
+    assert isinstance(final_step.challenger, frog_ast.ConcreteGame)
+    if (
+        first_step.challenger.game == final_step.challenger.game
+        and first_step.challenger.which != final_step.challenger.which
+        and first_step.adversary == final_step.adversary
+    ):
+        print(Fore.GREEN + "Proof Suceeded!")
+        return
+    print(Fore.YELLOW + "Proof Succeeded, but is incomplete")
+    sys.exit(1)
 
 
 def get_method_lookup(definition_namespace: frog_ast.Namespace) -> MethodLookup:

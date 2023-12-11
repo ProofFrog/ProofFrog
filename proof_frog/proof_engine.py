@@ -108,6 +108,11 @@ class ProofEngine:
             print(f"Current: {current_step}")
             print(f"Hop To: {next_step}\n")
 
+            if isinstance(current_step, frog_ast.Step) and isinstance(
+                next_step, frog_ast.Induction
+            ):
+                continue
+
             assert isinstance(current_step, frog_ast.Step)
             assert isinstance(next_step, frog_ast.Step)
 
@@ -115,40 +120,20 @@ class ProofEngine:
                 print("Valid by assumption")
                 continue
 
-            self.prove_step(current_step, next_step)
+            current_game_ast = self._get_game_ast(
+                current_step.challenger, current_step.reduction
+            )
+            next_game_ast = self._get_game_ast(
+                next_step.challenger, next_step.reduction
+            )
 
-    def prove_step(self, current_step: frog_ast.Step, next_step: frog_ast.Step) -> None:
-        current_game_ast = self._get_game_ast(current_step.challenger)
-        current_game_lookup = copy.deepcopy(self.method_lookup)
-        if current_step.reduction:
-            reduction = self._get_game_ast(current_step.reduction)
-            assert isinstance(reduction, frog_ast.Reduction)
-            current_game_lookup.update(get_challenger_method_lookup(current_game_ast))
-            current_game_ast = self.apply_reduction(current_game_ast, reduction)
+            self.check_equivalent(current_game_ast, next_game_ast)
 
-        next_game_lookup = copy.deepcopy(self.method_lookup)
-        next_game_ast = self._get_game_ast(next_step.challenger)
-        if next_step.reduction:
-            reduction = self._get_game_ast(next_step.reduction)
-            assert isinstance(reduction, frog_ast.Reduction)
-            next_game_lookup.update(get_challenger_method_lookup(next_game_ast))
-            next_game_ast = self.apply_reduction(next_game_ast, reduction)
-
-        if self.verbose:
-            print("BASIC GAMES")
-            print(current_game_ast)
-            print(next_game_ast)
-        current_game_ast = self.inline_calls(current_game_lookup, current_game_ast)
-        next_game_ast = self.inline_calls(next_game_lookup, next_game_ast)
-
-        if self.verbose:
-            print("INLINED GAMES")
-            print(current_game_ast)
-            print(next_game_ast)
-
+    def check_equivalent(
+        self, current_game_ast: frog_ast.Game, next_game_ast: frog_ast.Game
+    ) -> None:
         AstManipulator = namedtuple("AstManipulator", ["fn", "name"])
-
-        repeatable_ast_manipulators: list[AstManipulator] = [
+        ast_manipulators: list[AstManipulator] = [
             AstManipulator(
                 fn=lambda ast: visitors.RemoveTupleTransformer().transform(ast),
                 name="Remove Tuples",
@@ -189,7 +174,7 @@ class ProofEngine:
             while True:
 
                 def apply_manipulators(game: frog_ast.Game) -> frog_ast.Game:
-                    for manipulator in repeatable_ast_manipulators:
+                    for manipulator in ast_manipulators:
                         new_game = manipulator.fn(game)
                         if self.verbose and game != new_game:
                             print(f"APPLIED {manipulator.name}")
@@ -246,16 +231,28 @@ class ProofEngine:
     def _get_game_ast(
         self,
         challenger: frog_ast.ParameterizedGame | frog_ast.ConcreteGame,
+        reduction: Optional[frog_ast.ParameterizedGame] = None,
     ) -> frog_ast.Game:
+        game: frog_ast.Game
         if isinstance(challenger, frog_ast.ConcreteGame):
             game_file = self.definition_namespace[challenger.game.name]
             assert isinstance(game_file, frog_ast.GameFile)
-            game = game_file.get_game(challenger.which)
-            return self.instantiate_game(game, challenger.game.args)
+            game = self.instantiate_game(
+                game_file.get_game(challenger.which), challenger.game.args
+            )
+        else:
+            game_node = self.definition_namespace[challenger.name]
+            assert isinstance(game_node, frog_ast.Game)
+            game = self.instantiate_game(game_node, challenger.args)
 
-        game_node = self.definition_namespace[challenger.name]
-        assert isinstance(game_node, frog_ast.Game)
-        return self.instantiate_game(game_node, challenger.args)
+        lookup = copy.deepcopy(self.method_lookup)
+        if reduction:
+            reduction_ast = self._get_game_ast(reduction)
+            assert isinstance(reduction_ast, frog_ast.Reduction)
+            lookup.update(get_challenger_method_lookup(game))
+            game = self.apply_reduction(game, reduction_ast)
+
+        return self.inline_calls(lookup, game)
 
     # Replace a game's parameter list with empty, and instantiate the game with
     # the parameterized value

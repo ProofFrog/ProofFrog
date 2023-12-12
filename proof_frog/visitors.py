@@ -2,7 +2,18 @@ import copy
 import functools
 import operator
 from abc import ABC, abstractmethod
-from typing import Any, Optional, TypeVar, Generic, Callable, cast, final, Tuple, List
+from typing import (
+    Any,
+    Optional,
+    TypeVar,
+    Generic,
+    Callable,
+    cast,
+    final,
+    Tuple,
+    List,
+    Dict,
+)
 from sympy import Symbol
 
 from proof_frog import frog_ast
@@ -577,3 +588,89 @@ class SimplifyIfTransformer(Transformer):
             if not new_conditions:
                 new_conditions = [frog_ast.Boolean(True)]
         return frog_ast.IfStatement(new_conditions, new_blocks)
+
+
+class InlineTransformer(Transformer):
+    def __init__(self, method_lookup: Dict[Tuple[str, str], frog_ast.Method]) -> None:
+        self.blocks: list[frog_ast.Block] = []
+        self.statement_index = 0
+        self.method_lookup = method_lookup
+        self.finished = False
+
+    def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
+        if self.finished:
+            return block
+
+        self.blocks.append(block)
+        for index, statement in enumerate(block.statements):
+            self.statement_index = index
+            block.statements[index] = self.transform(statement)
+        return self.blocks.pop()
+
+    def transform_func_call_expression(self, exp: frog_ast.FuncCallExpression) -> None:
+        is_inlinable_call = (
+            isinstance(exp.func, frog_ast.FieldAccess)
+            and isinstance(exp.func.the_object, frog_ast.Variable)
+            and (exp.func.the_object.name, exp.func.name) in self.method_lookup
+        )
+        if not is_inlinable_call or self.finished:
+            return exp
+
+        called_method = copy.deepcopy(
+            self.method_lookup[(exp.func.the_object.name, exp.func.name)]
+        )
+
+        for var_statement in called_method.block.statements:
+            if (
+                isinstance(var_statement, (frog_ast.Assignment, frog_ast.Sample))
+                and var_statement.the_type is not None
+                and isinstance(var_statement.var, frog_ast.Variable)
+            ):
+                called_method = SubstitutionTransformer(
+                    [
+                        (
+                            var_statement.var,
+                            frog_ast.Variable(
+                                exp.func.the_object.name
+                                + "."
+                                + exp.func.name
+                                + "/"
+                                + var_statement.var.name
+                            ),
+                        )
+                    ]
+                ).transform(called_method)
+        transformed_method = InstantiationTransformer(
+            dict(
+                zip(
+                    (param.name for param in called_method.signature.parameters),
+                    (arg for arg in exp.args),
+                )
+            )
+        ).transform(called_method)
+
+        block_to_transform = self.blocks.pop()
+
+        statements_so_far = block_to_transform.statements[: self.statement_index]
+
+        statements_so_far += transformed_method.block.statements[:-1]
+
+        final_statement = transformed_method.block.statements[-1]
+
+        assert isinstance(final_statement, frog_ast.ReturnStatement)
+
+        returned_exp = final_statement.expression
+
+        changed_statement = ReplaceTransformer(exp, returned_exp).transform(
+            block_to_transform.statements[self.statement_index]
+        )
+
+        statements_after = block_to_transform.statements[self.statement_index + 1 :]
+
+        self.blocks.append(
+            frog_ast.Block(statements_so_far + [changed_statement] + statements_after)
+        )
+
+        self.finished = True
+
+        return exp

@@ -111,6 +111,20 @@ class ProofEngine:
             if isinstance(current_step, frog_ast.Step) and isinstance(
                 next_step, frog_ast.Induction
             ):
+                current_game_ast = self._get_game_ast(
+                    current_step.challenger, current_step.reduction
+                )
+                first_inductive_step = next_step.steps[0]
+                assert isinstance(first_inductive_step, frog_ast.Step)
+                first_inductive_step = visitors.SubstitutionTransformer(
+                    [(frog_ast.Variable(next_step.name), next_step.start)]
+                ).transform(first_inductive_step)
+                next_game_ast = self._get_game_ast(
+                    first_inductive_step.challenger, first_inductive_step.reduction
+                )
+                print("HERE")
+                print(current_game_ast, next_game_ast)
+                self.check_equivalent(current_game_ast, next_game_ast)
                 continue
 
             assert isinstance(current_step, frog_ast.Step)
@@ -252,7 +266,14 @@ class ProofEngine:
             lookup.update(get_challenger_method_lookup(game))
             game = self.apply_reduction(game, reduction_ast)
 
-        return self.inline_calls(lookup, game)
+        while True:
+            new_game = visitors.InlineTransformer(lookup).transform(game)
+            print(new_game)
+            if game != new_game:
+                game = new_game
+            else:
+                break
+        return game
 
     # Replace a game's parameter list with empty, and instantiate the game with
     # the parameterized value
@@ -300,98 +321,6 @@ class ProofEngine:
             and current_step.adversary == next_step.adversary
             and current_step.challenger.game in self.proof_file.assumptions
         )
-
-    def inline_calls(self, lookup: MethodLookup, game: frog_ast.Game) -> frog_ast.Game:
-        new_game = copy.deepcopy(game)
-        for method in new_game.methods:
-            new_block = self.inline_call(lookup, method.block)
-            if new_block != method.block:
-                method.block = new_block
-                return self.inline_calls(lookup, new_game)
-        return new_game
-
-    # Inline a single call. Goes through statements and first challenger call (as well as innermost)
-    # will be inlined.
-    # For each statement, we know what we to substitute the call with: it's going to be the return value
-    # So then just write a transformer that navigates
-    # to the first challenger call and returns the expression that is an ASTNode of the return value of the oracle
-    # And then just recursively do that over and over again until you have a list of statements with no challenger calls
-
-    def inline_call(
-        self,
-        method_lookup: MethodLookup,
-        block: frog_ast.Block,
-    ) -> frog_ast.Block:
-        # pylint: disable-next=global-statement
-        global inline_counter
-        inline_counter += 1
-        new_statements: list[frog_ast.Statement] = []
-        for index, statement in enumerate(block.statements):
-
-            def is_inlinable_call(exp: frog_ast.ASTNode) -> bool:
-                return (
-                    isinstance(exp, frog_ast.FuncCallExpression)
-                    and isinstance(exp.func, frog_ast.FieldAccess)
-                    and isinstance(exp.func.the_object, frog_ast.Variable)
-                    and (exp.func.the_object.name, exp.func.name) in method_lookup
-                )
-
-            func_call_exp = visitors.SearchVisitor[frog_ast.FuncCallExpression](
-                is_inlinable_call
-            ).visit(statement)
-
-            if not func_call_exp:
-                new_statements.append(copy.deepcopy(statement))
-                continue
-
-            assert isinstance(func_call_exp.func, frog_ast.FieldAccess)
-            assert isinstance(func_call_exp.func.the_object, frog_ast.Variable)
-            called_method = copy.deepcopy(
-                method_lookup[
-                    (func_call_exp.func.the_object.name, func_call_exp.func.name)
-                ]
-            )
-
-            for var_statement in called_method.block.statements:
-                if (
-                    isinstance(var_statement, (frog_ast.Assignment, frog_ast.Sample))
-                    and var_statement.the_type is not None
-                    and isinstance(var_statement.var, frog_ast.Variable)
-                ):
-                    called_method = visitors.SubstitutionTransformer(
-                        [
-                            (
-                                var_statement.var,
-                                frog_ast.Variable(
-                                    str(inline_counter) + var_statement.var.name
-                                ),
-                            )
-                        ]
-                    ).transform(called_method)
-
-            transformed_method = visitors.SubstitutionTransformer(
-                list(
-                    zip(
-                        (
-                            frog_ast.Variable(param.name)
-                            for param in called_method.signature.parameters
-                        ),
-                        (arg for arg in func_call_exp.args),
-                    )
-                )
-            ).transform(called_method)
-            final_statement = transformed_method.block.statements[-1]
-            new_statements += transformed_method.block.statements[:-1]
-            assert isinstance(final_statement, frog_ast.ReturnStatement)
-            returned_exp = final_statement.expression
-
-            changed_statement = visitors.ReplaceTransformer(
-                func_call_exp, returned_exp
-            ).transform(statement)
-            new_statements.append(changed_statement)
-            new_statements += block.statements[index + 1 :]
-            break
-        return frog_ast.Block(new_statements)
 
     def generate_dependency_graph(
         self, block: frog_ast.Block, proof_namespace: frog_ast.Namespace

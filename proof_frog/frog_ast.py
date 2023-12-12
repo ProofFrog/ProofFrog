@@ -294,7 +294,7 @@ class Block(Statement):
         self.statements = statements
 
     def __str__(self) -> str:
-        return "\n".join(str(statement) for statement in self.statements)
+        return "\n".join(str(statement) for statement in self.statements) + "\n"
 
     def __add__(self, other: Block) -> Block:
         return Block(list(self.statements) + list(other.statements))
@@ -736,9 +736,11 @@ def pretty_print(program: str) -> str:
     indent = 0
     output_string = ""
     for line in lines:
-        if line.count("{") < line.count("}"):
+        if line == "":
+            continue
+        if "}" in line:
             indent -= 1
         output_string += ("  " * indent) + line + "\n"
-        if line.count("{") > line.count("}"):
+        if "{" in line:
             indent += 1
     return output_string

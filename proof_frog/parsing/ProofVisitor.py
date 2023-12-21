@@ -209,6 +209,11 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#boolExp.
+    def visitBoolExp(self, ctx:ProofParser.BoolExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#notEqualsExp.
     def visitNotEqualsExp(self, ctx:ProofParser.NotEqualsExpContext):
         return self.visitChildren(ctx)
@@ -391,6 +396,11 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#set.
     def visitSet(self, ctx:ProofParser.SetContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#bool.
+    def visitBool(self, ctx:ProofParser.BoolContext):
         return self.visitChildren(ctx)
 
 

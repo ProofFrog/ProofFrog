@@ -149,6 +149,11 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SchemeParser#boolExp.
+    def visitBoolExp(self, ctx:SchemeParser.BoolExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SchemeParser#notEqualsExp.
     def visitNotEqualsExp(self, ctx:SchemeParser.NotEqualsExpContext):
         return self.visitChildren(ctx)
@@ -331,6 +336,11 @@ class SchemeVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SchemeParser#set.
     def visitSet(self, ctx:SchemeParser.SetContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#bool.
+    def visitBool(self, ctx:SchemeParser.BoolContext):
         return self.visitChildren(ctx)
 
 

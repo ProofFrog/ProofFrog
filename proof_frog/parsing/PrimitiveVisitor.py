@@ -144,6 +144,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#boolExp.
+    def visitBoolExp(self, ctx:PrimitiveParser.BoolExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#notEqualsExp.
     def visitNotEqualsExp(self, ctx:PrimitiveParser.NotEqualsExpContext):
         return self.visitChildren(ctx)
@@ -326,6 +331,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by PrimitiveParser#set.
     def visitSet(self, ctx:PrimitiveParser.SetContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#bool.
+    def visitBool(self, ctx:PrimitiveParser.BoolContext):
         return self.visitChildren(ctx)
 
 

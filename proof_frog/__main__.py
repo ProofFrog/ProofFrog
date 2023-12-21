@@ -13,19 +13,12 @@ def usage(module_name: str) -> None:
 
 def main(argv: list[str]) -> None:
     if argv[1] == "parse":
-        ast_type = argv[2]
-        file = argv[3]
-        match ast_type:
-            case "primitive":
-                print(frog_parser.parse_primitive_file(file))
-            case "scheme":
-                print(frog_parser.parse_scheme_file(file))
-            case "game":
-                print(frog_parser.parse_game_file(file))
-            case "proof":
-                print(frog_parser.parse_proof_file(file))
-            case _:
-                usage(argv[0])
+        file = argv[2]
+        try:
+            root = frog_parser.parse_file(file)
+            print(root)
+        except ValueError:
+            usage(argv[0])
     elif argv[1] == "prove":
         engine = proof_engine.ProofEngine(argv[2], len(argv) > 3 and argv[3] == "-v")
         engine.prove()

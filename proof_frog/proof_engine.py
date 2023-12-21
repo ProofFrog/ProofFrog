@@ -1,5 +1,4 @@
 from __future__ import annotations
-import os
 import sys
 import copy
 import functools
@@ -23,18 +22,7 @@ class ProofEngine:
         self.proof_namespace: frog_ast.Namespace = {}
 
         for imp in self.proof_file.imports:
-            file_type = _get_file_type(imp.filename)
-            root: frog_ast.Root
-            match file_type:
-                case frog_ast.FileType.PRIMITIVE:
-                    root = frog_parser.parse_primitive_file(imp.filename)
-                case frog_ast.FileType.SCHEME:
-                    root = frog_parser.parse_scheme_file(imp.filename)
-                case frog_ast.FileType.GAME:
-                    root = frog_parser.parse_game_file(imp.filename)
-                case frog_ast.FileType.PROOF:
-                    raise TypeError("Cannot import proofs")
-
+            root = frog_parser.parse_file(imp.filename)
             name = imp.rename if imp.rename else root.get_export_name()
             self.definition_namespace[name] = root
 
@@ -523,11 +511,6 @@ class ProofEngine:
         return visitors.InstantiationTransformer(self.proof_namespace).transform(
             new_scheme
         )
-
-
-def _get_file_type(file_name: str) -> frog_ast.FileType:
-    extension: str = os.path.splitext(file_name)[1].strip(".")
-    return frog_ast.FileType(extension)
 
 
 def get_challenger_method_lookup(challenger: frog_ast.Game) -> MethodLookup:

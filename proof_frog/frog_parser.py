@@ -275,7 +275,7 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         return frog_ast.Integer(int(ctx.INT().getText()))
 
     def visitBoolExp(self, ctx: PrimitiveParser.BoolExpContext) -> frog_ast.Boolean:
-        return frog_ast.Boolean(bool(ctx.bool_().getText()))
+        return frog_ast.Boolean(ctx.bool_().getText() == 'true')
 
     def visitBinaryNumExp(
         self, ctx: PrimitiveParser.BinaryNumExpContext
@@ -654,6 +654,25 @@ def parse_proof_file(proof_file: str) -> frog_ast.ProofFile:
         _get_parser(proof_file, ProofLexer, ProofParser).program()
     )
     return ast
+
+
+def _get_file_type(file_name: str) -> frog_ast.FileType:
+    extension: str = os.path.splitext(file_name)[1].strip(".")
+    return frog_ast.FileType(extension)
+
+
+def parse_file(file_name: str) -> frog_ast.Root:
+    match _get_file_type(file_name):
+        case frog_ast.FileType.PRIMITIVE:
+            return parse_primitive_file(file_name)
+        case frog_ast.FileType.SCHEME:
+            return parse_scheme_file(file_name)
+        case frog_ast.FileType.GAME:
+            return parse_game_file(file_name)
+        case frog_ast.FileType.PROOF:
+            return parse_proof_file(file_name)
+        case _:
+            raise ValueError(f"Invalid File Type ${file_name}")
 
 
 def parse_game(game: str) -> frog_ast.Game:

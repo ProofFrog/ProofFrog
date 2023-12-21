@@ -405,6 +405,16 @@ class SimplifySpliceTransformer(BlockTransformer):
 class VariableStandardizingTransformer(BlockTransformer):
     def __init__(self) -> None:
         self.variable_counter = 0
+        self.field_counter = 0
+        self.field_name_map = []
+
+    def transform_field(self, field: frog_ast.Field) -> frog_ast.Field:
+        self.field_counter += 1
+        new_name = "field" + str(self.field_counter)
+        self.field_name_map.append(
+            (frog_ast.Variable(field.name), frog_ast.Variable(new_name))
+        )
+        return frog_ast.Field(field.type, new_name, field.value)
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         new_block = copy.deepcopy(block)
@@ -438,8 +448,7 @@ class VariableStandardizingTransformer(BlockTransformer):
                 new_block = ReplaceTransformer(
                     to_transform, frog_ast.Variable(expected_name)
                 ).transform(new_block)
-
-        return new_block
+        return SubstitutionTransformer(self.field_name_map).transform(new_block)
 
 
 class SubstitutionTransformer(Transformer):
@@ -634,7 +643,7 @@ class InlineTransformer(Transformer):
                                 exp.func.the_object.name
                                 + "."
                                 + exp.func.name
-                                + "/"
+                                + "@"
                                 + var_statement.var.name
                             ),
                         )

@@ -122,8 +122,6 @@ class ProofEngine:
                 next_game_ast = self._get_game_ast(
                     first_inductive_step.challenger, first_inductive_step.reduction
                 )
-                print("HERE")
-                print(current_game_ast, next_game_ast)
                 self.check_equivalent(current_game_ast, next_game_ast)
                 continue
 
@@ -229,7 +227,11 @@ class ProofEngine:
         print(challenger)
         name = "Inlined"
         parameters = challenger.parameters
-        fields = copy.deepcopy(challenger.fields) + copy.deepcopy(reduction.fields)
+        new_fields = [
+            frog_ast.Field(field.type, "challenger@" + field.name, field.value)
+            for field in challenger.fields
+        ]
+        fields = new_fields + copy.deepcopy(reduction.fields)
         phases = challenger.phases
         methods = copy.deepcopy(reduction.methods)
         reduced_game = frog_ast.Game((name, parameters, fields, methods, phases))
@@ -263,12 +265,21 @@ class ProofEngine:
         if reduction:
             reduction_ast = self._get_game_ast(reduction)
             assert isinstance(reduction_ast, frog_ast.Reduction)
+            for index, method in enumerate(game.methods):
+                game.methods[index] = visitors.SubstitutionTransformer(
+                    [
+                        (
+                            frog_ast.Variable(field.name),
+                            frog_ast.Variable("challenger@" + field.name),
+                        )
+                        for field in game.fields
+                    ]
+                ).transform(method)
             lookup.update(get_challenger_method_lookup(game))
             game = self.apply_reduction(game, reduction_ast)
 
         while True:
             new_game = visitors.InlineTransformer(lookup).transform(game)
-            print(new_game)
             if game != new_game:
                 game = new_game
             else:
@@ -322,65 +333,23 @@ class ProofEngine:
             and current_step.challenger.game in self.proof_file.assumptions
         )
 
-    def generate_dependency_graph(
-        self, block: frog_ast.Block, proof_namespace: frog_ast.Namespace
-    ) -> DependencyGraph:
-        dependency_graph = DependencyGraph()
-        for statement in block.statements:
-            dependency_graph.add_node(Node(statement))
-
-        def add_dependency(node_in_graph: Node, node: frog_ast.Statement) -> None:
-            node_in_graph.add_neighbour(dependency_graph.get_node(node))
-
-        for index, statement in enumerate(block.statements):
-            node_in_graph = dependency_graph.get_node(statement)
-            earlier_statements = list(block.statements[:index])
-            earlier_statements.reverse()
-
-            if isinstance(statement, frog_ast.ReturnStatement):
-                for depends_on in earlier_statements:
-
-                    def search_for_return(node: frog_ast.ASTNode) -> bool:
-                        return isinstance(node, frog_ast.ReturnStatement)
-
-                    contains_return = visitors.SearchVisitor(search_for_return).visit(
-                        depends_on
-                    )
-                    if contains_return is not None:
-                        add_dependency(node_in_graph, depends_on)
-
-            variables = visitors.VariableCollectionVisitor().visit(statement)
-            for variable in variables:
-                for depends_on in earlier_statements:
-                    if variable.name in proof_namespace:
-                        continue
-
-                    def search_for_assignment(
-                        variable: frog_ast.Variable, node: frog_ast.ASTNode
-                    ) -> bool:
-                        return node == variable
-
-                    if (
-                        visitors.SearchVisitor(
-                            functools.partial(search_for_assignment, variable)
-                        ).visit(depends_on)
-                        is not None
-                    ):
-                        add_dependency(node_in_graph, depends_on)
-                        break
-
-        return dependency_graph
-
     def sort_game(self, game: frog_ast.Game) -> frog_ast.Game:
         new_game = copy.deepcopy(game)
         for method in new_game.methods:
-            method.block = self.sort_block(method.block)
+            method.block = self.sort_block(game, method.block)
         return new_game
 
-    def sort_block(self, block: frog_ast.Block) -> frog_ast.Block:
-        graph = self.generate_dependency_graph(block, self.proof_namespace)
+    def sort_block(self, game: frog_ast.Game, block: frog_ast.Block) -> frog_ast.Block:
+        graph = generate_dependency_graph(block, self.proof_namespace)
 
-        dfs_stack: list[Node] = [graph.get_node(block.statements[-1])]
+        def is_return(node: frog_ast.ASTNode) -> bool:
+            return node in block.statements and isinstance(
+                node, frog_ast.ReturnStatement
+            )
+
+        dfs_stack: list[Node] = []
+        if graph.find_node(is_return):
+            dfs_stack.append(graph.find_node(is_return))
         dfs_stack_visited = [False] * len(block.statements)
         dfs_sorted_statements: list[frog_ast.Statement] = []
         while dfs_stack:
@@ -390,6 +359,18 @@ class ProofEngine:
                 dfs_stack_visited[block.statements.index(node.statement)] = True
                 for neighbour in node.in_neighbours:
                     dfs_stack.append(neighbour)
+
+        for statement in block.statements:
+
+            def uses_field(node: frog_ast.ASTNode) -> bool:
+                return isinstance(node, frog_ast.Variable) and node.name in [
+                    field.name for field in game.fields
+                ]
+
+            found = visitors.SearchVisitor(uses_field).visit(statement)
+            if statement not in dfs_sorted_statements and found is not None:
+                dfs_sorted_statements.append(statement)
+
         dfs_sorted_statements.reverse()
 
         sorted_statements: list[frog_ast.Statement] = []
@@ -463,6 +444,48 @@ def get_challenger_method_lookup(challenger: frog_ast.Game) -> MethodLookup:
             challenger.methods,
         )
     )
+
+
+def generate_dependency_graph(
+    block: frog_ast.Block, proof_namespace: frog_ast.Namespace
+) -> DependencyGraph:
+    dependency_graph = DependencyGraph()
+    for statement in block.statements:
+        dependency_graph.add_node(Node(statement))
+
+    def add_dependency(node_in_graph: Node, statement: frog_ast.Statement) -> None:
+        node_in_graph.add_neighbour(dependency_graph.get_node(statement))
+
+    for index, statement in enumerate(block.statements):
+        node_in_graph = dependency_graph.get_node(statement)
+        earlier_statements = list(block.statements[:index])
+        earlier_statements.reverse()
+
+        if isinstance(statement, frog_ast.ReturnStatement):
+            if index > 0:
+                add_dependency(node_in_graph, block.statements[index - 1])
+
+        variables = visitors.VariableCollectionVisitor().visit(statement)
+        for variable in variables:
+            for depends_on in earlier_statements:
+                if variable.name in proof_namespace:
+                    continue
+
+                def search_for_assignment(
+                    variable: frog_ast.Variable, node: frog_ast.ASTNode
+                ) -> bool:
+                    return node == variable
+
+                if (
+                    visitors.SearchVisitor(
+                        functools.partial(search_for_assignment, variable)
+                    ).visit(depends_on)
+                    is not None
+                ):
+                    add_dependency(node_in_graph, depends_on)
+                    break
+
+    return dependency_graph
 
 
 class Node:

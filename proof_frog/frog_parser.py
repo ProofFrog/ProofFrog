@@ -26,6 +26,28 @@ def _binary_operation(
     )
 
 
+def add_line_number(func):
+    def wrapper(self, ctx):
+        result = func(self, ctx)
+        if isinstance(result, frog_ast.ASTNode):
+            result.line_num = ctx.start.line
+            result.column_num = ctx.start.column
+        return result
+
+    return wrapper
+
+
+def line_number_decorator(the_class):
+    class ModifiedClass(the_class):
+        pass
+
+    for name, attr in vars(the_class).items():
+        if callable(attr):
+            setattr(ModifiedClass, name, add_line_number(attr))
+    return ModifiedClass
+
+
+@line_number_decorator
 # pylint: disable-next=too-many-public-methods
 class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  # type: ignore[misc]
     def visitParamList(
@@ -409,6 +431,7 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         return frog_ast.Game(_parse_game_body(self.visit, ctx))
 
 
+@line_number_decorator
 class _PrimitiveASTGenerator(_SharedAST, PrimitiveVisitor):  # type: ignore[misc]
     def visitProgram(self, ctx: PrimitiveParser.ProgramContext) -> frog_ast.Primitive:
         name = ctx.ID().getText()
@@ -426,6 +449,7 @@ class _PrimitiveASTGenerator(_SharedAST, PrimitiveVisitor):  # type: ignore[misc
         return frog_ast.Primitive(name, param_list, field_list, method_list)
 
 
+@line_number_decorator
 class _SchemeASTGenerator(_SharedAST, SchemeVisitor):  # type: ignore[misc]
     def visitProgram(self, ctx: SchemeParser.ProgramContext) -> frog_ast.Scheme:
         scheme_ctx = ctx.scheme()
@@ -461,6 +485,7 @@ class _SchemeASTGenerator(_SharedAST, SchemeVisitor):  # type: ignore[misc]
         )
 
 
+@line_number_decorator
 class _GameASTGenerator(_SharedAST, GameVisitor):  # type: ignore[misc]
     def visitProgram(self, ctx: GameParser.ProgramContext) -> frog_ast.GameFile:
         imports = [self.visit(im) for im in ctx.moduleImport()]

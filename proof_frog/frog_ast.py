@@ -12,6 +12,10 @@ class FileType(Enum):
 
 
 class ASTNode(ABC):
+    def __init__(self) -> None:
+        self.line_num: int = -1
+        self.column_num: int = -1
+
     def __eq__(self, other: object) -> bool:
         if self is other:
             return True
@@ -21,7 +25,10 @@ class ASTNode(ABC):
 
         # Compare all attributes
         return all(
-            getattr(self, attr) == getattr(other, attr) for attr in self.__dict__
+            True
+            if attr in {"line_num", "column_num"}
+            else getattr(self, attr) == getattr(other, attr)
+            for attr in self.__dict__
         )
 
 

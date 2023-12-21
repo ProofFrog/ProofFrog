@@ -3,6 +3,7 @@ import os
 import sys
 import copy
 import functools
+from collections import namedtuple
 from typing import TypeAlias, Sequence, Tuple, Dict, Optional, Callable
 from colorama import Fore
 from sympy import Symbol
@@ -79,6 +80,9 @@ class ProofEngine:
         assert isinstance(first_step, frog_ast.Step)
         assert isinstance(final_step, frog_ast.Step)
 
+        assert isinstance(first_step.challenger, frog_ast.ConcreteGame)
+        assert isinstance(final_step.challenger, frog_ast.ConcreteGame)
+
         if first_step.challenger.game != self.proof_file.theorem:
             print(Fore.RED + "Proof must start with a game matching theorem")
             print(Fore.RED + f"Theorem: {self.proof_file.theorem}")
@@ -86,8 +90,6 @@ class ProofEngine:
 
         self.prove_steps(self.proof_file.steps)
 
-        assert isinstance(first_step.challenger, frog_ast.ConcreteGame)
-        assert isinstance(final_step.challenger, frog_ast.ConcreteGame)
         if (
             first_step.challenger.game == final_step.challenger.game
             and first_step.challenger.which != final_step.challenger.which
@@ -144,37 +146,36 @@ class ProofEngine:
             print(current_game_ast)
             print(next_game_ast)
 
-        repeatable_ast_manipulators = [
-            {
-                "fn": lambda ast: visitors.RemoveTupleTransformer().transform(ast),
-                "name": "Remove Tuples",
-            },
-            {
-                "fn": lambda ast: visitors.SymbolicComputationTransformer(
+        AstManipulator = namedtuple("AstManipulator", ["fn", "name"])
+
+        repeatable_ast_manipulators: list[AstManipulator] = [
+            AstManipulator(
+                fn=lambda ast: visitors.RemoveTupleTransformer().transform(ast),
+                name="Remove Tuples",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.SymbolicComputationTransformer(
                     self.variables
                 ).transform(ast),
-                "name": "Symbolic Computation",
-            },
-            {
-                "fn": lambda ast: visitors.SimplifySpliceTransformer(
+                name="Symbolic Computation",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifySpliceTransformer(
                     self.variables
                 ).transform(ast),
-                "name": "Simplifying Splices",
-            },
-            {
-                "fn": lambda ast: visitors.RedundantCopyTransformer().transform(ast),
-                "name": "Remove Redundant Copies",
-            },
-            {
-                "fn": self.sort_game,
-                "name": "Topological Sorting",
-            },
-            {
-                "fn": lambda ast: visitors.VariableStandardizingTransformer().transform(
+                name="Simplifying Splices",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.RedundantCopyTransformer().transform(ast),
+                name="Remove Redundant Copies",
+            ),
+            AstManipulator(fn=self.sort_game, name="Topological Sorting"),
+            AstManipulator(
+                fn=lambda ast: visitors.VariableStandardizingTransformer().transform(
                     ast
                 ),
-                "name": "Variable Standardizing",
-            },
+                name="Variable Standardizing",
+            ),
         ]
 
         for index, game in enumerate((current_game_ast, next_game_ast)):
@@ -189,9 +190,9 @@ class ProofEngine:
 
                 def apply_manipulators(game: frog_ast.Game) -> frog_ast.Game:
                     for manipulator in repeatable_ast_manipulators:
-                        new_game = manipulator["fn"](game)
+                        new_game = manipulator.fn(game)
                         if self.verbose and game != new_game:
-                            print(f"APPLIED {manipulator['name']}")
+                            print(f"APPLIED {manipulator.name}")
                             print(new_game)
                         game = new_game
                     return game

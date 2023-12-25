@@ -7,9 +7,15 @@ from . import visitors
 def check_well_formed(root: frog_ast.Root) -> None:
     if isinstance(root, frog_ast.Primitive):
         check_primitive_well_formed(root)
+    if isinstance(root, frog_ast.Scheme):
+        check_primitive_well_formed(root)
+
+    TypeCheckVisitor().visit(root)
 
 
-def check_primitive_well_formed(primitive: frog_ast.Primitive) -> None:
+def check_primitive_well_formed(
+    primitive: frog_ast.Primitive | frog_ast.Scheme,
+) -> None:
     for param in primitive.parameters:
 
         def is_user_defined(node: frog_ast.ASTNode) -> bool:
@@ -56,3 +62,28 @@ def print_error(location: frog_ast.ASTNode, message: str):
     print(f"Line {location.line_num}, column: {location.column_num}", file=sys.stderr)
     print(message, file=sys.stderr)
     sys.exit(1)
+
+
+class TypeCheckVisitor(visitors.Visitor[None]):
+    def __init__(self):
+        self.variable_type_map_stack = [{}]
+        self.type_stack = []
+
+    def result(self) -> None:
+        return None
+
+    def visit_parameter(self, param: frog_ast.Parameter) -> None:
+        self.variable_type_map_stack[0][param.name] = param.type
+
+    def leave_field(self, field: frog_ast.Field) -> None:
+        result_type = self.type_stack.pop()
+        expected_type = field.type
+        if result_type != expected_type:
+            print_error(field, f"In {field} {field.value} is not of type {field.type}")
+
+    def visit_variable(self, var: frog_ast.Variable) -> None:
+        for the_map in reversed(self.variable_type_map_stack):
+            if var.name in the_map:
+                self.type_stack.append(the_map[var.name])
+                return
+        assert False, "Variable not defined"

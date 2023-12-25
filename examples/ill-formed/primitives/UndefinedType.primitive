@@ -1,0 +1,3 @@
+Primitive InvalidType(Int x) {
+    Bla test = x;
+}

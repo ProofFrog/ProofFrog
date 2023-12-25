@@ -186,9 +186,7 @@ class Set(Expression):
 
 
 class Field(ASTNode):
-    def __init__(
-        self, the_type: ASTNode, name: str, value: Optional[Expression]
-    ) -> None:
+    def __init__(self, the_type: Type, name: str, value: Optional[Expression]) -> None:
         super().__init__()
         self.type = the_type
         self.name = name

@@ -4,7 +4,7 @@ Game SampleIntermediate1(int lambda) {
     Set<BitString<lambda>> R;
     bool bad;
 
-    void Initialize() {
+    Void Initialize() {
         R = {};
         bad = false;
     }
@@ -23,7 +23,7 @@ Game SampleIntermediate2(int lambda) {
     Set<BitString<lambda>> R;
     bool bad;
 
-    void Initialize() {
+    Void Initialize() {
         R = {};
         bad = false;
     }

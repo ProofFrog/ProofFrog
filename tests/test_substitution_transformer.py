@@ -8,7 +8,7 @@ from proof_frog import visitors, frog_parser, frog_ast
         # Simple substitution
         (
             """
-        void f() {
+        Void f() {
             Int b = a;
             if (a == 0) {
             }
@@ -18,7 +18,7 @@ from proof_frog import visitors, frog_parser, frog_ast
         }
         """,
             """
-        void f() {
+        Void f() {
             Int b = 100;
             if (100 == 0) {
             }
@@ -32,12 +32,12 @@ from proof_frog import visitors, frog_parser, frog_ast
         # Substitution shouldn't change field names
         (
             """
-        void f(A.a bla) {
+        Void f(A.a bla) {
             A.a x = bla;
         }
         """,
             """
-        void f(A.a bla) {
+        Void f(A.a bla) {
             A.a x = bla;
         }
         """,
@@ -45,12 +45,12 @@ from proof_frog import visitors, frog_parser, frog_ast
         ),
         (
             """
-        void f() {
+        Void f() {
             E.Ciphertext x = a;
         }
         """,
             """
-        void f() {
+        Void f() {
             Sigma.Ciphertext x = a;
         }
         """,

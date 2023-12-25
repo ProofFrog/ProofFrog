@@ -20,7 +20,7 @@ Game Left(SymEnc E) {
     }
 
     Phase {
-        void Initialize() {
+        Void Initialize() {
             k = E.KeyGen();
         }
         oracles: [Enc, Dec];
@@ -55,7 +55,7 @@ Game Right(SymEnc E) {
     }
 
     Phase {
-        void Initialize() {
+        Void Initialize() {
             k = E.KeyGen();
         }
         oracles: [Enc, Dec];

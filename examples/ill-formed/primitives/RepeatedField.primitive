@@ -1,0 +1,4 @@
+Primitive Repeated(Int x) {
+    Int y = x;
+    Int y = x;
+}

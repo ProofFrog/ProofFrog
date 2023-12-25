@@ -73,6 +73,7 @@ variable: type id;
 type: type QUESTION #optionalType
 	| set #setType
 	| BOOL #boolType
+	| VOID #voidType
 	| MAP L_ANGLE type COMMA type R_ANGLE #mapType
 	| ARRAY L_ANGLE type COMMA integerExpression R_ANGLE #arrayType
 	| INTTYPE #intType
@@ -133,6 +134,7 @@ VBAR: '|';
 SET: 'Set';
 BOOL: 'Bool';
 INTTYPE: 'Int';
+VOID: 'Void';
 MAP: 'Map';
 RETURN: 'return';
 IMPORT: 'import';

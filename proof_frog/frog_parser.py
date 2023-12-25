@@ -275,7 +275,7 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         return frog_ast.Integer(int(ctx.INT().getText()))
 
     def visitBoolExp(self, ctx: PrimitiveParser.BoolExpContext) -> frog_ast.Boolean:
-        return frog_ast.Boolean(ctx.bool_().getText() == 'true')
+        return frog_ast.Boolean(ctx.bool_().getText() == "true")
 
     def visitBinaryNumExp(
         self, ctx: PrimitiveParser.BinaryNumExpContext
@@ -315,8 +315,11 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             frog_ast.UnaryOperators.NOT, self.visit(ctx.expression())
         )
 
-    def visitIntType(self, ctx: PrimitiveParser.IntTypeContext) -> frog_ast.Type:
+    def visitIntType(self, ctx: PrimitiveParser.IntTypeContext) -> frog_ast.IntType:
         return frog_ast.IntType()
+
+    def visitVoidType(self, ctx: PrimitiveParser.VoidTypeContext) -> frog_ast.Void:
+        return frog_ast.Void()
 
     def visitSizeExp(
         self, ctx: PrimitiveParser.SizeExpContext
@@ -496,6 +499,7 @@ class _GameASTGenerator(_SharedAST, GameVisitor):  # type: ignore[misc]
         )
 
 
+@line_number_decorator
 class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
     def visitProgram(self, ctx: ProofParser.ProgramContext) -> frog_ast.ProofFile:
         game_list = []

@@ -76,14 +76,14 @@ from proof_frog import frog_parser, proof_engine
         }""",
             """Reduction Trivial() compose Test() against Test().Adversary {
             Int b;
-            void Initialize(Int arg) {
+            Void Initialize(Int arg) {
                 b = arg;
             }
         }""",
             """Game Inlined() {
             Int a;
             Int b;
-            void Initialize() {
+            Void Initialize() {
                 a = 1;
                 Int arg = 5;
                 b = arg;
@@ -93,18 +93,18 @@ from proof_frog import frog_parser, proof_engine
         # Composing finalization
         (
             """Game Test() {
-            void Finalize(Bool b1) {
+            Void Finalize(Bool b1) {
                 Int x;
                 return b1;
             }
         }""",
             """Reduction Trivial() compose Test() against Test().Adversary {
-            void Finalize(Bool b2) {
+            Void Finalize(Bool b2) {
                 return !b2;
             }
         }""",
             """Game Inlined() {
-            void Finalize(Bool b2) {
+            Void Finalize(Bool b2) {
                 Bool b1 = !b2;
                 Int x;
                 return b1;
@@ -114,17 +114,17 @@ from proof_frog import frog_parser, proof_engine
         # Trivial Reduction with a parameterized game
         (
             """Game Test(Int a) {
-            void oracle() {
+            Void oracle() {
                 return a;
             }
         }""",
             """Reduction Trivial(Int b) compose Test(b) against Test(b).Adversary {
-            void oracle() {
+            Void oracle() {
                 return challenger.oracle();
             }
         }""",
             """Game Inlined(Int b) {
-            void oracle() {
+            Void oracle() {
                 return b;
             }
         }""",

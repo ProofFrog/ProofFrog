@@ -3,7 +3,7 @@ import 'examples/Primitives/MAC.primitive';
 Game Real(MAC E) {
     E.Key k;
 
-    void Initialize() {
+    Void Initialize() {
         k = E.KeyGen();
     }
 
@@ -20,7 +20,7 @@ Game Random(MAC E) {
     E.Key k;
     Set<E.Message * E.Tag> T;
 
-    void Initialize() {
+    Void Initialize() {
         k = E.KeyGen();
         T = {};
     }

@@ -8,7 +8,7 @@ Reduction R1(PRG G, TriplingPRG T) compose Security(G) against Security(T).Adver
         BitString<2 * T.lambda> result1 = challenger.Query();
         BitString<T.lambda> x = result1[0 : T.lambda];
         BitString<T.lambda> y = result1[lambda : 2*T.lambda];
-        BitString<2 * T.lambda> result2 = G.evaluate(y);
+        BitString<2 * T.lambda> result2 = G.Evaluate(y);
 
         return x || result2;
     }
@@ -19,7 +19,7 @@ Game Intermediate1(TriplingPRG T) {
         BitString<2 * T.lambda> result1 <- BitString<2 * T.lambda>;
         BitString<T.lambda> x = result1[0 : T.lambda];
         BitString<T.lambda> y = result1[lambda : 2*T.lambda];
-        BitString<2 * T.lambda> result2 = G.evaluate(y);
+        BitString<2 * T.lambda> result2 = G.Evaluate(y);
 
         return x || result2;
     }
@@ -30,7 +30,7 @@ Reduction R2(TriplingPRG T, Int lambda) compose BitStringSampling(lambda, lambda
         BitString<2 * T.lambda> result1 = challenger.Query();
         BitString<T.lambda> x = result1[0 : T.lambda];
         BitString<T.lambda> y = result1[lambda : 2*T.lambda];
-        BitString<2 * T.lambda> result2 = G.evaluate(y);
+        BitString<2 * T.lambda> result2 = G.Evaluate(y);
 
         return x || result2;
     }
@@ -40,7 +40,7 @@ Game Intermediate2(TriplingPRG T) {
     BitString<T.lambda + T.stretch> Query() {
         BitString<T.lambda> x <- BitString<lambda>;
         BitString<T.lambda> y <- BitString<lambda>;
-        BitString<2 * T.lambda> result2 = G.evaluate(y);
+        BitString<2 * T.lambda> result2 = G.Evaluate(y);
 
         return x || result2;
     }

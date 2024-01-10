@@ -1,13 +1,13 @@
 import 'examples/Games/Misc/PredictBitString.game';
 
-Game PredictBitStringIntermdiate1(int lambda) {
-    bool bad;
+Game PredictBitStringIntermdiate1(Int lambda) {
+    Bool bad;
 
     Void Initialize() {
         bad = false;
     }
 
-    bool Predict(BitString<lambda> x) {
+    Bool Predict(BitString<lambda> x) {
         BitString<lambda> s <- BitString<lambda>;
         if (x == s) {
             bad = true;
@@ -17,14 +17,14 @@ Game PredictBitStringIntermdiate1(int lambda) {
     }
 }
 
-Game PredictBitStringItermediate2(int lambda) {
-    bool bad;
+Game PredictBitStringItermediate2(Int lambda) {
+    Bool bad;
 
     Void Initialize() {
         bad = false;
     }
 
-    bool Predict(BitString<lambda> x) {
+    Bool Predict(BitString<lambda> x) {
         BitString<lambda> s <- BitString<lambda>;
         if (x == s) {
             bad = true;
@@ -36,7 +36,7 @@ Game PredictBitStringItermediate2(int lambda) {
 proof:
 
 let:
-    int lambda;
+    Int lambda;
 
 assume:
 

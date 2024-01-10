@@ -8,7 +8,7 @@ Game Real(PRP F) {
     }
 
     BitString<F.blen> Lookup(BitString<F.blen> x) {
-        return F.evaluate(k, x);
+        return F.Evaluate(k, x);
     }
 }
 

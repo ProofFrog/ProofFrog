@@ -1,10 +1,10 @@
 import 'examples/Primitives/SecretSharing.primitive';
 
-Scheme OTP(int l) extends SecretSharing {
+Scheme OTP(Int l) extends SecretSharing {
     Set Message = BitString<l>;
     Set Shares = BitString<l>;
-    int shareCount = 2;
-    int threshold = 2;
+    Int shareCount = 2;
+    Int threshold = 2;
 
     Array<Shares, shareCount> Share(Message m) {
         BitString<l> s0 <- BitString<l>;

@@ -124,7 +124,7 @@ def serializedATN():
         0,275,25,1,0,0,0,276,281,3,32,16,0,277,278,5,14,0,0,278,280,3,32,
         16,0,279,277,1,0,0,0,280,283,1,0,0,0,281,279,1,0,0,0,281,282,1,0,
         0,0,282,27,1,0,0,0,283,281,1,0,0,0,284,285,6,14,-1,0,285,326,3,22,
-        11,0,286,287,5,30,0,0,287,326,3,28,14,12,288,289,5,31,0,0,289,290,
+        11,0,286,287,5,30,0,0,287,326,3,28,14,11,288,289,5,31,0,0,289,290,
         3,28,14,0,290,291,5,31,0,0,291,326,1,0,0,0,292,301,5,6,0,0,293,298,
         3,28,14,0,294,295,5,14,0,0,295,297,3,28,14,0,296,294,1,0,0,0,297,
         300,1,0,0,0,298,296,1,0,0,0,298,299,1,0,0,0,299,302,1,0,0,0,300,
@@ -138,20 +138,20 @@ def serializedATN():
         0,325,284,1,0,0,0,325,286,1,0,0,0,325,288,1,0,0,0,325,292,1,0,0,
         0,325,304,1,0,0,0,325,316,1,0,0,0,325,317,1,0,0,0,325,318,1,0,0,
         0,325,319,1,0,0,0,325,320,1,0,0,0,325,321,1,0,0,0,326,390,1,0,0,
-        0,327,328,10,29,0,0,328,329,5,22,0,0,329,389,3,28,14,30,330,331,
-        10,28,0,0,331,332,5,23,0,0,332,389,3,28,14,29,333,334,10,27,0,0,
-        334,335,5,11,0,0,335,389,3,28,14,28,336,337,10,26,0,0,337,338,5,
-        10,0,0,338,389,3,28,14,27,339,340,10,25,0,0,340,341,5,24,0,0,341,
-        389,3,28,14,26,342,343,10,24,0,0,343,344,5,25,0,0,344,389,3,28,14,
-        25,345,346,10,23,0,0,346,347,5,28,0,0,347,389,3,28,14,24,348,349,
-        10,22,0,0,349,350,5,42,0,0,350,389,3,28,14,23,351,352,10,21,0,0,
-        352,353,5,46,0,0,353,389,3,28,14,22,354,355,10,20,0,0,355,356,5,
-        26,0,0,356,389,3,28,14,21,357,358,10,19,0,0,358,359,5,47,0,0,359,
-        389,3,28,14,20,360,361,10,18,0,0,361,362,5,29,0,0,362,389,3,28,14,
-        19,363,364,10,17,0,0,364,365,5,18,0,0,365,389,3,28,14,18,366,367,
-        10,16,0,0,367,368,5,19,0,0,368,389,3,28,14,17,369,370,10,15,0,0,
-        370,371,5,16,0,0,371,389,3,28,14,16,372,373,10,14,0,0,373,374,5,
-        20,0,0,374,389,3,28,14,15,375,376,10,10,0,0,376,378,5,8,0,0,377,
+        0,327,328,10,28,0,0,328,329,5,22,0,0,329,389,3,28,14,29,330,331,
+        10,27,0,0,331,332,5,23,0,0,332,389,3,28,14,28,333,334,10,26,0,0,
+        334,335,5,11,0,0,335,389,3,28,14,27,336,337,10,25,0,0,337,338,5,
+        10,0,0,338,389,3,28,14,26,339,340,10,24,0,0,340,341,5,24,0,0,341,
+        389,3,28,14,25,342,343,10,23,0,0,343,344,5,25,0,0,344,389,3,28,14,
+        24,345,346,10,22,0,0,346,347,5,28,0,0,347,389,3,28,14,23,348,349,
+        10,21,0,0,349,350,5,42,0,0,350,389,3,28,14,22,351,352,10,20,0,0,
+        352,353,5,46,0,0,353,389,3,28,14,21,354,355,10,19,0,0,355,356,5,
+        26,0,0,356,389,3,28,14,20,357,358,10,18,0,0,358,359,5,47,0,0,359,
+        389,3,28,14,19,360,361,10,17,0,0,361,362,5,29,0,0,362,389,3,28,14,
+        18,363,364,10,16,0,0,364,365,5,18,0,0,365,389,3,28,14,17,366,367,
+        10,15,0,0,367,368,5,19,0,0,368,389,3,28,14,16,369,370,10,14,0,0,
+        370,371,5,16,0,0,371,389,3,28,14,15,372,373,10,13,0,0,373,374,5,
+        20,0,0,374,389,3,28,14,14,375,376,10,29,0,0,376,378,5,8,0,0,377,
         379,3,30,15,0,378,377,1,0,0,0,378,379,1,0,0,0,379,380,1,0,0,0,380,
         389,5,9,0,0,381,382,10,9,0,0,382,383,5,6,0,0,383,384,3,36,18,0,384,
         385,5,13,0,0,385,386,3,36,18,0,386,387,5,7,0,0,387,389,1,0,0,0,388,
@@ -2566,7 +2566,7 @@ class SchemeParser ( Parser ):
                 self.state = 286
                 self.match(SchemeParser.NOT)
                 self.state = 287
-                self.expression(12)
+                self.expression(11)
                 pass
 
             elif la_ == 3:
@@ -2710,217 +2710,217 @@ class SchemeParser ( Parser ):
                         localctx = SchemeParser.EqualsExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 327
-                        if not self.precpred(self._ctx, 29):
+                        if not self.precpred(self._ctx, 28):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 29)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 28)")
                         self.state = 328
                         self.match(SchemeParser.EQUALSCOMPARE)
                         self.state = 329
-                        self.expression(30)
+                        self.expression(29)
                         pass
 
                     elif la_ == 2:
                         localctx = SchemeParser.NotEqualsExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 330
-                        if not self.precpred(self._ctx, 28):
+                        if not self.precpred(self._ctx, 27):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 28)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 27)")
                         self.state = 331
                         self.match(SchemeParser.NOTEQUALS)
                         self.state = 332
-                        self.expression(29)
+                        self.expression(28)
                         pass
 
                     elif la_ == 3:
                         localctx = SchemeParser.GtExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 333
-                        if not self.precpred(self._ctx, 27):
+                        if not self.precpred(self._ctx, 26):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 27)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 26)")
                         self.state = 334
                         self.match(SchemeParser.R_ANGLE)
                         self.state = 335
-                        self.expression(28)
+                        self.expression(27)
                         pass
 
                     elif la_ == 4:
                         localctx = SchemeParser.LtExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 336
-                        if not self.precpred(self._ctx, 26):
+                        if not self.precpred(self._ctx, 25):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 26)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 25)")
                         self.state = 337
                         self.match(SchemeParser.L_ANGLE)
                         self.state = 338
-                        self.expression(27)
+                        self.expression(26)
                         pass
 
                     elif la_ == 5:
                         localctx = SchemeParser.GeqExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 339
-                        if not self.precpred(self._ctx, 25):
+                        if not self.precpred(self._ctx, 24):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 25)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 24)")
                         self.state = 340
                         self.match(SchemeParser.GEQ)
                         self.state = 341
-                        self.expression(26)
+                        self.expression(25)
                         pass
 
                     elif la_ == 6:
                         localctx = SchemeParser.LeqExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 342
-                        if not self.precpred(self._ctx, 24):
+                        if not self.precpred(self._ctx, 23):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 24)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 23)")
                         self.state = 343
                         self.match(SchemeParser.LEQ)
                         self.state = 344
-                        self.expression(25)
+                        self.expression(24)
                         pass
 
                     elif la_ == 7:
                         localctx = SchemeParser.AndExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 345
-                        if not self.precpred(self._ctx, 23):
+                        if not self.precpred(self._ctx, 22):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 23)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 22)")
                         self.state = 346
                         self.match(SchemeParser.AND)
                         self.state = 347
-                        self.expression(24)
+                        self.expression(23)
                         pass
 
                     elif la_ == 8:
                         localctx = SchemeParser.SubsetsExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 348
-                        if not self.precpred(self._ctx, 22):
+                        if not self.precpred(self._ctx, 21):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 22)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 21)")
                         self.state = 349
                         self.match(SchemeParser.SUBSETS)
                         self.state = 350
-                        self.expression(23)
+                        self.expression(22)
                         pass
 
                     elif la_ == 9:
                         localctx = SchemeParser.InExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 351
-                        if not self.precpred(self._ctx, 21):
+                        if not self.precpred(self._ctx, 20):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 21)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 20)")
                         self.state = 352
                         self.match(SchemeParser.IN)
                         self.state = 353
-                        self.expression(22)
+                        self.expression(21)
                         pass
 
                     elif la_ == 10:
                         localctx = SchemeParser.OrExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 354
-                        if not self.precpred(self._ctx, 20):
+                        if not self.precpred(self._ctx, 19):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 20)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 19)")
                         self.state = 355
                         self.match(SchemeParser.OR)
                         self.state = 356
-                        self.expression(21)
+                        self.expression(20)
                         pass
 
                     elif la_ == 11:
                         localctx = SchemeParser.UnionExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 357
-                        if not self.precpred(self._ctx, 19):
+                        if not self.precpred(self._ctx, 18):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 19)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 18)")
                         self.state = 358
                         self.match(SchemeParser.UNION)
                         self.state = 359
-                        self.expression(20)
+                        self.expression(19)
                         pass
 
                     elif la_ == 12:
                         localctx = SchemeParser.SetMinusExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 360
-                        if not self.precpred(self._ctx, 18):
+                        if not self.precpred(self._ctx, 17):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 18)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 17)")
                         self.state = 361
                         self.match(SchemeParser.BACKSLASH)
                         self.state = 362
-                        self.expression(19)
+                        self.expression(18)
                         pass
 
                     elif la_ == 13:
                         localctx = SchemeParser.AddExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 363
-                        if not self.precpred(self._ctx, 17):
+                        if not self.precpred(self._ctx, 16):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 17)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 16)")
                         self.state = 364
                         self.match(SchemeParser.PLUS)
                         self.state = 365
-                        self.expression(18)
+                        self.expression(17)
                         pass
 
                     elif la_ == 14:
                         localctx = SchemeParser.SubtractExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 366
-                        if not self.precpred(self._ctx, 16):
+                        if not self.precpred(self._ctx, 15):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 16)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 15)")
                         self.state = 367
                         self.match(SchemeParser.SUBTRACT)
                         self.state = 368
-                        self.expression(17)
+                        self.expression(16)
                         pass
 
                     elif la_ == 15:
                         localctx = SchemeParser.MultiplyExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 369
-                        if not self.precpred(self._ctx, 15):
+                        if not self.precpred(self._ctx, 14):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 15)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 14)")
                         self.state = 370
                         self.match(SchemeParser.TIMES)
                         self.state = 371
-                        self.expression(16)
+                        self.expression(15)
                         pass
 
                     elif la_ == 16:
                         localctx = SchemeParser.DivideExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 372
-                        if not self.precpred(self._ctx, 14):
+                        if not self.precpred(self._ctx, 13):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 14)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 13)")
                         self.state = 373
                         self.match(SchemeParser.DIVIDE)
                         self.state = 374
-                        self.expression(15)
+                        self.expression(14)
                         pass
 
                     elif la_ == 17:
                         localctx = SchemeParser.FnCallExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 375
-                        if not self.precpred(self._ctx, 10):
+                        if not self.precpred(self._ctx, 29):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 10)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 29)")
                         self.state = 376
                         self.match(SchemeParser.L_PAREN)
                         self.state = 378
@@ -3911,71 +3911,71 @@ class SchemeParser ( Parser ):
 
     def expression_sempred(self, localctx:ExpressionContext, predIndex:int):
             if predIndex == 0:
-                return self.precpred(self._ctx, 29)
-         
-
-            if predIndex == 1:
                 return self.precpred(self._ctx, 28)
          
 
-            if predIndex == 2:
+            if predIndex == 1:
                 return self.precpred(self._ctx, 27)
          
 
-            if predIndex == 3:
+            if predIndex == 2:
                 return self.precpred(self._ctx, 26)
          
 
-            if predIndex == 4:
+            if predIndex == 3:
                 return self.precpred(self._ctx, 25)
          
 
-            if predIndex == 5:
+            if predIndex == 4:
                 return self.precpred(self._ctx, 24)
          
 
-            if predIndex == 6:
+            if predIndex == 5:
                 return self.precpred(self._ctx, 23)
          
 
-            if predIndex == 7:
+            if predIndex == 6:
                 return self.precpred(self._ctx, 22)
          
 
-            if predIndex == 8:
+            if predIndex == 7:
                 return self.precpred(self._ctx, 21)
          
 
-            if predIndex == 9:
+            if predIndex == 8:
                 return self.precpred(self._ctx, 20)
          
 
-            if predIndex == 10:
+            if predIndex == 9:
                 return self.precpred(self._ctx, 19)
          
 
-            if predIndex == 11:
+            if predIndex == 10:
                 return self.precpred(self._ctx, 18)
          
 
-            if predIndex == 12:
+            if predIndex == 11:
                 return self.precpred(self._ctx, 17)
          
 
-            if predIndex == 13:
+            if predIndex == 12:
                 return self.precpred(self._ctx, 16)
          
 
-            if predIndex == 14:
+            if predIndex == 13:
                 return self.precpred(self._ctx, 15)
          
 
-            if predIndex == 15:
+            if predIndex == 14:
                 return self.precpred(self._ctx, 14)
          
 
+            if predIndex == 15:
+                return self.precpred(self._ctx, 13)
+         
+
             if predIndex == 16:
-                return self.precpred(self._ctx, 10)
+                return self.precpred(self._ctx, 29)
          
 
             if predIndex == 17:

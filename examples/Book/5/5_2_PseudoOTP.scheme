@@ -1,12 +1,10 @@
 import 'examples/Primitives/SymEnc.primitive';
 import 'examples/Primitives/PRG.primitive';
 
-Scheme PseudoOTP(Int lambda, Int stretch, PRG G) extends SymEnc {
-    requires G.lambda == lambda && G.stretch == stretch;
-
-    Set Key = BitString<lambda>;
-    Set Message = BitString<lambda + stretch>;
-    Set Ciphertext = BitString<lambda + stretch>;
+Scheme PseudoOTP(PRG G) extends SymEnc {
+    Set Key = BitString<G.lambda>;
+    Set Message = BitString<G.lambda + G.stretch>;
+    Set Ciphertext = BitString<G.lambda + G.stretch>;
 
     Key KeyGen() {
         Key k <- Key;
@@ -14,10 +12,10 @@ Scheme PseudoOTP(Int lambda, Int stretch, PRG G) extends SymEnc {
     }
 
     Ciphertext Enc(Key k, Message m) {
-        return G.evaluate(k) + m;
+        return G.Evaluate(k) + m;
     }
 
     Message Dec(Ciphertext c) {
-        return G.evaluate(k) + c;
+        return G.Evaluate(k) + c;
     }
 }

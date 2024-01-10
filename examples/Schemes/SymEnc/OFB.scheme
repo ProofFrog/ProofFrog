@@ -1,12 +1,12 @@
 import 'examples/Primitives/SymEnc.primitive';
+import 'examples/Primitives/PRF.primitive';
 
-Scheme OFB(int lambda, int blocks, PRF F) extends SymEnc {
+Scheme OFB(Int lambda, Int blocks, PRF F) extends SymEnc {
     requires F.lambda == lambda && F.in == lambda && F.out == lambda;
 
     Set Key = BitString<lambda>;
     Set Message = Array<BitString<lambda>, blocks>;
     Set Ciphertext = Array<BitString<lambda>, blocks + 1>;
-    PRF F = F;
 
     Key KeyGen() {
         Key k <- BitString<lambda>;

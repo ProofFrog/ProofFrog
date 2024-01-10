@@ -141,7 +141,7 @@ class UnaryOperators(Enum):
     SIZE = "|"
 
 
-class BinaryOperation(Expression):
+class BinaryOperation(Expression, Type):
     def __init__(
         self,
         operator: BinaryOperators,
@@ -376,11 +376,11 @@ class Slice(Expression):
 class VariableDeclaration(Statement):
     def __init__(self, the_type: Type, name: str) -> None:
         super().__init__()
-        self.the_type = the_type
+        self.type = the_type
         self.name = name
 
     def __str__(self) -> str:
-        return f"{self.the_type} {self.name};"
+        return f"{self.type} {self.name};"
 
 
 class NumericFor(Statement):

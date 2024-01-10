@@ -116,7 +116,7 @@ def serializedATN():
         256,5,6,0,0,256,23,1,0,0,0,257,262,3,30,15,0,258,259,5,11,0,0,259,
         261,3,30,15,0,260,258,1,0,0,0,261,264,1,0,0,0,262,260,1,0,0,0,262,
         263,1,0,0,0,263,25,1,0,0,0,264,262,1,0,0,0,265,266,6,13,-1,0,266,
-        307,3,20,10,0,267,268,5,27,0,0,268,307,3,26,13,12,269,270,5,28,0,
+        307,3,20,10,0,267,268,5,27,0,0,268,307,3,26,13,11,269,270,5,28,0,
         0,270,271,3,26,13,0,271,272,5,28,0,0,272,307,1,0,0,0,273,282,5,3,
         0,0,274,279,3,26,13,0,275,276,5,11,0,0,276,278,3,26,13,0,277,275,
         1,0,0,0,278,281,1,0,0,0,279,277,1,0,0,0,279,280,1,0,0,0,280,283,
@@ -130,20 +130,20 @@ def serializedATN():
         307,1,0,0,0,306,265,1,0,0,0,306,267,1,0,0,0,306,269,1,0,0,0,306,
         273,1,0,0,0,306,285,1,0,0,0,306,297,1,0,0,0,306,298,1,0,0,0,306,
         299,1,0,0,0,306,300,1,0,0,0,306,301,1,0,0,0,306,302,1,0,0,0,307,
-        371,1,0,0,0,308,309,10,29,0,0,309,310,5,19,0,0,310,370,3,26,13,30,
-        311,312,10,28,0,0,312,313,5,20,0,0,313,370,3,26,13,29,314,315,10,
-        27,0,0,315,316,5,8,0,0,316,370,3,26,13,28,317,318,10,26,0,0,318,
-        319,5,7,0,0,319,370,3,26,13,27,320,321,10,25,0,0,321,322,5,21,0,
-        0,322,370,3,26,13,26,323,324,10,24,0,0,324,325,5,22,0,0,325,370,
-        3,26,13,25,326,327,10,23,0,0,327,328,5,25,0,0,328,370,3,26,13,24,
-        329,330,10,22,0,0,330,331,5,39,0,0,331,370,3,26,13,23,332,333,10,
-        21,0,0,333,334,5,43,0,0,334,370,3,26,13,22,335,336,10,20,0,0,336,
-        337,5,23,0,0,337,370,3,26,13,21,338,339,10,19,0,0,339,340,5,44,0,
-        0,340,370,3,26,13,20,341,342,10,18,0,0,342,343,5,26,0,0,343,370,
-        3,26,13,19,344,345,10,17,0,0,345,346,5,15,0,0,346,370,3,26,13,18,
-        347,348,10,16,0,0,348,349,5,16,0,0,349,370,3,26,13,17,350,351,10,
-        15,0,0,351,352,5,13,0,0,352,370,3,26,13,16,353,354,10,14,0,0,354,
-        355,5,17,0,0,355,370,3,26,13,15,356,357,10,10,0,0,357,359,5,5,0,
+        371,1,0,0,0,308,309,10,28,0,0,309,310,5,19,0,0,310,370,3,26,13,29,
+        311,312,10,27,0,0,312,313,5,20,0,0,313,370,3,26,13,28,314,315,10,
+        26,0,0,315,316,5,8,0,0,316,370,3,26,13,27,317,318,10,25,0,0,318,
+        319,5,7,0,0,319,370,3,26,13,26,320,321,10,24,0,0,321,322,5,21,0,
+        0,322,370,3,26,13,25,323,324,10,23,0,0,324,325,5,22,0,0,325,370,
+        3,26,13,24,326,327,10,22,0,0,327,328,5,25,0,0,328,370,3,26,13,23,
+        329,330,10,21,0,0,330,331,5,39,0,0,331,370,3,26,13,22,332,333,10,
+        20,0,0,333,334,5,43,0,0,334,370,3,26,13,21,335,336,10,19,0,0,336,
+        337,5,23,0,0,337,370,3,26,13,20,338,339,10,18,0,0,339,340,5,44,0,
+        0,340,370,3,26,13,19,341,342,10,17,0,0,342,343,5,26,0,0,343,370,
+        3,26,13,18,344,345,10,16,0,0,345,346,5,15,0,0,346,370,3,26,13,17,
+        347,348,10,15,0,0,348,349,5,16,0,0,349,370,3,26,13,16,350,351,10,
+        14,0,0,351,352,5,13,0,0,352,370,3,26,13,15,353,354,10,13,0,0,354,
+        355,5,17,0,0,355,370,3,26,13,14,356,357,10,29,0,0,357,359,5,5,0,
         0,358,360,3,28,14,0,359,358,1,0,0,0,359,360,1,0,0,0,360,361,1,0,
         0,0,361,370,5,6,0,0,362,363,10,9,0,0,363,364,5,3,0,0,364,365,3,34,
         17,0,365,366,5,10,0,0,366,367,3,34,17,0,367,368,5,4,0,0,368,370,
@@ -2458,7 +2458,7 @@ class PrimitiveParser ( Parser ):
                 self.state = 267
                 self.match(PrimitiveParser.NOT)
                 self.state = 268
-                self.expression(12)
+                self.expression(11)
                 pass
 
             elif la_ == 3:
@@ -2602,217 +2602,217 @@ class PrimitiveParser ( Parser ):
                         localctx = PrimitiveParser.EqualsExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 308
-                        if not self.precpred(self._ctx, 29):
+                        if not self.precpred(self._ctx, 28):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 29)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 28)")
                         self.state = 309
                         self.match(PrimitiveParser.EQUALSCOMPARE)
                         self.state = 310
-                        self.expression(30)
+                        self.expression(29)
                         pass
 
                     elif la_ == 2:
                         localctx = PrimitiveParser.NotEqualsExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 311
-                        if not self.precpred(self._ctx, 28):
+                        if not self.precpred(self._ctx, 27):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 28)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 27)")
                         self.state = 312
                         self.match(PrimitiveParser.NOTEQUALS)
                         self.state = 313
-                        self.expression(29)
+                        self.expression(28)
                         pass
 
                     elif la_ == 3:
                         localctx = PrimitiveParser.GtExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 314
-                        if not self.precpred(self._ctx, 27):
+                        if not self.precpred(self._ctx, 26):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 27)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 26)")
                         self.state = 315
                         self.match(PrimitiveParser.R_ANGLE)
                         self.state = 316
-                        self.expression(28)
+                        self.expression(27)
                         pass
 
                     elif la_ == 4:
                         localctx = PrimitiveParser.LtExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 317
-                        if not self.precpred(self._ctx, 26):
+                        if not self.precpred(self._ctx, 25):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 26)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 25)")
                         self.state = 318
                         self.match(PrimitiveParser.L_ANGLE)
                         self.state = 319
-                        self.expression(27)
+                        self.expression(26)
                         pass
 
                     elif la_ == 5:
                         localctx = PrimitiveParser.GeqExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 320
-                        if not self.precpred(self._ctx, 25):
+                        if not self.precpred(self._ctx, 24):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 25)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 24)")
                         self.state = 321
                         self.match(PrimitiveParser.GEQ)
                         self.state = 322
-                        self.expression(26)
+                        self.expression(25)
                         pass
 
                     elif la_ == 6:
                         localctx = PrimitiveParser.LeqExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 323
-                        if not self.precpred(self._ctx, 24):
+                        if not self.precpred(self._ctx, 23):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 24)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 23)")
                         self.state = 324
                         self.match(PrimitiveParser.LEQ)
                         self.state = 325
-                        self.expression(25)
+                        self.expression(24)
                         pass
 
                     elif la_ == 7:
                         localctx = PrimitiveParser.AndExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 326
-                        if not self.precpred(self._ctx, 23):
+                        if not self.precpred(self._ctx, 22):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 23)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 22)")
                         self.state = 327
                         self.match(PrimitiveParser.AND)
                         self.state = 328
-                        self.expression(24)
+                        self.expression(23)
                         pass
 
                     elif la_ == 8:
                         localctx = PrimitiveParser.SubsetsExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 329
-                        if not self.precpred(self._ctx, 22):
+                        if not self.precpred(self._ctx, 21):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 22)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 21)")
                         self.state = 330
                         self.match(PrimitiveParser.SUBSETS)
                         self.state = 331
-                        self.expression(23)
+                        self.expression(22)
                         pass
 
                     elif la_ == 9:
                         localctx = PrimitiveParser.InExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 332
-                        if not self.precpred(self._ctx, 21):
+                        if not self.precpred(self._ctx, 20):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 21)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 20)")
                         self.state = 333
                         self.match(PrimitiveParser.IN)
                         self.state = 334
-                        self.expression(22)
+                        self.expression(21)
                         pass
 
                     elif la_ == 10:
                         localctx = PrimitiveParser.OrExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 335
-                        if not self.precpred(self._ctx, 20):
+                        if not self.precpred(self._ctx, 19):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 20)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 19)")
                         self.state = 336
                         self.match(PrimitiveParser.OR)
                         self.state = 337
-                        self.expression(21)
+                        self.expression(20)
                         pass
 
                     elif la_ == 11:
                         localctx = PrimitiveParser.UnionExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 338
-                        if not self.precpred(self._ctx, 19):
+                        if not self.precpred(self._ctx, 18):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 19)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 18)")
                         self.state = 339
                         self.match(PrimitiveParser.UNION)
                         self.state = 340
-                        self.expression(20)
+                        self.expression(19)
                         pass
 
                     elif la_ == 12:
                         localctx = PrimitiveParser.SetMinusExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 341
-                        if not self.precpred(self._ctx, 18):
+                        if not self.precpred(self._ctx, 17):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 18)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 17)")
                         self.state = 342
                         self.match(PrimitiveParser.BACKSLASH)
                         self.state = 343
-                        self.expression(19)
+                        self.expression(18)
                         pass
 
                     elif la_ == 13:
                         localctx = PrimitiveParser.AddExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 344
-                        if not self.precpred(self._ctx, 17):
+                        if not self.precpred(self._ctx, 16):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 17)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 16)")
                         self.state = 345
                         self.match(PrimitiveParser.PLUS)
                         self.state = 346
-                        self.expression(18)
+                        self.expression(17)
                         pass
 
                     elif la_ == 14:
                         localctx = PrimitiveParser.SubtractExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 347
-                        if not self.precpred(self._ctx, 16):
+                        if not self.precpred(self._ctx, 15):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 16)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 15)")
                         self.state = 348
                         self.match(PrimitiveParser.SUBTRACT)
                         self.state = 349
-                        self.expression(17)
+                        self.expression(16)
                         pass
 
                     elif la_ == 15:
                         localctx = PrimitiveParser.MultiplyExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 350
-                        if not self.precpred(self._ctx, 15):
+                        if not self.precpred(self._ctx, 14):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 15)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 14)")
                         self.state = 351
                         self.match(PrimitiveParser.TIMES)
                         self.state = 352
-                        self.expression(16)
+                        self.expression(15)
                         pass
 
                     elif la_ == 16:
                         localctx = PrimitiveParser.DivideExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 353
-                        if not self.precpred(self._ctx, 14):
+                        if not self.precpred(self._ctx, 13):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 14)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 13)")
                         self.state = 354
                         self.match(PrimitiveParser.DIVIDE)
                         self.state = 355
-                        self.expression(15)
+                        self.expression(14)
                         pass
 
                     elif la_ == 17:
                         localctx = PrimitiveParser.FnCallExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 356
-                        if not self.precpred(self._ctx, 10):
+                        if not self.precpred(self._ctx, 29):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 10)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 29)")
                         self.state = 357
                         self.match(PrimitiveParser.L_PAREN)
                         self.state = 359
@@ -3803,71 +3803,71 @@ class PrimitiveParser ( Parser ):
 
     def expression_sempred(self, localctx:ExpressionContext, predIndex:int):
             if predIndex == 0:
-                return self.precpred(self._ctx, 29)
-         
-
-            if predIndex == 1:
                 return self.precpred(self._ctx, 28)
          
 
-            if predIndex == 2:
+            if predIndex == 1:
                 return self.precpred(self._ctx, 27)
          
 
-            if predIndex == 3:
+            if predIndex == 2:
                 return self.precpred(self._ctx, 26)
          
 
-            if predIndex == 4:
+            if predIndex == 3:
                 return self.precpred(self._ctx, 25)
          
 
-            if predIndex == 5:
+            if predIndex == 4:
                 return self.precpred(self._ctx, 24)
          
 
-            if predIndex == 6:
+            if predIndex == 5:
                 return self.precpred(self._ctx, 23)
          
 
-            if predIndex == 7:
+            if predIndex == 6:
                 return self.precpred(self._ctx, 22)
          
 
-            if predIndex == 8:
+            if predIndex == 7:
                 return self.precpred(self._ctx, 21)
          
 
-            if predIndex == 9:
+            if predIndex == 8:
                 return self.precpred(self._ctx, 20)
          
 
-            if predIndex == 10:
+            if predIndex == 9:
                 return self.precpred(self._ctx, 19)
          
 
-            if predIndex == 11:
+            if predIndex == 10:
                 return self.precpred(self._ctx, 18)
          
 
-            if predIndex == 12:
+            if predIndex == 11:
                 return self.precpred(self._ctx, 17)
          
 
-            if predIndex == 13:
+            if predIndex == 12:
                 return self.precpred(self._ctx, 16)
          
 
-            if predIndex == 14:
+            if predIndex == 13:
                 return self.precpred(self._ctx, 15)
          
 
-            if predIndex == 15:
+            if predIndex == 14:
                 return self.precpred(self._ctx, 14)
          
 
+            if predIndex == 15:
+                return self.precpred(self._ctx, 13)
+         
+
             if predIndex == 16:
-                return self.precpred(self._ctx, 10)
+                return self.precpred(self._ctx, 29)
          
 
             if predIndex == 17:

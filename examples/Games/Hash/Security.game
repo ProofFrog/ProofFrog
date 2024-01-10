@@ -9,7 +9,7 @@ Game Real(Hash H) {
     }
 
     bool Test(BitString x, BitString xPrime) {
-        return x != xPrime && H.evaluate(s, x) == H.evaluate(s, xPrime);
+        return x != xPrime && H.Evaluate(s, x) == H.Evaluate(s, xPrime);
     }
 }
 

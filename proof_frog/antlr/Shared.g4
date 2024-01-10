@@ -34,7 +34,9 @@ methodSignature: type id L_PAREN paramList? R_PAREN;
 
 paramList: variable (COMMA variable)*;
 
-expression: expression EQUALSCOMPARE expression #equalsExp
+expression:
+	expression L_PAREN argList? R_PAREN #fnCallExp
+	| expression EQUALSCOMPARE expression #equalsExp
 	| expression NOTEQUALS expression #notEqualsExp
 	| expression R_ANGLE expression # gtExp
 	| expression L_ANGLE expression # ltExp
@@ -54,7 +56,6 @@ expression: expression EQUALSCOMPARE expression #equalsExp
 	| lvalue # lvalueExp
 	| NOT expression #notExp
 	| VBAR expression VBAR #sizeExp
-	| expression L_PAREN argList? R_PAREN #fnCallExp
 	| expression L_SQUARE integerExpression COLON integerExpression R_SQUARE #sliceExp
 	| L_SQUARE (expression (COMMA expression)*)? R_SQUARE #createTupleExp
 	| L_CURLY (expression (COMMA expression)*)? R_CURLY #createSetExp

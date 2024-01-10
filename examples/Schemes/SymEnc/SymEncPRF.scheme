@@ -15,12 +15,12 @@ Scheme SymEncPRF(PRF F) extends SymEnc {
 
     Ciphertext Enc(Key k, Message m) {
         BitString<F.lambda> r <- BitString<F.lambda>;
-        BitString<F.out> x = F.evaluate(k, r) + m;
+        BitString<F.out> x = F.Evaluate(k, r) + m;
         return [r, x];
     }
 
     Message Dec(Key k, Ciphertext c) {
-        Message m = F.evaluate(k, c[0]) + c[1];
+        Message m = F.Evaluate(k, c[0]) + c[1];
         return m;
     }
 }

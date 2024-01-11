@@ -1,0 +1,7 @@
+import 'examples/ill-formed/fixtures/VoidFPrimitive.primitive';
+
+Scheme InvalidParameter(Bla x) extends VoidFPrimitive {
+    Int x = 1;
+
+    Void f() {}
+}

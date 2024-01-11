@@ -1,4 +1,6 @@
 #!/bin/bash
+source ~/.bash_aliases
+shopt -s expand_aliases
 
 rm -r proof_frog/parsing/*
 touch proof_frog/parsing/__init__.py

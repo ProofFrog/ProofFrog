@@ -17,7 +17,7 @@ for file in $(find examples -type f); do
 			continue
 		fi
 		echo "Checking $file is well-formed"
-		python3 -m proof_frog check $file 2>> errorOutput.txt
+		python3 -m proof_frog check $file > /dev/null 2>> errorOutput.txt
 		if [ $? -ne 0 ]; then
 			echo "$file WAS NOT DETECTED AS WELL-FORMED"
 			exit 1

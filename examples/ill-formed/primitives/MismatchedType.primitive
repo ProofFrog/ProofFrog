@@ -1,0 +1,3 @@
+Primitive MismatchedType(Bool x) {
+    Int y = x;
+}

@@ -1,3 +1,0 @@
-Primitive InvalidType(Bool x) {
-    Int y = x;
-}

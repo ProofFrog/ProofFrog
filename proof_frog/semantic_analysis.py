@@ -326,7 +326,6 @@ class TypeCheckVisitor(visitors.Visitor[None]):
     def leave_func_call_expression(
         self, func_call: frog_ast.FuncCallExpression
     ) -> None:
-        print(func_call)
         arg_types = []
         for _ in func_call.args:
             arg_types.insert(0, self.type_stack.pop())

@@ -1,0 +1,5 @@
+Primitive SimplePrimitive(Set mySet) {
+    Set field = mySet;
+
+    Int f();
+}

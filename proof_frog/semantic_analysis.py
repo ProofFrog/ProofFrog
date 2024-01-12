@@ -167,13 +167,35 @@ class TypeCheckVisitor(visitors.Visitor[None]):
                 return
 
     def visit_scheme(self, scheme: frog_ast.Scheme) -> None:
-        if scheme.primitive_name not in self.import_namespace or not isinstance(
-            self.import_namespace[scheme.primitive_name], frog_ast.Primitive
-        ):
+        if scheme.primitive_name not in self.import_namespace:
+            print_error(
+                scheme,
+                f"In Scheme {scheme.name}, {scheme.primitive_name} is not defined",
+            )
+        base_primitive = self.import_namespace[scheme.primitive_name]
+        if not isinstance(base_primitive, frog_ast.Primitive):
             print_error(
                 scheme,
                 f"In Scheme {scheme.name}, {scheme.primitive_name} is not a Primitive",
             )
+            return
+        for field in base_primitive.fields:
+            if (
+                next(
+                    (
+                        scheme_field
+                        for scheme_field in scheme.fields
+                        if scheme_field.name == field.name
+                        and scheme_field.type == field.type
+                    ),
+                    None,
+                )
+                is None
+            ):
+                print_error(
+                    scheme,
+                    f"{base_primitive.name} defines field '{field.name}' which {scheme.name} does not override",
+                )
 
     def visit_method(self, method: frog_ast.Method) -> None:
         self.variable_type_map_stack.append(

@@ -19,7 +19,7 @@ Scheme GeneralDoubleSymEnc(SymEnc S, SymEnc T) extends SymEnc {
         return c2;
     }
 
-    Message Dec(Ciphertext c) {
+    Message Dec(Key k, Ciphertext c) {
         S.Ciphertext c2 = T.Dec(k[1], c);
         S.Message m = S.Dec(k[0], c2);
         return m;

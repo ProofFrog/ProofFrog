@@ -1,7 +1,5 @@
 #!/bin/bash
 
-rm errorOutput.txt
-
 for file in $(find examples -type f); do
 	echo $file | egrep "ill-formed" > /dev/null
 	isIllFormed=$?
@@ -21,7 +19,7 @@ for file in $(find examples -type f); do
 			continue
 		fi
 		echo "Checking $file is well-formed"
-		python3 -m proof_frog check $file > /dev/null 2>> errorOutput.txt
+		python3 -m proof_frog check $file
 		if [ $? -ne 0 ]; then
 			echo "$file WAS NOT DETECTED AS WELL-FORMED"
 			exit 1

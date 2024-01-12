@@ -15,7 +15,7 @@ Scheme PseudoOTP(PRG G) extends SymEnc {
         return G.Evaluate(k) + m;
     }
 
-    Message Dec(Ciphertext c) {
+    Message Dec(Key k, Ciphertext c) {
         return G.Evaluate(k) + c;
     }
 }

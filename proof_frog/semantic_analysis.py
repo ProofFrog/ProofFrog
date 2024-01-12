@@ -197,6 +197,50 @@ class TypeCheckVisitor(visitors.Visitor[None]):
                     f"{base_primitive.name} defines field '{field.name}' which {scheme.name} does not override",
                 )
 
+        def is_method_override(
+            primitive_signature: frog_ast.MethodSignature,
+            scheme_signature: frog_ast.MethodSignature,
+        ):
+            def is_type_equal(primitive_type, scheme_type):
+                if primitive_type == scheme_type:
+                    return True
+                if isinstance(primitive_type, frog_ast.OptionalType):
+                    return is_type_equal(primitive_type.the_type, scheme_type)
+                return False
+
+            return (
+                is_type_equal(
+                    primitive_signature.return_type, scheme_signature.return_type
+                )
+                and len(primitive_signature.parameters)
+                == len(scheme_signature.parameters)
+                and all(
+                    (
+                        is_type_equal(param1.type, param2.type)
+                        for [param1, param2] in zip(
+                            primitive_signature.parameters, scheme_signature.parameters
+                        )
+                    )
+                )
+            )
+
+        for method in base_primitive.methods:
+            if (
+                next(
+                    (
+                        scheme_method
+                        for scheme_method in scheme.methods
+                        if is_method_override(method, scheme_method.signature)
+                    ),
+                    None,
+                )
+                is None
+            ):
+                print_error(
+                    scheme,
+                    f"{base_primitive.name} defines method '{method}' which {scheme.name} does not override",
+                )
+
     def visit_method(self, method: frog_ast.Method) -> None:
         self.variable_type_map_stack.append(
             dict(

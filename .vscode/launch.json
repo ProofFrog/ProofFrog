@@ -9,7 +9,7 @@
             "type": "python",
             "request": "launch",
             "module": "proof_frog",
-            "args": ["prove", "examples/Book/5/5_5_LengthTriplingPRG.proof"],
+            "args": ["check", "examples/Book/5/5_2_PseudoOTP.scheme"],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "justMyCode": true

@@ -460,7 +460,7 @@ class Boolean(Expression):
         return str(self.bool).lower()
 
 
-class ASTNone(Expression):
+class NoneExpression(Expression):
     def __str__(self) -> str:
         return "None"
 

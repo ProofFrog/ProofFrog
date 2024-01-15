@@ -328,8 +328,8 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             frog_ast.UnaryOperators.SIZE, self.visit(ctx.expression())
         )
 
-    def visitNoneExp(self, __: PrimitiveParser.NoneExpContext) -> frog_ast.ASTNone:
-        return frog_ast.ASTNone()
+    def visitNoneExp(self, __: PrimitiveParser.NoneExpContext) -> frog_ast.NoneExpression:
+        return frog_ast.NoneExpression()
 
     def visitParenExp(
         self, ctx: PrimitiveParser.ParenExpContext

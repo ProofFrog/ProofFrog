@@ -17,7 +17,7 @@ def check_well_formed(root: frog_ast.Root) -> None:
             import_namespace[name] = parsed_file
         check_primitive_well_formed(root, import_namespace)
 
-    TypeCheckVisitor(import_namespace).visit(root)
+    TypeCheckVisitor(import_namespace, root).visit(root)
 
 
 def check_primitive_well_formed(
@@ -79,14 +79,16 @@ def check_primitive_well_formed(
 def print_error(location: frog_ast.ASTNode, message: str):
     print(f"Line {location.line_num}, column: {location.column_num}", file=sys.stderr)
     print(message, file=sys.stderr)
-    sys.exit(1)
+    sys.exit(2)
 
 
 class TypeCheckVisitor(visitors.Visitor[None]):
-    def __init__(self, import_namespace):
+    def __init__(self, import_namespace, root):
         self.variable_type_map_stack = [{}]
         self.type_stack = []
         self.import_namespace = import_namespace
+        self.method_return_type = None
+        self.root = root
 
     def result(self) -> None:
         return None
@@ -97,6 +99,18 @@ class TypeCheckVisitor(visitors.Visitor[None]):
             if not isinstance(param.type, frog_ast.Variable)
             else self.get_type(param.type.name)
         )
+
+    def leave_tuple(self, the_tuple: frog_ast.Tuple) -> None:
+        list_of_types = []
+        for _ in the_tuple.values:
+            list_of_types.append(self.type_stack.pop())
+
+        tuple_type = list_of_types[0]
+        for next_type in list_of_types[1:]:
+            tuple_type = frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.MULTIPLY, next_type, tuple_type
+            )
+        self.type_stack.append(tuple_type)
 
     def leave_field(self, field: frog_ast.Field) -> None:
         if isinstance(field.type, frog_ast.SetType):
@@ -129,7 +143,21 @@ class TypeCheckVisitor(visitors.Visitor[None]):
         if to_return:
             self.type_stack.append(to_return)
             return
-        assert False, "Variable not defined"
+        assert False, f"Variable {name} not defined"
+
+    def leave_return_statement(
+        self, return_statement: frog_ast.ReturnStatement
+    ) -> None:
+        expression_type = self.type_stack.pop()
+        assert isinstance(self.root, frog_ast.Scheme)
+        if not is_sub_type(
+            self.method_return_type,
+            SimplifyTypeTransformer(self.root.fields).transform(expression_type),
+        ):
+            print_error(
+                return_statement,
+                f"In '{return_statement}', {return_statement.expression} is of type {expression_type}, should be of type {self.method_return_type}",
+            )
 
     def leave_field_access(self, field_access: frog_ast.FieldAccess) -> None:
         if not isinstance(field_access.the_object, frog_ast.Variable):
@@ -201,22 +229,15 @@ class TypeCheckVisitor(visitors.Visitor[None]):
             primitive_signature: frog_ast.MethodSignature,
             scheme_signature: frog_ast.MethodSignature,
         ):
-            def is_type_equal(primitive_type, scheme_type):
-                if primitive_type == scheme_type:
-                    return True
-                if isinstance(primitive_type, frog_ast.OptionalType):
-                    return is_type_equal(primitive_type.the_type, scheme_type)
-                return False
-
             return (
-                is_type_equal(
+                is_sub_type(
                     primitive_signature.return_type, scheme_signature.return_type
                 )
                 and len(primitive_signature.parameters)
                 == len(scheme_signature.parameters)
                 and all(
                     (
-                        is_type_equal(param1.type, param2.type)
+                        param1.type == param2.type
                         for [param1, param2] in zip(
                             primitive_signature.parameters, scheme_signature.parameters
                         )
@@ -249,6 +270,10 @@ class TypeCheckVisitor(visitors.Visitor[None]):
                     (param.type for param in method.signature.parameters),
                 )
             )
+        )
+        assert isinstance(self.root, frog_ast.Scheme)
+        self.method_return_type = SimplifyTypeTransformer(self.root.fields).transform(
+            method.signature.return_type
         )
 
     def leave_method(self, _: frog_ast.Method) -> None:
@@ -293,8 +318,14 @@ class TypeCheckVisitor(visitors.Visitor[None]):
     def leave_integer(self, _: frog_ast.Integer) -> None:
         self.type_stack.append(frog_ast.IntType())
 
+    def leave_boolean(self, _: frog_ast.Boolean) -> None:
+        self.type_stack.append(frog_ast.BoolType())
+
     def leave_binary_num(self, _: frog_ast.BinaryNum) -> None:
         self.type_stack.append(frog_ast.BitStringType())
+
+    def leave_none_expression(self, _: frog_ast.NoneExpression) -> None:
+        self.type_stack.append(frog_ast.NoneExpression())
 
     def leave_binary_operation(self, binary_op: frog_ast.BinaryOperation) -> None:
         type1 = self.type_stack.pop()
@@ -334,7 +365,7 @@ class TypeCheckVisitor(visitors.Visitor[None]):
                     binary_op,
                     f"In {binary_op}, cannot perform operation on {type1} and {type2}",
                 )
-            self.type_stack.append(frog_ast.IntType())
+            self.type_stack.append(type1)
         if binary_op.operator == frog_ast.BinaryOperators.AND:
             if type1 != type2 or not isinstance(type1, frog_ast.BoolType):
                 print_error(
@@ -406,6 +437,30 @@ class TypeCheckVisitor(visitors.Visitor[None]):
             return self.import_namespace[name]
 
         return None
+
+
+class SimplifyTypeTransformer(visitors.Transformer):
+    def __init__(self, fields: list[frog_ast.Field]):
+        self.fields = fields
+
+    def transform_variable(self, var: frog_ast.Variable):
+        for field in self.fields:
+            if field.name == var.name:
+                return field.value
+        return var
+
+    def transform_field_access(self, field_access: frog_ast.FieldAccess):
+        return field_access
+
+
+def is_sub_type(base_type, maybe_sub_type):
+    if base_type == maybe_sub_type:
+        return True
+    if isinstance(base_type, frog_ast.OptionalType):
+        if isinstance(maybe_sub_type, frog_ast.NoneExpression):
+            return True
+        return is_sub_type(base_type.the_type, maybe_sub_type)
+    return False
 
 
 class AddFieldAccessTransformer(visitors.Transformer):

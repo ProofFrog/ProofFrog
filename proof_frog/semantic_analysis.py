@@ -276,6 +276,13 @@ class TypeCheckVisitor(visitors.Visitor[None]):
             method.signature.return_type
         )
 
+    def visit_if_statement(self, if_statement: frog_ast.IfStatement) -> None:
+        for condition in if_statement.conditions:
+            self.visit(condition)
+            expr_type = self.type_stack.pop()
+            if not isinstance(expr_type, frog_ast.BoolType):
+                print_error(condition, f"{condition} does not return type bool")
+
     def leave_method(self, _: frog_ast.Method) -> None:
         self.variable_type_map_stack.pop()
 
@@ -346,7 +353,10 @@ class TypeCheckVisitor(visitors.Visitor[None]):
                 self.type_stack.append(binary_op)
                 return
 
-        if binary_op.operator == frog_ast.BinaryOperators.EQUALS:
+        if (
+            binary_op.operator == frog_ast.BinaryOperators.EQUALS
+            or binary_op.operator == frog_ast.BinaryOperators.NOTEQUALS
+        ):
             if type1 != type2:
                 print_error(
                     binary_op,

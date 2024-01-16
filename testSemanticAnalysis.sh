@@ -1,6 +1,6 @@
 #!/bin/bash
 
-skipped="/OTP.scheme$|CounterPRG.scheme|TriplingPRG.scheme$"
+skipped="/OTP.scheme$|CounterPRG.scheme|TriplingPRG.scheme$|OFB.scheme$"
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 

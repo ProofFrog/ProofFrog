@@ -291,10 +291,22 @@ class TypeCheckVisitor(visitors.Visitor[None]):
             assert isinstance(assignment.var, frog_ast.Variable)
             self.variable_type_map_stack[-1][assignment.var.name] = assignment.the_type
 
-    def visit_sample(self, assignment: frog_ast.Assignment) -> None:
-        if assignment.the_type is not None:
-            assert isinstance(assignment.var, frog_ast.Variable)
-            self.variable_type_map_stack[-1][assignment.var.name] = assignment.the_type
+    def leave_assignment(self, assignment: frog_ast.Assignment) -> None:
+        rhs_type = self.type_stack.pop()
+        expected_type = self.type_stack.pop()
+        if not is_sub_type(expected_type, rhs_type):
+            print_error(
+                assignment,
+                f"{assignment.value} is of type {rhs_type}, which is not compatible with {expected_type}",
+            )
+
+    def visit_sample(self, sample: frog_ast.Sample) -> None:
+        if sample.the_type is not None:
+            assert isinstance(sample.var, frog_ast.Variable)
+            self.variable_type_map_stack[-1][sample.var.name] = sample.the_type
+
+    def leave_sample(self, assignment: frog_ast.Assignment) -> None:
+        pass
 
     def visit_variable_declaration(
         self, declaration: frog_ast.VariableDeclaration

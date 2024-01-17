@@ -9,6 +9,7 @@ Reduction R(PubKeyEnc E, Int h) compose OneTimeSecrecy(E) against CPA(E).Adversa
     E.PublicKey Initialize(E.PublicKey one_time_pk) {
         pk = one_time_pk;
         count = 0;
+        return pk;
     }
 
     E.Ciphertext Challenge(E.Message mL, E.Message mR) {

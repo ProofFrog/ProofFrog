@@ -220,11 +220,11 @@ class RemoveTupleTransformer(BlockTransformer):
                 continue
 
             def is_func_call(node: frog_ast.ASTNode) -> bool:
-                return isinstance(node, frog_ast.FuncCallExpression)
+                return isinstance(node, frog_ast.FuncCall)
 
-            has_func_call = SearchVisitor[frog_ast.FuncCallExpression](
-                is_func_call
-            ).visit(statement)
+            has_func_call = SearchVisitor[frog_ast.FuncCall](is_func_call).visit(
+                statement
+            )
 
             # We must be careful not to perform replacements with function calls,
             # because expanding it could have side effects.
@@ -616,7 +616,7 @@ class InlineTransformer(Transformer):
             block.statements[index] = self.transform(statement)
         return self.blocks.pop()
 
-    def transform_func_call_expression(self, exp: frog_ast.FuncCallExpression) -> None:
+    def transform_func_call(self, exp: frog_ast.FuncCall) -> None:
         is_inlinable_call = (
             isinstance(exp.func, frog_ast.FieldAccess)
             and isinstance(exp.func.the_object, frog_ast.Variable)

@@ -341,16 +341,16 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
 
     def visitFunctionCallStatement(
         self, ctx: PrimitiveParser.FunctionCallStatementContext
-    ) -> frog_ast.FuncCallStatement:
-        return frog_ast.FuncCallStatement(
+    ) -> frog_ast.FuncCall:
+        return frog_ast.FuncCall(
             self.visit(ctx.expression()),
             self.visit(ctx.argList()) if ctx.argList() else [],
         )
 
     def visitFnCallExp(
         self, ctx: PrimitiveParser.FnCallExpContext
-    ) -> frog_ast.FuncCallExpression:
-        return frog_ast.FuncCallExpression(
+    ) -> frog_ast.FuncCall:
+        return frog_ast.FuncCall(
             self.visit(ctx.expression()),
             self.visit(ctx.argList()) if ctx.argList() else [],
         )

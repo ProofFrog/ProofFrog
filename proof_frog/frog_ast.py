@@ -245,7 +245,7 @@ class Primitive(Root):
         return self.name
 
 
-class FuncCallExpression(Expression):
+class FuncCall(Expression, Statement):
     def __init__(self, func: Expression, args: list[Expression]) -> None:
         self.func = func
         self.args = args
@@ -253,16 +253,6 @@ class FuncCallExpression(Expression):
     def __str__(self) -> str:
         arg_str = ", ".join(str(arg) for arg in self.args)
         return f"{self.func}({arg_str})"
-
-
-class FuncCallStatement(Statement):
-    def __init__(self, func: Expression, args: list[Expression]) -> None:
-        self.func = func
-        self.args = args
-
-    def __str__(self) -> str:
-        arg_str = ", ".join(str(arg) for arg in self.args)
-        return f"{self.func}({arg_str});"
 
 
 class Variable(Expression, Type):

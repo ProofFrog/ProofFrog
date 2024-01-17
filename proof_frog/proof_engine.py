@@ -45,7 +45,7 @@ class ProofEngine:
 
         # Here, we are substituting the lets with the parameters they are given
         for let in self.proof_file.lets:
-            if isinstance(let.value, frog_ast.FuncCallExpression) and isinstance(
+            if isinstance(let.value, frog_ast.FuncCall) and isinstance(
                 let.value.func, frog_ast.Variable
             ):
                 definition = copy.deepcopy(
@@ -240,6 +240,34 @@ class ProofEngine:
             "Initialize"
         ):
             reduced_game.methods.insert(0, challenger.get_method("Initialize"))
+        elif challenger.has_method("Initialize"):
+            # Must combine two methods together
+            # Do so by inserting an arg = challenger.Initialize() at the beginning
+            # and then using the inline transformer
+            challenger_initialize = challenger.get_method("Initialize")
+            reduction_initialize = reduced_game.get_method("Initialize")
+            call_initialize = frog_ast.FuncCall(
+                frog_ast.FieldAccess(frog_ast.Variable("challenger"), "Initialize"),
+                [],
+            )
+            if isinstance(challenger_initialize.signature.return_type, frog_ast.Void):
+                reduction_initialize.block.statements.insert(0, call_initialize)
+            else:
+                param = reduction_initialize.signature.parameters[0]
+                reduction_initialize.block.statements.insert(
+                    0,
+                    frog_ast.Assignment(
+                        param.type, frog_ast.Variable(param.name), call_initialize
+                    ),
+                )
+            reduction_initialize.signature.parameters = []
+            reduction_initialize.signature.return_type = (
+                challenger_initialize.signature.return_type
+            )
+            reduction_initialize = visitors.InlineTransformer(
+                {("challenger", "Initialize"): challenger_initialize}
+            ).transform(reduction_initialize)
+            reduced_game.methods[0] = reduction_initialize
 
         return reduced_game
 
@@ -340,7 +368,7 @@ class ProofEngine:
         return new_game
 
     def sort_block(self, game: frog_ast.Game, block: frog_ast.Block) -> frog_ast.Block:
-        graph = generate_dependency_graph(block, self.proof_namespace)
+        graph = generate_dependency_graph(block, game, self.proof_namespace)
 
         def is_return(node: frog_ast.ASTNode) -> bool:
             return node in block.statements and isinstance(
@@ -354,8 +382,8 @@ class ProofEngine:
         dfs_sorted_statements: list[frog_ast.Statement] = []
         while dfs_stack:
             node = dfs_stack.pop()
-            dfs_sorted_statements.append(node.statement)
             if not dfs_stack_visited[block.statements.index(node.statement)]:
+                dfs_sorted_statements.append(node.statement)
                 dfs_stack_visited[block.statements.index(node.statement)] = True
                 for neighbour in node.in_neighbours:
                     dfs_stack.append(neighbour)
@@ -378,7 +406,8 @@ class ProofEngine:
 
         for statement in dfs_sorted_statements:
             if not graph.get_node(statement).in_neighbours:
-                stack.append(graph.get_node(statement))
+                stack.insert(0, graph.get_node(statement))
+
         while stack:
             node = stack.pop()
             sorted_statements.append(node.statement)
@@ -386,7 +415,7 @@ class ProofEngine:
                 if node in other_node.in_neighbours:
                     other_node.in_neighbours.remove(node)
                     if not other_node.in_neighbours:
-                        stack.append(other_node)
+                        stack.insert(0, other_node)
 
         return frog_ast.Block(sorted_statements)
 
@@ -447,7 +476,7 @@ def get_challenger_method_lookup(challenger: frog_ast.Game) -> MethodLookup:
 
 
 def generate_dependency_graph(
-    block: frog_ast.Block, proof_namespace: frog_ast.Namespace
+    block: frog_ast.Block, game, proof_namespace: frog_ast.Namespace
 ) -> DependencyGraph:
     dependency_graph = DependencyGraph()
     for statement in block.statements:
@@ -462,8 +491,16 @@ def generate_dependency_graph(
         earlier_statements.reverse()
 
         if isinstance(statement, frog_ast.ReturnStatement):
-            if index > 0:
-                add_dependency(node_in_graph, block.statements[index - 1])
+            for preceding_statement in block.statements[:index]:
+                if (
+                    isinstance(
+                        preceding_statement, (frog_ast.Sample, frog_ast.Assignment)
+                    )
+                    and isinstance(preceding_statement.var, frog_ast.Variable)
+                    and preceding_statement.var.name
+                    in [field.name for field in game.fields]
+                ):
+                    add_dependency(node_in_graph, preceding_statement)
 
         variables = visitors.VariableCollectionVisitor().visit(statement)
         for variable in variables:

@@ -173,6 +173,7 @@ class ProofEngine:
                 ),
                 name="Variable Standardizing",
             ),
+            AstManipulator(fn=remove_duplicate_fields, name="Remove Duplicate Fields"),
         ]
 
         for index, game in enumerate((current_game_ast, next_game_ast)):
@@ -473,6 +474,66 @@ def get_challenger_method_lookup(challenger: frog_ast.Game) -> MethodLookup:
             challenger.methods,
         )
     )
+
+
+def remove_duplicate_fields(game: frog_ast.Game) -> frog_ast.Game:
+    if not game.has_method("Initialize"):
+        return game
+
+    field_names = [field.name for field in game.fields]
+    initialize_statements = game.get_method("Initialize").block.statements
+    for index, statement in enumerate(initialize_statements):
+        if (
+            isinstance(statement, frog_ast.Assignment)
+            and isinstance(statement.var, frog_ast.Variable)
+            and isinstance(statement.value, frog_ast.Variable)
+            and statement.var.name in field_names
+            and statement.value.name in field_names
+            and statement.var.name != statement.value.name
+        ):
+            remaining_statements = initialize_statements[index + 1 :]
+
+            to_remove = statement.var.name
+            remaining_name = statement.value.name
+
+            def search_for_reassignment(
+                names: (str, str), node: frog_ast.ASTNode
+            ) -> bool:
+                return (
+                    isinstance(node, frog_ast.Assignment)
+                    and isinstance(node.var, frog_ast.Variable)
+                    and node.var.name in names
+                )
+
+            search_visitor = visitors.SearchVisitor(
+                functools.partial(
+                    search_for_reassignment,
+                    (to_remove, remaining_name),
+                )
+            )
+            if any(
+                search_visitor.visit(remaining_statement) is not None
+                for remaining_statement in remaining_statements
+            ) or any(
+                search_visitor.visit(method) is not None for method in game.methods[1:]
+            ):
+                continue
+
+            new_fields = [field for field in game.fields if field.name != to_remove]
+            new_initialize_statements = [
+                new_statement
+                for new_statement in initialize_statements
+                if new_statement != statement
+            ]
+
+            new_game = copy.deepcopy(game)
+            new_game.fields = new_fields
+            new_game.methods[0].block.statements = new_initialize_statements
+            return visitors.SubstitutionTransformer(
+                [(frog_ast.Variable(to_remove), frog_ast.Variable(remaining_name))]
+            ).transform(new_game)
+
+    return game
 
 
 def generate_dependency_graph(

@@ -24,3 +24,5 @@ done
 if [ $succeeded = true ]; then
 	echo "All proofs succeeded"
 fi
+echo "Running Unit Tests"
+pytest

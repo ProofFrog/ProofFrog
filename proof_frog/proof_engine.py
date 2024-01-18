@@ -368,7 +368,7 @@ class ProofEngine:
         return new_game
 
     def sort_block(self, game: frog_ast.Game, block: frog_ast.Block) -> frog_ast.Block:
-        graph = generate_dependency_graph(block, game, self.proof_namespace)
+        graph = generate_dependency_graph(block, game.fields, self.proof_namespace)
 
         def is_return(node: frog_ast.ASTNode) -> bool:
             return node in block.statements and isinstance(
@@ -476,7 +476,7 @@ def get_challenger_method_lookup(challenger: frog_ast.Game) -> MethodLookup:
 
 
 def generate_dependency_graph(
-    block: frog_ast.Block, game, proof_namespace: frog_ast.Namespace
+    block: frog_ast.Block, fields, proof_namespace: frog_ast.Namespace
 ) -> DependencyGraph:
     dependency_graph = DependencyGraph()
     for statement in block.statements:
@@ -492,14 +492,19 @@ def generate_dependency_graph(
 
         if isinstance(statement, frog_ast.ReturnStatement):
             for preceding_statement in block.statements[:index]:
+
+                def search_for_return(node: frog_ast.ASTNode) -> bool:
+                    return isinstance(node, frog_ast.ReturnStatement)
+
                 if (
                     isinstance(
                         preceding_statement, (frog_ast.Sample, frog_ast.Assignment)
                     )
                     and isinstance(preceding_statement.var, frog_ast.Variable)
-                    and preceding_statement.var.name
-                    in [field.name for field in game.fields]
-                ):
+                    and preceding_statement.var.name in [field.name for field in fields]
+                ) or visitors.SearchVisitor(search_for_return).visit(
+                    preceding_statement
+                ) is not None:
                     add_dependency(node_in_graph, preceding_statement)
 
         variables = visitors.VariableCollectionVisitor().visit(statement)

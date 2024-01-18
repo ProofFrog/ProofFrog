@@ -94,7 +94,7 @@ from proof_frog import frog_parser, proof_engine
 def test_dependencies(method_code: str, expected_dependencies: list[list[int]]) -> None:
     method = frog_parser.parse_method(method_code)
 
-    result = proof_engine.generate_dependency_graph(method.block, {})
+    result = proof_engine.generate_dependency_graph(method.block, [], {})
 
     nodes = [proof_engine.Node(statement) for statement in method.block.statements]
     for to_add_index, dependency_list in enumerate(expected_dependencies):

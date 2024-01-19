@@ -313,7 +313,13 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         return exp
 
     def visitLvalue(self, ctx: PrimitiveParser.LvalueExpContext) -> frog_ast.Expression:
-        expression: frog_ast.Expression = frog_ast.Variable(ctx.id_()[0].getText())
+        expression: frog_ast.Expression
+        if ctx.concreteGame():
+            expression = self.visit(ctx.concreteGame())
+        elif ctx.parameterizedGame():
+            expression = self.visit(ctx.parameterizedGame())
+        else:
+            expression = frog_ast.Variable(ctx.id_()[0].getText())
 
         i = 1
         while i < ctx.getChildCount():
@@ -540,6 +546,9 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
             self.visit(ctx.parameterizedGame()), ctx.ID().getText()
         )
 
+    def visitStepAssumption(self, ctx: ProofParser.StepAssumptionContext):
+        return frog_ast.StepAssumption(self.visit(ctx.expression()))
+
     def visitRegularStep(
         self, ctx: ProofParser.RegularStepContext
     ) -> frog_ast.ProofStep:
@@ -554,7 +563,7 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
             ctx.ID().getText(),
             self.visit(ctx.integerExpression()[0]),
             self.visit(ctx.integerExpression()[1]),
-            [self.visit(step) for step in ctx.gameStep()],
+            self.visit(ctx.gameList()),
         )
 
 

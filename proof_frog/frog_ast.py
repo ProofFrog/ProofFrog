@@ -648,13 +648,22 @@ class Step(ASTNode):
         return f"{self.challenger} against {self.adversary}.Adversary;"
 
 
+class StepAssumption(ASTNode):
+    def __init__(self, expression: Expression) -> None:
+        self.expression = expression
+
+    def __str__(self) -> str:
+        print(self.expression)
+        return f"assume {self.expression};"
+
+
 class Induction(ASTNode):
     def __init__(
         self,
         name: str,
         start: Expression,
         end: Expression,
-        steps: list[Step | Induction],
+        steps: list[Step | StepAssumption],
     ):
         self.name = name
         self.start = start
@@ -668,7 +677,7 @@ class Induction(ASTNode):
         return output_string
 
 
-ProofStep: TypeAlias = Step | Induction
+ProofStep: TypeAlias = Step | Induction | StepAssumption
 
 
 class ProofFile(Root):

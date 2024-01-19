@@ -28,7 +28,7 @@ statement: type id SEMI #varDeclStatement
 	;
 
 lvalue:
-	id (PERIOD id | L_SQUARE integerExpression R_SQUARE)*;
+	(id | parameterizedGame | concreteGame) (PERIOD id | L_SQUARE integerExpression R_SQUARE)*;
 
 methodSignature: type id L_PAREN paramList? R_PAREN;
 
@@ -65,6 +65,9 @@ expression: expression EQUALSCOMPARE expression #equalsExp
 	| NONE #noneExp
 	| L_PAREN expression R_PAREN #parenExp
 	;
+
+parameterizedGame: ID L_PAREN argList? R_PAREN;
+concreteGame: parameterizedGame PERIOD ID;
 
 argList: expression (COMMA expression)*;
 

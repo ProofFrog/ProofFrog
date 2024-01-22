@@ -46,7 +46,7 @@ theorem:
 games:
     CPA(E).Left against CPA(E).Adversary;
 
-    assume R(E, 0).count >= 0;
+    assume R(E, 0).count >= 1;
 
     induction(i from 0 to q) {
         OneTimeSecrecy(E).Left compose R(E, i) against CPA(E).Adversary;

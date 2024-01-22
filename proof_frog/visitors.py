@@ -14,7 +14,7 @@ from typing import (
     List,
     Dict,
 )
-from sympy import Symbol, parsing
+from sympy import Symbol, parsing, Rel, EmptySet, And
 
 from proof_frog import frog_ast
 from proof_frog import frog_parser
@@ -686,19 +686,15 @@ class InlineTransformer(Transformer):
 
 
 class SimplifyRangeTransformer(Transformer):
-    def __init__(self, the_range) -> None:
-        self.range = None
-        print(str(the_range))
-        try:
-            self.range = parsing.sympy_parser.parse_expr(str(the_range))
-        except ValueError:
-            pass
-        print(self.range)
+    def __init__(self, binary_op) -> None:
+        assert isinstance(binary_op.left_expression, frog_ast.Variable)
+        self.symbol = Symbol(binary_op.left_expression.name.replace("@", ""))
+        self.range = self._binary_op_to_sympy(binary_op)
 
     def transform_binary_operation(self, binary_operation: frog_ast.BinaryOperation):
+        print(binary_operation)
         if self.range is None:
             return binary_operation
-        print(binary_operation.operator)
         if binary_operation.operator not in (
             frog_ast.BinaryOperators.EQUALS,
             frog_ast.BinaryOperators.NOTEQUALS,
@@ -708,14 +704,20 @@ class SimplifyRangeTransformer(Transformer):
             frog_ast.BinaryOperators.GEQ,
         ):
             return binary_operation
-        string_form = str(binary_operation)
-        try:
-            print("HELLO")
-            relational = parsing.sympy_parser.parse_expr(string_form)
-            print("WOOHOO")
-            print(relational)
-            print(self.range)
-
-        except ValueError:
-            pass
+        relational = self._binary_op_to_sympy(binary_operation)
+        if relational is False:
+            print("FAILURE")
+            return binary_operation
+        if And(self.range, relational).as_set() is EmptySet:
+            print("failure")
+            return frog_ast.Boolean(False)
         return binary_operation
+
+    def _binary_op_to_sympy(self, binary_op: frog_ast.BinaryOperation):
+        return Rel(
+            self.symbol,
+            parsing.sympy_parser.parse_expr(
+                str(binary_op.right_expression).replace("@", "")
+            ),
+            binary_op.operator.value,
+        )

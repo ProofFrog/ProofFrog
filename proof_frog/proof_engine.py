@@ -151,7 +151,7 @@ class ProofEngine:
 
                     field_name = expression.left_expression.name
 
-                    visitors.SimplifyRangeTransformer(
+                    next_game_ast = visitors.SimplifyRangeTransformer(
                         frog_ast.BinaryOperation(
                             expression.operator,
                             frog_ast.Variable(field_name),
@@ -429,6 +429,8 @@ class ProofEngine:
                 for neighbour in node.in_neighbours:
                     dfs_stack.append(neighbour)
 
+        dfs_sorted_statements.reverse()
+
         for statement in block.statements:
 
             def uses_field(node: frog_ast.ASTNode) -> bool:
@@ -439,8 +441,6 @@ class ProofEngine:
             found = visitors.SearchVisitor(uses_field).visit(statement)
             if statement not in dfs_sorted_statements and found is not None:
                 dfs_sorted_statements.append(statement)
-
-        dfs_sorted_statements.reverse()
 
         sorted_statements: list[frog_ast.Statement] = []
         stack: list[Node] = []

@@ -14,7 +14,7 @@ from typing import (
     List,
     Dict,
 )
-from sympy import Symbol
+from sympy import Symbol, parsing
 
 from proof_frog import frog_ast
 from proof_frog import frog_parser
@@ -683,3 +683,39 @@ class InlineTransformer(Transformer):
         self.finished = True
 
         return exp
+
+
+class SimplifyRangeTransformer(Transformer):
+    def __init__(self, the_range) -> None:
+        self.range = None
+        print(str(the_range))
+        try:
+            self.range = parsing.sympy_parser.parse_expr(str(the_range))
+        except ValueError:
+            pass
+        print(self.range)
+
+    def transform_binary_operation(self, binary_operation: frog_ast.BinaryOperation):
+        if self.range is None:
+            return binary_operation
+        print(binary_operation.operator)
+        if binary_operation.operator not in (
+            frog_ast.BinaryOperators.EQUALS,
+            frog_ast.BinaryOperators.NOTEQUALS,
+            frog_ast.BinaryOperators.LEQ,
+            frog_ast.BinaryOperators.LT,
+            frog_ast.BinaryOperators.GT,
+            frog_ast.BinaryOperators.GEQ,
+        ):
+            return binary_operation
+        string_form = str(binary_operation)
+        try:
+            print("HELLO")
+            relational = parsing.sympy_parser.parse_expr(string_form)
+            print("WOOHOO")
+            print(relational)
+            print(self.range)
+
+        except ValueError:
+            pass
+        return binary_operation

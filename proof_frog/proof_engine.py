@@ -101,10 +101,22 @@ class ProofEngine:
         sys.exit(1)
 
     def prove_steps(self, steps: list[frog_ast.ProofStep]) -> None:
+        step_num = 0
+        assumptions = []
+
         for i in range(0, len(steps) - 1):
-            print(f"===STEP {i}===")
+            if isinstance(steps[i], frog_ast.StepAssumption):
+                continue
+
+            step_num += 1
+            print(f"===STEP {step_num}===")
             current_step = steps[i]
-            next_step = steps[i + 1]
+            i += 1
+            while isinstance(steps[i], frog_ast.StepAssumption):
+                assumptions.append(steps[i])
+                i += 1
+
+            next_step = steps[i]
             print(f"Current: {current_step}")
             print(f"Hop To: {next_step}\n")
 
@@ -122,6 +134,34 @@ class ProofEngine:
                 next_game_ast = self._get_game_ast(
                     first_inductive_step.challenger, first_inductive_step.reduction
                 )
+
+                for assumption in assumptions:
+                    expression = assumption.expression
+                    if not isinstance(expression, frog_ast.BinaryOperation):
+                        continue
+                    if not isinstance(expression.left_expression, frog_ast.FieldAccess):
+                        continue
+                    if expression.left_expression.the_object not in (
+                        current_step.challenger,
+                        current_step.reduction,
+                        first_inductive_step.challenger,
+                        first_inductive_step.reduction,
+                    ):
+                        continue
+
+                    field_name = expression.left_expression.name
+
+                    visitors.SimplifyRangeTransformer(
+                        frog_ast.BinaryOperation(
+                            expression.operator,
+                            frog_ast.Variable(field_name),
+                            expression.right_expression,
+                        )
+                    ).transform(next_game_ast)
+
+                    print("yippee, found in", expression.left_expression.the_object)
+                    # first, find which part it applies to: does it apply to a reduction, does it apply to a game, whatever
+                    #
                 self.check_equivalent(current_game_ast, next_game_ast)
                 continue
 

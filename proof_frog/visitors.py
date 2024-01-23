@@ -721,3 +721,54 @@ class SimplifyRangeTransformer(Transformer):
             ),
             binary_op.operator.value,
         )
+
+
+class BranchEliminiationTransformer(BlockTransformer):
+    def _transform_block_wrapper(
+        self,
+        block: frog_ast.Block,
+    ) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if isinstance(statement, frog_ast.IfStatement):
+                if_statement = statement
+                new_if_statement = copy.deepcopy(if_statement)
+
+                i = 0
+                while True:
+                    if i >= len(new_if_statement.conditions):
+                        break
+                    condition = new_if_statement.conditions[i]
+                    if isinstance(condition, frog_ast.Boolean) and condition.bool:
+                        new_if_statement.conditions = if_statement.conditions[: i + 1]
+                        new_if_statement.blocks = if_statement.blocks[: i + 1]
+                        if i == len(new_if_statement.conditions) - 1 and i > 0:
+                            del new_if_statement.conditions[-1]
+                        break
+                    if isinstance(condition, frog_ast.Boolean) and not condition.bool:
+                        del new_if_statement.conditions[i]
+                        del new_if_statement.blocks[i]
+                    else:
+                        i += 1
+
+                prior_block = frog_ast.Block(block.statements[:index])
+                remaining_block = frog_ast.Block(block.statements[index + 1 :])
+
+                if not new_if_statement.blocks:
+                    return prior_block + remaining_block
+
+                if (
+                    len(new_if_statement.conditions) == 1
+                    and isinstance(new_if_statement.conditions[0], frog_ast.Boolean)
+                    and new_if_statement.conditions[0].bool
+                ) or not new_if_statement.conditions:
+                    return self.transform_block(
+                        prior_block + new_if_statement.blocks[0] + remaining_block
+                    )
+
+                if new_if_statement != if_statement:
+                    return self.transform_block(
+                        prior_block
+                        + frog_ast.Block([new_if_statement])
+                        + remaining_block
+                    )
+        return block

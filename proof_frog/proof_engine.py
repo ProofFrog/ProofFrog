@@ -214,6 +214,10 @@ class ProofEngine:
                 name="Variable Standardizing",
             ),
             AstManipulator(fn=remove_duplicate_fields, name="Remove Duplicate Fields"),
+            AstManipulator(
+                fn=lambda ast: visitors.BranchEliminiationTransformer().transform(ast),
+                name="Branch Elimination",
+            ),
         ]
 
         for index, game in enumerate((current_game_ast, next_game_ast)):

@@ -253,7 +253,7 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         return frog_ast.Integer(int(ctx.INT().getText()))
 
     def visitBoolExp(self, ctx: PrimitiveParser.BoolExpContext) -> frog_ast.Boolean:
-        return frog_ast.Boolean(bool(ctx.bool_().getText()))
+        return frog_ast.Boolean(ctx.bool_().getText() == "true")
 
     def visitBinaryNumExp(
         self, ctx: PrimitiveParser.BinaryNumExpContext

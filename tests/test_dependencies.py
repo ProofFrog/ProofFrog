@@ -1,5 +1,6 @@
 import pytest
-from proof_frog import frog_parser, proof_engine
+from proof_frog import frog_parser
+from proof_frog import dependencies
 
 
 @pytest.mark.parametrize(
@@ -94,14 +95,14 @@ from proof_frog import frog_parser, proof_engine
 def test_dependencies(method_code: str, expected_dependencies: list[list[int]]) -> None:
     method = frog_parser.parse_method(method_code)
 
-    result = proof_engine.generate_dependency_graph(method.block, [], {})
+    result = dependencies.generate_dependency_graph(method.block, [], {})
 
-    nodes = [proof_engine.Node(statement) for statement in method.block.statements]
+    nodes = [dependencies.Node(statement) for statement in method.block.statements]
     for to_add_index, dependency_list in enumerate(expected_dependencies):
         for index in dependency_list:
             nodes[to_add_index].add_neighbour(nodes[index])
 
-    desired_graph = proof_engine.DependencyGraph(nodes)
+    desired_graph = dependencies.DependencyGraph(nodes)
     print("Expected:")
     print(desired_graph)
     print("Received:")

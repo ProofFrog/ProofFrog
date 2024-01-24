@@ -1,6 +1,6 @@
 import pytest
-from proof_frog import visitors, frog_parser, frog_ast
 from sympy import symbols
+from proof_frog import visitors, frog_parser
 
 
 @pytest.mark.parametrize(

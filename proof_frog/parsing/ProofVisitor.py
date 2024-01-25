@@ -209,13 +209,13 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#notEqualsExp.
-    def visitNotEqualsExp(self, ctx:ProofParser.NotEqualsExpContext):
+    # Visit a parse tree produced by ProofParser#addExp.
+    def visitAddExp(self, ctx:ProofParser.AddExpContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#addExp.
-    def visitAddExp(self, ctx:ProofParser.AddExpContext):
+    # Visit a parse tree produced by ProofParser#notEqualsExp.
+    def visitNotEqualsExp(self, ctx:ProofParser.NotEqualsExpContext):
         return self.visitChildren(ctx)
 
 

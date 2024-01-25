@@ -14,6 +14,7 @@ from typing import (
     List,
     Dict,
 )
+import z3
 from sympy import Symbol, parsing, Rel, EmptySet, And
 
 from proof_frog import frog_ast
@@ -686,15 +687,44 @@ class InlineTransformer(Transformer):
         return exp
 
 
+class Z3FormulaVisitor(Visitor):
+    def __init__(self) -> None:
+        self.stack = []
+
+    def result(self):
+        return self.stack[-1]
+
+    def visit_variable(self, var: frog_ast.Variable):
+        self.stack.append(z3.Int(var.name))
+
+    def visit_integer(self, node: frog_ast.Integer):
+        self.stack.append(node.num)
+
+    def leave_binary_operation(self, op: frog_ast.BinaryOperation):
+        operators = {
+            frog_ast.BinaryOperators.ADD: operator.add,
+            frog_ast.BinaryOperators.SUBTRACT: operator.sub,
+            frog_ast.BinaryOperators.MULTIPLY: operator.mul,
+            frog_ast.BinaryOperators.DIVIDE: operator.truediv,
+            frog_ast.BinaryOperators.EQUALS: operator.eq,
+            frog_ast.BinaryOperators.NOTEQUALS: operator.neg,
+            frog_ast.BinaryOperators.LT: operator.lt,
+            frog_ast.BinaryOperators.GT: operator.gt,
+            frog_ast.BinaryOperators.GEQ: operator.ge,
+            frog_ast.BinaryOperators.LEQ: operator.le,
+        }
+        right_item = self.stack.pop()
+        left_item = self.stack.pop()
+        self.stack.append(operators[op.operator](left_item, right_item))
+
+
 class SimplifyRangeTransformer(Transformer):
     def __init__(self, binary_op) -> None:
-        assert isinstance(binary_op.left_expression, frog_ast.Variable)
-        self.symbol = Symbol(binary_op.left_expression.name.replace("@", ""))
-        self.range = self._binary_op_to_sympy(binary_op)
+        self.assumed_formula = Z3FormulaVisitor().visit(binary_op)
+        self.solver = z3.Solver()
+        self.solver.add(self.assumed_formula)
 
     def transform_binary_operation(self, binary_operation: frog_ast.BinaryOperation):
-        if self.range is None:
-            return binary_operation
         if binary_operation.operator not in (
             frog_ast.BinaryOperators.EQUALS,
             frog_ast.BinaryOperators.NOTEQUALS,
@@ -704,21 +734,16 @@ class SimplifyRangeTransformer(Transformer):
             frog_ast.BinaryOperators.GEQ,
         ):
             return binary_operation
-        relational = self._binary_op_to_sympy(binary_operation)
-        if relational is False:
-            return binary_operation
-        if And(self.range, relational).as_set() is EmptySet:
+        statement_formula = Z3FormulaVisitor().visit(binary_operation)
+        self.solver.push()
+        self.solver.add(statement_formula)
+        satisfied = self.solver.check() == z3.sat
+        self.solver.pop()
+        if not satisfied:
             return frog_ast.Boolean(False)
+        if z3.is_true(z3.simplify(z3.Implies(self.assumed_formula, statement_formula))):
+            return frog_ast.Boolean(True)
         return binary_operation
-
-    def _binary_op_to_sympy(self, binary_op: frog_ast.BinaryOperation):
-        return Rel(
-            self.symbol,
-            parsing.sympy_parser.parse_expr(
-                str(binary_op.right_expression).replace("@", "")
-            ),
-            binary_op.operator.value,
-        )
 
 
 class BranchEliminiationTransformer(BlockTransformer):

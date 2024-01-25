@@ -131,65 +131,65 @@ def serializedATN():
         307,5,6,0,0,307,309,1,0,0,0,308,267,1,0,0,0,308,269,1,0,0,0,308,
         271,1,0,0,0,308,275,1,0,0,0,308,287,1,0,0,0,308,299,1,0,0,0,308,
         300,1,0,0,0,308,301,1,0,0,0,308,302,1,0,0,0,308,303,1,0,0,0,308,
-        304,1,0,0,0,309,373,1,0,0,0,310,311,10,29,0,0,311,312,5,19,0,0,312,
-        372,3,26,13,30,313,314,10,28,0,0,314,315,5,20,0,0,315,372,3,26,13,
-        29,316,317,10,27,0,0,317,318,5,8,0,0,318,372,3,26,13,28,319,320,
-        10,26,0,0,320,321,5,7,0,0,321,372,3,26,13,27,322,323,10,25,0,0,323,
-        324,5,21,0,0,324,372,3,26,13,26,325,326,10,24,0,0,326,327,5,22,0,
-        0,327,372,3,26,13,25,328,329,10,23,0,0,329,330,5,25,0,0,330,372,
-        3,26,13,24,331,332,10,22,0,0,332,333,5,38,0,0,333,372,3,26,13,23,
-        334,335,10,21,0,0,335,336,5,42,0,0,336,372,3,26,13,22,337,338,10,
-        20,0,0,338,339,5,23,0,0,339,372,3,26,13,21,340,341,10,19,0,0,341,
-        342,5,43,0,0,342,372,3,26,13,20,343,344,10,18,0,0,344,345,5,26,0,
-        0,345,372,3,26,13,19,346,347,10,17,0,0,347,348,5,15,0,0,348,372,
-        3,26,13,18,349,350,10,16,0,0,350,351,5,16,0,0,351,372,3,26,13,17,
-        352,353,10,15,0,0,353,354,5,13,0,0,354,372,3,26,13,16,355,356,10,
-        14,0,0,356,357,5,17,0,0,357,372,3,26,13,15,358,359,10,10,0,0,359,
-        361,5,5,0,0,360,362,3,32,16,0,361,360,1,0,0,0,361,362,1,0,0,0,362,
-        363,1,0,0,0,363,372,5,6,0,0,364,365,10,9,0,0,365,366,5,3,0,0,366,
-        367,3,38,19,0,367,368,5,10,0,0,368,369,3,38,19,0,369,370,5,4,0,0,
-        370,372,1,0,0,0,371,310,1,0,0,0,371,313,1,0,0,0,371,316,1,0,0,0,
-        371,319,1,0,0,0,371,322,1,0,0,0,371,325,1,0,0,0,371,328,1,0,0,0,
-        371,331,1,0,0,0,371,334,1,0,0,0,371,337,1,0,0,0,371,340,1,0,0,0,
-        371,343,1,0,0,0,371,346,1,0,0,0,371,349,1,0,0,0,371,352,1,0,0,0,
-        371,355,1,0,0,0,371,358,1,0,0,0,371,364,1,0,0,0,372,375,1,0,0,0,
-        373,371,1,0,0,0,373,374,1,0,0,0,374,27,1,0,0,0,375,373,1,0,0,0,376,
-        377,5,55,0,0,377,379,5,5,0,0,378,380,3,32,16,0,379,378,1,0,0,0,379,
-        380,1,0,0,0,380,381,1,0,0,0,381,382,5,6,0,0,382,29,1,0,0,0,383,384,
-        3,28,14,0,384,385,5,12,0,0,385,386,5,55,0,0,386,31,1,0,0,0,387,392,
-        3,26,13,0,388,389,5,11,0,0,389,391,3,26,13,0,390,388,1,0,0,0,391,
-        394,1,0,0,0,392,390,1,0,0,0,392,393,1,0,0,0,393,33,1,0,0,0,394,392,
-        1,0,0,0,395,396,3,36,18,0,396,397,3,48,24,0,397,35,1,0,0,0,398,399,
-        6,18,-1,0,399,419,3,42,21,0,400,419,5,30,0,0,401,402,5,32,0,0,402,
-        403,5,7,0,0,403,404,3,36,18,0,404,405,5,11,0,0,405,406,3,36,18,0,
-        406,407,5,8,0,0,407,419,1,0,0,0,408,409,5,36,0,0,409,410,5,7,0,0,
-        410,411,3,36,18,0,411,412,5,11,0,0,412,413,3,38,19,0,413,414,5,8,
-        0,0,414,419,1,0,0,0,415,419,5,31,0,0,416,419,3,40,20,0,417,419,3,
-        20,10,0,418,398,1,0,0,0,418,400,1,0,0,0,418,401,1,0,0,0,418,408,
-        1,0,0,0,418,415,1,0,0,0,418,416,1,0,0,0,418,417,1,0,0,0,419,431,
-        1,0,0,0,420,421,10,9,0,0,421,430,5,18,0,0,422,425,10,3,0,0,423,424,
-        5,13,0,0,424,426,3,36,18,0,425,423,1,0,0,0,426,427,1,0,0,0,427,425,
-        1,0,0,0,427,428,1,0,0,0,428,430,1,0,0,0,429,420,1,0,0,0,429,422,
-        1,0,0,0,430,433,1,0,0,0,431,429,1,0,0,0,431,432,1,0,0,0,432,37,1,
-        0,0,0,433,431,1,0,0,0,434,435,6,19,-1,0,435,439,3,20,10,0,436,439,
-        5,54,0,0,437,439,5,53,0,0,438,434,1,0,0,0,438,436,1,0,0,0,438,437,
-        1,0,0,0,439,454,1,0,0,0,440,441,10,7,0,0,441,442,5,13,0,0,442,453,
-        3,38,19,8,443,444,10,6,0,0,444,445,5,17,0,0,445,453,3,38,19,7,446,
-        447,10,5,0,0,447,448,5,15,0,0,448,453,3,38,19,6,449,450,10,4,0,0,
-        450,451,5,16,0,0,451,453,3,38,19,5,452,440,1,0,0,0,452,443,1,0,0,
-        0,452,446,1,0,0,0,452,449,1,0,0,0,453,456,1,0,0,0,454,452,1,0,0,
-        0,454,455,1,0,0,0,455,39,1,0,0,0,456,454,1,0,0,0,457,458,5,35,0,
-        0,458,459,5,7,0,0,459,460,3,38,19,0,460,461,5,8,0,0,461,464,1,0,
-        0,0,462,464,5,35,0,0,463,457,1,0,0,0,463,462,1,0,0,0,464,41,1,0,
-        0,0,465,466,5,29,0,0,466,467,5,7,0,0,467,468,3,36,18,0,468,469,5,
-        8,0,0,469,472,1,0,0,0,470,472,5,29,0,0,471,465,1,0,0,0,471,470,1,
-        0,0,0,472,43,1,0,0,0,473,474,7,0,0,0,474,45,1,0,0,0,475,476,5,34,
-        0,0,476,479,5,58,0,0,477,478,5,46,0,0,478,480,5,55,0,0,479,477,1,
-        0,0,0,479,480,1,0,0,0,480,481,1,0,0,0,481,482,5,9,0,0,482,47,1,0,
-        0,0,483,484,7,1,0,0,484,49,1,0,0,0,41,53,70,82,88,95,101,107,109,
-        116,126,136,149,183,206,211,233,238,246,248,255,264,281,284,293,
-        296,308,361,371,373,379,392,418,427,429,431,438,452,454,463,471,
-        479
+        304,1,0,0,0,309,373,1,0,0,0,310,311,10,29,0,0,311,312,5,15,0,0,312,
+        372,3,26,13,30,313,314,10,28,0,0,314,315,5,16,0,0,315,372,3,26,13,
+        29,316,317,10,27,0,0,317,318,5,13,0,0,318,372,3,26,13,28,319,320,
+        10,26,0,0,320,321,5,17,0,0,321,372,3,26,13,27,322,323,10,25,0,0,
+        323,324,5,19,0,0,324,372,3,26,13,26,325,326,10,24,0,0,326,327,5,
+        20,0,0,327,372,3,26,13,25,328,329,10,23,0,0,329,330,5,8,0,0,330,
+        372,3,26,13,24,331,332,10,22,0,0,332,333,5,7,0,0,333,372,3,26,13,
+        23,334,335,10,21,0,0,335,336,5,21,0,0,336,372,3,26,13,22,337,338,
+        10,20,0,0,338,339,5,22,0,0,339,372,3,26,13,21,340,341,10,19,0,0,
+        341,342,5,25,0,0,342,372,3,26,13,20,343,344,10,18,0,0,344,345,5,
+        38,0,0,345,372,3,26,13,19,346,347,10,17,0,0,347,348,5,42,0,0,348,
+        372,3,26,13,18,349,350,10,16,0,0,350,351,5,23,0,0,351,372,3,26,13,
+        17,352,353,10,15,0,0,353,354,5,43,0,0,354,372,3,26,13,16,355,356,
+        10,14,0,0,356,357,5,26,0,0,357,372,3,26,13,15,358,359,10,10,0,0,
+        359,361,5,5,0,0,360,362,3,32,16,0,361,360,1,0,0,0,361,362,1,0,0,
+        0,362,363,1,0,0,0,363,372,5,6,0,0,364,365,10,9,0,0,365,366,5,3,0,
+        0,366,367,3,38,19,0,367,368,5,10,0,0,368,369,3,38,19,0,369,370,5,
+        4,0,0,370,372,1,0,0,0,371,310,1,0,0,0,371,313,1,0,0,0,371,316,1,
+        0,0,0,371,319,1,0,0,0,371,322,1,0,0,0,371,325,1,0,0,0,371,328,1,
+        0,0,0,371,331,1,0,0,0,371,334,1,0,0,0,371,337,1,0,0,0,371,340,1,
+        0,0,0,371,343,1,0,0,0,371,346,1,0,0,0,371,349,1,0,0,0,371,352,1,
+        0,0,0,371,355,1,0,0,0,371,358,1,0,0,0,371,364,1,0,0,0,372,375,1,
+        0,0,0,373,371,1,0,0,0,373,374,1,0,0,0,374,27,1,0,0,0,375,373,1,0,
+        0,0,376,377,5,55,0,0,377,379,5,5,0,0,378,380,3,32,16,0,379,378,1,
+        0,0,0,379,380,1,0,0,0,380,381,1,0,0,0,381,382,5,6,0,0,382,29,1,0,
+        0,0,383,384,3,28,14,0,384,385,5,12,0,0,385,386,5,55,0,0,386,31,1,
+        0,0,0,387,392,3,26,13,0,388,389,5,11,0,0,389,391,3,26,13,0,390,388,
+        1,0,0,0,391,394,1,0,0,0,392,390,1,0,0,0,392,393,1,0,0,0,393,33,1,
+        0,0,0,394,392,1,0,0,0,395,396,3,36,18,0,396,397,3,48,24,0,397,35,
+        1,0,0,0,398,399,6,18,-1,0,399,419,3,42,21,0,400,419,5,30,0,0,401,
+        402,5,32,0,0,402,403,5,7,0,0,403,404,3,36,18,0,404,405,5,11,0,0,
+        405,406,3,36,18,0,406,407,5,8,0,0,407,419,1,0,0,0,408,409,5,36,0,
+        0,409,410,5,7,0,0,410,411,3,36,18,0,411,412,5,11,0,0,412,413,3,38,
+        19,0,413,414,5,8,0,0,414,419,1,0,0,0,415,419,5,31,0,0,416,419,3,
+        40,20,0,417,419,3,20,10,0,418,398,1,0,0,0,418,400,1,0,0,0,418,401,
+        1,0,0,0,418,408,1,0,0,0,418,415,1,0,0,0,418,416,1,0,0,0,418,417,
+        1,0,0,0,419,431,1,0,0,0,420,421,10,9,0,0,421,430,5,18,0,0,422,425,
+        10,3,0,0,423,424,5,13,0,0,424,426,3,36,18,0,425,423,1,0,0,0,426,
+        427,1,0,0,0,427,425,1,0,0,0,427,428,1,0,0,0,428,430,1,0,0,0,429,
+        420,1,0,0,0,429,422,1,0,0,0,430,433,1,0,0,0,431,429,1,0,0,0,431,
+        432,1,0,0,0,432,37,1,0,0,0,433,431,1,0,0,0,434,435,6,19,-1,0,435,
+        439,3,20,10,0,436,439,5,54,0,0,437,439,5,53,0,0,438,434,1,0,0,0,
+        438,436,1,0,0,0,438,437,1,0,0,0,439,454,1,0,0,0,440,441,10,7,0,0,
+        441,442,5,13,0,0,442,453,3,38,19,8,443,444,10,6,0,0,444,445,5,17,
+        0,0,445,453,3,38,19,7,446,447,10,5,0,0,447,448,5,15,0,0,448,453,
+        3,38,19,6,449,450,10,4,0,0,450,451,5,16,0,0,451,453,3,38,19,5,452,
+        440,1,0,0,0,452,443,1,0,0,0,452,446,1,0,0,0,452,449,1,0,0,0,453,
+        456,1,0,0,0,454,452,1,0,0,0,454,455,1,0,0,0,455,39,1,0,0,0,456,454,
+        1,0,0,0,457,458,5,35,0,0,458,459,5,7,0,0,459,460,3,38,19,0,460,461,
+        5,8,0,0,461,464,1,0,0,0,462,464,5,35,0,0,463,457,1,0,0,0,463,462,
+        1,0,0,0,464,41,1,0,0,0,465,466,5,29,0,0,466,467,5,7,0,0,467,468,
+        3,36,18,0,468,469,5,8,0,0,469,472,1,0,0,0,470,472,5,29,0,0,471,465,
+        1,0,0,0,471,470,1,0,0,0,472,43,1,0,0,0,473,474,7,0,0,0,474,45,1,
+        0,0,0,475,476,5,34,0,0,476,479,5,58,0,0,477,478,5,46,0,0,478,480,
+        5,55,0,0,479,477,1,0,0,0,479,480,1,0,0,0,480,481,1,0,0,0,481,482,
+        5,9,0,0,482,47,1,0,0,0,483,484,7,1,0,0,484,49,1,0,0,0,41,53,70,82,
+        88,95,101,107,109,116,126,136,149,183,206,211,233,238,246,248,255,
+        264,281,284,293,296,308,361,371,373,379,392,418,427,429,431,438,
+        452,454,463,471,479
     ]
 
 class GameParser ( Parser ):
@@ -1925,28 +1925,6 @@ class GameParser ( Parser ):
                 return visitor.visitChildren(self)
 
 
-    class NotEqualsExpContext(ExpressionContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a GameParser.ExpressionContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def expression(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(GameParser.ExpressionContext)
-            else:
-                return self.getTypedRuleContext(GameParser.ExpressionContext,i)
-
-        def NOTEQUALS(self):
-            return self.getToken(GameParser.NOTEQUALS, 0)
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitNotEqualsExp" ):
-                return visitor.visitNotEqualsExp(self)
-            else:
-                return visitor.visitChildren(self)
-
-
     class AddExpContext(ExpressionContext):
 
         def __init__(self, parser, ctx:ParserRuleContext): # actually a GameParser.ExpressionContext
@@ -1965,6 +1943,28 @@ class GameParser ( Parser ):
         def accept(self, visitor:ParseTreeVisitor):
             if hasattr( visitor, "visitAddExp" ):
                 return visitor.visitAddExp(self)
+            else:
+                return visitor.visitChildren(self)
+
+
+    class NotEqualsExpContext(ExpressionContext):
+
+        def __init__(self, parser, ctx:ParserRuleContext): # actually a GameParser.ExpressionContext
+            super().__init__(parser)
+            self.copyFrom(ctx)
+
+        def expression(self, i:int=None):
+            if i is None:
+                return self.getTypedRuleContexts(GameParser.ExpressionContext)
+            else:
+                return self.getTypedRuleContext(GameParser.ExpressionContext,i)
+
+        def NOTEQUALS(self):
+            return self.getToken(GameParser.NOTEQUALS, 0)
+
+        def accept(self, visitor:ParseTreeVisitor):
+            if hasattr( visitor, "visitNotEqualsExp" ):
+                return visitor.visitNotEqualsExp(self)
             else:
                 return visitor.visitChildren(self)
 
@@ -2589,209 +2589,209 @@ class GameParser ( Parser ):
                     self._errHandler.sync(self)
                     la_ = self._interp.adaptivePredict(self._input,27,self._ctx)
                     if la_ == 1:
-                        localctx = GameParser.EqualsExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = GameParser.AddExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 310
                         if not self.precpred(self._ctx, 29):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 29)")
                         self.state = 311
-                        self.match(GameParser.EQUALSCOMPARE)
+                        self.match(GameParser.PLUS)
                         self.state = 312
                         self.expression(30)
                         pass
 
                     elif la_ == 2:
-                        localctx = GameParser.NotEqualsExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = GameParser.SubtractExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 313
                         if not self.precpred(self._ctx, 28):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 28)")
                         self.state = 314
-                        self.match(GameParser.NOTEQUALS)
+                        self.match(GameParser.SUBTRACT)
                         self.state = 315
                         self.expression(29)
                         pass
 
                     elif la_ == 3:
-                        localctx = GameParser.GtExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = GameParser.MultiplyExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 316
                         if not self.precpred(self._ctx, 27):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 27)")
                         self.state = 317
-                        self.match(GameParser.R_ANGLE)
+                        self.match(GameParser.TIMES)
                         self.state = 318
                         self.expression(28)
                         pass
 
                     elif la_ == 4:
-                        localctx = GameParser.LtExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = GameParser.DivideExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 319
                         if not self.precpred(self._ctx, 26):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 26)")
                         self.state = 320
-                        self.match(GameParser.L_ANGLE)
+                        self.match(GameParser.DIVIDE)
                         self.state = 321
                         self.expression(27)
                         pass
 
                     elif la_ == 5:
-                        localctx = GameParser.GeqExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = GameParser.EqualsExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 322
                         if not self.precpred(self._ctx, 25):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 25)")
                         self.state = 323
-                        self.match(GameParser.GEQ)
+                        self.match(GameParser.EQUALSCOMPARE)
                         self.state = 324
                         self.expression(26)
                         pass
 
                     elif la_ == 6:
-                        localctx = GameParser.LeqExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = GameParser.NotEqualsExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 325
                         if not self.precpred(self._ctx, 24):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 24)")
                         self.state = 326
-                        self.match(GameParser.LEQ)
+                        self.match(GameParser.NOTEQUALS)
                         self.state = 327
                         self.expression(25)
                         pass
 
                     elif la_ == 7:
-                        localctx = GameParser.AndExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = GameParser.GtExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 328
                         if not self.precpred(self._ctx, 23):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 23)")
                         self.state = 329
-                        self.match(GameParser.AND)
+                        self.match(GameParser.R_ANGLE)
                         self.state = 330
                         self.expression(24)
                         pass
 
                     elif la_ == 8:
-                        localctx = GameParser.SubsetsExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = GameParser.LtExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 331
                         if not self.precpred(self._ctx, 22):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 22)")
                         self.state = 332
-                        self.match(GameParser.SUBSETS)
+                        self.match(GameParser.L_ANGLE)
                         self.state = 333
                         self.expression(23)
                         pass
 
                     elif la_ == 9:
-                        localctx = GameParser.InExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = GameParser.GeqExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 334
                         if not self.precpred(self._ctx, 21):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 21)")
                         self.state = 335
-                        self.match(GameParser.IN)
+                        self.match(GameParser.GEQ)
                         self.state = 336
                         self.expression(22)
                         pass
 
                     elif la_ == 10:
-                        localctx = GameParser.OrExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = GameParser.LeqExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 337
                         if not self.precpred(self._ctx, 20):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 20)")
                         self.state = 338
-                        self.match(GameParser.OR)
+                        self.match(GameParser.LEQ)
                         self.state = 339
                         self.expression(21)
                         pass
 
                     elif la_ == 11:
-                        localctx = GameParser.UnionExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = GameParser.AndExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 340
                         if not self.precpred(self._ctx, 19):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 19)")
                         self.state = 341
-                        self.match(GameParser.UNION)
+                        self.match(GameParser.AND)
                         self.state = 342
                         self.expression(20)
                         pass
 
                     elif la_ == 12:
-                        localctx = GameParser.SetMinusExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = GameParser.SubsetsExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 343
                         if not self.precpred(self._ctx, 18):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 18)")
                         self.state = 344
-                        self.match(GameParser.BACKSLASH)
+                        self.match(GameParser.SUBSETS)
                         self.state = 345
                         self.expression(19)
                         pass
 
                     elif la_ == 13:
-                        localctx = GameParser.AddExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = GameParser.InExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 346
                         if not self.precpred(self._ctx, 17):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 17)")
                         self.state = 347
-                        self.match(GameParser.PLUS)
+                        self.match(GameParser.IN)
                         self.state = 348
                         self.expression(18)
                         pass
 
                     elif la_ == 14:
-                        localctx = GameParser.SubtractExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = GameParser.OrExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 349
                         if not self.precpred(self._ctx, 16):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 16)")
                         self.state = 350
-                        self.match(GameParser.SUBTRACT)
+                        self.match(GameParser.OR)
                         self.state = 351
                         self.expression(17)
                         pass
 
                     elif la_ == 15:
-                        localctx = GameParser.MultiplyExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = GameParser.UnionExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 352
                         if not self.precpred(self._ctx, 15):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 15)")
                         self.state = 353
-                        self.match(GameParser.TIMES)
+                        self.match(GameParser.UNION)
                         self.state = 354
                         self.expression(16)
                         pass
 
                     elif la_ == 16:
-                        localctx = GameParser.DivideExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = GameParser.SetMinusExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 355
                         if not self.precpred(self._ctx, 14):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 14)")
                         self.state = 356
-                        self.match(GameParser.DIVIDE)
+                        self.match(GameParser.BACKSLASH)
                         self.state = 357
                         self.expression(15)
                         pass

@@ -134,19 +134,19 @@ def serializedATN():
         0,314,273,1,0,0,0,314,275,1,0,0,0,314,277,1,0,0,0,314,281,1,0,0,
         0,314,293,1,0,0,0,314,305,1,0,0,0,314,306,1,0,0,0,314,307,1,0,0,
         0,314,308,1,0,0,0,314,309,1,0,0,0,314,310,1,0,0,0,315,379,1,0,0,
-        0,316,317,10,29,0,0,317,318,5,19,0,0,318,378,3,26,13,30,319,320,
-        10,28,0,0,320,321,5,20,0,0,321,378,3,26,13,29,322,323,10,27,0,0,
-        323,324,5,8,0,0,324,378,3,26,13,28,325,326,10,26,0,0,326,327,5,7,
-        0,0,327,378,3,26,13,27,328,329,10,25,0,0,329,330,5,21,0,0,330,378,
-        3,26,13,26,331,332,10,24,0,0,332,333,5,22,0,0,333,378,3,26,13,25,
-        334,335,10,23,0,0,335,336,5,25,0,0,336,378,3,26,13,24,337,338,10,
-        22,0,0,338,339,5,38,0,0,339,378,3,26,13,23,340,341,10,21,0,0,341,
-        342,5,42,0,0,342,378,3,26,13,22,343,344,10,20,0,0,344,345,5,23,0,
-        0,345,378,3,26,13,21,346,347,10,19,0,0,347,348,5,43,0,0,348,378,
-        3,26,13,20,349,350,10,18,0,0,350,351,5,26,0,0,351,378,3,26,13,19,
-        352,353,10,17,0,0,353,354,5,15,0,0,354,378,3,26,13,18,355,356,10,
-        16,0,0,356,357,5,16,0,0,357,378,3,26,13,17,358,359,10,15,0,0,359,
-        360,5,13,0,0,360,378,3,26,13,16,361,362,10,14,0,0,362,363,5,17,0,
+        0,316,317,10,29,0,0,317,318,5,15,0,0,318,378,3,26,13,30,319,320,
+        10,28,0,0,320,321,5,16,0,0,321,378,3,26,13,29,322,323,10,27,0,0,
+        323,324,5,13,0,0,324,378,3,26,13,28,325,326,10,26,0,0,326,327,5,
+        17,0,0,327,378,3,26,13,27,328,329,10,25,0,0,329,330,5,19,0,0,330,
+        378,3,26,13,26,331,332,10,24,0,0,332,333,5,20,0,0,333,378,3,26,13,
+        25,334,335,10,23,0,0,335,336,5,8,0,0,336,378,3,26,13,24,337,338,
+        10,22,0,0,338,339,5,7,0,0,339,378,3,26,13,23,340,341,10,21,0,0,341,
+        342,5,21,0,0,342,378,3,26,13,22,343,344,10,20,0,0,344,345,5,22,0,
+        0,345,378,3,26,13,21,346,347,10,19,0,0,347,348,5,25,0,0,348,378,
+        3,26,13,20,349,350,10,18,0,0,350,351,5,38,0,0,351,378,3,26,13,19,
+        352,353,10,17,0,0,353,354,5,42,0,0,354,378,3,26,13,18,355,356,10,
+        16,0,0,356,357,5,23,0,0,357,378,3,26,13,17,358,359,10,15,0,0,359,
+        360,5,43,0,0,360,378,3,26,13,16,361,362,10,14,0,0,362,363,5,26,0,
         0,363,378,3,26,13,15,364,365,10,10,0,0,365,367,5,5,0,0,366,368,3,
         32,16,0,367,366,1,0,0,0,367,368,1,0,0,0,368,369,1,0,0,0,369,378,
         5,6,0,0,370,371,10,9,0,0,371,372,5,3,0,0,372,373,3,38,19,0,373,374,
@@ -1968,28 +1968,6 @@ class PrimitiveParser ( Parser ):
                 return visitor.visitChildren(self)
 
 
-    class NotEqualsExpContext(ExpressionContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def expression(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(PrimitiveParser.ExpressionContext)
-            else:
-                return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,i)
-
-        def NOTEQUALS(self):
-            return self.getToken(PrimitiveParser.NOTEQUALS, 0)
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitNotEqualsExp" ):
-                return visitor.visitNotEqualsExp(self)
-            else:
-                return visitor.visitChildren(self)
-
-
     class AddExpContext(ExpressionContext):
 
         def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
@@ -2008,6 +1986,28 @@ class PrimitiveParser ( Parser ):
         def accept(self, visitor:ParseTreeVisitor):
             if hasattr( visitor, "visitAddExp" ):
                 return visitor.visitAddExp(self)
+            else:
+                return visitor.visitChildren(self)
+
+
+    class NotEqualsExpContext(ExpressionContext):
+
+        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
+            super().__init__(parser)
+            self.copyFrom(ctx)
+
+        def expression(self, i:int=None):
+            if i is None:
+                return self.getTypedRuleContexts(PrimitiveParser.ExpressionContext)
+            else:
+                return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,i)
+
+        def NOTEQUALS(self):
+            return self.getToken(PrimitiveParser.NOTEQUALS, 0)
+
+        def accept(self, visitor:ParseTreeVisitor):
+            if hasattr( visitor, "visitNotEqualsExp" ):
+                return visitor.visitNotEqualsExp(self)
             else:
                 return visitor.visitChildren(self)
 
@@ -2632,209 +2632,209 @@ class PrimitiveParser ( Parser ):
                     self._errHandler.sync(self)
                     la_ = self._interp.adaptivePredict(self._input,29,self._ctx)
                     if la_ == 1:
-                        localctx = PrimitiveParser.EqualsExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = PrimitiveParser.AddExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 316
                         if not self.precpred(self._ctx, 29):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 29)")
                         self.state = 317
-                        self.match(PrimitiveParser.EQUALSCOMPARE)
+                        self.match(PrimitiveParser.PLUS)
                         self.state = 318
                         self.expression(30)
                         pass
 
                     elif la_ == 2:
-                        localctx = PrimitiveParser.NotEqualsExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = PrimitiveParser.SubtractExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 319
                         if not self.precpred(self._ctx, 28):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 28)")
                         self.state = 320
-                        self.match(PrimitiveParser.NOTEQUALS)
+                        self.match(PrimitiveParser.SUBTRACT)
                         self.state = 321
                         self.expression(29)
                         pass
 
                     elif la_ == 3:
-                        localctx = PrimitiveParser.GtExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = PrimitiveParser.MultiplyExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 322
                         if not self.precpred(self._ctx, 27):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 27)")
                         self.state = 323
-                        self.match(PrimitiveParser.R_ANGLE)
+                        self.match(PrimitiveParser.TIMES)
                         self.state = 324
                         self.expression(28)
                         pass
 
                     elif la_ == 4:
-                        localctx = PrimitiveParser.LtExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = PrimitiveParser.DivideExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 325
                         if not self.precpred(self._ctx, 26):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 26)")
                         self.state = 326
-                        self.match(PrimitiveParser.L_ANGLE)
+                        self.match(PrimitiveParser.DIVIDE)
                         self.state = 327
                         self.expression(27)
                         pass
 
                     elif la_ == 5:
-                        localctx = PrimitiveParser.GeqExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = PrimitiveParser.EqualsExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 328
                         if not self.precpred(self._ctx, 25):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 25)")
                         self.state = 329
-                        self.match(PrimitiveParser.GEQ)
+                        self.match(PrimitiveParser.EQUALSCOMPARE)
                         self.state = 330
                         self.expression(26)
                         pass
 
                     elif la_ == 6:
-                        localctx = PrimitiveParser.LeqExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = PrimitiveParser.NotEqualsExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 331
                         if not self.precpred(self._ctx, 24):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 24)")
                         self.state = 332
-                        self.match(PrimitiveParser.LEQ)
+                        self.match(PrimitiveParser.NOTEQUALS)
                         self.state = 333
                         self.expression(25)
                         pass
 
                     elif la_ == 7:
-                        localctx = PrimitiveParser.AndExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = PrimitiveParser.GtExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 334
                         if not self.precpred(self._ctx, 23):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 23)")
                         self.state = 335
-                        self.match(PrimitiveParser.AND)
+                        self.match(PrimitiveParser.R_ANGLE)
                         self.state = 336
                         self.expression(24)
                         pass
 
                     elif la_ == 8:
-                        localctx = PrimitiveParser.SubsetsExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = PrimitiveParser.LtExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 337
                         if not self.precpred(self._ctx, 22):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 22)")
                         self.state = 338
-                        self.match(PrimitiveParser.SUBSETS)
+                        self.match(PrimitiveParser.L_ANGLE)
                         self.state = 339
                         self.expression(23)
                         pass
 
                     elif la_ == 9:
-                        localctx = PrimitiveParser.InExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = PrimitiveParser.GeqExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 340
                         if not self.precpred(self._ctx, 21):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 21)")
                         self.state = 341
-                        self.match(PrimitiveParser.IN)
+                        self.match(PrimitiveParser.GEQ)
                         self.state = 342
                         self.expression(22)
                         pass
 
                     elif la_ == 10:
-                        localctx = PrimitiveParser.OrExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = PrimitiveParser.LeqExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 343
                         if not self.precpred(self._ctx, 20):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 20)")
                         self.state = 344
-                        self.match(PrimitiveParser.OR)
+                        self.match(PrimitiveParser.LEQ)
                         self.state = 345
                         self.expression(21)
                         pass
 
                     elif la_ == 11:
-                        localctx = PrimitiveParser.UnionExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = PrimitiveParser.AndExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 346
                         if not self.precpred(self._ctx, 19):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 19)")
                         self.state = 347
-                        self.match(PrimitiveParser.UNION)
+                        self.match(PrimitiveParser.AND)
                         self.state = 348
                         self.expression(20)
                         pass
 
                     elif la_ == 12:
-                        localctx = PrimitiveParser.SetMinusExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = PrimitiveParser.SubsetsExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 349
                         if not self.precpred(self._ctx, 18):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 18)")
                         self.state = 350
-                        self.match(PrimitiveParser.BACKSLASH)
+                        self.match(PrimitiveParser.SUBSETS)
                         self.state = 351
                         self.expression(19)
                         pass
 
                     elif la_ == 13:
-                        localctx = PrimitiveParser.AddExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = PrimitiveParser.InExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 352
                         if not self.precpred(self._ctx, 17):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 17)")
                         self.state = 353
-                        self.match(PrimitiveParser.PLUS)
+                        self.match(PrimitiveParser.IN)
                         self.state = 354
                         self.expression(18)
                         pass
 
                     elif la_ == 14:
-                        localctx = PrimitiveParser.SubtractExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = PrimitiveParser.OrExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 355
                         if not self.precpred(self._ctx, 16):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 16)")
                         self.state = 356
-                        self.match(PrimitiveParser.SUBTRACT)
+                        self.match(PrimitiveParser.OR)
                         self.state = 357
                         self.expression(17)
                         pass
 
                     elif la_ == 15:
-                        localctx = PrimitiveParser.MultiplyExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = PrimitiveParser.UnionExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 358
                         if not self.precpred(self._ctx, 15):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 15)")
                         self.state = 359
-                        self.match(PrimitiveParser.TIMES)
+                        self.match(PrimitiveParser.UNION)
                         self.state = 360
                         self.expression(16)
                         pass
 
                     elif la_ == 16:
-                        localctx = PrimitiveParser.DivideExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = PrimitiveParser.SetMinusExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 361
                         if not self.precpred(self._ctx, 14):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 14)")
                         self.state = 362
-                        self.match(PrimitiveParser.DIVIDE)
+                        self.match(PrimitiveParser.BACKSLASH)
                         self.state = 363
                         self.expression(15)
                         pass

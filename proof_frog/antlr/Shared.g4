@@ -34,7 +34,12 @@ methodSignature: type id L_PAREN paramList? R_PAREN;
 
 paramList: variable (COMMA variable)*;
 
-expression: expression EQUALSCOMPARE expression #equalsExp
+expression:
+	expression PLUS expression #addExp
+	| expression SUBTRACT expression #subtractExp
+	| expression TIMES expression #multiplyExp
+	| expression DIVIDE expression #divideExp
+	| expression EQUALSCOMPARE expression #equalsExp
 	| expression NOTEQUALS expression #notEqualsExp
 	| expression R_ANGLE expression # gtExp
 	| expression L_ANGLE expression # ltExp
@@ -46,10 +51,7 @@ expression: expression EQUALSCOMPARE expression #equalsExp
 	| expression OR expression #orExp
 	| expression UNION expression #unionExp
 	| expression BACKSLASH expression #setMinusExp
-	| expression PLUS expression #addExp
-	| expression SUBTRACT expression #subtractExp
-	| expression TIMES expression #multiplyExp
-	| expression DIVIDE expression #divideExp
+
 
 	| lvalue # lvalueExp
 	| NOT expression #notExp

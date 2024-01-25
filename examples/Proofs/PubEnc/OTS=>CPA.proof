@@ -55,4 +55,6 @@ games:
         OneTimeSecrecy(E).Right compose R(E, i+1) against CPA(E).Adversary;
     }
 
+    assume R(E, q+1).count < q + 1;
+
     CPA(E).Right against CPA(E).Adversary;

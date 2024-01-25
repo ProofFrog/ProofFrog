@@ -149,13 +149,13 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by PrimitiveParser#notEqualsExp.
-    def visitNotEqualsExp(self, ctx:PrimitiveParser.NotEqualsExpContext):
+    # Visit a parse tree produced by PrimitiveParser#addExp.
+    def visitAddExp(self, ctx:PrimitiveParser.AddExpContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by PrimitiveParser#addExp.
-    def visitAddExp(self, ctx:PrimitiveParser.AddExpContext):
+    # Visit a parse tree produced by PrimitiveParser#notEqualsExp.
+    def visitNotEqualsExp(self, ctx:PrimitiveParser.NotEqualsExpContext):
         return self.visitChildren(ctx)
 
 

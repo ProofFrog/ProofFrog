@@ -101,9 +101,9 @@ class ProofEngine:
 
     def prove_steps(self, steps: list[frog_ast.ProofStep]) -> None:
         step_num = 0
-        assumptions = []
 
         for i in range(0, len(steps) - 1):
+            assumptions = []
             if isinstance(steps[i], frog_ast.StepAssumption):
                 continue
 
@@ -158,9 +158,47 @@ class ProofEngine:
                         )
                     ).transform(next_game_ast)
 
-                    print("yippee, found in", expression.left_expression.the_object)
-                    # first, find which part it applies to: does it apply to a reduction, does it apply to a game, whatever
-                    #
+                self.check_equivalent(current_game_ast, next_game_ast)
+                continue
+            elif isinstance(current_step, frog_ast.Induction) and isinstance(
+                next_step, frog_ast.Step
+            ):
+                next_game_ast = self._get_game_ast(
+                    next_step.challenger, next_step.reduction
+                )
+                last_inductive_step = current_step.steps[-1]
+                assert isinstance(last_inductive_step, frog_ast.Step)
+                last_inductive_step = visitors.SubstitutionTransformer(
+                    [(frog_ast.Variable(current_step.name), current_step.end)]
+                ).transform(last_inductive_step)
+                current_game_ast = self._get_game_ast(
+                    last_inductive_step.challenger, last_inductive_step.reduction
+                )
+
+                for assumption in assumptions:
+                    expression = assumption.expression
+                    if not isinstance(expression, frog_ast.BinaryOperation):
+                        continue
+                    if not isinstance(expression.left_expression, frog_ast.FieldAccess):
+                        continue
+                    if expression.left_expression.the_object not in (
+                        next_step.challenger,
+                        next_step.reduction,
+                        last_inductive_step.challenger,
+                        last_inductive_step.reduction,
+                    ):
+                        continue
+
+                    field_name = expression.left_expression.name
+
+                    current_game_ast = visitors.SimplifyRangeTransformer(
+                        frog_ast.BinaryOperation(
+                            expression.operator,
+                            frog_ast.Variable(field_name),
+                            expression.right_expression,
+                        )
+                    ).transform(current_game_ast)
+
                 self.check_equivalent(current_game_ast, next_game_ast)
                 continue
 

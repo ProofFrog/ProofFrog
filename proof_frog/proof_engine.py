@@ -116,10 +116,25 @@ class ProofEngine:
                 i += 1
 
             next_step = steps[i]
-            print(f"Current: {current_step}")
-            print(f"Hop To: {next_step}\n")
+
+            current_game_ast: frog_ast.Game
+            next_game_ast: frog_ast.Game
 
             if isinstance(current_step, frog_ast.Step) and isinstance(
+                next_step, frog_ast.Step
+            ):
+                if self._is_by_assumption(current_step, next_step):
+                    print(f"Current: {current_step}")
+                    print(f"Hop To: {next_step}\n")
+                    print("Valid by assumption")
+                    continue
+                current_game_ast = self._get_game_ast(
+                    current_step.challenger, current_step.reduction
+                )
+                next_game_ast = self._get_game_ast(
+                    next_step.challenger, next_step.reduction
+                )
+            elif isinstance(current_step, frog_ast.Step) and isinstance(
                 next_step, frog_ast.Induction
             ):
                 current_game_ast = self._get_game_ast(
@@ -133,33 +148,7 @@ class ProofEngine:
                 next_game_ast = self._get_game_ast(
                     first_inductive_step.challenger, first_inductive_step.reduction
                 )
-
-                for assumption in assumptions:
-                    expression = assumption.expression
-                    if not isinstance(expression, frog_ast.BinaryOperation):
-                        continue
-                    if not isinstance(expression.left_expression, frog_ast.FieldAccess):
-                        continue
-                    if expression.left_expression.the_object not in (
-                        current_step.challenger,
-                        current_step.reduction,
-                        first_inductive_step.challenger,
-                        first_inductive_step.reduction,
-                    ):
-                        continue
-
-                    field_name = expression.left_expression.name
-
-                    next_game_ast = visitors.SimplifyRangeTransformer(
-                        frog_ast.BinaryOperation(
-                            expression.operator,
-                            frog_ast.Variable(field_name),
-                            expression.right_expression,
-                        )
-                    ).transform(next_game_ast)
-
-                self.check_equivalent(current_game_ast, next_game_ast)
-                continue
+                next_step = first_inductive_step
             elif isinstance(current_step, frog_ast.Induction) and isinstance(
                 next_step, frog_ast.Step
             ):
@@ -174,47 +163,50 @@ class ProofEngine:
                 current_game_ast = self._get_game_ast(
                     last_inductive_step.challenger, last_inductive_step.reduction
                 )
+                current_step = last_inductive_step
 
-                for assumption in assumptions:
-                    expression = assumption.expression
-                    if not isinstance(expression, frog_ast.BinaryOperation):
-                        continue
-                    if not isinstance(expression.left_expression, frog_ast.FieldAccess):
-                        continue
-                    if expression.left_expression.the_object not in (
-                        next_step.challenger,
-                        next_step.reduction,
-                        last_inductive_step.challenger,
-                        last_inductive_step.reduction,
-                    ):
-                        continue
+            print(f"Current: {current_step}")
+            print(f"Hop To: {next_step}\n")
 
-                    field_name = expression.left_expression.name
+            for assumption in assumptions:
+                expression = assumption.expression
+                if not isinstance(expression, frog_ast.BinaryOperation):
+                    continue
+                if not isinstance(expression.left_expression, frog_ast.FieldAccess):
+                    continue
+                if expression.left_expression.the_object not in (
+                    current_step.challenger,
+                    current_step.reduction,
+                    next_step.challenger,
+                    next_step.reduction,
+                ):
+                    continue
 
-                    current_game_ast = visitors.SimplifyRangeTransformer(
+                field_name = expression.left_expression.name
+
+                def transform(expression, field_name, game, is_challenger):
+                    return visitors.SimplifyRangeTransformer(
                         frog_ast.BinaryOperation(
                             expression.operator,
-                            frog_ast.Variable(field_name),
+                            frog_ast.Variable(
+                                get_challenger_field_name(field_name)
+                                if is_challenger
+                                else field_name
+                            ),
                             expression.right_expression,
                         )
-                    ).transform(current_game_ast)
+                    ).transform(game)
 
-                self.check_equivalent(current_game_ast, next_game_ast)
-                continue
+                do_transform = functools.partial(transform, expression, field_name)
 
-            assert isinstance(current_step, frog_ast.Step)
-            assert isinstance(next_step, frog_ast.Step)
-
-            if self._is_by_assumption(current_step, next_step):
-                print("Valid by assumption")
-                continue
-
-            current_game_ast = self._get_game_ast(
-                current_step.challenger, current_step.reduction
-            )
-            next_game_ast = self._get_game_ast(
-                next_step.challenger, next_step.reduction
-            )
+                if expression.left_expression.the_object == current_step.challenger:
+                    current_game_ast = do_transform(current_game_ast, True)
+                elif expression.left_expression.the_object == current_step.reduction:
+                    current_game_ast = do_transform(current_game_ast, False)
+                elif expression.left_expression.the_object == next_step.challenger:
+                    next_game_ast = do_transform(next_game_ast, True)
+                elif expression.left_expression.the_object == next_step.reduction:
+                    next_game_ast = do_transform(next_game_ast, False)
 
             self.check_equivalent(current_game_ast, next_game_ast)
 
@@ -316,7 +308,9 @@ class ProofEngine:
         name = "Inlined"
         parameters = challenger.parameters
         new_fields = [
-            frog_ast.Field(field.type, "challenger@" + field.name, field.value)
+            frog_ast.Field(
+                field.type, get_challenger_field_name(field.name), field.value
+            )
             for field in challenger.fields
         ]
         fields = new_fields + copy.deepcopy(reduction.fields)
@@ -386,7 +380,7 @@ class ProofEngine:
                     [
                         (
                             frog_ast.Variable(field.name),
-                            frog_ast.Variable("challenger@" + field.name),
+                            frog_ast.Variable(get_challenger_field_name(field.name)),
                         )
                         for field in game.fields
                     ]
@@ -623,3 +617,7 @@ def remove_duplicate_fields(game: frog_ast.Game) -> frog_ast.Game:
             ).transform(new_game)
 
     return game
+
+
+def get_challenger_field_name(name: str):
+    return f"challenger@{name}"

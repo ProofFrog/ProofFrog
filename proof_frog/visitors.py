@@ -909,3 +909,86 @@ class RemoveFieldTransformer(Transformer):
         return frog_ast.Block(
             [self.transform(copy.deepcopy(statement)) for statement in new_statements]
         )
+
+
+class CollapseAssignmentTransformer(BlockTransformer):
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if not isinstance(statement, (frog_ast.Assignment, frog_ast.Sample)):
+                continue
+            if not isinstance(statement.var, frog_ast.Variable):
+                continue
+
+            def calls_func(node):
+                return isinstance(node, frog_ast.FuncCall)
+
+            if SearchVisitor(calls_func).visit(statement) is not None:
+                continue
+
+            def uses_var(var: frog_ast.Variable, node: frog_ast.ASTNode) -> bool:
+                return node == var
+
+            uses_var_partial = functools.partial(uses_var, statement.var)
+            for later_index, later_statement in enumerate(
+                block.statements[index + 1 :]
+            ):
+                contains_var = SearchVisitor(uses_var_partial).visit(later_statement)
+                if contains_var is None:
+                    continue
+                if not isinstance(
+                    later_statement, (frog_ast.Assignment, frog_ast.Sample)
+                ):
+                    break
+                if (
+                    contains_var
+                    and SearchVisitor(uses_var_partial).visit(later_statement.value)
+                    is not None
+                ):
+                    break
+                replaced_statement = copy.deepcopy(statement)
+                replaced_statement.value = later_statement.value
+                return self.transform_block(
+                    frog_ast.Block(
+                        block.statements[:index]
+                        + block.statements[index + 1 : index + later_index]
+                        + [replaced_statement]
+                        + block.statements[index + later_index + 2 :]
+                    )
+                )
+
+        return block
+
+
+class SimplifyReturnTransformer(BlockTransformer):
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        if not block.statements:
+            return block
+        last_statement = block.statements[-1]
+        if not isinstance(last_statement, frog_ast.ReturnStatement):
+            return block
+        if not isinstance(last_statement.expression, frog_ast.Variable):
+            return block
+        index = len(block.statements) - 1
+
+        def uses_var(variable, node):
+            return variable == node
+
+        uses_var_partial = functools.partial(uses_var, last_statement.expression)
+        while index >= 0:
+            index -= 1
+            statement = block.statements[index]
+            if SearchVisitor(uses_var_partial).visit(statement) is None:
+                continue
+            if not isinstance(statement, (frog_ast.Variable, frog_ast.Assignment)):
+                break
+            if statement.var != last_statement.expression:
+                break
+            return self.transform_block(
+                frog_ast.Block(
+                    block.statements[:index]
+                    + block.statements[index + 1 : -1]
+                    + [frog_ast.ReturnStatement(statement.value)]
+                )
+            )
+
+        return block

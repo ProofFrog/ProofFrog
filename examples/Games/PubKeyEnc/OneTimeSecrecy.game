@@ -14,7 +14,7 @@ Game Left(PubKeyEnc E) {
     }
 
     E.Ciphertext? Challenge(E.Message mL, E.Message mR) {
-        Ciphertext? result = None;
+        E.Ciphertext? result = None;
         count = count + 1;
         if (count == 1) {
             result = E.Enc(pk, mL);
@@ -37,7 +37,7 @@ Game Right(PubKeyEnc E) {
     }
 
     E.Ciphertext? Challenge(E.Message mL, E.Message mR) {
-        Ciphertext? result = None;
+        E.Ciphertext? result = None;
         count = count + 1;
          if (count == 1) {
             result = E.Enc(pk, mR);

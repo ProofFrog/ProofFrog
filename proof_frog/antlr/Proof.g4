@@ -26,8 +26,9 @@ induction: INDUCTION L_PAREN ID FROM integerExpression TO integerExpression R_PA
 
 stepAssumption: ASSUME expression SEMI;
 
-varOrField: id (PERIOD id)*;
+gameField: (concreteGame | parameterizedGame) PERIOD ID;
 
+concreteGame: parameterizedGame PERIOD ID;
 gameAdversary: parameterizedGame PERIOD ADVERSARY;
 
 

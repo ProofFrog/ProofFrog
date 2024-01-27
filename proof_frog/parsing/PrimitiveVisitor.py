@@ -264,16 +264,6 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by PrimitiveParser#parameterizedGame.
-    def visitParameterizedGame(self, ctx:PrimitiveParser.ParameterizedGameContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#concreteGame.
-    def visitConcreteGame(self, ctx:PrimitiveParser.ConcreteGameContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by PrimitiveParser#argList.
     def visitArgList(self, ctx:PrimitiveParser.ArgListContext):
         return self.visitChildren(ctx)
@@ -281,6 +271,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by PrimitiveParser#variable.
     def visitVariable(self, ctx:PrimitiveParser.VariableContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#parameterizedGame.
+    def visitParameterizedGame(self, ctx:PrimitiveParser.ParameterizedGameContext):
         return self.visitChildren(ctx)
 
 

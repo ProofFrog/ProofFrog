@@ -269,16 +269,6 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SchemeParser#parameterizedGame.
-    def visitParameterizedGame(self, ctx:SchemeParser.ParameterizedGameContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SchemeParser#concreteGame.
-    def visitConcreteGame(self, ctx:SchemeParser.ConcreteGameContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by SchemeParser#argList.
     def visitArgList(self, ctx:SchemeParser.ArgListContext):
         return self.visitChildren(ctx)
@@ -286,6 +276,11 @@ class SchemeVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SchemeParser#variable.
     def visitVariable(self, ctx:SchemeParser.VariableContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#parameterizedGame.
+    def visitParameterizedGame(self, ctx:SchemeParser.ParameterizedGameContext):
         return self.visitChildren(ctx)
 
 

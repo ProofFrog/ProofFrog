@@ -209,6 +209,9 @@ class ProofEngine:
                     next_game_ast = do_transform(next_game_ast, False)
 
             self.check_equivalent(current_game_ast, next_game_ast)
+            if isinstance(steps[i], frog_ast.Induction):
+                pass
+                # self.prove_steps(steps[i].steps)
 
     def check_equivalent(
         self, current_game_ast: frog_ast.Game, next_game_ast: frog_ast.Game
@@ -248,10 +251,22 @@ class ProofEngine:
                 name="Branch Elimination",
             ),
             AstManipulator(
-                fn = lambda ast: visitors.RemoveFieldTransformer(
+                fn=lambda ast: visitors.RemoveFieldTransformer(
                     visitors.UnnecessaryFieldVisitor(self.proof_namespace).visit(ast)
                 ).transform(ast),
-                name = "Unnecessary Field Removal",
+                name="Unnecessary Field Removal",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.CollapseAssignmentTransformer().transform(ast),
+                name="Collapse Assignment",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifyReturnTransformer().transform(ast),
+                name="Simplify Returns",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifyIfTransformer().transform(ast),
+                name="Simplify Ifs",
             ),
         ]
 

@@ -305,7 +305,7 @@ class IfStatement(Statement):
             output_string += str(self.blocks[i])
 
         if self.has_else_block():
-            output_string += f"}} else {{\n {self.blocks[-1]}"
+            output_string += f"}} else {{\n{self.blocks[-1]}"
 
         output_string += "}\n"
 
@@ -653,7 +653,6 @@ class StepAssumption(ASTNode):
         self.expression = expression
 
     def __str__(self) -> str:
-        print(self.expression)
         return f"assume {self.expression};"
 
 

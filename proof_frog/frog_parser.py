@@ -314,14 +314,17 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
 
     def visitLvalue(self, ctx: PrimitiveParser.LvalueExpContext) -> frog_ast.Expression:
         expression: frog_ast.Expression
-        if ctx.concreteGame():
-            expression = self.visit(ctx.concreteGame())
-        elif ctx.parameterizedGame():
+        i = 1
+        if ctx.parameterizedGame():
             expression = self.visit(ctx.parameterizedGame())
+            if ctx.getChildCount() > 3:
+                expression = frog_ast.ConcreteGame(
+                    expression, ctx.getChild(2).getText()
+                )
+                i = 3
         else:
             expression = frog_ast.Variable(ctx.id_()[0].getText())
 
-        i = 1
         while i < ctx.getChildCount():
             if ctx.getChild(i).getText() == ".":
                 expression = frog_ast.FieldAccess(

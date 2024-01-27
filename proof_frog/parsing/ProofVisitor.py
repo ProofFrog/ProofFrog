@@ -69,8 +69,13 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#varOrField.
-    def visitVarOrField(self, ctx:ProofParser.VarOrFieldContext):
+    # Visit a parse tree produced by ProofParser#gameField.
+    def visitGameField(self, ctx:ProofParser.GameFieldContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#concreteGame.
+    def visitConcreteGame(self, ctx:ProofParser.ConcreteGameContext):
         return self.visitChildren(ctx)
 
 
@@ -324,16 +329,6 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#parameterizedGame.
-    def visitParameterizedGame(self, ctx:ProofParser.ParameterizedGameContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#concreteGame.
-    def visitConcreteGame(self, ctx:ProofParser.ConcreteGameContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by ProofParser#argList.
     def visitArgList(self, ctx:ProofParser.ArgListContext):
         return self.visitChildren(ctx)
@@ -341,6 +336,11 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#variable.
     def visitVariable(self, ctx:ProofParser.VariableContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#parameterizedGame.
+    def visitParameterizedGame(self, ctx:ProofParser.ParameterizedGameContext):
         return self.visitChildren(ctx)
 
 

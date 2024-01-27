@@ -71,6 +71,7 @@ class ProofEngine:
 
         self.get_method_lookup()
         self.verbose = verbose
+        self.step_assumptions = []
 
     def prove(self) -> None:
         first_step = self.proof_file.steps[0]
@@ -104,6 +105,7 @@ class ProofEngine:
 
         for i in range(0, len(steps) - 1):
             assumptions = []
+            self.step_assumptions = []
             if isinstance(steps[i], frog_ast.StepAssumption):
                 continue
 
@@ -170,48 +172,58 @@ class ProofEngine:
 
             for assumption in assumptions:
                 expression = assumption.expression
-                if not isinstance(expression, frog_ast.BinaryOperation):
-                    continue
-                if not isinstance(expression.left_expression, frog_ast.FieldAccess):
-                    continue
-                if expression.left_expression.the_object not in (
-                    current_step.challenger,
-                    current_step.reduction,
-                    next_step.challenger,
-                    next_step.reduction,
-                ):
-                    continue
 
-                field_name = expression.left_expression.name
+                def found_field_access(games, node):
+                    return (
+                        isinstance(node, frog_ast.FieldAccess)
+                        and node.the_object in games
+                    )
 
-                def transform(expression, field_name, game, is_challenger):
-                    return visitors.SimplifyRangeTransformer(
-                        frog_ast.BinaryOperation(
-                            expression.operator,
-                            frog_ast.Variable(
-                                get_challenger_field_name(field_name)
-                                if is_challenger
-                                else field_name
-                            ),
-                            expression.right_expression,
+                found_field_access_partial = functools.partial(
+                    found_field_access,
+                    (
+                        current_step.challenger,
+                        current_step.reduction,
+                        next_step.challenger,
+                        next_step.reduction,
+                    ),
+                )
+
+                assumption_field = visitors.SearchVisitor[frog_ast.FieldAccess](
+                    found_field_access_partial
+                ).visit(expression)
+                applies_to = "current"
+                while assumption_field is not None:
+                    new_var = frog_ast.Variable(
+                        get_challenger_field_name(assumption_field.name)
+                        if (
+                            assumption_field.the_object == current_step.challenger
+                            and current_step.reduction
                         )
-                    ).transform(game)
-
-                do_transform = functools.partial(transform, expression, field_name)
-
-                if expression.left_expression.the_object == current_step.challenger:
-                    current_game_ast = do_transform(current_game_ast, True)
-                elif expression.left_expression.the_object == current_step.reduction:
-                    current_game_ast = do_transform(current_game_ast, False)
-                elif expression.left_expression.the_object == next_step.challenger:
-                    next_game_ast = do_transform(next_game_ast, True)
-                elif expression.left_expression.the_object == next_step.reduction:
-                    next_game_ast = do_transform(next_game_ast, False)
+                        or (
+                            assumption_field.the_object == next_step.challenger
+                            and next_step.reduction
+                        )
+                        else assumption_field.name
+                    )
+                    if (
+                        assumption_field.the_object == next_step.challenger
+                        or assumption_field.the_object == next_step.reduction
+                    ):
+                        applies_to = "next"
+                    expression = visitors.ReplaceTransformer(
+                        assumption_field, new_var
+                    ).transform(expression)
+                    assumption_field = visitors.SearchVisitor[frog_ast.FieldAccess](
+                        found_field_access_partial
+                    ).visit(expression)
+                self.step_assumptions.append(
+                    {"assumption": expression, "applies_to": applies_to}
+                )
 
             self.check_equivalent(current_game_ast, next_game_ast)
             if isinstance(steps[i], frog_ast.Induction):
-                pass
-                # self.prove_steps(steps[i].steps)
+                self.prove_steps(steps[i].steps)
 
     def check_equivalent(
         self, current_game_ast: frog_ast.Game, next_game_ast: frog_ast.Game
@@ -239,12 +251,6 @@ class ProofEngine:
                 name="Remove Redundant Copies",
             ),
             AstManipulator(fn=self.sort_game, name="Topological Sorting"),
-            AstManipulator(
-                fn=lambda ast: visitors.VariableStandardizingTransformer().transform(
-                    ast
-                ),
-                name="Variable Standardizing",
-            ),
             AstManipulator(fn=remove_duplicate_fields, name="Remove Duplicate Fields"),
             AstManipulator(
                 fn=lambda ast: visitors.BranchEliminiationTransformer().transform(ast),
@@ -271,12 +277,35 @@ class ProofEngine:
         ]
 
         for index, game in enumerate((current_game_ast, next_game_ast)):
+
+            def apply_assumptions(which_game, ast):
+                for assumption in self.step_assumptions:
+                    if assumption["applies_to"] != which_game:
+                        continue
+                    ast = visitors.SimplifyRangeTransformer(
+                        assumption["assumption"]
+                    ).transform(ast)
+                return ast
+
             if index == 0:
                 print("SIMPLIFYING CURRENT GAME")
                 print(current_game_ast)
+                ast_manipulators.append(
+                    AstManipulator(
+                        fn=functools.partial(apply_assumptions, "current"),
+                        name="Apply Assumptions",
+                    )
+                )
             else:
+                ast_manipulators.pop()
                 print("SIMPLIFYING NEXT GAME")
                 print(next_game_ast)
+                ast_manipulators.append(
+                    AstManipulator(
+                        fn=functools.partial(apply_assumptions, "next"),
+                        name="Apply Assumptions",
+                    )
+                )
 
             while True:
 
@@ -298,6 +327,13 @@ class ProofEngine:
                     game = new_game
                 else:
                     break
+        current_game_ast = visitors.VariableStandardizingTransformer().transform(
+            current_game_ast
+        )
+        next_game_ast = visitors.VariableStandardizingTransformer().transform(
+            next_game_ast
+        )
+
         print("CURRENT")
         print(current_game_ast)
         print("NEXT")

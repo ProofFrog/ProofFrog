@@ -712,6 +712,8 @@ class Z3FormulaVisitor(Visitor):
             frog_ast.BinaryOperators.GT: operator.gt,
             frog_ast.BinaryOperators.GEQ: operator.ge,
             frog_ast.BinaryOperators.LEQ: operator.le,
+            frog_ast.BinaryOperators.OR: z3.Or,
+            frog_ast.BinaryOperators.AND: z3.And,
         }
         right_item = self.stack.pop()
         left_item = self.stack.pop()
@@ -732,6 +734,8 @@ class SimplifyRangeTransformer(Transformer):
             frog_ast.BinaryOperators.LT,
             frog_ast.BinaryOperators.GT,
             frog_ast.BinaryOperators.GEQ,
+            frog_ast.BinaryOperators.AND,
+            frog_ast.BinaryOperators.OR,
         ):
             return binary_operation
         statement_formula = Z3FormulaVisitor().visit(binary_operation)
@@ -741,7 +745,9 @@ class SimplifyRangeTransformer(Transformer):
         self.solver.pop()
         if not satisfied:
             return frog_ast.Boolean(False)
-        if z3.is_true(z3.simplify(z3.Implies(self.assumed_formula, statement_formula))):
+        s = z3.Solver()
+        s.add(z3.Not(z3.Implies(self.assumed_formula, statement_formula)))
+        if s.check() == z3.unsat:
             return frog_ast.Boolean(True)
         return binary_operation
 

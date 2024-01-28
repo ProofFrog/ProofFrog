@@ -16,7 +16,7 @@ assumptions: (parameterizedGame SEMI)* (CALLS (LEQ|L_ANGLE) expression SEMI)?;
 
 theorem: parameterizedGame SEMI;
 
-gameList: gameStep SEMI (gameStep SEMI|induction|stepAssumption)* gameStep SEMI;
+gameList: gameStep SEMI (gameStep SEMI|induction|stepAssumption)*;
 
 gameStep: concreteGame COMPOSE parameterizedGame AGAINST gameAdversary # reductionStep
 	| (concreteGame|parameterizedGame) AGAINST gameAdversary # regularStep

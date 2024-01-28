@@ -52,6 +52,8 @@ games:
     induction(i from 1 to q) {
         OneTimeSecrecy(E).Left compose R(E, i) against CPA(E).Adversary;
         OneTimeSecrecy(E).Right compose R(E, i) against CPA(E).Adversary;
+        assume OneTimeSecrecy(E).Left.count == 1;
+        assume OneTimeSecrecy(E).Right.count == 1;
     }
 
     assume R(E, q).count < q + 1;

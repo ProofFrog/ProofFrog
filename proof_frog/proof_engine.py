@@ -5,6 +5,7 @@ import copy
 import functools
 from collections import namedtuple
 from typing import TypeAlias, Sequence, Tuple, Dict, Optional
+import z3
 from colorama import Fore
 from sympy import Symbol
 from . import frog_parser
@@ -105,19 +106,21 @@ class ProofEngine:
 
         for i in range(0, len(steps) - 1):
             assumptions = []
-            self.step_assumptions = []
             if isinstance(steps[i], frog_ast.StepAssumption):
                 continue
 
             step_num += 1
-            print(f"===STEP {step_num}===")
             current_step = steps[i]
             i += 1
             while isinstance(steps[i], frog_ast.StepAssumption):
                 assumptions.append(steps[i])
                 i += 1
+                if i >= len(steps):
+                    return
 
             next_step = steps[i]
+
+            print(f"===STEP {step_num}===")
 
             current_game_ast: frog_ast.Game
             next_game_ast: frog_ast.Game
@@ -157,7 +160,11 @@ class ProofEngine:
                 next_game_ast = self._get_game_ast(
                     next_step.challenger, next_step.reduction
                 )
-                last_inductive_step = current_step.steps[-1]
+                last_inductive_step = next(
+                    step
+                    for step in current_step.steps[::-1]
+                    if isinstance(step, frog_ast.Step)
+                )
                 assert isinstance(last_inductive_step, frog_ast.Step)
                 last_inductive_step = visitors.SubstitutionTransformer(
                     [(frog_ast.Variable(current_step.name), current_step.end)]
@@ -170,60 +177,99 @@ class ProofEngine:
             print(f"Current: {current_step}")
             print(f"Hop To: {next_step}\n")
 
-            for assumption in assumptions:
-                expression = assumption.expression
-
-                def found_field_access(games, node):
-                    return (
-                        isinstance(node, frog_ast.FieldAccess)
-                        and node.the_object in games
-                    )
-
-                found_field_access_partial = functools.partial(
-                    found_field_access,
-                    (
-                        current_step.challenger,
-                        current_step.reduction,
-                        next_step.challenger,
-                        next_step.reduction,
-                    ),
-                )
-
-                assumption_field = visitors.SearchVisitor[frog_ast.FieldAccess](
-                    found_field_access_partial
-                ).visit(expression)
-                applies_to = "current"
-                while assumption_field is not None:
-                    new_var = frog_ast.Variable(
-                        get_challenger_field_name(assumption_field.name)
-                        if (
-                            assumption_field.the_object == current_step.challenger
-                            and current_step.reduction
-                        )
-                        or (
-                            assumption_field.the_object == next_step.challenger
-                            and next_step.reduction
-                        )
-                        else assumption_field.name
-                    )
-                    if (
-                        assumption_field.the_object == next_step.challenger
-                        or assumption_field.the_object == next_step.reduction
-                    ):
-                        applies_to = "next"
-                    expression = visitors.ReplaceTransformer(
-                        assumption_field, new_var
-                    ).transform(expression)
-                    assumption_field = visitors.SearchVisitor[frog_ast.FieldAccess](
-                        found_field_access_partial
-                    ).visit(expression)
-                self.step_assumptions.append(
-                    {"assumption": expression, "applies_to": applies_to}
-                )
+            self.set_up_assumptions(assumptions, current_step, next_step)
 
             self.check_equivalent(current_game_ast, next_game_ast)
             if isinstance(steps[i], frog_ast.Induction):
+                the_induction = steps[i]
+                assert isinstance(the_induction, frog_ast.Induction)
                 self.prove_steps(steps[i].steps)
+                # Check induction roll over
+                first_step = steps[i].steps[0]
+                assert isinstance(first_step, frog_ast.Step)
+                assumptions = []
+                last_step: frog_ast.Step
+                for step in the_induction.steps[::-1]:
+                    if isinstance(step, frog_ast.StepAssumption):
+                        assumptions.append(step)
+                    elif isinstance(step, frog_ast.Step):
+                        last_step = step
+                        break
+                first_step = visitors.SubstitutionTransformer(
+                    [
+                        (
+                            frog_ast.Variable(the_induction.name),
+                            frog_ast.BinaryOperation(
+                                frog_ast.BinaryOperators.ADD,
+                                frog_ast.Variable(the_induction.name),
+                                frog_ast.Integer(1),
+                            ),
+                        )
+                    ]
+                ).transform(first_step)
+                first_step_ast = self._get_game_ast(
+                    first_step.challenger, first_step.reduction
+                )
+                last_step_ast = self._get_game_ast(
+                    last_step.challenger, last_step.reduction
+                )
+                print("CHECKING INDUCTION ROLLOVER")
+                print(f"Current: {last_step}")
+                print(f"Hop To: {first_step}\n")
+                self.set_up_assumptions(assumptions, last_step, first_step)
+                self.check_equivalent(last_step_ast, first_step_ast)
+
+    def set_up_assumptions(self, assumptions, current_step, next_step):
+        self.step_assumptions = []
+        for assumption in assumptions:
+            expression = assumption.expression
+
+            def found_field_access(games, node):
+                return (
+                    isinstance(node, frog_ast.FieldAccess) and node.the_object in games
+                )
+
+            found_field_access_partial = functools.partial(
+                found_field_access,
+                (
+                    current_step.challenger,
+                    current_step.reduction,
+                    next_step.challenger,
+                    next_step.reduction,
+                ),
+            )
+
+            assumption_field = visitors.SearchVisitor[frog_ast.FieldAccess](
+                found_field_access_partial
+            ).visit(expression)
+            applies_to = "current"
+            while assumption_field is not None:
+                new_var = frog_ast.Variable(
+                    get_challenger_field_name(assumption_field.name)
+                    if (
+                        assumption_field.the_object == current_step.challenger
+                        and current_step.reduction
+                    )
+                    or (
+                        assumption_field.the_object == next_step.challenger
+                        and next_step.reduction
+                    )
+                    else assumption_field.name
+                )
+                if (
+                    assumption_field.the_object == next_step.challenger
+                    or assumption_field.the_object == next_step.reduction
+                ):
+                    applies_to = "next"
+                expression = visitors.ReplaceTransformer(
+                    assumption_field, new_var
+                ).transform(expression)
+                assumption_field = visitors.SearchVisitor[frog_ast.FieldAccess](
+                    found_field_access_partial
+                ).visit(expression)
+            self.step_assumptions.append(
+                {"assumption": expression, "applies_to": applies_to}
+            )
 
     def check_equivalent(
         self, current_game_ast: frog_ast.Game, next_game_ast: frog_ast.Game
@@ -343,9 +389,51 @@ class ProofEngine:
             print("Inline Success!")
             return
 
-        print("Step failed!")
-        print(Fore.RED + "Proof Failed!")
-        sys.exit(1)
+        class AllTrueTransformer(visitors.Transformer):
+            def transform_if_statement(self, stmt: frog_ast.IfStatement):
+                return frog_ast.IfStatement(
+                    [frog_ast.Boolean(True)] * len(stmt.conditions), stmt.blocks
+                )
+
+        def quit_proof():
+            print("Step failed!")
+            print(Fore.RED + "Proof Failed!")
+            sys.exit(1)
+
+        all_true_current = AllTrueTransformer().transform(current_game_ast)
+        all_true_next = AllTrueTransformer().transform(next_game_ast)
+        if all_true_current != all_true_next:
+            quit_proof()
+
+        found_ifs = []
+
+        def search_for_if(found_ifs, node: frog_ast.ASTNode) -> bool:
+            return isinstance(node, frog_ast.IfStatement) and node not in found_ifs
+
+        while True:
+            partial = functools.partial(search_for_if, found_ifs)
+            if_current = visitors.SearchVisitor[frog_ast.IfStatement](partial).visit(
+                current_game_ast
+            )
+            if_next = visitors.SearchVisitor[frog_ast.IfStatement](partial).visit(
+                next_game_ast
+            )
+            if if_current is None and if_next is None:
+                break
+            found_ifs.append(if_current)
+            found_ifs.append(if_next)
+            for i, condition in enumerate(if_current.conditions):
+                if condition == if_next.conditions[i]:
+                    continue
+                first_if_formula = visitors.Z3FormulaVisitor().visit(condition)
+                next_if_formula = visitors.Z3FormulaVisitor().visit(
+                    if_next.conditions[i]
+                )
+                solver = z3.Solver()
+                solver.add(z3.Not(first_if_formula == next_if_formula))
+                if solver.check() != z3.unsat:
+                    quit_proof()
+        print("Inline Success!")
 
     def apply_reduction(
         self,

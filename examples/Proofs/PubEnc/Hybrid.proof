@@ -1,0 +1,118 @@
+import 'examples/Primitives/PubKeyEnc.primitive';
+import 'examples/Primitives/SymEnc.primitive';
+import 'examples/Schemes/PubEnc/Hybrid.scheme';
+import 'examples/Games/SymEnc/OneTimeSecrecy.game';
+import 'examples/Games/PubKeyEnc/CPA.game';
+
+Reduction R1(SymEnc E, PubKeyEnc P, Hybrid H) compose CPA(P) against CPA(H).Adversary {
+    H.Ciphertext Challenge(H.Message mL, H.Message mR) {
+        E.Key tk = E.KeyGen();
+        E.Key tkPrime = E.KeyGen();
+        P.Ciphertext cpub = challenger.Challenge(tk, tkPrime);
+        E.Ciphertext csym = E.Enc(tk, mL);
+        return [cpub, csym];
+    }
+}
+
+Game Intermediate1(SymEnc E, PubKeyEnc P, Hybrid H) {
+    P.PublicKey pk;
+    P.SecretKey sk;
+
+    P.PublicKey Initialize() {
+        P.PublicKey * P.SecretKey k = P.KeyGen();
+        pk = k[0];
+        sk = k[1];
+        return pk;
+    }
+
+    H.Ciphertext Challenge(H.Message mL, H.Message mR) {
+        E.Key tk = E.KeyGen();
+        E.Key tkPrime = E.KeyGen();
+        P.Ciphertext cpub = P.Enc(pk, tkPrime);
+        E.Ciphertext csym = E.Enc(tk, mL);
+        return [cpub, csym];
+    }
+}
+
+Reduction R2(SymEnc E, PubKeyEnc P, Hybrid H) compose OneTimeSecrecy(E) against CPA(H).Adversary {
+    P.PublicKey pk;
+    P.SecretKey sk;
+
+    P.PublicKey Initialize() {
+        P.PublicKey * P.SecretKey k = P.KeyGen();
+        pk = k[0];
+        sk = k[1];
+        return pk;
+    }
+
+    H.Ciphertext Challenge(H.Message mL, H.Message mR) {
+        E.Key tkPrime = E.KeyGen();
+        P.Ciphertext cpub = P.Enc(pk, tkPrime);
+        P.Ciphertext csym = challenger.Eavesdrop(mL, mR);
+        return [cpub, csym];
+    }
+}
+
+Game Intermediate2(SymEnc E, PubKeyEnc P, Hybrid H) {
+    P.PublicKey pk;
+    P.SecretKey sk;
+
+    P.PublicKey Initialize() {
+        P.PublicKey * P.SecretKey k = P.KeyGen();
+        pk = k[0];
+        sk = k[1];
+        return pk;
+    }
+
+    H.Ciphertext Challenge(H.Message mL, H.Message mR) {
+        E.Key tk = E.KeyGen();
+        E.Key tkPrime = E.KeyGen();
+        P.Ciphertext cpub = P.Enc(pk, tkPrime);
+        E.Ciphertext csym = E.Enc(tk, mR);
+        return [cpub, csym];
+    }
+}
+
+Reduction R3(SymEnc E, PubKeyEnc P, Hybrid H) compose CPA(P) against CPA(H).Adversary {
+    H.Ciphertext Challenge(H.Message mL, H.Message mR) {
+        E.Key tk = E.KeyGen();
+        E.Key tkPrime = E.KeyGen();
+        P.Ciphertext cpub = challenger.Challenge(tk, tkPrime);
+        E.Ciphertext csym = E.Enc(tk, mR);
+        return [cpub, csym];
+    }
+}
+
+proof:
+
+let:
+    Set SymMessageSpace;
+    Set PubMessageSpace;
+    Set SymCiphertextSpace;
+    Set PubCiphertextSpace;
+
+    Set PubKeySpace;
+    Set SecretKeySpace;
+
+    SymEnc E = SymEnc(SymMessageSpace, SymCiphertextSpace, PubMessageSpace);
+    PubKeyEnc P = PubKeyEnc(PubMessageSpace, PubCiphertextSpace, PubKeySpace, SecretKeySpace);
+    Hybrid H = Hybrid(E, P);
+
+assume:
+    OneTimeSecrecy(E);
+    CPA(P);
+
+theorem:
+    CPA(H);
+
+games:
+    CPA(H).Left against CPA(H).Adversary;
+    CPA(P).Left compose R1(E, P, H) against CPA(H).Adversary;
+    CPA(P).Right compose R1(E, P, H) against CPA(H).Adversary;
+    Intermediate1(E, P, H) against CPA(H).Adversary;
+    OneTimeSecrecy(E).Left compose R2(E, P, H) against CPA(H).Adversary;
+    OneTimeSecrecy(E).Right compose R2(E, P, H) against CPA(H).Adversary;
+    Intermediate2(E, P, H) against CPA(H).Adversary;
+    CPA(P).Right compose R3(E, P, H) against CPA(H).Adversary;
+    CPA(P).Left compose R3(E, P, H) against CPA(H).Adversary;
+    CPA(H).Right against CPA(H).Adversary;

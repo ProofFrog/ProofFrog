@@ -1,0 +1,27 @@
+import 'examples/Primitives/SymEnc.primitive';
+import 'examples/Primitives/PubKeyEnc.primitive';
+
+Scheme Hybrid(SymEnc E, PubKeyEnc P) extends PubKeyEnc {
+    requires E.Key subsets P.Message;
+
+    Set Message = E.Message;
+    Set Ciphertext = E.Ciphertext * P.Ciphertext;
+    Set PublicKey = P.PublicKey;
+    Set SecretKey = P.SecretKey;
+
+    PublicKey * SecretKey KeyGen() {
+        return P.KeyGen();
+    }
+
+    Message Enc(PublicKey pk, Message m) {
+        E.Key tk = E.KeyGen();
+        P.Ciphertext cpub = P.Enc(pk, tk);
+        E.Ciphertext csym = E.Enc(tk, m);
+        return [cpub, csym];
+    }
+
+    Ciphertext Dec(SecretKey sk, Ciphertext c) {
+        E.Key tk = P.Dec(sk, c[0]);
+        return E.Dec(tk, c[1]);
+    }
+}

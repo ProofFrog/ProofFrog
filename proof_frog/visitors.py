@@ -389,9 +389,11 @@ class SimplifySpliceTransformer(BlockTransformer):
 
                 remaining_block = ReplaceTransformer(
                     to_transform,
-                    left_declaration.var
-                    if to_transform == left_slice
-                    else right_declaration.var,
+                    (
+                        left_declaration.var
+                        if to_transform == left_slice
+                        else right_declaration.var
+                    ),
                 ).transform(remaining_block)
             if not made_transformation:
                 continue

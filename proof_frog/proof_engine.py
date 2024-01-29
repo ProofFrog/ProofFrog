@@ -3,6 +3,7 @@ import os
 import sys
 import copy
 import functools
+from enum import Enum
 from collections import namedtuple
 from typing import TypeAlias, Sequence, Tuple, Dict, Optional
 import z3
@@ -14,6 +15,14 @@ from . import visitors
 from . import dependencies
 
 MethodLookup: TypeAlias = Dict[Tuple[str, str], frog_ast.Method]
+
+
+class WhichGame(Enum):
+    NEXT = "next"
+    CURRENT = "current"
+
+
+ProcessedAssumption = namedtuple("ProcessedAssumption", ["assumption", "which"])
 
 
 class ProofEngine:
@@ -72,7 +81,7 @@ class ProofEngine:
 
         self.get_method_lookup()
         self.verbose = verbose
-        self.step_assumptions = []
+        self.step_assumptions: list[ProcessedAssumption] = []
 
     def prove(self) -> None:
         first_step = self.proof_file.steps[0]
@@ -262,7 +271,7 @@ class ProofEngine:
             assumption_field = visitors.SearchVisitor[frog_ast.FieldAccess](
                 found_field_access_partial
             ).visit(expression)
-            applies_to = "current"
+            applies_to = WhichGame.CURRENT
             while assumption_field is not None:
                 new_var = frog_ast.Variable(
                     get_challenger_field_name(assumption_field.name)
@@ -280,7 +289,7 @@ class ProofEngine:
                     next_step.challenger,
                     next_step.reduction,
                 ):
-                    applies_to = "next"
+                    applies_to = WhichGame.NEXT
                 expression = visitors.ReplaceTransformer(
                     assumption_field, new_var
                 ).transform(expression)
@@ -288,7 +297,7 @@ class ProofEngine:
                     found_field_access_partial
                 ).visit(expression)
             self.step_assumptions.append(
-                {"assumption": expression, "applies_to": applies_to}
+                ProcessedAssumption(assumption=expression, which=applies_to)
             )
 
     def check_equivalent(
@@ -347,13 +356,13 @@ class ProofEngine:
         for index, game in enumerate((current_game_ast, next_game_ast)):
 
             def apply_assumptions(
-                which_game: str, ast: frog_ast.ASTNode
+                which_game: WhichGame, ast: frog_ast.ASTNode
             ) -> frog_ast.ASTNode:
                 for assumption in self.step_assumptions:
-                    if assumption["applies_to"] != which_game:
+                    if assumption.which != which_game:
                         continue
                     ast = visitors.SimplifyRangeTransformer(
-                        assumption["assumption"]
+                        assumption.assumption
                     ).transform(ast)
                 return ast
 
@@ -362,7 +371,7 @@ class ProofEngine:
                 print(current_game_ast)
                 ast_manipulators.append(
                     AstManipulator(
-                        fn=functools.partial(apply_assumptions, "current"),
+                        fn=functools.partial(apply_assumptions, WhichGame.CURRENT),
                         name="Apply Assumptions",
                     )
                 )
@@ -372,7 +381,7 @@ class ProofEngine:
                 print(next_game_ast)
                 ast_manipulators.append(
                     AstManipulator(
-                        fn=functools.partial(apply_assumptions, "next"),
+                        fn=functools.partial(apply_assumptions, WhichGame.NEXT),
                         name="Apply Assumptions",
                     )
                 )
@@ -500,14 +509,23 @@ class ProofEngine:
                 [],
             )
             if isinstance(challenger_initialize.signature.return_type, frog_ast.Void):
-                reduction_initialize.block.statements.insert(0, call_initialize)
+                reduction_initialize.block = (
+                    frog_ast.Block([call_initialize]) + reduction_initialize.block
+                )
+
             else:
                 param = reduction_initialize.signature.parameters[0]
-                reduction_initialize.block.statements.insert(
-                    0,
-                    frog_ast.Assignment(
-                        param.type, frog_ast.Variable(param.name), call_initialize
-                    ),
+                reduction_initialize.block = (
+                    frog_ast.Block(
+                        [
+                            frog_ast.Assignment(
+                                param.type,
+                                frog_ast.Variable(param.name),
+                                call_initialize,
+                            )
+                        ]
+                    )
+                    + reduction_initialize.block
                 )
             reduction_initialize.signature.parameters = []
             reduction_initialize.signature.return_type = (

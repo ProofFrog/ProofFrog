@@ -1,5 +1,8 @@
 #!/bin/bash
 
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
 proofs="examples/Proofs/SymEnc/OTUC=>OTS.proof
 examples/Proofs/SymEnc/CPA$=>CPA.proof
 examples/Proofs/SymEnc/GeneralDoubleOTUC.proof
@@ -18,7 +21,7 @@ for proof in $proofs; do
 	python3 -m proof_frog prove $proof -v >> proofOutput.txt
 	if [ $? -ne 0 ]; then
 		succeeded=false
-		echo "FAILED PROOF $proof"
+		echo -e "${RED}FAILED PROOF $proof${NC}"
 	fi
 	echo "========FINISHING PROOF $proof========" >> proofOutput.txt
 done

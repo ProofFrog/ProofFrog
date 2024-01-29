@@ -180,9 +180,7 @@ class Set(Expression):
 
 
 class Field(ASTNode):
-    def __init__(
-        self, the_type: ASTNode, name: str, value: Optional[Expression]
-    ) -> None:
+    def __init__(self, the_type: Type, name: str, value: Optional[Expression]) -> None:
         self.type = the_type
         self.name = name
         self.value = value
@@ -194,7 +192,7 @@ class Field(ASTNode):
 
 
 class Parameter(ASTNode):
-    def __init__(self, the_type: ASTNode, name: str) -> None:
+    def __init__(self, the_type: Type, name: str) -> None:
         self.type = the_type
         self.name = name
 
@@ -204,7 +202,7 @@ class Parameter(ASTNode):
 
 class MethodSignature(ASTNode):
     def __init__(
-        self, name: str, return_type: ASTNode, parameters: list[Parameter]
+        self, name: str, return_type: Type, parameters: list[Parameter]
     ) -> None:
         self.name = name
         self.return_type = return_type

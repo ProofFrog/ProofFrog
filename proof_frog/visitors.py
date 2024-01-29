@@ -614,7 +614,7 @@ class InlineTransformer(Transformer):
         self.blocks.append(block)
         for index, statement in enumerate(block.statements):
             self.statement_index = index
-            block.statements[index] = self.transform(statement)
+            block.statements[index] = self.transform(statement)  # type: ignore
         return self.blocks.pop()
 
     def transform_func_call(self, exp: frog_ast.FuncCall) -> frog_ast.FuncCall:
@@ -664,9 +664,9 @@ class InlineTransformer(Transformer):
 
         block_to_transform = self.blocks.pop()
 
-        statements_so_far = block_to_transform.statements[: self.statement_index]
+        statements_so_far = list(block_to_transform.statements[: self.statement_index])
 
-        statements_so_far += transformed_method.block.statements[:-1]
+        statements_so_far += list(transformed_method.block.statements[:-1])
 
         final_statement = transformed_method.block.statements[-1]
 
@@ -678,7 +678,9 @@ class InlineTransformer(Transformer):
             block_to_transform.statements[self.statement_index]
         )
 
-        statements_after = block_to_transform.statements[self.statement_index + 1 :]
+        statements_after = list(
+            block_to_transform.statements[self.statement_index + 1 :]
+        )
 
         self.blocks.append(
             frog_ast.Block(statements_so_far + [changed_statement] + statements_after)
@@ -935,11 +937,9 @@ class SimplifyReturnTransformer(BlockTransformer):
             if statement.var != last_statement.expression:
                 break
             return self.transform_block(
-                frog_ast.Block(
-                    block.statements[:index]
-                    + block.statements[index + 1 : -1]
-                    + [frog_ast.ReturnStatement(statement.value)]
-                )
+                frog_ast.Block(block.statements[:index])
+                + frog_ast.Block(block.statements[index + 1 : -1])
+                + frog_ast.Block([frog_ast.ReturnStatement(statement.value)])
             )
 
         return block

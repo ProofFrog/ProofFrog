@@ -1,5 +1,5 @@
 import pytest
-from proof_frog import visitors, frog_parser
+from proof_frog import dependencies, frog_parser
 
 
 @pytest.mark.parametrize(
@@ -131,5 +131,5 @@ def test_unnecessary_field_visitor(
 ) -> None:
     game_ast = frog_parser.parse_game(method)
 
-    received_unnecessary = visitors.UnnecessaryFieldVisitor({}).visit(game_ast)
+    received_unnecessary = dependencies.UnnecessaryFieldVisitor({}).visit(game_ast)
     assert expected == received_unnecessary

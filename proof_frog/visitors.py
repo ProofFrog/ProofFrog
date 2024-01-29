@@ -15,12 +15,11 @@ from typing import (
     Dict,
 )
 import z3
-from sympy import Symbol, parsing, Rel, EmptySet, And
+from sympy import Symbol
 
 from proof_frog import frog_ast
 from proof_frog import frog_parser
 from . import frog_ast
-from . import dependencies
 
 
 def _to_snake_case(camel_case: str) -> str:
@@ -801,65 +800,6 @@ class BranchEliminiationTransformer(BlockTransformer):
                         + remaining_block
                     )
         return block
-
-
-class UnnecessaryFieldVisitor(Visitor[list[str]]):
-    def __init__(self, proof_namespace) -> None:
-        self.proof_namespace = proof_namespace
-        self.all_fields = []
-        self.unnecessary_fields: dict[str, bool] = {}
-
-    def result(self) -> list[str]:
-        return self._get_unnecessary_field_list()
-
-    def _get_unnecessary_field_list(self):
-        return [
-            field_name
-            for field_name, unnecessary in self.unnecessary_fields.items()
-            if unnecessary
-        ]
-
-    def visit_game(self, game: frog_ast.Game) -> None:
-        # Initially, all fields are considered unnecessary
-        # We will flip them if we find a method that uses them
-        for field in game.fields:
-            self.unnecessary_fields[field.name] = True
-
-        self.all_fields = game.fields
-
-    def visit_method(self, method: frog_ast.Method) -> None:
-        graph = dependencies.generate_dependency_graph(
-            method.block, self.all_fields, self.proof_namespace, False
-        )
-
-        def has_return_statement(node: frog_ast.ASTNode) -> None:
-            return isinstance(node, frog_ast.ReturnStatement)
-
-        def search_dependencies(node: dependencies.Node):
-            visited = [False] * len(graph.nodes)
-            to_visit: list[dependencies.Node] = [node]
-            while to_visit:
-                cur = to_visit.pop()
-                if not visited[method.block.statements.index(cur.statement)]:
-                    visited[method.block.statements.index(cur.statement)] = True
-
-                    def find_field_usage(node):
-                        return (
-                            isinstance(node, frog_ast.Variable)
-                            and node.name in self._get_unnecessary_field_list()
-                        )
-
-                    found = SearchVisitor(find_field_usage).visit(cur.statement)
-                    while found is not None:
-                        self.unnecessary_fields[found.name] = False
-                        found = SearchVisitor(find_field_usage).visit(cur.statement)
-
-                    for neighbour in cur.in_neighbours:
-                        to_visit.append(neighbour)
-
-        for node in graph.nodes:
-            if SearchVisitor(has_return_statement).visit(node):
-                search_dependencies(node)
 
 
 class RemoveFieldTransformer(Transformer):

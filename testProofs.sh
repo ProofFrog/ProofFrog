@@ -6,7 +6,8 @@ examples/Proofs/SymEnc/GeneralDoubleOTUC.proof
 examples/Proofs/SymEnc/OTUC=>DoubleOTUC.proof
 examples/Book/2/2_13.proof
 examples/Book/5/5_3.proof
-examples/Book/5/5_5_LengthTriplingPRG.proof";
+examples/Book/5/5_5_LengthTriplingPRG.proof
+examples/Proofs/PubEnc/OTS=>CPA.proof";
 
 rm proofOutput.txt
 touch proofOutput.txt

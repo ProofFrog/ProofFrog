@@ -256,9 +256,9 @@ class ProofEngine:
                     )
                     else assumption_field.name
                 )
-                if (
-                    assumption_field.the_object == next_step.challenger
-                    or assumption_field.the_object == next_step.reduction
+                if assumption_field.the_object in (
+                    next_step.challenger,
+                    next_step.reduction,
                 ):
                     applies_to = "next"
                 expression = visitors.ReplaceTransformer(
@@ -304,7 +304,9 @@ class ProofEngine:
             ),
             AstManipulator(
                 fn=lambda ast: visitors.RemoveFieldTransformer(
-                    visitors.UnnecessaryFieldVisitor(self.proof_namespace).visit(ast)
+                    dependencies.UnnecessaryFieldVisitor(self.proof_namespace).visit(
+                        ast
+                    )
                 ).transform(ast),
                 name="Unnecessary Field Removal",
             ),
@@ -706,6 +708,7 @@ def remove_duplicate_fields(game: frog_ast.Game) -> frog_ast.Game:
     initialize_statements = game.get_method("Initialize").block.statements
     for index, statement in enumerate(initialize_statements):
         if (
+            # pylint: disable-next=too-many-boolean-expressions
             isinstance(statement, frog_ast.Assignment)
             and isinstance(statement.var, frog_ast.Variable)
             and isinstance(statement.value, frog_ast.Variable)

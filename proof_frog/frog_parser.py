@@ -253,7 +253,7 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         return frog_ast.Integer(int(ctx.INT().getText()))
 
     def visitBoolExp(self, ctx: PrimitiveParser.BoolExpContext) -> frog_ast.Boolean:
-        return frog_ast.Boolean(bool(ctx.bool_().getText()))
+        return frog_ast.Boolean(ctx.bool_().getText() == "true")
 
     def visitBinaryNumExp(
         self, ctx: PrimitiveParser.BinaryNumExpContext
@@ -313,9 +313,19 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         return exp
 
     def visitLvalue(self, ctx: PrimitiveParser.LvalueExpContext) -> frog_ast.Expression:
-        expression: frog_ast.Expression = frog_ast.Variable(ctx.id_()[0].getText())
-
+        expression: frog_ast.Expression
         i = 1
+        if ctx.parameterizedGame():
+            expression = self.visit(ctx.parameterizedGame())
+            assert isinstance(expression, frog_ast.ParameterizedGame)
+            if ctx.getChildCount() > 3:
+                expression = frog_ast.ConcreteGame(
+                    expression, ctx.getChild(2).getText()
+                )
+                i = 3
+        else:
+            expression = frog_ast.Variable(ctx.id_()[0].getText())
+
         while i < ctx.getChildCount():
             if ctx.getChild(i).getText() == ".":
                 expression = frog_ast.FieldAccess(
@@ -341,16 +351,16 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
 
     def visitFunctionCallStatement(
         self, ctx: PrimitiveParser.FunctionCallStatementContext
-    ) -> frog_ast.FuncCallStatement:
-        return frog_ast.FuncCallStatement(
+    ) -> frog_ast.FuncCall:
+        return frog_ast.FuncCall(
             self.visit(ctx.expression()),
             self.visit(ctx.argList()) if ctx.argList() else [],
         )
 
     def visitFnCallExp(
         self, ctx: PrimitiveParser.FnCallExpContext
-    ) -> frog_ast.FuncCallExpression:
-        return frog_ast.FuncCallExpression(
+    ) -> frog_ast.FuncCall:
+        return frog_ast.FuncCall(
             self.visit(ctx.expression()),
             self.visit(ctx.argList()) if ctx.argList() else [],
         )
@@ -540,6 +550,11 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
             self.visit(ctx.parameterizedGame()), ctx.ID().getText()
         )
 
+    def visitStepAssumption(
+        self, ctx: ProofParser.StepAssumptionContext
+    ) -> frog_ast.StepAssumption:
+        return frog_ast.StepAssumption(self.visit(ctx.expression()))
+
     def visitRegularStep(
         self, ctx: ProofParser.RegularStepContext
     ) -> frog_ast.ProofStep:
@@ -554,7 +569,7 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
             ctx.ID().getText(),
             self.visit(ctx.integerExpression()[0]),
             self.visit(ctx.integerExpression()[1]),
-            [self.visit(step) for step in ctx.gameStep()],
+            self.visit(ctx.gameList()),
         )
 
 

@@ -64,23 +64,23 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#varOrField.
-    def visitVarOrField(self, ctx:ProofParser.VarOrFieldContext):
+    # Visit a parse tree produced by ProofParser#stepAssumption.
+    def visitStepAssumption(self, ctx:ProofParser.StepAssumptionContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#parameterizedGame.
-    def visitParameterizedGame(self, ctx:ProofParser.ParameterizedGameContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#gameAdversary.
-    def visitGameAdversary(self, ctx:ProofParser.GameAdversaryContext):
+    # Visit a parse tree produced by ProofParser#gameField.
+    def visitGameField(self, ctx:ProofParser.GameFieldContext):
         return self.visitChildren(ctx)
 
 
     # Visit a parse tree produced by ProofParser#concreteGame.
     def visitConcreteGame(self, ctx:ProofParser.ConcreteGameContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#gameAdversary.
+    def visitGameAdversary(self, ctx:ProofParser.GameAdversaryContext):
         return self.visitChildren(ctx)
 
 
@@ -214,13 +214,13 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#notEqualsExp.
-    def visitNotEqualsExp(self, ctx:ProofParser.NotEqualsExpContext):
+    # Visit a parse tree produced by ProofParser#addExp.
+    def visitAddExp(self, ctx:ProofParser.AddExpContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#addExp.
-    def visitAddExp(self, ctx:ProofParser.AddExpContext):
+    # Visit a parse tree produced by ProofParser#notEqualsExp.
+    def visitNotEqualsExp(self, ctx:ProofParser.NotEqualsExpContext):
         return self.visitChildren(ctx)
 
 
@@ -336,6 +336,11 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#variable.
     def visitVariable(self, ctx:ProofParser.VariableContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#parameterizedGame.
+    def visitParameterizedGame(self, ctx:ProofParser.ParameterizedGameContext):
         return self.visitChildren(ctx)
 
 

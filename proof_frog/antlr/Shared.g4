@@ -28,13 +28,23 @@ statement: type id SEMI #varDeclStatement
 	;
 
 lvalue:
-	id (PERIOD id | L_SQUARE integerExpression R_SQUARE)*;
+	(id | parameterizedGame) (PERIOD id | L_SQUARE integerExpression R_SQUARE)*;
 
 methodSignature: type id L_PAREN paramList? R_PAREN;
 
 paramList: variable (COMMA variable)*;
 
-expression: expression EQUALSCOMPARE expression #equalsExp
+expression:
+	expression L_PAREN argList? R_PAREN #fnCallExp
+	| expression L_SQUARE integerExpression COLON integerExpression R_SQUARE #sliceExp
+	| NOT expression #notExp
+	| VBAR expression VBAR #sizeExp
+
+	| expression TIMES expression #multiplyExp
+	| expression DIVIDE expression #divideExp
+	| expression PLUS expression #addExp
+	| expression SUBTRACT expression #subtractExp
+	| expression EQUALSCOMPARE expression #equalsExp
 	| expression NOTEQUALS expression #notEqualsExp
 	| expression R_ANGLE expression # gtExp
 	| expression L_ANGLE expression # ltExp
@@ -46,16 +56,8 @@ expression: expression EQUALSCOMPARE expression #equalsExp
 	| expression OR expression #orExp
 	| expression UNION expression #unionExp
 	| expression BACKSLASH expression #setMinusExp
-	| expression PLUS expression #addExp
-	| expression SUBTRACT expression #subtractExp
-	| expression TIMES expression #multiplyExp
-	| expression DIVIDE expression #divideExp
 
 	| lvalue # lvalueExp
-	| NOT expression #notExp
-	| VBAR expression VBAR #sizeExp
-	| expression L_PAREN argList? R_PAREN #fnCallExp
-	| expression L_SQUARE integerExpression COLON integerExpression R_SQUARE #sliceExp
 	| L_SQUARE (expression (COMMA expression)*)? R_SQUARE #createTupleExp
 	| L_CURLY (expression (COMMA expression)*)? R_CURLY #createSetExp
 	| type #typeExp
@@ -69,6 +71,8 @@ expression: expression EQUALSCOMPARE expression #equalsExp
 argList: expression (COMMA expression)*;
 
 variable: type id;
+
+parameterizedGame: ID L_PAREN argList? R_PAREN;
 
 type: type QUESTION #optionalType
 	| set #setType

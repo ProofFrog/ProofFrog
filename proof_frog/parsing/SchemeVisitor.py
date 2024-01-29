@@ -154,13 +154,13 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SchemeParser#notEqualsExp.
-    def visitNotEqualsExp(self, ctx:SchemeParser.NotEqualsExpContext):
+    # Visit a parse tree produced by SchemeParser#addExp.
+    def visitAddExp(self, ctx:SchemeParser.AddExpContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SchemeParser#addExp.
-    def visitAddExp(self, ctx:SchemeParser.AddExpContext):
+    # Visit a parse tree produced by SchemeParser#notEqualsExp.
+    def visitNotEqualsExp(self, ctx:SchemeParser.NotEqualsExpContext):
         return self.visitChildren(ctx)
 
 
@@ -276,6 +276,11 @@ class SchemeVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SchemeParser#variable.
     def visitVariable(self, ctx:SchemeParser.VariableContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#parameterizedGame.
+    def visitParameterizedGame(self, ctx:SchemeParser.ParameterizedGameContext):
         return self.visitChildren(ctx)
 
 

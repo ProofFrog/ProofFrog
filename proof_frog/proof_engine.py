@@ -3,17 +3,26 @@ import os
 import sys
 import copy
 import functools
+from enum import Enum
 from collections import namedtuple
-from typing import TypeAlias, Sequence, Tuple, Dict, Optional, Callable
+from typing import TypeAlias, Sequence, Tuple, Dict, Optional
+import z3
 from colorama import Fore
 from sympy import Symbol
 from . import frog_parser
 from . import frog_ast
 from . import visitors
+from . import dependencies
 
 MethodLookup: TypeAlias = Dict[Tuple[str, str], frog_ast.Method]
 
-inline_counter: int = 0
+
+class WhichGame(Enum):
+    NEXT = "next"
+    CURRENT = "current"
+
+
+ProcessedAssumption = namedtuple("ProcessedAssumption", ["assumption", "which"])
 
 
 class ProofEngine:
@@ -45,7 +54,7 @@ class ProofEngine:
 
         # Here, we are substituting the lets with the parameters they are given
         for let in self.proof_file.lets:
-            if isinstance(let.value, frog_ast.FuncCallExpression) and isinstance(
+            if isinstance(let.value, frog_ast.FuncCall) and isinstance(
                 let.value.func, frog_ast.Variable
             ):
                 definition = copy.deepcopy(
@@ -72,6 +81,7 @@ class ProofEngine:
 
         self.get_method_lookup()
         self.verbose = verbose
+        self.step_assumptions: list[ProcessedAssumption] = []
 
     def prove(self) -> None:
         first_step = self.proof_file.steps[0]
@@ -79,6 +89,8 @@ class ProofEngine:
 
         assert isinstance(first_step, frog_ast.Step)
         assert isinstance(final_step, frog_ast.Step)
+        assert isinstance(first_step.challenger, frog_ast.ConcreteGame)
+        assert isinstance(final_step.challenger, frog_ast.ConcreteGame)
 
         assert isinstance(first_step.challenger, frog_ast.ConcreteGame)
         assert isinstance(final_step.challenger, frog_ast.ConcreteGame)
@@ -100,55 +112,199 @@ class ProofEngine:
         print(Fore.YELLOW + "Proof Succeeded, but is incomplete")
         sys.exit(1)
 
-    def prove_steps(self, steps: list[frog_ast.ProofStep]) -> None:
+    def prove_steps(self, steps: Sequence[frog_ast.ProofStep]) -> None:
+        step_num = 0
+
         for i in range(0, len(steps) - 1):
-            print(f"===STEP {i}===")
+            assumptions: list[frog_ast.StepAssumption] = []
+            if isinstance(steps[i], frog_ast.StepAssumption):
+                continue
+
+            step_num += 1
             current_step = steps[i]
-            next_step = steps[i + 1]
+            i += 1
+            assumption = steps[i]
+            while isinstance(assumption, frog_ast.StepAssumption):
+                assumptions.append(assumption)
+                i += 1
+                if i >= len(steps):
+                    return
+                assumption = steps[i]
+
+            next_step = steps[i]
+
+            print(f"===STEP {step_num}===")
+
+            current_game_ast: frog_ast.Game
+            next_game_ast: frog_ast.Game
+
+            if isinstance(current_step, frog_ast.Step) and isinstance(
+                next_step, frog_ast.Step
+            ):
+                if self._is_by_assumption(current_step, next_step):
+                    print(f"Current: {current_step}")
+                    print(f"Hop To: {next_step}\n")
+                    print("Valid by assumption")
+                    continue
+                current_game_ast = self._get_game_ast(
+                    current_step.challenger, current_step.reduction
+                )
+                next_game_ast = self._get_game_ast(
+                    next_step.challenger, next_step.reduction
+                )
+            elif isinstance(current_step, frog_ast.Step) and isinstance(
+                next_step, frog_ast.Induction
+            ):
+                current_game_ast = self._get_game_ast(
+                    current_step.challenger, current_step.reduction
+                )
+                first_inductive_step = next_step.steps[0]
+                assert isinstance(first_inductive_step, frog_ast.Step)
+                first_inductive_step = visitors.SubstitutionTransformer(
+                    [(frog_ast.Variable(next_step.name), next_step.start)]
+                ).transform(first_inductive_step)
+                next_game_ast = self._get_game_ast(
+                    first_inductive_step.challenger, first_inductive_step.reduction
+                )
+                next_step = first_inductive_step
+            elif isinstance(current_step, frog_ast.Induction) and isinstance(
+                next_step, frog_ast.Step
+            ):
+                next_game_ast = self._get_game_ast(
+                    next_step.challenger, next_step.reduction
+                )
+                last_inductive_step = next(
+                    step
+                    for step in current_step.steps[::-1]
+                    if isinstance(step, frog_ast.Step)
+                )
+                assert isinstance(last_inductive_step, frog_ast.Step)
+                last_inductive_step = visitors.SubstitutionTransformer(
+                    [(frog_ast.Variable(current_step.name), current_step.end)]
+                ).transform(last_inductive_step)
+                current_game_ast = self._get_game_ast(
+                    last_inductive_step.challenger, last_inductive_step.reduction
+                )
+                current_step = last_inductive_step
+
             print(f"Current: {current_step}")
             print(f"Hop To: {next_step}\n")
 
             assert isinstance(current_step, frog_ast.Step)
             assert isinstance(next_step, frog_ast.Step)
 
-            if self._is_by_assumption(current_step, next_step):
-                print("Valid by assumption")
-                continue
+            self.set_up_assumptions(assumptions, current_step, next_step)
 
-            self.prove_step(current_step, next_step)
+            self.check_equivalent(current_game_ast, next_game_ast)
+            if isinstance(steps[i], frog_ast.Induction):
+                the_induction = steps[i]
+                assert isinstance(the_induction, frog_ast.Induction)
+                self.prove_steps(the_induction.steps)
+                # Check induction roll over
+                first_step = the_induction.steps[0]
+                assert isinstance(first_step, frog_ast.Step)
+                assumptions = []
+                last_step: frog_ast.Step
+                for step in the_induction.steps[::-1]:
+                    if isinstance(step, frog_ast.StepAssumption):
+                        assumptions.append(step)
+                    elif isinstance(step, frog_ast.Step):
+                        last_step = step
+                        break
+                first_step = visitors.SubstitutionTransformer(
+                    [
+                        (
+                            frog_ast.Variable(the_induction.name),
+                            frog_ast.BinaryOperation(
+                                frog_ast.BinaryOperators.ADD,
+                                frog_ast.Variable(the_induction.name),
+                                frog_ast.Integer(1),
+                            ),
+                        )
+                    ]
+                ).transform(first_step)
+                first_step_ast = self._get_game_ast(
+                    first_step.challenger, first_step.reduction
+                )
+                last_step_ast = self._get_game_ast(
+                    last_step.challenger, last_step.reduction
+                )
+                print("CHECKING INDUCTION ROLLOVER")
+                print(f"Current: {last_step}")
+                print(f"Hop To: {first_step}\n")
+                self.set_up_assumptions(assumptions, last_step, first_step)
+                self.check_equivalent(last_step_ast, first_step_ast)
 
-    def prove_step(self, current_step: frog_ast.Step, next_step: frog_ast.Step) -> None:
-        current_game_ast = self._get_game_ast(current_step.challenger)
-        current_game_lookup = copy.deepcopy(self.method_lookup)
-        if current_step.reduction:
-            reduction = self._get_game_ast(current_step.reduction)
-            assert isinstance(reduction, frog_ast.Reduction)
-            current_game_lookup.update(get_challenger_method_lookup(current_game_ast))
-            current_game_ast = self.apply_reduction(current_game_ast, reduction)
+    def set_up_assumptions(
+        self,
+        assumptions: list[frog_ast.StepAssumption],
+        current_step: frog_ast.Step,
+        next_step: frog_ast.Step,
+    ) -> None:
+        self.step_assumptions = []
+        for assumption in assumptions:
+            expression = assumption.expression
 
-        next_game_lookup = copy.deepcopy(self.method_lookup)
-        next_game_ast = self._get_game_ast(next_step.challenger)
-        if next_step.reduction:
-            reduction = self._get_game_ast(next_step.reduction)
-            assert isinstance(reduction, frog_ast.Reduction)
-            next_game_lookup.update(get_challenger_method_lookup(next_game_ast))
-            next_game_ast = self.apply_reduction(next_game_ast, reduction)
+            def found_field_access(
+                games: tuple[
+                    frog_ast.ConcreteGame | frog_ast.ParameterizedGame,
+                    frog_ast.ParameterizedGame | None,
+                    frog_ast.ConcreteGame | frog_ast.ParameterizedGame,
+                    frog_ast.ParameterizedGame | None,
+                ],
+                node: frog_ast.ASTNode,
+            ) -> bool:
+                return (
+                    isinstance(node, frog_ast.FieldAccess) and node.the_object in games
+                )
 
-        if self.verbose:
-            print("BASIC GAMES")
-            print(current_game_ast)
-            print(next_game_ast)
-        current_game_ast = self.inline_calls(current_game_lookup, current_game_ast)
-        next_game_ast = self.inline_calls(next_game_lookup, next_game_ast)
+            found_field_access_partial = functools.partial(
+                found_field_access,
+                (
+                    current_step.challenger,
+                    current_step.reduction,
+                    next_step.challenger,
+                    next_step.reduction,
+                ),
+            )
 
-        if self.verbose:
-            print("INLINED GAMES")
-            print(current_game_ast)
-            print(next_game_ast)
+            assumption_field = visitors.SearchVisitor[frog_ast.FieldAccess](
+                found_field_access_partial
+            ).visit(expression)
+            applies_to = WhichGame.CURRENT
+            while assumption_field is not None:
+                new_var = frog_ast.Variable(
+                    get_challenger_field_name(assumption_field.name)
+                    if (
+                        assumption_field.the_object == current_step.challenger
+                        and current_step.reduction
+                    )
+                    or (
+                        assumption_field.the_object == next_step.challenger
+                        and next_step.reduction
+                    )
+                    else assumption_field.name
+                )
+                if assumption_field.the_object in (
+                    next_step.challenger,
+                    next_step.reduction,
+                ):
+                    applies_to = WhichGame.NEXT
+                expression = visitors.ReplaceTransformer(
+                    assumption_field, new_var
+                ).transform(expression)
+                assumption_field = visitors.SearchVisitor[frog_ast.FieldAccess](
+                    found_field_access_partial
+                ).visit(expression)
+            self.step_assumptions.append(
+                ProcessedAssumption(assumption=expression, which=applies_to)
+            )
 
+    def check_equivalent(
+        self, current_game_ast: frog_ast.Game, next_game_ast: frog_ast.Game
+    ) -> None:
         AstManipulator = namedtuple("AstManipulator", ["fn", "name"])
-
-        repeatable_ast_manipulators: list[AstManipulator] = [
+        ast_manipulators: list[AstManipulator] = [
             AstManipulator(
                 fn=lambda ast: visitors.RemoveTupleTransformer().transform(ast),
                 name="Remove Tuples",
@@ -170,26 +326,70 @@ class ProofEngine:
                 name="Remove Redundant Copies",
             ),
             AstManipulator(fn=self.sort_game, name="Topological Sorting"),
+            AstManipulator(fn=remove_duplicate_fields, name="Remove Duplicate Fields"),
             AstManipulator(
-                fn=lambda ast: visitors.VariableStandardizingTransformer().transform(
-                    ast
-                ),
-                name="Variable Standardizing",
+                fn=lambda ast: visitors.BranchEliminiationTransformer().transform(ast),
+                name="Branch Elimination",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.RemoveFieldTransformer(
+                    dependencies.UnnecessaryFieldVisitor(self.proof_namespace).visit(
+                        ast
+                    )
+                ).transform(ast),
+                name="Unnecessary Field Removal",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.CollapseAssignmentTransformer().transform(ast),
+                name="Collapse Assignment",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifyReturnTransformer().transform(ast),
+                name="Simplify Returns",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifyIfTransformer().transform(ast),
+                name="Simplify Ifs",
             ),
         ]
 
         for index, game in enumerate((current_game_ast, next_game_ast)):
+
+            def apply_assumptions(
+                which_game: WhichGame, ast: frog_ast.ASTNode
+            ) -> frog_ast.ASTNode:
+                for assumption in self.step_assumptions:
+                    if assumption.which != which_game:
+                        continue
+                    ast = visitors.SimplifyRangeTransformer(
+                        assumption.assumption
+                    ).transform(ast)
+                return ast
+
             if index == 0:
                 print("SIMPLIFYING CURRENT GAME")
                 print(current_game_ast)
+                ast_manipulators.append(
+                    AstManipulator(
+                        fn=functools.partial(apply_assumptions, WhichGame.CURRENT),
+                        name="Apply Assumptions",
+                    )
+                )
             else:
+                ast_manipulators.pop()
                 print("SIMPLIFYING NEXT GAME")
                 print(next_game_ast)
+                ast_manipulators.append(
+                    AstManipulator(
+                        fn=functools.partial(apply_assumptions, WhichGame.NEXT),
+                        name="Apply Assumptions",
+                    )
+                )
 
             while True:
 
                 def apply_manipulators(game: frog_ast.Game) -> frog_ast.Game:
-                    for manipulator in repeatable_ast_manipulators:
+                    for manipulator in ast_manipulators:
                         new_game = manipulator.fn(game)
                         if self.verbose and game != new_game:
                             print(f"APPLIED {manipulator.name}")
@@ -206,6 +406,13 @@ class ProofEngine:
                     game = new_game
                 else:
                     break
+        current_game_ast = visitors.VariableStandardizingTransformer().transform(
+            current_game_ast
+        )
+        next_game_ast = visitors.VariableStandardizingTransformer().transform(
+            next_game_ast
+        )
+
         print("CURRENT")
         print(current_game_ast)
         print("NEXT")
@@ -215,9 +422,55 @@ class ProofEngine:
             print("Inline Success!")
             return
 
-        print("Step failed!")
-        print(Fore.RED + "Proof Failed!")
-        sys.exit(1)
+        class AllTrueTransformer(visitors.Transformer):
+            def transform_if_statement(
+                self, stmt: frog_ast.IfStatement
+            ) -> frog_ast.IfStatement:
+                return frog_ast.IfStatement(
+                    [frog_ast.Boolean(True)] * len(stmt.conditions), stmt.blocks
+                )
+
+        def quit_proof() -> None:
+            print("Step failed!")
+            print(Fore.RED + "Proof Failed!")
+            sys.exit(1)
+
+        all_true_current = AllTrueTransformer().transform(current_game_ast)
+        all_true_next = AllTrueTransformer().transform(next_game_ast)
+        if all_true_current != all_true_next:
+            quit_proof()
+
+        found_ifs: list[frog_ast.IfStatement] = []
+
+        def search_for_if(
+            found_ifs: list[frog_ast.IfStatement], node: frog_ast.ASTNode
+        ) -> bool:
+            return isinstance(node, frog_ast.IfStatement) and node not in found_ifs
+
+        while True:
+            partial = functools.partial(search_for_if, found_ifs)
+            if_current = visitors.SearchVisitor[frog_ast.IfStatement](partial).visit(
+                current_game_ast
+            )
+            if_next = visitors.SearchVisitor[frog_ast.IfStatement](partial).visit(
+                next_game_ast
+            )
+            if if_current is None or if_next is None:
+                break
+            found_ifs.append(if_current)
+            found_ifs.append(if_next)
+            for i, condition in enumerate(if_current.conditions):
+                if condition == if_next.conditions[i]:
+                    continue
+                first_if_formula = visitors.Z3FormulaVisitor().visit(condition)
+                next_if_formula = visitors.Z3FormulaVisitor().visit(
+                    if_next.conditions[i]
+                )
+                solver = z3.Solver()
+                solver.add(z3.Not(first_if_formula == next_if_formula))
+                if solver.check() != z3.unsat:
+                    quit_proof()
+        print("Inline Success!")
 
     def apply_reduction(
         self,
@@ -230,7 +483,13 @@ class ProofEngine:
         print(challenger)
         name = "Inlined"
         parameters = challenger.parameters
-        fields = copy.deepcopy(challenger.fields) + copy.deepcopy(reduction.fields)
+        new_fields = [
+            frog_ast.Field(
+                field.type, get_challenger_field_name(field.name), field.value
+            )
+            for field in challenger.fields
+        ]
+        fields = new_fields + copy.deepcopy(reduction.fields)
         phases = challenger.phases
         methods = copy.deepcopy(reduction.methods)
         reduced_game = frog_ast.Game((name, parameters, fields, methods, phases))
@@ -239,6 +498,43 @@ class ProofEngine:
             "Initialize"
         ):
             reduced_game.methods.insert(0, challenger.get_method("Initialize"))
+        elif challenger.has_method("Initialize"):
+            # Must combine two methods together
+            # Do so by inserting an arg = challenger.Initialize() at the beginning
+            # and then using the inline transformer
+            challenger_initialize = challenger.get_method("Initialize")
+            reduction_initialize = reduced_game.get_method("Initialize")
+            call_initialize = frog_ast.FuncCall(
+                frog_ast.FieldAccess(frog_ast.Variable("challenger"), "Initialize"),
+                [],
+            )
+            if isinstance(challenger_initialize.signature.return_type, frog_ast.Void):
+                reduction_initialize.block = (
+                    frog_ast.Block([call_initialize]) + reduction_initialize.block
+                )
+
+            else:
+                param = reduction_initialize.signature.parameters[0]
+                reduction_initialize.block = (
+                    frog_ast.Block(
+                        [
+                            frog_ast.Assignment(
+                                param.type,
+                                frog_ast.Variable(param.name),
+                                call_initialize,
+                            )
+                        ]
+                    )
+                    + reduction_initialize.block
+                )
+            reduction_initialize.signature.parameters = []
+            reduction_initialize.signature.return_type = (
+                challenger_initialize.signature.return_type
+            )
+            reduction_initialize = visitors.InlineTransformer(
+                {("challenger", "Initialize"): challenger_initialize}
+            ).transform(reduction_initialize)
+            reduced_game.methods[0] = reduction_initialize
 
         return reduced_game
 
@@ -246,16 +542,44 @@ class ProofEngine:
     def _get_game_ast(
         self,
         challenger: frog_ast.ParameterizedGame | frog_ast.ConcreteGame,
+        reduction: Optional[frog_ast.ParameterizedGame] = None,
     ) -> frog_ast.Game:
+        game: frog_ast.Game
         if isinstance(challenger, frog_ast.ConcreteGame):
             game_file = self.definition_namespace[challenger.game.name]
             assert isinstance(game_file, frog_ast.GameFile)
-            game = game_file.get_game(challenger.which)
-            return self.instantiate_game(game, challenger.game.args)
+            game = self.instantiate_game(
+                game_file.get_game(challenger.which), challenger.game.args
+            )
+        else:
+            game_node = self.definition_namespace[challenger.name]
+            assert isinstance(game_node, frog_ast.Game)
+            game = self.instantiate_game(game_node, challenger.args)
 
-        game_node = self.definition_namespace[challenger.name]
-        assert isinstance(game_node, frog_ast.Game)
-        return self.instantiate_game(game_node, challenger.args)
+        lookup = copy.deepcopy(self.method_lookup)
+        if reduction:
+            reduction_ast = self._get_game_ast(reduction)
+            assert isinstance(reduction_ast, frog_ast.Reduction)
+            for index, method in enumerate(game.methods):
+                game.methods[index] = visitors.SubstitutionTransformer(
+                    [
+                        (
+                            frog_ast.Variable(field.name),
+                            frog_ast.Variable(get_challenger_field_name(field.name)),
+                        )
+                        for field in game.fields
+                    ]
+                ).transform(method)
+            lookup.update(get_challenger_method_lookup(game))
+            game = self.apply_reduction(game, reduction_ast)
+
+        while True:
+            new_game = visitors.InlineTransformer(lookup).transform(game)
+            if game != new_game:
+                game = new_game
+            else:
+                break
+        return game
 
     # Replace a game's parameter list with empty, and instantiate the game with
     # the parameterized value
@@ -304,174 +628,56 @@ class ProofEngine:
             and current_step.challenger.game in self.proof_file.assumptions
         )
 
-    def inline_calls(self, lookup: MethodLookup, game: frog_ast.Game) -> frog_ast.Game:
-        new_game = copy.deepcopy(game)
-        for method in new_game.methods:
-            new_block = self.inline_call(lookup, method.block)
-            if new_block != method.block:
-                method.block = new_block
-                return self.inline_calls(lookup, new_game)
-        return new_game
-
-    # Inline a single call. Goes through statements and first challenger call (as well as innermost)
-    # will be inlined.
-    # For each statement, we know what we to substitute the call with: it's going to be the return value
-    # So then just write a transformer that navigates
-    # to the first challenger call and returns the expression that is an ASTNode of the return value of the oracle
-    # And then just recursively do that over and over again until you have a list of statements with no challenger calls
-
-    def inline_call(
-        self,
-        method_lookup: MethodLookup,
-        block: frog_ast.Block,
-    ) -> frog_ast.Block:
-        # pylint: disable-next=global-statement
-        global inline_counter
-        inline_counter += 1
-        new_statements: list[frog_ast.Statement] = []
-        for index, statement in enumerate(block.statements):
-
-            def is_inlinable_call(exp: frog_ast.ASTNode) -> bool:
-                return (
-                    isinstance(exp, frog_ast.FuncCallExpression)
-                    and isinstance(exp.func, frog_ast.FieldAccess)
-                    and isinstance(exp.func.the_object, frog_ast.Variable)
-                    and (exp.func.the_object.name, exp.func.name) in method_lookup
-                )
-
-            func_call_exp = visitors.SearchVisitor[frog_ast.FuncCallExpression](
-                is_inlinable_call
-            ).visit(statement)
-
-            if not func_call_exp:
-                new_statements.append(copy.deepcopy(statement))
-                continue
-
-            assert isinstance(func_call_exp.func, frog_ast.FieldAccess)
-            assert isinstance(func_call_exp.func.the_object, frog_ast.Variable)
-            called_method = copy.deepcopy(
-                method_lookup[
-                    (func_call_exp.func.the_object.name, func_call_exp.func.name)
-                ]
-            )
-
-            for var_statement in called_method.block.statements:
-                if (
-                    isinstance(var_statement, (frog_ast.Assignment, frog_ast.Sample))
-                    and var_statement.the_type is not None
-                    and isinstance(var_statement.var, frog_ast.Variable)
-                ):
-                    called_method = visitors.SubstitutionTransformer(
-                        [
-                            (
-                                var_statement.var,
-                                frog_ast.Variable(
-                                    str(inline_counter) + var_statement.var.name
-                                ),
-                            )
-                        ]
-                    ).transform(called_method)
-
-            transformed_method = visitors.SubstitutionTransformer(
-                list(
-                    zip(
-                        (
-                            frog_ast.Variable(param.name)
-                            for param in called_method.signature.parameters
-                        ),
-                        (arg for arg in func_call_exp.args),
-                    )
-                )
-            ).transform(called_method)
-            final_statement = transformed_method.block.statements[-1]
-            new_statements += transformed_method.block.statements[:-1]
-            assert isinstance(final_statement, frog_ast.ReturnStatement)
-            returned_exp = final_statement.expression
-
-            changed_statement = visitors.ReplaceTransformer(
-                func_call_exp, returned_exp
-            ).transform(statement)
-            new_statements.append(changed_statement)
-            new_statements += block.statements[index + 1 :]
-            break
-        return frog_ast.Block(new_statements)
-
-    def generate_dependency_graph(
-        self, block: frog_ast.Block, proof_namespace: frog_ast.Namespace
-    ) -> DependencyGraph:
-        dependency_graph = DependencyGraph()
-        for statement in block.statements:
-            dependency_graph.add_node(Node(statement))
-
-        def add_dependency(node_in_graph: Node, node: frog_ast.Statement) -> None:
-            node_in_graph.add_neighbour(dependency_graph.get_node(node))
-
-        for index, statement in enumerate(block.statements):
-            node_in_graph = dependency_graph.get_node(statement)
-            earlier_statements = list(block.statements[:index])
-            earlier_statements.reverse()
-
-            if isinstance(statement, frog_ast.ReturnStatement):
-                for depends_on in earlier_statements:
-
-                    def search_for_return(node: frog_ast.ASTNode) -> bool:
-                        return isinstance(node, frog_ast.ReturnStatement)
-
-                    contains_return = visitors.SearchVisitor(search_for_return).visit(
-                        depends_on
-                    )
-                    if contains_return is not None:
-                        add_dependency(node_in_graph, depends_on)
-
-            variables = visitors.VariableCollectionVisitor().visit(statement)
-            for variable in variables:
-                for depends_on in earlier_statements:
-                    if variable.name in proof_namespace:
-                        continue
-
-                    def search_for_assignment(
-                        variable: frog_ast.Variable, node: frog_ast.ASTNode
-                    ) -> bool:
-                        return node == variable
-
-                    if (
-                        visitors.SearchVisitor(
-                            functools.partial(search_for_assignment, variable)
-                        ).visit(depends_on)
-                        is not None
-                    ):
-                        add_dependency(node_in_graph, depends_on)
-                        break
-
-        return dependency_graph
-
     def sort_game(self, game: frog_ast.Game) -> frog_ast.Game:
         new_game = copy.deepcopy(game)
         for method in new_game.methods:
-            method.block = self.sort_block(method.block)
+            method.block = self.sort_block(game, method.block)
         return new_game
 
-    def sort_block(self, block: frog_ast.Block) -> frog_ast.Block:
-        graph = self.generate_dependency_graph(block, self.proof_namespace)
+    def sort_block(self, game: frog_ast.Game, block: frog_ast.Block) -> frog_ast.Block:
+        graph = dependencies.generate_dependency_graph(
+            block, game.fields, self.proof_namespace
+        )
 
-        dfs_stack: list[Node] = [graph.get_node(block.statements[-1])]
+        def is_return(node: frog_ast.ASTNode) -> bool:
+            return node in block.statements and isinstance(
+                node, frog_ast.ReturnStatement
+            )
+
+        dfs_stack: list[dependencies.Node] = []
+        return_node = graph.find_node(is_return)
+        if return_node is not None:
+            dfs_stack.append(return_node)
         dfs_stack_visited = [False] * len(block.statements)
         dfs_sorted_statements: list[frog_ast.Statement] = []
         while dfs_stack:
             node = dfs_stack.pop()
-            dfs_sorted_statements.append(node.statement)
             if not dfs_stack_visited[block.statements.index(node.statement)]:
+                dfs_sorted_statements.append(node.statement)
                 dfs_stack_visited[block.statements.index(node.statement)] = True
                 for neighbour in node.in_neighbours:
                     dfs_stack.append(neighbour)
+
         dfs_sorted_statements.reverse()
 
+        for statement in block.statements:
+
+            def uses_field(node: frog_ast.ASTNode) -> bool:
+                return isinstance(node, frog_ast.Variable) and node.name in [
+                    field.name for field in game.fields
+                ]
+
+            found = visitors.SearchVisitor(uses_field).visit(statement)
+            if statement not in dfs_sorted_statements and found is not None:
+                dfs_sorted_statements.append(statement)
+
         sorted_statements: list[frog_ast.Statement] = []
-        stack: list[Node] = []
+        stack: list[dependencies.Node] = []
 
         for statement in dfs_sorted_statements:
             if not graph.get_node(statement).in_neighbours:
-                stack.append(graph.get_node(statement))
+                stack.insert(0, graph.get_node(statement))
+
         while stack:
             node = stack.pop()
             sorted_statements.append(node.statement)
@@ -479,7 +685,7 @@ class ProofEngine:
                 if node in other_node.in_neighbours:
                     other_node.in_neighbours.remove(node)
                     if not other_node.in_neighbours:
-                        stack.append(other_node)
+                        stack.insert(0, other_node)
 
         return frog_ast.Block(sorted_statements)
 
@@ -539,54 +745,66 @@ def get_challenger_method_lookup(challenger: frog_ast.Game) -> MethodLookup:
     )
 
 
-class Node:
-    def __init__(self, statement: frog_ast.Statement) -> None:
-        self.in_neighbours: list[Node] = []
-        self.statement = statement
+def remove_duplicate_fields(game: frog_ast.Game) -> frog_ast.Game:
+    if not game.has_method("Initialize"):
+        return game
 
-    def __eq__(self, __value: object) -> bool:
-        if not isinstance(__value, Node):
-            return False
-        return (
-            self.in_neighbours == __value.in_neighbours
-            and self.statement == __value.statement
-        )
+    field_names = [field.name for field in game.fields]
+    initialize_statements = game.get_method("Initialize").block.statements
+    for index, statement in enumerate(initialize_statements):
+        if (
+            # pylint: disable-next=too-many-boolean-expressions
+            isinstance(statement, frog_ast.Assignment)
+            and isinstance(statement.var, frog_ast.Variable)
+            and isinstance(statement.value, frog_ast.Variable)
+            and statement.var.name in field_names
+            and statement.value.name in field_names
+            and statement.var.name != statement.value.name
+        ):
+            remaining_statements = initialize_statements[index + 1 :]
 
-    def add_neighbour(self, neighbour: Node) -> None:
-        if not neighbour in self.in_neighbours:
-            self.in_neighbours.append(neighbour)
+            to_remove = statement.var.name
+            remaining_name = statement.value.name
+
+            def search_for_reassignment(
+                names: tuple[str, str], node: frog_ast.ASTNode
+            ) -> bool:
+                return (
+                    isinstance(node, frog_ast.Assignment)
+                    and isinstance(node.var, frog_ast.Variable)
+                    and node.var.name in names
+                )
+
+            search_visitor = visitors.SearchVisitor[frog_ast.Assignment](
+                functools.partial(
+                    search_for_reassignment,
+                    (to_remove, remaining_name),
+                )
+            )
+            if any(
+                search_visitor.visit(remaining_statement) is not None
+                for remaining_statement in remaining_statements
+            ) or any(
+                search_visitor.visit(method) is not None for method in game.methods[1:]
+            ):
+                continue
+
+            new_fields = [field for field in game.fields if field.name != to_remove]
+            new_initialize_statements = [
+                new_statement
+                for new_statement in initialize_statements
+                if new_statement != statement
+            ]
+
+            new_game = copy.deepcopy(game)
+            new_game.fields = new_fields
+            new_game.methods[0].block.statements = new_initialize_statements
+            return visitors.SubstitutionTransformer(
+                [(frog_ast.Variable(to_remove), frog_ast.Variable(remaining_name))]
+            ).transform(new_game)
+
+    return game
 
 
-class DependencyGraph:
-    def __init__(self, nodes: Optional[list[Node]] = None) -> None:
-        self.nodes: list[Node] = nodes if nodes else []
-
-    def add_node(self, new_node: Node) -> None:
-        self.nodes.append(new_node)
-
-    def get_node(self, statement: frog_ast.Statement) -> Node:
-        for potential_node in self.nodes:
-            if potential_node.statement == statement:
-                return potential_node
-        raise ValueError("Statement not found in graph")
-
-    def find_node(
-        self, predicate: Callable[[frog_ast.Statement], bool]
-    ) -> Optional[Node]:
-        for node in self.nodes:
-            if predicate(node.statement):
-                return node
-        return None
-
-    def __str__(self) -> str:
-        result = ""
-        for node in self.nodes:
-            result += f'{node.statement} depends on: {"nothing" if not node.in_neighbours else ""}\n'
-            for neighbour in node.in_neighbours:
-                result += f"  - {neighbour.statement}\n"
-        return result
-
-    def __eq__(self, __value: object) -> bool:
-        if not isinstance(__value, DependencyGraph):
-            return False
-        return self.nodes == __value.nodes
+def get_challenger_field_name(name: str) -> str:
+    return f"challenger@{name}"

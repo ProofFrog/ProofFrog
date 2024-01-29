@@ -7,9 +7,9 @@ from . import frog_ast
 
 def generate_dependency_graph(
     block: frog_ast.Block,
-    fields,
+    fields: list[frog_ast.Field],
     proof_namespace: frog_ast.Namespace,
-    return_depends_on_fields=True,
+    return_depends_on_fields: bool = True,
 ) -> DependencyGraph:
     dependency_graph = DependencyGraph()
     for statement in block.statements:
@@ -117,15 +117,15 @@ class DependencyGraph:
 
 
 class UnnecessaryFieldVisitor(visitors.Visitor[list[str]]):
-    def __init__(self, proof_namespace) -> None:
+    def __init__(self, proof_namespace: frog_ast.Namespace) -> None:
         self.proof_namespace = proof_namespace
-        self.all_fields = []
+        self.all_fields: list[frog_ast.Field] = []
         self.unnecessary_fields: dict[str, bool] = {}
 
     def result(self) -> list[str]:
         return self._get_unnecessary_field_list()
 
-    def _get_unnecessary_field_list(self):
+    def _get_unnecessary_field_list(self) -> list[str]:
         return [
             field_name
             for field_name, unnecessary in self.unnecessary_fields.items()
@@ -145,10 +145,10 @@ class UnnecessaryFieldVisitor(visitors.Visitor[list[str]]):
             method.block, self.all_fields, self.proof_namespace, False
         )
 
-        def has_return_statement(node: frog_ast.ASTNode) -> None:
+        def has_return_statement(node: frog_ast.ASTNode) -> bool:
             return isinstance(node, frog_ast.ReturnStatement)
 
-        def search_dependencies(node: Node):
+        def search_dependencies(node: Node) -> None:
             visited = [False] * len(graph.nodes)
             to_visit: list[Node] = [node]
             while to_visit:
@@ -156,7 +156,7 @@ class UnnecessaryFieldVisitor(visitors.Visitor[list[str]]):
                 if not visited[method.block.statements.index(cur.statement)]:
                     visited[method.block.statements.index(cur.statement)] = True
 
-                    def find_field_usage(node):
+                    def find_field_usage(node: frog_ast.ASTNode) -> bool:
                         return (
                             isinstance(node, frog_ast.Variable)
                             and node.name in self._get_unnecessary_field_list()
@@ -175,5 +175,5 @@ class UnnecessaryFieldVisitor(visitors.Visitor[list[str]]):
                         to_visit.append(neighbour)
 
         for node in graph.nodes:
-            if visitors.SearchVisitor(has_return_statement).visit(node):
+            if visitors.SearchVisitor(has_return_statement).visit(node.statement):
                 search_dependencies(node)

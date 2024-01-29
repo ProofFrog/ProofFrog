@@ -571,7 +571,7 @@ class Game(ASTNode):
         return any(method.signature.name == name for method in self.methods)
 
 
-class ParameterizedGame(ASTNode):
+class ParameterizedGame(Expression):
     def __init__(self, name: str, args: list[Expression]):
         self.name = name
         self.args = args
@@ -581,7 +581,7 @@ class ParameterizedGame(ASTNode):
         return f"{self.name}({arg_str})"
 
 
-class ConcreteGame(ASTNode):
+class ConcreteGame(Expression):
     def __init__(self, game: ParameterizedGame, which: str):
         self.game = game
         self.which = which

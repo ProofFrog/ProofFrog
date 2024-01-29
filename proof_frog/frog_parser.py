@@ -317,6 +317,7 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         i = 1
         if ctx.parameterizedGame():
             expression = self.visit(ctx.parameterizedGame())
+            assert isinstance(expression, frog_ast.ParameterizedGame)
             if ctx.getChildCount() > 3:
                 expression = frog_ast.ConcreteGame(
                     expression, ctx.getChild(2).getText()
@@ -549,7 +550,9 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
             self.visit(ctx.parameterizedGame()), ctx.ID().getText()
         )
 
-    def visitStepAssumption(self, ctx: ProofParser.StepAssumptionContext):
+    def visitStepAssumption(
+        self, ctx: ProofParser.StepAssumptionContext
+    ) -> frog_ast.StepAssumption:
         return frog_ast.StepAssumption(self.visit(ctx.expression()))
 
     def visitRegularStep(

@@ -80,6 +80,8 @@ class ProofEngine:
 
         assert isinstance(first_step, frog_ast.Step)
         assert isinstance(final_step, frog_ast.Step)
+        assert isinstance(first_step.challenger, frog_ast.ConcreteGame)
+        assert isinstance(final_step.challenger, frog_ast.ConcreteGame)
 
         assert isinstance(first_step.challenger, frog_ast.ConcreteGame)
         assert isinstance(final_step.challenger, frog_ast.ConcreteGame)
@@ -101,22 +103,24 @@ class ProofEngine:
         print(Fore.YELLOW + "Proof Succeeded, but is incomplete")
         sys.exit(1)
 
-    def prove_steps(self, steps: list[frog_ast.ProofStep]) -> None:
+    def prove_steps(self, steps: Sequence[frog_ast.ProofStep]) -> None:
         step_num = 0
 
         for i in range(0, len(steps) - 1):
-            assumptions = []
+            assumptions: list[frog_ast.StepAssumption] = []
             if isinstance(steps[i], frog_ast.StepAssumption):
                 continue
 
             step_num += 1
             current_step = steps[i]
             i += 1
-            while isinstance(steps[i], frog_ast.StepAssumption):
-                assumptions.append(steps[i])
+            assumption = steps[i]
+            while isinstance(assumption, frog_ast.StepAssumption):
+                assumptions.append(assumption)
                 i += 1
                 if i >= len(steps):
                     return
+                assumption = steps[i]
 
             next_step = steps[i]
 
@@ -177,15 +181,18 @@ class ProofEngine:
             print(f"Current: {current_step}")
             print(f"Hop To: {next_step}\n")
 
+            assert isinstance(current_step, frog_ast.Step)
+            assert isinstance(next_step, frog_ast.Step)
+
             self.set_up_assumptions(assumptions, current_step, next_step)
 
             self.check_equivalent(current_game_ast, next_game_ast)
             if isinstance(steps[i], frog_ast.Induction):
                 the_induction = steps[i]
                 assert isinstance(the_induction, frog_ast.Induction)
-                self.prove_steps(steps[i].steps)
+                self.prove_steps(the_induction.steps)
                 # Check induction roll over
-                first_step = steps[i].steps[0]
+                first_step = the_induction.steps[0]
                 assert isinstance(first_step, frog_ast.Step)
                 assumptions = []
                 last_step: frog_ast.Step
@@ -219,12 +226,25 @@ class ProofEngine:
                 self.set_up_assumptions(assumptions, last_step, first_step)
                 self.check_equivalent(last_step_ast, first_step_ast)
 
-    def set_up_assumptions(self, assumptions, current_step, next_step):
+    def set_up_assumptions(
+        self,
+        assumptions: list[frog_ast.StepAssumption],
+        current_step: frog_ast.Step,
+        next_step: frog_ast.Step,
+    ) -> None:
         self.step_assumptions = []
         for assumption in assumptions:
             expression = assumption.expression
 
-            def found_field_access(games, node):
+            def found_field_access(
+                games: tuple[
+                    frog_ast.ConcreteGame | frog_ast.ParameterizedGame,
+                    frog_ast.ParameterizedGame | None,
+                    frog_ast.ConcreteGame | frog_ast.ParameterizedGame,
+                    frog_ast.ParameterizedGame | None,
+                ],
+                node: frog_ast.ASTNode,
+            ) -> bool:
                 return (
                     isinstance(node, frog_ast.FieldAccess) and node.the_object in games
                 )
@@ -326,7 +346,9 @@ class ProofEngine:
 
         for index, game in enumerate((current_game_ast, next_game_ast)):
 
-            def apply_assumptions(which_game, ast):
+            def apply_assumptions(
+                which_game: str, ast: frog_ast.ASTNode
+            ) -> frog_ast.ASTNode:
                 for assumption in self.step_assumptions:
                     if assumption["applies_to"] != which_game:
                         continue
@@ -392,12 +414,14 @@ class ProofEngine:
             return
 
         class AllTrueTransformer(visitors.Transformer):
-            def transform_if_statement(self, stmt: frog_ast.IfStatement):
+            def transform_if_statement(
+                self, stmt: frog_ast.IfStatement
+            ) -> frog_ast.IfStatement:
                 return frog_ast.IfStatement(
                     [frog_ast.Boolean(True)] * len(stmt.conditions), stmt.blocks
                 )
 
-        def quit_proof():
+        def quit_proof() -> None:
             print("Step failed!")
             print(Fore.RED + "Proof Failed!")
             sys.exit(1)
@@ -407,9 +431,11 @@ class ProofEngine:
         if all_true_current != all_true_next:
             quit_proof()
 
-        found_ifs = []
+        found_ifs: list[frog_ast.IfStatement] = []
 
-        def search_for_if(found_ifs, node: frog_ast.ASTNode) -> bool:
+        def search_for_if(
+            found_ifs: list[frog_ast.IfStatement], node: frog_ast.ASTNode
+        ) -> bool:
             return isinstance(node, frog_ast.IfStatement) and node not in found_ifs
 
         while True:
@@ -420,7 +446,7 @@ class ProofEngine:
             if_next = visitors.SearchVisitor[frog_ast.IfStatement](partial).visit(
                 next_game_ast
             )
-            if if_current is None and if_next is None:
+            if if_current is None or if_next is None:
                 break
             found_ifs.append(if_current)
             found_ifs.append(if_next)
@@ -601,8 +627,9 @@ class ProofEngine:
             )
 
         dfs_stack: list[dependencies.Node] = []
-        if graph.find_node(is_return):
-            dfs_stack.append(graph.find_node(is_return))
+        return_node = graph.find_node(is_return)
+        if return_node is not None:
+            dfs_stack.append(return_node)
         dfs_stack_visited = [False] * len(block.statements)
         dfs_sorted_statements: list[frog_ast.Statement] = []
         while dfs_stack:
@@ -722,7 +749,7 @@ def remove_duplicate_fields(game: frog_ast.Game) -> frog_ast.Game:
             remaining_name = statement.value.name
 
             def search_for_reassignment(
-                names: (str, str), node: frog_ast.ASTNode
+                names: tuple[str, str], node: frog_ast.ASTNode
             ) -> bool:
                 return (
                     isinstance(node, frog_ast.Assignment)
@@ -730,7 +757,7 @@ def remove_duplicate_fields(game: frog_ast.Game) -> frog_ast.Game:
                     and node.var.name in names
                 )
 
-            search_visitor = visitors.SearchVisitor(
+            search_visitor = visitors.SearchVisitor[frog_ast.Assignment](
                 functools.partial(
                     search_for_reassignment,
                     (to_remove, remaining_name),
@@ -761,5 +788,5 @@ def remove_duplicate_fields(game: frog_ast.Game) -> frog_ast.Game:
     return game
 
 
-def get_challenger_field_name(name: str):
+def get_challenger_field_name(name: str) -> str:
     return f"challenger@{name}"

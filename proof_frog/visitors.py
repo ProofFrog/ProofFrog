@@ -407,7 +407,7 @@ class VariableStandardizingTransformer(BlockTransformer):
     def __init__(self) -> None:
         self.variable_counter = 0
         self.field_counter = 0
-        self.field_name_map = []
+        self.field_name_map: list[tuple[frog_ast.ASTNode, frog_ast.ASTNode]] = []
 
     def transform_field(self, field: frog_ast.Field) -> frog_ast.Field:
         self.field_counter += 1
@@ -617,7 +617,7 @@ class InlineTransformer(Transformer):
             block.statements[index] = self.transform(statement)
         return self.blocks.pop()
 
-    def transform_func_call(self, exp: frog_ast.FuncCall) -> None:
+    def transform_func_call(self, exp: frog_ast.FuncCall) -> frog_ast.FuncCall:
         is_inlinable_call = (
             isinstance(exp.func, frog_ast.FieldAccess)
             and isinstance(exp.func.the_object, frog_ast.Variable)
@@ -625,6 +625,9 @@ class InlineTransformer(Transformer):
         )
         if not is_inlinable_call or self.finished:
             return exp
+
+        assert isinstance(exp.func, frog_ast.FieldAccess)
+        assert isinstance(exp.func.the_object, frog_ast.Variable)
 
         called_method = copy.deepcopy(
             self.method_lookup[(exp.func.the_object.name, exp.func.name)]
@@ -686,20 +689,20 @@ class InlineTransformer(Transformer):
         return exp
 
 
-class Z3FormulaVisitor(Visitor):
+class Z3FormulaVisitor(Visitor[z3.AstRef]):
     def __init__(self) -> None:
-        self.stack = []
+        self.stack: list[z3.AstRef] = []
 
-    def result(self):
+    def result(self) -> z3.AstRef:
         return self.stack[-1]
 
-    def visit_variable(self, var: frog_ast.Variable):
+    def visit_variable(self, var: frog_ast.Variable) -> None:
         self.stack.append(z3.Int(var.name))
 
-    def visit_integer(self, node: frog_ast.Integer):
+    def visit_integer(self, node: frog_ast.Integer) -> None:
         self.stack.append(node.num)
 
-    def leave_binary_operation(self, op: frog_ast.BinaryOperation):
+    def leave_binary_operation(self, op: frog_ast.BinaryOperation) -> None:
         operators = {
             frog_ast.BinaryOperators.ADD: operator.add,
             frog_ast.BinaryOperators.SUBTRACT: operator.sub,
@@ -720,12 +723,14 @@ class Z3FormulaVisitor(Visitor):
 
 
 class SimplifyRangeTransformer(Transformer):
-    def __init__(self, binary_op) -> None:
+    def __init__(self, binary_op: frog_ast.BinaryOperation) -> None:
         self.assumed_formula = Z3FormulaVisitor().visit(binary_op)
         self.solver = z3.Solver()
         self.solver.add(self.assumed_formula)
 
-    def transform_binary_operation(self, binary_operation: frog_ast.BinaryOperation):
+    def transform_binary_operation(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
         if binary_operation.operator not in (
             frog_ast.BinaryOperators.EQUALS,
             frog_ast.BinaryOperators.NOTEQUALS,
@@ -806,7 +811,7 @@ class RemoveFieldTransformer(Transformer):
     def __init__(self, fields_to_remove: list[str]) -> None:
         self.fields_to_remove = fields_to_remove
 
-    def transform_game(self, game: frog_ast.Game):
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         new_game = copy.deepcopy(game)
         new_game.fields = [
             field for field in game.fields if field.name not in self.fields_to_remove
@@ -816,8 +821,8 @@ class RemoveFieldTransformer(Transformer):
 
         return new_game
 
-    def transform_block(self, block: frog_ast.Block) -> None:
-        new_statements = []
+    def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
+        new_statements: list[frog_ast.Statement] = []
 
         def to_be_deleted(node: frog_ast.ASTNode) -> bool:
             return (
@@ -865,7 +870,7 @@ class CollapseAssignmentTransformer(BlockTransformer):
             if not isinstance(statement.var, frog_ast.Variable):
                 continue
 
-            def calls_func(node):
+            def calls_func(node: frog_ast.ASTNode) -> bool:
                 return isinstance(node, frog_ast.FuncCall)
 
             if SearchVisitor(calls_func).visit(statement) is not None:
@@ -916,7 +921,7 @@ class SimplifyReturnTransformer(BlockTransformer):
             return block
         index = len(block.statements) - 1
 
-        def uses_var(variable, node):
+        def uses_var(variable: frog_ast.Expression, node: frog_ast.ASTNode) -> bool:
             return variable == node
 
         uses_var_partial = functools.partial(uses_var, last_statement.expression)

@@ -344,12 +344,12 @@ class Slice(Expression):
 
 
 class VariableDeclaration(Statement):
-    def __init__(self, the_type: Type, name: str) -> None:
+    def __init__(self, the_type: Type, var: Variable) -> None:
         self.the_type = the_type
-        self.name = name
+        self.var = var
 
     def __str__(self) -> str:
-        return f"{self.the_type} {self.name};"
+        return f"{self.the_type} {self.var};"
 
 
 class NumericFor(Statement):

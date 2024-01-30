@@ -1,0 +1,23 @@
+import 'examples/Primitives/PRG.primitive';
+
+Scheme SymmetricRatchet(PRG G, Int n) extends PRG {
+    requires G.lambda == G.stretch;
+
+    Int lambda = G.lambda;
+    Int stretch = G.lambda * n;
+
+    BitString<lambda + stretch> evaluate(BitString<lambda> x) {
+        Array<BitString<lambda>, n + 1> s;
+        Array<BitString<lambda>, n> t;
+        Array<BitString<lambda>, n + 1> result;
+        s[0] = x;
+        for (Int i = 1 to n) {
+            BitString<2 * G.lambda> v = G.evaluate(s[i-1]);
+            s[i] = v[0:lambda];
+            t[i-1] = v[lambda : 2 * lambda];
+            result[i-1] = t[i-1];
+        }
+        result[n] = s[n];
+        return result;
+    }
+}

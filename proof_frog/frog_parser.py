@@ -273,7 +273,7 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         self, ctx: PrimitiveParser.VarDeclStatementContext
     ) -> frog_ast.VariableDeclaration:
         return frog_ast.VariableDeclaration(
-            self.visit(ctx.type_()), ctx.id_().getText()
+            self.visit(ctx.type_()), frog_ast.Variable(ctx.id_().getText())
         )
 
     def visitArrayType(

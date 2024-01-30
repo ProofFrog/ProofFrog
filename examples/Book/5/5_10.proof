@@ -1,0 +1,40 @@
+import 'examples/Book/5/5_7.scheme';
+import 'examples/Book/5/5_10.game';
+import 'examples/Primitives/SymEnc.primitive';
+import 'examples/Primitives/PRG.primitive';
+import 'examples/Games/PRG/Security.game';
+import 'examples/Games/SymEnc/OneTimeUniformCiphertexts.game';
+
+Game Intermediate(SymmetricRatchet SR, SymEnc E, Int lambda, Int n) {
+    Array<BitString<lambda>, n + 1> Attack(Array<BitString<lambda>, n> messages) {
+        BitString<lambda> s <- BitString<lambda>;
+        Array<BitString<lambda>, n + 1> srValue = SR.evaluate(s);
+        Array<BitString<G.lambda>, n + 1> result;
+        for (Int i = 1 to n) {
+            result[i-1] = E.Enc(srValue[i-1], messages[i-1]);
+        }
+        result[n] = srValue[n];
+        return result;
+    }
+}
+
+proof:
+    let:
+        Int lambda;
+        Int n;
+
+        SymEnc E = SymEnc(BitString<lambda>, BitString<lambda>, BitString<lambda>);
+
+        PRG G = PRG(lambda, lambda);
+        SymmetricRatchet SR = SymmetricRatchet(G, n);
+    assume:
+        Security(SR);
+        OneTimeUniformCiphertexts(E);
+    theorem:
+        RatchetAttack(G, E, n);
+    games:
+        RatchetAttack(G, E, n).Real against RatchetAttack(G, E, n).Adversary;
+
+        Intermediate(SR, E, lambda, n) against RatchetAttack(G, E, n).Adversary;
+
+        RatchetAttack(G, E, n).Random against RatchetAttack(G, E, n).Adversary;

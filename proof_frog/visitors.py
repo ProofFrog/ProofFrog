@@ -422,14 +422,18 @@ class VariableStandardizingTransformer(BlockTransformer):
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         new_block = copy.deepcopy(block)
         for statement in new_block.statements:
-            if not isinstance(statement, frog_ast.Assignment) and not isinstance(
-                statement, frog_ast.Sample
+            if (
+                not isinstance(statement, frog_ast.Assignment)
+                and not isinstance(statement, frog_ast.Sample)
+                and not isinstance(statement, frog_ast.VariableDeclaration)
             ):
                 continue
             if not isinstance(statement.var, frog_ast.Variable):
                 continue
 
-            if statement.the_type is None:
+            if statement.the_type is None and isinstance(
+                statement, (frog_ast.Sample, frog_ast.VariableDeclaration)
+            ):
                 continue
 
             self.variable_counter += 1
@@ -640,6 +644,7 @@ class InlineTransformer(Transformer):
                 isinstance(var_statement, (frog_ast.Assignment, frog_ast.Sample))
                 and var_statement.the_type is not None
                 and isinstance(var_statement.var, frog_ast.Variable)
+                or isinstance(var_statement, frog_ast.VariableDeclaration)
             ):
                 called_method = SubstitutionTransformer(
                     [

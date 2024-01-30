@@ -770,12 +770,14 @@ def remove_duplicate_fields(game: frog_ast.Game) -> frog_ast.Game:
                 names: tuple[str, str], node: frog_ast.ASTNode
             ) -> bool:
                 return (
-                    isinstance(node, frog_ast.Assignment)
+                    isinstance(node, (frog_ast.Assignment, frog_ast.Sample))
                     and isinstance(node.var, frog_ast.Variable)
                     and node.var.name in names
                 )
 
-            search_visitor = visitors.SearchVisitor[frog_ast.Assignment](
+            search_visitor = visitors.SearchVisitor[
+                frog_ast.Assignment | frog_ast.Sample
+            ](
                 functools.partial(
                     search_for_reassignment,
                     (to_remove, remaining_name),

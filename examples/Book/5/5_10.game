@@ -1,0 +1,32 @@
+import 'examples/Primitives/PRG.primitive';
+import 'examples/Primitives/SymEnc.primitive';
+
+Game Real(PRG G, SymEnc E, Int n) {
+    Array<BitString<G.lambda>, n + 1> Attack(Array<BitString<G.lambda>, n> messages) {
+        Array<BitString<G.lambda>, n + 1> s;
+        Array<BitString<lambda>, n> t;
+        Array<BitString<lambda>, n+1> result;
+        s[0] <- BitString<G.lambda>;
+        for (Int i = 1 to n) {
+            BitString<G.lambda + G.stretch> v = G.evaluate(s[i-1]);
+            s[i] = v[0 : G.lambda];
+            t[i - 1] = v[G.lambda : 2 * G.lambda];
+            result[i] = E.Enc(t[i-1], messages[i-1]);
+        }
+        result[n] = s[n];
+        return result;
+    }
+}
+
+Game Random(PRG G, SymEnc E, Int n) {
+    Array<BitString<G.lambda>, n + 1> Attack(Array<BitString<G.lambda>, n> messages) {
+        Array<BitString<G.lambda>, n + 1> result;
+        for (Int i = 1 to n) {
+            result[i-1] <- E.Ciphertext;
+        }
+        result[n] <- BitString<G.lambda>;
+        return result;
+    }
+}
+
+export as RatchetAttack;

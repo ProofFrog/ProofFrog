@@ -351,6 +351,10 @@ class ProofEngine:
                 fn=lambda ast: visitors.SimplifyIfTransformer().transform(ast),
                 name="Simplify Ifs",
             ),
+            AstManipulator(
+                fn=lambda ast: visitors.ExpandTupleFields().transform(ast),
+                name="Expand Tuple Fields",
+            ),
         ]
 
         for index, game in enumerate((current_game_ast, next_game_ast)):

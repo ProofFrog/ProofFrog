@@ -947,9 +947,10 @@ class SimplifyReturnTransformer(BlockTransformer):
         return block
 
 
-class ExpandFieldTuples(BlockTransformer):
+class ExpandTupleFields(BlockTransformer):
     def __init__(self):
         self.to_transform = []
+        self.lengths = []
 
     def transform_game(self, game: frog_ast.Game):
         new_fields = []
@@ -974,6 +975,7 @@ class ExpandFieldTuples(BlockTransformer):
                         frog_ast.Field(the_type, f"{field.name}{index}", expression)
                     )
                 self.to_transform.append(field.name)
+                self.lengths.append(len(unfolded_types))
             else:
                 new_fields.append(field)
         return frog_ast.Game(
@@ -1003,9 +1005,43 @@ class ExpandFieldTuples(BlockTransformer):
                             tuple_value,
                         )
                     )
+            elif (
+                isinstance(statement, (frog_ast.Assignment, frog_ast.Sample))
+                and isinstance(statement.var, frog_ast.ArrayAccess)
+                and isinstance(statement.var.the_array, frog_ast.Variable)
+                and statement.var.the_array.name in self.to_transform
+            ):
+                assert isinstance(statement.var.index, frog_ast.Integer)
+                new_statement = copy.deepcopy(statement)
+                new_statement.var = frog_ast.Variable(
+                    f"{statement.var.the_array.name}{statement.var.index.num}",
+                )
+                new_statements.append(new_statement)
             else:
                 new_statements.append(statement)
         return frog_ast.Block(new_statements)
+
+    def transform_array_access(self, array_access: frog_ast.ArrayAccess) -> None:
+        if (
+            not isinstance(array_access.the_array, frog_ast.Variable)
+            or array_access.the_array.name not in self.to_transform
+        ):
+            return frog_ast.ArrayAccess(
+                self.transform(array_access.the_array),
+                self.transform(array_access.index),
+            )
+        assert isinstance(array_access.index, frog_ast.Integer)
+        return frog_ast.Variable(
+            f"{array_access.the_array.name}{array_access.index.num}"
+        )
+
+    def transform_variable(self, var: frog_ast.Variable):
+        if var.name not in self.to_transform:
+            return var
+        length = self.lengths[self.to_transform.index(var.name)]
+        return frog_ast.Tuple(
+            [frog_ast.Variable(f"{var.name}{index}") for index in range(length)]
+        )
 
 
 class AllConstantFieldAccesses(Visitor[bool]):

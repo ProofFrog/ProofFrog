@@ -524,7 +524,6 @@ GameBody: TypeAlias = tuple[
 
 
 class Game(ASTNode):
-    # pylint: disable=too-many-arguments
     def __init__(self, body: GameBody) -> None:
         self.name = body[0]
         self.parameters = body[1]

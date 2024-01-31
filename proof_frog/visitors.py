@@ -945,3 +945,89 @@ class SimplifyReturnTransformer(BlockTransformer):
             )
 
         return block
+
+
+class ExpandFieldTuples(BlockTransformer):
+    def __init__(self):
+        self.to_transform = []
+
+    def transform_game(self, game: frog_ast.Game):
+        new_fields = []
+        for field in game.fields:
+            if (
+                isinstance(field.type, frog_ast.BinaryOperation)
+                and field.type.operator == frog_ast.BinaryOperators.MULTIPLY
+                and AllConstantFieldAccesses(field.name).visit(game)
+            ):
+                unfolded_types = []
+                expanded_type = field.type
+                while isinstance(expanded_type, frog_ast.BinaryOperation):
+                    unfolded_types.append(expanded_type.left_expression)
+                    expanded_type = expanded_type.right_expression
+                unfolded_types.append(expanded_type)
+                for index, the_type in enumerate(unfolded_types):
+                    expression = None
+                    if field.value:
+                        assert isinstance(field.value, frog_ast.Tuple)
+                        expression = field.value.values[index]
+                    new_fields.append(
+                        frog_ast.Field(the_type, f"{field.name}{index}", expression)
+                    )
+                self.to_transform.append(field.name)
+            else:
+                new_fields.append(field)
+        return frog_ast.Game(
+            (
+                game.name,
+                game.parameters,
+                new_fields,
+                [self.transform(method) for method in game.methods],
+                [self.transform(phase) for phase in game.phases],
+            )
+        )
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        new_statements = []
+        for index, statement in enumerate(block.statements):
+            if (
+                isinstance(statement, frog_ast.Assignment)
+                and isinstance(statement.var, frog_ast.Variable)
+                and statement.var.name in self.to_transform
+            ):
+                assert isinstance(statement.value, frog_ast.Tuple)
+                for index, tuple_value in enumerate(statement.value.values):
+                    new_statements.append(
+                        frog_ast.Assignment(
+                            None,
+                            frog_ast.Variable(f"{statement.var}{index}"),
+                            tuple_value,
+                        )
+                    )
+            else:
+                new_statements.append(statement)
+        return frog_ast.Block(new_statements)
+
+
+class AllConstantFieldAccesses(Visitor[bool]):
+    def __init__(self, tuple_name: str):
+        self.tuple_name = tuple_name
+        self.all_constant = True
+
+    def result(self) -> bool:
+        return self.all_constant
+
+    def visit_array_access(self, array_access: frog_ast.ArrayAccess) -> None:
+        if not isinstance(array_access.the_array, frog_ast.Variable):
+            return
+        if array_access.the_array.name != self.tuple_name:
+            return
+        if not isinstance(array_access.index, frog_ast.Integer):
+            self.all_constant = False
+
+    def visit_assignment(self, assignment: frog_ast.Assignment) -> None:
+        if not isinstance(assignment.var, frog_ast.Variable):
+            return
+        if assignment.var.name != self.tuple_name:
+            return
+        if not isinstance(assignment.value, frog_ast.Tuple):
+            self.all_constant = False

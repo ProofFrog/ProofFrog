@@ -948,11 +948,11 @@ class SimplifyReturnTransformer(BlockTransformer):
 
 
 class ExpandTupleFields(BlockTransformer):
-    def __init__(self):
-        self.to_transform = []
-        self.lengths = []
+    def __init__(self) -> None:
+        self.to_transform: list[str] = []
+        self.lengths: list[int] = []
 
-    def transform_game(self, game: frog_ast.Game):
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         new_fields = []
         for field in game.fields:
             if (
@@ -960,11 +960,14 @@ class ExpandTupleFields(BlockTransformer):
                 and field.type.operator == frog_ast.BinaryOperators.MULTIPLY
                 and AllConstantFieldAccesses(field.name).visit(game)
             ):
-                unfolded_types = []
-                expanded_type = field.type
+                unfolded_types: list[frog_ast.Type] = []
+                expanded_type: frog_ast.Type | frog_ast.Expression = field.type
                 while isinstance(expanded_type, frog_ast.BinaryOperation):
-                    unfolded_types.append(expanded_type.left_expression)
+                    left_expr = expanded_type.left_expression
+                    assert isinstance(left_expr, frog_ast.Type)
+                    unfolded_types.append(left_expr)
                     expanded_type = expanded_type.right_expression
+                assert isinstance(expanded_type, frog_ast.Type)
                 unfolded_types.append(expanded_type)
                 for index, the_type in enumerate(unfolded_types):
                     expression = None
@@ -989,7 +992,7 @@ class ExpandTupleFields(BlockTransformer):
         )
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        new_statements = []
+        new_statements: list[frog_ast.Statement] = []
         for index, statement in enumerate(block.statements):
             if (
                 isinstance(statement, frog_ast.Assignment)
@@ -1021,7 +1024,9 @@ class ExpandTupleFields(BlockTransformer):
                 new_statements.append(statement)
         return frog_ast.Block(new_statements)
 
-    def transform_array_access(self, array_access: frog_ast.ArrayAccess) -> None:
+    def transform_array_access(
+        self, array_access: frog_ast.ArrayAccess
+    ) -> frog_ast.Expression:
         if (
             not isinstance(array_access.the_array, frog_ast.Variable)
             or array_access.the_array.name not in self.to_transform
@@ -1035,7 +1040,7 @@ class ExpandTupleFields(BlockTransformer):
             f"{array_access.the_array.name}{array_access.index.num}"
         )
 
-    def transform_variable(self, var: frog_ast.Variable):
+    def transform_variable(self, var: frog_ast.Variable) -> frog_ast.Expression:
         if var.name not in self.to_transform:
             return var
         length = self.lengths[self.to_transform.index(var.name)]

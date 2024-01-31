@@ -48,6 +48,9 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
     def visitBoolType(self, __: PrimitiveParser.BoolTypeContext) -> frog_ast.Type:
         return frog_ast.BoolType()
 
+    def visitVoidType(self, __: PrimitiveParser.VoidTypeContext) -> frog_ast.Void:
+        return frog_ast.Void()
+
     def visitBitStringType(
         self, ctx: PrimitiveParser.BitStringTypeContext
     ) -> frog_ast.BitStringType:

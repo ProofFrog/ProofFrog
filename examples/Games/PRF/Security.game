@@ -2,7 +2,7 @@ import 'examples/Primitives/PRF.primitive';
 
 Game Real(PRF F) {
     BitString<F.lambda> k;
-    void Initialize() {
+    Void Initialize() {
         k <- BitString<F.lambda>;
     }
 

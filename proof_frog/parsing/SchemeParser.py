@@ -10,7 +10,7 @@ else:
 
 def serializedATN():
     return [
-        4,1,61,504,2,0,7,0,2,1,7,1,2,2,7,2,2,3,7,3,2,4,7,4,2,5,7,5,2,6,7,
+        4,1,62,505,2,0,7,0,2,1,7,1,2,2,7,2,2,3,7,3,2,4,7,4,2,5,7,5,2,6,7,
         6,2,7,7,7,2,8,7,8,2,9,7,9,2,10,7,10,2,11,7,11,2,12,7,12,2,13,7,13,
         2,14,7,14,2,15,7,15,2,16,7,16,2,17,7,17,2,18,7,18,2,19,7,19,2,20,
         7,20,2,21,7,21,2,22,7,22,2,23,7,23,2,24,7,24,1,0,5,0,52,8,0,10,0,
@@ -45,30 +45,30 @@ def serializedATN():
         1,15,1,15,5,15,402,8,15,10,15,12,15,405,9,15,1,16,1,16,1,16,1,17,
         1,17,1,17,3,17,413,8,17,1,17,1,17,1,18,1,18,1,18,1,18,1,18,1,18,
         1,18,1,18,1,18,1,18,1,18,1,18,1,18,1,18,1,18,1,18,1,18,1,18,1,18,
-        1,18,3,18,437,8,18,1,18,1,18,1,18,1,18,1,18,4,18,444,8,18,11,18,
-        12,18,445,5,18,448,8,18,10,18,12,18,451,9,18,1,19,1,19,1,19,1,19,
-        3,19,457,8,19,1,19,1,19,1,19,1,19,1,19,1,19,1,19,1,19,1,19,1,19,
-        1,19,1,19,5,19,471,8,19,10,19,12,19,474,9,19,1,20,1,20,1,20,1,20,
-        1,20,1,20,3,20,482,8,20,1,21,1,21,1,21,1,21,1,21,1,21,3,21,490,8,
-        21,1,22,1,22,1,23,1,23,1,23,1,23,3,23,498,8,23,1,23,1,23,1,24,1,
-        24,1,24,0,3,28,36,38,25,0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,
-        30,32,34,36,38,40,42,44,46,48,0,2,1,0,54,55,2,0,45,45,58,58,564,
+        1,18,1,18,3,18,438,8,18,1,18,1,18,1,18,1,18,1,18,4,18,445,8,18,11,
+        18,12,18,446,5,18,449,8,18,10,18,12,18,452,9,18,1,19,1,19,1,19,1,
+        19,3,19,458,8,19,1,19,1,19,1,19,1,19,1,19,1,19,1,19,1,19,1,19,1,
+        19,1,19,1,19,5,19,472,8,19,10,19,12,19,475,9,19,1,20,1,20,1,20,1,
+        20,1,20,1,20,3,20,483,8,20,1,21,1,21,1,21,1,21,1,21,1,21,3,21,491,
+        8,21,1,22,1,22,1,23,1,23,1,23,1,23,3,23,499,8,23,1,23,1,23,1,24,
+        1,24,1,24,0,3,28,36,38,25,0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,
+        30,32,34,36,38,40,42,44,46,48,0,2,1,0,55,56,2,0,46,46,59,59,566,
         0,53,1,0,0,0,2,59,1,0,0,0,4,78,1,0,0,0,6,89,1,0,0,0,8,132,1,0,0,
         0,10,134,1,0,0,0,12,156,1,0,0,0,14,161,1,0,0,0,16,165,1,0,0,0,18,
         168,1,0,0,0,20,256,1,0,0,0,22,260,1,0,0,0,24,273,1,0,0,0,26,281,
         1,0,0,0,28,330,1,0,0,0,30,398,1,0,0,0,32,406,1,0,0,0,34,409,1,0,
-        0,0,36,436,1,0,0,0,38,456,1,0,0,0,40,481,1,0,0,0,42,489,1,0,0,0,
-        44,491,1,0,0,0,46,493,1,0,0,0,48,501,1,0,0,0,50,52,3,46,23,0,51,
+        0,0,36,437,1,0,0,0,38,457,1,0,0,0,40,482,1,0,0,0,42,490,1,0,0,0,
+        44,492,1,0,0,0,46,494,1,0,0,0,48,502,1,0,0,0,50,52,3,46,23,0,51,
         50,1,0,0,0,52,55,1,0,0,0,53,51,1,0,0,0,53,54,1,0,0,0,54,56,1,0,0,
         0,55,53,1,0,0,0,56,57,3,2,1,0,57,58,5,0,0,1,58,1,1,0,0,0,59,60,5,
-        2,0,0,60,61,5,58,0,0,61,63,5,8,0,0,62,64,3,26,13,0,63,62,1,0,0,0,
+        2,0,0,60,61,5,59,0,0,61,63,5,8,0,0,62,64,3,26,13,0,63,62,1,0,0,0,
         63,64,1,0,0,0,64,65,1,0,0,0,65,66,5,9,0,0,66,67,5,3,0,0,67,68,5,
-        58,0,0,68,69,5,4,0,0,69,70,3,4,2,0,70,71,5,5,0,0,71,3,1,0,0,0,72,
+        59,0,0,68,69,5,4,0,0,69,70,3,4,2,0,70,71,5,5,0,0,71,3,1,0,0,0,72,
         73,5,1,0,0,73,74,3,28,14,0,74,75,5,12,0,0,75,77,1,0,0,0,76,72,1,
         0,0,0,77,80,1,0,0,0,78,76,1,0,0,0,78,79,1,0,0,0,79,85,1,0,0,0,80,
         78,1,0,0,0,81,82,3,12,6,0,82,83,5,12,0,0,83,86,1,0,0,0,84,86,3,16,
         8,0,85,81,1,0,0,0,85,84,1,0,0,0,86,87,1,0,0,0,87,85,1,0,0,0,87,88,
-        1,0,0,0,88,5,1,0,0,0,89,90,5,47,0,0,90,91,5,58,0,0,91,93,5,8,0,0,
+        1,0,0,0,88,5,1,0,0,0,89,90,5,48,0,0,90,91,5,59,0,0,91,93,5,8,0,0,
         92,94,3,26,13,0,93,92,1,0,0,0,93,94,1,0,0,0,94,95,1,0,0,0,95,96,
         5,9,0,0,96,97,5,4,0,0,97,98,3,8,4,0,98,99,5,5,0,0,99,7,1,0,0,0,100,
         101,3,12,6,0,101,102,5,12,0,0,102,104,1,0,0,0,103,100,1,0,0,0,104,
@@ -81,9 +81,9 @@ def serializedATN():
         125,1,0,0,0,125,128,1,0,0,0,126,124,1,0,0,0,127,129,3,10,5,0,128,
         127,1,0,0,0,129,130,1,0,0,0,130,128,1,0,0,0,130,131,1,0,0,0,131,
         133,1,0,0,0,132,105,1,0,0,0,132,118,1,0,0,0,133,9,1,0,0,0,134,135,
-        5,50,0,0,135,137,5,4,0,0,136,138,3,16,8,0,137,136,1,0,0,0,138,139,
+        5,51,0,0,135,137,5,4,0,0,136,138,3,16,8,0,137,136,1,0,0,0,138,139,
         1,0,0,0,139,137,1,0,0,0,139,140,1,0,0,0,140,141,1,0,0,0,141,142,
-        5,51,0,0,142,143,5,13,0,0,143,144,5,6,0,0,144,149,3,48,24,0,145,
+        5,52,0,0,142,143,5,13,0,0,143,144,5,6,0,0,144,149,3,48,24,0,145,
         146,5,14,0,0,146,148,3,48,24,0,147,145,1,0,0,0,148,151,1,0,0,0,149,
         147,1,0,0,0,149,150,1,0,0,0,150,152,1,0,0,0,151,149,1,0,0,0,152,
         153,5,7,0,0,153,154,5,12,0,0,154,155,5,5,0,0,155,11,1,0,0,0,156,
@@ -102,18 +102,18 @@ def serializedATN():
         201,3,28,14,0,201,202,5,12,0,0,202,257,1,0,0,0,203,204,3,28,14,0,
         204,206,5,8,0,0,205,207,3,30,15,0,206,205,1,0,0,0,206,207,1,0,0,
         0,207,208,1,0,0,0,208,209,5,9,0,0,209,210,5,12,0,0,210,257,1,0,0,
-        0,211,212,5,36,0,0,212,213,3,28,14,0,213,214,5,12,0,0,214,257,1,
-        0,0,0,215,216,5,42,0,0,216,217,5,8,0,0,217,218,3,28,14,0,218,219,
-        5,9,0,0,219,229,3,18,9,0,220,221,5,52,0,0,221,222,5,42,0,0,222,223,
+        0,211,212,5,37,0,0,212,213,3,28,14,0,213,214,5,12,0,0,214,257,1,
+        0,0,0,215,216,5,43,0,0,216,217,5,8,0,0,217,218,3,28,14,0,218,219,
+        5,9,0,0,219,229,3,18,9,0,220,221,5,53,0,0,221,222,5,43,0,0,222,223,
         5,8,0,0,223,224,3,28,14,0,224,225,5,9,0,0,225,226,3,18,9,0,226,228,
         1,0,0,0,227,220,1,0,0,0,228,231,1,0,0,0,229,227,1,0,0,0,229,230,
-        1,0,0,0,230,234,1,0,0,0,231,229,1,0,0,0,232,233,5,52,0,0,233,235,
+        1,0,0,0,230,234,1,0,0,0,231,229,1,0,0,0,232,233,5,53,0,0,233,235,
         3,18,9,0,234,232,1,0,0,0,234,235,1,0,0,0,235,257,1,0,0,0,236,237,
-        5,43,0,0,237,238,5,8,0,0,238,239,5,34,0,0,239,240,3,48,24,0,240,
-        241,5,17,0,0,241,242,3,28,14,0,242,243,5,44,0,0,243,244,3,28,14,
-        0,244,245,5,9,0,0,245,246,3,18,9,0,246,257,1,0,0,0,247,248,5,43,
+        5,44,0,0,237,238,5,8,0,0,238,239,5,35,0,0,239,240,3,48,24,0,240,
+        241,5,17,0,0,241,242,3,28,14,0,242,243,5,45,0,0,243,244,3,28,14,
+        0,244,245,5,9,0,0,245,246,3,18,9,0,246,257,1,0,0,0,247,248,5,44,
         0,0,248,249,5,8,0,0,249,250,3,36,18,0,250,251,3,48,24,0,251,252,
-        5,45,0,0,252,253,3,28,14,0,253,254,5,9,0,0,254,255,3,18,9,0,255,
+        5,46,0,0,252,253,3,28,14,0,253,254,5,9,0,0,254,255,3,18,9,0,255,
         257,1,0,0,0,256,177,1,0,0,0,256,181,1,0,0,0,256,187,1,0,0,0,256,
         193,1,0,0,0,256,198,1,0,0,0,256,203,1,0,0,0,256,211,1,0,0,0,256,
         215,1,0,0,0,256,236,1,0,0,0,256,247,1,0,0,0,257,21,1,0,0,0,258,261,
@@ -135,8 +135,8 @@ def serializedATN():
         14,0,311,312,5,14,0,0,312,314,3,28,14,0,313,311,1,0,0,0,314,317,
         1,0,0,0,315,313,1,0,0,0,315,316,1,0,0,0,316,319,1,0,0,0,317,315,
         1,0,0,0,318,310,1,0,0,0,318,319,1,0,0,0,319,320,1,0,0,0,320,331,
-        5,5,0,0,321,331,3,36,18,0,322,331,5,56,0,0,323,331,5,57,0,0,324,
-        331,3,44,22,0,325,331,5,53,0,0,326,327,5,8,0,0,327,328,3,28,14,0,
+        5,5,0,0,321,331,3,36,18,0,322,331,5,57,0,0,323,331,5,58,0,0,324,
+        331,3,44,22,0,325,331,5,54,0,0,326,327,5,8,0,0,327,328,3,28,14,0,
         328,329,5,9,0,0,329,331,1,0,0,0,330,289,1,0,0,0,330,292,1,0,0,0,
         330,296,1,0,0,0,330,297,1,0,0,0,330,309,1,0,0,0,330,321,1,0,0,0,
         330,322,1,0,0,0,330,323,1,0,0,0,330,324,1,0,0,0,330,325,1,0,0,0,
@@ -150,9 +150,9 @@ def serializedATN():
         3,28,14,19,356,357,10,17,0,0,357,358,5,24,0,0,358,394,3,28,14,18,
         359,360,10,16,0,0,360,361,5,25,0,0,361,394,3,28,14,17,362,363,10,
         15,0,0,363,364,5,28,0,0,364,394,3,28,14,16,365,366,10,14,0,0,366,
-        367,5,41,0,0,367,394,3,28,14,15,368,369,10,13,0,0,369,370,5,45,0,
+        367,5,42,0,0,367,394,3,28,14,15,368,369,10,13,0,0,369,370,5,46,0,
         0,370,394,3,28,14,14,371,372,10,12,0,0,372,373,5,26,0,0,373,394,
-        3,28,14,13,374,375,10,11,0,0,375,376,5,46,0,0,376,394,3,28,14,12,
+        3,28,14,13,374,375,10,11,0,0,375,376,5,47,0,0,376,394,3,28,14,12,
         377,378,10,10,0,0,378,379,5,29,0,0,379,394,3,28,14,11,380,381,10,
         29,0,0,381,383,5,8,0,0,382,384,3,30,15,0,383,382,1,0,0,0,383,384,
         1,0,0,0,384,385,1,0,0,0,385,394,5,9,0,0,386,387,10,28,0,0,387,388,
@@ -166,38 +166,39 @@ def serializedATN():
         1,0,0,0,398,403,3,28,14,0,399,400,5,14,0,0,400,402,3,28,14,0,401,
         399,1,0,0,0,402,405,1,0,0,0,403,401,1,0,0,0,403,404,1,0,0,0,404,
         31,1,0,0,0,405,403,1,0,0,0,406,407,3,36,18,0,407,408,3,48,24,0,408,
-        33,1,0,0,0,409,410,5,58,0,0,410,412,5,8,0,0,411,413,3,30,15,0,412,
+        33,1,0,0,0,409,410,5,59,0,0,410,412,5,8,0,0,411,413,3,30,15,0,412,
         411,1,0,0,0,412,413,1,0,0,0,413,414,1,0,0,0,414,415,5,9,0,0,415,
-        35,1,0,0,0,416,417,6,18,-1,0,417,437,3,42,21,0,418,437,5,33,0,0,
-        419,420,5,35,0,0,420,421,5,10,0,0,421,422,3,36,18,0,422,423,5,14,
-        0,0,423,424,3,36,18,0,424,425,5,11,0,0,425,437,1,0,0,0,426,427,5,
-        39,0,0,427,428,5,10,0,0,428,429,3,36,18,0,429,430,5,14,0,0,430,431,
-        3,38,19,0,431,432,5,11,0,0,432,437,1,0,0,0,433,437,5,34,0,0,434,
-        437,3,40,20,0,435,437,3,22,11,0,436,416,1,0,0,0,436,418,1,0,0,0,
-        436,419,1,0,0,0,436,426,1,0,0,0,436,433,1,0,0,0,436,434,1,0,0,0,
-        436,435,1,0,0,0,437,449,1,0,0,0,438,439,10,9,0,0,439,448,5,21,0,
-        0,440,443,10,3,0,0,441,442,5,16,0,0,442,444,3,36,18,0,443,441,1,
-        0,0,0,444,445,1,0,0,0,445,443,1,0,0,0,445,446,1,0,0,0,446,448,1,
-        0,0,0,447,438,1,0,0,0,447,440,1,0,0,0,448,451,1,0,0,0,449,447,1,
-        0,0,0,449,450,1,0,0,0,450,37,1,0,0,0,451,449,1,0,0,0,452,453,6,19,
-        -1,0,453,457,3,22,11,0,454,457,5,57,0,0,455,457,5,56,0,0,456,452,
-        1,0,0,0,456,454,1,0,0,0,456,455,1,0,0,0,457,472,1,0,0,0,458,459,
-        10,7,0,0,459,460,5,16,0,0,460,471,3,38,19,8,461,462,10,6,0,0,462,
-        463,5,20,0,0,463,471,3,38,19,7,464,465,10,5,0,0,465,466,5,18,0,0,
-        466,471,3,38,19,6,467,468,10,4,0,0,468,469,5,19,0,0,469,471,3,38,
-        19,5,470,458,1,0,0,0,470,461,1,0,0,0,470,464,1,0,0,0,470,467,1,0,
-        0,0,471,474,1,0,0,0,472,470,1,0,0,0,472,473,1,0,0,0,473,39,1,0,0,
-        0,474,472,1,0,0,0,475,476,5,38,0,0,476,477,5,10,0,0,477,478,3,38,
-        19,0,478,479,5,11,0,0,479,482,1,0,0,0,480,482,5,38,0,0,481,475,1,
-        0,0,0,481,480,1,0,0,0,482,41,1,0,0,0,483,484,5,32,0,0,484,485,5,
-        10,0,0,485,486,3,36,18,0,486,487,5,11,0,0,487,490,1,0,0,0,488,490,
-        5,32,0,0,489,483,1,0,0,0,489,488,1,0,0,0,490,43,1,0,0,0,491,492,
-        7,0,0,0,492,45,1,0,0,0,493,494,5,37,0,0,494,497,5,61,0,0,495,496,
-        5,49,0,0,496,498,5,58,0,0,497,495,1,0,0,0,497,498,1,0,0,0,498,499,
-        1,0,0,0,499,500,5,12,0,0,500,47,1,0,0,0,501,502,7,1,0,0,502,49,1,
-        0,0,0,45,53,63,78,85,87,93,105,111,118,124,130,132,139,149,159,172,
-        206,229,234,256,260,268,270,277,286,303,306,315,318,330,383,393,
-        395,403,412,436,445,447,449,456,470,472,481,489,497
+        35,1,0,0,0,416,417,6,18,-1,0,417,438,3,42,21,0,418,438,5,33,0,0,
+        419,438,5,34,0,0,420,421,5,36,0,0,421,422,5,10,0,0,422,423,3,36,
+        18,0,423,424,5,14,0,0,424,425,3,36,18,0,425,426,5,11,0,0,426,438,
+        1,0,0,0,427,428,5,40,0,0,428,429,5,10,0,0,429,430,3,36,18,0,430,
+        431,5,14,0,0,431,432,3,38,19,0,432,433,5,11,0,0,433,438,1,0,0,0,
+        434,438,5,35,0,0,435,438,3,40,20,0,436,438,3,22,11,0,437,416,1,0,
+        0,0,437,418,1,0,0,0,437,419,1,0,0,0,437,420,1,0,0,0,437,427,1,0,
+        0,0,437,434,1,0,0,0,437,435,1,0,0,0,437,436,1,0,0,0,438,450,1,0,
+        0,0,439,440,10,10,0,0,440,449,5,21,0,0,441,444,10,3,0,0,442,443,
+        5,16,0,0,443,445,3,36,18,0,444,442,1,0,0,0,445,446,1,0,0,0,446,444,
+        1,0,0,0,446,447,1,0,0,0,447,449,1,0,0,0,448,439,1,0,0,0,448,441,
+        1,0,0,0,449,452,1,0,0,0,450,448,1,0,0,0,450,451,1,0,0,0,451,37,1,
+        0,0,0,452,450,1,0,0,0,453,454,6,19,-1,0,454,458,3,22,11,0,455,458,
+        5,58,0,0,456,458,5,57,0,0,457,453,1,0,0,0,457,455,1,0,0,0,457,456,
+        1,0,0,0,458,473,1,0,0,0,459,460,10,7,0,0,460,461,5,16,0,0,461,472,
+        3,38,19,8,462,463,10,6,0,0,463,464,5,20,0,0,464,472,3,38,19,7,465,
+        466,10,5,0,0,466,467,5,18,0,0,467,472,3,38,19,6,468,469,10,4,0,0,
+        469,470,5,19,0,0,470,472,3,38,19,5,471,459,1,0,0,0,471,462,1,0,0,
+        0,471,465,1,0,0,0,471,468,1,0,0,0,472,475,1,0,0,0,473,471,1,0,0,
+        0,473,474,1,0,0,0,474,39,1,0,0,0,475,473,1,0,0,0,476,477,5,39,0,
+        0,477,478,5,10,0,0,478,479,3,38,19,0,479,480,5,11,0,0,480,483,1,
+        0,0,0,481,483,5,39,0,0,482,476,1,0,0,0,482,481,1,0,0,0,483,41,1,
+        0,0,0,484,485,5,32,0,0,485,486,5,10,0,0,486,487,3,36,18,0,487,488,
+        5,11,0,0,488,491,1,0,0,0,489,491,5,32,0,0,490,484,1,0,0,0,490,489,
+        1,0,0,0,491,43,1,0,0,0,492,493,7,0,0,0,493,45,1,0,0,0,494,495,5,
+        38,0,0,495,498,5,62,0,0,496,497,5,50,0,0,497,499,5,59,0,0,498,496,
+        1,0,0,0,498,499,1,0,0,0,499,500,1,0,0,0,500,501,5,12,0,0,501,47,
+        1,0,0,0,502,503,7,1,0,0,503,49,1,0,0,0,45,53,63,78,85,87,93,105,
+        111,118,124,130,132,139,149,159,172,206,229,234,256,260,268,270,
+        277,286,303,306,315,318,330,383,393,395,403,412,437,446,448,450,
+        457,471,473,482,490,498
     ]
 
 class SchemeParser ( Parser ):
@@ -215,11 +216,11 @@ class SchemeParser ( Parser ):
                      "';'", "':'", "','", "'.'", "'*'", "'='", "'+'", "'-'", 
                      "'/'", "'?'", "'=='", "'!='", "'>='", "'<='", "'||'", 
                      "'<-'", "'&&'", "'\\'", "'!'", "'|'", "'Set'", "'Bool'", 
-                     "'Int'", "'Map'", "'return'", "'import'", "'BitString'", 
-                     "'Array'", "'Primitive'", "'subsets'", "'if'", "'for'", 
-                     "'to'", "'in'", "'union'", "'Game'", "'export'", "'as'", 
-                     "'Phase'", "'oracles'", "'else'", "'None'", "'true'", 
-                     "'false'" ]
+                     "'Void'", "'Int'", "'Map'", "'return'", "'import'", 
+                     "'BitString'", "'Array'", "'Primitive'", "'subsets'", 
+                     "'if'", "'for'", "'to'", "'in'", "'union'", "'Game'", 
+                     "'export'", "'as'", "'Phase'", "'oracles'", "'else'", 
+                     "'None'", "'true'", "'false'" ]
 
     symbolicNames = [ "<INVALID>", "REQUIRES", "SCHEME", "EXTENDS", "L_CURLY", 
                       "R_CURLY", "L_SQUARE", "R_SQUARE", "L_PAREN", "R_PAREN", 
@@ -227,11 +228,11 @@ class SchemeParser ( Parser ):
                       "TIMES", "EQUALS", "PLUS", "SUBTRACT", "DIVIDE", "QUESTION", 
                       "EQUALSCOMPARE", "NOTEQUALS", "GEQ", "LEQ", "OR", 
                       "SAMPLES", "AND", "BACKSLASH", "NOT", "VBAR", "SET", 
-                      "BOOL", "INTTYPE", "MAP", "RETURN", "IMPORT", "BITSTRING", 
-                      "ARRAY", "PRIMITIVE", "SUBSETS", "IF", "FOR", "TO", 
-                      "IN", "UNION", "GAME", "EXPORT", "AS", "PHASE", "ORACLES", 
-                      "ELSE", "NONE", "TRUE", "FALSE", "BINARYNUM", "INT", 
-                      "ID", "WS", "LINE_COMMENT", "FILESTRING" ]
+                      "BOOL", "VOID", "INTTYPE", "MAP", "RETURN", "IMPORT", 
+                      "BITSTRING", "ARRAY", "PRIMITIVE", "SUBSETS", "IF", 
+                      "FOR", "TO", "IN", "UNION", "GAME", "EXPORT", "AS", 
+                      "PHASE", "ORACLES", "ELSE", "NONE", "TRUE", "FALSE", 
+                      "BINARYNUM", "INT", "ID", "WS", "LINE_COMMENT", "FILESTRING" ]
 
     RULE_program = 0
     RULE_scheme = 1
@@ -300,34 +301,35 @@ class SchemeParser ( Parser ):
     VBAR=31
     SET=32
     BOOL=33
-    INTTYPE=34
-    MAP=35
-    RETURN=36
-    IMPORT=37
-    BITSTRING=38
-    ARRAY=39
-    PRIMITIVE=40
-    SUBSETS=41
-    IF=42
-    FOR=43
-    TO=44
-    IN=45
-    UNION=46
-    GAME=47
-    EXPORT=48
-    AS=49
-    PHASE=50
-    ORACLES=51
-    ELSE=52
-    NONE=53
-    TRUE=54
-    FALSE=55
-    BINARYNUM=56
-    INT=57
-    ID=58
-    WS=59
-    LINE_COMMENT=60
-    FILESTRING=61
+    VOID=34
+    INTTYPE=35
+    MAP=36
+    RETURN=37
+    IMPORT=38
+    BITSTRING=39
+    ARRAY=40
+    PRIMITIVE=41
+    SUBSETS=42
+    IF=43
+    FOR=44
+    TO=45
+    IN=46
+    UNION=47
+    GAME=48
+    EXPORT=49
+    AS=50
+    PHASE=51
+    ORACLES=52
+    ELSE=53
+    NONE=54
+    TRUE=55
+    FALSE=56
+    BINARYNUM=57
+    INT=58
+    ID=59
+    WS=60
+    LINE_COMMENT=61
+    FILESTRING=62
 
     def __init__(self, input:TokenStream, output:TextIO = sys.stdout):
         super().__init__(input, output)
@@ -381,7 +383,7 @@ class SchemeParser ( Parser ):
             self.state = 53
             self._errHandler.sync(self)
             _la = self._input.LA(1)
-            while _la==37:
+            while _la==38:
                 self.state = 50
                 self.moduleImport()
                 self.state = 55
@@ -468,7 +470,7 @@ class SchemeParser ( Parser ):
             self.state = 63
             self._errHandler.sync(self)
             _la = self._input.LA(1)
-            if (((_la) & ~0x3f) == 0 and ((1 << _la) & 288266449582030848) != 0):
+            if (((_la) & ~0x3f) == 0 and ((1 << _la) & 576532903459028992) != 0):
                 self.state = 62
                 self.paramList()
 
@@ -590,7 +592,7 @@ class SchemeParser ( Parser ):
                 self.state = 87 
                 self._errHandler.sync(self)
                 _la = self._input.LA(1)
-                if not ((((_la) & ~0x3f) == 0 and ((1 << _la) & 288266449582030848) != 0)):
+                if not ((((_la) & ~0x3f) == 0 and ((1 << _la) & 576532903459028992) != 0)):
                     break
 
         except RecognitionException as re:
@@ -663,7 +665,7 @@ class SchemeParser ( Parser ):
             self.state = 93
             self._errHandler.sync(self)
             _la = self._input.LA(1)
-            if (((_la) & ~0x3f) == 0 and ((1 << _la) & 288266449582030848) != 0):
+            if (((_la) & ~0x3f) == 0 and ((1 << _la) & 576532903459028992) != 0):
                 self.state = 92
                 self.paramList()
 
@@ -764,7 +766,7 @@ class SchemeParser ( Parser ):
                     self.state = 111 
                     self._errHandler.sync(self)
                     _la = self._input.LA(1)
-                    if not ((((_la) & ~0x3f) == 0 and ((1 << _la) & 288266449582030848) != 0)):
+                    if not ((((_la) & ~0x3f) == 0 and ((1 << _la) & 576532903459028992) != 0)):
                         break
 
                 pass
@@ -787,7 +789,7 @@ class SchemeParser ( Parser ):
                 self.state = 124
                 self._errHandler.sync(self)
                 _la = self._input.LA(1)
-                while (((_la) & ~0x3f) == 0 and ((1 << _la) & 288266449582030848) != 0):
+                while (((_la) & ~0x3f) == 0 and ((1 << _la) & 576532903459028992) != 0):
                     self.state = 121
                     self.method()
                     self.state = 126
@@ -803,7 +805,7 @@ class SchemeParser ( Parser ):
                     self.state = 130 
                     self._errHandler.sync(self)
                     _la = self._input.LA(1)
-                    if not (_la==50):
+                    if not (_la==51):
                         break
 
                 pass
@@ -901,7 +903,7 @@ class SchemeParser ( Parser ):
                 self.state = 139 
                 self._errHandler.sync(self)
                 _la = self._input.LA(1)
-                if not ((((_la) & ~0x3f) == 0 and ((1 << _la) & 288266449582030848) != 0)):
+                if not ((((_la) & ~0x3f) == 0 and ((1 << _la) & 576532903459028992) != 0)):
                     break
 
             self.state = 141
@@ -1138,7 +1140,7 @@ class SchemeParser ( Parser ):
             self.state = 172
             self._errHandler.sync(self)
             _la = self._input.LA(1)
-            while (((_la) & ~0x3f) == 0 and ((1 << _la) & 567502892559237456) != 0):
+            while (((_la) & ~0x3f) == 0 and ((1 << _la) & 1135005786192216400) != 0):
                 self.state = 169
                 self.statement()
                 self.state = 174
@@ -1549,7 +1551,7 @@ class SchemeParser ( Parser ):
                 self.state = 206
                 self._errHandler.sync(self)
                 _la = self._input.LA(1)
-                if (((_la) & ~0x3f) == 0 and ((1 << _la) & 567489629700227408) != 0):
+                if (((_la) & ~0x3f) == 0 and ((1 << _la) & 1134979260474196304) != 0):
                     self.state = 205
                     self.argList()
 
@@ -1608,7 +1610,7 @@ class SchemeParser ( Parser ):
                 self.state = 234
                 self._errHandler.sync(self)
                 _la = self._input.LA(1)
-                if _la==52:
+                if _la==53:
                     self.state = 232
                     self.match(SchemeParser.ELSE)
                     self.state = 233
@@ -1839,7 +1841,7 @@ class SchemeParser ( Parser ):
             self.state = 277
             self._errHandler.sync(self)
             _la = self._input.LA(1)
-            if (((_la) & ~0x3f) == 0 and ((1 << _la) & 288266449582030848) != 0):
+            if (((_la) & ~0x3f) == 0 and ((1 << _la) & 576532903459028992) != 0):
                 self.state = 276
                 self.paramList()
 
@@ -2611,7 +2613,7 @@ class SchemeParser ( Parser ):
                 self.state = 306
                 self._errHandler.sync(self)
                 _la = self._input.LA(1)
-                if (((_la) & ~0x3f) == 0 and ((1 << _la) & 567489629700227408) != 0):
+                if (((_la) & ~0x3f) == 0 and ((1 << _la) & 1134979260474196304) != 0):
                     self.state = 298
                     self.expression(0)
                     self.state = 303
@@ -2641,7 +2643,7 @@ class SchemeParser ( Parser ):
                 self.state = 318
                 self._errHandler.sync(self)
                 _la = self._input.LA(1)
-                if (((_la) & ~0x3f) == 0 and ((1 << _la) & 567489629700227408) != 0):
+                if (((_la) & ~0x3f) == 0 and ((1 << _la) & 1134979260474196304) != 0):
                     self.state = 310
                     self.expression(0)
                     self.state = 315
@@ -2947,7 +2949,7 @@ class SchemeParser ( Parser ):
                         self.state = 383
                         self._errHandler.sync(self)
                         _la = self._input.LA(1)
-                        if (((_la) & ~0x3f) == 0 and ((1 << _la) & 567489629700227408) != 0):
+                        if (((_la) & ~0x3f) == 0 and ((1 << _la) & 1134979260474196304) != 0):
                             self.state = 382
                             self.argList()
 
@@ -3143,7 +3145,7 @@ class SchemeParser ( Parser ):
             self.state = 412
             self._errHandler.sync(self)
             _la = self._input.LA(1)
-            if (((_la) & ~0x3f) == 0 and ((1 << _la) & 567489629700227408) != 0):
+            if (((_la) & ~0x3f) == 0 and ((1 << _la) & 1134979260474196304) != 0):
                 self.state = 411
                 self.argList()
 
@@ -3283,6 +3285,22 @@ class SchemeParser ( Parser ):
                 return visitor.visitChildren(self)
 
 
+    class VoidTypeContext(TypeContext):
+
+        def __init__(self, parser, ctx:ParserRuleContext): # actually a SchemeParser.TypeContext
+            super().__init__(parser)
+            self.copyFrom(ctx)
+
+        def VOID(self):
+            return self.getToken(SchemeParser.VOID, 0)
+
+        def accept(self, visitor:ParseTreeVisitor):
+            if hasattr( visitor, "visitVoidType" ):
+                return visitor.visitVoidType(self)
+            else:
+                return visitor.visitChildren(self)
+
+
     class SetTypeContext(TypeContext):
 
         def __init__(self, parser, ctx:ParserRuleContext): # actually a SchemeParser.TypeContext
@@ -3368,7 +3386,7 @@ class SchemeParser ( Parser ):
         self.enterRecursionRule(localctx, 36, self.RULE_type, _p)
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 436
+            self.state = 437
             self._errHandler.sync(self)
             token = self._input.LA(1)
             if token in [32]:
@@ -3386,66 +3404,73 @@ class SchemeParser ( Parser ):
                 self.state = 418
                 self.match(SchemeParser.BOOL)
                 pass
-            elif token in [35]:
-                localctx = SchemeParser.MapTypeContext(self, localctx)
+            elif token in [34]:
+                localctx = SchemeParser.VoidTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
                 self.state = 419
-                self.match(SchemeParser.MAP)
+                self.match(SchemeParser.VOID)
+                pass
+            elif token in [36]:
+                localctx = SchemeParser.MapTypeContext(self, localctx)
+                self._ctx = localctx
+                _prevctx = localctx
                 self.state = 420
-                self.match(SchemeParser.L_ANGLE)
+                self.match(SchemeParser.MAP)
                 self.state = 421
-                self.type_(0)
+                self.match(SchemeParser.L_ANGLE)
                 self.state = 422
-                self.match(SchemeParser.COMMA)
-                self.state = 423
                 self.type_(0)
+                self.state = 423
+                self.match(SchemeParser.COMMA)
                 self.state = 424
+                self.type_(0)
+                self.state = 425
                 self.match(SchemeParser.R_ANGLE)
                 pass
-            elif token in [39]:
+            elif token in [40]:
                 localctx = SchemeParser.ArrayTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
-                self.state = 426
-                self.match(SchemeParser.ARRAY)
                 self.state = 427
-                self.match(SchemeParser.L_ANGLE)
+                self.match(SchemeParser.ARRAY)
                 self.state = 428
-                self.type_(0)
+                self.match(SchemeParser.L_ANGLE)
                 self.state = 429
-                self.match(SchemeParser.COMMA)
+                self.type_(0)
                 self.state = 430
-                self.integerExpression(0)
+                self.match(SchemeParser.COMMA)
                 self.state = 431
+                self.integerExpression(0)
+                self.state = 432
                 self.match(SchemeParser.R_ANGLE)
                 pass
-            elif token in [34]:
+            elif token in [35]:
                 localctx = SchemeParser.IntTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
-                self.state = 433
+                self.state = 434
                 self.match(SchemeParser.INTTYPE)
                 pass
-            elif token in [38]:
+            elif token in [39]:
                 localctx = SchemeParser.BitStringTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
-                self.state = 434
+                self.state = 435
                 self.bitstring()
                 pass
-            elif token in [45, 58]:
+            elif token in [46, 59]:
                 localctx = SchemeParser.LvalueTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
-                self.state = 435
+                self.state = 436
                 self.lvalue()
                 pass
             else:
                 raise NoViableAltException(self)
 
             self._ctx.stop = self._input.LT(-1)
-            self.state = 449
+            self.state = 450
             self._errHandler.sync(self)
             _alt = self._interp.adaptivePredict(self._input,38,self._ctx)
             while _alt!=2 and _alt!=ATN.INVALID_ALT_NUMBER:
@@ -3453,47 +3478,47 @@ class SchemeParser ( Parser ):
                     if self._parseListeners is not None:
                         self.triggerExitRuleEvent()
                     _prevctx = localctx
-                    self.state = 447
+                    self.state = 448
                     self._errHandler.sync(self)
                     la_ = self._interp.adaptivePredict(self._input,37,self._ctx)
                     if la_ == 1:
                         localctx = SchemeParser.OptionalTypeContext(self, SchemeParser.TypeContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_type)
-                        self.state = 438
-                        if not self.precpred(self._ctx, 9):
-                            from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 9)")
                         self.state = 439
+                        if not self.precpred(self._ctx, 10):
+                            from antlr4.error.Errors import FailedPredicateException
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 10)")
+                        self.state = 440
                         self.match(SchemeParser.QUESTION)
                         pass
 
                     elif la_ == 2:
                         localctx = SchemeParser.ProductTypeContext(self, SchemeParser.TypeContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_type)
-                        self.state = 440
+                        self.state = 441
                         if not self.precpred(self._ctx, 3):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 3)")
-                        self.state = 443 
+                        self.state = 444 
                         self._errHandler.sync(self)
                         _alt = 1
                         while _alt!=2 and _alt!=ATN.INVALID_ALT_NUMBER:
                             if _alt == 1:
-                                self.state = 441
-                                self.match(SchemeParser.TIMES)
                                 self.state = 442
+                                self.match(SchemeParser.TIMES)
+                                self.state = 443
                                 self.type_(0)
 
                             else:
                                 raise NoViableAltException(self)
-                            self.state = 445 
+                            self.state = 446 
                             self._errHandler.sync(self)
                             _alt = self._interp.adaptivePredict(self._input,36,self._ctx)
 
                         pass
 
              
-                self.state = 451
+                self.state = 452
                 self._errHandler.sync(self)
                 _alt = self._interp.adaptivePredict(self._input,38,self._ctx)
 
@@ -3562,26 +3587,26 @@ class SchemeParser ( Parser ):
         self.enterRecursionRule(localctx, 38, self.RULE_integerExpression, _p)
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 456
+            self.state = 457
             self._errHandler.sync(self)
             token = self._input.LA(1)
-            if token in [45, 58]:
-                self.state = 453
+            if token in [46, 59]:
+                self.state = 454
                 self.lvalue()
                 pass
-            elif token in [57]:
-                self.state = 454
+            elif token in [58]:
+                self.state = 455
                 self.match(SchemeParser.INT)
                 pass
-            elif token in [56]:
-                self.state = 455
+            elif token in [57]:
+                self.state = 456
                 self.match(SchemeParser.BINARYNUM)
                 pass
             else:
                 raise NoViableAltException(self)
 
             self._ctx.stop = self._input.LT(-1)
-            self.state = 472
+            self.state = 473
             self._errHandler.sync(self)
             _alt = self._interp.adaptivePredict(self._input,41,self._ctx)
             while _alt!=2 and _alt!=ATN.INVALID_ALT_NUMBER:
@@ -3589,63 +3614,63 @@ class SchemeParser ( Parser ):
                     if self._parseListeners is not None:
                         self.triggerExitRuleEvent()
                     _prevctx = localctx
-                    self.state = 470
+                    self.state = 471
                     self._errHandler.sync(self)
                     la_ = self._interp.adaptivePredict(self._input,40,self._ctx)
                     if la_ == 1:
                         localctx = SchemeParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
-                        self.state = 458
+                        self.state = 459
                         if not self.precpred(self._ctx, 7):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 7)")
-                        self.state = 459
-                        self.match(SchemeParser.TIMES)
                         self.state = 460
+                        self.match(SchemeParser.TIMES)
+                        self.state = 461
                         self.integerExpression(8)
                         pass
 
                     elif la_ == 2:
                         localctx = SchemeParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
-                        self.state = 461
+                        self.state = 462
                         if not self.precpred(self._ctx, 6):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 6)")
-                        self.state = 462
-                        self.match(SchemeParser.DIVIDE)
                         self.state = 463
+                        self.match(SchemeParser.DIVIDE)
+                        self.state = 464
                         self.integerExpression(7)
                         pass
 
                     elif la_ == 3:
                         localctx = SchemeParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
-                        self.state = 464
+                        self.state = 465
                         if not self.precpred(self._ctx, 5):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 5)")
-                        self.state = 465
-                        self.match(SchemeParser.PLUS)
                         self.state = 466
+                        self.match(SchemeParser.PLUS)
+                        self.state = 467
                         self.integerExpression(6)
                         pass
 
                     elif la_ == 4:
                         localctx = SchemeParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
-                        self.state = 467
+                        self.state = 468
                         if not self.precpred(self._ctx, 4):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 4)")
-                        self.state = 468
-                        self.match(SchemeParser.SUBTRACT)
                         self.state = 469
+                        self.match(SchemeParser.SUBTRACT)
+                        self.state = 470
                         self.integerExpression(5)
                         pass
 
              
-                self.state = 474
+                self.state = 475
                 self._errHandler.sync(self)
                 _alt = self._interp.adaptivePredict(self._input,41,self._ctx)
 
@@ -3695,24 +3720,24 @@ class SchemeParser ( Parser ):
         localctx = SchemeParser.BitstringContext(self, self._ctx, self.state)
         self.enterRule(localctx, 40, self.RULE_bitstring)
         try:
-            self.state = 481
+            self.state = 482
             self._errHandler.sync(self)
             la_ = self._interp.adaptivePredict(self._input,42,self._ctx)
             if la_ == 1:
                 self.enterOuterAlt(localctx, 1)
-                self.state = 475
-                self.match(SchemeParser.BITSTRING)
                 self.state = 476
-                self.match(SchemeParser.L_ANGLE)
+                self.match(SchemeParser.BITSTRING)
                 self.state = 477
-                self.integerExpression(0)
+                self.match(SchemeParser.L_ANGLE)
                 self.state = 478
+                self.integerExpression(0)
+                self.state = 479
                 self.match(SchemeParser.R_ANGLE)
                 pass
 
             elif la_ == 2:
                 self.enterOuterAlt(localctx, 2)
-                self.state = 480
+                self.state = 481
                 self.match(SchemeParser.BITSTRING)
                 pass
 
@@ -3763,24 +3788,24 @@ class SchemeParser ( Parser ):
         localctx = SchemeParser.SetContext(self, self._ctx, self.state)
         self.enterRule(localctx, 42, self.RULE_set)
         try:
-            self.state = 489
+            self.state = 490
             self._errHandler.sync(self)
             la_ = self._interp.adaptivePredict(self._input,43,self._ctx)
             if la_ == 1:
                 self.enterOuterAlt(localctx, 1)
-                self.state = 483
-                self.match(SchemeParser.SET)
                 self.state = 484
-                self.match(SchemeParser.L_ANGLE)
+                self.match(SchemeParser.SET)
                 self.state = 485
-                self.type_(0)
+                self.match(SchemeParser.L_ANGLE)
                 self.state = 486
+                self.type_(0)
+                self.state = 487
                 self.match(SchemeParser.R_ANGLE)
                 pass
 
             elif la_ == 2:
                 self.enterOuterAlt(localctx, 2)
-                self.state = 488
+                self.state = 489
                 self.match(SchemeParser.SET)
                 pass
 
@@ -3826,9 +3851,9 @@ class SchemeParser ( Parser ):
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 491
+            self.state = 492
             _la = self._input.LA(1)
-            if not(_la==54 or _la==55):
+            if not(_la==55 or _la==56):
                 self._errHandler.recoverInline(self)
             else:
                 self._errHandler.reportMatch(self)
@@ -3883,21 +3908,21 @@ class SchemeParser ( Parser ):
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 493
-            self.match(SchemeParser.IMPORT)
             self.state = 494
+            self.match(SchemeParser.IMPORT)
+            self.state = 495
             self.match(SchemeParser.FILESTRING)
-            self.state = 497
+            self.state = 498
             self._errHandler.sync(self)
             _la = self._input.LA(1)
-            if _la==49:
-                self.state = 495
-                self.match(SchemeParser.AS)
+            if _la==50:
                 self.state = 496
+                self.match(SchemeParser.AS)
+                self.state = 497
                 self.match(SchemeParser.ID)
 
 
-            self.state = 499
+            self.state = 500
             self.match(SchemeParser.SEMI)
         except RecognitionException as re:
             localctx.exception = re
@@ -3940,9 +3965,9 @@ class SchemeParser ( Parser ):
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 501
+            self.state = 502
             _la = self._input.LA(1)
-            if not(_la==45 or _la==58):
+            if not(_la==46 or _la==59):
                 self._errHandler.recoverInline(self)
             else:
                 self._errHandler.reportMatch(self)
@@ -4044,7 +4069,7 @@ class SchemeParser ( Parser ):
 
     def type_sempred(self, localctx:TypeContext, predIndex:int):
             if predIndex == 18:
-                return self.precpred(self._ctx, 9)
+                return self.precpred(self._ctx, 10)
          
 
             if predIndex == 19:

@@ -4,7 +4,7 @@ Game Real(SymEnc E) {
     E.Key k;
     Set<E.Ciphertext> S;
 
-    void Initialize() {
+    Void Initialize() {
         k = E.KeyGen();
         S = {};
     }

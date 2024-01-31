@@ -15,7 +15,7 @@ Game Real(DigitalSignature E) {
         return E.Sign(sk, m);
     }
 
-    bool VerifySig(E.Message m, E.Signature s) {
+    Bool VerifySig(E.Message m, E.Signature s) {
         return E.Verify(vk, m, s);
     }
 }
@@ -39,7 +39,7 @@ Game Fake(DigitalSignature E) {
         return s;
     }
 
-    bool VerifySig(E.Message m, E.Signature s) {
+    Bool VerifySig(E.Message m, E.Signature s) {
         return [m, s] in S;
     }
 }

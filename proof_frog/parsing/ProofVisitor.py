@@ -369,6 +369,11 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#voidType.
+    def visitVoidType(self, ctx:ProofParser.VoidTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#setType.
     def visitSetType(self, ctx:ProofParser.SetTypeContext):
         return self.visitChildren(ctx)

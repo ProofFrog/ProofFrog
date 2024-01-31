@@ -9,12 +9,12 @@ from proof_frog import visitors, frog_parser
         # Simple substitution
         (
             """
-        void f() {
+        Void f() {
             Int x = lambda + lambda;
         }
         """,
             """
-        void f() {
+        Void f() {
             Int x = 2 * lambda;
         }
         """,
@@ -35,12 +35,12 @@ from proof_frog import visitors, frog_parser
         ),
         (
             """
-        void f() {
+        Void f() {
             return 3 + 5;
         }
         """,
             """
-        void f() {
+        Void f() {
             return 8;
         }
         """,

@@ -4,7 +4,7 @@ Game Left(SymEnc E) {
     E.Key k;
     Set<E.Ciphertext> S;
 
-    void Initialize() {
+    Void Initialize() {
         S = {};
         k = E.KeyGen();
     }
@@ -27,7 +27,7 @@ Game Right(SymEnc E) {
     E.Key k;
     Set<E.Ciphertext> S;
 
-    void Initialize() {
+    Void Initialize() {
         S = {};
         k = E.KeyGen();
     }

@@ -304,6 +304,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#voidType.
+    def visitVoidType(self, ctx:GameParser.VoidTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#setType.
     def visitSetType(self, ctx:GameParser.SetTypeContext):
         return self.visitChildren(ctx)

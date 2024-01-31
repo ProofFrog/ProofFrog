@@ -1,7 +1,7 @@
 import 'examples/Primitives/SymEnc.primitive';
 
 Game Real(SymEnc E) {
-    bool Test(E.Key k, E.Message m) {
+    Bool Test(E.Key k, E.Message m) {
         E.Ciphertext c = E.Enc(k, m);
         E.Message mPrime = E.Dec(k, c);
         return mPrime == m;
@@ -9,7 +9,7 @@ Game Real(SymEnc E) {
 }
 
 Game Fake(SymEnc E) {
-    bool Test(E.Key k, E.Message m) {
+    Bool Test(E.Key k, E.Message m) {
         return true;
     }
 }

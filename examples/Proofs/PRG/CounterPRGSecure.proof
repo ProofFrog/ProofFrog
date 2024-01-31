@@ -5,7 +5,7 @@ import 'examples/Games/PRF/Security.game' as PRFSecurity;
 Game SecurityIntermediate1(CounterPRG G, int hybridNum) {
     int count;
 
-    void Initialize() {
+    Void Initialize() {
         count = 0;
     }
 
@@ -26,7 +26,7 @@ Game SecurityIntermediate1(CounterPRG G, int hybridNum) {
 Game SecurityIntermediate2(CounterPRG G, int hybridNum) {
     int count;
 
-    void Initialize() {
+    Void Initialize() {
         count = 0;
     }
 
@@ -52,7 +52,7 @@ Game SecurityIntermediate2(CounterPRG G, int hybridNum) {
 Reduction R1(CounterPRG G, PRF F, int hybridNum) compose PRFSecurity(F) against PRGSecurity(G).Adversary {
     int count;
 
-    void Initialize() {
+    Void Initialize() {
         count = 0;
     }
 
@@ -78,7 +78,7 @@ Game SecurityIntermediate3(CounterPRG G, int hybridNum) {
     int count;
     Map<BitString<lambda>, BitString<lambda>> T;
 
-    void Initialize() {
+    Void Initialize() {
         count = 0;
         T = {};
     }
@@ -110,7 +110,7 @@ Game SecurityIntermediate3(CounterPRG G, int hybridNum) {
 Game SecurityIntermediate4(CounterPRG G, int hybridNum) {
     int count;
 
-    void Initialize() {
+    Void Initialize() {
         count = 0;
     }
 
@@ -135,7 +135,7 @@ Game SecurityIntermediate4(CounterPRG G, int hybridNum) {
 Game SecurityIntermediate5(CounterPRG G, int hybridNum) {
     int count;
 
-    void Initialize() {
+    Void Initialize() {
         count = 0;
     }
 

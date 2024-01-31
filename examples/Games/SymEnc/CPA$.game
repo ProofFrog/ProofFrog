@@ -2,7 +2,7 @@ import 'examples/Primitives/SymEnc.primitive';
 
 Game Real(SymEnc E) {
     E.Key k;
-    void Initialize() {
+    Void Initialize() {
         k = E.KeyGen();
     }
     E.Ciphertext CTXT(E.Message m) {
@@ -12,7 +12,7 @@ Game Real(SymEnc E) {
 
 Game Random(SymEnc E) {
     E.Key k;
-    void Initialize() {
+    Void Initialize() {
         k = E.KeyGen();
     }
     E.Ciphertext CTXT(E.Message m) {

@@ -8,7 +8,7 @@ Game Real(Hash H) {
         return seed;
     }
 
-    bool Test(BitString x, BitString xPrime) {
+    Bool Test(BitString x, BitString xPrime) {
         return x != xPrime && H.evaluate(s, x) == H.evaluate(s, xPrime);
     }
 }
@@ -21,7 +21,7 @@ Game Fake(Hash H) {
         return seed;
     }
 
-    bool Test(BitString x, BitString xPrime) {
+    Bool Test(BitString x, BitString xPrime) {
         return false;
     }
 }

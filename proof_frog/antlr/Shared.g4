@@ -77,6 +77,7 @@ parameterizedGame: ID L_PAREN argList? R_PAREN;
 type: type QUESTION #optionalType
 	| set #setType
 	| BOOL #boolType
+	| VOID #voidType
 	| MAP L_ANGLE type COMMA type R_ANGLE #mapType
 	| ARRAY L_ANGLE type COMMA integerExpression R_ANGLE #arrayType
 	| INTTYPE #intType
@@ -136,6 +137,7 @@ VBAR: '|';
 
 SET: 'Set';
 BOOL: 'Bool';
+VOID: 'Void';
 INTTYPE: 'Int';
 MAP: 'Map';
 RETURN: 'return';

@@ -304,6 +304,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#voidType.
+    def visitVoidType(self, ctx:PrimitiveParser.VoidTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#setType.
     def visitSetType(self, ctx:PrimitiveParser.SetTypeContext):
         return self.visitChildren(ctx)

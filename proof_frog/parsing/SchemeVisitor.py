@@ -309,6 +309,11 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SchemeParser#voidType.
+    def visitVoidType(self, ctx:SchemeParser.VoidTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SchemeParser#setType.
     def visitSetType(self, ctx:SchemeParser.SetTypeContext):
         return self.visitChildren(ctx)

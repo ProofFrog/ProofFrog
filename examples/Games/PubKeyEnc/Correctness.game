@@ -11,7 +11,7 @@ Game Real(PubKeyEnc E) {
         return k;
     }
 
-    bool Test(E.Message m) {
+    Bool Test(E.Message m) {
         E.Ciphertext c = E.Enc(pk, m);
         E.Message mPrime = E.Dec(sk, c);
         return m == mPrime;
@@ -29,7 +29,7 @@ Game Fake(PubKeyEnc E) {
         return k;
     }
 
-    bool Test(E.Message m) {
+    Bool Test(E.Message m) {
         return true;
     }
 }

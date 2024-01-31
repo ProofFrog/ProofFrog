@@ -3,7 +3,7 @@ import 'examples/Primitives/MAC.primitive';
 Game Real(MAC E) {
     E.Key k;
 
-    void Initialize() {
+    Void Initialize() {
         k = E.KeyGen();
     }
 
@@ -11,7 +11,7 @@ Game Real(MAC E) {
         return E.MAC(k, m);
     }
 
-    bool CheckTag(E.Message m, E.Tag t) {
+    Bool CheckTag(E.Message m, E.Tag t) {
         return t == E.MAC(k, m);
     }
 }
@@ -20,7 +20,7 @@ Game Random(MAC E) {
     E.Key k;
     Set<E.Message * E.Tag> T;
 
-    void Initialize() {
+    Void Initialize() {
         k = E.KeyGen();
         T = {};
     }
@@ -31,7 +31,7 @@ Game Random(MAC E) {
         return t;
     }
 
-    bool CheckTag(E.Message m, E.Tag t) {
+    Bool CheckTag(E.Message m, E.Tag t) {
         return [m, t] in T;
     }
 }

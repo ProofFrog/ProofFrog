@@ -2,7 +2,7 @@ import 'examples/Primitives/SymEnc.primitive';
 
 Game Left(SymEnc E) {
     E.Key k;
-    void Initialize() {
+    Void Initialize() {
         k = E.KeyGen();
     }
     E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
@@ -13,7 +13,7 @@ Game Left(SymEnc E) {
 
 Game Right(SymEnc E) {
     E.Key k;
-    void Initialize() {
+    Void Initialize() {
         k = E.KeyGen();
     }
     E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {

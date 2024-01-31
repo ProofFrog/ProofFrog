@@ -2,9 +2,9 @@ import 'examples/Games/Misc/Sample.game';
 
 Game SampleIntermediate1(int lambda) {
     Set<BitString<lambda>> R;
-    bool bad;
+    Bool bad;
 
-    void Initialize() {
+    Void Initialize() {
         R = {};
         bad = false;
     }
@@ -21,9 +21,9 @@ Game SampleIntermediate1(int lambda) {
 
 Game SampleIntermediate2(int lambda) {
     Set<BitString<lambda>> R;
-    bool bad;
+    Bool bad;
 
-    void Initialize() {
+    Void Initialize() {
         R = {};
         bad = false;
     }

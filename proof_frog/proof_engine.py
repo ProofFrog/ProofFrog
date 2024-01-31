@@ -306,10 +306,6 @@ class ProofEngine:
         AstManipulator = namedtuple("AstManipulator", ["fn", "name"])
         ast_manipulators: list[AstManipulator] = [
             AstManipulator(
-                fn=lambda ast: visitors.RemoveTupleTransformer().transform(ast),
-                name="Remove Tuples",
-            ),
-            AstManipulator(
                 fn=lambda ast: visitors.SymbolicComputationTransformer(
                     self.variables
                 ).transform(ast),
@@ -352,8 +348,8 @@ class ProofEngine:
                 name="Simplify Ifs",
             ),
             AstManipulator(
-                fn=lambda ast: visitors.ExpandTupleFields().transform(ast),
-                name="Expand Tuple Fields",
+                fn=lambda ast: visitors.ExpandTupleTransformer().transform(ast),
+                name="Expand Tuples",
             ),
         ]
 

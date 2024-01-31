@@ -180,9 +180,106 @@ from proof_frog import visitors, frog_parser
             }
             """,
         ),
+        (
+            """
+            Game G() {
+                Int f() {
+                    Int * Int tuple = [100, 200];
+                    return tuple[1];
+                }
+            }
+            """,
+            """
+            Game G() {
+                Int f() {
+                    Int tuple0 = 100;
+                    Int tuple1 = 200;
+                    return tuple1;
+                }
+            }
+            """,
+        ),
+        (
+            """
+            Game G() {
+                Int f() {
+                    Int * Int tuple = [100, 200];
+                    tuple = f();
+                    return tuple[1];
+                }
+            }
+            """,
+            """
+            Game G() {
+                Int f() {
+                    Int * Int tuple = [100, 200];
+                    tuple = f();
+                    return tuple[1];
+                }
+            }
+            """,
+        ),
+        (
+            """
+            Game G() {
+                Int f() {
+                    Int * Int tuple = [100, 200];
+                    Int a = 1;
+                    return tuple[a];
+                }
+            }
+            """,
+            """
+            Game G() {
+                Int f() {
+                    Int * Int tuple = [100, 200];
+                    Int a = 1;
+                    return tuple[a];
+                }
+            }
+            """,
+        ),
+        (
+            """
+            Game G() {
+                Int * Int myTuple;
+                Void Initialize() {
+                    myTuple[0] = 0;
+                    myTuple[1] = 1;
+                }
+                Int f() {
+                    Int * Int tuple = [100, 200];
+                    return tuple[1];
+                }
+                Int g() {
+                    Int tuple = 2;
+                    return tuple + myTuple[0];
+                }
+            }
+            """,
+            """
+            Game G() {
+                Int myTuple0;
+                Int myTuple1;
+                Void Initialize() {
+                    myTuple0 = 0;
+                    myTuple1 = 1;
+                }
+                Int f() {
+                    Int tuple0 = 100;
+                    Int tuple1 = 200;
+                    return tuple1;
+                }
+                Int g() {
+                    Int tuple = 2;
+                    return tuple + myTuple0;
+                }
+            }
+            """,
+        ),
     ],
 )
-def test_expand_tuple_fields(
+def test_expand_tuples(
     game: str,
     expected: str,
 ) -> None:
@@ -190,6 +287,6 @@ def test_expand_tuple_fields(
     expected_ast = frog_parser.parse_game(expected)
 
     print("EXPECTED: ", expected_ast)
-    transformed_ast = visitors.ExpandTupleFields().transform(game_ast)
+    transformed_ast = visitors.ExpandTupleTransformer().transform(game_ast)
     print("TRANSFORMED: ", transformed_ast)
     assert expected_ast == transformed_ast

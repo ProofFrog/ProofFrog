@@ -212,71 +212,6 @@ class RedundantCopyTransformer(BlockTransformer):
         return block
 
 
-class RemoveTupleTransformer(BlockTransformer):
-    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        for index, statement in enumerate(block.statements):
-            if not isinstance(statement, frog_ast.Assignment):
-                continue
-            if not isinstance(statement.value, frog_ast.Tuple):
-                continue
-
-            def is_func_call(node: frog_ast.ASTNode) -> bool:
-                return isinstance(node, frog_ast.FuncCall)
-
-            has_func_call = SearchVisitor[frog_ast.FuncCall](is_func_call).visit(
-                statement
-            )
-
-            # We must be careful not to perform replacements with function calls,
-            # because expanding it could have side effects.
-            if has_func_call is not None:
-                continue
-
-            # But otherwise we have a tuple that's made up of values
-            # so we can replace them. We do need to be careful though:
-            # if any variable that is used inside of a tuple has changed, then we cannot
-            # do a substitution. Or if the tuple itself changes, either directly or by a field access.
-
-            remaining_block = frog_ast.Block(block.statements[index + 1 :])
-
-            def use_or_reassignment(
-                the_array: frog_ast.Expression, node: frog_ast.ASTNode
-            ) -> bool:
-                return (
-                    isinstance(node, frog_ast.ArrayAccess)
-                    and isinstance(node.the_array, frog_ast.Variable)
-                    and node.the_array == the_array
-                ) or (isinstance(node, frog_ast.Assignment) and node.var == the_array)
-
-            while True:
-                to_transform = SearchVisitor[
-                    frog_ast.ArrayAccess | frog_ast.Assignment
-                ](functools.partial(use_or_reassignment, statement.var)).visit(
-                    remaining_block
-                )
-
-                if (
-                    isinstance(to_transform, frog_ast.Assignment)
-                    or to_transform is None
-                ):
-                    break
-
-                # For right now, can only replace if indexed with a direct Integer. Maybe later we
-                # can look at determining the type/value of a particular variable
-                if not isinstance(to_transform.index, frog_ast.Integer):
-                    break
-
-                remaining_block = ReplaceTransformer(
-                    to_transform, statement.value.values[to_transform.index.num]
-                ).transform(remaining_block)
-            return self.transform_block(
-                frog_ast.Block(copy.deepcopy(block.statements[:index]))
-                + remaining_block
-            )
-
-        return block
-
-
 class SimplifySpliceTransformer(BlockTransformer):
     def __init__(self, variables: dict[str, Symbol | frog_ast.Expression]) -> None:
         self.variables = variables
@@ -531,18 +466,31 @@ class InstantiationTransformer(Transformer):
 class SymbolicComputationTransformer(Transformer):
     def __init__(self, variables: dict[str, Symbol | frog_ast.Expression]) -> None:
         self.variables = variables
-        self.computation_stack: List[Symbol | int] = []
+        self.computation_stack: List[Symbol | int | None] = []
 
     def transform_variable(self, variable: frog_ast.Variable) -> frog_ast.Variable:
         if variable.name in self.variables:
             val = self.variables[variable.name]
             assert isinstance(val, Symbol)
             self.computation_stack.append(val)
+        else:
+            self.computation_stack.append(None)
         return variable
 
     def transform_integer(self, integer: frog_ast.Integer) -> frog_ast.Integer:
         self.computation_stack.append(integer.num)
         return integer
+
+    def transform_bit_string_type(
+        self, bs_type: frog_ast.BitStringType
+    ) -> frog_ast.BitStringType:
+        new_bs = frog_ast.BitStringType(
+            self.transform(bs_type.parameterization)
+            if bs_type.parameterization
+            else bs_type.parameterization
+        )
+        self.computation_stack.append(None)
+        return new_bs
 
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
@@ -558,15 +506,20 @@ class SymbolicComputationTransformer(Transformer):
                 frog_ast.BinaryOperators.MULTIPLY: operator.mul,
                 frog_ast.BinaryOperators.DIVIDE: operator.truediv,
             }
-            if binary_operation.operator in operators:
+            if (
+                binary_operation.operator in operators
+                and self.computation_stack[-1] is not None
+                and self.computation_stack[-2] is not None
+            ):
                 simplified_expression = operators[binary_operation.operator](
                     self.computation_stack[-1], self.computation_stack[-2]
                 )
+            self.computation_stack.pop()
+            self.computation_stack.pop()
             if simplified_expression is not None:
-                self.computation_stack.pop()
-                self.computation_stack.pop()
                 self.computation_stack.append(simplified_expression)
                 return frog_parser.parse_expression(str(simplified_expression))
+            self.computation_stack.append(None)
 
         return frog_ast.BinaryOperation(
             binary_operation.operator, transformed_left, transformed_right
@@ -947,28 +900,40 @@ class SimplifyReturnTransformer(BlockTransformer):
         return block
 
 
-class ExpandTupleFields(BlockTransformer):
+class ExpandTupleTransformer(Transformer):
     def __init__(self) -> None:
         self.to_transform: list[str] = []
         self.lengths: list[int] = []
 
+    def _is_transformable_tuple(
+        self, the_type: frog_ast.Type, name: str, search_space: frog_ast.ASTNode
+    ) -> bool:
+        return (
+            isinstance(the_type, frog_ast.BinaryOperation)
+            and the_type.operator == frog_ast.BinaryOperators.MULTIPLY
+            and AllConstantFieldAccesses(name).visit(search_space)
+        )
+
+    def _expand_tuple_type(
+        self, the_type: frog_ast.BinaryOperation
+    ) -> list[frog_ast.Type]:
+        unfolded_types: list[frog_ast.Type] = []
+        expanded_type: frog_ast.Type | frog_ast.Expression = the_type
+        while isinstance(expanded_type, frog_ast.BinaryOperation):
+            left_expr = expanded_type.left_expression
+            assert isinstance(left_expr, frog_ast.Type)
+            unfolded_types.append(left_expr)
+            expanded_type = expanded_type.right_expression
+        assert isinstance(expanded_type, frog_ast.Type)
+        unfolded_types.append(expanded_type)
+        return unfolded_types
+
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         new_fields = []
         for field in game.fields:
-            if (
-                isinstance(field.type, frog_ast.BinaryOperation)
-                and field.type.operator == frog_ast.BinaryOperators.MULTIPLY
-                and AllConstantFieldAccesses(field.name).visit(game)
-            ):
-                unfolded_types: list[frog_ast.Type] = []
-                expanded_type: frog_ast.Type | frog_ast.Expression = field.type
-                while isinstance(expanded_type, frog_ast.BinaryOperation):
-                    left_expr = expanded_type.left_expression
-                    assert isinstance(left_expr, frog_ast.Type)
-                    unfolded_types.append(left_expr)
-                    expanded_type = expanded_type.right_expression
-                assert isinstance(expanded_type, frog_ast.Type)
-                unfolded_types.append(expanded_type)
+            if self._is_transformable_tuple(field.type, field.name, game):
+                assert isinstance(field.type, frog_ast.BinaryOperation)
+                unfolded_types = self._expand_tuple_type(field.type)
                 for index, the_type in enumerate(unfolded_types):
                     expression = None
                     if field.value:
@@ -991,9 +956,11 @@ class ExpandTupleFields(BlockTransformer):
             )
         )
 
-    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+    def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
         new_statements: list[frog_ast.Statement] = []
+        expanded_tuple_count = 0
         for index, statement in enumerate(block.statements):
+            # Assigning to the tuple means assigning each individual value
             if (
                 isinstance(statement, frog_ast.Assignment)
                 and isinstance(statement.var, frog_ast.Variable)
@@ -1008,6 +975,7 @@ class ExpandTupleFields(BlockTransformer):
                             tuple_value,
                         )
                     )
+            # Asssigning to a tuple element means assigning to that one element
             elif (
                 isinstance(statement, (frog_ast.Assignment, frog_ast.Sample))
                 and isinstance(statement.var, frog_ast.ArrayAccess)
@@ -1020,9 +988,44 @@ class ExpandTupleFields(BlockTransformer):
                     f"{statement.var.the_array.name}{statement.var.index.num}",
                 )
                 new_statements.append(new_statement)
+            elif (
+                isinstance(statement, frog_ast.Assignment)
+                and statement.the_type is not None
+                and isinstance(statement.var, frog_ast.Variable)
+                and self._is_transformable_tuple(
+                    statement.the_type, statement.var.name, block
+                )
+            ):
+                assert isinstance(statement.the_type, frog_ast.BinaryOperation)
+                unfolded_types = self._expand_tuple_type(statement.the_type)
+                assert isinstance(statement.value, frog_ast.Tuple)
+                for index, the_type in enumerate(unfolded_types):
+                    new_statements.append(
+                        frog_ast.Assignment(
+                            the_type,
+                            frog_ast.Variable(f"{statement.var.name}{index}"),
+                            statement.value.values[index],
+                        )
+                    )
+                self.to_transform.append(statement.var.name)
+                self.lengths.append(len(unfolded_types))
+                expanded_tuple_count += 1
             else:
                 new_statements.append(statement)
-        return frog_ast.Block(new_statements)
+        new_block = frog_ast.Block(
+            [self.transform(statement) for statement in new_statements]
+        )
+        self.to_transform = (
+            self.to_transform[:-expanded_tuple_count]
+            if expanded_tuple_count > 0
+            else self.to_transform
+        )
+        self.lengths = (
+            self.lengths[:-expanded_tuple_count]
+            if expanded_tuple_count > 0
+            else self.lengths
+        )
+        return new_block
 
     def transform_array_access(
         self, array_access: frog_ast.ArrayAccess

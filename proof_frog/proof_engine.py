@@ -574,7 +574,7 @@ class ProofEngine:
             game = self.apply_reduction(game, reduction_ast)
 
         while True:
-            new_game = visitors.InlineTransformer(lookup).transform(game)
+            new_game = visitors.InlineTransformer(lookup).transform(copy.deepcopy(game))
             if game != new_game:
                 game = new_game
             else:

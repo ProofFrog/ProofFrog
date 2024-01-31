@@ -1,0 +1,29 @@
+import 'examples/Primitives/SymEnc.primitive';
+import 'examples/Primitives/MAC.primitive';
+import 'examples/Games/SymEnc/CPA.game';
+import 'examples/Games/MAC/Security.game';
+import 'examples/Games/SymEnc/CCABook.game';
+import 'examples/Schemes/SymEnc/EncryptThenMAC.scheme';
+
+proof:
+    let:
+        Set SymEncKeySpace;
+        Set MACKeySpace;
+        Set MessageSpace;
+        Set CiphertextSpace;
+        Set TagSpace;
+        SymEnc E = SymEnc(MessageSpace, CiphertextSpace, SymEncKeySpace);
+        MAC M = MAC(CiphertextSpace, TagSpace, MACKeySpace);
+        EncryptThenMAC EtM = EncryptThenMAC(E, M);
+
+    assume:
+        CPA(E);
+        Security(M);
+
+    theorem:
+        CCA(EtM);
+
+    games:
+        CCA(EtM).Left against CCA(EtM).Adversary;
+
+        CCA(EtM).Right against CCA(EtM).Adversary;

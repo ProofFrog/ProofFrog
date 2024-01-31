@@ -625,21 +625,26 @@ class InlineTransformer(Transformer):
 
         final_statement = transformed_method.block.statements[-1]
 
-        assert isinstance(final_statement, frog_ast.ReturnStatement)
-
-        returned_exp = final_statement.expression
-
-        changed_statement = ReplaceTransformer(exp, returned_exp).transform(
-            block_to_transform.statements[self.statement_index]
-        )
-
         statements_after = list(
             block_to_transform.statements[self.statement_index + 1 :]
         )
 
-        self.blocks.append(
-            frog_ast.Block(statements_so_far + [changed_statement] + statements_after)
-        )
+        if isinstance(final_statement, frog_ast.ReturnStatement):
+            returned_exp = final_statement.expression
+
+            changed_statement = ReplaceTransformer(exp, returned_exp).transform(
+                block_to_transform.statements[self.statement_index]
+            )
+
+            self.blocks.append(
+                frog_ast.Block(
+                    statements_so_far + [changed_statement] + statements_after
+                )
+            )
+        else:
+            self.blocks.append(
+                frog_ast.Block(statements_so_far + [final_statement] + statements_after)
+            )
 
         self.finished = True
 

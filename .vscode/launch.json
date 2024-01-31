@@ -9,7 +9,7 @@
             "type": "python",
             "request": "launch",
             "module": "proof_frog",
-            "args": ["prove", "examples/Proofs/PubEnc/OTS=>CPA.proof", "-v"],
+            "args": ["prove", "examples/Proofs/SymEnc/EncryptThenMACCCA.proof", "-v"],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "justMyCode": true

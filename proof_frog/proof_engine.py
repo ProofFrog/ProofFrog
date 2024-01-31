@@ -645,18 +645,22 @@ class ProofEngine:
             )
 
         dfs_stack: list[dependencies.Node] = []
+        dfs_stack_visited = [False] * len(block.statements)
+        dfs_sorted_statements: list[frog_ast.Statement] = []
+
+        def do_dfs():
+            while dfs_stack:
+                node = dfs_stack.pop()
+                if not dfs_stack_visited[block.statements.index(node.statement)]:
+                    dfs_sorted_statements.append(node.statement)
+                    dfs_stack_visited[block.statements.index(node.statement)] = True
+                    for neighbour in node.in_neighbours:
+                        dfs_stack.append(neighbour)
+
         return_node = graph.find_node(is_return)
         if return_node is not None:
             dfs_stack.append(return_node)
-        dfs_stack_visited = [False] * len(block.statements)
-        dfs_sorted_statements: list[frog_ast.Statement] = []
-        while dfs_stack:
-            node = dfs_stack.pop()
-            if not dfs_stack_visited[block.statements.index(node.statement)]:
-                dfs_sorted_statements.append(node.statement)
-                dfs_stack_visited[block.statements.index(node.statement)] = True
-                for neighbour in node.in_neighbours:
-                    dfs_stack.append(neighbour)
+            do_dfs()
 
         dfs_sorted_statements.reverse()
 
@@ -669,7 +673,8 @@ class ProofEngine:
 
             found = visitors.SearchVisitor(uses_field).visit(statement)
             if statement not in dfs_sorted_statements and found is not None:
-                dfs_sorted_statements.append(statement)
+                dfs_stack.append(graph.get_node(statement))
+                do_dfs()
 
         sorted_statements: list[frog_ast.Statement] = []
         stack: list[dependencies.Node] = []

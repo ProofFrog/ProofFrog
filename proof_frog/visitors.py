@@ -345,16 +345,6 @@ class SimplifySpliceTransformer(BlockTransformer):
 class VariableStandardizingTransformer(BlockTransformer):
     def __init__(self) -> None:
         self.variable_counter = 0
-        self.field_counter = 0
-        self.field_name_map: list[tuple[frog_ast.ASTNode, frog_ast.ASTNode]] = []
-
-    def transform_field(self, field: frog_ast.Field) -> frog_ast.Field:
-        self.field_counter += 1
-        new_name = "field" + str(self.field_counter)
-        self.field_name_map.append(
-            (frog_ast.Variable(field.name), frog_ast.Variable(new_name))
-        )
-        return frog_ast.Field(field.type, new_name, field.value)
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         new_block = copy.deepcopy(block)
@@ -388,7 +378,7 @@ class VariableStandardizingTransformer(BlockTransformer):
                 new_block = ReplaceTransformer(
                     to_transform, frog_ast.Variable(expected_name)
                 ).transform(new_block)
-        return SubstitutionTransformer(self.field_name_map).transform(new_block)
+        return new_block
 
 
 class SubstitutionTransformer(Transformer):
@@ -1204,3 +1194,21 @@ class RemoveEmptyMethodTransformer(Transformer):
             else:
                 i += 1
         return new_game
+
+
+class FieldOrderingVisitor(Visitor[dict[str, str]]):
+    def __init__(self):
+        self.field_num = 0
+        self.fields = []
+        self.field_rename_map: dict[str, str] = {}
+
+    def result(self) -> dict[str, str]:
+        return self.field_rename_map
+
+    def visit_field(self, field: frog_ast.Field) -> None:
+        self.fields.append(field.name)
+
+    def visit_variable(self, var: frog_ast.Variable) -> None:
+        if var.name in self.fields and var.name not in self.field_rename_map:
+            self.field_num += 1
+            self.field_rename_map[var.name] = f"field{self.field_num}"

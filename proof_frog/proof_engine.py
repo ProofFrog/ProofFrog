@@ -420,6 +420,8 @@ class ProofEngine:
         next_game_ast = visitors.VariableStandardizingTransformer().transform(
             next_game_ast
         )
+        current_game_ast = standardize_field_names(current_game_ast)
+        next_game_ast = standardize_field_names(next_game_ast)
 
         print("CURRENT")
         print(current_game_ast)
@@ -825,3 +827,17 @@ def remove_duplicate_fields(game: frog_ast.Game) -> frog_ast.Game:
 
 def get_challenger_field_name(name: str) -> str:
     return f"challenger@{name}"
+
+
+def standardize_field_names(game: frog_ast.Game) -> frog_ast.Game:
+    field_rename_map = visitors.FieldOrderingVisitor().visit(game)
+    new_game = visitors.SubstitutionTransformer(
+        [
+            (frog_ast.Variable(field_name), frog_ast.Variable(normalized_name))
+            for field_name, normalized_name in field_rename_map.items()
+        ]
+    ).transform(game)
+    for field in new_game.fields:
+        field.name = field_rename_map[field.name]
+    new_game.fields.sort(key=lambda element: element.name)
+    return new_game

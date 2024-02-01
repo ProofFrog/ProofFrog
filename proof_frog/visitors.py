@@ -212,6 +212,67 @@ class RedundantCopyTransformer(BlockTransformer):
         return block
 
 
+class RedundantFieldCopyTransformer(BlockTransformer):
+    def __init__(self):
+        self.fields = []
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        self.fields = [field.name for field in game.fields]
+        new_game = copy.deepcopy(game)
+        new_game.methods = [self.transform(method) for method in new_game.methods]
+        return new_game
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if (
+                isinstance(statement, frog_ast.Assignment)
+                and isinstance(statement.var, frog_ast.Variable)
+                and statement.var.name in self.fields
+            ):
+                if not isinstance(statement.value, frog_ast.Variable):
+                    continue
+
+                def search_for_other_use(
+                    var: frog_ast.Variable, node: frog_ast.ASTNode
+                ):
+                    return node == var
+
+                no_other_uses = True
+                decl_index: int
+                decl_statement: frog_ast.Statement
+                for other_index, other_statement in enumerate(block.statements):
+                    if statement == other_statement:
+                        continue
+                    if (
+                        isinstance(other_statement, frog_ast.Assignment)
+                        and other_statement.the_type is not None
+                        and other_statement.var == statement.value
+                    ):
+                        decl_index = other_index
+                        decl_statement = other_statement
+                        continue
+                    if (
+                        SearchVisitor(
+                            functools.partial(search_for_other_use, statement.var)
+                        ).visit(other_statement)
+                        is not None
+                    ):
+                        no_other_uses = False
+                if not no_other_uses:
+                    continue
+                modified_statement = copy.deepcopy(statement)
+                modified_statement.value = decl_statement.value
+                return self.transform(
+                    frog_ast.Block(
+                        block.statements[:decl_index]
+                        + [modified_statement]
+                        + block.statements[decl_index + 1 : index]
+                        + block.statements[index + 1 :]
+                    )
+                )
+        return block
+
+
 class SimplifySpliceTransformer(BlockTransformer):
     def __init__(self, variables: dict[str, Symbol | frog_ast.Expression]) -> None:
         self.variables = variables

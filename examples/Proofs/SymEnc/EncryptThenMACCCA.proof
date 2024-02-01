@@ -9,16 +9,15 @@ Reduction R(SymEnc E, MAC M, EncryptThenMAC EtM) compose Security(M) against CCA
     E.Key ke;
     Set<E.Ciphertext * M.Tag> S;
     Void Initialize() {
-        E.Key ke_local = E.KeyGen();
-        ke = ke_local;
+        ke = E.KeyGen();
     }
-    E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
+    EtM.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
         E.Ciphertext c = E.Enc(ke, mL);
         M.Tag t = challenger.GetTag(c);
         S = S union [c, t];
         return [c, t];
     }
-    E.Message? Dec(E.Ciphertext c) {
+    E.Message? Decrypt(EtM.Ciphertext c) {
         if (c in S) {
             return None;
         }

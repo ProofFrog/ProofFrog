@@ -351,6 +351,14 @@ class ProofEngine:
                 fn=lambda ast: visitors.ExpandTupleTransformer().transform(ast),
                 name="Expand Tuples",
             ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifyNot().transform(ast),
+                name="Simplify Nots",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.RedundantFieldCopyTransformer().transform(ast),
+                name="Remove redundant variables for fields",
+            ),
         ]
 
         for index, game in enumerate((current_game_ast, next_game_ast)):

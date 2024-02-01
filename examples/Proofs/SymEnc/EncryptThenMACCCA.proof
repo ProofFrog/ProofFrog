@@ -41,7 +41,12 @@ Reduction R2(SymEnc E, MAC M, EncryptThenMAC EtM) compose CPA(E) against CCA(EtM
         return [c, t];
     }
     EtM.Message? Decrypt(EtM.Ciphertext c) {
-        return None;
+        if (c in S) {
+            return None;
+        }
+        if (!(c in S)) {
+            return None;
+        }
     }
 }
 

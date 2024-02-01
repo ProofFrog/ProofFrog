@@ -19,7 +19,7 @@ succeeded=true
 for proof in $proofs; do
 	echo "Running proof $proof"
 	echo "========STARTING PROOF $proof========" >> proofOutput.txt
-	python3 -m proof_frog prove $proof -v >> proofOutput.txt
+	python3 -m proof_frog prove $proof $1 >> proofOutput.txt
 	if [ $? -ne 0 ]; then
 		succeeded=false
 		echo -e "${RED}FAILED PROOF $proof${NC}"

@@ -5,6 +5,30 @@ import 'examples/Games/MAC/Security.game';
 import 'examples/Games/SymEnc/CCABook.game';
 import 'examples/Schemes/SymEnc/EncryptThenMAC.scheme';
 
+Reduction R(SymEnc E, MAC M, EncryptThenMAC EtM) compose Security(M) against CCA(EtM).Adversary {
+    E.Key ke;
+    Set<E.Ciphertext * M.Tag> S;
+    Void Initialize() {
+        E.Key ke_local = E.KeyGen();
+        ke = ke_local;
+    }
+    E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
+        E.Ciphertext c = E.Enc(ke, mL);
+        M.Tag t = challenger.GetTag(c);
+        S = S union [c, t];
+        return [c, t];
+    }
+    E.Message? Dec(E.Ciphertext c) {
+        if (c in S) {
+            return None;
+        }
+        if (!challenger.CheckTag(c[0], c[1])) {
+            return None;
+        }
+        return E.Dec(ke, c[0]);
+    }
+}
+
 proof:
     let:
         Set SymEncKeySpace;
@@ -25,5 +49,7 @@ proof:
 
     games:
         CCA(EtM).Left against CCA(EtM).Adversary;
+
+        Security(M).Real compose R(E, M, EtM) against CCA(EtM).Adversary;
 
         CCA(EtM).Right against CCA(EtM).Adversary;

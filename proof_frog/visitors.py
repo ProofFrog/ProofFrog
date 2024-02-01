@@ -983,26 +983,12 @@ class ExpandTupleTransformer(Transformer):
             and AllConstantFieldAccesses(name).visit(search_space)
         )
 
-    def _expand_tuple_type(
-        self, the_type: frog_ast.BinaryOperation
-    ) -> list[frog_ast.Type]:
-        unfolded_types: list[frog_ast.Type] = []
-        expanded_type: frog_ast.Type | frog_ast.Expression = the_type
-        while isinstance(expanded_type, frog_ast.BinaryOperation):
-            left_expr = expanded_type.left_expression
-            assert isinstance(left_expr, frog_ast.Type)
-            unfolded_types.append(left_expr)
-            expanded_type = expanded_type.right_expression
-        assert isinstance(expanded_type, frog_ast.Type)
-        unfolded_types.append(expanded_type)
-        return unfolded_types
-
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         new_fields = []
         for field in game.fields:
             if self._is_transformable_tuple(field.type, field.name, game):
                 assert isinstance(field.type, frog_ast.BinaryOperation)
-                unfolded_types = self._expand_tuple_type(field.type)
+                unfolded_types = frog_ast.expand_tuple_type(field.type)
                 for index, the_type in enumerate(unfolded_types):
                     expression = None
                     if field.value:
@@ -1066,7 +1052,7 @@ class ExpandTupleTransformer(Transformer):
                 )
             ):
                 assert isinstance(statement.the_type, frog_ast.BinaryOperation)
-                unfolded_types = self._expand_tuple_type(statement.the_type)
+                unfolded_types = frog_ast.expand_tuple_type(statement.the_type)
                 assert isinstance(statement.value, frog_ast.Tuple)
                 for index, the_type in enumerate(unfolded_types):
                     new_statements.append(
@@ -1264,3 +1250,31 @@ class GetTypeMapVisitor(Visitor[NameTypeMap]):
     @_test_stop
     def visit_ast_node(self, node: frog_ast.ASTNode):
         pass
+
+
+class SimplifyTupleTransformer(Transformer):
+    def __init__(self, ast):
+        self.ast = ast
+
+    def transform_tuple(self, tuple: frog_ast.Tuple):
+        if not all(isinstance(value, frog_ast.ArrayAccess) for value in tuple.values):
+            return tuple
+        if not all(isinstance(value.index, frog_ast.Integer) for value in tuple.values):
+            return tuple
+        if not all(
+            value.index.num == index for index, value in enumerate(tuple.values)
+        ):
+            return tuple
+        if not all(
+            isinstance(value.the_array, frog_ast.Variable) for value in tuple.values
+        ):
+            return tuple
+        tuple_val_name = tuple.values[0].the_array.name
+        if not all(value.the_array.name == tuple_val_name for value in tuple.values):
+            return tuple
+
+        type_map = GetTypeMapVisitor(tuple).visit(self.ast)
+        expanded_type_array = frog_ast.expand_tuple_type(type_map.get(tuple_val_name))
+        if len(expanded_type_array) == len(tuple.values):
+            return frog_ast.Variable(tuple_val_name)
+        return tuple

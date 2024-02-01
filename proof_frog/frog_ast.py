@@ -739,3 +739,16 @@ def pretty_print(program: str) -> str:
         if "{" in line:
             indent += 1
     return output_string
+
+
+def expand_tuple_type(the_type: BinaryOperation) -> list[Type]:
+    unfolded_types: list[Type] = []
+    expanded_type: Type | Expression = the_type
+    while isinstance(expanded_type, BinaryOperation):
+        left_expr = expanded_type.left_expression
+        assert isinstance(left_expr, Type)
+        unfolded_types.append(left_expr)
+        expanded_type = expanded_type.right_expression
+    assert isinstance(expanded_type, Type)
+    unfolded_types.append(expanded_type)
+    return unfolded_types

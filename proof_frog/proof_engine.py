@@ -359,6 +359,10 @@ class ProofEngine:
                 fn=lambda ast: visitors.RedundantFieldCopyTransformer().transform(ast),
                 name="Remove redundant variables for fields",
             ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifyTupleTransformer(ast).transform(ast),
+                name="Simplify tuples that are copies of their fields",
+            ),
         ]
 
         for index, game in enumerate((current_game_ast, next_game_ast)):

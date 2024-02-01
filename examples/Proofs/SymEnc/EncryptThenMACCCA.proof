@@ -5,19 +5,19 @@ import 'examples/Games/MAC/Security.game';
 import 'examples/Games/SymEnc/CCABook.game';
 import 'examples/Schemes/SymEnc/EncryptThenMAC.scheme';
 
-Reduction R(SymEnc E, MAC M, EncryptThenMAC EtM) compose Security(M) against CCA(EtM).Adversary {
+Reduction R1(SymEnc E, MAC M, EncryptThenMAC EtM) compose Security(M) against CCA(EtM).Adversary {
     E.Key ke;
     Set<E.Ciphertext * M.Tag> S;
     Void Initialize() {
         ke = E.KeyGen();
     }
-    EtM.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
+    EtM.Ciphertext Eavesdrop(EtM.Message mL, EtM.Message mR) {
         E.Ciphertext c = E.Enc(ke, mL);
         M.Tag t = challenger.GetTag(c);
         S = S union [c, t];
         return [c, t];
     }
-    E.Message? Decrypt(EtM.Ciphertext c) {
+    EtM.Message? Decrypt(EtM.Ciphertext c) {
         if (c in S) {
             return None;
         }
@@ -25,6 +25,23 @@ Reduction R(SymEnc E, MAC M, EncryptThenMAC EtM) compose Security(M) against CCA
             return None;
         }
         return E.Dec(ke, c[0]);
+    }
+}
+
+Reduction R2(SymEnc E, MAC M, EncryptThenMAC EtM) compose CPA(E) against CCA(EtM).Adversary {
+    M.Key km;
+    Set<E.Ciphertext * M.Tag> S;
+    void Initialize() {
+        km = M.KeyGen();
+    }
+    EtM.Ciphertext Eavesdrop(EtM.Message mL, EtM.Message mR) {
+        E.Ciphertext c = challenger.Eavesdrop(mL, mR);
+        M.Tag t = M.MAC(km, c);
+        S = S union [c, t];
+        return [c, t];
+    }
+    EtM.Message? Decrypt(EtM.Ciphertext c) {
+        return None;
     }
 }
 
@@ -49,6 +66,10 @@ proof:
     games:
         CCA(EtM).Left against CCA(EtM).Adversary;
 
-        Security(M).Real compose R(E, M, EtM) against CCA(EtM).Adversary;
+        Security(M).Real compose R1(E, M, EtM) against CCA(EtM).Adversary;
+
+        Security(M).Random compose R1(E, M, EtM) against CCA(EtM).Adversary;
+
+        CPA(E).Left compose R2(E, M, EtM) against CCA(EtM).Adversary;
 
         CCA(EtM).Right against CCA(EtM).Adversary;

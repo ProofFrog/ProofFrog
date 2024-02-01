@@ -1,6 +1,8 @@
+from __future__ import annotations
 import copy
 import functools
 import operator
+from collections import namedtuple
 from abc import ABC, abstractmethod
 from typing import (
     Any,
@@ -1177,3 +1179,88 @@ class FieldOrderingVisitor(Visitor[dict[str, str]]):
         if var.name in self.fields and var.name not in self.field_rename_map:
             self.field_num += 1
             self.field_rename_map[var.name] = f"field{self.field_num}"
+
+
+NameTypePair = namedtuple("NameTypePair", ["name", "type"])
+
+
+class NameTypeMap:
+    def __init__(self):
+        self.type_map: list[NameTypePair] = []
+
+    def set(self, name: str, the_type: frog_ast.Type):
+        for index, item in enumerate(self.type_map):
+            if item.name == name:
+                self.type_map[index] = NameTypePair(item.name, the_type)
+                return
+        self.type_map.append(NameTypePair(name=name, type=the_type))
+
+    def get(self, name: str) -> Optional[frog_ast.Type]:
+        for item in self.type_map:
+            if item.name == name:
+                return item.type
+        return None
+
+    def remove(self, name: str) -> None:
+        for index, item in enumerate(self.type_map):
+            if item.name == name:
+                del self.type_map[index]
+                return
+
+    def __add__(self, other: NameTypeMap):
+        new_map = NameTypeMap()
+        for val in self.type_map:
+            new_map.set(val.name, val.type)
+        for val in other.type_map:
+            new_map.set(val.name, val.type)
+        return new_map
+
+
+def _test_stop(func):
+    def wrapper(self, param):
+        if param is self.stopping_point:
+            self.stopped = True
+        if not self.stopped:
+            func(self, param)
+
+    return wrapper
+
+
+class GetTypeMapVisitor(Visitor[NameTypeMap]):
+    def __init__(self, stopping_point: frog_ast.ASTNode):
+        self.stopping_point = stopping_point
+        self.stopped = False
+        self.type_map = NameTypeMap()
+
+    def result(self) -> NameTypeMap:
+        return self.type_map
+
+    @_test_stop
+    def visit_field(self, field: frog_ast.Field):
+        self.type_map.set(field.name, field.type)
+
+    @_test_stop
+    def visit_assignment(self, assignment: frog_ast.Assignment):
+        if assignment.the_type is not None:
+            assert isinstance(assignment.var, frog_ast.Variable)
+            self.type_map.set(assignment.var.name, assignment.the_type)
+
+    @_test_stop
+    def visit_sample(self, sample: frog_ast.Sample):
+        if sample.the_type is not None:
+            assert isinstance(sample.var, frog_ast.Variable)
+            self.type_map.set(sample.var.name, sample.the_type)
+
+    @_test_stop
+    def visit_variable_declaration(
+        self, variable_declaration: frog_ast.VariableDeclaration
+    ):
+        self.type_map.set(variable_declaration.name, variable_declaration.the_type)
+
+    @_test_stop
+    def visit_parameter(self, parameter: frog_ast.Parameter):
+        self.type_map.set(parameter.name, parameter.type)
+
+    @_test_stop
+    def visit_ast_node(self, node: frog_ast.ASTNode):
+        pass

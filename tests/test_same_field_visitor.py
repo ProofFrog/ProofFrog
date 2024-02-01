@@ -182,6 +182,10 @@ from proof_frog import visitors, frog_parser
 def test_same_field_visitor(game: str, pair: tuple[str, str], expected: bool) -> None:
     game_ast = frog_parser.parse_game(game)
 
+    print("GAME", game_ast)
     are_the_same = visitors.SameFieldVisitor(pair).visit(game_ast)
 
-    assert are_the_same == expected
+    if expected:
+        assert isinstance(are_the_same, list)
+    else:
+        assert are_the_same is None

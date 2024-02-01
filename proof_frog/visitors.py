@@ -1280,19 +1280,23 @@ class SimplifyTupleTransformer(Transformer):
         return tuple
 
 
-class SameFieldVisitor(Visitor[bool]):
+class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
     def __init__(self, field_name_pair: tuple[str, str]):
         self.field_name_pair = field_name_pair
         self.are_same = True
+        self.paired_statements = []
 
-    def result(self) -> bool:
-        return self.are_same
+    def result(self) -> Optional[list[frog_ast.Statement]]:
+        return None if not self.are_same else self.paired_statements
 
     def visit_block(self, block: frog_ast.Block) -> None:
         if not self.are_same:
             return
 
         for index, statement in enumerate(block.statements):
+            if statement in self.paired_statements:
+                continue
+
             if not isinstance(statement, frog_ast.Assignment):
                 continue
             if not isinstance(statement.var, frog_ast.Variable):
@@ -1328,41 +1332,44 @@ class SameFieldVisitor(Visitor[bool]):
             assigns_variable_partial = functools.partial(
                 assigns_variable, used_variables
             )
-            paired = False
+
             paired_value = SubstitutionTransformer(
                 [(statement.var, frog_ast.Variable(pair_name))]
             ).transform(statement.value)
-            for prior_statement in block.statements[:index][::-1]:
-                if (
-                    SearchVisitor(assigns_variable_partial).visit(prior_statement)
-                    is not None
-                ):
-                    break
-                if (
-                    isinstance(prior_statement, frog_ast.Assignment)
-                    and isinstance(prior_statement.var, frog_ast.Variable)
-                    and prior_statement.var.name == pair_name
-                    and prior_statement.value == paired_value
-                ):
-                    paired = True
-                    break
-            if paired:
-                continue
+
+            paired = False
             for subsequent_statement in block.statements[index + 1 :]:
                 if (
                     SearchVisitor(assigns_variable_partial).visit(subsequent_statement)
                     is not None
                 ):
-                    break
+                    self.are_same = False
+                    return
+
                 if (
                     isinstance(subsequent_statement, frog_ast.Assignment)
                     and isinstance(subsequent_statement.var, frog_ast.Variable)
                     and subsequent_statement.var.name == pair_name
-                    and subsequent_statement.value == paired_value
+                    and (
+                        subsequent_statement.value == paired_value
+                        or subsequent_statement.value == statement.var
+                    )
                 ):
                     paired = True
+                    self.paired_statements.append(subsequent_statement)
                     break
-            if paired:
-                continue
-            self.are_same = False
-            break
+            if not paired:
+                self.are_same = False
+                return
+
+
+class RemoveStatementTransformer(BlockTransformer):
+    def __init__(self, to_remove: list[frog_ast.Statement]):
+        self.to_remove = to_remove
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        new_statements = []
+        for statement in block.statements:
+            if statement not in self.to_remove:
+                new_statements.append(statement)
+        return frog_ast.Block(new_statements)

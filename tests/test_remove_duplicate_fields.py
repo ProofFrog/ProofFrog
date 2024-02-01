@@ -126,6 +126,7 @@ def test_remove_duplicate_fields(
     game_ast = frog_parser.parse_game(method)
     expected_ast = frog_parser.parse_game(expected)
 
+    print("EXPECTED", expected_ast)
     transformed_ast = proof_engine.remove_duplicate_fields(game_ast)
-    print(transformed_ast)
+    print("TRANSFORMED", transformed_ast)
     assert transformed_ast == expected_ast

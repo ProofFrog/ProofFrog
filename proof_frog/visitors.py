@@ -868,6 +868,15 @@ class CollapseAssignmentTransformer(BlockTransformer):
 
 
 class SimplifyReturnTransformer(BlockTransformer):
+    def __init__(self) -> None:
+        self.fields: list[str] = []
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        self.fields = [field.name for field in game.fields]
+        new_game = copy.deepcopy(game)
+        new_game.methods = [self.transform(method) for method in new_game.methods]
+        return new_game
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         if not block.statements:
             return block
@@ -875,6 +884,8 @@ class SimplifyReturnTransformer(BlockTransformer):
         if not isinstance(last_statement, frog_ast.ReturnStatement):
             return block
         if not isinstance(last_statement.expression, frog_ast.Variable):
+            return block
+        if last_statement.expression.name in self.fields:
             return block
         index = len(block.statements) - 1
 

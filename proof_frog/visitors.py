@@ -1278,3 +1278,91 @@ class SimplifyTupleTransformer(Transformer):
         if len(expanded_type_array) == len(tuple.values):
             return frog_ast.Variable(tuple_val_name)
         return tuple
+
+
+class SameFieldVisitor(Visitor[bool]):
+    def __init__(self, field_name_pair: tuple[str, str]):
+        self.field_name_pair = field_name_pair
+        self.are_same = True
+
+    def result(self) -> bool:
+        return self.are_same
+
+    def visit_block(self, block: frog_ast.Block) -> None:
+        if not self.are_same:
+            return
+
+        for index, statement in enumerate(block.statements):
+            if not isinstance(statement, frog_ast.Assignment):
+                continue
+            if not isinstance(statement.var, frog_ast.Variable):
+                continue
+            if statement.var.name not in self.field_name_pair:
+                continue
+
+            assigned_name = statement.var.name
+            pair_name = (
+                self.field_name_pair[0]
+                if assigned_name == self.field_name_pair[1]
+                else self.field_name_pair[1]
+            )
+
+            def contains_func(node: frog_ast.ASTNode) -> bool:
+                return isinstance(node, frog_ast.FuncCall)
+
+            if SearchVisitor(contains_func).visit(statement) is not None:
+                self.are_same = False
+                return
+
+            used_variables = VariableCollectionVisitor().visit(statement.value)
+
+            def assigns_variable(used_variables, node: frog_ast.ASTNode) -> bool:
+                return isinstance(node, (frog_ast.Assignment, frog_ast.Sample)) and (
+                    (node.var in used_variables)
+                    or (
+                        isinstance(node.var, frog_ast.ArrayAccess)
+                        and node.var.the_array in used_variables
+                    )
+                )
+
+            assigns_variable_partial = functools.partial(
+                assigns_variable, used_variables
+            )
+            paired = False
+            paired_value = SubstitutionTransformer(
+                [(statement.var, frog_ast.Variable(pair_name))]
+            ).transform(statement.value)
+            for prior_statement in block.statements[:index][::-1]:
+                if (
+                    SearchVisitor(assigns_variable_partial).visit(prior_statement)
+                    is not None
+                ):
+                    break
+                if (
+                    isinstance(prior_statement, frog_ast.Assignment)
+                    and isinstance(prior_statement.var, frog_ast.Variable)
+                    and prior_statement.var.name == pair_name
+                    and prior_statement.value == paired_value
+                ):
+                    paired = True
+                    break
+            if paired:
+                continue
+            for subsequent_statement in block.statements[index + 1 :]:
+                if (
+                    SearchVisitor(assigns_variable_partial).visit(subsequent_statement)
+                    is not None
+                ):
+                    break
+                if (
+                    isinstance(subsequent_statement, frog_ast.Assignment)
+                    and isinstance(subsequent_statement.var, frog_ast.Variable)
+                    and subsequent_statement.var.name == pair_name
+                    and subsequent_statement.value == paired_value
+                ):
+                    paired = True
+                    break
+            if paired:
+                continue
+            self.are_same = False
+            break

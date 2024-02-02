@@ -436,6 +436,12 @@ class ProofEngine:
         )
         current_game_ast = standardize_field_names(current_game_ast)
         next_game_ast = standardize_field_names(next_game_ast)
+        current_game_ast = dependencies.BubbleSortFieldAssignment().transform(
+            current_game_ast
+        )
+        next_game_ast = dependencies.BubbleSortFieldAssignment().transform(
+            next_game_ast
+        )
 
         print("CURRENT")
         print(current_game_ast)

@@ -1252,15 +1252,29 @@ class FieldOrderingVisitor(Visitor[dict[str, str]]):
         self.field_num = 0
         self.fields = []
         self.field_rename_map: dict[str, str] = {}
+        self.in_initialize = False
 
     def result(self) -> dict[str, str]:
         return self.field_rename_map
+
+    def visit_method_signature(
+        self, method_signature: frog_ast.MethodSignature
+    ) -> None:
+        if method_signature.name == "Initialize":
+            self.in_initialize = True
+
+    def leave_method(self, __: frog_ast.Method) -> None:
+        self.in_initialize = False
 
     def visit_field(self, field: frog_ast.Field) -> None:
         self.fields.append(field.name)
 
     def visit_variable(self, var: frog_ast.Variable) -> None:
-        if var.name in self.fields and var.name not in self.field_rename_map:
+        if (
+            var.name in self.fields
+            and var.name not in self.field_rename_map
+            and not self.in_initialize
+        ):
             self.field_num += 1
             self.field_rename_map[var.name] = f"field{self.field_num}"
 

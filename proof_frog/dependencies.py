@@ -1,5 +1,6 @@
 from __future__ import annotations
 import functools
+import copy
 from typing import Optional, Callable
 from . import visitors
 from . import frog_ast
@@ -177,3 +178,40 @@ class UnnecessaryFieldVisitor(visitors.Visitor[list[str]]):
         for node in graph.nodes:
             if visitors.SearchVisitor(has_return_statement).visit(node.statement):
                 search_dependencies(node)
+
+
+class BubbleSortFieldAssignment(visitors.BlockTransformer):
+    def __init__(self):
+        self.fields = []
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        new_game = copy.deepcopy(game)
+        self.fields = new_game.fields
+        new_game.methods = [self.transform(method) for method in new_game.methods]
+        return new_game
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        graph = generate_dependency_graph(block, self.fields, {})
+        new_statements = copy.deepcopy(block.statements)
+        while True:
+            swapped = False
+            for i in range(1, len(new_statements)):
+                first = new_statements[i - 1]
+                second = new_statements[i]
+                if (
+                    isinstance(first, (frog_ast.Assignment, frog_ast.Sample))
+                    and isinstance(second, (frog_ast.Assignment, frog_ast.Sample))
+                    and isinstance(first.var, frog_ast.Variable)
+                    and isinstance(second.var, frog_ast.Variable)
+                    and first.var.name in [field.name for field in self.fields]
+                    and second.var.name in [field.name for field in self.fields]
+                    and first.var.name > second.var.name
+                    and graph.get_node(first)
+                    not in graph.get_node(second).in_neighbours
+                ):
+                    new_statements[i - 1] = second
+                    new_statements[i] = first
+                    swapped = True
+            if not swapped:
+                break
+        return frog_ast.Block(new_statements)

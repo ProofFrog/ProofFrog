@@ -649,7 +649,7 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         self.type_map = type_map
 
     def result(self) -> Optional[z3.AstRef]:
-        return self.stack[-1]
+        return self.stack[-1] if self.stack else None
 
     def visit_variable(self, var: frog_ast.Variable) -> None:
         if isinstance(self.type_map.get(var.name), frog_ast.IntType):
@@ -659,6 +659,16 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
 
     def visit_integer(self, node: frog_ast.Integer) -> None:
         self.stack.append(node.num)
+
+    def leave_unary_operation(self, op: frog_ast.UnaryOperation) -> None:
+        if op.operator == frog_ast.UnaryOperators.NOT and self.stack:
+            val = self.stack.pop()
+            if val is not None:
+                self.stack.append(z3.Not(self.stack.pop()))
+            else:
+                self.stack.append(None)
+        else:
+            self.stack.append(None)
 
     def leave_binary_operation(self, op: frog_ast.BinaryOperation) -> None:
         operators = {
@@ -675,8 +685,8 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
             frog_ast.BinaryOperators.OR: z3.Or,
             frog_ast.BinaryOperators.AND: z3.And,
         }
-        right_item = self.stack.pop()
-        left_item = self.stack.pop()
+        right_item = self.stack.pop() if self.stack else None
+        left_item = self.stack.pop() if self.stack else None
         if right_item is not None and left_item is not None:
             self.stack.append(operators[op.operator](left_item, right_item))
         else:
@@ -688,21 +698,34 @@ class SimplifyRangeTransformer(Transformer):
         self,
         proof_let_types: NameTypeMap,
         game: frog_ast.Game,
-        binary_op: frog_ast.BinaryOperation,
+        op: frog_ast.BinaryOperation | frog_ast.UnaryOperation,
     ) -> None:
         self.game = game
         self.proof_let_types = proof_let_types
         type_map = GetTypeMapVisitor(game.methods[0]).visit(game) + proof_let_types
-        self.assumed_formula = Z3FormulaVisitor(type_map).visit(binary_op)
+        self.assumed_op = op
+        self.assumed_formula = Z3FormulaVisitor(type_map).visit(op)
         if self.assumed_formula is not None:
             self.solver = z3.Solver()
             self.solver.add(self.assumed_formula)
 
+    def transform_unary_operation(
+        self, unary_operation: frog_ast.UnaryOperation
+    ) -> frog_ast.Expression:
+        return self._get_op(unary_operation)
+
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
     ) -> frog_ast.Expression:
+        return self._get_op(binary_operation)
+
+    def _get_op(
+        self, operation: frog_ast.BinaryOperation | frog_ast.UnaryOperation
+    ) -> frog_ast.Expression:
+        if operation == self.assumed_op:
+            return frog_ast.Boolean(True)
         if (
-            binary_operation.operator
+            operation.operator
             not in (
                 frog_ast.BinaryOperators.EQUALS,
                 frog_ast.BinaryOperators.NOTEQUALS,
@@ -712,16 +735,15 @@ class SimplifyRangeTransformer(Transformer):
                 frog_ast.BinaryOperators.GEQ,
                 frog_ast.BinaryOperators.AND,
                 frog_ast.BinaryOperators.OR,
+                frog_ast.UnaryOperators.NOT,
             )
             or self.assumed_formula is None
         ):
-            return binary_operation
-        type_map = (
-            GetTypeMapVisitor(binary_operation).visit(self.game) + self.proof_let_types
-        )
-        statement_formula = Z3FormulaVisitor(type_map).visit(binary_operation)
+            return operation
+        type_map = GetTypeMapVisitor(operation).visit(self.game) + self.proof_let_types
+        statement_formula = Z3FormulaVisitor(type_map).visit(operation)
         if statement_formula is None:
-            return binary_operation
+            return operation
         self.solver.push()
         self.solver.add(statement_formula)
         satisfied = self.solver.check() == z3.sat
@@ -732,7 +754,7 @@ class SimplifyRangeTransformer(Transformer):
         s.add(z3.Not(z3.Implies(self.assumed_formula, statement_formula)))
         if s.check() == z3.unsat:
             return frog_ast.Boolean(True)
-        return binary_operation
+        return operation
 
 
 class BranchEliminiationTransformer(BlockTransformer):

@@ -188,6 +188,169 @@ from proof_frog import visitors, frog_parser
             }
             """,
         ),
+        (
+            """
+            Int f(Bool a, Bool b) {
+                if (b) {
+                    return 1;
+                }
+                if (a) {
+                    b = !b;
+                }
+                if (!b) {
+                    return 2;
+                }
+                return 3;
+            }
+            """,
+            """
+            Int f(Bool a, Bool b) {
+                if (b) {
+                    return 1;
+                }
+                if (a) {
+                    b = !b;
+                }
+                if (!b) {
+                    return 2;
+                }
+                return 3;
+            }
+            """,
+        ),
+        (
+            """
+            Int f(Int x, Set<Int> s) {
+                if (x in S) {
+                    return 1;
+                }
+                if (!(x in S)) {
+                    return 2;
+                }
+                return 3;
+            }
+            """,
+            """
+            Int f(Int x, Set<Int> s) {
+                if (x in S) {
+                    return 1;
+                }
+                if (!(x in S)) {
+                    return 2;
+                }
+            }
+            """,
+        ),
+        (
+            """
+            Int f(Int x, Set<Int> s) {
+                if (challenger.g() in S) {
+                    return 1;
+                }
+                if (!(challenger.g() in S)) {
+                    return 2;
+                }
+                return 3;
+            }
+            """,
+            """
+            Int f(Int x, Set<Int> s) {
+                if (challenger.g() in S) {
+                    return 1;
+                }
+                if (!(challenger.g() in S)) {
+                    return 2;
+                }
+            }
+            """,
+        ),
+        (
+            """
+            Int f(Int x, Set<Int> s) {
+                if (x in S) {
+                    return 1;
+                }
+                x = 2;
+                if (!(x in S)) {
+                    return 2;
+                }
+                return 3;
+            }
+            """,
+            """
+            Int f(Int x, Set<Int> s) {
+                if (x in S) {
+                    return 1;
+                }
+                x = 2;
+                if (!(x in S)) {
+                    return 2;
+                }
+                return 3;
+            }
+            """,
+        ),
+        (
+            """
+            Int f(Int x, Set<Int> s, Set<Int> t) {
+                if (x in S) {
+                    return 1;
+                }
+                s = t;
+                if (!(x in S)) {
+                    return 2;
+                }
+                return 3;
+            }
+            """,
+            """
+            Int f(Int x, Set<Int> s, Set<Int> t) {
+                if (x in S) {
+                    return 1;
+                }
+                s = t;
+                if (!(x in S)) {
+                    return 2;
+                }
+                return 3;
+            }
+            """,
+        ),
+        (
+            """
+            Int f(Int x, Set<Int> s, Set<Int> t) {
+                if (x in s && x in t) {
+                    return 1;
+                }
+                if (!(x in s) && x in t) {
+                    return 2;
+                }
+                if (x in s && !(x in t)) {
+                    return 3;
+                }
+                if (!(x in s) && !(x in t)) {
+                    return 4;
+                }
+                return 5;
+            }
+            """,
+            """
+            Int f(Int x, Set<Int> s, Set<Int> t) {
+                if (x in s && x in t) {
+                    return 1;
+                }
+                if (!(x in s) && x in t) {
+                    return 2;
+                }
+                if (x in s && !(x in t)) {
+                    return 3;
+                }
+                if (!(x in s) && !(x in t)) {
+                    return 4;
+                }
+            }
+            """,
+        ),
     ],
 )
 def test_unreachable_transformer(

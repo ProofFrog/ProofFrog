@@ -149,8 +149,8 @@ def serializedATN():
         0,352,394,3,28,14,20,353,354,10,18,0,0,354,355,5,10,0,0,355,394,
         3,28,14,19,356,357,10,17,0,0,357,358,5,24,0,0,358,394,3,28,14,18,
         359,360,10,16,0,0,360,361,5,25,0,0,361,394,3,28,14,17,362,363,10,
-        15,0,0,363,364,5,28,0,0,364,394,3,28,14,16,365,366,10,14,0,0,366,
-        367,5,42,0,0,367,394,3,28,14,15,368,369,10,13,0,0,369,370,5,46,0,
+        15,0,0,363,364,5,46,0,0,364,394,3,28,14,16,365,366,10,14,0,0,366,
+        367,5,42,0,0,367,394,3,28,14,15,368,369,10,13,0,0,369,370,5,28,0,
         0,370,394,3,28,14,14,371,372,10,12,0,0,372,373,5,26,0,0,373,394,
         3,28,14,13,374,375,10,11,0,0,375,376,5,47,0,0,376,394,3,28,14,12,
         377,378,10,10,0,0,378,379,5,29,0,0,379,394,3,28,14,11,380,381,10,
@@ -2860,14 +2860,14 @@ class SchemeParser ( Parser ):
                         pass
 
                     elif la_ == 11:
-                        localctx = SchemeParser.AndExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = SchemeParser.InExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 362
                         if not self.precpred(self._ctx, 15):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 15)")
                         self.state = 363
-                        self.match(SchemeParser.AND)
+                        self.match(SchemeParser.IN)
                         self.state = 364
                         self.expression(16)
                         pass
@@ -2886,14 +2886,14 @@ class SchemeParser ( Parser ):
                         pass
 
                     elif la_ == 13:
-                        localctx = SchemeParser.InExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = SchemeParser.AndExpContext(self, SchemeParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 368
                         if not self.precpred(self._ctx, 13):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 13)")
                         self.state = 369
-                        self.match(SchemeParser.IN)
+                        self.match(SchemeParser.AND)
                         self.state = 370
                         self.expression(14)
                         pass

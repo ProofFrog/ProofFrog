@@ -50,9 +50,10 @@ expression:
 	| expression L_ANGLE expression # ltExp
 	| expression GEQ expression #geqExp
 	| expression LEQ expression #leqExp
-	| expression AND expression #andExp
-	| expression SUBSETS expression #subsetsExp
 	| expression IN expression #inExp
+	| expression SUBSETS expression #subsetsExp
+
+	| expression AND expression #andExp
 	| expression OR expression #orExp
 	| expression UNION expression #unionExp
 	| expression BACKSLASH expression #setMinusExp

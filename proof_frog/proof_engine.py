@@ -367,6 +367,12 @@ class ProofEngine:
                 fn=lambda ast: visitors.SimplifyTupleTransformer(ast).transform(ast),
                 name="Simplify tuples that are copies of their fields",
             ),
+            AstManipulator(
+                fn=lambda ast: visitors.RemoveUnreachableTransformer(ast).transform(
+                    ast
+                ),
+                name="Remove unreachable blocks of code",
+            ),
         ]
 
         for index, game in enumerate((current_game_ast, next_game_ast)):

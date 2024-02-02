@@ -39,29 +39,31 @@ class Visitor(ABC, Generic[U]):
     def result(self) -> U:
         pass
 
-    def visit(self, node: frog_ast.ASTNode) -> U:
-        visit_name = "visit_" + _to_snake_case(type(node).__name__)
-        if hasattr(self, visit_name):
-            getattr(self, visit_name)(node)
-        elif hasattr(self, "visit_ast_node"):
-            getattr(self, "visit_ast_node")(node)
+    def visit(self, visiting_node: frog_ast.ASTNode) -> U:
+        def visit_helper(node: frog_ast.Node) -> None:
+            visit_name = "visit_" + _to_snake_case(type(node).__name__)
+            if hasattr(self, visit_name):
+                getattr(self, visit_name)(node)
+            elif hasattr(self, "visit_ast_node"):
+                getattr(self, "visit_ast_node")(node)
 
-        def visit_children(child: Any) -> Any:
-            if isinstance(child, frog_ast.ASTNode):
-                self.visit(child)
-            if isinstance(child, list):
-                for item in child:
-                    visit_children(item)
+            def visit_children(child: Any) -> Any:
+                if isinstance(child, frog_ast.ASTNode):
+                    visit_helper(child)
+                if isinstance(child, list):
+                    for item in child:
+                        visit_children(item)
 
-        for attr in vars(node):
-            visit_children(getattr(node, attr))
+            for attr in vars(node):
+                visit_children(getattr(node, attr))
 
-        leave_name = "leave_" + _to_snake_case(type(node).__name__)
-        if hasattr(self, leave_name):
-            getattr(self, leave_name)(node)
-        elif hasattr(self, "leave_ast_node"):
-            getattr(self, "leave_ast_node")(node)
+            leave_name = "leave_" + _to_snake_case(type(node).__name__)
+            if hasattr(self, leave_name):
+                getattr(self, leave_name)(node)
+            elif hasattr(self, "leave_ast_node"):
+                getattr(self, "leave_ast_node")(node)
 
+        visit_helper(visiting_node)
         return self.result()
 
 
@@ -706,20 +708,40 @@ class InlineTransformer(Transformer):
 
 class Z3FormulaVisitor(Visitor[z3.AstRef]):
     # Don't just append Int(var.name), need mapping from name to new name in this formula
-    def __init__(self, type_map: NameTypeMap) -> None:
+    def __init__(self, type_map: NameTypeMap, variable_version_map=None) -> None:
         self.stack: list[Optional[z3.AstRef]] = []
         self.type_map = type_map
+        self.variable_version_map = variable_version_map
+        self.bool_num = 0
+        self.expression_formula_map = []
 
     def result(self) -> Optional[z3.AstRef]:
-        return self.stack[-1] if self.stack else None
+        value = self.stack[-1] if self.stack else None
+        self.stack = []
+        return value
+
+    def set_type_map(self, type_map):
+        self.type_map = type_map
+
+    def set_variable_version_map(self, version_map):
+        self.variable_version_map = version_map
+
+    def _search_expression_formula_map(self, potential):
+        for item in self.expression_formula_map:
+            if item[0] == potential:
+                return item[1]
+        return None
 
     def visit_variable(self, var: frog_ast.Variable) -> None:
+        name = var.name
+        if self.variable_version_map and name in self.variable_version_map:
+            name = f"{name}@z3@{self.variable_version_map[name]}"
         if isinstance(self.type_map.get(var.name), frog_ast.IntType):
-            self.stack.append(z3.Int(var.name))
+            self.stack.append(z3.Int(name))
         elif isinstance(self.type_map.get(var.name), frog_ast.BoolType):
-            self.stack.append(z3.Bool(var.name))
+            self.stack.append(z3.Bool(name))
         else:
-            self.stack.append(None)
+            self.stack.append(name)
 
     def visit_integer(self, node: frog_ast.Integer) -> None:
         self.stack.append(node.num)
@@ -754,7 +776,30 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         }
         right_item = self.stack.pop() if self.stack else None
         left_item = self.stack.pop() if self.stack else None
-        if right_item is not None and left_item is not None:
+        if (
+            right_item is not None
+            and left_item is not None
+            and op.operator
+            in set([frog_ast.BinaryOperators.IN, frog_ast.BinaryOperators.SUBSETS])
+        ):
+            z3_bool = self._search_expression_formula_map(
+                (op, self.variable_version_map)
+            )
+            if z3_bool is None:
+                z3_bool = z3.Bool(f"@@@unknown_boolean{self.bool_num}")
+                self.bool_num += 1
+                self.expression_formula_map.append(
+                    ((op, copy.deepcopy(self.variable_version_map)), z3_bool)
+                )
+            self.stack.append(z3_bool)
+            return
+
+        if (
+            right_item is not None
+            and left_item is not None
+            and not isinstance(left_item, str)
+            and not isinstance(right_item, str)
+        ):
             self.stack.append(operators[op.operator](left_item, right_item))
         else:
             self.stack.append(None)
@@ -1333,6 +1378,16 @@ class SimplifyTupleTransformer(Transformer):
         return tuple
 
 
+def assigns_variable(used_variables, node: frog_ast.ASTNode) -> bool:
+    return isinstance(node, (frog_ast.Assignment, frog_ast.Sample)) and (
+        (node.var in used_variables)
+        or (
+            isinstance(node.var, frog_ast.ArrayAccess)
+            and node.var.the_array in used_variables
+        )
+    )
+
+
 class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
     def __init__(self, field_name_pair: tuple[str, str]):
         self.field_name_pair = field_name_pair
@@ -1372,15 +1427,6 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
                 return
 
             used_variables = VariableCollectionVisitor().visit(statement.value)
-
-            def assigns_variable(used_variables, node: frog_ast.ASTNode) -> bool:
-                return isinstance(node, (frog_ast.Assignment, frog_ast.Sample)) and (
-                    (node.var in used_variables)
-                    or (
-                        isinstance(node.var, frog_ast.ArrayAccess)
-                        and node.var.the_array in used_variables
-                    )
-                )
 
             assigns_variable_partial = functools.partial(
                 assigns_variable, used_variables
@@ -1443,10 +1489,39 @@ class RemoveUnreachableTransformer(BlockTransformer):
                 for statement in block.statements
             )
 
+        used_variables = VariableCollectionVisitor().visit(block)
+        variable_version_map = dict((var.name, 0) for var in used_variables)
+
+        def update_version(node: frog_ast.ASTNode):
+            updated = []
+
+            def assigns_variable_search(search_node):
+                if not isinstance(search_node, (frog_ast.Assignment, frog_ast.Sample)):
+                    return False
+                var = None
+                if isinstance(search_node.var, frog_ast.Variable):
+                    var = search_node.var
+                if isinstance(search_node.var, frog_ast.ArrayAccess) and isinstance(
+                    search_node.var.the_array, frog_ast.Variable
+                ):
+                    var = search_node.var.the_array
+
+                if var in used_variables and var not in updated:
+                    variable_version_map[search_node.var.name] += 1
+                    updated.append(var)
+                    return True
+                return False
+
+            while SearchVisitor(assigns_variable_search).visit(node) is not None:
+                pass
+
         formula_so_far = None
+
+        formula_visitor = Z3FormulaVisitor(NameTypeMap())
 
         for index, statement in enumerate(block.statements):
             if not isinstance(statement, frog_ast.IfStatement):
+                update_version(statement)
                 continue
 
             if statement.has_else_block() and all(
@@ -1454,10 +1529,15 @@ class RemoveUnreachableTransformer(BlockTransformer):
             ):
                 return frog_ast.Block(block.statements[: index + 1])
             s = z3.Solver()
+
             type_map = GetTypeMapVisitor(statement).visit(self.ast)
+            formula_visitor.set_type_map(type_map)
+            formula_visitor.set_variable_version_map(variable_version_map)
             condition_formulae = []
             for condition_index, condition in enumerate(statement.conditions):
-                individual_formula = Z3FormulaVisitor(type_map).visit(condition)
+                individual_formula = formula_visitor.visit(condition)
+                if individual_formula is None:
+                    break
                 if contains_unconditional_return(statement.blocks[condition_index]):
                     to_get_here = (
                         individual_formula
@@ -1477,7 +1557,9 @@ class RemoveUnreachableTransformer(BlockTransformer):
                     )
                 condition_formulae.append(individual_formula)
 
-            s.add(z3.Not(formula_so_far))
+            update_version(statement)
+            if formula_so_far is not None:
+                s.add(z3.Not(formula_so_far))
             satisfiable = s.check()
             s.reset()
             if satisfiable == z3.unsat:

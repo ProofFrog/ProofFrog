@@ -654,14 +654,18 @@ class InlineTransformer(Transformer):
 
 
 class Z3FormulaVisitor(Visitor[z3.AstRef]):
-    def __init__(self) -> None:
-        self.stack: list[z3.AstRef] = []
+    def __init__(self, type_map: NameTypeMap) -> None:
+        self.stack: list[Optional[z3.AstRef]] = []
+        self.type_map = type_map
 
-    def result(self) -> z3.AstRef:
+    def result(self) -> Optional[z3.AstRef]:
         return self.stack[-1]
 
     def visit_variable(self, var: frog_ast.Variable) -> None:
-        self.stack.append(z3.Int(var.name))
+        if isinstance(self.type_map.get(var.name), frog_ast.IntType):
+            self.stack.append(z3.Int(var.name))
+        else:
+            self.stack.append(None)
 
     def visit_integer(self, node: frog_ast.Integer) -> None:
         self.stack.append(node.num)
@@ -683,30 +687,51 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         }
         right_item = self.stack.pop()
         left_item = self.stack.pop()
-        self.stack.append(operators[op.operator](left_item, right_item))
+        if right_item is not None and left_item is not None:
+            self.stack.append(operators[op.operator](left_item, right_item))
+        else:
+            self.stack.append(None)
 
 
 class SimplifyRangeTransformer(Transformer):
-    def __init__(self, binary_op: frog_ast.BinaryOperation) -> None:
-        self.assumed_formula = Z3FormulaVisitor().visit(binary_op)
-        self.solver = z3.Solver()
-        self.solver.add(self.assumed_formula)
+    def __init__(
+        self,
+        proof_let_types: NameTypeMap,
+        game: frog_ast.Game,
+        binary_op: frog_ast.BinaryOperation,
+    ) -> None:
+        self.game = game
+        self.proof_let_types = proof_let_types
+        type_map = GetTypeMapVisitor(game.methods[0]).visit(game) + proof_let_types
+        self.assumed_formula = Z3FormulaVisitor(type_map).visit(binary_op)
+        if self.assumed_formula is not None:
+            self.solver = z3.Solver()
+            self.solver.add(self.assumed_formula)
 
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
     ) -> frog_ast.Expression:
-        if binary_operation.operator not in (
-            frog_ast.BinaryOperators.EQUALS,
-            frog_ast.BinaryOperators.NOTEQUALS,
-            frog_ast.BinaryOperators.LEQ,
-            frog_ast.BinaryOperators.LT,
-            frog_ast.BinaryOperators.GT,
-            frog_ast.BinaryOperators.GEQ,
-            frog_ast.BinaryOperators.AND,
-            frog_ast.BinaryOperators.OR,
+        if (
+            binary_operation.operator
+            not in (
+                frog_ast.BinaryOperators.EQUALS,
+                frog_ast.BinaryOperators.NOTEQUALS,
+                frog_ast.BinaryOperators.LEQ,
+                frog_ast.BinaryOperators.LT,
+                frog_ast.BinaryOperators.GT,
+                frog_ast.BinaryOperators.GEQ,
+                frog_ast.BinaryOperators.AND,
+                frog_ast.BinaryOperators.OR,
+            )
+            or self.assumed_formula is None
         ):
             return binary_operation
-        statement_formula = Z3FormulaVisitor().visit(binary_operation)
+        type_map = (
+            GetTypeMapVisitor(binary_operation).visit(self.game) + self.proof_let_types
+        )
+        statement_formula = Z3FormulaVisitor(type_map).visit(binary_operation)
+        if statement_formula is None:
+            return binary_operation
         self.solver.push()
         self.solver.add(statement_formula)
         satisfied = self.solver.check() == z3.sat

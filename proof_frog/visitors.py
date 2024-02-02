@@ -1373,3 +1373,34 @@ class RemoveStatementTransformer(BlockTransformer):
             if statement not in self.to_remove:
                 new_statements.append(statement)
         return frog_ast.Block(new_statements)
+
+
+# Consider case where else if condition might have a return but then the if condition doesn't
+# Then in order to check whether it's definitely true we need (not A and B) where A is first condition and B is second.
+
+
+class RemoveUnreachableTransformer(BlockTransformer):
+    def __init__(self, ast):
+        self.ast = ast
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        def contains_unconditional_return(block: frog_ast.Block):
+            return any(
+                isinstance(statement, frog_ast.ReturnStatement)
+                for statement in block.statements
+            )
+
+        formulae_so_far = []
+
+        for index, statement in enumerate(block.statements):
+            if (
+                isinstance(statement, frog_ast.IfStatement)
+                and statement.has_else_block()
+                and all(
+                    contains_unconditional_return(if_block)
+                    for if_block in statement.blocks
+                )
+            ):
+                return frog_ast.Block(block.statements[: index + 1])
+            if isinstance(statement, frog_ast)
+        return block

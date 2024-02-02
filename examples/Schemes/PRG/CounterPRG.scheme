@@ -1,12 +1,12 @@
 import 'examples/Primitives/PRF.primitive';
+import 'examples/Primitives/PRG.primitive';
 
 Scheme CounterPRG(PRF F) extends PRG {
     requires F.lambda == F.in;
     requires F.in == F.out;
 
-    int lambda = F.lambda;
-    int stretch = F.lambda;
-    PRF F = F;
+    Int lambda = F.lambda;
+    Int stretch = F.lambda;
 
     BitString<lambda + stretch> evaluate(BitString<lambda> s) {
         BitString<lambda> x = F.evaluate(s, 0b0);

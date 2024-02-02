@@ -1192,3 +1192,15 @@ class GetTypeMapVisitor(Visitor[NameTypeMap]):
     @_test_stop
     def visit_ast_node(self, node: frog_ast.ASTNode):
         pass
+
+
+class RemoveEmptyMethodTransformer(Transformer):
+    def transform_game(self, game: frog_ast.Game):
+        new_game = copy.deepcopy(game)
+        i = 0
+        while i < len(new_game.methods):
+            if not new_game.methods[i].block.statements:
+                del new_game.methods[i]
+            else:
+                i += 1
+        return new_game

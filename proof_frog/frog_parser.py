@@ -299,6 +299,9 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
     def visitIntType(self, ctx: PrimitiveParser.IntTypeContext) -> frog_ast.Type:
         return frog_ast.IntType()
 
+    def visitVoidType(self, ctx: PrimitiveParser.VoidTypeContext) -> frog_ast.Void:
+        return frog_ast.Void()
+
     def visitSizeExp(
         self, ctx: PrimitiveParser.SizeExpContext
     ) -> frog_ast.UnaryOperation:

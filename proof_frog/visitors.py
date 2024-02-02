@@ -705,6 +705,7 @@ class InlineTransformer(Transformer):
 
 
 class Z3FormulaVisitor(Visitor[z3.AstRef]):
+    # Don't just append Int(var.name), need mapping from name to new name in this formula
     def __init__(self, type_map: NameTypeMap) -> None:
         self.stack: list[Optional[z3.AstRef]] = []
         self.type_map = type_map
@@ -715,11 +716,16 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
     def visit_variable(self, var: frog_ast.Variable) -> None:
         if isinstance(self.type_map.get(var.name), frog_ast.IntType):
             self.stack.append(z3.Int(var.name))
+        elif isinstance(self.type_map.get(var.name), frog_ast.BoolType):
+            self.stack.append(z3.Bool(var.name))
         else:
             self.stack.append(None)
 
     def visit_integer(self, node: frog_ast.Integer) -> None:
         self.stack.append(node.num)
+
+    def visit_boolean(self, node: frog_ast.Boolean) -> None:
+        self.stack.append(node.bool)
 
     def leave_unary_operation(self, op: frog_ast.UnaryOperation) -> None:
         if op.operator == frog_ast.UnaryOperators.NOT and self.stack:
@@ -1449,5 +1455,4 @@ class RemoveUnreachableTransformer(BlockTransformer):
                 )
             ):
                 return frog_ast.Block(block.statements[: index + 1])
-            if isinstance(statement, frog_ast)
         return block

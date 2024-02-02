@@ -26,6 +26,32 @@ Reduction R(PRF F, PRG G, Int i) compose PRFSecurity(F) against PRGSecurity(G).A
     }
 }
 
+Game Intermediate1(PRF F, PRG G, Int i) {
+    Int count;
+    Map<BitString<G.lambda>, BitString<G.lambda>> T;
+    Void Initialize() {
+        count = 0;
+    }
+    BitString<G.lambda + G.stretch> Query() {
+        count = count + 1;
+        if (count < i) {
+            BitString<G.lambda + G.stretch> r <- BitString<G.lambda + G.stretch>;
+            return r;
+        } else if (count == i) {
+            T[0b0] <- BitString<G.lambda>;
+            BitString<G.lambda> x = T[0b0];
+            T[0b1] <- BitString<G.lambda>;
+            BitString<G.lambda> y = T[0b1];
+            return x || y;
+        } else {
+            BitString<G.lambda> s <- BitString<G.lambda>;
+            BitString<G.lambda> x = F.evaluate(s, 0b0);
+            BitString<G.lambda> y = F.evaluate(s, 0b1);
+            return x || y;
+        }
+    }
+}
+
 proof:
 
 let:
@@ -49,6 +75,9 @@ games:
     induction(i from 0 to q) {
         PRFSecurity(F).Real compose R(F, G, i) against PRGSecurity(G).Adversary;
         PRFSecurity(F).Random compose R(F, G, i) against PRGSecurity(G).Adversary;
+        assume !(0b0 in PRFSecurity(F).Random.T);
+        assume !(0b1 in PRFSecurity(F).Random.T);
+        Intermediate1(F, G, i) against PRGSecurity(G).Adversary;
     }
 
     PRGSecurity(G).Random against PRGSecurity(G).Adversary;

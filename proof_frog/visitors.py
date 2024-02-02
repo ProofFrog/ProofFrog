@@ -731,7 +731,7 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         if op.operator == frog_ast.UnaryOperators.NOT and self.stack:
             val = self.stack.pop()
             if val is not None:
-                self.stack.append(z3.Not(self.stack.pop()))
+                self.stack.append(z3.Not(val))
             else:
                 self.stack.append(None)
         else:
@@ -1443,16 +1443,44 @@ class RemoveUnreachableTransformer(BlockTransformer):
                 for statement in block.statements
             )
 
-        formulae_so_far = []
+        formula_so_far = None
 
         for index, statement in enumerate(block.statements):
-            if (
-                isinstance(statement, frog_ast.IfStatement)
-                and statement.has_else_block()
-                and all(
-                    contains_unconditional_return(if_block)
-                    for if_block in statement.blocks
-                )
+            if not isinstance(statement, frog_ast.IfStatement):
+                continue
+
+            if statement.has_else_block() and all(
+                contains_unconditional_return(if_block) for if_block in statement.blocks
             ):
                 return frog_ast.Block(block.statements[: index + 1])
+            s = z3.Solver()
+            type_map = GetTypeMapVisitor(statement).visit(self.ast)
+            condition_formulae = []
+            for condition_index, condition in enumerate(statement.conditions):
+                individual_formula = Z3FormulaVisitor(type_map).visit(condition)
+                if contains_unconditional_return(statement.blocks[condition_index]):
+                    to_get_here = (
+                        individual_formula
+                        if not condition_formulae
+                        else z3.And(
+                            *(
+                                z3.Not(condition_formula)
+                                for condition_formula in condition_formulae
+                            ),
+                            individual_formula,
+                        )
+                    )
+                    formula_so_far = (
+                        z3.Or(to_get_here, formula_so_far)
+                        if formula_so_far is not None
+                        else to_get_here
+                    )
+                condition_formulae.append(individual_formula)
+
+            s.add(z3.Not(formula_so_far))
+            satisfiable = s.check()
+            s.reset()
+            if satisfiable == z3.unsat:
+                return frog_ast.Block(block.statements[: index + 1])
+
         return block

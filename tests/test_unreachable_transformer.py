@@ -157,13 +157,13 @@ from proof_frog import visitors, frog_parser
                 } else if (b) {
                     return 1;
                 }
-                if (!a and !b) {
+                if (!a && !b) {
                     return 2;
                 }
-                if (!a and b) {
+                if (a && !b) {
                     return 3;
                 }
-                if (a and b) {
+                if (a && b) {
                     return 4;
                 }
                 return 5;
@@ -176,13 +176,13 @@ from proof_frog import visitors, frog_parser
                 } else if (b) {
                     return 1;
                 }
-                if (!a and !b) {
+                if (!a && !b) {
                     return 2;
                 }
-                if (!a and b) {
+                if (a && !b) {
                     return 3;
                 }
-                if (a and b) {
+                if (a && b) {
                     return 4;
                 }
             }

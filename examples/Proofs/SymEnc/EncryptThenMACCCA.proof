@@ -50,6 +50,29 @@ Reduction R2(SymEnc E, MAC M, EncryptThenMAC EtM) compose CPA(E) against CCA(EtM
     }
 }
 
+Reduction R3(SymEnc E, MAC M, EncryptThenMAC EtM) compose Security(M) against CCA(EtM).Adversary {
+    E.Key ke;
+    Set<E.Ciphertext * M.Tag> S;
+    Void Initialize() {
+        ke = E.KeyGen();
+    }
+    EtM.Ciphertext Eavesdrop(EtM.Message mL, EtM.Message mR) {
+        E.Ciphertext c = E.Enc(ke, mR);
+        M.Tag t = challenger.GetTag(c);
+        S = S union [c, t];
+        return [c, t];
+    }
+    EtM.Message? Decrypt(EtM.Ciphertext c) {
+        if (c in S) {
+            return None;
+        }
+        if (!challenger.CheckTag(c[0], c[1])) {
+            return None;
+        }
+        return E.Dec(ke, c[0]);
+    }
+}
+
 proof:
     let:
         Set SymEncKeySpace;
@@ -76,5 +99,11 @@ proof:
         Security(M).Random compose R1(E, M, EtM) against CCA(EtM).Adversary;
 
         CPA(E).Left compose R2(E, M, EtM) against CCA(EtM).Adversary;
+
+        CPA(E).Right compose R2(E, M, EtM) against CCA(EtM).Adversary;
+
+        Security(M).Random compose R3(E, M, EtM) against CCA(EtM).Adversary;
+
+        Security(M).Real compose R3(E, M, EtM) against CCA(EtM).Adversary;
 
         CCA(EtM).Right against CCA(EtM).Adversary;

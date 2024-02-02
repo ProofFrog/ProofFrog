@@ -30,6 +30,7 @@ class ProofEngine:
         self.proof_file = frog_parser.parse_proof_file(proof_file_name)
         self.definition_namespace: frog_ast.Namespace = {}
         self.proof_namespace: frog_ast.Namespace = {}
+        self.proof_let_types: visitors.NameTypeMap = visitors.NameTypeMap()
 
         for imp in self.proof_file.imports:
             file_type = _get_file_type(imp.filename)
@@ -54,6 +55,7 @@ class ProofEngine:
 
         # Here, we are substituting the lets with the parameters they are given
         for let in self.proof_file.lets:
+            self.proof_let_types.set(let.name, let.type)
             if isinstance(let.value, frog_ast.FuncCall) and isinstance(
                 let.value.func, frog_ast.Variable
             ):
@@ -199,6 +201,7 @@ class ProofEngine:
             if isinstance(steps[i], frog_ast.Induction):
                 the_induction = steps[i]
                 assert isinstance(the_induction, frog_ast.Induction)
+                self.proof_let_types.set(the_induction.name, frog_ast.IntType())
                 self.prove_steps(the_induction.steps)
                 # Check induction roll over
                 first_step = the_induction.steps[0]
@@ -234,6 +237,7 @@ class ProofEngine:
                 print(f"Hop To: {first_step}\n")
                 self.set_up_assumptions(assumptions, last_step, first_step)
                 self.check_equivalent(last_step_ast, first_step_ast)
+                self.proof_let_types.remove(the_induction.name)
 
     def set_up_assumptions(
         self,
@@ -374,7 +378,7 @@ class ProofEngine:
                     if assumption.which != which_game:
                         continue
                     ast = visitors.SimplifyRangeTransformer(
-                        assumption.assumption
+                        self.proof_let_types, ast, assumption.assumption
                     ).transform(ast)
                 return ast
 
@@ -476,10 +480,19 @@ class ProofEngine:
             for i, condition in enumerate(if_current.conditions):
                 if condition == if_next.conditions[i]:
                     continue
-                first_if_formula = visitors.Z3FormulaVisitor().visit(condition)
-                next_if_formula = visitors.Z3FormulaVisitor().visit(
-                    if_next.conditions[i]
-                )
+
+                first_if_formula = visitors.Z3FormulaVisitor(
+                    visitors.GetTypeMapVisitor(condition).visit(current_game_ast)
+                    + self.proof_let_types
+                ).visit(condition)
+                next_if_formula = visitors.Z3FormulaVisitor(
+                    visitors.GetTypeMapVisitor(if_next.conditions[i]).visit(
+                        next_game_ast
+                    )
+                    + self.proof_let_types
+                ).visit(if_next.conditions[i])
+                if first_if_formula is None or first_if_formula is None:
+                    quit_proof()
                 solver = z3.Solver()
                 solver.add(z3.Not(first_if_formula == next_if_formula))
                 if solver.check() != z3.unsat:

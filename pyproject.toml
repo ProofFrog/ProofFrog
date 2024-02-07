@@ -31,7 +31,10 @@ disable = '''missing-module-docstring,
     too-many-lines,
     too-many-locals,
     too-many-statements,
-    too-many-branches
+    too-many-branches,
+    too-many-instance-attributes,
+    too-many-return-statements,
+    too-many-boolean-expressions
 '''
 max-line-length='120'
 ignore='parsing'

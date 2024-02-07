@@ -5,13 +5,12 @@ Game Left(SymEnc E) {
     Set<E.Ciphertext> S;
 
     Void Initialize() {
-        S = {};
         k = E.KeyGen();
     }
 
     E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
         E.Ciphertext c = E.Enc(k, mL);
-        S = S + c;
+        S = S union c;
         return c;
     }
 
@@ -28,13 +27,12 @@ Game Right(SymEnc E) {
     Set<E.Ciphertext> S;
 
     Void Initialize() {
-        S = {};
         k = E.KeyGen();
     }
 
     E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
         E.Ciphertext c = E.Enc(k, mR);
-        S = S + c;
+        S = S union c;
         return c;
     }
 

@@ -138,9 +138,9 @@ def serializedATN():
         21,325,326,10,19,0,0,326,327,5,8,0,0,327,369,3,26,13,20,328,329,
         10,18,0,0,329,330,5,7,0,0,330,369,3,26,13,19,331,332,10,17,0,0,332,
         333,5,21,0,0,333,369,3,26,13,18,334,335,10,16,0,0,335,336,5,22,0,
-        0,336,369,3,26,13,17,337,338,10,15,0,0,338,339,5,25,0,0,339,369,
+        0,336,369,3,26,13,17,337,338,10,15,0,0,338,339,5,43,0,0,339,369,
         3,26,13,16,340,341,10,14,0,0,341,342,5,39,0,0,342,369,3,26,13,15,
-        343,344,10,13,0,0,344,345,5,43,0,0,345,369,3,26,13,14,346,347,10,
+        343,344,10,13,0,0,344,345,5,25,0,0,345,369,3,26,13,14,346,347,10,
         12,0,0,347,348,5,23,0,0,348,369,3,26,13,13,349,350,10,11,0,0,350,
         351,5,44,0,0,351,369,3,26,13,12,352,353,10,10,0,0,353,354,5,26,0,
         0,354,369,3,26,13,11,355,356,10,29,0,0,356,358,5,5,0,0,357,359,3,
@@ -2707,14 +2707,14 @@ class GameParser ( Parser ):
                         pass
 
                     elif la_ == 11:
-                        localctx = GameParser.AndExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = GameParser.InExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 337
                         if not self.precpred(self._ctx, 15):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 15)")
                         self.state = 338
-                        self.match(GameParser.AND)
+                        self.match(GameParser.IN)
                         self.state = 339
                         self.expression(16)
                         pass
@@ -2733,14 +2733,14 @@ class GameParser ( Parser ):
                         pass
 
                     elif la_ == 13:
-                        localctx = GameParser.InExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
+                        localctx = GameParser.AndExpContext(self, GameParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 343
                         if not self.precpred(self._ctx, 13):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 13)")
                         self.state = 344
-                        self.match(GameParser.IN)
+                        self.match(GameParser.AND)
                         self.state = 345
                         self.expression(14)
                         pass

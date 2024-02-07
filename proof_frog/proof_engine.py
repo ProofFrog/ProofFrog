@@ -30,6 +30,7 @@ class ProofEngine:
         self.proof_file = frog_parser.parse_proof_file(proof_file_name)
         self.definition_namespace: frog_ast.Namespace = {}
         self.proof_namespace: frog_ast.Namespace = {}
+        self.proof_let_types: visitors.NameTypeMap = visitors.NameTypeMap()
 
         for imp in self.proof_file.imports:
             file_type = _get_file_type(imp.filename)
@@ -54,6 +55,7 @@ class ProofEngine:
 
         # Here, we are substituting the lets with the parameters they are given
         for let in self.proof_file.lets:
+            self.proof_let_types.set(let.name, let.type)
             if isinstance(let.value, frog_ast.FuncCall) and isinstance(
                 let.value.func, frog_ast.Variable
             ):
@@ -199,6 +201,7 @@ class ProofEngine:
             if isinstance(steps[i], frog_ast.Induction):
                 the_induction = steps[i]
                 assert isinstance(the_induction, frog_ast.Induction)
+                self.proof_let_types.set(the_induction.name, frog_ast.IntType())
                 self.prove_steps(the_induction.steps)
                 # Check induction roll over
                 first_step = the_induction.steps[0]
@@ -234,6 +237,7 @@ class ProofEngine:
                 print(f"Hop To: {first_step}\n")
                 self.set_up_assumptions(assumptions, last_step, first_step)
                 self.check_equivalent(last_step_ast, first_step_ast)
+                self.proof_let_types.remove(the_induction.name)
 
     def set_up_assumptions(
         self,
@@ -351,18 +355,36 @@ class ProofEngine:
                 fn=lambda ast: visitors.ExpandTupleTransformer().transform(ast),
                 name="Expand Tuples",
             ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifyNot().transform(ast),
+                name="Simplify Nots",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.RedundantFieldCopyTransformer().transform(ast),
+                name="Remove redundant variables for fields",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifyTupleTransformer(ast).transform(ast),
+                name="Simplify tuples that are copies of their fields",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.RemoveUnreachableTransformer(ast).transform(
+                    ast
+                ),
+                name="Remove unreachable blocks of code",
+            ),
         ]
 
         for index, game in enumerate((current_game_ast, next_game_ast)):
 
             def apply_assumptions(
-                which_game: WhichGame, ast: frog_ast.ASTNode
+                which_game: WhichGame, ast: frog_ast.Game
             ) -> frog_ast.ASTNode:
                 for assumption in self.step_assumptions:
                     if assumption.which != which_game:
                         continue
                     ast = visitors.SimplifyRangeTransformer(
-                        assumption.assumption
+                        self.proof_let_types, ast, assumption.assumption
                     ).transform(ast)
                 return ast
 
@@ -410,6 +432,14 @@ class ProofEngine:
             current_game_ast
         )
         next_game_ast = visitors.VariableStandardizingTransformer().transform(
+            next_game_ast
+        )
+        current_game_ast = standardize_field_names(current_game_ast)
+        next_game_ast = standardize_field_names(next_game_ast)
+        current_game_ast = dependencies.BubbleSortFieldAssignment().transform(
+            current_game_ast
+        )
+        next_game_ast = dependencies.BubbleSortFieldAssignment().transform(
             next_game_ast
         )
 
@@ -462,10 +492,19 @@ class ProofEngine:
             for i, condition in enumerate(if_current.conditions):
                 if condition == if_next.conditions[i]:
                     continue
-                first_if_formula = visitors.Z3FormulaVisitor().visit(condition)
-                next_if_formula = visitors.Z3FormulaVisitor().visit(
-                    if_next.conditions[i]
-                )
+
+                first_if_formula = visitors.Z3FormulaVisitor(
+                    visitors.GetTypeMapVisitor(condition).visit(current_game_ast)
+                    + self.proof_let_types
+                ).visit(condition)
+                next_if_formula = visitors.Z3FormulaVisitor(
+                    visitors.GetTypeMapVisitor(if_next.conditions[i]).visit(
+                        next_game_ast
+                    )
+                    + self.proof_let_types
+                ).visit(if_next.conditions[i])
+                if first_if_formula is None or first_if_formula is None:
+                    quit_proof()
                 solver = z3.Solver()
                 solver.add(z3.Not(first_if_formula == next_if_formula))
                 if solver.check() != z3.unsat:
@@ -574,7 +613,7 @@ class ProofEngine:
             game = self.apply_reduction(game, reduction_ast)
 
         while True:
-            new_game = visitors.InlineTransformer(lookup).transform(game)
+            new_game = visitors.InlineTransformer(lookup).transform(copy.deepcopy(game))
             if game != new_game:
                 game = new_game
             else:
@@ -645,18 +684,22 @@ class ProofEngine:
             )
 
         dfs_stack: list[dependencies.Node] = []
+        dfs_stack_visited = [False] * len(block.statements)
+        dfs_sorted_statements: list[frog_ast.Statement] = []
+
+        def do_dfs() -> None:
+            while dfs_stack:
+                node = dfs_stack.pop()
+                if not dfs_stack_visited[block.statements.index(node.statement)]:
+                    dfs_sorted_statements.append(node.statement)
+                    dfs_stack_visited[block.statements.index(node.statement)] = True
+                    for neighbour in node.in_neighbours:
+                        dfs_stack.append(neighbour)
+
         return_node = graph.find_node(is_return)
         if return_node is not None:
             dfs_stack.append(return_node)
-        dfs_stack_visited = [False] * len(block.statements)
-        dfs_sorted_statements: list[frog_ast.Statement] = []
-        while dfs_stack:
-            node = dfs_stack.pop()
-            if not dfs_stack_visited[block.statements.index(node.statement)]:
-                dfs_sorted_statements.append(node.statement)
-                dfs_stack_visited[block.statements.index(node.statement)] = True
-                for neighbour in node.in_neighbours:
-                    dfs_stack.append(neighbour)
+            do_dfs()
 
         dfs_sorted_statements.reverse()
 
@@ -669,7 +712,8 @@ class ProofEngine:
 
             found = visitors.SearchVisitor(uses_field).visit(statement)
             if statement not in dfs_sorted_statements and found is not None:
-                dfs_sorted_statements.append(statement)
+                dfs_stack.append(graph.get_node(statement))
+                do_dfs()
 
         sorted_statements: list[frog_ast.Statement] = []
         stack: list[dependencies.Node] = []
@@ -746,65 +790,47 @@ def get_challenger_method_lookup(challenger: frog_ast.Game) -> MethodLookup:
 
 
 def remove_duplicate_fields(game: frog_ast.Game) -> frog_ast.Game:
-    if not game.has_method("Initialize"):
-        return game
-
-    field_names = [field.name for field in game.fields]
-    initialize_statements = game.get_method("Initialize").block.statements
-    for index, statement in enumerate(initialize_statements):
-        if (
-            # pylint: disable-next=too-many-boolean-expressions
-            isinstance(statement, frog_ast.Assignment)
-            and isinstance(statement.var, frog_ast.Variable)
-            and isinstance(statement.value, frog_ast.Variable)
-            and statement.var.name in field_names
-            and statement.value.name in field_names
-            and statement.var.name != statement.value.name
-        ):
-            remaining_statements = initialize_statements[index + 1 :]
-
-            to_remove = statement.var.name
-            remaining_name = statement.value.name
-
-            def search_for_reassignment(
-                names: tuple[str, str], node: frog_ast.ASTNode
-            ) -> bool:
-                return (
-                    isinstance(node, frog_ast.Assignment)
-                    and isinstance(node.var, frog_ast.Variable)
-                    and node.var.name in names
-                )
-
-            search_visitor = visitors.SearchVisitor[frog_ast.Assignment](
-                functools.partial(
-                    search_for_reassignment,
-                    (to_remove, remaining_name),
-                )
-            )
-            if any(
-                search_visitor.visit(remaining_statement) is not None
-                for remaining_statement in remaining_statements
-            ) or any(
-                search_visitor.visit(method) is not None for method in game.methods[1:]
-            ):
-                continue
-
-            new_fields = [field for field in game.fields if field.name != to_remove]
-            new_initialize_statements = [
-                new_statement
-                for new_statement in initialize_statements
-                if new_statement != statement
-            ]
-
-            new_game = copy.deepcopy(game)
-            new_game.fields = new_fields
-            new_game.methods[0].block.statements = new_initialize_statements
-            return visitors.SubstitutionTransformer(
-                [(frog_ast.Variable(to_remove), frog_ast.Variable(remaining_name))]
-            ).transform(new_game)
-
+    for field in game.fields:
+        for other_field in game.fields:
+            if field.type == other_field.type and field.name < other_field.name:
+                duplicated_statements = visitors.SameFieldVisitor(
+                    (field.name, other_field.name)
+                ).visit(game)
+                if duplicated_statements is not None:
+                    new_game = copy.deepcopy(game)
+                    new_game.fields = [
+                        the_field
+                        for the_field in game.fields
+                        if the_field.name != other_field.name
+                    ]
+                    return visitors.SubstitutionTransformer(
+                        [
+                            (
+                                frog_ast.Variable(other_field.name),
+                                frog_ast.Variable(field.name),
+                            )
+                        ]
+                    ).transform(
+                        visitors.RemoveStatementTransformer(
+                            duplicated_statements
+                        ).transform(new_game)
+                    )
     return game
 
 
 def get_challenger_field_name(name: str) -> str:
     return f"challenger@{name}"
+
+
+def standardize_field_names(game: frog_ast.Game) -> frog_ast.Game:
+    field_rename_map = visitors.FieldOrderingVisitor().visit(game)
+    new_game = visitors.SubstitutionTransformer(
+        [
+            (frog_ast.Variable(field_name), frog_ast.Variable(normalized_name))
+            for field_name, normalized_name in field_rename_map.items()
+        ]
+    ).transform(game)
+    for field in new_game.fields:
+        field.name = field_rename_map[field.name]
+    new_game.fields.sort(key=lambda element: element.name)
+    return new_game

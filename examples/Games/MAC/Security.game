@@ -22,12 +22,11 @@ Game Random(MAC E) {
 
     Void Initialize() {
         k = E.KeyGen();
-        T = {};
     }
 
     E.Tag GetTag(E.Message m) {
         E.Tag t = E.MAC(k, m);
-        T = T + [m, t];
+        T = T union [m, t];
         return t;
     }
 

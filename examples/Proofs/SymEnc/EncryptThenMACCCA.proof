@@ -1,0 +1,109 @@
+import 'examples/Primitives/SymEnc.primitive';
+import 'examples/Primitives/MAC.primitive';
+import 'examples/Games/SymEnc/CPA.game';
+import 'examples/Games/MAC/Security.game';
+import 'examples/Games/SymEnc/CCABook.game';
+import 'examples/Schemes/SymEnc/EncryptThenMAC.scheme';
+
+Reduction R1(SymEnc E, MAC M, EncryptThenMAC EtM) compose Security(M) against CCA(EtM).Adversary {
+    E.Key ke;
+    Set<E.Ciphertext * M.Tag> S;
+    Void Initialize() {
+        ke = E.KeyGen();
+    }
+    EtM.Ciphertext Eavesdrop(EtM.Message mL, EtM.Message mR) {
+        E.Ciphertext c = E.Enc(ke, mL);
+        M.Tag t = challenger.GetTag(c);
+        S = S union [c, t];
+        return [c, t];
+    }
+    EtM.Message? Decrypt(EtM.Ciphertext c) {
+        if (c in S) {
+            return None;
+        }
+        if (!challenger.CheckTag(c[0], c[1])) {
+            return None;
+        }
+        return E.Dec(ke, c[0]);
+    }
+}
+
+Reduction R2(SymEnc E, MAC M, EncryptThenMAC EtM) compose CPA(E) against CCA(EtM).Adversary {
+    M.Key km;
+    Set<E.Ciphertext * M.Tag> S;
+    void Initialize() {
+        km = M.KeyGen();
+    }
+    EtM.Ciphertext Eavesdrop(EtM.Message mL, EtM.Message mR) {
+        E.Ciphertext c = challenger.Eavesdrop(mL, mR);
+        M.Tag t = M.MAC(km, c);
+        S = S union [c, t];
+        return [c, t];
+    }
+    EtM.Message? Decrypt(EtM.Ciphertext c) {
+        if (c in S) {
+            return None;
+        }
+        if (!(c in S)) {
+            return None;
+        }
+    }
+}
+
+Reduction R3(SymEnc E, MAC M, EncryptThenMAC EtM) compose Security(M) against CCA(EtM).Adversary {
+    E.Key ke;
+    Set<E.Ciphertext * M.Tag> S;
+    Void Initialize() {
+        ke = E.KeyGen();
+    }
+    EtM.Ciphertext Eavesdrop(EtM.Message mL, EtM.Message mR) {
+        E.Ciphertext c = E.Enc(ke, mR);
+        M.Tag t = challenger.GetTag(c);
+        S = S union [c, t];
+        return [c, t];
+    }
+    EtM.Message? Decrypt(EtM.Ciphertext c) {
+        if (c in S) {
+            return None;
+        }
+        if (!challenger.CheckTag(c[0], c[1])) {
+            return None;
+        }
+        return E.Dec(ke, c[0]);
+    }
+}
+
+proof:
+    let:
+        Set SymEncKeySpace;
+        Set MACKeySpace;
+        Set MessageSpace;
+        Set CiphertextSpace;
+        Set TagSpace;
+        SymEnc E = SymEnc(MessageSpace, CiphertextSpace, SymEncKeySpace);
+        MAC M = MAC(CiphertextSpace, TagSpace, MACKeySpace);
+        EncryptThenMAC EtM = EncryptThenMAC(E, M);
+
+    assume:
+        CPA(E);
+        Security(M);
+
+    theorem:
+        CCA(EtM);
+
+    games:
+        CCA(EtM).Left against CCA(EtM).Adversary;
+
+        Security(M).Real compose R1(E, M, EtM) against CCA(EtM).Adversary;
+
+        Security(M).Random compose R1(E, M, EtM) against CCA(EtM).Adversary;
+
+        CPA(E).Left compose R2(E, M, EtM) against CCA(EtM).Adversary;
+
+        CPA(E).Right compose R2(E, M, EtM) against CCA(EtM).Adversary;
+
+        Security(M).Random compose R3(E, M, EtM) against CCA(EtM).Adversary;
+
+        Security(M).Real compose R3(E, M, EtM) against CCA(EtM).Adversary;
+
+        CCA(EtM).Right against CCA(EtM).Adversary;

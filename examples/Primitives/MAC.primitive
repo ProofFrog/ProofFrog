@@ -1,9 +1,0 @@
-Primitive MAC(Set MessageSpace, Set TagSpace, Set KeySpace) {
-    Set Message = MessageSpace;
-    Set Tag = TagSpace;
-    Set Key = KeySpace;
-
-    Key KeyGen();
-
-    Tag MAC(Key k, Message m);
-}

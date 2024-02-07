@@ -1,3 +1,29 @@
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "proof_frog"
+version = "0.1"
+description = "A tool for verifying game-hopping proofs"
+readme = "README.md"
+authors = [{name = "Ross Evans", email = "rpevans@uwaterloo.ca"}]
+requires-python = ">=3.11"
+license={file = "LICENSE"}
+dependencies = [
+	"antlr4-python-runtime >= 4.13",
+	"colorama >= 0.4",
+	"z3-solver >= 4.12",
+	"sympy >= 1.12"
+]
+
+[project.urls]
+Source = "https://github.com/ProofFrog/ProofFrog"
+Documentation = "https://prooffrog.github.io"
+
+[project.scripts]
+proof_frog = "proof_frog:main"
+
 [tool.black]
 exclude = 'proof_frog/parsing/'
 

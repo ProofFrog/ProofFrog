@@ -11,7 +11,9 @@ def usage(module_name: str) -> None:
     sys.exit(1)
 
 
-def main(argv: list[str]) -> None:
+def main() -> None:
+    init(autoreset=True)
+    argv: list[str] = sys.argv
     if argv[1] == "parse":
         ast_type = argv[2]
         file = argv[3]
@@ -34,5 +36,4 @@ def main(argv: list[str]) -> None:
 
 
 if __name__ == "__main__":
-    init(autoreset=True)
-    main(sys.argv)
+    main()

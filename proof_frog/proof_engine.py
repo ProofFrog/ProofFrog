@@ -9,10 +9,10 @@ from typing import TypeAlias, Sequence, Tuple, Dict, Optional
 import z3
 from colorama import Fore
 from sympy import Symbol
-from proof_frog import frog_parser
-from proof_frog import frog_ast
-from proof_frog import visitors
-from proof_frog import dependencies
+from . import frog_parser
+from . import frog_ast
+from . import visitors
+from . import dependencies
 
 MethodLookup: TypeAlias = Dict[Tuple[str, str], frog_ast.Method]
 

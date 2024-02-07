@@ -1,1 +1,1 @@
-from .__main__ import main
+from .proof_frog import main

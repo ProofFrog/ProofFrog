@@ -181,8 +181,8 @@ class UnnecessaryFieldVisitor(visitors.Visitor[list[str]]):
 
 
 class BubbleSortFieldAssignment(visitors.BlockTransformer):
-    def __init__(self):
-        self.fields = []
+    def __init__(self) -> None:
+        self.fields: list[frog_ast.Field] = []
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         new_game = copy.deepcopy(game)
@@ -192,7 +192,7 @@ class BubbleSortFieldAssignment(visitors.BlockTransformer):
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         graph = generate_dependency_graph(block, self.fields, {})
-        new_statements = copy.deepcopy(block.statements)
+        new_statements = list(copy.deepcopy(block.statements))
         while True:
             swapped = False
             for i in range(1, len(new_statements)):

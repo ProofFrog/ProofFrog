@@ -2,7 +2,7 @@ from __future__ import annotations
 import copy
 import functools
 import operator
-from collections import namedtuple
+from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from typing import (
     Any,
@@ -40,7 +40,7 @@ class Visitor(ABC, Generic[U]):
         pass
 
     def visit(self, visiting_node: frog_ast.ASTNode) -> U:
-        def visit_helper(node: frog_ast.Node) -> None:
+        def visit_helper(node: frog_ast.ASTNode) -> None:
             visit_name = "visit_" + _to_snake_case(type(node).__name__)
             if hasattr(self, visit_name):
                 getattr(self, visit_name)(node)
@@ -217,8 +217,8 @@ class RedundantCopyTransformer(BlockTransformer):
 
 
 class RedundantFieldCopyTransformer(BlockTransformer):
-    def __init__(self):
-        self.fields = []
+    def __init__(self) -> None:
+        self.fields: list[str] = []
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.fields = [field.name for field in game.fields]
@@ -238,12 +238,12 @@ class RedundantFieldCopyTransformer(BlockTransformer):
 
                 def search_for_other_use(
                     var: frog_ast.Variable, node: frog_ast.ASTNode
-                ):
+                ) -> bool:
                     return node == var
 
                 no_other_uses = True
                 decl_index: int
-                decl_statement: frog_ast.Statement
+                decl_statement: frog_ast.Assignment
                 for other_index, other_statement in enumerate(block.statements):
                     if statement == other_statement:
                         continue
@@ -268,10 +268,10 @@ class RedundantFieldCopyTransformer(BlockTransformer):
                 modified_statement.value = decl_statement.value
                 return self.transform(
                     frog_ast.Block(
-                        block.statements[:decl_index]
+                        list(block.statements[:decl_index])
                         + [modified_statement]
-                        + block.statements[decl_index + 1 : index]
-                        + block.statements[index + 1 :]
+                        + list(block.statements[decl_index + 1 : index])
+                        + list(block.statements[index + 1 :])
                     )
                 )
         return block
@@ -708,25 +708,33 @@ class InlineTransformer(Transformer):
 
 class Z3FormulaVisitor(Visitor[z3.AstRef]):
     # Don't just append Int(var.name), need mapping from name to new name in this formula
-    def __init__(self, type_map: NameTypeMap, variable_version_map=None) -> None:
+    def __init__(
+        self,
+        type_map: NameTypeMap,
+        variable_version_map: Optional[dict[str, int]] = None,
+    ) -> None:
         self.stack: list[Optional[z3.AstRef]] = []
         self.type_map = type_map
         self.variable_version_map = variable_version_map
         self.bool_num = 0
-        self.expression_formula_map = []
+        self.expression_formula_map: list[
+            tuple[tuple[frog_ast.Expression, dict[str, int]], z3.AstRef]
+        ] = []
 
     def result(self) -> Optional[z3.AstRef]:
         value = self.stack[-1] if self.stack else None
         self.stack = []
         return value
 
-    def set_type_map(self, type_map):
+    def set_type_map(self, type_map: NameTypeMap) -> None:
         self.type_map = type_map
 
-    def set_variable_version_map(self, version_map):
+    def set_variable_version_map(self, version_map: dict[str, int]) -> None:
         self.variable_version_map = version_map
 
-    def _search_expression_formula_map(self, potential):
+    def _search_expression_formula_map(
+        self, potential: tuple[frog_ast.Expression, dict[str, int]]
+    ) -> Optional[z3.AstRef]:
         for item in self.expression_formula_map:
             if item[0] == potential:
                 return item[1]
@@ -749,8 +757,8 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
     def visit_boolean(self, node: frog_ast.Boolean) -> None:
         self.stack.append(node.bool)
 
-    def leave_unary_operation(self, op: frog_ast.UnaryOperation) -> None:
-        if op.operator == frog_ast.UnaryOperators.NOT and self.stack:
+    def leave_unary_operation(self, operation: frog_ast.UnaryOperation) -> None:
+        if operation.operator == frog_ast.UnaryOperators.NOT and self.stack:
             val = self.stack.pop()
             if val is not None:
                 self.stack.append(z3.Not(val))
@@ -759,7 +767,7 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         else:
             self.stack.append(None)
 
-    def leave_binary_operation(self, op: frog_ast.BinaryOperation) -> None:
+    def leave_binary_operation(self, operation: frog_ast.BinaryOperation) -> None:
         operators = {
             frog_ast.BinaryOperators.ADD: operator.add,
             frog_ast.BinaryOperators.SUBTRACT: operator.sub,
@@ -779,17 +787,18 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         if (
             right_item is not None
             and left_item is not None
-            and op.operator
+            and operation.operator
             in set([frog_ast.BinaryOperators.IN, frog_ast.BinaryOperators.SUBSETS])
         ):
+            assert self.variable_version_map is not None
             z3_bool = self._search_expression_formula_map(
-                (op, self.variable_version_map)
+                (operation, self.variable_version_map)
             )
             if z3_bool is None:
                 z3_bool = z3.Bool(f"@@@unknown_boolean{self.bool_num}")
                 self.bool_num += 1
                 self.expression_formula_map.append(
-                    ((op, copy.deepcopy(self.variable_version_map)), z3_bool)
+                    ((operation, copy.deepcopy(self.variable_version_map)), z3_bool)
                 )
             self.stack.append(z3_bool)
             return
@@ -800,7 +809,7 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
             and not isinstance(left_item, str)
             and not isinstance(right_item, str)
         ):
-            self.stack.append(operators[op.operator](left_item, right_item))
+            self.stack.append(operators[operation.operator](left_item, right_item))
         else:
             self.stack.append(None)
 
@@ -810,13 +819,13 @@ class SimplifyRangeTransformer(Transformer):
         self,
         proof_let_types: NameTypeMap,
         game: frog_ast.Game,
-        op: frog_ast.BinaryOperation | frog_ast.UnaryOperation,
+        operation: frog_ast.BinaryOperation | frog_ast.UnaryOperation,
     ) -> None:
         self.game = game
         self.proof_let_types = proof_let_types
         type_map = GetTypeMapVisitor(game.methods[0]).visit(game) + proof_let_types
-        self.assumed_op = op
-        self.assumed_formula = Z3FormulaVisitor(type_map).visit(op)
+        self.assumed_op = operation
+        self.assumed_formula = Z3FormulaVisitor(type_map).visit(operation)
         if self.assumed_formula is not None:
             self.solver = z3.Solver()
             self.solver.add(self.assumed_formula)
@@ -862,9 +871,9 @@ class SimplifyRangeTransformer(Transformer):
         self.solver.pop()
         if not satisfied:
             return frog_ast.Boolean(False)
-        s = z3.Solver()
-        s.add(z3.Not(z3.Implies(self.assumed_formula, statement_formula)))
-        if s.check() == z3.unsat:
+        solver = z3.Solver()
+        solver.add(z3.Not(z3.Implies(self.assumed_formula, statement_formula)))
+        if solver.check() == z3.unsat:
             return frog_ast.Boolean(True)
         return operation
 
@@ -1248,9 +1257,9 @@ class SimplifyNot(Transformer):
 
 
 class FieldOrderingVisitor(Visitor[dict[str, str]]):
-    def __init__(self):
+    def __init__(self) -> None:
         self.field_num = 0
-        self.fields = []
+        self.fields: list[str] = []
         self.field_rename_map: dict[str, str] = {}
         self.in_initialize = False
 
@@ -1279,14 +1288,17 @@ class FieldOrderingVisitor(Visitor[dict[str, str]]):
             self.field_rename_map[var.name] = f"field{self.field_num}"
 
 
-NameTypePair = namedtuple("NameTypePair", ["name", "type"])
+@dataclass
+class NameTypePair:
+    name: str
+    type: frog_ast.Type
 
 
 class NameTypeMap:
-    def __init__(self):
+    def __init__(self) -> None:
         self.type_map: list[NameTypePair] = []
 
-    def set(self, name: str, the_type: frog_ast.Type):
+    def set(self, name: str, the_type: frog_ast.Type) -> None:
         for index, item in enumerate(self.type_map):
             if item.name == name:
                 self.type_map[index] = NameTypePair(item.name, the_type)
@@ -1305,7 +1317,7 @@ class NameTypeMap:
                 del self.type_map[index]
                 return
 
-    def __add__(self, other: NameTypeMap):
+    def __add__(self, other: NameTypeMap) -> NameTypeMap:
         new_map = NameTypeMap()
         for val in self.type_map:
             new_map.set(val.name, val.type)
@@ -1314,14 +1326,17 @@ class NameTypeMap:
         return new_map
 
 
-def _test_stop(func):
-    def wrapper(self, param):
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def _test_stop(func: F) -> F:
+    def wrapper(self: GetTypeMapVisitor, param: frog_ast.ASTNode) -> None:
         if param is self.stopping_point:
             self.stopped = True
         if not self.stopped:
             func(self, param)
 
-    return wrapper
+    return cast(F, wrapper)
 
 
 class GetTypeMapVisitor(Visitor[NameTypeMap]):
@@ -1334,17 +1349,17 @@ class GetTypeMapVisitor(Visitor[NameTypeMap]):
         return self.type_map
 
     @_test_stop
-    def visit_field(self, field: frog_ast.Field):
+    def visit_field(self, field: frog_ast.Field) -> None:
         self.type_map.set(field.name, field.type)
 
     @_test_stop
-    def visit_assignment(self, assignment: frog_ast.Assignment):
+    def visit_assignment(self, assignment: frog_ast.Assignment) -> None:
         if assignment.the_type is not None:
             assert isinstance(assignment.var, frog_ast.Variable)
             self.type_map.set(assignment.var.name, assignment.the_type)
 
     @_test_stop
-    def visit_sample(self, sample: frog_ast.Sample):
+    def visit_sample(self, sample: frog_ast.Sample) -> None:
         if sample.the_type is not None:
             assert isinstance(sample.var, frog_ast.Variable)
             self.type_map.set(sample.var.name, sample.the_type)
@@ -1352,47 +1367,57 @@ class GetTypeMapVisitor(Visitor[NameTypeMap]):
     @_test_stop
     def visit_variable_declaration(
         self, variable_declaration: frog_ast.VariableDeclaration
-    ):
+    ) -> None:
         self.type_map.set(variable_declaration.name, variable_declaration.the_type)
 
     @_test_stop
-    def visit_parameter(self, parameter: frog_ast.Parameter):
+    def visit_parameter(self, parameter: frog_ast.Parameter) -> None:
         self.type_map.set(parameter.name, parameter.type)
 
     @_test_stop
-    def visit_ast_node(self, node: frog_ast.ASTNode):
+    def visit_ast_node(self, node: frog_ast.ASTNode) -> None:
         pass
 
 
 class SimplifyTupleTransformer(Transformer):
-    def __init__(self, ast):
+    def __init__(self, ast: frog_ast.ASTNode) -> None:
         self.ast = ast
 
-    def transform_tuple(self, tuple: frog_ast.Tuple):
-        if not all(isinstance(value, frog_ast.ArrayAccess) for value in tuple.values):
-            return tuple
-        if not all(isinstance(value.index, frog_ast.Integer) for value in tuple.values):
-            return tuple
+    def transform_tuple(self, the_tuple: frog_ast.Tuple) -> frog_ast.Expression:
         if not all(
-            value.index.num == index for index, value in enumerate(tuple.values)
+            isinstance(value, frog_ast.ArrayAccess) for value in the_tuple.values
         ):
-            return tuple
+            return the_tuple
         if not all(
-            isinstance(value.the_array, frog_ast.Variable) for value in tuple.values
+            isinstance(value.index, frog_ast.Integer) for value in the_tuple.values  # type: ignore
         ):
-            return tuple
-        tuple_val_name = tuple.values[0].the_array.name
-        if not all(value.the_array.name == tuple_val_name for value in tuple.values):
-            return tuple
+            return the_tuple
+        if not all(
+            value.index.num == index for index, value in enumerate(the_tuple.values)  # type: ignore
+        ):
+            return the_tuple
+        if not all(
+            isinstance(value.the_array, frog_ast.Variable) for value in the_tuple.values  # type: ignore
+        ):
+            return the_tuple
+        tuple_val_name = the_tuple.values[0].the_array.name  # type: ignore
+        if not all(
+            value.the_array.name == tuple_val_name for value in the_tuple.values  # type: ignore
+        ):
+            return the_tuple
 
-        type_map = GetTypeMapVisitor(tuple).visit(self.ast)
-        expanded_type_array = frog_ast.expand_tuple_type(type_map.get(tuple_val_name))
-        if len(expanded_type_array) == len(tuple.values):
+        type_map = GetTypeMapVisitor(the_tuple).visit(self.ast)
+        tuple_type = type_map.get(tuple_val_name)
+        assert isinstance(tuple_type, frog_ast.BinaryOperation)
+        expanded_type_array = frog_ast.expand_tuple_type(tuple_type)
+        if len(expanded_type_array) == len(the_tuple.values):
             return frog_ast.Variable(tuple_val_name)
-        return tuple
+        return the_tuple
 
 
-def assigns_variable(used_variables, node: frog_ast.ASTNode) -> bool:
+def assigns_variable(
+    used_variables: list[frog_ast.Variable], node: frog_ast.ASTNode
+) -> bool:
     return isinstance(node, (frog_ast.Assignment, frog_ast.Sample)) and (
         (node.var in used_variables)
         or (
@@ -1406,7 +1431,7 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
     def __init__(self, field_name_pair: tuple[str, str]):
         self.field_name_pair = field_name_pair
         self.are_same = True
-        self.paired_statements = []
+        self.paired_statements: list[frog_ast.Statement] = []
 
     def result(self) -> Optional[list[frog_ast.Statement]]:
         return None if not self.are_same else self.paired_statements
@@ -1463,10 +1488,7 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
                     isinstance(subsequent_statement, frog_ast.Assignment)
                     and isinstance(subsequent_statement.var, frog_ast.Variable)
                     and subsequent_statement.var.name == pair_name
-                    and (
-                        subsequent_statement.value == paired_value
-                        or subsequent_statement.value == statement.var
-                    )
+                    and subsequent_statement.value in (paired_value, statement.var)
                 ):
                     paired = True
                     self.paired_statements.append(subsequent_statement)
@@ -1493,11 +1515,11 @@ class RemoveStatementTransformer(BlockTransformer):
 
 
 class RemoveUnreachableTransformer(BlockTransformer):
-    def __init__(self, ast):
+    def __init__(self, ast: frog_ast.ASTNode):
         self.ast = ast
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        def contains_unconditional_return(block: frog_ast.Block):
+        def contains_unconditional_return(block: frog_ast.Block) -> bool:
             return any(
                 isinstance(statement, frog_ast.ReturnStatement)
                 for statement in block.statements
@@ -1506,10 +1528,10 @@ class RemoveUnreachableTransformer(BlockTransformer):
         used_variables = VariableCollectionVisitor().visit(block)
         variable_version_map = dict((var.name, 0) for var in used_variables)
 
-        def update_version(node: frog_ast.ASTNode):
+        def update_version(node: frog_ast.ASTNode) -> None:
             updated = []
 
-            def assigns_variable_search(search_node):
+            def assigns_variable_search(search_node: frog_ast.ASTNode) -> bool:
                 if not isinstance(search_node, (frog_ast.Assignment, frog_ast.Sample)):
                     return False
                 var = None
@@ -1521,7 +1543,7 @@ class RemoveUnreachableTransformer(BlockTransformer):
                     var = search_node.var.the_array
 
                 if var in used_variables and var not in updated:
-                    variable_version_map[search_node.var.name] += 1
+                    variable_version_map[var.name] += 1
                     updated.append(var)
                     return True
                 return False
@@ -1542,12 +1564,12 @@ class RemoveUnreachableTransformer(BlockTransformer):
                 contains_unconditional_return(if_block) for if_block in statement.blocks
             ):
                 return frog_ast.Block(block.statements[: index + 1])
-            s = z3.Solver()
+            solver = z3.Solver()
 
             type_map = GetTypeMapVisitor(statement).visit(self.ast)
             formula_visitor.set_type_map(type_map)
             formula_visitor.set_variable_version_map(variable_version_map)
-            condition_formulae = []
+            condition_formulae: list[z3.AstRef] = []
             for condition_index, condition in enumerate(statement.conditions):
                 individual_formula = formula_visitor.visit(condition)
                 if individual_formula is None:
@@ -1573,9 +1595,9 @@ class RemoveUnreachableTransformer(BlockTransformer):
 
             update_version(statement)
             if formula_so_far is not None:
-                s.add(z3.Not(formula_so_far))
-            satisfiable = s.check()
-            s.reset()
+                solver.add(z3.Not(formula_so_far))
+            satisfiable = solver.check()
+            solver.reset()
             if satisfiable == z3.unsat:
                 return frog_ast.Block(block.statements[: index + 1])
 

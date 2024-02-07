@@ -378,7 +378,7 @@ class ProofEngine:
         for index, game in enumerate((current_game_ast, next_game_ast)):
 
             def apply_assumptions(
-                which_game: WhichGame, ast: frog_ast.ASTNode
+                which_game: WhichGame, ast: frog_ast.Game
             ) -> frog_ast.ASTNode:
                 for assumption in self.step_assumptions:
                     if assumption.which != which_game:
@@ -687,7 +687,7 @@ class ProofEngine:
         dfs_stack_visited = [False] * len(block.statements)
         dfs_sorted_statements: list[frog_ast.Statement] = []
 
-        def do_dfs():
+        def do_dfs() -> None:
             while dfs_stack:
                 node = dfs_stack.pop()
                 if not dfs_stack_visited[block.statements.index(node.statement)]:
@@ -794,7 +794,7 @@ def remove_duplicate_fields(game: frog_ast.Game) -> frog_ast.Game:
         for other_field in game.fields:
             if field.type == other_field.type and field.name < other_field.name:
                 duplicated_statements = visitors.SameFieldVisitor(
-                    [field.name, other_field.name]
+                    (field.name, other_field.name)
                 ).visit(game)
                 if duplicated_statements is not None:
                     new_game = copy.deepcopy(game)

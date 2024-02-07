@@ -21,7 +21,6 @@ from sympy import Symbol
 
 from proof_frog import frog_ast
 from proof_frog import frog_parser
-from . import frog_ast
 
 
 def _to_snake_case(camel_case: str) -> str:

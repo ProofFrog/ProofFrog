@@ -11,7 +11,7 @@ authors = [{name = "Ross Evans", email = "rpevans@uwaterloo.ca"}]
 requires-python = ">=3.11"
 license={file = "LICENSE"}
 dependencies = [
-	"antlr4-python-runtime >= 4.13",
+	"antlr4-python3-runtime >= 4.13",
 	"colorama >= 0.4",
 	"z3-solver >= 4.12",
 	"sympy >= 1.12"

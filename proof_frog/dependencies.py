@@ -2,8 +2,8 @@ from __future__ import annotations
 import functools
 import copy
 from typing import Optional, Callable
-from proof_frog import visitors
-from proof_frog import frog_ast
+from . import visitors
+from . import frog_ast
 
 
 def generate_dependency_graph(

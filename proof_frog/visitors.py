@@ -19,8 +19,8 @@ from typing import (
 import z3
 from sympy import Symbol
 
-from proof_frog import frog_ast
-from proof_frog import frog_parser
+from . import frog_ast
+from . import frog_parser
 
 
 def _to_snake_case(camel_case: str) -> str:

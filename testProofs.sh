@@ -12,7 +12,8 @@ examples/Book/5/5_3.proof
 examples/Book/5/5_5_TriplingPRGSecure.proof
 examples/Proofs/PubEnc/OTS=>CPA.proof
 examples/Proofs/PubEnc/Hybrid.proof
-examples/Proofs/SymEnc/EncryptThenMACCCA.proof";
+examples/Proofs/SymEnc/EncryptThenMACCCA.proof
+examples/Proofs/SymEnc/DoubleCPA$.proof";
 
 rm proofOutput.txt
 touch proofOutput.txt

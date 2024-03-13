@@ -455,21 +455,11 @@ class SubstitutionTransformer(Transformer):
             return the_list[0][1]
         return None
 
-    def transform_variable(self, v: frog_ast.Variable) -> frog_ast.ASTNode:
-        found = self._find(v)
+    def transform_ast_node(self, node: frog_ast.ASTNode) -> Optional[frog_ast.ASTNode]:
+        found = self._find(node)
         if found:
             return found
-        return v
-
-    def transform_field_access(
-        self, field_access: frog_ast.FieldAccess
-    ) -> frog_ast.ASTNode:
-        found = self._find(field_access)
-        if found:
-            return found
-        return frog_ast.FieldAccess(
-            self.transform(field_access.the_object), field_access.name
-        )
+        return None
 
 
 class InstantiationTransformer(Transformer):
@@ -1101,7 +1091,7 @@ class ExpandTupleTransformer(Transformer):
                         assert isinstance(field.value, frog_ast.Tuple)
                         expression = field.value.values[index]
                     new_fields.append(
-                        frog_ast.Field(the_type, f"{field.name}{index}", expression)
+                        frog_ast.Field(the_type, f"{field.name}@{index}", expression)
                     )
                 self.to_transform.append(field.name)
                 self.lengths.append(len(unfolded_types))
@@ -1132,7 +1122,7 @@ class ExpandTupleTransformer(Transformer):
                     new_statements.append(
                         frog_ast.Assignment(
                             None,
-                            frog_ast.Variable(f"{statement.var}{index}"),
+                            frog_ast.Variable(f"{statement.var}@{index}"),
                             tuple_value,
                         )
                     )
@@ -1146,7 +1136,7 @@ class ExpandTupleTransformer(Transformer):
                 assert isinstance(statement.var.index, frog_ast.Integer)
                 new_statement = copy.deepcopy(statement)
                 new_statement.var = frog_ast.Variable(
-                    f"{statement.var.the_array.name}{statement.var.index.num}",
+                    f"{statement.var.the_array.name}@{statement.var.index.num}",
                 )
                 new_statements.append(new_statement)
             elif (
@@ -1164,7 +1154,7 @@ class ExpandTupleTransformer(Transformer):
                     new_statements.append(
                         frog_ast.Assignment(
                             the_type,
-                            frog_ast.Variable(f"{statement.var.name}{index}"),
+                            frog_ast.Variable(f"{statement.var.name}@{index}"),
                             statement.value.values[index],
                         )
                     )
@@ -1201,7 +1191,7 @@ class ExpandTupleTransformer(Transformer):
             )
         assert isinstance(array_access.index, frog_ast.Integer)
         return frog_ast.Variable(
-            f"{array_access.the_array.name}{array_access.index.num}"
+            f"{array_access.the_array.name}@{array_access.index.num}"
         )
 
     def transform_variable(self, var: frog_ast.Variable) -> frog_ast.Expression:
@@ -1209,7 +1199,7 @@ class ExpandTupleTransformer(Transformer):
             return var
         length = self.lengths[self.to_transform.index(var.name)]
         return frog_ast.Tuple(
-            [frog_ast.Variable(f"{var.name}{index}") for index in range(length)]
+            [frog_ast.Variable(f"{var.name}@{index}") for index in range(length)]
         )
 
 

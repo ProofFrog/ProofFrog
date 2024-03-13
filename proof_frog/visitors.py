@@ -168,10 +168,18 @@ class RedundantCopyTransformer(BlockTransformer):
             if (
                 isinstance(statement, frog_ast.Assignment)
                 and statement.the_type is not None
+                and isinstance(statement.var, frog_ast.Variable)
                 and isinstance(statement.value, frog_ast.Variable)
             ):
-                # Search through the remaining statements to see if the variable was ever used again.
+                copy_name = statement.var.name
                 original_name = statement.value.name
+
+                def written_to(copy_name: str, node: frog_ast.ASTNode) -> bool:
+                    return (
+                        isinstance(node, (frog_ast.Sample, frog_ast.Assignment))
+                        and isinstance(node.var, frog_ast.Variable)
+                        and node.var.name == copy_name
+                    )
 
                 def original_used(original_name: str, node: frog_ast.ASTNode) -> bool:
                     return (
@@ -182,16 +190,15 @@ class RedundantCopyTransformer(BlockTransformer):
                 remaining_block = frog_ast.Block(
                     copy.deepcopy(block.statements[index + 1 :])
                 )
+                was_written = SearchVisitor[frog_ast.Variable](
+                    functools.partial(written_to, copy_name)
+                ).visit(remaining_block)
                 used_again = SearchVisitor[frog_ast.Variable](
                     functools.partial(original_used, original_name)
                 ).visit(remaining_block)
                 # If it was used again, just move on. This ain't gonna work.
-                if used_again:
+                if was_written or used_again:
                     continue
-
-                assert isinstance(statement.var, frog_ast.Variable)
-
-                copy_name = statement.var.name
 
                 def copy_used(copy_name: str, node: frog_ast.ASTNode) -> bool:
                     return (

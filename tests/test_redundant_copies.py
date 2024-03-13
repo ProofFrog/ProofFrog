@@ -27,7 +27,7 @@ from proof_frog import visitors, frog_parser
             Int f() {
                 Int a = 1;
                 Int b = a;
-                a += 1;
+                a = a + 1;
                 return b;
             }
             """,
@@ -35,7 +35,7 @@ from proof_frog import visitors, frog_parser
             Int f() {
                 Int a = 1;
                 Int b = a;
-                a += 1;
+                a = a + 1;
                 return b;
             }
             """,
@@ -95,7 +95,7 @@ from proof_frog import visitors, frog_parser
                 Int a = 1;
                 Int b = a;
                 if (True) {
-                    a += 1;
+                    a = a + 1;
                 }
                 return b;
             }
@@ -105,9 +105,31 @@ from proof_frog import visitors, frog_parser
                 Int a = 1;
                 Int b = a;
                 if (True) {
-                    a += 1;
+                    a = a + 1;
                 }
                 return b;
+            }
+            """,
+        ),
+        (
+            """
+            Int f() {
+                Int a = 1;
+                if (True) {
+                    Int b = a;
+                    b = b + 1;
+                }
+                return a;
+            }
+            """,
+            """
+            Int f() {
+                Int a = 1;
+                if (True) {
+                    Int b = a;
+                    b = b + 1;
+                }
+                return a;
             }
             """,
         ),
@@ -121,5 +143,6 @@ def test_redundant_copies(
     expected_ast = frog_parser.parse_method(expected)
 
     transformed_ast = visitors.RedundantCopyTransformer().transform(game_ast)
-    print(transformed_ast)
+    print("EXPECTED", expected_ast)
+    print("TRANSFORMED", transformed_ast)
     assert expected_ast == transformed_ast

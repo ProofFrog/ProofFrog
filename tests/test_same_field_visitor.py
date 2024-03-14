@@ -177,6 +177,25 @@ from proof_frog import visitors, frog_parser
             ("x", "y"),
             False,
         ),
+        (
+            """
+            Game G() {
+                Int x;
+                Int y;
+                Void f() {
+                    x = 5;
+                    y = 5;
+
+                    x = 10;
+                    Int a = y;
+                    y = 10;
+                    return a;
+                }
+            }
+            """,
+            ("x", "y"),
+            False,
+        ),
     ],
 )
 def test_same_field_visitor(game: str, pair: tuple[str, str], expected: bool) -> None:

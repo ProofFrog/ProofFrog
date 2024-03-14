@@ -1464,11 +1464,16 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
                 self.are_same = False
                 return
 
+            def reads_pair(pair_name: str, node: frog_ast.ASTNode) -> bool:
+                return isinstance(node, frog_ast.Variable) and node.name == pair_name
+
             used_variables = VariableCollectionVisitor().visit(statement.value)
 
             assigns_variable_partial = functools.partial(
                 assigns_variable, used_variables
             )
+
+            reads_pair_partial = functools.partial(reads_pair, pair_name)
 
             paired_value = SubstitutionTransformer(
                 [(statement.var, frog_ast.Variable(pair_name))]
@@ -1476,13 +1481,6 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
 
             paired = False
             for subsequent_statement in block.statements[index + 1 :]:
-                if (
-                    SearchVisitor(assigns_variable_partial).visit(subsequent_statement)
-                    is not None
-                ):
-                    self.are_same = False
-                    return
-
                 if (
                     isinstance(subsequent_statement, frog_ast.Assignment)
                     and isinstance(subsequent_statement.var, frog_ast.Variable)
@@ -1492,6 +1490,15 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
                     paired = True
                     self.paired_statements.append(subsequent_statement)
                     break
+
+                if (
+                    SearchVisitor(assigns_variable_partial).visit(subsequent_statement)
+                    is not None
+                ) or (
+                    SearchVisitor(reads_pair_partial).visit(subsequent_statement)
+                ) is not None:
+                    self.are_same = False
+                    return
             if not paired:
                 self.are_same = False
                 return

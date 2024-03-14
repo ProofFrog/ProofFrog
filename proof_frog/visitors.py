@@ -249,12 +249,14 @@ class RedundantFieldCopyTransformer(BlockTransformer):
 
                 no_other_uses = True
                 decl_index: int
-                decl_statement: frog_ast.Assignment
+                decl_statement: frog_ast.Assignment | frog_ast.Sample
                 for other_index, other_statement in enumerate(block.statements):
                     if statement == other_statement:
                         continue
                     if (
-                        isinstance(other_statement, frog_ast.Assignment)
+                        isinstance(
+                            other_statement, (frog_ast.Sample, frog_ast.Assignment)
+                        )
                         and other_statement.the_type is not None
                         and other_statement.var == statement.value
                     ):
@@ -270,8 +272,9 @@ class RedundantFieldCopyTransformer(BlockTransformer):
                         no_other_uses = False
                 if not no_other_uses:
                     continue
-                modified_statement = copy.deepcopy(statement)
-                modified_statement.value = decl_statement.value
+                modified_statement = copy.deepcopy(decl_statement)
+                modified_statement.var = statement.var
+                modified_statement.the_type = None
                 return self.transform(
                     frog_ast.Block(
                         list(block.statements[:decl_index])

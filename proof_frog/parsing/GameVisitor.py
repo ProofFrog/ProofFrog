@@ -219,6 +219,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#minusExp.
+    def visitMinusExp(self, ctx:GameParser.MinusExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#typeExp.
     def visitTypeExp(self, ctx:GameParser.TypeExpContext):
         return self.visitChildren(ctx)

@@ -296,6 +296,13 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             frog_ast.UnaryOperators.NOT, self.visit(ctx.expression())
         )
 
+    def visitMinusExp(
+        self, ctx: PrimitiveParser.MinusExpContext
+    ) -> frog_ast.UnaryOperation:
+        return frog_ast.UnaryOperation(
+            frog_ast.UnaryOperators.MINUS, self.visit(ctx.expression())
+        )
+
     def visitIntType(self, ctx: PrimitiveParser.IntTypeContext) -> frog_ast.Type:
         return frog_ast.IntType()
 

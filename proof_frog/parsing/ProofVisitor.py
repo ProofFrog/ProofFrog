@@ -284,6 +284,11 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#minusExp.
+    def visitMinusExp(self, ctx:ProofParser.MinusExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#typeExp.
     def visitTypeExp(self, ctx:ProofParser.TypeExpContext):
         return self.visitChildren(ctx)

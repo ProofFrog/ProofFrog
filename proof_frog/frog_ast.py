@@ -136,6 +136,7 @@ class BinaryOperators(Enum):
 class UnaryOperators(Enum):
     NOT = "!"
     SIZE = "|"
+    MINUS = "-"
 
 
 class BinaryOperation(Expression):
@@ -163,6 +164,8 @@ class UnaryOperation(Expression):
             return f"!({self.expression})"
         if self.operator == UnaryOperators.SIZE:
             return f"|{self.expression}|"
+        if self.operator == UnaryOperators.MINUS:
+            return f"-{self.expression}"
         return "UNDEFINED UNARY OPERATOR"
 
 

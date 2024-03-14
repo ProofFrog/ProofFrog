@@ -219,6 +219,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#minusExp.
+    def visitMinusExp(self, ctx:PrimitiveParser.MinusExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#typeExp.
     def visitTypeExp(self, ctx:PrimitiveParser.TypeExpContext):
         return self.visitChildren(ctx)

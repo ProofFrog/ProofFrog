@@ -42,6 +42,7 @@ expression:
 
 	| expression TIMES expression #multiplyExp
 	| expression DIVIDE expression #divideExp
+	| SUBTRACT expression #minusExp
 	| expression PLUS expression #addExp
 	| expression SUBTRACT expression #subtractExp
 	| expression EQUALSCOMPARE expression #equalsExp

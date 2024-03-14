@@ -224,6 +224,11 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SchemeParser#minusExp.
+    def visitMinusExp(self, ctx:SchemeParser.MinusExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SchemeParser#typeExp.
     def visitTypeExp(self, ctx:SchemeParser.TypeExpContext):
         return self.visitChildren(ctx)

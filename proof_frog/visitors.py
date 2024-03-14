@@ -757,14 +757,19 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         self.stack.append(node.bool)
 
     def leave_unary_operation(self, operation: frog_ast.UnaryOperation) -> None:
-        if operation.operator == frog_ast.UnaryOperators.NOT and self.stack:
-            val = self.stack.pop()
-            if val is not None:
-                self.stack.append(z3.Not(val))
-            else:
-                self.stack.append(None)
-        else:
+        if not self.stack or operation.operator == frog_ast.UnaryOperators.SIZE:
             self.stack.append(None)
+            return
+
+        val = self.stack.pop()
+        if val is None:
+            self.stack.append(None)
+            return
+
+        if operation.operator == frog_ast.UnaryOperators.NOT:
+            self.stack.append(z3.Not(val))
+        else:
+            self.stack.append(-val)
 
     def leave_binary_operation(self, operation: frog_ast.BinaryOperation) -> None:
         operators = {
@@ -856,6 +861,7 @@ class SimplifyRangeTransformer(Transformer):
                 frog_ast.BinaryOperators.AND,
                 frog_ast.BinaryOperators.OR,
                 frog_ast.UnaryOperators.NOT,
+                frog_ast.UnaryOperators.MINUS,
             )
             or self.assumed_formula is None
         ):

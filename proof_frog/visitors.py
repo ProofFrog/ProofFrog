@@ -1028,7 +1028,7 @@ class CollapseAssignmentTransformer(BlockTransformer):
                 return self.transform_block(
                     frog_ast.Block(
                         block.statements[:index]
-                        + block.statements[index + 1 : index + later_index]
+                        + block.statements[index + 1 : index + later_index + 1]
                         + [replaced_statement]
                         + block.statements[index + later_index + 2 :]
                     )

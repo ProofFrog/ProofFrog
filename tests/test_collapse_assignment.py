@@ -71,6 +71,25 @@ from proof_frog import visitors, frog_parser
             }
             """,
         ),
+        (
+            """
+            Int f() {
+                Int b = 0;
+                Int a = 1;
+                b = b + 1;
+                a = 2;
+                return a;
+            }
+            """,
+            """
+            Int f() {
+                Int b = 0;
+                b = b + 1;
+                Int a = 2;
+                return a;
+            }
+            """,
+        ),
     ],
 )
 def test_collapse_assignment(
@@ -79,7 +98,7 @@ def test_collapse_assignment(
 ) -> None:
     game_ast = frog_parser.parse_method(method)
     expected_ast = frog_parser.parse_method(expected)
-
+    print("EXPECTED", expected_ast)
     transformed_ast = visitors.CollapseAssignmentTransformer().transform(game_ast)
-    print(transformed_ast)
+    print("TRANSFORMED", transformed_ast)
     assert expected_ast == transformed_ast

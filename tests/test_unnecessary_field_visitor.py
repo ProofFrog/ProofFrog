@@ -130,6 +130,6 @@ def test_unnecessary_field_visitor(
     expected: list[str],
 ) -> None:
     game_ast = frog_parser.parse_game(method)
-
+    print("AST", game_ast)
     received_unnecessary = dependencies.UnnecessaryFieldVisitor({}).visit(game_ast)
     assert expected == received_unnecessary

@@ -141,43 +141,53 @@ class UnnecessaryFieldVisitor(visitors.Visitor[list[str]]):
 
         self.all_fields = game.fields
 
-    def visit_method(self, method: frog_ast.Method) -> None:
+    def visit_block(self, block: frog_ast.Block) -> None:
         graph = generate_dependency_graph(
-            method.block, self.all_fields, self.proof_namespace, False
+            block, self.all_fields, self.proof_namespace, False
         )
 
         def has_return_statement(node: frog_ast.ASTNode) -> bool:
             return isinstance(node, frog_ast.ReturnStatement)
+
+        def find_field_usage(node: frog_ast.ASTNode) -> bool:
+            return (
+                isinstance(node, frog_ast.Variable)
+                and node.name in self._get_unnecessary_field_list()
+            )
+
+        def add_field_usages(node: frog_ast.ASTNode) -> None:
+            found = visitors.SearchVisitor(find_field_usage).visit(node)
+            while found is not None:
+                self.unnecessary_fields[found.name] = False
+                found = visitors.SearchVisitor(find_field_usage).visit(node)
 
         def search_dependencies(node: Node) -> None:
             visited = [False] * len(graph.nodes)
             to_visit: list[Node] = [node]
             while to_visit:
                 cur = to_visit.pop()
-                if not visited[method.block.statements.index(cur.statement)]:
-                    visited[method.block.statements.index(cur.statement)] = True
+                if not visited[block.statements.index(cur.statement)]:
+                    visited[block.statements.index(cur.statement)] = True
 
-                    def find_field_usage(node: frog_ast.ASTNode) -> bool:
-                        return (
-                            isinstance(node, frog_ast.Variable)
-                            and node.name in self._get_unnecessary_field_list()
-                        )
-
-                    found = visitors.SearchVisitor(find_field_usage).visit(
-                        cur.statement
-                    )
-                    while found is not None:
-                        self.unnecessary_fields[found.name] = False
-                        found = visitors.SearchVisitor(find_field_usage).visit(
-                            cur.statement
-                        )
+                    add_field_usages(cur.statement)
 
                     for neighbour in cur.in_neighbours:
                         to_visit.append(neighbour)
 
         for node in graph.nodes:
-            if visitors.SearchVisitor(has_return_statement).visit(node.statement):
+            if isinstance(node.statement, frog_ast.ReturnStatement):
                 search_dependencies(node)
+                continue
+            if not visitors.SearchVisitor(has_return_statement).visit(node.statement):
+                continue
+            if isinstance(node.statement, frog_ast.IfStatement):
+                for condition in node.statement.conditions:
+                    add_field_usages(condition)
+            elif isinstance(node.statement, frog_ast.GenericFor):
+                add_field_usages(node.statement.over)
+            elif isinstance(node.statement, frog_ast.NumericFor):
+                add_field_usages(node.statement.start)
+                add_field_usages(node.statement.end)
 
 
 class BubbleSortFieldAssignment(visitors.BlockTransformer):

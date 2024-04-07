@@ -675,3 +675,21 @@ def parse_method(method: str) -> frog_ast.Method:
         _get_parser(method, GameLexer, GameParser).method()
     )
     return ast
+
+
+def get_file_type(file_name: str) -> frog_ast.FileType:
+    extension: str = os.path.splitext(file_name)[1].strip(".")
+    return frog_ast.FileType(extension)
+
+
+def parse_file_from_name(file_name: str) -> frog_ast.Root:
+    file_type = get_file_type(file_name)
+    match file_type:
+        case frog_ast.FileType.PRIMITIVE:
+            return parse_primitive_file(file_name)
+        case frog_ast.FileType.SCHEME:
+            return parse_scheme_file(file_name)
+        case frog_ast.FileType.GAME:
+            return parse_game_file(file_name)
+        case frog_ast.FileType.PROOF:
+            return parse_proof_file(file_name)

@@ -1,0 +1,36 @@
+import 'hacs/SymEnc.primitive';
+
+Game Real(SymEnc E) {
+    E.Key k;
+
+    Void Initialize() {
+        k = E.KeyGen();
+    }
+
+    E.Ciphertext Challenge(E.Message m) {
+        return E.Enc(k, m);
+    }
+
+    E.Ciphertext Encrypt(E.Message m) {
+        return E.Enc(k, m);
+    }
+}
+
+Game Random(SymEnc E) {
+    E.Key k;
+
+    Void Initialize() {
+        k = E.KeyGen();
+    }
+
+    E.Ciphertext Challenge(E.Message m) {
+        E.Message fake <- E.Message;
+        return E.Enc(k, fake);
+    }
+
+    E.Ciphertext Encrypt(E.Message m) {
+        return E.Enc(k, m);
+    }
+}
+
+export as MultiChallengeCPA;

@@ -4,7 +4,7 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "proof_frog"
-version = "0.1.0"
+version = "0.1.1"
 description = "A tool for verifying game-hopping proofs"
 readme = "README.md"
 authors = [{name = "Ross Evans", email = "rpevans@uwaterloo.ca"}]

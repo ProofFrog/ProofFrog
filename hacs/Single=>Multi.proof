@@ -1,0 +1,60 @@
+import 'hacs/SymEnc.primitive';
+import 'hacs/SingleChallengeCPA.game';
+import 'hacs/MultiChallengeCPA.game';
+
+Reduction R(SymEnc E, Int i) compose SingleChallengeCPA(E) against MultiChallengeCPA(E).Adversary {
+    Int count;
+
+    Void Initialize() {
+        count = 0;
+    }
+
+    E.Ciphertext Challenge(E.Message m) {
+        if (count > i) {
+            return challenger.Encrypt(m);
+        } else if (count == i) {
+            return challenger.Challenge(m);
+        } else {
+            E.Message fake <- E.Message;
+            return challenger.Encrypt(fake);
+        }
+    }
+
+    E.Ciphertext Encrypt(E.Message m) {
+        return challenger.Encrypt(m);
+    }
+}
+
+proof:
+
+let:
+    Set MessageSpace;
+    Set CiphertextSpace;
+    Set KeySpace;
+
+    SymEnc E = SymEnc(MessageSpace, CiphertextSpace, KeySpace);
+    Int q;
+
+assume:
+    SingleChallengeCPA(E);
+
+theorem:
+    MultiChallengeCPA(E);
+
+games:
+    MultiChallengeCPA(E).Real against MultiChallengeCPA(E).Adversary;
+
+    assume R(E, 0).count >= 0;
+    assume SingleChallengeCPA(E).Real.count == 0;
+
+    induction(i from 0 to q) {
+        SingleChallengeCPA(E).Real compose R(E, i) against MultiChallengeCPA(E).Adversary;
+        SingleChallengeCPA(E).Random compose R(E, i) against MultiChallengeCPA(E).Adversary;
+        assume SingleChallengeCPA(E).Random.count == 0;
+        assume SingleChallengeCPA(E).Real.count == 0;
+    }
+
+    assume R(E, q).count <= q;
+    assume SingleChallengeCPA(E).Random.count == 0;
+
+    MultiChallengeCPA(E).Random against MultiChallengeCPA(E).Adversary;

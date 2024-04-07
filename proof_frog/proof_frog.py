@@ -1,13 +1,13 @@
 import sys
 from colorama import init
-from . import frog_parser
-from . import proof_engine
+from . import proof_engine, frog_parser, latex_output
 
 
 def usage() -> None:
     print("Incorrect Arguments", file=sys.stderr)
     print("Usage: proof_frog parse [primitive|game|scheme|proof] <file>")
     print("Usage: proof_frog prove <file.proof>")
+    print("Usage: proof_frog print <file>")
     sys.exit(1)
 
 
@@ -34,6 +34,10 @@ def main() -> None:
     elif argv[1] == "prove":
         engine = proof_engine.ProofEngine(argv[2], len(argv) > 3 and argv[3] == "-v")
         engine.prove()
+    elif argv[1] == "print":
+        file_name = argv[2]
+        root = frog_parser.parse_file_from_name(file_name)
+        latex_output.LatexVisitor().visit(root)
     else:
         usage()
 

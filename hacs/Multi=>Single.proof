@@ -1,0 +1,50 @@
+import 'hacs/SymEnc.primitive';
+import 'hacs/SingleChallengeCPA.game';
+import 'hacs/MultiChallengeCPA.game';
+
+Reduction R(SymEnc E) compose MultiChallengeCPA(E) against SingleChallengeCPA(E).Adversary {
+    Int count;
+
+    Void Initialize() {
+        count = 0;
+    }
+
+    E.Ciphertext? Challenge(Message m) {
+        E.Ciphertext? result = None;
+        if (count == 0) {
+            result = challenger.Challenge(m);
+        }
+        count = count + 1;
+        return result;
+    }
+
+    E.Ciphertext Encrypt(Message m) {
+        return challenger.Encrypt(m);
+    }
+}
+
+proof:
+
+let:
+    Set MessageSpace;
+    Set CiphertextSpace;
+    Set KeySpace;
+
+    SymEnc E = SymEnc(MessageSpace, CiphertextSpace, KeySpace);
+
+assume:
+
+    MultiChallengeCPA(E);
+
+theorem:
+
+    SingleChallengeCPA(E);
+
+games:
+    SingleChallengeCPA(E).Real against SingleChallengeCPA(E).Adversary;
+
+    MultiChallengeCPA(E).Real compose R(E) against SingleChallengeCPA(E).Adversary;
+
+    MultiChallengeCPA(E).Random compose R(E) against SingleChallengeCPA(E).Adversary;
+
+    SingleChallengeCPA(E).Random against SingleChallengeCPA(E).Adversary;

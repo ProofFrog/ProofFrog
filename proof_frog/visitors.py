@@ -49,7 +49,7 @@ class Visitor(ABC, Generic[U]):
             def visit_children(child: Any) -> Any:
                 if isinstance(child, frog_ast.ASTNode):
                     visit_helper(child)
-                if isinstance(child, list):
+                if isinstance(child, (list, tuple)):
                     for item in child:
                         visit_children(item)
 

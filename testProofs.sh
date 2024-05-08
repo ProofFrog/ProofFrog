@@ -33,3 +33,6 @@ if [ $succeeded = true ]; then
 fi
 echo "Running Unit Tests"
 pytest
+if [ $? -ne 0 ] || [ $succeeded = false ]; then
+	exit 1
+fi

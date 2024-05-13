@@ -9,7 +9,7 @@
             "type": "python",
             "request": "launch",
             "module": "proof_frog",
-            "args": ["check", "examples/Book/5/5_2_PseudoOTP.scheme"],
+            "args": ["check", "ill-formed/scheme/BadIf.scheme"],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "justMyCode": true

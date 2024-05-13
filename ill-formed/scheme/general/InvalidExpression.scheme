@@ -1,4 +1,4 @@
-import 'examples/ill-formed/fixtures/VoidFPrimitive.primitive';
+import 'ill-formed/fixtures/VoidFPrimitive.primitive';
 
 Scheme InvalidExpression() extends VoidFPrimitive {
     Set Test = bla;

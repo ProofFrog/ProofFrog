@@ -1,4 +1,4 @@
-import 'examples/ill-formed/fixtures/SimplePrimitive.primitive';
+import 'ill-formed/fixtures/SimplePrimitive.primitive';
 
 Scheme NotOverridingFields() extends SimplePrimitive {
     Int f() {

@@ -1,4 +1,4 @@
-import 'examples/ill-formed/fixtures/SimplePrimitive.primitive';
+import 'ill-formed/fixtures/SimplePrimitive.primitive';
 
 Scheme IncorrectReturn(Set set1) extends SimplePrimitive {
     Set field = set1;

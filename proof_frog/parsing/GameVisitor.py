@@ -149,13 +149,13 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by GameParser#notEqualsExp.
-    def visitNotEqualsExp(self, ctx:GameParser.NotEqualsExpContext):
+    # Visit a parse tree produced by GameParser#addExp.
+    def visitAddExp(self, ctx:GameParser.AddExpContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by GameParser#addExp.
-    def visitAddExp(self, ctx:GameParser.AddExpContext):
+    # Visit a parse tree produced by GameParser#notEqualsExp.
+    def visitNotEqualsExp(self, ctx:GameParser.NotEqualsExpContext):
         return self.visitChildren(ctx)
 
 
@@ -219,6 +219,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#minusExp.
+    def visitMinusExp(self, ctx:GameParser.MinusExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#typeExp.
     def visitTypeExp(self, ctx:GameParser.TypeExpContext):
         return self.visitChildren(ctx)
@@ -271,6 +276,11 @@ class GameVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by GameParser#variable.
     def visitVariable(self, ctx:GameParser.VariableContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#parameterizedGame.
+    def visitParameterizedGame(self, ctx:GameParser.ParameterizedGameContext):
         return self.visitChildren(ctx)
 
 

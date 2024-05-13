@@ -442,9 +442,7 @@ class TypeCheckVisitor(visitors.Visitor[None]):
             f"In {array_access}, {array_access.the_array} is not an indexable type",
         )
 
-    def leave_func_call_expression(
-        self, func_call: frog_ast.FuncCallExpression
-    ) -> None:
+    def leave_func_call(self, func_call: frog_ast.FuncCall) -> None:
         arg_types = []
         for _ in func_call.args:
             arg_types.insert(0, self.type_stack.pop())

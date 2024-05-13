@@ -149,13 +149,13 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by PrimitiveParser#notEqualsExp.
-    def visitNotEqualsExp(self, ctx:PrimitiveParser.NotEqualsExpContext):
+    # Visit a parse tree produced by PrimitiveParser#addExp.
+    def visitAddExp(self, ctx:PrimitiveParser.AddExpContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by PrimitiveParser#addExp.
-    def visitAddExp(self, ctx:PrimitiveParser.AddExpContext):
+    # Visit a parse tree produced by PrimitiveParser#notEqualsExp.
+    def visitNotEqualsExp(self, ctx:PrimitiveParser.NotEqualsExpContext):
         return self.visitChildren(ctx)
 
 
@@ -219,6 +219,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#minusExp.
+    def visitMinusExp(self, ctx:PrimitiveParser.MinusExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#typeExp.
     def visitTypeExp(self, ctx:PrimitiveParser.TypeExpContext):
         return self.visitChildren(ctx)
@@ -271,6 +276,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by PrimitiveParser#variable.
     def visitVariable(self, ctx:PrimitiveParser.VariableContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#parameterizedGame.
+    def visitParameterizedGame(self, ctx:PrimitiveParser.ParameterizedGameContext):
         return self.visitChildren(ctx)
 
 

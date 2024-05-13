@@ -16,19 +16,21 @@ assumptions: (parameterizedGame SEMI)* (CALLS (LEQ|L_ANGLE) expression SEMI)?;
 
 theorem: parameterizedGame SEMI;
 
-gameList: (gameStep SEMI|induction)+;
+gameList: gameStep SEMI (gameStep SEMI|induction|stepAssumption)*;
 
 gameStep: concreteGame COMPOSE parameterizedGame AGAINST gameAdversary # reductionStep
 	| (concreteGame|parameterizedGame) AGAINST gameAdversary # regularStep
 	;
 
-induction: INDUCTION L_PAREN ID FROM integerExpression TO integerExpression R_PAREN L_CURLY (gameStep SEMI)+ R_CURLY;
+induction: INDUCTION L_PAREN ID FROM integerExpression TO integerExpression R_PAREN L_CURLY gameList R_CURLY;
 
-varOrField: id (PERIOD id)*;
+stepAssumption: ASSUME expression SEMI;
 
-parameterizedGame: ID L_PAREN argList? R_PAREN;
-gameAdversary: parameterizedGame PERIOD ADVERSARY;
+gameField: (concreteGame | parameterizedGame) PERIOD ID;
+
 concreteGame: parameterizedGame PERIOD ID;
+gameAdversary: parameterizedGame PERIOD ADVERSARY;
+
 
 REDUCTION: 'Reduction';
 AGAINST: 'against';

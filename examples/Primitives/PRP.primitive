@@ -1,8 +1,0 @@
-Primitive PRP(Int lambda, Int blen) {
-    Int lambda = lambda;
-    Int blen = blen;
-
-    BitString<blen> Evaluate(BitString<lambda> seed, BitString<blen> input);
-
-    BitString<blen> EvaluateInverse(BitString<lambda> seed, BitString<blen> input);
-}

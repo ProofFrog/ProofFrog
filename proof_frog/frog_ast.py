@@ -25,9 +25,11 @@ class ASTNode(ABC):
 
         # Compare all attributes
         return all(
-            True
-            if attr in {"line_num", "column_num"}
-            else getattr(self, attr) == getattr(other, attr)
+            (
+                True
+                if attr in {"line_num", "column_num"}
+                else getattr(self, attr) == getattr(other, attr)
+            )
             for attr in self.__dict__
         )
 
@@ -139,6 +141,7 @@ class BinaryOperators(Enum):
 class UnaryOperators(Enum):
     NOT = "!"
     SIZE = "|"
+    MINUS = "-"
 
 
 class BinaryOperation(Expression, Type):
@@ -168,6 +171,8 @@ class UnaryOperation(Expression):
             return f"!({self.expression})"
         if self.operator == UnaryOperators.SIZE:
             return f"|{self.expression}|"
+        if self.operator == UnaryOperators.MINUS:
+            return f"-{self.expression}"
         return "UNDEFINED UNARY OPERATOR"
 
 
@@ -199,7 +204,7 @@ class Field(ASTNode):
 
 
 class Parameter(ASTNode):
-    def __init__(self, the_type: ASTNode, name: str) -> None:
+    def __init__(self, the_type: Type, name: str) -> None:
         super().__init__()
         self.type = the_type
         self.name = name
@@ -210,7 +215,7 @@ class Parameter(ASTNode):
 
 class MethodSignature(ASTNode):
     def __init__(
-        self, name: str, return_type: ASTNode, parameters: list[Parameter]
+        self, name: str, return_type: Type, parameters: list[Parameter]
     ) -> None:
         super().__init__()
         self.name = name
@@ -253,7 +258,7 @@ class Primitive(Root):
         return self.name
 
 
-class FuncCallExpression(Expression):
+class FuncCall(Expression, Statement):
     def __init__(self, func: Expression, args: list[Expression]) -> None:
         super().__init__()
         self.func = func
@@ -262,17 +267,6 @@ class FuncCallExpression(Expression):
     def __str__(self) -> str:
         arg_str = ", ".join(str(arg) for arg in self.args)
         return f"{self.func}({arg_str})"
-
-
-class FuncCallStatement(Statement):
-    def __init__(self, func: Expression, args: list[Expression]) -> None:
-        super().__init__()
-        self.func = func
-        self.args = args
-
-    def __str__(self) -> str:
-        arg_str = ", ".join(str(arg) for arg in self.args)
-        return f"{self.func}({arg_str});"
 
 
 class Variable(Expression, Type):
@@ -308,7 +302,17 @@ class Block(Statement):
         self.statements = statements
 
     def __str__(self) -> str:
-        return "\n".join(str(statement) for statement in self.statements)
+        return (
+            "\n".join(
+                (
+                    str(statement) + ";"
+                    if isinstance(statement, FuncCall)
+                    else str(statement)
+                )
+                for statement in self.statements
+            )
+            + "\n"
+        )
 
     def __add__(self, other: Block) -> Block:
         return Block(list(self.statements) + list(other.statements))
@@ -330,7 +334,7 @@ class IfStatement(Statement):
             output_string += str(self.blocks[i])
 
         if self.has_else_block():
-            output_string += f"}} else {{\n {self.blocks[-1]}"
+            output_string += f"}} else {{\n{self.blocks[-1]}"
 
         output_string += "}\n"
 
@@ -563,7 +567,6 @@ GameBody: TypeAlias = tuple[
 
 
 class Game(ASTNode):
-    # pylint: disable=too-many-arguments
     def __init__(self, body: GameBody) -> None:
         super().__init__()
         self.name = body[0]
@@ -609,7 +612,7 @@ class Game(ASTNode):
         return any(method.signature.name == name for method in self.methods)
 
 
-class ParameterizedGame(ASTNode):
+class ParameterizedGame(Expression):
     def __init__(self, name: str, args: list[Expression]):
         super().__init__()
         self.name = name
@@ -620,7 +623,7 @@ class ParameterizedGame(ASTNode):
         return f"{self.name}({arg_str})"
 
 
-class ConcreteGame(ASTNode):
+class ConcreteGame(Expression):
     def __init__(self, game: ParameterizedGame, which: str):
         super().__init__()
         self.game = game
@@ -690,13 +693,21 @@ class Step(ASTNode):
         return f"{self.challenger} against {self.adversary}.Adversary;"
 
 
+class StepAssumption(ASTNode):
+    def __init__(self, expression: Expression) -> None:
+        self.expression = expression
+
+    def __str__(self) -> str:
+        return f"assume {self.expression};"
+
+
 class Induction(ASTNode):
     def __init__(
         self,
         name: str,
         start: Expression,
         end: Expression,
-        steps: list[Step | Induction],
+        steps: list[Step | StepAssumption],
     ):
         super().__init__()
         self.name = name
@@ -711,7 +722,7 @@ class Induction(ASTNode):
         return output_string
 
 
-ProofStep: TypeAlias = Step | Induction
+ProofStep: TypeAlias = Step | Induction | StepAssumption
 
 
 class ProofFile(Root):
@@ -770,9 +781,24 @@ def pretty_print(program: str) -> str:
     indent = 0
     output_string = ""
     for line in lines:
-        if line.count("{") < line.count("}"):
+        if line == "":
+            continue
+        if "}" in line:
             indent -= 1
         output_string += ("  " * indent) + line + "\n"
-        if line.count("{") > line.count("}"):
+        if "{" in line:
             indent += 1
     return output_string
+
+
+def expand_tuple_type(the_type: BinaryOperation) -> list[Type]:
+    unfolded_types: list[Type] = []
+    expanded_type: Type | Expression = the_type
+    while isinstance(expanded_type, BinaryOperation):
+        left_expr = expanded_type.left_expression
+        assert isinstance(left_expr, Type)
+        unfolded_types.append(left_expr)
+        expanded_type = expanded_type.right_expression
+    assert isinstance(expanded_type, Type)
+    unfolded_types.append(expanded_type)
+    return unfolded_types

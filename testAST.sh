@@ -41,6 +41,6 @@ for game in examples/Games/**/*; do
 	runTest $game
 done
 
-for proof in examples/Proofs/**/*; do
+for proof in examples/Proofs/**/*.proof; do
 	runTest $proof
 done

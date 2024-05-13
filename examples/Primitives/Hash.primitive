@@ -1,6 +1,0 @@
-Primitive Hash(Int lambda, Int outputLen) {
-    Int lambda = lambda;
-    Int outputLen = outputLen;
-
-    BitString<outputLen> Evaluate(BitString<lambda> seed, BitString input);
-}

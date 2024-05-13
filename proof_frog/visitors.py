@@ -658,6 +658,7 @@ class InlineTransformer(Transformer):
                                 + exp.func.name
                                 + "@"
                                 + var_statement.var.name
+                                + str(self.statement_index)
                             ),
                         )
                     ]

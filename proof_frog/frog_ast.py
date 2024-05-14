@@ -12,6 +12,9 @@ class FileType(Enum):
 
 
 class ASTNode(ABC):
+    def __init__(self) -> None:
+        self.surrounding_block: Optional[Block] = None
+
     def __eq__(self, other: object) -> bool:
         if self is other:
             return True
@@ -47,31 +50,23 @@ class Type(ASTNode, ABC):
 
 
 class IntType(Type):
-    def __init__(self) -> None:
-        pass
-
     def __str__(self) -> str:
         return "Int"
 
 
 class BoolType(Type):
-    def __init__(self) -> None:
-        pass
-
     def __str__(self) -> str:
         return "Bool"
 
 
 class Void(Type):
-    def __init__(self) -> None:
-        pass
-
     def __str__(self) -> str:
         return "Void"
 
 
 class ArrayType(Type):
     def __init__(self, element_type: Type, count: Expression) -> None:
+        super().__init__()
         self.element_type = element_type
         self.count = count
 
@@ -81,6 +76,7 @@ class ArrayType(Type):
 
 class MapType(Type):
     def __init__(self, key_type: Type, value_type: Type) -> None:
+        super().__init__()
         self.key_type = key_type
         self.value_type = value_type
 
@@ -90,6 +86,7 @@ class MapType(Type):
 
 class SetType(Type):
     def __init__(self, parameterization: Optional[Expression] = None) -> None:
+        super().__init__()
         self.parameterization = parameterization
 
     def __str__(self) -> str:
@@ -98,6 +95,7 @@ class SetType(Type):
 
 class BitStringType(Type):
     def __init__(self, parameterization: Optional[Expression] = None) -> None:
+        super().__init__()
         self.parameterization = parameterization
 
     def __str__(self) -> str:
@@ -106,6 +104,7 @@ class BitStringType(Type):
 
 class OptionalType(Type):
     def __init__(self, the_type: Type) -> None:
+        super().__init__()
         self.the_type = the_type
 
     def __str__(self) -> str:
@@ -146,6 +145,7 @@ class BinaryOperation(Expression):
         left_expression: Expression,
         right_expression: Expression,
     ) -> None:
+        super().__init__()
         self.operator = operator
         self.left_expression = left_expression
         self.right_expression = right_expression
@@ -156,6 +156,7 @@ class BinaryOperation(Expression):
 
 class UnaryOperation(Expression):
     def __init__(self, operator: UnaryOperators, expression: Expression) -> None:
+        super().__init__()
         self.operator = operator
         self.expression = expression
 
@@ -171,6 +172,7 @@ class UnaryOperation(Expression):
 
 class Set(Expression):
     def __init__(self, elements: list[Expression]) -> None:
+        super().__init__()
         self.elements = elements
 
     def __str__(self) -> str:
@@ -184,6 +186,7 @@ class Set(Expression):
 
 class Field(ASTNode):
     def __init__(self, the_type: Type, name: str, value: Optional[Expression]) -> None:
+        super().__init__()
         self.type = the_type
         self.name = name
         self.value = value
@@ -196,6 +199,7 @@ class Field(ASTNode):
 
 class Parameter(ASTNode):
     def __init__(self, the_type: Type, name: str) -> None:
+        super().__init__()
         self.type = the_type
         self.name = name
 
@@ -207,6 +211,7 @@ class MethodSignature(ASTNode):
     def __init__(
         self, name: str, return_type: Type, parameters: list[Parameter]
     ) -> None:
+        super().__init__()
         self.name = name
         self.return_type = return_type
         self.parameters = parameters
@@ -225,6 +230,7 @@ class Primitive(Root):
         fields: list[Field],
         methods: list[MethodSignature],
     ) -> None:
+        super().__init__()
         self.name = name
         self.parameters = parameters
         self.fields = fields
@@ -248,6 +254,7 @@ class Primitive(Root):
 
 class FuncCall(Expression, Statement):
     def __init__(self, func: Expression, args: list[Expression]) -> None:
+        super().__init__()
         self.func = func
         self.args = args
 
@@ -258,6 +265,7 @@ class FuncCall(Expression, Statement):
 
 class Variable(Expression, Type):
     def __init__(self, name: str) -> None:
+        super().__init__()
         self.name = name
 
     def __str__(self) -> str:
@@ -266,6 +274,7 @@ class Variable(Expression, Type):
 
 class Tuple(Expression):
     def __init__(self, values: list[Expression]) -> None:
+        super().__init__()
         self.values = values
 
     def __str__(self) -> str:
@@ -274,6 +283,7 @@ class Tuple(Expression):
 
 class ReturnStatement(Statement):
     def __init__(self, expression: Expression):
+        super().__init__()
         self.expression = expression
 
     def __str__(self) -> str:
@@ -282,6 +292,7 @@ class ReturnStatement(Statement):
 
 class Block(Statement):
     def __init__(self, statements: Sequence[Statement]):
+        super().__init__()
         self.statements = statements
 
     def __str__(self) -> str:
@@ -293,6 +304,7 @@ class Block(Statement):
 
 class IfStatement(Statement):
     def __init__(self, conditions: list[Expression], blocks: list[Block]):
+        super().__init__()
         self.conditions = conditions
         self.blocks = blocks
 
@@ -318,6 +330,7 @@ class IfStatement(Statement):
 
 class FieldAccess(Expression, Type):
     def __init__(self, the_object: Expression, name: str) -> None:
+        super().__init__()
         self.the_object = the_object
         self.name = name
 
@@ -327,6 +340,7 @@ class FieldAccess(Expression, Type):
 
 class ArrayAccess(Expression):
     def __init__(self, the_array: Expression, index: Expression) -> None:
+        super().__init__()
         self.the_array = the_array
         self.index = index
 
@@ -338,6 +352,7 @@ class Slice(Expression):
     def __init__(
         self, the_array: Expression, start: Expression, end: Expression
     ) -> None:
+        super().__init__()
         self.the_array = the_array
         self.start = start
         self.end = end
@@ -348,6 +363,7 @@ class Slice(Expression):
 
 class VariableDeclaration(Statement):
     def __init__(self, the_type: Type, name: str) -> None:
+        super().__init__()
         self.the_type = the_type
         self.name = name
 
@@ -357,6 +373,7 @@ class VariableDeclaration(Statement):
 
 class NumericFor(Statement):
     def __init__(self, name: str, start: Expression, end: Expression, block: Block):
+        super().__init__()
         self.name = name
         self.start = start
         self.end = end
@@ -370,6 +387,7 @@ class NumericFor(Statement):
 
 class GenericFor(Statement):
     def __init__(self, var_type: Type, var_name: str, over: Expression, block: Block):
+        super().__init__()
         self.var_type = var_type
         self.var_name = var_name
         self.over = over
@@ -386,6 +404,7 @@ class Sample(Statement):
     def __init__(
         self, the_type: Optional[Type], var: Expression, sampled_from: Expression
     ) -> None:
+        super().__init__()
         self.the_type = the_type
         self.var = var
         self.sampled_from = sampled_from
@@ -400,6 +419,7 @@ class Assignment(Statement):
     def __init__(
         self, the_type: Optional[Type], var: Expression, value: Expression
     ) -> None:
+        super().__init__()
         self.the_type = the_type
         self.var = var
         self.value = value
@@ -412,6 +432,7 @@ class Assignment(Statement):
 
 class Integer(Expression):
     def __init__(self, num: int) -> None:
+        super().__init__()
         self.num = num
 
     def __str__(self) -> str:
@@ -420,6 +441,7 @@ class Integer(Expression):
 
 class Boolean(Expression):
     def __init__(self, the_bool: bool) -> None:
+        super().__init__()
         self.bool = the_bool
 
     def __str__(self) -> str:
@@ -427,15 +449,13 @@ class Boolean(Expression):
 
 
 class ASTNone(Expression):
-    def __init__(self) -> None:
-        pass
-
     def __str__(self) -> str:
         return "None"
 
 
 class BinaryNum(Expression):
     def __init__(self, num: int):
+        super().__init__()
         self.num = num
 
     def __str__(self) -> str:
@@ -444,6 +464,7 @@ class BinaryNum(Expression):
 
 class Method(ASTNode):
     def __init__(self, signature: MethodSignature, block: Block) -> None:
+        super().__init__()
         self.signature = signature
         self.block = block
 
@@ -455,6 +476,7 @@ class Method(ASTNode):
 
 class Import(ASTNode):
     def __init__(self, filename: str, rename: Optional[str]) -> None:
+        super().__init__()
         self.filename = filename
         self.rename = rename
 
@@ -478,6 +500,7 @@ class Scheme(Root):
         requirements: list[Expression],
         methods: list[Method],
     ) -> None:
+        super().__init__()
         self.name = name
         self.parameters = parameters
         self.primitive_name = primitive_name
@@ -509,6 +532,7 @@ class Scheme(Root):
 
 class Phase(ASTNode):
     def __init__(self, oracles: list[str], methods: list[Method]):
+        super().__init__()
         self.oracles = oracles
         self.methods = methods
 
@@ -528,6 +552,7 @@ GameBody: TypeAlias = tuple[
 
 class Game(ASTNode):
     def __init__(self, body: GameBody) -> None:
+        super().__init__()
         self.name = body[0]
         self.parameters = body[1]
         self.fields = body[2]
@@ -573,6 +598,7 @@ class Game(ASTNode):
 
 class ParameterizedGame(Expression):
     def __init__(self, name: str, args: list[Expression]):
+        super().__init__()
         self.name = name
         self.args = args
 
@@ -583,6 +609,7 @@ class ParameterizedGame(Expression):
 
 class ConcreteGame(Expression):
     def __init__(self, game: ParameterizedGame, which: str):
+        super().__init__()
         self.game = game
         self.which = which
 
@@ -610,6 +637,7 @@ class GameFile(Root):
     def __init__(
         self, imports: list[Import], games: tuple[Game, Game], name: str
     ) -> None:
+        super().__init__()
         self.imports = imports
         self.games = games
         self.name = name
@@ -638,6 +666,7 @@ class Step(ASTNode):
         reduction: Optional[ParameterizedGame],
         adversary: ParameterizedGame,
     ):
+        super().__init__()
         self.challenger = challenger
         self.reduction = reduction
         self.adversary = adversary
@@ -650,6 +679,7 @@ class Step(ASTNode):
 
 class StepAssumption(ASTNode):
     def __init__(self, expression: Expression) -> None:
+        super().__init__()
         self.expression = expression
 
     def __str__(self) -> str:
@@ -664,6 +694,7 @@ class Induction(ASTNode):
         end: Expression,
         steps: list[Step | StepAssumption],
     ):
+        super().__init__()
         self.name = name
         self.start = start
         self.end = end
@@ -691,6 +722,7 @@ class ProofFile(Root):
         theorem: ParameterizedGame,
         steps: list[ProofStep],
     ) -> None:
+        super().__init__()
         self.imports = imports
         self.helpers = helpers
         self.lets = lets

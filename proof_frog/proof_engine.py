@@ -414,6 +414,7 @@ class ProofEngine:
                     for manipulator in ast_manipulators:
                         new_game = manipulator.fn(game)
                         if self.verbose and game != new_game:
+                            visitors.SurroundingBlockVisitor().visit(new_game)
                             print(f"APPLIED {manipulator.name}")
                             print(new_game)
                         game = new_game

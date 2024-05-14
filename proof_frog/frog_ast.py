@@ -24,7 +24,9 @@ class ASTNode(ABC):
 
         # Compare all attributes
         return all(
-            getattr(self, attr) == getattr(other, attr) for attr in self.__dict__
+            getattr(self, attr) == getattr(other, attr)
+            for attr in self.__dict__
+            if attr != "surrounding_block"
         )
 
 

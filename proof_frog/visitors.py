@@ -54,7 +54,8 @@ class Visitor(ABC, Generic[U]):
                         visit_children(item)
 
             for attr in vars(node):
-                visit_children(getattr(node, attr))
+                if attr != "surrounding_block":
+                    visit_children(getattr(node, attr))
 
             leave_name = "leave_" + _to_snake_case(type(node).__name__)
             if hasattr(self, leave_name):
@@ -64,6 +65,25 @@ class Visitor(ABC, Generic[U]):
 
         visit_helper(visiting_node)
         return self.result()
+
+
+# Annotates each ast node with their surrounding block, helpful for symbol tables
+class SurroundingBlockVisitor(Visitor[None]):
+    def __init__(self):
+        self.blocks = []
+
+    def result(self) -> None:
+        pass
+
+    def visit_block(self, block: frog_ast.Block) -> None:
+        self.blocks.append(block)
+
+    def visit_ast_node(self, ast_node: frog_ast.ASTNode) -> None:
+        if self.blocks:
+            ast_node.surrounding_block = self.blocks[-1]
+
+    def leave_block(self, block: frog_ast.Block) -> None:
+        self.blocks.pop()
 
 
 # Used to represent the type of Node that is being transformed
@@ -92,7 +112,8 @@ class Transformer(ABC):
             return child
 
         for attr in vars(node_copy):
-            setattr(node_copy, attr, visit_children(getattr(node, attr)))
+            if attr != "surrounding_block":
+                setattr(node_copy, attr, visit_children(getattr(node, attr)))
         return node_copy
 
 

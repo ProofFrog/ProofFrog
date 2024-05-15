@@ -1,5 +1,4 @@
 from __future__ import annotations
-import os
 import sys
 import copy
 import functools
@@ -9,7 +8,6 @@ from typing import TypeAlias, Sequence, Tuple, Dict, Optional
 import z3
 from colorama import Fore
 from sympy import Symbol
-from . import frog_parser
 from . import frog_ast
 from . import visitors
 from . import dependencies
@@ -34,25 +32,10 @@ class ProofEngine:
         self.verbose = verbose
         self.step_assumptions: list[ProcessedAssumption] = []
 
-    def prove(self, proof_file_name: str) -> None:
-        proof_file = frog_parser.parse_proof_file(proof_file_name)
+    def add_definition(self, name: str, root: frog_ast.Root) -> None:
+        self.definition_namespace[name] = root
 
-        for imp in proof_file.imports:
-            file_type = _get_file_type(imp.filename)
-            root: frog_ast.Root
-            match file_type:
-                case frog_ast.FileType.PRIMITIVE:
-                    root = frog_parser.parse_primitive_file(imp.filename)
-                case frog_ast.FileType.SCHEME:
-                    root = frog_parser.parse_scheme_file(imp.filename)
-                case frog_ast.FileType.GAME:
-                    root = frog_parser.parse_game_file(imp.filename)
-                case frog_ast.FileType.PROOF:
-                    raise TypeError("Cannot import proofs")
-
-            name = imp.rename if imp.rename else root.get_export_name()
-            self.definition_namespace[name] = root
-
+    def prove(self, proof_file: frog_ast.ProofFile) -> None:
         for game in proof_file.helpers:
             self.definition_namespace[game.name] = game
 
@@ -782,11 +765,6 @@ class ProofEngine:
         return visitors.InstantiationTransformer(self.proof_namespace).transform(
             new_scheme
         )
-
-
-def _get_file_type(file_name: str) -> frog_ast.FileType:
-    extension: str = os.path.splitext(file_name)[1].strip(".")
-    return frog_ast.FileType(extension)
 
 
 def get_challenger_method_lookup(challenger: frog_ast.Game) -> MethodLookup:

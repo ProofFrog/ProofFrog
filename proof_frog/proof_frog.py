@@ -1,6 +1,6 @@
 import sys
-from colorama import init
 import os
+from colorama import init
 from . import frog_parser
 from . import frog_ast
 from . import proof_engine

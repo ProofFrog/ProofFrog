@@ -31,6 +31,8 @@ class ProofEngine:
 
         self.verbose = verbose
         self.step_assumptions: list[ProcessedAssumption] = []
+        self.variables: dict[str, Symbol | frog_ast.Expression] = {}
+        self.method_lookup: MethodLookup = {}
 
     def add_definition(self, name: str, root: frog_ast.Root) -> None:
         self.definition_namespace[name] = root
@@ -38,8 +40,6 @@ class ProofEngine:
     def prove(self, proof_file: frog_ast.ProofFile) -> None:
         for game in proof_file.helpers:
             self.definition_namespace[game.name] = game
-
-        self.variables: dict[str, Symbol | frog_ast.Expression] = {}
 
         # Here, we are substituting the lets with the parameters they are given
         for let in proof_file.lets:
@@ -634,7 +634,7 @@ class ProofEngine:
         return new_game
 
     def get_method_lookup(self) -> None:
-        self.method_lookup: MethodLookup = {}
+        self.method_lookup = {}
 
         for name, node in self.proof_namespace.items():
             if isinstance(node, frog_ast.Scheme):

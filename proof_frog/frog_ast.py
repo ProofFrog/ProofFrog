@@ -662,7 +662,7 @@ class Induction(ASTNode):
         name: str,
         start: Expression,
         end: Expression,
-        steps: list[Step | StepAssumption],
+        steps: list[Step | StepAssumption | Induction],
     ):
         self.name = name
         self.start = start

@@ -26,13 +26,18 @@ ProcessedAssumption = namedtuple("ProcessedAssumption", ["assumption", "which"])
 
 
 class ProofEngine:
-    def __init__(self, proof_file_name: str, verbose: bool) -> None:
-        self.proof_file = frog_parser.parse_proof_file(proof_file_name)
+    def __init__(self, verbose: bool) -> None:
         self.definition_namespace: frog_ast.Namespace = {}
         self.proof_namespace: frog_ast.Namespace = {}
         self.proof_let_types: visitors.NameTypeMap = visitors.NameTypeMap()
 
-        for imp in self.proof_file.imports:
+        self.verbose = verbose
+        self.step_assumptions: list[ProcessedAssumption] = []
+
+    def prove(self, proof_file_name: str) -> None:
+        proof_file = frog_parser.parse_proof_file(proof_file_name)
+
+        for imp in proof_file.imports:
             file_type = _get_file_type(imp.filename)
             root: frog_ast.Root
             match file_type:
@@ -48,13 +53,13 @@ class ProofEngine:
             name = imp.rename if imp.rename else root.get_export_name()
             self.definition_namespace[name] = root
 
-        for game in self.proof_file.helpers:
+        for game in proof_file.helpers:
             self.definition_namespace[game.name] = game
 
         self.variables: dict[str, Symbol | frog_ast.Expression] = {}
 
         # Here, we are substituting the lets with the parameters they are given
-        for let in self.proof_file.lets:
+        for let in proof_file.lets:
             self.proof_let_types.set(let.name, let.type)
             if isinstance(let.value, frog_ast.FuncCall) and isinstance(
                 let.value.func, frog_ast.Variable
@@ -82,12 +87,9 @@ class ProofEngine:
                         self.variables[let.name] = sympy_symbol
 
         self.get_method_lookup()
-        self.verbose = verbose
-        self.step_assumptions: list[ProcessedAssumption] = []
 
-    def prove(self) -> None:
-        first_step = self.proof_file.steps[0]
-        final_step = self.proof_file.steps[-1]
+        first_step = proof_file.steps[0]
+        final_step = proof_file.steps[-1]
 
         assert isinstance(first_step, frog_ast.Step)
         assert isinstance(final_step, frog_ast.Step)
@@ -97,12 +99,12 @@ class ProofEngine:
         assert isinstance(first_step.challenger, frog_ast.ConcreteGame)
         assert isinstance(final_step.challenger, frog_ast.ConcreteGame)
 
-        if first_step.challenger.game != self.proof_file.theorem:
+        if first_step.challenger.game != proof_file.theorem:
             print(Fore.RED + "Proof must start with a game matching theorem")
-            print(Fore.RED + f"Theorem: {self.proof_file.theorem}")
+            print(Fore.RED + f"Theorem: {proof_file.theorem}")
             print(Fore.RED + f"First Game: {first_step.challenger}")
 
-        self.prove_steps(self.proof_file.steps)
+        self.prove_steps(proof_file.steps, proof_file.assumptions)
 
         if (
             first_step.challenger.game == final_step.challenger.game
@@ -114,7 +116,11 @@ class ProofEngine:
         print(Fore.YELLOW + "Proof Succeeded, but is incomplete")
         sys.exit(1)
 
-    def prove_steps(self, steps: Sequence[frog_ast.ProofStep]) -> None:
+    def prove_steps(
+        self,
+        steps: list[frog_ast.ProofStep],
+        assumed_indistinguishable: list[frog_ast.ParameterizedGame],
+    ) -> None:
         step_num = 0
 
         for i in range(0, len(steps) - 1):
@@ -143,7 +149,9 @@ class ProofEngine:
             if isinstance(current_step, frog_ast.Step) and isinstance(
                 next_step, frog_ast.Step
             ):
-                if self._is_by_assumption(current_step, next_step):
+                if self._is_by_indistinguishability(
+                    current_step, next_step, assumed_indistinguishable
+                ):
                     print(f"Current: {current_step}")
                     print(f"Hop To: {next_step}\n")
                     print("Valid by assumption")
@@ -202,7 +210,7 @@ class ProofEngine:
                 the_induction = steps[i]
                 assert isinstance(the_induction, frog_ast.Induction)
                 self.proof_let_types.set(the_induction.name, frog_ast.IntType())
-                self.prove_steps(the_induction.steps)
+                self.prove_steps(the_induction.steps, assumed_indistinguishable)
                 # Check induction roll over
                 first_step = the_induction.steps[0]
                 assert isinstance(first_step, frog_ast.Step)
@@ -650,10 +658,11 @@ class ProofEngine:
                 for method in node.methods:
                     self.method_lookup[(name, method.signature.name)] = method
 
-    def _is_by_assumption(
+    def _is_by_indistinguishability(
         self,
         current_step: frog_ast.Step,
         next_step: frog_ast.Step,
+        assumed_indistinguishable: list[frog_ast.ParameterizedGame],
     ) -> bool:
         if not isinstance(
             current_step.challenger, frog_ast.ConcreteGame
@@ -664,7 +673,7 @@ class ProofEngine:
             and current_step.reduction
             and current_step.reduction == next_step.reduction
             and current_step.adversary == next_step.adversary
-            and current_step.challenger.game in self.proof_file.assumptions
+            and current_step.challenger.game in assumed_indistinguishable
         )
 
     def sort_game(self, game: frog_ast.Game) -> frog_ast.Game:

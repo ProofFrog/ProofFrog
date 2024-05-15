@@ -32,8 +32,8 @@ def main() -> None:
             case _:
                 usage()
     elif argv[1] == "prove":
-        engine = proof_engine.ProofEngine(argv[2], len(argv) > 3 and argv[3] == "-v")
-        engine.prove()
+        engine = proof_engine.ProofEngine(len(argv) > 3 and argv[3] == "-v")
+        engine.prove(argv[2])
     else:
         usage()
 

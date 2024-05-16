@@ -291,22 +291,31 @@ class SimplifySpliceTransformer(BlockTransformer):
         self.variables = variables
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        def is_all_concatenated(node: frog_ast.ASTNode) -> bool:
+            if isinstance(node, frog_ast.Variable):
+                return True
+            if not isinstance(node, frog_ast.BinaryOperation):
+                return False
+            if node.operator is not frog_ast.BinaryOperators.OR:
+                return False
+
+            return is_all_concatenated(node.left_expression) and is_all_concatenated(
+                node.right_expression
+            )
+
         for index, statement in enumerate(block.statements):
             if not isinstance(statement, frog_ast.Assignment):
                 continue
+            if not isinstance(statement.var, frog_ast.Variable):
+                continue
             if not isinstance(statement.value, frog_ast.BinaryOperation):
                 continue
-            if not isinstance(
-                statement.value.left_expression, frog_ast.Variable
-            ) or not isinstance(statement.value.right_expression, frog_ast.Variable):
-                continue
-            # Concatenate in this context
-            if statement.value.operator is not frog_ast.BinaryOperators.OR:
+
+            if not is_all_concatenated(statement.value):
                 continue
 
-            # Step 1, find type of variables (to get length)
-            # Step 2, determine lengths
-            # Step 3, replace, so long as statement and left/right are not changed
+            # Get variables all concatenated together
+            concatenated_var_names = VariableCollectionVisitor().visit(statement.value)
 
             def find_declaration(variable: str, node: frog_ast.ASTNode) -> bool:
                 return (
@@ -317,50 +326,46 @@ class SimplifySpliceTransformer(BlockTransformer):
                     and node.the_type.parameterization is not None
                 )
 
-            left_declaration = SearchVisitor(
-                functools.partial(
-                    find_declaration, statement.value.left_expression.name
+            # Step 1, find type of variables (to get lengths)
+
+            lengths: list[Symbol] = []
+            for var in concatenated_var_names:
+                declaration = SearchVisitor(
+                    functools.partial(find_declaration, var.name)
+                ).visit(block)
+                if declaration is None:
+                    break
+                assert isinstance(declaration, (frog_ast.Assignment, frog_ast.Sample))
+                assert isinstance(declaration.the_type, frog_ast.BitStringType)
+                assert declaration.the_type.parameterization is not None
+                if not isinstance(
+                    declaration.the_type.parameterization, frog_ast.Variable
+                ):
+                    break
+                if declaration.the_type.parameterization.name not in self.variables:
+                    break
+                lengths.append(
+                    self.variables[declaration.the_type.parameterization.name]
                 )
-            ).visit(block)
-            right_declaration = SearchVisitor(
-                functools.partial(
-                    find_declaration, statement.value.right_expression.name
+
+            # We quit because we weren't able to find the length of some variable in our concatenation
+            if len(lengths) != len(concatenated_var_names):
+                continue
+
+            # Step 2, create slices that map to these vars
+            partial_sum = 0
+            slices = []
+            for length in lengths:
+                slices.append(
+                    frog_ast.Slice(
+                        frog_ast.Variable(statement.var.name),
+                        frog_parser.parse_expression(str(partial_sum)),
+                        frog_parser.parse_expression(str(partial_sum + length)),
+                    )
                 )
-            ).visit(block)
-            if left_declaration is None or right_declaration is None:
-                continue
+                partial_sum += length
 
-            assert isinstance(left_declaration, (frog_ast.Assignment, frog_ast.Sample))
-            assert isinstance(right_declaration, (frog_ast.Assignment, frog_ast.Sample))
-            assert isinstance(
-                left_declaration.the_type, frog_ast.BitStringType
-            ) and isinstance(right_declaration.the_type, frog_ast.BitStringType)
-            assert (
-                left_declaration.the_type.parameterization is not None
-                and right_declaration.the_type.parameterization is not None
-            )
-            left_len = left_declaration.the_type.parameterization
-            right_len = left_declaration.the_type.parameterization
-
-            if not isinstance(left_len, frog_ast.Variable) or not isinstance(
-                right_len, frog_ast.Variable
-            ):
-                continue
-            if (
-                not left_len.name in self.variables
-                or not right_len.name in self.variables
-            ):
-                continue
-            end_length = self.variables[left_len.name] + self.variables[right_len.name]
-
-            left_slice = frog_ast.Slice(
-                frog_ast.Variable(statement.var.name), frog_ast.Integer(0), left_len
-            )
-            right_slice = frog_ast.Slice(
-                frog_ast.Variable(statement.var.name),
-                left_len,
-                frog_parser.parse_expression(str(end_length)),
-            )
+            # Step 3, replace, so long as none of the variables are changed
 
             remaining_block = frog_ast.Block(block.statements[index + 1 :])
 
@@ -381,8 +386,8 @@ class SimplifySpliceTransformer(BlockTransformer):
                 ](
                     functools.partial(
                         use_or_reassignment,
-                        [statement.var, left_declaration.var, right_declaration.var],
-                        [left_slice, right_slice],
+                        [statement.var] + concatenated_var_names,
+                        slices,
                     )
                 ).visit(
                     remaining_block
@@ -396,13 +401,10 @@ class SimplifySpliceTransformer(BlockTransformer):
 
                 made_transformation = True
 
+                associated_var = concatenated_var_names[slices.index(to_transform)]
+
                 remaining_block = ReplaceTransformer(
-                    to_transform,
-                    (
-                        left_declaration.var
-                        if to_transform == left_slice
-                        else right_declaration.var
-                    ),
+                    to_transform, associated_var
                 ).transform(remaining_block)
             if not made_transformation:
                 continue

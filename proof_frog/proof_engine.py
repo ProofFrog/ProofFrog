@@ -1,5 +1,4 @@
 from __future__ import annotations
-import sys
 import copy
 import functools
 from enum import Enum
@@ -21,6 +20,10 @@ class WhichGame(Enum):
 
 
 ProcessedAssumption = namedtuple("ProcessedAssumption", ["assumption", "which"])
+
+
+class FailedProof(Exception):
+    pass
 
 
 class ProofEngine:
@@ -97,7 +100,7 @@ class ProofEngine:
             print(Fore.GREEN + "Proof Suceeded!")
             return
         print(Fore.YELLOW + "Proof Succeeded, but is incomplete")
-        sys.exit(1)
+        raise FailedProof()
 
     def prove_steps(
         self,
@@ -450,7 +453,7 @@ class ProofEngine:
         def quit_proof() -> None:
             print("Step failed!")
             print(Fore.RED + "Proof Failed!")
-            sys.exit(1)
+            raise FailedProof()
 
         all_true_current = AllTrueTransformer().transform(current_game_ast)
         all_true_next = AllTrueTransformer().transform(next_game_ast)

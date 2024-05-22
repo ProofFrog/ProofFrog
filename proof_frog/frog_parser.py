@@ -1,6 +1,6 @@
 import os
 from typing import Type
-from antlr4 import FileStream, InputStream, CommonTokenStream
+from antlr4 import FileStream, InputStream, CommonTokenStream, BailErrorStrategy
 from .parsing.PrimitiveVisitor import PrimitiveVisitor
 from .parsing.PrimitiveParser import PrimitiveParser
 from .parsing.PrimitiveLexer import PrimitiveLexer
@@ -618,7 +618,10 @@ def _get_parser(
     else:
         input_stream = InputStream
     lexer = lexer_functor(input_stream(input_))
-    return parser_functor(CommonTokenStream(lexer))
+    parser = parser_functor(CommonTokenStream(lexer))
+    # No way to do this without editing the protected field in antlr's python runtime
+    parser._errHandler = BailErrorStrategy()  # pylint: disable=protected-access
+    return parser
 
 
 def parse_primitive_file(primitive: str) -> frog_ast.Primitive:

@@ -323,12 +323,8 @@ class ProofEngine:
                 name="Branch Elimination",
             ),
             AstManipulator(
-                fn=lambda ast: visitors.RemoveFieldTransformer(
-                    dependencies.UnnecessaryFieldVisitor(self.proof_namespace).visit(
-                        ast
-                    )
-                ).transform(ast),
-                name="Unnecessary Field Removal",
+                fn=dependencies.remove_unnecessary_fields,
+                name="Remove unnecessary statements and fields",
             ),
             AstManipulator(
                 fn=lambda ast: visitors.CollapseAssignmentTransformer().transform(ast),

@@ -1,7 +1,7 @@
 from __future__ import annotations
 import functools
 import copy
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple
 from . import visitors
 from . import frog_ast
 
@@ -117,79 +117,6 @@ class DependencyGraph:
         return self.nodes == __value.nodes
 
 
-class UnnecessaryFieldVisitor(visitors.Visitor[list[str]]):
-    def __init__(self, proof_namespace: frog_ast.Namespace) -> None:
-        self.proof_namespace = proof_namespace
-        self.all_fields: list[frog_ast.Field] = []
-        self.unnecessary_fields: dict[str, bool] = {}
-
-    def result(self) -> list[str]:
-        return self._get_unnecessary_field_list()
-
-    def _get_unnecessary_field_list(self) -> list[str]:
-        return [
-            field_name
-            for field_name, unnecessary in self.unnecessary_fields.items()
-            if unnecessary
-        ]
-
-    def visit_game(self, game: frog_ast.Game) -> None:
-        # Initially, all fields are considered unnecessary
-        # We will flip them if we find a method that uses them
-        for field in game.fields:
-            self.unnecessary_fields[field.name] = True
-
-        self.all_fields = game.fields
-
-    def visit_block(self, block: frog_ast.Block) -> None:
-        graph = generate_dependency_graph(
-            block, self.all_fields, self.proof_namespace, False
-        )
-
-        def has_return_statement(node: frog_ast.ASTNode) -> bool:
-            return isinstance(node, frog_ast.ReturnStatement)
-
-        def find_field_usage(node: frog_ast.ASTNode) -> bool:
-            return (
-                isinstance(node, frog_ast.Variable)
-                and node.name in self._get_unnecessary_field_list()
-            )
-
-        def add_field_usages(node: frog_ast.ASTNode) -> None:
-            found = visitors.SearchVisitor(find_field_usage).visit(node)
-            while found is not None:
-                self.unnecessary_fields[found.name] = False
-                found = visitors.SearchVisitor(find_field_usage).visit(node)
-
-        def search_dependencies(node: Node) -> None:
-            visited = [False] * len(graph.nodes)
-            to_visit: list[Node] = [node]
-            while to_visit:
-                cur = to_visit.pop()
-                if not visited[block.statements.index(cur.statement)]:
-                    visited[block.statements.index(cur.statement)] = True
-
-                    add_field_usages(cur.statement)
-
-                    for neighbour in cur.in_neighbours:
-                        to_visit.append(neighbour)
-
-        for node in graph.nodes:
-            if isinstance(node.statement, frog_ast.ReturnStatement):
-                search_dependencies(node)
-                continue
-            if not visitors.SearchVisitor(has_return_statement).visit(node.statement):
-                continue
-            if isinstance(node.statement, frog_ast.IfStatement):
-                for condition in node.statement.conditions:
-                    add_field_usages(condition)
-            elif isinstance(node.statement, frog_ast.GenericFor):
-                add_field_usages(node.statement.over)
-            elif isinstance(node.statement, frog_ast.NumericFor):
-                add_field_usages(node.statement.start)
-                add_field_usages(node.statement.end)
-
-
 class BubbleSortFieldAssignment(visitors.BlockTransformer):
     def __init__(self) -> None:
         self.fields: list[frog_ast.Field] = []
@@ -225,3 +152,92 @@ class BubbleSortFieldAssignment(visitors.BlockTransformer):
             if not swapped:
                 break
         return frog_ast.Block(new_statements)
+
+
+def unnecessary_statement_info(
+    fields: list[str], block: frog_ast.Block
+) -> Tuple[frog_ast.ASTMap[bool], list[frog_ast.Variable]]:
+    required_map = frog_ast.ASTMap[bool]()
+
+    necessary_vars = [frog_ast.Variable(field) for field in fields]
+
+    def remove_helper(block: frog_ast.Block) -> None:
+        for statement in block.statements:
+            required_map.set(statement, False)
+        nonlocal necessary_vars
+        for statement in reversed(block.statements):
+            if isinstance(
+                statement, frog_ast.ReturnStatement
+            ) or visitors.assigns_variable(necessary_vars, statement):
+                all_vars = visitors.VariableCollectionVisitor().visit(statement)
+                necessary_vars += all_vars
+                required_map.set(statement, True)
+            elif isinstance(statement, frog_ast.NumericFor):
+                necessary_vars += visitors.VariableCollectionVisitor().visit(
+                    statement.start
+                ) + visitors.VariableCollectionVisitor().visit(statement.end)
+                remove_helper(statement.block)
+            elif isinstance(
+                statement,
+                frog_ast.GenericFor,
+            ):
+                necessary_vars += visitors.VariableCollectionVisitor().visit(
+                    statement.over
+                )
+                remove_helper(statement.block)
+            elif isinstance(statement, frog_ast.IfStatement):
+                for condition in statement.conditions:
+                    necessary_vars += visitors.VariableCollectionVisitor().visit(
+                        condition
+                    )
+                for if_block in statement.blocks:
+                    remove_helper(if_block)
+
+    remove_helper(block)
+    return (required_map, necessary_vars)
+
+
+def remove_unnecessary_statements(
+    fields: list[str], block: frog_ast.Block
+) -> frog_ast.Block:
+    (required_map, _) = unnecessary_statement_info(fields, block)
+
+    def construct_new(block: frog_ast.Block) -> frog_ast.Block:
+        new_statements: list[frog_ast.Statement] = []
+        for statement in block.statements:
+            if isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
+                new_statement = copy.deepcopy(statement)
+                nested_block = construct_new(statement.block)
+                new_statement.block = nested_block
+                new_statements.append(new_statement)
+            elif isinstance(statement, frog_ast.IfStatement):
+                new_if_statement = copy.deepcopy(statement)
+                nested_blocks = [construct_new(block) for block in statement.blocks]
+                new_if_statement.blocks = nested_blocks
+                new_statements.append(new_if_statement)
+            elif required_map.get(statement):
+                new_statements.append(statement)
+        return frog_ast.Block(new_statements)
+
+    return construct_new(block)
+
+
+def remove_unnecessary_fields(game: frog_ast.Game) -> frog_ast.Game:
+    necessary_vars = []
+    for method in game.methods:
+        # We pass an empty list of fields
+        # so that we can determine which fields are necessary based solely on return values
+        necessary_vars += unnecessary_statement_info([], method.block)[1]
+
+    new_game = copy.deepcopy(game)
+    new_game.fields = [
+        field
+        for field in game.fields
+        if frog_ast.Variable(field.name) in necessary_vars
+    ]
+    actually_necessary_field_names = [field.name for field in new_game.fields]
+    for method in new_game.methods:
+        method.block = remove_unnecessary_statements(
+            actually_necessary_field_names, method.block
+        )
+    return new_game

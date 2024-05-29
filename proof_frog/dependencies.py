@@ -10,7 +10,6 @@ def generate_dependency_graph(
     block: frog_ast.Block,
     fields: list[frog_ast.Field],
     proof_namespace: frog_ast.Namespace,
-    return_depends_on_fields: bool = True,
 ) -> DependencyGraph:
     dependency_graph = DependencyGraph()
     for statement in block.statements:
@@ -30,8 +29,7 @@ def generate_dependency_graph(
         if visitors.SearchVisitor(contains_return).visit(statement):
             for preceding_statement in block.statements[:index]:
                 if (
-                    return_depends_on_fields
-                    and isinstance(
+                    isinstance(
                         preceding_statement, (frog_ast.Sample, frog_ast.Assignment)
                     )
                     and isinstance(preceding_statement.var, frog_ast.Variable)

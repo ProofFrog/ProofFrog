@@ -936,6 +936,7 @@ class BranchEliminiationTransformer(BlockTransformer):
                     )
         return block
 
+
 class CollapseAssignmentTransformer(BlockTransformer):
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):

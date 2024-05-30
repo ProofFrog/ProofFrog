@@ -937,61 +937,6 @@ class BranchEliminiationTransformer(BlockTransformer):
         return block
 
 
-class RemoveFieldTransformer(Transformer):
-    def __init__(self, fields_to_remove: list[str]) -> None:
-        self.fields_to_remove = fields_to_remove
-
-    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
-        new_game = copy.deepcopy(game)
-        new_game.fields = [
-            field for field in game.fields if field.name not in self.fields_to_remove
-        ]
-
-        new_game.methods = [self.transform(method) for method in game.methods]
-
-        return new_game
-
-    def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
-        new_statements: list[frog_ast.Statement] = []
-
-        def to_be_deleted(node: frog_ast.ASTNode) -> bool:
-            return (
-                isinstance(node, frog_ast.Variable)
-                and node.name in self.fields_to_remove
-            )
-
-        for statement in block.statements:
-            if isinstance(statement, frog_ast.IfStatement):
-                new_if = copy.deepcopy(statement)
-                i = 0
-                while i < len(new_if.conditions):
-                    if (
-                        SearchVisitor(to_be_deleted).visit(new_if.conditions[i])
-                        is not None
-                    ):
-                        del new_if.conditions[i]
-                        del new_if.blocks[i]
-                    else:
-                        i += 1
-                if len(new_if.conditions) > 0:
-                    new_statements.append(new_if)
-            elif isinstance(statement, frog_ast.NumericFor):
-                if (
-                    SearchVisitor(to_be_deleted).visit(statement.start) is None
-                    and SearchVisitor(to_be_deleted).visit(statement.end) is None
-                ):
-                    new_statements.append(statement)
-            elif isinstance(statement, frog_ast.GenericFor):
-                if SearchVisitor(to_be_deleted).visit(statement.over) is None:
-                    new_statements.append(statement)
-            else:
-                if SearchVisitor(to_be_deleted).visit(statement) is None:
-                    new_statements.append(statement)
-        return frog_ast.Block(
-            [self.transform(copy.deepcopy(statement)) for statement in new_statements]
-        )
-
-
 class CollapseAssignmentTransformer(BlockTransformer):
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):

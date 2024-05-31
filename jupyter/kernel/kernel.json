@@ -1,0 +1,4 @@
+{"argv":["python3", "/app/jupyter_kernel.py",	"-f", "{connection_file}"],
+ "display_name":"proof_frog"
+}
+

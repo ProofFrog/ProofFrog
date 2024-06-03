@@ -41,7 +41,7 @@ from proof_frog import visitors, frog_parser
             """
             Int f() {
                 Int a = 1;
-                Int b = a
+                Int b = a;
                 a = 2;
                 return a;
             }
@@ -49,7 +49,7 @@ from proof_frog import visitors, frog_parser
             """
             Int f() {
                 Int a = 1;
-                Int b = a
+                Int b = a;
                 a = 2;
                 return a;
             }

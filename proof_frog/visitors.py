@@ -17,7 +17,7 @@ from typing import (
     Dict,
 )
 import z3
-from sympy import Symbol
+from sympy import Symbol, Rational
 
 from . import frog_ast
 from . import frog_parser
@@ -286,27 +286,77 @@ class RedundantFieldCopyTransformer(BlockTransformer):
         return block
 
 
+class FrogToSympyVisitor(Visitor[Optional[Symbol | int]]):
+    def __init__(self, variables: dict[str, Symbol]) -> None:
+        self.stack: list[Symbol | int] = []
+        self.variables = variables
+        self.failed = False
+
+    def result(self) -> Optional[Symbol | int]:
+        return self.stack[0] if not self.failed else None
+
+    def leave_binary_operation(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> None:
+        if len(self.stack) < 2:
+            self.failed = True
+            return
+        item1 = self.stack.pop()
+        item2 = self.stack.pop()
+        if binary_operation.operator == frog_ast.BinaryOperators.ADD:
+            self.stack.append(item1 + item2)
+        elif binary_operation.operator == frog_ast.BinaryOperators.SUBTRACT:
+            self.stack.append(item2 - item1)
+        elif binary_operation.operator == frog_ast.BinaryOperators.MULTIPLY:
+            self.stack.append(item1 * item2)
+        elif binary_operation.operator == frog_ast.BinaryOperators.DIVIDE:
+            self.stack.append(Rational(item2, item1))
+        else:
+            self.failed = True
+
+    def leave_unary_operation(self, unary_operation: frog_ast.UnaryOperation) -> None:
+        if not self.stack or unary_operation.operator != frog_ast.UnaryOperators.MINUS:
+            self.failed = True
+            return
+        self.stack.append(-self.stack.pop())
+
+    def leave_integer(self, integer: frog_ast.Integer) -> None:
+        self.stack.append(integer.num)
+
+    def leave_variable(self, var: frog_ast.Variable) -> None:
+        self.stack.append(self.variables[var.name])
+
+
 class SimplifySpliceTransformer(BlockTransformer):
     def __init__(self, variables: dict[str, Symbol | frog_ast.Expression]) -> None:
         self.variables = variables
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        def is_all_concatenated(node: frog_ast.ASTNode) -> bool:
+            if isinstance(node, frog_ast.Variable):
+                return True
+            if not isinstance(node, frog_ast.BinaryOperation):
+                return False
+            if node.operator is not frog_ast.BinaryOperators.OR:
+                return False
+
+            return is_all_concatenated(node.left_expression) and is_all_concatenated(
+                node.right_expression
+            )
+
         for index, statement in enumerate(block.statements):
             if not isinstance(statement, frog_ast.Assignment):
                 continue
+            if not isinstance(statement.var, frog_ast.Variable):
+                continue
             if not isinstance(statement.value, frog_ast.BinaryOperation):
                 continue
-            if not isinstance(
-                statement.value.left_expression, frog_ast.Variable
-            ) or not isinstance(statement.value.right_expression, frog_ast.Variable):
-                continue
-            # Concatenate in this context
-            if statement.value.operator is not frog_ast.BinaryOperators.OR:
+
+            if not is_all_concatenated(statement.value):
                 continue
 
-            # Step 1, find type of variables (to get length)
-            # Step 2, determine lengths
-            # Step 3, replace, so long as statement and left/right are not changed
+            # Get variables all concatenated together
+            concatenated_var_names = VariableCollectionVisitor().visit(statement.value)
 
             def find_declaration(variable: str, node: frog_ast.ASTNode) -> bool:
                 return (
@@ -317,50 +367,49 @@ class SimplifySpliceTransformer(BlockTransformer):
                     and node.the_type.parameterization is not None
                 )
 
-            left_declaration = SearchVisitor(
-                functools.partial(
-                    find_declaration, statement.value.left_expression.name
+            # Step 1, find type of variables (to get lengths)
+
+            lengths: list[Symbol] = []
+            for var in concatenated_var_names:
+                declaration = SearchVisitor(
+                    functools.partial(find_declaration, var.name)
+                ).visit(block)
+                if declaration is None:
+                    break
+                assert isinstance(declaration, (frog_ast.Assignment, frog_ast.Sample))
+                assert isinstance(declaration.the_type, frog_ast.BitStringType)
+                assert declaration.the_type.parameterization is not None
+                variables_used = VariableCollectionVisitor().visit(
+                    declaration.the_type.parameterization
                 )
-            ).visit(block)
-            right_declaration = SearchVisitor(
-                functools.partial(
-                    find_declaration, statement.value.right_expression.name
+                if len(variables_used) != 1:
+                    break
+                if variables_used[0].name not in self.variables:
+                    break
+                lengths.append(
+                    FrogToSympyVisitor(self.variables).visit(
+                        declaration.the_type.parameterization
+                    )
                 )
-            ).visit(block)
-            if left_declaration is None or right_declaration is None:
+
+            # We quit because we weren't able to find the length of some variable in our concatenation
+            if len(lengths) != len(concatenated_var_names):
                 continue
 
-            assert isinstance(left_declaration, (frog_ast.Assignment, frog_ast.Sample))
-            assert isinstance(right_declaration, (frog_ast.Assignment, frog_ast.Sample))
-            assert isinstance(
-                left_declaration.the_type, frog_ast.BitStringType
-            ) and isinstance(right_declaration.the_type, frog_ast.BitStringType)
-            assert (
-                left_declaration.the_type.parameterization is not None
-                and right_declaration.the_type.parameterization is not None
-            )
-            left_len = left_declaration.the_type.parameterization
-            right_len = left_declaration.the_type.parameterization
+            # Step 2, create slices that map to these vars
+            partial_sum = 0
+            slices = []
+            for length in lengths:
+                slices.append(
+                    frog_ast.Slice(
+                        frog_ast.Variable(statement.var.name),
+                        frog_parser.parse_expression(str(partial_sum)),
+                        frog_parser.parse_expression(str(partial_sum + length)),
+                    )
+                )
+                partial_sum += length
 
-            if not isinstance(left_len, frog_ast.Variable) or not isinstance(
-                right_len, frog_ast.Variable
-            ):
-                continue
-            if (
-                not left_len.name in self.variables
-                or not right_len.name in self.variables
-            ):
-                continue
-            end_length = self.variables[left_len.name] + self.variables[right_len.name]
-
-            left_slice = frog_ast.Slice(
-                frog_ast.Variable(statement.var.name), frog_ast.Integer(0), left_len
-            )
-            right_slice = frog_ast.Slice(
-                frog_ast.Variable(statement.var.name),
-                left_len,
-                frog_parser.parse_expression(str(end_length)),
-            )
+            # Step 3, replace, so long as none of the variables are changed
 
             remaining_block = frog_ast.Block(block.statements[index + 1 :])
 
@@ -381,8 +430,8 @@ class SimplifySpliceTransformer(BlockTransformer):
                 ](
                     functools.partial(
                         use_or_reassignment,
-                        [statement.var, left_declaration.var, right_declaration.var],
-                        [left_slice, right_slice],
+                        [statement.var] + concatenated_var_names,
+                        slices,
                     )
                 ).visit(
                     remaining_block
@@ -396,18 +445,15 @@ class SimplifySpliceTransformer(BlockTransformer):
 
                 made_transformation = True
 
+                associated_var = concatenated_var_names[slices.index(to_transform)]
+
                 remaining_block = ReplaceTransformer(
-                    to_transform,
-                    (
-                        left_declaration.var
-                        if to_transform == left_slice
-                        else right_declaration.var
-                    ),
+                    to_transform, associated_var
                 ).transform(remaining_block)
             if not made_transformation:
                 continue
             return self.transform_block(
-                frog_ast.Block(copy.deepcopy(block.statements[:index]))
+                frog_ast.Block(copy.deepcopy(block.statements[: index + 1]))
                 + remaining_block
             )
 
@@ -933,61 +979,6 @@ class BranchEliminiationTransformer(BlockTransformer):
                         + remaining_block
                     )
         return block
-
-
-class RemoveFieldTransformer(Transformer):
-    def __init__(self, fields_to_remove: list[str]) -> None:
-        self.fields_to_remove = fields_to_remove
-
-    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
-        new_game = copy.deepcopy(game)
-        new_game.fields = [
-            field for field in game.fields if field.name not in self.fields_to_remove
-        ]
-
-        new_game.methods = [self.transform(method) for method in game.methods]
-
-        return new_game
-
-    def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
-        new_statements: list[frog_ast.Statement] = []
-
-        def to_be_deleted(node: frog_ast.ASTNode) -> bool:
-            return (
-                isinstance(node, frog_ast.Variable)
-                and node.name in self.fields_to_remove
-            )
-
-        for statement in block.statements:
-            if isinstance(statement, frog_ast.IfStatement):
-                new_if = copy.deepcopy(statement)
-                i = 0
-                while i < len(new_if.conditions):
-                    if (
-                        SearchVisitor(to_be_deleted).visit(new_if.conditions[i])
-                        is not None
-                    ):
-                        del new_if.conditions[i]
-                        del new_if.blocks[i]
-                    else:
-                        i += 1
-                if len(new_if.conditions) > 0:
-                    new_statements.append(new_if)
-            elif isinstance(statement, frog_ast.NumericFor):
-                if (
-                    SearchVisitor(to_be_deleted).visit(statement.start) is None
-                    and SearchVisitor(to_be_deleted).visit(statement.end) is None
-                ):
-                    new_statements.append(statement)
-            elif isinstance(statement, frog_ast.GenericFor):
-                if SearchVisitor(to_be_deleted).visit(statement.over) is None:
-                    new_statements.append(statement)
-            else:
-                if SearchVisitor(to_be_deleted).visit(statement) is None:
-                    new_statements.append(statement)
-        return frog_ast.Block(
-            [self.transform(copy.deepcopy(statement)) for statement in new_statements]
-        )
 
 
 class CollapseAssignmentTransformer(BlockTransformer):

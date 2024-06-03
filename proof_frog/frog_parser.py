@@ -1,6 +1,6 @@
 import os
 from typing import Type
-from antlr4 import FileStream, InputStream, CommonTokenStream
+from antlr4 import FileStream, InputStream, CommonTokenStream, BailErrorStrategy
 from .parsing.PrimitiveVisitor import PrimitiveVisitor
 from .parsing.PrimitiveParser import PrimitiveParser
 from .parsing.PrimitiveLexer import PrimitiveLexer
@@ -181,13 +181,16 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
     def visitIntegerExpression(
         self, ctx: PrimitiveParser.IntegerExpressionContext
     ) -> frog_ast.Expression:
+        if ctx.L_PAREN():
+            exp: frog_ast.Expression = self.visit(ctx.getChild(1))
+            return exp
         if ctx.INT():
             return frog_ast.Integer(int(ctx.INT().getText()))
         if ctx.BINARYNUM():
             return frog_ast.BinaryNum(int(ctx.BINARYNUM().getText(), 2))
 
         if ctx.lvalue():
-            exp: frog_ast.Expression = self.visit(ctx.lvalue())
+            exp = self.visit(ctx.lvalue())
             return exp
 
         operator: frog_ast.BinaryOperators
@@ -618,7 +621,10 @@ def _get_parser(
     else:
         input_stream = InputStream
     lexer = lexer_functor(input_stream(input_))
-    return parser_functor(CommonTokenStream(lexer))
+    parser = parser_functor(CommonTokenStream(lexer))
+    # No way to do this without editing the protected field in antlr's python runtime
+    parser._errHandler = BailErrorStrategy()  # pylint: disable=protected-access
+    return parser
 
 
 def parse_primitive_file(primitive: str) -> frog_ast.Primitive:

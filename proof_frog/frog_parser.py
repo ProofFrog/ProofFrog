@@ -203,13 +203,16 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
     def visitIntegerExpression(
         self, ctx: PrimitiveParser.IntegerExpressionContext
     ) -> frog_ast.Expression:
+        if ctx.L_PAREN():
+            exp: frog_ast.Expression = self.visit(ctx.getChild(1))
+            return exp
         if ctx.INT():
             return frog_ast.Integer(int(ctx.INT().getText()))
         if ctx.BINARYNUM():
             return frog_ast.BinaryNum(int(ctx.BINARYNUM().getText(), 2))
 
         if ctx.lvalue():
-            exp: frog_ast.Expression = self.visit(ctx.lvalue())
+            exp = self.visit(ctx.lvalue())
             return exp
 
         operator: frog_ast.BinaryOperators

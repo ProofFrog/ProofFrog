@@ -96,6 +96,7 @@ integerExpression
 	| lvalue
 	| INT
 	| BINARYNUM
+	| L_PAREN integerExpression R_PAREN
 	;
 
 bitstring: BITSTRING L_ANGLE integerExpression R_ANGLE | BITSTRING;

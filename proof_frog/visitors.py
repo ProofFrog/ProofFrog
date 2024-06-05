@@ -17,7 +17,7 @@ from typing import (
     Dict,
 )
 import z3
-from sympy import Symbol
+from sympy import Symbol, Rational
 
 from . import frog_ast
 from . import frog_parser
@@ -286,6 +286,47 @@ class RedundantFieldCopyTransformer(BlockTransformer):
         return block
 
 
+class FrogToSympyVisitor(Visitor[Optional[Symbol | int]]):
+    def __init__(self, variables: dict[str, Symbol]) -> None:
+        self.stack: list[Symbol | int] = []
+        self.variables = variables
+        self.failed = False
+
+    def result(self) -> Optional[Symbol | int]:
+        return self.stack[0] if not self.failed else None
+
+    def leave_binary_operation(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> None:
+        if len(self.stack) < 2:
+            self.failed = True
+            return
+        item1 = self.stack.pop()
+        item2 = self.stack.pop()
+        if binary_operation.operator == frog_ast.BinaryOperators.ADD:
+            self.stack.append(item1 + item2)
+        elif binary_operation.operator == frog_ast.BinaryOperators.SUBTRACT:
+            self.stack.append(item2 - item1)
+        elif binary_operation.operator == frog_ast.BinaryOperators.MULTIPLY:
+            self.stack.append(item1 * item2)
+        elif binary_operation.operator == frog_ast.BinaryOperators.DIVIDE:
+            self.stack.append(Rational(item2, item1))
+        else:
+            self.failed = True
+
+    def leave_unary_operation(self, unary_operation: frog_ast.UnaryOperation) -> None:
+        if not self.stack or unary_operation.operator != frog_ast.UnaryOperators.MINUS:
+            self.failed = True
+            return
+        self.stack.append(-self.stack.pop())
+
+    def leave_integer(self, integer: frog_ast.Integer) -> None:
+        self.stack.append(integer.num)
+
+    def leave_variable(self, var: frog_ast.Variable) -> None:
+        self.stack.append(self.variables[var.name])
+
+
 class SimplifySpliceTransformer(BlockTransformer):
     def __init__(self, variables: dict[str, Symbol | frog_ast.Expression]) -> None:
         self.variables = variables
@@ -338,14 +379,17 @@ class SimplifySpliceTransformer(BlockTransformer):
                 assert isinstance(declaration, (frog_ast.Assignment, frog_ast.Sample))
                 assert isinstance(declaration.the_type, frog_ast.BitStringType)
                 assert declaration.the_type.parameterization is not None
-                if not isinstance(
-                    declaration.the_type.parameterization, frog_ast.Variable
-                ):
+                variables_used = VariableCollectionVisitor().visit(
+                    declaration.the_type.parameterization
+                )
+                if len(variables_used) != 1:
                     break
-                if declaration.the_type.parameterization.name not in self.variables:
+                if variables_used[0].name not in self.variables:
                     break
                 lengths.append(
-                    self.variables[declaration.the_type.parameterization.name]
+                    FrogToSympyVisitor(self.variables).visit(
+                        declaration.the_type.parameterization
+                    )
                 )
 
             # We quit because we weren't able to find the length of some variable in our concatenation
@@ -409,7 +453,7 @@ class SimplifySpliceTransformer(BlockTransformer):
             if not made_transformation:
                 continue
             return self.transform_block(
-                frog_ast.Block(copy.deepcopy(block.statements[:index]))
+                frog_ast.Block(copy.deepcopy(block.statements[: index + 1]))
                 + remaining_block
             )
 

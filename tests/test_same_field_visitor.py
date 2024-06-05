@@ -105,8 +105,8 @@ from proof_frog import visitors, frog_parser
                     a = a + 1;
                     a = a * a;
                     a = a + x + y;
-                    x = x + 1
-                    y = y + 1
+                    x = x + 1;
+                    y = y + 1;
                 }
             }
             """,

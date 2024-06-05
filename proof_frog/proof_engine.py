@@ -1,5 +1,4 @@
 from __future__ import annotations
-import sys
 import copy
 import functools
 from enum import Enum
@@ -8,7 +7,6 @@ from typing import TypeAlias, Sequence, Tuple, Dict, Optional
 import z3
 from colorama import Fore
 from sympy import Symbol
-from . import frog_parser
 from . import frog_ast
 from . import visitors
 from . import dependencies
@@ -24,25 +22,30 @@ class WhichGame(Enum):
 ProcessedAssumption = namedtuple("ProcessedAssumption", ["assumption", "which"])
 
 
+class FailedProof(Exception):
+    pass
+
+
 class ProofEngine:
-    def __init__(self, proof_file_name: str, verbose: bool) -> None:
-        self.proof_file = frog_parser.parse_proof_file(proof_file_name)
+    def __init__(self, verbose: bool) -> None:
         self.definition_namespace: frog_ast.Namespace = {}
         self.proof_namespace: frog_ast.Namespace = {}
         self.proof_let_types: visitors.NameTypeMap = visitors.NameTypeMap()
 
-        for imp in self.proof_file.imports:
-            root = frog_parser.parse_file(imp.filename)
-            name = imp.rename if imp.rename else root.get_export_name()
-            self.definition_namespace[name] = root
+        self.verbose = verbose
+        self.step_assumptions: list[ProcessedAssumption] = []
+        self.variables: dict[str, Symbol | frog_ast.Expression] = {}
+        self.method_lookup: MethodLookup = {}
 
-        for game in self.proof_file.helpers:
+    def add_definition(self, name: str, root: frog_ast.Root) -> None:
+        self.definition_namespace[name] = root
+
+    def prove(self, proof_file: frog_ast.ProofFile) -> None:
+        for game in proof_file.helpers:
             self.definition_namespace[game.name] = game
 
-        self.variables: dict[str, Symbol | frog_ast.Expression] = {}
-
         # Here, we are substituting the lets with the parameters they are given
-        for let in self.proof_file.lets:
+        for let in proof_file.lets:
             self.proof_let_types.set(let.name, let.type)
             if isinstance(let.value, frog_ast.FuncCall) and isinstance(
                 let.value.func, frog_ast.Variable
@@ -70,12 +73,9 @@ class ProofEngine:
                         self.variables[let.name] = sympy_symbol
 
         self.get_method_lookup()
-        self.verbose = verbose
-        self.step_assumptions: list[ProcessedAssumption] = []
 
-    def prove(self) -> None:
-        first_step = self.proof_file.steps[0]
-        final_step = self.proof_file.steps[-1]
+        first_step = proof_file.steps[0]
+        final_step = proof_file.steps[-1]
 
         assert isinstance(first_step, frog_ast.Step)
         assert isinstance(final_step, frog_ast.Step)
@@ -85,12 +85,12 @@ class ProofEngine:
         assert isinstance(first_step.challenger, frog_ast.ConcreteGame)
         assert isinstance(final_step.challenger, frog_ast.ConcreteGame)
 
-        if first_step.challenger.game != self.proof_file.theorem:
+        if first_step.challenger.game != proof_file.theorem:
             print(Fore.RED + "Proof must start with a game matching theorem")
-            print(Fore.RED + f"Theorem: {self.proof_file.theorem}")
+            print(Fore.RED + f"Theorem: {proof_file.theorem}")
             print(Fore.RED + f"First Game: {first_step.challenger}")
 
-        self.prove_steps(self.proof_file.steps)
+        self.prove_steps(proof_file.steps, proof_file.assumptions)
 
         if (
             first_step.challenger.game == final_step.challenger.game
@@ -100,9 +100,13 @@ class ProofEngine:
             print(Fore.GREEN + "Proof Suceeded!")
             return
         print(Fore.YELLOW + "Proof Succeeded, but is incomplete")
-        sys.exit(1)
+        raise FailedProof()
 
-    def prove_steps(self, steps: Sequence[frog_ast.ProofStep]) -> None:
+    def prove_steps(
+        self,
+        steps: list[frog_ast.ProofStep],
+        assumed_indistinguishable: list[frog_ast.ParameterizedGame],
+    ) -> None:
         step_num = 0
 
         for i in range(0, len(steps) - 1):
@@ -131,7 +135,9 @@ class ProofEngine:
             if isinstance(current_step, frog_ast.Step) and isinstance(
                 next_step, frog_ast.Step
             ):
-                if self._is_by_assumption(current_step, next_step):
+                if self._is_by_indistinguishability(
+                    current_step, next_step, assumed_indistinguishable
+                ):
                     print(f"Current: {current_step}")
                     print(f"Hop To: {next_step}\n")
                     print("Valid by assumption")
@@ -190,7 +196,7 @@ class ProofEngine:
                 the_induction = steps[i]
                 assert isinstance(the_induction, frog_ast.Induction)
                 self.proof_let_types.set(the_induction.name, frog_ast.IntType())
-                self.prove_steps(the_induction.steps)
+                self.prove_steps(the_induction.steps, assumed_indistinguishable)
                 # Check induction roll over
                 first_step = the_induction.steps[0]
                 assert isinstance(first_step, frog_ast.Step)
@@ -320,12 +326,8 @@ class ProofEngine:
                 name="Branch Elimination",
             ),
             AstManipulator(
-                fn=lambda ast: visitors.RemoveFieldTransformer(
-                    dependencies.UnnecessaryFieldVisitor(self.proof_namespace).visit(
-                        ast
-                    )
-                ).transform(ast),
-                name="Unnecessary Field Removal",
+                fn=dependencies.remove_unnecessary_fields,
+                name="Remove unnecessary statements and fields",
             ),
             AstManipulator(
                 fn=lambda ast: visitors.CollapseAssignmentTransformer().transform(ast),
@@ -451,7 +453,7 @@ class ProofEngine:
         def quit_proof() -> None:
             print("Step failed!")
             print(Fore.RED + "Proof Failed!")
-            sys.exit(1)
+            raise FailedProof()
 
         all_true_current = AllTrueTransformer().transform(current_game_ast)
         all_true_next = AllTrueTransformer().transform(next_game_ast)
@@ -631,17 +633,18 @@ class ProofEngine:
         return new_game
 
     def get_method_lookup(self) -> None:
-        self.method_lookup: MethodLookup = {}
+        self.method_lookup = {}
 
         for name, node in self.proof_namespace.items():
             if isinstance(node, frog_ast.Scheme):
                 for method in node.methods:
                     self.method_lookup[(name, method.signature.name)] = method
 
-    def _is_by_assumption(
+    def _is_by_indistinguishability(
         self,
         current_step: frog_ast.Step,
         next_step: frog_ast.Step,
+        assumed_indistinguishable: list[frog_ast.ParameterizedGame],
     ) -> bool:
         if not isinstance(
             current_step.challenger, frog_ast.ConcreteGame
@@ -652,7 +655,7 @@ class ProofEngine:
             and current_step.reduction
             and current_step.reduction == next_step.reduction
             and current_step.adversary == next_step.adversary
-            and current_step.challenger.game in self.proof_file.assumptions
+            and current_step.challenger.game in assumed_indistinguishable
         )
 
     def sort_game(self, game: frog_ast.Game) -> frog_ast.Game:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Optional, TypeAlias, Sequence
+from typing import Optional, TypeAlias, Sequence, TypeVar, Generic, Tuple as PyTuple
 
 
 class FileType(Enum):
@@ -707,7 +707,7 @@ class Induction(ASTNode):
         name: str,
         start: Expression,
         end: Expression,
-        steps: list[Step | StepAssumption],
+        steps: list[Step | StepAssumption | Induction],
     ):
         super().__init__()
         self.name = name
@@ -770,6 +770,32 @@ class ProofFile(Root):
     def get_export_name(self) -> str:
         # We should never be proving more than one thing, so this doesn't need to be unique.
         return "Proof"
+
+
+VT = TypeVar("VT")
+
+
+class ASTMap(Generic[VT]):
+    def __init__(self, identity: bool = True) -> None:
+        self.__list: list[PyTuple[ASTNode, VT]] = []
+        self.__identity = identity
+
+    def __compare(self, key1: ASTNode, key2: ASTNode) -> bool:
+        return (self.__identity and key1 is key2) or (
+            not self.__identity and key1 == key2
+        )
+
+    def get(self, key: ASTNode) -> VT:
+        for potential_key, value in self.__list:
+            if self.__compare(key, potential_key):
+                return value
+        raise KeyError()
+
+    def set(self, key: ASTNode, value: VT) -> None:
+        for index, (potential_key, _) in enumerate(self.__list):
+            if self.__compare(key, potential_key):
+                self.__list[index] = (key, value)
+        self.__list.append((key, value))
 
 
 def _parameter_list_string(parameters: list[Parameter]) -> str:

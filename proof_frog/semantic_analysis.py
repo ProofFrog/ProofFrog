@@ -8,6 +8,13 @@ from . import visitors
 
 def check_well_formed(root: frog_ast.Root) -> None:
     import_namespace = {}
+    if isinstance(root, frog_ast.ProofFile):
+        for imp in root.imports:
+            parsed_file = frog_parser.parse_file(imp.filename)
+            name = imp.rename if imp.rename else parsed_file.get_export_name()
+            import_namespace[name] = parsed_file
+        check_proof_well_formed(root, import_namespace)
+
     if isinstance(root, frog_ast.Primitive):
         check_primitive_well_formed(root, import_namespace)
     if isinstance(root, frog_ast.Scheme):
@@ -18,6 +25,15 @@ def check_well_formed(root: frog_ast.Root) -> None:
         check_primitive_well_formed(root, import_namespace)
 
     TypeCheckVisitor(import_namespace, root).visit(root)
+
+
+def check_proof_well_formed(proof: frog_ast.ProofFile, import_namespace):
+    variable_type_map_stack = [{}]
+    ast_type_map = frog_ast.ASTMap()
+    type_check_visitor = DetermineTypeVisitor(variable_type_map_stack, ast_type_map, import_namespace)
+    for let in proof.lets:
+        print(ast_type_map)
+        type_check_visitor.visit(let)
 
 
 def check_primitive_well_formed(
@@ -80,6 +96,30 @@ def print_error(location: frog_ast.ASTNode, message: str):
     print(f"Line {location.line_num}, column: {location.column_num}", file=sys.stderr)
     print(message, file=sys.stderr)
     sys.exit(2)
+
+
+class DetermineTypeVisitor(visitors.Visitor[None]):
+    def __init__(self, variable_type_map_stack, ast_type_map: frog_ast.ASTMap, import_namespace):
+        self.variable_type_map_stack = variable_type_map_stack
+        self.ast_type_map = ast_type_map
+        self.import_namespace = import_namespace
+
+    def result(self) -> None:
+        return None
+
+    def visit_field(self, field: frog_ast.Field):
+        if not field.value:
+            if field.type == frog_ast.SetType(None):
+                self.variable_type_map_stack[0][field.name] = frog_ast.Variable(
+                    field.name
+                )
+                self.ast_type_map.set(field, frog_ast.Variable(field.name))
+            else:
+                raise NotImplementedError()
+
+    def visit_func_call(self, func_call: frog_ast.FuncCall):
+        if isinstance(func_call.func, frog_ast.Variable) and func_call.func.name in self.import_namespace:
+
 
 
 class TypeCheckVisitor(visitors.Visitor[None]):

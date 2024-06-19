@@ -65,9 +65,9 @@ def test_substitution(
 ) -> None:
     game_ast = frog_parser.parse_method(method)
     expected_ast = frog_parser.parse_method(expected)
-
-    transformed_ast = visitors.SubstitutionTransformer(substitution_map).transform(
-        game_ast
-    )
+    ast_map = frog_ast.ASTMap(identity=False)
+    for item in substitution_map:
+        ast_map.set(item[0], item[1])
+    transformed_ast = visitors.SubstitutionTransformer(ast_map).transform(game_ast)
     print(transformed_ast)
     assert expected_ast == transformed_ast

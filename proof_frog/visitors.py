@@ -500,22 +500,14 @@ class VariableStandardizingTransformer(BlockTransformer):
 
 
 class SubstitutionTransformer(Transformer):
-    def __init__(
-        self, replace_map: list[Tuple[frog_ast.ASTNode, frog_ast.ASTNode]]
-    ) -> None:
+    def __init__(self, replace_map: frog_ast.ASTMap[frog_ast.ASTNode]) -> None:
         self.replace_map = replace_map
 
-    def _find(self, v: frog_ast.ASTNode) -> Optional[frog_ast.ASTNode]:
-        the_list = [item for item in self.replace_map if item[0] == v]
-        if the_list:
-            return the_list[0][1]
-        return None
-
     def transform_ast_node(self, node: frog_ast.ASTNode) -> Optional[frog_ast.ASTNode]:
-        found = self._find(node)
-        if found:
-            return found
-        return None
+        try:
+            return self.replace_map.get(node)
+        except KeyError:
+            return None
 
 
 class InstantiationTransformer(Transformer):
@@ -694,21 +686,21 @@ class InlineTransformer(Transformer):
                 and var_statement.the_type is not None
                 and isinstance(var_statement.var, frog_ast.Variable)
             ):
-                called_method = SubstitutionTransformer(
-                    [
-                        (
-                            var_statement.var,
-                            frog_ast.Variable(
-                                exp.func.the_object.name
-                                + "."
-                                + exp.func.name
-                                + "@"
-                                + var_statement.var.name
-                                + str(self.statement_index)
-                            ),
-                        )
-                    ]
-                ).transform(called_method)
+                ast_map = frog_ast.ASTMap(identity=False)
+                ast_map.set(
+                    var_statement.var,
+                    frog_ast.Variable(
+                        exp.func.the_object.name
+                        + "."
+                        + exp.func.name
+                        + "@"
+                        + var_statement.var.name
+                        + str(self.statement_index)
+                    ),
+                )
+                called_method = SubstitutionTransformer(ast_map).transform(
+                    called_method
+                )
         transformed_method = InstantiationTransformer(
             dict(
                 zip(
@@ -1472,10 +1464,9 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
             )
 
             reads_pair_partial = functools.partial(reads_pair, pair_name)
-
-            paired_value = SubstitutionTransformer(
-                [(statement.var, frog_ast.Variable(pair_name))]
-            ).transform(statement.value)
+            ast_map = frog_ast.ASTMap(identity=False)
+            ast_map.set(statement.var, frog_ast.Variable(pair_name))
+            paired_value = SubstitutionTransformer(ast_map).transform(statement.value)
 
             paired = False
             for subsequent_statement in block.statements[index + 1 :]:

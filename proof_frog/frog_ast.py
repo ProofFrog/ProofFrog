@@ -797,6 +797,12 @@ class ASTMap(Generic[VT]):
                 self.__list[index] = (key, value)
         self.__list.append((key, value))
 
+    def __str__(self) -> str:
+        return_val = ""
+        for item in self.__list:
+            return_val += str(item[0]) + " => " + str(item[1]) + "\n"
+        return return_val
+
 
 def _parameter_list_string(parameters: list[Parameter]) -> str:
     return ", ".join(str(param) for param in parameters) if parameters else ""

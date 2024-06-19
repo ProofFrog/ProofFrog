@@ -54,11 +54,11 @@ class ProofEngine:
                     self.definition_namespace[let.value.func.name]
                 )
                 if isinstance(definition, frog_ast.Scheme):
-                    self.proof_namespace[let.name] = self.instantiate_scheme(
+                    self.proof_namespace[let.name] = self.instantiate(
                         definition, let.value.args
                     )
                 elif isinstance(definition, frog_ast.Primitive):
-                    self.proof_namespace[let.name] = self.instantiate_primitive(
+                    self.proof_namespace[let.name] = self.instantiate(
                         definition, let.value.args
                     )
                 else:
@@ -581,13 +581,13 @@ class ProofEngine:
         if isinstance(challenger, frog_ast.ConcreteGame):
             game_file = self.definition_namespace[challenger.game.name]
             assert isinstance(game_file, frog_ast.GameFile)
-            game = self.instantiate_game(
+            game = self.instantiate(
                 game_file.get_game(challenger.which), challenger.game.args
             )
         else:
             game_node = self.definition_namespace[challenger.name]
             assert isinstance(game_node, frog_ast.Game)
-            game = self.instantiate_game(game_node, challenger.args)
+            game = self.instantiate(game_node, challenger.args)
 
         lookup = copy.deepcopy(self.method_lookup)
         if reduction:
@@ -613,28 +613,6 @@ class ProofEngine:
             else:
                 break
         return game
-
-    # Replace a game's parameter list with empty, and instantiate the game with
-    # the parameterized value
-    def instantiate_game(
-        self,
-        game: frog_ast.Game,
-        parameters: Sequence[frog_ast.ASTNode],
-    ) -> frog_ast.Game:
-        game_copy = copy.deepcopy(game)
-        ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-        for index, parameter in enumerate(game.parameters):
-            ast_map.set(frog_ast.Variable(parameter.name), parameters[index])
-
-        game_copy.parameters = []
-
-        new_game = visitors.SubstitutionTransformer(ast_map).transform(game_copy)
-
-        new_game = visitors.InstantiationTransformer(self.proof_namespace).transform(
-            new_game
-        )
-
-        return new_game
 
     def get_method_lookup(self) -> None:
         self.method_lookup = {}
@@ -735,32 +713,18 @@ class ProofEngine:
     # 2 - Change method signatures: either those that rely on external values,
     #     or those that refer to the fields
     # 3 - For schemes, might need to change things in the method bodies.
-    def instantiate_primitive(
+    def instantiate(
         self,
-        primitive: frog_ast.Primitive,
+        root: frog_ast.Primitive | frog_ast.Scheme | frog_ast.Game,
         args: list[frog_ast.Expression],
     ) -> frog_ast.Primitive:
         ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-        for index, parameter in enumerate(primitive.parameters):
+        for index, parameter in enumerate(root.parameters):
             ast_map.set(frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
-        new_primitive = visitors.SubstitutionTransformer(ast_map).transform(primitive)
-        new_primitive.parameters.clear()
+        new_root = visitors.SubstitutionTransformer(ast_map).transform(root)
+        new_root.parameters.clear()
         return visitors.InstantiationTransformer(self.proof_namespace).transform(
-            new_primitive
-        )
-
-    def instantiate_scheme(
-        self,
-        scheme: frog_ast.Scheme,
-        args: list[frog_ast.Expression],
-    ) -> frog_ast.Scheme:
-        ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-        for index, parameter in enumerate(scheme.parameters):
-            ast_map.set(frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
-        new_scheme = visitors.SubstitutionTransformer(ast_map).transform(scheme)
-        new_scheme.parameters.clear()
-        return visitors.InstantiationTransformer(self.proof_namespace).transform(
-            new_scheme
+            new_root
         )
 
 

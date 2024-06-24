@@ -1431,7 +1431,11 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
         self.paired_statements: list[frog_ast.Statement] = []
 
     def result(self) -> Optional[list[frog_ast.Statement]]:
-        return None if not self.are_same or len(self.paired_statements) == 0 else self.paired_statements
+        return (
+            None
+            if not self.are_same or len(self.paired_statements) == 0
+            else self.paired_statements
+        )
 
     def visit_block(self, block: frog_ast.Block) -> None:
         if not self.are_same:

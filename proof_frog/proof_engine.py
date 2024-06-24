@@ -654,9 +654,14 @@ class ProofEngine:
             current_step.challenger.game == next_step.challenger.game
             and current_step.adversary == next_step.adversary
             and current_step.challenger.game in assumed_indistinguishable
-            and (not current_step.reduction
-                 or (current_step.reduction
-                     and current_step.reduction == next_step.reduction)))
+            and (
+                not current_step.reduction
+                or (
+                    current_step.reduction
+                    and current_step.reduction == next_step.reduction
+                )
+            )
+        )
 
     def sort_game(self, game: frog_ast.Game) -> frog_ast.Game:
         new_game = copy.deepcopy(game)

@@ -105,7 +105,7 @@ from proof_frog import proof_engine, frog_parser
             }
         }""",
             """
-               Game Test() {
+        Game Test() {
             Int field1;
             Void Initialize() {
                 field1 = 100;
@@ -114,6 +114,28 @@ from proof_frog import proof_engine, frog_parser
             Int f() {
                 Int value = 2 * field1;
                 return value;
+            }
+        }""",
+        ),
+        (
+            """
+        Game Test() {
+            BitString field1;
+            BitString field2;
+            BitString Initialize() {
+                field1 <- BitString;
+                field2 <- BitString;
+                return field1;
+            }
+        }""",
+            """
+        Game Test() {
+            BitString field1;
+            BitString field2;
+            BitString Initialize() {
+                field1 <- BitString;
+                field2 <- BitString;
+                return field1;
             }
         }""",
         ),

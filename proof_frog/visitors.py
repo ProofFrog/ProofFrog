@@ -1441,7 +1441,7 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
             if statement in self.paired_statements:
                 continue
 
-            if not isinstance(statement, frog_ast.Assignment):
+            if not isinstance(statement, (frog_ast.Sample, frog_ast.Assignment)):
                 continue
             if not isinstance(statement.var, frog_ast.Variable):
                 continue
@@ -1458,7 +1458,9 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
             def contains_func(node: frog_ast.ASTNode) -> bool:
                 return isinstance(node, frog_ast.FuncCall)
 
-            if SearchVisitor(contains_func).visit(statement) is not None:
+            if SearchVisitor(contains_func).visit(statement) is not None or isinstance(
+                statement, frog_ast.Sample
+            ):
                 self.are_same = False
                 return
 

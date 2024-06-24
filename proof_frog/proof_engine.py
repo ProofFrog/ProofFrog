@@ -650,7 +650,7 @@ class ProofEngine:
             current_step.challenger, frog_ast.ConcreteGame
         ) or not isinstance(next_step.challenger, frog_ast.ConcreteGame):
             return False
-        return bool (
+        return bool(
             current_step.challenger.game == next_step.challenger.game
             and current_step.adversary == next_step.adversary
             and current_step.challenger.game in assumed_indistinguishable

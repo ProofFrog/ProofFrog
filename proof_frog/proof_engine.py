@@ -53,13 +53,9 @@ class ProofEngine:
                 definition = copy.deepcopy(
                     self.definition_namespace[let.value.func.name]
                 )
-                if isinstance(definition, frog_ast.Scheme):
-                    self.proof_namespace[let.name] = self.instantiate(
-                        definition, let.value.args
-                    )
-                elif isinstance(definition, frog_ast.Primitive):
-                    self.proof_namespace[let.name] = self.instantiate(
-                        definition, let.value.args
+                if isinstance(definition, (frog_ast.Primitive, frog_ast.Scheme)):
+                    self.proof_namespace[let.name] = instantiate(
+                        definition, let.value.args, self.proof_namespace
                     )
                 else:
                     raise TypeError("Must instantiate either a Primitive or Scheme ")
@@ -581,13 +577,15 @@ class ProofEngine:
         if isinstance(challenger, frog_ast.ConcreteGame):
             game_file = self.definition_namespace[challenger.game.name]
             assert isinstance(game_file, frog_ast.GameFile)
-            game = self.instantiate(
-                game_file.get_game(challenger.which), challenger.game.args
+            game = instantiate(
+                game_file.get_game(challenger.which),
+                challenger.game.args,
+                self.proof_namespace,
             )
         else:
             game_node = self.definition_namespace[challenger.name]
             assert isinstance(game_node, frog_ast.Game)
-            game = self.instantiate(game_node, challenger.args)
+            game = instantiate(game_node, challenger.args, self.proof_namespace)
 
         lookup = copy.deepcopy(self.method_lookup)
         if reduction:
@@ -706,26 +704,25 @@ class ProofEngine:
 
         return frog_ast.Block(sorted_statements)
 
-    # I want to be able to instantiate primitives and schemes
-    # What does this entail? For primitives, all I have are fields and
-    # method signatures. So I'd like to:
-    # 1 - Set fields to values gotten from the proof namespace
-    # 2 - Change method signatures: either those that rely on external values,
-    #     or those that refer to the fields
-    # 3 - For schemes, might need to change things in the method bodies.
-    def instantiate(
-        self,
-        root: frog_ast.Primitive | frog_ast.Scheme | frog_ast.Game,
-        args: list[frog_ast.Expression],
-    ) -> frog_ast.Primitive:
-        ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-        for index, parameter in enumerate(root.parameters):
-            ast_map.set(frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
-        new_root = visitors.SubstitutionTransformer(ast_map).transform(root)
-        new_root.parameters.clear()
-        return visitors.InstantiationTransformer(self.proof_namespace).transform(
-            new_root
-        )
+
+# I want to be able to instantiate primitives and schemes
+# What does this entail? For primitives, all I have are fields and
+# method signatures. So I'd like to:
+# 1 - Set fields to values gotten from the proof namespace
+# 2 - Change method signatures: either those that rely on external values,
+#     or those that refer to the fields
+# 3 - For schemes, might need to change things in the method bodies.
+def instantiate(
+    root: frog_ast.Primitive | frog_ast.Scheme | frog_ast.Game,
+    args: list[frog_ast.Expression],
+    namespace: frog_ast.Namespace,
+) -> frog_ast.Primitive | frog_ast.Game | frog_ast.Scheme:
+    ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+    for index, parameter in enumerate(root.parameters):
+        ast_map.set(frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
+    new_root = visitors.SubstitutionTransformer(ast_map).transform(root)
+    new_root.parameters.clear()
+    return visitors.InstantiationTransformer(namespace).transform(new_root)
 
 
 def get_challenger_method_lookup(challenger: frog_ast.Game) -> MethodLookup:

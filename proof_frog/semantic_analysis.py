@@ -60,15 +60,10 @@ def name_resolution(initial_root: frog_ast.Root, initial_file_name: str):
     do_name_resolution(initial_root, initial_file_name)
 
 
-class NameResolutionVisitor(visitors.Visitor[None]):
-    def __init__(self, import_namespace, file_name):
+class VariableTypeVisitor(visitors.Visitor[None]):
+    def __init__(self, import_namespace):
         self.variable_type_map_stack = [{}]
         self.import_namespace = import_namespace
-        self.file_name = file_name
-        self.in_field_access = False
-
-    def result(self) -> None:
-        return None
 
     def visit_parameter(self, param: frog_ast.Parameter) -> None:
         self.variable_type_map_stack[-1][param.name] = (
@@ -100,6 +95,69 @@ class NameResolutionVisitor(visitors.Visitor[None]):
     def leave_reduction(self, _: frog_ast.Reduction) -> None:
         self.variable_type_map_stack.pop()
 
+    def visit_method(self, method: frog_ast.Method) -> None:
+        self.variable_type_map_stack.append(
+            dict(
+                zip(
+                    (param.name for param in method.signature.parameters),
+                    (param.type for param in method.signature.parameters),
+                )
+            )
+        )
+
+    def leave_method(self, _: frog_ast.Method) -> None:
+        self.variable_type_map_stack.pop()
+
+    def visit_assignment(self, assignment: frog_ast.Assignment) -> None:
+        if assignment.the_type is not None:
+            assert isinstance(assignment.var, frog_ast.Variable)
+            self.variable_type_map_stack[-1][assignment.var.name] = assignment.the_type
+
+    def visit_sample(self, sample: frog_ast.Sample) -> None:
+        if sample.the_type is not None:
+            assert isinstance(sample.var, frog_ast.Variable)
+            self.variable_type_map_stack[-1][sample.var.name] = sample.the_type
+
+    def visit_variable_declaration(
+        self, declaration: frog_ast.VariableDeclaration
+    ) -> None:
+        self.variable_type_map_stack[-1][declaration.name] = declaration.type
+
+    def visit_block(self, _: frog_ast.Block) -> None:
+        self.variable_type_map_stack.append({})
+
+    def leave_block(self, _: frog_ast.Block) -> None:
+        self.variable_type_map_stack.pop()
+
+    def visit_numeric_for(self, numeric_for: frog_ast.NumericFor) -> None:
+        self.variable_type_map_stack.append({numeric_for.name: frog_ast.IntType()})
+
+    def leave_numeric_for(self, _: frog_ast.NumericFor) -> None:
+        self.variable_type_map_stack.pop()
+
+    def get_type(self, name: str) -> Optional[frog_ast.Type]:
+        for the_map in reversed(self.variable_type_map_stack):
+            if name in the_map:
+                return the_map[name]
+        if name in self.import_namespace:
+            return self.import_namespace[name]
+
+        return None
+
+    def visit_induction(self, induction: frog_ast.Induction) -> None:
+        self.variable_type_map_stack.append({})
+        self.variable_type_map_stack[-1][induction.name] = frog_ast.IntType()
+
+    def result(self) -> None:
+        return None
+
+
+class NameResolutionVisitor(VariableTypeVisitor):
+    def __init__(self, import_namespace, file_name):
+        super().__init__(import_namespace)
+        self.file_name = file_name
+        self.in_field_access = True
+
     def visit_variable(self, var: frog_ast.Variable) -> None:
         if self.in_field_access:
             return
@@ -107,10 +165,6 @@ class NameResolutionVisitor(visitors.Visitor[None]):
         the_type = self.get_type(var.name)
         if the_type is None:
             print_error(var, f"Variable {var.name} not defined", self.file_name)
-
-    def visit_induction(self, induction: frog_ast.Induction) -> None:
-        self.variable_type_map_stack.append({})
-        self.variable_type_map_stack[-1][induction.name] = frog_ast.IntType()
 
     def visit_field_access(self, _: frog_ast.FieldAccess) -> None:
         self.in_field_access = True
@@ -187,55 +241,6 @@ class NameResolutionVisitor(visitors.Visitor[None]):
                 self.file_name,
             )
 
-    def visit_method(self, method: frog_ast.Method) -> None:
-        self.variable_type_map_stack.append(
-            dict(
-                zip(
-                    (param.name for param in method.signature.parameters),
-                    (param.type for param in method.signature.parameters),
-                )
-            )
-        )
-
-    def leave_method(self, _: frog_ast.Method) -> None:
-        self.variable_type_map_stack.pop()
-
-    def visit_assignment(self, assignment: frog_ast.Assignment) -> None:
-        if assignment.the_type is not None:
-            assert isinstance(assignment.var, frog_ast.Variable)
-            self.variable_type_map_stack[-1][assignment.var.name] = assignment.the_type
-
-    def visit_sample(self, sample: frog_ast.Sample) -> None:
-        if sample.the_type is not None:
-            assert isinstance(sample.var, frog_ast.Variable)
-            self.variable_type_map_stack[-1][sample.var.name] = sample.the_type
-
-    def visit_variable_declaration(
-        self, declaration: frog_ast.VariableDeclaration
-    ) -> None:
-        self.variable_type_map_stack[-1][declaration.name] = declaration.type
-
-    def visit_block(self, _: frog_ast.Block) -> None:
-        self.variable_type_map_stack.append({})
-
-    def leave_block(self, _: frog_ast.Block) -> None:
-        self.variable_type_map_stack.pop()
-
-    def visit_numeric_for(self, numeric_for: frog_ast.NumericFor) -> None:
-        self.variable_type_map_stack.append({numeric_for.name: frog_ast.IntType()})
-
-    def leave_numeric_for(self, _: frog_ast.NumericFor) -> None:
-        self.variable_type_map_stack.pop()
-
-    def get_type(self, name: str) -> Optional[frog_ast.Type]:
-        for the_map in reversed(self.variable_type_map_stack):
-            if name in the_map:
-                return the_map[name]
-        if name in self.import_namespace:
-            return self.import_namespace[name]
-
-        return None
-
 
 def check_proof_well_formed(
     proof: frog_ast.ProofFile, import_namespace, variable_type_map_stack, ast_type_map
@@ -304,15 +309,59 @@ def check_primitive_well_formed(
             print_error(method, "Duplicated parameter name")
 
 
-def print_error(location: frog_ast.ASTNode, message: str):
+def print_error(location: frog_ast.ASTNode, message: str, file_name: str = "Unknown"):
+    print(f"File: {file_name}")
     print(f"Line {location.line_num}, column: {location.column_num}", file=sys.stderr)
     print(message, file=sys.stderr)
-    sys.exit(2)
+    raise FailedTypeCheck()
+
+
+class DetermineTypeVisitor(visitors.Visitor[None]):
+    def __init__(
+        self, variable_type_map_stack, ast_type_map: frog_ast.ASTMap, import_namespace
+    ):
+        self.variable_type_map_stack = variable_type_map_stack
+        self.ast_type_map = ast_type_map
+        self.import_namespace = import_namespace
+
+    def result(self) -> None:
+        return None
+
+    def visit_field(self, field: frog_ast.Field):
+        if not field.value:
+            if field.type == frog_ast.SetType(None):
+                self.variable_type_map_stack[0][field.name] = frog_ast.Variable(
+                    field.name
+                )
+                self.ast_type_map.set(field, frog_ast.Variable(field.name))
+            else:
+                raise NotImplementedError()
+
+    def visit_func_call(self, func_call: frog_ast.FuncCall):
+        if (
+            isinstance(func_call.func, frog_ast.Variable)
+            and func_call.func.name in self.import_namespace
+        ):
+            instantiated_scheme = proof_engine.instantiate(
+                self.import_namespace[func_call.func.name],
+                func_call.args,
+                self.variable_type_map_stack[0],
+            )
+            check_well_formed(instantiated_scheme)
+            type_dict = {}
+            for field in instantiated_scheme.fields:
+                type_dict[field.name] = field.type
+            for method in instantiated_scheme.methods:
+                if isinstance(method, frog_ast.MethodSignature):
+                    type_dict[method.name] = method
+                else:
+                    type_dict[method.signature.name] = method.signature
+            self.ast_type_map.set(func_call, type_dict)
 
 
 class TypeCheckVisitor(visitors.Visitor[None]):
-    def __init__(self, import_namespace, root):
-        self.variable_type_map_stack = [{}]
+    def __init__(self, import_namespace, root, variable_type_map_stack):
+        self.variable_type_map_stack = variable_type_map_stack
         self.type_stack = []
         self.import_namespace = import_namespace
         self.method_return_type = None
@@ -504,13 +553,6 @@ class TypeCheckVisitor(visitors.Visitor[None]):
             method.signature.return_type
         )
 
-    def visit_if_statement(self, if_statement: frog_ast.IfStatement) -> None:
-        for condition in if_statement.conditions:
-            self.visit(condition)
-            expr_type = self.type_stack.pop()
-            if not isinstance(expr_type, frog_ast.BoolType):
-                print_error(condition, f"{condition} does not return type bool")
-
     def leave_method(self, _: frog_ast.Method) -> None:
         self.variable_type_map_stack.pop()
 
@@ -518,15 +560,6 @@ class TypeCheckVisitor(visitors.Visitor[None]):
         if assignment.the_type is not None:
             assert isinstance(assignment.var, frog_ast.Variable)
             self.variable_type_map_stack[-1][assignment.var.name] = assignment.the_type
-
-    def leave_assignment(self, assignment: frog_ast.Assignment) -> None:
-        rhs_type = self.type_stack.pop()
-        expected_type = self.type_stack.pop()
-        if not is_sub_type(expected_type, rhs_type):
-            print_error(
-                assignment,
-                f"{assignment.value} is of type {rhs_type}, which is not compatible with {expected_type}",
-            )
 
     def visit_sample(self, sample: frog_ast.Sample) -> None:
         if sample.the_type is not None:

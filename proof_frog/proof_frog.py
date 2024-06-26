@@ -29,11 +29,11 @@ def main() -> None:
         except ValueError:
             usage(argv[0])
     elif argv[1] == "check":
-        file = argv[2]
+        file_name = argv[2]
         try:
-            root = frog_parser.parse_file(file)
-            semantic_analysis.check_well_formed(root)
-            print(f"{file} is well-formed.")
+            root = frog_parser.parse_file(file_name)
+            semantic_analysis.check_well_formed(root, file_name)
+            print(f"{file_name} is well-formed.")
         except ValueError:
             usage(argv[0])
 

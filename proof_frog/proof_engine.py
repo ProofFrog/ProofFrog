@@ -53,13 +53,9 @@ class ProofEngine:
                 definition = copy.deepcopy(
                     self.definition_namespace[let.value.func.name]
                 )
-                if isinstance(definition, frog_ast.Scheme):
-                    self.proof_namespace[let.name] = self.instantiate_scheme(
-                        definition, let.value.args
-                    )
-                elif isinstance(definition, frog_ast.Primitive):
-                    self.proof_namespace[let.name] = self.instantiate_primitive(
-                        definition, let.value.args
+                if isinstance(definition, (frog_ast.Primitive, frog_ast.Scheme)):
+                    self.proof_namespace[let.name] = instantiate(
+                        definition, let.value.args, self.proof_namespace
                     )
                 else:
                     raise TypeError("Must instantiate either a Primitive or Scheme ")
@@ -156,8 +152,10 @@ class ProofEngine:
                 )
                 first_inductive_step = next_step.steps[0]
                 assert isinstance(first_inductive_step, frog_ast.Step)
+                ast_map = frog_ast.ASTMap(identity=False)
+                ast_map.set(frog_ast.Variable(next_step.name), next_step.start)
                 first_inductive_step = visitors.SubstitutionTransformer(
-                    [(frog_ast.Variable(next_step.name), next_step.start)]
+                    ast_map
                 ).transform(first_inductive_step)
                 next_game_ast = self._get_game_ast(
                     first_inductive_step.challenger, first_inductive_step.reduction
@@ -175,8 +173,10 @@ class ProofEngine:
                     if isinstance(step, frog_ast.Step)
                 )
                 assert isinstance(last_inductive_step, frog_ast.Step)
+                ast_map = frog_ast.ASTMap(identity=False)
+                ast_map.set(frog_ast.Variable(current_step.name), current_step.end)
                 last_inductive_step = visitors.SubstitutionTransformer(
-                    [(frog_ast.Variable(current_step.name), current_step.end)]
+                    ast_map
                 ).transform(last_inductive_step)
                 current_game_ast = self._get_game_ast(
                     last_inductive_step.challenger, last_inductive_step.reduction
@@ -208,18 +208,18 @@ class ProofEngine:
                     elif isinstance(step, frog_ast.Step):
                         last_step = step
                         break
-                first_step = visitors.SubstitutionTransformer(
-                    [
-                        (
-                            frog_ast.Variable(the_induction.name),
-                            frog_ast.BinaryOperation(
-                                frog_ast.BinaryOperators.ADD,
-                                frog_ast.Variable(the_induction.name),
-                                frog_ast.Integer(1),
-                            ),
-                        )
-                    ]
-                ).transform(first_step)
+                ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+                ast_map.set(
+                    frog_ast.Variable(the_induction.name),
+                    frog_ast.BinaryOperation(
+                        frog_ast.BinaryOperators.ADD,
+                        frog_ast.Variable(the_induction.name),
+                        frog_ast.Integer(1),
+                    ),
+                )
+                first_step = visitors.SubstitutionTransformer(ast_map).transform(
+                    first_step
+                )
                 first_step_ast = self._get_game_ast(
                     first_step.challenger, first_step.reduction
                 )
@@ -577,27 +577,29 @@ class ProofEngine:
         if isinstance(challenger, frog_ast.ConcreteGame):
             game_file = self.definition_namespace[challenger.game.name]
             assert isinstance(game_file, frog_ast.GameFile)
-            game = self.instantiate_game(
-                game_file.get_game(challenger.which), challenger.game.args
+            game = instantiate(
+                game_file.get_game(challenger.which),
+                challenger.game.args,
+                self.proof_namespace,
             )
         else:
             game_node = self.definition_namespace[challenger.name]
             assert isinstance(game_node, frog_ast.Game)
-            game = self.instantiate_game(game_node, challenger.args)
+            game = instantiate(game_node, challenger.args, self.proof_namespace)
 
         lookup = copy.deepcopy(self.method_lookup)
         if reduction:
             reduction_ast = self._get_game_ast(reduction)
             assert isinstance(reduction_ast, frog_ast.Reduction)
             for index, method in enumerate(game.methods):
+                ast_map = frog_ast.ASTMap(identity=False)
+                for field in game.fields:
+                    ast_map.set(
+                        frog_ast.Variable(field.name),
+                        frog_ast.Variable(get_challenger_field_name(field.name)),
+                    )
                 game.methods[index] = visitors.SubstitutionTransformer(
-                    [
-                        (
-                            frog_ast.Variable(field.name),
-                            frog_ast.Variable(get_challenger_field_name(field.name)),
-                        )
-                        for field in game.fields
-                    ]
+                    ast_map
                 ).transform(method)
             lookup.update(get_challenger_method_lookup(game))
             game = self.apply_reduction(game, reduction_ast)
@@ -609,28 +611,6 @@ class ProofEngine:
             else:
                 break
         return game
-
-    # Replace a game's parameter list with empty, and instantiate the game with
-    # the parameterized value
-    def instantiate_game(
-        self,
-        game: frog_ast.Game,
-        parameters: Sequence[frog_ast.ASTNode],
-    ) -> frog_ast.Game:
-        game_copy = copy.deepcopy(game)
-        replace_map: list[Tuple[frog_ast.ASTNode, frog_ast.ASTNode]] = []
-        for index, parameter in enumerate(game.parameters):
-            replace_map.append((frog_ast.Variable(parameter.name), parameters[index]))
-
-        game_copy.parameters = []
-
-        new_game = visitors.SubstitutionTransformer(replace_map).transform(game_copy)
-
-        new_game = visitors.InstantiationTransformer(self.proof_namespace).transform(
-            new_game
-        )
-
-        return new_game
 
     def get_method_lookup(self) -> None:
         self.method_lookup = {}
@@ -724,46 +704,25 @@ class ProofEngine:
 
         return frog_ast.Block(sorted_statements)
 
-    # I want to be able to instantiate primitives and schemes
-    # What does this entail? For primitives, all I have are fields and
-    # method signatures. So I'd like to:
-    # 1 - Set fields to values gotten from the proof namespace
-    # 2 - Change method signatures: either those that rely on external values,
-    #     or those that refer to the fields
-    # 3 - For schemes, might need to change things in the method bodies.
-    def instantiate_primitive(
-        self,
-        primitive: frog_ast.Primitive,
-        args: list[frog_ast.Expression],
-    ) -> frog_ast.Primitive:
-        replace_map: list[Tuple[frog_ast.ASTNode, frog_ast.ASTNode]] = []
-        for index, parameter in enumerate(primitive.parameters):
-            replace_map.append(
-                (frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
-            )
-        new_primitive = visitors.SubstitutionTransformer(replace_map).transform(
-            primitive
-        )
-        new_primitive.parameters.clear()
-        return visitors.InstantiationTransformer(self.proof_namespace).transform(
-            new_primitive
-        )
 
-    def instantiate_scheme(
-        self,
-        scheme: frog_ast.Scheme,
-        args: list[frog_ast.Expression],
-    ) -> frog_ast.Scheme:
-        replace_map: list[Tuple[frog_ast.ASTNode, frog_ast.ASTNode]] = []
-        for index, parameter in enumerate(scheme.parameters):
-            replace_map.append(
-                (frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
-            )
-        new_scheme = visitors.SubstitutionTransformer(replace_map).transform(scheme)
-        new_scheme.parameters.clear()
-        return visitors.InstantiationTransformer(self.proof_namespace).transform(
-            new_scheme
-        )
+# I want to be able to instantiate primitives and schemes
+# What does this entail? For primitives, all I have are fields and
+# method signatures. So I'd like to:
+# 1 - Set fields to values gotten from the proof namespace
+# 2 - Change method signatures: either those that rely on external values,
+#     or those that refer to the fields
+# 3 - For schemes, might need to change things in the method bodies.
+def instantiate(
+    root: frog_ast.Primitive | frog_ast.Scheme | frog_ast.Game,
+    args: list[frog_ast.Expression],
+    namespace: frog_ast.Namespace,
+) -> frog_ast.Primitive | frog_ast.Game | frog_ast.Scheme:
+    ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+    for index, parameter in enumerate(root.parameters):
+        ast_map.set(frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
+    new_root = visitors.SubstitutionTransformer(ast_map).transform(root)
+    new_root.parameters.clear()
+    return visitors.InstantiationTransformer(namespace).transform(new_root)
 
 
 def get_challenger_method_lookup(challenger: frog_ast.Game) -> MethodLookup:
@@ -789,14 +748,12 @@ def remove_duplicate_fields(game: frog_ast.Game) -> frog_ast.Game:
                         for the_field in game.fields
                         if the_field.name != other_field.name
                     ]
-                    return visitors.SubstitutionTransformer(
-                        [
-                            (
-                                frog_ast.Variable(other_field.name),
-                                frog_ast.Variable(field.name),
-                            )
-                        ]
-                    ).transform(
+                    ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+                    ast_map.set(
+                        frog_ast.Variable(other_field.name),
+                        frog_ast.Variable(field.name),
+                    )
+                    return visitors.SubstitutionTransformer(ast_map).transform(
                         visitors.RemoveStatementTransformer(
                             duplicated_statements
                         ).transform(new_game)
@@ -810,12 +767,11 @@ def get_challenger_field_name(name: str) -> str:
 
 def standardize_field_names(game: frog_ast.Game) -> frog_ast.Game:
     field_rename_map = visitors.FieldOrderingVisitor().visit(game)
-    new_game = visitors.SubstitutionTransformer(
-        [
-            (frog_ast.Variable(field_name), frog_ast.Variable(normalized_name))
-            for field_name, normalized_name in field_rename_map.items()
-        ]
-    ).transform(game)
+    ast_map = frog_ast.ASTMap(identity=False)
+    for field_name, normalized_name in field_rename_map.items():
+        ast_map.set(frog_ast.Variable(field_name), frog_ast.Variable(normalized_name))
+
+    new_game = visitors.SubstitutionTransformer(ast_map).transform(game)
     for field in new_game.fields:
         field.name = field_rename_map[field.name]
     new_game.fields.sort(key=lambda element: element.name)

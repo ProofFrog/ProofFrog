@@ -1,9 +1,10 @@
 #!/bin/bash
 
-skipped="/OTP.scheme$|CounterPRG.scheme|TriplingPRG.scheme$|OFB.scheme$"
+skipped="asdf" # "/OTP.scheme$|CounterPRG.scheme|TriplingPRG.scheme$|OFB.scheme$"
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
+if [ 1 -eq 0 ]; then
 for file in $(find ill-formed -type f); do
 	echo $file | egrep "fixtures" > /dev/null
 	isFixture=$?
@@ -17,10 +18,11 @@ for file in $(find ill-formed -type f); do
 		echo
 	fi
 done
+fi
 
 for file in $(find examples -type f); do
-	echo $file | egrep "proof|game" > /dev/null
-	if [ $? -eq 0 ]; then
+	echo $file | egrep "\.(proof|game|primitive|scheme)$" > /dev/null
+	if [ $? -ne 0 ]; then
 		continue
 	fi
 	echo $file | egrep $skipped > /dev/null

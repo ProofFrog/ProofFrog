@@ -14,17 +14,14 @@ class FailedTypeCheck(Exception):
 def check_well_formed(root: frog_ast.Root, file_name: str) -> None:
     name_resolution(root, file_name)
 
-    """import_namespace = {}
+    import_namespace = {}
     if isinstance(root, frog_ast.ProofFile):
         for imp in root.imports:
             parsed_file = frog_parser.parse_file(imp.filename)
             name = imp.rename if imp.rename else parsed_file.get_export_name()
-            import_namespace[name] = parsed_file
-        check_proof_well_formed(root, import_namespace)
-        check_proof_well_formed(
-            root, import_namespace, variable_type_map_stack, ast_type_map
-        )
+            import_namespace[name] = parsed_fil
 
+    """
     if isinstance(root, frog_ast.Primitive):
         check_primitive_well_formed(root, import_namespace)
     if isinstance(root, frog_ast.Scheme):
@@ -62,9 +59,11 @@ def name_resolution(initial_root: frog_ast.Root, initial_file_name: str):
 
 
 class VariableTypeVisitor(visitors.Visitor[None]):
-    def __init__(self, import_namespace):
-        self.variable_type_map_stack = [{}]
+    def __init__(self, import_namespace, variable_type_map_stack=None):
         self.import_namespace = import_namespace
+        self.variable_type_map_stack = (
+            variable_type_map_stack if variable_type_map_stack is not None else [{}]
+        )
 
     def visit_parameter(self, param: frog_ast.Parameter) -> None:
         self.variable_type_map_stack[-1][param.name] = (
@@ -243,21 +242,12 @@ class NameResolutionVisitor(VariableTypeVisitor):
             )
 
 
-def check_proof_well_formed(
-    proof: frog_ast.ProofFile, import_namespace, variable_type_map_stack, ast_type_map
-):
-    type_check_visitor = DetermineTypeVisitor(
-        variable_type_map_stack, ast_type_map, import_namespace
-    )
-    for let in proof.lets:
-        type_check_visitor.visit(let)
-        print(ast_type_map)
-
-
 def check_proof_well_formed(proof: frog_ast.ProofFile, import_namespace):
     variable_type_map_stack = [{}]
     ast_type_map = frog_ast.ASTMap()
-    type_check_visitor = DetermineTypeVisitor(variable_type_map_stack, ast_type_map, import_namespace)
+    type_check_visitor = DetermineTypeVisitor(
+        variable_type_map_stack, ast_type_map, import_namespace
+    )
     for let in proof.lets:
         print(ast_type_map)
         type_check_visitor.visit(let)
@@ -326,7 +316,7 @@ def print_error(location: frog_ast.ASTNode, message: str, file_name: str = "Unkn
     raise FailedTypeCheck()
 
 
-class DetermineTypeVisitor(visitors.Visitor[None]):
+class CheckTypeVisitor(visitors.Visitor[None]):
     def __init__(
         self, variable_type_map_stack, ast_type_map: frog_ast.ASTMap, import_namespace
     ):
@@ -366,33 +356,9 @@ class DetermineTypeVisitor(visitors.Visitor[None]):
                     type_dict[method.name] = method
                 else:
                     type_dict[method.signature.name] = method.signature
-            self.ast_type_map.set(func_call, type_dict)
 
 
-class DetermineTypeVisitor(visitors.Visitor[None]):
-    def __init__(self, variable_type_map_stack, ast_type_map: frog_ast.ASTMap, import_namespace):
-        self.variable_type_map_stack = variable_type_map_stack
-        self.ast_type_map = ast_type_map
-        self.import_namespace = import_namespace
-
-    def result(self) -> None:
-        return None
-
-    def visit_field(self, field: frog_ast.Field):
-        if not field.value:
-            if field.type == frog_ast.SetType(None):
-                self.variable_type_map_stack[0][field.name] = frog_ast.Variable(
-                    field.name
-                )
-                self.ast_type_map.set(field, frog_ast.Variable(field.name))
-            else:
-                raise NotImplementedError()
-
-    def visit_func_call(self, func_call: frog_ast.FuncCall):
-        if isinstance(func_call.func, frog_ast.Variable) and func_call.func.name in self.import_namespace:
-
-
-
+"""
 class TypeCheckVisitor(visitors.Visitor[None]):
     def __init__(self, import_namespace, root, variable_type_map_stack):
         self.variable_type_map_stack = variable_type_map_stack
@@ -752,6 +718,7 @@ class TypeCheckVisitor(visitors.Visitor[None]):
             return self.import_namespace[name]
 
         return None
+"""
 
 
 class SimplifyTypeTransformer(visitors.Transformer):

@@ -111,7 +111,7 @@ def serializedATN():
         184,1,0,0,0,237,192,1,0,0,0,237,196,1,0,0,0,237,217,1,0,0,0,237,
         228,1,0,0,0,238,19,1,0,0,0,239,242,3,46,23,0,240,242,3,32,16,0,241,
         239,1,0,0,0,241,240,1,0,0,0,242,251,1,0,0,0,243,244,5,12,0,0,244,
-        250,3,46,23,0,245,246,5,3,0,0,246,247,3,36,18,0,247,248,5,4,0,0,
+        250,3,46,23,0,245,246,5,3,0,0,246,247,3,26,13,0,247,248,5,4,0,0,
         248,250,1,0,0,0,249,243,1,0,0,0,249,245,1,0,0,0,250,253,1,0,0,0,
         251,249,1,0,0,0,251,252,1,0,0,0,252,21,1,0,0,0,253,251,1,0,0,0,254,
         255,3,34,17,0,255,256,3,46,23,0,256,258,5,5,0,0,257,259,3,24,12,
@@ -1598,11 +1598,11 @@ class PrimitiveParser ( Parser ):
             else:
                 return self.getToken(PrimitiveParser.L_SQUARE, i)
 
-        def integerExpression(self, i:int=None):
+        def expression(self, i:int=None):
             if i is None:
-                return self.getTypedRuleContexts(PrimitiveParser.IntegerExpressionContext)
+                return self.getTypedRuleContexts(PrimitiveParser.ExpressionContext)
             else:
-                return self.getTypedRuleContext(PrimitiveParser.IntegerExpressionContext,i)
+                return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,i)
 
 
         def R_SQUARE(self, i:int=None):
@@ -1661,7 +1661,7 @@ class PrimitiveParser ( Parser ):
                         self.state = 245
                         self.match(PrimitiveParser.L_SQUARE)
                         self.state = 246
-                        self.integerExpression(0)
+                        self.expression(0)
                         self.state = 247
                         self.match(PrimitiveParser.R_SQUARE)
                         pass

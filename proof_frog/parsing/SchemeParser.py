@@ -119,7 +119,7 @@ def serializedATN():
         0,0,0,256,211,1,0,0,0,256,215,1,0,0,0,256,236,1,0,0,0,256,247,1,
         0,0,0,257,21,1,0,0,0,258,261,3,48,24,0,259,261,3,34,17,0,260,258,
         1,0,0,0,260,259,1,0,0,0,261,270,1,0,0,0,262,263,5,15,0,0,263,269,
-        3,48,24,0,264,265,5,6,0,0,265,266,3,38,19,0,266,267,5,7,0,0,267,
+        3,48,24,0,264,265,5,6,0,0,265,266,3,28,14,0,266,267,5,7,0,0,267,
         269,1,0,0,0,268,262,1,0,0,0,268,264,1,0,0,0,269,272,1,0,0,0,270,
         268,1,0,0,0,270,271,1,0,0,0,271,23,1,0,0,0,272,270,1,0,0,0,273,274,
         3,36,18,0,274,275,3,48,24,0,275,277,5,8,0,0,276,278,3,26,13,0,277,
@@ -1708,11 +1708,11 @@ class SchemeParser ( Parser ):
             else:
                 return self.getToken(SchemeParser.L_SQUARE, i)
 
-        def integerExpression(self, i:int=None):
+        def expression(self, i:int=None):
             if i is None:
-                return self.getTypedRuleContexts(SchemeParser.IntegerExpressionContext)
+                return self.getTypedRuleContexts(SchemeParser.ExpressionContext)
             else:
-                return self.getTypedRuleContext(SchemeParser.IntegerExpressionContext,i)
+                return self.getTypedRuleContext(SchemeParser.ExpressionContext,i)
 
 
         def R_SQUARE(self, i:int=None):
@@ -1771,7 +1771,7 @@ class SchemeParser ( Parser ):
                         self.state = 264
                         self.match(SchemeParser.L_SQUARE)
                         self.state = 265
-                        self.integerExpression(0)
+                        self.expression(0)
                         self.state = 266
                         self.match(SchemeParser.R_SQUARE)
                         pass

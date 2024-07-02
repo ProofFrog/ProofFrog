@@ -109,7 +109,7 @@ def serializedATN():
         190,1,0,0,0,231,211,1,0,0,0,231,222,1,0,0,0,232,19,1,0,0,0,233,236,
         3,46,23,0,234,236,3,32,16,0,235,233,1,0,0,0,235,234,1,0,0,0,236,
         245,1,0,0,0,237,238,5,12,0,0,238,244,3,46,23,0,239,240,5,3,0,0,240,
-        241,3,36,18,0,241,242,5,4,0,0,242,244,1,0,0,0,243,237,1,0,0,0,243,
+        241,3,26,13,0,241,242,5,4,0,0,242,244,1,0,0,0,243,237,1,0,0,0,243,
         239,1,0,0,0,244,247,1,0,0,0,245,243,1,0,0,0,245,246,1,0,0,0,246,
         21,1,0,0,0,247,245,1,0,0,0,248,249,3,34,17,0,249,250,3,46,23,0,250,
         252,5,5,0,0,251,253,3,24,12,0,252,251,1,0,0,0,252,253,1,0,0,0,253,
@@ -1554,11 +1554,11 @@ class GameParser ( Parser ):
             else:
                 return self.getToken(GameParser.L_SQUARE, i)
 
-        def integerExpression(self, i:int=None):
+        def expression(self, i:int=None):
             if i is None:
-                return self.getTypedRuleContexts(GameParser.IntegerExpressionContext)
+                return self.getTypedRuleContexts(GameParser.ExpressionContext)
             else:
-                return self.getTypedRuleContext(GameParser.IntegerExpressionContext,i)
+                return self.getTypedRuleContext(GameParser.ExpressionContext,i)
 
 
         def R_SQUARE(self, i:int=None):
@@ -1617,7 +1617,7 @@ class GameParser ( Parser ):
                         self.state = 239
                         self.match(GameParser.L_SQUARE)
                         self.state = 240
-                        self.integerExpression(0)
+                        self.expression(0)
                         self.state = 241
                         self.match(GameParser.R_SQUARE)
                         pass

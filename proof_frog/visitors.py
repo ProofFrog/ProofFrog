@@ -825,7 +825,7 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
             frog_ast.BinaryOperators.MULTIPLY: operator.mul,
             frog_ast.BinaryOperators.DIVIDE: operator.truediv,
             frog_ast.BinaryOperators.EQUALS: operator.eq,
-            frog_ast.BinaryOperators.NOTEQUALS: operator.neg,
+            frog_ast.BinaryOperators.NOTEQUALS: operator.ne,
             frog_ast.BinaryOperators.LT: operator.lt,
             frog_ast.BinaryOperators.GT: operator.gt,
             frog_ast.BinaryOperators.GEQ: operator.ge,

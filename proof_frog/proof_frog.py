@@ -27,7 +27,7 @@ def main() -> None:
             root = frog_parser.parse_file(file)
             print(root)
         except ValueError:
-            usage(argv[0])
+            usage()
     elif argv[1] == "check":
         file_name = argv[2]
         try:
@@ -35,7 +35,9 @@ def main() -> None:
             semantic_analysis.check_well_formed(root, file_name)
             print(f"{file_name} is well-formed.")
         except ValueError:
-            usage(argv[0])
+            usage()
+        except semantic_analysis.FailedTypeCheck:
+            print("Failed to type check")
 
     elif argv[1] == "prove":
         engine = proof_engine.ProofEngine(len(argv) > 3 and argv[3] == "-v")

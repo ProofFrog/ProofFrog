@@ -14,17 +14,15 @@ class FailedTypeCheck(Exception):
 def check_well_formed(root: frog_ast.Root, file_name: str) -> None:
     name_resolution(root, file_name)
 
-    """import_namespace = {}
+    import_namespace = {}
     if isinstance(root, frog_ast.ProofFile):
         for imp in root.imports:
             parsed_file = frog_parser.parse_file(imp.filename)
             name = imp.rename if imp.rename else parsed_file.get_export_name()
             import_namespace[name] = parsed_file
         check_proof_well_formed(root, import_namespace)
-        check_proof_well_formed(
-            root, import_namespace, variable_type_map_stack, ast_type_map
-        )
 
+    """
     if isinstance(root, frog_ast.Primitive):
         check_primitive_well_formed(root, import_namespace)
     if isinstance(root, frog_ast.Scheme):
@@ -62,9 +60,11 @@ def name_resolution(initial_root: frog_ast.Root, initial_file_name: str):
 
 
 class VariableTypeVisitor(visitors.Visitor[None]):
-    def __init__(self, import_namespace):
-        self.variable_type_map_stack = [{}]
+    def __init__(self, import_namespace, variable_type_map_stack=None):
         self.import_namespace = import_namespace
+        self.variable_type_map_stack = (
+            variable_type_map_stack if variable_type_map_stack is not None else [{}]
+        )
 
     def visit_parameter(self, param: frog_ast.Parameter) -> None:
         self.variable_type_map_stack[-1][param.name] = (
@@ -157,7 +157,7 @@ class NameResolutionVisitor(VariableTypeVisitor):
     def __init__(self, import_namespace, file_name):
         super().__init__(import_namespace)
         self.file_name = file_name
-        self.in_field_access = True
+        self.in_field_access = False
 
     def visit_variable(self, var: frog_ast.Variable) -> None:
         if self.in_field_access:
@@ -243,156 +243,115 @@ class NameResolutionVisitor(VariableTypeVisitor):
             )
 
 
-def check_proof_well_formed(
-    proof: frog_ast.ProofFile, import_namespace, variable_type_map_stack, ast_type_map
-):
-    type_check_visitor = DetermineTypeVisitor(
-        variable_type_map_stack, ast_type_map, import_namespace
-    )
-    for let in proof.lets:
-        type_check_visitor.visit(let)
-        print(ast_type_map)
-
-
 def check_proof_well_formed(proof: frog_ast.ProofFile, import_namespace):
-    variable_type_map_stack = [{}]
-    ast_type_map = frog_ast.ASTMap()
-    type_check_visitor = DetermineTypeVisitor(variable_type_map_stack, ast_type_map, import_namespace)
+    type_check_visitor = CheckTypeVisitor(import_namespace)
     for let in proof.lets:
-        print(ast_type_map)
         type_check_visitor.visit(let)
-
-
-def check_primitive_well_formed(
-    primitive: frog_ast.Primitive | frog_ast.Scheme, import_namespace
-) -> None:
-    for param in primitive.parameters:
-
-        def is_user_defined(node: frog_ast.ASTNode) -> bool:
-            return isinstance(node, frog_ast.FieldAccess) or (
-                isinstance(node, frog_ast.Variable)
-                and node.name not in import_namespace
-            )
-
-        the_type = visitors.SearchVisitor(is_user_defined).visit(param.type)
-        if the_type is not None:
-            print_error(
-                the_type,
-                f"In {', '.join(str(param) for param in primitive.parameters)}, '{the_type}' is not a defined type",
-            )
-    valid_names = [param.name for param in primitive.parameters]
-
-    method_signatures = (
-        primitive.methods
-        if isinstance(primitive, frog_ast.Primitive)
-        else [method.signature for method in primitive.methods]
-    )
-    for field in primitive.fields + method_signatures:
-
-        def is_invalid_name(valid_names: list[str], node: frog_ast.ASTNode) -> bool:
-            return isinstance(node, frog_ast.Variable) and node.name not in valid_names
-
-        found_invalid = visitors.SearchVisitor(
-            functools.partial(is_invalid_name, valid_names)
-        ).visit(field)
-        if found_invalid is not None:
-            print_error(
-                field, f"In {field} '{found_invalid}' is not a defined variable"
-            )
-        if isinstance(field, frog_ast.Field):
-            valid_names.append(field.name)
-
-    param_names = [param.name for param in primitive.parameters]
-    if len(param_names) != len(set(param_names)):
-        print_error(primitive.parameters[0], "Duplicated parameter name")
-    field_names = [field.name for field in primitive.fields]
-    if len(field_names) != len(set(field_names)):
-        print_error(primitive.fields[0], "Duplicated field name")
-
-    method_names = [method.name for method in method_signatures]
-    if len(method_names) != len(set(method_names)):
-        print_error(primitive.methods[0], "Duplicated method name")
-
-    for method in method_signatures:
-        method_param_names = [param.name for param in method.parameters]
-        if len(method_param_names) != len(set(method_param_names)):
-            print_error(method, "Duplicated parameter name")
 
 
 def print_error(location: frog_ast.ASTNode, message: str, file_name: str = "Unknown"):
     print(f"File: {file_name}")
     print(f"Line {location.line_num}, column: {location.column_num}", file=sys.stderr)
+    print(location)
     print(message, file=sys.stderr)
     raise FailedTypeCheck()
 
 
-class DetermineTypeVisitor(visitors.Visitor[None]):
-    def __init__(
-        self, variable_type_map_stack, ast_type_map: frog_ast.ASTMap, import_namespace
-    ):
-        self.variable_type_map_stack = variable_type_map_stack
-        self.ast_type_map = ast_type_map
+class CheckTypeVisitor(VariableTypeVisitor):
+    def __init__(self, import_namespace, variable_type_map_stack=None):
+        super().__init__(import_namespace, variable_type_map_stack)
         self.import_namespace = import_namespace
+        self.ast_type_map = frog_ast.ASTMap()
 
     def result(self) -> None:
         return None
 
-    def visit_field(self, field: frog_ast.Field):
-        if not field.value:
-            if field.type == frog_ast.SetType(None):
-                self.variable_type_map_stack[0][field.name] = frog_ast.Variable(
-                    field.name
-                )
-                self.ast_type_map.set(field, frog_ast.Variable(field.name))
-            else:
-                raise NotImplementedError()
+    # TODO: Make sure parameters aren't duplicated for methods
+
+    def visit_primitive(self, primitive: frog_ast.Primitive):
+        method_signatures = (
+            primitive.methods
+            if isinstance(primitive, frog_ast.Primitive)
+            else [method.signature for method in primitive.methods]
+        )
+
+        field_names = [field.name for field in primitive.fields]
+        if len(field_names) != len(set(field_names)):
+            print_error(primitive.fields[0], "Duplicated field name")
+
+        method_names = [method.name for method in method_signatures]
+        if len(method_names) != len(set(method_names)):
+            print_error(primitive.methods[0], "Duplicated method name")
+
+    def visit_method_signature(self, method_signature: frog_ast.MethodSignature):
+        parameter_names = [param.name for param in method_signature.parameters]
+        if len(parameter_names) != len(set(parameter_names)):
+            print_error(method_signature, "Duplicated parameter name")
+
+    def visit_variable(self, variable: frog_ast.Variable):
+        my_type = self.get_type(variable.name)
+        self.ast_type_map.set(variable, my_type)
+
+    def leave_field(self, field: frog_ast.Field):
+        super().leave_field(field)
+        if field.value:
+            the_type: frog_ast.Type
+            try:
+                the_type = self.ast_type_map.get(field.value)
+            except KeyError:
+                print_error(field.value, f"Could not determine type of {field.value}")
+            if field.type == frog_ast.SetType() and isinstance(
+                the_type, frog_ast.Variable
+            ):
+                return
+            if isinstance(the_type, dict) and field.type == frog_ast.Variable(
+                the_type["object_name"]
+            ):
+                return
+
+            if the_type != field.type:
+                print_error(field, f"{the_type} is not of type {field.type}")
 
     def visit_func_call(self, func_call: frog_ast.FuncCall):
         if (
             isinstance(func_call.func, frog_ast.Variable)
             and func_call.func.name in self.import_namespace
         ):
+            scheme = self.import_namespace[func_call.func.name]
+            expected_args_count = len(scheme.parameters)
+            passed_args_count = len(func_call.args)
+            if expected_args_count != passed_args_count:
+                print_error(
+                    func_call,
+                    f"Expected {expected_args_count} arguments, received {passed_args_count}",
+                )
+            param_names = [param.name for param in scheme.parameters]
+            if len(param_names) != len(set(param_names)):
+                print_error(scheme, "Duplicated parameter name")
+
             instantiated_scheme = proof_engine.instantiate(
-                self.import_namespace[func_call.func.name],
+                scheme,
                 func_call.args,
                 self.variable_type_map_stack[0],
             )
-            check_well_formed(instantiated_scheme)
+            CheckTypeVisitor(
+                self.import_namespace, [self.variable_type_map_stack[0]]
+            ).visit(instantiated_scheme)
             type_dict = {}
+            type_dict["object_name"] = func_call.func.name
+            type_dict["object"] = {}
             for field in instantiated_scheme.fields:
-                type_dict[field.name] = field.type
+                type_dict["object"][field.name] = field.type
             for method in instantiated_scheme.methods:
                 if isinstance(method, frog_ast.MethodSignature):
-                    type_dict[method.name] = method
+                    type_dict["object"][method.name] = method
                 else:
-                    type_dict[method.signature.name] = method.signature
+                    type_dict["object"][method.signature.name] = method.signature
+
             self.ast_type_map.set(func_call, type_dict)
 
 
-class DetermineTypeVisitor(visitors.Visitor[None]):
-    def __init__(self, variable_type_map_stack, ast_type_map: frog_ast.ASTMap, import_namespace):
-        self.variable_type_map_stack = variable_type_map_stack
-        self.ast_type_map = ast_type_map
-        self.import_namespace = import_namespace
-
-    def result(self) -> None:
-        return None
-
-    def visit_field(self, field: frog_ast.Field):
-        if not field.value:
-            if field.type == frog_ast.SetType(None):
-                self.variable_type_map_stack[0][field.name] = frog_ast.Variable(
-                    field.name
-                )
-                self.ast_type_map.set(field, frog_ast.Variable(field.name))
-            else:
-                raise NotImplementedError()
-
-    def visit_func_call(self, func_call: frog_ast.FuncCall):
-        if isinstance(func_call.func, frog_ast.Variable) and func_call.func.name in self.import_namespace:
-
-
-
+"""
 class TypeCheckVisitor(visitors.Visitor[None]):
     def __init__(self, import_namespace, root, variable_type_map_stack):
         self.variable_type_map_stack = variable_type_map_stack
@@ -752,6 +711,7 @@ class TypeCheckVisitor(visitors.Visitor[None]):
             return self.import_namespace[name]
 
         return None
+"""
 
 
 class SimplifyTypeTransformer(visitors.Transformer):

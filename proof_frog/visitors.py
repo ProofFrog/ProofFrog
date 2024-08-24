@@ -832,7 +832,7 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
             frog_ast.BinaryOperators.MULTIPLY: operator.mul,
             frog_ast.BinaryOperators.DIVIDE: operator.truediv,
             frog_ast.BinaryOperators.EQUALS: operator.eq,
-            frog_ast.BinaryOperators.NOTEQUALS: operator.neg,
+            frog_ast.BinaryOperators.NOTEQUALS: operator.ne,
             frog_ast.BinaryOperators.LT: operator.lt,
             frog_ast.BinaryOperators.GT: operator.gt,
             frog_ast.BinaryOperators.GEQ: operator.ge,
@@ -1448,7 +1448,7 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
             if statement in self.paired_statements:
                 continue
 
-            if not isinstance(statement, frog_ast.Assignment):
+            if not isinstance(statement, (frog_ast.Sample, frog_ast.Assignment)):
                 continue
             if not isinstance(statement.var, frog_ast.Variable):
                 continue
@@ -1465,7 +1465,9 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
             def contains_func(node: frog_ast.ASTNode) -> bool:
                 return isinstance(node, frog_ast.FuncCall)
 
-            if SearchVisitor(contains_func).visit(statement) is not None:
+            if SearchVisitor(contains_func).visit(statement) is not None or isinstance(
+                statement, frog_ast.Sample
+            ):
                 self.are_same = False
                 return
 

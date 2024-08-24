@@ -1,4 +1,4 @@
-# Generated from proof_frog/antlr/Primitive.g4 by ANTLR 4.13.1
+# Generated from proof_frog/antlr/Primitive.g4 by ANTLR 4.13.2
 # encoding: utf-8
 from antlr4 import *
 from io import StringIO
@@ -112,7 +112,7 @@ def serializedATN():
         197,1,0,0,0,238,218,1,0,0,0,238,229,1,0,0,0,239,19,1,0,0,0,240,243,
         3,46,23,0,241,243,3,32,16,0,242,240,1,0,0,0,242,241,1,0,0,0,243,
         252,1,0,0,0,244,245,5,12,0,0,245,251,3,46,23,0,246,247,5,3,0,0,247,
-        248,3,36,18,0,248,249,5,4,0,0,249,251,1,0,0,0,250,244,1,0,0,0,250,
+        248,3,26,13,0,248,249,5,4,0,0,249,251,1,0,0,0,250,244,1,0,0,0,250,
         246,1,0,0,0,251,254,1,0,0,0,252,250,1,0,0,0,252,253,1,0,0,0,253,
         21,1,0,0,0,254,252,1,0,0,0,255,256,3,34,17,0,256,257,3,46,23,0,257,
         259,5,5,0,0,258,260,3,24,12,0,259,258,1,0,0,0,259,260,1,0,0,0,260,
@@ -321,7 +321,7 @@ class PrimitiveParser ( Parser ):
 
     def __init__(self, input:TokenStream, output:TextIO = sys.stdout):
         super().__init__(input, output)
-        self.checkVersion("4.13.1")
+        self.checkVersion("4.13.2")
         self._interp = ParserATNSimulator(self, self.atn, self.decisionsToDFA, self.sharedContextCache)
         self._predicates = None
 
@@ -1596,11 +1596,11 @@ class PrimitiveParser ( Parser ):
             else:
                 return self.getToken(PrimitiveParser.L_SQUARE, i)
 
-        def integerExpression(self, i:int=None):
+        def expression(self, i:int=None):
             if i is None:
-                return self.getTypedRuleContexts(PrimitiveParser.IntegerExpressionContext)
+                return self.getTypedRuleContexts(PrimitiveParser.ExpressionContext)
             else:
-                return self.getTypedRuleContext(PrimitiveParser.IntegerExpressionContext,i)
+                return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,i)
 
 
         def R_SQUARE(self, i:int=None):
@@ -1659,7 +1659,7 @@ class PrimitiveParser ( Parser ):
                         self.state = 246
                         self.match(PrimitiveParser.L_SQUARE)
                         self.state = 247
-                        self.integerExpression(0)
+                        self.expression(0)
                         self.state = 248
                         self.match(PrimitiveParser.R_SQUARE)
                         pass

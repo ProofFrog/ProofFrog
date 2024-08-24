@@ -6,10 +6,10 @@
     "configurations": [
         {
             "name": "Python: proof_frog.py",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
             "module": "proof_frog",
-            "args": ["check", "ill-formed/scheme/BadIf.scheme"],
+            "args": ["prove", "examples/Proofs/PubEnc/OTSimpliesCPA.proof", "-v"],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "justMyCode": true

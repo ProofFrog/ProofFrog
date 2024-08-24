@@ -1,4 +1,4 @@
-# Generated from proof_frog/antlr/Proof.g4 by ANTLR 4.13.1
+# Generated from proof_frog/antlr/Proof.g4 by ANTLR 4.13.2
 # encoding: utf-8
 from antlr4 import *
 from io import StringIO
@@ -161,7 +161,7 @@ def serializedATN():
         333,1,0,0,0,374,354,1,0,0,0,374,365,1,0,0,0,375,43,1,0,0,0,376,379,
         3,70,35,0,377,379,3,56,28,0,378,376,1,0,0,0,378,377,1,0,0,0,379,
         388,1,0,0,0,380,381,5,24,0,0,381,387,3,70,35,0,382,383,5,15,0,0,
-        383,384,3,60,30,0,384,385,5,16,0,0,385,387,1,0,0,0,386,380,1,0,0,
+        383,384,3,50,25,0,384,385,5,16,0,0,385,387,1,0,0,0,386,380,1,0,0,
         0,386,382,1,0,0,0,387,390,1,0,0,0,388,386,1,0,0,0,388,389,1,0,0,
         0,389,45,1,0,0,0,390,388,1,0,0,0,391,392,3,58,29,0,392,393,3,70,
         35,0,393,395,5,17,0,0,394,396,3,48,24,0,395,394,1,0,0,0,395,396,
@@ -404,7 +404,7 @@ class ProofParser ( Parser ):
 
     def __init__(self, input:TokenStream, output:TextIO = sys.stdout):
         super().__init__(input, output)
-        self.checkVersion("4.13.1")
+        self.checkVersion("4.13.2")
         self._interp = ParserATNSimulator(self, self.atn, self.decisionsToDFA, self.sharedContextCache)
         self._predicates = None
 
@@ -2593,11 +2593,11 @@ class ProofParser ( Parser ):
             else:
                 return self.getToken(ProofParser.L_SQUARE, i)
 
-        def integerExpression(self, i:int=None):
+        def expression(self, i:int=None):
             if i is None:
-                return self.getTypedRuleContexts(ProofParser.IntegerExpressionContext)
+                return self.getTypedRuleContexts(ProofParser.ExpressionContext)
             else:
-                return self.getTypedRuleContext(ProofParser.IntegerExpressionContext,i)
+                return self.getTypedRuleContext(ProofParser.ExpressionContext,i)
 
 
         def R_SQUARE(self, i:int=None):
@@ -2656,7 +2656,7 @@ class ProofParser ( Parser ):
                         self.state = 382
                         self.match(ProofParser.L_SQUARE)
                         self.state = 383
-                        self.integerExpression(0)
+                        self.expression(0)
                         self.state = 384
                         self.match(ProofParser.R_SQUARE)
                         pass

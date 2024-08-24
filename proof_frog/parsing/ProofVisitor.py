@@ -1,4 +1,4 @@
-# Generated from proof_frog/antlr/Proof.g4 by ANTLR 4.13.1
+# Generated from proof_frog/antlr/Proof.g4 by ANTLR 4.13.2
 from antlr4 import *
 if "." in __name__:
     from .ProofParser import ProofParser

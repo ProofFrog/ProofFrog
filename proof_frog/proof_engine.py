@@ -3,7 +3,7 @@ import copy
 import functools
 from enum import Enum
 from collections import namedtuple
-from typing import TypeAlias, Sequence, Tuple, Dict, Optional
+from typing import TypeAlias, Tuple, Dict, Optional, TypeVar, Union
 import z3
 from colorama import Fore
 from sympy import Symbol
@@ -53,7 +53,12 @@ class ProofEngine:
                 definition = copy.deepcopy(
                     self.definition_namespace[let.value.func.name]
                 )
-                if isinstance(definition, (frog_ast.Primitive, frog_ast.Scheme)):
+                # Necessary because mypy doesn't allow for union types with typevar functions
+                if isinstance(definition, frog_ast.Primitive):
+                    self.proof_namespace[let.name] = instantiate(
+                        definition, let.value.args, self.proof_namespace
+                    )
+                elif isinstance(definition, frog_ast.Scheme):
                     self.proof_namespace[let.name] = instantiate(
                         definition, let.value.args, self.proof_namespace
                     )
@@ -152,7 +157,7 @@ class ProofEngine:
                 )
                 first_inductive_step = next_step.steps[0]
                 assert isinstance(first_inductive_step, frog_ast.Step)
-                ast_map = frog_ast.ASTMap(identity=False)
+                ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
                 ast_map.set(frog_ast.Variable(next_step.name), next_step.start)
                 first_inductive_step = visitors.SubstitutionTransformer(
                     ast_map
@@ -592,7 +597,7 @@ class ProofEngine:
             reduction_ast = self._get_game_ast(reduction)
             assert isinstance(reduction_ast, frog_ast.Reduction)
             for index, method in enumerate(game.methods):
-                ast_map = frog_ast.ASTMap(identity=False)
+                ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
                 for field in game.fields:
                     ast_map.set(
                         frog_ast.Variable(field.name),
@@ -712,11 +717,15 @@ class ProofEngine:
 # 2 - Change method signatures: either those that rely on external values,
 #     or those that refer to the fields
 # 3 - For schemes, might need to change things in the method bodies.
+
+T = TypeVar("T", bound=Union[frog_ast.Primitive, frog_ast.Scheme, frog_ast.Game])
+
+
 def instantiate(
-    root: frog_ast.Primitive | frog_ast.Scheme | frog_ast.Game,
+    root: T,
     args: list[frog_ast.Expression],
     namespace: frog_ast.Namespace,
-) -> frog_ast.Primitive | frog_ast.Game | frog_ast.Scheme:
+) -> T:
     ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
     for index, parameter in enumerate(root.parameters):
         ast_map.set(frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
@@ -767,7 +776,7 @@ def get_challenger_field_name(name: str) -> str:
 
 def standardize_field_names(game: frog_ast.Game) -> frog_ast.Game:
     field_rename_map = visitors.FieldOrderingVisitor().visit(game)
-    ast_map = frog_ast.ASTMap(identity=False)
+    ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
     for field_name, normalized_name in field_rename_map.items():
         ast_map.set(frog_ast.Variable(field_name), frog_ast.Variable(normalized_name))
 

@@ -91,7 +91,7 @@ class MapType(Type):
 
 
 class SetType(Type):
-    def __init__(self, parameterization: Optional[Expression] = None) -> None:
+    def __init__(self, parameterization: Optional[Type] = None) -> None:
         super().__init__()
         self.parameterization = parameterization
 
@@ -464,7 +464,7 @@ class Boolean(Expression):
         return str(self.bool).lower()
 
 
-class NoneExpression(Expression):
+class NoneExpression(Expression, Type):
     def __str__(self) -> str:
         return "None"
 
@@ -695,6 +695,7 @@ class Step(ASTNode):
 
 class StepAssumption(ASTNode):
     def __init__(self, expression: Expression) -> None:
+        super().__init__()
         self.expression = expression
 
     def __str__(self) -> str:
@@ -772,6 +773,9 @@ class ProofFile(Root):
         return "Proof"
 
 
+Instantiable: TypeAlias = Primitive | Scheme | Game
+
+
 VT = TypeVar("VT")
 
 
@@ -827,10 +831,15 @@ def expand_tuple_type(the_type: BinaryOperation) -> list[Type]:
     unfolded_types: list[Type] = []
     expanded_type: Type | Expression = the_type
     while isinstance(expanded_type, BinaryOperation):
+        if expanded_type.operator != BinaryOperators.MULTIPLY:
+            raise ValueError("Tuple type must use multiplication operator")
         left_expr = expanded_type.left_expression
-        assert isinstance(left_expr, Type)
+        if not isinstance(left_expr, Type):
+            raise ValueError("Tuple type has non-type components")
         unfolded_types.append(left_expr)
         expanded_type = expanded_type.right_expression
+    if not isinstance(expanded_type, Type):
+        raise ValueError("Tuple type has non-type components")
     assert isinstance(expanded_type, Type)
     unfolded_types.append(expanded_type)
     return unfolded_types

@@ -18,6 +18,7 @@ def usage() -> None:
 def main() -> None:
     init(autoreset=True)
     argv: list[str] = sys.argv
+    root: frog_ast.Root
     if len(argv) < 2:
         usage()
 
@@ -32,10 +33,11 @@ def main() -> None:
         file_name = argv[2]
         try:
             root = frog_parser.parse_file(file_name)
-            semantic_analysis.check_well_formed(root, file_name)
-            print(f"{file_name} is well-formed.")
         except ValueError:
             usage()
+        try:
+            semantic_analysis.check_well_formed(root, file_name)
+            print(f"{file_name} is well-formed.")
         except semantic_analysis.FailedTypeCheck:
             print("Failed to type check")
 
@@ -50,7 +52,6 @@ def main() -> None:
 
         for imp in proof_file.imports:
             file_type = _get_file_type(imp.filename)
-            root: frog_ast.Root
             try:
                 match file_type:
                     case frog_ast.FileType.PRIMITIVE:

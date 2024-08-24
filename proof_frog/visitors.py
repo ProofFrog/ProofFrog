@@ -23,6 +23,13 @@ from . import frog_ast
 from . import frog_parser
 
 
+@dataclass
+class InstantiableType:
+    name: str
+    members: dict[str, frog_ast.ASTNode]
+    superclass: str
+
+
 def _to_snake_case(camel_case: str) -> str:
     return "".join(["_" + i.lower() if i.isupper() else i for i in camel_case]).lstrip(
         "_"
@@ -49,7 +56,7 @@ class Visitor(ABC, Generic[U]):
             def visit_children(child: Any) -> Any:
                 if isinstance(child, frog_ast.ASTNode):
                     visit_helper(child)
-                if isinstance(child, list):
+                if isinstance(child, (list, tuple)):
                     for item in child:
                         visit_children(item)
 
@@ -527,7 +534,9 @@ class InstantiationTransformer(Transformer):
         if variable.name in self.namespace:
             value = self.namespace[variable.name]
             if (
-                not isinstance(value, (frog_ast.Scheme, frog_ast.Primitive))
+                not isinstance(
+                    value, (frog_ast.Scheme, frog_ast.Primitive, InstantiableType)
+                )
                 and value is not None
             ):
                 return copy.deepcopy(value)
@@ -541,17 +550,23 @@ class InstantiationTransformer(Transformer):
             and field_access.the_object.name in self.namespace
         ):
             value = self.namespace[field_access.the_object.name]
-            assert isinstance(value, (frog_ast.Scheme, frog_ast.Primitive))
-            the_field = next(
-                (
-                    field.value
-                    for field in value.fields
-                    if field.name == field_access.name
-                ),
-                None,
-            )
-            if the_field is not None:
-                return copy.deepcopy(the_field)
+            if isinstance(value, InstantiableType):
+                if field_access.name in value.members and not isinstance(
+                    value.members[field_access.name], frog_ast.MethodSignature
+                ):
+                    return copy.deepcopy(value.members[field_access.name])
+            else:
+                assert isinstance(value, (frog_ast.Scheme, frog_ast.Primitive))
+                the_field = next(
+                    (
+                        field.value
+                        for field in value.fields
+                        if field.name == field_access.name
+                    ),
+                    None,
+                )
+                if the_field is not None:
+                    return copy.deepcopy(the_field)
         return field_access
 
 
@@ -686,7 +701,7 @@ class InlineTransformer(Transformer):
                 and var_statement.the_type is not None
                 and isinstance(var_statement.var, frog_ast.Variable)
             ):
-                ast_map = frog_ast.ASTMap(identity=False)
+                ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
                 ast_map.set(
                     var_statement.var,
                     frog_ast.Variable(
@@ -1357,7 +1372,7 @@ class GetTypeMapVisitor(Visitor[NameTypeMap]):
     def visit_variable_declaration(
         self, variable_declaration: frog_ast.VariableDeclaration
     ) -> None:
-        self.type_map.set(variable_declaration.name, variable_declaration.the_type)
+        self.type_map.set(variable_declaration.name, variable_declaration.type)
 
     @_test_stop
     def visit_parameter(self, parameter: frog_ast.Parameter) -> None:
@@ -1464,7 +1479,7 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
             )
 
             reads_pair_partial = functools.partial(reads_pair, pair_name)
-            ast_map = frog_ast.ASTMap(identity=False)
+            ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
             ast_map.set(statement.var, frog_ast.Variable(pair_name))
             paired_value = SubstitutionTransformer(ast_map).transform(statement.value)
 

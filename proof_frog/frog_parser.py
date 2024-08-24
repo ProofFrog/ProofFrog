@@ -1,6 +1,13 @@
+from __future__ import annotations
 import os
-from typing import Type
-from antlr4 import FileStream, InputStream, CommonTokenStream, BailErrorStrategy
+from typing import Type, Callable
+from antlr4 import (
+    FileStream,
+    InputStream,
+    CommonTokenStream,
+    BailErrorStrategy,
+    ParserRuleContext,
+)
 from .parsing.PrimitiveVisitor import PrimitiveVisitor
 from .parsing.PrimitiveParser import PrimitiveParser
 from .parsing.PrimitiveLexer import PrimitiveLexer
@@ -26,8 +33,10 @@ def _binary_operation(
     )
 
 
-def add_line_number(func):
-    def wrapper(self, ctx):
+def add_line_number(
+    func: Callable[[_SharedAST, ParserRuleContext], frog_ast.ASTNode]
+) -> Callable[[_SharedAST, ParserRuleContext], frog_ast.ASTNode]:
+    def wrapper(self: _SharedAST, ctx: ParserRuleContext) -> frog_ast.ASTNode:
         result = func(self, ctx)
         if isinstance(result, frog_ast.ASTNode):
             result.line_num = ctx.start.line
@@ -37,8 +46,8 @@ def add_line_number(func):
     return wrapper
 
 
-def line_number_decorator(the_class):
-    class ModifiedClass(the_class):
+def line_number_decorator(the_class):  # type: ignore
+    class ModifiedClass(the_class):  # type: ignore
         pass
 
     for name, attr in vars(the_class).items():
@@ -330,9 +339,6 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
 
     def visitIntType(self, ctx: PrimitiveParser.IntTypeContext) -> frog_ast.IntType:
         return frog_ast.IntType()
-
-    def visitVoidType(self, ctx: PrimitiveParser.VoidTypeContext) -> frog_ast.Void:
-        return frog_ast.Void()
 
     def visitSizeExp(
         self, ctx: PrimitiveParser.SizeExpContext

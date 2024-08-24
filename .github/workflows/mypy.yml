@@ -27,4 +27,4 @@ jobs:
           pip install -r requirements-dev.txt
       - name: mypy
         run: |
-          mypy proof_frog
+          mypy proof_frog --no-warn-unused-ignores

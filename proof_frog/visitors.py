@@ -248,7 +248,7 @@ class RedundantFieldCopyTransformer(BlockTransformer):
                     return node == var
 
                 no_other_uses = True
-                decl_index: int
+                decl_index = -1
                 decl_statement: frog_ast.Assignment | frog_ast.Sample
                 for other_index, other_statement in enumerate(block.statements):
                     if statement == other_statement:
@@ -270,7 +270,10 @@ class RedundantFieldCopyTransformer(BlockTransformer):
                         is not None
                     ):
                         no_other_uses = False
-                if not no_other_uses:
+                # decl_index == -1 implies we weren't able to find
+                # the declaration of the variable on the RHS of the assignment. This means
+                # it is a field, and isn't a redundant copy
+                if not no_other_uses or decl_index == -1:
                     continue
                 modified_statement = copy.deepcopy(decl_statement)
                 modified_statement.var = statement.var

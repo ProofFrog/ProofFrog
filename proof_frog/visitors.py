@@ -1264,6 +1264,12 @@ class FieldOrderingVisitor(Visitor[dict[str, str]]):
         self.in_initialize = False
 
     def result(self) -> dict[str, str]:
+        # Some fields may not be used anywhere apart from Initialize
+        # so we will just name any remaining ones sequentially w.r.t to definition order
+        for field_name in self.fields:
+            if field_name not in self.field_rename_map:
+                self.field_num += 1
+                self.field_rename_map[field_name] = f"field{self.field_num}"
         return self.field_rename_map
 
     def visit_method_signature(

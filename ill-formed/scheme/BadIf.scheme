@@ -1,0 +1,10 @@
+import 'ill-formed/fixtures/VoidFPrimitive.primitive';
+
+Scheme BadIf() extends VoidFPrimitive {
+    Void f() {
+        Int x = 1;
+        if (1) {
+            x = 2;
+        }
+    }
+}

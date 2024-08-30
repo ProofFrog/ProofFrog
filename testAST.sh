@@ -4,14 +4,13 @@ verbose=true
 
 function runTest {
 
-	parseType=$1
-	fileName=$2
+	fileName=$1
 
 	parsedOutput=$(mktemp)
 	parsedOutput2=$(mktemp)
 	trimmedOriginal=$(mktemp)
 
-	python3 -m proof_frog parse $parseType $fileName > $parsedOutput
+	python3 -m proof_frog parse $fileName > $parsedOutput
 
 	cat $parsedOutput | tr -d "[:space:]" > $parsedOutput2
 	cat $fileName | egrep -v '//' | tr -d "[:space:]" > $trimmedOriginal
@@ -31,17 +30,17 @@ function runTest {
 }
 
 for primitive in examples/Primitives/*; do
-	runTest primitive $primitive
+	runTest $primitive
 done
 
 for scheme in examples/Schemes/**/*; do
-	runTest scheme $scheme
+	runTest $scheme
 done
 
 for game in examples/Games/**/*; do
-	runTest game $game
+	runTest $game
 done
 
-for proof in examples/Proofs/**/*; do
-	runTest proof $proof
+for proof in examples/Proofs/**/*.proof; do
+	runTest $proof
 done

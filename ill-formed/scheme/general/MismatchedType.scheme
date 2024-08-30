@@ -1,0 +1,5 @@
+import 'ill-formed/fixtures/EmptyPrimitive.primitive';
+
+Scheme MismatchedType(Bool x) extends EmptyPrimitive {
+    Int y = x;
+}

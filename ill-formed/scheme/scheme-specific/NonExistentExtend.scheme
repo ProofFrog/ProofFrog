@@ -1,0 +1,3 @@
+Scheme InvalidExtend() extends NonExistent {
+    Void f() {}
+}

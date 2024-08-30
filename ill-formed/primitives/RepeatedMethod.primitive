@@ -1,0 +1,4 @@
+Primitive Repeated() {
+    Void f();
+    Int f();
+}

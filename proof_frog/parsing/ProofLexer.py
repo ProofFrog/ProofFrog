@@ -1,4 +1,4 @@
-# Generated from proof_frog/antlr/Proof.g4 by ANTLR 4.13.1
+# Generated from proof_frog/antlr/Proof.g4 by ANTLR 4.13.2
 from antlr4 import *
 from io import StringIO
 import sys
@@ -55,7 +55,7 @@ def serializedATN():
         54,109,55,111,56,113,57,115,58,117,59,119,60,121,61,123,62,125,63,
         127,64,129,65,131,66,133,67,135,68,137,69,139,70,141,71,1,0,6,1,
         0,48,49,1,0,48,57,4,0,36,36,65,90,95,95,97,122,5,0,36,36,48,57,65,
-        90,95,95,97,122,3,0,9,10,13,13,32,32,7,0,32,32,36,36,46,57,60,62,
+        90,95,95,97,122,3,0,9,10,13,13,32,32,7,0,32,32,36,36,45,57,60,62,
         65,90,95,95,97,122,490,0,1,1,0,0,0,0,3,1,0,0,0,0,5,1,0,0,0,0,7,1,
         0,0,0,0,9,1,0,0,0,0,11,1,0,0,0,0,13,1,0,0,0,0,15,1,0,0,0,0,17,1,
         0,0,0,0,19,1,0,0,0,0,21,1,0,0,0,0,23,1,0,0,0,0,25,1,0,0,0,0,27,1,
@@ -306,7 +306,7 @@ class ProofLexer(Lexer):
 
     def __init__(self, input=None, output:TextIO = sys.stdout):
         super().__init__(input, output)
-        self.checkVersion("4.13.1")
+        self.checkVersion("4.13.2")
         self._interp = LexerATNSimulator(self, self.atn, self.decisionsToDFA, PredictionContextCache())
         self._actions = None
         self._predicates = None

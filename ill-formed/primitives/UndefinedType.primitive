@@ -1,0 +1,3 @@
+Primitive UndefinedType(Int x) {
+    Bla test = x;
+}

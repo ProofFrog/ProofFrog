@@ -286,17 +286,15 @@ def test_expand_tuples(
     game_ast = frog_parser.parse_game(game)
     expected_ast = frog_parser.parse_game(expected)
 
-    replace_map = []
+    replace_map = frog_ast.ASTMap(identity=False)
     for i in range(0, 4):
         for prefix in ["tuple", "myTuple"]:
-            replace_map.append(
-                (frog_ast.Variable(f"{prefix}{i}"), frog_ast.Variable(f"{prefix}@{i}"))
+            replace_map.set(
+                frog_ast.Variable(f"{prefix}{i}"), frog_ast.Variable(f"{prefix}@{i}")
             )
-            replace_map.append(
-                (
-                    frog_ast.Field(frog_ast.IntType(), f"{prefix}{i}", None),
-                    frog_ast.Field(frog_ast.IntType(), f"{prefix}@{i}", None),
-                )
+            replace_map.set(
+                frog_ast.Field(frog_ast.IntType(), f"{prefix}{i}", None),
+                frog_ast.Field(frog_ast.IntType(), f"{prefix}@{i}", None),
             )
 
     expected_ast = visitors.SubstitutionTransformer(replace_map).transform(expected_ast)

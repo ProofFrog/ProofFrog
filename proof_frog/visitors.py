@@ -23,6 +23,13 @@ from . import frog_ast
 from . import frog_parser
 
 
+@dataclass
+class InstantiableType:
+    name: str
+    members: dict[str, frog_ast.ASTNode]
+    superclass: str
+
+
 def _to_snake_case(camel_case: str) -> str:
     return "".join(["_" + i.lower() if i.isupper() else i for i in camel_case]).lstrip(
         "_"
@@ -49,7 +56,7 @@ class Visitor(ABC, Generic[U]):
             def visit_children(child: Any) -> Any:
                 if isinstance(child, frog_ast.ASTNode):
                     visit_helper(child)
-                if isinstance(child, list):
+                if isinstance(child, (list, tuple)):
                     for item in child:
                         visit_children(item)
 
@@ -503,22 +510,14 @@ class VariableStandardizingTransformer(BlockTransformer):
 
 
 class SubstitutionTransformer(Transformer):
-    def __init__(
-        self, replace_map: list[Tuple[frog_ast.ASTNode, frog_ast.ASTNode]]
-    ) -> None:
+    def __init__(self, replace_map: frog_ast.ASTMap[frog_ast.ASTNode]) -> None:
         self.replace_map = replace_map
 
-    def _find(self, v: frog_ast.ASTNode) -> Optional[frog_ast.ASTNode]:
-        the_list = [item for item in self.replace_map if item[0] == v]
-        if the_list:
-            return the_list[0][1]
-        return None
-
     def transform_ast_node(self, node: frog_ast.ASTNode) -> Optional[frog_ast.ASTNode]:
-        found = self._find(node)
-        if found:
-            return found
-        return None
+        try:
+            return self.replace_map.get(node)
+        except KeyError:
+            return None
 
 
 class InstantiationTransformer(Transformer):
@@ -538,7 +537,9 @@ class InstantiationTransformer(Transformer):
         if variable.name in self.namespace:
             value = self.namespace[variable.name]
             if (
-                not isinstance(value, (frog_ast.Scheme, frog_ast.Primitive))
+                not isinstance(
+                    value, (frog_ast.Scheme, frog_ast.Primitive, InstantiableType)
+                )
                 and value is not None
             ):
                 return copy.deepcopy(value)
@@ -552,17 +553,23 @@ class InstantiationTransformer(Transformer):
             and field_access.the_object.name in self.namespace
         ):
             value = self.namespace[field_access.the_object.name]
-            assert isinstance(value, (frog_ast.Scheme, frog_ast.Primitive))
-            the_field = next(
-                (
-                    field.value
-                    for field in value.fields
-                    if field.name == field_access.name
-                ),
-                None,
-            )
-            if the_field is not None:
-                return copy.deepcopy(the_field)
+            if isinstance(value, InstantiableType):
+                if field_access.name in value.members and not isinstance(
+                    value.members[field_access.name], frog_ast.MethodSignature
+                ):
+                    return copy.deepcopy(value.members[field_access.name])
+            else:
+                assert isinstance(value, (frog_ast.Scheme, frog_ast.Primitive))
+                the_field = next(
+                    (
+                        field.value
+                        for field in value.fields
+                        if field.name == field_access.name
+                    ),
+                    None,
+                )
+                if the_field is not None:
+                    return copy.deepcopy(the_field)
         return field_access
 
 
@@ -697,21 +704,21 @@ class InlineTransformer(Transformer):
                 and var_statement.the_type is not None
                 and isinstance(var_statement.var, frog_ast.Variable)
             ):
-                called_method = SubstitutionTransformer(
-                    [
-                        (
-                            var_statement.var,
-                            frog_ast.Variable(
-                                exp.func.the_object.name
-                                + "."
-                                + exp.func.name
-                                + "@"
-                                + var_statement.var.name
-                                + str(self.statement_index)
-                            ),
-                        )
-                    ]
-                ).transform(called_method)
+                ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+                ast_map.set(
+                    var_statement.var,
+                    frog_ast.Variable(
+                        exp.func.the_object.name
+                        + "."
+                        + exp.func.name
+                        + "@"
+                        + var_statement.var.name
+                        + str(self.statement_index)
+                    ),
+                )
+                called_method = SubstitutionTransformer(ast_map).transform(
+                    called_method
+                )
         transformed_method = InstantiationTransformer(
             dict(
                 zip(
@@ -1374,7 +1381,7 @@ class GetTypeMapVisitor(Visitor[NameTypeMap]):
     def visit_variable_declaration(
         self, variable_declaration: frog_ast.VariableDeclaration
     ) -> None:
-        self.type_map.set(variable_declaration.name, variable_declaration.the_type)
+        self.type_map.set(variable_declaration.name, variable_declaration.type)
 
     @_test_stop
     def visit_parameter(self, parameter: frog_ast.Parameter) -> None:
@@ -1483,10 +1490,9 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
             )
 
             reads_pair_partial = functools.partial(reads_pair, pair_name)
-
-            paired_value = SubstitutionTransformer(
-                [(statement.var, frog_ast.Variable(pair_name))]
-            ).transform(statement.value)
+            ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+            ast_map.set(statement.var, frog_ast.Variable(pair_name))
+            paired_value = SubstitutionTransformer(ast_map).transform(statement.value)
 
             paired = False
             for subsequent_statement in block.statements[index + 1 :]:

@@ -1,0 +1,9 @@
+import 'ill-formed/fixtures/SimplePrimitive.primitive';
+
+Scheme IncorrectReturn(Set set1) extends SimplePrimitive {
+    Set field = set1;
+
+    Int f() {
+        return true;
+    }
+}

@@ -1,6 +1,13 @@
+from __future__ import annotations
 import os
-from typing import Type
-from antlr4 import FileStream, InputStream, CommonTokenStream, BailErrorStrategy
+from typing import Type, Callable
+from antlr4 import (
+    FileStream,
+    InputStream,
+    CommonTokenStream,
+    BailErrorStrategy,
+    ParserRuleContext,
+)
 from .parsing.PrimitiveVisitor import PrimitiveVisitor
 from .parsing.PrimitiveParser import PrimitiveParser
 from .parsing.PrimitiveLexer import PrimitiveLexer
@@ -26,6 +33,30 @@ def _binary_operation(
     )
 
 
+def add_line_number(
+    func: Callable[[_SharedAST, ParserRuleContext], frog_ast.ASTNode]
+) -> Callable[[_SharedAST, ParserRuleContext], frog_ast.ASTNode]:
+    def wrapper(self: _SharedAST, ctx: ParserRuleContext) -> frog_ast.ASTNode:
+        result = func(self, ctx)
+        if isinstance(result, frog_ast.ASTNode):
+            result.line_num = ctx.start.line
+            result.column_num = ctx.start.column
+        return result
+
+    return wrapper
+
+
+def line_number_decorator(the_class):  # type: ignore
+    class ModifiedClass(the_class):  # type: ignore
+        pass
+
+    for name, attr in vars(the_class).items():
+        if callable(attr):
+            setattr(ModifiedClass, name, add_line_number(attr))
+    return ModifiedClass
+
+
+@line_number_decorator
 # pylint: disable-next=too-many-public-methods
 class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  # type: ignore[misc]
     def visitParamList(
@@ -306,7 +337,7 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             frog_ast.UnaryOperators.MINUS, self.visit(ctx.expression())
         )
 
-    def visitIntType(self, ctx: PrimitiveParser.IntTypeContext) -> frog_ast.Type:
+    def visitIntType(self, ctx: PrimitiveParser.IntTypeContext) -> frog_ast.IntType:
         return frog_ast.IntType()
 
     def visitSizeExp(
@@ -316,8 +347,10 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             frog_ast.UnaryOperators.SIZE, self.visit(ctx.expression())
         )
 
-    def visitNoneExp(self, __: PrimitiveParser.NoneExpContext) -> frog_ast.ASTNone:
-        return frog_ast.ASTNone()
+    def visitNoneExp(
+        self, __: PrimitiveParser.NoneExpContext
+    ) -> frog_ast.NoneExpression:
+        return frog_ast.NoneExpression()
 
     def visitParenExp(
         self, ctx: PrimitiveParser.ParenExpContext
@@ -432,6 +465,7 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         return frog_ast.Game(_parse_game_body(self.visit, ctx))
 
 
+@line_number_decorator
 class _PrimitiveASTGenerator(_SharedAST, PrimitiveVisitor):  # type: ignore[misc]
     def visitProgram(self, ctx: PrimitiveParser.ProgramContext) -> frog_ast.Primitive:
         name = ctx.ID().getText()
@@ -449,6 +483,7 @@ class _PrimitiveASTGenerator(_SharedAST, PrimitiveVisitor):  # type: ignore[misc
         return frog_ast.Primitive(name, param_list, field_list, method_list)
 
 
+@line_number_decorator
 class _SchemeASTGenerator(_SharedAST, SchemeVisitor):  # type: ignore[misc]
     def visitProgram(self, ctx: SchemeParser.ProgramContext) -> frog_ast.Scheme:
         scheme_ctx = ctx.scheme()
@@ -484,6 +519,7 @@ class _SchemeASTGenerator(_SharedAST, SchemeVisitor):  # type: ignore[misc]
         )
 
 
+@line_number_decorator
 class _GameASTGenerator(_SharedAST, GameVisitor):  # type: ignore[misc]
     def visitProgram(self, ctx: GameParser.ProgramContext) -> frog_ast.GameFile:
         imports = [self.visit(im) for im in ctx.moduleImport()]
@@ -494,6 +530,7 @@ class _GameASTGenerator(_SharedAST, GameVisitor):  # type: ignore[misc]
         )
 
 
+@line_number_decorator
 class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
     def visitProgram(self, ctx: ProofParser.ProgramContext) -> frog_ast.ProofFile:
         game_list = []
@@ -660,6 +697,25 @@ def parse_proof_file(proof_file: str) -> frog_ast.ProofFile:
         _get_parser(proof_file, ProofLexer, ProofParser).program()
     )
     return ast
+
+
+def _get_file_type(file_name: str) -> frog_ast.FileType:
+    extension: str = os.path.splitext(file_name)[1].strip(".")
+    return frog_ast.FileType(extension)
+
+
+def parse_file(file_name: str) -> frog_ast.Root:
+    match _get_file_type(file_name):
+        case frog_ast.FileType.PRIMITIVE:
+            return parse_primitive_file(file_name)
+        case frog_ast.FileType.SCHEME:
+            return parse_scheme_file(file_name)
+        case frog_ast.FileType.GAME:
+            return parse_game_file(file_name)
+        case frog_ast.FileType.PROOF:
+            return parse_proof_file(file_name)
+        case _:
+            raise ValueError(f"Invalid File Type ${file_name}")
 
 
 def parse_game(game: str) -> frog_ast.Game:

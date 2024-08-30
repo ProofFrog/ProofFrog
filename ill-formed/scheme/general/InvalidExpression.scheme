@@ -1,0 +1,7 @@
+import 'ill-formed/fixtures/VoidFPrimitive.primitive';
+
+Scheme InvalidExpression() extends VoidFPrimitive {
+    Set Test = bla;
+
+    Void f() {}
+}

@@ -1,0 +1,7 @@
+import 'ill-formed/fixtures/SimplePrimitive.primitive';
+
+Scheme NotOverridingFields() extends SimplePrimitive {
+    Int f() {
+        return 1;
+    }
+}

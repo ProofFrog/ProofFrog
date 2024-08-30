@@ -1,0 +1,6 @@
+import 'ill-formed/fixtures/EmptyPrimitive.primitive';
+
+Scheme Repeated() extends EmptyPrimitive {
+    Void f() {}
+    Void f() {}
+}

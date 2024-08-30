@@ -1,0 +1,7 @@
+import 'ill-formed/fixtures/SimplePrimitive.primitive';
+
+Scheme NotOverridingMethods(Set mySet1) extends SimplePrimitive {
+    Set field = mySet1;
+
+    Void f() {}
+}

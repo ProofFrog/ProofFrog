@@ -1,0 +1,5 @@
+import 'ill-formed/fixtures/EmptyPrimitive.primitive';
+
+Scheme UndefinedType(Int x) extends EmptyPrimitive {
+    Bla test = x;
+}

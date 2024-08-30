@@ -5,6 +5,7 @@ from antlr4 import error
 from . import frog_parser
 from . import frog_ast
 from . import proof_engine
+from . import semantic_analysis
 
 
 def usage() -> None:
@@ -17,23 +18,29 @@ def usage() -> None:
 def main() -> None:
     init(autoreset=True)
     argv: list[str] = sys.argv
+    root: frog_ast.Root
     if len(argv) < 2:
         usage()
 
     if argv[1] == "parse":
-        ast_type = argv[2]
-        file = argv[3]
-        match ast_type:
-            case "primitive":
-                print(frog_parser.parse_primitive_file(file))
-            case "scheme":
-                print(frog_parser.parse_scheme_file(file))
-            case "game":
-                print(frog_parser.parse_game_file(file))
-            case "proof":
-                print(frog_parser.parse_proof_file(file))
-            case _:
-                usage()
+        file = argv[2]
+        try:
+            root = frog_parser.parse_file(file)
+            print(root)
+        except ValueError:
+            usage()
+    elif argv[1] == "check":
+        file_name = argv[2]
+        try:
+            root = frog_parser.parse_file(file_name)
+        except ValueError:
+            usage()
+        try:
+            semantic_analysis.check_well_formed(root, file_name)
+            print(f"{file_name} is well-formed.")
+        except semantic_analysis.FailedTypeCheck:
+            print("Failed to type check")
+
     elif argv[1] == "prove":
         engine = proof_engine.ProofEngine(len(argv) > 3 and argv[3] == "-v")
         proof_file: frog_ast.ProofFile
@@ -45,7 +52,6 @@ def main() -> None:
 
         for imp in proof_file.imports:
             file_type = _get_file_type(imp.filename)
-            root: frog_ast.Root
             try:
                 match file_type:
                     case frog_ast.FileType.PRIMITIVE:

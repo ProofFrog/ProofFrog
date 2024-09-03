@@ -26,3 +26,10 @@ docker run -p 8888:8888 proof_frog
 ```
 
 The output from the `docker run` command will contain a `localhost:8888` URL containing a token that will allow you to view the jupyter notebook.
+
+# Acknowledgements
+<img src="media/NSERC.jpg" alt="NSERC signature" width="750"/> 
+
+We acknowledge the support of the Natural Sciences and Engineering Research Council of Canada (NSERC).
+
+Nous remercions le Conseil de recherches en sciences naturelles et en génie du Canada (CRSNG) de son soutien.

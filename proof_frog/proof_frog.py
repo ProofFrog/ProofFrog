@@ -10,7 +10,7 @@ from . import semantic_analysis
 
 def usage() -> None:
     print("Incorrect Arguments", file=sys.stderr)
-    print("Usage: proof_frog parse [primitive|game|scheme|proof] <file>")
+    print("Usage: proof_frog parse <file>")
     print("Usage: proof_frog prove <file.proof>")
     sys.exit(1)
 

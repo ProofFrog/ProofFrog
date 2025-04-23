@@ -505,7 +505,7 @@ class Import(ASTNode):
 
 
 class Scheme(Root):
-    # pylint: disable=too-many-arguments
+    # pylint: disable=too-many-positional-arguments,too-many-arguments
     def __init__(
         self,
         imports: list[Import],
@@ -727,7 +727,7 @@ ProofStep: TypeAlias = Step | Induction | StepAssumption
 
 
 class ProofFile(Root):
-    # pylint: disable=too-many-arguments
+    # pylint: disable=too-many-positional-arguments,too-many-arguments
     def __init__(
         self,
         imports: list[Import],

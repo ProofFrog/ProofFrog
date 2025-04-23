@@ -472,7 +472,7 @@ def print_error(
 
 
 class CheckTypeVisitor(VariableTypeVisitor):
-    # pylint: disable=too-many-arguments
+    # pylint: disable=too-many-positional-arguments,too-many-arguments
     def __init__(
         self,
         import_namespace: dict[str, frog_ast.Root | frog_ast.Game],

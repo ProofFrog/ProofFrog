@@ -34,7 +34,7 @@ def _binary_operation(
 
 
 def add_line_number(
-    func: Callable[[_SharedAST, ParserRuleContext], frog_ast.ASTNode]
+    func: Callable[[_SharedAST, ParserRuleContext], frog_ast.ASTNode],
 ) -> Callable[[_SharedAST, ParserRuleContext], frog_ast.ASTNode]:
     def wrapper(self: _SharedAST, ctx: ParserRuleContext) -> frog_ast.ASTNode:
         result = func(self, ctx)

@@ -27,6 +27,14 @@ docker run -p 8888:8888 proof_frog
 
 The output from the `docker run` command will contain a `localhost:8888` URL containing a token that will allow you to view the jupyter notebook.
 
+## Plugin for JetBrains IDE-s
+
+There's a plugin available for JetBrains IDE-s which provides syntax validation and highlighting, custom color settings, 
+import statement file path references, context-menu actions and other features for the ProofFrog language. 
+You can obtain the plugin from the JetBrains Marketplace inside the IDE. 
+The project is hosted in [this GitHub repository](https://github.com/aabmets/proof-frog-ide-plugin).
+
+
 # Acknowledgements
 <img src="media/NSERC.jpg" alt="NSERC signature" width="750"/> 
 

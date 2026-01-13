@@ -48,10 +48,33 @@ def generate_dependency_graph(
                 def search_for_assignment(
                     variable: frog_ast.Variable, node: frog_ast.ASTNode
                 ) -> bool:
-                    return node == variable
+                    return (
+                        isinstance(node, (frog_ast.Assignment, frog_ast.Sample))
+                    ) and node.var == variable
 
+                has_write = False
                 if (
                     visitors.SearchVisitor(
+                        functools.partial(search_for_assignment, variable)
+                    ).visit(statement)
+                    is not None
+                ):
+                    has_write = True
+
+                def search_for_any(
+                    variable: frog_ast.Variable, node: frog_ast.ASTNode
+                ) -> bool:
+                    return variable == node
+
+                if (
+                    has_write
+                    and visitors.SearchVisitor(
+                        functools.partial(search_for_any, variable)
+                    ).visit(depends_on)
+                    is not None
+                ) or (
+                    not has_write
+                    and visitors.SearchVisitor(
                         functools.partial(search_for_assignment, variable)
                     ).visit(depends_on)
                     is not None

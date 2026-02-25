@@ -16,7 +16,7 @@ from proof_frog import dependencies
                 Int w = 5;
                 Int a = x + y + z + w;
             }""",
-            [[], [0], [], [], [1, 2, 3]],
+            [[], [0], [], [], [0, 1, 2, 3]],
         ),
         # If statement
         (

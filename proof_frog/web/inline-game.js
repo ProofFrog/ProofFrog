@@ -62,6 +62,66 @@ export function getStepAtCursor(content, cursorLine) {
 
 // ── Open inline split-pane tab ────────────────────────────────────────────────
 
+function makeSplitPane(headerText) {
+  const pane = document.createElement("div");
+  pane.className = "split-pane";
+  const header = document.createElement("div");
+  header.className = "split-pane-header";
+  header.textContent = headerText;
+  pane.appendChild(header);
+  return pane;
+}
+
+function setupHSplit(handle, topRow, bottomRow, wrap, cmsToRefresh) {
+  let startY, startFlex;
+  handle.addEventListener("mousedown", e => {
+    startY = e.clientY;
+    startFlex = topRow.getBoundingClientRect().height;
+    handle.classList.add("dragging");
+    function onMove(e) {
+      const delta = e.clientY - startY;
+      const totalH = wrap.getBoundingClientRect().height
+        - Array.from(wrap.querySelectorAll(".h-split-handle"))
+               .reduce((s, h) => s + h.offsetHeight, 0);
+      const newTopH = Math.max(50, Math.min(totalH - 50, startFlex + delta));
+      topRow.style.flex = `0 0 ${newTopH}px`;
+      bottomRow.style.flex = "1 1 0";
+      cmsToRefresh.forEach(cm => cm.refresh());
+    }
+    function onUp() {
+      handle.classList.remove("dragging");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+}
+
+function setupVSplit(handle, leftPane, rightPane, row, cmsToRefresh) {
+  let startX, startFlex;
+  handle.addEventListener("mousedown", e => {
+    startX = e.clientX;
+    startFlex = leftPane.getBoundingClientRect().width;
+    handle.classList.add("dragging");
+    function onMove(e) {
+      const delta = e.clientX - startX;
+      const totalW = row.getBoundingClientRect().width - handle.offsetWidth;
+      const newLeftW = Math.max(100, Math.min(totalW - 100, startFlex + delta));
+      leftPane.style.flex = `0 0 ${newLeftW}px`;
+      rightPane.style.flex = "1 1 0";
+      cmsToRefresh.forEach(cm => cm.refresh());
+    }
+    function onUp() {
+      handle.classList.remove("dragging");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+}
+
 export async function openInlineTab(stepIndex, label) {
   if (!state.activeTab) return;
   const sourceTab = state.activeTab;
@@ -71,62 +131,64 @@ export async function openInlineTab(stepIndex, label) {
   // Close existing inline tab for this step if already open
   if (state.tabs.has(virtualPath)) closeTab(virtualPath);
 
-  // Build split-view wrapper: left pane (inlined) + drag handle + right pane (canonical)
+  // Build 3-row wrapper
   const wrap = document.createElement("div");
   wrap.className = "editor-wrap readonly split-view";
   editorsContainer.appendChild(wrap);
 
-  function makeSplitPane(headerText) {
-    const pane = document.createElement("div");
-    pane.className = "split-pane";
-    const header = document.createElement("div");
-    header.className = "split-pane-header";
-    header.textContent = headerText;
-    pane.appendChild(header);
-    return pane;
+  function makeRow() {
+    const row = document.createElement("div");
+    row.className = "split-row";
+    return row;
   }
 
-  const leftPane = makeSplitPane("Inlined Game");
-  const handle = document.createElement("div");
-  handle.className = "v-split-handle";
-  const rightPane = makeSplitPane("Canonical Form");
+  // Row 1: previous game hop
+  const row1 = makeRow();
+  const prevInlinedPane = makeSplitPane("Previous Game — Inlined");
+  const vHandle1 = document.createElement("div");
+  vHandle1.className = "v-split-handle";
+  const prevCanonPane = makeSplitPane("Previous Game — Canonical Form");
+  row1.appendChild(prevInlinedPane);
+  row1.appendChild(vHandle1);
+  row1.appendChild(prevCanonPane);
 
-  wrap.appendChild(leftPane);
-  wrap.appendChild(handle);
-  wrap.appendChild(rightPane);
+  // Row 2: current game hop
+  const hHandle1 = document.createElement("div");
+  hHandle1.className = "h-split-handle";
+  const row2 = makeRow();
+  const currInlinedPane = makeSplitPane("Current Game — Inlined");
+  const vHandle2 = document.createElement("div");
+  vHandle2.className = "v-split-handle";
+  const currCanonPane = makeSplitPane("Current Game — Canonical Form");
+  row2.appendChild(currInlinedPane);
+  row2.appendChild(vHandle2);
+  row2.appendChild(currCanonPane);
 
-  const cmOpts = { value: "Loading…", mode: "prooffrog", theme: getCmTheme(), lineNumbers: true, readOnly: true, lineWrapping: false };
-  const cmLeft = CodeMirror(leftPane, cmOpts);
-  const cmRight = CodeMirror(rightPane, { ...cmOpts });
+  // Row 3: reserved for future use
+  const hHandle2 = document.createElement("div");
+  hHandle2.className = "h-split-handle";
+  const row3 = makeRow();
 
-  // Vertical drag-to-resize
-  (function setupVSplit() {
-    let startX, startFlex;
-    handle.addEventListener("mousedown", e => {
-      startX = e.clientX;
-      startFlex = leftPane.getBoundingClientRect().width;
-      handle.classList.add("dragging");
-      function onMove(e) {
-        const delta = e.clientX - startX;
-        const totalW = wrap.getBoundingClientRect().width - handle.offsetWidth;
-        const newLeftW = Math.max(100, Math.min(totalW - 100, startFlex + delta));
-        leftPane.style.flex = `0 0 ${newLeftW}px`;
-        rightPane.style.flex = "1 1 0";
-        cmLeft.refresh();
-        cmRight.refresh();
-      }
-      function onUp() {
-        handle.classList.remove("dragging");
-        document.removeEventListener("mousemove", onMove);
-        document.removeEventListener("mouseup", onUp);
-      }
-      document.addEventListener("mousemove", onMove);
-      document.addEventListener("mouseup", onUp);
-    });
-  })();
+  wrap.appendChild(row1);
+  wrap.appendChild(hHandle1);
+  wrap.appendChild(row2);
+  wrap.appendChild(hHandle2);
+  wrap.appendChild(row3);
+
+  const cmOpts = { value: "", mode: "prooffrog", theme: getCmTheme(), lineNumbers: true, readOnly: true, lineWrapping: false };
+  const cmPrevInlined = CodeMirror(prevInlinedPane, { ...cmOpts });
+  const cmPrevCanon   = CodeMirror(prevCanonPane,   { ...cmOpts });
+  const cmCurrInlined = CodeMirror(currInlinedPane, { ...cmOpts, value: "Loading…" });
+  const cmCurrCanon   = CodeMirror(currCanonPane,   { ...cmOpts, value: "Loading…" });
+
+  setupVSplit(vHandle1, prevInlinedPane, prevCanonPane, row1, [cmPrevInlined, cmPrevCanon]);
+  setupVSplit(vHandle2, currInlinedPane, currCanonPane, row2, [cmCurrInlined, cmCurrCanon]);
+  setupHSplit(hHandle1, row1, row2, wrap, [cmPrevInlined, cmPrevCanon, cmCurrInlined, cmCurrCanon]);
+  setupHSplit(hHandle2, row2, row3, wrap, [cmCurrInlined, cmCurrCanon]);
 
   const tabName = `[inline] ${label}`;
-  state.tabs.set(virtualPath, { name: tabName, savedContent: "Loading…", cm: cmLeft, cmRight, wrap, readonly: true });
+  const cms = [cmPrevInlined, cmPrevCanon, cmCurrInlined, cmCurrCanon];
+  state.tabs.set(virtualPath, { name: tabName, savedContent: "Loading…", cm: cmCurrInlined, cms, wrap, readonly: true });
 
   const tabEl = document.createElement("div");
   tabEl.className = "tab";
@@ -140,24 +202,42 @@ export async function openInlineTab(stepIndex, label) {
   tabsEl.appendChild(tabEl);
 
   activateTab(virtualPath);
+  // Defer an initial refresh so flex layout dimensions are resolved before CodeMirror measures
+  requestAnimationFrame(() => cms.forEach(cm => cm.refresh()));
 
-  // Fetch both the inlined game and canonical form
+  // Fetch inlined game and canonical form for current step (and previous if applicable)
   setRunning(true);
   try {
-    const data = await apiFetch("/api/inline", {
+    const fetchCurrent = apiFetch("/api/inline", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: sourceTab, content, step_index: stepIndex }),
     });
-    const raw = data.output || "(no output)";
-    const canonical = data.canonical || "(no output)";
-    cmLeft.setValue(raw);
-    cmRight.setValue(canonical);
+    const fetchPrev = stepIndex > 0
+      ? apiFetch("/api/inline", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: sourceTab, content, step_index: stepIndex - 1 }),
+        })
+      : Promise.resolve(null);
+
+    const [currData, prevData] = await Promise.all([fetchCurrent, fetchPrev]);
+
+    cmCurrInlined.setValue(currData.output || "(no output)");
+    cmCurrCanon.setValue(currData.canonical || "(no output)");
+    if (prevData) {
+      cmPrevInlined.setValue(prevData.output || "(no output)");
+      cmPrevCanon.setValue(prevData.canonical || "(no output)");
+    }
+
+    // Refresh all editors after content is set to fix gutter alignment
+    cms.forEach(cm => cm.refresh());
+
     const tab = state.tabs.get(virtualPath);
-    if (tab) tab.savedContent = raw;
+    if (tab) tab.savedContent = currData.output || "";
   } catch (e) {
-    cmLeft.setValue(`Error: ${e}`);
-    cmRight.setValue("");
+    cmCurrInlined.setValue(`Error: ${e}`);
+    cmCurrCanon.setValue("");
   } finally {
     setRunning(false);
   }

@@ -48,7 +48,10 @@ export function applyTheme(dark) {
   document.documentElement.dataset.theme = dark ? "dark" : "light";
   btnTheme.textContent = dark ? "Light" : "Dark";
   state.tabs.forEach(tab => {
-    tab.cm.setOption("theme", getCmTheme());
-    if (tab.cmRight) tab.cmRight.setOption("theme", getCmTheme());
+    if (tab.cms) {
+      tab.cms.forEach(cm => cm.setOption("theme", getCmTheme()));
+    } else {
+      tab.cm.setOption("theme", getCmTheme());
+    }
   });
 }

@@ -228,8 +228,9 @@ select.wizard-input { cursor: pointer; }
 .editor-wrap.readonly .CodeMirror-cursor { display: none !important; }
 
 /* ── Split-pane (inline game + canonical) ── */
-.editor-wrap.split-view { flex-direction: row; }
+.editor-wrap.split-view { flex-direction: column; }
 .editor-wrap.split-view.active { display: flex; }
+.split-row { display: flex; flex-direction: row; flex: 1; overflow: hidden; min-height: 0; min-width: 0; }
 .split-pane { display: flex; flex-direction: column; flex: 1; overflow: hidden; min-width: 0; }
 .split-pane-header {
   padding: 3px 10px; font-size: 11px; font-weight: 600;
@@ -243,6 +244,11 @@ select.wizard-input { cursor: pointer; }
   border-left: 1px solid var(--border);
 }
 .v-split-handle:hover, .v-split-handle.dragging { background: var(--accent2); }
+.h-split-handle {
+  height: 4px; cursor: ns-resize; background: transparent; flex-shrink: 0;
+  border-top: 1px solid var(--border);
+}
+.h-split-handle:hover, .h-split-handle.dragging { background: var(--accent2); }
 
 /* ── Welcome screen ── */
 #welcome {

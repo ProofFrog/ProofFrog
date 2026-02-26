@@ -79,9 +79,14 @@
     /* ── Sidebar ── */
     #sidebar {
       width: var(--sidebar-width); background: var(--bg2);
-      border-right: 1px solid var(--border); overflow-y: auto;
+      border-right: 1px solid var(--border); overflow: hidden;
       flex-shrink: 0; display: flex; flex-direction: column;
     }
+    #sidebar-resize-handle {
+      width: 4px; cursor: ew-resize; background: transparent; flex-shrink: 0;
+      border-left: 1px solid var(--border);
+    }
+    #sidebar-resize-handle:hover, #sidebar-resize-handle.dragging { background: var(--accent2); }
     #sidebar-header {
       padding: 6px 10px; font-size: 11px; font-weight: 600;
       text-transform: uppercase; color: var(--text-dim); letter-spacing: 0.08em;
@@ -95,6 +100,20 @@
     .tree-item .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
     .tree-dir > .tree-children { display: block; }
     .tree-dir.collapsed > .tree-children { display: none; }
+
+    /* ── Game Hops panel ── */
+    #game-hops-panel { flex-shrink: 0; display: flex; flex-direction: column; }
+    #inner-resize-handle {
+      height: 4px; cursor: ns-resize; background: transparent; flex-shrink: 0;
+      border-top: 1px solid var(--border);
+    }
+    #inner-resize-handle:hover, #inner-resize-handle.dragging { background: var(--accent2); }
+    #game-hops-header { padding: 6px 10px; font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--text-dim); letter-spacing: 0.08em; flex-shrink: 0; }
+    #game-hops-list { overflow-y: auto; padding: 4px 0; flex: 1; min-height: 0; }
+    .hop-item { display: flex; align-items: center; cursor: pointer; padding: 2px 8px 2px 14px; user-select: none; font-size: 12px; font-family: 'Menlo','Monaco','Consolas',monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .hop-item:hover { background: var(--bg3); }
+    .hop-item.active { background: rgba(78,201,176,0.12); color: var(--accent); }
+    .hop-item-empty { padding: 4px 14px; font-size: 12px; color: var(--text-dim); font-style: italic; }
 
     /* ── Editor area ── */
     #editor-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
@@ -155,7 +174,8 @@
     .editor-wrap.readonly .CodeMirror-cursor { display: none !important; }
 
     /* ── Split-pane (inline game + canonical) ── */
-    .editor-wrap.split-view { display: flex; flex-direction: row; }
+    .editor-wrap.split-view { flex-direction: row; }
+    .editor-wrap.split-view.active { display: flex; }
     .split-pane { display: flex; flex-direction: column; flex: 1; overflow: hidden; min-width: 0; }
     .split-pane-header {
       padding: 3px 10px; font-size: 11px; font-weight: 600;
@@ -210,7 +230,13 @@
     <div id="sidebar">
       <div id="sidebar-header">Explorer</div>
       <div id="file-tree"></div>
+      <div id="game-hops-panel" style="display:none">
+        <div id="inner-resize-handle"></div>
+        <div id="game-hops-header">Game Hops</div>
+        <div id="game-hops-list"></div>
+      </div>
     </div>
+    <div id="sidebar-resize-handle"></div>
     <div id="editor-area">
       <div id="tabs"><span id="tabs-empty">Open a file from the explorer</span></div>
       <div id="editors-container">
@@ -420,6 +446,7 @@ function activateTab(path) {
 
   updateToolbar();
   scrollTabIntoView(path);
+  updateGameHopsPanel();
 }
 
 function scrollTabIntoView(path) {
@@ -458,7 +485,10 @@ async function openFile(path, name) {
   if (data.error) { alert(data.error); return; }
   const content = data.content;
 
-  const { cm, wrap } = createEditor(content, () => updateTabEl(path), path);
+  const { cm, wrap } = createEditor(content, () => {
+    updateTabEl(path);
+    if (activeTab === path && path.endsWith(".proof")) updateGameHopsPanel();
+  }, path);
 
   tabs.set(path, { name, savedContent: content, cm, wrap, readonly: false });
 
@@ -503,6 +533,7 @@ function closeTab(path) {
   if (tabs.size === 0) tabsEmpty.style.display = "";
   updateToolbar();
   highlightActiveFile(activeTab);
+  updateGameHopsPanel();
 }
 
 // ── Save ──────────────────────────────────────────────────────────────────────
@@ -632,6 +663,100 @@ function getStepAtCursor(content, cursorLine) {
     }
   }
   return null;
+}
+
+// ── Game hops extraction ──────────────────────────────────────────────────────
+
+function getAllGameHops(content) {
+  const lines = content.split("\n");
+  let gamesLine = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*games\s*:/.test(lines[i])) { gamesLine = i; break; }
+  }
+  if (gamesLine === -1) return [];
+
+  const hops = [];
+  let braceDepth = 0, stepIndex = 0, currentStepStart = gamesLine + 1;
+  for (let i = gamesLine + 1; i < lines.length; i++) {
+    const stripped = lines[i].replace(/\/\/.*$/, "");
+    for (const ch of stripped) {
+      if (ch === "{") braceDepth++;
+      else if (ch === "}") braceDepth--;
+    }
+    if (braceDepth === 0 && stripped.includes(";")) {
+      const stepText = lines.slice(currentStepStart, i + 1)
+        .map(l => l.replace(/\/\/.*$/, "").trim()).join(" ")
+        .replace(/\s+/g, " ").replace(/\s*;\s*$/, "").trim();
+      if (stepText.includes(" against ")) {
+        const label = stepText.replace(/\s+against\s+\S+\s*$/, "").trim();
+        hops.push({ stepIndex, label });
+      }
+      stepIndex++;
+      currentStepStart = i + 1;
+    }
+  }
+  return hops;
+}
+
+function updateGameHopsPanel() {
+  const panel = document.getElementById("game-hops-panel");
+  const list = document.getElementById("game-hops-list");
+
+  // Resolve the source .proof path (handles both proof tabs and inline tabs)
+  let proofPath = null;
+  if (activeTab) {
+    if (activeTab.endsWith(".proof")) {
+      proofPath = activeTab;
+    } else if (activeTab.startsWith(":inline:")) {
+      // Format: ":inline:STEPINDEX:FILEPATH"
+      const withoutPrefix = activeTab.slice(":inline:".length);
+      const colonPos = withoutPrefix.indexOf(":");
+      if (colonPos !== -1) {
+        const candidate = withoutPrefix.slice(colonPos + 1);
+        if (candidate.endsWith(".proof")) proofPath = candidate;
+      }
+    }
+  }
+
+  if (!proofPath) { panel.style.display = "none"; return; }
+
+  const content = getTabContent(proofPath);
+  if (content === null) { panel.style.display = "none"; return; }
+
+  // Determine highlighted step when an inline tab is active
+  let activeStepIndex = null;
+  if (activeTab && activeTab.startsWith(":inline:")) {
+    const withoutPrefix = activeTab.slice(":inline:".length);
+    const colonPos = withoutPrefix.indexOf(":");
+    if (colonPos !== -1) {
+      const parsed = parseInt(withoutPrefix.slice(0, colonPos), 10);
+      if (!isNaN(parsed)) activeStepIndex = parsed;
+    }
+  }
+
+  const hops = getAllGameHops(content);
+  panel.style.display = "";
+  list.innerHTML = "";
+
+  if (hops.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "hop-item-empty";
+    empty.textContent = "No game hops";
+    list.appendChild(empty);
+    return;
+  }
+
+  hops.forEach(({ stepIndex, label }) => {
+    const item = document.createElement("div");
+    item.className = "hop-item" + (stepIndex === activeStepIndex ? " active" : "");
+    item.textContent = label;
+    item.title = label;
+    item.addEventListener("click", () => {
+      if (activeTab !== proofPath) activateTab(proofPath);
+      openInlineTab(stepIndex, label);
+    });
+    list.appendChild(item);
+  });
 }
 
 // ── Inline tab ────────────────────────────────────────────────────────────────
@@ -816,6 +941,54 @@ btnTheme.addEventListener("click", () => applyTheme(!darkMode));
     const newH = Math.max(80, Math.min(600, startH + delta));
     outputPane.style.height = newH + "px";
   }
+})();
+
+(function setupSidebarResize() {
+  const handle = document.getElementById("sidebar-resize-handle");
+  const sidebar = document.getElementById("sidebar");
+  let startX, startW;
+  handle.addEventListener("mousedown", e => {
+    startX = e.clientX;
+    startW = sidebar.offsetWidth;
+    handle.classList.add("dragging");
+    function onMove(e) {
+      const newW = Math.max(120, Math.min(500, startW + e.clientX - startX));
+      sidebar.style.width = newW + "px";
+    }
+    function onUp() {
+      handle.classList.remove("dragging");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+})();
+
+(function setupInnerResize() {
+  const handle = document.getElementById("inner-resize-handle");
+  const fileTree = document.getElementById("file-tree");
+  const gameHopsPanel = document.getElementById("game-hops-panel");
+  let startY, startH;
+  handle.addEventListener("mousedown", e => {
+    startY = e.clientY;
+    startH = gameHopsPanel.offsetHeight;
+    handle.classList.add("dragging");
+    function onMove(e) {
+      const sidebar = document.getElementById("sidebar");
+      const maxH = sidebar.offsetHeight - 100;
+      const delta = startY - e.clientY;
+      const newH = Math.max(80, Math.min(maxH, startH + delta));
+      gameHopsPanel.style.height = newH + "px";
+    }
+    function onUp() {
+      handle.classList.remove("dragging");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
 })();
 
 // ── Init ──────────────────────────────────────────────────────────────────────

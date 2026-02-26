@@ -66,7 +66,7 @@ def _resolve_import(directory: str, filename: str) -> str:
     return os.path.join(directory, filename)
 
 
-def _capture_inline(file_path: str, step_index: int, directory: str = "") -> tuple[str, str, bool]:
+def _capture_inline(file_path: str, step_index: int, directory: str = "") -> tuple[str, str, bool, bool, str, str, str]:
     buf = io.StringIO()
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
@@ -107,18 +107,44 @@ def _capture_inline(file_path: str, step_index: int, directory: str = "") -> tup
             engine.get_method_lookup()
 
         if step_index < 0 or step_index >= len(proof_file.steps):
-            return f"Step index {step_index} out of range (proof has {len(proof_file.steps)} steps)", "", False
+            return f"Step index {step_index} out of range (proof has {len(proof_file.steps)} steps)", "", False, False, "", "", ""
         step = proof_file.steps[step_index]
         if not isinstance(step, frog_ast.Step):
-            return "This step is an assumption, not a game step.", "", False
+            return "This step is an assumption, not a game step.", "", False, False, "", "", ""
 
         suppress = io.StringIO()
         with redirect_stdout(suppress), redirect_stderr(suppress):
             game = engine._get_game_ast(step.challenger, step.reduction)
             canon = engine.canonicalize_game(copy.deepcopy(game))
-        return str(game), str(canon), True
+
+        has_reduction = step.reduction is not None
+        reduction_str = ""
+        challenger_str = ""
+        scheme_str = ""
+        if has_reduction:
+            suppress2 = io.StringIO()
+            with redirect_stdout(suppress2), redirect_stderr(suppress2):
+                reduction_game = engine._get_game_ast(step.reduction)
+                challenger_only = engine._get_game_ast(step.challenger)
+            reduction_str = str(reduction_game)
+            challenger_str = str(challenger_only)
+
+            # Find the underlying scheme from the challenger's args
+            challenger_args = (
+                step.challenger.game.args
+                if isinstance(step.challenger, frog_ast.ConcreteGame)
+                else step.challenger.args
+            )
+            for arg in challenger_args:
+                if isinstance(arg, frog_ast.Variable) and arg.name in engine.proof_namespace:
+                    candidate = engine.proof_namespace[arg.name]
+                    if isinstance(candidate, frog_ast.Scheme):
+                        scheme_str = str(candidate)
+                        break
+
+        return str(game), str(canon), True, has_reduction, reduction_str, challenger_str, scheme_str
     except Exception as e:
-        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", "", False
+        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", "", False, False, "", "", ""
 
 
 def _capture_prove(file_path: str, directory: str = "") -> tuple[str, bool, list[dict]]:
@@ -266,8 +292,9 @@ def create_app(directory: str) -> Flask:
         if abs_path is None:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
-        output, canonical, success = _capture_inline(str(abs_path), step_index, directory)
-        return jsonify({"output": output, "canonical": canonical, "success": success})
+        output, canonical, success, has_reduction, reduction, challenger, scheme = _capture_inline(str(abs_path), step_index, directory)
+        return jsonify({"output": output, "canonical": canonical, "success": success,
+                        "has_reduction": has_reduction, "reduction": reduction, "challenger": challenger, "scheme": scheme})
 
     return app
 

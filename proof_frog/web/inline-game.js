@@ -164,10 +164,17 @@ export async function openInlineTab(stepIndex, label) {
   row2.appendChild(vHandle2);
   row2.appendChild(currCanonPane);
 
-  // Row 3: reserved for future use
+  // Row 3: scheme-inline analysis panes
   const hHandle2 = document.createElement("div");
   hHandle2.className = "h-split-handle";
   const row3 = makeRow();
+  const row3PaneA = makeSplitPane("Reduction");
+  const vHandleR3a = document.createElement("div");
+  vHandleR3a.className = "v-split-handle";
+  const row3PaneB = makeSplitPane("Challenger");
+  row3.appendChild(row3PaneA);
+  row3.appendChild(vHandleR3a);
+  row3.appendChild(row3PaneB);
 
   wrap.appendChild(row1);
   wrap.appendChild(hHandle1);
@@ -180,14 +187,17 @@ export async function openInlineTab(stepIndex, label) {
   const cmPrevCanon   = CodeMirror(prevCanonPane,   { ...cmOpts });
   const cmCurrInlined = CodeMirror(currInlinedPane, { ...cmOpts, value: "Loading…" });
   const cmCurrCanon   = CodeMirror(currCanonPane,   { ...cmOpts, value: "Loading…" });
+  const cmRow3A       = CodeMirror(row3PaneA,        { ...cmOpts });
+  const cmRow3B       = CodeMirror(row3PaneB,        { ...cmOpts });
 
-  setupVSplit(vHandle1, prevInlinedPane, prevCanonPane, row1, [cmPrevInlined, cmPrevCanon]);
-  setupVSplit(vHandle2, currInlinedPane, currCanonPane, row2, [cmCurrInlined, cmCurrCanon]);
+  setupVSplit(vHandle1,   prevInlinedPane, prevCanonPane, row1, [cmPrevInlined, cmPrevCanon]);
+  setupVSplit(vHandle2,   currInlinedPane, currCanonPane, row2, [cmCurrInlined, cmCurrCanon]);
+  setupVSplit(vHandleR3a, row3PaneA,       row3PaneB,     row3, [cmRow3A, cmRow3B]);
   setupHSplit(hHandle1, row1, row2, wrap, [cmPrevInlined, cmPrevCanon, cmCurrInlined, cmCurrCanon]);
-  setupHSplit(hHandle2, row2, row3, wrap, [cmCurrInlined, cmCurrCanon]);
+  setupHSplit(hHandle2, row2, row3, wrap, [cmCurrInlined, cmCurrCanon, cmRow3A, cmRow3B]);
 
   const tabName = `[inline] ${label}`;
-  const cms = [cmPrevInlined, cmPrevCanon, cmCurrInlined, cmCurrCanon];
+  const cms = [cmPrevInlined, cmPrevCanon, cmCurrInlined, cmCurrCanon, cmRow3A, cmRow3B];
   state.tabs.set(virtualPath, { name: tabName, savedContent: "Loading…", cm: cmCurrInlined, cms, wrap, readonly: true });
 
   const tabEl = document.createElement("div");
@@ -228,6 +238,10 @@ export async function openInlineTab(stepIndex, label) {
     if (prevData) {
       cmPrevInlined.setValue(prevData.output || "(no output)");
       cmPrevCanon.setValue(prevData.canonical || "(no output)");
+    }
+    if (currData.has_reduction) {
+      cmRow3A.setValue(currData.reduction || "(no output)");
+      cmRow3B.setValue(currData.challenger || "(no output)");
     }
 
     // Refresh all editors after content is set to fix gutter alignment

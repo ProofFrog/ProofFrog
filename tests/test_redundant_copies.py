@@ -40,6 +40,24 @@ from proof_frog import visitors, frog_parser
             }
             """,
         ),
+        # Douglas' test case
+        (
+            """
+            BitString<lambda + stretch> Eval(BitString<lambda> k, BitString<lambda + stretch> m) { 
+                BitString<lambda + stretch> v1 = G.evaluate(k);
+                BitString<lambda + stretch> v2 = v1;
+                BitString<lambda + stretch> v3 = v2 + m;
+                return v1 + v3;
+            }
+            """,
+            """
+            BitString<lambda + stretch> Eval(BitString<lambda> k, BitString<lambda + stretch> m) { 
+                BitString<lambda + stretch> v1 = G.evaluate(k);
+                BitString<lambda + stretch> v3 = v1 + m;
+                return v1 + v3;
+            }
+            """,
+        ),
         # Many chained together
         (
             """

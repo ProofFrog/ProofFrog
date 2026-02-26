@@ -188,23 +188,18 @@ class RedundantCopyTransformer(BlockTransformer):
                         and node.var.name == copy_name
                     )
 
-                def original_used(original_name: str, node: frog_ast.ASTNode) -> bool:
-                    return (
-                        isinstance(node, frog_ast.Variable)
-                        and node.name == original_name
-                    )
-
                 remaining_block = frog_ast.Block(
                     copy.deepcopy(block.statements[index + 1 :])
                 )
                 was_written = SearchVisitor[frog_ast.Variable](
                     functools.partial(written_to, copy_name)
                 ).visit(remaining_block)
-                used_again = SearchVisitor[frog_ast.Variable](
-                    functools.partial(original_used, original_name)
+                original_reassigned = SearchVisitor[frog_ast.Variable](
+                    functools.partial(written_to, original_name)
                 ).visit(remaining_block)
-                # If it was used again, just move on. This ain't gonna work.
-                if was_written or used_again:
+                # If the copy was reassigned, or the original was reassigned
+                # (making the substitution unsafe), skip.
+                if was_written or original_reassigned:
                     continue
 
                 def copy_used(copy_name: str, node: frog_ast.ASTNode) -> bool:

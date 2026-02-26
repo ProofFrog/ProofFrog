@@ -14,7 +14,8 @@ dependencies = [
 	"antlr4-python3-runtime >= 4.13",
 	"colorama >= 0.4",
 	"z3-solver >= 4.12",
-	"sympy >= 1.12"
+	"sympy >= 1.12",
+	"flask >= 3.0"
 ]
 
 [project.urls]

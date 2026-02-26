@@ -12,6 +12,7 @@ def usage() -> None:
     print("Incorrect Arguments", file=sys.stderr)
     print("Usage: proof_frog parse <file>")
     print("Usage: proof_frog prove <file.proof>")
+    print("Usage: proof_frog web <directory>")
     sys.exit(1)
 
 
@@ -73,6 +74,12 @@ def main() -> None:
             engine.prove(proof_file)
         except proof_engine.FailedProof:
             sys.exit(1)
+
+    elif argv[1] == "web":
+        directory = argv[2] if len(argv) > 2 else "."
+        from proof_frog.web_server import start_server
+        start_server(directory)
+
     else:
         usage()
 

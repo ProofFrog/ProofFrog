@@ -16,6 +16,16 @@ You can also parse any type of file (scheme, proof, game, or primitive) using `p
 
 The bash files `testParsing.sh` ensures that the ANTLR grammar can parse each file in the examples folder. `testAST.sh` parses each file with proof_frog, strips the whitespace, and diffs it with the original file to ensure that the AST output matches the file input. Finally, `testProofs.sh` runs both the suite of examples and the pytest unit tests.
 
+## Web Interface
+
+ProofFrog includes a browser-based editor for interactively editing and verifying proof files.
+
+```
+python3 -m proof_frog web [directory]
+```
+
+This starts a local web server (default port 5173) and opens the interface in your browser. The `[directory]` argument specifies the working directory for proof files; it defaults to the current directory. From the interface you can browse, edit, parse, and prove files without using the command line.
+
 ## Jupyter Notebook
 
 We have a custom kernel that allows a user to interact with proof_frog via a Jupyter notebook. To do so, run the following commands from the base directory.

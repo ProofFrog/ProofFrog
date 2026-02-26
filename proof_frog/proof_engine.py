@@ -506,6 +506,83 @@ class ProofEngine:
                     quit_proof()
         print("Inline Success!")
 
+    def canonicalize_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        """Apply the same simplification pipeline as check_equivalent() (without
+        step-specific assumptions) and the final standardization steps, returning
+        the canonical form of the game as printed by the prove command."""
+        AstManipulator = namedtuple("AstManipulator", ["fn", "name"])
+        ast_manipulators: list[AstManipulator] = [
+            AstManipulator(
+                fn=lambda ast: visitors.SymbolicComputationTransformer(
+                    self.variables
+                ).transform(ast),
+                name="Symbolic Computation",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifySpliceTransformer(
+                    self.variables
+                ).transform(ast),
+                name="Simplifying Splices",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.RedundantCopyTransformer().transform(ast),
+                name="Remove Redundant Copies",
+            ),
+            AstManipulator(fn=self.sort_game, name="Topological Sorting"),
+            AstManipulator(fn=remove_duplicate_fields, name="Remove Duplicate Fields"),
+            AstManipulator(
+                fn=lambda ast: visitors.BranchEliminiationTransformer().transform(ast),
+                name="Branch Elimination",
+            ),
+            AstManipulator(
+                fn=dependencies.remove_unnecessary_fields,
+                name="Remove unnecessary statements and fields",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.CollapseAssignmentTransformer().transform(ast),
+                name="Collapse Assignment",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifyReturnTransformer().transform(ast),
+                name="Simplify Returns",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifyIfTransformer().transform(ast),
+                name="Simplify Ifs",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.ExpandTupleTransformer().transform(ast),
+                name="Expand Tuples",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifyNot().transform(ast),
+                name="Simplify Nots",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.RedundantFieldCopyTransformer().transform(ast),
+                name="Remove redundant variables for fields",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifyTupleTransformer(ast).transform(ast),
+                name="Simplify tuples that are copies of their fields",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.RemoveUnreachableTransformer(ast).transform(ast),
+                name="Remove unreachable blocks of code",
+            ),
+        ]
+        while True:
+            new_game = game
+            for manipulator in ast_manipulators:
+                new_game = manipulator.fn(new_game)
+            if new_game == game:
+                break
+            game = new_game
+        game = visitors.VariableStandardizingTransformer().transform(game)
+        game = standardize_field_names(game)
+        game = dependencies.BubbleSortFieldAssignment().transform(game)
+        return game
+
     def apply_reduction(
         self,
         challenger: frog_ast.Game,

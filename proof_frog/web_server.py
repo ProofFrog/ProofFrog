@@ -61,7 +61,7 @@ def _get_file_type(file_name: str) -> frog_ast.FileType:
     return frog_ast.FileType(extension)
 
 
-def _capture_inline(file_path: str, step_index: int) -> tuple[str, bool]:
+def _capture_inline(file_path: str, step_index: int) -> tuple[str, str, bool]:
     buf = io.StringIO()
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
@@ -101,17 +101,18 @@ def _capture_inline(file_path: str, step_index: int) -> tuple[str, bool]:
             engine.get_method_lookup()
 
         if step_index < 0 or step_index >= len(proof_file.steps):
-            return f"Step index {step_index} out of range (proof has {len(proof_file.steps)} steps)", False
+            return f"Step index {step_index} out of range (proof has {len(proof_file.steps)} steps)", "", False
         step = proof_file.steps[step_index]
         if not isinstance(step, frog_ast.Step):
-            return "This step is an assumption, not a game step.", False
+            return "This step is an assumption, not a game step.", "", False
 
         suppress = io.StringIO()
         with redirect_stdout(suppress), redirect_stderr(suppress):
             game = engine._get_game_ast(step.challenger, step.reduction)
-        return str(game), True
+            canon = engine.canonicalize_game(copy.deepcopy(game))
+        return str(game), str(canon), True
     except Exception as e:
-        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False
+        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", "", False
 
 
 def _capture_prove(file_path: str) -> tuple[str, bool]:
@@ -243,8 +244,8 @@ def create_app(directory: str) -> Flask:
         if abs_path is None:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
-        output, success = _capture_inline(str(abs_path), step_index)
-        return jsonify({"output": output, "success": success})
+        output, canonical, success = _capture_inline(str(abs_path), step_index)
+        return jsonify({"output": output, "canonical": canonical, "success": success})
 
     return app
 

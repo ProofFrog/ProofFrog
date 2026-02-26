@@ -133,6 +133,22 @@
     .editor-wrap.readonly .CodeMirror { background: #181818; }
     .editor-wrap.readonly .CodeMirror-cursor { display: none !important; }
 
+    /* ── Split-pane (inline game + canonical) ── */
+    .editor-wrap.split-view { display: flex; flex-direction: row; }
+    .split-pane { display: flex; flex-direction: column; flex: 1; overflow: hidden; min-width: 0; }
+    .split-pane-header {
+      padding: 3px 10px; font-size: 11px; font-weight: 600;
+      background: var(--bg3); border-bottom: 1px solid var(--border);
+      color: var(--text-dim); letter-spacing: 0.05em; flex-shrink: 0;
+    }
+    .split-pane .CodeMirror { height: 100%; font-size: 13px; font-family: 'Menlo','Monaco','Consolas',monospace; }
+    .split-pane .CodeMirror-scroll { height: 100%; }
+    .v-split-handle {
+      width: 4px; cursor: ew-resize; background: transparent; flex-shrink: 0;
+      border-left: 1px solid var(--border);
+    }
+    .v-split-handle:hover, .v-split-handle.dragging { background: var(--accent2); }
+
     /* ── Welcome screen ── */
     #welcome {
       position: absolute; inset: 0; display: flex; flex-direction: column;
@@ -305,9 +321,10 @@ function activateTab(path) {
   const tabEl = document.querySelector(`.tab[data-path="${CSS.escape(path)}"]`);
   if (tabEl) tabEl.classList.add("active");
 
-  const { wrap, cm } = tabs.get(path);
+  const { wrap, cm, cmRight } = tabs.get(path);
   wrap.classList.add("active");
   cm.refresh(); // CM5 needs refresh after being made visible
+  if (cmRight) cmRight.refresh();
   if (!tabs.get(path)?.readonly) cm.focus();
 
   updateToolbar();
@@ -537,21 +554,62 @@ async function openInlineTab(stepIndex, label) {
   // Close existing inline tab for this step if already open
   if (tabs.has(virtualPath)) closeTab(virtualPath);
 
-  // Create read-only editor (placeholder content while loading)
+  // Build split-view wrapper: left pane (inlined) + drag handle + right pane (canonical)
   const wrap = document.createElement("div");
-  wrap.className = "editor-wrap readonly";
+  wrap.className = "editor-wrap readonly split-view";
   editorsContainer.appendChild(wrap);
 
-  const cm = CodeMirror(wrap, {
-    value: "Loading…",
-    theme: "dracula",
-    lineNumbers: true,
-    readOnly: true,
-    lineWrapping: false,
-  });
+  function makeSplitPane(headerText) {
+    const pane = document.createElement("div");
+    pane.className = "split-pane";
+    const header = document.createElement("div");
+    header.className = "split-pane-header";
+    header.textContent = headerText;
+    pane.appendChild(header);
+    return pane;
+  }
+
+  const leftPane = makeSplitPane("Inlined Game");
+  const handle = document.createElement("div");
+  handle.className = "v-split-handle";
+  const rightPane = makeSplitPane("Canonical Form");
+
+  wrap.appendChild(leftPane);
+  wrap.appendChild(handle);
+  wrap.appendChild(rightPane);
+
+  const cmOpts = { value: "Loading…", theme: "dracula", lineNumbers: true, readOnly: true, lineWrapping: false };
+  const cmLeft = CodeMirror(leftPane, cmOpts);
+  const cmRight = CodeMirror(rightPane, { ...cmOpts });
+
+  // Vertical drag-to-resize
+  (function setupVSplit() {
+    let startX, startFlex;
+    handle.addEventListener("mousedown", e => {
+      startX = e.clientX;
+      startFlex = leftPane.getBoundingClientRect().width;
+      handle.classList.add("dragging");
+      function onMove(e) {
+        const delta = e.clientX - startX;
+        const totalW = wrap.getBoundingClientRect().width - handle.offsetWidth;
+        const newLeftW = Math.max(100, Math.min(totalW - 100, startFlex + delta));
+        leftPane.style.flex = `0 0 ${newLeftW}px`;
+        rightPane.style.flex = "1 1 0";
+        cmLeft.refresh();
+        cmRight.refresh();
+      }
+      function onUp() {
+        handle.classList.remove("dragging");
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+      }
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  })();
 
   const tabName = `[inline] ${label}`;
-  tabs.set(virtualPath, { name: tabName, savedContent: "Loading…", cm, wrap, readonly: true });
+  tabs.set(virtualPath, { name: tabName, savedContent: "Loading…", cm: cmLeft, cmRight, wrap, readonly: true });
 
   const tabEl = document.createElement("div");
   tabEl.className = "tab";
@@ -566,7 +624,7 @@ async function openInlineTab(stepIndex, label) {
 
   activateTab(virtualPath);
 
-  // Now fetch the inlined game
+  // Fetch both the inlined game and canonical form
   setRunning(true);
   try {
     const data = await apiFetch("/api/inline", {
@@ -574,12 +632,15 @@ async function openInlineTab(stepIndex, label) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: sourceTab, content, step_index: stepIndex }),
     });
-    const result = data.output || "(no output)";
-    cm.setValue(result);
+    const raw = data.output || "(no output)";
+    const canonical = data.canonical || "(no output)";
+    cmLeft.setValue(raw);
+    cmRight.setValue(canonical);
     const tab = tabs.get(virtualPath);
-    if (tab) tab.savedContent = result;
+    if (tab) tab.savedContent = raw;
   } catch (e) {
-    cm.setValue(`Error: ${e}`);
+    cmLeft.setValue(`Error: ${e}`);
+    cmRight.setValue("");
   } finally {
     setRunning(false);
   }

@@ -1,0 +1,90 @@
+// ── Resize handle setup (side effects only) ───────────────────────────────────
+
+import { outputPane, wizardPanel } from './state.js';
+
+(function setupResize() {
+  const handle = document.getElementById("resize-handle");
+  let startY, startH;
+  handle.addEventListener("mousedown", e => {
+    startY = e.clientY;
+    startH = outputPane.offsetHeight;
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", () => document.removeEventListener("mousemove", onMove), { once: true });
+  });
+  function onMove(e) {
+    const delta = startY - e.clientY;
+    const newH = Math.max(80, Math.min(600, startH + delta));
+    outputPane.style.height = newH + "px";
+  }
+})();
+
+(function setupSidebarResize() {
+  const handle = document.getElementById("sidebar-resize-handle");
+  const sidebar = document.getElementById("sidebar");
+  let startX, startW;
+  handle.addEventListener("mousedown", e => {
+    startX = e.clientX;
+    startW = sidebar.offsetWidth;
+    handle.classList.add("dragging");
+    function onMove(e) {
+      const newW = Math.max(120, Math.min(500, startW + e.clientX - startX));
+      sidebar.style.width = newW + "px";
+    }
+    function onUp() {
+      handle.classList.remove("dragging");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+})();
+
+(function setupInnerResize() {
+  const handle = document.getElementById("inner-resize-handle");
+  const gameHopsPanel = document.getElementById("game-hops-panel");
+  let startY, startH;
+  handle.addEventListener("mousedown", e => {
+    startY = e.clientY;
+    startH = gameHopsPanel.offsetHeight;
+    handle.classList.add("dragging");
+    function onMove(e) {
+      const sidebar = document.getElementById("sidebar");
+      const maxH = sidebar.offsetHeight - 100;
+      const delta = startY - e.clientY;
+      const newH = Math.max(80, Math.min(maxH, startH + delta));
+      gameHopsPanel.style.height = newH + "px";
+    }
+    function onUp() {
+      handle.classList.remove("dragging");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+})();
+
+(function setupWizardResize() {
+  const handle = document.getElementById("wizard-resize-handle");
+  let startY, startH;
+  handle.addEventListener("mousedown", e => {
+    startY = e.clientY;
+    startH = wizardPanel.offsetHeight;
+    handle.classList.add("dragging");
+    function onMove(e) {
+      const sidebar = document.getElementById("sidebar");
+      const maxH = sidebar.offsetHeight - 100;
+      const delta = startY - e.clientY;
+      const newH = Math.max(60, Math.min(maxH, startH + delta));
+      wizardPanel.style.height = newH + "px";
+    }
+    function onUp() {
+      handle.classList.remove("dragging");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+})();

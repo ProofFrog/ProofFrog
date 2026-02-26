@@ -8,7 +8,7 @@ import webbrowser
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, send_from_directory
 
 from . import frog_parser, frog_ast, proof_engine
 
@@ -175,7 +175,7 @@ def _build_tree(path: Path, base: Path) -> dict:
 
 
 def create_app(directory: str) -> Flask:
-    app = Flask(__name__)
+    app = Flask(__name__, static_folder=None)
     static_dir = Path(__file__).parent / "web"
 
     @app.route("/")
@@ -185,6 +185,10 @@ def create_app(directory: str) -> Flask:
     @app.route("/prooffrog.png")
     def logo():  # type: ignore[return-value]
         return send_file(static_dir / "prooffrog.png")
+
+    @app.route("/static/<path:filename>")
+    def serve_static(filename):  # type: ignore[return-value]
+        return send_from_directory(str(static_dir), filename)
 
     @app.route("/api/files")
     def list_files():  # type: ignore[return-value]

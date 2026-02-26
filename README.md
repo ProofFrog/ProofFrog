@@ -1,32 +1,62 @@
 # ProofFrog
-ProofFrog is a work-in-progress tool for verifying cryptographic game-hopping proofs. All security properties in ProofFrog are written via pairs of indistinguishable games. More info can be found on our [wiki](https://prooffrog.github.io/)
 
-## Installation:
+ProofFrog is a work-in-progress tool for verifying game transitions in cryptographic game-hopping proofs. All security properties in ProofFrog are written via pairs of indistinguishable games. More info can be found on [the ProofFrog website](https://prooffrog.github.io/)
+
+## Installation
+
+There are two ways of installing ProofFrog: from the published Python package, or by cloning the ProofFrog repository and running that version. If you want the latest features of ProofFrog, you should use the second approach.
+
+### From PyPI (recommended)
+
+Install ProofFrog into a virtual environment:
 
 ```
-pip3 install -r requirements.txt
-pip3 install -r requirements-dev.txt
+python3 -m venv .venv
+source .venv/bin/activate
+pip install proof_frog
 ```
 
-## Commands:
+Once installed, the `proof_frog` command is available directly:
 
-To use the proof engine: `python3 -m proof_frog prove [proof_file]`. The [examples repo](https://github.com/ProofFrog/examples/]) contains a list of examples largely adapated from [The Joy of Cryptography](https://joyofcryptography.com/). See also our [examples page](https://github.com/ProofFrog/examples) on our wiki.
+```
+proof_frog web .
+proof_frog prove [proof_file]
+```
 
-You can also parse any type of file (scheme, proof, game, or primitive) using `python3 -m proof_frog parse [file]`. It will read the file, transform it into an internal AST representation, stringify the representation, and print it back out to the screen.
+### From source (local development)
 
-The bash files `testParsing.sh` ensures that the ANTLR grammar can parse each file in the examples folder. `testAST.sh` parses each file with proof_frog, strips the whitespace, and diffs it with the original file to ensure that the AST output matches the file input. Finally, `testProofs.sh` runs both the suite of examples and the pytest unit tests.
+Clone the repository and install in editable mode:
+
+```
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+pip install -r requirements-dev.txt
+```
+
+Run commands via the module:
+
+```
+python3 -m proof_frog prove [proof_file]
+```
 
 ## Web Interface
 
 ProofFrog includes a browser-based editor for interactively editing and verifying proof files.
 
 ```
-python3 -m proof_frog web [directory]
+proof_frog web [directory]
 ```
 
 This starts a local web server (default port 5173) and opens the interface in your browser. The `[directory]` argument specifies the working directory for proof files; it defaults to the current directory. From the interface you can browse, edit, parse, and prove files without using the command line.
 
-## Jupyter Notebook
+## Command-Line Interface
+
+To use the proof engine, run `proof_frog prove [proof_file]` (PyPI install) or `python3 -m proof_frog prove [proof_file]` (local install). The [examples repo](https://github.com/ProofFrog/examples/) contains a list of examples largely adapted from [The Joy of Cryptography](https://joyofcryptography.com/). See also the [examples and tutorials on our website](https://prooffrog.github.io/).
+
+You can also parse any type of file (scheme, proof, game, or primitive) using `proof_frog parse [file]`. It will read the file, transform it into an internal AST representation, stringify the representation, and print it back out to the screen.
+
+<!-- ## Jupyter Notebook
 
 We have a custom kernel that allows a user to interact with proof_frog via a Jupyter notebook. To do so, run the following commands from the base directory.
 
@@ -35,7 +65,7 @@ docker build -f jupyter/Dockerfile -t proof_frog .
 docker run -p 8888:8888 proof_frog
 ```
 
-The output from the `docker run` command will contain a `localhost:8888` URL containing a token that will allow you to view the jupyter notebook.
+The output from the `docker run` command will contain a `localhost:8888` URL containing a token that will allow you to view the jupyter notebook. -->
 
 # Acknowledgements
 <img src="media/NSERC.jpg" alt="NSERC signature" width="750"/> 

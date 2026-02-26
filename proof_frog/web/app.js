@@ -1,12 +1,12 @@
 // ── Application entry point ───────────────────────────────────────────────────
 // Wires up button handlers, keyboard shortcuts, and runs init.
 
-import { state, applyTheme, btnSave, btnParse, btnProve, btnInline, btnTheme } from './state.js';
+import { state, applyTheme, btnSave, btnParse, btnProve, btnTheme } from './state.js';
 import './cm-mode.js';
 import { saveFile, runCommand, updateToolbar } from './editor.js';
-import { openInlineTab } from './inline-game.js';
 import { loadFileTree } from './file-tree.js';
 import { updateWizardPanel, closeWizardModal, createGameFromWizard } from './wizard.js';
+import { updateGameHopsPanel } from './game-hops.js';
 import './resize.js';
 
 // ── Button handlers ───────────────────────────────────────────────────────────
@@ -14,11 +14,6 @@ import './resize.js';
 btnSave.addEventListener("click", () => saveFile(state.activeTab));
 btnParse.addEventListener("click", () => runCommand("/api/parse", "Parse"));
 btnProve.addEventListener("click", () => runCommand("/api/prove", "Run Proof"));
-btnInline.addEventListener("click", () => {
-  if (state.activeTab && state.cursorInlineStep) {
-    openInlineTab(state.cursorInlineStep.stepIndex, state.cursorInlineStep.label);
-  }
-});
 document.getElementById("output-close").addEventListener("click", () => {
   document.getElementById("output-pane").classList.remove("visible");
 });
@@ -54,3 +49,4 @@ applyTheme(state.darkMode);
 updateToolbar();
 loadFileTree();
 updateWizardPanel();
+updateGameHopsPanel();

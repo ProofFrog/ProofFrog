@@ -55,10 +55,22 @@ export function updateGameHopsPanel() {
     }
   }
 
-  if (!proofPath) { panel.style.display = "none"; return; }
+  if (!proofPath) {
+    panel.style.display = "";
+    list.innerHTML = "";
+    const empty = document.createElement("div");
+    empty.className = "hop-item-empty";
+    empty.textContent = "No proof file open";
+    list.appendChild(empty);
+    return;
+  }
 
   const content = getTabContent(proofPath);
-  if (content === null) { panel.style.display = "none"; return; }
+  if (content === null) {
+    panel.style.display = "";
+    list.innerHTML = "";
+    return;
+  }
 
   // Determine highlighted step when an inline tab is active
   let activeStepIndex = null;
@@ -91,14 +103,15 @@ export function updateGameHopsPanel() {
     item.className = "hop-item" + (stepIndex === activeStepIndex ? " active" : "") + validityClass;
     item.title = label;
 
+    const labelSpan = document.createElement("span");
+    labelSpan.className = "hop-label";
+    labelSpan.textContent = label;
+
     const statusSpan = document.createElement("span");
     statusSpan.className = "hop-status";
     statusSpan.textContent = result ? (result.valid ? "✓" : "✗") : "";
 
-    const labelSpan = document.createElement("span");
-    labelSpan.textContent = label;
-
-    item.append(statusSpan, labelSpan);
+    item.append(labelSpan, statusSpan);
     item.addEventListener("click", () => {
       if (state.activeTab !== proofPath) activateTab(proofPath);
       openInlineTab(stepIndex, label);

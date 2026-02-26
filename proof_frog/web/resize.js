@@ -2,6 +2,23 @@
 
 import { outputPane, wizardPanel } from './state.js';
 
+(function initPanelHeights() {
+  const sidebar = document.getElementById("sidebar");
+  const gameHopsPanel = document.getElementById("game-hops-panel");
+  function setHeights() {
+    const h = sidebar.offsetHeight;
+    if (h > 0) {
+      gameHopsPanel.style.height = Math.round(h * 0.25) + "px";
+      wizardPanel.style.height = Math.round(h * 0.10) + "px";
+    }
+  }
+  if (sidebar.offsetHeight > 0) {
+    setHeights();
+  } else {
+    requestAnimationFrame(setHeights);
+  }
+})();
+
 (function setupResize() {
   const handle = document.getElementById("resize-handle");
   let startY, startH;

@@ -6,8 +6,7 @@ export const state = {
   tabs: new Map(),           // path → { name, savedContent, cm, wrap, readonly }
   hopResultsByPath: new Map(), // path → [{step_num, valid, kind}, ...]
   activeTab: null,
-  cursorInlineStep: null,    // null or { stepIndex, label }
-  primitiveFiles: [],        // { path, name } for all .primitive files, sorted by name
+primitiveFiles: [],        // { path, name } for all .primitive files, sorted by name
   darkMode: localStorage.getItem("theme") === "dark",
 };
 
@@ -20,7 +19,6 @@ export const welcome           = document.getElementById("welcome");
 export const btnSave           = document.getElementById("btn-save");
 export const btnParse          = document.getElementById("btn-parse");
 export const btnProve          = document.getElementById("btn-prove");
-export const btnInline         = document.getElementById("btn-inline");
 export const btnTheme          = document.getElementById("btn-theme");
 export const dirLabel          = document.getElementById("dir-label");
 export const outputPane        = document.getElementById("output-pane");

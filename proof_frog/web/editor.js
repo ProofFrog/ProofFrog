@@ -6,27 +6,16 @@
 import {
   state,
   tabsEl, tabsEmpty, editorsContainer, welcome,
-  btnSave, btnParse, btnProve, btnInline,
+  btnSave, btnParse, btnProve,
   outputPane, outputStatus, outputTitle, outputPre,
   apiFetch, getCmTheme,
 } from './state.js';
 import { getModeForFile } from './cm-mode.js';
 import { updateGameHopsPanel } from './game-hops.js';
-import { getStepAtCursor } from './inline-game.js';
 import { updateWizardPanel } from './wizard.js';
 import { highlightActiveFile } from './file-tree.js';
 
 // ── Toolbar helpers ───────────────────────────────────────────────────────────
-
-export function updateInlineButton() {
-  const isProof = state.activeTab && state.activeTab.endsWith(".proof");
-  if (!isProof || !state.cursorInlineStep) {
-    btnInline.style.display = "none";
-    return;
-  }
-  btnInline.style.display = "";
-  btnInline.disabled = false;
-}
 
 export function updateToolbar() {
   const hasTab = state.activeTab !== null;
@@ -36,22 +25,18 @@ export function updateToolbar() {
   const isProof = hasTab && state.activeTab.endsWith(".proof");
   btnProve.style.display = isProof ? "" : "none";
   btnProve.disabled = !isProof;
-  updateInlineButton();
 }
 
 export function setRunning(running) {
   btnParse.disabled = running || !state.activeTab;
   btnProve.disabled = running || !(state.activeTab && state.activeTab.endsWith(".proof"));
   btnSave.disabled = running || !state.activeTab;
-  btnInline.disabled = running || !state.cursorInlineStep;
   if (running) {
     btnParse.classList.add("running");
     btnProve.classList.add("running");
-    btnInline.classList.add("running");
   } else {
     btnParse.classList.remove("running");
     btnProve.classList.remove("running");
-    btnInline.classList.remove("running");
     updateToolbar();
   }
 }
@@ -93,7 +78,6 @@ export function activateTab(path) {
   }
 
   state.activeTab = path;
-  state.cursorInlineStep = null;
   welcome.classList.add("hidden");
 
   const tabEl = document.querySelector(`.tab[data-path="${CSS.escape(path)}"]`);
@@ -141,14 +125,6 @@ export function createEditor(content, onChange, path) {
   });
 
   cm.on("change", onChange);
-
-  if (path && path.endsWith(".proof")) {
-    cm.on("cursorActivity", () => {
-      if (state.activeTab !== path) return;
-      state.cursorInlineStep = getStepAtCursor(cm.getValue(), cm.getCursor().line);
-      updateInlineButton();
-    });
-  }
 
   return { cm, wrap };
 }

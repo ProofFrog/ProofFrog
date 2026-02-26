@@ -1,3 +1,4 @@
+import os
 import sys
 import copy
 from typing import Optional, TypeVar, Union, TypeAlias
@@ -464,10 +465,22 @@ def check_proof_well_formed(
 def print_error(
     location: frog_ast.ASTNode, message: str, file_name: str = "Unknown"
 ) -> None:
-    print(f"File: {file_name}")
-    print(f"Line {location.line_num}, column: {location.column_num}", file=sys.stderr)
-    print(location)
-    print(message, file=sys.stderr)
+    line, col = location.line_num, location.column_num
+    loc = file_name
+    if line >= 0:
+        loc += f":{line}:{col}"
+    print(f"{loc}: error: {message}", file=sys.stderr)
+    if file_name != "Unknown" and os.path.isfile(file_name) and line >= 1:
+        try:
+            with open(file_name, encoding="utf-8") as f:
+                lines = f.readlines()
+            if line <= len(lines):
+                src = lines[line - 1].rstrip()
+                caret = " " * col + "^"
+                print(src, file=sys.stderr)
+                print(caret, file=sys.stderr)
+        except OSError:
+            pass
     raise FailedTypeCheck()
 
 

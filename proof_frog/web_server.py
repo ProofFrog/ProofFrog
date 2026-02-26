@@ -8,7 +8,6 @@ import webbrowser
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 
-from antlr4 import error
 from flask import Flask, request, jsonify, send_file
 
 from . import frog_parser, frog_ast, proof_engine
@@ -50,8 +49,8 @@ def _capture_parse(file_path: str) -> tuple[str, bool]:
         return _strip_ansi(buf.getvalue()), True
     except ValueError as e:
         return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False
-    except error.Errors.ParseCancellationException as e:
-        return _strip_ansi(buf.getvalue()) + f"\nParse error: {e}", False
+    except frog_parser.ParseError as e:
+        return _strip_ansi(buf.getvalue()) + f"\n{e}", False
     except Exception as e:
         return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False
 
@@ -149,8 +148,8 @@ def _capture_prove(file_path: str) -> tuple[str, bool, list[dict]]:
             if r.depth == 0 and r.kind != "induction_rollover"
         ]
         return _strip_ansi(buf.getvalue()), proof_succeeded, hop_results
-    except error.Errors.ParseCancellationException as e:
-        return _strip_ansi(buf.getvalue()) + f"\nParse error: {e}", False, []
+    except frog_parser.ParseError as e:
+        return _strip_ansi(buf.getvalue()) + f"\n{e}", False, []
     except Exception as e:
         return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False, []
 

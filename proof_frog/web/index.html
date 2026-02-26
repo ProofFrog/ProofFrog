@@ -232,6 +232,55 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/codemirror.min.js"></script>
 <script>
+// ── ProofFrog syntax highlighting mode ───────────────────────────────────────
+
+CodeMirror.defineMode("prooffrog", function () {
+  var keywords = new Set([
+    "Primitive","Scheme","Game","Reduction","proof","let","assume","theorem",
+    "games","export","as","extends","compose","against","import","requires",
+    "if","else","for","return","union","in","subsets"
+  ]);
+  var types = new Set(["Bool","Void","Int","BitString","Set","Map","Array"]);
+  var atoms = new Set(["true","false","None"]);
+
+  return {
+    token: function (stream) {
+      if (stream.eatSpace()) return null;
+      // Line comment
+      if (stream.match("//")) { stream.skipToEnd(); return "comment"; }
+      // Single-quoted string (import paths)
+      if (stream.peek() === "'") {
+        stream.next();
+        while (!stream.eol() && stream.peek() !== "'") stream.next();
+        if (!stream.eol()) stream.next();
+        return "string";
+      }
+      // Numbers: binary and decimal
+      if (stream.match(/0b[01]+/) || stream.match(/\d+/)) return "number";
+      // Identifiers and keywords
+      if (stream.match(/[A-Za-z_][A-Za-z0-9_]*/)) {
+        var w = stream.current();
+        if (keywords.has(w)) return "keyword";
+        if (types.has(w)) return "type";
+        if (atoms.has(w)) return "atom";
+        return "variable";
+      }
+      // Operators
+      if (stream.match("<-")) return "operator";
+      if (stream.match(/[=!<>]=|&&|\|\|/)) return "operator";
+      if (stream.match(/[+\-*\/|!<>=]/)) return "operator";
+      stream.next();
+      return null;
+    }
+  };
+});
+
+function getModeForFile(path) {
+  if (!path || path.startsWith(":inline:")) return null;
+  var ext = path.split(".").pop();
+  return ["primitive","scheme","game","proof"].includes(ext) ? "prooffrog" : null;
+}
+
 // ── State ────────────────────────────────────────────────────────────────────
 
 const tabs = new Map(); // path → { name, savedContent, cm, wrap, readonly }
@@ -289,6 +338,7 @@ function createEditor(content, onChange, path) {
 
   const cm = CodeMirror(wrap, {
     value: content,
+    mode: getModeForFile(path),
     theme: getCmTheme(),
     lineNumbers: true,
     tabSize: 2,
@@ -616,7 +666,7 @@ async function openInlineTab(stepIndex, label) {
   wrap.appendChild(handle);
   wrap.appendChild(rightPane);
 
-  const cmOpts = { value: "Loading…", theme: getCmTheme(), lineNumbers: true, readOnly: true, lineWrapping: false };
+  const cmOpts = { value: "Loading…", mode: "prooffrog", theme: getCmTheme(), lineNumbers: true, readOnly: true, lineWrapping: false };
   const cmLeft = CodeMirror(leftPane, cmOpts);
   const cmRight = CodeMirror(rightPane, { ...cmOpts });
 

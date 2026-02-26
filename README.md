@@ -19,7 +19,7 @@ pip install proof_frog
 Once installed, the `proof_frog` command is available directly:
 
 ```
-proof_frog web .
+proof_frog web examples/ # or whatever other directory you want
 proof_frog prove [proof_file]
 ```
 
@@ -28,6 +28,9 @@ proof_frog prove [proof_file]
 Clone the repository and install in editable mode:
 
 ```
+git clone https://github.com/ProofFrog/ProofFrog
+cd ProofFrog
+git submodule update --init
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -37,6 +40,7 @@ pip install -r requirements-dev.txt
 Run commands via the module:
 
 ```
+proof_frog web examples/ # or whatever other directory you want
 python3 -m proof_frog prove [proof_file]
 ```
 

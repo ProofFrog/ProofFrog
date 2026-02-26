@@ -18,6 +18,9 @@ dependencies = [
 	"flask >= 3.0"
 ]
 
+[project.optional-dependencies]
+mcp = ["mcp[cli] >= 1.0"]
+
 [project.urls]
 Source = "https://github.com/ProofFrog/ProofFrog"
 Documentation = "https://prooffrog.github.io"

@@ -11,7 +11,9 @@ def usage() -> None:
     print("Incorrect Arguments", file=sys.stderr)
     print("Usage: proof_frog parse <file>")
     print("Usage: proof_frog prove <file.proof>")
+    print("Usage: proof_frog describe <file>")
     print("Usage: proof_frog web <directory>")
+    print("Usage: proof_frog mcp [directory]")
     sys.exit(1)
 
 
@@ -80,10 +82,34 @@ def main() -> None:
         except proof_engine.FailedProof:
             sys.exit(1)
 
+    elif argv[1] == "describe":
+        if len(argv) < 3:
+            usage()
+        file_name = argv[2]
+        from proof_frog.describe import describe_file
+        try:
+            print(describe_file(file_name))
+        except (ValueError, frog_parser.ParseError) as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+
     elif argv[1] == "web":
         directory = argv[2] if len(argv) > 2 else "."
         from proof_frog.web_server import start_server
         start_server(directory)
+
+    elif argv[1] == "mcp":
+        directory = argv[2] if len(argv) > 2 else "."
+        try:
+            from proof_frog.mcp_server import run_server
+        except ImportError:
+            print(
+                "The 'mcp' package is required for the MCP server.\n"
+                "Install it with: pip install 'proof_frog[mcp]'",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        run_server(directory)
 
     else:
         usage()

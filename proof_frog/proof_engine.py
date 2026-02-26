@@ -20,7 +20,7 @@ class WhichGame(Enum):
 
 
 ProcessedAssumption = namedtuple("ProcessedAssumption", ["assumption", "which"])
-HopResult = namedtuple("HopResult", ["step_num", "valid", "kind"])
+HopResult = namedtuple("HopResult", ["step_num", "valid", "kind", "depth"])
 
 
 class FailedProof(Exception):
@@ -114,6 +114,7 @@ class ProofEngine:
         self,
         steps: list[frog_ast.ProofStep],
         assumed_indistinguishable: list[frog_ast.ParameterizedGame],
+        _depth: int = 0,
     ) -> None:
         step_num = 0
 
@@ -150,7 +151,7 @@ class ProofEngine:
                     print(f"Hop To: {next_step}\n")
                     print("Valid by assumption")
                     self.hop_results.append(
-                        HopResult(step_num=step_num, valid=True, kind="by_assumption")
+                        HopResult(step_num=step_num, valid=True, kind="by_assumption", depth=_depth)
                     )
                     continue
                 current_game_ast = self._get_game_ast(
@@ -214,13 +215,14 @@ class ProofEngine:
                     step_num=step_num,
                     valid=hop_valid,
                     kind="equivalent" if hop_valid else "failed",
+                    depth=_depth,
                 )
             )
             if isinstance(steps[i], frog_ast.Induction):
                 the_induction = steps[i]
                 assert isinstance(the_induction, frog_ast.Induction)
                 self.proof_let_types.set(the_induction.name, frog_ast.IntType())
-                self.prove_steps(the_induction.steps, assumed_indistinguishable)
+                self.prove_steps(the_induction.steps, assumed_indistinguishable, _depth=_depth + 1)
                 # Check induction roll over
                 first_step = the_induction.steps[0]
                 assert isinstance(first_step, frog_ast.Step)
@@ -262,6 +264,7 @@ class ProofEngine:
                         step_num=step_num,
                         valid=rollover_valid,
                         kind="induction_rollover",
+                        depth=_depth,
                     )
                 )
                 self.proof_let_types.remove(the_induction.name)

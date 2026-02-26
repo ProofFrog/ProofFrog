@@ -115,12 +115,13 @@ def _capture_inline(file_path: str, step_index: int) -> tuple[str, str, bool]:
         return _strip_ansi(buf.getvalue()) + f"\nError: {e}", "", False
 
 
-def _capture_prove(file_path: str) -> tuple[str, bool]:
+def _capture_prove(file_path: str) -> tuple[str, bool, list[dict]]:
     buf = io.StringIO()
+    engine = proof_engine.ProofEngine(False)
+    proof_succeeded = False
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
             proof_file = frog_parser.parse_proof_file(file_path)
-            engine = proof_engine.ProofEngine(False)
 
             for imp in proof_file.imports:
                 file_type = _get_file_type(imp.filename)
@@ -138,14 +139,20 @@ def _capture_prove(file_path: str) -> tuple[str, bool]:
 
             try:
                 engine.prove(proof_file)
+                proof_succeeded = True
             except proof_engine.FailedProof:
-                return _strip_ansi(buf.getvalue()), False
+                pass
 
-        return _strip_ansi(buf.getvalue()), True
+        hop_results = [
+            {"step_num": r.step_num, "valid": r.valid, "kind": r.kind}
+            for r in engine.hop_results
+            if r.depth == 0 and r.kind != "induction_rollover"
+        ]
+        return _strip_ansi(buf.getvalue()), proof_succeeded, hop_results
     except error.Errors.ParseCancellationException as e:
-        return _strip_ansi(buf.getvalue()) + f"\nParse error: {e}", False
+        return _strip_ansi(buf.getvalue()) + f"\nParse error: {e}", False, []
     except Exception as e:
-        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False
+        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False, []
 
 
 def _build_tree(path: Path, base: Path) -> dict:
@@ -233,8 +240,8 @@ def create_app(directory: str) -> Flask:
         if abs_path is None:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
-        output, success = _capture_prove(str(abs_path))
-        return jsonify({"output": output, "success": success})
+        output, success, hop_results = _capture_prove(str(abs_path))
+        return jsonify({"output": output, "success": success, "hop_results": hop_results})
 
     @app.route("/api/inline", methods=["POST"])
     def run_inline():  # type: ignore[return-value]

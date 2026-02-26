@@ -114,6 +114,9 @@
     .hop-item:hover { background: var(--bg3); }
     .hop-item.active { background: rgba(78,201,176,0.12); color: var(--accent); }
     .hop-item-empty { padding: 4px 14px; font-size: 12px; color: var(--text-dim); font-style: italic; }
+    .hop-status { width: 16px; flex-shrink: 0; font-size: 13px; text-align: center; }
+    .hop-item.hop-valid { color: var(--success); }
+    .hop-item.hop-invalid { color: var(--error); }
 
     /* ── Editor area ── */
     #editor-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
@@ -313,6 +316,7 @@ function getModeForFile(path) {
 // ── State ────────────────────────────────────────────────────────────────────
 
 const tabs = new Map(); // path → { name, savedContent, cm, wrap, readonly }
+const hopResultsByPath = new Map(); // path → [{step_num, valid, kind}, ...]
 let activeTab = null;
 let cursorInlineStep = null; // null or { stepIndex, label }
 
@@ -519,6 +523,7 @@ function closeTab(path) {
     tab.wrap.remove();
     tabs.delete(path);
   }
+  hopResultsByPath.delete(path);
 
   const tabEl = document.querySelector(`.tab[data-path="${CSS.escape(path)}"]`);
   if (tabEl) tabEl.remove();
@@ -602,6 +607,10 @@ async function runCommand(endpoint, title) {
       outputStatus.className = "error";
     }
     outputPre.textContent = data.output || "(no output)";
+    if (endpoint === "/api/prove" && Array.isArray(data.hop_results)) {
+      hopResultsByPath.set(activeTab, data.hop_results);
+      updateGameHopsPanel();
+    }
   } catch (e) {
     outputStatus.textContent = "✗ Error";
     outputStatus.className = "error";
@@ -746,11 +755,22 @@ function updateGameHopsPanel() {
     return;
   }
 
-  hops.forEach(({ stepIndex, label }) => {
+  const hopResults = proofPath ? (hopResultsByPath.get(proofPath) ?? []) : [];
+  hops.forEach(({ stepIndex, label }, i) => {
+    const result = hopResults[i - 1];
+    const validityClass = result ? (result.valid ? " hop-valid" : " hop-invalid") : "";
     const item = document.createElement("div");
-    item.className = "hop-item" + (stepIndex === activeStepIndex ? " active" : "");
-    item.textContent = label;
+    item.className = "hop-item" + (stepIndex === activeStepIndex ? " active" : "") + validityClass;
     item.title = label;
+
+    const statusSpan = document.createElement("span");
+    statusSpan.className = "hop-status";
+    statusSpan.textContent = result ? (result.valid ? "✓" : "✗") : "";
+
+    const labelSpan = document.createElement("span");
+    labelSpan.textContent = label;
+
+    item.append(statusSpan, labelSpan);
     item.addEventListener("click", () => {
       if (activeTab !== proofPath) activateTab(proofPath);
       openInlineTab(stepIndex, label);

@@ -6,6 +6,7 @@
   <title>ProofFrog</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/codemirror.min.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/theme/dracula.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/theme/eclipse.min.css">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -23,10 +24,28 @@
       --warn: #ce9178;
       --tab-active: #1e1e1e;
       --tab-inactive: #2d2d30;
+      --readonly-bg: #181818;
       --sidebar-width: 220px;
       --toolbar-height: 38px;
       --tab-height: 35px;
       --output-height: 220px;
+    }
+
+    html[data-theme="light"] {
+      --bg: #f3f3f3;
+      --bg2: #ffffff;
+      --bg3: #e8e8e8;
+      --border: #d0d0d0;
+      --text: #333333;
+      --text-dim: #777777;
+      --accent: #007a7a;
+      --accent2: #0066b8;
+      --success: #007a7a;
+      --error: #c0392b;
+      --warn: #8b5e00;
+      --tab-active: #f3f3f3;
+      --tab-inactive: #e8e8e8;
+      --readonly-bg: #f0f0f0;
     }
 
     html, body { height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 13px; overflow: hidden; }
@@ -130,7 +149,7 @@
     }
 
     /* ── Read-only (inline) editors ── */
-    .editor-wrap.readonly .CodeMirror { background: #181818; }
+    .editor-wrap.readonly .CodeMirror { background: var(--readonly-bg); }
     .editor-wrap.readonly .CodeMirror-cursor { display: none !important; }
 
     /* ── Split-pane (inline game + canonical) ── */
@@ -183,6 +202,7 @@
     <button id="btn-inline" class="primary" title="Show inlined game for current step" disabled style="display:none">Inline Game</button>
     <span class="spacer"></span>
     <span class="dir-label" id="dir-label"></span>
+    <button id="btn-theme" title="Toggle light/dark mode">Dark</button>
   </div>
   <div id="main">
     <div id="sidebar">
@@ -228,12 +248,30 @@ const btnSave = document.getElementById("btn-save");
 const btnParse = document.getElementById("btn-parse");
 const btnProve = document.getElementById("btn-prove");
 const btnInline = document.getElementById("btn-inline");
+const btnTheme = document.getElementById("btn-theme");
 const dirLabel = document.getElementById("dir-label");
 const outputPane = document.getElementById("output-pane");
 const outputStatus = document.getElementById("output-status");
 const outputTitle = document.getElementById("output-title");
 const outputPre = document.getElementById("output-pre");
 const fileTree = document.getElementById("file-tree");
+
+// ── Theme ─────────────────────────────────────────────────────────────────────
+
+let darkMode = localStorage.getItem("theme") === "dark";
+
+function getCmTheme() { return darkMode ? "dracula" : "eclipse"; }
+
+function applyTheme(dark) {
+  darkMode = dark;
+  localStorage.setItem("theme", dark ? "dark" : "light");
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  btnTheme.textContent = dark ? "Light" : "Dark";
+  tabs.forEach(tab => {
+    tab.cm.setOption("theme", getCmTheme());
+    if (tab.cmRight) tab.cmRight.setOption("theme", getCmTheme());
+  });
+}
 
 // ── API helpers ───────────────────────────────────────────────────────────────
 
@@ -251,7 +289,7 @@ function createEditor(content, onChange, path) {
 
   const cm = CodeMirror(wrap, {
     value: content,
-    theme: "dracula",
+    theme: getCmTheme(),
     lineNumbers: true,
     tabSize: 2,
     indentWithTabs: false,
@@ -578,7 +616,7 @@ async function openInlineTab(stepIndex, label) {
   wrap.appendChild(handle);
   wrap.appendChild(rightPane);
 
-  const cmOpts = { value: "Loading…", theme: "dracula", lineNumbers: true, readOnly: true, lineWrapping: false };
+  const cmOpts = { value: "Loading…", theme: getCmTheme(), lineNumbers: true, readOnly: true, lineWrapping: false };
   const cmLeft = CodeMirror(leftPane, cmOpts);
   const cmRight = CodeMirror(rightPane, { ...cmOpts });
 
@@ -707,6 +745,7 @@ btnInline.addEventListener("click", () => {
   }
 });
 document.getElementById("output-close").addEventListener("click", () => outputPane.classList.remove("visible"));
+btnTheme.addEventListener("click", () => applyTheme(!darkMode));
 
 // ── Resize handle ─────────────────────────────────────────────────────────────
 
@@ -728,6 +767,7 @@ document.getElementById("output-close").addEventListener("click", () => outputPa
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
+applyTheme(darkMode);
 updateToolbar();
 loadFileTree();
 </script>

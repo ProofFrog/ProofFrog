@@ -30,6 +30,7 @@ exclude = 'proof_frog/parsing/'
 
 [tool.pytest.ini_options]
 pythonpath = 'proof_frog'
+addopts = '-n auto'
 
 [tool.mypy]
 exclude = 'parsing'

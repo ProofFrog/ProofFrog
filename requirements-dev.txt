@@ -2,4 +2,5 @@ mypy
 pylint
 types-colorama
 pytest
+pytest-xdist
 black

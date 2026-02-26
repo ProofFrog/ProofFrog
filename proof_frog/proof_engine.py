@@ -20,6 +20,7 @@ class WhichGame(Enum):
 
 
 ProcessedAssumption = namedtuple("ProcessedAssumption", ["assumption", "which"])
+HopResult = namedtuple("HopResult", ["step_num", "valid", "kind"])
 
 
 class FailedProof(Exception):
@@ -34,6 +35,7 @@ class ProofEngine:
 
         self.verbose = verbose
         self.step_assumptions: list[ProcessedAssumption] = []
+        self.hop_results: list[HopResult] = []
         self.variables: dict[str, Symbol | frog_ast.Expression] = {}
         self.method_lookup: MethodLookup = {}
 
@@ -91,7 +93,12 @@ class ProofEngine:
             print(Fore.RED + f"Theorem: {proof_file.theorem}")
             print(Fore.RED + f"First Game: {first_step.challenger}")
 
+        self.hop_results = []
         self.prove_steps(proof_file.steps, proof_file.assumptions)
+
+        if any(not r.valid for r in self.hop_results):
+            print(Fore.RED + "Proof Failed!")
+            raise FailedProof()
 
         if (
             first_step.challenger.game == final_step.challenger.game
@@ -142,6 +149,9 @@ class ProofEngine:
                     print(f"Current: {current_step}")
                     print(f"Hop To: {next_step}\n")
                     print("Valid by assumption")
+                    self.hop_results.append(
+                        HopResult(step_num=step_num, valid=True, kind="by_assumption")
+                    )
                     continue
                 current_game_ast = self._get_game_ast(
                     current_step.challenger, current_step.reduction
@@ -196,7 +206,16 @@ class ProofEngine:
 
             self.set_up_assumptions(assumptions, current_step, next_step)
 
-            self.check_equivalent(current_game_ast, next_game_ast)
+            hop_valid = self.check_equivalent(current_game_ast, next_game_ast)
+            if not hop_valid:
+                print("Step failed!")
+            self.hop_results.append(
+                HopResult(
+                    step_num=step_num,
+                    valid=hop_valid,
+                    kind="equivalent" if hop_valid else "failed",
+                )
+            )
             if isinstance(steps[i], frog_ast.Induction):
                 the_induction = steps[i]
                 assert isinstance(the_induction, frog_ast.Induction)
@@ -235,7 +254,16 @@ class ProofEngine:
                 print(f"Current: {last_step}")
                 print(f"Hop To: {first_step}\n")
                 self.set_up_assumptions(assumptions, last_step, first_step)
-                self.check_equivalent(last_step_ast, first_step_ast)
+                rollover_valid = self.check_equivalent(last_step_ast, first_step_ast)
+                if not rollover_valid:
+                    print("Step failed!")
+                self.hop_results.append(
+                    HopResult(
+                        step_num=step_num,
+                        valid=rollover_valid,
+                        kind="induction_rollover",
+                    )
+                )
                 self.proof_let_types.remove(the_induction.name)
 
     def set_up_assumptions(
@@ -305,7 +333,7 @@ class ProofEngine:
 
     def check_equivalent(
         self, current_game_ast: frog_ast.Game, next_game_ast: frog_ast.Game
-    ) -> None:
+    ) -> bool:
         AstManipulator = namedtuple("AstManipulator", ["fn", "name"])
         ast_manipulators: list[AstManipulator] = [
             AstManipulator(
@@ -445,7 +473,7 @@ class ProofEngine:
 
         if current_game_ast == next_game_ast:
             print("Inline Success!")
-            return
+            return True
 
         class AllTrueTransformer(visitors.Transformer):
             def transform_if_statement(
@@ -455,15 +483,10 @@ class ProofEngine:
                     [frog_ast.Boolean(True)] * len(stmt.conditions), stmt.blocks
                 )
 
-        def quit_proof() -> None:
-            print("Step failed!")
-            print(Fore.RED + "Proof Failed!")
-            raise FailedProof()
-
         all_true_current = AllTrueTransformer().transform(current_game_ast)
         all_true_next = AllTrueTransformer().transform(next_game_ast)
         if all_true_current != all_true_next:
-            quit_proof()
+            return False
 
         found_ifs: list[frog_ast.IfStatement] = []
 
@@ -499,12 +522,13 @@ class ProofEngine:
                     + self.proof_let_types
                 ).visit(if_next.conditions[i])
                 if first_if_formula is None or first_if_formula is None:
-                    quit_proof()
+                    return False
                 solver = z3.Solver()
                 solver.add(z3.Not(first_if_formula == next_if_formula))
                 if solver.check() != z3.unsat:
-                    quit_proof()
+                    return False
         print("Inline Success!")
+        return True
 
     def canonicalize_game(self, game: frog_ast.Game) -> frog_ast.Game:
         """Apply the same simplification pipeline as check_equivalent() (without

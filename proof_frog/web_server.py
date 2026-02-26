@@ -60,21 +60,28 @@ def _get_file_type(file_name: str) -> frog_ast.FileType:
     return frog_ast.FileType(extension)
 
 
-def _capture_inline(file_path: str, step_index: int) -> tuple[str, str, bool]:
+def _resolve_import(directory: str, filename: str) -> str:
+    if os.path.isabs(filename):
+        return filename
+    return os.path.join(directory, filename)
+
+
+def _capture_inline(file_path: str, step_index: int, directory: str = "") -> tuple[str, str, bool]:
     buf = io.StringIO()
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
             proof_file = frog_parser.parse_proof_file(file_path)
             engine = proof_engine.ProofEngine(False)
             for imp in proof_file.imports:
-                file_type = _get_file_type(imp.filename)
+                imp_path = _resolve_import(directory, imp.filename) if directory else imp.filename
+                file_type = _get_file_type(imp_path)
                 match file_type:
                     case frog_ast.FileType.PRIMITIVE:
-                        root = frog_parser.parse_primitive_file(imp.filename)
+                        root = frog_parser.parse_primitive_file(imp_path)
                     case frog_ast.FileType.SCHEME:
-                        root = frog_parser.parse_scheme_file(imp.filename)
+                        root = frog_parser.parse_scheme_file(imp_path)
                     case frog_ast.FileType.GAME:
-                        root = frog_parser.parse_game_file(imp.filename)
+                        root = frog_parser.parse_game_file(imp_path)
                     case _:
                         raise TypeError(f"Cannot import {file_type}")
                 name = imp.rename if imp.rename else root.get_export_name()
@@ -114,7 +121,7 @@ def _capture_inline(file_path: str, step_index: int) -> tuple[str, str, bool]:
         return _strip_ansi(buf.getvalue()) + f"\nError: {e}", "", False
 
 
-def _capture_prove(file_path: str) -> tuple[str, bool, list[dict]]:
+def _capture_prove(file_path: str, directory: str = "") -> tuple[str, bool, list[dict]]:
     buf = io.StringIO()
     engine = proof_engine.ProofEngine(False)
     proof_succeeded = False
@@ -123,14 +130,15 @@ def _capture_prove(file_path: str) -> tuple[str, bool, list[dict]]:
             proof_file = frog_parser.parse_proof_file(file_path)
 
             for imp in proof_file.imports:
-                file_type = _get_file_type(imp.filename)
+                imp_path = _resolve_import(directory, imp.filename) if directory else imp.filename
+                file_type = _get_file_type(imp_path)
                 match file_type:
                     case frog_ast.FileType.PRIMITIVE:
-                        root = frog_parser.parse_primitive_file(imp.filename)
+                        root = frog_parser.parse_primitive_file(imp_path)
                     case frog_ast.FileType.SCHEME:
-                        root = frog_parser.parse_scheme_file(imp.filename)
+                        root = frog_parser.parse_scheme_file(imp_path)
                     case frog_ast.FileType.GAME:
-                        root = frog_parser.parse_game_file(imp.filename)
+                        root = frog_parser.parse_game_file(imp_path)
                     case _:
                         raise TypeError(f"Cannot import {file_type}")
                 name = imp.rename if imp.rename else root.get_export_name()
@@ -243,7 +251,7 @@ def create_app(directory: str) -> Flask:
         if abs_path is None:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
-        output, success, hop_results = _capture_prove(str(abs_path))
+        output, success, hop_results = _capture_prove(str(abs_path), directory)
         return jsonify({"output": output, "success": success, "hop_results": hop_results})
 
     @app.route("/api/inline", methods=["POST"])
@@ -258,7 +266,7 @@ def create_app(directory: str) -> Flask:
         if abs_path is None:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
-        output, canonical, success = _capture_inline(str(abs_path), step_index)
+        output, canonical, success = _capture_inline(str(abs_path), step_index, directory)
         return jsonify({"output": output, "canonical": canonical, "success": success})
 
     return app

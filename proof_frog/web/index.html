@@ -118,6 +118,67 @@
     .hop-item.hop-valid { color: var(--success); }
     .hop-item.hop-invalid { color: var(--error); }
 
+    /* ── Wizard panel ── */
+    #wizard-panel { flex-shrink: 0; display: flex; flex-direction: column; }
+    #wizard-resize-handle {
+      height: 4px; cursor: ns-resize; background: transparent; flex-shrink: 0;
+      border-top: 1px solid var(--border);
+    }
+    #wizard-resize-handle:hover, #wizard-resize-handle.dragging { background: var(--accent2); }
+    #wizard-panel-header {
+      padding: 6px 10px; font-size: 11px; font-weight: 600;
+      text-transform: uppercase; color: var(--text-dim); letter-spacing: 0.08em; flex-shrink: 0;
+    }
+    #wizard-body { overflow-y: auto; padding: 6px 10px; flex: 1; min-height: 0; font-size: 12px; }
+    .wizard-suggestion {
+      color: var(--accent2); cursor: pointer; text-decoration: underline;
+      background: none; border: none; padding: 0; font-size: 12px; font-family: inherit;
+    }
+    .wizard-suggestion:hover { color: var(--accent); }
+    .wizard-empty { color: var(--text-dim); font-style: italic; }
+
+    /* ── Wizard modal ── */
+    #wizard-modal {
+      position: fixed; inset: 0; z-index: 1000;
+      background: rgba(0,0,0,0.5);
+      display: flex; align-items: center; justify-content: center;
+    }
+    #wizard-modal-panel {
+      background: var(--bg2); border: 1px solid var(--border); border-radius: 5px;
+      width: 340px; max-width: 90vw; display: flex; flex-direction: column;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    }
+    #wizard-modal-header {
+      display: flex; align-items: center; padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    #wizard-modal-title { flex: 1; font-weight: 600; font-size: 13px; }
+    #wizard-modal-close {
+      background: none; border: none; color: var(--text-dim); cursor: pointer;
+      font-size: 18px; padding: 0 2px; line-height: 1;
+    }
+    #wizard-modal-close:hover { color: var(--text); }
+    #wizard-modal-body { padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+    .wizard-label { font-size: 11px; color: var(--text-dim); margin-bottom: 2px; display: block; }
+    .wizard-input {
+      width: 100%; padding: 5px 8px; box-sizing: border-box;
+      background: var(--bg3); border: 1px solid var(--border); border-radius: 3px;
+      color: var(--text); font-size: 12px; font-family: inherit;
+    }
+    .wizard-input:focus { outline: none; border-color: var(--accent2); }
+    select.wizard-input { cursor: pointer; }
+    #wizard-modal-footer {
+      display: flex; gap: 8px; padding: 10px 14px;
+      border-top: 1px solid var(--border); justify-content: flex-end;
+    }
+    #wizard-modal-footer button {
+      padding: 5px 14px; border: 1px solid var(--border); border-radius: 3px;
+      background: var(--bg3); color: var(--text); cursor: pointer; font-size: 12px;
+    }
+    #wizard-modal-footer button:hover { background: var(--bg2); border-color: var(--accent2); }
+    #wizard-modal-footer button.primary { border-color: var(--accent2); color: var(--accent2); }
+    #wizard-modal-footer button.primary:hover { background: rgba(86,156,214,0.12); }
+
     /* ── Editor area ── */
     #editor-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
 
@@ -238,6 +299,11 @@
         <div id="game-hops-header">Game Hops</div>
         <div id="game-hops-list"></div>
       </div>
+      <div id="wizard-panel">
+        <div id="wizard-resize-handle"></div>
+        <div id="wizard-panel-header">Wizard</div>
+        <div id="wizard-body"></div>
+      </div>
     </div>
     <div id="sidebar-resize-handle"></div>
     <div id="editor-area">
@@ -258,6 +324,37 @@
         </div>
         <div id="output-content"><pre id="output-pre"></pre></div>
       </div>
+    </div>
+  </div>
+</div>
+
+<div id="wizard-modal" role="dialog" aria-modal="true" aria-labelledby="wizard-modal-title" style="display:none">
+  <div id="wizard-modal-panel">
+    <div id="wizard-modal-header">
+      <span id="wizard-modal-title">Create New Game</span>
+      <button id="wizard-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="wizard-modal-body">
+      <div>
+        <label class="wizard-label" for="wizard-prop-name">Security property name</label>
+        <input class="wizard-input" id="wizard-prop-name" type="text" placeholder="e.g. CPA" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="wizard-primitive">Primitive</label>
+        <select class="wizard-input" id="wizard-primitive"></select>
+      </div>
+      <div>
+        <label class="wizard-label" for="wizard-left-name">Left side name</label>
+        <input class="wizard-input" id="wizard-left-name" type="text" value="Left" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="wizard-right-name">Right side name</label>
+        <input class="wizard-input" id="wizard-right-name" type="text" value="Right" autocomplete="off">
+      </div>
+    </div>
+    <div id="wizard-modal-footer">
+      <button id="wizard-modal-create" class="primary">Create</button>
+      <button id="wizard-modal-cancel">Close</button>
     </div>
   </div>
 </div>
@@ -319,6 +416,7 @@ const tabs = new Map(); // path → { name, savedContent, cm, wrap, readonly }
 const hopResultsByPath = new Map(); // path → [{step_num, valid, kind}, ...]
 let activeTab = null;
 let cursorInlineStep = null; // null or { stepIndex, label }
+let primitiveFiles = []; // { path, name } for all .primitive files, sorted by name
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 
@@ -337,6 +435,8 @@ const outputStatus = document.getElementById("output-status");
 const outputTitle = document.getElementById("output-title");
 const outputPre = document.getElementById("output-pre");
 const fileTree = document.getElementById("file-tree");
+const wizardPanel = document.getElementById("wizard-panel");
+const wizardBody  = document.getElementById("wizard-body");
 
 // ── Theme ─────────────────────────────────────────────────────────────────────
 
@@ -451,6 +551,7 @@ function activateTab(path) {
   updateToolbar();
   scrollTabIntoView(path);
   updateGameHopsPanel();
+  updateWizardPanel();
 }
 
 function scrollTabIntoView(path) {
@@ -492,6 +593,7 @@ async function openFile(path, name) {
   const { cm, wrap } = createEditor(content, () => {
     updateTabEl(path);
     if (activeTab === path && path.endsWith(".proof")) updateGameHopsPanel();
+    if (activeTab === path) updateWizardPanel();
   }, path);
 
   tabs.set(path, { name, savedContent: content, cm, wrap, readonly: false });
@@ -539,6 +641,7 @@ function closeTab(path) {
   updateToolbar();
   highlightActiveFile(activeTab);
   updateGameHopsPanel();
+  updateWizardPanel();
 }
 
 // ── Save ──────────────────────────────────────────────────────────────────────
@@ -918,11 +1021,112 @@ function highlightActiveFile(path) {
   });
 }
 
+function collectPrimitives(node, result) {
+  if (node.type === "file" && node.name.endsWith(".primitive")) {
+    result.push({ path: node.path, name: node.name.replace(/\.primitive$/, "") });
+  }
+  if (node.type === "directory") {
+    (node.children || []).forEach(child => collectPrimitives(child, result));
+  }
+}
+
 async function loadFileTree() {
   const data = await apiFetch("/api/files");
   fileTree.innerHTML = "";
   dirLabel.textContent = data.name || "";
   (data.children || []).forEach(child => fileTree.appendChild(buildTree(child, 0)));
+  primitiveFiles = [];
+  collectPrimitives(data, primitiveFiles);
+  primitiveFiles.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// ── Wizard panel ──────────────────────────────────────────────────────────────
+
+function updateWizardPanel() {
+  const isGame = activeTab !== null
+    && activeTab.endsWith(".game")
+    && !activeTab.startsWith(":inline:");
+
+  wizardPanel.style.display = "";
+  wizardBody.innerHTML = "";
+
+  if (isGame) {
+    const content = getTabContent(activeTab);
+    const isEmpty = content !== null && content.trim() === "";
+    if (isEmpty) {
+      const btn = document.createElement("button");
+      btn.className = "wizard-suggestion";
+      btn.textContent = "Create new game";
+      btn.addEventListener("click", openWizardModal);
+      wizardBody.appendChild(btn);
+      return;
+    }
+  }
+
+  const msg = document.createElement("span");
+  msg.className = "wizard-empty";
+  msg.textContent = "No suggestions";
+  wizardBody.appendChild(msg);
+}
+
+function openWizardModal() {
+  const sel = document.getElementById("wizard-primitive");
+  sel.innerHTML = "";
+  if (primitiveFiles.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "(no primitives found)";
+    sel.appendChild(opt);
+  } else {
+    primitiveFiles.forEach(pf => {
+      const opt = document.createElement("option");
+      opt.value = pf.path;
+      opt.textContent = pf.name;
+      sel.appendChild(opt);
+    });
+  }
+  document.getElementById("wizard-prop-name").value = "";
+  document.getElementById("wizard-left-name").value = "Left";
+  document.getElementById("wizard-right-name").value = "Right";
+  document.getElementById("wizard-modal").style.display = "";
+  document.getElementById("wizard-prop-name").focus();
+}
+
+function closeWizardModal() {
+  document.getElementById("wizard-modal").style.display = "none";
+}
+
+function createGameFromWizard() {
+  const propName  = document.getElementById("wizard-prop-name").value.trim();
+  const primPath  = document.getElementById("wizard-primitive").value;
+  const leftName  = document.getElementById("wizard-left-name").value.trim() || "Left";
+  const rightName = document.getElementById("wizard-right-name").value.trim() || "Right";
+
+  if (!propName) { document.getElementById("wizard-prop-name").focus(); return; }
+  if (!primPath) return;
+
+  const primName = primPath.split("/").pop().replace(/\.primitive$/, "");
+  const template =
+`import '${primPath}';
+
+Game ${leftName}(${primName} E) {
+    Void Initialize() {
+    }
+}
+
+Game ${rightName}(${primName} E) {
+    Void Initialize() {
+    }
+}
+
+export as ${propName};
+`;
+
+  const tab = tabs.get(activeTab);
+  if (!tab) return;
+  tab.cm.setValue(template);
+  closeWizardModal();
+  updateWizardPanel();
 }
 
 // ── Keyboard shortcuts ────────────────────────────────────────────────────────
@@ -944,6 +1148,23 @@ btnInline.addEventListener("click", () => {
 });
 document.getElementById("output-close").addEventListener("click", () => outputPane.classList.remove("visible"));
 btnTheme.addEventListener("click", () => applyTheme(!darkMode));
+
+document.getElementById("wizard-modal-close").addEventListener("click", closeWizardModal);
+document.getElementById("wizard-modal-cancel").addEventListener("click", closeWizardModal);
+document.getElementById("wizard-modal-create").addEventListener("click", createGameFromWizard);
+document.getElementById("wizard-modal").addEventListener("click", e => {
+  if (e.target === document.getElementById("wizard-modal")) closeWizardModal();
+});
+document.querySelectorAll("#wizard-modal-body input.wizard-input").forEach(inp => {
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") createGameFromWizard(); });
+});
+
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") {
+    const modal = document.getElementById("wizard-modal");
+    if (modal.style.display !== "none") closeWizardModal();
+  }
+});
 
 // ── Resize handle ─────────────────────────────────────────────────────────────
 
@@ -1011,11 +1232,36 @@ btnTheme.addEventListener("click", () => applyTheme(!darkMode));
   });
 })();
 
+(function setupWizardResize() {
+  const handle = document.getElementById("wizard-resize-handle");
+  let startY, startH;
+  handle.addEventListener("mousedown", e => {
+    startY = e.clientY;
+    startH = wizardPanel.offsetHeight;
+    handle.classList.add("dragging");
+    function onMove(e) {
+      const sidebar = document.getElementById("sidebar");
+      const maxH = sidebar.offsetHeight - 100;
+      const delta = startY - e.clientY;
+      const newH = Math.max(60, Math.min(maxH, startH + delta));
+      wizardPanel.style.height = newH + "px";
+    }
+    function onUp() {
+      handle.classList.remove("dragging");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+})();
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 applyTheme(darkMode);
 updateToolbar();
 loadFileTree();
+updateWizardPanel();
 </script>
 </body>
 </html>

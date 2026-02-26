@@ -176,6 +176,10 @@ def create_app(directory: str) -> Flask:
     def index():  # type: ignore[return-value]
         return send_file(static_dir / "index.html")
 
+    @app.route("/prooffrog.png")
+    def logo():  # type: ignore[return-value]
+        return send_file(static_dir / "prooffrog.png")
+
     @app.route("/api/files")
     def list_files():  # type: ignore[return-value]
         tree = _build_tree(Path(directory), Path(directory))

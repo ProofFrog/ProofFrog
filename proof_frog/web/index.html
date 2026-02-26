@@ -59,7 +59,9 @@
       background: var(--bg3); border-bottom: 1px solid var(--border);
       flex-shrink: 0;
     }
-    #toolbar .logo { font-weight: 700; color: var(--accent); margin-right: 8px; font-size: 14px; }
+    #toolbar .logo { display: flex; align-items: center; gap: 6px; font-weight: 700; color: var(--accent); margin-right: 8px; font-size: 14px; }
+    #toolbar .logo img { height: 22px; width: auto; }
+    #welcome img { height: 80px; width: auto; margin-bottom: 4px; }
     #toolbar button {
       padding: 4px 12px; border: 1px solid var(--border); border-radius: 3px;
       background: var(--bg2); color: var(--text); cursor: pointer; font-size: 12px;
@@ -195,7 +197,7 @@
 <body>
 <div id="app">
   <div id="toolbar">
-    <span class="logo">ProofFrog</span>
+    <span class="logo"><img src="/prooffrog.png" alt="ProofFrog">ProofFrog</span>
     <button id="btn-save" title="Save (Ctrl+S)" disabled>Save</button>
     <button id="btn-parse" class="primary" title="Parse current file" disabled>Parse</button>
     <button id="btn-prove" class="primary" title="Run proof" disabled style="display:none">Run Proof</button>
@@ -213,6 +215,7 @@
       <div id="tabs"><span id="tabs-empty">Open a file from the explorer</span></div>
       <div id="editors-container">
         <div id="welcome">
+          <img src="/prooffrog.png" alt="ProofFrog">
           <h2>ProofFrog</h2>
           <p>Select a file from the explorer to start editing.</p>
         </div>

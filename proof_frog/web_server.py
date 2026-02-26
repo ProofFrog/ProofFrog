@@ -1,3 +1,4 @@
+import copy
 import io
 import os
 import re
@@ -58,6 +59,59 @@ def _capture_parse(file_path: str) -> tuple[str, bool]:
 def _get_file_type(file_name: str) -> frog_ast.FileType:
     extension: str = os.path.splitext(file_name)[1].strip(".")
     return frog_ast.FileType(extension)
+
+
+def _capture_inline(file_path: str, step_index: int) -> tuple[str, bool]:
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf), redirect_stderr(buf):
+            proof_file = frog_parser.parse_proof_file(file_path)
+            engine = proof_engine.ProofEngine(False)
+            for imp in proof_file.imports:
+                file_type = _get_file_type(imp.filename)
+                match file_type:
+                    case frog_ast.FileType.PRIMITIVE:
+                        root = frog_parser.parse_primitive_file(imp.filename)
+                    case frog_ast.FileType.SCHEME:
+                        root = frog_parser.parse_scheme_file(imp.filename)
+                    case frog_ast.FileType.GAME:
+                        root = frog_parser.parse_game_file(imp.filename)
+                    case _:
+                        raise TypeError(f"Cannot import {file_type}")
+                name = imp.rename if imp.rename else root.get_export_name()
+                engine.add_definition(name, root)
+            for game in proof_file.helpers:
+                engine.definition_namespace[game.name] = game
+            for let in proof_file.lets:
+                engine.proof_let_types.set(let.name, let.type)
+                if isinstance(let.value, frog_ast.FuncCall) and isinstance(
+                    let.value.func, frog_ast.Variable
+                ):
+                    definition = copy.deepcopy(
+                        engine.definition_namespace[let.value.func.name]
+                    )
+                    if isinstance(definition, (frog_ast.Primitive, frog_ast.Scheme)):
+                        engine.proof_namespace[let.name] = proof_engine.instantiate(
+                            definition, let.value.args, engine.proof_namespace
+                        )
+                    else:
+                        raise TypeError("Must instantiate either a Primitive or Scheme")
+                else:
+                    engine.proof_namespace[let.name] = copy.deepcopy(let.value)
+            engine.get_method_lookup()
+
+        if step_index < 0 or step_index >= len(proof_file.steps):
+            return f"Step index {step_index} out of range (proof has {len(proof_file.steps)} steps)", False
+        step = proof_file.steps[step_index]
+        if not isinstance(step, frog_ast.Step):
+            return "This step is an assumption, not a game step.", False
+
+        suppress = io.StringIO()
+        with redirect_stdout(suppress), redirect_stderr(suppress):
+            game = engine._get_game_ast(step.challenger, step.reduction)
+        return str(game), True
+    except Exception as e:
+        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False
 
 
 def _capture_prove(file_path: str) -> tuple[str, bool]:
@@ -175,6 +229,21 @@ def create_app(directory: str) -> Flask:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
         output, success = _capture_prove(str(abs_path))
+        return jsonify({"output": output, "success": success})
+
+    @app.route("/api/inline", methods=["POST"])
+    def run_inline():  # type: ignore[return-value]
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data"}), 400
+        rel_path = data.get("path", "")
+        content = data.get("content", "")
+        step_index = data.get("step_index", 0)
+        abs_path = _safe_path(directory, rel_path)
+        if abs_path is None:
+            return jsonify({"error": "Invalid path"}), 403
+        abs_path.write_text(content, encoding="utf-8")
+        output, success = _capture_inline(str(abs_path), step_index)
         return jsonify({"output": output, "success": success})
 
     return app

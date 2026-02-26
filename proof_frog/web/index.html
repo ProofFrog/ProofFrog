@@ -129,6 +129,10 @@
       line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: var(--text);
     }
 
+    /* ── Read-only (inline) editors ── */
+    .editor-wrap.readonly .CodeMirror { background: #181818; }
+    .editor-wrap.readonly .CodeMirror-cursor { display: none !important; }
+
     /* ── Welcome screen ── */
     #welcome {
       position: absolute; inset: 0; display: flex; flex-direction: column;
@@ -160,6 +164,7 @@
     <button id="btn-save" title="Save (Ctrl+S)" disabled>Save</button>
     <button id="btn-parse" class="primary" title="Parse current file" disabled>Parse</button>
     <button id="btn-prove" class="primary" title="Run proof" disabled style="display:none">Run Proof</button>
+    <button id="btn-inline" class="primary" title="Show inlined game for current step" disabled style="display:none">Inline Game</button>
     <span class="spacer"></span>
     <span class="dir-label" id="dir-label"></span>
   </div>
@@ -193,8 +198,9 @@
 <script>
 // ── State ────────────────────────────────────────────────────────────────────
 
-const tabs = new Map(); // path → { name, savedContent, cm, wrap }
+const tabs = new Map(); // path → { name, savedContent, cm, wrap, readonly }
 let activeTab = null;
+let cursorInlineStep = null; // null or { stepIndex, label }
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 
@@ -205,6 +211,7 @@ const welcome = document.getElementById("welcome");
 const btnSave = document.getElementById("btn-save");
 const btnParse = document.getElementById("btn-parse");
 const btnProve = document.getElementById("btn-prove");
+const btnInline = document.getElementById("btn-inline");
 const dirLabel = document.getElementById("dir-label");
 const outputPane = document.getElementById("output-pane");
 const outputStatus = document.getElementById("output-status");
@@ -221,7 +228,7 @@ async function apiFetch(url, opts = {}) {
 
 // ── Editor ────────────────────────────────────────────────────────────────────
 
-function createEditor(content, onChange) {
+function createEditor(content, onChange, path) {
   const wrap = document.createElement("div");
   wrap.className = "editor-wrap";
   editorsContainer.appendChild(wrap);
@@ -248,6 +255,15 @@ function createEditor(content, onChange) {
   });
 
   cm.on("change", onChange);
+
+  if (path && path.endsWith(".proof")) {
+    cm.on("cursorActivity", () => {
+      if (activeTab !== path) return;
+      cursorInlineStep = getStepAtCursor(cm.getValue(), cm.getCursor().line);
+      updateInlineButton();
+    });
+  }
+
   return { cm, wrap };
 }
 
@@ -283,6 +299,7 @@ function activateTab(path) {
   }
 
   activeTab = path;
+  cursorInlineStep = null;
   welcome.classList.add("hidden");
 
   const tabEl = document.querySelector(`.tab[data-path="${CSS.escape(path)}"]`);
@@ -291,7 +308,7 @@ function activateTab(path) {
   const { wrap, cm } = tabs.get(path);
   wrap.classList.add("active");
   cm.refresh(); // CM5 needs refresh after being made visible
-  cm.focus();
+  if (!tabs.get(path)?.readonly) cm.focus();
 
   updateToolbar();
   scrollTabIntoView(path);
@@ -304,11 +321,23 @@ function scrollTabIntoView(path) {
 
 function updateToolbar() {
   const hasTab = activeTab !== null;
-  btnSave.disabled = !hasTab;
-  btnParse.disabled = !hasTab;
+  const isVirtual = hasTab && activeTab.startsWith(":inline:");
+  btnSave.disabled = !hasTab || isVirtual;
+  btnParse.disabled = !hasTab || isVirtual;
   const isProof = hasTab && activeTab.endsWith(".proof");
   btnProve.style.display = isProof ? "" : "none";
   btnProve.disabled = !isProof;
+  updateInlineButton();
+}
+
+function updateInlineButton() {
+  const isProof = activeTab && activeTab.endsWith(".proof");
+  if (!isProof || !cursorInlineStep) {
+    btnInline.style.display = "none";
+    return;
+  }
+  btnInline.style.display = "";
+  btnInline.disabled = false;
 }
 
 async function openFile(path, name) {
@@ -321,9 +350,9 @@ async function openFile(path, name) {
   if (data.error) { alert(data.error); return; }
   const content = data.content;
 
-  const { cm, wrap } = createEditor(content, () => updateTabEl(path));
+  const { cm, wrap } = createEditor(content, () => updateTabEl(path), path);
 
-  tabs.set(path, { name, savedContent: content, cm, wrap });
+  tabs.set(path, { name, savedContent: content, cm, wrap, readonly: false });
 
   // Create tab element
   const tabEl = document.createElement("div");
@@ -342,7 +371,7 @@ async function openFile(path, name) {
 }
 
 function closeTab(path) {
-  if (isModified(path)) {
+  if (!path.startsWith(":inline:") && isModified(path)) {
     const name = tabs.get(path)?.name;
     if (!confirm(`'${name}' has unsaved changes. Close anyway?`)) return;
   }
@@ -391,12 +420,15 @@ function setRunning(running) {
   btnParse.disabled = running || !activeTab;
   btnProve.disabled = running || !(activeTab && activeTab.endsWith(".proof"));
   btnSave.disabled = running || !activeTab;
+  btnInline.disabled = running || !cursorInlineStep;
   if (running) {
     btnParse.classList.add("running");
     btnProve.classList.add("running");
+    btnInline.classList.add("running");
   } else {
     btnParse.classList.remove("running");
     btnProve.classList.remove("running");
+    btnInline.classList.remove("running");
     updateToolbar();
   }
 }
@@ -435,6 +467,119 @@ async function runCommand(endpoint, title) {
     outputStatus.textContent = "✗ Error";
     outputStatus.className = "error";
     outputPre.textContent = String(e);
+  } finally {
+    setRunning(false);
+  }
+}
+
+// ── Cursor / games-section detection ─────────────────────────────────────────
+
+function getStepAtCursor(content, cursorLine) {
+  const lines = content.split("\n");
+
+  // Find the "games:" line
+  let gamesLine = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*games\s*:/.test(lines[i])) { gamesLine = i; break; }
+  }
+  if (gamesLine === -1 || cursorLine <= gamesLine) return null;
+
+  // Walk through the games section line-by-line, tracking:
+  //   braceDepth — to skip induction { ... } blocks
+  //   stepIndex  — 0-based count of all ; -terminated top-level statements
+  //   currentStepStart — first line of the current in-progress statement
+  let braceDepth = 0;
+  let stepIndex = 0;
+  let currentStepStart = gamesLine + 1;
+
+  for (let i = gamesLine + 1; i < lines.length; i++) {
+    const raw = lines[i];
+    // Strip line comments
+    const stripped = raw.replace(/\/\/.*$/, "");
+
+    for (const ch of stripped) {
+      if (ch === "{") braceDepth++;
+      else if (ch === "}") braceDepth--;
+    }
+
+    // Only track steps at depth 0 (not inside induction blocks)
+    if (braceDepth === 0 && stripped.includes(";")) {
+      // This line ends a top-level step
+      if (cursorLine >= currentStepStart && cursorLine <= i) {
+        // Cursor is within this step's line range
+        const stepText = lines
+          .slice(currentStepStart, i + 1)
+          .map(l => l.replace(/\/\/.*$/, "").trim())
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim();
+
+        if (!stepText.includes(" against ")) return null; // assume step or other
+
+        const label = stepText.length > 50 ? stepText.slice(0, 47) + "…" : stepText;
+        return { stepIndex, label };
+      }
+      stepIndex++;
+      currentStepStart = i + 1;
+    }
+  }
+  return null;
+}
+
+// ── Inline tab ────────────────────────────────────────────────────────────────
+
+async function openInlineTab(stepIndex, label) {
+  if (!activeTab) return;
+  const sourceTab = activeTab;
+  const content = getTabContent(sourceTab);
+  const virtualPath = `:inline:${stepIndex}:${sourceTab}`;
+
+  // Close existing inline tab for this step if already open
+  if (tabs.has(virtualPath)) closeTab(virtualPath);
+
+  // Create read-only editor (placeholder content while loading)
+  const wrap = document.createElement("div");
+  wrap.className = "editor-wrap readonly";
+  editorsContainer.appendChild(wrap);
+
+  const cm = CodeMirror(wrap, {
+    value: "Loading…",
+    theme: "dracula",
+    lineNumbers: true,
+    readOnly: true,
+    lineWrapping: false,
+  });
+
+  const tabName = `[inline] ${label}`;
+  tabs.set(virtualPath, { name: tabName, savedContent: "Loading…", cm, wrap, readonly: true });
+
+  const tabEl = document.createElement("div");
+  tabEl.className = "tab";
+  tabEl.dataset.path = virtualPath;
+  tabEl.innerHTML = `<span class="tab-name" title="${label}">${tabName}</span><span class="tab-dot" style="visibility:hidden">&#x2022;</span><span class="tab-close" title="Close">&#x2715;</span>`;
+  tabEl.addEventListener("click", e => {
+    if (e.target.classList.contains("tab-close")) { closeTab(virtualPath); return; }
+    activateTab(virtualPath);
+  });
+  tabsEmpty.style.display = "none";
+  tabsEl.appendChild(tabEl);
+
+  activateTab(virtualPath);
+
+  // Now fetch the inlined game
+  setRunning(true);
+  try {
+    const data = await apiFetch("/api/inline", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: sourceTab, content, step_index: stepIndex }),
+    });
+    const result = data.output || "(no output)";
+    cm.setValue(result);
+    const tab = tabs.get(virtualPath);
+    if (tab) tab.savedContent = result;
+  } catch (e) {
+    cm.setValue(`Error: ${e}`);
   } finally {
     setRunning(false);
   }
@@ -495,6 +640,11 @@ document.addEventListener("keydown", e => {
 btnSave.addEventListener("click", () => saveFile(activeTab));
 btnParse.addEventListener("click", () => runCommand("/api/parse", "Parse"));
 btnProve.addEventListener("click", () => runCommand("/api/prove", "Run Proof"));
+btnInline.addEventListener("click", () => {
+  if (activeTab && cursorInlineStep) {
+    openInlineTab(cursorInlineStep.stepIndex, cursorInlineStep.label);
+  }
+});
 document.getElementById("output-close").addEventListener("click", () => outputPane.classList.remove("visible"));
 
 // ── Resize handle ─────────────────────────────────────────────────────────────

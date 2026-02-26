@@ -741,6 +741,8 @@ def _get_parser(
     lexer.removeErrorListeners()
     lexer.addErrorListener(_SilentErrorListener())
     parser = parser_functor(CommonTokenStream(lexer))
+    parser.removeErrorListeners()
+    parser.addErrorListener(_SilentErrorListener())
     # No way to do this without editing the protected field in antlr's python runtime
     parser._errHandler = BailErrorStrategy()  # pylint: disable=protected-access
     return parser

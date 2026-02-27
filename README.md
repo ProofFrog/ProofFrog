@@ -30,6 +30,7 @@ Clone the repository and install in editable mode:
 ```
 git clone https://github.com/ProofFrog/ProofFrog
 cd ProofFrog
+git checkout ds-web # currently the main dev branch
 git submodule update --init
 python3 -m venv .venv
 source .venv/bin/activate

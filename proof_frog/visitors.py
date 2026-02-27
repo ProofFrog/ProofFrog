@@ -471,36 +471,48 @@ class VariableStandardizingTransformer(BlockTransformer):
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         new_block = copy.deepcopy(block)
+
+        # Collect typed local variable names in statement order.
+        ordered_names: list[str] = []
         for statement in new_block.statements:
-            if not isinstance(statement, frog_ast.Assignment) and not isinstance(
-                statement, frog_ast.Sample
-            ):
+            if not isinstance(statement, (frog_ast.Assignment, frog_ast.Sample)):
                 continue
             if not isinstance(statement.var, frog_ast.Variable):
                 continue
-
             if statement.the_type is None:
                 continue
+            ordered_names.append(statement.var.name)
 
-            self.variable_counter += 1
-            expected_name = f"v{self.variable_counter}"
-            if statement.var.name == expected_name:
-                continue
-
+        def replace_all(blk: frog_ast.Block, old: str, new: str) -> frog_ast.Block:
+            # ReplaceTransformer uses identity (`is`) comparison, so we use
+            # SearchVisitor to get the actual object reference first, then
+            # replace one occurrence at a time until none remain.
             def var_used(var: frog_ast.Variable, node: frog_ast.ASTNode) -> bool:
                 return node == var
 
             while True:
-                to_transform = SearchVisitor[frog_ast.Variable](
-                    functools.partial(var_used, statement.var)
-                ).visit(new_block)
-
-                if to_transform is None:
+                found = SearchVisitor[frog_ast.Variable](
+                    functools.partial(var_used, frog_ast.Variable(old))
+                ).visit(blk)
+                if found is None:
                     break
+                blk = ReplaceTransformer(found, frog_ast.Variable(new)).transform(blk)
+            return blk
 
-                new_block = ReplaceTransformer(
-                    to_transform, frog_ast.Variable(expected_name)
-                ).transform(new_block)
+        # Phase 1: rename each typed variable to a collision-free intermediate
+        # name. These names cannot conflict with any user-written "v1", "v2", …
+        # names, so this step is always safe regardless of what names already exist.
+        for i, old_name in enumerate(ordered_names):
+            new_block = replace_all(new_block, old_name, f"__vstandard_{i}__")
+
+        # Phase 2: rename intermediate names to v1, v2, v3, … in order.
+        # Phase 1 guarantees each source name is unique, so no collision is possible.
+        for i in range(len(ordered_names)):
+            self.variable_counter += 1
+            new_block = replace_all(
+                new_block, f"__vstandard_{i}__", f"v{self.variable_counter}"
+            )
+
         return new_block
 
 

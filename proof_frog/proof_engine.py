@@ -355,6 +355,12 @@ class ProofEngine:
                 fn=lambda ast: visitors.RedundantCopyTransformer().transform(ast),
                 name="Remove Redundant Copies",
             ),
+            AstManipulator(
+                fn=lambda ast: visitors.InlineSingleUseVariableTransformer().transform(
+                    ast
+                ),
+                name="Inline Single-Use Variables",
+            ),
             AstManipulator(fn=self.sort_game, name="Topological Sorting"),
             AstManipulator(fn=remove_duplicate_fields, name="Remove Duplicate Fields"),
             AstManipulator(
@@ -554,6 +560,12 @@ class ProofEngine:
             AstManipulator(
                 fn=lambda ast: visitors.RedundantCopyTransformer().transform(ast),
                 name="Remove Redundant Copies",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.InlineSingleUseVariableTransformer().transform(
+                    ast
+                ),
+                name="Inline Single-Use Variables",
             ),
             AstManipulator(fn=self.sort_game, name="Topological Sorting"),
             AstManipulator(fn=remove_duplicate_fields, name="Remove Duplicate Fields"),

@@ -224,6 +224,133 @@ class RedundantCopyTransformer(BlockTransformer):
         return block
 
 
+class InlineSingleUseVariableTransformer(BlockTransformer):
+    """Inlines a declaration `Type v = expr` when v is used exactly once in
+    subsequent statements and no variable free in expr is modified between
+    the declaration and that single use site.
+
+    This is more general than RedundantCopyTransformer, which only handles
+    simple variable copies (where expr is a plain Variable).
+
+    Example:
+        v3 = v1 + G.evaluate(v2);
+        return v3 + mL;
+    becomes:
+        return v1 + G.evaluate(v2) + mL;
+    """
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if not (
+                isinstance(statement, frog_ast.Assignment)
+                and statement.the_type is not None
+                and isinstance(statement.var, frog_ast.Variable)
+                and not isinstance(statement.value, frog_ast.Variable)
+                # Tuple literals are handled by ExpandTupleTransformer; inlining
+                # them prematurely breaks that pipeline (e.g. c=[a,b]; return c[0]).
+                and not isinstance(statement.value, frog_ast.Tuple)
+            ):
+                continue
+
+            var_name = statement.var.name
+            expr = statement.value
+
+            def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(node, (frog_ast.Sample, frog_ast.Assignment))
+                    and isinstance(node.var, frog_ast.Variable)
+                    and node.var.name == name
+                )
+
+            def uses_var(name: str, node: frog_ast.ASTNode) -> bool:
+                return isinstance(node, frog_ast.Variable) and node.name == name
+
+            remaining_block = frog_ast.Block(
+                copy.deepcopy(list(block.statements[index + 1 :]))
+            )
+
+            # Skip if var is reassigned anywhere in remaining
+            if (
+                SearchVisitor(
+                    functools.partial(is_written_to, var_name)
+                ).visit(remaining_block)
+                is not None
+            ):
+                continue
+
+            # Find the first use of var in remaining_block
+            first_use_idx = None
+            for i, s in enumerate(remaining_block.statements):
+                if (
+                    SearchVisitor(
+                        functools.partial(uses_var, var_name)
+                    ).visit(s)
+                    is not None
+                ):
+                    first_use_idx = i
+                    break
+
+            if first_use_idx is None:
+                continue  # var not used; other transformers will clean it up
+
+            # Count total occurrences of var in remaining_block.  We use a
+            # replace loop so that multiple uses *within the same statement*
+            # (e.g. `return v3 + v3`) are also detected.
+            total_uses = 0
+            count_block = copy.deepcopy(remaining_block)
+            while True:
+                found = SearchVisitor(
+                    functools.partial(uses_var, var_name)
+                ).visit(count_block)
+                if found is None:
+                    break
+                total_uses += 1
+                if total_uses > 1:
+                    break
+                count_block = ReplaceTransformer(
+                    found, frog_ast.Variable(var_name + "__counted__")
+                ).transform(count_block)
+
+            if total_uses != 1:
+                continue
+
+            # Collect free variables in expr and check none are written to
+            # between the declaration and the single use site
+            free_vars = VariableCollectionVisitor().visit(copy.deepcopy(expr))
+            intermediate = frog_ast.Block(
+                list(remaining_block.statements[:first_use_idx])
+            )
+            if any(
+                SearchVisitor(
+                    functools.partial(is_written_to, fv.name)
+                ).visit(intermediate)
+                is not None
+                for fv in free_vars
+            ):
+                continue
+
+            # Perform the inlining: replace every occurrence of var in
+            # remaining_block with expr (there is exactly one, verified above)
+            expr_copy = copy.deepcopy(expr)
+            while True:
+                var_node = SearchVisitor(
+                    functools.partial(uses_var, var_name)
+                ).visit(remaining_block)
+                if var_node is None:
+                    break
+                remaining_block = ReplaceTransformer(
+                    var_node, copy.deepcopy(expr_copy)
+                ).transform(remaining_block)
+
+            # Rebuild: remove the declaration, keep the updated remaining block
+            new_block = frog_ast.Block(
+                list(block.statements[:index]) + list(remaining_block.statements)
+            )
+            return self.transform_block(new_block)
+
+        return block
+
+
 class RedundantFieldCopyTransformer(BlockTransformer):
     def __init__(self) -> None:
         self.fields: list[str] = []

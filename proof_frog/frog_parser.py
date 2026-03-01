@@ -735,6 +735,8 @@ def _get_parser(
     input_stream: InputStream | FileStream
     if os.path.isfile(input_):
         input_stream = FileStream
+    elif input_.endswith((".primitive", ".scheme", ".game", ".proof")):
+        raise FileNotFoundError(f"file not found: '{input_}'")
     else:
         input_stream = InputStream
     lexer = lexer_functor(input_stream(input_))

@@ -49,7 +49,7 @@ def _capture_parse(file_path: str) -> tuple[str, bool]:
         return _strip_ansi(buf.getvalue()), True
     except ValueError as e:
         return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False
-    except frog_parser.ParseError as e:
+    except (frog_parser.ParseError, FileNotFoundError) as e:
         return _strip_ansi(buf.getvalue()) + f"\n{e}", False
     except Exception as e:
         return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False
@@ -246,7 +246,7 @@ def _capture_prove(file_path: str, directory: str = "") -> tuple[str, bool, list
             if r.depth == 0 and r.kind != "induction_rollover"
         ]
         return _strip_ansi(buf.getvalue()), proof_succeeded, hop_results
-    except frog_parser.ParseError as e:
+    except (frog_parser.ParseError, FileNotFoundError) as e:
         return _strip_ansi(buf.getvalue()) + f"\n{e}", False, []
     except Exception as e:
         return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False, []

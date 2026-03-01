@@ -119,7 +119,7 @@ def describe(path: str) -> str:
     """
     try:
         return describe_module.describe_file(_resolve(path))
-    except (ValueError, frog_parser.ParseError) as e:
+    except (ValueError, frog_parser.ParseError, FileNotFoundError) as e:
         return f"Error: {e}"
 
 
@@ -155,7 +155,7 @@ def check(path: str) -> dict[str, Any]:
         with redirect_stdout(buf), redirect_stderr(buf):
             semantic_analysis.check_well_formed(root, abs_path)
         return {"output": f"{abs_path} is well-formed.", "success": True}
-    except frog_parser.ParseError as e:
+    except (frog_parser.ParseError, FileNotFoundError) as e:
         return {"output": str(e), "success": False}
     except semantic_analysis.FailedTypeCheck:
         msg = _strip_ansi(buf.getvalue()) or "Type check failed."

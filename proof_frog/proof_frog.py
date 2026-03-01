@@ -31,7 +31,7 @@ def main() -> None:
             print(root)
         except ValueError:
             usage()
-        except frog_parser.ParseError as e:
+        except (frog_parser.ParseError, FileNotFoundError) as e:
             print(str(e), file=sys.stderr)
             sys.exit(1)
     elif argv[1] == "check":
@@ -40,7 +40,7 @@ def main() -> None:
             root = frog_parser.parse_file(file_name)
         except ValueError:
             usage()
-        except frog_parser.ParseError as e:
+        except (frog_parser.ParseError, FileNotFoundError) as e:
             print(str(e), file=sys.stderr)
             sys.exit(1)
         try:
@@ -54,7 +54,7 @@ def main() -> None:
         proof_file: frog_ast.ProofFile
         try:
             proof_file = frog_parser.parse_proof_file(argv[2])
-        except frog_parser.ParseError as e:
+        except (frog_parser.ParseError, FileNotFoundError) as e:
             print(str(e), file=sys.stderr)
             sys.exit(1)
 
@@ -70,7 +70,7 @@ def main() -> None:
                         root = frog_parser.parse_game_file(imp.filename)
                     case frog_ast.FileType.PROOF:
                         raise TypeError("Cannot import proofs")
-            except frog_parser.ParseError as e:
+            except (frog_parser.ParseError, FileNotFoundError) as e:
                 print(str(e), file=sys.stderr)
                 sys.exit(1)
 
@@ -89,7 +89,7 @@ def main() -> None:
         from proof_frog.describe import describe_file
         try:
             print(describe_file(file_name))
-        except (ValueError, frog_parser.ParseError) as e:
+        except (ValueError, frog_parser.ParseError, FileNotFoundError) as e:
             print(str(e), file=sys.stderr)
             sys.exit(1)
 

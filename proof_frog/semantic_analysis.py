@@ -1,3 +1,4 @@
+import os
 import sys
 import copy
 from typing import Optional, TypeVar, Union, TypeAlias
@@ -19,10 +20,11 @@ def check_well_formed(root: frog_ast.Root, file_name: str) -> None:
     file_name_mapping: dict[str, str] = {}
     if isinstance(root, frog_ast.ProofFile):
         for imp in root.imports:
-            parsed_file = frog_parser.parse_file(imp.filename)
+            resolved = frog_parser.resolve_import_path(imp.filename, file_name)
+            parsed_file = frog_parser.parse_file(resolved)
             name = imp.rename if imp.rename else parsed_file.get_export_name()
             import_namespace[name] = parsed_file
-            file_name_mapping[name] = imp.filename
+            file_name_mapping[name] = resolved
         check_proof_well_formed(root, file_name, import_namespace, file_name_mapping)
     else:
         print(
@@ -37,18 +39,19 @@ def name_resolution(initial_root: frog_ast.Root, initial_file_name: str) -> None
         import_namespace: dict[str, frog_ast.Game | frog_ast.Root] = {}
         if isinstance(root, (frog_ast.GameFile, frog_ast.Scheme, frog_ast.ProofFile)):
             for imp in root.imports:
-                if imp.filename in all_imports:
-                    definition = all_imports[imp.filename]
+                resolved = frog_parser.resolve_import_path(imp.filename, file_name)
+                if resolved in all_imports:
+                    definition = all_imports[resolved]
                     import_namespace[
                         imp.rename if imp.rename else definition.get_export_name()
                     ] = definition
                     continue
 
-                parsed_file = frog_parser.parse_file(imp.filename)
-                do_name_resolution(parsed_file, imp.filename)
+                parsed_file = frog_parser.parse_file(resolved)
+                do_name_resolution(parsed_file, resolved)
                 name = imp.rename if imp.rename else parsed_file.get_export_name()
                 import_namespace[name] = parsed_file
-                all_imports[imp.filename] = parsed_file
+                all_imports[resolved] = parsed_file
         NameResolutionVisitor(import_namespace, file_name).visit(root)
 
     do_name_resolution(initial_root, initial_file_name)
@@ -464,10 +467,22 @@ def check_proof_well_formed(
 def print_error(
     location: frog_ast.ASTNode, message: str, file_name: str = "Unknown"
 ) -> None:
-    print(f"File: {file_name}")
-    print(f"Line {location.line_num}, column: {location.column_num}", file=sys.stderr)
-    print(location)
-    print(message, file=sys.stderr)
+    line, col = location.line_num, location.column_num
+    loc = file_name
+    if line >= 0:
+        loc += f":{line}:{col}"
+    print(f"{loc}: error: {message}", file=sys.stderr)
+    if file_name != "Unknown" and os.path.isfile(file_name) and line >= 1:
+        try:
+            with open(file_name, encoding="utf-8") as f:
+                lines = f.readlines()
+            if line <= len(lines):
+                src = lines[line - 1].rstrip()
+                caret = " " * col + "^"
+                print(src, file=sys.stderr)
+                print(caret, file=sys.stderr)
+        except OSError:
+            pass
     raise FailedTypeCheck()
 
 

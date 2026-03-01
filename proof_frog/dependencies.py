@@ -221,7 +221,7 @@ def unnecessary_statement_info(
 def remove_unnecessary_statements(
     fields: list[str], block: frog_ast.Block
 ) -> frog_ast.Block:
-    (required_map, _) = unnecessary_statement_info(fields, block)
+    required_map, _ = unnecessary_statement_info(fields, block)
 
     def construct_new(block: frog_ast.Block) -> frog_ast.Block:
         new_statements: list[frog_ast.Statement] = []

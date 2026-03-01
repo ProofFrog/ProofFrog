@@ -7,7 +7,9 @@ from antlr4 import (
     CommonTokenStream,
     BailErrorStrategy,
     ParserRuleContext,
+    error as antlr_error,
 )
+from antlr4.error.ErrorListener import ErrorListener
 from .parsing.PrimitiveVisitor import PrimitiveVisitor
 from .parsing.PrimitiveParser import PrimitiveParser
 from .parsing.PrimitiveLexer import PrimitiveLexer
@@ -21,6 +23,84 @@ from .parsing.ProofVisitor import ProofVisitor
 from .parsing.ProofParser import ProofParser
 from .parsing.ProofLexer import ProofLexer
 from . import frog_ast
+
+
+class _SilentErrorListener(ErrorListener):  # type: ignore[misc]
+    """Suppresses ANTLR's default stderr output; errors are reported via exceptions."""
+
+    def syntaxError(self, recognizer, offendingSymbol, line, column, msg, e):  # type: ignore[override, no-untyped-def]  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        pass
+
+
+class ParseError(Exception):
+    """A syntax error from the ANTLR parser with location info."""
+
+    def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        message: str,
+        file_name: str = "",
+        line: int = -1,
+        column: int = -1,
+        token: str = "",
+        source_line: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.file_name = file_name
+        self.line = line
+        self.column = column
+        self.token = token
+        self.source_line = source_line
+
+    def __str__(self) -> str:
+        loc = self.file_name if self.file_name else "<input>"
+        if self.line >= 0:
+            loc += f":{self.line}:{self.column}"
+        header = f"{loc}: parse error: {self.args[0]}"
+        if self.source_line:
+            caret = " " * self.column + "^"
+            return f"{header}\n{self.source_line}\n{caret}"
+        return header
+
+
+def _to_parse_error(
+    e: antlr_error.Errors.ParseCancellationException, source: str
+) -> ParseError:
+    """Extract location info from a BailErrorStrategy exception."""
+    file_name = source if os.path.isfile(source) else "<input>"
+    line, col, token_text = -1, -1, ""
+    inner = e.args[0] if e.args else None
+    if inner is not None and hasattr(inner, "offendingToken") and inner.offendingToken:
+        tok = inner.offendingToken
+        line, col, token_text = tok.line, tok.column, tok.text or ""
+
+    if token_text == "<EOF>":
+        msg = "unexpected end of file"
+    elif token_text:
+        msg = f"unexpected token '{token_text}'"
+    else:
+        msg = "syntax error"
+
+    source_line = ""
+    if line >= 1:
+        try:
+            if os.path.isfile(source):
+                with open(source, encoding="utf-8") as f:
+                    lines = f.readlines()
+            else:
+                lines = source.splitlines(keepends=True)
+            if line <= len(lines):
+                source_line = lines[line - 1].rstrip()
+        except OSError:
+            pass
+
+    return ParseError(
+        msg,
+        file_name=file_name,
+        line=line,
+        column=col,
+        token=token_text,
+        source_line=source_line,
+    )
 
 
 def _binary_operation(
@@ -655,53 +735,88 @@ def _get_parser(
     input_stream: InputStream | FileStream
     if os.path.isfile(input_):
         input_stream = FileStream
+    elif input_.endswith((".primitive", ".scheme", ".game", ".proof")):
+        raise FileNotFoundError(f"file not found: '{input_}'")
     else:
         input_stream = InputStream
     lexer = lexer_functor(input_stream(input_))
+    lexer.removeErrorListeners()
+    lexer.addErrorListener(_SilentErrorListener())
     parser = parser_functor(CommonTokenStream(lexer))
+    parser.removeErrorListeners()
+    parser.addErrorListener(_SilentErrorListener())
     # No way to do this without editing the protected field in antlr's python runtime
     parser._errHandler = BailErrorStrategy()  # pylint: disable=protected-access
     return parser
 
 
 def parse_primitive_file(primitive: str) -> frog_ast.Primitive:
-    ast: frog_ast.Primitive = _PrimitiveASTGenerator().visit(
-        _get_parser(primitive, PrimitiveLexer, PrimitiveParser).program()
-    )
-    return ast
+    try:
+        ast: frog_ast.Primitive = _PrimitiveASTGenerator().visit(
+            _get_parser(primitive, PrimitiveLexer, PrimitiveParser).program()
+        )
+        return ast
+    except antlr_error.Errors.ParseCancellationException as e:
+        raise _to_parse_error(e, primitive) from e
 
 
 def parse_scheme_file(scheme: str) -> frog_ast.Scheme:
-    ast: frog_ast.Scheme = _SchemeASTGenerator().visit(
-        _get_parser(scheme, SchemeLexer, SchemeParser).program()
-    )
-    return ast
+    try:
+        ast: frog_ast.Scheme = _SchemeASTGenerator().visit(
+            _get_parser(scheme, SchemeLexer, SchemeParser).program()
+        )
+        return ast
+    except antlr_error.Errors.ParseCancellationException as e:
+        raise _to_parse_error(e, scheme) from e
 
 
 def parse_expression(expression: str) -> frog_ast.Expression:
-    ast: frog_ast.Expression = _SharedAST().visit(
-        _get_parser(expression, GameLexer, GameParser).expression()
-    )
-    return ast
+    try:
+        ast: frog_ast.Expression = _SharedAST().visit(
+            _get_parser(expression, GameLexer, GameParser).expression()
+        )
+        return ast
+    except antlr_error.Errors.ParseCancellationException as e:
+        raise _to_parse_error(e, expression) from e
 
 
 def parse_game_file(game_file: str) -> frog_ast.GameFile:
-    ast: frog_ast.GameFile = _GameASTGenerator().visit(
-        _get_parser(game_file, GameLexer, GameParser).program()
-    )
-    return ast
+    try:
+        ast: frog_ast.GameFile = _GameASTGenerator().visit(
+            _get_parser(game_file, GameLexer, GameParser).program()
+        )
+        return ast
+    except antlr_error.Errors.ParseCancellationException as e:
+        raise _to_parse_error(e, game_file) from e
 
 
 def parse_proof_file(proof_file: str) -> frog_ast.ProofFile:
-    ast: frog_ast.ProofFile = _ProofASTGenerator().visit(
-        _get_parser(proof_file, ProofLexer, ProofParser).program()
-    )
-    return ast
+    try:
+        ast: frog_ast.ProofFile = _ProofASTGenerator().visit(
+            _get_parser(proof_file, ProofLexer, ProofParser).program()
+        )
+        return ast
+    except antlr_error.Errors.ParseCancellationException as e:
+        raise _to_parse_error(e, proof_file) from e
 
 
 def _get_file_type(file_name: str) -> frog_ast.FileType:
     extension: str = os.path.splitext(file_name)[1].strip(".")
     return frog_ast.FileType(extension)
+
+
+def resolve_import_path(import_path: str, importing_file_path: str) -> str:
+    """Resolve an import path relative to the importing file's directory.
+
+    If import_path is absolute, it is returned as-is.
+    Otherwise it is resolved relative to the directory of importing_file_path
+    and normalised (so '../' components are collapsed).
+    """
+    if os.path.isabs(import_path):
+        return import_path
+    return os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(importing_file_path)), import_path)
+    )
 
 
 def parse_file(file_name: str) -> frog_ast.Root:
@@ -719,21 +834,30 @@ def parse_file(file_name: str) -> frog_ast.Root:
 
 
 def parse_game(game: str) -> frog_ast.Game:
-    ast: frog_ast.Game = _SharedAST().visit(
-        _get_parser(game, GameLexer, GameParser).game()
-    )
-    return ast
+    try:
+        ast: frog_ast.Game = _SharedAST().visit(
+            _get_parser(game, GameLexer, GameParser).game()
+        )
+        return ast
+    except antlr_error.Errors.ParseCancellationException as e:
+        raise _to_parse_error(e, game) from e
 
 
 def parse_reduction(reduction: str) -> frog_ast.Reduction:
-    ast: frog_ast.Reduction = _ProofASTGenerator().visit(
-        _get_parser(reduction, ProofLexer, ProofParser).reduction()
-    )
-    return ast
+    try:
+        ast: frog_ast.Reduction = _ProofASTGenerator().visit(
+            _get_parser(reduction, ProofLexer, ProofParser).reduction()
+        )
+        return ast
+    except antlr_error.Errors.ParseCancellationException as e:
+        raise _to_parse_error(e, reduction) from e
 
 
 def parse_method(method: str) -> frog_ast.Method:
-    ast: frog_ast.Method = _SharedAST().visit(
-        _get_parser(method, GameLexer, GameParser).method()
-    )
-    return ast
+    try:
+        ast: frog_ast.Method = _SharedAST().visit(
+            _get_parser(method, GameLexer, GameParser).method()
+        )
+        return ast
+    except antlr_error.Errors.ParseCancellationException as e:
+        raise _to_parse_error(e, method) from e

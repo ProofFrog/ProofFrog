@@ -20,6 +20,7 @@ class WhichGame(Enum):
 
 
 ProcessedAssumption = namedtuple("ProcessedAssumption", ["assumption", "which"])
+HopResult = namedtuple("HopResult", ["step_num", "valid", "kind", "depth"])
 
 
 class FailedProof(Exception):
@@ -34,6 +35,7 @@ class ProofEngine:
 
         self.verbose = verbose
         self.step_assumptions: list[ProcessedAssumption] = []
+        self.hop_results: list[HopResult] = []
         self.variables: dict[str, Symbol | frog_ast.Expression] = {}
         self.method_lookup: MethodLookup = {}
 
@@ -91,7 +93,12 @@ class ProofEngine:
             print(Fore.RED + f"Theorem: {proof_file.theorem}")
             print(Fore.RED + f"First Game: {first_step.challenger}")
 
+        self.hop_results = []
         self.prove_steps(proof_file.steps, proof_file.assumptions)
+
+        if any(not r.valid for r in self.hop_results):
+            print(Fore.RED + "Proof Failed!")
+            raise FailedProof()
 
         if (
             first_step.challenger.game == final_step.challenger.game
@@ -107,6 +114,7 @@ class ProofEngine:
         self,
         steps: list[frog_ast.ProofStep],
         assumed_indistinguishable: list[frog_ast.ParameterizedGame],
+        _depth: int = 0,
     ) -> None:
         step_num = 0
 
@@ -142,6 +150,14 @@ class ProofEngine:
                     print(f"Current: {current_step}")
                     print(f"Hop To: {next_step}\n")
                     print("Valid by assumption")
+                    self.hop_results.append(
+                        HopResult(
+                            step_num=step_num,
+                            valid=True,
+                            kind="by_assumption",
+                            depth=_depth,
+                        )
+                    )
                     continue
                 current_game_ast = self._get_game_ast(
                     current_step.challenger, current_step.reduction
@@ -196,12 +212,24 @@ class ProofEngine:
 
             self.set_up_assumptions(assumptions, current_step, next_step)
 
-            self.check_equivalent(current_game_ast, next_game_ast)
+            hop_valid = self.check_equivalent(current_game_ast, next_game_ast)
+            if not hop_valid:
+                print("Step failed!")
+            self.hop_results.append(
+                HopResult(
+                    step_num=step_num,
+                    valid=hop_valid,
+                    kind="equivalent" if hop_valid else "failed",
+                    depth=_depth,
+                )
+            )
             if isinstance(steps[i], frog_ast.Induction):
                 the_induction = steps[i]
                 assert isinstance(the_induction, frog_ast.Induction)
                 self.proof_let_types.set(the_induction.name, frog_ast.IntType())
-                self.prove_steps(the_induction.steps, assumed_indistinguishable)
+                self.prove_steps(
+                    the_induction.steps, assumed_indistinguishable, _depth=_depth + 1
+                )
                 # Check induction roll over
                 first_step = the_induction.steps[0]
                 assert isinstance(first_step, frog_ast.Step)
@@ -235,7 +263,17 @@ class ProofEngine:
                 print(f"Current: {last_step}")
                 print(f"Hop To: {first_step}\n")
                 self.set_up_assumptions(assumptions, last_step, first_step)
-                self.check_equivalent(last_step_ast, first_step_ast)
+                rollover_valid = self.check_equivalent(last_step_ast, first_step_ast)
+                if not rollover_valid:
+                    print("Step failed!")
+                self.hop_results.append(
+                    HopResult(
+                        step_num=step_num,
+                        valid=rollover_valid,
+                        kind="induction_rollover",
+                        depth=_depth,
+                    )
+                )
                 self.proof_let_types.remove(the_induction.name)
 
     def set_up_assumptions(
@@ -305,7 +343,7 @@ class ProofEngine:
 
     def check_equivalent(
         self, current_game_ast: frog_ast.Game, next_game_ast: frog_ast.Game
-    ) -> None:
+    ) -> bool:
         AstManipulator = namedtuple("AstManipulator", ["fn", "name"])
         ast_manipulators: list[AstManipulator] = [
             AstManipulator(
@@ -323,6 +361,12 @@ class ProofEngine:
             AstManipulator(
                 fn=lambda ast: visitors.RedundantCopyTransformer().transform(ast),
                 name="Remove Redundant Copies",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.InlineSingleUseVariableTransformer().transform(
+                    ast
+                ),
+                name="Inline Single-Use Variables",
             ),
             AstManipulator(fn=self.sort_game, name="Topological Sorting"),
             AstManipulator(fn=remove_duplicate_fields, name="Remove Duplicate Fields"),
@@ -445,7 +489,7 @@ class ProofEngine:
 
         if current_game_ast == next_game_ast:
             print("Inline Success!")
-            return
+            return True
 
         class AllTrueTransformer(visitors.Transformer):
             def transform_if_statement(
@@ -455,15 +499,10 @@ class ProofEngine:
                     [frog_ast.Boolean(True)] * len(stmt.conditions), stmt.blocks
                 )
 
-        def quit_proof() -> None:
-            print("Step failed!")
-            print(Fore.RED + "Proof Failed!")
-            raise FailedProof()
-
         all_true_current = AllTrueTransformer().transform(current_game_ast)
         all_true_next = AllTrueTransformer().transform(next_game_ast)
         if all_true_current != all_true_next:
-            quit_proof()
+            return False
 
         found_ifs: list[frog_ast.IfStatement] = []
 
@@ -499,12 +538,98 @@ class ProofEngine:
                     + self.proof_let_types
                 ).visit(if_next.conditions[i])
                 if first_if_formula is None or first_if_formula is None:
-                    quit_proof()
+                    return False
                 solver = z3.Solver()
                 solver.add(z3.Not(first_if_formula == next_if_formula))
                 if solver.check() != z3.unsat:
-                    quit_proof()
+                    return False
         print("Inline Success!")
+        return True
+
+    def canonicalize_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        """Apply the same simplification pipeline as check_equivalent() (without
+        step-specific assumptions) and the final standardization steps, returning
+        the canonical form of the game as printed by the prove command."""
+        AstManipulator = namedtuple("AstManipulator", ["fn", "name"])
+        ast_manipulators: list[AstManipulator] = [
+            AstManipulator(
+                fn=lambda ast: visitors.SymbolicComputationTransformer(
+                    self.variables
+                ).transform(ast),
+                name="Symbolic Computation",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifySpliceTransformer(
+                    self.variables
+                ).transform(ast),
+                name="Simplifying Splices",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.RedundantCopyTransformer().transform(ast),
+                name="Remove Redundant Copies",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.InlineSingleUseVariableTransformer().transform(
+                    ast
+                ),
+                name="Inline Single-Use Variables",
+            ),
+            AstManipulator(fn=self.sort_game, name="Topological Sorting"),
+            AstManipulator(fn=remove_duplicate_fields, name="Remove Duplicate Fields"),
+            AstManipulator(
+                fn=lambda ast: visitors.BranchEliminiationTransformer().transform(ast),
+                name="Branch Elimination",
+            ),
+            AstManipulator(
+                fn=dependencies.remove_unnecessary_fields,
+                name="Remove unnecessary statements and fields",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.CollapseAssignmentTransformer().transform(ast),
+                name="Collapse Assignment",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifyReturnTransformer().transform(ast),
+                name="Simplify Returns",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifyIfTransformer().transform(ast),
+                name="Simplify Ifs",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.ExpandTupleTransformer().transform(ast),
+                name="Expand Tuples",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifyNot().transform(ast),
+                name="Simplify Nots",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.RedundantFieldCopyTransformer().transform(ast),
+                name="Remove redundant variables for fields",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.SimplifyTupleTransformer(ast).transform(ast),
+                name="Simplify tuples that are copies of their fields",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.RemoveUnreachableTransformer(ast).transform(
+                    ast
+                ),
+                name="Remove unreachable blocks of code",
+            ),
+        ]
+        while True:
+            new_game = game
+            for manipulator in ast_manipulators:
+                new_game = manipulator.fn(new_game)
+            if new_game == game:
+                break
+            game = new_game
+        game = visitors.VariableStandardizingTransformer().transform(game)
+        game = standardize_field_names(game)
+        game = dependencies.BubbleSortFieldAssignment().transform(game)
+        return game
 
     def apply_reduction(
         self,

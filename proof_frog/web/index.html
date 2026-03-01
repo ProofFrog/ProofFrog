@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ProofFrog</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/codemirror.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/theme/dracula.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/theme/eclipse.min.css">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <span class="logo"><img src="/prooffrog.png" alt="ProofFrog">ProofFrog</span>
+    <button id="btn-save" title="Save (Ctrl+S)" disabled>Save</button>
+    <button id="btn-parse" class="primary" title="Parse current file" disabled>Parse</button>
+    <button id="btn-prove" class="primary" title="Run proof" disabled style="display:none">Run Proof</button>
+<span class="spacer"></span>
+    <span class="dir-label" id="dir-label"></span>
+    <button id="btn-theme" title="Toggle light/dark mode">Dark</button>
+  </div>
+  <div id="main">
+    <div id="sidebar">
+      <div id="sidebar-header">Explorer</div>
+      <div id="file-tree"></div>
+      <div id="game-hops-panel">
+        <div id="inner-resize-handle"></div>
+        <div id="game-hops-header">Game Hops</div>
+        <div id="game-hops-list"></div>
+      </div>
+      <div id="wizard-panel">
+        <div id="wizard-resize-handle"></div>
+        <div id="wizard-panel-header">Wizard</div>
+        <div id="wizard-body"></div>
+      </div>
+    </div>
+    <div id="sidebar-resize-handle"></div>
+    <div id="editor-area">
+      <div id="tabs"><span id="tabs-empty">Open a file from the explorer</span></div>
+      <div id="editors-container">
+        <div id="welcome">
+          <img src="/prooffrog.png" alt="ProofFrog">
+          <h2>ProofFrog</h2>
+          <p>Select a file from the explorer to start editing.</p>
+        </div>
+      </div>
+      <div id="resize-handle"></div>
+      <div id="output-pane">
+        <div id="output-header">
+          <span id="output-status"></span>
+          <span id="output-title"></span>
+          <button id="output-close" title="Close output">&#x2715;</button>
+        </div>
+        <div id="output-content"><pre id="output-pre"></pre></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="wizard-modal" role="dialog" aria-modal="true" aria-labelledby="wizard-modal-title" style="display:none">
+  <div id="wizard-modal-panel">
+    <div id="wizard-modal-header">
+      <span id="wizard-modal-title">Create New Game</span>
+      <button id="wizard-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="wizard-modal-body">
+      <div>
+        <label class="wizard-label" for="wizard-prop-name">Security property name</label>
+        <input class="wizard-input" id="wizard-prop-name" type="text" placeholder="e.g. CPA" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="wizard-primitive">Primitive</label>
+        <select class="wizard-input" id="wizard-primitive"></select>
+      </div>
+      <div>
+        <label class="wizard-label" for="wizard-left-name">Left side name</label>
+        <input class="wizard-input" id="wizard-left-name" type="text" value="Left" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="wizard-right-name">Right side name</label>
+        <input class="wizard-input" id="wizard-right-name" type="text" value="Right" autocomplete="off">
+      </div>
+    </div>
+    <div id="wizard-modal-footer">
+      <button id="wizard-modal-create" class="primary">Create</button>
+      <button id="wizard-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/codemirror.min.js"></script>
+<script src="/static/app.js" type="module"></script>
+</body>
+</html>

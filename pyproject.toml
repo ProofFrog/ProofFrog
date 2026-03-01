@@ -14,8 +14,12 @@ dependencies = [
 	"antlr4-python3-runtime >= 4.13",
 	"colorama >= 0.4",
 	"z3-solver >= 4.12",
-	"sympy >= 1.12"
+	"sympy >= 1.12",
+	"flask >= 3.0"
 ]
+
+[project.optional-dependencies]
+mcp = ["mcp[cli] >= 1.0"]
 
 [project.urls]
 Source = "https://github.com/ProofFrog/ProofFrog"
@@ -29,6 +33,7 @@ exclude = 'proof_frog/parsing/'
 
 [tool.pytest.ini_options]
 pythonpath = 'proof_frog'
+addopts = '-n auto'
 
 [tool.mypy]
 exclude = 'parsing'
@@ -49,6 +54,9 @@ module='z3.*'
 ignore_missing_imports = 'True'
 [[tool.mypy.overrides]]
 module='sympy.*'
+ignore_missing_imports = 'True'
+[[tool.mypy.overrides]]
+module='mcp.*'
 ignore_missing_imports = 'True'
 
 [tool.pylint.MASTER]

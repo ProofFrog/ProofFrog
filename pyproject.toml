@@ -55,6 +55,9 @@ ignore_missing_imports = 'True'
 [[tool.mypy.overrides]]
 module='sympy.*'
 ignore_missing_imports = 'True'
+[[tool.mypy.overrides]]
+module='mcp.*'
+ignore_missing_imports = 'True'
 
 [tool.pylint.MASTER]
 disable = '''missing-module-docstring,

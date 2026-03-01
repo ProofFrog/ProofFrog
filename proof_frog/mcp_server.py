@@ -27,7 +27,7 @@ from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error
 
 from . import frog_parser, semantic_analysis
 from . import describe as describe_module
@@ -68,7 +68,7 @@ def _resolve(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool()  # type: ignore[misc, untyped-decorator]
 def list_files(subdirectory: str = "") -> dict[str, Any]:
     """List all ProofFrog files in a directory tree.
 
@@ -81,7 +81,7 @@ def list_files(subdirectory: str = "") -> dict[str, Any]:
     return _build_tree(Path(target), base)
 
 
-@mcp.tool()
+@mcp.tool()  # type: ignore[misc, untyped-decorator]
 def read_file(path: str) -> str:
     """Read the text content of a ProofFrog file.
 
@@ -90,7 +90,7 @@ def read_file(path: str) -> str:
     return Path(_resolve(path)).read_text(encoding="utf-8")
 
 
-@mcp.tool()
+@mcp.tool()  # type: ignore[misc, untyped-decorator]
 def write_file(path: str, content: str) -> dict[str, Any]:
     """Write (create or overwrite) a ProofFrog file.
 
@@ -109,7 +109,7 @@ def write_file(path: str, content: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool()  # type: ignore[misc, untyped-decorator]
 def describe(path: str) -> str:
     """Get a concise interface description of a ProofFrog file.
 
@@ -130,7 +130,7 @@ def describe(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool()  # type: ignore[misc, untyped-decorator]
 def parse(path: str) -> dict[str, Any]:
     """Parse a ProofFrog file and return its AST representation.
 
@@ -142,7 +142,7 @@ def parse(path: str) -> dict[str, Any]:
     return {"output": output, "success": success}
 
 
-@mcp.tool()
+@mcp.tool()  # type: ignore[misc, untyped-decorator]
 def check(path: str) -> dict[str, Any]:
     """Run semantic type-checking on a ProofFrog file.
 
@@ -166,7 +166,7 @@ def check(path: str) -> dict[str, Any]:
         return {"output": f"Error: {e}", "success": False}
 
 
-@mcp.tool()
+@mcp.tool()  # type: ignore[misc, untyped-decorator]
 def prove(proof_path: str) -> dict[str, Any]:
     """Run proof verification on a .proof file.
 
@@ -182,7 +182,7 @@ def prove(proof_path: str) -> dict[str, Any]:
     return {"output": output, "success": success, "hop_results": hop_results}
 
 
-@mcp.tool()
+@mcp.tool()  # type: ignore[misc, untyped-decorator]
 def get_step_detail(proof_path: str, step_index: int) -> dict[str, Any]:
     """Get the canonical (fully simplified) form of one proof step.
 
@@ -220,7 +220,7 @@ def get_step_detail(proof_path: str, step_index: int) -> dict[str, Any]:
     }
 
 
-@mcp.tool()
+@mcp.tool()  # type: ignore[misc, untyped-decorator]
 def get_inlined_game(proof_path: str, step_text: str) -> dict[str, Any]:
     """Get the canonical form of a game step without needing the full proof to parse.
 
@@ -407,7 +407,7 @@ NOT relative to the importing file.
 """
 
 
-@mcp.resource("prooffrog://language-reference")
+@mcp.resource("prooffrog://language-reference")  # type: ignore[misc, untyped-decorator]
 def language_reference() -> str:
     """Concise ProofFrog language syntax reference."""
     return _LANGUAGE_REFERENCE

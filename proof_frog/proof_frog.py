@@ -59,15 +59,16 @@ def main() -> None:
             sys.exit(1)
 
         for imp in proof_file.imports:
-            file_type = _get_file_type(imp.filename)
+            resolved = frog_parser.resolve_import_path(imp.filename, argv[2])
+            file_type = _get_file_type(resolved)
             try:
                 match file_type:
                     case frog_ast.FileType.PRIMITIVE:
-                        root = frog_parser.parse_primitive_file(imp.filename)
+                        root = frog_parser.parse_primitive_file(resolved)
                     case frog_ast.FileType.SCHEME:
-                        root = frog_parser.parse_scheme_file(imp.filename)
+                        root = frog_parser.parse_scheme_file(resolved)
                     case frog_ast.FileType.GAME:
-                        root = frog_parser.parse_game_file(imp.filename)
+                        root = frog_parser.parse_game_file(resolved)
                     case frog_ast.FileType.PROOF:
                         raise TypeError("Cannot import proofs")
             except (frog_parser.ParseError, FileNotFoundError) as e:

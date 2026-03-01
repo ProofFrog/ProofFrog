@@ -176,7 +176,7 @@ def prove(proof_path: str) -> dict[str, Any]:
     Imports in the proof are resolved relative to the server's working directory.
     Use write_file first to save the proof content to disk, then call prove.
     """
-    output, success, hop_results = _capture_prove(_resolve(proof_path), _directory)
+    output, success, hop_results = _capture_prove(_resolve(proof_path))
     return {"output": output, "success": success, "hop_results": hop_results}
 
 
@@ -205,7 +205,7 @@ def get_step_detail(proof_path: str, step_index: int) -> dict[str, Any]:
       scheme        — The underlying scheme (if applicable)
     """
     output, canonical, success, has_reduction, reduction, challenger, scheme = (
-        _capture_inline(_resolve(proof_path), step_index, _directory)
+        _capture_inline(_resolve(proof_path), step_index)
     )
     return {
         "output": output,
@@ -259,7 +259,7 @@ def get_inlined_game(proof_path: str, step_text: str) -> dict[str, Any]:
         try:
             with _os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(minimal)
-            output, canonical, success, _, _, _, _ = _capture_inline(tmp_path, 0, _directory)
+            output, canonical, success, _, _, _, _ = _capture_inline(tmp_path, 0)
         finally:
             _os.unlink(tmp_path)
         return {"output": output, "canonical": canonical, "success": success}

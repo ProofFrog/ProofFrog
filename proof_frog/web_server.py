@@ -60,12 +60,6 @@ def _get_file_type(file_name: str) -> frog_ast.FileType:
     return frog_ast.FileType(extension)
 
 
-def _resolve_import(directory: str, filename: str) -> str:
-    if os.path.isabs(filename):
-        return filename
-    return os.path.join(directory, filename)
-
-
 def _build_minimal_proof(proof_text: str, step_text: str) -> str | None:
     """Build a minimal parseable proof containing only one game step.
 
@@ -130,14 +124,14 @@ def _build_minimal_proof(proof_text: str, step_text: str) -> str | None:
     return "\n\n".join(parts) + "\n"
 
 
-def _capture_inline(file_path: str, step_index: int, directory: str = "") -> tuple[str, str, bool, bool, str, str, str]:
+def _capture_inline(file_path: str, step_index: int) -> tuple[str, str, bool, bool, str, str, str]:
     buf = io.StringIO()
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
             proof_file = frog_parser.parse_proof_file(file_path)
             engine = proof_engine.ProofEngine(False)
             for imp in proof_file.imports:
-                imp_path = _resolve_import(directory, imp.filename) if directory else imp.filename
+                imp_path = frog_parser.resolve_import_path(imp.filename, file_path)
                 file_type = _get_file_type(imp_path)
                 match file_type:
                     case frog_ast.FileType.PRIMITIVE:
@@ -211,7 +205,7 @@ def _capture_inline(file_path: str, step_index: int, directory: str = "") -> tup
         return _strip_ansi(buf.getvalue()) + f"\nError: {e}", "", False, False, "", "", ""
 
 
-def _capture_prove(file_path: str, directory: str = "") -> tuple[str, bool, list[dict]]:
+def _capture_prove(file_path: str) -> tuple[str, bool, list[dict]]:
     buf = io.StringIO()
     engine = proof_engine.ProofEngine(False)
     proof_succeeded = False
@@ -220,7 +214,7 @@ def _capture_prove(file_path: str, directory: str = "") -> tuple[str, bool, list
             proof_file = frog_parser.parse_proof_file(file_path)
 
             for imp in proof_file.imports:
-                imp_path = _resolve_import(directory, imp.filename) if directory else imp.filename
+                imp_path = frog_parser.resolve_import_path(imp.filename, file_path)
                 file_type = _get_file_type(imp_path)
                 match file_type:
                     case frog_ast.FileType.PRIMITIVE:
@@ -341,7 +335,7 @@ def create_app(directory: str) -> Flask:
         if abs_path is None:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
-        output, success, hop_results = _capture_prove(str(abs_path), directory)
+        output, success, hop_results = _capture_prove(str(abs_path))
         return jsonify({"output": output, "success": success, "hop_results": hop_results})
 
     @app.route("/api/inline", methods=["POST"])
@@ -356,7 +350,7 @@ def create_app(directory: str) -> Flask:
         if abs_path is None:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
-        output, canonical, success, has_reduction, reduction, challenger, scheme = _capture_inline(str(abs_path), step_index, directory)
+        output, canonical, success, has_reduction, reduction, challenger, scheme = _capture_inline(str(abs_path), step_index)
         return jsonify({"output": output, "canonical": canonical, "success": success,
                         "has_reduction": has_reduction, "reduction": reduction, "challenger": challenger, "scheme": scheme})
 

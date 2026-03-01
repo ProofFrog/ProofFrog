@@ -805,6 +805,20 @@ def _get_file_type(file_name: str) -> frog_ast.FileType:
     return frog_ast.FileType(extension)
 
 
+def resolve_import_path(import_path: str, importing_file_path: str) -> str:
+    """Resolve an import path relative to the importing file's directory.
+
+    If import_path is absolute, it is returned as-is.
+    Otherwise it is resolved relative to the directory of importing_file_path
+    and normalised (so '../' components are collapsed).
+    """
+    if os.path.isabs(import_path):
+        return import_path
+    return os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(importing_file_path)), import_path)
+    )
+
+
 def parse_file(file_name: str) -> frog_ast.Root:
     match _get_file_type(file_name):
         case frog_ast.FileType.PRIMITIVE:

@@ -38,6 +38,7 @@ python3 -m venv .venv
 - `parsing/` directory is excluded from black, mypy, and pylint
 - Proof imports use paths relative to the directory where the CLI is invoked
 - Tests live in `tests/`; `test_proofs.py` runs all `examples/**/*.proof` files as subprocesses
+- Only use ASCII characters in primitive/scheme/game/proof files.
 
 ## Domain Knowledge
 
@@ -73,6 +74,17 @@ When modifying the proof engine, be careful to ensure that transformations prese
 
 - **Naming**: Use naming conventions from the cryptographic literature rather than sequentially naming variables `v0`, `v1`, etc.
 - **Proofs**: Write out what the intermediate games are intended to be before creating the reductions that hop between games. Use comments at the top of the file to describe: the main result, the high-level proof idea, and descriptions of the sequence of games. For each reduction or intermediate game, add a comment explaining its main idea.
-- **MCP**: A MCP server exists to allow Claude to interact with the ProofFrog engine to check if code parses and type checks, and see which steps of a game hopping proof are valid.
+- **Scope discipline**: Do exactly what is asked and nothing more. If asked to add an intermediate game, add it — do not also think ahead about what reductions will be needed or comment on upcoming proof steps. Work on reductions only when explicitly asked to.
+- **MCP**: A MCP server exists to allow Claude to interact with the ProofFrog engine to check if code parses and type checks, and see which steps of a game hopping proof are valid. Key tools: `get_step_detail(proof_path, step_index)` returns the canonical form of a game step in an existing proof — read the `canonical` field, not `output` (which has mangled internal names). `get_inlined_game(proof_path, step_text)` returns the canonical form of an arbitrary game step using the proof's let:/assume: context, without the step needing to appear in the proof yet.
+- **Writing intermediate games**: To write an intermediate game that matches how a game step canonicalizes, use `get_step_detail` (if the step is already in the proof's games: list) or `get_inlined_game` (to evaluate any step text against the proof's let block). Write a `Game` definition whose body matches the returned `canonical` form. Prefer type aliases like `E.Ciphertext` and `BitString<G.lambda>` over raw sizes for readability.
 - **Engine limitations**: The ProofFrog engine is fairly limited and may have bugs. If a step where certain pieces of code should canonicalize to each other doesn't validate, pause and tell the user so they can investigate whether the engine should be fixed.
 - **Assumptions**: If the user specifies a particular set of security assumptions to use, stick to those unless stuck. It is okay to suggest or automatically add assumptions from `examples/Games/Misc`, as these are helper assumptions that hold statistically or work around engine limitations.
+- **Assumption hops are bidirectional**: An assumption hop in the games list can go Real→Random or Random→Real; indistinguishability is symmetric so both directions are valid. Sometimes, in the forward (left) half of a symmetric proof the hop goes Real→Random and in the reverse (right) half it goes Random→Real.
+- **Reduction parameter rule**: A reduction's parameter list must include every parameter needed to instantiate the composed security game, even if that parameter is not referenced in the reduction body. For example, a reduction composing with `OTPUniform(2 * G.lambda)` must take `PRG G` as a parameter even if `G` is not used inside the reduction's oracle methods.
+- **Standard four-step pattern for a reduction hop**: Each use of a reduction in the games sequence occupies four consecutive entries — two interchangeability hops flanking one assumption hop:
+  ```
+  G_A against Adversary;                          // interchangeability with Security.Side1 compose R
+  Security.Side1 compose R against Adversary;      // interchangeability
+  Security.Side2 compose R against Adversary;      // by assumption (Side1 -> Side2)
+  G_B against Adversary;                          // interchangeability with Security.Side2 compose R
+  ```

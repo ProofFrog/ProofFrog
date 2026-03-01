@@ -29,7 +29,14 @@ from mcp.server.fastmcp import FastMCP
 
 from . import frog_parser, semantic_analysis
 from . import describe as describe_module
-from .web_server import _capture_parse, _capture_prove, _capture_inline, _build_tree, _strip_ansi
+from .web_server import (
+    _capture_parse,
+    _capture_prove,
+    _capture_inline,
+    _build_minimal_proof,
+    _build_tree,
+    _strip_ansi,
+)
 
 mcp: FastMCP = FastMCP(
     "ProofFrog",
@@ -37,7 +44,9 @@ mcp: FastMCP = FastMCP(
         "Tools for reading, writing, parsing, and proving ProofFrog cryptographic "
         "proof files. Use `list_files` to explore available primitives/games/schemes, "
         "`describe` to understand their interfaces, `write_file` + `prove` to verify "
-        "a proof, and `get_step_detail` to diagnose failing proof steps."
+        "a proof, `get_step_detail` to diagnose failing proof steps, and "
+        "`get_inlined_game` to see the canonical form of a game step without "
+        "needing the full proof to be parseable (useful when writing intermediate games)."
     ),
 )
 
@@ -179,16 +188,21 @@ def get_step_detail(proof_path: str, step_index: int) -> dict[str, Any]:
     canonical forms of two adjacent steps to see exactly what differs — a failing
     step means those canonical forms are not structurally identical.
 
+    Requires the entire proof file to be parseable. If the proof has incomplete
+    stub reductions, use get_inlined_game instead.
+
     step_index is 0-based (first game in the `games:` list is index 0).
 
     Returns:
-      output       — Raw (pre-simplification) game AST
-      canonical    — Fully simplified canonical game form (what ProofFrog compares)
-      success      — False if the step index is out of range or an error occurred
+      output        — Raw (pre-simplification) game AST with mangled intern names;
+                      ignore this field — use `canonical` instead.
+      canonical     — Fully simplified canonical game form (what ProofFrog compares);
+                      THIS is the field to read when writing matching intermediate games.
+      success       — False if the step index is out of range or an error occurred
       has_reduction — True if this step uses a reduction
-      reduction    — The reduction game (if has_reduction)
-      challenger   — The challenger game without reduction (if has_reduction)
-      scheme       — The underlying scheme (if applicable)
+      reduction     — The reduction game (if has_reduction)
+      challenger    — The challenger game without reduction (if has_reduction)
+      scheme        — The underlying scheme (if applicable)
     """
     output, canonical, success, has_reduction, reduction, challenger, scheme = (
         _capture_inline(_resolve(proof_path), step_index, _directory)
@@ -202,6 +216,55 @@ def get_step_detail(proof_path: str, step_index: int) -> dict[str, Any]:
         "challenger": challenger,
         "scheme": scheme,
     }
+
+
+@mcp.tool()
+def get_inlined_game(proof_path: str, step_text: str) -> dict[str, Any]:
+    """Get the canonical form of a game step without needing the full proof to parse.
+
+    Use this instead of get_step_detail when the proof file contains incomplete
+    stub reductions (e.g. with empty or comment-only bodies) that prevent the
+    full proof from parsing. This is the primary tool for writing intermediate
+    games: it shows exactly what a game looks like after inlining a scheme so
+    you can write a matching Game definition.
+
+    This tool reads the imports, intermediate Game definitions, let:, assume:,
+    and theorem: blocks from the proof file. Stub Reduction definitions are
+    ignored. The provided step is then evaluated in that context.
+
+    proof_path — path to the proof file (must have a valid let:/theorem: block)
+    step_text  — the game step expression to evaluate, e.g.:
+                 "OneTimeSecrecy(E).Left against OneTimeSecrecy(E).Adversary"
+
+    Returns:
+      output    — Raw (pre-simplification) game form; use `canonical` instead.
+      canonical — Fully simplified canonical game form; use this to write a
+                  matching intermediate Game definition.
+      success   — False if evaluation failed (error message will be in output)
+    """
+    import os as _os
+    import tempfile as _tempfile
+
+    abs_path = _resolve(proof_path)
+    try:
+        proof_text = Path(abs_path).read_text(encoding="utf-8")
+        minimal = _build_minimal_proof(proof_text, step_text)
+        if minimal is None:
+            return {
+                "output": "Could not extract theorem: block from proof file.",
+                "canonical": "",
+                "success": False,
+            }
+        fd, tmp_path = _tempfile.mkstemp(suffix=".proof", dir=_os.path.dirname(abs_path))
+        try:
+            with _os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(minimal)
+            output, canonical, success, _, _, _, _ = _capture_inline(tmp_path, 0, _directory)
+        finally:
+            _os.unlink(tmp_path)
+        return {"output": output, "canonical": canonical, "success": success}
+    except Exception as e:  # pylint: disable=broad-except
+        return {"output": f"Error: {e}", "canonical": "", "success": False}
 
 
 # ---------------------------------------------------------------------------

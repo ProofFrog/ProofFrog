@@ -66,6 +66,70 @@ def _resolve_import(directory: str, filename: str) -> str:
     return os.path.join(directory, filename)
 
 
+def _build_minimal_proof(proof_text: str, step_text: str) -> str | None:
+    """Build a minimal parseable proof containing only one game step.
+
+    Extracts imports, intermediate Game definitions (skipping Reduction stubs),
+    the let:/assume:/theorem: blocks from *proof_text*, then wraps *step_text*
+    as the only step (listed twice so the grammar's two-game requirement is met).
+
+    Returns the minimal proof as a string, or None if a theorem could not be
+    extracted from *proof_text*.
+    """
+    # Import lines
+    import_lines = "\n".join(
+        re.findall(r"^import\s+'[^']+'(?:\s+as\s+\w+)?\s*;", proof_text, re.MULTILINE)
+    )
+
+    # Intermediate Game blocks (skip Reduction blocks)
+    game_defs: list[str] = []
+    for match in re.finditer(r"^Game\s+", proof_text, re.MULTILINE):
+        start = match.start()
+        brace_start = proof_text.find("{", start)
+        if brace_start == -1:
+            continue
+        depth = 0
+        for i in range(brace_start, len(proof_text)):
+            if proof_text[i] == "{":
+                depth += 1
+            elif proof_text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    game_defs.append(proof_text[start : i + 1])
+                    break
+
+    # let: block
+    let_match = re.search(
+        r"\blet\s*:\s*((?:.|\n)*?)(?=\bassume\b|\btheorem\b|\bgames\b)", proof_text
+    )
+    let_block = "let:\n" + let_match.group(1).rstrip() if let_match else ""
+
+    # assume: block
+    assume_match = re.search(
+        r"\bassume\s*:\s*((?:.|\n)*?)(?=\btheorem\b|\bgames\b)", proof_text
+    )
+    assume_block = "assume:\n" + assume_match.group(1).rstrip() if assume_match else ""
+
+    # theorem: (required)
+    theorem_match = re.search(r"\btheorem\s*:\s*((?:.|\n)*?);", proof_text)
+    if not theorem_match:
+        return None
+    theorem_block = "theorem:\n    " + theorem_match.group(1).strip() + ";"
+
+    parts: list[str] = []
+    if import_lines:
+        parts.append(import_lines)
+    parts.extend(game_defs)
+    parts.append("proof:")
+    if let_block:
+        parts.append(let_block)
+    if assume_block:
+        parts.append(assume_block)
+    parts.append(theorem_block)
+    parts.append(f"games:\n    {step_text};\n    {step_text};")
+    return "\n\n".join(parts) + "\n"
+
+
 def _capture_inline(file_path: str, step_index: int, directory: str = "") -> tuple[str, str, bool, bool, str, str, str]:
     buf = io.StringIO()
     try:

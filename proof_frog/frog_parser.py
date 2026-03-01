@@ -25,17 +25,17 @@ from .parsing.ProofLexer import ProofLexer
 from . import frog_ast
 
 
-class _SilentErrorListener(ErrorListener):
+class _SilentErrorListener(ErrorListener):  # type: ignore[misc]
     """Suppresses ANTLR's default stderr output; errors are reported via exceptions."""
 
-    def syntaxError(self, recognizer, offendingSymbol, line, column, msg, e):  # type: ignore[override]
+    def syntaxError(self, recognizer, offendingSymbol, line, column, msg, e):  # type: ignore[override, no-untyped-def]  # pylint: disable=too-many-arguments,too-many-positional-arguments
         pass
 
 
 class ParseError(Exception):
     """A syntax error from the ANTLR parser with location info."""
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         message: str,
         file_name: str = "",

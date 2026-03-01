@@ -11,9 +11,26 @@ python3 -m venv .venv
 ## Commands
 
 - **Run tests**: `pytest` (runs in parallel via `pytest-xdist` `-n auto` by default; use `-n0` to disable)
-- **Lint**: `pylint proof_frog/` and `mypy proof_frog/`
-- **Format**: `black proof_frog/`
+- **All CI checks**: `make lint` — runs `black --check`, `mypy`, and `pylint` in sequence (must all pass before committing)
+- **Auto-format**: `make format` — runs `black` to reformat in place, then re-run `make lint`
 - **CLI**: `python -m proof_frog [parse|check|prove|web] <file>`
+
+## CI Checks (must pass before committing)
+
+The CI runs three checks on every push/PR to `main`. Always run `make lint` locally first.
+
+- `black --check proof_frog` — enforces formatting (Python 3.10 compatible style)
+- `mypy proof_frog --no-warn-unused-ignores` — strict type checking
+- `pylint proof_frog` — style/quality linting (target: 10.00/10)
+
+### Patterns for suppressions
+- ANTLR-generated `ErrorListener` subclasses need `# type: ignore[misc]` on the class line and `# type: ignore[override, no-untyped-def]` on `syntaxError`
+- Flask route functions inside `create_app` should use `-> Any:` return type (avoids `no-untyped-def` and `return-value` errors)
+- Intentional broad `except Exception` catches in web/server code: `# pylint: disable=broad-exception-caught`
+- Accesses to `_`-prefixed engine methods from outside the class: use a `# pylint: disable=protected-access` / `# pylint: enable=protected-access` block
+- Lazy imports inside a function body (e.g. CLI subcommands): add `# pylint: disable=import-outside-toplevel` as the first line inside the function
+- Cross-file duplicate-code warnings between related modules: add `# pylint: disable=duplicate-code` at module level with an explanatory comment
+- `match` blocks that assign a union type: declare `var: TypeA | TypeB | TypeC` before the `match` so mypy doesn't infer the type from the first case only
 
 ## Architecture
 

@@ -18,9 +18,11 @@ Then register it in .claude/settings.json:
     }
 """
 
+# pylint: disable=duplicate-code  # mcp_server shares return-dict patterns with web_server by design
 from __future__ import annotations
 import io
 import os
+import tempfile
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from typing import Any
@@ -242,9 +244,6 @@ def get_inlined_game(proof_path: str, step_text: str) -> dict[str, Any]:
                   matching intermediate Game definition.
       success   — False if evaluation failed (error message will be in output)
     """
-    import os as _os
-    import tempfile as _tempfile
-
     abs_path = _resolve(proof_path)
     try:
         proof_text = Path(abs_path).read_text(encoding="utf-8")
@@ -255,13 +254,13 @@ def get_inlined_game(proof_path: str, step_text: str) -> dict[str, Any]:
                 "canonical": "",
                 "success": False,
             }
-        fd, tmp_path = _tempfile.mkstemp(suffix=".proof", dir=_os.path.dirname(abs_path))
+        fd, tmp_path = tempfile.mkstemp(suffix=".proof", dir=os.path.dirname(abs_path))
         try:
-            with _os.fdopen(fd, "w", encoding="utf-8") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(minimal)
             output, canonical, success, _, _, _, _ = _capture_inline(tmp_path, 0)
         finally:
-            _os.unlink(tmp_path)
+            os.unlink(tmp_path)
         return {"output": output, "canonical": canonical, "success": success}
     except Exception as e:  # pylint: disable=broad-except
         return {"output": f"Error: {e}", "canonical": "", "success": False}

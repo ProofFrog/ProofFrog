@@ -18,6 +18,7 @@ def usage() -> None:
 
 
 def main() -> None:
+    # pylint: disable=import-outside-toplevel
     init(autoreset=True)
     argv: list[str] = sys.argv
     root: frog_ast.Root
@@ -88,6 +89,7 @@ def main() -> None:
             usage()
         file_name = argv[2]
         from proof_frog.describe import describe_file
+
         try:
             print(describe_file(file_name))
         except (ValueError, frog_parser.ParseError, FileNotFoundError) as e:
@@ -97,6 +99,7 @@ def main() -> None:
     elif argv[1] == "web":
         directory = argv[2] if len(argv) > 2 else "."
         from proof_frog.web_server import start_server
+
         start_server(directory)
 
     elif argv[1] == "mcp":

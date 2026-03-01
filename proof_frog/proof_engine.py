@@ -151,7 +151,12 @@ class ProofEngine:
                     print(f"Hop To: {next_step}\n")
                     print("Valid by assumption")
                     self.hop_results.append(
-                        HopResult(step_num=step_num, valid=True, kind="by_assumption", depth=_depth)
+                        HopResult(
+                            step_num=step_num,
+                            valid=True,
+                            kind="by_assumption",
+                            depth=_depth,
+                        )
                     )
                     continue
                 current_game_ast = self._get_game_ast(
@@ -222,7 +227,9 @@ class ProofEngine:
                 the_induction = steps[i]
                 assert isinstance(the_induction, frog_ast.Induction)
                 self.proof_let_types.set(the_induction.name, frog_ast.IntType())
-                self.prove_steps(the_induction.steps, assumed_indistinguishable, _depth=_depth + 1)
+                self.prove_steps(
+                    the_induction.steps, assumed_indistinguishable, _depth=_depth + 1
+                )
                 # Check induction roll over
                 first_step = the_induction.steps[0]
                 assert isinstance(first_step, frog_ast.Step)
@@ -606,7 +613,9 @@ class ProofEngine:
                 name="Simplify tuples that are copies of their fields",
             ),
             AstManipulator(
-                fn=lambda ast: visitors.RemoveUnreachableTransformer(ast).transform(ast),
+                fn=lambda ast: visitors.RemoveUnreachableTransformer(ast).transform(
+                    ast
+                ),
                 name="Remove unreachable blocks of code",
             ),
         ]

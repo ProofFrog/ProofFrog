@@ -271,9 +271,9 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
 
             # Skip if var is reassigned anywhere in remaining
             if (
-                SearchVisitor(
-                    functools.partial(is_written_to, var_name)
-                ).visit(remaining_block)
+                SearchVisitor(functools.partial(is_written_to, var_name)).visit(
+                    remaining_block
+                )
                 is not None
             ):
                 continue
@@ -282,9 +282,7 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
             first_use_idx = None
             for i, s in enumerate(remaining_block.statements):
                 if (
-                    SearchVisitor(
-                        functools.partial(uses_var, var_name)
-                    ).visit(s)
+                    SearchVisitor(functools.partial(uses_var, var_name)).visit(s)
                     is not None
                 ):
                     first_use_idx = i
@@ -299,9 +297,9 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
             total_uses = 0
             count_block = copy.deepcopy(remaining_block)
             while True:
-                found = SearchVisitor(
-                    functools.partial(uses_var, var_name)
-                ).visit(count_block)
+                found = SearchVisitor(functools.partial(uses_var, var_name)).visit(
+                    count_block
+                )
                 if found is None:
                     break
                 total_uses += 1
@@ -321,9 +319,9 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
                 list(remaining_block.statements[:first_use_idx])
             )
             if any(
-                SearchVisitor(
-                    functools.partial(is_written_to, fv.name)
-                ).visit(intermediate)
+                SearchVisitor(functools.partial(is_written_to, fv.name)).visit(
+                    intermediate
+                )
                 is not None
                 for fv in free_vars
             ):
@@ -333,9 +331,9 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
             # remaining_block with expr (there is exactly one, verified above)
             expr_copy = copy.deepcopy(expr)
             while True:
-                var_node = SearchVisitor(
-                    functools.partial(uses_var, var_name)
-                ).visit(remaining_block)
+                var_node = SearchVisitor(functools.partial(uses_var, var_name)).visit(
+                    remaining_block
+                )
                 if var_node is None:
                     break
                 remaining_block = ReplaceTransformer(

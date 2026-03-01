@@ -1,5 +1,6 @@
 import copy
 import io
+import logging
 import os
 import re
 import socket
@@ -7,6 +8,7 @@ import threading
 import webbrowser
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
+from typing import Any
 
 from flask import Flask, request, jsonify, send_file, send_from_directory
 
@@ -36,7 +38,7 @@ def _safe_path(base: str, rel: str) -> Path | None:
         if not str(abs_path).startswith(str(base_resolved)):
             return None
         return abs_path
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
         return None
 
 
@@ -51,7 +53,7 @@ def _capture_parse(file_path: str) -> tuple[str, bool]:
         return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False
     except (frog_parser.ParseError, FileNotFoundError) as e:
         return _strip_ansi(buf.getvalue()) + f"\n{e}", False
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
         return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False
 
 
@@ -124,7 +126,9 @@ def _build_minimal_proof(proof_text: str, step_text: str) -> str | None:
     return "\n\n".join(parts) + "\n"
 
 
-def _capture_inline(file_path: str, step_index: int) -> tuple[str, str, bool, bool, str, str, str]:
+def _capture_inline(
+    file_path: str, step_index: int
+) -> tuple[str, str, bool, bool, str, str, str]:
     buf = io.StringIO()
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
@@ -133,6 +137,7 @@ def _capture_inline(file_path: str, step_index: int) -> tuple[str, str, bool, bo
             for imp in proof_file.imports:
                 imp_path = frog_parser.resolve_import_path(imp.filename, file_path)
                 file_type = _get_file_type(imp_path)
+                root: frog_ast.Primitive | frog_ast.Scheme | frog_ast.GameFile
                 match file_type:
                     case frog_ast.FileType.PRIMITIVE:
                         root = frog_parser.parse_primitive_file(imp_path)
@@ -165,14 +170,32 @@ def _capture_inline(file_path: str, step_index: int) -> tuple[str, str, bool, bo
             engine.get_method_lookup()
 
         if step_index < 0 or step_index >= len(proof_file.steps):
-            return f"Step index {step_index} out of range (proof has {len(proof_file.steps)} steps)", "", False, False, "", "", ""
+            return (
+                f"Step index {step_index} out of range (proof has {len(proof_file.steps)} steps)",
+                "",
+                False,
+                False,
+                "",
+                "",
+                "",
+            )
         step = proof_file.steps[step_index]
         if not isinstance(step, frog_ast.Step):
-            return "This step is an assumption, not a game step.", "", False, False, "", "", ""
+            return (
+                "This step is an assumption, not a game step.",
+                "",
+                False,
+                False,
+                "",
+                "",
+                "",
+            )
 
         suppress = io.StringIO()
         with redirect_stdout(suppress), redirect_stderr(suppress):
+            # pylint: disable=protected-access
             game = engine._get_game_ast(step.challenger, step.reduction)
+            # pylint: enable=protected-access
             canon = engine.canonicalize_game(copy.deepcopy(game))
 
         has_reduction = step.reduction is not None
@@ -180,10 +203,13 @@ def _capture_inline(file_path: str, step_index: int) -> tuple[str, str, bool, bo
         challenger_str = ""
         scheme_str = ""
         if has_reduction:
+            assert step.reduction is not None
             suppress2 = io.StringIO()
             with redirect_stdout(suppress2), redirect_stderr(suppress2):
+                # pylint: disable=protected-access
                 reduction_game = engine._get_game_ast(step.reduction)
                 challenger_only = engine._get_game_ast(step.challenger)
+                # pylint: enable=protected-access
             reduction_str = str(reduction_game)
             challenger_str = str(challenger_only)
 
@@ -194,18 +220,37 @@ def _capture_inline(file_path: str, step_index: int) -> tuple[str, str, bool, bo
                 else step.challenger.args
             )
             for arg in challenger_args:
-                if isinstance(arg, frog_ast.Variable) and arg.name in engine.proof_namespace:
+                if (
+                    isinstance(arg, frog_ast.Variable)
+                    and arg.name in engine.proof_namespace
+                ):
                     candidate = engine.proof_namespace[arg.name]
                     if isinstance(candidate, frog_ast.Scheme):
                         scheme_str = str(candidate)
                         break
 
-        return str(game), str(canon), True, has_reduction, reduction_str, challenger_str, scheme_str
-    except Exception as e:
-        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", "", False, False, "", "", ""
+        return (
+            str(game),
+            str(canon),
+            True,
+            has_reduction,
+            reduction_str,
+            challenger_str,
+            scheme_str,
+        )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        return (
+            _strip_ansi(buf.getvalue()) + f"\nError: {e}",
+            "",
+            False,
+            False,
+            "",
+            "",
+            "",
+        )
 
 
-def _capture_prove(file_path: str) -> tuple[str, bool, list[dict]]:
+def _capture_prove(file_path: str) -> tuple[str, bool, list[dict[str, object]]]:
     buf = io.StringIO()
     engine = proof_engine.ProofEngine(False)
     proof_succeeded = False
@@ -216,17 +261,18 @@ def _capture_prove(file_path: str) -> tuple[str, bool, list[dict]]:
             for imp in proof_file.imports:
                 imp_path = frog_parser.resolve_import_path(imp.filename, file_path)
                 file_type = _get_file_type(imp_path)
+                root2: frog_ast.Primitive | frog_ast.Scheme | frog_ast.GameFile
                 match file_type:
                     case frog_ast.FileType.PRIMITIVE:
-                        root = frog_parser.parse_primitive_file(imp_path)
+                        root2 = frog_parser.parse_primitive_file(imp_path)
                     case frog_ast.FileType.SCHEME:
-                        root = frog_parser.parse_scheme_file(imp_path)
+                        root2 = frog_parser.parse_scheme_file(imp_path)
                     case frog_ast.FileType.GAME:
-                        root = frog_parser.parse_game_file(imp_path)
+                        root2 = frog_parser.parse_game_file(imp_path)
                     case _:
                         raise TypeError(f"Cannot import {file_type}")
-                name = imp.rename if imp.rename else root.get_export_name()
-                engine.add_definition(name, root)
+                name = imp.rename if imp.rename else root2.get_export_name()
+                engine.add_definition(name, root2)
 
             try:
                 engine.prove(proof_file)
@@ -234,7 +280,7 @@ def _capture_prove(file_path: str) -> tuple[str, bool, list[dict]]:
             except proof_engine.FailedProof:
                 pass
 
-        hop_results = [
+        hop_results: list[dict[str, object]] = [
             {"step_num": r.step_num, "valid": r.valid, "kind": r.kind}
             for r in engine.hop_results
             if r.depth == 0 and r.kind != "induction_rollover"
@@ -242,11 +288,11 @@ def _capture_prove(file_path: str) -> tuple[str, bool, list[dict]]:
         return _strip_ansi(buf.getvalue()), proof_succeeded, hop_results
     except (frog_parser.ParseError, FileNotFoundError) as e:
         return _strip_ansi(buf.getvalue()) + f"\n{e}", False, []
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
         return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False, []
 
 
-def _build_tree(path: Path, base: Path) -> dict:
+def _build_tree(path: Path, base: Path) -> dict[str, object]:
     if path.is_dir():
         children = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
         return {
@@ -271,24 +317,24 @@ def create_app(directory: str) -> Flask:
     static_dir = Path(__file__).parent / "web"
 
     @app.route("/")
-    def index():  # type: ignore[return-value]
+    def index() -> Any:
         return send_file(static_dir / "index.html")
 
     @app.route("/prooffrog.png")
-    def logo():  # type: ignore[return-value]
+    def logo() -> Any:
         return send_file(static_dir / "prooffrog.png")
 
     @app.route("/static/<path:filename>")
-    def serve_static(filename):  # type: ignore[return-value]
+    def serve_static(filename: str) -> Any:
         return send_from_directory(str(static_dir), filename)
 
     @app.route("/api/files")
-    def list_files():  # type: ignore[return-value]
+    def list_files() -> Any:
         tree = _build_tree(Path(directory), Path(directory))
         return jsonify(tree)
 
     @app.route("/api/file", methods=["GET"])
-    def get_file():  # type: ignore[return-value]
+    def get_file() -> Any:
         rel_path = request.args.get("path", "")
         abs_path = _safe_path(directory, rel_path)
         if abs_path is None:
@@ -300,7 +346,7 @@ def create_app(directory: str) -> Flask:
             return jsonify({"error": "File not found"}), 404
 
     @app.route("/api/file", methods=["PUT"])
-    def save_file():  # type: ignore[return-value]
+    def save_file() -> Any:
         rel_path = request.args.get("path", "")
         abs_path = _safe_path(directory, rel_path)
         if abs_path is None:
@@ -311,7 +357,7 @@ def create_app(directory: str) -> Flask:
         return jsonify({"success": True})
 
     @app.route("/api/parse", methods=["POST"])
-    def run_parse():  # type: ignore[return-value]
+    def run_parse() -> Any:
         data = request.get_json()
         if not data:
             return jsonify({"error": "No data"}), 400
@@ -325,7 +371,7 @@ def create_app(directory: str) -> Flask:
         return jsonify({"output": output, "success": success})
 
     @app.route("/api/prove", methods=["POST"])
-    def run_prove():  # type: ignore[return-value]
+    def run_prove() -> Any:
         data = request.get_json()
         if not data:
             return jsonify({"error": "No data"}), 400
@@ -336,10 +382,12 @@ def create_app(directory: str) -> Flask:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
         output, success, hop_results = _capture_prove(str(abs_path))
-        return jsonify({"output": output, "success": success, "hop_results": hop_results})
+        return jsonify(
+            {"output": output, "success": success, "hop_results": hop_results}
+        )
 
     @app.route("/api/inline", methods=["POST"])
-    def run_inline():  # type: ignore[return-value]
+    def run_inline() -> Any:
         data = request.get_json()
         if not data:
             return jsonify({"error": "No data"}), 400
@@ -350,9 +398,20 @@ def create_app(directory: str) -> Flask:
         if abs_path is None:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
-        output, canonical, success, has_reduction, reduction, challenger, scheme = _capture_inline(str(abs_path), step_index)
-        return jsonify({"output": output, "canonical": canonical, "success": success,
-                        "has_reduction": has_reduction, "reduction": reduction, "challenger": challenger, "scheme": scheme})
+        output, canonical, success, has_reduction, reduction, challenger, scheme = (
+            _capture_inline(str(abs_path), step_index)
+        )
+        return jsonify(
+            {
+                "output": output,
+                "canonical": canonical,
+                "success": success,
+                "has_reduction": has_reduction,
+                "reduction": reduction,
+                "challenger": challenger,
+                "scheme": scheme,
+            }
+        )
 
     return app
 
@@ -373,7 +432,6 @@ def start_server(directory: str) -> None:
     print(f"Working directory: {directory}")
     print("Press Ctrl+C to stop.")
 
-    import logging
     log = logging.getLogger("werkzeug")
     log.setLevel(logging.ERROR)
 

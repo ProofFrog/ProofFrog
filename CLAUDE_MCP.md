@@ -61,12 +61,68 @@ Claude will call `prooffrog:list_files` and return the file tree.
 | `check` | Full semantic type-check (catches type mismatches, undefined names, etc.) |
 | `prove` | Run proof verification; returns per-hop pass/fail results |
 | `get_step_detail` | Canonical (fully simplified) form of one proof step — key for diagnosing failures |
+| `get_inlined_game` | Canonical form of an arbitrary game step expression evaluated against the proof's `let:` context — use when the step isn't yet in the `games:` list or when stub reductions prevent parsing |
 
 There is also a **language reference resource** (`prooffrog://language-reference`)
 that Claude can fetch to remind itself of proof DSL syntax without reading through
 example files.
 
 ---
+
+## MCP Tool Usage Guide for Claude
+
+### Prefer MCP tools over CLI
+
+When the MCP server is connected, **always use the MCP tools instead of running
+CLI commands via Bash**. The MCP tools return structured output that is easier to
+work with and avoids parsing text. Use:
+
+- `parse` and `check` instead of `python -m proof_frog parse/check`
+- `prove` instead of `python -m proof_frog prove`
+- `get_step_detail` instead of grepping prover output
+
+### Writing intermediate games
+
+To write an intermediate game that matches the canonical form of a proof step:
+
+1. **If the step is already in the proof's `games:` list**, call
+   `get_step_detail(proof_path, step_index)` and read the `canonical` field
+   (not the `output` field, which has mangled internal names).
+2. **If you want to evaluate an arbitrary step expression** against the proof's
+   `let:` context without adding it to the proof first, call
+   `get_inlined_game(proof_path, step_text)` — e.g.
+   `get_inlined_game("path/to/proof.proof", "OneTimeSecrecy(E).Left")`.
+
+In both cases, write a `Game` definition whose body matches the returned
+canonical form. Use readable variable names from the cryptographic literature
+rather than the engine's `v1`, `v2` names.
+
+### Writing reductions
+
+When writing a reduction for a hop between games A and B via assumption S:
+
+1. Use `get_inlined_game` to see the canonical forms of A and B.
+2. Identify what the reduction needs to delegate to the challenger versus compute
+   itself.
+3. Write the reduction, then use `prove` to check that the four-step pattern
+   validates:
+   - A ↔ S.Real ∘ R (interchangeability)
+   - S.Real ∘ R → S.Random ∘ R (by assumption)
+   - S.Random ∘ R ↔ B (interchangeability)
+
+### Diagnosing failing steps
+
+When a step fails:
+
+1. Call `get_step_detail(proof_path, step_index)` on both the current and next
+   step to see their canonical forms side-by-side.
+2. Compare the two canonical forms to identify the difference — this usually
+   reveals what the engine cannot simplify automatically.
+
+### Validating non-proof files
+
+After creating or editing `.scheme`, `.primitive`, or `.game` files, call `check`
+to verify they parse and type-check before using them in a proof.
 
 ## Example Workflow
 
@@ -110,6 +166,7 @@ implementation bodies — useful for quickly understanding what's available when
 or planning a proof.
 
 ---
+
 
 ## Starting the server manually (for debugging)
 

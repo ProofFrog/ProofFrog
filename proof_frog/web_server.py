@@ -35,7 +35,7 @@ def _safe_path(base: str, rel: str) -> Path | None:
     try:
         base_resolved = Path(base).resolve()
         abs_path = (base_resolved / rel).resolve()
-        if not str(abs_path).startswith(str(base_resolved)):
+        if not abs_path.is_relative_to(base_resolved):
             return None
         return abs_path
     except Exception:  # pylint: disable=broad-exception-caught
@@ -314,6 +314,7 @@ def _build_tree(path: Path, base: Path) -> dict[str, object]:
 
 def create_app(directory: str) -> Flask:
     app = Flask(__name__, static_folder=None)
+    app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB
     static_dir = Path(__file__).parent / "web"
 
     @app.route("/")

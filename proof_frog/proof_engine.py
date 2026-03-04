@@ -540,6 +540,7 @@ class ProofEngine:
                 if first_if_formula is None or first_if_formula is None:
                     return False
                 solver = z3.Solver()
+                solver.set("timeout", 30000)
                 solver.add(z3.Not(first_if_formula == next_if_formula))
                 if solver.check() != z3.unsat:
                     return False

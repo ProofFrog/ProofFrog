@@ -1,122 +1,137 @@
 import sys
 import os
+
+import click
 from colorama import init
+
 from . import frog_parser
 from . import frog_ast
 from . import proof_engine
 from . import semantic_analysis
 
 
-def usage() -> None:
-    print("Incorrect Arguments", file=sys.stderr)
-    print("Usage: proof_frog parse <file>")
-    print("Usage: proof_frog prove <file.proof>")
-    print("Usage: proof_frog describe <file>")
-    print("Usage: proof_frog web <directory>")
-    print("Usage: proof_frog mcp [directory]")
-    sys.exit(1)
-
-
-def main() -> None:
-    # pylint: disable=import-outside-toplevel
+@click.group()
+def cli() -> None:
+    """ProofFrog — A tool for checking transitions in cryptographic game-hopping proofs."""
     init(autoreset=True)
-    argv: list[str] = sys.argv
-    root: frog_ast.Root
-    if len(argv) < 2:
-        usage()
 
-    if argv[1] == "parse":
-        file = argv[2]
+
+@cli.command()
+@click.argument("file")
+def parse(file: str) -> None:
+    """Parse a FrogLang file and print its AST."""
+    try:
+        root = frog_parser.parse_file(file)
+        print(root)
+    except ValueError:
+        click.echo("Unsupported file type.", err=True)
+        sys.exit(1)
+    except (frog_parser.ParseError, FileNotFoundError) as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument("file")
+def check(file: str) -> None:
+    """Type-check and semantically analyze a FrogLang file."""
+    try:
+        root = frog_parser.parse_file(file)
+    except ValueError:
+        click.echo("Unsupported file type.", err=True)
+        sys.exit(1)
+    except (frog_parser.ParseError, FileNotFoundError) as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
+    try:
+        semantic_analysis.check_well_formed(root, file)
+        print(f"{file} is well-formed.")
+    except semantic_analysis.FailedTypeCheck:
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument("file")
+@click.option("-v", "--verbose", is_flag=True, help="Enable verbose output.")
+def prove(file: str, verbose: bool) -> None:
+    """Run proof verification on a .proof file."""
+    engine = proof_engine.ProofEngine(verbose)
+    proof_file: frog_ast.ProofFile
+    try:
+        proof_file = frog_parser.parse_proof_file(file)
+    except (frog_parser.ParseError, FileNotFoundError) as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
+
+    for imp in proof_file.imports:
+        resolved = frog_parser.resolve_import_path(imp.filename, file)
+        file_type = _get_file_type(resolved)
+        root: frog_ast.Root
         try:
-            root = frog_parser.parse_file(file)
-            print(root)
-        except ValueError:
-            usage()
+            match file_type:
+                case frog_ast.FileType.PRIMITIVE:
+                    root = frog_parser.parse_primitive_file(resolved)
+                case frog_ast.FileType.SCHEME:
+                    root = frog_parser.parse_scheme_file(resolved)
+                case frog_ast.FileType.GAME:
+                    root = frog_parser.parse_game_file(resolved)
+                case frog_ast.FileType.PROOF:
+                    raise TypeError("Cannot import proofs")
         except (frog_parser.ParseError, FileNotFoundError) as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
-    elif argv[1] == "check":
-        file_name = argv[2]
-        try:
-            root = frog_parser.parse_file(file_name)
-        except ValueError:
-            usage()
-        except (frog_parser.ParseError, FileNotFoundError) as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
-        try:
-            semantic_analysis.check_well_formed(root, file_name)
-            print(f"{file_name} is well-formed.")
-        except semantic_analysis.FailedTypeCheck:
+            click.echo(str(e), err=True)
             sys.exit(1)
 
-    elif argv[1] == "prove":
-        engine = proof_engine.ProofEngine(len(argv) > 3 and argv[3] == "-v")
-        proof_file: frog_ast.ProofFile
-        try:
-            proof_file = frog_parser.parse_proof_file(argv[2])
-        except (frog_parser.ParseError, FileNotFoundError) as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
+        name = imp.rename if imp.rename else root.get_export_name()
+        engine.add_definition(name, root)
 
-        for imp in proof_file.imports:
-            resolved = frog_parser.resolve_import_path(imp.filename, argv[2])
-            file_type = _get_file_type(resolved)
-            try:
-                match file_type:
-                    case frog_ast.FileType.PRIMITIVE:
-                        root = frog_parser.parse_primitive_file(resolved)
-                    case frog_ast.FileType.SCHEME:
-                        root = frog_parser.parse_scheme_file(resolved)
-                    case frog_ast.FileType.GAME:
-                        root = frog_parser.parse_game_file(resolved)
-                    case frog_ast.FileType.PROOF:
-                        raise TypeError("Cannot import proofs")
-            except (frog_parser.ParseError, FileNotFoundError) as e:
-                print(str(e), file=sys.stderr)
-                sys.exit(1)
+    try:
+        engine.prove(proof_file)
+    except proof_engine.FailedProof:
+        sys.exit(1)
 
-            name = imp.rename if imp.rename else root.get_export_name()
-            engine.add_definition(name, root)
 
-        try:
-            engine.prove(proof_file)
-        except proof_engine.FailedProof:
-            sys.exit(1)
+@cli.command()
+@click.argument("file")
+def describe(file: str) -> None:
+    """Print a concise interface description of a FrogLang file."""
+    # pylint: disable=import-outside-toplevel
+    from proof_frog.describe import describe_file
 
-    elif argv[1] == "describe":
-        if len(argv) < 3:
-            usage()
-        file_name = argv[2]
-        from proof_frog.describe import describe_file
+    try:
+        print(describe_file(file))
+    except (ValueError, frog_parser.ParseError, FileNotFoundError) as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
 
-        try:
-            print(describe_file(file_name))
-        except (ValueError, frog_parser.ParseError, FileNotFoundError) as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
 
-    elif argv[1] == "web":
-        directory = argv[2] if len(argv) > 2 else "."
-        from proof_frog.web_server import start_server
+@cli.command()
+@click.argument("directory", default=".")
+def web(directory: str) -> None:
+    """Start the ProofFrog web interface."""
+    # pylint: disable=import-outside-toplevel
+    from proof_frog.web_server import start_server
 
-        start_server(directory)
+    start_server(directory)
 
-    elif argv[1] == "mcp":
-        directory = argv[2] if len(argv) > 2 else "."
-        try:
-            from proof_frog.mcp_server import run_server
-        except ImportError:
-            print(
-                "The 'mcp' package is required for the MCP server.\n"
-                "Install it with: pip install 'proof_frog[mcp]'",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        run_server(directory)
 
-    else:
-        usage()
+@cli.command()
+@click.argument("directory", default=".")
+def mcp(directory: str) -> None:
+    """Start the MCP (Model Context Protocol) server."""
+    # pylint: disable=import-outside-toplevel
+    try:
+        from proof_frog.mcp_server import run_server
+    except ImportError:
+        click.echo(
+            "The 'mcp' package is required for the MCP server.\n"
+            "Install it with: pip install 'proof_frog[mcp]'",
+            err=True,
+        )
+        sys.exit(1)
+    run_server(directory)
+
+
+main = cli
 
 
 def _get_file_type(file_name: str) -> frog_ast.FileType:

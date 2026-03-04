@@ -4,7 +4,7 @@
 import { state, applyTheme, btnSave, btnParse, btnProve, btnTheme } from './state.js';
 import './cm-mode.js';
 import { saveFile, runCommand, updateToolbar } from './editor.js';
-import { loadFileTree } from './file-tree.js';
+import { loadFileTree, collapseAll, expandAll } from './file-tree.js';
 import { updateWizardPanel, closeWizardModal, createGameFromWizard } from './wizard.js';
 import { updateGameHopsPanel } from './game-hops.js';
 import './resize.js';
@@ -18,6 +18,8 @@ document.getElementById("output-close").addEventListener("click", () => {
   document.getElementById("output-pane").classList.remove("visible");
 });
 btnTheme.addEventListener("click", () => applyTheme(!state.darkMode));
+document.getElementById("btn-collapse-all").addEventListener("click", collapseAll);
+document.getElementById("btn-expand-all").addEventListener("click", expandAll);
 
 document.getElementById("wizard-modal-close").addEventListener("click", closeWizardModal);
 document.getElementById("wizard-modal-cancel").addEventListener("click", closeWizardModal);

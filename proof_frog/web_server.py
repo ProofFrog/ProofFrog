@@ -333,11 +333,23 @@ def create_app(directory: str) -> Flask:
     def _check_origin() -> Any:
         if request.method in ("POST", "PUT", "DELETE"):
             origin = request.headers.get("Origin", "")
-            if origin and not origin.startswith(
-                f"http://127.0.0.1:{request.host.split(':')[-1]}"
-            ):
+            if not origin:
+                return jsonify({"error": "Missing Origin header"}), 403
+            if not origin.startswith(f"http://127.0.0.1:{request.host.split(':')[-1]}"):
                 return jsonify({"error": "Origin not allowed"}), 403
         return None
+
+    @app.after_request
+    def _add_security_headers(response: Any) -> Any:
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' https://cdnjs.cloudflare.com; "
+            "style-src 'self' https://cdnjs.cloudflare.com; "
+            "img-src 'self'; "
+            "connect-src 'self'"
+        )
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
 
     @app.route("/")
     def index() -> Any:

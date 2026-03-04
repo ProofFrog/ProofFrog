@@ -9,7 +9,7 @@ export function updateWizardPanel() {
     && !state.activeTab.startsWith(":inline:");
 
   wizardPanel.style.display = "";
-  wizardBody.innerHTML = "";
+  wizardBody.replaceChildren();
 
   if (isGame) {
     const content = getTabContent(state.activeTab);
@@ -32,7 +32,7 @@ export function updateWizardPanel() {
 
 export function openWizardModal() {
   const sel = document.getElementById("wizard-primitive");
-  sel.innerHTML = "";
+  sel.replaceChildren();
   if (state.primitiveFiles.length === 0) {
     const opt = document.createElement("option");
     opt.value = "";

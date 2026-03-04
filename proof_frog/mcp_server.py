@@ -173,7 +173,7 @@ def check(path: str) -> dict[str, Any]:
     try:
         root = frog_parser.parse_file(abs_path)
         with redirect_stdout(buf), redirect_stderr(buf):
-            semantic_analysis.check_well_formed(root, abs_path)
+            semantic_analysis.check_well_formed(root, abs_path, allowed_root=_directory)
         return {"output": f"{abs_path} is well-formed.", "success": True}
     except (frog_parser.ParseError, FileNotFoundError) as e:
         return {"output": str(e), "success": False}

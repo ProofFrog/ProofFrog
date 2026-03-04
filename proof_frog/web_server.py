@@ -344,7 +344,7 @@ def create_app(directory: str) -> Flask:
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
             "script-src 'self' https://cdnjs.cloudflare.com; "
-            "style-src 'self' https://cdnjs.cloudflare.com; "
+            "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
             "img-src 'self'; "
             "connect-src 'self'"
         )

@@ -39,7 +39,7 @@ document.addEventListener("keydown", e => {
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
     const modal = document.getElementById("wizard-modal");
-    if (modal.style.display !== "none") closeWizardModal();
+    if (modal.classList.contains("visible")) closeWizardModal();
   }
 });
 

@@ -49,12 +49,12 @@ export function openWizardModal() {
   document.getElementById("wizard-prop-name").value = "";
   document.getElementById("wizard-left-name").value = "Left";
   document.getElementById("wizard-right-name").value = "Right";
-  document.getElementById("wizard-modal").style.display = "";
+  document.getElementById("wizard-modal").classList.add("visible");
   document.getElementById("wizard-prop-name").focus();
 }
 
 export function closeWizardModal() {
-  document.getElementById("wizard-modal").style.display = "none";
+  document.getElementById("wizard-modal").classList.remove("visible");
 }
 
 export function createGameFromWizard() {

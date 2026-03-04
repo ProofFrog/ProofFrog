@@ -5,11 +5,26 @@ build-backend = "flit_core.buildapi"
 [project]
 name = "proof_frog"
 version = "0.2.0"
-description = "A tool for verifying game-hopping proofs"
+description = "A tool for checking transitions in cryptographic game-hopping proofs"
+keywords = ["cryptography", "latex", "game-hopping", "proofs"]
 readme = "README.md"
-authors = [{name = "Ross Evans", email = "rpevans@uwaterloo.ca"}]
+authors = [
+    {name = "Ross Evans", email = "rpevans@uwaterloo.ca"},
+    {name = "Douglas Stebila", email = "dstebila@uwaterloo.ca"},
+]
 requires-python = ">=3.11"
-license={file = "LICENSE"}
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security :: Cryptography",
+]
 dependencies = [
 	"antlr4-python3-runtime >= 4.13",
 	"colorama >= 0.4",

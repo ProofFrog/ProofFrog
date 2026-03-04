@@ -3,6 +3,20 @@
 import { state, fileTreeEl, dirLabel, apiFetch } from './state.js';
 import { openFile } from './editor.js';
 
+export function collapseAll() {
+  fileTreeEl.querySelectorAll(".tree-dir").forEach(dir => {
+    dir.classList.add("collapsed");
+    dir.querySelector(":scope > .tree-item > .icon").textContent = "\u25B6";
+  });
+}
+
+export function expandAll() {
+  fileTreeEl.querySelectorAll(".tree-dir").forEach(dir => {
+    dir.classList.remove("collapsed");
+    dir.querySelector(":scope > .tree-item > .icon").textContent = "\u25BC";
+  });
+}
+
 function makeIconNamePair(iconText, nameText) {
   const icon = document.createElement("span");
   icon.className = "icon";
@@ -17,11 +31,11 @@ export function buildTree(node, depth) {
   const el = document.createElement("div");
 
   if (node.type === "directory") {
-    el.className = "tree-dir";
+    el.className = "tree-dir collapsed";
     const header = document.createElement("div");
     header.className = "tree-item";
     header.style.paddingLeft = `${8 + depth * 14}px`;
-    const { icon, name } = makeIconNamePair("\u25BC", node.name);
+    const { icon, name } = makeIconNamePair("\u25B6", node.name);
     header.appendChild(icon);
     header.appendChild(name);
     header.addEventListener("click", () => {

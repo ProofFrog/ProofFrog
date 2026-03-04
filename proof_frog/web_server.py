@@ -37,6 +37,10 @@ def _safe_path(base: str, rel: str) -> Path | None:
         abs_path = (base_resolved / rel).resolve()
         if not abs_path.is_relative_to(base_resolved):
             return None
+        # Block access to dotfiles/dotdirs (e.g. .git)
+        rel_to_base = abs_path.relative_to(base_resolved)
+        if any(part.startswith(".") for part in rel_to_base.parts):
+            return None
         return abs_path
     except Exception:  # pylint: disable=broad-exception-caught
         return None
@@ -127,7 +131,9 @@ def _build_minimal_proof(proof_text: str, step_text: str) -> str | None:
 
 
 def _capture_inline(
-    file_path: str, step_index: int
+    file_path: str,
+    step_index: int,
+    allowed_root: str | None = None,
 ) -> tuple[str, str, bool, bool, str, str, str]:
     buf = io.StringIO()
     try:
@@ -135,7 +141,9 @@ def _capture_inline(
             proof_file = frog_parser.parse_proof_file(file_path)
             engine = proof_engine.ProofEngine(False)
             for imp in proof_file.imports:
-                imp_path = frog_parser.resolve_import_path(imp.filename, file_path)
+                imp_path = frog_parser.resolve_import_path(
+                    imp.filename, file_path, allowed_root=allowed_root
+                )
                 file_type = _get_file_type(imp_path)
                 root: frog_ast.Primitive | frog_ast.Scheme | frog_ast.GameFile
                 match file_type:
@@ -250,7 +258,9 @@ def _capture_inline(
         )
 
 
-def _capture_prove(file_path: str) -> tuple[str, bool, list[dict[str, object]]]:
+def _capture_prove(
+    file_path: str, allowed_root: str | None = None
+) -> tuple[str, bool, list[dict[str, object]]]:
     buf = io.StringIO()
     engine = proof_engine.ProofEngine(False)
     proof_succeeded = False
@@ -259,7 +269,9 @@ def _capture_prove(file_path: str) -> tuple[str, bool, list[dict[str, object]]]:
             proof_file = frog_parser.parse_proof_file(file_path)
 
             for imp in proof_file.imports:
-                imp_path = frog_parser.resolve_import_path(imp.filename, file_path)
+                imp_path = frog_parser.resolve_import_path(
+                    imp.filename, file_path, allowed_root=allowed_root
+                )
                 file_type = _get_file_type(imp_path)
                 root2: frog_ast.Primitive | frog_ast.Scheme | frog_ast.GameFile
                 match file_type:
@@ -316,6 +328,16 @@ def create_app(directory: str) -> Flask:
     app = Flask(__name__, static_folder=None)
     app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB
     static_dir = Path(__file__).parent / "web"
+
+    @app.before_request
+    def _check_origin() -> Any:
+        if request.method in ("POST", "PUT", "DELETE"):
+            origin = request.headers.get("Origin", "")
+            if origin and not origin.startswith(
+                f"http://127.0.0.1:{request.host.split(':')[-1]}"
+            ):
+                return jsonify({"error": "Origin not allowed"}), 403
+        return None
 
     @app.route("/")
     def index() -> Any:
@@ -382,7 +404,9 @@ def create_app(directory: str) -> Flask:
         if abs_path is None:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
-        output, success, hop_results = _capture_prove(str(abs_path))
+        output, success, hop_results = _capture_prove(
+            str(abs_path), allowed_root=directory
+        )
         return jsonify(
             {"output": output, "success": success, "hop_results": hop_results}
         )
@@ -400,7 +424,7 @@ def create_app(directory: str) -> Flask:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
         output, canonical, success, has_reduction, reduction, challenger, scheme = (
-            _capture_inline(str(abs_path), step_index)
+            _capture_inline(str(abs_path), step_index, allowed_root=directory)
         )
         return jsonify(
             {

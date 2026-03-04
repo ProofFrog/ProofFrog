@@ -63,7 +63,8 @@ class _PathOutsideDirectory(Exception):
 def _safe_resolve(path: str) -> str:
     """Resolve a path relative to the server's working directory.
 
-    Raises _PathOutsideDirectory if the resolved path falls outside _directory.
+    Raises _PathOutsideDirectory if the resolved path falls outside _directory
+    or targets a dotfile/dotdir (e.g. .git).
     """
     base = Path(_directory).resolve()
     resolved = (base / path).resolve()
@@ -71,6 +72,9 @@ def _safe_resolve(path: str) -> str:
         raise _PathOutsideDirectory(
             f"Path '{path}' resolves outside the working directory"
         )
+    rel = resolved.relative_to(base)
+    if any(part.startswith(".") for part in rel.parts):
+        raise _PathOutsideDirectory(f"Path '{path}' targets a hidden file or directory")
     return str(resolved)
 
 
@@ -192,7 +196,9 @@ def prove(proof_path: str) -> dict[str, Any]:
     Imports in the proof are resolved relative to the server's working directory.
     Use write_file first to save the proof content to disk, then call prove.
     """
-    output, success, hop_results = _capture_prove(_safe_resolve(proof_path))
+    output, success, hop_results = _capture_prove(
+        _safe_resolve(proof_path), allowed_root=_directory
+    )
     return {"output": output, "success": success, "hop_results": hop_results}
 
 
@@ -221,7 +227,7 @@ def get_step_detail(proof_path: str, step_index: int) -> dict[str, Any]:
       scheme        — The underlying scheme (if applicable)
     """
     output, canonical, success, has_reduction, reduction, challenger, scheme = (
-        _capture_inline(_safe_resolve(proof_path), step_index)
+        _capture_inline(_safe_resolve(proof_path), step_index, allowed_root=_directory)
     )
     return {
         "output": output,
@@ -272,7 +278,9 @@ def get_inlined_game(proof_path: str, step_text: str) -> dict[str, Any]:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(minimal)
-            output, canonical, success, _, _, _, _ = _capture_inline(tmp_path, 0)
+            output, canonical, success, _, _, _, _ = _capture_inline(
+                tmp_path, 0, allowed_root=_directory
+            )
         finally:
             os.unlink(tmp_path)
         return {"output": output, "canonical": canonical, "success": success}

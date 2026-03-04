@@ -6,7 +6,7 @@
 
 **A tool for checking transitions in cryptographic game-hopping proofs.**
 
-ProofFrog checks the validity of transitions in game-hopping proofs — the standard technique in provable security for showing that a cryptographic scheme satisfies a security property. Proofs are written in FrogLang, a domain-specific language for defining primitives, schemes, security games, and proof scripts. The engine checks each hop by manipulating abstract syntax trees into a canonical form, with some help from other tools like Z3 and SymPy.
+ProofFrog checks the validity of transitions in game-hopping proofs — the standard technique in provable security for showing that a cryptographic scheme satisfies a security property. Proofs are written in FrogLang, a domain-specific language for defining primitives, schemes, security games, and proofs. ProofFrog is designed to handle introductory-level proofs, trading expressivity and power for ease of use. The engine checks each hop by manipulating abstract syntax trees into a canonical form, with some help from other tools like Z3 and SymPy. ProofFrog's engine does not have any formal guarantees: the soundness of its transformations has not been verified.
 
 ProofFrog can be used via a **command-line interface**, a **browser-based editor**, or an **MCP server** for integration with AI coding assistants. More info at [prooffrog.github.io](https://prooffrog.github.io/).
 
@@ -24,12 +24,6 @@ source .venv/bin/activate
 pip install proof_frog
 ```
 
-To enable the MCP server for Claude Code integration:
-
-```
-pip install proof_frog[mcp]
-```
-
 ### From source
 
 ```
@@ -38,7 +32,7 @@ cd ProofFrog
 git submodule update --init
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e . # or pip install -e ".[mcp]" with the MCP server
+pip install -e .
 pip install -r requirements-dev.txt
 ```
 
@@ -60,7 +54,6 @@ The web interface lets you edit ProofFrog files (with syntax highlighting), vali
 | `proof_frog check <file>` | Type-check a file for well-formedness |
 | `proof_frog prove <file>` | Verify a game-hopping proof (`-v` for verbose output) |
 | `proof_frog web [dir]` | Launch the browser-based editor |
-| `proof_frog mcp [dir]` | Start an MCP server (requires `proof_frog[mcp]`) |
 
 When installed from source, use `python3 -m proof_frog` instead of `proof_frog`.
 
@@ -154,6 +147,10 @@ games:
     OneTimeUniformCiphertexts(proofE).Real compose R2(proofE) against OneTimeSecrecy(proofE).Adversary;
     OneTimeSecrecy(proofE).Right against OneTimeSecrecy(proofE).Adversary;
 ```
+
+## Vibe-Coding a Proof
+
+ProofFrog also provides an MCP server for integration with AI coding assistants like Claude Code. See the ProofFrog website for an [example of vibe-coding a ProofFrog proof with Claude Code](https://prooffrog.github.io/hacs-2026/vibe/).
 
 ## Examples
 

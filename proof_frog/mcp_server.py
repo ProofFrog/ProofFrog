@@ -56,11 +56,26 @@ mcp: FastMCP = FastMCP(
 _directory: str = "."  # pylint: disable=invalid-name
 
 
-def _resolve(path: str) -> str:
-    """Resolve a path relative to the server's working directory."""
-    if os.path.isabs(path):
-        return path
-    return str(Path(_directory) / path)
+class _PathOutsideDirectory(Exception):
+    """Raised when a resolved path escapes the server's working directory."""
+
+
+def _safe_resolve(path: str) -> str:
+    """Resolve a path relative to the server's working directory.
+
+    Raises _PathOutsideDirectory if the resolved path falls outside _directory
+    or targets a dotfile/dotdir (e.g. .git).
+    """
+    base = Path(_directory).resolve()
+    resolved = (base / path).resolve()
+    if not resolved.is_relative_to(base):
+        raise _PathOutsideDirectory(
+            f"Path '{path}' resolves outside the working directory"
+        )
+    rel = resolved.relative_to(base)
+    if any(part.startswith(".") for part in rel.parts):
+        raise _PathOutsideDirectory(f"Path '{path}' targets a hidden file or directory")
+    return str(resolved)
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +91,10 @@ def list_files(subdirectory: str = "") -> dict[str, Any]:
     Files include .primitive, .game, .scheme, and .proof extensions.
     Leave subdirectory empty to list the server's root working directory.
     """
-    target = _resolve(subdirectory) if subdirectory else _directory
+    try:
+        target = _safe_resolve(subdirectory) if subdirectory else _directory
+    except _PathOutsideDirectory as e:
+        return {"error": str(e)}
     base = Path(_directory)
     return _build_tree(Path(target), base)
 
@@ -85,20 +103,20 @@ def list_files(subdirectory: str = "") -> dict[str, Any]:
 def read_file(path: str) -> str:
     """Read the text content of a ProofFrog file.
 
-    Path may be absolute or relative to the server's working directory.
+    Path is relative to the server's working directory.
     """
-    return Path(_resolve(path)).read_text(encoding="utf-8")
+    return Path(_safe_resolve(path)).read_text(encoding="utf-8")
 
 
 @mcp.tool()  # type: ignore[misc, untyped-decorator]
 def write_file(path: str, content: str) -> dict[str, Any]:
     """Write (create or overwrite) a ProofFrog file.
 
-    Path may be absolute or relative to the server's working directory.
+    Path is relative to the server's working directory.
     Parent directories are created automatically.
     Returns {"success": true, "path": "<absolute path>"}.
     """
-    abs_path = Path(_resolve(path))
+    abs_path = Path(_safe_resolve(path))
     abs_path.parent.mkdir(parents=True, exist_ok=True)
     abs_path.write_text(content, encoding="utf-8")
     return {"success": True, "path": str(abs_path)}
@@ -120,7 +138,7 @@ def describe(path: str) -> str:
     Supported: .primitive, .scheme, .game, .proof
     """
     try:
-        return describe_module.describe_file(_resolve(path))
+        return describe_module.describe_file(_safe_resolve(path))
     except (ValueError, frog_parser.ParseError, FileNotFoundError) as e:
         return f"Error: {e}"
 
@@ -138,7 +156,7 @@ def parse(path: str) -> dict[str, Any]:
     The output is the stringified AST on success, or error message on failure.
     Useful for checking syntax in any file type before running a proof.
     """
-    output, success = _capture_parse(_resolve(path))
+    output, success = _capture_parse(_safe_resolve(path))
     return {"output": output, "success": success}
 
 
@@ -150,12 +168,12 @@ def check(path: str) -> dict[str, Any]:
     More thorough than parse — catches type mismatches, undefined names,
     signature mismatches between Left/Right games, etc.
     """
-    abs_path = _resolve(path)
+    abs_path = _safe_resolve(path)
     buf = io.StringIO()
     try:
         root = frog_parser.parse_file(abs_path)
         with redirect_stdout(buf), redirect_stderr(buf):
-            semantic_analysis.check_well_formed(root, abs_path)
+            semantic_analysis.check_well_formed(root, abs_path, allowed_root=_directory)
         return {"output": f"{abs_path} is well-formed.", "success": True}
     except (frog_parser.ParseError, FileNotFoundError) as e:
         return {"output": str(e), "success": False}
@@ -178,7 +196,9 @@ def prove(proof_path: str) -> dict[str, Any]:
     Imports in the proof are resolved relative to the server's working directory.
     Use write_file first to save the proof content to disk, then call prove.
     """
-    output, success, hop_results = _capture_prove(_resolve(proof_path))
+    output, success, hop_results = _capture_prove(
+        _safe_resolve(proof_path), allowed_root=_directory
+    )
     return {"output": output, "success": success, "hop_results": hop_results}
 
 
@@ -207,7 +227,7 @@ def get_step_detail(proof_path: str, step_index: int) -> dict[str, Any]:
       scheme        — The underlying scheme (if applicable)
     """
     output, canonical, success, has_reduction, reduction, challenger, scheme = (
-        _capture_inline(_resolve(proof_path), step_index)
+        _capture_inline(_safe_resolve(proof_path), step_index, allowed_root=_directory)
     )
     return {
         "output": output,
@@ -244,7 +264,7 @@ def get_inlined_game(proof_path: str, step_text: str) -> dict[str, Any]:
                   matching intermediate Game definition.
       success   — False if evaluation failed (error message will be in output)
     """
-    abs_path = _resolve(proof_path)
+    abs_path = _safe_resolve(proof_path)
     try:
         proof_text = Path(abs_path).read_text(encoding="utf-8")
         minimal = _build_minimal_proof(proof_text, step_text)
@@ -258,7 +278,9 @@ def get_inlined_game(proof_path: str, step_text: str) -> dict[str, Any]:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(minimal)
-            output, canonical, success, _, _, _, _ = _capture_inline(tmp_path, 0)
+            output, canonical, success, _, _, _, _ = _capture_inline(
+                tmp_path, 0, allowed_root=_directory
+            )
         finally:
             os.unlink(tmp_path)
         return {"output": output, "canonical": canonical, "success": success}

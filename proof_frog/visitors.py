@@ -1021,6 +1021,7 @@ class SimplifyRangeTransformer(Transformer):
         self.assumed_formula = Z3FormulaVisitor(type_map).visit(operation)
         if self.assumed_formula is not None:
             self.solver = z3.Solver()
+            self.solver.set("timeout", 30000)
             self.solver.add(self.assumed_formula)
 
     def transform_unary_operation(
@@ -1066,6 +1067,7 @@ class SimplifyRangeTransformer(Transformer):
         if not satisfied:
             return frog_ast.Boolean(False)
         solver = z3.Solver()
+        solver.set("timeout", 30000)
         solver.add(z3.Not(z3.Implies(self.assumed_formula, statement_formula)))
         if solver.check() == z3.unsat:
             return frog_ast.Boolean(True)
@@ -1718,6 +1720,7 @@ class RemoveUnreachableTransformer(BlockTransformer):
             ):
                 return frog_ast.Block(block.statements[: index + 1])
             solver = z3.Solver()
+            solver.set("timeout", 30000)
 
             type_map = GetTypeMapVisitor(statement).visit(self.ast)
             formula_visitor.set_type_map(type_map)

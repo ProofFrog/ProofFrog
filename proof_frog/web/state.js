@@ -33,6 +33,12 @@ export const wizardBody        = document.getElementById("wizard-body");
 
 export async function apiFetch(url, opts = {}) {
   const res = await fetch(url, opts);
+  if (!res.ok) {
+    const text = await res.text();
+    let msg;
+    try { msg = JSON.parse(text).error; } catch { msg = undefined; }
+    throw new Error(msg || `HTTP ${res.status}: ${res.statusText}`);
+  }
   return res.json();
 }
 

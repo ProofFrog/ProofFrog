@@ -1,6 +1,7 @@
 from __future__ import annotations
 import copy
 import functools
+import warnings
 from enum import Enum
 from collections import namedtuple
 from typing import TypeAlias, Tuple, Dict, Optional, TypeVar, Union
@@ -12,6 +13,8 @@ from . import visitors
 from . import dependencies
 
 MethodLookup: TypeAlias = Dict[Tuple[str, str], frog_ast.Method]
+
+_MAX_FIXED_POINT_ITERATIONS = 200
 
 
 class WhichGame(Enum):
@@ -447,7 +450,7 @@ class ProofEngine:
                     )
                 )
 
-            while True:
+            for _iteration in range(_MAX_FIXED_POINT_ITERATIONS):
 
                 def apply_manipulators(game: frog_ast.Game) -> frog_ast.Game:
                     for manipulator in ast_manipulators:
@@ -467,6 +470,12 @@ class ProofEngine:
                     game = new_game
                 else:
                     break
+            else:
+                warnings.warn(
+                    "Canonicalization did not converge within "
+                    f"{_MAX_FIXED_POINT_ITERATIONS} iterations",
+                    stacklevel=2,
+                )
         current_game_ast = visitors.VariableStandardizingTransformer().transform(
             current_game_ast
         )
@@ -540,6 +549,7 @@ class ProofEngine:
                 if first_if_formula is None or first_if_formula is None:
                     return False
                 solver = z3.Solver()
+                solver.set("timeout", 30000)
                 solver.add(z3.Not(first_if_formula == next_if_formula))
                 if solver.check() != z3.unsat:
                     return False
@@ -619,13 +629,19 @@ class ProofEngine:
                 name="Remove unreachable blocks of code",
             ),
         ]
-        while True:
+        for _iteration in range(_MAX_FIXED_POINT_ITERATIONS):
             new_game = game
             for manipulator in ast_manipulators:
                 new_game = manipulator.fn(new_game)
             if new_game == game:
                 break
             game = new_game
+        else:
+            warnings.warn(
+                "Canonicalization did not converge within "
+                f"{_MAX_FIXED_POINT_ITERATIONS} iterations",
+                stacklevel=2,
+            )
         game = visitors.VariableStandardizingTransformer().transform(game)
         game = standardize_field_names(game)
         game = dependencies.BubbleSortFieldAssignment().transform(game)
@@ -734,12 +750,18 @@ class ProofEngine:
             lookup.update(get_challenger_method_lookup(game))
             game = self.apply_reduction(game, reduction_ast)
 
-        while True:
+        for _iteration in range(_MAX_FIXED_POINT_ITERATIONS):
             new_game = visitors.InlineTransformer(lookup).transform(copy.deepcopy(game))
             if game != new_game:
                 game = new_game
             else:
                 break
+        else:
+            warnings.warn(
+                "Inlining did not converge within "
+                f"{_MAX_FIXED_POINT_ITERATIONS} iterations",
+                stacklevel=2,
+            )
         return game
 
     def get_method_lookup(self) -> None:

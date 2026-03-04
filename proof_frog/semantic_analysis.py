@@ -13,14 +13,20 @@ class FailedTypeCheck(Exception):
     pass
 
 
-def check_well_formed(root: frog_ast.Root, file_name: str) -> None:
-    name_resolution(root, file_name)
+def check_well_formed(
+    root: frog_ast.Root,
+    file_name: str,
+    allowed_root: Optional[str] = None,
+) -> None:
+    name_resolution(root, file_name, allowed_root=allowed_root)
 
     import_namespace: dict[str, frog_ast.Root | frog_ast.Game] = {}
     file_name_mapping: dict[str, str] = {}
     if isinstance(root, frog_ast.ProofFile):
         for imp in root.imports:
-            resolved = frog_parser.resolve_import_path(imp.filename, file_name)
+            resolved = frog_parser.resolve_import_path(
+                imp.filename, file_name, allowed_root=allowed_root
+            )
             parsed_file = frog_parser.parse_file(resolved)
             name = imp.rename if imp.rename else parsed_file.get_export_name()
             import_namespace[name] = parsed_file
@@ -32,14 +38,20 @@ def check_well_formed(root: frog_ast.Root, file_name: str) -> None:
         )
 
 
-def name_resolution(initial_root: frog_ast.Root, initial_file_name: str) -> None:
+def name_resolution(
+    initial_root: frog_ast.Root,
+    initial_file_name: str,
+    allowed_root: Optional[str] = None,
+) -> None:
     all_imports: dict[str, frog_ast.Root] = {}
 
     def do_name_resolution(root: frog_ast.Root, file_name: str) -> None:
         import_namespace: dict[str, frog_ast.Game | frog_ast.Root] = {}
         if isinstance(root, (frog_ast.GameFile, frog_ast.Scheme, frog_ast.ProofFile)):
             for imp in root.imports:
-                resolved = frog_parser.resolve_import_path(imp.filename, file_name)
+                resolved = frog_parser.resolve_import_path(
+                    imp.filename, file_name, allowed_root=allowed_root
+                )
                 if resolved in all_imports:
                     definition = all_imports[resolved]
                     import_namespace[

@@ -805,18 +805,37 @@ def _get_file_type(file_name: str) -> frog_ast.FileType:
     return frog_ast.FileType(extension)
 
 
-def resolve_import_path(import_path: str, importing_file_path: str) -> str:
+def resolve_import_path(
+    import_path: str,
+    importing_file_path: str,
+    allowed_root: str | None = None,
+) -> str:
     """Resolve an import path relative to the importing file's directory.
 
     If import_path is absolute, it is returned as-is.
     Otherwise it is resolved relative to the directory of importing_file_path
     and normalised (so '../' components are collapsed).
+
+    When *allowed_root* is provided the resolved path must stay within that
+    directory tree; a ``ValueError`` is raised otherwise.
     """
     if os.path.isabs(import_path):
-        return import_path
-    return os.path.normpath(
-        os.path.join(os.path.dirname(os.path.abspath(importing_file_path)), import_path)
-    )
+        resolved = import_path
+    else:
+        resolved = os.path.normpath(
+            os.path.join(
+                os.path.dirname(os.path.abspath(importing_file_path)), import_path
+            )
+        )
+    if allowed_root is not None:
+        from pathlib import Path  # pylint: disable=import-outside-toplevel
+
+        if not Path(resolved).resolve().is_relative_to(Path(allowed_root).resolve()):
+            raise ValueError(
+                f"Import '{import_path}' resolves outside the allowed "
+                f"directory '{allowed_root}'"
+            )
+    return resolved
 
 
 def parse_file(file_name: str) -> frog_ast.Root:

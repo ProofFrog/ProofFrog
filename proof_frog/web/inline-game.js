@@ -203,7 +203,19 @@ export async function openInlineTab(stepIndex, label) {
   const tabEl = document.createElement("div");
   tabEl.className = "tab";
   tabEl.dataset.path = virtualPath;
-  tabEl.innerHTML = `<span class="tab-name" title="${label}">${tabName}</span><span class="tab-dot" style="visibility:hidden">&#x2022;</span><span class="tab-close" title="Close">&#x2715;</span>`;
+  const tabNameSpan = document.createElement("span");
+  tabNameSpan.className = "tab-name";
+  tabNameSpan.title = label;
+  tabNameSpan.textContent = tabName;
+  const tabDot = document.createElement("span");
+  tabDot.className = "tab-dot";
+  tabDot.style.visibility = "hidden";
+  tabDot.textContent = "\u2022";
+  const tabClose = document.createElement("span");
+  tabClose.className = "tab-close";
+  tabClose.title = "Close";
+  tabClose.textContent = "\u2715";
+  tabEl.append(tabNameSpan, tabDot, tabClose);
   tabEl.addEventListener("click", e => {
     if (e.target.classList.contains("tab-close")) { closeTab(virtualPath); return; }
     activateTab(virtualPath);

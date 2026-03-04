@@ -152,7 +152,19 @@ export async function openFile(path, name) {
   const tabEl = document.createElement("div");
   tabEl.className = "tab";
   tabEl.dataset.path = path;
-  tabEl.innerHTML = `<span class="tab-name" title="${path}">${name}</span><span class="tab-dot" style="visibility:hidden">&#x2022;</span><span class="tab-close" title="Close">&#x2715;</span>`;
+  const tabName = document.createElement("span");
+  tabName.className = "tab-name";
+  tabName.title = path;
+  tabName.textContent = name;
+  const tabDot = document.createElement("span");
+  tabDot.className = "tab-dot";
+  tabDot.style.visibility = "hidden";
+  tabDot.textContent = "\u2022";
+  const tabClose = document.createElement("span");
+  tabClose.className = "tab-close";
+  tabClose.title = "Close";
+  tabClose.textContent = "\u2715";
+  tabEl.append(tabName, tabDot, tabClose);
   tabEl.addEventListener("click", e => {
     if (e.target.classList.contains("tab-close")) { closeTab(path); return; }
     activateTab(path);

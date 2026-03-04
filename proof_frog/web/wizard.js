@@ -9,7 +9,7 @@ export function updateWizardPanel() {
     && !state.activeTab.startsWith(":inline:");
 
   wizardPanel.style.display = "";
-  wizardBody.innerHTML = "";
+  wizardBody.replaceChildren();
 
   if (isGame) {
     const content = getTabContent(state.activeTab);
@@ -32,7 +32,7 @@ export function updateWizardPanel() {
 
 export function openWizardModal() {
   const sel = document.getElementById("wizard-primitive");
-  sel.innerHTML = "";
+  sel.replaceChildren();
   if (state.primitiveFiles.length === 0) {
     const opt = document.createElement("option");
     opt.value = "";
@@ -49,12 +49,12 @@ export function openWizardModal() {
   document.getElementById("wizard-prop-name").value = "";
   document.getElementById("wizard-left-name").value = "Left";
   document.getElementById("wizard-right-name").value = "Right";
-  document.getElementById("wizard-modal").style.display = "";
+  document.getElementById("wizard-modal").classList.add("visible");
   document.getElementById("wizard-prop-name").focus();
 }
 
 export function closeWizardModal() {
-  document.getElementById("wizard-modal").style.display = "none";
+  document.getElementById("wizard-modal").classList.remove("visible");
 }
 
 export function createGameFromWizard() {

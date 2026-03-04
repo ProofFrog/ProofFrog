@@ -57,7 +57,7 @@ export function updateGameHopsPanel() {
 
   if (!proofPath) {
     panel.style.display = "";
-    list.innerHTML = "";
+    list.replaceChildren();
     const empty = document.createElement("div");
     empty.className = "hop-item-empty";
     empty.textContent = "No proof file open";
@@ -68,7 +68,7 @@ export function updateGameHopsPanel() {
   const content = getTabContent(proofPath);
   if (content === null) {
     panel.style.display = "";
-    list.innerHTML = "";
+    list.replaceChildren();
     return;
   }
 

@@ -368,6 +368,12 @@ class ProofEngine:
                 ),
                 name="Inline Single-Use Variables",
             ),
+            AstManipulator(
+                fn=lambda ast: visitors.UniformXorSimplificationTransformer().transform(
+                    ast
+                ),
+                name="Uniform XOR Simplification",
+            ),
             AstManipulator(fn=self.sort_game, name="Topological Sorting"),
             AstManipulator(fn=remove_duplicate_fields, name="Remove Duplicate Fields"),
             AstManipulator(
@@ -573,6 +579,12 @@ class ProofEngine:
                     ast
                 ),
                 name="Inline Single-Use Variables",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.UniformXorSimplificationTransformer().transform(
+                    ast
+                ),
+                name="Uniform XOR Simplification",
             ),
             AstManipulator(fn=self.sort_game, name="Topological Sorting"),
             AstManipulator(fn=remove_duplicate_fields, name="Remove Duplicate Fields"),

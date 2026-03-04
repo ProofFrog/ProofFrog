@@ -6,7 +6,7 @@
 
 **A tool for checking transitions in cryptographic game-hopping proofs.**
 
-ProofFrog checks validity of transitions game-hopping proofs — the standard technique in provable security for showing that a cryptographic scheme satisfies a security property. Proofs are written in FrogLang, a domain-specific language for defining primitives, schemes, security games, and proof scripts. The engine checks each hop by manipulating abstract syntax trees into a canonical form, with some help from other tools like Z3 and SymPy.
+ProofFrog checks the validity of transitions in game-hopping proofs — the standard technique in provable security for showing that a cryptographic scheme satisfies a security property. Proofs are written in FrogLang, a domain-specific language for defining primitives, schemes, security games, and proof scripts. The engine checks each hop by manipulating abstract syntax trees into a canonical form, with some help from other tools like Z3 and SymPy.
 
 ProofFrog can be used via a **command-line interface**, a **browser-based editor**, or an **MCP server** for integration with AI coding assistants. More info at [prooffrog.github.io](https://prooffrog.github.io/).
 
@@ -159,7 +159,7 @@ The [`examples/`](https://github.com/ProofFrog/examples) repository contains pri
 
 ## License
 
-ProofFrog is released under the [MIT License](https://github.com/ProofFrog/examples/blob/main/LICENSE).
+ProofFrog is released under the [MIT License](https://github.com/ProofFrog/ProofFrog/blob/main/LICENSE).
 
 ## Acknowledgements
 

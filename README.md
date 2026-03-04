@@ -78,3 +78,5 @@ The output from the `docker run` command will contain a `localhost:8888` URL con
 We acknowledge the support of the Natural Sciences and Engineering Research Council of Canada (NSERC).
 
 Nous remercions le Conseil de recherches en sciences naturelles et en génie du Canada (CRSNG) de son soutien.
+
+Includes icons from the [vscode-codicons](https://github.com/microsoft/vscode-codicons) projects.

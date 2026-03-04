@@ -64,7 +64,9 @@ The web interface lets you edit ProofFrog files (with syntax highlighting), vali
 
 When installed from source, use `python3 -m proof_frog` instead of `proof_frog`.
 
-## FrogLang File Types
+## Writing a Proof in ProofFrog
+
+Take a look at the [guide](https://github.com/ProofFrog/ProofFrog/blob/main/docs/guide.md) for writing a proof in ProofFrog.
 
 ProofFrog uses four file types to express the components of a cryptographic proof.
 

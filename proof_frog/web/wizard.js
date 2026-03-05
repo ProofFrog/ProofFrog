@@ -29,7 +29,61 @@ function filenameWithoutExt(tabPath) {
   return dot > 0 ? name.substring(0, dot) : name;
 }
 
+function populateSelect(selectEl, items, emptyText) {
+  selectEl.replaceChildren();
+  if (items.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = emptyText;
+    selectEl.appendChild(opt);
+  } else {
+    items.forEach(item => {
+      const opt = document.createElement("option");
+      opt.value = item.path;
+      opt.textContent = item.name;
+      selectEl.appendChild(opt);
+    });
+  }
+}
+
+function openModal(modalId) {
+  document.getElementById(modalId).classList.add("visible");
+}
+
+function closeModal(modalId) {
+  document.getElementById(modalId).classList.remove("visible");
+}
+
+function applyTemplate(template) {
+  const tab = state.tabs.get(state.activeTab);
+  if (!tab) return;
+  tab.cm.setValue(template);
+  updateWizardPanel();
+}
+
+/**
+ * Wire up a modal's close/cancel/backdrop/Enter-key event listeners.
+ * Call this once per modal from app.js instead of repeating the pattern.
+ */
+export function wireModal(modalId, closeFn, createFn) {
+  document.getElementById(`${modalId}-close`).addEventListener("click", closeFn);
+  document.getElementById(`${modalId}-cancel`).addEventListener("click", closeFn);
+  document.getElementById(`${modalId}-create`).addEventListener("click", createFn);
+  const modal = document.getElementById(modalId);
+  modal.addEventListener("click", e => { if (e.target === modal) closeFn(); });
+  modal.querySelectorAll("input.wizard-input, select.wizard-input").forEach(inp => {
+    inp.addEventListener("keydown", e => { if (e.key === "Enter") createFn(); });
+  });
+}
+
 // ── Wizard panel ─────────────────────────────────────────────────────────────
+
+const wizardConfig = [
+  { ext: "primitive", label: "Create new primitive", opener: openPrimitiveWizardModal },
+  { ext: "scheme",    label: "Create new scheme",    opener: openSchemeWizardModal },
+  { ext: "game",      label: "Create new game",      opener: openWizardModal },
+  { ext: "proof",     label: "Create new proof",     opener: openProofWizardModal },
+];
 
 export function updateWizardPanel() {
   wizardPanel.style.display = "";
@@ -48,35 +102,12 @@ export function updateWizardPanel() {
   const isEmpty = content !== null && content.trim() === "";
 
   if (isEmpty) {
-    if (ext === "primitive") {
+    const config = wizardConfig.find(c => c.ext === ext);
+    if (config) {
       const btn = document.createElement("button");
       btn.className = "wizard-suggestion";
-      btn.textContent = "Create new primitive";
-      btn.addEventListener("click", openPrimitiveWizardModal);
-      wizardBody.appendChild(btn);
-      return;
-    }
-    if (ext === "scheme") {
-      const btn = document.createElement("button");
-      btn.className = "wizard-suggestion";
-      btn.textContent = "Create new scheme";
-      btn.addEventListener("click", openSchemeWizardModal);
-      wizardBody.appendChild(btn);
-      return;
-    }
-    if (ext === "game") {
-      const btn = document.createElement("button");
-      btn.className = "wizard-suggestion";
-      btn.textContent = "Create new game";
-      btn.addEventListener("click", openWizardModal);
-      wizardBody.appendChild(btn);
-      return;
-    }
-    if (ext === "proof") {
-      const btn = document.createElement("button");
-      btn.className = "wizard-suggestion";
-      btn.textContent = "Create new proof";
-      btn.addEventListener("click", openProofWizardModal);
+      btn.textContent = config.label;
+      btn.addEventListener("click", config.opener);
       wizardBody.appendChild(btn);
       return;
     }
@@ -88,34 +119,22 @@ export function updateWizardPanel() {
   wizardBody.appendChild(msg);
 }
 
-// ── Game wizard (existing) ───────────────────────────────────────────────────
+// ── Game wizard ─────────────────────────────────────────────────────────────
 
 export function openWizardModal() {
-  const sel = document.getElementById("wizard-primitive");
-  sel.replaceChildren();
-  if (state.primitiveFiles.length === 0) {
-    const opt = document.createElement("option");
-    opt.value = "";
-    opt.textContent = "(no primitives found)";
-    sel.appendChild(opt);
-  } else {
-    state.primitiveFiles.forEach(pf => {
-      const opt = document.createElement("option");
-      opt.value = pf.path;
-      opt.textContent = pf.name;
-      sel.appendChild(opt);
-    });
-  }
+  populateSelect(
+    document.getElementById("wizard-primitive"),
+    state.primitiveFiles,
+    "(no primitives found)"
+  );
   document.getElementById("wizard-prop-name").value = "";
   document.getElementById("wizard-left-name").value = "Left";
   document.getElementById("wizard-right-name").value = "Right";
-  document.getElementById("wizard-modal").classList.add("visible");
+  openModal("wizard-modal");
   document.getElementById("wizard-prop-name").focus();
 }
 
-export function closeWizardModal() {
-  document.getElementById("wizard-modal").classList.remove("visible");
-}
+export function closeWizardModal() { closeModal("wizard-modal"); }
 
 export function createGameFromWizard() {
   const propName  = document.getElementById("wizard-prop-name").value.trim();
@@ -143,67 +162,42 @@ Game ${rightName}(${primName} E) {
 export as ${propName};
 `;
 
-  const tab = state.tabs.get(state.activeTab);
-  if (!tab) return;
-  tab.cm.setValue(template);
+  applyTemplate(template);
   closeWizardModal();
-  updateWizardPanel();
 }
 
 // ── Primitive wizard ─────────────────────────────────────────────────────────
 
 export function openPrimitiveWizardModal() {
   document.getElementById("primitive-wizard-name").value = filenameWithoutExt(state.activeTab);
-  document.getElementById("primitive-wizard-modal").classList.add("visible");
+  openModal("primitive-wizard-modal");
   document.getElementById("primitive-wizard-name").focus();
 }
 
-export function closePrimitiveWizardModal() {
-  document.getElementById("primitive-wizard-modal").classList.remove("visible");
-}
+export function closePrimitiveWizardModal() { closeModal("primitive-wizard-modal"); }
 
 export function createPrimitiveFromWizard() {
   const name = document.getElementById("primitive-wizard-name").value.trim();
   if (!name) { document.getElementById("primitive-wizard-name").focus(); return; }
 
-  const template =
-`Primitive ${name}() {
-}
-`;
-
-  const tab = state.tabs.get(state.activeTab);
-  if (!tab) return;
-  tab.cm.setValue(template);
+  applyTemplate(`Primitive ${name}() {\n}\n`);
   closePrimitiveWizardModal();
-  updateWizardPanel();
 }
 
 // ── Scheme wizard ────────────────────────────────────────────────────────────
 
 export function openSchemeWizardModal() {
   document.getElementById("scheme-wizard-name").value = filenameWithoutExt(state.activeTab);
-  const sel = document.getElementById("scheme-wizard-primitive");
-  sel.replaceChildren();
-  if (state.primitiveFiles.length === 0) {
-    const opt = document.createElement("option");
-    opt.value = "";
-    opt.textContent = "(no primitives found)";
-    sel.appendChild(opt);
-  } else {
-    state.primitiveFiles.forEach(pf => {
-      const opt = document.createElement("option");
-      opt.value = pf.path;
-      opt.textContent = pf.name;
-      sel.appendChild(opt);
-    });
-  }
-  document.getElementById("scheme-wizard-modal").classList.add("visible");
+  populateSelect(
+    document.getElementById("scheme-wizard-primitive"),
+    state.primitiveFiles,
+    "(no primitives found)"
+  );
+  openModal("scheme-wizard-modal");
   document.getElementById("scheme-wizard-name").focus();
 }
 
-export function closeSchemeWizardModal() {
-  document.getElementById("scheme-wizard-modal").classList.remove("visible");
-}
+export function closeSchemeWizardModal() { closeModal("scheme-wizard-modal"); }
 
 export function createSchemeFromWizard() {
   const name = document.getElementById("scheme-wizard-name").value.trim();
@@ -213,62 +207,33 @@ export function createSchemeFromWizard() {
 
   const primName = primPath.split("/").pop().replace(/\.primitive$/, "");
   const importPath = relativePath(state.activeTab, primPath);
-  const template =
+  applyTemplate(
 `import '${importPath}';
 
 Scheme ${name}(${primName} E) extends ${primName} {
 }
-`;
-
-  const tab = state.tabs.get(state.activeTab);
-  if (!tab) return;
-  tab.cm.setValue(template);
+`);
   closeSchemeWizardModal();
-  updateWizardPanel();
 }
 
 // ── Proof wizard ─────────────────────────────────────────────────────────────
 
 export function openProofWizardModal() {
-  const schemeSel = document.getElementById("proof-wizard-scheme");
-  schemeSel.replaceChildren();
-  if (state.schemeFiles.length === 0) {
-    const opt = document.createElement("option");
-    opt.value = "";
-    opt.textContent = "(no schemes found)";
-    schemeSel.appendChild(opt);
-  } else {
-    state.schemeFiles.forEach(sf => {
-      const opt = document.createElement("option");
-      opt.value = sf.path;
-      opt.textContent = sf.name;
-      schemeSel.appendChild(opt);
-    });
-  }
-
-  const gameSel = document.getElementById("proof-wizard-game");
-  gameSel.replaceChildren();
-  if (state.gameFiles.length === 0) {
-    const opt = document.createElement("option");
-    opt.value = "";
-    opt.textContent = "(no games found)";
-    gameSel.appendChild(opt);
-  } else {
-    state.gameFiles.forEach(gf => {
-      const opt = document.createElement("option");
-      opt.value = gf.path;
-      opt.textContent = gf.name;
-      gameSel.appendChild(opt);
-    });
-  }
-
-  document.getElementById("proof-wizard-modal").classList.add("visible");
-  schemeSel.focus();
+  populateSelect(
+    document.getElementById("proof-wizard-scheme"),
+    state.schemeFiles,
+    "(no schemes found)"
+  );
+  populateSelect(
+    document.getElementById("proof-wizard-game"),
+    state.gameFiles,
+    "(no games found)"
+  );
+  openModal("proof-wizard-modal");
+  document.getElementById("proof-wizard-scheme").focus();
 }
 
-export function closeProofWizardModal() {
-  document.getElementById("proof-wizard-modal").classList.remove("visible");
-}
+export function closeProofWizardModal() { closeModal("proof-wizard-modal"); }
 
 export async function createProofFromWizard() {
   const schemePath = document.getElementById("proof-wizard-scheme").value;
@@ -334,9 +299,6 @@ games:
     ${gameExportName}(S).${sides[sides.length - 1]} against ${gameExportName}(S).Adversary;
 `;
 
-  const tab = state.tabs.get(state.activeTab);
-  if (!tab) return;
-  tab.cm.setValue(template);
+  applyTemplate(template);
   closeProofWizardModal();
-  updateWizardPanel();
 }

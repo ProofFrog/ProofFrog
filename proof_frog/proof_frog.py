@@ -77,7 +77,7 @@ def prove(file: str, verbose: bool, json_output: bool) -> None:
         # pylint: disable=import-outside-toplevel
         from .web_server import _capture_prove
 
-        output, success, hop_results = _capture_prove(file)
+        output, success, hop_results, _has_induction = _capture_prove(file)
         click.echo(
             json.dumps(
                 {"output": output, "success": success, "hop_results": hop_results}

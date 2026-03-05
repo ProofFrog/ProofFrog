@@ -182,7 +182,7 @@ def prove(proof_path: str) -> dict[str, Any]:
     Imports in the proof are resolved relative to the server's working directory.
     Use write_file first to save the proof content to disk, then call prove.
     """
-    output, success, hop_results = _capture_prove(
+    output, success, hop_results, _has_induction = _capture_prove(
         _safe_resolve(proof_path), allowed_root=_directory
     )
     return {"output": output, "success": success, "hop_results": hop_results}

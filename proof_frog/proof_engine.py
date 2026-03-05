@@ -362,6 +362,12 @@ class ProofEngine:
                 name="Simplifying Splices",
             ),
             AstManipulator(
+                fn=lambda ast: visitors.MergeUniformSamplesTransformer(
+                    self.variables
+                ).transform(ast),
+                name="Merge Uniform Samples",
+            ),
+            AstManipulator(
                 fn=lambda ast: visitors.RedundantCopyTransformer().transform(ast),
                 name="Remove Redundant Copies",
             ),
@@ -573,6 +579,12 @@ class ProofEngine:
                     self.variables
                 ).transform(ast),
                 name="Simplifying Splices",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.MergeUniformSamplesTransformer(
+                    self.variables
+                ).transform(ast),
+                name="Merge Uniform Samples",
             ),
             AstManipulator(
                 fn=lambda ast: visitors.RedundantCopyTransformer().transform(ast),

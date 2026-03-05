@@ -590,6 +590,183 @@ class SimplifySpliceTransformer(BlockTransformer):
         return block
 
 
+class MergeUniformSamplesTransformer(BlockTransformer):
+    """Merges independent uniform BitString samples that are concatenated.
+
+    Transforms:
+        BitString<len1> x <- BitString<len1>;
+        BitString<len2> y <- BitString<len2>;
+        return x || y;
+    Into:
+        BitString<len1 + len2> x <- BitString<len1 + len2>;
+        return x;
+
+    This captures the mathematical fact that concatenating independent
+    uniform random bitstrings produces a uniform random bitstring of the
+    combined length.
+    """
+
+    def __init__(self, variables: dict[str, Symbol | frog_ast.Expression]) -> None:
+        self.variables = variables
+
+    @staticmethod
+    def _flatten_concat(
+        node: frog_ast.Expression,
+    ) -> list[frog_ast.Variable] | None:
+        """Flatten a tree of || operations into a list of leaf variables."""
+        if isinstance(node, frog_ast.Variable):
+            return [node]
+        if (
+            isinstance(node, frog_ast.BinaryOperation)
+            and node.operator is frog_ast.BinaryOperators.OR
+        ):
+            left = MergeUniformSamplesTransformer._flatten_concat(node.left_expression)
+            right = MergeUniformSamplesTransformer._flatten_concat(
+                node.right_expression
+            )
+            if left is not None and right is not None:
+                return left + right
+        return None
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            # Find concatenation expressions in returns or assignments
+            concat_expr: frog_ast.Expression | None = None
+            if isinstance(statement, frog_ast.ReturnStatement):
+                concat_expr = statement.expression
+            elif (
+                isinstance(statement, frog_ast.Assignment)
+                and statement.the_type is not None
+            ):
+                concat_expr = statement.value
+            else:
+                continue
+
+            if not isinstance(concat_expr, frog_ast.BinaryOperation):
+                continue
+            if concat_expr.operator is not frog_ast.BinaryOperators.OR:
+                continue
+
+            # Flatten the concatenation tree to get leaf variables
+            leaf_vars = self._flatten_concat(concat_expr)
+            if leaf_vars is None or len(leaf_vars) < 2:
+                continue
+
+            # For each leaf variable, find its Sample declaration
+            sample_indices: list[int] = []
+            lengths: list[Symbol | int] = []
+            all_valid = True
+
+            for var in leaf_vars:
+                found = False
+                for si in range(index):
+                    s = block.statements[si]
+                    if not (
+                        isinstance(s, frog_ast.Sample)
+                        and isinstance(s.var, frog_ast.Variable)
+                        and s.var.name == var.name
+                        and isinstance(s.the_type, frog_ast.BitStringType)
+                        and s.the_type.parameterization is not None
+                        and isinstance(s.sampled_from, frog_ast.BitStringType)
+                        and s.sampled_from.parameterization is not None
+                    ):
+                        continue
+
+                    # Verify uniform sampling: type param == sampled_from param
+                    type_len = FrogToSympyVisitor(self.variables).visit(
+                        s.the_type.parameterization
+                    )
+                    sample_len = FrogToSympyVisitor(self.variables).visit(
+                        s.sampled_from.parameterization
+                    )
+                    if type_len is None or sample_len is None or type_len != sample_len:
+                        all_valid = False
+                        break
+
+                    sample_indices.append(si)
+                    lengths.append(type_len)
+                    found = True
+                    break
+
+                if not found or not all_valid:
+                    all_valid = False
+                    break
+
+            if not all_valid:
+                continue
+
+            # Check each variable is used only in the concatenation
+            all_single_use = True
+            sample_index_set = set(sample_indices)
+            for vi, var in enumerate(leaf_vars):
+
+                def uses_var(name: str, node: frog_ast.ASTNode) -> bool:
+                    return isinstance(node, frog_ast.Variable) and node.name == name
+
+                # Check all statements except the sample declaration and
+                # the concatenation statement itself
+                other_stmts = [
+                    s
+                    for si, s in enumerate(block.statements)
+                    if si not in (sample_indices[vi], index)
+                ]
+                other_block = frog_ast.Block(other_stmts)
+                if (
+                    SearchVisitor(functools.partial(uses_var, var.name)).visit(
+                        other_block
+                    )
+                    is not None
+                ):
+                    all_single_use = False
+                    break
+
+            if not all_single_use:
+                continue
+
+            # Compute combined length
+            combined_length = sum(lengths[1:], lengths[0])
+            combined_length_expr = frog_parser.parse_expression(str(combined_length))
+            combined_type = frog_ast.BitStringType(combined_length_expr)
+            # Build new block
+            new_var = frog_ast.Variable(leaf_vars[0].name)
+            new_sample = frog_ast.Sample(
+                combined_type,
+                new_var,
+                cast(
+                    frog_ast.Expression,
+                    frog_ast.BitStringType(
+                        frog_parser.parse_expression(str(combined_length))
+                    ),
+                ),
+            )
+
+            new_statements: list[frog_ast.Statement] = []
+            for si, s in enumerate(block.statements):
+                if si in sample_index_set:
+                    continue  # Remove individual samples
+                if si == index:
+                    # Insert merged sample, then the statement with concat replaced
+                    new_statements.append(new_sample)
+                    if isinstance(statement, frog_ast.ReturnStatement):
+                        new_statements.append(
+                            frog_ast.ReturnStatement(copy.deepcopy(new_var))
+                        )
+                    elif isinstance(statement, frog_ast.Assignment):
+                        new_statements.append(
+                            frog_ast.Assignment(
+                                statement.the_type,
+                                copy.deepcopy(statement.var),
+                                copy.deepcopy(new_var),
+                            )
+                        )
+                else:
+                    new_statements.append(s)
+
+            return self.transform_block(frog_ast.Block(new_statements))
+
+        return block
+
+
 class VariableStandardizingTransformer(BlockTransformer):
     def __init__(self) -> None:
         self.variable_counter = 0

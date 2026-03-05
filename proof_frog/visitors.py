@@ -652,6 +652,11 @@ class MergeUniformSamplesTransformer(BlockTransformer):
             if leaf_vars is None or len(leaf_vars) < 2:
                 continue
 
+            # All leaf variables must be distinct (independent samples)
+            leaf_names = [v.name for v in leaf_vars]
+            if len(leaf_names) != len(set(leaf_names)):
+                continue
+
             # For each leaf variable, find its Sample declaration
             sample_indices: list[int] = []
             lengths: list[Symbol | int] = []
@@ -812,13 +817,37 @@ class SplitUniformSampleTransformer(BlockTransformer):
         BitString<len2> z_1 <- BitString<len2>;
         ... z_0 ... z_1 ...
 
-    This captures the mathematical fact that slicing a uniform random
-    bitstring into non-overlapping parts covering the whole range produces
-    independent uniform random bitstrings.
+    The slices do not need to cover the full range. Unused portions of the
+    sample are simply discarded, which is sound because unused random bits
+    do not affect the distribution of the used bits.
     """
 
     def __init__(self, variables: dict[str, Symbol | frog_ast.Expression]) -> None:
         self.variables = variables
+
+    @staticmethod
+    def _pos(expr: Symbol | int, pos_subs: dict[Symbol, Symbol]) -> Symbol | int:
+        """Substitute positive symbol assumptions if expr is symbolic."""
+        if pos_subs and hasattr(expr, "subs"):
+            return expr.subs(pos_subs)
+        return expr
+
+    @staticmethod
+    def _check_overlaps(
+        slice_bounds: list[tuple[Symbol | int, Symbol | int]],
+        pos_subs: dict[Symbol, Symbol],
+    ) -> bool:
+        """Check if any pair of slices overlap, using positive substitutions."""
+        pos = SplitUniformSampleTransformer._pos
+        for i, (start_i, end_i) in enumerate(slice_bounds):
+            for j in range(i + 1, len(slice_bounds)):
+                start_j, end_j = slice_bounds[j]
+                # No overlap if end_i <= start_j or end_j <= start_i
+                gap_ij = sympy_simplify(pos(start_j, pos_subs) - pos(end_i, pos_subs))
+                gap_ji = sympy_simplify(pos(start_i, pos_subs) - pos(end_j, pos_subs))
+                if not gap_ij.is_nonnegative and not gap_ji.is_nonnegative:
+                    return True
+        return False
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for sample_idx, statement in enumerate(block.statements):
@@ -913,44 +942,23 @@ class SplitUniformSampleTransformer(BlockTransformer):
             if not all_resolved:
                 continue
 
-            # Order slices by chaining: find which starts at 0,
-            # then which starts where that one ends, etc.
-            remaining = list(range(len(slices)))
-            sorted_indices: list[int] = []
+            # BitString parameters are always non-negative. Create
+            # positive symbol substitutions for sympy sign reasoning.
+            all_syms: set[Symbol] = set()
+            for sb in slice_bounds:
+                for expr in sb:
+                    if hasattr(expr, "free_symbols"):
+                        all_syms.update(expr.free_symbols)
+            pos_subs = {
+                s: Symbol(s.name, positive=True) for s in all_syms if not s.is_positive
+            }
 
-            # Find the slice starting at 0
-            first_idx = None
-            for i in remaining:
-                if sympy_simplify(slice_bounds[i][0]) == 0:
-                    first_idx = i
-                    break
-            if first_idx is None:
+            # Check slices are non-overlapping. Two slices [a,b) and [c,d)
+            # don't overlap if b <= c or d <= a. Gaps are allowed (unused
+            # portions are discarded).
+            overlaps = self._check_overlaps(slice_bounds, pos_subs)
+            if overlaps:
                 continue
-            sorted_indices.append(first_idx)
-            remaining.remove(first_idx)
-
-            # Chain: find the next slice whose start equals current end
-            chain_ok = True
-            while remaining:
-                current_end = slice_bounds[sorted_indices[-1]][1]
-                found_next = False
-                for i in remaining:
-                    if sympy_simplify(slice_bounds[i][0] - current_end) == 0:
-                        sorted_indices.append(i)
-                        remaining.remove(i)
-                        found_next = True
-                        break
-                if not found_next:
-                    chain_ok = False
-                    break
-            if not chain_ok:
-                continue
-
-            # Check the last slice ends at total_len
-            if sympy_simplify(slice_bounds[sorted_indices[-1]][1] - total_len) != 0:
-                continue
-
-            sorted_bounds = [slice_bounds[i] for i in sorted_indices]
 
             # All checks pass - create replacement samples and substitution map
             new_samples: list[frog_ast.Sample] = []
@@ -959,7 +967,7 @@ class SplitUniformSampleTransformer(BlockTransformer):
                 []
             )
 
-            for i, (start, end) in enumerate(sorted_bounds):
+            for i, (start, end) in enumerate(slice_bounds):
                 part_len = end - start
                 part_len_expr = frog_parser.parse_expression(str(part_len))
                 part_type = frog_ast.BitStringType(part_len_expr)

@@ -109,6 +109,38 @@ from proof_frog import visitors, frog_parser
             }
             """,
         ),
+        # No merge: non-uniform sample (type != sampled_from)
+        (
+            """
+            BitString<2 * lambda> f() {
+                BitString<lambda> x <- BitString<2 * lambda>;
+                BitString<lambda> y <- BitString<lambda>;
+                return x || y;
+            }
+            """,
+            """
+            BitString<2 * lambda> f() {
+                BitString<lambda> x <- BitString<2 * lambda>;
+                BitString<lambda> y <- BitString<lambda>;
+                return x || y;
+            }
+            """,
+        ),
+        # No merge: only one sample in concatenation
+        (
+            """
+            BitString<2 * lambda> f() {
+                BitString<lambda> x <- BitString<lambda>;
+                return x || x;
+            }
+            """,
+            """
+            BitString<2 * lambda> f() {
+                BitString<lambda> x <- BitString<lambda>;
+                return x || x;
+            }
+            """,
+        ),
     ],
 )
 def test_merge_uniform_samples(

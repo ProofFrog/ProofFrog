@@ -567,6 +567,82 @@ def create_app(directory: str) -> Flask:
             }
         )
 
+    @app.route("/api/file-metadata")
+    def file_metadata() -> Any:
+        rel_path = request.args.get("path", "")
+        abs_path = _safe_path(directory, rel_path)
+        if abs_path is None:
+            return jsonify({"error": "Invalid path"}), 403
+        file_path_str = str(abs_path)
+        try:
+            file_type = _get_file_type(file_path_str)
+        except ValueError:
+            return jsonify({"error": "Unsupported file type"}), 400
+
+        def _params(params: list[frog_ast.Parameter]) -> list[dict[str, str]]:
+            return [{"type": str(p.type), "name": p.name} for p in params]
+
+        def _fields(fields: list[frog_ast.Field]) -> list[dict[str, str]]:
+            return [{"type": str(f.type), "name": f.name} for f in fields]
+
+        try:
+            result: dict[str, object]
+            if file_type == frog_ast.FileType.PRIMITIVE:
+                prim = frog_parser.parse_primitive_file(file_path_str)
+                result = {
+                    "type": "primitive",
+                    "name": prim.name,
+                    "parameters": _params(prim.parameters),
+                    "fields": _fields(prim.fields),
+                    "methods": [str(m) for m in prim.methods],
+                }
+            elif file_type == frog_ast.FileType.SCHEME:
+                scheme = frog_parser.parse_scheme_file(file_path_str)
+                result = {
+                    "type": "scheme",
+                    "name": scheme.name,
+                    "parameters": _params(scheme.parameters),
+                    "primitive_name": scheme.primitive_name,
+                    "fields": _fields(scheme.fields),
+                    "methods": [str(m.signature) for m in scheme.methods],
+                }
+            elif file_type == frog_ast.FileType.GAME:
+                game_file = frog_parser.parse_game_file(file_path_str)
+                result = {
+                    "type": "game",
+                    "export_name": game_file.name,
+                    "sides": [g.name for g in game_file.games],
+                    "games": [
+                        {
+                            "name": g.name,
+                            "parameters": _params(g.parameters),
+                            "fields": _fields(g.fields),
+                            "methods": [str(m.signature) for m in g.methods],
+                        }
+                        for g in game_file.games
+                    ],
+                }
+            elif file_type == frog_ast.FileType.PROOF:
+                proof_file = frog_parser.parse_proof_file(file_path_str)
+                result = {
+                    "type": "proof",
+                    "lets": [str(let) for let in proof_file.lets],
+                    "assumptions": [str(a) for a in proof_file.assumptions],
+                    "theorem": str(proof_file.theorem),
+                    "steps": [str(s) for s in proof_file.steps],
+                }
+            else:
+                return jsonify({"error": "Unsupported file type"}), 400
+            return jsonify(result)
+        except (
+            frog_parser.ParseError,
+            FileNotFoundError,
+            semantic_analysis.FailedTypeCheck,
+        ) as e:
+            return jsonify({"error": str(e)}), 400
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            return jsonify({"error": f"Error: {e}"}), 400
+
     return app
 
 

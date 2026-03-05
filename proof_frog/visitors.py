@@ -17,7 +17,7 @@ from typing import (
     Dict,
 )
 import z3
-from sympy import Symbol, Rational
+from sympy import Symbol, Rational, simplify as sympy_simplify
 
 from . import frog_ast
 from . import frog_parser
@@ -763,6 +763,237 @@ class MergeUniformSamplesTransformer(BlockTransformer):
                     new_statements.append(s)
 
             return self.transform_block(frog_ast.Block(new_statements))
+
+        return block
+
+
+class _SliceReplacer(Transformer):
+    """Replaces Slice nodes of a specific variable with new variables,
+    matching by sympy-resolved bounds rather than object identity."""
+
+    def __init__(
+        self,
+        var_name: str,
+        bound_to_var: list[tuple[Symbol | int, Symbol | int, frog_ast.Variable]],
+        variables: dict[str, Symbol | frog_ast.Expression],
+    ) -> None:
+        self.var_name = var_name
+        self.bound_to_var = bound_to_var
+        self.variables = variables
+
+    def transform_slice(self, node: frog_ast.Slice) -> Optional[frog_ast.ASTNode]:
+        if not (
+            isinstance(node.the_array, frog_ast.Variable)
+            and node.the_array.name == self.var_name
+        ):
+            return None
+        start = FrogToSympyVisitor(self.variables).visit(node.start)
+        end = FrogToSympyVisitor(self.variables).visit(node.end)
+        if start is None or end is None:
+            return None
+        for b_start, b_end, new_var in self.bound_to_var:
+            if (
+                sympy_simplify(start - b_start) == 0
+                and sympy_simplify(end - b_end) == 0
+            ):
+                return copy.deepcopy(new_var)
+        return None
+
+
+class SplitUniformSampleTransformer(BlockTransformer):
+    """Splits a uniform BitString sample accessed only via non-overlapping
+    slices into multiple independent samples.
+
+    Transforms:
+        BitString<len1 + len2> z <- BitString<len1 + len2>;
+        ... z[0 : len1] ... z[len1 : len1 + len2] ...
+    Into:
+        BitString<len1> z_0 <- BitString<len1>;
+        BitString<len2> z_1 <- BitString<len2>;
+        ... z_0 ... z_1 ...
+
+    This captures the mathematical fact that slicing a uniform random
+    bitstring into non-overlapping parts covering the whole range produces
+    independent uniform random bitstrings.
+    """
+
+    def __init__(self, variables: dict[str, Symbol | frog_ast.Expression]) -> None:
+        self.variables = variables
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for sample_idx, statement in enumerate(block.statements):
+            if not (
+                isinstance(statement, frog_ast.Sample)
+                and isinstance(statement.var, frog_ast.Variable)
+                and isinstance(statement.the_type, frog_ast.BitStringType)
+                and statement.the_type.parameterization is not None
+                and isinstance(statement.sampled_from, frog_ast.BitStringType)
+                and statement.sampled_from.parameterization is not None
+            ):
+                continue
+
+            var_name = statement.var.name
+
+            # Check it's uniform sampling
+            total_len = FrogToSympyVisitor(self.variables).visit(
+                statement.the_type.parameterization
+            )
+            sample_len = FrogToSympyVisitor(self.variables).visit(
+                statement.sampled_from.parameterization
+            )
+            if total_len is None or sample_len is None or total_len != sample_len:
+                continue
+
+            # Collect all usages of this variable in the rest of the block
+            remaining_stmts = block.statements[sample_idx + 1 :]
+
+            # Find all Slice nodes that reference this variable
+            slices: list[frog_ast.Slice] = []
+
+            def collect_slices(
+                name: str,
+                node: frog_ast.ASTNode,
+            ) -> bool:
+                return isinstance(node, frog_ast.Slice) and (
+                    isinstance(node.the_array, frog_ast.Variable)
+                    and node.the_array.name == name
+                )
+
+            def is_bare_var_use(
+                name: str,
+                node: frog_ast.ASTNode,
+            ) -> bool:
+                """Check if a variable is used outside of a Slice context."""
+                return isinstance(node, frog_ast.Variable) and node.name == name
+
+            remaining_block = frog_ast.Block(remaining_stmts)
+
+            # Collect all slices of this variable from the original block.
+            # We search, collect (by identity), then replace-in-copy to
+            # find the next one, but track the originals for later replacement.
+            replaced_block = remaining_block
+            while True:
+                found_slice = SearchVisitor(
+                    functools.partial(collect_slices, var_name)
+                ).visit(replaced_block)
+                if found_slice is None:
+                    break
+                assert isinstance(found_slice, frog_ast.Slice)
+                slices.append(found_slice)
+                # Replace found slice in search copy to find next one
+                replaced_block = ReplaceTransformer(
+                    found_slice, frog_ast.Variable("__placeholder__")
+                ).transform(replaced_block)
+
+            if not slices:
+                continue
+
+            # Check there are no bare variable uses (non-slice uses)
+            # After replacing all slices, any remaining use of var_name
+            # means it's used in a non-slice context
+            if (
+                SearchVisitor(functools.partial(is_bare_var_use, var_name)).visit(
+                    replaced_block
+                )
+                is not None
+            ):
+                continue
+
+            # Resolve slice bounds to sympy
+            slice_bounds: list[tuple[Symbol | int, Symbol | int]] = []
+            all_resolved = True
+            for s in slices:
+                start = FrogToSympyVisitor(self.variables).visit(s.start)
+                end = FrogToSympyVisitor(self.variables).visit(s.end)
+                if start is None or end is None:
+                    all_resolved = False
+                    break
+                slice_bounds.append((start, end))
+
+            if not all_resolved:
+                continue
+
+            # Order slices by chaining: find which starts at 0,
+            # then which starts where that one ends, etc.
+            remaining = list(range(len(slices)))
+            sorted_indices: list[int] = []
+
+            # Find the slice starting at 0
+            first_idx = None
+            for i in remaining:
+                if sympy_simplify(slice_bounds[i][0]) == 0:
+                    first_idx = i
+                    break
+            if first_idx is None:
+                continue
+            sorted_indices.append(first_idx)
+            remaining.remove(first_idx)
+
+            # Chain: find the next slice whose start equals current end
+            chain_ok = True
+            while remaining:
+                current_end = slice_bounds[sorted_indices[-1]][1]
+                found_next = False
+                for i in remaining:
+                    if sympy_simplify(slice_bounds[i][0] - current_end) == 0:
+                        sorted_indices.append(i)
+                        remaining.remove(i)
+                        found_next = True
+                        break
+                if not found_next:
+                    chain_ok = False
+                    break
+            if not chain_ok:
+                continue
+
+            # Check the last slice ends at total_len
+            if sympy_simplify(slice_bounds[sorted_indices[-1]][1] - total_len) != 0:
+                continue
+
+            sorted_bounds = [slice_bounds[i] for i in sorted_indices]
+
+            # All checks pass - create replacement samples and substitution map
+            new_samples: list[frog_ast.Sample] = []
+            # Map from (start_sympy, end_sympy) -> new variable
+            bound_to_var: list[tuple[Symbol | int, Symbol | int, frog_ast.Variable]] = (
+                []
+            )
+
+            for i, (start, end) in enumerate(sorted_bounds):
+                part_len = end - start
+                part_len_expr = frog_parser.parse_expression(str(part_len))
+                part_type = frog_ast.BitStringType(part_len_expr)
+                new_var_name = f"{var_name}_{i}"
+                new_var = frog_ast.Variable(new_var_name)
+                new_sample = frog_ast.Sample(
+                    part_type,
+                    new_var,
+                    cast(
+                        frog_ast.Expression,
+                        frog_ast.BitStringType(
+                            frog_parser.parse_expression(str(part_len))
+                        ),
+                    ),
+                )
+                new_samples.append(new_sample)
+                bound_to_var.append((start, end, new_var))
+
+            # Build new block: replace original sample with new samples
+            new_statements: list[frog_ast.Statement] = []
+            for si, stmt in enumerate(block.statements):
+                if si == sample_idx:
+                    new_statements.extend(new_samples)
+                else:
+                    new_statements.append(stmt)
+
+            new_block = frog_ast.Block(new_statements)
+
+            # Replace slice usages by matching on bounds
+            new_block = _SliceReplacer(
+                var_name, bound_to_var, self.variables
+            ).transform(new_block)
+
+            return self.transform_block(new_block)
 
         return block
 

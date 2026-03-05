@@ -273,7 +273,7 @@ CPA security is like one-time secrecy but the key persists across multiple queri
 
 Some games capture simple probabilistic facts rather than cryptographic security properties. These are placed in `Games/Misc/` and often appear as assumptions in proofs.
 
-**BitStringSampling**: Concatenating two independent random samples is the same as sampling one longer bitstring.
+**BitStringSampling**: Concatenating two independent random samples is the same as sampling one longer bitstring. The ProofFrog engine handles this equivalence automatically during canonicalization (merging concatenated uniform samples and splitting samples accessed only via covering slices), so this game no longer needs to be explicitly assumed in most proofs.
 
 ```
 Game Concatenate(Int len1, Int len2) {
@@ -482,10 +482,9 @@ Lists the security assumptions (games that are assumed to hold for underlying sc
 ```
 assume:
     Security(G);                          // PRG security
-    BitStringSampling(lambda, lambda);    // helper assumption
 ```
 
-Helper assumptions from `Games/Misc/` (like `BitStringSampling` and `OTPUniform`) capture simple probabilistic facts and can be freely added as needed.
+Helper assumptions from `Games/Misc/` (like `OTPUniform`) capture simple probabilistic facts and can be freely added as needed. Note that `BitStringSampling` no longer needs to be assumed explicitly, as the engine handles it automatically.
 
 ### The `theorem:` section
 
@@ -632,21 +631,9 @@ A more complex proof showing that the tripling PRG construction is secure if the
 ```
 import '../../Primitives/PRG.primitive';
 import '../../Schemes/PRG/TriplingPRG.scheme';
-import '../../Games/Misc/BitStringSampling.game';
 import '../../Games/PRG/Security.game';
 
 Reduction R1(PRG G, TriplingPRG T) compose Security(G)
-    against Security(T).Adversary {
-    BitString<T.lambda + T.stretch> Query() {
-        BitString<2 * T.lambda> result1 = challenger.Query();
-        BitString<T.lambda> x = result1[0 : T.lambda];
-        BitString<T.lambda> y = result1[T.lambda : 2*T.lambda];
-        BitString<2 * T.lambda> result2 = G.evaluate(y);
-        return x || result2;
-    }
-}
-
-Reduction R2(PRG G, TriplingPRG T, Int lambda) compose BitStringSampling(lambda, lambda)
     against Security(T).Adversary {
     BitString<T.lambda + T.stretch> Query() {
         BitString<2 * T.lambda> result1 = challenger.Query();
@@ -666,13 +653,6 @@ Reduction R3(PRG G, TriplingPRG T) compose Security(G)
     }
 }
 
-Reduction R4(TriplingPRG T) compose BitStringSampling(T.lambda, 2 * T.lambda)
-    against Security(T).Adversary {
-    BitString<T.lambda + T.stretch> Query() {
-        return challenger.Query();
-    }
-}
-
 proof:
 
 let:
@@ -682,8 +662,6 @@ let:
 
 assume:
     Security(G);
-    BitStringSampling(lambda, lambda);
-    BitStringSampling(lambda, 2 * lambda);
 
 theorem:
     Security(T);
@@ -695,26 +673,14 @@ games:
     Security(G).Real compose R1(G, T) against Security(T).Adversary;
     Security(G).Random compose R1(G, T) against Security(T).Adversary;
 
-    // Sampling: concat of two random strings = one longer random string
-    BitStringSampling(lambda, lambda).SampleDirectly compose R2(G, T, lambda)
-        against Security(T).Adversary;
-    BitStringSampling(lambda, lambda).Concatenate compose R2(G, T, lambda)
-        against Security(T).Adversary;
-
     // Second PRG application: replace G.evaluate(y) with random
     Security(G).Real compose R3(G, T) against Security(T).Adversary;
     Security(G).Random compose R3(G, T) against Security(T).Adversary;
 
-    // Final sampling: concat of random strings = one long random string
-    BitStringSampling(lambda, 2 * lambda).Concatenate compose R4(T)
-        against Security(T).Adversary;
-    BitStringSampling(lambda, 2 * lambda).SampleDirectly compose R4(T)
-        against Security(T).Adversary;
-
     Security(T).Random against Security(T).Adversary;
 ```
 
-**Proof idea**: The TriplingPRG applies the underlying PRG twice. We replace each PRG call with random output one at a time (using the PRG security assumption), and use the BitStringSampling helper to simplify concatenations of independent random samples into single random samples.
+**Proof idea**: The TriplingPRG applies the underlying PRG twice. We replace each PRG call with random output one at a time (using the PRG security assumption). The engine automatically handles the equivalence between concatenating independent random samples and sampling a single longer bitstring, so no explicit `BitStringSampling` assumptions are needed.
 
 ## Testing and Verification
 
@@ -775,12 +741,12 @@ import '../../Games/SymEnc/OneTimeSecrecy.game';   // up two levels, into Games/
 
 ### Reduction parameters
 
-A reduction's parameter list must include every parameter needed to instantiate the composed security game, even if that parameter is not referenced in the reduction body. For example, if a reduction composes with `BitStringSampling(lambda, lambda)`, it must take the `Int lambda` parameter (or a scheme whose fields provide it).
+A reduction's parameter list must include every parameter needed to instantiate the composed security game, even if that parameter is not referenced in the reduction body. For example, if a reduction composes with `OTPUniform(2 * G.lambda)`, it must take the `PRG G` parameter even if `G` is not used inside the reduction's oracle methods.
 
 ### Common patterns
 
 - **Symmetric proofs**: Many proofs are symmetric around a midpoint. The first half transitions from the theorem's Left/Real game toward a "neutral" middle (often with all randomness replaced), and the second half transitions from the middle to the Right/Random game.
-- **Helper assumptions**: The `Games/Misc/` directory contains helper games that capture basic probabilistic facts (e.g., `BitStringSampling`, `OTPUniform`). These can be assumed freely in proofs since they hold unconditionally.
+- **Helper assumptions**: The `Games/Misc/` directory contains helper games that capture basic probabilistic facts (e.g., `OTPUniform`). These can be assumed freely in proofs since they hold unconditionally. Note that `BitStringSampling` is now handled automatically by the engine and no longer needs to be explicitly assumed.
 - **Incremental development**: Build proofs one hop at a time. Write the reduction, add the corresponding game steps, and verify before moving on.
 
 ## Further Resources

@@ -1,7 +1,7 @@
 // ── Editor, tab management, save, parse/prove ─────────────────────────────────
 // CodeMirror is a CDN global loaded before the module entry point.
 
-/* global CodeMirror */
+/* global CodeMirror, marked */
 
 import {
   state,
@@ -129,6 +129,68 @@ export function createEditor(content, onChange, path) {
   return { cm, wrap };
 }
 
+// ── Markdown preview ─────────────────────────────────────────────────────────
+
+function updateMarkdownPreview(path) {
+  const tab = state.tabs.get(path);
+  if (!tab || !tab.previewEl) return;
+  tab.previewEl.innerHTML = marked.parse(tab.cm.getValue());
+}
+
+function setupMarkdownSplit(wrap, cm, content) {
+  wrap.classList.add("md-split-view");
+
+  // Wrap the CodeMirror element in a left pane
+  const cmEl = wrap.querySelector(".CodeMirror");
+  const leftPane = document.createElement("div");
+  leftPane.className = "md-editor-pane";
+  wrap.insertBefore(leftPane, cmEl);
+  leftPane.appendChild(cmEl);
+
+  // Vertical resize handle
+  const handle = document.createElement("div");
+  handle.className = "v-split-handle";
+  wrap.appendChild(handle);
+
+  // Right pane with preview
+  const rightPane = document.createElement("div");
+  rightPane.className = "md-preview-pane";
+  const header = document.createElement("div");
+  header.className = "split-pane-header";
+  header.textContent = "Preview";
+  const preview = document.createElement("div");
+  preview.className = "md-preview";
+  preview.innerHTML = marked.parse(content);
+  rightPane.appendChild(header);
+  rightPane.appendChild(preview);
+  wrap.appendChild(rightPane);
+
+  // Store preview element for live updates (tab not yet in state.tabs, so attach to wrap)
+  wrap._mdPreview = preview;
+
+  // Drag-to-resize
+  let startX, startFlex;
+  handle.addEventListener("mousedown", e => {
+    startX = e.clientX;
+    startFlex = leftPane.getBoundingClientRect().width;
+    handle.classList.add("dragging");
+    function onMove(e) {
+      const totalW = wrap.getBoundingClientRect().width - handle.offsetWidth;
+      const newLeftW = Math.max(100, Math.min(totalW - 100, startFlex + (e.clientX - startX)));
+      leftPane.style.flex = `0 0 ${newLeftW}px`;
+      rightPane.style.flex = "1 1 0";
+      cm.refresh();
+    }
+    function onUp() {
+      handle.classList.remove("dragging");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+}
+
 // ── Open / close tabs ─────────────────────────────────────────────────────────
 
 export async function openFile(path, name) {
@@ -141,13 +203,21 @@ export async function openFile(path, name) {
   if (data.error) { alert(data.error); return; }
   const content = data.content;
 
+  const isMarkdown = path.endsWith(".md");
+
   const { cm, wrap } = createEditor(content, () => {
     updateTabEl(path);
     if (state.activeTab === path && path.endsWith(".proof")) updateGameHopsPanel();
     if (state.activeTab === path) updateWizardPanel();
+    if (isMarkdown) updateMarkdownPreview(path);
   }, path);
 
-  state.tabs.set(path, { name, savedContent: content, cm, wrap, readonly: false });
+  if (isMarkdown) {
+    setupMarkdownSplit(wrap, cm, content);
+  }
+
+  state.tabs.set(path, { name, savedContent: content, cm, wrap, readonly: false,
+    previewEl: wrap._mdPreview || null });
 
   const tabEl = document.createElement("div");
   tabEl.className = "tab";

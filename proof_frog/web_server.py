@@ -47,22 +47,30 @@ def _safe_path(base: str, rel: str) -> Path | None:
         return None
 
 
-def _capture_parse(file_path: str) -> tuple[str, bool]:
+def _capture_parse(
+    file_path: str,
+) -> tuple[str, bool, int | None, int | None]:
     buf = io.StringIO()
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
             root = frog_parser.parse_file(file_path)
             print(root)
-        return _strip_ansi(buf.getvalue()), True
+        return _strip_ansi(buf.getvalue()), True, None, None
     except ValueError as e:
-        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False
-    except (frog_parser.ParseError, FileNotFoundError) as e:
-        return _strip_ansi(buf.getvalue()) + f"\n{e}", False
+        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False, None, None
+    except frog_parser.ParseError as e:
+        line = e.line if e.line >= 0 else None
+        col = e.column if e.column >= 0 else None
+        return _strip_ansi(buf.getvalue()) + f"\n{e}", False, line, col
+    except FileNotFoundError as e:
+        return _strip_ansi(buf.getvalue()) + f"\n{e}", False, None, None
     except Exception as e:  # pylint: disable=broad-exception-caught
-        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False
+        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False, None, None
 
 
-def _capture_check(file_path: str, allowed_root: str | None = None) -> tuple[str, bool]:
+def _capture_check(
+    file_path: str, allowed_root: str | None = None
+) -> tuple[str, bool, int | None, int | None]:
     buf = io.StringIO()
     try:
         root = frog_parser.parse_file(file_path)
@@ -70,14 +78,18 @@ def _capture_check(file_path: str, allowed_root: str | None = None) -> tuple[str
             semantic_analysis.check_well_formed(
                 root, file_path, allowed_root=allowed_root
             )
-        return f"{file_path} is well-formed.", True
-    except (frog_parser.ParseError, FileNotFoundError) as e:
-        return str(e), False
+        return f"{file_path} is well-formed.", True, None, None
+    except frog_parser.ParseError as e:
+        line = e.line if e.line >= 0 else None
+        col = e.column if e.column >= 0 else None
+        return str(e), False, line, col
+    except FileNotFoundError as e:
+        return str(e), False, None, None
     except semantic_analysis.FailedTypeCheck:
         msg = _strip_ansi(buf.getvalue()) or "Type check failed."
-        return msg, False
+        return msg, False, None, None
     except Exception as e:  # pylint: disable=broad-exception-caught
-        return f"Error: {e}", False
+        return f"Error: {e}", False, None, None
 
 
 def _capture_describe(file_path: str) -> tuple[str, bool]:
@@ -288,7 +300,7 @@ def _capture_inline(
 
 def _capture_prove(
     file_path: str, allowed_root: str | None = None
-) -> tuple[str, bool, list[dict[str, object]], bool]:
+) -> tuple[str, bool, list[dict[str, object]], bool, int | None, int | None]:
     buf = io.StringIO()
     engine = proof_engine.ProofEngine(False)
     proof_succeeded = False
@@ -329,11 +341,43 @@ def _capture_prove(
             for r in engine.hop_results
             if r.depth == 0 and r.kind != "induction_rollover"
         ]
-        return _strip_ansi(buf.getvalue()), proof_succeeded, hop_results, has_induction
-    except (frog_parser.ParseError, FileNotFoundError) as e:
-        return _strip_ansi(buf.getvalue()) + f"\n{e}", False, [], False
+        return (
+            _strip_ansi(buf.getvalue()),
+            proof_succeeded,
+            hop_results,
+            has_induction,
+            None,
+            None,
+        )
+    except frog_parser.ParseError as e:
+        line = e.line if e.line >= 0 else None
+        col = e.column if e.column >= 0 else None
+        return (
+            _strip_ansi(buf.getvalue()) + f"\n{e}",
+            False,
+            [],
+            False,
+            line,
+            col,
+        )
+    except FileNotFoundError as e:
+        return (
+            _strip_ansi(buf.getvalue()) + f"\n{e}",
+            False,
+            [],
+            False,
+            None,
+            None,
+        )
     except Exception as e:  # pylint: disable=broad-exception-caught
-        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False, [], False
+        return (
+            _strip_ansi(buf.getvalue()) + f"\nError: {e}",
+            False,
+            [],
+            False,
+            None,
+            None,
+        )
 
 
 def _build_tree(path: Path, base: Path) -> dict[str, object]:
@@ -434,8 +478,13 @@ def create_app(directory: str) -> Flask:
         if abs_path is None:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
-        output, success = _capture_parse(str(abs_path))
-        return jsonify({"output": output, "success": success})
+        output, success, error_line, error_column = _capture_parse(str(abs_path))
+        resp: dict[str, object] = {"output": output, "success": success}
+        if error_line is not None:
+            resp["error_line"] = error_line
+        if error_column is not None:
+            resp["error_column"] = error_column
+        return jsonify(resp)
 
     @app.route("/api/prove", methods=["POST"])
     def run_prove() -> Any:
@@ -448,17 +497,20 @@ def create_app(directory: str) -> Flask:
         if abs_path is None:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
-        output, success, hop_results, has_induction = _capture_prove(
-            str(abs_path), allowed_root=directory
+        output, success, hop_results, has_induction, error_line, error_column = (
+            _capture_prove(str(abs_path), allowed_root=directory)
         )
-        return jsonify(
-            {
-                "output": output,
-                "success": success,
-                "hop_results": hop_results,
-                "has_induction": has_induction,
-            }
-        )
+        prove_resp: dict[str, object] = {
+            "output": output,
+            "success": success,
+            "hop_results": hop_results,
+            "has_induction": has_induction,
+        }
+        if error_line is not None:
+            prove_resp["error_line"] = error_line
+        if error_column is not None:
+            prove_resp["error_column"] = error_column
+        return jsonify(prove_resp)
 
     @app.route("/api/inline", methods=["POST"])
     def run_inline() -> Any:

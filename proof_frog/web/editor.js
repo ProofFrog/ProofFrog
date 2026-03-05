@@ -298,17 +298,38 @@ export async function saveFile(path) {
   }
 }
 
+// ── Error line highlighting ───────────────────────────────────────────────────
+
+function clearErrorHighlights(cm) {
+  cm.eachLine(handle => {
+    cm.removeLineClass(handle, "background", "cm-error-line");
+  });
+}
+
+function highlightErrorLine(cm, line) {
+  // line is 1-indexed from the parser; CodeMirror uses 0-indexed
+  const zeroLine = line - 1;
+  if (zeroLine >= 0 && zeroLine < cm.lineCount()) {
+    cm.addLineClass(zeroLine, "background", "cm-error-line");
+    cm.scrollIntoView({ line: zeroLine, ch: 0 }, 100);
+  }
+}
+
 // ── Parse / Prove ─────────────────────────────────────────────────────────────
 
 export async function runCommand(endpoint, title) {
   if (!state.activeTab) return;
   const content = getTabContent(state.activeTab);
+  const tab = state.tabs.get(state.activeTab);
   setRunning(true);
   outputPane.classList.add("visible");
-  outputTitle.textContent = `Running ${title} on ${state.tabs.get(state.activeTab)?.name}…`;
+  outputTitle.textContent = `Running ${title} on ${tab?.name}…`;
   outputStatus.textContent = "";
   outputStatus.className = "";
   outputPre.textContent = "";
+
+  // Clear previous error highlights
+  if (tab) clearErrorHighlights(tab.cm);
 
   try {
     const data = await apiFetch(endpoint, {
@@ -318,7 +339,6 @@ export async function runCommand(endpoint, title) {
     });
 
     // Update saved state (auto-save happened server-side)
-    const tab = state.tabs.get(state.activeTab);
     if (tab) { tab.savedContent = content; updateTabEl(state.activeTab); }
 
     outputTitle.textContent = title;
@@ -328,6 +348,10 @@ export async function runCommand(endpoint, title) {
     } else {
       outputStatus.textContent = "✗ Failed";
       outputStatus.className = "error";
+      // Highlight error line in the editor if available
+      if (tab && data.error_line) {
+        highlightErrorLine(tab.cm, data.error_line);
+      }
     }
     outputPre.textContent = data.output || "(no output)";
     if (endpoint === "/api/prove" && Array.isArray(data.hop_results)) {

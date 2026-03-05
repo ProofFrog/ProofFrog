@@ -304,6 +304,9 @@ select.wizard-input { cursor: pointer; }
 }
 .h-split-handle:hover, .h-split-handle.dragging { background: var(--accent2); }
 
+/* ── Diff highlighting in canonical panes ── */
+.diff-removed { background: rgba(244,135,113,0.15) !important; }
+.diff-added   { background: rgba(78,201,176,0.15) !important; }
 /* ── Markdown split-view ── */
 .editor-wrap.md-split-view { flex-direction: row; }
 .editor-wrap.md-split-view.active { display: flex; }

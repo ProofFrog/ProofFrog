@@ -93,6 +93,11 @@ export function activateTab(path) {
   scrollTabIntoView(path);
   updateGameHopsPanel();
   updateWizardPanel();
+
+  // Show warning modal for proofs containing induction steps
+  if (path.endsWith(".proof") && /\binduction\s*\(/.test(cm.getValue())) {
+    document.getElementById("induction-modal").classList.add("visible");
+  }
 }
 
 // ── Editor factory ────────────────────────────────────────────────────────────

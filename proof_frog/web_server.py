@@ -288,13 +288,17 @@ def _capture_inline(
 
 def _capture_prove(
     file_path: str, allowed_root: str | None = None
-) -> tuple[str, bool, list[dict[str, object]]]:
+) -> tuple[str, bool, list[dict[str, object]], bool]:
     buf = io.StringIO()
     engine = proof_engine.ProofEngine(False)
     proof_succeeded = False
+    has_induction = False
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
             proof_file = frog_parser.parse_proof_file(file_path)
+            has_induction = any(
+                isinstance(step, frog_ast.Induction) for step in proof_file.steps
+            )
 
             for imp in proof_file.imports:
                 imp_path = frog_parser.resolve_import_path(
@@ -325,11 +329,11 @@ def _capture_prove(
             for r in engine.hop_results
             if r.depth == 0 and r.kind != "induction_rollover"
         ]
-        return _strip_ansi(buf.getvalue()), proof_succeeded, hop_results
+        return _strip_ansi(buf.getvalue()), proof_succeeded, hop_results, has_induction
     except (frog_parser.ParseError, FileNotFoundError) as e:
-        return _strip_ansi(buf.getvalue()) + f"\n{e}", False, []
+        return _strip_ansi(buf.getvalue()) + f"\n{e}", False, [], False
     except Exception as e:  # pylint: disable=broad-exception-caught
-        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False, []
+        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False, [], False
 
 
 def _build_tree(path: Path, base: Path) -> dict[str, object]:
@@ -444,11 +448,16 @@ def create_app(directory: str) -> Flask:
         if abs_path is None:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
-        output, success, hop_results = _capture_prove(
+        output, success, hop_results, has_induction = _capture_prove(
             str(abs_path), allowed_root=directory
         )
         return jsonify(
-            {"output": output, "success": success, "hop_results": hop_results}
+            {
+                "output": output,
+                "success": success,
+                "hop_results": hop_results,
+                "has_induction": has_induction,
+            }
         )
 
     @app.route("/api/inline", methods=["POST"])

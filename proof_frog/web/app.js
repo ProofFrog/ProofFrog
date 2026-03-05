@@ -31,6 +31,16 @@ document.querySelectorAll("#wizard-modal-body input.wizard-input").forEach(inp =
   inp.addEventListener("keydown", e => { if (e.key === "Enter") createGameFromWizard(); });
 });
 
+// ── Induction warning modal ──────────────────────────────────────────────
+function closeInductionModal() {
+  document.getElementById("induction-modal").classList.remove("visible");
+}
+document.getElementById("induction-modal-close").addEventListener("click", closeInductionModal);
+document.getElementById("induction-modal-ok").addEventListener("click", closeInductionModal);
+document.getElementById("induction-modal").addEventListener("click", e => {
+  if (e.target === document.getElementById("induction-modal")) closeInductionModal();
+});
+
 // ── Keyboard shortcuts ────────────────────────────────────────────────────────
 
 document.addEventListener("keydown", e => {
@@ -40,8 +50,10 @@ document.addEventListener("keydown", e => {
 
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
-    const modal = document.getElementById("wizard-modal");
-    if (modal.classList.contains("visible")) closeWizardModal();
+    const wizard = document.getElementById("wizard-modal");
+    if (wizard.classList.contains("visible")) closeWizardModal();
+    const induction = document.getElementById("induction-modal");
+    if (induction.classList.contains("visible")) closeInductionModal();
   }
 });
 

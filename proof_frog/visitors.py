@@ -1313,9 +1313,7 @@ class ExpandTupleTransformer(Transformer):
                 # If the value has fewer elements than the fully-flattened type,
                 # only split at the top level to match the value's arity.
                 if len(statement.value.values) < len(unfolded_types):
-                    unfolded_types = frog_ast.split_tuple_type_top(
-                        statement.the_type
-                    )
+                    unfolded_types = frog_ast.split_tuple_type_top(statement.the_type)
                 for index, the_type in enumerate(unfolded_types):
                     new_statements.append(
                         frog_ast.Assignment(

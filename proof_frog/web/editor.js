@@ -22,7 +22,7 @@ export function updateToolbar() {
   const isVirtual = hasTab && state.activeTab.startsWith(":inline:");
   btnSave.disabled = !hasTab || isVirtual;
   btnParse.disabled = !hasTab || isVirtual;
-  const isProof = hasTab && state.activeTab.endsWith(".proof");
+  const isProof = hasTab && !isVirtual && state.activeTab.endsWith(".proof");
   btnProve.style.display = isProof ? "" : "none";
   btnProve.disabled = !isProof;
 }

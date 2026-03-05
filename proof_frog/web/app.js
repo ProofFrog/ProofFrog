@@ -7,6 +7,7 @@ import { saveFile, runCommand, updateToolbar } from './editor.js';
 import { loadFileTree, collapseAll, expandAll } from './file-tree.js';
 import { updateWizardPanel, closeWizardModal, createGameFromWizard } from './wizard.js';
 import { updateGameHopsPanel } from './game-hops.js';
+import { openNewFileModal, closeNewFileModal, createNewFile } from './new-file.js';
 import './resize.js';
 
 // ── Button handlers ───────────────────────────────────────────────────────────
@@ -31,6 +32,18 @@ document.querySelectorAll("#wizard-modal-body input.wizard-input").forEach(inp =
   inp.addEventListener("keydown", e => { if (e.key === "Enter") createGameFromWizard(); });
 });
 
+// ── New-file modal ───────────────────────────────────────────────────────
+document.getElementById("btn-new-file").addEventListener("click", openNewFileModal);
+document.getElementById("newfile-modal-close").addEventListener("click", closeNewFileModal);
+document.getElementById("newfile-modal-cancel").addEventListener("click", closeNewFileModal);
+document.getElementById("newfile-modal-create").addEventListener("click", createNewFile);
+document.getElementById("newfile-modal").addEventListener("click", e => {
+  if (e.target === document.getElementById("newfile-modal")) closeNewFileModal();
+});
+document.querySelectorAll("#newfile-modal-body input.wizard-input, #newfile-modal-body select.wizard-input").forEach(inp => {
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") createNewFile(); });
+});
+
 // ── Induction warning modal ──────────────────────────────────────────────
 function closeInductionModal() {
   document.getElementById("induction-modal").classList.remove("visible");
@@ -50,6 +63,8 @@ document.addEventListener("keydown", e => {
 
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
+    const newfile = document.getElementById("newfile-modal");
+    if (newfile.classList.contains("visible")) closeNewFileModal();
     const wizard = document.getElementById("wizard-modal");
     if (wizard.classList.contains("visible")) closeWizardModal();
     const induction = document.getElementById("induction-modal");

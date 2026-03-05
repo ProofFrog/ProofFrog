@@ -456,6 +456,34 @@ def create_app(directory: str) -> Flask:
         except FileNotFoundError:
             return jsonify({"error": "File not found"}), 404
 
+    @app.route("/api/file", methods=["POST"])
+    def create_file() -> Any:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data"}), 400
+        rel_path = data.get("path", "")
+        abs_path = _safe_path(directory, rel_path)
+        if abs_path is None:
+            return jsonify({"error": "Invalid path"}), 403
+        if abs_path.exists():
+            return jsonify({"error": "File already exists"}), 409
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        abs_path.write_text("", encoding="utf-8")
+        return jsonify({"success": True})
+
+    @app.route("/api/directories")
+    def list_directories() -> Any:
+        dirs: list[str] = [""]
+        base = Path(directory)
+        for dirpath, dirnames, _ in os.walk(base):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            dirnames.sort(key=str.lower)
+            p = Path(dirpath)
+            if p != base:
+                dirs.append(str(p.relative_to(base)))
+        dirs.sort(key=str.lower)
+        return jsonify(dirs)
+
     @app.route("/api/file", methods=["PUT"])
     def save_file() -> Any:
         rel_path = request.args.get("path", "")

@@ -19,6 +19,7 @@
 <div id="app">
   <div id="toolbar">
     <span class="logo"><img src="/prooffrog.png" alt="ProofFrog">ProofFrog</span>
+    <button id="btn-new-file" title="New File">New File</button>
     <button id="btn-save" title="Save (Ctrl+S)" disabled>Save</button>
     <button id="btn-parse" class="primary" title="Parse current file" disabled>Parse</button>
     <button id="btn-prove" class="primary" title="Run proof" disabled style="display:none">Run Proof</button>
@@ -107,6 +108,40 @@
     </div>
     <div id="induction-modal-footer">
       <button id="induction-modal-ok" class="primary">OK</button>
+    </div>
+  </div>
+</div>
+
+<div id="newfile-modal" role="dialog" aria-modal="true" aria-labelledby="newfile-modal-title">
+  <div id="newfile-modal-panel">
+    <div id="newfile-modal-header">
+      <span id="newfile-modal-title">New File</span>
+      <button id="newfile-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="newfile-modal-body">
+      <div>
+        <label class="wizard-label" for="newfile-folder">Folder</label>
+        <select class="wizard-input" id="newfile-folder"></select>
+      </div>
+      <div>
+        <label class="wizard-label" for="newfile-name">File name (without extension)</label>
+        <input class="wizard-input" id="newfile-name" type="text" placeholder="e.g. MyScheme" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="newfile-type">File type</label>
+        <select class="wizard-input" id="newfile-type">
+          <option value=".primitive">.primitive</option>
+          <option value=".scheme">.scheme</option>
+          <option value=".game">.game</option>
+          <option value=".proof">.proof</option>
+          <option value=".md">.md</option>
+        </select>
+      </div>
+      <div id="newfile-error" style="color: var(--error); font-size: 12px; display: none;"></div>
+    </div>
+    <div id="newfile-modal-footer">
+      <button id="newfile-modal-create" class="primary">Create</button>
+      <button id="newfile-modal-cancel">Close</button>
     </div>
   </div>
 </div>

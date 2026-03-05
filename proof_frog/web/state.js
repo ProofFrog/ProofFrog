@@ -7,6 +7,8 @@ export const state = {
   hopResultsByPath: new Map(), // path → [{step_num, valid, kind}, ...]
   activeTab: null,
 primitiveFiles: [],        // { path, name } for all .primitive files, sorted by name
+  schemeFiles: [],           // { path, name } for all .scheme files, sorted by name
+  gameFiles: [],             // { path, name } for all .game files, sorted by name
   darkMode: localStorage.getItem("theme") === "dark",
 };
 

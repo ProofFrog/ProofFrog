@@ -5,7 +5,12 @@ import { state, applyTheme, btnSave, btnParse, btnProve, btnTheme } from './stat
 import './cm-mode.js';
 import { saveFile, runCommand, updateToolbar } from './editor.js';
 import { loadFileTree, collapseAll, expandAll } from './file-tree.js';
-import { updateWizardPanel, closeWizardModal, createGameFromWizard } from './wizard.js';
+import {
+  updateWizardPanel, closeWizardModal, createGameFromWizard,
+  closePrimitiveWizardModal, createPrimitiveFromWizard,
+  closeSchemeWizardModal, createSchemeFromWizard,
+  closeProofWizardModal, createProofFromWizard,
+} from './wizard.js';
 import { updateGameHopsPanel } from './game-hops.js';
 import { openNewFileModal, closeNewFileModal, createNewFile } from './new-file.js';
 import './resize.js';
@@ -30,6 +35,36 @@ document.getElementById("wizard-modal").addEventListener("click", e => {
 });
 document.querySelectorAll("#wizard-modal-body input.wizard-input").forEach(inp => {
   inp.addEventListener("keydown", e => { if (e.key === "Enter") createGameFromWizard(); });
+});
+
+// ── Primitive wizard modal ────────────────────────────────────────────
+document.getElementById("primitive-wizard-modal-close").addEventListener("click", closePrimitiveWizardModal);
+document.getElementById("primitive-wizard-modal-cancel").addEventListener("click", closePrimitiveWizardModal);
+document.getElementById("primitive-wizard-modal-create").addEventListener("click", createPrimitiveFromWizard);
+document.getElementById("primitive-wizard-modal").addEventListener("click", e => {
+  if (e.target === document.getElementById("primitive-wizard-modal")) closePrimitiveWizardModal();
+});
+document.querySelectorAll("#primitive-wizard-modal-body input.wizard-input").forEach(inp => {
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") createPrimitiveFromWizard(); });
+});
+
+// ── Scheme wizard modal ──────────────────────────────────────────────
+document.getElementById("scheme-wizard-modal-close").addEventListener("click", closeSchemeWizardModal);
+document.getElementById("scheme-wizard-modal-cancel").addEventListener("click", closeSchemeWizardModal);
+document.getElementById("scheme-wizard-modal-create").addEventListener("click", createSchemeFromWizard);
+document.getElementById("scheme-wizard-modal").addEventListener("click", e => {
+  if (e.target === document.getElementById("scheme-wizard-modal")) closeSchemeWizardModal();
+});
+document.querySelectorAll("#scheme-wizard-modal-body input.wizard-input").forEach(inp => {
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") createSchemeFromWizard(); });
+});
+
+// ── Proof wizard modal ───────────────────────────────────────────────
+document.getElementById("proof-wizard-modal-close").addEventListener("click", closeProofWizardModal);
+document.getElementById("proof-wizard-modal-cancel").addEventListener("click", closeProofWizardModal);
+document.getElementById("proof-wizard-modal-create").addEventListener("click", createProofFromWizard);
+document.getElementById("proof-wizard-modal").addEventListener("click", e => {
+  if (e.target === document.getElementById("proof-wizard-modal")) closeProofWizardModal();
 });
 
 // ── New-file modal ───────────────────────────────────────────────────────
@@ -67,6 +102,12 @@ document.addEventListener("keydown", e => {
     if (newfile.classList.contains("visible")) closeNewFileModal();
     const wizard = document.getElementById("wizard-modal");
     if (wizard.classList.contains("visible")) closeWizardModal();
+    const primWiz = document.getElementById("primitive-wizard-modal");
+    if (primWiz.classList.contains("visible")) closePrimitiveWizardModal();
+    const schemeWiz = document.getElementById("scheme-wizard-modal");
+    if (schemeWiz.classList.contains("visible")) closeSchemeWizardModal();
+    const proofWiz = document.getElementById("proof-wizard-modal");
+    if (proofWiz.classList.contains("visible")) closeProofWizardModal();
     const induction = document.getElementById("induction-modal");
     if (induction.classList.contains("visible")) closeInductionModal();
   }

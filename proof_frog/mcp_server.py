@@ -20,24 +20,22 @@ Then register it in .claude/settings.json:
 
 # pylint: disable=duplicate-code  # mcp_server shares return-dict patterns with web_server by design
 from __future__ import annotations
-import io
 import os
 import tempfile
-from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error
 
-from . import frog_parser, semantic_analysis
+from . import frog_parser
 from . import describe as describe_module
 from .web_server import (
     _capture_parse,
+    _capture_check as _capture_check_impl,
     _capture_prove,
     _capture_inline,
     _build_minimal_proof,
     _build_tree,
-    _strip_ansi,
 )
 
 mcp: FastMCP = FastMCP(
@@ -168,20 +166,8 @@ def check(path: str) -> dict[str, Any]:
     More thorough than parse — catches type mismatches, undefined names,
     signature mismatches between Left/Right games, etc.
     """
-    abs_path = _safe_resolve(path)
-    buf = io.StringIO()
-    try:
-        root = frog_parser.parse_file(abs_path)
-        with redirect_stdout(buf), redirect_stderr(buf):
-            semantic_analysis.check_well_formed(root, abs_path, allowed_root=_directory)
-        return {"output": f"{abs_path} is well-formed.", "success": True}
-    except (frog_parser.ParseError, FileNotFoundError) as e:
-        return {"output": str(e), "success": False}
-    except semantic_analysis.FailedTypeCheck:
-        msg = _strip_ansi(buf.getvalue()) or "Type check failed."
-        return {"output": msg, "success": False}
-    except Exception as e:  # pylint: disable=broad-except
-        return {"output": f"Error: {e}", "success": False}
+    output, success = _capture_check_impl(_safe_resolve(path), allowed_root=_directory)
+    return {"output": output, "success": success}
 
 
 @mcp.tool()  # type: ignore[misc, untyped-decorator]

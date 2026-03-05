@@ -1,3 +1,4 @@
+import json
 import sys
 import os
 
@@ -18,8 +19,16 @@ def cli() -> None:
 
 @cli.command()
 @click.argument("file")
-def parse(file: str) -> None:
+@click.option("--json", "-j", "json_output", is_flag=True, help="Output JSON.")
+def parse(file: str, json_output: bool) -> None:
     """Parse a FrogLang file and print its AST."""
+    if json_output:
+        # pylint: disable=import-outside-toplevel
+        from .web_server import _capture_parse
+
+        output, success = _capture_parse(file)
+        click.echo(json.dumps({"output": output, "success": success}))
+        return
     try:
         root = frog_parser.parse_file(file)
         print(root)
@@ -33,8 +42,16 @@ def parse(file: str) -> None:
 
 @cli.command()
 @click.argument("file")
-def check(file: str) -> None:
+@click.option("--json", "-j", "json_output", is_flag=True, help="Output JSON.")
+def check(file: str, json_output: bool) -> None:
     """Type-check and semantically analyze a FrogLang file."""
+    if json_output:
+        # pylint: disable=import-outside-toplevel
+        from .web_server import _capture_check
+
+        output, success = _capture_check(file)
+        click.echo(json.dumps({"output": output, "success": success}))
+        return
     try:
         root = frog_parser.parse_file(file)
     except ValueError:
@@ -53,8 +70,20 @@ def check(file: str) -> None:
 @cli.command()
 @click.argument("file")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose output.")
-def prove(file: str, verbose: bool) -> None:
+@click.option("--json", "-j", "json_output", is_flag=True, help="Output JSON.")
+def prove(file: str, verbose: bool, json_output: bool) -> None:
     """Run proof verification on a .proof file."""
+    if json_output:
+        # pylint: disable=import-outside-toplevel
+        from .web_server import _capture_prove
+
+        output, success, hop_results = _capture_prove(file)
+        click.echo(
+            json.dumps(
+                {"output": output, "success": success, "hop_results": hop_results}
+            )
+        )
+        return
     engine = proof_engine.ProofEngine(verbose)
     proof_file: frog_ast.ProofFile
     try:
@@ -92,8 +121,16 @@ def prove(file: str, verbose: bool) -> None:
 
 @cli.command()
 @click.argument("file")
-def describe(file: str) -> None:
+@click.option("--json", "-j", "json_output", is_flag=True, help="Output JSON.")
+def describe(file: str, json_output: bool) -> None:
     """Print a concise interface description of a FrogLang file."""
+    if json_output:
+        # pylint: disable=import-outside-toplevel
+        from .web_server import _capture_describe
+
+        output, success = _capture_describe(file)
+        click.echo(json.dumps({"output": output, "success": success}))
+        return
     # pylint: disable=import-outside-toplevel
     from proof_frog.describe import describe_file
 

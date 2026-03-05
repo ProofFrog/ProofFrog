@@ -12,7 +12,8 @@ from typing import Any
 
 from flask import Flask, request, jsonify, send_file, send_from_directory
 
-from . import frog_parser, frog_ast, proof_engine
+from . import frog_parser, frog_ast, proof_engine, semantic_analysis
+from . import describe as describe_module
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -59,6 +60,33 @@ def _capture_parse(file_path: str) -> tuple[str, bool]:
         return _strip_ansi(buf.getvalue()) + f"\n{e}", False
     except Exception as e:  # pylint: disable=broad-exception-caught
         return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False
+
+
+def _capture_check(file_path: str, allowed_root: str | None = None) -> tuple[str, bool]:
+    buf = io.StringIO()
+    try:
+        root = frog_parser.parse_file(file_path)
+        with redirect_stdout(buf), redirect_stderr(buf):
+            semantic_analysis.check_well_formed(
+                root, file_path, allowed_root=allowed_root
+            )
+        return f"{file_path} is well-formed.", True
+    except (frog_parser.ParseError, FileNotFoundError) as e:
+        return str(e), False
+    except semantic_analysis.FailedTypeCheck:
+        msg = _strip_ansi(buf.getvalue()) or "Type check failed."
+        return msg, False
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        return f"Error: {e}", False
+
+
+def _capture_describe(file_path: str) -> tuple[str, bool]:
+    try:
+        return describe_module.describe_file(file_path), True
+    except (ValueError, frog_parser.ParseError, FileNotFoundError) as e:
+        return str(e), False
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        return f"Error: {e}", False
 
 
 def _get_file_type(file_name: str) -> frog_ast.FileType:

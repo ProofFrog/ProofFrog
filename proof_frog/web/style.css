@@ -254,6 +254,9 @@ select.wizard-input { cursor: pointer; }
 .editor-wrap .CodeMirror { height: 100%; font-size: 13px; font-family: 'Menlo','Monaco','Consolas',monospace; }
 .editor-wrap .CodeMirror-scroll { height: 100%; }
 
+/* Error line highlight */
+.cm-error-line { background: rgba(244, 135, 113, 0.15) !important; }
+
 /* ── Output pane ── */
 #output-pane {
   background: var(--bg2); border-top: 1px solid var(--border);

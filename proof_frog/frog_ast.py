@@ -843,3 +843,21 @@ def expand_tuple_type(the_type: BinaryOperation) -> list[Type]:
     assert isinstance(expanded_type, Type)
     unfolded_types.append(expanded_type)
     return unfolded_types
+
+
+def split_tuple_type_top(the_type: BinaryOperation) -> list[Type]:
+    """Split a product type at the top level only (A * B) -> [A, B].
+
+    Unlike expand_tuple_type which fully flattens (A * B) * C -> [A, B, C],
+    this only splits the outermost product: (A * B) * C -> [A * B, C].
+    This is needed when the corresponding tuple value has only 2 elements
+    (because the nested product type is an opaque/alias type at value level).
+    """
+    assert the_type.operator == BinaryOperators.MULTIPLY
+    left_expr = the_type.left_expression
+    right_expr = the_type.right_expression
+    if not isinstance(left_expr, Type):
+        raise ValueError("Tuple type has non-type components")
+    if not isinstance(right_expr, Type):
+        raise ValueError("Tuple type has non-type components")
+    return [left_expr, right_expr]

@@ -1237,12 +1237,19 @@ class ExpandTupleTransformer(Transformer):
             if self._is_transformable_tuple(field.type, field.name, game):
                 assert isinstance(field.type, frog_ast.BinaryOperation)
                 unfolded_types = frog_ast.expand_tuple_type(field.type)
-                # If the value has fewer elements than the fully-flattened type,
-                # only split at the top level to match the value's arity.
+                # If the value has fewer elements than the fully-flattened
+                # type, and the right side of the product is itself a nested
+                # product (which is what expand_tuple_type over-flattened),
+                # fall back to a top-level-only split.
                 if (
                     field.value
                     and isinstance(field.value, frog_ast.Tuple)
                     and len(field.value.values) < len(unfolded_types)
+                    and isinstance(
+                        field.type.right_expression, frog_ast.BinaryOperation
+                    )
+                    and field.type.right_expression.operator
+                    == frog_ast.BinaryOperators.MULTIPLY
                 ):
                     unfolded_types = frog_ast.split_tuple_type_top(field.type)
                 for index, the_type in enumerate(unfolded_types):
@@ -1310,9 +1317,19 @@ class ExpandTupleTransformer(Transformer):
                 assert isinstance(statement.the_type, frog_ast.BinaryOperation)
                 unfolded_types = frog_ast.expand_tuple_type(statement.the_type)
                 assert isinstance(statement.value, frog_ast.Tuple)
-                # If the value has fewer elements than the fully-flattened type,
-                # only split at the top level to match the value's arity.
-                if len(statement.value.values) < len(unfolded_types):
+                # If the value has fewer elements than the fully-flattened
+                # type, and the right side of the product is itself a nested
+                # product (which is what expand_tuple_type over-flattened),
+                # fall back to a top-level-only split.
+                if (
+                    len(statement.value.values) < len(unfolded_types)
+                    and isinstance(
+                        statement.the_type.right_expression,
+                        frog_ast.BinaryOperation,
+                    )
+                    and statement.the_type.right_expression.operator
+                    == frog_ast.BinaryOperators.MULTIPLY
+                ):
                     unfolded_types = frog_ast.split_tuple_type_top(statement.the_type)
                 for index, the_type in enumerate(unfolded_types):
                     new_statements.append(

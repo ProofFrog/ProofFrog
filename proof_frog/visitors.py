@@ -2082,6 +2082,95 @@ class SimplifyNot(Transformer):
         return unary_op
 
 
+def _flatten_add_chain(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
+    """Flatten a left-associative chain of ADD operations into a list of terms."""
+    if (
+        isinstance(expr, frog_ast.BinaryOperation)
+        and expr.operator == frog_ast.BinaryOperators.ADD
+    ):
+        return _flatten_add_chain(expr.left_expression) + _flatten_add_chain(
+            expr.right_expression
+        )
+    return [expr]
+
+
+def _rebuild_add_chain(terms: list[frog_ast.Expression]) -> frog_ast.Expression:
+    """Rebuild a left-associative ADD chain from a list of terms."""
+    result = terms[0]
+    for term in terms[1:]:
+        result = frog_ast.BinaryOperation(frog_ast.BinaryOperators.ADD, result, term)
+    return result
+
+
+class XorCancellationTransformer(Transformer):
+    """Cancels pairs of identical terms in XOR (ADD on bitstrings) chains.
+
+    Since XOR is self-inverse (a ^ a = 0) and associative/commutative,
+    pairs of identical terms cancel out.
+
+    Example:
+        k + k + m  ->  m
+        a + b + a  ->  b
+    """
+
+    def transform_binary_operation(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        transformed = frog_ast.BinaryOperation(
+            binary_operation.operator,
+            self.transform(binary_operation.left_expression),
+            self.transform(binary_operation.right_expression),
+        )
+        if transformed.operator != frog_ast.BinaryOperators.ADD:
+            return transformed
+
+        terms = _flatten_add_chain(transformed)
+        if len(terms) < 2:
+            return transformed
+
+        # Cancel pairs of identical terms
+        remaining: list[frog_ast.Expression] = []
+        for term in terms:
+            found = False
+            for i, existing in enumerate(remaining):
+                if term == existing:
+                    remaining.pop(i)
+                    found = True
+                    break
+            if not found:
+                remaining.append(term)
+
+        if len(remaining) == len(terms):
+            return transformed
+        if not remaining:
+            return transformed
+        return _rebuild_add_chain(remaining)
+
+
+class ReflexiveComparisonTransformer(Transformer):
+    """Simplifies reflexive comparisons: x == x -> true, x != x -> false."""
+
+    def transform_binary_operation(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        transformed = frog_ast.BinaryOperation(
+            binary_operation.operator,
+            self.transform(binary_operation.left_expression),
+            self.transform(binary_operation.right_expression),
+        )
+        if (
+            transformed.operator == frog_ast.BinaryOperators.EQUALS
+            and transformed.left_expression == transformed.right_expression
+        ):
+            return frog_ast.Boolean(True)
+        if (
+            transformed.operator == frog_ast.BinaryOperators.NOTEQUALS
+            and transformed.left_expression == transformed.right_expression
+        ):
+            return frog_ast.Boolean(False)
+        return transformed
+
+
 class FieldOrderingVisitor(Visitor[dict[str, str]]):
     def __init__(self) -> None:
         self.field_num = 0

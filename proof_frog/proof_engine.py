@@ -424,6 +424,14 @@ class ProofEngine:
                 name="Simplify Nots",
             ),
             AstManipulator(
+                fn=lambda ast: visitors.XorCancellationTransformer().transform(ast),
+                name="XOR Cancellation",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.ReflexiveComparisonTransformer().transform(ast),
+                name="Reflexive Comparison",
+            ),
+            AstManipulator(
                 fn=lambda ast: visitors.RedundantFieldCopyTransformer().transform(ast),
                 name="Remove redundant variables for fields",
             ),
@@ -657,6 +665,14 @@ class ProofEngine:
             AstManipulator(
                 fn=lambda ast: visitors.SimplifyNot().transform(ast),
                 name="Simplify Nots",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.XorCancellationTransformer().transform(ast),
+                name="XOR Cancellation",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.ReflexiveComparisonTransformer().transform(ast),
+                name="Reflexive Comparison",
             ),
             AstManipulator(
                 fn=lambda ast: visitors.RedundantFieldCopyTransformer().transform(ast),

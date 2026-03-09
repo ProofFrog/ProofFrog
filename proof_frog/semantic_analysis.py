@@ -1014,6 +1014,9 @@ class CheckTypeVisitor(VariableTypeVisitor):
     def leave_integer(self, num: frog_ast.Integer) -> None:
         self.ast_type_map.set(num, frog_ast.IntType())
 
+    def leave_boolean(self, bool_const: frog_ast.Boolean) -> None:
+        self.ast_type_map.set(bool_const, frog_ast.BoolType())
+
     def leave_tuple(self, the_tuple: frog_ast.Tuple) -> None:
         types: list[frog_ast.Type] = []
         for expression in the_tuple.values:

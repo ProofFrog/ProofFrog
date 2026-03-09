@@ -60,6 +60,60 @@ export function getStepAtCursor(content, cursorLine) {
   return null;
 }
 
+// ── Line-level diff (LCS-based) ─────────────────────────────────────────────
+
+function computeLineDiff(prevLines, currLines) {
+  const m = prevLines.length;
+  const n = currLines.length;
+
+  // Build LCS table
+  const dp = Array.from({ length: m + 1 }, () => new Uint16Array(n + 1));
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = prevLines[i - 1] === currLines[j - 1]
+        ? dp[i - 1][j - 1] + 1
+        : Math.max(dp[i - 1][j], dp[i][j - 1]);
+    }
+  }
+
+  // Backtrack to produce per-line tags
+  const prevTags = new Array(m);
+  const currTags = new Array(n);
+  let i = m, j = n;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && prevLines[i - 1] === currLines[j - 1]) {
+      prevTags[--i] = "same";
+      currTags[--j] = "same";
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      currTags[--j] = "added";
+    } else {
+      prevTags[--i] = "removed";
+    }
+  }
+  return { prevTags, currTags };
+}
+
+function applyDiffHighlight(cmPrev, cmCurr) {
+  const prevText = cmPrev.getValue();
+  const currText = cmCurr.getValue();
+  if (!prevText || !currText) return;
+
+  const prevLines = prevText.split("\n");
+  const currLines = currText.split("\n");
+  const { prevTags, currTags } = computeLineDiff(prevLines, currLines);
+
+  for (let i = 0; i < prevTags.length; i++) {
+    if (prevTags[i] === "removed") {
+      cmPrev.addLineClass(i, "background", "diff-removed");
+    }
+  }
+  for (let i = 0; i < currTags.length; i++) {
+    if (currTags[i] === "added") {
+      cmCurr.addLineClass(i, "background", "diff-added");
+    }
+  }
+}
+
 // ── Open inline split-pane tab ────────────────────────────────────────────────
 
 function makeSplitPane(headerText) {
@@ -254,6 +308,11 @@ export async function openInlineTab(stepIndex, label) {
     if (currData.has_reduction) {
       cmRow3A.setValue(currData.reduction || "(no output)");
       cmRow3B.setValue(currData.challenger || "(no output)");
+    }
+
+    // Highlight lines that differ between the two canonical forms
+    if (prevData) {
+      applyDiffHighlight(cmPrevCanon, cmCurrCanon);
     }
 
     // Refresh all editors after content is set to fix gutter alignment

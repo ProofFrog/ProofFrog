@@ -349,6 +349,104 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
         return block
 
 
+class UniformXorSimplificationTransformer(BlockTransformer):
+    """Simplifies expressions where a uniformly sampled variable is XORed
+    with another value.  Since uniform XOR anything is still uniform, we
+    can drop the other operand.
+
+    Requires the sampled variable to be used exactly once so that the
+    distributional equivalence holds (no correlation issues).
+
+    Example:
+        BitString<n> u <- BitString<n>;
+        return u + m;
+    becomes:
+        BitString<n> u <- BitString<n>;
+        return u;
+    """
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if not (
+                isinstance(statement, frog_ast.Sample)
+                and isinstance(statement.var, frog_ast.Variable)
+                and isinstance(statement.the_type, frog_ast.BitStringType)
+            ):
+                continue
+
+            var_name = statement.var.name
+
+            remaining_block = frog_ast.Block(
+                copy.deepcopy(list(block.statements[index + 1 :]))
+            )
+
+            # Count uses of var_name — must be exactly 1
+            def uses_var(name: str, node: frog_ast.ASTNode) -> bool:
+                return isinstance(node, frog_ast.Variable) and node.name == name
+
+            total_uses = 0
+            count_block = copy.deepcopy(remaining_block)
+            while True:
+                found = SearchVisitor(functools.partial(uses_var, var_name)).visit(
+                    count_block
+                )
+                if found is None:
+                    break
+                total_uses += 1
+                if total_uses > 1:
+                    break
+                count_block = ReplaceTransformer(
+                    found, frog_ast.Variable(var_name + "__counted__")
+                ).transform(count_block)
+
+            if total_uses != 1:
+                continue
+
+            # Find a BinaryOperation(ADD, ...) where one operand is our variable
+            def is_xor_with_uniform(name: str, node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(node, frog_ast.BinaryOperation)
+                    and node.operator == frog_ast.BinaryOperators.ADD
+                    and (
+                        (
+                            isinstance(node.left_expression, frog_ast.Variable)
+                            and node.left_expression.name == name
+                        )
+                        or (
+                            isinstance(node.right_expression, frog_ast.Variable)
+                            and node.right_expression.name == name
+                        )
+                    )
+                )
+
+            xor_node = SearchVisitor(
+                functools.partial(is_xor_with_uniform, var_name)
+            ).visit(remaining_block)
+            if xor_node is None:
+                continue
+
+            # Replace the BinaryOperation with just the uniform variable
+            assert isinstance(xor_node, frog_ast.BinaryOperation)
+            if (
+                isinstance(xor_node.left_expression, frog_ast.Variable)
+                and xor_node.left_expression.name == var_name
+            ):
+                uniform_var = xor_node.left_expression
+            else:
+                uniform_var = xor_node.right_expression
+
+            remaining_block = ReplaceTransformer(
+                xor_node, copy.deepcopy(uniform_var)
+            ).transform(remaining_block)
+
+            new_block = frog_ast.Block(
+                list(block.statements[: index + 1]) + list(remaining_block.statements)
+            )
+            return self.transform_block(new_block)
+
+        return block
+
+
 class RedundantFieldCopyTransformer(BlockTransformer):
     def __init__(self) -> None:
         self.fields: list[str] = []
@@ -1653,6 +1751,21 @@ class ExpandTupleTransformer(Transformer):
             if self._is_transformable_tuple(field.type, field.name, game):
                 assert isinstance(field.type, frog_ast.BinaryOperation)
                 unfolded_types = frog_ast.expand_tuple_type(field.type)
+                # If the value has fewer elements than the fully-flattened
+                # type, and the right side of the product is itself a nested
+                # product (which is what expand_tuple_type over-flattened),
+                # fall back to a top-level-only split.
+                if (
+                    field.value
+                    and isinstance(field.value, frog_ast.Tuple)
+                    and len(field.value.values) < len(unfolded_types)
+                    and isinstance(
+                        field.type.right_expression, frog_ast.BinaryOperation
+                    )
+                    and field.type.right_expression.operator
+                    == frog_ast.BinaryOperators.MULTIPLY
+                ):
+                    unfolded_types = frog_ast.split_tuple_type_top(field.type)
                 for index, the_type in enumerate(unfolded_types):
                     expression = None
                     if field.value:
@@ -1718,6 +1831,20 @@ class ExpandTupleTransformer(Transformer):
                 assert isinstance(statement.the_type, frog_ast.BinaryOperation)
                 unfolded_types = frog_ast.expand_tuple_type(statement.the_type)
                 assert isinstance(statement.value, frog_ast.Tuple)
+                # If the value has fewer elements than the fully-flattened
+                # type, and the right side of the product is itself a nested
+                # product (which is what expand_tuple_type over-flattened),
+                # fall back to a top-level-only split.
+                if (
+                    len(statement.value.values) < len(unfolded_types)
+                    and isinstance(
+                        statement.the_type.right_expression,
+                        frog_ast.BinaryOperation,
+                    )
+                    and statement.the_type.right_expression.operator
+                    == frog_ast.BinaryOperators.MULTIPLY
+                ):
+                    unfolded_types = frog_ast.split_tuple_type_top(statement.the_type)
                 for index, the_type in enumerate(unfolded_types):
                     new_statements.append(
                         frog_ast.Assignment(

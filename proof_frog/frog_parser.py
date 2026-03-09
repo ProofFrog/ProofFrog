@@ -62,6 +62,17 @@ class ParseError(Exception):
         return header
 
 
+def _read_source_lines(source: str) -> list[str]:
+    """Read all lines from *source* (a file path or raw text)."""
+    try:
+        if os.path.isfile(source):
+            with open(source, encoding="utf-8") as f:
+                return f.readlines()
+        return source.splitlines(keepends=True)
+    except OSError:
+        return []
+
+
 def _to_parse_error(
     e: antlr_error.Errors.ParseCancellationException, source: str
 ) -> ParseError:
@@ -80,18 +91,32 @@ def _to_parse_error(
     else:
         msg = "syntax error"
 
+    all_lines = _read_source_lines(source)
+
+    # Heuristic: if the offending token starts a new line and the previous
+    # non-blank line doesn't end with a semicolon, brace, or colon, the
+    # real problem is likely a missing ';' on that previous line.
+    if line >= 2 and token_text and token_text != "<EOF>":
+        prev_idx = line - 2  # 0-indexed previous line
+        while prev_idx >= 0 and not all_lines[prev_idx].strip():
+            prev_idx -= 1
+        if prev_idx >= 0:
+            prev_stripped = all_lines[prev_idx].rstrip()
+            if prev_stripped and not prev_stripped.endswith((";", "{", "}", ":")):
+                prev_line_num = prev_idx + 1  # back to 1-indexed
+                prev_col = len(prev_stripped)
+                return ParseError(
+                    f"missing ';' (found '{token_text}' on next line)",
+                    file_name=file_name,
+                    line=prev_line_num,
+                    column=prev_col,
+                    token=token_text,
+                    source_line=prev_stripped,
+                )
+
     source_line = ""
-    if line >= 1:
-        try:
-            if os.path.isfile(source):
-                with open(source, encoding="utf-8") as f:
-                    lines = f.readlines()
-            else:
-                lines = source.splitlines(keepends=True)
-            if line <= len(lines):
-                source_line = lines[line - 1].rstrip()
-        except OSError:
-            pass
+    if 1 <= line <= len(all_lines):
+        source_line = all_lines[line - 1].rstrip()
 
     return ParseError(
         msg,

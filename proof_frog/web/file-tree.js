@@ -74,6 +74,24 @@ export function collectPrimitives(node, result) {
   }
 }
 
+export function collectSchemes(node, result) {
+  if (node.type === "file" && node.name.endsWith(".scheme")) {
+    result.push({ path: node.path, name: node.name.replace(/\.scheme$/, "") });
+  }
+  if (node.type === "directory") {
+    (node.children || []).forEach(child => collectSchemes(child, result));
+  }
+}
+
+export function collectGames(node, result) {
+  if (node.type === "file" && node.name.endsWith(".game")) {
+    result.push({ path: node.path, name: node.name.replace(/\.game$/, "") });
+  }
+  if (node.type === "directory") {
+    (node.children || []).forEach(child => collectGames(child, result));
+  }
+}
+
 export async function loadFileTree() {
   const data = await apiFetch("/api/files");
   fileTreeEl.replaceChildren();
@@ -82,4 +100,10 @@ export async function loadFileTree() {
   state.primitiveFiles = [];
   collectPrimitives(data, state.primitiveFiles);
   state.primitiveFiles.sort((a, b) => a.name.localeCompare(b.name));
+  state.schemeFiles = [];
+  collectSchemes(data, state.schemeFiles);
+  state.schemeFiles.sort((a, b) => a.name.localeCompare(b.name));
+  state.gameFiles = [];
+  collectGames(data, state.gameFiles);
+  state.gameFiles.sort((a, b) => a.name.localeCompare(b.name));
 }

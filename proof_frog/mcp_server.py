@@ -154,7 +154,7 @@ def parse(path: str) -> dict[str, Any]:
     The output is the stringified AST on success, or error message on failure.
     Useful for checking syntax in any file type before running a proof.
     """
-    output, success = _capture_parse(_safe_resolve(path))
+    output, success, _err_line, _err_col = _capture_parse(_safe_resolve(path))
     return {"output": output, "success": success}
 
 
@@ -166,7 +166,9 @@ def check(path: str) -> dict[str, Any]:
     More thorough than parse — catches type mismatches, undefined names,
     signature mismatches between Left/Right games, etc.
     """
-    output, success = _capture_check_impl(_safe_resolve(path), allowed_root=_directory)
+    output, success, _err_line, _err_col = _capture_check_impl(
+        _safe_resolve(path), allowed_root=_directory
+    )
     return {"output": output, "success": success}
 
 
@@ -182,7 +184,7 @@ def prove(proof_path: str) -> dict[str, Any]:
     Imports in the proof are resolved relative to the server's working directory.
     Use write_file first to save the proof content to disk, then call prove.
     """
-    output, success, hop_results = _capture_prove(
+    output, success, hop_results, _has_induction, _err_line, _err_col = _capture_prove(
         _safe_resolve(proof_path), allowed_root=_directory
     )
     return {"output": output, "success": success, "hop_results": hop_results}

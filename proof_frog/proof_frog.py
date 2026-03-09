@@ -26,7 +26,7 @@ def parse(file: str, json_output: bool) -> None:
         # pylint: disable=import-outside-toplevel
         from .web_server import _capture_parse
 
-        output, success = _capture_parse(file)
+        output, success, _err_line, _err_col = _capture_parse(file)
         click.echo(json.dumps({"output": output, "success": success}))
         return
     try:
@@ -49,7 +49,7 @@ def check(file: str, json_output: bool) -> None:
         # pylint: disable=import-outside-toplevel
         from .web_server import _capture_check
 
-        output, success = _capture_check(file)
+        output, success, _err_line, _err_col = _capture_check(file)
         click.echo(json.dumps({"output": output, "success": success}))
         return
     try:
@@ -77,7 +77,9 @@ def prove(file: str, verbose: bool, json_output: bool) -> None:
         # pylint: disable=import-outside-toplevel
         from .web_server import _capture_prove
 
-        output, success, hop_results = _capture_prove(file)
+        output, success, hop_results, _has_induction, _err_line, _err_col = (
+            _capture_prove(file)
+        )
         click.echo(
             json.dumps(
                 {"output": output, "success": success, "hop_results": hop_results}

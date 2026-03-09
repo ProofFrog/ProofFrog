@@ -42,9 +42,7 @@ export function updateGameHopsPanel() {
   // Resolve the source .proof path (handles both proof tabs and inline tabs)
   let proofPath = null;
   if (state.activeTab) {
-    if (state.activeTab.endsWith(".proof")) {
-      proofPath = state.activeTab;
-    } else if (state.activeTab.startsWith(":inline:")) {
+    if (state.activeTab.startsWith(":inline:")) {
       // Format: ":inline:STEPINDEX:FILEPATH"
       const withoutPrefix = state.activeTab.slice(":inline:".length);
       const colonPos = withoutPrefix.indexOf(":");
@@ -52,6 +50,8 @@ export function updateGameHopsPanel() {
         const candidate = withoutPrefix.slice(colonPos + 1);
         if (candidate.endsWith(".proof")) proofPath = candidate;
       }
+    } else if (state.activeTab.endsWith(".proof")) {
+      proofPath = state.activeTab;
     }
   }
 

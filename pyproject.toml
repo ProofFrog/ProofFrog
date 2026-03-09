@@ -4,7 +4,7 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "proof_frog"
-version = "0.3.0"
+version = "0.3.1"
 description = "A tool for checking transitions in cryptographic game-hopping proofs"
 keywords = ["cryptography", "latex", "game-hopping", "proofs"]
 readme = "README.md"

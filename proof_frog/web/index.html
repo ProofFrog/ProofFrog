@@ -19,6 +19,7 @@
 <div id="app">
   <div id="toolbar">
     <span class="logo"><img src="/prooffrog.png" alt="ProofFrog">ProofFrog</span>
+    <button id="btn-new-file" title="New File">New File</button>
     <button id="btn-save" title="Save (Ctrl+S)" disabled>Save</button>
     <button id="btn-parse" class="primary" title="Parse current file" disabled>Parse</button>
     <button id="btn-prove" class="primary" title="Run proof" disabled style="display:none">Run Proof</button>
@@ -95,7 +96,123 @@
   </div>
 </div>
 
+<div id="primitive-wizard-modal" role="dialog" aria-modal="true" aria-labelledby="primitive-wizard-modal-title">
+  <div id="primitive-wizard-modal-panel">
+    <div id="primitive-wizard-modal-header">
+      <span id="primitive-wizard-modal-title">Create New Primitive</span>
+      <button id="primitive-wizard-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="primitive-wizard-modal-body">
+      <div>
+        <label class="wizard-label" for="primitive-wizard-name">Name</label>
+        <input class="wizard-input" id="primitive-wizard-name" type="text" placeholder="e.g. SKE" autocomplete="off">
+      </div>
+    </div>
+    <div id="primitive-wizard-modal-footer">
+      <button id="primitive-wizard-modal-create" class="primary">Create</button>
+      <button id="primitive-wizard-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="scheme-wizard-modal" role="dialog" aria-modal="true" aria-labelledby="scheme-wizard-modal-title">
+  <div id="scheme-wizard-modal-panel">
+    <div id="scheme-wizard-modal-header">
+      <span id="scheme-wizard-modal-title">Create New Scheme</span>
+      <button id="scheme-wizard-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="scheme-wizard-modal-body">
+      <div>
+        <label class="wizard-label" for="scheme-wizard-name">Name</label>
+        <input class="wizard-input" id="scheme-wizard-name" type="text" placeholder="e.g. MyScheme" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="scheme-wizard-primitive">Primitive</label>
+        <select class="wizard-input" id="scheme-wizard-primitive"></select>
+      </div>
+    </div>
+    <div id="scheme-wizard-modal-footer">
+      <button id="scheme-wizard-modal-create" class="primary">Create</button>
+      <button id="scheme-wizard-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="proof-wizard-modal" role="dialog" aria-modal="true" aria-labelledby="proof-wizard-modal-title">
+  <div id="proof-wizard-modal-panel">
+    <div id="proof-wizard-modal-header">
+      <span id="proof-wizard-modal-title">Create New Proof</span>
+      <button id="proof-wizard-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="proof-wizard-modal-body">
+      <div>
+        <label class="wizard-label" for="proof-wizard-scheme">Scheme</label>
+        <select class="wizard-input" id="proof-wizard-scheme"></select>
+      </div>
+      <div>
+        <label class="wizard-label" for="proof-wizard-game">Security game</label>
+        <select class="wizard-input" id="proof-wizard-game"></select>
+      </div>
+    </div>
+    <div id="proof-wizard-modal-footer">
+      <button id="proof-wizard-modal-create" class="primary">Create</button>
+      <button id="proof-wizard-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="induction-modal" role="dialog" aria-modal="true" aria-labelledby="induction-modal-title">
+  <div id="induction-modal-panel">
+    <div id="induction-modal-header">
+      <span id="induction-modal-title">Warning</span>
+      <button id="induction-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="induction-modal-body">
+      <p>This proof contains induction steps. The web UI does not currently display induction-related elements correctly.</p>
+      <p>For full induction support, please use the command-line interface.</p>
+    </div>
+    <div id="induction-modal-footer">
+      <button id="induction-modal-ok" class="primary">OK</button>
+    </div>
+  </div>
+</div>
+
+<div id="newfile-modal" role="dialog" aria-modal="true" aria-labelledby="newfile-modal-title">
+  <div id="newfile-modal-panel">
+    <div id="newfile-modal-header">
+      <span id="newfile-modal-title">New File</span>
+      <button id="newfile-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="newfile-modal-body">
+      <div>
+        <label class="wizard-label" for="newfile-folder">Folder</label>
+        <select class="wizard-input" id="newfile-folder"></select>
+      </div>
+      <div>
+        <label class="wizard-label" for="newfile-name">File name (without extension)</label>
+        <input class="wizard-input" id="newfile-name" type="text" placeholder="e.g. MyScheme" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="newfile-type">File type</label>
+        <select class="wizard-input" id="newfile-type">
+          <option value=".primitive">.primitive</option>
+          <option value=".scheme">.scheme</option>
+          <option value=".game">.game</option>
+          <option value=".proof">.proof</option>
+          <option value=".md">.md</option>
+        </select>
+      </div>
+      <div id="newfile-error" style="color: var(--error); font-size: 12px; display: none;"></div>
+    </div>
+    <div id="newfile-modal-footer">
+      <button id="newfile-modal-create" class="primary">Create</button>
+      <button id="newfile-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/codemirror.min.js" integrity="sha512-6cPYokihlrofMNApz7OXVQNObWjLiKGIBBb7+UB+AuMiRCLKmFKgrwms21sHq3bdFFZWpfHYRJBJvMFMPj1S9g==" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/16.3.0/lib/marked.umd.min.js" integrity="sha512-V6rGY7jjOEUc7q5Ews8mMlretz1Vn2wLdMW/qgABLWunzsLfluM0FwHuGjGQ1lc8jO5vGpGIGFE+rTzB+63HdA==" crossorigin="anonymous"></script>
 <script src="/static/app.js" type="module"></script>
 </body>
 </html>

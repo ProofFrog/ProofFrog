@@ -12,7 +12,8 @@ from typing import Any
 
 from flask import Flask, request, jsonify, send_file, send_from_directory
 
-from . import frog_parser, frog_ast, proof_engine
+from . import frog_parser, frog_ast, proof_engine, semantic_analysis
+from . import describe as describe_module
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -35,26 +36,69 @@ def _safe_path(base: str, rel: str) -> Path | None:
     try:
         base_resolved = Path(base).resolve()
         abs_path = (base_resolved / rel).resolve()
-        if not str(abs_path).startswith(str(base_resolved)):
+        if not abs_path.is_relative_to(base_resolved):
+            return None
+        # Block access to dotfiles/dotdirs (e.g. .git)
+        rel_to_base = abs_path.relative_to(base_resolved)
+        if any(part.startswith(".") for part in rel_to_base.parts):
             return None
         return abs_path
     except Exception:  # pylint: disable=broad-exception-caught
         return None
 
 
-def _capture_parse(file_path: str) -> tuple[str, bool]:
+def _capture_parse(
+    file_path: str,
+) -> tuple[str, bool, int | None, int | None]:
     buf = io.StringIO()
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
             root = frog_parser.parse_file(file_path)
             print(root)
-        return _strip_ansi(buf.getvalue()), True
+        return _strip_ansi(buf.getvalue()), True, None, None
     except ValueError as e:
-        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False
-    except (frog_parser.ParseError, FileNotFoundError) as e:
-        return _strip_ansi(buf.getvalue()) + f"\n{e}", False
+        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False, None, None
+    except frog_parser.ParseError as e:
+        line = e.line if e.line >= 0 else None
+        col = e.column if e.column >= 0 else None
+        return _strip_ansi(buf.getvalue()) + f"\n{e}", False, line, col
+    except FileNotFoundError as e:
+        return _strip_ansi(buf.getvalue()) + f"\n{e}", False, None, None
     except Exception as e:  # pylint: disable=broad-exception-caught
-        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False
+        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False, None, None
+
+
+def _capture_check(
+    file_path: str, allowed_root: str | None = None
+) -> tuple[str, bool, int | None, int | None]:
+    buf = io.StringIO()
+    try:
+        root = frog_parser.parse_file(file_path)
+        with redirect_stdout(buf), redirect_stderr(buf):
+            semantic_analysis.check_well_formed(
+                root, file_path, allowed_root=allowed_root
+            )
+        return f"{file_path} is well-formed.", True, None, None
+    except frog_parser.ParseError as e:
+        line = e.line if e.line >= 0 else None
+        col = e.column if e.column >= 0 else None
+        return str(e), False, line, col
+    except FileNotFoundError as e:
+        return str(e), False, None, None
+    except semantic_analysis.FailedTypeCheck:
+        msg = _strip_ansi(buf.getvalue()) or "Type check failed."
+        return msg, False, None, None
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        return f"Error: {e}", False, None, None
+
+
+def _capture_describe(file_path: str) -> tuple[str, bool]:
+    try:
+        return describe_module.describe_file(file_path), True
+    except (ValueError, frog_parser.ParseError, FileNotFoundError) as e:
+        return str(e), False
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        return f"Error: {e}", False
 
 
 def _get_file_type(file_name: str) -> frog_ast.FileType:
@@ -127,7 +171,9 @@ def _build_minimal_proof(proof_text: str, step_text: str) -> str | None:
 
 
 def _capture_inline(
-    file_path: str, step_index: int
+    file_path: str,
+    step_index: int,
+    allowed_root: str | None = None,
 ) -> tuple[str, str, bool, bool, str, str, str]:
     buf = io.StringIO()
     try:
@@ -135,7 +181,9 @@ def _capture_inline(
             proof_file = frog_parser.parse_proof_file(file_path)
             engine = proof_engine.ProofEngine(False)
             for imp in proof_file.imports:
-                imp_path = frog_parser.resolve_import_path(imp.filename, file_path)
+                imp_path = frog_parser.resolve_import_path(
+                    imp.filename, file_path, allowed_root=allowed_root
+                )
                 file_type = _get_file_type(imp_path)
                 root: frog_ast.Primitive | frog_ast.Scheme | frog_ast.GameFile
                 match file_type:
@@ -250,16 +298,24 @@ def _capture_inline(
         )
 
 
-def _capture_prove(file_path: str) -> tuple[str, bool, list[dict[str, object]]]:
+def _capture_prove(
+    file_path: str, allowed_root: str | None = None
+) -> tuple[str, bool, list[dict[str, object]], bool, int | None, int | None]:
     buf = io.StringIO()
     engine = proof_engine.ProofEngine(False)
     proof_succeeded = False
+    has_induction = False
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
             proof_file = frog_parser.parse_proof_file(file_path)
+            has_induction = any(
+                isinstance(step, frog_ast.Induction) for step in proof_file.steps
+            )
 
             for imp in proof_file.imports:
-                imp_path = frog_parser.resolve_import_path(imp.filename, file_path)
+                imp_path = frog_parser.resolve_import_path(
+                    imp.filename, file_path, allowed_root=allowed_root
+                )
                 file_type = _get_file_type(imp_path)
                 root2: frog_ast.Primitive | frog_ast.Scheme | frog_ast.GameFile
                 match file_type:
@@ -285,11 +341,43 @@ def _capture_prove(file_path: str) -> tuple[str, bool, list[dict[str, object]]]:
             for r in engine.hop_results
             if r.depth == 0 and r.kind != "induction_rollover"
         ]
-        return _strip_ansi(buf.getvalue()), proof_succeeded, hop_results
-    except (frog_parser.ParseError, FileNotFoundError) as e:
-        return _strip_ansi(buf.getvalue()) + f"\n{e}", False, []
+        return (
+            _strip_ansi(buf.getvalue()),
+            proof_succeeded,
+            hop_results,
+            has_induction,
+            None,
+            None,
+        )
+    except frog_parser.ParseError as e:
+        line = e.line if e.line >= 0 else None
+        col = e.column if e.column >= 0 else None
+        return (
+            _strip_ansi(buf.getvalue()) + f"\n{e}",
+            False,
+            [],
+            False,
+            line,
+            col,
+        )
+    except FileNotFoundError as e:
+        return (
+            _strip_ansi(buf.getvalue()) + f"\n{e}",
+            False,
+            [],
+            False,
+            None,
+            None,
+        )
     except Exception as e:  # pylint: disable=broad-exception-caught
-        return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False, []
+        return (
+            _strip_ansi(buf.getvalue()) + f"\nError: {e}",
+            False,
+            [],
+            False,
+            None,
+            None,
+        )
 
 
 def _build_tree(path: Path, base: Path) -> dict[str, object]:
@@ -314,7 +402,30 @@ def _build_tree(path: Path, base: Path) -> dict[str, object]:
 
 def create_app(directory: str) -> Flask:
     app = Flask(__name__, static_folder=None)
+    app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB
     static_dir = Path(__file__).parent / "web"
+
+    @app.before_request
+    def _check_origin() -> Any:
+        if request.method in ("POST", "PUT", "DELETE"):
+            origin = request.headers.get("Origin", "")
+            if not origin:
+                return jsonify({"error": "Missing Origin header"}), 403
+            if not origin.startswith(f"http://127.0.0.1:{request.host.split(':')[-1]}"):
+                return jsonify({"error": "Origin not allowed"}), 403
+        return None
+
+    @app.after_request
+    def _add_security_headers(response: Any) -> Any:
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' https://cdnjs.cloudflare.com; "
+            "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
+            "img-src 'self'; "
+            "connect-src 'self'"
+        )
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
 
     @app.route("/")
     def index() -> Any:
@@ -345,6 +456,34 @@ def create_app(directory: str) -> Flask:
         except FileNotFoundError:
             return jsonify({"error": "File not found"}), 404
 
+    @app.route("/api/file", methods=["POST"])
+    def create_file() -> Any:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data"}), 400
+        rel_path = data.get("path", "")
+        abs_path = _safe_path(directory, rel_path)
+        if abs_path is None:
+            return jsonify({"error": "Invalid path"}), 403
+        if abs_path.exists():
+            return jsonify({"error": "File already exists"}), 409
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        abs_path.write_text("", encoding="utf-8")
+        return jsonify({"success": True})
+
+    @app.route("/api/directories")
+    def list_directories() -> Any:
+        dirs: list[str] = [""]
+        base = Path(directory)
+        for dirpath, dirnames, _ in os.walk(base):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            dirnames.sort(key=str.lower)
+            p = Path(dirpath)
+            if p != base:
+                dirs.append(str(p.relative_to(base)))
+        dirs.sort(key=str.lower)
+        return jsonify(dirs)
+
     @app.route("/api/file", methods=["PUT"])
     def save_file() -> Any:
         rel_path = request.args.get("path", "")
@@ -367,8 +506,13 @@ def create_app(directory: str) -> Flask:
         if abs_path is None:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
-        output, success = _capture_parse(str(abs_path))
-        return jsonify({"output": output, "success": success})
+        output, success, error_line, error_column = _capture_parse(str(abs_path))
+        resp: dict[str, object] = {"output": output, "success": success}
+        if error_line is not None:
+            resp["error_line"] = error_line
+        if error_column is not None:
+            resp["error_column"] = error_column
+        return jsonify(resp)
 
     @app.route("/api/prove", methods=["POST"])
     def run_prove() -> Any:
@@ -381,10 +525,20 @@ def create_app(directory: str) -> Flask:
         if abs_path is None:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
-        output, success, hop_results = _capture_prove(str(abs_path))
-        return jsonify(
-            {"output": output, "success": success, "hop_results": hop_results}
+        output, success, hop_results, has_induction, error_line, error_column = (
+            _capture_prove(str(abs_path), allowed_root=directory)
         )
+        prove_resp: dict[str, object] = {
+            "output": output,
+            "success": success,
+            "hop_results": hop_results,
+            "has_induction": has_induction,
+        }
+        if error_line is not None:
+            prove_resp["error_line"] = error_line
+        if error_column is not None:
+            prove_resp["error_column"] = error_column
+        return jsonify(prove_resp)
 
     @app.route("/api/inline", methods=["POST"])
     def run_inline() -> Any:
@@ -399,7 +553,7 @@ def create_app(directory: str) -> Flask:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
         output, canonical, success, has_reduction, reduction, challenger, scheme = (
-            _capture_inline(str(abs_path), step_index)
+            _capture_inline(str(abs_path), step_index, allowed_root=directory)
         )
         return jsonify(
             {
@@ -412,6 +566,82 @@ def create_app(directory: str) -> Flask:
                 "scheme": scheme,
             }
         )
+
+    @app.route("/api/file-metadata")
+    def file_metadata() -> Any:
+        rel_path = request.args.get("path", "")
+        abs_path = _safe_path(directory, rel_path)
+        if abs_path is None:
+            return jsonify({"error": "Invalid path"}), 403
+        file_path_str = str(abs_path)
+        try:
+            file_type = _get_file_type(file_path_str)
+        except ValueError:
+            return jsonify({"error": "Unsupported file type"}), 400
+
+        def _params(params: list[frog_ast.Parameter]) -> list[dict[str, str]]:
+            return [{"type": str(p.type), "name": p.name} for p in params]
+
+        def _fields(fields: list[frog_ast.Field]) -> list[dict[str, str]]:
+            return [{"type": str(f.type), "name": f.name} for f in fields]
+
+        try:
+            result: dict[str, object]
+            if file_type == frog_ast.FileType.PRIMITIVE:
+                prim = frog_parser.parse_primitive_file(file_path_str)
+                result = {
+                    "type": "primitive",
+                    "name": prim.name,
+                    "parameters": _params(prim.parameters),
+                    "fields": _fields(prim.fields),
+                    "methods": [str(m) for m in prim.methods],
+                }
+            elif file_type == frog_ast.FileType.SCHEME:
+                scheme = frog_parser.parse_scheme_file(file_path_str)
+                result = {
+                    "type": "scheme",
+                    "name": scheme.name,
+                    "parameters": _params(scheme.parameters),
+                    "primitive_name": scheme.primitive_name,
+                    "fields": _fields(scheme.fields),
+                    "methods": [str(m.signature) for m in scheme.methods],
+                }
+            elif file_type == frog_ast.FileType.GAME:
+                game_file = frog_parser.parse_game_file(file_path_str)
+                result = {
+                    "type": "game",
+                    "export_name": game_file.name,
+                    "sides": [g.name for g in game_file.games],
+                    "games": [
+                        {
+                            "name": g.name,
+                            "parameters": _params(g.parameters),
+                            "fields": _fields(g.fields),
+                            "methods": [str(m.signature) for m in g.methods],
+                        }
+                        for g in game_file.games
+                    ],
+                }
+            elif file_type == frog_ast.FileType.PROOF:
+                proof_file = frog_parser.parse_proof_file(file_path_str)
+                result = {
+                    "type": "proof",
+                    "lets": [str(let) for let in proof_file.lets],
+                    "assumptions": [str(a) for a in proof_file.assumptions],
+                    "theorem": str(proof_file.theorem),
+                    "steps": [str(s) for s in proof_file.steps],
+                }
+            else:
+                return jsonify({"error": "Unsupported file type"}), 400
+            return jsonify(result)
+        except (
+            frog_parser.ParseError,
+            FileNotFoundError,
+            semantic_analysis.FailedTypeCheck,
+        ) as e:
+            return jsonify({"error": str(e)}), 400
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            return jsonify({"error": f"Error: {e}"}), 400
 
     return app
 

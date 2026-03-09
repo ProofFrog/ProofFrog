@@ -7,6 +7,8 @@ export const state = {
   hopResultsByPath: new Map(), // path → [{step_num, valid, kind}, ...]
   activeTab: null,
 primitiveFiles: [],        // { path, name } for all .primitive files, sorted by name
+  schemeFiles: [],           // { path, name } for all .scheme files, sorted by name
+  gameFiles: [],             // { path, name } for all .game files, sorted by name
   darkMode: localStorage.getItem("theme") === "dark",
 };
 
@@ -33,6 +35,12 @@ export const wizardBody        = document.getElementById("wizard-body");
 
 export async function apiFetch(url, opts = {}) {
   const res = await fetch(url, opts);
+  if (!res.ok) {
+    const text = await res.text();
+    let msg;
+    try { msg = JSON.parse(text).error; } catch { msg = undefined; }
+    throw new Error(msg || `HTTP ${res.status}: ${res.statusText}`);
+  }
   return res.json();
 }
 

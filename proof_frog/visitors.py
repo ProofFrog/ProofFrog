@@ -1119,6 +1119,7 @@ class SimplifyRangeTransformer(Transformer):
         self.assumed_formula = Z3FormulaVisitor(type_map).visit(operation)
         if self.assumed_formula is not None:
             self.solver = z3.Solver()
+            self.solver.set("timeout", 30000)
             self.solver.add(self.assumed_formula)
 
     def transform_unary_operation(
@@ -1164,6 +1165,7 @@ class SimplifyRangeTransformer(Transformer):
         if not satisfied:
             return frog_ast.Boolean(False)
         solver = z3.Solver()
+        solver.set("timeout", 30000)
         solver.add(z3.Not(z3.Implies(self.assumed_formula, statement_formula)))
         if solver.check() == z3.unsat:
             return frog_ast.Boolean(True)
@@ -1333,6 +1335,21 @@ class ExpandTupleTransformer(Transformer):
             if self._is_transformable_tuple(field.type, field.name, game):
                 assert isinstance(field.type, frog_ast.BinaryOperation)
                 unfolded_types = frog_ast.expand_tuple_type(field.type)
+                # If the value has fewer elements than the fully-flattened
+                # type, and the right side of the product is itself a nested
+                # product (which is what expand_tuple_type over-flattened),
+                # fall back to a top-level-only split.
+                if (
+                    field.value
+                    and isinstance(field.value, frog_ast.Tuple)
+                    and len(field.value.values) < len(unfolded_types)
+                    and isinstance(
+                        field.type.right_expression, frog_ast.BinaryOperation
+                    )
+                    and field.type.right_expression.operator
+                    == frog_ast.BinaryOperators.MULTIPLY
+                ):
+                    unfolded_types = frog_ast.split_tuple_type_top(field.type)
                 for index, the_type in enumerate(unfolded_types):
                     expression = None
                     if field.value:
@@ -1398,6 +1415,20 @@ class ExpandTupleTransformer(Transformer):
                 assert isinstance(statement.the_type, frog_ast.BinaryOperation)
                 unfolded_types = frog_ast.expand_tuple_type(statement.the_type)
                 assert isinstance(statement.value, frog_ast.Tuple)
+                # If the value has fewer elements than the fully-flattened
+                # type, and the right side of the product is itself a nested
+                # product (which is what expand_tuple_type over-flattened),
+                # fall back to a top-level-only split.
+                if (
+                    len(statement.value.values) < len(unfolded_types)
+                    and isinstance(
+                        statement.the_type.right_expression,
+                        frog_ast.BinaryOperation,
+                    )
+                    and statement.the_type.right_expression.operator
+                    == frog_ast.BinaryOperators.MULTIPLY
+                ):
+                    unfolded_types = frog_ast.split_tuple_type_top(statement.the_type)
                 for index, the_type in enumerate(unfolded_types):
                     new_statements.append(
                         frog_ast.Assignment(
@@ -1816,6 +1847,7 @@ class RemoveUnreachableTransformer(BlockTransformer):
             ):
                 return frog_ast.Block(block.statements[: index + 1])
             solver = z3.Solver()
+            solver.set("timeout", 30000)
 
             type_map = GetTypeMapVisitor(statement).visit(self.ast)
             formula_visitor.set_type_map(type_map)

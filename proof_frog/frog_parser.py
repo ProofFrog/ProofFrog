@@ -62,6 +62,17 @@ class ParseError(Exception):
         return header
 
 
+def _read_source_lines(source: str) -> list[str]:
+    """Read all lines from *source* (a file path or raw text)."""
+    try:
+        if os.path.isfile(source):
+            with open(source, encoding="utf-8") as f:
+                return f.readlines()
+        return source.splitlines(keepends=True)
+    except OSError:
+        return []
+
+
 def _to_parse_error(
     e: antlr_error.Errors.ParseCancellationException, source: str
 ) -> ParseError:
@@ -80,18 +91,32 @@ def _to_parse_error(
     else:
         msg = "syntax error"
 
+    all_lines = _read_source_lines(source)
+
+    # Heuristic: if the offending token starts a new line and the previous
+    # non-blank line doesn't end with a semicolon, brace, or colon, the
+    # real problem is likely a missing ';' on that previous line.
+    if line >= 2 and token_text and token_text != "<EOF>":
+        prev_idx = line - 2  # 0-indexed previous line
+        while prev_idx >= 0 and not all_lines[prev_idx].strip():
+            prev_idx -= 1
+        if prev_idx >= 0:
+            prev_stripped = all_lines[prev_idx].rstrip()
+            if prev_stripped and not prev_stripped.endswith((";", "{", "}", ":")):
+                prev_line_num = prev_idx + 1  # back to 1-indexed
+                prev_col = len(prev_stripped)
+                return ParseError(
+                    f"missing ';' (found '{token_text}' on next line)",
+                    file_name=file_name,
+                    line=prev_line_num,
+                    column=prev_col,
+                    token=token_text,
+                    source_line=prev_stripped,
+                )
+
     source_line = ""
-    if line >= 1:
-        try:
-            if os.path.isfile(source):
-                with open(source, encoding="utf-8") as f:
-                    lines = f.readlines()
-            else:
-                lines = source.splitlines(keepends=True)
-            if line <= len(lines):
-                source_line = lines[line - 1].rstrip()
-        except OSError:
-            pass
+    if 1 <= line <= len(all_lines):
+        source_line = all_lines[line - 1].rstrip()
 
     return ParseError(
         msg,
@@ -805,18 +830,37 @@ def _get_file_type(file_name: str) -> frog_ast.FileType:
     return frog_ast.FileType(extension)
 
 
-def resolve_import_path(import_path: str, importing_file_path: str) -> str:
+def resolve_import_path(
+    import_path: str,
+    importing_file_path: str,
+    allowed_root: str | None = None,
+) -> str:
     """Resolve an import path relative to the importing file's directory.
 
     If import_path is absolute, it is returned as-is.
     Otherwise it is resolved relative to the directory of importing_file_path
     and normalised (so '../' components are collapsed).
+
+    When *allowed_root* is provided the resolved path must stay within that
+    directory tree; a ``ValueError`` is raised otherwise.
     """
     if os.path.isabs(import_path):
-        return import_path
-    return os.path.normpath(
-        os.path.join(os.path.dirname(os.path.abspath(importing_file_path)), import_path)
-    )
+        resolved = import_path
+    else:
+        resolved = os.path.normpath(
+            os.path.join(
+                os.path.dirname(os.path.abspath(importing_file_path)), import_path
+            )
+        )
+    if allowed_root is not None:
+        from pathlib import Path  # pylint: disable=import-outside-toplevel
+
+        if not Path(resolved).resolve().is_relative_to(Path(allowed_root).resolve()):
+            raise ValueError(
+                f"Import '{import_path}' resolves outside the allowed "
+                f"directory '{allowed_root}'"
+            )
+    return resolved
 
 
 def parse_file(file_name: str) -> frog_ast.Root:

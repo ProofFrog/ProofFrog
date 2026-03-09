@@ -7,18 +7,27 @@ import pytest
 REPO_ROOT = Path(__file__).parent.parent
 
 
+_FROG_EXTENSIONS = {".primitive", ".scheme", ".game", ".proof"}
+
+
 def _collect_files() -> list[Path]:
     files: list[Path] = []
     # Direct children of Primitives (flat directory)
     files.extend(
-        p for p in (REPO_ROOT / "examples/Primitives").iterdir() if p.is_file()
+        p
+        for p in (REPO_ROOT / "examples/Primitives").iterdir()
+        if p.is_file() and p.suffix in _FROG_EXTENSIONS
     )
     # All files recursively in Schemes and Games
     files.extend(
-        p for p in (REPO_ROOT / "examples/Schemes").rglob("*") if p.is_file()
+        p
+        for p in (REPO_ROOT / "examples/Schemes").rglob("*")
+        if p.is_file() and p.suffix in _FROG_EXTENSIONS
     )
     files.extend(
-        p for p in (REPO_ROOT / "examples/Games").rglob("*") if p.is_file()
+        p
+        for p in (REPO_ROOT / "examples/Games").rglob("*")
+        if p.is_file() and p.suffix in _FROG_EXTENSIONS
     )
     # Only .proof files in Proofs
     files.extend((REPO_ROOT / "examples/Proofs").rglob("*.proof"))

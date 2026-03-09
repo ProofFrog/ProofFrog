@@ -273,47 +273,6 @@ CPA security is like one-time secrecy but the key persists across multiple queri
 
 Some games capture simple probabilistic facts rather than cryptographic security properties. These are placed in `Games/Misc/` and often appear as assumptions in proofs.
 
-**BitStringSampling**: Concatenating two independent random samples is the same as sampling one longer bitstring. The ProofFrog engine handles this equivalence automatically during canonicalization (merging concatenated uniform samples and splitting samples accessed only via covering slices), so this game no longer needs to be explicitly assumed in most proofs.
-
-```
-Game Concatenate(Int len1, Int len2) {
-    BitString<len1 + len2> Query() {
-        BitString<len1> x <- BitString<len1>;
-        BitString<len2> y <- BitString<len2>;
-        return x || y;
-    }
-}
-
-Game SampleDirectly(Int len1, Int len2) {
-    BitString<len1 + len2> Query() {
-        BitString<len1 + len2> value <- BitString<len1 + len2>;
-        return value;
-    }
-}
-
-export as BitStringSampling;
-```
-
-**OTPUniform**: XOR-ing a message with a random key produces a uniform random ciphertext.
-
-```
-Game Real(Int lambda) {
-    BitString<lambda> CTXT(BitString<lambda> m) {
-        BitString<lambda> k <- BitString<lambda>;
-        return k + m;
-    }
-}
-
-Game Random(Int lambda) {
-    BitString<lambda> CTXT(BitString<lambda> m) {
-        BitString<lambda> c <- BitString<lambda>;
-        return c;
-    }
-}
-
-export as OTPUniform;
-```
-
 ### Testing a game
 
 ```bash
@@ -484,7 +443,7 @@ assume:
     Security(G);                          // PRG security
 ```
 
-Helper assumptions from `Games/Misc/` (like `OTPUniform`) capture simple probabilistic facts and can be freely added as needed. Note that `BitStringSampling` no longer needs to be assumed explicitly, as the engine handles it automatically.
+Helper assumptions from `Games/Misc/` capture simple probabilistic facts and can be freely added as needed.
 
 ### The `theorem:` section
 
@@ -680,7 +639,7 @@ games:
     Security(T).Random against Security(T).Adversary;
 ```
 
-**Proof idea**: The TriplingPRG applies the underlying PRG twice. We replace each PRG call with random output one at a time (using the PRG security assumption). The engine automatically handles the equivalence between concatenating independent random samples and sampling a single longer bitstring, so no explicit `BitStringSampling` assumptions are needed.
+**Proof idea**: The TriplingPRG applies the underlying PRG twice. We replace each PRG call with random output one at a time (using the PRG security assumption).
 
 ## Testing and Verification
 
@@ -741,12 +700,12 @@ import '../../Games/SymEnc/OneTimeSecrecy.game';   // up two levels, into Games/
 
 ### Reduction parameters
 
-A reduction's parameter list must include every parameter needed to instantiate the composed security game, even if that parameter is not referenced in the reduction body. For example, if a reduction composes with `OTPUniform(2 * G.lambda)`, it must take the `PRG G` parameter even if `G` is not used inside the reduction's oracle methods.
+A reduction's parameter list must include every parameter needed to instantiate the composed security game, even if that parameter is not referenced in the reduction body.
 
 ### Common patterns
 
 - **Symmetric proofs**: Many proofs are symmetric around a midpoint. The first half transitions from the theorem's Left/Real game toward a "neutral" middle (often with all randomness replaced), and the second half transitions from the middle to the Right/Random game.
-- **Helper assumptions**: The `Games/Misc/` directory contains helper games that capture basic probabilistic facts (e.g., `OTPUniform`). These can be assumed freely in proofs since they hold unconditionally. Note that `BitStringSampling` is now handled automatically by the engine and no longer needs to be explicitly assumed.
+- **Helper assumptions**: The `Games/Misc/` directory contains helper games that capture basic probabilistic facts. These can be assumed freely in proofs since they hold unconditionally.
 - **Incremental development**: Build proofs one hop at a time. Write the reduction, add the corresponding game steps, and verify before moving on.
 
 ## Further Resources

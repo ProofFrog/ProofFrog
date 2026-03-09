@@ -137,6 +137,26 @@ class BinaryOperators(Enum):
     MULTIPLY = "*"
     DIVIDE = "/"
 
+    def precedence(self) -> int:
+        """Return precedence level (higher binds tighter)."""
+        if self in (BinaryOperators.MULTIPLY, BinaryOperators.DIVIDE):
+            return 4
+        if self in (BinaryOperators.ADD, BinaryOperators.SUBTRACT):
+            return 3
+        if self in (
+            BinaryOperators.EQUALS,
+            BinaryOperators.NOTEQUALS,
+            BinaryOperators.GT,
+            BinaryOperators.LT,
+            BinaryOperators.GEQ,
+            BinaryOperators.LEQ,
+            BinaryOperators.IN,
+            BinaryOperators.SUBSETS,
+        ):
+            return 2
+        # AND, OR, UNION, SETMINUS
+        return 1
+
 
 class UnaryOperators(Enum):
     NOT = "!"
@@ -156,8 +176,20 @@ class BinaryOperation(Expression, Type):
         self.left_expression = left_expression
         self.right_expression = right_expression
 
+    @staticmethod
+    def _parenthesize(child: Expression, parent_prec: int, is_right: bool) -> str:
+        """Wrap child in parens if needed based on precedence."""
+        if isinstance(child, BinaryOperation):
+            child_prec = child.operator.precedence()
+            if child_prec < parent_prec or (is_right and child_prec == parent_prec):
+                return f"({child})"
+        return str(child)
+
     def __str__(self) -> str:
-        return f"{self.left_expression} {self.operator.value} {self.right_expression}"
+        prec = self.operator.precedence()
+        left = self._parenthesize(self.left_expression, prec, is_right=False)
+        right = self._parenthesize(self.right_expression, prec, is_right=True)
+        return f"{left} {self.operator.value} {right}"
 
 
 class UnaryOperation(Expression):
@@ -487,6 +519,8 @@ class BitStringLiteral(Expression):
         self.length = length
 
     def __str__(self) -> str:
+        if isinstance(self.length, BinaryOperation):
+            return f"{self.bit}^({self.length})"
         return f"{self.bit}^{self.length}"
 
 

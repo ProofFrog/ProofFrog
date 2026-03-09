@@ -368,6 +368,10 @@ class ProofEngine:
                 name="Merge Uniform Samples",
             ),
             AstManipulator(
+                fn=lambda ast: visitors.MergeProductSamplesTransformer().transform(ast),
+                name="Merge Product Samples",
+            ),
+            AstManipulator(
                 fn=lambda ast: visitors.SplitUniformSampleTransformer(
                     self.variables
                 ).transform(ast),
@@ -597,6 +601,10 @@ class ProofEngine:
                     self.variables
                 ).transform(ast),
                 name="Merge Uniform Samples",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.MergeProductSamplesTransformer().transform(ast),
+                name="Merge Product Samples",
             ),
             AstManipulator(
                 fn=lambda ast: visitors.SplitUniformSampleTransformer(

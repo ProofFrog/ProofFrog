@@ -870,6 +870,148 @@ class MergeUniformSamplesTransformer(BlockTransformer):
         return block
 
 
+class MergeProductSamplesTransformer(BlockTransformer):
+    """Merges independent uniform samples combined into a tuple into a single
+    product-type sample.
+
+    Transforms:
+        A a <- A;
+        B b <- B;
+        return [a, b];
+    Into:
+        A * B a <- A * B;
+        return a;
+
+    This captures the mathematical fact that sampling each component of a
+    product type independently and combining them is equivalent to sampling
+    the product type jointly.
+    """
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            # Find tuple expressions in return statements only.
+            # We do not merge in assignments because the assigned variable
+            # may be accessed via element indices (e.g. k[0], k[1]), which
+            # would prevent other simplifications like XOR simplification.
+            if not isinstance(statement, frog_ast.ReturnStatement):
+                continue
+            tuple_expr = statement.expression
+
+            if not isinstance(tuple_expr, frog_ast.Tuple):
+                continue
+            if len(tuple_expr.values) < 2:
+                continue
+
+            # Each element must be a distinct variable
+            leaf_vars: list[frog_ast.Variable] = []
+            all_vars = True
+            for val in tuple_expr.values:
+                if not isinstance(val, frog_ast.Variable):
+                    all_vars = False
+                    break
+                leaf_vars.append(val)
+            if not all_vars:
+                continue
+
+            leaf_names = [v.name for v in leaf_vars]
+            if len(leaf_names) != len(set(leaf_names)):
+                continue
+
+            # For each leaf variable, find its Sample declaration
+            sample_indices: list[int] = []
+            component_types: list[frog_ast.Type] = []
+            all_valid = True
+
+            for var in leaf_vars:
+                found = False
+                for si in range(index):
+                    s = block.statements[si]
+                    if not (
+                        isinstance(s, frog_ast.Sample)
+                        and isinstance(s.var, frog_ast.Variable)
+                        and s.var.name == var.name
+                        and s.the_type is not None
+                        and isinstance(s.the_type, frog_ast.Type)
+                    ):
+                        continue
+
+                    # Verify uniform sampling: declared type == sampled-from type
+                    if s.the_type != s.sampled_from:
+                        all_valid = False
+                        break
+
+                    sample_indices.append(si)
+                    component_types.append(s.the_type)
+                    found = True
+                    break
+
+                if not found or not all_valid:
+                    all_valid = False
+                    break
+
+            if not all_valid:
+                continue
+
+            # Check each variable is used only in the tuple
+            all_single_use = True
+            for vi, var in enumerate(leaf_vars):
+
+                def uses_var(name: str, node: frog_ast.ASTNode) -> bool:
+                    return isinstance(node, frog_ast.Variable) and node.name == name
+
+                other_stmts = [
+                    s
+                    for si, s in enumerate(block.statements)
+                    if si not in (sample_indices[vi], index)
+                ]
+                other_block = frog_ast.Block(other_stmts)
+                if (
+                    SearchVisitor(functools.partial(uses_var, var.name)).visit(
+                        other_block
+                    )
+                    is not None
+                ):
+                    all_single_use = False
+                    break
+
+            if not all_single_use:
+                continue
+
+            # Build product type right-associatively: T1 * (T2 * T3)
+            product_type: frog_ast.Type = copy.deepcopy(component_types[-1])
+            for t in reversed(component_types[:-1]):
+                product_type = frog_ast.BinaryOperation(
+                    frog_ast.BinaryOperators.MULTIPLY,
+                    cast(frog_ast.Expression, copy.deepcopy(t)),
+                    cast(frog_ast.Expression, product_type),
+                )
+
+            new_var = frog_ast.Variable(leaf_vars[0].name)
+            new_sample = frog_ast.Sample(
+                product_type,
+                new_var,
+                cast(frog_ast.Expression, copy.deepcopy(product_type)),
+            )
+
+            # Build new block
+            sample_index_set = set(sample_indices)
+            new_statements: list[frog_ast.Statement] = []
+            for si, s in enumerate(block.statements):
+                if si in sample_index_set:
+                    continue  # Remove individual samples
+                if si == index:
+                    new_statements.append(new_sample)
+                    new_statements.append(
+                        frog_ast.ReturnStatement(copy.deepcopy(new_var))
+                    )
+                else:
+                    new_statements.append(s)
+
+            return self.transform_block(frog_ast.Block(new_statements))
+
+        return block
+
+
 class _SliceReplacer(Transformer):
     """Replaces Slice nodes of a specific variable with new variables,
     matching by sympy-resolved bounds rather than object identity."""

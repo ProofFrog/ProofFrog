@@ -204,6 +204,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#onesExp.
+    def visitOnesExp(self, ctx:GameParser.OnesExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#unionExp.
     def visitUnionExp(self, ctx:GameParser.UnionExpContext):
         return self.visitChildren(ctx)
@@ -236,6 +241,11 @@ class GameVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by GameParser#orExp.
     def visitOrExp(self, ctx:GameParser.OrExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#zerosExp.
+    def visitZerosExp(self, ctx:GameParser.ZerosExpContext):
         return self.visitChildren(ctx)
 
 
@@ -336,6 +346,11 @@ class GameVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by GameParser#integerExpression.
     def visitIntegerExpression(self, ctx:GameParser.IntegerExpressionContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#integerAtom.
+    def visitIntegerAtom(self, ctx:GameParser.IntegerAtomContext):
         return self.visitChildren(ctx)
 
 

@@ -63,6 +63,8 @@ expression:
 	| L_SQUARE (expression (COMMA expression)*)? R_SQUARE #createTupleExp
 	| L_CURLY (expression (COMMA expression)*)? R_CURLY #createSetExp
 	| type #typeExp
+	| ZEROS_CARET integerAtom #zerosExp
+	| ONES_CARET integerAtom #onesExp
 	| BINARYNUM #binaryNumExp
 	| INT #intExp
 	| bool #boolExp
@@ -96,6 +98,12 @@ integerExpression
 	| lvalue
 	| INT
 	| BINARYNUM
+	| L_PAREN integerExpression R_PAREN
+	;
+
+integerAtom
+	: lvalue
+	| INT
 	| L_PAREN integerExpression R_PAREN
 	;
 
@@ -167,6 +175,8 @@ TRUE: 'true';
 FALSE: 'false';
 
 BINARYNUM: '0b'[01]+ ;
+ZEROS_CARET: '0^' ;
+ONES_CARET: '1^' ;
 INT: [0-9]+ ;
 ID: [a-zA-Z_$][a-zA-Z_0-9$]* ;
 WS: [ \t\r\n]+ -> skip ;

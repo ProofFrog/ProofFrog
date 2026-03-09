@@ -478,6 +478,18 @@ class BinaryNum(Expression):
         return bin(self.num)
 
 
+class BitStringLiteral(Expression):
+    """A bitstring literal: 0^n (all zeros) or 1^n (all ones)."""
+
+    def __init__(self, bit: int, length: Expression) -> None:
+        super().__init__()
+        self.bit = bit
+        self.length = length
+
+    def __str__(self) -> str:
+        return f"{self.bit}^{self.length}"
+
+
 class Method(ASTNode):
     def __init__(self, signature: MethodSignature, block: Block) -> None:
         super().__init__()

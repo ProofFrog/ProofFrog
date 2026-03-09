@@ -2147,6 +2147,40 @@ class XorCancellationTransformer(Transformer):
         return _rebuild_add_chain(remaining)
 
 
+class XorIdentityTransformer(Transformer):
+    """Removes 0^n terms from XOR (ADD) chains, since x XOR 0 = x.
+
+    Example:
+        x + 0^lambda  ->  x
+        0^3 + y + z   ->  y + z
+    """
+
+    def transform_binary_operation(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        transformed = frog_ast.BinaryOperation(
+            binary_operation.operator,
+            self.transform(binary_operation.left_expression),
+            self.transform(binary_operation.right_expression),
+        )
+        if transformed.operator != frog_ast.BinaryOperators.ADD:
+            return transformed
+
+        terms = _flatten_add_chain(transformed)
+        remaining = [
+            t
+            for t in terms
+            if not (isinstance(t, frog_ast.BitStringLiteral) and t.bit == 0)
+        ]
+
+        if len(remaining) == len(terms):
+            return transformed
+        if not remaining:
+            # All terms were 0^n; return the first zero literal
+            return terms[0]
+        return _rebuild_add_chain(remaining)
+
+
 class ReflexiveComparisonTransformer(Transformer):
     """Simplifies reflexive comparisons: x == x -> true, x != x -> false."""
 

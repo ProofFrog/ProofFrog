@@ -269,6 +269,11 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#onesExp.
+    def visitOnesExp(self, ctx:ProofParser.OnesExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#unionExp.
     def visitUnionExp(self, ctx:ProofParser.UnionExpContext):
         return self.visitChildren(ctx)
@@ -301,6 +306,11 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#orExp.
     def visitOrExp(self, ctx:ProofParser.OrExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#zerosExp.
+    def visitZerosExp(self, ctx:ProofParser.ZerosExpContext):
         return self.visitChildren(ctx)
 
 
@@ -401,6 +411,11 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#integerExpression.
     def visitIntegerExpression(self, ctx:ProofParser.IntegerExpressionContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#integerAtom.
+    def visitIntegerAtom(self, ctx:ProofParser.IntegerAtomContext):
         return self.visitChildren(ctx)
 
 

@@ -402,6 +402,28 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
     ) -> frog_ast.BinaryNum:
         return frog_ast.BinaryNum(int(ctx.BINARYNUM().getText(), 2))
 
+    def visitZerosExp(
+        self, ctx: PrimitiveParser.ZerosExpContext
+    ) -> frog_ast.BitStringLiteral:
+        return frog_ast.BitStringLiteral(0, self.visit(ctx.integerAtom()))
+
+    def visitOnesExp(
+        self, ctx: PrimitiveParser.OnesExpContext
+    ) -> frog_ast.BitStringLiteral:
+        return frog_ast.BitStringLiteral(1, self.visit(ctx.integerAtom()))
+
+    def visitIntegerAtom(
+        self, ctx: PrimitiveParser.IntegerAtomContext
+    ) -> frog_ast.Expression:
+        if ctx.INT():
+            return frog_ast.Integer(int(ctx.INT().getText()))
+        if ctx.lvalue():
+            exp: frog_ast.Expression = self.visit(ctx.lvalue())
+            return exp
+        # Parenthesized: L_PAREN integerExpression R_PAREN
+        exp = self.visit(ctx.integerExpression())
+        return exp
+
     def visitVarDeclWithSampleStatement(
         self, ctx: PrimitiveParser.VarDeclWithSampleStatementContext
     ) -> frog_ast.Sample:

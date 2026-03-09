@@ -349,6 +349,104 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
         return block
 
 
+class UniformXorSimplificationTransformer(BlockTransformer):
+    """Simplifies expressions where a uniformly sampled variable is XORed
+    with another value.  Since uniform XOR anything is still uniform, we
+    can drop the other operand.
+
+    Requires the sampled variable to be used exactly once so that the
+    distributional equivalence holds (no correlation issues).
+
+    Example:
+        BitString<n> u <- BitString<n>;
+        return u + m;
+    becomes:
+        BitString<n> u <- BitString<n>;
+        return u;
+    """
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if not (
+                isinstance(statement, frog_ast.Sample)
+                and isinstance(statement.var, frog_ast.Variable)
+                and isinstance(statement.the_type, frog_ast.BitStringType)
+            ):
+                continue
+
+            var_name = statement.var.name
+
+            remaining_block = frog_ast.Block(
+                copy.deepcopy(list(block.statements[index + 1 :]))
+            )
+
+            # Count uses of var_name — must be exactly 1
+            def uses_var(name: str, node: frog_ast.ASTNode) -> bool:
+                return isinstance(node, frog_ast.Variable) and node.name == name
+
+            total_uses = 0
+            count_block = copy.deepcopy(remaining_block)
+            while True:
+                found = SearchVisitor(functools.partial(uses_var, var_name)).visit(
+                    count_block
+                )
+                if found is None:
+                    break
+                total_uses += 1
+                if total_uses > 1:
+                    break
+                count_block = ReplaceTransformer(
+                    found, frog_ast.Variable(var_name + "__counted__")
+                ).transform(count_block)
+
+            if total_uses != 1:
+                continue
+
+            # Find a BinaryOperation(ADD, ...) where one operand is our variable
+            def is_xor_with_uniform(name: str, node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(node, frog_ast.BinaryOperation)
+                    and node.operator == frog_ast.BinaryOperators.ADD
+                    and (
+                        (
+                            isinstance(node.left_expression, frog_ast.Variable)
+                            and node.left_expression.name == name
+                        )
+                        or (
+                            isinstance(node.right_expression, frog_ast.Variable)
+                            and node.right_expression.name == name
+                        )
+                    )
+                )
+
+            xor_node = SearchVisitor(
+                functools.partial(is_xor_with_uniform, var_name)
+            ).visit(remaining_block)
+            if xor_node is None:
+                continue
+
+            # Replace the BinaryOperation with just the uniform variable
+            assert isinstance(xor_node, frog_ast.BinaryOperation)
+            if (
+                isinstance(xor_node.left_expression, frog_ast.Variable)
+                and xor_node.left_expression.name == var_name
+            ):
+                uniform_var = xor_node.left_expression
+            else:
+                uniform_var = xor_node.right_expression
+
+            remaining_block = ReplaceTransformer(
+                xor_node, copy.deepcopy(uniform_var)
+            ).transform(remaining_block)
+
+            new_block = frog_ast.Block(
+                list(block.statements[: index + 1]) + list(remaining_block.statements)
+            )
+            return self.transform_block(new_block)
+
+        return block
+
+
 class RedundantFieldCopyTransformer(BlockTransformer):
     def __init__(self) -> None:
         self.fields: list[str] = []

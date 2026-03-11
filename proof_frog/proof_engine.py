@@ -712,10 +712,6 @@ class ProofEngine:
         challenger: frog_ast.Game,
         reduction: frog_ast.Reduction,
     ) -> frog_ast.Game:
-        print("Reduction to apply:")
-        print(reduction)
-        print("Challenger:")
-        print(challenger)
         name = "Inlined"
         parameters = challenger.parameters
         new_fields = [
@@ -735,7 +731,7 @@ class ProofEngine:
             reduced_game.methods.insert(0, challenger.get_method("Initialize"))
         elif challenger.has_method("Initialize"):
             # Must combine two methods together
-            # Do so by inserting an arg = challenger.Initialize() at the beginning
+            # Do so by inserting a challenger.Initialize() call at the beginning
             # and then using the inline transformer
             challenger_initialize = challenger.get_method("Initialize")
             reduction_initialize = reduced_game.get_method("Initialize")
@@ -744,11 +740,13 @@ class ProofEngine:
                 [],
             )
             if isinstance(challenger_initialize.signature.return_type, frog_ast.Void):
+                # Case A: Challenger returns Void — call as statement
                 reduction_initialize.block = (
                     frog_ast.Block([call_initialize]) + reduction_initialize.block
                 )
-
-            else:
+            elif reduction_initialize.signature.parameters:
+                # Case B: Challenger returns non-Void and reduction has a
+                # parameter to receive it (existing convention)
                 param = reduction_initialize.signature.parameters[0]
                 reduction_initialize.block = (
                     frog_ast.Block(
@@ -762,10 +760,29 @@ class ProofEngine:
                     )
                     + reduction_initialize.block
                 )
-            reduction_initialize.signature.parameters = []
-            reduction_initialize.signature.return_type = (
-                challenger_initialize.signature.return_type
-            )
+                reduction_initialize.signature.parameters = (
+                    reduction_initialize.signature.parameters[1:]
+                )
+                reduction_initialize.signature.return_type = (
+                    challenger_initialize.signature.return_type
+                )
+            else:
+                # Case C: Challenger returns non-Void but reduction has no
+                # parameters — assign to temp variable and discard
+                reduction_initialize.block = (
+                    frog_ast.Block(
+                        [
+                            frog_ast.Assignment(
+                                copy.deepcopy(
+                                    challenger_initialize.signature.return_type
+                                ),
+                                frog_ast.Variable("_init_result"),
+                                call_initialize,
+                            )
+                        ]
+                    )
+                    + reduction_initialize.block
+                )
             reduction_initialize = visitors.InlineTransformer(
                 {("challenger", "Initialize"): challenger_initialize}
             ).transform(reduction_initialize)

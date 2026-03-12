@@ -794,6 +794,15 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 )
         self.ast_type_map.set(bit_string_type, bit_string_type)
 
+    def leave_mod_int_type(self, mod_int_type: frog_ast.ModIntType) -> None:
+        modulus_type = self.get_type_from_ast(mod_int_type.modulus)
+        if modulus_type != frog_ast.IntType():
+            self.print_error(
+                mod_int_type,
+                f"ModInt must be parameterized with an integer value, got type {modulus_type}",
+            )
+        self.ast_type_map.set(mod_int_type, mod_int_type)
+
     def leave_array_access(self, array_access: frog_ast.ArrayAccess) -> None:
         if not isinstance(array_access.index, frog_ast.Integer):
             self.print_error(array_access, "Index must be an integer constant")
@@ -832,12 +841,15 @@ class CheckTypeVisitor(VariableTypeVisitor):
             self.ast_type_map.set(unary_op, frog_ast.BoolType())
         elif unary_op.operator == frog_ast.UnaryOperators.MINUS:
             expression_type = self.get_type_from_ast(unary_op.expression)
-            if not compare_types(frog_ast.IntType(), expression_type):
+            if isinstance(expression_type, frog_ast.ModIntType):
+                self.ast_type_map.set(unary_op, expression_type)
+            elif compare_types(frog_ast.IntType(), expression_type):
+                self.ast_type_map.set(unary_op, frog_ast.IntType())
+            else:
                 self.print_error(
                     unary_op,
-                    f"{unary_op.expression} has type {expression_type}, expected Int",
+                    f"{unary_op.expression} has type {expression_type}, expected Int or ModInt",
                 )
-            self.ast_type_map.set(unary_op, frog_ast.IntType())
         elif unary_op.operator == frog_ast.UnaryOperators.SIZE:
             expression_type = self.get_type_from_ast(unary_op.expression)
             if not isinstance(expression_type, frog_ast.SetType):
@@ -847,39 +859,109 @@ class CheckTypeVisitor(VariableTypeVisitor):
             self.ast_type_map.set(unary_op, frog_ast.IntType())
 
     def leave_binary_operation(self, bin_op: frog_ast.BinaryOperation) -> None:
+        left_type = self.get_type_from_ast(bin_op.left_expression)
+        right_type = self.get_type_from_ast(bin_op.right_expression)
+
+        # Product type: T * U where T, U are type-level expressions (not value variables).
+        # Guard against Int or ModInt operands, which indicate arithmetic multiplication.
         if (
             bin_op.operator == frog_ast.BinaryOperators.MULTIPLY
             and isinstance(bin_op.left_expression, frog_ast.Type)
             and isinstance(bin_op.right_expression, frog_ast.Type)
+            and not isinstance(left_type, (frog_ast.IntType, frog_ast.ModIntType))
         ):
             self.ast_type_map.set(bin_op, bin_op)
             return
 
-        left_type = self.get_type_from_ast(bin_op.left_expression)
-        right_type = self.get_type_from_ast(bin_op.right_expression)
-
         if bin_op.operator == frog_ast.BinaryOperators.ADD:
-            if not compare_types(left_type, right_type):
-                self.print_error(
-                    bin_op,
-                    f"Left expression and right expression have different types: {left_type} and {right_type}",
-                )
-            if not isinstance(left_type, frog_ast.IntType) and not isinstance(
-                left_type, frog_ast.BitStringType
+            if isinstance(left_type, frog_ast.ModIntType) and isinstance(
+                right_type, frog_ast.ModIntType
             ):
-                self.print_error(bin_op, "Cannot add types")
-            self.ast_type_map.set(bin_op, left_type)
-        elif bin_op.operator in (
-            frog_ast.BinaryOperators.MULTIPLY,
-            frog_ast.BinaryOperators.SUBTRACT,
-            bin_op.operator == frog_ast.BinaryOperators.DIVIDE,
-        ):
-            if left_type != frog_ast.IntType() or right_type != frog_ast.IntType():
+                if not compare_types(left_type, right_type):
+                    self.print_error(
+                        bin_op,
+                        f"ModInt addition requires matching moduli, got {left_type} and {right_type}",
+                    )
+                self.ast_type_map.set(bin_op, left_type)
+            elif isinstance(left_type, frog_ast.IntType) and isinstance(
+                right_type, frog_ast.IntType
+            ):
+                self.ast_type_map.set(bin_op, frog_ast.IntType())
+            elif isinstance(left_type, frog_ast.BitStringType) and isinstance(
+                right_type, frog_ast.BitStringType
+            ):
+                if not compare_types(left_type, right_type):
+                    self.print_error(
+                        bin_op,
+                        f"Left expression and right expression have different types: {left_type} and {right_type}",
+                    )
+                self.ast_type_map.set(bin_op, left_type)
+            else:
                 self.print_error(
                     bin_op,
-                    f"Can not use operator {bin_op.operator.value} with types {left_type} and {right_type}",
+                    f"Cannot add types {left_type} and {right_type}",
                 )
-            self.ast_type_map.set(bin_op, frog_ast.IntType())
+        elif bin_op.operator == frog_ast.BinaryOperators.SUBTRACT:
+            if isinstance(left_type, frog_ast.ModIntType) and isinstance(
+                right_type, frog_ast.ModIntType
+            ):
+                if not compare_types(left_type, right_type):
+                    self.print_error(
+                        bin_op,
+                        f"ModInt subtraction requires matching moduli, got {left_type} and {right_type}",
+                    )
+                self.ast_type_map.set(bin_op, left_type)
+            elif left_type == frog_ast.IntType() and right_type == frog_ast.IntType():
+                self.ast_type_map.set(bin_op, frog_ast.IntType())
+            else:
+                self.print_error(
+                    bin_op,
+                    f"Can not use operator - with types {left_type} and {right_type}",
+                )
+        elif bin_op.operator == frog_ast.BinaryOperators.MULTIPLY:
+            if isinstance(left_type, frog_ast.ModIntType) and isinstance(
+                right_type, frog_ast.ModIntType
+            ):
+                if not compare_types(left_type, right_type):
+                    self.print_error(
+                        bin_op,
+                        f"ModInt multiplication requires matching moduli, got {left_type} and {right_type}",
+                    )
+                self.ast_type_map.set(bin_op, left_type)
+            elif left_type == frog_ast.IntType() and right_type == frog_ast.IntType():
+                self.ast_type_map.set(bin_op, frog_ast.IntType())
+            else:
+                self.print_error(
+                    bin_op,
+                    f"Can not use operator * with types {left_type} and {right_type}",
+                )
+        elif bin_op.operator == frog_ast.BinaryOperators.DIVIDE:
+            if isinstance(left_type, frog_ast.ModIntType) and isinstance(
+                right_type, frog_ast.ModIntType
+            ):
+                if not compare_types(left_type, right_type):
+                    self.print_error(
+                        bin_op,
+                        f"ModInt division requires matching moduli, got {left_type} and {right_type}",
+                    )
+                self.ast_type_map.set(bin_op, left_type)
+            elif left_type == frog_ast.IntType() and right_type == frog_ast.IntType():
+                self.ast_type_map.set(bin_op, frog_ast.IntType())
+            else:
+                self.print_error(
+                    bin_op,
+                    f"Can not use operator / with types {left_type} and {right_type}",
+                )
+        elif bin_op.operator == frog_ast.BinaryOperators.EXPONENTIATE:
+            if isinstance(left_type, frog_ast.ModIntType) and isinstance(
+                right_type, frog_ast.IntType
+            ):
+                self.ast_type_map.set(bin_op, left_type)
+            else:
+                self.print_error(
+                    bin_op,
+                    f"Exponentiation requires ModInt base and Int exponent, got {left_type} and {right_type}",
+                )
         elif bin_op.operator == frog_ast.BinaryOperators.AND:
             if left_type == frog_ast.BoolType() and right_type == frog_ast.BoolType():
                 self.ast_type_map.set(bin_op, frog_ast.BoolType())
@@ -1281,6 +1363,21 @@ def compare_types(declared_type: PossibleType, value_type: PossibleType) -> bool
             value_type_expression = get_sympy_expression(value_type)
             bool_value = declared_type_expression == value_type_expression
             return bool_value
+        return True
+
+    if isinstance(declared_type, frog_ast.ModIntType) and isinstance(
+        value_type, frog_ast.ModIntType
+    ):
+        declared_modulus = get_sympy_expression(declared_type.modulus)
+        value_modulus = get_sympy_expression(value_type.modulus)
+        if declared_modulus is None or value_modulus is None:
+            return declared_type == value_type
+        bool_value = declared_modulus == value_modulus
+        return bool_value
+
+    if isinstance(declared_type, frog_ast.ModIntType) and isinstance(
+        value_type, frog_ast.IntType
+    ):
         return True
 
     return False

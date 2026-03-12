@@ -1,4 +1,4 @@
-# Generated from proof_frog/antlr/Scheme.g4 by ANTLR 4.13.2
+# Generated from Scheme.g4 by ANTLR 4.13.2
 from antlr4 import *
 if "." in __name__:
     from .SchemeParser import SchemeParser
@@ -254,6 +254,11 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SchemeParser#exponentiationExp.
+    def visitExponentiationExp(self, ctx:SchemeParser.ExponentiationExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SchemeParser#createTupleExp.
     def visitCreateTupleExp(self, ctx:SchemeParser.CreateTupleExpContext):
         return self.visitChildren(ctx)
@@ -329,6 +334,11 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SchemeParser#modIntType.
+    def visitModIntType(self, ctx:SchemeParser.ModIntTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SchemeParser#setType.
     def visitSetType(self, ctx:SchemeParser.SetTypeContext):
         return self.visitChildren(ctx)
@@ -361,6 +371,11 @@ class SchemeVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SchemeParser#bitstring.
     def visitBitstring(self, ctx:SchemeParser.BitstringContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#modint.
+    def visitModint(self, ctx:SchemeParser.ModintContext):
         return self.visitChildren(ctx)
 
 

@@ -1,4 +1,4 @@
-# Generated from proof_frog/antlr/Primitive.g4 by ANTLR 4.13.2
+# Generated from Primitive.g4 by ANTLR 4.13.2
 from antlr4 import *
 if "." in __name__:
     from .PrimitiveParser import PrimitiveParser
@@ -249,6 +249,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#exponentiationExp.
+    def visitExponentiationExp(self, ctx:PrimitiveParser.ExponentiationExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#createTupleExp.
     def visitCreateTupleExp(self, ctx:PrimitiveParser.CreateTupleExpContext):
         return self.visitChildren(ctx)
@@ -324,6 +329,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#modIntType.
+    def visitModIntType(self, ctx:PrimitiveParser.ModIntTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#setType.
     def visitSetType(self, ctx:PrimitiveParser.SetTypeContext):
         return self.visitChildren(ctx)
@@ -356,6 +366,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by PrimitiveParser#bitstring.
     def visitBitstring(self, ctx:PrimitiveParser.BitstringContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#modint.
+    def visitModint(self, ctx:PrimitiveParser.ModintContext):
         return self.visitChildren(ctx)
 
 

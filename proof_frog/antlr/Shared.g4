@@ -40,6 +40,8 @@ expression:
 	| NOT expression #notExp
 	| VBAR expression VBAR #sizeExp
 
+	| <assoc=right> expression CARET expression #exponentiationExp
+
 	| expression TIMES expression #multiplyExp
 	| expression DIVIDE expression #divideExp
 	| SUBTRACT expression #minusExp
@@ -87,6 +89,7 @@ type: type QUESTION #optionalType
 	| INTTYPE #intType
 	| type (TIMES type)+ #productType
 	| bitstring #bitStringType
+	| modint #modIntType
 	| lvalue # lvalueType
 	;
 
@@ -108,6 +111,8 @@ integerAtom
 	;
 
 bitstring: BITSTRING L_ANGLE integerExpression R_ANGLE | BITSTRING;
+
+modint: MODINT L_ANGLE integerExpression R_ANGLE;
 
 set: SET L_ANGLE type R_ANGLE | SET;
 
@@ -144,6 +149,7 @@ SAMPLES: '<-';
 AND: '&&';
 BACKSLASH: '\\';
 NOT: '!';
+CARET: '^';
 VBAR: '|';
 
 SET: 'Set';
@@ -155,6 +161,7 @@ MAP: 'Map';
 RETURN: 'return';
 IMPORT: 'import';
 BITSTRING: 'BitString';
+MODINT: 'ModInt';
 ARRAY: 'Array';
 PRIMITIVE: 'Primitive';
 SUBSETS: 'subsets';

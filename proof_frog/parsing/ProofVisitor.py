@@ -1,4 +1,4 @@
-# Generated from proof_frog/antlr/Proof.g4 by ANTLR 4.13.2
+# Generated from Proof.g4 by ANTLR 4.13.2
 from antlr4 import *
 if "." in __name__:
     from .ProofParser import ProofParser
@@ -314,6 +314,11 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#exponentiationExp.
+    def visitExponentiationExp(self, ctx:ProofParser.ExponentiationExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#createTupleExp.
     def visitCreateTupleExp(self, ctx:ProofParser.CreateTupleExpContext):
         return self.visitChildren(ctx)
@@ -389,6 +394,11 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#modIntType.
+    def visitModIntType(self, ctx:ProofParser.ModIntTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#setType.
     def visitSetType(self, ctx:ProofParser.SetTypeContext):
         return self.visitChildren(ctx)
@@ -421,6 +431,11 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#bitstring.
     def visitBitstring(self, ctx:ProofParser.BitstringContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#modint.
+    def visitModint(self, ctx:ProofParser.ModintContext):
         return self.visitChildren(ctx)
 
 

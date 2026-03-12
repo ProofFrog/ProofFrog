@@ -108,6 +108,15 @@ class BitStringType(Type):
         return f'BitString{"" if not self.parameterization else f"<{self.parameterization}>"}'
 
 
+class ModIntType(Type):
+    def __init__(self, modulus: Expression) -> None:
+        super().__init__()
+        self.modulus = modulus
+
+    def __str__(self) -> str:
+        return f"ModInt<{self.modulus}>"
+
+
 class OptionalType(Type):
     def __init__(self, the_type: Type) -> None:
         super().__init__()
@@ -136,9 +145,12 @@ class BinaryOperators(Enum):
     SUBTRACT = "-"
     MULTIPLY = "*"
     DIVIDE = "/"
+    EXPONENTIATE = "^"
 
     def precedence(self) -> int:
         """Return precedence level (higher binds tighter)."""
+        if self == BinaryOperators.EXPONENTIATE:
+            return 5
         if self in (BinaryOperators.MULTIPLY, BinaryOperators.DIVIDE):
             return 4
         if self in (BinaryOperators.ADD, BinaryOperators.SUBTRACT):
@@ -177,18 +189,33 @@ class BinaryOperation(Expression, Type):
         self.right_expression = right_expression
 
     @staticmethod
-    def _parenthesize(child: Expression, parent_prec: int, is_right: bool) -> str:
+    def _parenthesize(
+        child: Expression,
+        parent_prec: int,
+        is_right: bool,
+        right_assoc: bool = False,
+    ) -> str:
         """Wrap child in parens if needed based on precedence."""
         if isinstance(child, BinaryOperation):
             child_prec = child.operator.precedence()
-            if child_prec < parent_prec or (is_right and child_prec == parent_prec):
+            if child_prec < parent_prec:
                 return f"({child})"
+            if child_prec == parent_prec:
+                # Left-assoc: parenthesize right child at equal prec
+                # Right-assoc: parenthesize left child at equal prec
+                if (not right_assoc and is_right) or (right_assoc and not is_right):
+                    return f"({child})"
         return str(child)
 
     def __str__(self) -> str:
         prec = self.operator.precedence()
-        left = self._parenthesize(self.left_expression, prec, is_right=False)
-        right = self._parenthesize(self.right_expression, prec, is_right=True)
+        right_assoc = self.operator == BinaryOperators.EXPONENTIATE
+        left = self._parenthesize(
+            self.left_expression, prec, is_right=False, right_assoc=right_assoc
+        )
+        right = self._parenthesize(
+            self.right_expression, prec, is_right=True, right_assoc=right_assoc
+        )
         return f"{left} {self.operator.value} {right}"
 
 

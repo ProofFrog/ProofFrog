@@ -1,4 +1,4 @@
-# Generated from proof_frog/antlr/Game.g4 by ANTLR 4.13.2
+# Generated from Game.g4 by ANTLR 4.13.2
 from antlr4 import *
 if "." in __name__:
     from .GameParser import GameParser
@@ -249,6 +249,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#exponentiationExp.
+    def visitExponentiationExp(self, ctx:GameParser.ExponentiationExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#createTupleExp.
     def visitCreateTupleExp(self, ctx:GameParser.CreateTupleExpContext):
         return self.visitChildren(ctx)
@@ -324,6 +329,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#modIntType.
+    def visitModIntType(self, ctx:GameParser.ModIntTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#setType.
     def visitSetType(self, ctx:GameParser.SetTypeContext):
         return self.visitChildren(ctx)
@@ -356,6 +366,11 @@ class GameVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by GameParser#bitstring.
     def visitBitstring(self, ctx:GameParser.BitstringContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#modint.
+    def visitModint(self, ctx:GameParser.ModintContext):
         return self.visitChildren(ctx)
 
 

@@ -194,6 +194,11 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             return frog_ast.BitStringType()
         return frog_ast.BitStringType(self.visit(ctx.bitstring().integerExpression()))
 
+    def visitModIntType(
+        self, ctx: PrimitiveParser.ModIntTypeContext
+    ) -> frog_ast.ModIntType:
+        return frog_ast.ModIntType(self.visit(ctx.modint().integerExpression()))
+
     def visitProductType(
         self, ctx: PrimitiveParser.ProductTypeContext
     ) -> frog_ast.BinaryOperation:
@@ -299,6 +304,11 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         self, ctx: PrimitiveParser.DivideExpContext
     ) -> frog_ast.BinaryOperation:
         return _binary_operation(frog_ast.BinaryOperators.DIVIDE, self.visit, ctx)
+
+    def visitExponentiationExp(
+        self, ctx: PrimitiveParser.ExponentiationExpContext
+    ) -> frog_ast.BinaryOperation:
+        return _binary_operation(frog_ast.BinaryOperators.EXPONENTIATE, self.visit, ctx)
 
     def visitCreateSetExp(
         self, ctx: PrimitiveParser.CreateSetExpContext

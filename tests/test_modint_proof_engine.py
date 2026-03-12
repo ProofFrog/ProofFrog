@@ -505,6 +505,40 @@ class TestUniformModIntSimplification:
         result = UniformModIntSimplificationTransformer().transform(method)
         assert result == method
 
+    def test_simplifies_uniform_minus_value(self) -> None:
+        """ModInt<q> r <- ModInt<q>; return r - m; -> return r;"""
+        method = frog_parser.parse_method("""
+            ModInt<q> f(ModInt<q> m) {
+                ModInt<q> r <- ModInt<q>;
+                return r - m;
+            }
+        """)
+        expected = frog_parser.parse_method("""
+            ModInt<q> f(ModInt<q> m) {
+                ModInt<q> r <- ModInt<q>;
+                return r;
+            }
+        """)
+        result = UniformModIntSimplificationTransformer().transform(method)
+        assert result == expected
+
+    def test_simplifies_value_minus_uniform(self) -> None:
+        """ModInt<q> r <- ModInt<q>; return m - r; -> return r;"""
+        method = frog_parser.parse_method("""
+            ModInt<q> f(ModInt<q> m) {
+                ModInt<q> r <- ModInt<q>;
+                return m - r;
+            }
+        """)
+        expected = frog_parser.parse_method("""
+            ModInt<q> f(ModInt<q> m) {
+                ModInt<q> r <- ModInt<q>;
+                return r;
+            }
+        """)
+        result = UniformModIntSimplificationTransformer().transform(method)
+        assert result == expected
+
     def test_does_not_simplify_multiply(self) -> None:
         """Uniform + anything is uniform, but uniform * anything is NOT uniform."""
         method = frog_parser.parse_method("""

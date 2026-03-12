@@ -449,16 +449,17 @@ class UniformXorSimplificationTransformer(BlockTransformer):
 
 class UniformModIntSimplificationTransformer(BlockTransformer):
     """Simplifies expressions where a uniformly sampled ModInt variable is
-    added to another value.  Since uniform + anything is still uniform in
-    a group, we can drop the other operand.
+    combined additively with another value.  Since uniform +/- anything
+    is still uniform in a group (and anything - uniform is also uniform),
+    we can drop the other operand.
 
     Requires the sampled variable to be used exactly once so that the
     distributional equivalence holds (no correlation issues).
 
-    Example:
-        ModInt<q> u <- ModInt<q>;
-        return u + m;
-    becomes:
+    Examples:
+        ModInt<q> u <- ModInt<q>;    ModInt<q> u <- ModInt<q>;
+        return u + m;                return u - m;
+    both become:
         ModInt<q> u <- ModInt<q>;
         return u;
     """
@@ -500,11 +501,17 @@ class UniformModIntSimplificationTransformer(BlockTransformer):
             if total_uses != 1:
                 continue
 
-            # Find a BinaryOperation(ADD, ...) where one operand is our variable
-            def is_add_with_uniform(name: str, node: frog_ast.ASTNode) -> bool:
+            # Find a BinaryOperation(ADD or SUBTRACT, ...) where one operand
+            # is our variable.  In a group, uniform +/- anything = uniform
+            # and anything - uniform = uniform.
+            def is_additive_with_uniform(name: str, node: frog_ast.ASTNode) -> bool:
                 return (
                     isinstance(node, frog_ast.BinaryOperation)
-                    and node.operator == frog_ast.BinaryOperators.ADD
+                    and node.operator
+                    in (
+                        frog_ast.BinaryOperators.ADD,
+                        frog_ast.BinaryOperators.SUBTRACT,
+                    )
                     and (
                         (
                             isinstance(node.left_expression, frog_ast.Variable)
@@ -518,7 +525,7 @@ class UniformModIntSimplificationTransformer(BlockTransformer):
                 )
 
             add_node = SearchVisitor(
-                functools.partial(is_add_with_uniform, var_name)
+                functools.partial(is_additive_with_uniform, var_name)
             ).visit(remaining_block)
             if add_node is None:
                 continue

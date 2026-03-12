@@ -393,6 +393,12 @@ class ProofEngine:
                 ),
                 name="Uniform XOR Simplification",
             ),
+            AstManipulator(
+                fn=lambda ast: visitors.UniformModIntSimplificationTransformer().transform(
+                    ast
+                ),
+                name="Uniform ModInt Simplification",
+            ),
             AstManipulator(fn=self.sort_game, name="Topological Sorting"),
             AstManipulator(fn=remove_duplicate_fields, name="Remove Duplicate Fields"),
             AstManipulator(
@@ -424,12 +430,22 @@ class ProofEngine:
                 name="Simplify Nots",
             ),
             AstManipulator(
-                fn=lambda ast: visitors.XorCancellationTransformer().transform(ast),
+                fn=lambda ast: visitors.XorCancellationTransformer(
+                    visitors.build_game_type_map(ast, self.proof_let_types)
+                ).transform(ast),
                 name="XOR Cancellation",
             ),
             AstManipulator(
-                fn=lambda ast: visitors.XorIdentityTransformer().transform(ast),
+                fn=lambda ast: visitors.XorIdentityTransformer(
+                    visitors.build_game_type_map(ast, self.proof_let_types)
+                ).transform(ast),
                 name="XOR Identity",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.ModIntSimplificationTransformer(
+                    visitors.build_game_type_map(ast, self.proof_let_types)
+                ).transform(ast),
+                name="ModInt Simplification",
             ),
             AstManipulator(
                 fn=lambda ast: visitors.ReflexiveComparisonTransformer().transform(ast),
@@ -640,6 +656,12 @@ class ProofEngine:
                 ),
                 name="Uniform XOR Simplification",
             ),
+            AstManipulator(
+                fn=lambda ast: visitors.UniformModIntSimplificationTransformer().transform(
+                    ast
+                ),
+                name="Uniform ModInt Simplification",
+            ),
             AstManipulator(fn=self.sort_game, name="Topological Sorting"),
             AstManipulator(fn=remove_duplicate_fields, name="Remove Duplicate Fields"),
             AstManipulator(
@@ -671,12 +693,22 @@ class ProofEngine:
                 name="Simplify Nots",
             ),
             AstManipulator(
-                fn=lambda ast: visitors.XorCancellationTransformer().transform(ast),
+                fn=lambda ast: visitors.XorCancellationTransformer(
+                    visitors.build_game_type_map(ast, self.proof_let_types)
+                ).transform(ast),
                 name="XOR Cancellation",
             ),
             AstManipulator(
-                fn=lambda ast: visitors.XorIdentityTransformer().transform(ast),
+                fn=lambda ast: visitors.XorIdentityTransformer(
+                    visitors.build_game_type_map(ast, self.proof_let_types)
+                ).transform(ast),
                 name="XOR Identity",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.ModIntSimplificationTransformer(
+                    visitors.build_game_type_map(ast, self.proof_let_types)
+                ).transform(ast),
+                name="ModInt Simplification",
             ),
             AstManipulator(
                 fn=lambda ast: visitors.ReflexiveComparisonTransformer().transform(ast),

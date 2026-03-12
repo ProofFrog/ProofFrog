@@ -1390,6 +1390,13 @@ class SymbolicComputationTransformer(Transformer):
         self.computation_stack.append(None)
         return new_bs
 
+    def transform_mod_int_type(
+        self, mod_int_type: frog_ast.ModIntType
+    ) -> frog_ast.ModIntType:
+        new_modulus = self.transform(mod_int_type.modulus)
+        self.computation_stack.append(None)
+        return frog_ast.ModIntType(new_modulus)
+
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
     ) -> frog_ast.ASTNode:

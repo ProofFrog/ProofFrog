@@ -204,6 +204,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#onesExp.
+    def visitOnesExp(self, ctx:PrimitiveParser.OnesExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#unionExp.
     def visitUnionExp(self, ctx:PrimitiveParser.UnionExpContext):
         return self.visitChildren(ctx)
@@ -236,6 +241,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by PrimitiveParser#orExp.
     def visitOrExp(self, ctx:PrimitiveParser.OrExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#zerosExp.
+    def visitZerosExp(self, ctx:PrimitiveParser.ZerosExpContext):
         return self.visitChildren(ctx)
 
 
@@ -336,6 +346,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by PrimitiveParser#integerExpression.
     def visitIntegerExpression(self, ctx:PrimitiveParser.IntegerExpressionContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#integerAtom.
+    def visitIntegerAtom(self, ctx:PrimitiveParser.IntegerAtomContext):
         return self.visitChildren(ctx)
 
 

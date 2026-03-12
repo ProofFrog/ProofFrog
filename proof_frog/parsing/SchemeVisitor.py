@@ -209,6 +209,11 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SchemeParser#onesExp.
+    def visitOnesExp(self, ctx:SchemeParser.OnesExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SchemeParser#unionExp.
     def visitUnionExp(self, ctx:SchemeParser.UnionExpContext):
         return self.visitChildren(ctx)
@@ -241,6 +246,11 @@ class SchemeVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SchemeParser#orExp.
     def visitOrExp(self, ctx:SchemeParser.OrExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#zerosExp.
+    def visitZerosExp(self, ctx:SchemeParser.ZerosExpContext):
         return self.visitChildren(ctx)
 
 
@@ -341,6 +351,11 @@ class SchemeVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SchemeParser#integerExpression.
     def visitIntegerExpression(self, ctx:SchemeParser.IntegerExpressionContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#integerAtom.
+    def visitIntegerAtom(self, ctx:SchemeParser.IntegerAtomContext):
         return self.visitChildren(ctx)
 
 

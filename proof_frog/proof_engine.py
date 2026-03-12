@@ -428,6 +428,10 @@ class ProofEngine:
                 name="XOR Cancellation",
             ),
             AstManipulator(
+                fn=lambda ast: visitors.XorIdentityTransformer().transform(ast),
+                name="XOR Identity",
+            ),
+            AstManipulator(
                 fn=lambda ast: visitors.ReflexiveComparisonTransformer().transform(ast),
                 name="Reflexive Comparison",
             ),
@@ -669,6 +673,10 @@ class ProofEngine:
             AstManipulator(
                 fn=lambda ast: visitors.XorCancellationTransformer().transform(ast),
                 name="XOR Cancellation",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.XorIdentityTransformer().transform(ast),
+                name="XOR Identity",
             ),
             AstManipulator(
                 fn=lambda ast: visitors.ReflexiveComparisonTransformer().transform(ast),

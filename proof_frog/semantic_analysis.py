@@ -1047,6 +1047,13 @@ class CheckTypeVisitor(VariableTypeVisitor):
     def leave_binary_num(self, binary_num: frog_ast.BinaryNum) -> None:
         self.ast_type_map.set(binary_num, frog_ast.BitStringType())
 
+    def leave_bitstring_literal(
+        self, bitstring_literal: frog_ast.BitStringLiteral
+    ) -> None:
+        self.ast_type_map.set(
+            bitstring_literal, frog_ast.BitStringType(bitstring_literal.length)
+        )
+
     def leave_assignment(self, assignment: frog_ast.Assignment) -> None:
         super().leave_assignment(assignment)
         expected_type = (

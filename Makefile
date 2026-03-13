@@ -1,6 +1,6 @@
 PYTHON := .venv/bin/python
 
-.PHONY: lint format test
+.PHONY: lint format test parser
 
 lint:
 	$(PYTHON) -m black --check proof_frog
@@ -12,3 +12,11 @@ format:
 
 test:
 	$(PYTHON) -m pytest
+
+GRAMMARS := Game.g4 Primitive.g4 Proof.g4 Scheme.g4
+
+parser:
+	rm -rf proof_frog/parsing/*
+	touch proof_frog/parsing/__init__.py
+	$(foreach g,$(GRAMMARS),antlr -Dlanguage=Python3 -visitor -no-listener proof_frog/antlr/$(g);)
+	mv proof_frog/antlr/*.interp proof_frog/antlr/*.tokens proof_frog/antlr/*.py proof_frog/parsing/

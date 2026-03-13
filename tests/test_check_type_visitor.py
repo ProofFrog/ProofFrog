@@ -74,3 +74,102 @@ class TestIntegerLiteralControl:
             }
             """
         )
+
+
+class TestNullableTypes:
+    """Tests for nullable type handling and null-narrowing."""
+
+    def test_nullable_equals_none(self) -> None:
+        _check_game(
+            """
+            Game G() {
+                Bool Test(BitString<8>? x) {
+                    return x == None;
+                }
+            }
+            """
+        )
+
+    def test_nullable_not_equals_none(self) -> None:
+        _check_game(
+            """
+            Game G() {
+                Bool Test(BitString<8>? x) {
+                    return x != None;
+                }
+            }
+            """
+        )
+
+    def test_compare_nullable_with_nonnullable(self) -> None:
+        _check_game(
+            """
+            Game G() {
+                Bool Test(BitString<8> x, BitString<8>? y) {
+                    return x == y;
+                }
+            }
+            """
+        )
+
+    def test_null_narrowing_after_return_guard(self) -> None:
+        _check_game(
+            """
+            Game G() {
+                BitString<8> Test(BitString<8>? x) {
+                    if (x == None) {
+                        return 0^8;
+                    }
+                    BitString<8> y = x;
+                    return y;
+                }
+            }
+            """
+        )
+
+    def test_implicit_unwrap_rejected(self) -> None:
+        with pytest.raises(semantic_analysis.FailedTypeCheck):
+            _check_game(
+                """
+                Game G() {
+                    BitString<8> Test(BitString<8>? x) {
+                        BitString<8> y = x;
+                        return y;
+                    }
+                }
+                """
+            )
+
+    def test_nullable_return_from_nullable_method(self) -> None:
+        _check_game(
+            """
+            Game G() {
+                BitString<8>? Test(BitString<8>? x) {
+                    return x;
+                }
+            }
+            """
+        )
+
+    def test_none_return_from_nullable_method(self) -> None:
+        _check_game(
+            """
+            Game G() {
+                BitString<8>? Test() {
+                    return None;
+                }
+            }
+            """
+        )
+
+    def test_nonnullable_to_nullable_assignment(self) -> None:
+        _check_game(
+            """
+            Game G() {
+                BitString<8>? Test(BitString<8> x) {
+                    BitString<8>? y = x;
+                    return y;
+                }
+            }
+            """
+        )

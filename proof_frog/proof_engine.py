@@ -422,6 +422,12 @@ class ProofEngine:
                 name="Simplify Ifs",
             ),
             AstManipulator(
+                fn=lambda ast: visitors.DeadNullGuardEliminator(
+                    visitors.build_game_type_map(ast, self.proof_let_types)
+                ).transform(ast),
+                name="Dead Null Guard Elimination",
+            ),
+            AstManipulator(
                 fn=lambda ast: visitors.ExpandTupleTransformer().transform(ast),
                 name="Expand Tuples",
             ),
@@ -683,6 +689,12 @@ class ProofEngine:
             AstManipulator(
                 fn=lambda ast: visitors.SimplifyIfTransformer().transform(ast),
                 name="Simplify Ifs",
+            ),
+            AstManipulator(
+                fn=lambda ast: visitors.DeadNullGuardEliminator(
+                    visitors.build_game_type_map(ast, self.proof_let_types)
+                ).transform(ast),
+                name="Dead Null Guard Elimination",
             ),
             AstManipulator(
                 fn=lambda ast: visitors.ExpandTupleTransformer().transform(ast),

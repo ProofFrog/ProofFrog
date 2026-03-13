@@ -498,6 +498,63 @@ def print_error(
     raise FailedTypeCheck()
 
 
+def _types_comparable(left_type: PossibleType, right_type: PossibleType) -> bool:
+    """Check if two types can be compared with == or !=.
+
+    Allows T == T, T? == None, None == T?, T == T?, and T? == T.
+    """
+    if left_type == right_type:
+        return True
+    # T? == None or None == T?
+    if isinstance(left_type, frog_ast.OptionalType) and isinstance(
+        right_type, frog_ast.NoneExpression
+    ):
+        return True
+    if isinstance(right_type, frog_ast.OptionalType) and isinstance(
+        left_type, frog_ast.NoneExpression
+    ):
+        return True
+    # T == T? or T? == T
+    left_base = (
+        left_type.the_type
+        if isinstance(left_type, frog_ast.OptionalType)
+        else left_type
+    )
+    right_base = (
+        right_type.the_type
+        if isinstance(right_type, frog_ast.OptionalType)
+        else right_type
+    )
+    return left_base == right_base
+
+
+def _extract_null_check_variable(
+    condition: frog_ast.Expression,
+    operator: frog_ast.BinaryOperators,
+) -> Optional[str]:
+    """If condition is `x == None` (or `!=`), return x's variable name."""
+    if not isinstance(condition, frog_ast.BinaryOperation):
+        return None
+    if condition.operator != operator:
+        return None
+    if isinstance(condition.left_expression, frog_ast.Variable) and isinstance(
+        condition.right_expression, frog_ast.NoneExpression
+    ):
+        return condition.left_expression.name
+    if isinstance(condition.right_expression, frog_ast.Variable) and isinstance(
+        condition.left_expression, frog_ast.NoneExpression
+    ):
+        return condition.right_expression.name
+    return None
+
+
+def _block_always_returns(block: frog_ast.Block) -> bool:
+    """Check if a block always returns (last statement is a return)."""
+    if not block.statements:
+        return False
+    return isinstance(block.statements[-1], frog_ast.ReturnStatement)
+
+
 def _extract_subsets_pairs(
     instantiated_scheme: frog_ast.Instantiable,
 ) -> list[tuple[PossibleType, PossibleType]]:
@@ -598,6 +655,15 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 self.print_error(
                     condition, f"Condition has type {condition_type}, expected bool"
                 )
+        # Null-narrowing: if (x == None) { return ...; } narrows x after the if
+        if if_statement.conditions and not if_statement.has_else_block():
+            var_name = _extract_null_check_variable(
+                if_statement.conditions[0], frog_ast.BinaryOperators.EQUALS
+            )
+            if var_name is not None and _block_always_returns(if_statement.blocks[0]):
+                current_type = self.get_type(var_name)
+                if isinstance(current_type, frog_ast.OptionalType):
+                    self.variable_type_map_stack[-1][var_name] = current_type.the_type
 
     def leave_numeric_for(self, numeric_for: frog_ast.NumericFor) -> None:
         super().leave_numeric_for(numeric_for)
@@ -1036,7 +1102,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             frog_ast.BinaryOperators.EQUALS,
             frog_ast.BinaryOperators.NOTEQUALS,
         ):
-            if left_type != right_type:
+            if not _types_comparable(left_type, right_type):
                 self.print_error(
                     bin_op,
                     f"Cannot compare different types {left_type} and {right_type}",
@@ -1442,16 +1508,15 @@ def compare_types(
     ):
         return True
 
-    if isinstance(declared_type, frog_ast.OptionalType) and compare_types(
-        declared_type.the_type, value_type, subsets_pairs
-    ):
-        return True
-
-    # Allow implicit unwrap: T? value can be used where T is expected
-    if isinstance(value_type, frog_ast.OptionalType) and compare_types(
-        declared_type, value_type.the_type, subsets_pairs
-    ):
-        return True
+    if isinstance(declared_type, frog_ast.OptionalType):
+        # T? can hold T
+        if compare_types(declared_type.the_type, value_type, subsets_pairs):
+            return True
+        # T? can hold S? if T can hold S
+        if isinstance(value_type, frog_ast.OptionalType) and compare_types(
+            declared_type.the_type, value_type.the_type, subsets_pairs
+        ):
+            return True
 
     expanded_declared_type = declared_type
     expanded_value_type = value_type

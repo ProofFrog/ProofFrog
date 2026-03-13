@@ -1568,6 +1568,52 @@ class SimplifyIfTransformer(Transformer):
         return frog_ast.IfStatement(new_conditions, new_blocks)
 
 
+class DeadNullGuardEliminator(BlockTransformer):
+    """Removes if (x == None) { ... } guards when x has non-nullable type.
+
+    After inlining, Dec methods with null guards may produce dead guards
+    when the assigned variable comes from a non-nullable source (e.g., KeyGen).
+    """
+
+    def __init__(self, type_map: NameTypeMap) -> None:
+        self.type_map = type_map
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        new_statements: list[frog_ast.Statement] = []
+        for statement in block.statements:
+            if isinstance(statement, frog_ast.IfStatement) and self._is_dead_null_guard(
+                statement
+            ):
+                continue
+            new_statements.append(statement)
+        return frog_ast.Block(new_statements)
+
+    def _is_dead_null_guard(self, if_stmt: frog_ast.IfStatement) -> bool:
+        """Check if this is `if (x == None) { ... }` where x is non-nullable."""
+        if if_stmt.has_else_block() or len(if_stmt.conditions) != 1:
+            return False
+        condition = if_stmt.conditions[0]
+        if not isinstance(condition, frog_ast.BinaryOperation):
+            return False
+        if condition.operator != frog_ast.BinaryOperators.EQUALS:
+            return False
+        var_name: Optional[str] = None
+        if isinstance(condition.left_expression, frog_ast.Variable) and isinstance(
+            condition.right_expression, frog_ast.NoneExpression
+        ):
+            var_name = condition.left_expression.name
+        elif isinstance(condition.right_expression, frog_ast.Variable) and isinstance(
+            condition.left_expression, frog_ast.NoneExpression
+        ):
+            var_name = condition.right_expression.name
+        if var_name is None:
+            return False
+        var_type = self.type_map.get(var_name)
+        if var_type is None:
+            return False
+        return not isinstance(var_type, frog_ast.OptionalType)
+
+
 class InlineTransformer(Transformer):
     def __init__(self, method_lookup: Dict[Tuple[str, str], frog_ast.Method]) -> None:
         self.blocks: list[frog_ast.Block] = []

@@ -498,6 +498,86 @@ def print_error(
     raise FailedTypeCheck()
 
 
+def _types_comparable(left_type: PossibleType, right_type: PossibleType) -> bool:
+    """Check if two types can be compared with == or !=.
+
+    Allows T == T, T? == None, None == T?, T == T?, and T? == T.
+    """
+    if left_type == right_type:
+        return True
+    # T? == None or None == T?
+    if isinstance(left_type, frog_ast.OptionalType) and isinstance(
+        right_type, frog_ast.NoneExpression
+    ):
+        return True
+    if isinstance(right_type, frog_ast.OptionalType) and isinstance(
+        left_type, frog_ast.NoneExpression
+    ):
+        return True
+    # T == T? or T? == T
+    left_base = (
+        left_type.the_type
+        if isinstance(left_type, frog_ast.OptionalType)
+        else left_type
+    )
+    right_base = (
+        right_type.the_type
+        if isinstance(right_type, frog_ast.OptionalType)
+        else right_type
+    )
+    return left_base == right_base
+
+
+def _extract_null_check_variable(
+    condition: frog_ast.Expression,
+    operator: frog_ast.BinaryOperators,
+) -> Optional[str]:
+    """If condition is `x == None` (or `!=`), return x's variable name."""
+    if not isinstance(condition, frog_ast.BinaryOperation):
+        return None
+    if condition.operator != operator:
+        return None
+    if isinstance(condition.left_expression, frog_ast.Variable) and isinstance(
+        condition.right_expression, frog_ast.NoneExpression
+    ):
+        return condition.left_expression.name
+    if isinstance(condition.right_expression, frog_ast.Variable) and isinstance(
+        condition.left_expression, frog_ast.NoneExpression
+    ):
+        return condition.right_expression.name
+    return None
+
+
+def _block_always_returns(block: frog_ast.Block) -> bool:
+    """Check if a block always returns (last statement is a return)."""
+    if not block.statements:
+        return False
+    return isinstance(block.statements[-1], frog_ast.ReturnStatement)
+
+
+def _extract_subsets_pairs(
+    instantiated_scheme: frog_ast.Instantiable,
+) -> list[tuple[PossibleType, PossibleType]]:
+    """Extract (sub_type, super_type) pairs from requires...subsets clauses.
+
+    After instantiation, the requirements have concrete Variable nodes
+    (e.g., KeySpace2 subsets IntermediateSpace).
+    """
+    pairs: list[tuple[PossibleType, PossibleType]] = []
+    if not isinstance(instantiated_scheme, frog_ast.Scheme):
+        return pairs
+    for req in instantiated_scheme.requirements:
+        if (
+            isinstance(req, frog_ast.BinaryOperation)
+            and req.operator == frog_ast.BinaryOperators.SUBSETS
+        ):
+            if isinstance(req.left_expression, frog_ast.Type) and isinstance(
+                req.right_expression, frog_ast.Type
+            ):
+                pairs.append((req.left_expression, req.right_expression))
+    return pairs
+
+
 class CheckTypeVisitor(VariableTypeVisitor):
     # pylint: disable=too-many-positional-arguments,too-many-arguments
     def __init__(
@@ -507,15 +587,25 @@ class CheckTypeVisitor(VariableTypeVisitor):
         file_name_mapping: dict[str, str],
         variable_type_map_stack: VariableTypeMapStackType = None,
         field_value_map: Optional[frog_ast.Namespace] = None,
+        subsets_pairs: Optional[list[tuple[PossibleType, PossibleType]]] = None,
     ) -> None:
         super().__init__(import_namespace, variable_type_map_stack, field_value_map)
         self.import_namespace = import_namespace
         self.ast_type_map = frog_ast.ASTMap[PossibleType]()
         self.file_name = file_name
         self.file_name_mapping = file_name_mapping
+        self.subsets_pairs: list[tuple[PossibleType, PossibleType]] = (
+            subsets_pairs if subsets_pairs is not None else []
+        )
 
     def result(self) -> None:
         return None
+
+    def check_types(
+        self, declared_type: PossibleType, value_type: PossibleType
+    ) -> bool:
+        """compare_types with subsets constraint awareness."""
+        return compare_types(declared_type, value_type, self.subsets_pairs)
 
     def print_error(self, location: frog_ast.ASTNode, message: str) -> None:
         print_error(location, message, self.file_name)
@@ -551,7 +641,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
         self._shared_primitive_scheme_checks(scheme)
         for requirement in scheme.requirements:
             requirement_type = self.get_type_from_ast(requirement)
-            if not compare_types(frog_ast.BoolType(), requirement_type):
+            if not self.check_types(frog_ast.BoolType(), requirement_type):
                 self.print_error(
                     requirement,
                     f"Requirements should evaluate to a boolean type, received {requirement_type}",
@@ -561,20 +651,29 @@ class CheckTypeVisitor(VariableTypeVisitor):
     def leave_if_statement(self, if_statement: frog_ast.IfStatement) -> None:
         for condition in if_statement.conditions:
             condition_type = self.get_type_from_ast(condition)
-            if not compare_types(frog_ast.BoolType(), condition_type):
+            if not self.check_types(frog_ast.BoolType(), condition_type):
                 self.print_error(
                     condition, f"Condition has type {condition_type}, expected bool"
                 )
+        # Null-narrowing: if (x == None) { return ...; } narrows x after the if
+        if if_statement.conditions and not if_statement.has_else_block():
+            var_name = _extract_null_check_variable(
+                if_statement.conditions[0], frog_ast.BinaryOperators.EQUALS
+            )
+            if var_name is not None and _block_always_returns(if_statement.blocks[0]):
+                current_type = self.get_type(var_name)
+                if isinstance(current_type, frog_ast.OptionalType):
+                    self.variable_type_map_stack[-1][var_name] = current_type.the_type
 
     def leave_numeric_for(self, numeric_for: frog_ast.NumericFor) -> None:
         super().leave_numeric_for(numeric_for)
         start_type = self.get_type_from_ast(numeric_for.start)
         end_type = self.get_type_from_ast(numeric_for.end)
-        if not compare_types(frog_ast.IntType(), start_type):
+        if not self.check_types(frog_ast.IntType(), start_type):
             self.print_error(
                 numeric_for, f"Start expression has type {start_type}, expected Int"
             )
-        if not compare_types(frog_ast.IntType(), end_type):
+        if not self.check_types(frog_ast.IntType(), end_type):
             self.print_error(
                 numeric_for, f"End expression has type {end_type}, expected Int"
             )
@@ -739,7 +838,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
 
     def leave_step_assumption(self, assumption: frog_ast.StepAssumption) -> None:
         expression_type = self.get_type_from_ast(assumption.expression)
-        if not compare_types(frog_ast.BoolType(), expression_type):
+        if not self.check_types(frog_ast.BoolType(), expression_type):
             self.print_error(
                 assumption, f"Expression has type {expression_type}, expected Bool"
             )
@@ -747,11 +846,11 @@ class CheckTypeVisitor(VariableTypeVisitor):
     def leave_induction(self, induction: frog_ast.Induction) -> None:
         start_type = self.get_type_from_ast(induction.start)
         end_type = self.get_type_from_ast(induction.end)
-        if not compare_types(frog_ast.IntType(), start_type):
+        if not self.check_types(frog_ast.IntType(), start_type):
             self.print_error(
                 induction.start, f"Induction start has type {start_type}, expected Int"
             )
-        if not compare_types(frog_ast.IntType(), end_type):
+        if not self.check_types(frog_ast.IntType(), end_type):
             self.print_error(
                 induction.start, f"Induction end has type {end_type}, expected Int"
             )
@@ -766,7 +865,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
 
             expr_type = self.get_type_from_ast(node.expression)
 
-            return not compare_types(expected_type, expr_type)
+            return not self.check_types(expected_type, expr_type)
 
         bad_return = visitors.SearchVisitor[frog_ast.ReturnStatement](
             is_bad_return
@@ -821,7 +920,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
 
     def leave_array_type(self, array_type: frog_ast.ArrayType) -> None:
         count_type = self.get_type_from_ast(array_type.count)
-        if not compare_types(frog_ast.IntType(), count_type):
+        if not self.check_types(frog_ast.IntType(), count_type):
             self.print_error(
                 array_type, f"Array count has type {count_type}, expected Int"
             )
@@ -833,7 +932,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
     def leave_unary_operation(self, unary_op: frog_ast.UnaryOperation) -> None:
         if unary_op.operator == frog_ast.UnaryOperators.NOT:
             expression_type = self.get_type_from_ast(unary_op.expression)
-            if not compare_types(frog_ast.BoolType(), expression_type):
+            if not self.check_types(frog_ast.BoolType(), expression_type):
                 self.print_error(
                     unary_op,
                     f"{unary_op.expression} has type {expression_type}, expected Bool",
@@ -843,7 +942,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             expression_type = self.get_type_from_ast(unary_op.expression)
             if isinstance(expression_type, frog_ast.ModIntType):
                 self.ast_type_map.set(unary_op, expression_type)
-            elif compare_types(frog_ast.IntType(), expression_type):
+            elif self.check_types(frog_ast.IntType(), expression_type):
                 self.ast_type_map.set(unary_op, frog_ast.IntType())
             else:
                 self.print_error(
@@ -877,7 +976,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             if isinstance(left_type, frog_ast.ModIntType) and isinstance(
                 right_type, frog_ast.ModIntType
             ):
-                if not compare_types(left_type, right_type):
+                if not self.check_types(left_type, right_type):
                     self.print_error(
                         bin_op,
                         f"ModInt addition requires matching moduli, got {left_type} and {right_type}",
@@ -890,7 +989,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             elif isinstance(left_type, frog_ast.BitStringType) and isinstance(
                 right_type, frog_ast.BitStringType
             ):
-                if not compare_types(left_type, right_type):
+                if not self.check_types(left_type, right_type):
                     self.print_error(
                         bin_op,
                         f"Left expression and right expression have different types: {left_type} and {right_type}",
@@ -905,7 +1004,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             if isinstance(left_type, frog_ast.ModIntType) and isinstance(
                 right_type, frog_ast.ModIntType
             ):
-                if not compare_types(left_type, right_type):
+                if not self.check_types(left_type, right_type):
                     self.print_error(
                         bin_op,
                         f"ModInt subtraction requires matching moduli, got {left_type} and {right_type}",
@@ -922,7 +1021,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             if isinstance(left_type, frog_ast.ModIntType) and isinstance(
                 right_type, frog_ast.ModIntType
             ):
-                if not compare_types(left_type, right_type):
+                if not self.check_types(left_type, right_type):
                     self.print_error(
                         bin_op,
                         f"ModInt multiplication requires matching moduli, got {left_type} and {right_type}",
@@ -939,7 +1038,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             if isinstance(left_type, frog_ast.ModIntType) and isinstance(
                 right_type, frog_ast.ModIntType
             ):
-                if not compare_types(left_type, right_type):
+                if not self.check_types(left_type, right_type):
                     self.print_error(
                         bin_op,
                         f"ModInt division requires matching moduli, got {left_type} and {right_type}",
@@ -1003,7 +1102,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             frog_ast.BinaryOperators.EQUALS,
             frog_ast.BinaryOperators.NOTEQUALS,
         ):
-            if left_type != right_type:
+            if not _types_comparable(left_type, right_type):
                 self.print_error(
                     bin_op,
                     f"Cannot compare different types {left_type} and {right_type}",
@@ -1056,16 +1155,20 @@ class CheckTypeVisitor(VariableTypeVisitor):
             add_possible_types(left_type, left_types)
             add_possible_types(right_type, right_types)
 
-            satisfied = False
-            for l_type in left_types:
-                for r_type in right_types:
-                    satisfied = satisfied or compare_types(l_type, r_type)
+            # For subsets, both sides just need to be set-like types;
+            # the constraint is validated at instantiation time.
+            # For union/setminus, the types must be compatible.
+            if bin_op.operator != frog_ast.BinaryOperators.SUBSETS:
+                satisfied = False
+                for l_type in left_types:
+                    for r_type in right_types:
+                        satisfied = satisfied or self.check_types(l_type, r_type)
 
-            if not satisfied:
-                self.print_error(
-                    bin_op,
-                    f"Cannot perform set operation {bin_op.operator.value} {left_type} and {right_type}",
-                )
+                if not satisfied:
+                    self.print_error(
+                        bin_op,
+                        f"Cannot perform set operation {bin_op.operator.value} {left_type} and {right_type}",
+                    )
             self.ast_type_map.set(
                 bin_op,
                 (
@@ -1087,7 +1190,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
                     f"Set type for {bin_op.right_expression} must be parameterized",
                 )
                 return
-            if not compare_types(right_type.parameterization, left_type):
+            if not self.check_types(right_type.parameterization, left_type):
                 self.print_error(
                     bin_op, f"Cannot see if {left_type} is in {right_type}"
                 )
@@ -1116,7 +1219,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
         super().leave_field(field)
         if field.value:
             the_type = self.get_type_from_ast(field.value)
-            if not compare_types(field.type, the_type):
+            if not self.check_types(field.type, the_type):
                 self.print_error(field, f"{the_type} is not of type {field.type}")
 
     def leave_field_access(self, field_acess: frog_ast.FieldAccess) -> None:
@@ -1129,11 +1232,11 @@ class CheckTypeVisitor(VariableTypeVisitor):
     def leave_binary_num(self, binary_num: frog_ast.BinaryNum) -> None:
         self.ast_type_map.set(binary_num, frog_ast.BitStringType())
 
-    def leave_bitstring_literal(
-        self, bitstring_literal: frog_ast.BitStringLiteral
+    def leave_bit_string_literal(
+        self, bit_string_literal: frog_ast.BitStringLiteral
     ) -> None:
         self.ast_type_map.set(
-            bitstring_literal, frog_ast.BitStringType(bitstring_literal.length)
+            bit_string_literal, frog_ast.BitStringType(bit_string_literal.length)
         )
 
     def leave_assignment(self, assignment: frog_ast.Assignment) -> None:
@@ -1144,7 +1247,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             else self.get_type_from_ast(assignment.var)
         )
         found_type = self.get_type_from_ast(assignment.value)
-        if not compare_types(expected_type, found_type):
+        if not self.check_types(expected_type, found_type):
             self.print_error(
                 assignment,
                 f"{assignment.value} has type {found_type}, expected {expected_type}",
@@ -1158,7 +1261,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             else self.get_type_from_ast(sample.var)
         )
         found_type = self.get_type_from_ast(sample.sampled_from)
-        if not compare_types(expected_type, found_type):
+        if not self.check_types(expected_type, found_type):
             self.print_error(
                 sample,
                 f"{sample.sampled_from} has type {found_type}, expected {expected_type}",
@@ -1170,6 +1273,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
         definition = self.import_namespace[parameterized_game.name]
 
         if isinstance(definition, frog_ast.GameFile):
+            # Type-check instantiation of both games in the pair
             for game in definition.games:
                 self._check_instantiation(
                     parameterized_game,
@@ -1177,15 +1281,57 @@ class CheckTypeVisitor(VariableTypeVisitor):
                     parameterized_game.args,
                     self._get_file_name_from_instantiable(parameterized_game.name),
                 )
+            # Set type from first game for field access (e.g., G(E).count)
+            self.ast_type_map.set(
+                parameterized_game,
+                self.instantiate_and_get_type(
+                    definition.games[0],
+                    parameterized_game.args,
+                    parameterized_game.name,
+                ),
+            )
         elif isinstance(definition, frog_ast.Game):
+            # Pass the full variable_type_map_stack so induction variables
+            # (substituted into the body) are in scope for the inner checker.
             self._check_instantiation(
                 parameterized_game,
                 definition,
                 parameterized_game.args,
                 self._get_file_name_from_instantiable(parameterized_game.name),
+                copy.deepcopy(self.variable_type_map_stack),
+            )
+            self.ast_type_map.set(
+                parameterized_game,
+                self.instantiate_and_get_type(
+                    definition,
+                    parameterized_game.args,
+                    parameterized_game.name,
+                ),
             )
         else:
             print_error(parameterized_game, f"{parameterized_game} is not a Game")
+
+    def leave_concrete_game(self, concrete_game: frog_ast.ConcreteGame) -> None:
+        definition = self.import_namespace.get(concrete_game.game.name)
+        if not isinstance(definition, frog_ast.GameFile):
+            return
+        # Find the game matching the concrete name (e.g., "Left", "Real")
+        target_game = None
+        for game in definition.games:
+            if game.name == concrete_game.which:
+                target_game = game
+                break
+        if target_game is None:
+            return
+        instantiated = proof_engine.instantiate(
+            target_game,
+            concrete_game.game.args,
+            self.instantiation_namespace,
+        )
+        self.ast_type_map.set(
+            concrete_game,
+            get_type_from_instantiable(concrete_game.which, instantiated),
+        )
 
     def _check_instantiation(
         self,
@@ -1193,6 +1339,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
         scheme: frog_ast.Instantiable,
         args: list[frog_ast.Expression],
         file_name: str,
+        variable_type_map_stack: VariableTypeMapStackType = None,
     ) -> frog_ast.Instantiable:
         expected_args_count = len(scheme.parameters)
         passed_args_count = len(args)
@@ -1208,7 +1355,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
         arg_types = [self.get_type_from_ast(arg) for arg in args]
 
         for index, param in enumerate(scheme.parameters):
-            if not compare_types(param.type, arg_types[index]):
+            if not self.check_types(param.type, arg_types[index]):
                 self.print_error(
                     location,
                     f"{args[index]} is not of type {param.type}",
@@ -1218,12 +1365,23 @@ class CheckTypeVisitor(VariableTypeVisitor):
             scheme, args, self.instantiation_namespace
         )
 
+        # Extract subsets constraints from requires clauses
+        subsets_pairs = _extract_subsets_pairs(instantiated_scheme)
+        # Propagate to parent visitor so reduction bodies can use them
+        self.subsets_pairs.extend(subsets_pairs)
+
+        stack = (
+            variable_type_map_stack
+            if variable_type_map_stack is not None
+            else [copy.deepcopy(self.variable_type_map_stack[0])]
+        )
         CheckTypeVisitor(
             self.import_namespace,
             file_name,
             self.file_name_mapping,
-            [copy.deepcopy(self.variable_type_map_stack[0])],
+            stack,
             copy.deepcopy(self.instantiation_namespace),
+            self.subsets_pairs,
         ).visit(instantiated_scheme)
         return instantiated_scheme
 
@@ -1239,21 +1397,47 @@ class CheckTypeVisitor(VariableTypeVisitor):
             isinstance(func_call.func, frog_ast.Variable)
             and func_call.func.name in self.import_namespace
         ):
-            scheme = self.import_namespace[func_call.func.name]
-            if not isinstance(scheme, (frog_ast.Scheme, frog_ast.Primitive)):
-                self.print_error(func_call, "Should be either a scheme or a primitive")
-                return
-            instantiated_scheme = self._check_instantiation(
-                func_call,
-                scheme,
-                func_call.args,
-                self._get_file_name_from_instantiable(func_call.func.name),
-            )
-
-            self.ast_type_map.set(
-                func_call,
-                get_type_from_instantiable(func_call.func.name, instantiated_scheme),
-            )
+            definition = self.import_namespace[func_call.func.name]
+            if isinstance(definition, frog_ast.GameFile):
+                # GameFile: instantiate and get type from first game
+                instantiated = proof_engine.instantiate(
+                    definition.games[0],
+                    func_call.args,
+                    self.instantiation_namespace,
+                )
+                self.ast_type_map.set(
+                    func_call,
+                    get_type_from_instantiable(func_call.func.name, instantiated),
+                )
+            elif isinstance(definition, frog_ast.Game):
+                # Game (including Reduction helpers)
+                instantiated = proof_engine.instantiate(
+                    definition,
+                    func_call.args,
+                    self.instantiation_namespace,
+                )
+                self.ast_type_map.set(
+                    func_call,
+                    get_type_from_instantiable(func_call.func.name, instantiated),
+                )
+            elif isinstance(definition, (frog_ast.Scheme, frog_ast.Primitive)):
+                instantiated_scheme = self._check_instantiation(
+                    func_call,
+                    definition,
+                    func_call.args,
+                    self._get_file_name_from_instantiable(func_call.func.name),
+                )
+                self.ast_type_map.set(
+                    func_call,
+                    get_type_from_instantiable(
+                        func_call.func.name, instantiated_scheme
+                    ),
+                )
+            else:
+                self.print_error(
+                    func_call,
+                    "Should be a scheme, primitive, or game",
+                )
         else:
             func_call_signature = self.get_type_from_ast(func_call.func)
             if not isinstance(func_call_signature, frog_ast.MethodSignature):
@@ -1265,7 +1449,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
 
             for index, arg_type in enumerate(arg_types):
                 declared_type = func_call_signature.parameters[index].type
-                if not compare_types(declared_type, arg_type):
+                if not self.check_types(declared_type, arg_type):
                     self.print_error(
                         func_call,
                         f"{func_call.args[index]} is of type {arg_type}, expected {declared_type}",
@@ -1310,9 +1494,23 @@ def has_matching_methods(
     return True
 
 
-def compare_types(declared_type: PossibleType, value_type: PossibleType) -> bool:
+def compare_types(
+    declared_type: PossibleType,
+    value_type: PossibleType,
+    subsets_pairs: Optional[list[tuple[PossibleType, PossibleType]]] = None,
+) -> bool:
     if declared_type == value_type:
         return True
+
+    # Check if types are related via requires...subsets constraints.
+    # Treated as bidirectional type compatibility since the scheme author
+    # asserts the sets are interchangeable in context.
+    if subsets_pairs:
+        for sub_type, super_type in subsets_pairs:
+            if (value_type == sub_type and declared_type == super_type) or (
+                value_type == super_type and declared_type == sub_type
+            ):
+                return True
 
     if declared_type == frog_ast.SetType() and isinstance(value_type, frog_ast.Type):
         return True
@@ -1322,10 +1520,15 @@ def compare_types(declared_type: PossibleType, value_type: PossibleType) -> bool
     ):
         return True
 
-    if isinstance(declared_type, frog_ast.OptionalType) and compare_types(
-        declared_type.the_type, value_type
-    ):
-        return True
+    if isinstance(declared_type, frog_ast.OptionalType):
+        # T? can hold T
+        if compare_types(declared_type.the_type, value_type, subsets_pairs):
+            return True
+        # T? can hold S? if T can hold S
+        if isinstance(value_type, frog_ast.OptionalType) and compare_types(
+            declared_type.the_type, value_type.the_type, subsets_pairs
+        ):
+            return True
 
     expanded_declared_type = declared_type
     expanded_value_type = value_type

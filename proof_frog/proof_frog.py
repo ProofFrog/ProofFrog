@@ -94,6 +94,11 @@ def prove(file: str, verbose: bool, json_output: bool) -> None:
         click.echo(str(e), err=True)
         sys.exit(1)
 
+    try:
+        semantic_analysis.check_well_formed(proof_file, file)
+    except semantic_analysis.FailedTypeCheck:
+        sys.exit(1)
+
     for imp in proof_file.imports:
         resolved = frog_parser.resolve_import_path(imp.filename, file)
         file_type = _get_file_type(resolved)

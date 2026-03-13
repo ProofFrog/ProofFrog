@@ -1,5 +1,6 @@
 import pytest
-from proof_frog import visitors, frog_parser
+from proof_frog import frog_parser
+from proof_frog.transforms.inlining import CollapseAssignmentTransformer
 
 
 @pytest.mark.parametrize(
@@ -99,6 +100,6 @@ def test_collapse_assignment(
     game_ast = frog_parser.parse_method(method)
     expected_ast = frog_parser.parse_method(expected)
     print("EXPECTED", expected_ast)
-    transformed_ast = visitors.CollapseAssignmentTransformer().transform(game_ast)
+    transformed_ast = CollapseAssignmentTransformer().transform(game_ast)
     print("TRANSFORMED", transformed_ast)
     assert expected_ast == transformed_ast

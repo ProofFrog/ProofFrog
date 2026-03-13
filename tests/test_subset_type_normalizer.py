@@ -1,6 +1,7 @@
 """Tests for SubsetTypeNormalizer transformer."""
 
-from proof_frog import visitors, frog_parser, frog_ast
+from proof_frog import frog_parser, frog_ast
+from proof_frog.transforms.types import SubsetTypeNormalizer
 
 
 def _make_pairs(
@@ -29,7 +30,7 @@ class TestBasicNormalization:
         # Int is not in the pairs, so field type won't change —
         # use assignment type instead (tested in test_normalizes_assignment_type)
         pairs = _make_pairs(("KeySpace2", "IntermediateSpace"))
-        result = visitors.SubsetTypeNormalizer(pairs).transform(game)
+        result = SubsetTypeNormalizer(pairs).transform(game)
         assert result == game
 
     def test_normalizes_assignment_type(self) -> None:
@@ -48,7 +49,7 @@ class TestBasicNormalization:
             """
         )
         pairs = _make_pairs(("KeySpace2", "IntermediateSpace"))
-        result = visitors.SubsetTypeNormalizer(pairs).transform(method)
+        result = SubsetTypeNormalizer(pairs).transform(method)
         assert result == expected
 
     def test_normalizes_optional_type(self) -> None:
@@ -67,7 +68,7 @@ class TestBasicNormalization:
             """
         )
         pairs = _make_pairs(("KeySpace2", "IntermediateSpace"))
-        result = visitors.SubsetTypeNormalizer(pairs).transform(method)
+        result = SubsetTypeNormalizer(pairs).transform(method)
         assert result == expected
 
     def test_normalizes_parameter_type(self) -> None:
@@ -86,7 +87,7 @@ class TestBasicNormalization:
             """
         )
         pairs = _make_pairs(("KeySpace2", "IntermediateSpace"))
-        result = visitors.SubsetTypeNormalizer(pairs).transform(method)
+        result = SubsetTypeNormalizer(pairs).transform(method)
         assert result == expected
 
     def test_normalizes_return_type(self) -> None:
@@ -105,7 +106,7 @@ class TestBasicNormalization:
             """
         )
         pairs = _make_pairs(("KeySpace2", "IntermediateSpace"))
-        result = visitors.SubsetTypeNormalizer(pairs).transform(method)
+        result = SubsetTypeNormalizer(pairs).transform(method)
         assert result == expected
 
     def test_normalizes_product_type(self) -> None:
@@ -124,7 +125,7 @@ class TestBasicNormalization:
             """
         )
         pairs = _make_pairs(("KeySpace2", "IntermediateSpace"))
-        result = visitors.SubsetTypeNormalizer(pairs).transform(method)
+        result = SubsetTypeNormalizer(pairs).transform(method)
         assert result == expected
 
 
@@ -139,7 +140,7 @@ class TestNoNormalization:
             }
             """
         )
-        result = visitors.SubsetTypeNormalizer([]).transform(method)
+        result = SubsetTypeNormalizer([]).transform(method)
         assert result == method
 
     def test_does_not_change_variable_references(self) -> None:
@@ -152,7 +153,7 @@ class TestNoNormalization:
             """
         )
         pairs = _make_pairs(("KeySpace2", "IntermediateSpace"))
-        result = visitors.SubsetTypeNormalizer(pairs).transform(method)
+        result = SubsetTypeNormalizer(pairs).transform(method)
         # The variable reference 'KeySpace2_var' should not be changed
         # (it's not a type, just a variable whose name starts with KeySpace2)
         assert result == method
@@ -166,7 +167,7 @@ class TestNoNormalization:
             """
         )
         pairs = _make_pairs(("KeySpace2", "IntermediateSpace"))
-        result = visitors.SubsetTypeNormalizer(pairs).transform(method)
+        result = SubsetTypeNormalizer(pairs).transform(method)
         assert result == method
 
 
@@ -194,5 +195,5 @@ class TestMultiplePairs:
             ("KeySpace2", "IntermediateSpace"),
             ("CiphertextSpace2", "MessageSpace"),
         )
-        result = visitors.SubsetTypeNormalizer(pairs).transform(method)
+        result = SubsetTypeNormalizer(pairs).transform(method)
         assert result == expected

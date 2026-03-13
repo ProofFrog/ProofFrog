@@ -1,5 +1,6 @@
 import pytest
-from proof_frog import visitors, frog_parser
+from proof_frog import frog_parser
+from proof_frog.transforms.control_flow import RemoveUnreachableTransformer
 
 
 @pytest.mark.parametrize(
@@ -361,7 +362,7 @@ def test_unreachable_transformer(
     expected_ast = frog_parser.parse_method(expected)
 
     print("EXPECTED: ", expected_ast)
-    transformed_ast = visitors.RemoveUnreachableTransformer(method_ast).transform(
+    transformed_ast = RemoveUnreachableTransformer(method_ast).transform(
         method_ast
     )
     print("TRANSFORMED: ", transformed_ast)

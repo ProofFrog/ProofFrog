@@ -1,5 +1,6 @@
 import pytest
-from proof_frog import visitors, frog_parser
+from proof_frog import frog_parser
+from proof_frog.transforms.control_flow import SimplifyReturnTransformer
 
 
 @pytest.mark.parametrize(
@@ -58,6 +59,6 @@ def test_simplify_return(
     game_ast = frog_parser.parse_method(method)
     expected_ast = frog_parser.parse_method(expected)
 
-    transformed_ast = visitors.SimplifyReturnTransformer().transform(game_ast)
+    transformed_ast = SimplifyReturnTransformer().transform(game_ast)
     print(transformed_ast)
     assert expected_ast == transformed_ast

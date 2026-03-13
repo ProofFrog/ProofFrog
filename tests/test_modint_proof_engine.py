@@ -13,14 +13,16 @@ import pytest
 import z3
 
 from proof_frog import frog_ast, frog_parser
-from proof_frog.visitors import (
+from proof_frog.transforms.algebraic import (
     XorCancellationTransformer,
     XorIdentityTransformer,
     ModIntSimplificationTransformer,
     UniformModIntSimplificationTransformer,
-    SymbolicComputationTransformer,
-    Z3FormulaVisitor,
     ReflexiveComparisonTransformer,
+)
+from proof_frog.transforms.symbolic import SymbolicComputationTransformer
+from proof_frog.visitors import (
+    Z3FormulaVisitor,
     NameTypeMap,
     build_game_type_map,
 )

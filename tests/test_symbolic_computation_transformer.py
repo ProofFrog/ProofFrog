@@ -1,6 +1,7 @@
 import pytest
 from sympy import symbols
-from proof_frog import visitors, frog_parser
+from proof_frog import frog_parser
+from proof_frog.transforms.symbolic import SymbolicComputationTransformer
 
 
 @pytest.mark.parametrize(
@@ -57,7 +58,7 @@ def test_symbolic_computation_transformer(
     expected_ast = frog_parser.parse_method(expected)
     print("EXPECTED:", expected_ast)
 
-    transformed_ast = visitors.SymbolicComputationTransformer(symbol_map).transform(
+    transformed_ast = SymbolicComputationTransformer(symbol_map).transform(
         game_ast
     )
     print("TRANSFORMED: ", transformed_ast)

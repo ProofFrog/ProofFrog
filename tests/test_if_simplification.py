@@ -1,5 +1,6 @@
 import pytest
-from proof_frog import visitors, frog_parser
+from proof_frog import frog_parser
+from proof_frog.transforms.control_flow import SimplifyIfTransformer
 
 
 @pytest.mark.parametrize(
@@ -101,6 +102,6 @@ def test_redundant_copies(
     game_ast = frog_parser.parse_method(method)
     expected_ast = frog_parser.parse_method(expected)
 
-    transformed_ast = visitors.SimplifyIfTransformer().transform(game_ast)
+    transformed_ast = SimplifyIfTransformer().transform(game_ast)
     print(transformed_ast)
     assert expected_ast == transformed_ast

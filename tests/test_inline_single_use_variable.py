@@ -1,5 +1,6 @@
 import pytest
-from proof_frog import visitors, frog_parser
+from proof_frog import frog_parser
+from proof_frog.transforms.inlining import InlineSingleUseVariableTransformer
 
 
 @pytest.mark.parametrize(
@@ -321,7 +322,7 @@ def test_inline_single_use_variable(
 ) -> None:
     method_ast = frog_parser.parse_method(method)
     expected_ast = frog_parser.parse_method(expected)
-    transformed_ast = visitors.InlineSingleUseVariableTransformer().transform(method_ast)
+    transformed_ast = InlineSingleUseVariableTransformer().transform(method_ast)
     print("EXPECTED", expected_ast)
     print("TRANSFORMED", transformed_ast)
     assert expected_ast == transformed_ast

@@ -1,5 +1,6 @@
 import pytest
-from proof_frog import visitors, frog_parser
+from proof_frog import frog_parser
+from proof_frog.transforms.algebraic import UniformXorSimplificationTransformer
 
 
 @pytest.mark.parametrize(
@@ -173,7 +174,7 @@ def test_uniform_xor_simplification(
     # Apply repeatedly to handle nested XOR (mirroring engine's iterative pipeline)
     transformed_ast = method_ast
     while True:
-        new_ast = visitors.UniformXorSimplificationTransformer().transform(
+        new_ast = UniformXorSimplificationTransformer().transform(
             transformed_ast
         )
         if new_ast == transformed_ast:

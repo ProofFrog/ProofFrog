@@ -1,5 +1,9 @@
 import pytest
-from proof_frog import visitors, frog_ast, frog_parser
+from proof_frog import frog_ast, frog_parser
+from proof_frog.transforms.algebraic import (
+    XorIdentityTransformer,
+    XorCancellationTransformer,
+)
 
 
 class TestParsing:
@@ -129,7 +133,7 @@ class TestXorIdentity:
     def test_xor_identity(self, method: str, expected: str) -> None:
         method_ast = frog_parser.parse_method(method)
         expected_ast = frog_parser.parse_method(expected)
-        transformed_ast = visitors.XorIdentityTransformer().transform(method_ast)
+        transformed_ast = XorIdentityTransformer().transform(method_ast)
         assert expected_ast == transformed_ast
 
 
@@ -150,7 +154,7 @@ class TestXorCancellationWithLiterals:
         """)
         transformed_ast = method_ast
         while True:
-            new_ast = visitors.XorCancellationTransformer().transform(transformed_ast)
+            new_ast = XorCancellationTransformer().transform(transformed_ast)
             if new_ast == transformed_ast:
                 break
             transformed_ast = new_ast
@@ -170,7 +174,7 @@ class TestXorCancellationWithLiterals:
         """)
         transformed_ast = method_ast
         while True:
-            new_ast = visitors.XorCancellationTransformer().transform(transformed_ast)
+            new_ast = XorCancellationTransformer().transform(transformed_ast)
             if new_ast == transformed_ast:
                 break
             transformed_ast = new_ast
@@ -190,8 +194,8 @@ class TestXorCancellationWithLiterals:
         """)
         transformed_ast = method_ast
         while True:
-            new_ast = visitors.XorCancellationTransformer().transform(transformed_ast)
-            new_ast = visitors.XorIdentityTransformer().transform(new_ast)
+            new_ast = XorCancellationTransformer().transform(transformed_ast)
+            new_ast = XorIdentityTransformer().transform(new_ast)
             if new_ast == transformed_ast:
                 break
             transformed_ast = new_ast

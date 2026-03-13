@@ -1,5 +1,9 @@
 import pytest
-from proof_frog import visitors, frog_parser
+from proof_frog import frog_parser
+from proof_frog.transforms.algebraic import (
+    XorCancellationTransformer,
+    ReflexiveComparisonTransformer,
+)
 
 
 @pytest.mark.parametrize(
@@ -100,7 +104,7 @@ def test_xor_cancellation(
     # Apply repeatedly to handle iterative cancellation
     transformed_ast = method_ast
     while True:
-        new_ast = visitors.XorCancellationTransformer().transform(transformed_ast)
+        new_ast = XorCancellationTransformer().transform(transformed_ast)
         if new_ast == transformed_ast:
             break
         transformed_ast = new_ast
@@ -200,7 +204,7 @@ def test_reflexive_comparison(
     method_ast = frog_parser.parse_method(method)
     expected_ast = frog_parser.parse_method(expected)
 
-    transformed_ast = visitors.ReflexiveComparisonTransformer().transform(method_ast)
+    transformed_ast = ReflexiveComparisonTransformer().transform(method_ast)
 
     print("EXPECTED", expected_ast)
     print("TRANSFORMED", transformed_ast)
@@ -222,8 +226,8 @@ def test_xor_cancellation_with_reflexive_comparison() -> None:
 
     transformed_ast = method_ast
     while True:
-        new_ast = visitors.XorCancellationTransformer().transform(transformed_ast)
-        new_ast = visitors.ReflexiveComparisonTransformer().transform(new_ast)
+        new_ast = XorCancellationTransformer().transform(transformed_ast)
+        new_ast = ReflexiveComparisonTransformer().transform(new_ast)
         if new_ast == transformed_ast:
             break
         transformed_ast = new_ast

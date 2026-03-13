@@ -1,6 +1,7 @@
 import pytest
 from sympy import Symbol
-from proof_frog import visitors, frog_parser
+from proof_frog import frog_parser
+from proof_frog.transforms.sampling import SplitUniformSampleTransformer
 
 
 @pytest.mark.parametrize(
@@ -212,7 +213,7 @@ def test_split_uniform_samples(
     game_ast = frog_parser.parse_method(method)
     expected_ast = frog_parser.parse_method(expected)
 
-    transformed_ast = visitors.SplitUniformSampleTransformer(
+    transformed_ast = SplitUniformSampleTransformer(
         {"lambda": Symbol("lambda")}
     ).transform(game_ast)
     print("EXPECTED", expected_ast)

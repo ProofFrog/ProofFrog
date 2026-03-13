@@ -1,6 +1,7 @@
 import pytest
 from sympy import Symbol
-from proof_frog import visitors, frog_parser
+from proof_frog import frog_parser
+from proof_frog.transforms.sampling import SimplifySpliceTransformer
 
 
 @pytest.mark.parametrize(
@@ -127,7 +128,7 @@ def test_slice_simplification(
     game_ast = frog_parser.parse_method(method)
     expected_ast = frog_parser.parse_method(expected)
 
-    transformed_ast = visitors.SimplifySpliceTransformer(
+    transformed_ast = SimplifySpliceTransformer(
         {"lambda": Symbol("lambda")}
     ).transform(game_ast)
     print("EXPECTED", expected_ast)

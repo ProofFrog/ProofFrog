@@ -1,6 +1,7 @@
 import pytest
 from sympy import Symbol
-from proof_frog import visitors, frog_parser
+from proof_frog import frog_parser
+from proof_frog.transforms.sampling import MergeUniformSamplesTransformer
 
 
 @pytest.mark.parametrize(
@@ -150,7 +151,7 @@ def test_merge_uniform_samples(
     game_ast = frog_parser.parse_method(method)
     expected_ast = frog_parser.parse_method(expected)
 
-    transformed_ast = visitors.MergeUniformSamplesTransformer(
+    transformed_ast = MergeUniformSamplesTransformer(
         {"lambda": Symbol("lambda")}
     ).transform(game_ast)
     print("EXPECTED", expected_ast)

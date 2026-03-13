@@ -1,5 +1,6 @@
 import pytest
 from proof_frog import visitors, frog_parser, frog_ast
+from proof_frog.transforms.tuples import ExpandTupleTransformer
 
 
 @pytest.mark.parametrize(
@@ -300,7 +301,7 @@ def test_expand_tuples(
     expected_ast = visitors.SubstitutionTransformer(replace_map).transform(expected_ast)
 
     print("EXPECTED: ", expected_ast)
-    transformed_ast = visitors.ExpandTupleTransformer().transform(game_ast)
+    transformed_ast = ExpandTupleTransformer().transform(game_ast)
     print("TRANSFORMED: ", transformed_ast)
     assert expected_ast == transformed_ast
 
@@ -368,7 +369,7 @@ def test_nested_product_field_with_initializer() -> None:
     }
     """
     game_ast = frog_parser.parse_game(game)
-    transformed = visitors.ExpandTupleTransformer().transform(game_ast)
+    transformed = ExpandTupleTransformer().transform(game_ast)
 
     assert len(transformed.fields) == 2
     assert transformed.fields[0].name == "myTuple@0"
@@ -467,5 +468,5 @@ def test_expand_nested_product_tuples(
 
     expected_ast = visitors.SubstitutionTransformer(replace_map).transform(expected_ast)
 
-    transformed_ast = visitors.ExpandTupleTransformer().transform(game_ast)
+    transformed_ast = ExpandTupleTransformer().transform(game_ast)
     assert expected_ast == transformed_ast

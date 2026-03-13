@@ -11,7 +11,8 @@ is also named "v1", so the next rename step incorrectly renames both.
 Fix: two-phase rename — first to collision-safe intermediates, then to v1, v2, ...
 """
 import pytest
-from proof_frog import visitors, frog_parser, proof_engine
+from proof_frog import frog_parser, proof_engine
+from proof_frog.transforms.standardization import VariableStandardizingTransformer
 
 
 @pytest.mark.parametrize(
@@ -85,7 +86,7 @@ def test_variable_standardizing_no_collision(method: str, expected: str) -> None
     """VST correctly renames variables even when the target name already exists."""
     method_ast = frog_parser.parse_method(method)
     expected_ast = frog_parser.parse_method(expected)
-    result = visitors.VariableStandardizingTransformer().transform(method_ast)
+    result = VariableStandardizingTransformer().transform(method_ast)
     print("EXPECTED", expected_ast)
     print("RESULT  ", result)
     assert result == expected_ast

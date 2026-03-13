@@ -8,8 +8,8 @@ from proof_frog import frog_ast
 from proof_frog.visitors import (
     SubstitutionTransformer,
     InstantiationTransformer,
-    SymbolicComputationTransformer,
 )
+from proof_frog.transforms.symbolic import SymbolicComputationTransformer
 
 
 # ---------------------------------------------------------------------------

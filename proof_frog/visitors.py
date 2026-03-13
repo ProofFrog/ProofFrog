@@ -1569,27 +1569,91 @@ class SimplifyIfTransformer(Transformer):
 
 
 class DeadNullGuardEliminator(BlockTransformer):
-    """Removes if (x == None) { ... } guards when x has non-nullable type.
+    """Removes if (x == None) { ... } guards that can never execute.
 
-    After inlining, Dec methods with null guards may produce dead guards
-    when the assigned variable comes from a non-nullable source (e.g., KeyGen).
+    Two cases are handled:
+    1. x has non-nullable declared type (can never be None).
+    2. x was declared as `T? x = expr` where expr is provably non-nullable,
+       based on the return type of a method call on a known instantiable
+       (primitive or scheme) in the proof namespace.
+
+    After inlining, reduction bodies with null-narrowing guards produce
+    patterns like `T? v = E.Enc(...); if (v == None) { return ...; } return v;`
+    which can be simplified by this rule once E.Enc's non-nullable return
+    type is known.
     """
 
-    def __init__(self, type_map: NameTypeMap) -> None:
+    def __init__(
+        self,
+        type_map: NameTypeMap,
+        proof_instantiables: Optional[dict[str, frog_ast.Instantiable]] = None,
+    ) -> None:
         self.type_map = type_map
+        self.proof_instantiables = proof_instantiables or {}
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        # Pre-pass: for nullable declarations `T? v = expr` where expr is
+        # provably non-nullable, record v as effectively non-null.
+        non_null_locals: set[str] = set()
+        for stmt in block.statements:
+            if (
+                isinstance(stmt, frog_ast.Assignment)
+                and stmt.the_type is not None
+                and isinstance(stmt.the_type, frog_ast.OptionalType)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.value is not None
+                and self._is_nonnullable_expr(stmt.value)
+            ):
+                non_null_locals.add(stmt.var.name)
+
         new_statements: list[frog_ast.Statement] = []
         for statement in block.statements:
             if isinstance(statement, frog_ast.IfStatement) and self._is_dead_null_guard(
-                statement
+                statement, non_null_locals
             ):
                 continue
             new_statements.append(statement)
         return frog_ast.Block(new_statements)
 
-    def _is_dead_null_guard(self, if_stmt: frog_ast.IfStatement) -> bool:
-        """Check if this is `if (x == None) { ... }` where x is non-nullable."""
+    def _is_nonnullable_expr(self, expr: frog_ast.ASTNode) -> bool:
+        """Return True if expr is provably non-nullable.
+
+        Handles:
+        - Variables with non-nullable type in type_map.
+        - Method calls obj.method(args) where obj is a known instantiable
+          and method's declared return type is not Optional.
+        """
+        if isinstance(expr, frog_ast.NoneExpression):
+            return False
+        if isinstance(expr, frog_ast.Variable):
+            t = self.type_map.get(expr.name)
+            return t is not None and not isinstance(t, frog_ast.OptionalType)
+        if isinstance(expr, frog_ast.FuncCall) and isinstance(
+            expr.func, frog_ast.FieldAccess
+        ):
+            field_access = expr.func
+            if isinstance(field_access.the_object, frog_ast.Variable):
+                obj_name = field_access.the_object.name
+                instantiable = self.proof_instantiables.get(obj_name)
+                if instantiable is not None:
+                    for method in instantiable.methods:
+                        sig = (
+                            method
+                            if isinstance(method, frog_ast.MethodSignature)
+                            else method.signature
+                        )
+                        if sig.name == field_access.name:
+                            return not isinstance(
+                                sig.return_type, frog_ast.OptionalType
+                            )
+        return False
+
+    def _is_dead_null_guard(
+        self,
+        if_stmt: frog_ast.IfStatement,
+        non_null_locals: Optional[set[str]] = None,
+    ) -> bool:
+        """Check if this is a dead `if (x == None) { ... }` guard."""
         if if_stmt.has_else_block() or len(if_stmt.conditions) != 1:
             return False
         condition = if_stmt.conditions[0]
@@ -1608,10 +1672,17 @@ class DeadNullGuardEliminator(BlockTransformer):
             var_name = condition.right_expression.name
         if var_name is None:
             return False
+
+        # Case 1: variable has non-nullable declared type.
         var_type = self.type_map.get(var_name)
-        if var_type is None:
-            return False
-        return not isinstance(var_type, frog_ast.OptionalType)
+        if var_type is not None and not isinstance(var_type, frog_ast.OptionalType):
+            return True
+
+        # Case 2: nullable var was assigned from a provably non-nullable expr.
+        if non_null_locals and var_name in non_null_locals:
+            return True
+
+        return False
 
 
 class SubsetTypeNormalizer(Transformer):

@@ -293,3 +293,80 @@ class TestNullableTypeErrors:
             }
             """
         )
+
+
+_NULLABLE_ORACLE_GAME = """\
+Game Left() {
+    BitString<8>? Challenge() {
+        BitString<8>? result = None;
+        return result;
+    }
+}
+Game Right() {
+    BitString<8>? Challenge() {
+        BitString<8>? result = None;
+        return result;
+    }
+}
+export as SecurityGame;
+"""
+
+
+def _check_reduction(reduction_str: str) -> None:
+    """Parse a reduction string and run CheckTypeVisitor on it."""
+    security_game = frog_parser.parse_game_file(_NULLABLE_ORACLE_GAME)
+    reduction = frog_parser.parse_reduction(reduction_str)
+    checker = semantic_analysis.CheckTypeVisitor(
+        {"SecurityGame": security_game}, "test", {}
+    )
+    checker.visit(reduction)
+
+
+def _check_reduction_fails(reduction_str: str) -> None:
+    """Assert that a reduction string fails type checking."""
+    with pytest.raises(semantic_analysis.FailedTypeCheck):
+        _check_reduction(reduction_str)
+
+
+class TestReductionTypeChecking:
+    """Tests for type checking of reduction bodies, including nullable challenger calls."""
+
+    def test_reduction_returning_nullable_from_nonnullable_oracle(self) -> None:
+        """Reduction returning nullable challenger result from non-nullable oracle is a type error."""
+        _check_reduction_fails(
+            """
+            Reduction R() compose SecurityGame() against SecurityGame().Adversary {
+                BitString<8> Challenge() {
+                    return challenger.Challenge();
+                }
+            }
+            """
+        )
+
+    def test_reduction_with_null_narrowing_passes(self) -> None:
+        """Reduction using null-narrowing before returning challenger result type-checks."""
+        _check_reduction(
+            """
+            Reduction R() compose SecurityGame() against SecurityGame().Adversary {
+                BitString<8> Challenge() {
+                    BitString<8>? result = challenger.Challenge();
+                    if (result == None) {
+                        return 0^8;
+                    }
+                    return result;
+                }
+            }
+            """
+        )
+
+    def test_reduction_returning_nullable_from_nullable_oracle_passes(self) -> None:
+        """Reduction declaring nullable return type can return challenger result directly."""
+        _check_reduction(
+            """
+            Reduction R() compose SecurityGame() against SecurityGame().Adversary {
+                BitString<8>? Challenge() {
+                    return challenger.Challenge();
+                }
+            }
+            """
+        )

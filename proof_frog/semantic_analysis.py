@@ -1291,9 +1291,15 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 ),
             )
         elif isinstance(definition, frog_ast.Game):
-            # For reductions/intermediate games, just set the type.
-            # Deep body checking is impractical here because the nested
-            # visitor lacks context (e.g., induction loop variables).
+            # Pass the full variable_type_map_stack so induction variables
+            # (substituted into the body) are in scope for the inner checker.
+            self._check_instantiation(
+                parameterized_game,
+                definition,
+                parameterized_game.args,
+                self._get_file_name_from_instantiable(parameterized_game.name),
+                copy.deepcopy(self.variable_type_map_stack),
+            )
             self.ast_type_map.set(
                 parameterized_game,
                 self.instantiate_and_get_type(
@@ -1333,6 +1339,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
         scheme: frog_ast.Instantiable,
         args: list[frog_ast.Expression],
         file_name: str,
+        variable_type_map_stack: VariableTypeMapStackType = None,
     ) -> frog_ast.Instantiable:
         expected_args_count = len(scheme.parameters)
         passed_args_count = len(args)
@@ -1363,11 +1370,16 @@ class CheckTypeVisitor(VariableTypeVisitor):
         # Propagate to parent visitor so reduction bodies can use them
         self.subsets_pairs.extend(subsets_pairs)
 
+        stack = (
+            variable_type_map_stack
+            if variable_type_map_stack is not None
+            else [copy.deepcopy(self.variable_type_map_stack[0])]
+        )
         CheckTypeVisitor(
             self.import_namespace,
             file_name,
             self.file_name_mapping,
-            [copy.deepcopy(self.variable_type_map_stack[0])],
+            stack,
             copy.deepcopy(self.instantiation_namespace),
             self.subsets_pairs,
         ).visit(instantiated_scheme)

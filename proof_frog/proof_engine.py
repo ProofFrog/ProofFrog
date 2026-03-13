@@ -425,7 +425,14 @@ class ProofEngine:
             ),
             AstManipulator(
                 fn=lambda ast: visitors.DeadNullGuardEliminator(
-                    visitors.build_game_type_map(ast, self.proof_let_types)
+                    visitors.build_game_type_map(ast, self.proof_let_types),
+                    {
+                        k: v
+                        for k, v in self.proof_namespace.items()
+                        if isinstance(
+                            v, (frog_ast.Primitive, frog_ast.Scheme, frog_ast.Game)
+                        )
+                    },
                 ).transform(ast),
                 name="Dead Null Guard Elimination",
             ),
@@ -700,7 +707,14 @@ class ProofEngine:
             ),
             AstManipulator(
                 fn=lambda ast: visitors.DeadNullGuardEliminator(
-                    visitors.build_game_type_map(ast, self.proof_let_types)
+                    visitors.build_game_type_map(ast, self.proof_let_types),
+                    {
+                        k: v
+                        for k, v in self.proof_namespace.items()
+                        if isinstance(
+                            v, (frog_ast.Primitive, frog_ast.Scheme, frog_ast.Game)
+                        )
+                    },
                 ).transform(ast),
                 name="Dead Null Guard Elimination",
             ),

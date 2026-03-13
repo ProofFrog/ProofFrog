@@ -1,4 +1,9 @@
-"""Standardization passes: variable/field name standardization, field ordering."""
+"""Standardization passes: variable/field name standardization, field ordering.
+
+These passes run once after the core fixed-point loop to assign canonical
+names to variables and fields, ensuring two semantically equivalent games
+produce identical ASTs.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +27,14 @@ from ._base import TransformPass, PipelineContext
 
 
 class VariableStandardizingTransformer(BlockTransformer):
+    """Renames all typed local variables to canonical names (v1, v2, v3, ...).
+
+    Variables are numbered in declaration order across all methods.  A
+    two-phase rename is used (first to collision-free intermediates, then
+    to final names) to avoid conflicts when user-written names overlap
+    with the v1/v2/... namespace.
+    """
+
     def __init__(self) -> None:
         self.variable_counter = 0
 

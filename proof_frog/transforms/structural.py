@@ -1,4 +1,8 @@
-"""Structural passes: topological sort, remove duplicate/unnecessary fields."""
+"""Structural passes: topological sort, remove duplicate/unnecessary fields.
+
+These passes operate on the game structure as a whole rather than individual
+expressions or blocks.
+"""
 
 from __future__ import annotations
 

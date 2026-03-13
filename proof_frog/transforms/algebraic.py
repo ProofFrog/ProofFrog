@@ -1,6 +1,11 @@
 # pylint: disable=duplicate-code
 # Uniform sampling transformers share counting/search patterns with inlining.
-"""Algebraic simplification passes: XOR, ModInt, reflexive comparison."""
+"""Algebraic simplification passes: XOR, ModInt, reflexive comparison.
+
+These passes exploit mathematical identities (self-inverse properties of XOR,
+group properties of ModInt arithmetic, reflexive comparisons) to simplify
+expressions during canonicalization.
+"""
 
 from __future__ import annotations
 
@@ -228,6 +233,8 @@ class UniformModIntSimplificationTransformer(BlockTransformer):
 
 
 class SimplifyNot(Transformer):
+    """Rewrites ``!(a == b)`` as ``a != b``."""
+
     def transform_unary_operation(
         self, unary_op: frog_ast.UnaryOperation
     ) -> frog_ast.Expression:

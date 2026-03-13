@@ -1,4 +1,9 @@
-"""Type-related passes: subset normalization, dead null guard elimination."""
+"""Type-related passes: subset normalization, dead null guard elimination.
+
+These passes normalize type annotations and remove type-related dead code to
+ensure canonical forms match across games with equivalent but differently
+annotated types.
+"""
 
 from __future__ import annotations
 

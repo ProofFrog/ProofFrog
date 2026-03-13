@@ -1,6 +1,11 @@
 # pylint: disable=duplicate-code
 # SimplifyReturnTransformer shares transform_game pattern with inlining module.
-"""Control flow passes: branch elimination, if/return simplification, unreachable."""
+"""Control flow passes: branch elimination, if/return simplification, unreachable.
+
+These passes simplify the control flow graph by eliminating dead branches,
+merging equivalent branches, inlining trivial returns, and removing
+unreachable code after points where all paths have returned.
+"""
 
 from __future__ import annotations
 
@@ -27,6 +32,14 @@ from ._base import TransformPass, PipelineContext
 
 
 class BranchEliminiationTransformer(BlockTransformer):
+    """Removes if/else-if branches whose conditions are statically known.
+
+    When a condition is the literal ``true``, the branch body is inlined
+    and all subsequent branches are dropped.  When a condition is the
+    literal ``false``, the branch is removed entirely.  If every branch
+    is eliminated the whole if-statement is removed.
+    """
+
     def _transform_block_wrapper(
         self,
         block: frog_ast.Block,
@@ -78,6 +91,19 @@ class BranchEliminiationTransformer(BlockTransformer):
 
 
 class SimplifyIfTransformer(Transformer):
+    """Merges adjacent if/else-if branches that have identical bodies.
+
+    When two consecutive branches execute the same block, their conditions
+    are combined with OR and one copy of the block is kept.  An else block
+    that duplicates the preceding branch is also removed.
+
+    Example::
+
+        if (a) { return x; } else if (b) { return x; }
+      becomes:
+        if (a || b) { return x; }
+    """
+
     def transform_if_statement(
         self, if_statement: frog_ast.IfStatement
     ) -> frog_ast.IfStatement:
@@ -107,6 +133,20 @@ class SimplifyIfTransformer(Transformer):
 
 
 class SimplifyReturnTransformer(BlockTransformer):
+    """Inlines the value of an assignment into a trailing return statement.
+
+    When a block ends with ``Type v = expr; return v;``, the assignment is
+    removed and the return is rewritten as ``return expr;``.  Field variables
+    are skipped because their assignment is a meaningful state mutation.
+
+    Example::
+
+        BitString<n> v3 = v1 + G.evaluate(v2);
+        return v3;
+      becomes:
+        return v1 + G.evaluate(v2);
+    """
+
     def __init__(self) -> None:
         self.fields: list[str] = []
 
@@ -151,6 +191,8 @@ class SimplifyReturnTransformer(BlockTransformer):
 
 
 class RemoveStatementTransformer(BlockTransformer):
+    """Filters out specific statement instances (matched by identity) from all blocks."""
+
     def __init__(self, to_remove: list[frog_ast.Statement]):
         self.to_remove = to_remove
 
@@ -167,6 +209,18 @@ class RemoveStatementTransformer(BlockTransformer):
 
 
 class RemoveUnreachableTransformer(BlockTransformer):
+    """Removes statements that follow a point where all execution paths return.
+
+    Handles two cases:
+
+    1. An if/else where every branch contains an unconditional return --
+       all subsequent statements are trivially dead.
+    2. A sequence of if-statements whose return-bearing branches, taken
+       together, cover all possible executions.  Uses Z3 to check whether
+       the negation of the accumulated return conditions is unsatisfiable,
+       proving that no execution can reach subsequent statements.
+    """
+
     def __init__(self, ast: frog_ast.ASTNode):
         self.ast = ast
 

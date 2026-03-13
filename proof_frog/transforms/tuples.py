@@ -1,4 +1,8 @@
-"""Tuple-related passes: expand and simplify tuples."""
+"""Tuple-related passes: expand and simplify tuples.
+
+Product-typed values are expanded into individual components for
+canonicalization, then collapsed back when possible.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +22,14 @@ from ._base import TransformPass, PipelineContext
 
 
 class ExpandTupleTransformer(Transformer):
+    """Expands product-typed variables into individual component variables.
+
+    A field or local of type ``T1 * T2`` is split into ``T1 v@0`` and
+    ``T2 v@1``.  Index accesses like ``v[0]`` are rewritten to the
+    corresponding component variable.  Only applies when all accesses
+    use constant indices (checked via ``AllConstantFieldAccesses``).
+    """
+
     def __init__(self) -> None:
         self.to_transform: list[str] = []
         self.lengths: list[int] = []
@@ -185,6 +197,12 @@ class ExpandTupleTransformer(Transformer):
 
 
 class SimplifyTupleTransformer(Transformer):
+    """Collapses a tuple literal back into the original variable.
+
+    When a tuple ``[v[0], v[1], ...]`` reconstructs every element of a
+    product-typed variable ``v`` in order, it is simplified to just ``v``.
+    """
+
     def __init__(self, ast: frog_ast.ASTNode) -> None:
         self.ast = ast
 

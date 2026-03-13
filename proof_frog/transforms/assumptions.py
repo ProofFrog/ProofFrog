@@ -1,4 +1,8 @@
-"""Assumption-based passes: apply step-specific assumptions."""
+"""Assumption-based passes: apply step-specific assumptions.
+
+Unlike core pipeline passes which are singletons, assumption passes are
+instantiated per proof step with specific assumed predicates and a game side.
+"""
 
 from __future__ import annotations
 

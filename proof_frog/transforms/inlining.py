@@ -1,6 +1,11 @@
 # pylint: disable=duplicate-code
 # Counting/search patterns shared with algebraic uniform sampling transformers.
-"""Inlining and assignment passes: redundant copy, inline single-use, collapse."""
+"""Inlining and assignment passes: redundant copy, inline single-use, collapse.
+
+These passes reduce the number of local variables by inlining definitions,
+collapsing assignment chains, and eliminating redundant copies, bringing the
+AST closer to its minimal canonical form.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +27,20 @@ from ._base import TransformPass, PipelineContext
 
 
 class RedundantCopyTransformer(BlockTransformer):
+    """Eliminates redundant variable copies by substituting the original.
+
+    When a typed assignment ``Type v = w`` creates a simple copy and neither
+    ``v`` nor ``w`` is reassigned afterward, all uses of ``v`` are replaced
+    with ``w`` and the copy assignment is removed.
+
+    Example::
+
+        BitString<n> ct = c;
+        return ct;
+      becomes:
+        return c;
+    """
+
     def _transform_block_wrapper(
         self,
         block: frog_ast.Block,
@@ -206,6 +225,21 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
 
 
 class CollapseAssignmentTransformer(BlockTransformer):
+    """Collapses a declaration followed by a reassignment into a single statement.
+
+    When a variable is declared and later reassigned without its initial value
+    being read, the later value is moved into the original declaration.
+    Skips statements whose right-hand side contains function calls, which may
+    have side effects.
+
+    Example::
+
+        Type v = expr1;
+        v = expr2;
+      becomes:
+        Type v = expr2;
+    """
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
             if not isinstance(statement, (frog_ast.Assignment, frog_ast.Sample)):
@@ -254,6 +288,20 @@ class CollapseAssignmentTransformer(BlockTransformer):
 
 
 class RedundantFieldCopyTransformer(BlockTransformer):
+    """Eliminates an intermediate local variable used only to assign to a field.
+
+    When a local is declared, used solely to copy its value into a game field,
+    and not referenced elsewhere, the local declaration is replaced by
+    assigning directly to the field.
+
+    Example::
+
+        Type v <- Type;
+        fieldName = v;
+      becomes:
+        fieldName <- Type;
+    """
+
     def __init__(self) -> None:
         self.fields: list[str] = []
 

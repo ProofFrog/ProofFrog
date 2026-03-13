@@ -1,6 +1,11 @@
 # pylint: disable=duplicate-code
 # Operator dispatch table is structurally similar to visitors.Z3FormulaVisitor.
-"""Symbolic computation pass using SymPy."""
+"""Symbolic computation pass using SymPy.
+
+Dispatches arithmetic sub-expressions to SymPy for symbolic simplification,
+enabling the engine to reason about parameterized type sizes (e.g.,
+``BitString<n + n>`` becoming ``BitString<2*n>``).
+"""
 
 from __future__ import annotations
 
@@ -20,6 +25,14 @@ from ._base import TransformPass, PipelineContext
 
 
 class SymbolicComputationTransformer(Transformer):
+    """Evaluates arithmetic sub-expressions symbolically using SymPy.
+
+    Tracks a computation stack while traversing the AST.  When both operands
+    of an arithmetic binary operation (+, -, *, /, ^) resolve to known
+    symbolic or integer values, the expression is replaced with the
+    simplified result.
+    """
+
     def __init__(self, variables: dict[str, Symbol | frog_ast.Expression]) -> None:
         self.variables = variables
         self.computation_stack: List[Symbol | int | None] = []

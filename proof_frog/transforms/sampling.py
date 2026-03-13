@@ -1,4 +1,9 @@
-"""Sampling-related passes: splice, merge/split uniform, product samples."""
+"""Sampling-related passes: splice, merge/split uniform, product samples.
+
+These passes normalize how uniform random sampling is represented, ensuring
+that equivalent sampling patterns (split, merged, or spliced) converge to the
+same canonical form.
+"""
 
 from __future__ import annotations
 
@@ -26,6 +31,22 @@ from ._base import TransformPass, PipelineContext
 
 
 class SimplifySpliceTransformer(BlockTransformer):
+    """Replaces slice accesses on a concatenated variable with the originals.
+
+    When a variable is assigned as a concatenation of other variables
+    (e.g., ``z = x || y``), subsequent slices that correspond to the
+    original components are replaced with direct references to those
+    component variables.
+
+    Example::
+
+        z = x || y;
+        return z[0 : len1];
+      becomes:
+        z = x || y;
+        return x;
+    """
+
     def __init__(self, variables: dict[str, Symbol | frog_ast.Expression]) -> None:
         self.variables = variables
 

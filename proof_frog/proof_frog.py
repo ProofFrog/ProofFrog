@@ -119,6 +119,9 @@ def prove(file: str, verbose: bool, json_output: bool) -> None:
         engine.prove(proof_file)
     except proof_engine.FailedProof:
         sys.exit(1)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        click.echo(f"Error during proof verification: {e}", err=True)
+        sys.exit(1)
 
 
 @cli.command()

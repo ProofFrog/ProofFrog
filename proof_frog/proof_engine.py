@@ -35,6 +35,7 @@ class ProofEngine:
         self.definition_namespace: frog_ast.Namespace = {}
         self.proof_namespace: frog_ast.Namespace = {}
         self.proof_let_types: visitors.NameTypeMap = visitors.NameTypeMap()
+        self.subsets_pairs: list[tuple[frog_ast.Type, frog_ast.Type]] = []
 
         self.verbose = verbose
         self.step_assumptions: list[ProcessedAssumption] = []
@@ -79,6 +80,7 @@ class ProofEngine:
                         self.variables[let.name] = sympy_symbol
 
         self.get_method_lookup()
+        self._extract_subsets_pairs()
 
         first_step = proof_file.steps[0]
         final_step = proof_file.steps[-1]
@@ -428,6 +430,12 @@ class ProofEngine:
                 name="Dead Null Guard Elimination",
             ),
             AstManipulator(
+                fn=lambda ast: visitors.SubsetTypeNormalizer(
+                    self.subsets_pairs
+                ).transform(ast),
+                name="Subset Type Normalization",
+            ),
+            AstManipulator(
                 fn=lambda ast: visitors.ExpandTupleTransformer().transform(ast),
                 name="Expand Tuples",
             ),
@@ -697,6 +705,12 @@ class ProofEngine:
                 name="Dead Null Guard Elimination",
             ),
             AstManipulator(
+                fn=lambda ast: visitors.SubsetTypeNormalizer(
+                    self.subsets_pairs
+                ).transform(ast),
+                name="Subset Type Normalization",
+            ),
+            AstManipulator(
                 fn=lambda ast: visitors.ExpandTupleTransformer().transform(ast),
                 name="Expand Tuples",
             ),
@@ -900,6 +914,21 @@ class ProofEngine:
             if isinstance(node, frog_ast.Scheme):
                 for method in node.methods:
                     self.method_lookup[(name, method.signature.name)] = method
+
+    def _extract_subsets_pairs(self) -> None:
+        """Extract subsets constraint pairs from all schemes in the proof."""
+        for node in self.proof_namespace.values():
+            if isinstance(node, frog_ast.Scheme):
+                for req in node.requirements:
+                    if (
+                        isinstance(req, frog_ast.BinaryOperation)
+                        and req.operator == frog_ast.BinaryOperators.SUBSETS
+                        and isinstance(req.left_expression, frog_ast.Type)
+                        and isinstance(req.right_expression, frog_ast.Type)
+                    ):
+                        self.subsets_pairs.append(
+                            (req.left_expression, req.right_expression)
+                        )
 
     def _is_by_indistinguishability(
         self,

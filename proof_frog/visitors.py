@@ -1614,6 +1614,86 @@ class DeadNullGuardEliminator(BlockTransformer):
         return not isinstance(var_type, frog_ast.OptionalType)
 
 
+class SubsetTypeNormalizer(Transformer):
+    """Normalizes subset types to their superset equivalents.
+
+    Given subsets pairs like (KeySpace2, IntermediateSpace), replaces
+    KeySpace2 with IntermediateSpace in type annotations. This ensures
+    canonical forms match when the same value has different but
+    subsets-equivalent type annotations in different games.
+    """
+
+    def __init__(
+        self, subsets_pairs: list[tuple[frog_ast.Type, frog_ast.Type]]
+    ) -> None:
+        self.type_replacements: dict[str, frog_ast.Type] = {}
+        for sub_type, super_type in subsets_pairs:
+            if isinstance(sub_type, frog_ast.Variable):
+                self.type_replacements[sub_type.name] = super_type
+
+    def transform_assignment(
+        self, assignment: frog_ast.Assignment
+    ) -> frog_ast.Assignment:
+        new_type = self._normalize(assignment.the_type) if assignment.the_type else None
+        return frog_ast.Assignment(
+            new_type,
+            self.transform(assignment.var),
+            self.transform(assignment.value),
+        )
+
+    def transform_sample(self, sample: frog_ast.Sample) -> frog_ast.Sample:
+        new_type = self._normalize(sample.the_type) if sample.the_type else None
+        return frog_ast.Sample(
+            new_type,
+            self.transform(sample.var),
+            self.transform(sample.sampled_from),
+        )
+
+    def transform_field(self, field: frog_ast.Field) -> frog_ast.Field:
+        return frog_ast.Field(
+            self._normalize(field.type),
+            field.name,
+            self.transform(field.value) if field.value else None,
+        )
+
+    def transform_variable_declaration(
+        self, decl: frog_ast.VariableDeclaration
+    ) -> frog_ast.VariableDeclaration:
+        return frog_ast.VariableDeclaration(self._normalize(decl.type), decl.name)
+
+    def transform_parameter(self, param: frog_ast.Parameter) -> frog_ast.Parameter:
+        return frog_ast.Parameter(self._normalize(param.type), param.name)
+
+    def transform_method_signature(
+        self, sig: frog_ast.MethodSignature
+    ) -> frog_ast.MethodSignature:
+        return frog_ast.MethodSignature(
+            sig.name,
+            self._normalize(sig.return_type),
+            [self.transform(p) for p in sig.parameters],
+        )
+
+    def _normalize(self, the_type: frog_ast.Type) -> frog_ast.Type:
+        if isinstance(the_type, frog_ast.OptionalType):
+            return frog_ast.OptionalType(self._normalize(the_type.the_type))
+        if (
+            isinstance(the_type, frog_ast.Variable)
+            and the_type.name in self.type_replacements
+        ):
+            return copy.deepcopy(self.type_replacements[the_type.name])
+        if isinstance(the_type, frog_ast.BinaryOperation):
+            # Product types like T1 * T2 — left/right are Expression in AST
+            # but Type in this context
+            left = cast(frog_ast.Type, the_type.left_expression)
+            right = cast(frog_ast.Type, the_type.right_expression)
+            return frog_ast.BinaryOperation(
+                the_type.operator,
+                cast(frog_ast.Expression, self._normalize(left)),
+                cast(frog_ast.Expression, self._normalize(right)),
+            )
+        return the_type
+
+
 class InlineTransformer(Transformer):
     def __init__(self, method_lookup: Dict[Tuple[str, str], frog_ast.Method]) -> None:
         self.blocks: list[frog_ast.Block] = []

@@ -306,12 +306,26 @@ def _capture_prove(
     proof_succeeded = False
     has_induction = False
     try:
-        with redirect_stdout(buf), redirect_stderr(buf):
-            proof_file = frog_parser.parse_proof_file(file_path)
-            has_induction = any(
-                isinstance(step, frog_ast.Induction) for step in proof_file.steps
+        proof_file = frog_parser.parse_proof_file(file_path)
+        has_induction = any(
+            isinstance(step, frog_ast.Induction) for step in proof_file.steps
+        )
+
+        # Run semantic analysis before proof verification
+        check_output, check_ok, check_err_line, check_err_col = _capture_check(
+            file_path, allowed_root=allowed_root
+        )
+        if not check_ok:
+            return (
+                check_output,
+                False,
+                [],
+                has_induction,
+                check_err_line,
+                check_err_col,
             )
 
+        with redirect_stdout(buf), redirect_stderr(buf):
             for imp in proof_file.imports:
                 imp_path = frog_parser.resolve_import_path(
                     imp.filename, file_path, allowed_root=allowed_root

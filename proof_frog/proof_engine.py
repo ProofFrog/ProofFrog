@@ -11,10 +11,22 @@ from sympy import Symbol
 from . import frog_ast
 from . import visitors
 from . import dependencies
+from .transforms._base import (
+    PipelineContext,
+    run_pipeline,
+    run_standardization,
+    _MAX_FIXED_POINT_ITERATIONS,
+)
+from .transforms.pipelines import CORE_PIPELINE, STANDARDIZATION_PIPELINE
+from .transforms.assumptions import ApplyAssumptions
+from .transforms.structural import (  # pylint: disable=unused-import
+    remove_duplicate_fields,
+)
+from .transforms.standardization import (  # pylint: disable=unused-import
+    standardize_field_names,
+)
 
 MethodLookup: TypeAlias = Dict[Tuple[str, str], frog_ast.Method]
-
-_MAX_FIXED_POINT_ITERATIONS = 200
 
 
 class WhichGame(Enum):
@@ -31,6 +43,15 @@ HopResult = namedtuple(
 
 class FailedProof(Exception):
     pass
+
+
+class _AllTrueTransformer(visitors.Transformer):
+    def transform_if_statement(
+        self, stmt: frog_ast.IfStatement
+    ) -> frog_ast.IfStatement:
+        return frog_ast.IfStatement(
+            [frog_ast.Boolean(True)] * len(stmt.conditions), stmt.blocks
+        )
 
 
 class ProofEngine:
@@ -480,223 +501,37 @@ class ProofEngine:
                 ProcessedAssumption(assumption=expression, which=applies_to)
             )
 
+    def _build_context(self) -> PipelineContext:
+        return PipelineContext(
+            variables=self.variables,
+            proof_let_types=self.proof_let_types,
+            proof_namespace=self.proof_namespace,
+            subsets_pairs=self.subsets_pairs,
+            sort_game_fn=self.sort_game,
+        )
+
     def check_equivalent(
         self, current_game_ast: frog_ast.Game, next_game_ast: frog_ast.Game
     ) -> bool:
-        AstManipulator = namedtuple("AstManipulator", ["fn", "name"])
-        ast_manipulators: list[AstManipulator] = [
-            AstManipulator(
-                fn=lambda ast: visitors.SymbolicComputationTransformer(
-                    self.variables
-                ).transform(ast),
-                name="Symbolic Computation",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.SimplifySpliceTransformer(
-                    self.variables
-                ).transform(ast),
-                name="Simplifying Splices",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.MergeUniformSamplesTransformer(
-                    self.variables
-                ).transform(ast),
-                name="Merge Uniform Samples",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.MergeProductSamplesTransformer().transform(ast),
-                name="Merge Product Samples",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.SplitUniformSampleTransformer(
-                    self.variables
-                ).transform(ast),
-                name="Split Uniform Samples",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.RedundantCopyTransformer().transform(ast),
-                name="Remove Redundant Copies",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.InlineSingleUseVariableTransformer().transform(
-                    ast
-                ),
-                name="Inline Single-Use Variables",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.UniformXorSimplificationTransformer().transform(
-                    ast
-                ),
-                name="Uniform XOR Simplification",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.UniformModIntSimplificationTransformer().transform(
-                    ast
-                ),
-                name="Uniform ModInt Simplification",
-            ),
-            AstManipulator(fn=self.sort_game, name="Topological Sorting"),
-            AstManipulator(fn=remove_duplicate_fields, name="Remove Duplicate Fields"),
-            AstManipulator(
-                fn=lambda ast: visitors.BranchEliminiationTransformer().transform(ast),
-                name="Branch Elimination",
-            ),
-            AstManipulator(
-                fn=dependencies.remove_unnecessary_fields,
-                name="Remove unnecessary statements and fields",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.CollapseAssignmentTransformer().transform(ast),
-                name="Collapse Assignment",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.SimplifyReturnTransformer().transform(ast),
-                name="Simplify Returns",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.SimplifyIfTransformer().transform(ast),
-                name="Simplify Ifs",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.DeadNullGuardEliminator(
-                    visitors.build_game_type_map(ast, self.proof_let_types),
-                    {
-                        k: v
-                        for k, v in self.proof_namespace.items()
-                        if isinstance(
-                            v, (frog_ast.Primitive, frog_ast.Scheme, frog_ast.Game)
-                        )
-                    },
-                ).transform(ast),
-                name="Dead Null Guard Elimination",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.SubsetTypeNormalizer(
-                    self.subsets_pairs
-                ).transform(ast),
-                name="Subset Type Normalization",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.ExpandTupleTransformer().transform(ast),
-                name="Expand Tuples",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.SimplifyNot().transform(ast),
-                name="Simplify Nots",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.XorCancellationTransformer(
-                    visitors.build_game_type_map(ast, self.proof_let_types)
-                ).transform(ast),
-                name="XOR Cancellation",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.XorIdentityTransformer(
-                    visitors.build_game_type_map(ast, self.proof_let_types)
-                ).transform(ast),
-                name="XOR Identity",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.ModIntSimplificationTransformer(
-                    visitors.build_game_type_map(ast, self.proof_let_types)
-                ).transform(ast),
-                name="ModInt Simplification",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.ReflexiveComparisonTransformer().transform(ast),
-                name="Reflexive Comparison",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.RedundantFieldCopyTransformer().transform(ast),
-                name="Remove redundant variables for fields",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.SimplifyTupleTransformer(ast).transform(ast),
-                name="Simplify tuples that are copies of their fields",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.RemoveUnreachableTransformer(ast).transform(
-                    ast
-                ),
-                name="Remove unreachable blocks of code",
-            ),
-        ]
+        ctx = self._build_context()
 
         for index, game in enumerate((current_game_ast, next_game_ast)):
+            which = WhichGame.CURRENT if index == 0 else WhichGame.NEXT
+            if self.verbose:
+                label = "CURRENT" if index == 0 else "NEXT"
+                print(f"SIMPLIFYING {label} GAME")
+                print(game)
 
-            def apply_assumptions(
-                which_game: WhichGame, ast: frog_ast.Game
-            ) -> frog_ast.ASTNode:
-                for assumption in self.step_assumptions:
-                    if assumption.which != which_game:
-                        continue
-                    ast = visitors.SimplifyRangeTransformer(
-                        self.proof_let_types, ast, assumption.assumption
-                    ).transform(ast)
-                return ast
+            pipeline = list(CORE_PIPELINE) + [
+                ApplyAssumptions(self.step_assumptions, which, self.proof_let_types)
+            ]
+            game = run_pipeline(game, pipeline, ctx, verbose=self.verbose)
+            game = run_standardization(game, STANDARDIZATION_PIPELINE, ctx)
 
             if index == 0:
-                if self.verbose:
-                    print("SIMPLIFYING CURRENT GAME")
-                    print(current_game_ast)
-                ast_manipulators.append(
-                    AstManipulator(
-                        fn=functools.partial(apply_assumptions, WhichGame.CURRENT),
-                        name="Apply Assumptions",
-                    )
-                )
+                current_game_ast = game
             else:
-                ast_manipulators.pop()
-                if self.verbose:
-                    print("SIMPLIFYING NEXT GAME")
-                    print(next_game_ast)
-                ast_manipulators.append(
-                    AstManipulator(
-                        fn=functools.partial(apply_assumptions, WhichGame.NEXT),
-                        name="Apply Assumptions",
-                    )
-                )
-
-            for _iteration in range(_MAX_FIXED_POINT_ITERATIONS):
-
-                def apply_manipulators(game: frog_ast.Game) -> frog_ast.Game:
-                    for manipulator in ast_manipulators:
-                        new_game = manipulator.fn(game)
-                        if self.verbose and game != new_game:
-                            print(f"APPLIED {manipulator.name}")
-                            print(new_game)
-                        game = new_game
-                    return game
-
-                new_game = apply_manipulators(game)
-                if new_game != game:
-                    if index == 0:
-                        current_game_ast = new_game
-                    else:
-                        next_game_ast = new_game
-                    game = new_game
-                else:
-                    break
-            else:
-                warnings.warn(
-                    "Canonicalization did not converge within "
-                    f"{_MAX_FIXED_POINT_ITERATIONS} iterations",
-                    stacklevel=2,
-                )
-        current_game_ast = visitors.VariableStandardizingTransformer().transform(
-            current_game_ast
-        )
-        next_game_ast = visitors.VariableStandardizingTransformer().transform(
-            next_game_ast
-        )
-        current_game_ast = standardize_field_names(current_game_ast)
-        next_game_ast = standardize_field_names(next_game_ast)
-        current_game_ast = dependencies.BubbleSortFieldAssignment().transform(
-            current_game_ast
-        )
-        next_game_ast = dependencies.BubbleSortFieldAssignment().transform(
-            next_game_ast
-        )
+                next_game_ast = game
 
         if self.verbose:
             print("CURRENT")
@@ -709,16 +544,15 @@ class ProofEngine:
                 print("Inline Success!")
             return True
 
-        class AllTrueTransformer(visitors.Transformer):
-            def transform_if_statement(
-                self, stmt: frog_ast.IfStatement
-            ) -> frog_ast.IfStatement:
-                return frog_ast.IfStatement(
-                    [frog_ast.Boolean(True)] * len(stmt.conditions), stmt.blocks
-                )
+        return self._z3_conditional_equivalence(current_game_ast, next_game_ast)
 
-        all_true_current = AllTrueTransformer().transform(current_game_ast)
-        all_true_next = AllTrueTransformer().transform(next_game_ast)
+    def _z3_conditional_equivalence(
+        self,
+        current_game_ast: frog_ast.Game,
+        next_game_ast: frog_ast.Game,
+    ) -> bool:
+        all_true_current = _AllTrueTransformer().transform(current_game_ast)
+        all_true_next = _AllTrueTransformer().transform(next_game_ast)
         if all_true_current != all_true_next:
             return False
 
@@ -770,160 +604,9 @@ class ProofEngine:
         """Apply the same simplification pipeline as check_equivalent() (without
         step-specific assumptions) and the final standardization steps, returning
         the canonical form of the game as printed by the prove command."""
-        AstManipulator = namedtuple("AstManipulator", ["fn", "name"])
-        ast_manipulators: list[AstManipulator] = [
-            AstManipulator(
-                fn=lambda ast: visitors.SymbolicComputationTransformer(
-                    self.variables
-                ).transform(ast),
-                name="Symbolic Computation",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.SimplifySpliceTransformer(
-                    self.variables
-                ).transform(ast),
-                name="Simplifying Splices",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.MergeUniformSamplesTransformer(
-                    self.variables
-                ).transform(ast),
-                name="Merge Uniform Samples",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.MergeProductSamplesTransformer().transform(ast),
-                name="Merge Product Samples",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.SplitUniformSampleTransformer(
-                    self.variables
-                ).transform(ast),
-                name="Split Uniform Samples",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.RedundantCopyTransformer().transform(ast),
-                name="Remove Redundant Copies",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.InlineSingleUseVariableTransformer().transform(
-                    ast
-                ),
-                name="Inline Single-Use Variables",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.UniformXorSimplificationTransformer().transform(
-                    ast
-                ),
-                name="Uniform XOR Simplification",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.UniformModIntSimplificationTransformer().transform(
-                    ast
-                ),
-                name="Uniform ModInt Simplification",
-            ),
-            AstManipulator(fn=self.sort_game, name="Topological Sorting"),
-            AstManipulator(fn=remove_duplicate_fields, name="Remove Duplicate Fields"),
-            AstManipulator(
-                fn=lambda ast: visitors.BranchEliminiationTransformer().transform(ast),
-                name="Branch Elimination",
-            ),
-            AstManipulator(
-                fn=dependencies.remove_unnecessary_fields,
-                name="Remove unnecessary statements and fields",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.CollapseAssignmentTransformer().transform(ast),
-                name="Collapse Assignment",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.SimplifyReturnTransformer().transform(ast),
-                name="Simplify Returns",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.SimplifyIfTransformer().transform(ast),
-                name="Simplify Ifs",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.DeadNullGuardEliminator(
-                    visitors.build_game_type_map(ast, self.proof_let_types),
-                    {
-                        k: v
-                        for k, v in self.proof_namespace.items()
-                        if isinstance(
-                            v, (frog_ast.Primitive, frog_ast.Scheme, frog_ast.Game)
-                        )
-                    },
-                ).transform(ast),
-                name="Dead Null Guard Elimination",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.SubsetTypeNormalizer(
-                    self.subsets_pairs
-                ).transform(ast),
-                name="Subset Type Normalization",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.ExpandTupleTransformer().transform(ast),
-                name="Expand Tuples",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.SimplifyNot().transform(ast),
-                name="Simplify Nots",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.XorCancellationTransformer(
-                    visitors.build_game_type_map(ast, self.proof_let_types)
-                ).transform(ast),
-                name="XOR Cancellation",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.XorIdentityTransformer(
-                    visitors.build_game_type_map(ast, self.proof_let_types)
-                ).transform(ast),
-                name="XOR Identity",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.ModIntSimplificationTransformer(
-                    visitors.build_game_type_map(ast, self.proof_let_types)
-                ).transform(ast),
-                name="ModInt Simplification",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.ReflexiveComparisonTransformer().transform(ast),
-                name="Reflexive Comparison",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.RedundantFieldCopyTransformer().transform(ast),
-                name="Remove redundant variables for fields",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.SimplifyTupleTransformer(ast).transform(ast),
-                name="Simplify tuples that are copies of their fields",
-            ),
-            AstManipulator(
-                fn=lambda ast: visitors.RemoveUnreachableTransformer(ast).transform(
-                    ast
-                ),
-                name="Remove unreachable blocks of code",
-            ),
-        ]
-        for _iteration in range(_MAX_FIXED_POINT_ITERATIONS):
-            new_game = game
-            for manipulator in ast_manipulators:
-                new_game = manipulator.fn(new_game)
-            if new_game == game:
-                break
-            game = new_game
-        else:
-            warnings.warn(
-                "Canonicalization did not converge within "
-                f"{_MAX_FIXED_POINT_ITERATIONS} iterations",
-                stacklevel=2,
-            )
-        game = visitors.VariableStandardizingTransformer().transform(game)
-        game = standardize_field_names(game)
-        game = dependencies.BubbleSortFieldAssignment().transform(game)
+        ctx = self._build_context()
+        game = run_pipeline(game, CORE_PIPELINE, ctx)
+        game = run_standardization(game, STANDARDIZATION_PIPELINE, ctx)
         return game
 
     def apply_reduction(
@@ -1206,45 +889,5 @@ def get_challenger_method_lookup(challenger: frog_ast.Game) -> MethodLookup:
     )
 
 
-def remove_duplicate_fields(game: frog_ast.Game) -> frog_ast.Game:
-    for field in game.fields:
-        for other_field in game.fields:
-            if field.type == other_field.type and field.name < other_field.name:
-                duplicated_statements = visitors.SameFieldVisitor(
-                    (field.name, other_field.name)
-                ).visit(game)
-                if duplicated_statements is not None:
-                    new_game = copy.deepcopy(game)
-                    new_game.fields = [
-                        the_field
-                        for the_field in game.fields
-                        if the_field.name != other_field.name
-                    ]
-                    ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-                    ast_map.set(
-                        frog_ast.Variable(other_field.name),
-                        frog_ast.Variable(field.name),
-                    )
-                    return visitors.SubstitutionTransformer(ast_map).transform(
-                        visitors.RemoveStatementTransformer(
-                            duplicated_statements
-                        ).transform(new_game)
-                    )
-    return game
-
-
 def get_challenger_field_name(name: str) -> str:
     return f"challenger@{name}"
-
-
-def standardize_field_names(game: frog_ast.Game) -> frog_ast.Game:
-    field_rename_map = visitors.FieldOrderingVisitor().visit(game)
-    ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-    for field_name, normalized_name in field_rename_map.items():
-        ast_map.set(frog_ast.Variable(field_name), frog_ast.Variable(normalized_name))
-
-    new_game = visitors.SubstitutionTransformer(ast_map).transform(game)
-    for field in new_game.fields:
-        field.name = field_rename_map[field.name]
-    new_game.fields.sort(key=lambda element: element.name)
-    return new_game

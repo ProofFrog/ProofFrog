@@ -657,6 +657,8 @@ class FrogToSympyVisitor(Visitor[Optional[Symbol | int]]):
         self.stack.append(integer.num)
 
     def leave_variable(self, var: frog_ast.Variable) -> None:
+        if var.name not in self.variables:
+            raise KeyError(f"Undefined variable '{var.name}' in expression")
         self.stack.append(self.variables[var.name])
 
 

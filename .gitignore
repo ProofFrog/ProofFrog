@@ -4,3 +4,4 @@ dist
 proofOutput.txt
 .venv
 .claude
+.worktrees

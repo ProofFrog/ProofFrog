@@ -32,6 +32,19 @@ class _SilentErrorListener(ErrorListener):  # type: ignore[misc]
         pass
 
 
+class _CollectingErrorListener(ErrorListener):  # type: ignore[misc]
+    """Records all syntax errors for better error reporting."""
+
+    def __init__(self) -> None:
+        self.errors: list[tuple[int, int, str, str]] = (
+            []
+        )  # (line, column, token_text, msg)
+
+    def syntaxError(self, recognizer, offendingSymbol, line, column, msg, e):  # type: ignore[override, no-untyped-def]  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        token_text = offendingSymbol.text if offendingSymbol else ""
+        self.errors.append((line, column, token_text, msg))
+
+
 class ParseError(Exception):
     """A syntax error from the ANTLR parser with location info."""
 
@@ -120,6 +133,105 @@ def _to_parse_error(
 
     return ParseError(
         msg,
+        file_name=file_name,
+        line=line,
+        column=col,
+        token=token_text,
+        source_line=source_line,
+    )
+
+
+def _reparse_for_error(
+    source: str,
+    lexer_functor: type[PrimitiveLexer],
+    parser_functor: type[PrimitiveParser],
+) -> ParseError | None:
+    """Re-parse with DefaultErrorStrategy to get a better error location.
+
+    BailErrorStrategy (used for normal parsing) can report errors far from the
+    actual problem.  DefaultErrorStrategy does proper recovery and reports at
+    the real mismatch point.  Returns None if the reparse finds no errors.
+    """
+    input_stream: InputStream | FileStream
+    if os.path.isfile(source):
+        input_stream = FileStream
+    else:
+        input_stream = InputStream
+    lexer = lexer_functor(input_stream(source))
+    lexer.removeErrorListeners()
+    collector = _CollectingErrorListener()
+    parser = parser_functor(CommonTokenStream(lexer))
+    parser.removeErrorListeners()
+    parser.addErrorListener(collector)
+    try:
+        parser.program()
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+    if not collector.errors:
+        return None
+
+    # Heuristic for choosing the most useful error among potentially many:
+    # When there are few errors (1-3), the first non-EOF error is usually
+    # the root cause.  When there are many errors (4+), earlier ones are
+    # often cascading noise from recovery attempts, so prefer the last
+    # non-EOF error which tends to be closest to the real problem.
+    chosen = collector.errors[0]
+    if len(collector.errors) >= 4:
+        for err in reversed(collector.errors):
+            if err[2] != "<EOF>":
+                chosen = err
+                break
+    else:
+        for err in collector.errors:
+            if err[2] != "<EOF>":
+                chosen = err
+                break
+
+    line, col, token_text, antlr_msg = chosen
+    file_name = source if os.path.isfile(source) else "<input>"
+    all_lines = _read_source_lines(source)
+
+    if token_text == "<EOF>":
+        display_msg = "unexpected end of file"
+    elif token_text:
+        display_msg = f"unexpected token '{token_text}'"
+    else:
+        display_msg = "syntax error"
+
+    # Use ANTLR's message when it contains useful context ("expecting"
+    # or "missing"), but clean up internal token names for readability.
+    if antlr_msg and ("expecting" in antlr_msg or "missing" in antlr_msg):
+        cleaned = antlr_msg
+        cleaned = cleaned.replace("ID", "identifier")
+        cleaned = cleaned.replace("'in', ", "")
+        cleaned = cleaned.replace("{", "")
+        cleaned = cleaned.replace("}", "")
+        cleaned = cleaned.replace("extraneous input", "unexpected")
+        display_msg = cleaned
+
+    # Apply the same missing-semicolon heuristic as _to_parse_error.
+    if line >= 2 and token_text and token_text != "<EOF>":
+        prev_idx = line - 2
+        while prev_idx >= 0 and not all_lines[prev_idx].strip():
+            prev_idx -= 1
+        if prev_idx >= 0:
+            prev_stripped = all_lines[prev_idx].rstrip()
+            if prev_stripped and not prev_stripped.endswith((";", "{", "}", ":")):
+                return ParseError(
+                    f"missing ';' (found '{token_text}' on next line)",
+                    file_name=file_name,
+                    line=prev_idx + 1,
+                    column=len(prev_stripped),
+                    token=token_text,
+                    source_line=prev_stripped,
+                )
+
+    source_line = ""
+    if 1 <= line <= len(all_lines):
+        source_line = all_lines[line - 1].rstrip()
+
+    return ParseError(
+        display_msg,
         file_name=file_name,
         line=line,
         column=col,
@@ -814,7 +926,8 @@ def parse_primitive_file(primitive: str) -> frog_ast.Primitive:
         )
         return ast
     except antlr_error.Errors.ParseCancellationException as e:
-        raise _to_parse_error(e, primitive) from e
+        better = _reparse_for_error(primitive, PrimitiveLexer, PrimitiveParser)
+        raise (better or _to_parse_error(e, primitive)) from e
 
 
 def parse_scheme_file(scheme: str) -> frog_ast.Scheme:
@@ -824,7 +937,8 @@ def parse_scheme_file(scheme: str) -> frog_ast.Scheme:
         )
         return ast
     except antlr_error.Errors.ParseCancellationException as e:
-        raise _to_parse_error(e, scheme) from e
+        better = _reparse_for_error(scheme, SchemeLexer, SchemeParser)
+        raise (better or _to_parse_error(e, scheme)) from e
 
 
 def parse_expression(expression: str) -> frog_ast.Expression:
@@ -834,7 +948,8 @@ def parse_expression(expression: str) -> frog_ast.Expression:
         )
         return ast
     except antlr_error.Errors.ParseCancellationException as e:
-        raise _to_parse_error(e, expression) from e
+        better = _reparse_for_error(expression, GameLexer, GameParser)
+        raise (better or _to_parse_error(e, expression)) from e
 
 
 def parse_game_file(game_file: str) -> frog_ast.GameFile:
@@ -844,7 +959,8 @@ def parse_game_file(game_file: str) -> frog_ast.GameFile:
         )
         return ast
     except antlr_error.Errors.ParseCancellationException as e:
-        raise _to_parse_error(e, game_file) from e
+        better = _reparse_for_error(game_file, GameLexer, GameParser)
+        raise (better or _to_parse_error(e, game_file)) from e
 
 
 def parse_proof_file(proof_file: str) -> frog_ast.ProofFile:
@@ -854,7 +970,8 @@ def parse_proof_file(proof_file: str) -> frog_ast.ProofFile:
         )
         return ast
     except antlr_error.Errors.ParseCancellationException as e:
-        raise _to_parse_error(e, proof_file) from e
+        better = _reparse_for_error(proof_file, ProofLexer, ProofParser)
+        raise (better or _to_parse_error(e, proof_file)) from e
 
 
 def _get_file_type(file_name: str) -> frog_ast.FileType:

@@ -23,7 +23,10 @@ class WhichGame(Enum):
 
 
 ProcessedAssumption = namedtuple("ProcessedAssumption", ["assumption", "which"])
-HopResult = namedtuple("HopResult", ["step_num", "valid", "kind", "depth"])
+HopResult = namedtuple(
+    "HopResult",
+    ["step_num", "valid", "kind", "depth", "current_desc", "next_desc"],
+)
 
 
 class FailedProof(Exception):
@@ -41,9 +44,32 @@ class ProofEngine:
         self.hop_results: list[HopResult] = []
         self.variables: dict[str, Symbol | frog_ast.Expression] = {}
         self.method_lookup: MethodLookup = {}
+        self._total_steps = 0
+        self._current_step = 0
 
     def add_definition(self, name: str, root: frog_ast.Root) -> None:
         self.definition_namespace[name] = root
+
+    @staticmethod
+    def _count_hops(steps: list[frog_ast.ProofStep]) -> int:
+        """Count the number of hops in a list of proof steps."""
+        count = 0
+        for i in range(len(steps) - 1):
+            if isinstance(steps[i], frog_ast.StepAssumption):
+                continue
+            # Skip past any assumptions between this step and the next
+            j = i + 1
+            while j < len(steps) and isinstance(steps[j], frog_ast.StepAssumption):
+                j += 1
+            if j < len(steps):
+                count += 1
+                # If the next step is an induction, count its internal hops
+                # plus the induction rollover
+                next_step = steps[j]
+                if isinstance(next_step, frog_ast.Induction):
+                    count += ProofEngine._count_hops(next_step.steps)
+                    count += 1  # induction rollover
+        return count
 
     def prove(self, proof_file: frog_ast.ProofFile) -> None:
         for game in proof_file.helpers:
@@ -96,8 +122,16 @@ class ProofEngine:
             print(Fore.RED + f"Theorem: {proof_file.theorem}")
             print(Fore.RED + f"First Game: {first_step.challenger}")
 
+        print(f"Proving: {proof_file.theorem}\n")
+
         self.hop_results = []
+        self._total_steps = self._count_hops(proof_file.steps)
+        self._current_step = 0
         self.prove_steps(proof_file.steps, proof_file.assumptions)
+
+        print()
+        self._print_summary_table()
+        print()
 
         if any(not r.valid for r in self.hop_results):
             print(Fore.RED + "Proof Failed!")
@@ -108,10 +142,77 @@ class ProofEngine:
             and first_step.challenger.which != final_step.challenger.which
             and first_step.adversary == final_step.adversary
         ):
-            print(Fore.GREEN + "Proof Suceeded!")
+            print(Fore.GREEN + "Proof Succeeded!")
             return
         print(Fore.YELLOW + "Proof Succeeded, but is incomplete")
         raise FailedProof()
+
+    def _print_step_status(self, hop_desc: str, result: str, color: str) -> None:
+        """Print a single-line step status."""
+        width = len(str(self._total_steps))
+        step_str = f"Step {self._current_step:>{width}}/{self._total_steps}"
+        print(f"  {step_str}  {hop_desc} ... {color}{result}{Fore.RESET}")
+
+    def _print_summary_table(self) -> None:
+        """Print a summary table of all hop results."""
+        # Filter to top-level steps only
+        results = [r for r in self.hop_results if r.depth == 0]
+        if not results:
+            return
+
+        # Compute column widths
+        step_width = max(len(str(r.step_num)) for r in results)
+        step_width = max(step_width, 4)  # minimum "Step" header width
+
+        hop_descs: list[str] = []
+        for r in results:
+            hop_descs.append(f"{r.current_desc} -> {r.next_desc}")
+        hop_width = max(len(d) for d in hop_descs)
+        hop_width = max(hop_width, 3)  # minimum "Hop" header width
+
+        type_labels: list[str] = []
+        for r in results:
+            if r.kind == "by_assumption":
+                type_labels.append("assumption")
+            elif r.kind == "induction_rollover":
+                type_labels.append("rollover")
+            else:
+                type_labels.append("equivalence")
+        type_width = max(len(t) for t in type_labels)
+        type_width = max(type_width, 4)  # minimum "Type" header width
+
+        result_width = 6  # "Result" header width
+
+        # Print table
+        header = (
+            f"  {'Step':>{step_width}}  "
+            f"{'Hop':<{hop_width}}  "
+            f"{'Type':<{type_width}}  "
+            f"{'Result':<{result_width}}"
+        )
+        separator = (
+            f"  {'-' * step_width}  "
+            f"{'-' * hop_width}  "
+            f"{'-' * type_width}  "
+            f"{'-' * result_width}"
+        )
+
+        print(header)
+        print(separator)
+
+        for r, hop_desc, type_label in zip(results, hop_descs, type_labels):
+            if r.kind == "by_assumption":
+                result_str = Fore.CYAN + "assume" + Fore.RESET
+            elif r.valid:
+                result_str = Fore.GREEN + "ok" + Fore.RESET
+            else:
+                result_str = Fore.RED + "FAILED" + Fore.RESET
+            print(
+                f"  {r.step_num:>{step_width}}  "
+                f"{hop_desc:<{hop_width}}  "
+                f"{type_label:<{type_width}}  "
+                f"{result_str}"
+            )
 
     def prove_steps(
         self,
@@ -138,8 +239,10 @@ class ProofEngine:
                 assumption = steps[i]
 
             next_step = steps[i]
+            self._current_step += 1
 
-            print(f"===STEP {step_num}===")
+            if self.verbose:
+                print(f"===STEP {step_num}===")
 
             current_game_ast: frog_ast.Game
             next_game_ast: frog_ast.Game
@@ -150,15 +253,22 @@ class ProofEngine:
                 if self._is_by_indistinguishability(
                     current_step, next_step, assumed_indistinguishable
                 ):
-                    print(f"Current: {current_step}")
-                    print(f"Hop To: {next_step}\n")
-                    print("Valid by assumption")
+                    current_desc = str(current_step)
+                    next_desc = str(next_step)
+                    if self.verbose:
+                        print(f"Current: {current_desc}")
+                        print(f"Hop To: {next_desc}\n")
+                        print("Valid by assumption")
+                    hop_desc = f"{current_desc} -> {next_desc}"
+                    self._print_step_status(hop_desc, "by assumption", Fore.CYAN)
                     self.hop_results.append(
                         HopResult(
                             step_num=step_num,
                             valid=True,
                             kind="by_assumption",
                             depth=_depth,
+                            current_desc=current_desc,
+                            next_desc=next_desc,
                         )
                     )
                     continue
@@ -207,8 +317,12 @@ class ProofEngine:
                 )
                 current_step = last_inductive_step
 
-            print(f"Current: {current_step}")
-            print(f"Hop To: {next_step}\n")
+            current_desc = str(current_step)
+            next_desc = str(next_step)
+
+            if self.verbose:
+                print(f"Current: {current_desc}")
+                print(f"Hop To: {next_desc}\n")
 
             assert isinstance(current_step, frog_ast.Step)
             assert isinstance(next_step, frog_ast.Step)
@@ -216,14 +330,21 @@ class ProofEngine:
             self.set_up_assumptions(assumptions, current_step, next_step)
 
             hop_valid = self.check_equivalent(current_game_ast, next_game_ast)
-            if not hop_valid:
-                print("Step failed!")
+            hop_desc = f"{current_desc} -> {next_desc}"
+            if hop_valid:
+                self._print_step_status(hop_desc, "ok", Fore.GREEN)
+            else:
+                self._print_step_status(hop_desc, "FAILED", Fore.RED)
+                if self.verbose:
+                    print("Step failed!")
             self.hop_results.append(
                 HopResult(
                     step_num=step_num,
                     valid=hop_valid,
-                    kind="equivalent" if hop_valid else "failed",
+                    kind="equivalent",
                     depth=_depth,
+                    current_desc=current_desc,
+                    next_desc=next_desc,
                 )
             )
             if isinstance(steps[i], frog_ast.Induction):
@@ -262,19 +383,32 @@ class ProofEngine:
                 last_step_ast = self._get_game_ast(
                     last_step.challenger, last_step.reduction
                 )
-                print("CHECKING INDUCTION ROLLOVER")
-                print(f"Current: {last_step}")
-                print(f"Hop To: {first_step}\n")
+                self._current_step += 1
+                rollover_current_desc = str(last_step)
+                rollover_next_desc = str(first_step)
+                if self.verbose:
+                    print("CHECKING INDUCTION ROLLOVER")
+                    print(f"Current: {rollover_current_desc}")
+                    print(f"Hop To: {rollover_next_desc}\n")
                 self.set_up_assumptions(assumptions, last_step, first_step)
                 rollover_valid = self.check_equivalent(last_step_ast, first_step_ast)
-                if not rollover_valid:
-                    print("Step failed!")
+                rollover_hop = (
+                    f"[rollover] {rollover_current_desc} -> {rollover_next_desc}"
+                )
+                if rollover_valid:
+                    self._print_step_status(rollover_hop, "ok", Fore.GREEN)
+                else:
+                    self._print_step_status(rollover_hop, "FAILED", Fore.RED)
+                    if self.verbose:
+                        print("Step failed!")
                 self.hop_results.append(
                     HopResult(
                         step_num=step_num,
                         valid=rollover_valid,
                         kind="induction_rollover",
                         depth=_depth,
+                        current_desc=rollover_current_desc,
+                        next_desc=rollover_next_desc,
                     )
                 )
                 self.proof_let_types.remove(the_induction.name)
@@ -481,8 +615,9 @@ class ProofEngine:
                 return ast
 
             if index == 0:
-                print("SIMPLIFYING CURRENT GAME")
-                print(current_game_ast)
+                if self.verbose:
+                    print("SIMPLIFYING CURRENT GAME")
+                    print(current_game_ast)
                 ast_manipulators.append(
                     AstManipulator(
                         fn=functools.partial(apply_assumptions, WhichGame.CURRENT),
@@ -491,8 +626,9 @@ class ProofEngine:
                 )
             else:
                 ast_manipulators.pop()
-                print("SIMPLIFYING NEXT GAME")
-                print(next_game_ast)
+                if self.verbose:
+                    print("SIMPLIFYING NEXT GAME")
+                    print(next_game_ast)
                 ast_manipulators.append(
                     AstManipulator(
                         fn=functools.partial(apply_assumptions, WhichGame.NEXT),
@@ -541,13 +677,15 @@ class ProofEngine:
             next_game_ast
         )
 
-        print("CURRENT")
-        print(current_game_ast)
-        print("NEXT")
-        print(next_game_ast)
+        if self.verbose:
+            print("CURRENT")
+            print(current_game_ast)
+            print("NEXT")
+            print(next_game_ast)
 
         if current_game_ast == next_game_ast:
-            print("Inline Success!")
+            if self.verbose:
+                print("Inline Success!")
             return True
 
         class AllTrueTransformer(visitors.Transformer):
@@ -603,7 +741,8 @@ class ProofEngine:
                 solver.add(z3.Not(first_if_formula == next_if_formula))
                 if solver.check() != z3.unsat:
                     return False
-        print("Inline Success!")
+        if self.verbose:
+            print("Inline Success!")
         return True
 
     def canonicalize_game(self, game: frog_ast.Game) -> frog_ast.Game:

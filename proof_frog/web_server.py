@@ -337,7 +337,13 @@ def _capture_prove(
                 pass
 
         hop_results: list[dict[str, object]] = [
-            {"step_num": r.step_num, "valid": r.valid, "kind": r.kind}
+            {
+                "step_num": r.step_num,
+                "valid": r.valid,
+                "kind": r.kind,
+                "current_desc": r.current_desc,
+                "next_desc": r.next_desc,
+            }
             for r in engine.hop_results
             if r.depth == 0 and r.kind != "induction_rollover"
         ]

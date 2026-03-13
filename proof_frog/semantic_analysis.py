@@ -292,6 +292,7 @@ class NameResolutionVisitor(VariableTypeVisitor):
         super().__init__(import_namespace)
         self.file_name = file_name
         self.in_field_access = False
+        self.in_parameter_type = False
         self.defining_variable: Optional[frog_ast.Expression] = None
 
     def visit_game_file(self, game_file: frog_ast.GameFile) -> None:
@@ -345,6 +346,13 @@ class NameResolutionVisitor(VariableTypeVisitor):
                 f"Scheme does not correctly implement primitive {scheme.primitive_name}",
             )
 
+    def visit_parameter(self, param: frog_ast.Parameter) -> None:
+        self.in_parameter_type = True
+        super().visit_parameter(param)
+
+    def leave_parameter(self, _: frog_ast.Parameter) -> None:
+        self.in_parameter_type = False
+
     def visit_assignment(self, assignment: frog_ast.Assignment) -> None:
         if assignment.the_type is not None:
             self.defining_variable = assignment.var
@@ -367,7 +375,40 @@ class NameResolutionVisitor(VariableTypeVisitor):
         # Check for valid!
         the_type = self.get_type(var.name)
         if the_type is None:
-            print_error(var, f"Variable {var.name} not defined", self.file_name)
+            if self.in_parameter_type:
+                print_error(
+                    var,
+                    f"Type '{var.name}' is not defined; check that it is imported",
+                    self.file_name,
+                )
+            else:
+                qualified_suggestions = self._find_qualified_names(var.name)
+                if qualified_suggestions:
+                    suggestions = " or ".join(f"'{s}'" for s in qualified_suggestions)
+                    print_error(
+                        var,
+                        f"Variable '{var.name}' is not defined."
+                        f" Did you mean {suggestions}?",
+                        self.file_name,
+                    )
+                else:
+                    print_error(
+                        var,
+                        f"Variable '{var.name}' is not defined",
+                        self.file_name,
+                    )
+
+    def _find_qualified_names(self, field_name: str) -> list[str]:
+        """Search scope for InstantiableTypes that have a member matching field_name."""
+        results: list[str] = []
+        for scope in self.variable_type_map_stack:
+            for var_name, var_type in scope.items():
+                if (
+                    isinstance(var_type, visitors.InstantiableType)
+                    and field_name in var_type.members
+                ):
+                    results.append(f"{var_name}.{field_name}")
+        return results
 
     def visit_parameterized_game(
         self, parameterized_game: frog_ast.ParameterizedGame
@@ -803,7 +844,11 @@ class CheckTypeVisitor(VariableTypeVisitor):
             if non_matching_method is not True:
                 self.print_error(
                     step,
-                    f"Method {non_matching_method} listed in reduction's composition by not step's composition",
+                    f"Reduction composes with {instantiated_challenger.to_use} "
+                    f"which has method '{non_matching_method}', "
+                    f"but step's game {step.challenger.game} has no matching method. "
+                    f"Check that the reduction's compose clause uses the same "
+                    f"parameter types as the step",
                 )
 
     def leave_slice(self, the_slice: frog_ast.Slice) -> None:

@@ -5,7 +5,7 @@ from pathlib import Path
 from proof_frog.describe import describe_file
 from proof_frog.frog_parser import ParseError
 
-REPO_ROOT = Path(__file__).parent.parent
+REPO_ROOT = Path(__file__).parent.parent.parent.parent
 EXAMPLES = REPO_ROOT / "examples"
 
 

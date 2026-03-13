@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).parent.parent
+REPO_ROOT = Path(__file__).parent.parent.parent
 PROOF_FILES = sorted(REPO_ROOT.glob("examples/**/*.proof"))
 
 

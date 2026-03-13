@@ -7,7 +7,7 @@ from click.testing import CliRunner
 
 from proof_frog.proof_frog import cli
 
-EXAMPLES = os.path.join(os.path.dirname(__file__), "..", "examples")
+EXAMPLES = os.path.join(os.path.dirname(__file__), "..", "..", "examples")
 PRIMITIVE = os.path.join(EXAMPLES, "Primitives", "PRG.primitive")
 GAME = os.path.join(EXAMPLES, "Games", "PRG", "PRGSecurity.game")
 PROOF = os.path.join(EXAMPLES, "Book", "5", "5_3.proof")

@@ -1,5 +1,0 @@
-Primitive InvalidExpression() {
-    Set Test = bla;
-
-    Int f();
-}

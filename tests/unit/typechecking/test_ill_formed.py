@@ -2,12 +2,10 @@
 
 Some cases are marked xfail because check_well_formed only runs name resolution
 (not full type checking) for non-proof files. These document gaps in the checker:
-- Duplicate field/method/parameter names are not detected
 - Type mismatches in field assignments are not detected
 - Bad if-conditions and incorrect return types are not detected
-- Scheme-vs-primitive method matching has a bug (has_matching_methods returns a
-  truthy MethodSignature instead of False, so ``not has_matching_methods(...)``
-  never triggers)
+- Missing fields in schemes are not detected (has_matching_methods only checks
+  methods, not fields)
 """
 
 from pathlib import Path
@@ -49,8 +47,8 @@ _NOT_CHECKED = pytest.mark.xfail(
     strict=True,
 )
 
-_SCHEME_METHOD_BUG = pytest.mark.xfail(
-    reason="has_matching_methods returns truthy MethodSignature; `not` check never triggers",
+_MISSING_FIELD_CHECK = pytest.mark.xfail(
+    reason="has_matching_methods only checks methods, not fields",
     strict=True,
 )
 
@@ -59,19 +57,16 @@ _PRIMITIVE_CASES = [
         "Primitive Repeated(Int x) {\n    Int y = x;\n    Int y = x;\n}\n",
         "Duplicated field name",
         id="repeated_field",
-        marks=_NOT_CHECKED,
     ),
     pytest.param(
         "Primitive Repeated() {\n    Void f();\n    Int f();\n}\n",
         "Duplicated method name",
         id="repeated_method",
-        marks=_NOT_CHECKED,
     ),
     pytest.param(
         "Primitive Repeated(Int x, Int x) {\n    Int y = x;\n}\n",
         "Duplicated parameter name",
         id="repeated_parameter",
-        marks=_NOT_CHECKED,
     ),
     pytest.param(
         (
@@ -83,7 +78,6 @@ _PRIMITIVE_CASES = [
         ),
         "Duplicated parameter name",
         id="repeated_method_param",
-        marks=_NOT_CHECKED,
     ),
     pytest.param(
         "Primitive UndefinedType(Int x) {\n    Bla test = x;\n}\n",
@@ -159,7 +153,6 @@ _SCHEME_CASES = [
         ),
         "Duplicated field name",
         id="repeated_field",
-        marks=_NOT_CHECKED,
     ),
     pytest.param(
         (
@@ -171,7 +164,6 @@ _SCHEME_CASES = [
         ),
         "Duplicated method name",
         id="repeated_method",
-        marks=_NOT_CHECKED,
     ),
     pytest.param(
         (
@@ -182,7 +174,6 @@ _SCHEME_CASES = [
         ),
         "Duplicated parameter name",
         id="repeated_parameter",
-        marks=_NOT_CHECKED,
     ),
     pytest.param(
         (
@@ -195,7 +186,6 @@ _SCHEME_CASES = [
         ),
         "Duplicated parameter name",
         id="repeated_method_param",
-        marks=_NOT_CHECKED,
     ),
     pytest.param(
         (
@@ -285,7 +275,6 @@ _SCHEME_CASES = [
         ),
         "does not correctly implement",
         id="incorrect_override",
-        marks=_SCHEME_METHOD_BUG,
     ),
     pytest.param(
         (
@@ -298,7 +287,7 @@ _SCHEME_CASES = [
         ),
         "does not correctly implement",
         id="not_overriding_fields",
-        marks=_SCHEME_METHOD_BUG,
+        marks=_MISSING_FIELD_CHECK,
     ),
     pytest.param(
         (
@@ -309,7 +298,6 @@ _SCHEME_CASES = [
         ),
         "does not correctly implement",
         id="not_overriding_methods",
-        marks=_SCHEME_METHOD_BUG,
     ),
 ]
 

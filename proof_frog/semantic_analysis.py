@@ -295,6 +295,37 @@ class NameResolutionVisitor(VariableTypeVisitor):
         self.in_parameter_type = False
         self.defining_variable: Optional[frog_ast.Expression] = None
 
+    def _check_duplicate_names(
+        self, node: frog_ast.Primitive | frog_ast.Scheme | frog_ast.Game
+    ) -> None:
+        """Check for duplicated field, method, and parameter names."""
+        field_names = [field.name for field in node.fields]
+        if len(field_names) != len(set(field_names)):
+            print_error(node.fields[0], "Duplicated field name", self.file_name)
+
+        method_signatures = (
+            node.methods
+            if isinstance(node, frog_ast.Primitive)
+            else [method.signature for method in node.methods]
+        )
+        method_names = [method.name for method in method_signatures]
+        if len(method_names) != len(set(method_names)):
+            print_error(node.methods[0], "Duplicated method name", self.file_name)
+
+        param_names = [param.name for param in node.parameters]
+        if len(param_names) != len(set(param_names)):
+            print_error(node, "Duplicated parameter name", self.file_name)
+
+    def visit_primitive(self, primitive: frog_ast.Primitive) -> None:
+        self._check_duplicate_names(primitive)
+
+    def visit_method_signature(
+        self, method_signature: frog_ast.MethodSignature
+    ) -> None:
+        parameter_names = [param.name for param in method_signature.parameters]
+        if len(parameter_names) != len(set(parameter_names)):
+            print_error(method_signature, "Duplicated parameter name", self.file_name)
+
     def visit_game_file(self, game_file: frog_ast.GameFile) -> None:
         for index, game in enumerate(game_file.games):
             other_game = game_file.games[1 - index]
@@ -323,6 +354,7 @@ class NameResolutionVisitor(VariableTypeVisitor):
             )
 
     def visit_scheme(self, scheme: frog_ast.Scheme) -> None:
+        self._check_duplicate_names(scheme)
         if scheme.primitive_name not in self.import_namespace:
             print_error(
                 scheme,
@@ -338,12 +370,14 @@ class NameResolutionVisitor(VariableTypeVisitor):
         primitive_definition = get_type_from_instantiable(
             scheme.primitive_name, corresponding_primitive, True
         )
-        if not has_matching_methods(
+        non_matching_method = has_matching_methods(
             primitive_definition, get_type_from_instantiable(scheme.name, scheme, True)
-        ):
+        )
+        if non_matching_method is not True:
             print_error(
                 scheme,
                 f"Scheme does not correctly implement primitive {scheme.primitive_name}",
+                self.file_name,
             )
 
     def visit_parameter(self, param: frog_ast.Parameter) -> None:

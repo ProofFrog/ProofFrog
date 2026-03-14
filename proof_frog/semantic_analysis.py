@@ -2,7 +2,7 @@ import os
 import sys
 import copy
 from typing import Optional, TypeVar, Union, TypeAlias
-from sympy import Symbol
+from sympy import Rational, Symbol
 from . import frog_ast
 from . import frog_parser
 from . import proof_engine
@@ -716,6 +716,9 @@ class CheckTypeVisitor(VariableTypeVisitor):
         self.subsets_pairs: list[tuple[PossibleType, PossibleType]] = (
             subsets_pairs if subsets_pairs is not None else []
         )
+        self._instantiation_cache: dict[
+            tuple[str, tuple[str, ...]], frog_ast.Instantiable
+        ] = {}
 
     def result(self) -> None:
         return None
@@ -871,8 +874,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             # Skip instantiated schemes/primitives/games stored as AST nodes
             if isinstance(ns_val, (frog_ast.Primitive, frog_ast.Scheme, frog_ast.Game)):
                 continue
-            flattened = _FieldAccessFlattener().transform(copy.deepcopy(ns_val))
-            sym_val = get_sympy_expression(flattened)
+            sym_val = _ast_to_sympy(ns_val)
             if sym_val is not None:
                 subs[Symbol(ns_name)] = sym_val
         # From requires equality pairs
@@ -881,10 +883,8 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 right, frog_ast.ASTNode
             ):
                 continue
-            left_flat = _FieldAccessFlattener().transform(copy.deepcopy(left))
-            right_flat = _FieldAccessFlattener().transform(copy.deepcopy(right))
-            left_sym = get_sympy_expression(left_flat)
-            right_sym = get_sympy_expression(right_flat)
+            left_sym = _ast_to_sympy(left)
+            right_sym = _ast_to_sympy(right)
             if (
                 left_sym is not None
                 and right_sym is not None
@@ -1686,7 +1686,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 definition,
                 parameterized_game.args,
                 self._get_file_name_from_instantiable(parameterized_game.name),
-                copy.deepcopy(self.variable_type_map_stack),
+                [dict(d) for d in self.variable_type_map_stack],
             )
             self.ast_type_map.set(
                 parameterized_game,
@@ -1749,6 +1749,17 @@ class CheckTypeVisitor(VariableTypeVisitor):
                     f"{args[index]} is not of type {param.type}",
                 )
 
+        # Check cache to avoid redundant instantiation and type-checking
+        cache_key = (scheme.name, tuple(str(a) for a in args))
+        cached = self._instantiation_cache.get(cache_key)
+        if cached is not None:
+            # Re-propagate subsets constraints from the cached result
+            subsets_pairs = _extract_subsets_pairs(cached)
+            for pair in subsets_pairs:
+                if pair not in self.subsets_pairs:
+                    self.subsets_pairs.append(pair)
+            return cached
+
         # Build a combined namespace so that scheme/primitive FuncCall args
         # (e.g. UG(K, NG, H, G)) can be expanded to their field types during
         # instantiation. Scheme/primitive definitions live in import_namespace
@@ -1772,16 +1783,18 @@ class CheckTypeVisitor(VariableTypeVisitor):
         stack = (
             variable_type_map_stack
             if variable_type_map_stack is not None
-            else [copy.deepcopy(self.variable_type_map_stack[0])]
+            else [dict(self.variable_type_map_stack[0])]
         )
         CheckTypeVisitor(
             self.import_namespace,
             file_name,
             self.file_name_mapping,
             stack,
-            copy.deepcopy(combined_ns),
+            dict(combined_ns),
             self.subsets_pairs,
         ).visit(instantiated_scheme)
+
+        self._instantiation_cache[cache_key] = instantiated_scheme
         return instantiated_scheme
 
     def _get_file_name_from_instantiable(self, name: str) -> str:
@@ -1873,12 +1886,48 @@ class _FieldAccessFlattener(visitors.Transformer):
 
 
 def get_sympy_expression(the_type: frog_ast.ASTNode) -> Symbol | int | None:
-    flattened = _FieldAccessFlattener().transform(copy.deepcopy(the_type))
-    variables = visitors.VariableCollectionVisitor().visit(flattened)
-    sympy_variables: dict[str, Symbol] = {
-        variable.name: Symbol(variable.name) for variable in variables  # type: ignore
-    }
-    return visitors.FrogToSympyVisitor(sympy_variables).visit(flattened)
+    """Convert an AST numeric expression to a SymPy expression.
+
+    Handles Variable, FieldAccess (flattened to dotted names), Integer,
+    BinaryOperation (+, -, *, /), and UnaryOperation (-) without copying
+    or mutating the input tree.
+    """
+    return _ast_to_sympy(the_type)
+
+
+def _ast_to_sympy(  # pylint: disable=too-many-return-statements
+    node: frog_ast.ASTNode,
+) -> Symbol | int | None:
+    """Read-only recursive extraction of a SymPy expression from an AST node."""
+    if isinstance(node, frog_ast.Integer):
+        return node.num
+    if isinstance(node, frog_ast.Variable):
+        return Symbol(node.name)
+    if isinstance(node, frog_ast.FieldAccess):
+        if isinstance(node.the_object, frog_ast.Variable):
+            return Symbol(f"{node.the_object.name}.{node.name}")
+        return None
+    if isinstance(node, frog_ast.BinaryOperation):
+        left = _ast_to_sympy(node.left_expression)
+        right = _ast_to_sympy(node.right_expression)
+        if left is None or right is None:
+            return None
+        if node.operator == frog_ast.BinaryOperators.ADD:
+            return left + right
+        if node.operator == frog_ast.BinaryOperators.SUBTRACT:
+            return left - right
+        if node.operator == frog_ast.BinaryOperators.MULTIPLY:
+            return left * right
+        if node.operator == frog_ast.BinaryOperators.DIVIDE:
+            return Rational(left, right)
+        return None
+    if isinstance(node, frog_ast.UnaryOperation):
+        if node.operator == frog_ast.UnaryOperators.MINUS:
+            val = _ast_to_sympy(node.expression)
+            if val is not None:
+                return -val
+        return None
+    return None
 
 
 def has_matching_methods(

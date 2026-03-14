@@ -36,6 +36,7 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = ["mcp[cli] >= 1.0"]
+lsp = ["pygls >= 1.3"]
 
 [project.urls]
 Source = "https://github.com/ProofFrog/ProofFrog"
@@ -74,6 +75,12 @@ module='sympy.*'
 ignore_missing_imports = 'True'
 [[tool.mypy.overrides]]
 module='mcp.*'
+ignore_missing_imports = 'True'
+[[tool.mypy.overrides]]
+module='pygls.*'
+ignore_missing_imports = 'True'
+[[tool.mypy.overrides]]
+module='lsprotocol.*'
 ignore_missing_imports = 'True'
 
 [tool.pylint.MASTER]

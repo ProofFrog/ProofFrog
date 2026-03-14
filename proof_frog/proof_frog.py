@@ -162,6 +162,22 @@ def web(directory: str) -> None:
 
 
 @cli.command()
+def lsp() -> None:
+    """Start the Language Server Protocol server."""
+    # pylint: disable=import-outside-toplevel
+    try:
+        from proof_frog.lsp import run_server
+    except ImportError:
+        click.echo(
+            "The 'pygls' package is required for the LSP server.\n"
+            "Install it with: pip install 'proof_frog[lsp]'",
+            err=True,
+        )
+        sys.exit(1)
+    run_server()
+
+
+@cli.command()
 @click.argument("directory", default=".")
 def mcp(directory: str) -> None:
     """Start the MCP (Model Context Protocol) server."""

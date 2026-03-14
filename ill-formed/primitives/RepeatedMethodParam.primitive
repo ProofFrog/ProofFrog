@@ -1,6 +1,0 @@
-Primitive Repeated() {
-    Int x = 5;
-
-    Void f(Int x);
-    Void g(Int x, Int y, Bool x);
-}

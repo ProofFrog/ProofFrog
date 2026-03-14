@@ -1,3 +1,0 @@
-Primitive VoidFPrimitive() {
-    Void f();
-}

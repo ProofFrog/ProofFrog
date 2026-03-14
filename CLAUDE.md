@@ -11,7 +11,8 @@ python3 -m venv .venv
 
 - **Run tests**: `pytest` (runs in parallel via `pytest-xdist` `-n auto` by default; use `-n0` to disable)
 - **All CI checks**: `make lint` — runs `black --check`, `mypy`, and `pylint` in sequence (must all pass before committing)
-- **Auto-format**: `make format` — runs `black` to reformat in place, then re-run `make lint`
+- **Auto-format**: `make format` — runs `black` to reformat in place
+- **Regenerate parser**: `make parser` — regenerates ANTLR parsing code from grammar files into `proof_frog/parsing/`
 - **CLI**: `python -m proof_frog [parse|check|prove|web] <file>`
 
 ## CI Checks (must pass before committing)
@@ -34,10 +35,15 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 ## Architecture
 
 - `proof_frog/proof_frog.py` — CLI entry point (`parse`, `check`, `prove`, `web` commands)
+- `proof_frog/frog_ast.py` — AST node definitions
 - `proof_frog/frog_parser.py` — ANTLR-based parser
 - `proof_frog/proof_engine.py` — Proof verification (Z3 + SymPy)
 - `proof_frog/semantic_analysis.py` — Type checking / semantic analysis
-- `proof_frog/visitors.py` — AST visitor/transformer infrastructure
+- `proof_frog/visitors.py` — AST visitor/transformer base classes (`Visitor[U]`, `Transformer`, `BlockTransformer`) and core utility visitors/transformers (substitution, inlining, Z3/SymPy conversion, type maps)
+- `proof_frog/transforms/` — Modular canonicalization pipeline; each file defines `TransformPass` subclasses in a specific domain (algebraic, sampling, control flow, inlining, symbolic, types, tuples, structural, standardization, assumptions). `pipelines.py` assembles passes into `CORE_PIPELINE` (fixed-point canonicalization) and `STANDARDIZATION_PIPELINE` (post-canonicalization normalization). `_base.py` provides `TransformPass`, `PipelineContext`, and the `run_pipeline()`/`run_standardization()` runners.
+- `proof_frog/describe.py` — Human-readable descriptions of primitives/schemes/games
+- `proof_frog/dependencies.py` — Dependency resolution for proof files
+- `proof_frog/mcp_server.py` — MCP server for tool-based proof interaction
 - `proof_frog/web_server.py` — Flask web server (`web` command, branch `ds-web`)
 - `proof_frog/parsing/` — ANTLR-generated code; do not edit manually
 
@@ -53,8 +59,9 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 - Python 3.11+, built with Flit (`pyproject.toml`)
 - `parsing/` directory is excluded from black, mypy, and pylint
 - Proof imports use paths relative to the directory where the CLI is invoked
-- Tests live in `tests/`; `test_proofs.py` runs all `examples/**/*.proof` files as subprocesses
+- Tests live in `tests/`, organized into `tests/integration/` (proof runs, CLI, AST checks) and `tests/unit/` (by area: engine, transforms, typechecking, visitors, parsing, other); `tests/integration/test_proofs.py` runs all `examples/**/*.proof` files as subprocesses
 - Only use ASCII characters in primitive/scheme/game/proof files.
+- When making changes that affect architecture, commands, test structure, or conventions, update CLAUDE.md to reflect those changes.
 
 ## Domain Knowledge
 

@@ -50,10 +50,21 @@ class TestExtractSubsetsPairs:
         pairs = semantic_analysis._extract_subsets_pairs(scheme)
         assert len(pairs) == 2
 
-    def test_non_subsets_requirement_ignored(self) -> None:
-        """Non-SUBSETS requirements (e.g., equality) should be ignored."""
+    def test_equality_requirement_extracted(self) -> None:
+        """Equality requirements should be extracted as type pairs."""
         req = frog_ast.BinaryOperation(
             frog_ast.BinaryOperators.EQUALS,
+            frog_ast.Variable("A"),
+            frog_ast.Variable("B"),
+        )
+        scheme = _make_scheme_with_requirements([req])
+        pairs = semantic_analysis._extract_subsets_pairs(scheme)
+        assert len(pairs) == 1
+
+    def test_non_equality_non_subsets_requirement_ignored(self) -> None:
+        """Non-EQUALS/SUBSETS requirements should be ignored."""
+        req = frog_ast.BinaryOperation(
+            frog_ast.BinaryOperators.LT,
             frog_ast.Variable("A"),
             frog_ast.Variable("B"),
         )

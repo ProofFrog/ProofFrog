@@ -120,11 +120,18 @@ class VariableTypeVisitor(visitors.Visitor[None]):
         self.variable_type_map_stack.pop()
 
     def visit_parameter(self, param: frog_ast.Parameter) -> None:
-        self.variable_type_map_stack[-1][param.name] = (
-            param.type
-            if not isinstance(param.type, frog_ast.Variable)
-            else self.get_type(param.type.name)
-        )
+        resolved_type: PossibleType = param.type
+        if isinstance(param.type, frog_ast.Variable):
+            resolved_type = self.get_type(param.type.name)
+        elif isinstance(param.type, frog_ast.FieldAccess) and isinstance(
+            param.type.the_object, frog_ast.Variable
+        ):
+            obj_type = self.get_type(param.type.the_object.name)
+            if isinstance(obj_type, visitors.InstantiableType):
+                member = obj_type.members.get(param.type.name)
+                if member is not None:
+                    resolved_type = member  # type: ignore[assignment]
+        self.variable_type_map_stack[-1][param.name] = resolved_type
 
     def leave_field(self, field: frog_ast.Field) -> None:
         was_scheme = False
@@ -621,7 +628,15 @@ def _types_comparable(left_type: PossibleType, right_type: PossibleType) -> bool
         if isinstance(right_type, frog_ast.OptionalType)
         else right_type
     )
-    return left_base == right_base
+    if left_base == right_base:
+        return True
+    # Two abstract type variables (not unwrapped from optionals) can be compared
+    # for equality — needed for requires clauses like S.Message == S.Ciphertext
+    if isinstance(left_type, frog_ast.Variable) and isinstance(
+        right_type, frog_ast.Variable
+    ):
+        return True
+    return False
 
 
 def _extract_null_check_variable(
@@ -654,18 +669,19 @@ def _block_always_returns(block: frog_ast.Block) -> bool:
 def _extract_subsets_pairs(
     instantiated_scheme: frog_ast.Instantiable,
 ) -> list[tuple[PossibleType, PossibleType]]:
-    """Extract (sub_type, super_type) pairs from requires...subsets clauses.
+    """Extract (sub_type, super_type) pairs from requires clauses.
 
-    After instantiation, the requirements have concrete Variable nodes
+    Handles both ``subsets`` and ``==`` constraints. After instantiation,
+    the requirements have concrete Variable nodes
     (e.g., KeySpace2 subsets IntermediateSpace).
     """
     pairs: list[tuple[PossibleType, PossibleType]] = []
     if not isinstance(instantiated_scheme, frog_ast.Scheme):
         return pairs
     for req in instantiated_scheme.requirements:
-        if (
-            isinstance(req, frog_ast.BinaryOperation)
-            and req.operator == frog_ast.BinaryOperators.SUBSETS
+        if isinstance(req, frog_ast.BinaryOperation) and req.operator in (
+            frog_ast.BinaryOperators.SUBSETS,
+            frog_ast.BinaryOperators.EQUALS,
         ):
             if isinstance(req.left_expression, frog_ast.Type) and isinstance(
                 req.right_expression, frog_ast.Type
@@ -697,18 +713,209 @@ class CheckTypeVisitor(VariableTypeVisitor):
     def result(self) -> None:
         return None
 
+    def _resolve_type_alias(
+        self, t: PossibleType, _seen: frozenset[str] | None = None
+    ) -> PossibleType:
+        """Resolve Variable and FieldAccess types through known aliases."""
+        if _seen is None:
+            _seen = frozenset()
+        if isinstance(t, frog_ast.Variable) and t.name in self.instantiation_namespace:
+            if t.name in _seen:
+                return t  # Avoid infinite recursion on self-referencing aliases
+            resolved = self.instantiation_namespace[t.name]
+            if isinstance(resolved, frog_ast.Type):
+                # Recursively resolve in case the alias is itself a FieldAccess
+                return self._resolve_type_alias(resolved, _seen | {t.name})
+        if isinstance(t, frog_ast.FieldAccess) and isinstance(
+            t.the_object, frog_ast.Variable
+        ):
+            obj_type = self.get_type(t.the_object.name)
+            if isinstance(obj_type, visitors.InstantiableType):
+                member = obj_type.members.get(t.name)
+                if member is not None:
+                    return self._resolve_type_alias(member, _seen)  # type: ignore[arg-type]
+        if isinstance(t, frog_ast.ProductType):
+            resolved_types: list[frog_ast.Type] = []
+            for sub in t.types:
+                resolved_sub = self._resolve_type_alias(sub, _seen)
+                if isinstance(resolved_sub, frog_ast.Type):
+                    resolved_types.append(resolved_sub)
+                else:
+                    resolved_types.append(sub)
+            return frog_ast.ProductType(resolved_types)
+        if isinstance(t, frog_ast.OptionalType):
+            resolved_inner = self._resolve_type_alias(t.the_type, _seen)
+            if isinstance(resolved_inner, frog_ast.Type):
+                return frog_ast.OptionalType(resolved_inner)
+        if isinstance(t, frog_ast.ArrayType):
+            resolved_elem = self._resolve_type_alias(t.element_type, _seen)
+            if isinstance(resolved_elem, frog_ast.Type):
+                return frog_ast.ArrayType(resolved_elem, t.count)
+        return t
+
+    def _normalize_bitstring_params(self, t: PossibleType) -> PossibleType:
+        """Normalize BitString parameterizations.
+
+        Replaces FieldAccess expressions (like G.lambda) with the field's
+        internal Variable name (like lambda). Uses both requires equality
+        constraints and direct Int field lookups.
+        """
+        if isinstance(t, frog_ast.ProductType):
+            normalized = [self._normalize_bitstring_params(sub) for sub in t.types]
+            if any(n is not orig for n, orig in zip(normalized, t.types)):
+                return frog_ast.ProductType(
+                    [
+                        n if isinstance(n, frog_ast.Type) else orig
+                        for n, orig in zip(normalized, t.types)
+                    ]
+                )
+            return t
+        if not isinstance(t, frog_ast.BitStringType) or t.parameterization is None:
+            return t
+        # Build substitution map: FieldAccess -> Variable
+        aliases: dict[str, frog_ast.ASTNode] = {}
+        # From requires equality constraints
+        for left, right in self.subsets_pairs:
+            if isinstance(left, frog_ast.FieldAccess) and isinstance(
+                right, frog_ast.Variable
+            ):
+                aliases[str(left)] = right
+            elif isinstance(right, frog_ast.FieldAccess) and isinstance(
+                left, frog_ast.Variable
+            ):
+                aliases[str(right)] = left
+        # From InstantiableType Int fields: G.lambda -> Variable("lambda")
+        self._collect_field_access_aliases(t.parameterization, aliases)
+        if not aliases:
+            return t
+        new_param = self._substitute_expr(copy.deepcopy(t.parameterization), aliases)
+        if isinstance(new_param, frog_ast.Expression):
+            return frog_ast.BitStringType(new_param)
+        return t
+
+    def _collect_field_access_aliases(
+        self, expr: frog_ast.ASTNode, aliases: dict[str, frog_ast.ASTNode]
+    ) -> None:
+        """Collect FieldAccess -> Variable aliases from Int fields."""
+        if isinstance(expr, frog_ast.FieldAccess) and isinstance(
+            expr.the_object, frog_ast.Variable
+        ):
+            obj_type = self.get_type(expr.the_object.name)
+            if isinstance(obj_type, visitors.InstantiableType):
+                member_val = obj_type.members.get(expr.name)
+                if isinstance(member_val, frog_ast.IntType):
+                    aliases[str(expr)] = frog_ast.Variable(expr.name)
+        elif isinstance(expr, frog_ast.BinaryOperation):
+            self._collect_field_access_aliases(expr.left_expression, aliases)
+            self._collect_field_access_aliases(expr.right_expression, aliases)
+
+    @staticmethod
+    def _substitute_expr(
+        expr: frog_ast.ASTNode, aliases: dict[str, frog_ast.ASTNode]
+    ) -> frog_ast.ASTNode:
+        """Substitute expression nodes by their string representation."""
+        key = str(expr)
+        if key in aliases:
+            return copy.deepcopy(aliases[key])
+        if isinstance(expr, frog_ast.BinaryOperation):
+            new_left = CheckTypeVisitor._substitute_expr(expr.left_expression, aliases)
+            new_right = CheckTypeVisitor._substitute_expr(
+                expr.right_expression, aliases
+            )
+            if isinstance(new_left, frog_ast.Expression) and isinstance(
+                new_right, frog_ast.Expression
+            ):
+                return frog_ast.BinaryOperation(expr.operator, new_left, new_right)
+        return expr
+
+    def _build_sympy_subs(self) -> dict[Symbol, Symbol | int]:
+        """Build SymPy substitutions from Int field definitions and requires."""
+        subs: dict[Symbol, Symbol | int] = {}
+        # From primitive/scheme Int fields: map internal name to qualified name.
+        # E.g., if F is a PRF with Int out, add Symbol("out") -> Symbol("F.out")
+        # so that bare internal names from return types can be resolved.
+        for type_map in self.variable_type_map_stack:
+            for name, val in type_map.items():
+                if isinstance(val, visitors.InstantiableType):
+                    for member_name, member_val in val.members.items():
+                        if isinstance(member_val, frog_ast.IntType):
+                            qualified = f"{name}.{member_name}"
+                            subs[Symbol(member_name)] = Symbol(qualified)
+        # From instantiation_namespace Int fields: expand local definitions
+        # E.g., "stretch" -> 2 * G.lambda means Symbol("stretch") -> 2*Symbol("G.lambda")
+        for ns_name, ns_val in self.instantiation_namespace.items():
+            if ns_val is None or not isinstance(ns_val, frog_ast.ASTNode):
+                continue  # Skip non-AST values
+            # Skip non-numeric type aliases (BitStringType, ProductType, etc.)
+            # but keep Variables, FieldAccess, and BinaryOperations that
+            # represent numeric/symbolic Int field values.
+            if isinstance(
+                ns_val,
+                (
+                    frog_ast.BitStringType,
+                    frog_ast.ProductType,
+                    frog_ast.SetType,
+                    frog_ast.BoolType,
+                    frog_ast.OptionalType,
+                    frog_ast.ModIntType,
+                ),
+            ):
+                continue
+            # Skip instantiated schemes/primitives/games stored as AST nodes
+            if isinstance(ns_val, (frog_ast.Primitive, frog_ast.Scheme, frog_ast.Game)):
+                continue
+            flattened = _FieldAccessFlattener().transform(copy.deepcopy(ns_val))
+            sym_val = get_sympy_expression(flattened)
+            if sym_val is not None:
+                subs[Symbol(ns_name)] = sym_val
+        # From requires equality pairs
+        for left, right in self.subsets_pairs:
+            if not isinstance(left, frog_ast.ASTNode) or not isinstance(
+                right, frog_ast.ASTNode
+            ):
+                continue
+            left_flat = _FieldAccessFlattener().transform(copy.deepcopy(left))
+            right_flat = _FieldAccessFlattener().transform(copy.deepcopy(right))
+            left_sym = get_sympy_expression(left_flat)
+            right_sym = get_sympy_expression(right_flat)
+            if (
+                left_sym is not None
+                and right_sym is not None
+                and isinstance(left_sym, Symbol)
+            ):
+                subs[left_sym] = right_sym
+        return subs
+
     def check_types(
         self, declared_type: PossibleType, value_type: PossibleType
     ) -> bool:
-        """compare_types with subsets constraint awareness."""
-        return compare_types(declared_type, value_type, self.subsets_pairs)
+        """compare_types with subsets constraint and alias awareness."""
+        declared_type = self._resolve_type_alias(declared_type)
+        value_type = self._resolve_type_alias(value_type)
+        # Resolve subsets_pairs through aliases so FieldAccess-based
+        # requires constraints match resolved Variable types
+        resolved_pairs: list[tuple[PossibleType, PossibleType]] = [
+            (self._resolve_type_alias(a), self._resolve_type_alias(b))
+            for a, b in self.subsets_pairs
+        ]
+        # First try with AST-level normalization (handles simple cases
+        # like G.lambda -> Variable("lambda") without name collisions)
+        norm_declared = self._normalize_bitstring_params(declared_type)
+        norm_value = self._normalize_bitstring_params(value_type)
+        if compare_types(norm_declared, norm_value, resolved_pairs):
+            return True
+        # Fall back to SymPy-level substitutions for complex cases
+        # (Int field definitions + requires equalities)
+        sympy_subs = self._build_sympy_subs()
+        return compare_types(declared_type, value_type, resolved_pairs, sympy_subs)
 
     def print_error(self, location: frog_ast.ASTNode, message: str) -> None:
         print_error(location, message, self.file_name)
 
     def get_type_from_ast(self, node: frog_ast.ASTNode) -> PossibleType:
         try:
-            return self.ast_type_map.get(node)
+            result = self.ast_type_map.get(node)
+            return self._resolve_type_alias(result)
         except KeyError:
             self.print_error(node, f"Could not determine type of {node}")
             sys.exit(1)
@@ -729,6 +936,28 @@ class CheckTypeVisitor(VariableTypeVisitor):
         method_names = [method.name for method in method_signatures]
         if len(method_names) != len(set(method_names)):
             self.print_error(primitive.methods[0], "Duplicated method name")
+
+    def visit_scheme(self, scheme: frog_ast.Scheme) -> None:
+        # Pre-extract equality/subsets pairs from requires clauses so they
+        # are available during method body type checking.
+        for req in scheme.requirements:
+            self._extract_requires_pairs(req)
+
+    def _extract_requires_pairs(self, expr: frog_ast.Expression) -> None:
+        """Recursively extract pairs from requires expressions."""
+        if not isinstance(expr, frog_ast.BinaryOperation):
+            return
+        if expr.operator == frog_ast.BinaryOperators.AND:
+            self._extract_requires_pairs(expr.left_expression)
+            self._extract_requires_pairs(expr.right_expression)
+        elif expr.operator in (
+            frog_ast.BinaryOperators.SUBSETS,
+            frog_ast.BinaryOperators.EQUALS,
+        ):
+            if isinstance(expr.left_expression, frog_ast.Type) and isinstance(
+                expr.right_expression, frog_ast.Type
+            ):
+                self.subsets_pairs.append((expr.left_expression, expr.right_expression))
 
     def visit_primitive(self, primitive: frog_ast.Primitive) -> None:
         self._shared_primitive_scheme_checks(primitive)
@@ -1342,7 +1571,28 @@ class CheckTypeVisitor(VariableTypeVisitor):
         if not isinstance(object_type, visitors.InstantiableType):
             self.print_error(field_acess, "Accessing field of non object-type")
             return
-        self.ast_type_map.set(field_acess, object_type.members[field_acess.name])  # type: ignore
+        member = object_type.members[field_acess.name]  # type: ignore[index]
+        # Qualify method signature Int variable references with the object name
+        # so that e.g. Variable("lambda") becomes FieldAccess(Variable("G"), "lambda")
+        # to distinguish the primitive's internal names from the scheme's local names.
+        if isinstance(member, frog_ast.MethodSignature) and isinstance(
+            field_acess.the_object, frog_ast.Variable
+        ):
+            int_fields = {
+                k
+                for k, v in object_type.members.items()
+                if not isinstance(v, frog_ast.MethodSignature)
+                and isinstance(v, frog_ast.IntType)
+            }
+            if int_fields:
+                qualify_aliases: dict[str, frog_ast.ASTNode] = {
+                    fname: frog_ast.FieldAccess(
+                        frog_ast.Variable(field_acess.the_object.name), fname
+                    )
+                    for fname in int_fields
+                }
+                member = _substitute_field_aliases(member, qualify_aliases)
+        self.ast_type_map.set(field_acess, member)  # type: ignore[arg-type]
 
     def leave_binary_num(self, binary_num: frog_ast.BinaryNum) -> None:
         self.ast_type_map.set(binary_num, frog_ast.BitStringType())
@@ -1572,12 +1822,29 @@ class CheckTypeVisitor(VariableTypeVisitor):
             self.ast_type_map.set(func_call, func_call_signature.return_type)
 
 
+class _FieldAccessFlattener(visitors.Transformer):
+    """Replace FieldAccess(Variable("G"), "lambda") with Variable("G.lambda")."""
+
+    def transform_field_access(
+        self, field_access: frog_ast.FieldAccess
+    ) -> frog_ast.ASTNode:
+        if isinstance(field_access.the_object, frog_ast.Variable):
+            result = frog_ast.Variable(
+                f"{field_access.the_object.name}.{field_access.name}"
+            )
+            result.line_num = field_access.line_num
+            result.column_num = field_access.column_num
+            return result
+        return field_access
+
+
 def get_sympy_expression(the_type: frog_ast.ASTNode) -> Symbol | int | None:
-    variables = visitors.VariableCollectionVisitor().visit(the_type)
+    flattened = _FieldAccessFlattener().transform(copy.deepcopy(the_type))
+    variables = visitors.VariableCollectionVisitor().visit(flattened)
     sympy_variables: dict[str, Symbol] = {
         variable.name: Symbol(variable.name) for variable in variables  # type: ignore
     }
-    return visitors.FrogToSympyVisitor(sympy_variables).visit(the_type)
+    return visitors.FrogToSympyVisitor(sympy_variables).visit(flattened)
 
 
 def has_matching_methods(
@@ -1624,6 +1891,7 @@ def compare_types(
     declared_type: PossibleType,
     value_type: PossibleType,
     subsets_pairs: Optional[list[tuple[PossibleType, PossibleType]]] = None,
+    sympy_subs: Optional[dict[Symbol, Symbol | int]] = None,
 ) -> bool:
     if declared_type == value_type:
         return True
@@ -1648,11 +1916,14 @@ def compare_types(
 
     if isinstance(declared_type, frog_ast.OptionalType):
         # T? can hold T
-        if compare_types(declared_type.the_type, value_type, subsets_pairs):
+        if compare_types(declared_type.the_type, value_type, subsets_pairs, sympy_subs):
             return True
         # T? can hold S? if T can hold S
         if isinstance(value_type, frog_ast.OptionalType) and compare_types(
-            declared_type.the_type, value_type.the_type, subsets_pairs
+            declared_type.the_type,
+            value_type.the_type,
+            subsets_pairs,
+            sympy_subs,
         ):
             return True
 
@@ -1676,7 +1947,7 @@ def compare_types(
         value_type, frog_ast.ProductType
     ):
         return len(declared_type.types) == len(value_type.types) and all(
-            compare_types(d, v, subsets_pairs)
+            compare_types(d, v, subsets_pairs, sympy_subs)
             for d, v in zip(declared_type.types, value_type.types)
         )
 
@@ -1695,6 +1966,25 @@ def compare_types(
         ):
             declared_type_expression = get_sympy_expression(declared_type)
             value_type_expression = get_sympy_expression(value_type)
+            if sympy_subs and declared_type_expression != value_type_expression:
+                # Apply Int field definitions and requires equalities
+                # iteratively until fixed point for transitive chains
+                for _ in range(10):
+                    prev_d = declared_type_expression
+                    prev_v = value_type_expression
+                    if declared_type_expression is not None:
+                        declared_type_expression = declared_type_expression.subs(  # type: ignore[union-attr]
+                            sympy_subs
+                        )
+                    if value_type_expression is not None:
+                        value_type_expression = value_type_expression.subs(  # type: ignore[union-attr]
+                            sympy_subs
+                        )
+                    if (
+                        declared_type_expression == prev_d
+                        and value_type_expression == prev_v
+                    ):
+                        break
             bool_value = declared_type_expression == value_type_expression
             return bool_value
         return True
@@ -1714,7 +2004,104 @@ def compare_types(
     ):
         return True
 
+    if isinstance(declared_type, frog_ast.ArrayType) and isinstance(
+        value_type, frog_ast.ArrayType
+    ):
+        if not compare_types(
+            declared_type.element_type,
+            value_type.element_type,
+            subsets_pairs,
+            sympy_subs,
+        ):
+            return False
+        d_count = get_sympy_expression(declared_type.count)
+        v_count = get_sympy_expression(value_type.count)
+        if d_count is None or v_count is None:
+            return declared_type.count == value_type.count
+        if sympy_subs and d_count != v_count:
+            for _ in range(10):
+                prev_d, prev_v = d_count, v_count
+                d_count = d_count.subs(sympy_subs)  # type: ignore[union-attr]
+                v_count = v_count.subs(sympy_subs)  # type: ignore[union-attr]
+                if d_count == prev_d and v_count == prev_v:
+                    break
+        return d_count == v_count
+
     return False
+
+
+def _substitute_type_node(
+    node: frog_ast.ASTNode, aliases: dict[str, frog_ast.ASTNode]
+) -> frog_ast.ASTNode:
+    """Recursively substitute Variable nodes using field aliases."""
+    if isinstance(node, frog_ast.Variable) and node.name in aliases:
+        return copy.deepcopy(aliases[node.name])
+    if isinstance(node, frog_ast.BitStringType) and node.parameterization is not None:
+        new_param = _substitute_type_node(node.parameterization, aliases)
+        if isinstance(new_param, frog_ast.Expression):
+            result = frog_ast.BitStringType(new_param)
+            result.line_num = node.line_num
+            result.column_num = node.column_num
+            return result
+    if isinstance(node, frog_ast.OptionalType):
+        new_inner = _substitute_type_node(node.the_type, aliases)
+        if isinstance(new_inner, frog_ast.Type):
+            result_opt = frog_ast.OptionalType(new_inner)
+            result_opt.line_num = node.line_num
+            result_opt.column_num = node.column_num
+            return result_opt
+    if isinstance(node, frog_ast.ProductType):
+        new_types: list[frog_ast.Type] = []
+        for sub in node.types:
+            substituted = _substitute_type_node(sub, aliases)
+            if isinstance(substituted, frog_ast.Type):
+                new_types.append(substituted)
+        result_prod = frog_ast.ProductType(new_types)
+        result_prod.line_num = node.line_num
+        result_prod.column_num = node.column_num
+        return result_prod
+    if isinstance(node, frog_ast.BinaryOperation):
+        new_left = _substitute_type_node(node.left_expression, aliases)
+        new_right = _substitute_type_node(node.right_expression, aliases)
+        if isinstance(new_left, frog_ast.Expression) and isinstance(
+            new_right, frog_ast.Expression
+        ):
+            result_bin = frog_ast.BinaryOperation(node.operator, new_left, new_right)
+            result_bin.line_num = node.line_num
+            result_bin.column_num = node.column_num
+            return result_bin
+    if isinstance(node, frog_ast.UnaryOperation):
+        new_operand = _substitute_type_node(node.expression, aliases)
+        if isinstance(new_operand, frog_ast.Expression):
+            result_un = frog_ast.UnaryOperation(node.operator, new_operand)
+            result_un.line_num = node.line_num
+            result_un.column_num = node.column_num
+            return result_un
+    return node
+
+
+def _substitute_field_aliases(
+    sig: frog_ast.MethodSignature, aliases: dict[str, frog_ast.ASTNode]
+) -> frog_ast.MethodSignature:
+    """Return a copy of a MethodSignature with field aliases substituted."""
+    new_params: list[frog_ast.Parameter] = []
+    for param in sig.parameters:
+        new_type: frog_ast.Type = param.type
+        substituted = _substitute_type_node(param.type, aliases)
+        if isinstance(substituted, frog_ast.Type):
+            new_type = substituted
+        new_param = frog_ast.Parameter(new_type, param.name)
+        new_param.line_num = param.line_num
+        new_param.column_num = param.column_num
+        new_params.append(new_param)
+    new_return: frog_ast.Type = sig.return_type
+    substituted_ret = _substitute_type_node(sig.return_type, aliases)
+    if isinstance(substituted_ret, frog_ast.Type):
+        new_return = substituted_ret
+    new_sig = frog_ast.MethodSignature(sig.name, new_return, new_params)
+    new_sig.line_num = sig.line_num
+    new_sig.column_num = sig.column_num
+    return new_sig
 
 
 def get_type_from_instantiable(
@@ -1739,11 +2126,25 @@ def get_type_from_instantiable(
                     [v for v in to_set_to.values if isinstance(v, frog_ast.Type)]
                 )
             type_dict[field.name] = to_set_to
+    # Build substitution map from Set field aliases (e.g., "Key" -> Variable("KeySpace"))
+    field_aliases: dict[str, frog_ast.ASTNode] = {}
+    if not just_methods:
+        for field in instantiable.fields:
+            if field.type == frog_ast.SetType() and field.value is not None:
+                field_aliases[field.name] = type_dict[field.name]
+
     for method in instantiable.methods:
         if isinstance(method, frog_ast.MethodSignature):
             type_dict[method.name] = method
         else:
             type_dict[method.signature.name] = method.signature
+
+    # Apply field alias substitution to method signatures so that e.g.
+    # a method expecting Variable("Key") becomes Variable("KeySpace")
+    if field_aliases:
+        for key, value in type_dict.items():
+            if isinstance(value, frog_ast.MethodSignature):
+                type_dict[key] = _substitute_field_aliases(value, field_aliases)
 
     superclass = (
         instantiable.primitive_name if isinstance(instantiable, frog_ast.Scheme) else ""

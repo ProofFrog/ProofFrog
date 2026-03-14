@@ -111,6 +111,12 @@ class VariableTypeVisitor(visitors.Visitor[None]):
             just_methods,
         )
 
+    def visit_scheme(self, scheme: frog_ast.Scheme) -> None:
+        # Make 'this' available in scheme method bodies so that
+        # this.Method() calls resolve correctly.
+        self_type = get_type_from_instantiable(scheme.name, scheme)
+        self.variable_type_map_stack[-1]["this"] = self_type
+
     def visit_game(self, game: frog_ast.Game) -> None:
         game_type = get_type_from_instantiable(game.name, game)
         self.variable_type_map_stack[-1][game.name] = game_type
@@ -368,6 +374,7 @@ class NameResolutionVisitor(VariableTypeVisitor):
             )
 
     def visit_scheme(self, scheme: frog_ast.Scheme) -> None:
+        super().visit_scheme(scheme)
         self._check_duplicate_names(scheme)
         if scheme.primitive_name not in self.import_namespace:
             print_error(
@@ -938,6 +945,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             self.print_error(primitive.methods[0], "Duplicated method name")
 
     def visit_scheme(self, scheme: frog_ast.Scheme) -> None:
+        super().visit_scheme(scheme)
         # Pre-extract equality/subsets pairs from requires clauses so they
         # are available during method body type checking.
         for req in scheme.requirements:

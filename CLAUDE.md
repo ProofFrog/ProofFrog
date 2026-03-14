@@ -87,7 +87,7 @@ ProofFrog checks the validity of transitions in a cryptographic game hopping pro
 
 A **cryptographic primitive** (grammar file: `proof_frog/antlr/Primitive.g4`; extension: `.primitive`) specifies the sets and functions that define a cryptographic operation, like symmetric key encryption or digital signatures.
 
-A **cryptographic scheme** (grammar file: `proof_frog/antlr/Scheme.g4`; extension: `.scheme`) is an instantiation of a cryptographic primitive. Often cryptographic schemes are built generically from other primitives.
+A **cryptographic scheme** (grammar file: `proof_frog/antlr/Scheme.g4`; extension: `.scheme`) is an instantiation of a cryptographic primitive. Often cryptographic schemes are built generically from other primitives. Scheme methods can call other methods in the same scheme using the `this` keyword (e.g., `this.DeriveKey(seed)`). During proof verification, `this` references are rewritten to the scheme's instance name so the inliner resolves them.
 
 A **game** (grammar file: `proof_frog/antlr/Game.g4`) is a stateful set of methods, representing the adversary's interaction with a system. There are some optional state variables, an `Initialize` method that would be run once to set up the state, and then some oracle methods that the adversary would call to interact with the system.
 

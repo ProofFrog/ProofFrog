@@ -818,7 +818,8 @@ class ProofEngine:
 
         for name, node in self.proof_namespace.items():
             if isinstance(node, frog_ast.Scheme):
-                for method in node.methods:
+                rewritten = rewrite_this_in_scheme(name, copy.deepcopy(node))
+                for method in rewritten.methods:
                     self.method_lookup[(name, method.signature.name)] = method
 
     def _extract_subsets_pairs(self) -> None:
@@ -948,6 +949,17 @@ def instantiate(
     new_root = visitors.SubstitutionTransformer(ast_map).transform(root)
     new_root.parameters.clear()
     return visitors.InstantiationTransformer(namespace).transform(new_root)
+
+
+def rewrite_this_in_scheme(name: str, scheme: frog_ast.Scheme) -> frog_ast.Scheme:
+    """Rewrite Variable('this') to Variable(name) in all method bodies."""
+    ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+    ast_map.set(frog_ast.Variable("this"), frog_ast.Variable(name))
+    for index, method in enumerate(scheme.methods):
+        scheme.methods[index] = visitors.SubstitutionTransformer(ast_map).transform(
+            method
+        )
+    return scheme
 
 
 def get_challenger_method_lookup(challenger: frog_ast.Game) -> MethodLookup:

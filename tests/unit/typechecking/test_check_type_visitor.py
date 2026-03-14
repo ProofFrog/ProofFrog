@@ -370,3 +370,119 @@ class TestReductionTypeChecking:
             }
             """
         )
+
+
+# --- Tests for parameterized game/scheme type checking ---
+
+_SYM_ENC_PRIMITIVE = """\
+Primitive SymEnc() {
+    Set Key = KeySpace;
+    Set Message = MessageSpace;
+    Set Ciphertext = CiphertextSpace;
+
+    Key KeyGen();
+    Ciphertext Enc(Key k, Message m);
+    Message Dec(Key k, Ciphertext c);
+}
+"""
+
+
+def _check_game_with_imports(
+    game_source: str, imports: dict[str, object]
+) -> None:
+    """Parse a game with imported primitives/schemes and type-check it."""
+    import_namespace: dict[str, object] = {}
+    for name, source in imports.items():
+        assert isinstance(source, str)
+        if "Primitive" in source:
+            parsed = frog_parser.parse_primitive_file(source)
+        elif "Scheme" in source and "extends" in source:
+            parsed = frog_parser.parse_scheme_file(source)
+        else:
+            parsed = frog_parser.parse_game_file(source)
+        import_namespace[name] = parsed
+    game = frog_parser.parse_game(game_source)
+    visitor = semantic_analysis.CheckTypeVisitor(
+        import_namespace, "test", {}  # type: ignore[arg-type]
+    )
+    visitor.visit(game)
+
+
+def _check_game_with_imports_fails(
+    game_source: str, imports: dict[str, object]
+) -> None:
+    """Assert that a game with imports fails type checking."""
+    with pytest.raises(semantic_analysis.FailedTypeCheck):
+        _check_game_with_imports(game_source, imports)
+
+
+class TestFieldAliasSubstitution:
+    """Fix 1: field alias substitution in method signatures."""
+
+    def test_method_arg_matches_field_alias(self) -> None:
+        """E.Key variable should match E.Enc parameter type."""
+        _check_game_with_imports(
+            """
+            Game G(SymEnc E) {
+                E.Ciphertext Test(E.Key k, E.Message m) {
+                    return E.Enc(k, m);
+                }
+            }
+            """,
+            {"SymEnc": _SYM_ENC_PRIMITIVE},
+        )
+
+    def test_keygen_return_type_matches_field_alias(self) -> None:
+        """E.KeyGen() return type should match E.Key field."""
+        _check_game_with_imports(
+            """
+            Game G(SymEnc E) {
+                E.Key Test() {
+                    E.Key k = E.KeyGen();
+                    return k;
+                }
+            }
+            """,
+            {"SymEnc": _SYM_ENC_PRIMITIVE},
+        )
+
+    def test_wrong_type_still_rejected(self) -> None:
+        """Passing Int where Key is expected should still fail."""
+        _check_game_with_imports_fails(
+            """
+            Game G(SymEnc E) {
+                E.Ciphertext Test(E.Message m) {
+                    Int x = 42;
+                    return E.Enc(x, m);
+                }
+            }
+            """,
+            {"SymEnc": _SYM_ENC_PRIMITIVE},
+        )
+
+
+class TestFieldAccessInBitStringParam:
+    """Fix 2: FieldAccess in BitString parameterizations."""
+
+    _PRG_PRIMITIVE = """\
+Primitive PRG(Int lambda, Int stretch) {
+    Int lambda = lambda;
+    Int stretch = stretch;
+
+    BitString<lambda + stretch> evaluate(BitString<lambda> x);
+}
+"""
+
+    def test_field_access_in_bitstring_param(self) -> None:
+        """BitString<G.lambda> should work in type positions."""
+        _check_game_with_imports(
+            """
+            Game G(PRG P) {
+                BitString<P.lambda + P.stretch> Test() {
+                    BitString<P.lambda> s <- BitString<P.lambda>;
+                    return P.evaluate(s);
+                }
+            }
+            """,
+            {"PRG": self._PRG_PRIMITIVE},
+        )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import copy
 import functools
+import shutil
 import warnings
 from enum import Enum
 from collections import namedtuple
@@ -176,7 +177,16 @@ class ProofEngine:
         """Print a single-line step status."""
         width = len(str(self._total_steps))
         step_str = f"Step {self._current_step:>{width}}/{self._total_steps}"
-        print(f"  {step_str}  {hop_desc} ... {color}{result}{Fore.RESET}")
+        prefix = f"  {step_str}  "
+        suffix = f" ... {color}{result}{Fore.RESET}"
+        line = f"{prefix}{hop_desc}{suffix}"
+        terminal_width = shutil.get_terminal_size().columns
+        if len(prefix) + len(hop_desc) + len(f" ... {result}") > terminal_width:
+            indent = " " * len(prefix)
+            hop_desc = hop_desc.replace(" -> ", f"\n{indent}-> ")
+            print(f"{prefix}{hop_desc}{suffix}")
+        else:
+            print(line)
 
     def _print_summary_table(self) -> None:
         """Print a summary table of all hop results."""
@@ -192,8 +202,6 @@ class ProofEngine:
         hop_descs: list[str] = []
         for r in results:
             hop_descs.append(f"{r.current_desc} -> {r.next_desc}")
-        hop_width = max(len(d) for d in hop_descs)
-        hop_width = max(hop_width, 3)  # minimum "Hop" header width
 
         type_labels: list[str] = []
         for r in results:
@@ -207,6 +215,21 @@ class ProofEngine:
         type_width = max(type_width, 4)  # minimum "Type" header width
 
         result_width = 6  # "Result" header width
+
+        # Determine hop column width, capping to fit terminal
+        terminal_width = shutil.get_terminal_size().columns
+        fixed_width = 2 + step_width + 2 + 2 + type_width + 2 + result_width
+        max_hop_width = max(terminal_width - fixed_width, 20)
+        full_hop_width = max(len(d) for d in hop_descs)
+        full_hop_width = max(full_hop_width, 3)  # minimum "Hop" header width
+        needs_wrap = full_hop_width > max_hop_width
+        if needs_wrap:
+            # Use the max width of just the first part (before ->)
+            first_parts = [d.split(" -> ", 1)[0] for d in hop_descs]
+            hop_width = max(len(p) for p in first_parts)
+            hop_width = max(hop_width, 3)
+        else:
+            hop_width = full_hop_width
 
         # Print table
         header = (
@@ -225,6 +248,7 @@ class ProofEngine:
         print(header)
         print(separator)
 
+        hop_indent = " " * (2 + step_width + 2)
         for r, hop_desc, type_label in zip(results, hop_descs, type_labels):
             if r.kind == "by_assumption":
                 result_str = Fore.CYAN + "assume" + Fore.RESET
@@ -232,12 +256,26 @@ class ProofEngine:
                 result_str = Fore.GREEN + "ok" + Fore.RESET
             else:
                 result_str = Fore.RED + "FAILED" + Fore.RESET
-            print(
-                f"  {r.step_num:>{step_width}}  "
-                f"{hop_desc:<{hop_width}}  "
-                f"{type_label:<{type_width}}  "
-                f"{result_str}"
-            )
+
+            if needs_wrap and len(hop_desc) > hop_width:
+                # Split at " -> " and put continuation on next line
+                parts = hop_desc.split(" -> ", 1)
+                first_line = parts[0]
+                print(
+                    f"  {r.step_num:>{step_width}}  "
+                    f"{first_line:<{hop_width}}  "
+                    f"{type_label:<{type_width}}  "
+                    f"{result_str}"
+                )
+                if len(parts) > 1:
+                    print(f"{hop_indent}-> {parts[1]}")
+            else:
+                print(
+                    f"  {r.step_num:>{step_width}}  "
+                    f"{hop_desc:<{hop_width}}  "
+                    f"{type_label:<{type_width}}  "
+                    f"{result_str}"
+                )
 
     def prove_steps(
         self,

@@ -7,9 +7,10 @@ CodeMirror.defineMode("prooffrog", function () {
   var keywords = new Set([
     "Primitive","Scheme","Game","Reduction","proof","let","assume","theorem",
     "games","export","as","extends","compose","against","import","requires",
-    "if","else","for","return","union","in","subsets"
+    "if","else","for","return","union","in","subsets",
+    "adversary","calls","induction","from","to","Phase","oracles"
   ]);
-  var types = new Set(["Bool","Void","Int","BitString","Set","Map","Array"]);
+  var types = new Set(["Bool","Void","Int","BitString","Set","Map","Array","ModInt"]);
   var atoms = new Set(["true","false","None"]);
 
   return {

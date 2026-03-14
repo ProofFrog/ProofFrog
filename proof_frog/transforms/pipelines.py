@@ -25,7 +25,12 @@ from .algebraic import (
     ModIntSimplification,
     ReflexiveComparison,
 )
-from .structural import TopologicalSort, RemoveDuplicateFields, RemoveUnnecessaryFields
+from .structural import (
+    TopologicalSort,
+    RemoveDuplicateFields,
+    RemoveUnnecessaryFields,
+    TrivialEncodingElimination,
+)
 from .control_flow import (
     BranchElimination,
     SimplifyReturn,
@@ -46,6 +51,7 @@ CORE_PIPELINE: list[TransformPass] = [
     MergeUniformSamples(),
     MergeProductSamples(),
     SplitUniformSamples(),
+    TrivialEncodingElimination(),
     RedundantCopy(),
     InlineSingleUseVariable(),
     UniformXorSimplification(),

@@ -1027,10 +1027,25 @@ class CheckTypeVisitor(VariableTypeVisitor):
             self.print_error(reduction, "Adversary must be a game file")
             return
 
-        adversary_type = self.instantiate_and_get_type(
-            adversary_definition.games[0],
-            reduction.play_against.args,
+        # Build a combined namespace so that scheme FuncCalls in the adversary
+        # args (e.g. UG(K, NG, H, G) in KEMCCA(UG(K, NG, H, G)).Adversary) can
+        # be expanded to their field types. Scheme/primitive definitions live in
+        # import_namespace but not in instantiation_namespace.
+        combined_ns: frog_ast.Namespace = {
+            **self.instantiation_namespace,
+            **{
+                name: val
+                for name, val in self.import_namespace.items()
+                if isinstance(val, (frog_ast.Scheme, frog_ast.Primitive))
+            },
+        }
+        adversary_type = get_type_from_instantiable(
             reduction.play_against.name,
+            proof_engine.instantiate(
+                adversary_definition.games[0],
+                reduction.play_against.args,
+                combined_ns,
+            ),
             True,
         )
         reduction_type = get_type_from_instantiable(reduction.name, reduction, True)
@@ -1734,9 +1749,20 @@ class CheckTypeVisitor(VariableTypeVisitor):
                     f"{args[index]} is not of type {param.type}",
                 )
 
-        instantiated_scheme = proof_engine.instantiate(
-            scheme, args, self.instantiation_namespace
-        )
+        # Build a combined namespace so that scheme/primitive FuncCall args
+        # (e.g. UG(K, NG, H, G)) can be expanded to their field types during
+        # instantiation. Scheme/primitive definitions live in import_namespace
+        # but not in instantiation_namespace.
+        combined_ns: frog_ast.Namespace = {
+            **self.instantiation_namespace,
+            **{
+                name: val
+                for name, val in self.import_namespace.items()
+                if isinstance(val, (frog_ast.Scheme, frog_ast.Primitive))
+            },
+        }
+
+        instantiated_scheme = proof_engine.instantiate(scheme, args, combined_ns)
 
         # Extract subsets constraints from requires clauses
         subsets_pairs = _extract_subsets_pairs(instantiated_scheme)
@@ -1753,7 +1779,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             file_name,
             self.file_name_mapping,
             stack,
-            copy.deepcopy(self.instantiation_namespace),
+            copy.deepcopy(combined_ns),
             self.subsets_pairs,
         ).visit(instantiated_scheme)
         return instantiated_scheme

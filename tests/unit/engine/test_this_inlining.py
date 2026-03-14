@@ -1,4 +1,5 @@
-"""Tests that 'this' references in scheme methods are rewritten for inlining."""
+"""Tests that 'this' references in scheme methods are rewritten for inlining,
+and that InlineTransformer handles edge cases like empty method bodies."""
 
 import copy
 
@@ -93,3 +94,42 @@ def test_this_inlined_via_fixed_point() -> None:
     assert isinstance(assign, frog_ast.Assignment)
     assert isinstance(assign.value, frog_ast.Integer)
     assert assign.value.num == 42
+
+
+def test_inline_empty_void_method_drops_call() -> None:
+    """Inlining a Void method with an empty body should drop the call site.
+
+    Regression test for an IndexError that occurred when inlining methods with
+    no statements (e.g., PRFSec.Random.Initialize() has an empty body).
+    """
+    # Build an empty Void method: Void EmptyInit() {}
+    empty_method = frog_ast.Method(
+        frog_ast.MethodSignature("EmptyInit", frog_ast.Void(), []),
+        frog_ast.Block([]),
+    )
+    lookup = {("S", "EmptyInit"): empty_method}
+
+    # Build a game whose Initialize calls S.EmptyInit() followed by a return.
+    # FuncCall is itself a Statement node in frog_ast.
+    call_stmt = frog_ast.FuncCall(
+        frog_ast.FieldAccess(frog_ast.Variable("S"), "EmptyInit"),
+        [],
+    )
+    ret_stmt = frog_ast.ReturnStatement(frog_ast.Integer(1))
+    game_method = frog_ast.Method(
+        frog_ast.MethodSignature("Initialize", frog_ast.IntType(), []),
+        frog_ast.Block([call_stmt, ret_stmt]),
+    )
+    game = frog_ast.Game(("TestGame", [], [], [game_method], []))
+
+    # Run inlining — should not raise IndexError
+    for _ in range(10):
+        new_game = visitors.InlineTransformer(lookup).transform(copy.deepcopy(game))
+        if new_game == game:
+            break
+        game = new_game
+
+    # The call to EmptyInit should have been dropped; only the return remains
+    init = game.get_method("Initialize")
+    assert len(init.block.statements) == 1
+    assert isinstance(init.block.statements[0], frog_ast.ReturnStatement)

@@ -1,4 +1,4 @@
-# Generated from Primitive.g4 by ANTLR 4.13.2
+# Generated from proof_frog/antlr/Primitive.g4 by ANTLR 4.13.2
 from antlr4 import *
 if "." in __name__:
     from .PrimitiveParser import PrimitiveParser

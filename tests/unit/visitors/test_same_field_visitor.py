@@ -136,7 +136,7 @@ from proof_frog import visitors, frog_parser
                 Int x;
                 Int y;
                 Void f() {
-                    Int * Int a = [5, 10];
+                    [Int, Int] a = [5, 10];
                     x = a[0];
                     y = a[0];
                 }
@@ -151,7 +151,7 @@ from proof_frog import visitors, frog_parser
                 Int x;
                 Int y;
                 Void f() {
-                    Int * Int a = [5, 10];
+                    [Int, Int] a = [5, 10];
                     x = a[0];
                     a[0] = 100;
                     y = a[0];
@@ -167,7 +167,7 @@ from proof_frog import visitors, frog_parser
                 Int x;
                 Int y;
                 Void f() {
-                    Int * Int a = [5, 10];
+                    [Int, Int] a = [5, 10];
                     x = a[0];
                     a = [20, 30];
                     y = a[0];

@@ -8,7 +8,7 @@ annotated types.
 from __future__ import annotations
 
 import copy
-from typing import Optional, cast
+from typing import Optional
 
 from .. import frog_ast
 from ..visitors import (
@@ -208,16 +208,8 @@ class SubsetTypeNormalizer(Transformer):
             and the_type.name in self.type_replacements
         ):
             return copy.deepcopy(self.type_replacements[the_type.name])
-        if isinstance(the_type, frog_ast.BinaryOperation):
-            # Product types like T1 * T2 — left/right are Expression in AST
-            # but Type in this context
-            left = cast(frog_ast.Type, the_type.left_expression)
-            right = cast(frog_ast.Type, the_type.right_expression)
-            return frog_ast.BinaryOperation(
-                the_type.operator,
-                cast(frog_ast.Expression, self._normalize(left)),
-                cast(frog_ast.Expression, self._normalize(right)),
-            )
+        if isinstance(the_type, frog_ast.ProductType):
+            return frog_ast.ProductType([self._normalize(t) for t in the_type.types])
         return the_type
 
 

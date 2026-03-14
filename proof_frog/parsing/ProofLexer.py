@@ -1,4 +1,4 @@
-# Generated from Proof.g4 by ANTLR 4.13.2
+# Generated from proof_frog/antlr/Proof.g4 by ANTLR 4.13.2
 from antlr4 import *
 from io import StringIO
 import sys

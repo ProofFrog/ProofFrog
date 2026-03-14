@@ -113,14 +113,14 @@ class TestBasicNormalization:
         method = frog_parser.parse_method(
             """
             Void f() {
-                KeySpace2 * MessageSpace x = y;
+                [KeySpace2, MessageSpace] x = y;
             }
             """
         )
         expected = frog_parser.parse_method(
             """
             Void f() {
-                IntermediateSpace * MessageSpace x = y;
+                [IntermediateSpace, MessageSpace] x = y;
             }
             """
         )

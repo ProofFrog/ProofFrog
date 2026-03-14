@@ -37,33 +37,16 @@ class ExpandTupleTransformer(Transformer):
     def _is_transformable_tuple(
         self, the_type: frog_ast.Type, name: str, search_space: frog_ast.ASTNode
     ) -> bool:
-        return (
-            isinstance(the_type, frog_ast.BinaryOperation)
-            and the_type.operator == frog_ast.BinaryOperators.MULTIPLY
-            and AllConstantFieldAccesses(name).visit(search_space)
-        )
+        return isinstance(the_type, frog_ast.ProductType) and AllConstantFieldAccesses(
+            name
+        ).visit(search_space)
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         new_fields = []
         for field in game.fields:
             if self._is_transformable_tuple(field.type, field.name, game):
-                assert isinstance(field.type, frog_ast.BinaryOperation)
-                unfolded_types = frog_ast.expand_tuple_type(field.type)
-                # If the value has fewer elements than the fully-flattened
-                # type, and the right side of the product is itself a nested
-                # product (which is what expand_tuple_type over-flattened),
-                # fall back to a top-level-only split.
-                if (
-                    field.value
-                    and isinstance(field.value, frog_ast.Tuple)
-                    and len(field.value.values) < len(unfolded_types)
-                    and isinstance(
-                        field.type.right_expression, frog_ast.BinaryOperation
-                    )
-                    and field.type.right_expression.operator
-                    == frog_ast.BinaryOperators.MULTIPLY
-                ):
-                    unfolded_types = frog_ast.split_tuple_type_top(field.type)
+                assert isinstance(field.type, frog_ast.ProductType)
+                unfolded_types = field.type.types
                 for index, the_type in enumerate(unfolded_types):
                     expression = None
                     if field.value:
@@ -126,23 +109,9 @@ class ExpandTupleTransformer(Transformer):
                     statement.the_type, statement.var.name, block
                 )
             ):
-                assert isinstance(statement.the_type, frog_ast.BinaryOperation)
-                unfolded_types = frog_ast.expand_tuple_type(statement.the_type)
+                assert isinstance(statement.the_type, frog_ast.ProductType)
+                unfolded_types = statement.the_type.types
                 assert isinstance(statement.value, frog_ast.Tuple)
-                # If the value has fewer elements than the fully-flattened
-                # type, and the right side of the product is itself a nested
-                # product (which is what expand_tuple_type over-flattened),
-                # fall back to a top-level-only split.
-                if (
-                    len(statement.value.values) < len(unfolded_types)
-                    and isinstance(
-                        statement.the_type.right_expression,
-                        frog_ast.BinaryOperation,
-                    )
-                    and statement.the_type.right_expression.operator
-                    == frog_ast.BinaryOperators.MULTIPLY
-                ):
-                    unfolded_types = frog_ast.split_tuple_type_top(statement.the_type)
                 for index, the_type in enumerate(unfolded_types):
                     new_statements.append(
                         frog_ast.Assignment(
@@ -231,9 +200,8 @@ class SimplifyTupleTransformer(Transformer):
 
         type_map = GetTypeMapVisitor(the_tuple).visit(self.ast)
         tuple_type = type_map.get(tuple_val_name)
-        assert isinstance(tuple_type, frog_ast.BinaryOperation)
-        expanded_type_array = frog_ast.expand_tuple_type(tuple_type)
-        if len(expanded_type_array) == len(the_tuple.values):
+        assert isinstance(tuple_type, frog_ast.ProductType)
+        if len(tuple_type.types) == len(the_tuple.values):
             return frog_ast.Variable(tuple_val_name)
         return the_tuple
 

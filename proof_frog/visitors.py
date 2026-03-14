@@ -227,7 +227,18 @@ class InstantiationTransformer(Transformer):
             field.name,
             self.transform(field.value) if field.value else None,
         )
-        self.namespace[field.name] = new_field.value
+        # Set field aliases: convert Tuple of types to ProductType so that
+        # Variable substitutions produce a Type node, not an Expression.
+        ns_value: frog_ast.ASTNode | None = new_field.value
+        if (
+            isinstance(ns_value, frog_ast.Tuple)
+            and ns_value.values
+            and all(isinstance(v, frog_ast.Type) for v in ns_value.values)
+        ):
+            ns_value = frog_ast.ProductType(
+                [v for v in ns_value.values if isinstance(v, frog_ast.Type)]
+            )
+        self.namespace[field.name] = ns_value
         return new_field
 
     def transform_variable(self, variable: frog_ast.Variable) -> frog_ast.ASTNode:
@@ -239,7 +250,17 @@ class InstantiationTransformer(Transformer):
                 )
                 and value is not None
             ):
-                return copy.deepcopy(value)
+                result = copy.deepcopy(value)
+                # Convert Tuple of types to ProductType for type-position substitution
+                if (
+                    isinstance(result, frog_ast.Tuple)
+                    and result.values
+                    and all(isinstance(v, frog_ast.Type) for v in result.values)
+                ):
+                    return frog_ast.ProductType(
+                        [v for v in result.values if isinstance(v, frog_ast.Type)]
+                    )
+                return result
         return variable
 
     def transform_field_access(
@@ -266,7 +287,17 @@ class InstantiationTransformer(Transformer):
                     None,
                 )
                 if the_field is not None:
-                    return copy.deepcopy(the_field)
+                    result = copy.deepcopy(the_field)
+                    # Convert Tuple of types to ProductType for Set field aliases
+                    if (
+                        isinstance(result, frog_ast.Tuple)
+                        and result.values
+                        and all(isinstance(v, frog_ast.Type) for v in result.values)
+                    ):
+                        return frog_ast.ProductType(
+                            [v for v in result.values if isinstance(v, frog_ast.Type)]
+                        )
+                    return result
         return field_access
 
 

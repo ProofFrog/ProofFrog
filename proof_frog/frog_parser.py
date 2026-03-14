@@ -313,16 +313,8 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
 
     def visitProductType(
         self, ctx: PrimitiveParser.ProductTypeContext
-    ) -> frog_ast.BinaryOperation:
-        expression = self.visit(ctx.type_()[-1])
-        reversed_list = ctx.type_().copy()[:-1]
-        reversed_list.reverse()
-        for the_type in reversed_list:
-            expression = frog_ast.BinaryOperation(
-                frog_ast.BinaryOperators.MULTIPLY, self.visit(the_type), expression
-            )
-        assert isinstance(expression, frog_ast.BinaryOperation)
-        return expression
+    ) -> frog_ast.ProductType:
+        return frog_ast.ProductType([self.visit(t) for t in ctx.type_()])
 
     def visitSetType(self, ctx: PrimitiveParser.SetTypeContext) -> frog_ast.SetType:
         return frog_ast.SetType(

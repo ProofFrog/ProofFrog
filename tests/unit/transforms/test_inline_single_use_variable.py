@@ -136,14 +136,14 @@ from proof_frog.transforms.inlining import InlineSingleUseVariableTransformer
         # needs to see the pattern `c = [a, b]; return c[0]` intact)
         (
             """
-            Int * Int f(Int a, Int b) {
-                Int * Int c = [a, b];
+            [Int, Int] f(Int a, Int b) {
+                [Int, Int] c = [a, b];
                 return c[0];
             }
             """,
             """
-            Int * Int f(Int a, Int b) {
-                Int * Int c = [a, b];
+            [Int, Int] f(Int a, Int b) {
+                [Int, Int] c = [a, b];
                 return c[0];
             }
             """,

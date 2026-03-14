@@ -2,7 +2,7 @@
 
 This guide walks through writing each component of a cryptographic game-hopping proof in ProofFrog's domain-specific language, **FrogLang**, and testing them with the CLI.
 
-Proofs in ProofFrog strictly follow the distinguishing game hopping paradigm exmplified in [Mike Rosulek's *Joy of Cryptography*](https://joyofcryptography.com/).
+Proofs in ProofFrog strictly follow the distinguishing game hopping paradigm exemplified in [Mike Rosulek's *Joy of Cryptography*](https://joyofcryptography.com/).
 
 ## Overview
 
@@ -28,6 +28,7 @@ Before diving into file types, here is a summary of the types available in FrogL
 | `Void` | No return value (used for `Initialize` methods) |
 | `BitString<n>` | Bitstring of length `n` (where `n` is an integer expression) |
 | `BitString` | Generic/unparameterized bitstring (used in primitive signatures) |
+| `ModInt<q>` | Modular integer (integers mod `q`) |
 
 ### Composite types
 
@@ -47,15 +48,27 @@ Primitives and schemes define named sets (e.g., `Set Key = BitString<lambda>`). 
 
 | Operator | Description |
 |----------|-------------|
-| `+` | XOR (on bitstrings) or addition (on integers) |
-| `\|\|` | Concatenation |
+| `+` | XOR (on bitstrings), addition (on integers/ModInt) |
+| `-` | Subtraction (on integers/ModInt) |
+| `*` | Multiplication (on integers/ModInt) |
+| `/` | Division (on integers/ModInt) |
+| `^` | Exponentiation |
+| `\|\|` | Concatenation (on bitstrings) or logical OR (on booleans) |
+| `&&` | Logical AND |
+| `!` | Logical NOT |
 | `[i : j]` | Slice from index `i` to `j` |
 | `[i]` | Indexing |
 | `<-` | Uniform random sampling |
 | `==`, `!=`, `<`, `>`, `<=`, `>=` | Comparison |
-| `&&`, `\|\|`, `!` | Logical operators |
 | `in` | Membership test |
+| `subsets` | Subset test |
+| `union` | Set union |
+| `\` | Set difference |
 | `\|expr\|` | Size/cardinality |
+| `0^n` | Bitstring of `n` zeros |
+| `1^n` | Bitstring of `n` ones |
+| `0b...` | Binary number literal (e.g., `0b1010`) |
+| `None` | Null value for optional types |
 
 ## 1. Primitives
 
@@ -184,7 +197,7 @@ Type var;                 // declare without initializing
 lvalue = expr;            // assignment
 return expr;              // return a value
 if (condition) { ... }    // conditional
-if (condition) { ... } else { ... }
+if (condition) { ... } else if (condition) { ... } else { ... }
 for (Int i = start to end) { ... }   // numeric for loop
 for (Type x in expr) { ... }         // iteration
 ```
@@ -652,6 +665,8 @@ games:
 | `proof_frog prove <file>` | Verify a proof (only for `.proof` files) |
 | `proof_frog prove -v <file>` | Verbose proof output (shows canonical forms) |
 | `proof_frog describe <file>` | Show interface summary |
+| `proof_frog lsp` | Start Language Server Protocol server |
+| `proof_frog mcp [directory]` | Start MCP server for tool-based proof interaction |
 
 ### Development workflow
 
@@ -707,6 +722,10 @@ A reduction's parameter list must include every parameter needed to instantiate 
 - **Symmetric proofs**: Many proofs are symmetric around a midpoint. The first half transitions from the theorem's Left/Real game toward a "neutral" middle (often with all randomness replaced), and the second half transitions from the middle to the Right/Random game.
 - **Helper assumptions**: The `Games/Misc/` directory contains helper games that capture basic probabilistic facts. These can be assumed freely in proofs since they hold unconditionally.
 - **Incremental development**: Build proofs one hop at a time. Write the reduction, add the corresponding game steps, and verify before moving on.
+
+## VSCode Extension
+
+A VSCode extension is available that provides syntax highlighting and LSP integration (go-to-definition, hover, completions, diagnostics, rename, and proof verification). See the `vscode-extension/` directory for installation instructions.
 
 ## Further Resources
 

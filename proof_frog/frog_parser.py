@@ -610,6 +610,8 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
                     expression, ctx.getChild(2).getText()
                 )
                 i = 3
+        elif ctx.THIS():
+            expression = frog_ast.Variable("this")
         else:
             expression = frog_ast.Variable(ctx.id_()[0].getText())
 

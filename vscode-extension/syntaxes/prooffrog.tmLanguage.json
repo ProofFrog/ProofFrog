@@ -51,7 +51,7 @@
       "patterns": [
         {
           "name": "keyword.control.prooffrog",
-          "match": "\\b(if|else|for|to|in|return)\\b"
+          "match": "\\b(if|else|for|to|in|return|this)\\b"
         },
         {
           "name": "keyword.declaration.prooffrog",

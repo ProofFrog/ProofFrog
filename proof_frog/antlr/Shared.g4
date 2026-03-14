@@ -28,7 +28,7 @@ statement: type id SEMI #varDeclStatement
 	;
 
 lvalue:
-	(id | parameterizedGame) (PERIOD id | L_SQUARE expression R_SQUARE)*;
+	(id | parameterizedGame | THIS) (PERIOD id | L_SQUARE expression R_SQUARE)*;
 
 methodSignature: type id L_PAREN paramList? R_PAREN;
 
@@ -177,6 +177,7 @@ PHASE: 'Phase';
 ORACLES: 'oracles';
 ELSE: 'else';
 NONE: 'None';
+THIS: 'this';
 
 TRUE: 'true';
 FALSE: 'false';

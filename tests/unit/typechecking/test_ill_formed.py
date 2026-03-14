@@ -1,12 +1,4 @@
-"""Tests that ill-formed primitives and schemes are rejected by semantic analysis.
-
-Some cases are marked xfail because check_well_formed only runs name resolution
-(not full type checking) for non-proof files. These document gaps in the checker:
-- Type mismatches in field assignments are not detected
-- Bad if-conditions and incorrect return types are not detected
-- Missing fields in schemes are not detected (has_matching_methods only checks
-  methods, not fields)
-"""
+"""Tests that ill-formed primitives and schemes are rejected by semantic analysis."""
 
 from pathlib import Path
 
@@ -41,16 +33,6 @@ Primitive VoidFPrimitive() {
 # ---------------------------------------------------------------------------
 # Ill-formed primitives
 # ---------------------------------------------------------------------------
-
-_NOT_CHECKED = pytest.mark.xfail(
-    reason="check_well_formed does not run full type checking on non-proof files",
-    strict=True,
-)
-
-_MISSING_FIELD_CHECK = pytest.mark.xfail(
-    reason="has_matching_methods only checks methods, not fields",
-    strict=True,
-)
 
 _PRIMITIVE_CASES = [
     pytest.param(
@@ -134,7 +116,7 @@ _PRIMITIVE_CASES = [
         "Primitive MismatchedType(Bool x) {\n    Int y = x;\n}\n",
         "not of type",
         id="mismatched_type",
-        marks=_NOT_CHECKED,
+
     ),
 ]
 
@@ -228,7 +210,7 @@ _SCHEME_CASES = [
         ),
         "not of type",
         id="mismatched_type",
-        marks=_NOT_CHECKED,
+
     ),
     pytest.param(
         (
@@ -244,7 +226,7 @@ _SCHEME_CASES = [
         ),
         "expected",
         id="bad_if",
-        marks=_NOT_CHECKED,
+
     ),
     pytest.param(
         (
@@ -258,7 +240,7 @@ _SCHEME_CASES = [
         ),
         "expected",
         id="incorrect_return",
-        marks=_NOT_CHECKED,
+
     ),
     pytest.param(
         "Scheme InvalidExtend() extends NonExistent {\n    Void f() {}\n}\n",
@@ -287,7 +269,7 @@ _SCHEME_CASES = [
         ),
         "does not correctly implement",
         id="not_overriding_fields",
-        marks=_MISSING_FIELD_CHECK,
+
     ),
     pytest.param(
         (

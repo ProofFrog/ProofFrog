@@ -22,7 +22,7 @@ def check_well_formed(
 
     import_namespace: dict[str, frog_ast.Root | frog_ast.Game] = {}
     file_name_mapping: dict[str, str] = {}
-    if isinstance(root, frog_ast.ProofFile):
+    if isinstance(root, (frog_ast.GameFile, frog_ast.Scheme, frog_ast.ProofFile)):
         for imp in root.imports:
             resolved = frog_parser.resolve_import_path(
                 imp.filename, file_name, allowed_root=allowed_root
@@ -31,11 +31,10 @@ def check_well_formed(
             name = imp.rename if imp.rename else parsed_file.get_export_name()
             import_namespace[name] = parsed_file
             file_name_mapping[name] = resolved
+    if isinstance(root, frog_ast.ProofFile):
         check_proof_well_formed(root, file_name, import_namespace, file_name_mapping)
     else:
-        print(
-            "WARNING: Type checking only ensures names are well-defined for non-proofs"
-        )
+        CheckTypeVisitor(import_namespace, file_name, file_name_mapping).visit(root)
 
 
 def name_resolution(
@@ -370,10 +369,17 @@ class NameResolutionVisitor(VariableTypeVisitor):
         primitive_definition = get_type_from_instantiable(
             scheme.primitive_name, corresponding_primitive, True
         )
+        scheme_definition = get_type_from_instantiable(scheme.name, scheme, True)
         non_matching_method = has_matching_methods(
-            primitive_definition, get_type_from_instantiable(scheme.name, scheme, True)
+            primitive_definition, scheme_definition
         )
         if non_matching_method is not True:
+            print_error(
+                scheme,
+                f"Scheme does not correctly implement primitive {scheme.primitive_name}",
+                self.file_name,
+            )
+        if not has_matching_fields(corresponding_primitive, scheme):
             print_error(
                 scheme,
                 f"Scheme does not correctly implement primitive {scheme.primitive_name}",
@@ -1570,6 +1576,17 @@ def has_matching_methods(
                 found = True
         if not found:
             return method
+    return True
+
+
+def has_matching_fields(
+    needed_primitive: frog_ast.Primitive, scheme: frog_ast.Scheme
+) -> bool:
+    """Check that every field in the primitive has a corresponding field in the scheme."""
+    scheme_field_names = {field.name for field in scheme.fields}
+    for field in needed_primitive.fields:
+        if field.name not in scheme_field_names:
+            return False
     return True
 
 

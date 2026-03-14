@@ -1,0 +1,78 @@
+{
+  "name": "prooffrog",
+  "displayName": "ProofFrog",
+  "description": "Language support for ProofFrog's FrogLang cryptographic proof DSL",
+  "version": "0.1.0",
+  "publisher": "prooffrog",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ProofFrog/ProofFrog"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "prooffrog",
+        "aliases": ["ProofFrog", "FrogLang"],
+        "extensions": [".primitive", ".scheme", ".game", ".proof"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "prooffrog",
+        "scopeName": "source.prooffrog",
+        "path": "./syntaxes/prooffrog.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "ProofFrog",
+      "properties": {
+        "prooffrog.pythonPath": {
+          "type": "string",
+          "default": "python3",
+          "description": "Path to the Python interpreter with ProofFrog installed."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "prooffrog.showHopDetail",
+        "title": "ProofFrog: Show Hop Detail"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "prooffrogProofSteps",
+          "name": "ProofFrog: Proof Hops",
+          "when": "resourceExtname == .proof"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run bundle",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "bundle": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --sourcemap --minify",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.24.0"
+  }
+}

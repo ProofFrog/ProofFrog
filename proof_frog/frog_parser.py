@@ -1012,6 +1012,134 @@ def resolve_import_path(
     return resolved
 
 
+def _get_parser_from_stream(
+    content: str,
+    lexer_functor: type[PrimitiveLexer],
+    parser_functor: type[PrimitiveParser],
+) -> PrimitiveParser:
+    """Create a parser from raw source text, always using InputStream."""
+    lexer = lexer_functor(InputStream(content))
+    lexer.removeErrorListeners()
+    lexer.addErrorListener(_SilentErrorListener())
+    parser = parser_functor(CommonTokenStream(lexer))
+    parser.removeErrorListeners()
+    parser.addErrorListener(_SilentErrorListener())
+    # No way to do this without editing the protected field in antlr's python runtime
+    parser._errHandler = BailErrorStrategy()  # pylint: disable=protected-access
+    return parser
+
+
+def parse_string(content: str, file_type: frog_ast.FileType) -> frog_ast.Root:
+    """Parse raw source text for a given file type, returning the AST."""
+    parser_map: dict[
+        frog_ast.FileType,
+        tuple[type[PrimitiveLexer], type[PrimitiveParser], _SharedAST],
+    ] = {
+        frog_ast.FileType.PRIMITIVE: (
+            PrimitiveLexer,
+            PrimitiveParser,
+            _PrimitiveASTGenerator(),
+        ),
+        frog_ast.FileType.SCHEME: (SchemeLexer, SchemeParser, _SchemeASTGenerator()),
+        frog_ast.FileType.GAME: (GameLexer, GameParser, _GameASTGenerator()),
+        frog_ast.FileType.PROOF: (ProofLexer, ProofParser, _ProofASTGenerator()),
+    }
+    lexer_cls, parser_cls, visitor = parser_map[file_type]
+    try:
+        parser = _get_parser_from_stream(content, lexer_cls, parser_cls)
+        ast: frog_ast.Root = visitor.visit(parser.program())
+        return ast
+    except antlr_error.Errors.ParseCancellationException as e:
+        better = _reparse_for_error(content, lexer_cls, parser_cls)
+        raise (better or _to_parse_error(e, content)) from e
+
+
+def parse_string_collecting_errors(
+    content: str,
+    file_type: frog_ast.FileType,
+    file_name: str = "<input>",
+) -> tuple[frog_ast.Root | None, list[ParseError]]:
+    """Parse raw source text, collecting all errors instead of raising.
+
+    Returns (ast_or_None, list_of_errors).  If parsing succeeds the error
+    list is empty and the AST is returned.  Otherwise the AST is ``None``
+    and all discovered errors are in the list.
+    """
+    # First try the fast path (BailErrorStrategy) which succeeds for valid input
+    parser_map: dict[
+        frog_ast.FileType,
+        tuple[type[PrimitiveLexer], type[PrimitiveParser], _SharedAST],
+    ] = {
+        frog_ast.FileType.PRIMITIVE: (
+            PrimitiveLexer,
+            PrimitiveParser,
+            _PrimitiveASTGenerator(),
+        ),
+        frog_ast.FileType.SCHEME: (SchemeLexer, SchemeParser, _SchemeASTGenerator()),
+        frog_ast.FileType.GAME: (GameLexer, GameParser, _GameASTGenerator()),
+        frog_ast.FileType.PROOF: (ProofLexer, ProofParser, _ProofASTGenerator()),
+    }
+    lexer_cls, parser_cls, visitor = parser_map[file_type]
+
+    try:
+        parser = _get_parser_from_stream(content, lexer_cls, parser_cls)
+        ast: frog_ast.Root = visitor.visit(parser.program())
+        return ast, []
+    except antlr_error.Errors.ParseCancellationException:
+        pass
+
+    # Re-parse with DefaultErrorStrategy to collect all errors
+    lexer = lexer_cls(InputStream(content))
+    lexer.removeErrorListeners()
+    collector = _CollectingErrorListener()
+    parser2 = parser_cls(CommonTokenStream(lexer))
+    parser2.removeErrorListeners()
+    parser2.addErrorListener(collector)
+    try:
+        parser2.program()
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
+    all_lines = content.splitlines(keepends=True)
+    errors: list[ParseError] = []
+    for line, col, token_text, antlr_msg in collector.errors:
+        if token_text == "<EOF>":
+            msg = "unexpected end of file"
+        elif token_text:
+            msg = f"unexpected token '{token_text}'"
+        else:
+            msg = "syntax error"
+
+        if antlr_msg and ("expecting" in antlr_msg or "missing" in antlr_msg):
+            cleaned = antlr_msg
+            cleaned = cleaned.replace("ID", "identifier")
+            cleaned = cleaned.replace("'in', ", "")
+            cleaned = cleaned.replace("{", "")
+            cleaned = cleaned.replace("}", "")
+            cleaned = cleaned.replace("extraneous input", "unexpected")
+            msg = cleaned
+
+        source_line = ""
+        if 1 <= line <= len(all_lines):
+            source_line = all_lines[line - 1].rstrip()
+
+        errors.append(
+            ParseError(
+                msg,
+                file_name=file_name,
+                line=line,
+                column=col,
+                token=token_text,
+                source_line=source_line,
+            )
+        )
+
+    if not errors:
+        errors.append(ParseError("syntax error", file_name=file_name))
+
+    return None, errors
+
+
 def parse_file(file_name: str) -> frog_ast.Root:
     match _get_file_type(file_name):
         case frog_ast.FileType.PRIMITIVE:

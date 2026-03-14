@@ -11,9 +11,11 @@ python3 -m venv .venv
 
 - **Run tests**: `pytest` (runs in parallel via `pytest-xdist` `-n auto` by default; use `-n0` to disable)
 - **All CI checks**: `make lint` — runs `black --check`, `mypy`, and `pylint` in sequence (must all pass before committing)
-- **Auto-format**: `make format` — runs `black` to reformat in place
+- **Auto-format**: `make format` — runs `black` to reformat in place, then re-run `make lint`
+- **CLI**: `python -m proof_frog [parse|check|prove|web|lsp] <file>`
+- **Build VSCode extension**: `make vscode-extension`
+- **Package VSCode extension**: `make vscode-vsix`
 - **Regenerate parser**: `make parser` — regenerates ANTLR parsing code from grammar files into `proof_frog/parsing/`
-- **CLI**: `python -m proof_frog [parse|check|prove|web] <file>`
 
 ## CI Checks (must pass before committing)
 
@@ -22,6 +24,7 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 - `black --check proof_frog` — enforces formatting (Python 3.10 compatible style)
 - `mypy proof_frog --no-warn-unused-ignores` — strict type checking
 - `pylint proof_frog` — style/quality linting (target: 10.00/10)
+- `cd vscode-extension && npx tsc --noEmit` — TypeScript type checking for the VSCode extension
 
 ### Patterns for suppressions
 - ANTLR-generated `ErrorListener` subclasses need `# type: ignore[misc]` on the class line and `# type: ignore[override, no-untyped-def]` on `syntaxError`
@@ -45,6 +48,17 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 - `proof_frog/dependencies.py` — Dependency resolution for proof files
 - `proof_frog/mcp_server.py` — MCP server for tool-based proof interaction
 - `proof_frog/web_server.py` — Flask web server (`web` command, branch `ds-web`)
+- `proof_frog/lsp/` — Language Server Protocol implementation (`lsp` command)
+  - `server.py` — pygls-based LSP server, feature registration, event handlers
+  - `document_state.py` — per-document state tracking (AST, source, parse errors)
+  - `diagnostics.py` — parse and semantic analysis error reporting
+  - `navigation.py` — go-to-definition, hover, import resolution
+  - `completion.py` — completion items, let-binding resolution, signature help
+  - `symbols.py` — document symbol provider (Outline panel)
+  - `rename.py` — rename support (F2) for local symbols
+  - `folding.py` — folding ranges for code blocks and comment groups
+  - `proof_features.py` — proof verification, code lens, proof hops tree view
+- `vscode-extension/` — VSCode extension (TypeScript) for syntax highlighting and LSP client
 - `proof_frog/parsing/` — ANTLR-generated code; do not edit manually
 
 ## File Types
@@ -61,6 +75,8 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 - Proof imports use paths relative to the directory where the CLI is invoked
 - Tests live in `tests/`, organized into `tests/integration/` (proof runs, CLI, AST checks) and `tests/unit/` (by area: engine, transforms, typechecking, visitors, parsing, other); `tests/integration/test_proofs.py` runs all `examples/**/*.proof` files as subprocesses
 - Only use ASCII characters in primitive/scheme/game/proof files.
+- LSP server uses `pygls` and communicates over stdio; uses full document sync (`TextDocumentSyncKind.Full`)
+- The LSP caches a `last_good_ast` per document so completion/hover work even when the file has syntax errors
 - When making changes that affect architecture, commands, test structure, or conventions, update CLAUDE.md to reflect those changes.
 
 ## Domain Knowledge

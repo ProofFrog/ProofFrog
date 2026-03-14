@@ -1,0 +1,119 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "ProofFrog",
+  "scopeName": "source.prooffrog",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#constants" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#operators" },
+    { "include": "#numbers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.prooffrog",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.single.prooffrog",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.prooffrog",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.prooffrog",
+          "match": "\\b(true|false|None)\\b"
+        },
+        {
+          "name": "constant.language.adversary.prooffrog",
+          "match": "\\b(Adversary)\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.prooffrog",
+          "match": "\\b(if|else|for|to|in|return)\\b"
+        },
+        {
+          "name": "keyword.declaration.prooffrog",
+          "match": "\\b(Primitive|Scheme|Game|Reduction)\\b"
+        },
+        {
+          "name": "keyword.proof.prooffrog",
+          "match": "\\b(proof|assume|theorem|games|let|induction|from|against|compose|Phase)\\b"
+        },
+        {
+          "name": "keyword.other.prooffrog",
+          "match": "\\b(import|export|as|requires|extends|calls|oracles|subsets|union)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.prooffrog",
+          "match": "\\b(Set|Bool|Void|Int|BitString|ModInt|Array|Map)\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.comparison.prooffrog",
+          "match": "==|!=|>=|<=|<|>"
+        },
+        {
+          "name": "keyword.operator.logical.prooffrog",
+          "match": "&&|\\|\\||!"
+        },
+        {
+          "name": "keyword.operator.assignment.prooffrog",
+          "match": "<-|="
+        },
+        {
+          "name": "keyword.operator.arithmetic.prooffrog",
+          "match": "\\+|-|\\*|/|\\^"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.binary.prooffrog",
+          "match": "\\b0b[01]+\\b"
+        },
+        {
+          "name": "constant.numeric.zeros.prooffrog",
+          "match": "0\\^"
+        },
+        {
+          "name": "constant.numeric.ones.prooffrog",
+          "match": "1\\^"
+        },
+        {
+          "name": "constant.numeric.integer.prooffrog",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    }
+  }
+}

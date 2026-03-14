@@ -170,6 +170,74 @@ def _build_minimal_proof(proof_text: str, step_text: str) -> str | None:
     return "\n\n".join(parts) + "\n"
 
 
+def _setup_engine_for_proof(
+    file_path: str, allowed_root: str | None = None
+) -> tuple[proof_engine.ProofEngine, frog_ast.ProofFile]:
+    """Parse a proof file, set up an engine with its namespace, and return both.
+
+    Caller is responsible for suppressing stdout/stderr if needed.
+    """
+    proof_file = frog_parser.parse_proof_file(file_path)
+    engine = proof_engine.ProofEngine(False)
+    for imp in proof_file.imports:
+        imp_path = frog_parser.resolve_import_path(
+            imp.filename, file_path, allowed_root=allowed_root
+        )
+        file_type = _get_file_type(imp_path)
+        root: frog_ast.Primitive | frog_ast.Scheme | frog_ast.GameFile
+        match file_type:
+            case frog_ast.FileType.PRIMITIVE:
+                root = frog_parser.parse_primitive_file(imp_path)
+            case frog_ast.FileType.SCHEME:
+                root = frog_parser.parse_scheme_file(imp_path)
+            case frog_ast.FileType.GAME:
+                root = frog_parser.parse_game_file(imp_path)
+            case _:
+                raise TypeError(f"Cannot import {file_type}")
+        name = imp.rename if imp.rename else root.get_export_name()
+        engine.add_definition(name, root)
+    for game in proof_file.helpers:
+        engine.definition_namespace[game.name] = game
+    for let in proof_file.lets:
+        engine.proof_let_types.set(let.name, let.type)
+        if isinstance(let.value, frog_ast.FuncCall) and isinstance(
+            let.value.func, frog_ast.Variable
+        ):
+            definition = copy.deepcopy(engine.definition_namespace[let.value.func.name])
+            if isinstance(definition, (frog_ast.Primitive, frog_ast.Scheme)):
+                engine.proof_namespace[let.name] = proof_engine.instantiate(
+                    definition, let.value.args, engine.proof_namespace
+                )
+            else:
+                raise TypeError("Must instantiate either a Primitive or Scheme")
+        else:
+            engine.proof_namespace[let.name] = copy.deepcopy(let.value)
+    engine.get_method_lookup()
+    return engine, proof_file
+
+
+def _resolve_step_game(
+    engine: proof_engine.ProofEngine,
+    proof_file: frog_ast.ProofFile,
+    step_index: int,
+) -> tuple[frog_ast.Game | None, str]:
+    """Get the inlined game AST for a proof step.  Returns (game, error)."""
+    if step_index < 0 or step_index >= len(proof_file.steps):
+        return None, (
+            f"Step index {step_index} out of range "
+            f"(proof has {len(proof_file.steps)} steps)"
+        )
+    step = proof_file.steps[step_index]
+    if not isinstance(step, frog_ast.Step):
+        return None, "This step is an assumption, not a game step."
+    suppress = io.StringIO()
+    with redirect_stdout(suppress), redirect_stderr(suppress):
+        # pylint: disable=protected-access
+        game = engine._get_game_ast(step.challenger, step.reduction)
+        # pylint: enable=protected-access
+    return game, ""
+
+
 def _capture_inline(
     file_path: str,
     step_index: int,
@@ -178,44 +246,7 @@ def _capture_inline(
     buf = io.StringIO()
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
-            proof_file = frog_parser.parse_proof_file(file_path)
-            engine = proof_engine.ProofEngine(False)
-            for imp in proof_file.imports:
-                imp_path = frog_parser.resolve_import_path(
-                    imp.filename, file_path, allowed_root=allowed_root
-                )
-                file_type = _get_file_type(imp_path)
-                root: frog_ast.Primitive | frog_ast.Scheme | frog_ast.GameFile
-                match file_type:
-                    case frog_ast.FileType.PRIMITIVE:
-                        root = frog_parser.parse_primitive_file(imp_path)
-                    case frog_ast.FileType.SCHEME:
-                        root = frog_parser.parse_scheme_file(imp_path)
-                    case frog_ast.FileType.GAME:
-                        root = frog_parser.parse_game_file(imp_path)
-                    case _:
-                        raise TypeError(f"Cannot import {file_type}")
-                name = imp.rename if imp.rename else root.get_export_name()
-                engine.add_definition(name, root)
-            for game in proof_file.helpers:
-                engine.definition_namespace[game.name] = game
-            for let in proof_file.lets:
-                engine.proof_let_types.set(let.name, let.type)
-                if isinstance(let.value, frog_ast.FuncCall) and isinstance(
-                    let.value.func, frog_ast.Variable
-                ):
-                    definition = copy.deepcopy(
-                        engine.definition_namespace[let.value.func.name]
-                    )
-                    if isinstance(definition, (frog_ast.Primitive, frog_ast.Scheme)):
-                        engine.proof_namespace[let.name] = proof_engine.instantiate(
-                            definition, let.value.args, engine.proof_namespace
-                        )
-                    else:
-                        raise TypeError("Must instantiate either a Primitive or Scheme")
-                else:
-                    engine.proof_namespace[let.name] = copy.deepcopy(let.value)
-            engine.get_method_lookup()
+            engine, proof_file = _setup_engine_for_proof(file_path, allowed_root)
 
         if step_index < 0 or step_index >= len(proof_file.steps):
             return (
@@ -296,6 +327,72 @@ def _capture_inline(
             "",
             "",
         )
+
+
+# ---------------------------------------------------------------------------
+# Canonicalization debugging capture functions
+# ---------------------------------------------------------------------------
+
+
+def _capture_canonicalization_trace(
+    file_path: str, step_index: int, allowed_root: str | None = None
+) -> dict[str, Any]:
+    """Return a trace of which transforms fired per iteration for a step."""
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf), redirect_stderr(buf):
+            engine, proof_file = _setup_engine_for_proof(file_path, allowed_root)
+        game, err = _resolve_step_game(engine, proof_file, step_index)
+        if game is None:
+            return {"success": False, "error": err}
+        suppress = io.StringIO()
+        with redirect_stdout(suppress), redirect_stderr(suppress):
+            _canon, trace = engine.canonicalize_game_with_trace(copy.deepcopy(game))
+        trace["success"] = True
+        return trace
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        return {
+            "success": False,
+            "error": _strip_ansi(buf.getvalue()) + f"\nError: {e}",
+        }
+
+
+def _capture_step_after_transform(
+    file_path: str,
+    step_index: int,
+    transform_name: str,
+    allowed_root: str | None = None,
+) -> dict[str, Any]:
+    """Return game AST after applying transforms up to the named one."""
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf), redirect_stderr(buf):
+            engine, proof_file = _setup_engine_for_proof(file_path, allowed_root)
+        game, err = _resolve_step_game(engine, proof_file, step_index)
+        if game is None:
+            return {"success": False, "error": err}
+        suppress = io.StringIO()
+        with redirect_stdout(suppress), redirect_stderr(suppress):
+            result_game, changed, available = engine.canonicalize_until_transform(
+                copy.deepcopy(game), transform_name
+            )
+        if transform_name not in available:
+            return {
+                "success": False,
+                "error": f"Unknown transform '{transform_name}'",
+                "available_transforms": available,
+            }
+        return {
+            "success": True,
+            "output": str(result_game),
+            "transform_applied": changed,
+            "available_transforms": available,
+        }
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        return {
+            "success": False,
+            "error": _strip_ansi(buf.getvalue()) + f"\nError: {e}",
+        }
 
 
 def _capture_prove(

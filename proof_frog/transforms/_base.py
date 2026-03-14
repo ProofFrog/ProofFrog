@@ -75,3 +75,89 @@ def run_standardization(
     for pass_ in pipeline:
         game = pass_.apply(game, ctx)
     return game
+
+
+# ---------------------------------------------------------------------------
+# Traced / diagnostic pipeline runners
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class IterationTrace:
+    """Record of one fixed-point iteration."""
+
+    iteration: int
+    transforms_applied: list[str]
+
+
+@dataclass
+class PipelineTrace:
+    """Full trace of a pipeline run."""
+
+    iterations: list[IterationTrace]
+    converged: bool
+
+
+def run_pipeline_with_trace(
+    game: frog_ast.Game,
+    pipeline: list[TransformPass],
+    ctx: PipelineContext,
+    max_iterations: int = _MAX_FIXED_POINT_ITERATIONS,
+) -> tuple[frog_ast.Game, PipelineTrace]:
+    """Run transform passes in a fixed-point loop, recording which fired."""
+    iterations: list[IterationTrace] = []
+    converged = False
+    for iteration in range(max_iterations):
+        transforms_applied: list[str] = []
+        new_game = game
+        for pass_ in pipeline:
+            before = new_game
+            new_game = pass_.apply(new_game, ctx)
+            if new_game != before:
+                transforms_applied.append(pass_.name)
+        if new_game == game:
+            converged = True
+            break
+        iterations.append(
+            IterationTrace(
+                iteration=iteration + 1, transforms_applied=transforms_applied
+            )
+        )
+        game = new_game
+    if not converged:
+        warnings.warn(
+            "Canonicalization did not converge within " f"{max_iterations} iterations",
+            stacklevel=3,
+        )
+    return game, PipelineTrace(iterations=iterations, converged=converged)
+
+
+def run_pipeline_until(
+    game: frog_ast.Game,
+    core_pipeline: list[TransformPass],
+    std_pipeline: list[TransformPass],
+    ctx: PipelineContext,
+    transform_name: str,
+) -> tuple[frog_ast.Game, bool, list[str]]:
+    """Apply transforms up to and including *transform_name* (first iteration).
+
+    Returns ``(game_after, transform_changed_ast, available_names)``.
+    """
+    available_names = [p.name for p in core_pipeline] + [p.name for p in std_pipeline]
+
+    if transform_name not in available_names:
+        return game, False, available_names
+
+    for pass_ in core_pipeline:
+        before = game
+        game = pass_.apply(game, ctx)
+        if pass_.name == transform_name:
+            return game, game != before, available_names
+
+    for pass_ in std_pipeline:
+        before = game
+        game = pass_.apply(game, ctx)
+        if pass_.name == transform_name:
+            return game, game != before, available_names
+
+    return game, False, available_names

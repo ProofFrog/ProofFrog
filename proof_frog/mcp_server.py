@@ -34,6 +34,8 @@ from .web_server import (
     _capture_check as _capture_check_impl,
     _capture_prove,
     _capture_inline,
+    _capture_canonicalization_trace,
+    _capture_step_after_transform,
     _build_minimal_proof,
     _build_tree,
 )
@@ -46,7 +48,9 @@ mcp: FastMCP = FastMCP(
         "`describe` to understand their interfaces, `write_file` + `prove` to verify "
         "a proof, `get_step_detail` to diagnose failing proof steps, and "
         "`get_inlined_game` to see the canonical form of a game step without "
-        "needing the full proof to be parseable (useful when writing intermediate games)."
+        "needing the full proof to be parseable (useful when writing intermediate games). "
+        "For debugging failing hops use `get_canonicalization_trace` to see which "
+        "transforms fired and `get_step_after_transform` to inspect intermediate states."
     ),
 )
 
@@ -274,6 +278,52 @@ def get_inlined_game(proof_path: str, step_text: str) -> dict[str, Any]:
         return {"output": output, "canonical": canonical, "success": success}
     except Exception as e:  # pylint: disable=broad-except
         return {"output": f"Error: {e}", "canonical": "", "success": False}
+
+
+# ---------------------------------------------------------------------------
+# Canonicalization debugging tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()  # type: ignore[misc, untyped-decorator]
+def get_canonicalization_trace(proof_path: str, step_index: int) -> Any:
+    """Get a trace of which transforms fired at each fixed-point iteration.
+
+    Use this to understand how the engine simplifies a game step.
+    step_index is 0-based.
+
+    Returns:
+      success          — bool
+      iterations       — list of {iteration: int, transforms_applied: [str]}
+      total_iterations — number of iterations before convergence
+      converged        — whether the fixed-point loop converged
+    """
+    return _capture_canonicalization_trace(
+        _safe_resolve(proof_path), step_index, allowed_root=_directory
+    )
+
+
+@mcp.tool()  # type: ignore[misc, untyped-decorator]
+def get_step_after_transform(
+    proof_path: str, step_index: int, transform_name: str
+) -> Any:
+    """Get the game AST after applying transforms up to a named transform.
+
+    Applies the first iteration of the canonicalization pipeline up to and
+    including the named transform. Useful for inspecting the intermediate
+    state after a specific transformation pass.
+
+    step_index is 0-based.
+
+    Returns:
+      success              — bool
+      output               — game AST as string after the named transform
+      transform_applied    — whether the named transform changed the AST
+      available_transforms — list of valid transform names
+    """
+    return _capture_step_after_transform(
+        _safe_resolve(proof_path), step_index, transform_name, allowed_root=_directory
+    )
 
 
 # ---------------------------------------------------------------------------

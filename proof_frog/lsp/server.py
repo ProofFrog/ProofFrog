@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from lsprotocol import types as lsp  # type: ignore[import-untyped]
 from pygls.lsp.server import LanguageServer  # type: ignore[import-untyped]
@@ -20,13 +21,20 @@ from proof_frog.lsp.document_state import (
 )
 from proof_frog.lsp.diagnostics import parse_and_diagnose, check_and_diagnose
 from proof_frog.lsp.navigation import goto_definition, hover
-from proof_frog.lsp.completion import get_completions
+from proof_frog.lsp.completion import get_completions, get_signature_help
+from proof_frog.lsp.symbols import get_document_symbols
+from proof_frog.lsp.rename import (
+    prepare_rename as do_prepare_rename,
+    rename as do_rename,
+)
+from proof_frog.lsp.folding import get_folding_ranges
 from proof_frog.lsp.proof_features import (
     ProofStepResult,
     run_proof_verification,
     build_code_lenses,
     get_proof_steps_response,
     PROOF_STEPS_METHOD,
+    PROOF_VERIFICATION_DONE,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,7 +53,11 @@ class FrogLanguageServer(LanguageServer):  # type: ignore[misc]
     """Language server for ProofFrog's FrogLang DSL."""
 
     def __init__(self) -> None:
-        super().__init__("prooffrog-lsp", "v0.1.0")
+        super().__init__(
+            "prooffrog-lsp",
+            "v0.1.0",
+            text_document_sync_kind=lsp.TextDocumentSyncKind.Full,
+        )
         self.document_states: dict[str, DocumentState] = {}
         self.proof_results: dict[str, list[ProofStepResult]] = {}
 
@@ -115,9 +127,17 @@ def did_save(ls: FrogLanguageServer, params: lsp.DidSaveTextDocumentParams) -> N
     if state.file_type == frog_ast.FileType.PROOF:
         diagnostics, step_results = run_proof_verification(state)
         ls.proof_results[uri] = step_results
-    else:
-        diagnostics = check_and_diagnose(state)
+        _publish(ls, uri, diagnostics)
+        # Notify the client that verification is done so it can refresh the tree
+        ls.protocol.notify(  # type: ignore[attr-defined]
+            PROOF_VERIFICATION_DONE,
+            {"uri": uri, "steps": get_proof_steps_response(step_results)},
+        )
+        # Ask the client to re-request code lenses with the updated results
+        ls.workspace_code_lens_refresh(None)
+        return
 
+    diagnostics = check_and_diagnose(state)
     _publish(ls, uri, diagnostics)
 
 
@@ -170,6 +190,76 @@ def completions(
     return get_completions(state, params.position)
 
 
+# -- Signature help --
+
+
+@server.feature(  # type: ignore[misc]
+    lsp.TEXT_DOCUMENT_SIGNATURE_HELP,
+    lsp.SignatureHelpOptions(trigger_characters=["(", ","]),
+)
+def signature_help(
+    ls: FrogLanguageServer, params: lsp.SignatureHelpParams
+) -> lsp.SignatureHelp | None:
+    """Provide signature help for function calls."""
+    state = ls.document_states.get(params.text_document.uri)
+    if state is None:
+        return None
+    return get_signature_help(state, params.position)
+
+
+# -- Document symbols --
+
+
+@server.feature(lsp.TEXT_DOCUMENT_DOCUMENT_SYMBOL)  # type: ignore[misc]
+def document_symbol(
+    ls: FrogLanguageServer, params: lsp.DocumentSymbolParams
+) -> list[lsp.DocumentSymbol]:
+    """Provide document symbols for the Outline panel."""
+    state = ls.document_states.get(params.text_document.uri)
+    if state is None:
+        return []
+    return get_document_symbols(state)
+
+
+# -- Rename --
+
+
+@server.feature(lsp.TEXT_DOCUMENT_PREPARE_RENAME)  # type: ignore[misc]
+def prepare_rename(
+    ls: FrogLanguageServer, params: lsp.PrepareRenameParams
+) -> lsp.Range | None:
+    """Check if the symbol at position can be renamed."""
+    state = ls.document_states.get(params.text_document.uri)
+    if state is None:
+        return None
+    return do_prepare_rename(state, params.position)
+
+
+@server.feature(lsp.TEXT_DOCUMENT_RENAME)  # type: ignore[misc]
+def rename_handler(
+    ls: FrogLanguageServer, params: lsp.RenameParams
+) -> lsp.WorkspaceEdit | None:
+    """Rename all occurrences of the symbol at position."""
+    state = ls.document_states.get(params.text_document.uri)
+    if state is None:
+        return None
+    return do_rename(state, params.position, params.new_name)
+
+
+# -- Folding ranges --
+
+
+@server.feature(lsp.TEXT_DOCUMENT_FOLDING_RANGE)  # type: ignore[misc]
+def folding_range(
+    ls: FrogLanguageServer, params: lsp.FoldingRangeParams
+) -> list[lsp.FoldingRange]:
+    """Provide folding ranges for code blocks."""
+    state = ls.document_states.get(params.text_document.uri)
+    if state is None:
+        return []
+    return get_folding_ranges(state)
+
+
 # -- Proof features --
 
 
@@ -189,8 +279,8 @@ def code_lens(ls: FrogLanguageServer, params: lsp.CodeLensParams) -> list[lsp.Co
 
 @server.command(PROOF_STEPS_METHOD)  # type: ignore[misc]
 def proof_steps_command(
-    ls: FrogLanguageServer, args: list[object]
-) -> list[dict[str, object]]:
+    ls: FrogLanguageServer, args: list[Any]
+) -> list[dict[str, Any]]:
     """Custom command to get proof step results for the tree view."""
     if not args:
         return []
@@ -201,4 +291,6 @@ def proof_steps_command(
 
 def run_server() -> None:
     """Start the ProofFrog LSP server on stdio."""
+    # Suppress noisy "Cancel notification for unknown message id" warnings
+    logging.getLogger("pygls.protocol.json_rpc").setLevel(logging.ERROR)
     server.start_io()

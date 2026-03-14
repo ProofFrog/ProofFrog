@@ -13,13 +13,11 @@ export class ProofStepItem extends vscode.TreeItem {
   public readonly line: number;
 
   constructor(data: ProofStepData) {
-    const icon =
-      data.valid === null ? "\u2B1C" : data.valid ? "\u2705" : "\u274C";
     const kindLabel =
       data.kind === "by_assumption" ? "by assumption" : "interchangeability";
     const status = data.valid === false ? " -- FAILED" : "";
 
-    const label = `${icon} Step ${data.step_num}: ${data.current_desc} -> ${data.next_desc}`;
+    const label = `Step ${data.step_num}: ${data.current_desc} -> ${data.next_desc}`;
 
     super(label, vscode.TreeItemCollapsibleState.None);
 
@@ -42,7 +40,25 @@ export class ProofStepItem extends vscode.TreeItem {
       arguments: [this],
     };
 
-    this.iconPath = undefined; // Use text icons in label
+    if (data.valid === null) {
+      // Assumption hop — blue checkbox
+      this.iconPath = new vscode.ThemeIcon(
+        "pass",
+        new vscode.ThemeColor("charts.blue")
+      );
+    } else if (data.valid) {
+      // Valid interchangeability — green checkbox
+      this.iconPath = new vscode.ThemeIcon(
+        "pass",
+        new vscode.ThemeColor("charts.green")
+      );
+    } else {
+      // Failed — red X
+      this.iconPath = new vscode.ThemeIcon(
+        "error",
+        new vscode.ThemeColor("charts.red")
+      );
+    }
   }
 }
 

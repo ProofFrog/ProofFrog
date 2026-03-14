@@ -517,6 +517,13 @@ def check_proof_well_formed(
         type_check_visitor.visit(step)
 
 
+def _format_type(t: PossibleType) -> str:
+    """Format a PossibleType for display in error messages."""
+    if isinstance(t, list):
+        return "[" + ", ".join(str(item) for item in t) + "]"
+    return str(t)
+
+
 def print_error(
     location: frog_ast.ASTNode, message: str, file_name: str = "Unknown"
 ) -> None:
@@ -919,7 +926,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             got_type = self.get_type_from_ast(bad_return.expression)
             self.print_error(
                 bad_return,
-                f"{bad_return.expression} is of type {got_type}, expected {expected_type}",
+                f"{bad_return.expression} is of type {_format_type(got_type)}, expected {expected_type}",
             )
 
     def visit_variable(self, variable: frog_ast.Variable) -> None:
@@ -1226,7 +1233,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             if not isinstance(right_type, frog_ast.SetType):
                 self.print_error(
                     bin_op,
-                    f"{bin_op.right_expression} is of type {right_type}, expected Set",
+                    f"{bin_op.right_expression} is of type {_format_type(right_type)}, expected Set",
                 )
                 return
             if not right_type.parameterization:
@@ -1497,7 +1504,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 if not self.check_types(declared_type, arg_type):
                     self.print_error(
                         func_call,
-                        f"{func_call.args[index]} is of type {arg_type}, expected {declared_type}",
+                        f"{func_call.args[index]} is of type {_format_type(arg_type)}, expected {declared_type}",
                     )
             self.ast_type_map.set(func_call, func_call_signature.return_type)
 

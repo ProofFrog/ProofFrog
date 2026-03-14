@@ -48,9 +48,10 @@ def _resolve_import_namespace(
 ) -> dict[str, tuple[str, frog_ast.Root]]:
     """Build {name -> (resolved_path, parsed_root)} for all imports."""
     namespace: dict[str, tuple[str, frog_ast.Root]] = {}
-    if state.ast is None:
+    ast = state.ast or state.last_good_ast
+    if ast is None:
         return namespace
-    for imp in _get_imports(state.ast):
+    for imp in _get_imports(ast):
         try:
             resolved = frog_parser.resolve_import_path(imp.filename, state.file_path)
             parsed = frog_parser.parse_file(resolved)
@@ -80,7 +81,9 @@ def _find_word_at_position(source: str, position: lsp.Position) -> str:
     if position.line >= len(lines):
         return ""
     line_text = lines[position.line]
-    col = position.character
+    if not line_text:
+        return ""
+    col = min(position.character, len(line_text) - 1)
 
     # Expand from cursor position to capture dotted identifier
     start = col

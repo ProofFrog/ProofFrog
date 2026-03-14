@@ -6,6 +6,7 @@ lint:
 	$(PYTHON) -m black --check proof_frog
 	$(PYTHON) -m mypy proof_frog --no-warn-unused-ignores
 	$(PYTHON) -m pylint proof_frog
+	cd vscode-extension && npx tsc --noEmit
 
 format:
 	$(PYTHON) -m black proof_frog

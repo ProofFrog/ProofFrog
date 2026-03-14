@@ -18,6 +18,7 @@ class DocumentState:
     file_type: frog_ast.FileType
     source: str = ""
     ast: frog_ast.Root | None = None
+    last_good_ast: frog_ast.Root | None = None
     parse_errors: list[ParseError] = field(default_factory=list)
     version: int = 0
 

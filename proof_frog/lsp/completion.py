@@ -144,15 +144,120 @@ def get_completions(
     return items
 
 
-def _complete_module_members(
-    state: DocumentState, module_name: str
-) -> list[lsp.CompletionItem]:
-    """Return completion items for members of a module (after 'Module.')."""
+def _resolve_module(state: DocumentState, module_name: str) -> frog_ast.Root | None:
+    """Resolve a module name to its parsed AST (import or let binding)."""
     namespace = _resolve_import_namespace(state)
-    if module_name not in namespace:
-        return []
+    if module_name in namespace:
+        _, parsed = namespace[module_name]
+        return parsed
+    return _resolve_let_binding(state, module_name, namespace)
 
-    _, parsed = namespace[module_name]
+
+def _find_method_signature(
+    parsed: frog_ast.Root, method_name: str
+) -> frog_ast.MethodSignature | None:
+    """Find a method signature by name in a parsed primitive or scheme."""
+    if isinstance(parsed, frog_ast.Primitive):
+        for ms in parsed.methods:
+            if ms.name == method_name:
+                return ms
+    elif isinstance(parsed, frog_ast.Scheme):
+        for method in parsed.methods:
+            if method.signature.name == method_name:
+                return method.signature
+    return None
+
+
+def get_signature_help(
+    state: DocumentState, position: lsp.Position
+) -> lsp.SignatureHelp | None:
+    """Return signature help for a function call at the given position."""
+    lines = state.source.splitlines()
+    if position.line >= len(lines):
+        return None
+    line_text = lines[position.line]
+    col = position.character
+
+    # Walk backwards from cursor to find the matching '(' and count commas
+    paren_depth = 0
+    active_param = 0
+    paren_pos = -1
+    for i in range(col - 1, -1, -1):
+        ch = line_text[i]
+        if ch == ")":
+            paren_depth += 1
+        elif ch == "(":
+            if paren_depth == 0:
+                paren_pos = i
+                break
+            paren_depth -= 1
+        elif ch == "," and paren_depth == 0:
+            active_param += 1
+
+    if paren_pos < 0:
+        return None
+
+    # Extract the dotted name before the '('
+    name_end = paren_pos
+    name_start = paren_pos
+    while name_start > 0 and (
+        line_text[name_start - 1].isalnum() or line_text[name_start - 1] in "_."
+    ):
+        name_start -= 1
+    full_name = line_text[name_start:name_end]
+
+    if "." not in full_name:
+        return None
+
+    parts = full_name.rsplit(".", 1)
+    module_name, method_name = parts[0], parts[1]
+
+    parsed = _resolve_module(state, module_name)
+    if parsed is None:
+        return None
+
+    sig = _find_method_signature(parsed, method_name)
+    if sig is None:
+        return None
+
+    param_infos = [
+        lsp.ParameterInformation(label=f"{p.type} {p.name}") for p in sig.parameters
+    ]
+
+    return lsp.SignatureHelp(
+        signatures=[
+            lsp.SignatureInformation(
+                label=str(sig),
+                parameters=param_infos,
+            )
+        ],
+        active_signature=0,
+        active_parameter=active_param,
+    )
+
+
+def _resolve_let_binding(
+    state: DocumentState,
+    name: str,
+    namespace: dict[str, tuple[str, frog_ast.Root]],
+) -> frog_ast.Root | None:
+    """If *name* is a let: binding in a proof, resolve it to its primitive/scheme type."""
+    ast = state.ast or state.last_good_ast
+    if not isinstance(ast, frog_ast.ProofFile):
+        return None
+    for let_field in ast.lets:
+        if let_field.name == name:
+            # The type name (e.g. "SymEnc") refers to an import
+            type_name = str(let_field.type)
+            if type_name in namespace:
+                _, parsed = namespace[type_name]
+                return parsed
+            return None
+    return None
+
+
+def _items_for_parsed(parsed: frog_ast.Root) -> list[lsp.CompletionItem]:
+    """Return completion items for members of a parsed primitive/scheme/game."""
     items: list[lsp.CompletionItem] = []
 
     if isinstance(parsed, frog_ast.Primitive):
@@ -201,3 +306,22 @@ def _complete_module_members(
             )
 
     return items
+
+
+def _complete_module_members(
+    state: DocumentState, module_name: str
+) -> list[lsp.CompletionItem]:
+    """Return completion items for members of a module (after 'Module.')."""
+    namespace = _resolve_import_namespace(state)
+
+    # Direct import (e.g. SymEnc.KeyGen)
+    if module_name in namespace:
+        _, parsed = namespace[module_name]
+        return _items_for_parsed(parsed)
+
+    # Let binding in a proof (e.g. E2.KeyGen where E2 is defined in let:)
+    resolved = _resolve_let_binding(state, module_name, namespace)
+    if resolved is not None:
+        return _items_for_parsed(resolved)
+
+    return []

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import tempfile
 from contextlib import redirect_stdout, redirect_stderr
 
@@ -11,6 +12,27 @@ from lsprotocol import types as lsp  # type: ignore[import-untyped]
 
 from proof_frog import frog_parser, semantic_analysis
 from proof_frog.lsp.document_state import DocumentState
+
+
+def _parse_error_location(
+    msg: str,
+) -> tuple[int, int, str]:
+    """Extract line, column, and message from a semantic analysis error.
+
+    Error format: ``filename:line:col: error: message``
+    Returns (0-based line, column, message text).  Falls back to (0, 0, msg).
+    """
+    match = re.search(r":(\d+):(\d+): error: (.+)", msg)
+    if match:
+        line = max(0, int(match.group(1)) - 1)
+        col = int(match.group(2))
+        return line, col, match.group(3)
+    # Try without column
+    match = re.search(r":(\d+): error: (.+)", msg)
+    if match:
+        line = max(0, int(match.group(1)) - 1)
+        return line, 0, match.group(2)
+    return 0, 0, msg
 
 
 def parse_and_diagnose(state: DocumentState) -> list[lsp.Diagnostic]:
@@ -22,6 +44,8 @@ def parse_and_diagnose(state: DocumentState) -> list[lsp.Diagnostic]:
         state.source, state.file_type, file_name=state.file_path
     )
     state.ast = ast
+    if ast is not None and not errors:
+        state.last_good_ast = ast
     state.parse_errors = errors
 
     diagnostics: list[lsp.Diagnostic] = []
@@ -102,13 +126,14 @@ def check_and_diagnose(state: DocumentState) -> list[lsp.Diagnostic]:
             semantic_analysis.check_well_formed(root, file_path)
     except semantic_analysis.FailedTypeCheck:
         msg = buf.getvalue().strip() or "Type check failed."
+        line, col, text = _parse_error_location(msg)
         diagnostics.append(
             lsp.Diagnostic(
                 range=lsp.Range(
-                    start=lsp.Position(line=0, character=0),
-                    end=lsp.Position(line=0, character=0),
+                    start=lsp.Position(line=line, character=col),
+                    end=lsp.Position(line=line, character=999),
                 ),
-                message=msg,
+                message=text,
                 severity=lsp.DiagnosticSeverity.Error,
                 source="prooffrog",
             )
@@ -118,7 +143,7 @@ def check_and_diagnose(state: DocumentState) -> list[lsp.Diagnostic]:
             lsp.Diagnostic(
                 range=lsp.Range(
                     start=lsp.Position(line=0, character=0),
-                    end=lsp.Position(line=0, character=0),
+                    end=lsp.Position(line=0, character=999),
                 ),
                 message=f"Analysis error: {e}",
                 severity=lsp.DiagnosticSeverity.Error,

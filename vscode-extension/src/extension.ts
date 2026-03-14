@@ -101,22 +101,13 @@ export async function activate(
     clientOptions
   );
 
-  // Refresh proof steps when a .proof file is saved
-  context.subscriptions.push(
-    vscode.workspace.onDidSaveTextDocument((doc) => {
-      if (doc.uri.fsPath.endsWith(".proof") && client) {
-        setTimeout(() => {
-          refreshProofSteps(doc.uri);
-        }, 1000);
-      }
-    })
-  );
-
-  // Refresh when active editor changes to a .proof file
+  // Refresh when active editor changes to a .proof file (fetch cached results)
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       if (editor?.document.uri.fsPath.endsWith(".proof") && client) {
         refreshProofSteps(editor.document.uri);
+      } else if (!editor?.document.uri.fsPath.endsWith(".proof")) {
+        proofStepsProvider.update([]);
       }
     })
   );
@@ -124,6 +115,24 @@ export async function activate(
   try {
     await client.start();
     outputChannel.appendLine("ProofFrog LSP server started successfully.");
+
+    // Listen for verification-done notifications from the server
+    client.onNotification(
+      "prooffrog/verificationDone",
+      (params: {
+        uri: string;
+        steps: Array<{
+          step_num: number;
+          valid: boolean | null;
+          kind: string;
+          current_desc: string;
+          next_desc: string;
+          line: number;
+        }>;
+      }) => {
+        proofStepsProvider.update(params.steps);
+      }
+    );
   } catch (e) {
     outputChannel.appendLine(`Failed to start LSP server: ${e}`);
     vscode.window.showErrorMessage(

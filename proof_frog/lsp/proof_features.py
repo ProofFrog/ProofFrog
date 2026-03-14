@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from lsprotocol import types as lsp  # type: ignore[import-untyped]
 
 from proof_frog import frog_ast, frog_parser, proof_engine, semantic_analysis
+from proof_frog.lsp.diagnostics import _parse_error_location
 from proof_frog.lsp.document_state import DocumentState
 
 
@@ -71,13 +72,14 @@ def run_proof_verification(state: DocumentState) -> tuple[
             semantic_analysis.check_well_formed(proof_file, file_path)
     except semantic_analysis.FailedTypeCheck:
         msg = buf.getvalue().strip() or "Type check failed."
+        line, col, text = _parse_error_location(msg)
         diagnostics.append(
             lsp.Diagnostic(
                 range=lsp.Range(
-                    start=lsp.Position(line=0, character=0),
-                    end=lsp.Position(line=0, character=0),
+                    start=lsp.Position(line=line, character=col),
+                    end=lsp.Position(line=line, character=999),
                 ),
-                message=msg,
+                message=text,
                 severity=lsp.DiagnosticSeverity.Error,
                 source="prooffrog",
             )
@@ -88,7 +90,7 @@ def run_proof_verification(state: DocumentState) -> tuple[
             lsp.Diagnostic(
                 range=lsp.Range(
                     start=lsp.Position(line=0, character=0),
-                    end=lsp.Position(line=0, character=0),
+                    end=lsp.Position(line=0, character=999),
                 ),
                 message=f"Semantic analysis error: {e}",
                 severity=lsp.DiagnosticSeverity.Error,
@@ -243,8 +245,9 @@ def build_code_lenses(
     return lenses
 
 
-# Custom LSP request for the tree view
+# Custom LSP notification and command
 PROOF_STEPS_METHOD = "prooffrog/proofSteps"
+PROOF_VERIFICATION_DONE = "prooffrog/verificationDone"
 
 
 def get_proof_steps_response(

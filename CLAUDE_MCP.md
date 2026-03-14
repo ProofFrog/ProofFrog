@@ -62,6 +62,8 @@ Claude will call `prooffrog:list_files` and return the file tree.
 | `prove` | Run proof verification; returns per-hop pass/fail results |
 | `get_step_detail` | Canonical (fully simplified) form of one proof step — key for diagnosing failures |
 | `get_inlined_game` | Canonical form of an arbitrary game step expression evaluated against the proof's `let:` context — use when the step isn't yet in the `games:` list or when stub reductions prevent parsing |
+| `get_canonicalization_trace` | Trace of which transforms fired at each iteration of the fixed-point loop for a step |
+| `get_step_after_transform` | Game AST after applying transforms up to a specific named transform — for inspecting intermediate states |
 
 There is also a **language reference resource** (`prooffrog://language-reference`)
 that Claude can fetch to remind itself of proof DSL syntax without reading through
@@ -118,6 +120,12 @@ When a step fails:
    step to see their canonical forms side-by-side.
 2. Compare the two canonical forms to identify the difference — this usually
    reveals what the engine cannot simplify automatically.
+3. Use `get_canonicalization_trace(proof_path, step_index)` to see which
+   transforms fired at each iteration — helpful for understanding the
+   simplification sequence.
+4. Use `get_step_after_transform(proof_path, step_index, transform_name)` to
+   inspect the game AST after a specific transform — useful when you suspect a
+   particular transform is misbehaving.
 
 ### Validating non-proof files
 

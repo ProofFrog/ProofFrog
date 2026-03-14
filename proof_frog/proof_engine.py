@@ -14,6 +14,8 @@ from . import dependencies
 from .transforms._base import (
     PipelineContext,
     run_pipeline,
+    run_pipeline_until,
+    run_pipeline_with_trace,
     run_standardization,
     _MAX_FIXED_POINT_ITERATIONS,
 )
@@ -608,6 +610,36 @@ class ProofEngine:
         game = run_pipeline(game, CORE_PIPELINE, ctx)
         game = run_standardization(game, STANDARDIZATION_PIPELINE, ctx)
         return game
+
+    def canonicalize_game_with_trace(
+        self, game: frog_ast.Game
+    ) -> tuple[frog_ast.Game, dict[str, object]]:
+        """Same pipeline as canonicalize_game, but records which transforms
+        fired at each iteration of the fixed-point loop."""
+        ctx = self._build_context()
+        game, trace = run_pipeline_with_trace(game, CORE_PIPELINE, ctx)
+        game = run_standardization(game, STANDARDIZATION_PIPELINE, ctx)
+        return game, {
+            "iterations": [
+                {
+                    "iteration": it.iteration,
+                    "transforms_applied": it.transforms_applied,
+                }
+                for it in trace.iterations
+            ],
+            "total_iterations": len(trace.iterations),
+            "converged": trace.converged,
+        }
+
+    def canonicalize_until_transform(
+        self, game: frog_ast.Game, transform_name: str
+    ) -> tuple[frog_ast.Game, bool, list[str]]:
+        """Apply transforms up to and including *transform_name* (first
+        iteration only) and return the resulting game."""
+        ctx = self._build_context()
+        return run_pipeline_until(
+            game, CORE_PIPELINE, STANDARDIZATION_PIPELINE, ctx, transform_name
+        )
 
     def apply_reduction(
         self,

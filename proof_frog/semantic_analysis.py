@@ -252,6 +252,12 @@ class VariableTypeVisitor(visitors.Visitor[None]):
             assert isinstance(sample.var, frog_ast.Variable)
             self.variable_type_map_stack[-1][sample.var.name] = sample.the_type
 
+    def leave_unique_sample(self, unique_sample: frog_ast.UniqueSample) -> None:
+        assert isinstance(unique_sample.var, frog_ast.Variable)
+        self.variable_type_map_stack[-1][
+            unique_sample.var.name
+        ] = unique_sample.the_type
+
     def visit_variable_declaration(
         self, declaration: frog_ast.VariableDeclaration
     ) -> None:
@@ -431,6 +437,13 @@ class NameResolutionVisitor(VariableTypeVisitor):
         super().leave_sample(sample)
         self.defining_variable = None
 
+    def visit_unique_sample(self, unique_sample: frog_ast.UniqueSample) -> None:
+        self.defining_variable = unique_sample.var
+
+    def leave_unique_sample(self, unique_sample: frog_ast.UniqueSample) -> None:
+        super().leave_unique_sample(unique_sample)
+        self.defining_variable = None
+
     def visit_variable(self, var: frog_ast.Variable) -> None:
         if self.in_field_access or self.defining_variable is var:
             return
@@ -540,6 +553,16 @@ class NameResolutionVisitor(VariableTypeVisitor):
                 if field_access.the_object.which == the_type[0].name
                 else the_type[1]
             )
+
+        if isinstance(the_type, frog_ast.RandomFunctionType):
+            if field_access.name != "domain":
+                print_error(
+                    field_access,
+                    f"RandomFunctions has no field '{field_access.name}'"
+                    " (only 'domain' is available)",
+                    self.file_name,
+                )
+            return
 
         if not isinstance(the_type, visitors.InstantiableType):
             print_error(
@@ -1230,6 +1253,9 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 )
         self.ast_type_map.set(bit_string_type, bit_string_type)
 
+    def leave_random_function_type(self, rf_type: frog_ast.RandomFunctionType) -> None:
+        self.ast_type_map.set(rf_type, rf_type)
+
     def leave_mod_int_type(self, mod_int_type: frog_ast.ModIntType) -> None:
         modulus_type = self.get_type_from_ast(mod_int_type.modulus)
         if modulus_type != frog_ast.IntType():
@@ -1576,6 +1602,18 @@ class CheckTypeVisitor(VariableTypeVisitor):
 
     def leave_field_access(self, field_acess: frog_ast.FieldAccess) -> None:
         object_type = self.get_type_from_ast(field_acess.the_object)
+        if isinstance(object_type, frog_ast.RandomFunctionType):
+            if field_acess.name == "domain":
+                self.ast_type_map.set(
+                    field_acess, frog_ast.SetType(object_type.domain_type)
+                )
+            else:
+                self.print_error(
+                    field_acess,
+                    f"RandomFunctions has no field '{field_acess.name}'"
+                    " (only 'domain' is available)",
+                )
+            return
         if not isinstance(object_type, visitors.InstantiableType):
             self.print_error(field_acess, "Accessing field of non object-type")
             return
@@ -1638,6 +1676,35 @@ class CheckTypeVisitor(VariableTypeVisitor):
             self.print_error(
                 sample,
                 f"{sample.sampled_from} has type {found_type}, expected {expected_type}",
+            )
+
+    def leave_unique_sample(self, unique_sample: frog_ast.UniqueSample) -> None:
+        super().leave_unique_sample(unique_sample)
+        # Check that unique_set has type Set<D> and sampled_from has type D
+        set_type = self.get_type_from_ast(unique_sample.unique_set)
+        if not isinstance(set_type, frog_ast.SetType):
+            self.print_error(
+                unique_sample,
+                f"Unique sample set must be a Set type, got {set_type}",
+            )
+            return
+        if set_type.parameterization is None:
+            self.print_error(
+                unique_sample,
+                "Unique sample set must be a parameterized Set<D>",
+            )
+            return
+        if not self.check_types(set_type.parameterization, unique_sample.sampled_from):
+            self.print_error(
+                unique_sample,
+                f"Set element type {set_type.parameterization} does not match"
+                f" sampled type {unique_sample.sampled_from}",
+            )
+        if not self.check_types(unique_sample.the_type, unique_sample.sampled_from):
+            self.print_error(
+                unique_sample,
+                f"Declared type {unique_sample.the_type} does not match"
+                f" sampled type {unique_sample.sampled_from}",
             )
 
     def leave_parameterized_game(
@@ -1812,7 +1879,23 @@ class CheckTypeVisitor(VariableTypeVisitor):
                     "Should be a scheme, primitive, or game",
                 )
         else:
-            func_call_signature = self.get_type_from_ast(func_call.func)
+            func_call_type = self.get_type_from_ast(func_call.func)
+            if isinstance(func_call_type, frog_ast.RandomFunctionType):
+                if len(func_call.args) != 1:
+                    self.print_error(
+                        func_call, "RandomFunctions call requires exactly 1 argument"
+                    )
+                    return
+                arg_type = self.get_type_from_ast(func_call.args[0])
+                if not self.check_types(func_call_type.domain_type, arg_type):
+                    self.print_error(
+                        func_call,
+                        f"{func_call.args[0]} is of type {_format_type(arg_type)},"
+                        f" expected {func_call_type.domain_type}",
+                    )
+                self.ast_type_map.set(func_call, func_call_type.range_type)
+                return
+            func_call_signature = func_call_type
             if not isinstance(func_call_signature, frog_ast.MethodSignature):
                 self.print_error(func_call, "Was not able to get method signature")
                 return

@@ -85,6 +85,37 @@ class TestDescribeProof:
         assert "Right" in out
 
 
+class TestDescribeRandomFunctionType:
+    def test_random_function_type_in_game(self, tmp_path: Path) -> None:
+        game_file = tmp_path / "RFTest.game"
+        game_file.write_text(
+            "Game Left() {\n"
+            "    RandomFunctions<BitString<8>, BitString<16>> RF;\n"
+            "    Void Initialize() {\n"
+            "        RF <- RandomFunctions<BitString<8>, BitString<16>>;\n"
+            "    }\n"
+            "    BitString<16> Lookup(BitString<8> x) {\n"
+            "        BitString<16> z = RF(x);\n"
+            "        return z;\n"
+            "    }\n"
+            "}\n"
+            "\n"
+            "Game Right() {\n"
+            "    Void Initialize() { }\n"
+            "    BitString<16> Lookup(BitString<8> x) {\n"
+            "        BitString<16> z <- BitString<16>;\n"
+            "        return z;\n"
+            "    }\n"
+            "}\n"
+            "\n"
+            "export as RFTest;\n",
+            encoding="utf-8",
+        )
+        out = describe_file(str(game_file))
+        assert "RandomFunctions" in out
+        assert "RF" in out
+
+
 class TestDescribeErrors:
     def test_unknown_extension(self) -> None:
         with pytest.raises(ValueError, match="Unknown ProofFrog file type"):

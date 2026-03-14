@@ -56,9 +56,25 @@ class RedundantCopyTransformer(BlockTransformer):
                 copy_name = statement.var.name
                 original_name = statement.value.name
 
+                # Self-assignment (e.g., r = r after inlining): just remove it
+                if copy_name == original_name:
+                    return self.transform_block(
+                        frog_ast.Block(
+                            list(block.statements[:index])
+                            + list(block.statements[index + 1 :])
+                        )
+                    )
+
                 def written_to(copy_name: str, node: frog_ast.ASTNode) -> bool:
                     return (
-                        isinstance(node, (frog_ast.Sample, frog_ast.Assignment))
+                        isinstance(
+                            node,
+                            (
+                                frog_ast.Sample,
+                                frog_ast.Assignment,
+                                frog_ast.UniqueSample,
+                            ),
+                        )
                         and isinstance(node.var, frog_ast.Variable)
                         and node.var.name == copy_name
                     )

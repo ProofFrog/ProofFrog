@@ -1,0 +1,239 @@
+"""Random-function simplification pass.
+
+When every call to a ``RandomFunctions`` field ``RF`` in a game uses an
+argument that was uniquely sampled (via ``<-uniq``) from a consistent set,
+each ``z = RF(r)`` can be replaced with ``z <- R``.
+
+Soundness: unique sampling from a consistent set guarantees every RF query
+is on a distinct, previously-unseen input, so each result is an independent
+uniform sample from the range type.
+"""
+
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass, field
+
+from .. import frog_ast
+from ..visitors import BlockTransformer
+from ._base import TransformPass, PipelineContext
+
+
+@dataclass
+class _RFCallSite:
+    """A call ``z = RF(r)`` found during analysis."""
+
+    rf_name: str
+    arg_name: str
+    unique_set_name: str
+
+
+@dataclass
+class _RFAnalysis:
+    """Per-RF analysis result."""
+
+    eligible: bool = True
+    call_sites: list[_RFCallSite] = field(default_factory=list)
+    unique_set_name: str | None = None
+
+
+def _get_unique_set_name(expr: frog_ast.Expression) -> str:
+    """Return a canonical string for the set used in a <-uniq statement."""
+    if isinstance(expr, frog_ast.Variable):
+        return expr.name
+    if isinstance(expr, frog_ast.FieldAccess) and isinstance(
+        expr.the_object, frog_ast.Variable
+    ):
+        return f"{expr.the_object.name}.{expr.name}"
+    return str(expr)
+
+
+def _analyze_rf_eligibility(
+    game: frog_ast.Game,
+    rf_types: dict[str, frog_ast.RandomFunctionType],
+) -> dict[str, _RFAnalysis]:
+    """Check whether each RF field's calls are all guarded by <-uniq on a
+    consistent set.
+
+    Returns a dict mapping RF field name to its analysis result.
+    """
+    analysis: dict[str, _RFAnalysis] = {name: _RFAnalysis() for name in rf_types}
+
+    for method in game.methods:
+        _analyze_block(method.block, analysis, rf_types)
+
+    return analysis
+
+
+def _analyze_block(
+    block: frog_ast.Block,
+    analysis: dict[str, _RFAnalysis],
+    rf_types: dict[str, frog_ast.RandomFunctionType],
+) -> None:
+    """Analyze a block for RF calls and their <-uniq guards."""
+    # Build map: variable name -> unique set name (from <-uniq in this block)
+    uniq_guards: dict[str, str] = {}
+
+    for statement in block.statements:
+        # Track <-uniq bindings
+        if isinstance(statement, frog_ast.UniqueSample) and isinstance(
+            statement.var, frog_ast.Variable
+        ):
+            uniq_guards[statement.var.name] = _get_unique_set_name(statement.unique_set)
+
+        # Check RF calls in assignments
+        if (
+            isinstance(statement, frog_ast.Assignment)
+            and isinstance(statement.value, frog_ast.FuncCall)
+            and isinstance(statement.value.func, frog_ast.Variable)
+            and statement.value.func.name in rf_types
+            and len(statement.value.args) == 1
+        ):
+            rf_name = statement.value.func.name
+            rf_analysis = analysis[rf_name]
+            arg = statement.value.args[0]
+
+            if not isinstance(arg, frog_ast.Variable):
+                rf_analysis.eligible = False
+                continue
+
+            if arg.name not in uniq_guards:
+                rf_analysis.eligible = False
+                continue
+
+            set_name = uniq_guards[arg.name]
+
+            # If RF.domain is the set, verify it matches this RF
+            if "." in set_name:
+                obj_name, field_name = set_name.split(".", 1)
+                if field_name == "domain" and obj_name != rf_name:
+                    rf_analysis.eligible = False
+                    continue
+
+            # Check set consistency across all call sites
+            if rf_analysis.unique_set_name is None:
+                rf_analysis.unique_set_name = set_name
+            elif rf_analysis.unique_set_name != set_name:
+                rf_analysis.eligible = False
+                continue
+
+            rf_analysis.call_sites.append(
+                _RFCallSite(
+                    rf_name=rf_name,
+                    arg_name=arg.name,
+                    unique_set_name=set_name,
+                )
+            )
+
+        # Recurse into nested blocks
+        if isinstance(statement, frog_ast.IfStatement):
+            for nested_block in statement.blocks:
+                _analyze_block(nested_block, analysis, rf_types)
+        elif isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
+            _analyze_block(statement.block, analysis, rf_types)
+
+
+class _RFCallReplacer(BlockTransformer):
+    """Replace ``z = RF(r)`` with ``z <- R`` for eligible RF fields."""
+
+    def __init__(
+        self,
+        eligible_rfs: dict[str, frog_ast.RandomFunctionType],
+    ) -> None:
+        self.eligible_rfs = eligible_rfs
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if not (
+                isinstance(statement, frog_ast.Assignment)
+                and isinstance(statement.value, frog_ast.FuncCall)
+                and isinstance(statement.value.func, frog_ast.Variable)
+                and statement.value.func.name in self.eligible_rfs
+            ):
+                continue
+
+            rf_name = statement.value.func.name
+            range_type = self.eligible_rfs[rf_name].range_type
+
+            # Type is used as Expression in sampling (DSL convention)
+            new_sample = frog_ast.Sample(
+                statement.the_type,
+                copy.deepcopy(statement.var),
+                copy.deepcopy(range_type),  # type: ignore[arg-type]
+            )
+
+            new_stmts = (
+                list(block.statements[:index])
+                + [new_sample]
+                + list(block.statements[index + 1 :])
+            )
+            return self.transform_block(frog_ast.Block(new_stmts))
+
+        return block
+
+
+class UniqueRFSimplificationTransformer(BlockTransformer):
+    """Standalone variant that resolves RF types from Sample statements
+    in the same block.  Used in unit tests where RF is declared locally."""
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        # Discover RF types from Sample statements in this block
+        rf_types: dict[str, frog_ast.RandomFunctionType] = {}
+        for stmt in block.statements:
+            if (
+                isinstance(stmt, frog_ast.Sample)
+                and isinstance(stmt.sampled_from, frog_ast.RandomFunctionType)
+                and isinstance(stmt.var, frog_ast.Variable)
+            ):
+                rf_types[stmt.var.name] = stmt.sampled_from
+
+        if not rf_types:
+            return block
+
+        # Build a temporary game to run analysis on
+        dummy_game = frog_ast.Game(
+            (
+                "_Dummy",
+                [],
+                [],
+                [
+                    frog_ast.Method(
+                        frog_ast.MethodSignature("f", frog_ast.Void(), []),
+                        block,
+                    )
+                ],
+                [],
+            )
+        )
+        analysis = _analyze_rf_eligibility(dummy_game, rf_types)
+        eligible = {
+            name: rf_types[name] for name, result in analysis.items() if result.eligible
+        }
+
+        if not eligible:
+            return block
+
+        return _RFCallReplacer(eligible).transform_block(block)
+
+
+class UniqueRFSimplification(TransformPass):
+    name = "Unique RF Simplification"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        rf_types: dict[str, frog_ast.RandomFunctionType] = {}
+        for rf_field in game.fields:
+            if isinstance(rf_field.type, frog_ast.RandomFunctionType):
+                rf_types[rf_field.name] = rf_field.type
+
+        if not rf_types:
+            return game
+
+        analysis = _analyze_rf_eligibility(game, rf_types)
+        eligible = {
+            name: rf_types[name] for name, result in analysis.items() if result.eligible
+        }
+
+        if not eligible:
+            return game
+
+        return _RFCallReplacer(eligible).transform(game)

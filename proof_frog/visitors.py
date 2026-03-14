@@ -276,8 +276,7 @@ class InstantiationTransformer(Transformer):
                     value.members[field_access.name], frog_ast.MethodSignature
                 ):
                     return copy.deepcopy(value.members[field_access.name])
-            else:
-                assert isinstance(value, (frog_ast.Scheme, frog_ast.Primitive))
+            elif isinstance(value, (frog_ast.Scheme, frog_ast.Primitive)):
                 the_field = next(
                     (
                         field.value
@@ -653,6 +652,11 @@ class GetTypeMapVisitor(Visitor[NameTypeMap]):
             self.type_map.set(sample.var.name, sample.the_type)
 
     @_test_stop
+    def visit_unique_sample(self, unique_sample: frog_ast.UniqueSample) -> None:
+        assert isinstance(unique_sample.var, frog_ast.Variable)
+        self.type_map.set(unique_sample.var.name, unique_sample.the_type)
+
+    @_test_stop
     def visit_variable_declaration(
         self, variable_declaration: frog_ast.VariableDeclaration
     ) -> None:
@@ -686,7 +690,9 @@ def build_game_type_map(
 def assigns_variable(
     used_variables: list[frog_ast.Variable], node: frog_ast.ASTNode
 ) -> bool:
-    return isinstance(node, (frog_ast.Assignment, frog_ast.Sample)) and (
+    return isinstance(
+        node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+    ) and (
         (node.var in used_variables)
         or (
             isinstance(node.var, frog_ast.ArrayAccess)

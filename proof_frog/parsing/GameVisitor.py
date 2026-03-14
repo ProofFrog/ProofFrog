@@ -79,6 +79,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#uniqueSampleStatement.
+    def visitUniqueSampleStatement(self, ctx:GameParser.UniqueSampleStatementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#functionCallStatement.
     def visitFunctionCallStatement(self, ctx:GameParser.FunctionCallStatementContext):
         return self.visitChildren(ctx)
@@ -326,6 +331,11 @@ class GameVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by GameParser#voidType.
     def visitVoidType(self, ctx:GameParser.VoidTypeContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#randomFunctionType.
+    def visitRandomFunctionType(self, ctx:GameParser.RandomFunctionTypeContext):
         return self.visitChildren(ctx)
 
 

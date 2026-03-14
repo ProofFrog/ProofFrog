@@ -79,6 +79,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#uniqueSampleStatement.
+    def visitUniqueSampleStatement(self, ctx:PrimitiveParser.UniqueSampleStatementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#functionCallStatement.
     def visitFunctionCallStatement(self, ctx:PrimitiveParser.FunctionCallStatementContext):
         return self.visitChildren(ctx)
@@ -326,6 +331,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by PrimitiveParser#voidType.
     def visitVoidType(self, ctx:PrimitiveParser.VoidTypeContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#randomFunctionType.
+    def visitRandomFunctionType(self, ctx:PrimitiveParser.RandomFunctionTypeContext):
         return self.visitChildren(ctx)
 
 

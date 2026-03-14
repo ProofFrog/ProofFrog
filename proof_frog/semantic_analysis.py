@@ -1597,6 +1597,27 @@ def has_matching_fields(
     return True
 
 
+def _full_flatten_product(node: frog_ast.Type) -> list[frog_ast.Type]:
+    """Recursively flatten a product type regardless of associativity.
+
+    Unlike expand_tuple_type (which only follows the right spine),
+    this handles both left-associative and right-associative nesting.
+    """
+    if (
+        isinstance(node, frog_ast.BinaryOperation)
+        and node.operator == frog_ast.BinaryOperators.MULTIPLY
+    ):
+        left = node.left_expression
+        right = node.right_expression
+        result: list[frog_ast.Type] = []
+        if isinstance(left, frog_ast.Type):
+            result.extend(_full_flatten_product(left))
+        if isinstance(right, frog_ast.Type):
+            result.extend(_full_flatten_product(right))
+        return result
+    return [node]
+
+
 def compare_types(
     declared_type: PossibleType,
     value_type: PossibleType,
@@ -1649,6 +1670,32 @@ def compare_types(
     if isinstance(declared_type, frog_ast.BinaryOperation) or isinstance(
         value_type, frog_ast.BinaryOperation
     ):
+        if isinstance(expanded_declared_type, list) and isinstance(
+            expanded_value_type, list
+        ):
+            if len(expanded_declared_type) != len(expanded_value_type):
+                # Right-spine expansion gave different lengths. This happens
+                # when Set field values are parsed as left-associative
+                # expressions (e.g., (A * B) * C instead of A * (B * C)).
+                # Fall back to fully flattening both sides recursively.
+                assert isinstance(declared_type, frog_ast.BinaryOperation)
+                flat_declared = _full_flatten_product(declared_type)
+                flat_value: list[frog_ast.Type] = []
+                for v in expanded_value_type:
+                    if isinstance(v, frog_ast.BinaryOperation):
+                        flat_value.extend(_full_flatten_product(v))
+                    elif isinstance(v, frog_ast.Type):
+                        flat_value.append(v)
+                if len(flat_declared) == len(flat_value):
+                    return all(
+                        compare_types(d, v, subsets_pairs)
+                        for d, v in zip(flat_declared, flat_value)
+                    )
+            decl_list: list[PossibleType] = list(expanded_declared_type)
+            val_list: list[PossibleType] = list(expanded_value_type)
+            return len(decl_list) == len(val_list) and all(
+                compare_types(d, v, subsets_pairs) for d, v in zip(decl_list, val_list)
+            )
         bool_value: bool = expanded_declared_type == expanded_value_type
         return bool_value
 

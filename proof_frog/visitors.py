@@ -298,6 +298,53 @@ class InstantiationTransformer(Transformer):
                             [v for v in result.values if isinstance(v, frog_ast.Type)]
                         )
                     return result
+        # Handle FuncCall.field case, e.g. UG(K, NG, H, G).EncapsKey.
+        # After SubstitutionTransformer replaces a scheme parameter with a FuncCall,
+        # type-position field accesses like K.EncapsKey become
+        # FuncCall("UG", [K, NG, H, G]).EncapsKey. Look up the field in the named
+        # scheme and substitute the scheme's parameters with the FuncCall's args.
+        if (
+            isinstance(field_access.the_object, frog_ast.FuncCall)
+            and isinstance(field_access.the_object.func, frog_ast.Variable)
+            and field_access.the_object.func.name in self.namespace
+        ):
+            func_call = field_access.the_object
+            assert isinstance(func_call.func, frog_ast.Variable)
+            scheme_def = self.namespace[func_call.func.name]
+            if isinstance(scheme_def, (frog_ast.Scheme, frog_ast.Primitive)):
+                the_field = next(
+                    (
+                        field.value
+                        for field in scheme_def.fields
+                        if field.name == field_access.name
+                    ),
+                    None,
+                )
+                if the_field is not None:
+                    result = copy.deepcopy(the_field)
+                    # Substitute scheme parameters with the FuncCall's actual args
+                    param_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+                    for idx, param in enumerate(scheme_def.parameters):
+                        if idx < len(func_call.args):
+                            param_map.set(
+                                frog_ast.Variable(param.name),
+                                copy.deepcopy(func_call.args[idx]),
+                            )
+                    result = SubstitutionTransformer(param_map).transform(result)
+                    # Further resolve any remaining FieldAccess nodes through the
+                    # current namespace (e.g. Variable("K").EncapsKey -> EncapsKeySpace
+                    # when K is a concrete instantiated scheme in the namespace).
+                    result = InstantiationTransformer(self.namespace).transform(result)
+                    # Convert Tuple of types to ProductType for Set field aliases
+                    if (
+                        isinstance(result, frog_ast.Tuple)
+                        and result.values
+                        and all(isinstance(v, frog_ast.Type) for v in result.values)
+                    ):
+                        return frog_ast.ProductType(
+                            [v for v in result.values if isinstance(v, frog_ast.Type)]
+                        )
+                    return result
         return field_access
 
 
@@ -370,11 +417,18 @@ class InlineTransformer(Transformer):
 
         statements_so_far += list(transformed_method.block.statements[:-1])
 
-        final_statement = transformed_method.block.statements[-1]
-
         statements_after = list(
             block_to_transform.statements[self.statement_index + 1 :]
         )
+
+        if not transformed_method.block.statements:
+            # Empty method body (e.g. a Void Initialize with no statements):
+            # drop the call site entirely and continue with surrounding statements.
+            self.blocks.append(frog_ast.Block(statements_so_far + statements_after))
+            self.finished = True
+            return exp
+
+        final_statement = transformed_method.block.statements[-1]
 
         if isinstance(final_statement, frog_ast.ReturnStatement):
             returned_exp = final_statement.expression

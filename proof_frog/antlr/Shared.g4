@@ -87,7 +87,7 @@ type: type QUESTION #optionalType
 	| MAP L_ANGLE type COMMA type R_ANGLE #mapType
 	| ARRAY L_ANGLE type COMMA integerExpression R_ANGLE #arrayType
 	| INTTYPE #intType
-	| type (TIMES type)+ #productType
+	| L_SQUARE type (COMMA type)+ R_SQUARE #productType
 	| bitstring #bitStringType
 	| modint #modIntType
 	| lvalue # lvalueType

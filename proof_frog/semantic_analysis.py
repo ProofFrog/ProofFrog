@@ -70,11 +70,7 @@ def name_resolution(
 
 T = TypeVar("T", bound=Union[frog_ast.Primitive, frog_ast.Scheme, frog_ast.Game])
 PossibleType: TypeAlias = (
-    None
-    | frog_ast.Type
-    | visitors.InstantiableType
-    | list[visitors.InstantiableType]
-    | list[frog_ast.Type]
+    None | frog_ast.Type | visitors.InstantiableType | list[visitors.InstantiableType]
 )
 
 VariableTypeMapStackType: TypeAlias = Optional[
@@ -173,7 +169,19 @@ class VariableTypeVisitor(visitors.Visitor[None]):
             else:
                 self.variable_type_map_stack[-1][field.name] = field.type
         if not was_scheme:
-            self.instantiation_namespace[field.name] = field.value
+            # Set field aliases: Set Key = [A, B] stores a ProductType so that
+            # when Key appears in a type position, it resolves to [A, B] (a Type).
+            if isinstance(field.value, frog_ast.Tuple) and all(
+                isinstance(v, frog_ast.Type) for v in field.value.values
+            ):
+                product = frog_ast.ProductType(
+                    [v for v in field.value.values if isinstance(v, frog_ast.Type)]
+                )
+                product.line_num = field.value.line_num
+                product.column_num = field.value.column_num
+                self.instantiation_namespace[field.name] = product
+            else:
+                self.instantiation_namespace[field.name] = field.value
 
     def visit_reduction(self, reduction: frog_ast.Reduction) -> None:
         reduction_type = get_type_from_instantiable(reduction.name, reduction)
@@ -995,20 +1003,32 @@ class CheckTypeVisitor(VariableTypeVisitor):
         self.ast_type_map.set(mod_int_type, mod_int_type)
 
     def leave_array_access(self, array_access: frog_ast.ArrayAccess) -> None:
+        array_type = self.get_type_from_ast(array_access.the_array)
+        # Map subscript: T[key] returns the value type
+        if isinstance(array_type, frog_ast.MapType):
+            index_type = self.get_type_from_ast(array_access.index)
+            if not self.check_types(array_type.key_type, index_type):
+                self.print_error(
+                    array_access,
+                    f"Map key type mismatch: expected"
+                    f" {_format_type(array_type.key_type)}, got"
+                    f" {_format_type(index_type)}",
+                )
+            self.ast_type_map.set(array_access, array_type.value_type)
+            return
+        # Tuple indexing: tuple[integer_constant]
         if not isinstance(array_access.index, frog_ast.Integer):
             self.print_error(array_access, "Index must be an integer constant")
             return
-        array_type = self.get_type_from_ast(array_access.the_array)
-        if not isinstance(array_type, frog_ast.BinaryOperation):
+        if not isinstance(array_type, frog_ast.ProductType):
             self.print_error(
                 array_access, f"Must access a tuple type, received {array_type}"
             )
             return
-        tuple_type_list = frog_ast.expand_tuple_type(array_type)
         index = array_access.index.num
-        if index >= len(tuple_type_list):
+        if index >= len(array_type.types):
             self.print_error(array_access, "Index out of bounds")
-        self.ast_type_map.set(array_access, tuple_type_list[index])
+        self.ast_type_map.set(array_access, array_type.types[index])
 
     def leave_array_type(self, array_type: frog_ast.ArrayType) -> None:
         count_type = self.get_type_from_ast(array_type.count)
@@ -1049,20 +1069,12 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 )
             self.ast_type_map.set(unary_op, frog_ast.IntType())
 
+    def leave_product_type(self, product_type: frog_ast.ProductType) -> None:
+        self.ast_type_map.set(product_type, product_type)
+
     def leave_binary_operation(self, bin_op: frog_ast.BinaryOperation) -> None:
         left_type = self.get_type_from_ast(bin_op.left_expression)
         right_type = self.get_type_from_ast(bin_op.right_expression)
-
-        # Product type: T * U where T, U are type-level expressions (not value variables).
-        # Guard against Int or ModInt operands, which indicate arithmetic multiplication.
-        if (
-            bin_op.operator == frog_ast.BinaryOperators.MULTIPLY
-            and isinstance(bin_op.left_expression, frog_ast.Type)
-            and isinstance(bin_op.right_expression, frog_ast.Type)
-            and not isinstance(left_type, (frog_ast.IntType, frog_ast.ModIntType))
-        ):
-            self.ast_type_map.set(bin_op, bin_op)
-            return
 
         if bin_op.operator == frog_ast.BinaryOperators.ADD:
             if isinstance(left_type, frog_ast.ModIntType) and isinstance(
@@ -1270,22 +1282,33 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 ),
             )
         elif bin_op.operator == frog_ast.BinaryOperators.IN:
-            if not isinstance(right_type, frog_ast.SetType):
+            if isinstance(right_type, frog_ast.MapType):
+                if not self.check_types(right_type.key_type, left_type):
+                    self.print_error(
+                        bin_op,
+                        f"Cannot see if {_format_type(left_type)} is in"
+                        f" {_format_type(right_type)}",
+                    )
+            elif isinstance(right_type, frog_ast.SetType):
+                if not right_type.parameterization:
+                    self.print_error(
+                        bin_op,
+                        f"Set type for {bin_op.right_expression} must be parameterized",
+                    )
+                    return
+                if not self.check_types(right_type.parameterization, left_type):
+                    self.print_error(
+                        bin_op,
+                        f"Cannot see if {_format_type(left_type)} is in"
+                        f" {_format_type(right_type)}",
+                    )
+            else:
                 self.print_error(
                     bin_op,
-                    f"{bin_op.right_expression} is of type {_format_type(right_type)}, expected Set",
+                    f"{bin_op.right_expression} is of type"
+                    f" {_format_type(right_type)}, expected Set or Map",
                 )
                 return
-            if not right_type.parameterization:
-                self.print_error(
-                    bin_op,
-                    f"Set type for {bin_op.right_expression} must be parameterized",
-                )
-                return
-            if not self.check_types(right_type.parameterization, left_type):
-                self.print_error(
-                    bin_op, f"Cannot see if {left_type} is in {right_type}"
-                )
             self.ast_type_map.set(bin_op, frog_ast.BoolType())
 
     def leave_integer(self, num: frog_ast.Integer) -> None:
@@ -1305,7 +1328,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 )
                 return
             types.append(expression_type)
-        self.ast_type_map.set(the_tuple, types)
+        self.ast_type_map.set(the_tuple, frog_ast.ProductType(types))
 
     def leave_field(self, field: frog_ast.Field) -> None:
         super().leave_field(field)
@@ -1597,27 +1620,6 @@ def has_matching_fields(
     return True
 
 
-def _full_flatten_product(node: frog_ast.Type) -> list[frog_ast.Type]:
-    """Recursively flatten a product type regardless of associativity.
-
-    Unlike expand_tuple_type (which only follows the right spine),
-    this handles both left-associative and right-associative nesting.
-    """
-    if (
-        isinstance(node, frog_ast.BinaryOperation)
-        and node.operator == frog_ast.BinaryOperators.MULTIPLY
-    ):
-        left = node.left_expression
-        right = node.right_expression
-        result: list[frog_ast.Type] = []
-        if isinstance(left, frog_ast.Type):
-            result.extend(_full_flatten_product(left))
-        if isinstance(right, frog_ast.Type):
-            result.extend(_full_flatten_product(right))
-        return result
-    return [node]
-
-
 def compare_types(
     declared_type: PossibleType,
     value_type: PossibleType,
@@ -1654,50 +1656,29 @@ def compare_types(
         ):
             return True
 
-    expanded_declared_type = declared_type
-    expanded_value_type = value_type
-
-    if isinstance(declared_type, frog_ast.BinaryOperation):
-        try:
-            expanded_declared_type = frog_ast.expand_tuple_type(declared_type)
-        except ValueError as value_error:
-            print_error(declared_type, value_error.args[0])
-    if isinstance(value_type, frog_ast.BinaryOperation):
-        try:
-            expanded_value_type = frog_ast.expand_tuple_type(value_type)
-        except ValueError as value_error:
-            print_error(value_type, value_error.args[0])
-    if isinstance(declared_type, frog_ast.BinaryOperation) or isinstance(
-        value_type, frog_ast.BinaryOperation
+    # Normalize Tuple-of-types to ProductType for comparison.
+    # Set field aliases like Set Key = [A, B] produce Tuple nodes that may
+    # appear in type positions via InstantiationTransformer substitution.
+    if isinstance(declared_type, frog_ast.Tuple) and all(
+        isinstance(v, frog_ast.Type) for v in declared_type.values
     ):
-        if isinstance(expanded_declared_type, list) and isinstance(
-            expanded_value_type, list
-        ):
-            if len(expanded_declared_type) != len(expanded_value_type):
-                # Right-spine expansion gave different lengths. This happens
-                # when Set field values are parsed as left-associative
-                # expressions (e.g., (A * B) * C instead of A * (B * C)).
-                # Fall back to fully flattening both sides recursively.
-                assert isinstance(declared_type, frog_ast.BinaryOperation)
-                flat_declared = _full_flatten_product(declared_type)
-                flat_value: list[frog_ast.Type] = []
-                for v in expanded_value_type:
-                    if isinstance(v, frog_ast.BinaryOperation):
-                        flat_value.extend(_full_flatten_product(v))
-                    elif isinstance(v, frog_ast.Type):
-                        flat_value.append(v)
-                if len(flat_declared) == len(flat_value):
-                    return all(
-                        compare_types(d, v, subsets_pairs)
-                        for d, v in zip(flat_declared, flat_value)
-                    )
-            decl_list: list[PossibleType] = list(expanded_declared_type)
-            val_list: list[PossibleType] = list(expanded_value_type)
-            return len(decl_list) == len(val_list) and all(
-                compare_types(d, v, subsets_pairs) for d, v in zip(decl_list, val_list)
-            )
-        bool_value: bool = expanded_declared_type == expanded_value_type
-        return bool_value
+        declared_type = frog_ast.ProductType(
+            [v for v in declared_type.values if isinstance(v, frog_ast.Type)]
+        )
+    if isinstance(value_type, frog_ast.Tuple) and all(
+        isinstance(v, frog_ast.Type) for v in value_type.values
+    ):
+        value_type = frog_ast.ProductType(
+            [v for v in value_type.values if isinstance(v, frog_ast.Type)]
+        )
+
+    if isinstance(declared_type, frog_ast.ProductType) and isinstance(
+        value_type, frog_ast.ProductType
+    ):
+        return len(declared_type.types) == len(value_type.types) and all(
+            compare_types(d, v, subsets_pairs)
+            for d, v in zip(declared_type.types, value_type.types)
+        )
 
     if isinstance(value_type, visitors.InstantiableType) and (
         declared_type == frog_ast.Variable(value_type.name)
@@ -1742,10 +1723,21 @@ def get_type_from_instantiable(
     type_dict: dict[str, frog_ast.ASTNode] = {}
     if not just_methods:
         for field in instantiable.fields:
-            to_set_to = field.type if field.type != frog_ast.SetType() else field.value
+            to_set_to: frog_ast.ASTNode | None = (
+                field.type if field.type != frog_ast.SetType() else field.value
+            )
             if to_set_to is None:
                 print_error(instantiable, "Set fields must have corresponding value")
                 sys.exit(1)
+            # Convert Tuple of types to ProductType for Set field aliases
+            if (
+                isinstance(to_set_to, frog_ast.Tuple)
+                and to_set_to.values
+                and all(isinstance(v, frog_ast.Type) for v in to_set_to.values)
+            ):
+                to_set_to = frog_ast.ProductType(
+                    [v for v in to_set_to.values if isinstance(v, frog_ast.Type)]
+                )
             type_dict[field.name] = to_set_to
     for method in instantiable.methods:
         if isinstance(method, frog_ast.MethodSignature):

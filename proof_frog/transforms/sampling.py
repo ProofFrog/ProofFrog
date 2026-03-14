@@ -468,20 +468,20 @@ class MergeProductSamplesTransformer(BlockTransformer):
             if not all_single_use:
                 continue
 
-            # Build product type right-associatively: T1 * (T2 * T3)
-            product_type: frog_ast.Type = copy.deepcopy(component_types[-1])
-            for t in reversed(component_types[:-1]):
-                product_type = frog_ast.BinaryOperation(
-                    frog_ast.BinaryOperators.MULTIPLY,
-                    cast(frog_ast.Expression, copy.deepcopy(t)),
-                    cast(frog_ast.Expression, product_type),
-                )
+            product_type: frog_ast.Type = frog_ast.ProductType(
+                [copy.deepcopy(t) for t in component_types]
+            )
 
             new_var = frog_ast.Variable(leaf_vars[0].name)
             new_sample = frog_ast.Sample(
                 product_type,
                 new_var,
-                cast(frog_ast.Expression, copy.deepcopy(product_type)),
+                frog_ast.Tuple(
+                    [
+                        cast(frog_ast.Expression, copy.deepcopy(t))
+                        for t in component_types
+                    ]
+                ),
             )
 
             # Build new block

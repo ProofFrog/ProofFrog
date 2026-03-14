@@ -117,6 +117,25 @@ class ModIntType(Type):
         return f"ModInt<{self.modulus}>"
 
 
+class ProductType(Type):
+    def __init__(self, types: list[Type]) -> None:
+        super().__init__()
+        self.types = types
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, ProductType):
+            return self.types == other.types
+        # ProductType([A, B]) == Tuple([A, B]) when elements match,
+        # since Set field aliases produce ProductType in expression positions
+        # where Tuple would normally appear.
+        if isinstance(other, Tuple):
+            return list(self.types) == other.values
+        return False
+
+    def __str__(self) -> str:
+        return f'[{", ".join(str(t) for t in self.types)}]'
+
+
 class OptionalType(Type):
     def __init__(self, the_type: Type) -> None:
         super().__init__()
@@ -341,6 +360,13 @@ class Tuple(Expression):
     def __init__(self, values: list[Expression]) -> None:
         super().__init__()
         self.values = values
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Tuple):
+            return self.values == other.values
+        if isinstance(other, ProductType):
+            return self.values == list(other.types)
+        return False
 
     def __str__(self) -> str:
         return f'[{", ".join(str(value) for value in self.values)}]'
@@ -898,39 +924,3 @@ def pretty_print(program: str) -> str:
         if "{" in line:
             indent += 1
     return output_string
-
-
-def expand_tuple_type(the_type: BinaryOperation) -> list[Type]:
-    unfolded_types: list[Type] = []
-    expanded_type: Type | Expression = the_type
-    while isinstance(expanded_type, BinaryOperation):
-        if expanded_type.operator != BinaryOperators.MULTIPLY:
-            raise ValueError("Tuple type must use multiplication operator")
-        left_expr = expanded_type.left_expression
-        if not isinstance(left_expr, Type):
-            raise ValueError("Tuple type has non-type components")
-        unfolded_types.append(left_expr)
-        expanded_type = expanded_type.right_expression
-    if not isinstance(expanded_type, Type):
-        raise ValueError("Tuple type has non-type components")
-    assert isinstance(expanded_type, Type)
-    unfolded_types.append(expanded_type)
-    return unfolded_types
-
-
-def split_tuple_type_top(the_type: BinaryOperation) -> list[Type]:
-    """Split a product type at the top level only (A * B) -> [A, B].
-
-    Unlike expand_tuple_type which fully flattens (A * B) * C -> [A, B, C],
-    this only splits the outermost product: (A * B) * C -> [A * B, C].
-    This is needed when the corresponding tuple value has only 2 elements
-    (because the nested product type is an opaque/alias type at value level).
-    """
-    assert the_type.operator == BinaryOperators.MULTIPLY
-    left_expr = the_type.left_expression
-    right_expr = the_type.right_expression
-    if not isinstance(left_expr, Type):
-        raise ValueError("Tuple type has non-type components")
-    if not isinstance(right_expr, Type):
-        raise ValueError("Tuple type has non-type components")
-    return [left_expr, right_expr]

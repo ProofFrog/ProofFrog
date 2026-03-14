@@ -121,7 +121,7 @@ class TestCaseC:
         Game G() {
             Int pk;
             Int sk;
-            Int * Int Initialize() {
+            [Int, Int] Initialize() {
                 pk = 1;
                 sk = 2;
                 return [pk, sk];

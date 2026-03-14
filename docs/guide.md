@@ -37,7 +37,7 @@ Before diving into file types, here is a summary of the types available in FrogL
 | `Set<T>` | Set of elements of type `T` |
 | `Map<K, V>` | Map from keys of type `K` to values of type `V` |
 | `Array<T, n>` | Array of `n` elements of type `T` |
-| `T1 * T2` | Product (tuple) type |
+| `[T1, T2]` | Product (tuple) type |
 | `T?` | Optional type (nullable) |
 
 ### Type aliases

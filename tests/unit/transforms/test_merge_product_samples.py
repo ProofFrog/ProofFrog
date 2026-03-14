@@ -9,15 +9,15 @@ from proof_frog.transforms.sampling import MergeProductSamplesTransformer
         # Two uniform samples combined into a tuple in return
         (
             """
-            A * B f() {
+            [A, B] f() {
                 A a <- A;
                 B b <- B;
                 return [a, b];
             }
             """,
             """
-            A * B f() {
-                A * B a <- A * B;
+            [A, B] f() {
+                [A, B] a <- [A, B];
                 return a;
             }
             """,
@@ -28,7 +28,7 @@ from proof_frog.transforms.sampling import MergeProductSamplesTransformer
             Void f() {
                 A a <- A;
                 B b <- B;
-                A * B z = [a, b];
+                [A, B] z = [a, b];
                 return z;
             }
             """,
@@ -36,7 +36,7 @@ from proof_frog.transforms.sampling import MergeProductSamplesTransformer
             Void f() {
                 A a <- A;
                 B b <- B;
-                A * B z = [a, b];
+                [A, B] z = [a, b];
                 return z;
             }
             """,
@@ -44,14 +44,14 @@ from proof_frog.transforms.sampling import MergeProductSamplesTransformer
         # No merge: non-sample variable
         (
             """
-            A * B f() {
+            [A, B] f() {
                 A a <- A;
                 B b = g();
                 return [a, b];
             }
             """,
             """
-            A * B f() {
+            [A, B] f() {
                 A a <- A;
                 B b = g();
                 return [a, b];
@@ -61,7 +61,7 @@ from proof_frog.transforms.sampling import MergeProductSamplesTransformer
         # No merge: variable used elsewhere
         (
             """
-            A * B f() {
+            [A, B] f() {
                 A a <- A;
                 B b <- B;
                 A c = a;
@@ -69,7 +69,7 @@ from proof_frog.transforms.sampling import MergeProductSamplesTransformer
             }
             """,
             """
-            A * B f() {
+            [A, B] f() {
                 A a <- A;
                 B b <- B;
                 A c = a;
@@ -80,14 +80,14 @@ from proof_frog.transforms.sampling import MergeProductSamplesTransformer
         # No merge: non-uniform sample (type != sampled_from)
         (
             """
-            A * B f() {
+            [A, B] f() {
                 A a <- B;
                 B b <- B;
                 return [a, b];
             }
             """,
             """
-            A * B f() {
+            [A, B] f() {
                 A a <- B;
                 B b <- B;
                 return [a, b];
@@ -97,13 +97,13 @@ from proof_frog.transforms.sampling import MergeProductSamplesTransformer
         # No merge: duplicate variable in tuple
         (
             """
-            A * A f() {
+            [A, A] f() {
                 A a <- A;
                 return [a, a];
             }
             """,
             """
-            A * A f() {
+            [A, A] f() {
                 A a <- A;
                 return [a, a];
             }

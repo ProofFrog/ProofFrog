@@ -9,8 +9,13 @@ from __future__ import annotations
 from ._base import TransformPass
 from .symbolic import SymbolicComputation
 from .sampling import SimplifySplice, MergeUniformSamples, MergeProductSamples
-from .sampling import SplitUniformSamples, SingleCallFieldToLocal
-from .random_functions import ExtractRFCalls, UniqueRFSimplification
+from .sampling import (
+    SplitUniformSamples,
+    SingleCallFieldToLocal,
+    CounterGuardedFieldToLocal,
+    SinkUniformSample,
+)
+from .random_functions import ExtractRFCalls, UniqueRFSimplification, LocalRFToUniform
 from .inlining import (
     RedundantCopy,
     InlineSingleUseVariable,
@@ -48,6 +53,7 @@ from .standardization import (
 
 CORE_PIPELINE: list[TransformPass] = [
     SingleCallFieldToLocal(),
+    CounterGuardedFieldToLocal(),
     SymbolicComputation(),
     SimplifySplice(),
     MergeUniformSamples(),
@@ -56,6 +62,7 @@ CORE_PIPELINE: list[TransformPass] = [
     TrivialEncodingElimination(),
     ExtractRFCalls(),
     UniqueRFSimplification(),
+    LocalRFToUniform(),
     RedundantCopy(),
     InlineSingleUseVariable(),
     UniformXorSimplification(),
@@ -66,6 +73,7 @@ CORE_PIPELINE: list[TransformPass] = [
     RemoveUnnecessaryFields(),
     CollapseAssignment(),
     SimplifyReturn(),
+    SinkUniformSample(),
     SimplifyIf(),
     DeadNullGuardElimination(),
     SubsetTypeNormalization(),

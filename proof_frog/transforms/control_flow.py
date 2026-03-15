@@ -19,6 +19,7 @@ from ..visitors import (
     Transformer,
     BlockTransformer,
     SearchVisitor,
+    SubstitutionTransformer,
     VariableCollectionVisitor,
     Z3FormulaVisitor,
     GetTypeMapVisitor,
@@ -90,12 +91,47 @@ class BranchEliminiationTransformer(BlockTransformer):
         return block
 
 
+def _normalize_block_locals(block: frog_ast.Block) -> frog_ast.Block:
+    """Rename locally-declared variables in *block* to v1, v2, ... by
+    declaration order.  Used for alpha-equivalent comparison of branches."""
+    rename_map: dict[str, str] = {}
+    counter = 0
+
+    # Collect local declarations (Sample and Assignment with the_type)
+    for stmt in block.statements:
+        if isinstance(stmt, (frog_ast.Sample, frog_ast.Assignment)):
+            if (
+                isinstance(stmt.var, frog_ast.Variable)
+                and stmt.the_type is not None
+                and stmt.var.name not in rename_map
+            ):
+                counter += 1
+                rename_map[stmt.var.name] = f"__alpha_{counter}__"
+
+    if not rename_map:
+        return block
+
+    normalized = copy.deepcopy(block)
+    for old_name, new_name in rename_map.items():
+        ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+        ast_map.set(frog_ast.Variable(old_name), frog_ast.Variable(new_name))
+        normalized = SubstitutionTransformer(ast_map).transform(normalized)
+    return normalized
+
+
+def _blocks_alpha_equivalent(a: frog_ast.Block, b: frog_ast.Block) -> bool:
+    """Check if two blocks are identical up to renaming of locally-declared
+    variables."""
+    return _normalize_block_locals(a) == _normalize_block_locals(b)
+
+
 class SimplifyIfTransformer(Transformer):
     """Merges adjacent if/else-if branches that have identical bodies.
 
-    When two consecutive branches execute the same block, their conditions
-    are combined with OR and one copy of the block is kept.  An else block
-    that duplicates the preceding branch is also removed.
+    When two consecutive branches execute the same block (up to alpha-
+    renaming of locally-scoped variables), their conditions are combined
+    with OR and one copy of the block is kept.  An else block that
+    duplicates the preceding branch is also removed.
 
     Example::
 
@@ -111,7 +147,7 @@ class SimplifyIfTransformer(Transformer):
         new_conditions = copy.deepcopy(if_statement.conditions)
         index = 0
         while index < len(new_blocks) - (1 if not if_statement.has_else_block() else 2):
-            if new_blocks[index] == new_blocks[index + 1]:
+            if _blocks_alpha_equivalent(new_blocks[index], new_blocks[index + 1]):
                 del new_blocks[index]
                 new_conditions[index] = frog_ast.BinaryOperation(
                     frog_ast.BinaryOperators.OR,
@@ -123,7 +159,7 @@ class SimplifyIfTransformer(Transformer):
                 index += 1
 
         if if_statement.has_else_block():
-            if new_blocks[-1] == new_blocks[-2]:
+            if _blocks_alpha_equivalent(new_blocks[-1], new_blocks[-2]):
                 del new_blocks[-1]
                 del new_conditions[-1]
 

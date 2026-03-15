@@ -12,6 +12,7 @@ uniform sample from the range type.
 from __future__ import annotations
 
 import copy
+import functools
 from dataclasses import dataclass, field
 
 from .. import frog_ast
@@ -324,3 +325,145 @@ class ExtractRFCalls(TransformPass):
             return game
 
         return _RFCallExtractor(set(rf_types.keys()), rf_types).transform(game)
+
+
+# ---------------------------------------------------------------------------
+# Local RF single-call -> uniform sample
+# ---------------------------------------------------------------------------
+
+
+def _rf_call_in_loop(block: frog_ast.Block, rf_name: str) -> bool:
+    """Return True if an RF call to *rf_name* appears inside a loop body."""
+    for stmt in block.statements:
+        if isinstance(stmt, (frog_ast.NumericFor, frog_ast.GenericFor)):
+
+            def is_rf_call(name: str, node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(node, frog_ast.FuncCall)
+                    and isinstance(node.func, frog_ast.Variable)
+                    and node.func.name == name
+                )
+
+            if (
+                SearchVisitor(functools.partial(is_rf_call, rf_name)).visit(stmt.block)
+                is not None
+            ):
+                return True
+        elif isinstance(stmt, frog_ast.IfStatement):
+            for branch_block in stmt.blocks:
+                if _rf_call_in_loop(branch_block, rf_name):
+                    return True
+    return False
+
+
+def _count_rf_calls(block: frog_ast.Block, rf_name: str) -> tuple[int, int]:
+    """Count RF calls and non-call references to *rf_name* in a block.
+
+    Returns ``(call_count, field_access_count)``.  Field accesses are
+    references like ``RF.domain`` that prevent simplification.  The
+    ``Variable("RF")`` inside ``FuncCall(RF, x)`` is not counted separately.
+    """
+    counts: list[int] = [0, 0]  # [calls, field_accesses]
+
+    def counter(name: str, node: frog_ast.ASTNode) -> bool:
+        if (
+            isinstance(node, frog_ast.FuncCall)
+            and isinstance(node.func, frog_ast.Variable)
+            and node.func.name == name
+        ):
+            counts[0] += 1
+            return False
+        if (
+            isinstance(node, frog_ast.FieldAccess)
+            and isinstance(node.the_object, frog_ast.Variable)
+            and node.the_object.name == name
+        ):
+            counts[1] += 1
+            return False
+        return False
+
+    SearchVisitor(functools.partial(counter, rf_name)).visit(block)
+    return counts[0], counts[1]
+
+
+class LocalRFToUniformTransformer(BlockTransformer):
+    """Replace a locally-sampled RF called exactly once with a uniform sample.
+
+    A ``RandomFunctions`` variable that is sampled locally and called once on
+    any input produces a uniform sample from its range type, because a fresh
+    random function evaluated on a single input is an independent uniform draw.
+
+    Conditions:
+
+    - RF is declared via a local ``Sample`` (has ``the_type``, not a bare
+      field sample)
+    - RF is called exactly once in the remaining block (including branches)
+    - RF is not referenced in any other context (e.g., ``RF.domain``)
+    """
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for sample_idx, stmt in enumerate(block.statements):
+            if not (
+                isinstance(stmt, frog_ast.Sample)
+                and isinstance(stmt.sampled_from, frog_ast.RandomFunctionType)
+                and isinstance(stmt.var, frog_ast.Variable)
+            ):
+                continue
+
+            rf_name = stmt.var.name
+            rf_type = stmt.sampled_from
+
+            # Verify this is a local RF (typed sample, or bare sample preceded
+            # by a matching VariableDeclaration)
+            if stmt.the_type is None:
+                has_decl = any(
+                    isinstance(s, frog_ast.VariableDeclaration)
+                    and s.name == rf_name
+                    and isinstance(s.type, frog_ast.RandomFunctionType)
+                    for s in block.statements[:sample_idx]
+                )
+                if not has_decl:
+                    continue
+
+            remaining = frog_ast.Block(block.statements[sample_idx + 1 :])
+
+            call_count, other_ref_count = _count_rf_calls(remaining, rf_name)
+
+            if call_count != 1 or other_ref_count > 0:
+                continue
+
+            # Reject if the RF call is inside a loop (the single syntactic
+            # call would execute multiple times per RF instantiation)
+            if _rf_call_in_loop(remaining, rf_name):
+                continue
+
+            # Try _RFCallReplacer (handles z = RF(x) in assignments)
+            new_remaining = _RFCallReplacer({rf_name: rf_type}).transform(remaining)
+
+            if new_remaining == remaining:
+                # Also handle RF calls in return statements and other
+                # embedded positions by extracting then replacing
+                new_remaining = _RFCallExtractor(
+                    {rf_name}, {rf_name: rf_type}
+                ).transform(remaining)
+                if new_remaining != remaining:
+                    new_remaining = _RFCallReplacer({rf_name: rf_type}).transform(
+                        new_remaining
+                    )
+
+            if new_remaining != remaining:
+                new_stmts = list(block.statements[: sample_idx + 1]) + list(
+                    new_remaining.statements
+                )
+                return self.transform_block(frog_ast.Block(new_stmts))
+
+        return block
+
+
+class LocalRFToUniform(TransformPass):
+    """Replace locally-sampled RFs called once with uniform samples."""
+
+    name = "Local RF To Uniform"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return LocalRFToUniformTransformer().transform(game)

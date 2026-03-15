@@ -170,10 +170,18 @@ class SubsetTypeNormalizer(Transformer):
 
     def transform_sample(self, sample: frog_ast.Sample) -> frog_ast.Sample:
         new_type = self._normalize(sample.the_type) if sample.the_type else None
+        sampled = sample.sampled_from
+        # sampled_from can be a Type (e.g. BitStringType) used as a set expression;
+        # normalize it the same way as type annotations.
+        new_sampled: frog_ast.Expression = (
+            self._normalize(sampled)  # type: ignore[assignment]
+            if isinstance(sampled, frog_ast.Type)
+            else self.transform(sampled)
+        )
         return frog_ast.Sample(
             new_type,
             self.transform(sample.var),
-            self.transform(sample.sampled_from),
+            new_sampled,
         )
 
     def transform_field(self, field: frog_ast.Field) -> frog_ast.Field:

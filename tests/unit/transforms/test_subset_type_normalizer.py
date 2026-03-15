@@ -129,6 +129,60 @@ class TestBasicNormalization:
         assert result == expected
 
 
+class TestSampleNormalization:
+    """Tests that sample statements are fully normalized."""
+
+    def test_normalizes_sample_type_and_sampled_from(self) -> None:
+        """Both the type annotation and sampled_from should be normalized."""
+        method = frog_parser.parse_method(
+            """
+            Void f() {
+                KeySpace2 x <- KeySpace2;
+            }
+            """
+        )
+        expected = frog_parser.parse_method(
+            """
+            Void f() {
+                IntermediateSpace x <- IntermediateSpace;
+            }
+            """
+        )
+        pairs = _make_pairs(("KeySpace2", "IntermediateSpace"))
+        result = SubsetTypeNormalizer(pairs).transform(method)
+        assert result == expected
+
+    def test_normalizes_sample_sampled_from_only(self) -> None:
+        """sampled_from should be normalized even if it differs from the type."""
+        method = frog_parser.parse_method(
+            """
+            Void f() {
+                KeySpace2 x <- KeySpace2;
+            }
+            """
+        )
+        pairs = _make_pairs(("KeySpace2", "IntermediateSpace"))
+        result = SubsetTypeNormalizer(pairs).transform(method)
+        # Check the sampled_from was normalized (not just the type)
+        sample = result.block.statements[0]
+        assert isinstance(sample, frog_ast.Sample)
+        assert isinstance(sample.sampled_from, frog_ast.Variable)
+        assert sample.sampled_from.name == "IntermediateSpace"
+
+    def test_unrelated_sample_unchanged(self) -> None:
+        """Samples from unrelated types should not be changed."""
+        method = frog_parser.parse_method(
+            """
+            Void f() {
+                MessageSpace x <- MessageSpace;
+            }
+            """
+        )
+        pairs = _make_pairs(("KeySpace2", "IntermediateSpace"))
+        result = SubsetTypeNormalizer(pairs).transform(method)
+        assert result == method
+
+
 class TestNoNormalization:
     """Tests that non-subset types are left unchanged."""
 

@@ -2133,9 +2133,7 @@ def compare_types(
             declared_type_expression = get_sympy_expression(
                 declared_type.parameterization
             )
-            value_type_expression = get_sympy_expression(
-                value_type.parameterization
-            )
+            value_type_expression = get_sympy_expression(value_type.parameterization)
             if sympy_subs and declared_type_expression != value_type_expression:
                 # Apply Int field definitions and requires equalities
                 # iteratively until fixed point for transitive chains

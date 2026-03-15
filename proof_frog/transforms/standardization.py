@@ -44,7 +44,9 @@ class VariableStandardizingTransformer(BlockTransformer):
         # Collect typed local variable names in statement order.
         ordered_names: list[str] = []
         for statement in new_block.statements:
-            if not isinstance(statement, (frog_ast.Assignment, frog_ast.Sample)):
+            if not isinstance(
+                statement, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+            ):
                 continue
             if not isinstance(statement.var, frog_ast.Variable):
                 continue

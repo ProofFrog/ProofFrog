@@ -10,7 +10,7 @@ from ._base import TransformPass
 from .symbolic import SymbolicComputation
 from .sampling import SimplifySplice, MergeUniformSamples, MergeProductSamples
 from .sampling import SplitUniformSamples, SingleCallFieldToLocal
-from .random_functions import UniqueRFSimplification
+from .random_functions import ExtractRFCalls, UniqueRFSimplification
 from .inlining import (
     RedundantCopy,
     InlineSingleUseVariable,
@@ -54,6 +54,7 @@ CORE_PIPELINE: list[TransformPass] = [
     MergeProductSamples(),
     SplitUniformSamples(),
     TrivialEncodingElimination(),
+    ExtractRFCalls(),
     UniqueRFSimplification(),
     RedundantCopy(),
     InlineSingleUseVariable(),

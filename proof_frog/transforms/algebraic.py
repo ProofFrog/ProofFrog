@@ -51,6 +51,7 @@ class UniformXorSimplificationTransformer(BlockTransformer):
                 isinstance(statement, frog_ast.Sample)
                 and isinstance(statement.var, frog_ast.Variable)
                 and isinstance(statement.the_type, frog_ast.BitStringType)
+                and isinstance(statement.sampled_from, frog_ast.BitStringType)
             ):
                 continue
 
@@ -150,6 +151,7 @@ class UniformModIntSimplificationTransformer(BlockTransformer):
                 isinstance(statement, frog_ast.Sample)
                 and isinstance(statement.var, frog_ast.Variable)
                 and isinstance(statement.the_type, frog_ast.ModIntType)
+                and isinstance(statement.sampled_from, frog_ast.ModIntType)
             ):
                 continue
 

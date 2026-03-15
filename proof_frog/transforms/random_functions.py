@@ -15,7 +15,7 @@ import copy
 from dataclasses import dataclass, field
 
 from .. import frog_ast
-from ..visitors import BlockTransformer
+from ..visitors import BlockTransformer, SearchVisitor, ReplaceTransformer
 from ._base import TransformPass, PipelineContext
 
 
@@ -133,6 +133,76 @@ def _analyze_block(
             _analyze_block(statement.block, analysis, rf_types)
 
 
+class _RFCallExtractor(BlockTransformer):
+    """Extract RF calls embedded in expressions into separate assignments.
+
+    Transforms ``return [v1, m + RF(v1)]`` into::
+
+        RangeType __rf_extract_0 = RF(v1);
+        return [v1, m + __rf_extract_0];
+
+    This enables ``_RFCallReplacer`` to detect and simplify the call.
+    """
+
+    def __init__(
+        self,
+        rf_names: set[str],
+        rf_types: dict[str, frog_ast.RandomFunctionType],
+    ) -> None:
+        self.rf_names = rf_names
+        self.rf_types = rf_types
+        self.counter = 0
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            # Skip assignments where the value IS the RF call (already handled)
+            if (
+                isinstance(statement, frog_ast.Assignment)
+                and isinstance(statement.value, frog_ast.FuncCall)
+                and isinstance(statement.value.func, frog_ast.Variable)
+                and statement.value.func.name in self.rf_names
+            ):
+                continue
+
+            def is_rf_call(node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(node, frog_ast.FuncCall)
+                    and isinstance(node.func, frog_ast.Variable)
+                    and node.func.name in self.rf_names
+                )
+
+            found = SearchVisitor(is_rf_call).visit(statement)
+            if found is None:
+                continue
+
+            assert isinstance(found, frog_ast.FuncCall)
+            assert isinstance(found.func, frog_ast.Variable)
+            rf_name = found.func.name
+            range_type = copy.deepcopy(self.rf_types[rf_name].range_type)
+
+            var_name = f"__rf_extract_{self.counter}__"
+            self.counter += 1
+
+            new_assignment = frog_ast.Assignment(
+                range_type,  # type: ignore[arg-type]
+                frog_ast.Variable(var_name),
+                copy.deepcopy(found),
+            )
+
+            new_statement = ReplaceTransformer(
+                found, frog_ast.Variable(var_name)
+            ).transform(statement)
+
+            new_stmts = (
+                list(block.statements[:index])
+                + [new_assignment, new_statement]
+                + list(block.statements[index + 1 :])
+            )
+            return self.transform_block(frog_ast.Block(new_stmts))
+
+        return block
+
+
 class _RFCallReplacer(BlockTransformer):
     """Replace ``z = RF(r)`` with ``z <- R`` for eligible RF fields."""
 
@@ -237,3 +307,20 @@ class UniqueRFSimplification(TransformPass):
             return game
 
         return _RFCallReplacer(eligible).transform(game)
+
+
+class ExtractRFCalls(TransformPass):
+    """Extract RF field calls embedded in expressions into separate assignments."""
+
+    name = "Extract RF Calls"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        rf_types: dict[str, frog_ast.RandomFunctionType] = {}
+        for rf_field in game.fields:
+            if isinstance(rf_field.type, frog_ast.RandomFunctionType):
+                rf_types[rf_field.name] = rf_field.type
+
+        if not rf_types:
+            return game
+
+        return _RFCallExtractor(set(rf_types.keys()), rf_types).transform(game)

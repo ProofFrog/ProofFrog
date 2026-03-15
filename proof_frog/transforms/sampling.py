@@ -875,6 +875,354 @@ class SingleCallFieldToLocal(TransformPass):
         return _single_call_field_to_local(game)
 
 
+# ---------------------------------------------------------------------------
+# Counter-guarded field to local
+# ---------------------------------------------------------------------------
+
+
+def _find_counter_fields(game: frog_ast.Game) -> set[str]:
+    """Find Int fields that are initialized to 0."""
+    if not game.has_method("Initialize"):
+        return set()
+    init_method = game.get_method("Initialize")
+    counter_fields: set[str] = set()
+    int_field_names = {
+        f.name for f in game.fields if isinstance(f.type, frog_ast.IntType)
+    }
+    for stmt in init_method.block.statements:
+        if (
+            isinstance(stmt, frog_ast.Assignment)
+            and isinstance(stmt.var, frog_ast.Variable)
+            and stmt.var.name in int_field_names
+            and isinstance(stmt.value, frog_ast.Integer)
+            and stmt.value.num == 0
+        ):
+            counter_fields.add(stmt.var.name)
+    return counter_fields
+
+
+def _has_counter_increment(
+    block: frog_ast.Block, counter_names: set[str]
+) -> Optional[str]:
+    """Check if a block contains ``counter = counter + 1`` and return the name."""
+    for stmt in block.statements:
+        if (
+            isinstance(stmt, frog_ast.Assignment)
+            and isinstance(stmt.var, frog_ast.Variable)
+            and stmt.var.name in counter_names
+            and stmt.the_type is None
+            and isinstance(stmt.value, frog_ast.BinaryOperation)
+            and stmt.value.operator is frog_ast.BinaryOperators.ADD
+            and isinstance(stmt.value.left_expression, frog_ast.Variable)
+            and stmt.value.left_expression.name == stmt.var.name
+            and isinstance(stmt.value.right_expression, frog_ast.Integer)
+            and stmt.value.right_expression.num == 1
+        ):
+            return stmt.var.name
+    return None
+
+
+def _all_refs_in_counter_guarded_branches(
+    block: frog_ast.Block,
+    field_name: str,
+    counter_name: str,
+) -> bool:
+    """Check that every reference to *field_name* is inside a branch guarded
+    by ``counter_name == <expr>``.
+
+    Returns ``False`` if the field is referenced outside such branches or in
+    an else block.
+    """
+    past_increment = False
+    for stmt in block.statements:
+        # Track whether we've passed the counter increment
+        if (
+            isinstance(stmt, frog_ast.Assignment)
+            and isinstance(stmt.var, frog_ast.Variable)
+            and stmt.var.name == counter_name
+        ):
+            past_increment = True
+            continue
+
+        if isinstance(stmt, frog_ast.IfStatement) and past_increment:
+            for cond_idx, condition in enumerate(stmt.conditions):
+                branch_block = stmt.blocks[cond_idx]
+                if not _references_name(branch_block, field_name):
+                    continue
+                # Branch uses the field — condition must be counter == expr
+                if not (
+                    isinstance(condition, frog_ast.BinaryOperation)
+                    and condition.operator is frog_ast.BinaryOperators.EQUALS
+                    and isinstance(condition.left_expression, frog_ast.Variable)
+                    and condition.left_expression.name == counter_name
+                ):
+                    return False
+            # Else block must not reference the field
+            if stmt.has_else_block() and _references_name(stmt.blocks[-1], field_name):
+                return False
+            continue
+
+        # Reference outside an if-statement
+        if _references_name(stmt, field_name):
+            return False
+
+    return past_increment
+
+
+def _is_written_in_recursive(node: frog_ast.ASTNode, name: str) -> bool:
+    """Check if a variable is assigned or sampled anywhere in the AST."""
+
+    def check(n: frog_ast.ASTNode) -> bool:
+        return (
+            isinstance(n, (frog_ast.Assignment, frog_ast.Sample))
+            and isinstance(n.var, frog_ast.Variable)
+            and n.var.name == name
+        )
+
+    return SearchVisitor(check).visit(node) is not None
+
+
+def _count_assignments_recursive(node: frog_ast.ASTNode, name: str) -> int:
+    """Count how many times *name* is assigned or sampled anywhere in the AST."""
+    count = 0
+
+    def counter(n: frog_ast.ASTNode) -> bool:
+        nonlocal count
+        if (
+            isinstance(n, (frog_ast.Assignment, frog_ast.Sample))
+            and isinstance(n.var, frog_ast.Variable)
+            and n.var.name == name
+        ):
+            count += 1
+        return False
+
+    SearchVisitor(counter).visit(node)
+    return count
+
+
+def _counter_guarded_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
+    """Convert fields to locals when only read inside counter-guarded branches.
+
+    A field is eligible if:
+
+    - It is uniformly sampled (``<-``) in Initialize (bare sample, no type)
+    - That sample is the only reference to the field in Initialize
+    - The field is referenced in exactly one non-Initialize method
+    - The field is not written to in that method
+    - All references are inside if-branches guarded by ``counter == <expr>``,
+      where *counter* is an Int field initialized to 0 and incremented by 1
+      before the if-statement
+
+    Since each ``counter == val`` branch fires at most once (counter is
+    strictly increasing), the field is read at most once total, making the
+    conversion to a local sample sound.
+    """
+    if not game.has_method("Initialize"):
+        return game
+
+    counter_fields = _find_counter_fields(game)
+    if not counter_fields:
+        return game
+
+    init_method = game.get_method("Initialize")
+
+    eligible: list[tuple[frog_ast.Field, int, frog_ast.Sample, str]] = []
+
+    for field in game.fields:
+        if field.name in counter_fields:
+            continue
+
+        # Step 1: Find the uniform sample of this field in Initialize
+        init_sample: Optional[frog_ast.Sample] = None
+        init_sample_idx: Optional[int] = None
+        field_used_elsewhere_in_init = False
+
+        for idx, stmt in enumerate(init_method.block.statements):
+            if (
+                isinstance(stmt, frog_ast.Sample)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name == field.name
+                and stmt.the_type is None
+            ):
+                init_sample = stmt
+                init_sample_idx = idx
+            elif _references_name(stmt, field.name):
+                field_used_elsewhere_in_init = True
+
+        if init_sample is None or field_used_elsewhere_in_init:
+            continue
+
+        # Step 2: Find which non-Initialize methods reference this field
+        using_methods: list[str] = []
+        for method in game.methods:
+            if method.signature.name == "Initialize":
+                continue
+            if _references_name(method.block, field.name):
+                using_methods.append(method.signature.name)
+
+        if len(using_methods) != 1:
+            continue
+
+        # Step 3: Check the field is not written to in the using method
+        target_method_name = using_methods[0]
+        target_method = game.get_method(target_method_name)
+        if _is_written_in_recursive(target_method.block, field.name):
+            continue
+
+        # Step 4: Check counter is incremented and not modified elsewhere
+        counter_name = _has_counter_increment(target_method.block, counter_fields)
+        if counter_name is None:
+            continue
+
+        # The counter must only be assigned once in the method (the increment).
+        # If the counter is reset or modified elsewhere (even inside branches),
+        # the guard branch could fire multiple times, making field-to-local
+        # unsound.
+        counter_assign_count = _count_assignments_recursive(
+            target_method.block, counter_name
+        )
+        if counter_assign_count != 1:
+            continue
+
+        # Step 5: Check all references are inside counter-guarded branches
+        if not _all_refs_in_counter_guarded_branches(
+            target_method.block, field.name, counter_name
+        ):
+            continue
+
+        assert init_sample_idx is not None
+        eligible.append((field, init_sample_idx, init_sample, target_method_name))
+
+    if not eligible:
+        return game
+
+    # Apply transformations (same pattern as _single_call_field_to_local)
+    eligible_names = {f.name for f, _, _, _ in eligible}
+    init_remove_indices = {idx for _, idx, _, _ in eligible}
+
+    new_game = copy.deepcopy(game)
+    new_game.fields = [f for f in new_game.fields if f.name not in eligible_names]
+
+    new_init = new_game.get_method("Initialize")
+    new_init.block = frog_ast.Block(
+        [
+            s
+            for i, s in enumerate(new_init.block.statements)
+            if i not in init_remove_indices
+        ]
+    )
+
+    by_method: dict[str, list[frog_ast.Sample]] = {}
+    for field, _, init_sample, target_method_name in eligible:
+        local_sample = frog_ast.Sample(
+            copy.deepcopy(field.type),
+            frog_ast.Variable(field.name),
+            copy.deepcopy(init_sample.sampled_from),
+        )
+        by_method.setdefault(target_method_name, []).append(local_sample)
+
+    for method_name, samples in by_method.items():
+        target = new_game.get_method(method_name)
+        target.block = frog_ast.Block(samples) + target.block
+
+    return new_game
+
+
+class CounterGuardedFieldToLocal(TransformPass):
+    """Push field samples to locals when only used in counter-guarded branches."""
+
+    name = "Counter Guarded Field To Local"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return _counter_guarded_field_to_local(game)
+
+
+class SinkUniformSampleTransformer(BlockTransformer):
+    """Move a uniform sample from before an if/else into the branch that uses it.
+
+    When a uniformly sampled variable is only referenced inside a single
+    branch of a following if/else (and not in any condition or after the
+    if/else), the sample is moved inside that branch.  This is always
+    sound because uniform sampling is independent of the branch condition.
+    """
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for idx, stmt in enumerate(block.statements):
+            if not (
+                isinstance(stmt, frog_ast.Sample)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.the_type is not None
+            ):
+                continue
+
+            var_name = stmt.var.name
+
+            # The very next non-sample statement must be an IfStatement,
+            # and no intermediate statement may reference the variable.
+            next_idx = idx + 1
+            intermediate_refs_var = False
+            while next_idx < len(block.statements) and isinstance(
+                block.statements[next_idx], frog_ast.Sample
+            ):
+                if _references_name(block.statements[next_idx], var_name):
+                    intermediate_refs_var = True
+                    break
+                next_idx += 1
+            if intermediate_refs_var:
+                continue
+            if next_idx >= len(block.statements):
+                continue
+            next_stmt = block.statements[next_idx]
+            if not isinstance(next_stmt, frog_ast.IfStatement):
+                continue
+
+            # Check var is not used in the condition or after the if
+            used_in_condition = any(
+                _references_name(c, var_name) for c in next_stmt.conditions
+            )
+            if used_in_condition:
+                continue
+
+            after_if = frog_ast.Block(block.statements[next_idx + 1 :])
+            if _references_name(after_if, var_name):
+                continue
+
+            # Find which branches reference the variable
+            using_branches: list[int] = []
+            for bi, branch_block in enumerate(next_stmt.blocks):
+                if _references_name(branch_block, var_name):
+                    using_branches.append(bi)
+
+            if len(using_branches) != 1:
+                continue
+
+            # Move sample into the one branch
+            target_bi = using_branches[0]
+            new_if = copy.deepcopy(next_stmt)
+            new_if.blocks[target_bi] = (
+                frog_ast.Block([copy.deepcopy(stmt)]) + new_if.blocks[target_bi]
+            )
+
+            new_stmts = (
+                list(block.statements[:idx])
+                + list(block.statements[idx + 1 : next_idx])
+                + [new_if]
+                + list(block.statements[next_idx + 1 :])
+            )
+            return self.transform_block(frog_ast.Block(new_stmts))
+
+        return block
+
+
+class SinkUniformSample(TransformPass):
+    """Sink uniform samples into if-branches when only used in one branch."""
+
+    name = "Sink Uniform Sample"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return SinkUniformSampleTransformer().transform(game)
+
+
 class SimplifySplice(TransformPass):
     name = "Simplifying Splices"
 

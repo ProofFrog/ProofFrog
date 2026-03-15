@@ -55,63 +55,78 @@ class RedundantCopyTransformer(BlockTransformer):
             ):
                 copy_name = statement.var.name
                 original_name = statement.value.name
-
-                # Self-assignment (e.g., r = r after inlining): just remove it
-                if copy_name == original_name:
-                    return self.transform_block(
-                        frog_ast.Block(
-                            list(block.statements[:index])
-                            + list(block.statements[index + 1 :])
-                        )
+            elif (
+                isinstance(statement, frog_ast.Sample)
+                and isinstance(statement.var, frog_ast.Variable)
+                and isinstance(statement.sampled_from, frog_ast.Variable)
+                and any(
+                    isinstance(
+                        s, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
                     )
-
-                def written_to(copy_name: str, node: frog_ast.ASTNode) -> bool:
-                    return (
-                        isinstance(
-                            node,
-                            (
-                                frog_ast.Sample,
-                                frog_ast.Assignment,
-                                frog_ast.UniqueSample,
-                            ),
-                        )
-                        and isinstance(node.var, frog_ast.Variable)
-                        and node.var.name == copy_name
-                    )
-
-                remaining_block = frog_ast.Block(
-                    copy.deepcopy(block.statements[index + 1 :])
+                    and isinstance(s.var, frog_ast.Variable)
+                    and s.var.name == statement.sampled_from.name
+                    for s in block.statements[:index]
                 )
-                was_written = SearchVisitor[frog_ast.Variable](
-                    functools.partial(written_to, copy_name)
-                ).visit(remaining_block)
-                original_reassigned = SearchVisitor[frog_ast.Variable](
-                    functools.partial(written_to, original_name)
-                ).visit(remaining_block)
-                # If the copy was reassigned, or the original was reassigned
-                # (making the substitution unsafe), skip.
-                if was_written or original_reassigned:
-                    continue
+            ):
+                copy_name = statement.var.name
+                original_name = statement.sampled_from.name
+            else:
+                continue
 
-                def copy_used(copy_name: str, node: frog_ast.ASTNode) -> bool:
-                    return (
-                        isinstance(node, frog_ast.Variable) and node.name == copy_name
-                    )
-
-                while True:
-                    copy_found = SearchVisitor[frog_ast.Variable](
-                        functools.partial(copy_used, copy_name)
-                    ).visit(remaining_block)
-                    if copy_found is None:
-                        break
-                    remaining_block = ReplaceTransformer(
-                        copy_found, frog_ast.Variable(original_name)
-                    ).transform(remaining_block)
-
+            # Self-assignment (e.g., r = r after inlining): just remove it
+            if copy_name == original_name:
                 return self.transform_block(
-                    frog_ast.Block(copy.deepcopy(block.statements[:index]))
-                    + remaining_block
+                    frog_ast.Block(
+                        list(block.statements[:index])
+                        + list(block.statements[index + 1 :])
+                    )
                 )
+
+            def written_to(copy_name: str, node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(
+                        node,
+                        (
+                            frog_ast.Sample,
+                            frog_ast.Assignment,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
+                    and isinstance(node.var, frog_ast.Variable)
+                    and node.var.name == copy_name
+                )
+
+            remaining_block = frog_ast.Block(
+                copy.deepcopy(block.statements[index + 1 :])
+            )
+            was_written = SearchVisitor[frog_ast.Variable](
+                functools.partial(written_to, copy_name)
+            ).visit(remaining_block)
+            original_reassigned = SearchVisitor[frog_ast.Variable](
+                functools.partial(written_to, original_name)
+            ).visit(remaining_block)
+            # If the copy was reassigned, or the original was reassigned
+            # (making the substitution unsafe), skip.
+            if was_written or original_reassigned:
+                continue
+
+            def copy_used(copy_name: str, node: frog_ast.ASTNode) -> bool:
+                return isinstance(node, frog_ast.Variable) and node.name == copy_name
+
+            while True:
+                copy_found = SearchVisitor[frog_ast.Variable](
+                    functools.partial(copy_used, copy_name)
+                ).visit(remaining_block)
+                if copy_found is None:
+                    break
+                remaining_block = ReplaceTransformer(
+                    copy_found, frog_ast.Variable(original_name)
+                ).transform(remaining_block)
+
+            return self.transform_block(
+                frog_ast.Block(copy.deepcopy(block.statements[:index]))
+                + remaining_block
+            )
         return block
 
 
@@ -283,14 +298,28 @@ class CollapseAssignmentTransformer(BlockTransformer):
                     later_statement, (frog_ast.Assignment, frog_ast.Sample)
                 ):
                     break
+                later_rhs = (
+                    later_statement.sampled_from
+                    if isinstance(later_statement, frog_ast.Sample)
+                    else later_statement.value
+                )
                 if (
                     contains_var
-                    and SearchVisitor(uses_var_partial).visit(later_statement.value)
-                    is not None
+                    and SearchVisitor(uses_var_partial).visit(later_rhs) is not None
                 ):
                     break
-                replaced_statement = copy.deepcopy(statement)
-                replaced_statement.value = later_statement.value
+                if isinstance(later_statement, frog_ast.Sample):
+                    replaced_statement: frog_ast.Statement = frog_ast.Sample(
+                        statement.the_type,
+                        copy.deepcopy(statement.var),
+                        copy.deepcopy(later_rhs),
+                    )
+                else:
+                    replaced_statement = frog_ast.Assignment(
+                        statement.the_type,
+                        copy.deepcopy(statement.var),
+                        copy.deepcopy(later_rhs),
+                    )
                 return self.transform_block(
                     frog_ast.Block(
                         block.statements[:index]

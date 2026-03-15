@@ -10,6 +10,8 @@ from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from typing import Any
 
+from sympy import Symbol
+
 from flask import Flask, request, jsonify, send_file, send_from_directory
 
 from . import frog_parser, frog_ast, proof_engine, semantic_analysis
@@ -212,6 +214,11 @@ def _setup_engine_for_proof(
                 raise TypeError("Must instantiate either a Primitive or Scheme")
         else:
             engine.proof_namespace[let.name] = copy.deepcopy(let.value)
+            if isinstance(let.type, frog_ast.IntType):
+                if let.value is not None:
+                    engine.variables[let.name] = let.value
+                else:
+                    engine.variables[let.name] = Symbol(let.name)  # type: ignore
     engine.get_method_lookup()
     return engine, proof_file
 

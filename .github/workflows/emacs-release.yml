@@ -1,0 +1,53 @@
+name: emacs-release
+
+on:
+  release:
+    types: [published]
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: purcell/setup-emacs@master
+        with:
+          version: "29.4"
+
+      - name: Update version from tag
+        working-directory: emacs
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/;; Version: .*/;; Version: ${VERSION}/" prooffrog-mode.el
+
+      - name: Byte-compile
+        working-directory: emacs
+        run: make compile
+
+      - name: Package-lint
+        working-directory: emacs
+        run: make lint
+
+      - name: Build package tarball
+        working-directory: emacs
+        run: make package
+
+      - name: Upload release asset
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" emacs/prooffrog-mode-*.tar
+
+      - name: Upload release asset (tag push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" emacs/prooffrog-mode-*.tar \
+            --title "prooffrog-mode ${VERSION}" \
+            --notes "Emacs package release for prooffrog-mode ${VERSION}"

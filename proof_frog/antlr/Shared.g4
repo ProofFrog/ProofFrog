@@ -20,6 +20,7 @@ statement: type id SEMI #varDeclStatement
 	| type lvalue SAMPLES expression SEMI #varDeclWithSampleStatement
 	| lvalue EQUALS expression SEMI #assignmentStatement
 	| lvalue SAMPLES expression SEMI #sampleStatement
+	| type lvalue SAMPUNIQ L_SQUARE lvalue R_SQUARE type SEMI #uniqueSampleStatement
 	| expression L_PAREN argList? R_PAREN SEMI #functionCallStatement
 	| RETURN expression SEMI #returnStatement
 	| IF L_PAREN expression R_PAREN block (ELSE IF L_PAREN expression R_PAREN block )* (ELSE block )? #ifStatement
@@ -86,6 +87,7 @@ type: type QUESTION #optionalType
 	| VOID #voidType
 	| MAP L_ANGLE type COMMA type R_ANGLE #mapType
 	| ARRAY L_ANGLE type COMMA integerExpression R_ANGLE #arrayType
+	| RANDOMFUNCTIONS L_ANGLE type COMMA type R_ANGLE #randomFunctionType
 	| INTTYPE #intType
 	| L_SQUARE type (COMMA type)+ R_SQUARE #productType
 	| bitstring #bitStringType
@@ -145,6 +147,7 @@ NOTEQUALS: '!=';
 GEQ: '>=';
 LEQ: '<=';
 OR: '||';
+SAMPUNIQ: '<-uniq';
 SAMPLES: '<-';
 AND: '&&';
 BACKSLASH: '\\';
@@ -163,6 +166,7 @@ IMPORT: 'import';
 BITSTRING: 'BitString';
 MODINT: 'ModInt';
 ARRAY: 'Array';
+RANDOMFUNCTIONS: 'RandomFunctions';
 PRIMITIVE: 'Primitive';
 SUBSETS: 'subsets';
 IF: 'if';

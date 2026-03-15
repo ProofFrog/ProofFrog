@@ -23,8 +23,6 @@ _KNOWN_LIMITATIONS = {
     # Empty set literal {} — checker can't infer element type
     "examples/Games/DigitalSignature/Security.game",
     "examples/Games/SymEnc/AE.game",
-    # Set comprehension {r} / set difference — type inference not supported
-    "examples/Games/Misc/Sample.game",
     # Map.values field access on Map types not supported
     "examples/Games/PRP/Security.game",
     "examples/Games/PRP/StrongSecurity.game",

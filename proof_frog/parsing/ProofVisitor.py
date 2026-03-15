@@ -144,6 +144,11 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#uniqueSampleStatement.
+    def visitUniqueSampleStatement(self, ctx:ProofParser.UniqueSampleStatementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#functionCallStatement.
     def visitFunctionCallStatement(self, ctx:ProofParser.FunctionCallStatementContext):
         return self.visitChildren(ctx)
@@ -391,6 +396,11 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#voidType.
     def visitVoidType(self, ctx:ProofParser.VoidTypeContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#randomFunctionType.
+    def visitRandomFunctionType(self, ctx:ProofParser.RandomFunctionTypeContext):
         return self.visitChildren(ctx)
 
 

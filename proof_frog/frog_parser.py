@@ -547,6 +547,16 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             self.visit(ctx.expression()),
         )
 
+    def visitUniqueSampleStatement(
+        self, ctx: PrimitiveParser.UniqueSampleStatementContext
+    ) -> frog_ast.UniqueSample:
+        return frog_ast.UniqueSample(
+            self.visit(ctx.type_()[0]),
+            self.visit(ctx.lvalue()[0]),
+            self.visit(ctx.lvalue()[1]),
+            self.visit(ctx.type_()[1]),
+        )
+
     def visitVarDeclStatement(
         self, ctx: PrimitiveParser.VarDeclStatementContext
     ) -> frog_ast.VariableDeclaration:
@@ -563,6 +573,13 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
 
     def visitMapType(self, ctx: PrimitiveParser.MapTypeContext) -> frog_ast.MapType:
         return frog_ast.MapType(self.visit(ctx.type_()[0]), self.visit(ctx.type_()[1]))
+
+    def visitRandomFunctionType(
+        self, ctx: PrimitiveParser.RandomFunctionTypeContext
+    ) -> frog_ast.RandomFunctionType:
+        return frog_ast.RandomFunctionType(
+            self.visit(ctx.type_()[0]), self.visit(ctx.type_()[1])
+        )
 
     def visitNotExp(
         self, ctx: PrimitiveParser.NotExpContext

@@ -261,4 +261,13 @@ def remove_unnecessary_fields(game: frog_ast.Game) -> frog_ast.Game:
         method.block = remove_unnecessary_statements(
             actually_necessary_field_names, method.block
         )
+    # Remove Void methods with empty bodies (e.g., Initialize after field removal)
+    new_game.methods = [
+        method
+        for method in new_game.methods
+        if not (
+            isinstance(method.signature.return_type, frog_ast.Void)
+            and not method.block.statements
+        )
+    ]
     return new_game

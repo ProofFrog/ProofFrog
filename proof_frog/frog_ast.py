@@ -136,6 +136,16 @@ class ProductType(Type):
         return f'[{", ".join(str(t) for t in self.types)}]'
 
 
+class RandomFunctionType(Type):
+    def __init__(self, domain_type: Type, range_type: Type) -> None:
+        super().__init__()
+        self.domain_type = domain_type
+        self.range_type = range_type
+
+    def __str__(self) -> str:
+        return f"RandomFunctions<{self.domain_type}, {self.range_type}>"
+
+
 class OptionalType(Type):
     def __init__(self, the_type: Type) -> None:
         super().__init__()
@@ -514,6 +524,26 @@ class Sample(Statement):
         return (
             f"{self.the_type} " if self.the_type else ""
         ) + f"{self.var} <- {self.sampled_from};"
+
+
+class UniqueSample(Statement):
+    def __init__(
+        self,
+        the_type: Type,
+        var: Expression,
+        unique_set: Expression,
+        sampled_from: Type,
+    ) -> None:
+        super().__init__()
+        self.the_type = the_type
+        self.var = var
+        self.unique_set = unique_set
+        self.sampled_from = sampled_from
+
+    def __str__(self) -> str:
+        return (
+            f"{self.the_type} {self.var} <-uniq[{self.unique_set}] {self.sampled_from};"
+        )
 
 
 class Assignment(Statement):

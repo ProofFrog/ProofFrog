@@ -27,6 +27,7 @@ class PipelineContext:
     proof_namespace: frog_ast.Namespace
     subsets_pairs: list[tuple[frog_ast.Type, frog_ast.Type]]
     sort_game_fn: Optional[Callable[[frog_ast.Game], frog_ast.Game]] = None
+    max_calls: Optional[int] = None
 
 
 class TransformPass(ABC):

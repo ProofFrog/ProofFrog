@@ -9,7 +9,7 @@ from __future__ import annotations
 from ._base import TransformPass
 from .symbolic import SymbolicComputation
 from .sampling import SimplifySplice, MergeUniformSamples, MergeProductSamples
-from .sampling import SplitUniformSamples
+from .sampling import SplitUniformSamples, SingleCallFieldToLocal
 from .random_functions import UniqueRFSimplification
 from .inlining import (
     RedundantCopy,
@@ -47,6 +47,7 @@ from .standardization import (
 )
 
 CORE_PIPELINE: list[TransformPass] = [
+    SingleCallFieldToLocal(),
     SymbolicComputation(),
     SimplifySplice(),
     MergeUniformSamples(),

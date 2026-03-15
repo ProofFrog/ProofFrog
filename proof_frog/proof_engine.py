@@ -69,6 +69,7 @@ class ProofEngine:
         self.hop_results: list[HopResult] = []
         self.variables: dict[str, Symbol | frog_ast.Expression] = {}
         self.method_lookup: MethodLookup = {}
+        self.max_calls: Optional[int] = None
         self._total_steps = 0
         self._current_step = 0
 
@@ -128,6 +129,14 @@ class ProofEngine:
                     else:
                         sympy_symbol: Symbol = Symbol(let.name)  # type: ignore
                         self.variables[let.name] = sympy_symbol
+
+        if proof_file.max_calls is not None:
+            if isinstance(proof_file.max_calls, frog_ast.Integer):
+                self.max_calls = proof_file.max_calls.num
+            elif isinstance(proof_file.max_calls, frog_ast.Variable):
+                val = self.variables.get(proof_file.max_calls.name)
+                if isinstance(val, frog_ast.Integer):
+                    self.max_calls = val.num
 
         self.get_method_lookup()
         self._extract_subsets_pairs()
@@ -548,6 +557,7 @@ class ProofEngine:
             proof_namespace=self.proof_namespace,
             subsets_pairs=self.subsets_pairs,
             sort_game_fn=self.sort_game,
+            max_calls=self.max_calls,
         )
 
     def check_equivalent(

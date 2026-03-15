@@ -219,6 +219,13 @@ def _setup_engine_for_proof(
                     engine.variables[let.name] = let.value
                 else:
                     engine.variables[let.name] = Symbol(let.name)  # type: ignore
+    if proof_file.max_calls is not None:
+        if isinstance(proof_file.max_calls, frog_ast.Integer):
+            engine.max_calls = proof_file.max_calls.num
+        elif isinstance(proof_file.max_calls, frog_ast.Variable):
+            val = engine.variables.get(proof_file.max_calls.name)
+            if isinstance(val, frog_ast.Integer):
+                engine.max_calls = val.num
     engine.get_method_lookup()
     return engine, proof_file
 

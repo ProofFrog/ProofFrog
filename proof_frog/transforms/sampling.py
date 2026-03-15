@@ -742,6 +742,139 @@ class SplitUniformSampleTransformer(BlockTransformer):
 # ---------------------------------------------------------------------------
 
 
+def _single_call_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
+    """When each oracle is called at most once, push field-initialized uniform
+    samples down to local variables in the oracle that uses them.
+
+    A field is eligible if:
+    - It is uniformly sampled (<-) in Initialize
+    - That sample is the only statement in Initialize that references the field
+    - The field is referenced in exactly one non-Initialize method
+    - The field is not written to in that method
+    """
+    if not game.has_method("Initialize"):
+        return game
+
+    init_method = game.get_method("Initialize")
+
+    # Collect eligible fields: (field, init_sample_idx, init_sample, target_method_name)
+    eligible: list[tuple[frog_ast.Field, int, frog_ast.Sample, str]] = []
+
+    for field in game.fields:
+        # Skip fields with structured types (RandomFunctions, Sets, Maps)
+        # that interact with other transforms in ways that depend on being fields
+        if isinstance(
+            field.type,
+            (frog_ast.RandomFunctionType, frog_ast.SetType, frog_ast.MapType),
+        ):
+            continue
+
+        # Step 1: Find the uniform sample of this field in Initialize
+        init_sample: Optional[frog_ast.Sample] = None
+        init_sample_idx: Optional[int] = None
+        field_used_elsewhere_in_init = False
+
+        for idx, stmt in enumerate(init_method.block.statements):
+            if (
+                isinstance(stmt, frog_ast.Sample)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name == field.name
+                and stmt.the_type is None
+            ):
+                init_sample = stmt
+                init_sample_idx = idx
+            elif _references_name(stmt, field.name):
+                field_used_elsewhere_in_init = True
+
+        if init_sample is None or field_used_elsewhere_in_init:
+            continue
+
+        # Step 2: Find which non-Initialize methods reference this field
+        using_methods: list[str] = []
+        for method in game.methods:
+            if method.signature.name == "Initialize":
+                continue
+            if _references_name(method.block, field.name):
+                using_methods.append(method.signature.name)
+
+        if len(using_methods) != 1:
+            continue
+
+        # Step 3: Check the field is not written to in the using method
+        target_method_name = using_methods[0]
+        target_method = game.get_method(target_method_name)
+        if _is_assigned_in(target_method.block, field.name):
+            continue
+
+        assert init_sample_idx is not None
+        eligible.append((field, init_sample_idx, init_sample, target_method_name))
+
+    if not eligible:
+        return game
+
+    # Apply all transformations at once
+    eligible_names = {f.name for f, _, _, _ in eligible}
+    init_remove_indices = {idx for _, idx, _, _ in eligible}
+
+    new_game = copy.deepcopy(game)
+    new_game.fields = [f for f in new_game.fields if f.name not in eligible_names]
+
+    # Remove the samples from Initialize
+    new_init = new_game.get_method("Initialize")
+    new_init.block = frog_ast.Block(
+        [
+            s
+            for i, s in enumerate(new_init.block.statements)
+            if i not in init_remove_indices
+        ]
+    )
+
+    # Group eligible fields by target method and prepend local samples
+    by_method: dict[str, list[frog_ast.Sample]] = {}
+    for field, _, init_sample, target_method_name in eligible:
+        local_sample = frog_ast.Sample(
+            copy.deepcopy(field.type),
+            frog_ast.Variable(field.name),
+            copy.deepcopy(init_sample.sampled_from),
+        )
+        by_method.setdefault(target_method_name, []).append(local_sample)
+
+    for method_name, samples in by_method.items():
+        target = new_game.get_method(method_name)
+        target.block = frog_ast.Block(samples) + target.block
+
+    return new_game
+
+
+def _references_name(node: frog_ast.ASTNode, name: str) -> bool:
+    """Check if an AST node contains any reference to a variable name."""
+
+    def check(n: frog_ast.ASTNode) -> bool:
+        return isinstance(n, frog_ast.Variable) and n.name == name
+
+    return SearchVisitor(check).visit(node) is not None
+
+
+def _is_assigned_in(block: frog_ast.Block, name: str) -> bool:
+    """Check if a variable is assigned or sampled in a block."""
+    for stmt in block.statements:
+        if isinstance(stmt, (frog_ast.Assignment, frog_ast.Sample)):
+            if isinstance(stmt.var, frog_ast.Variable) and stmt.var.name == name:
+                return True
+    return False
+
+
+class SingleCallFieldToLocal(TransformPass):
+    """When max_calls == 1, push field-initialized uniform samples to locals."""
+
+    name = "Single Call Field To Local"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        if ctx.max_calls is None or ctx.max_calls > 1:
+            return game
+        return _single_call_field_to_local(game)
+
+
 class SimplifySplice(TransformPass):
     name = "Simplifying Splices"
 

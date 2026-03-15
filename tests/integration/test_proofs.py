@@ -8,10 +8,7 @@ REPO_ROOT = Path(__file__).parent.parent.parent
 PROOF_FILES = sorted(REPO_ROOT.glob("examples/**/*.proof"))
 
 
-_KNOWN_LIMITATIONS: set[str] = {
-    # Engine cannot move sample from method body to field (one-time equivalence)
-    "examples/Proofs/SymEnc/SymEncPRFSimpleOTUC.proof",
-}
+_KNOWN_LIMITATIONS: set[str] = set()
 
 
 @pytest.mark.parametrize(

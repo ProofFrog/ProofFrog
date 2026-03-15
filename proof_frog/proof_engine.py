@@ -721,7 +721,28 @@ class ProofEngine:
                 frog_ast.FieldAccess(frog_ast.Variable("challenger"), "Initialize"),
                 [],
             )
-            if isinstance(challenger_initialize.signature.return_type, frog_ast.Void):
+
+            # Check if the reduction already calls challenger.Initialize()
+            def _has_challenger_init_call(node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(node, frog_ast.FuncCall)
+                    and isinstance(node.func, frog_ast.FieldAccess)
+                    and isinstance(node.func.the_object, frog_ast.Variable)
+                    and node.func.the_object.name == "challenger"
+                    and node.func.name == "Initialize"
+                )
+
+            already_calls = (
+                visitors.SearchVisitor(_has_challenger_init_call).visit(
+                    reduction_initialize
+                )
+                is not None
+            )
+
+            if already_calls:
+                # Reduction already calls challenger.Initialize() — just inline it
+                pass
+            elif isinstance(challenger_initialize.signature.return_type, frog_ast.Void):
                 # Case A: Challenger returns Void — call as statement
                 reduction_initialize.block = (
                     frog_ast.Block([call_initialize]) + reduction_initialize.block

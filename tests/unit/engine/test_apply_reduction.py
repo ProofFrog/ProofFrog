@@ -178,6 +178,83 @@ class TestCaseC:
         assert len(init.block.statements) > 1
 
 
+class TestExistingChallengerCall:
+    """Reduction already calls challenger.Initialize() explicitly."""
+
+    def test_no_duplicate_when_reduction_calls_challenger_init(self) -> None:
+        """If reduction already calls challenger.Initialize(), don't prepend another."""
+        challenger = frog_parser.parse_game("""
+        Game G() {
+            Int x;
+            Void Initialize() {
+                x = 1;
+                return None;
+            }
+            Int Run() {
+                return x;
+            }
+        }
+        """)
+        reduction = frog_parser.parse_reduction("""
+        Reduction R() compose G() against H().Adversary {
+            Int y;
+            Void Initialize() {
+                challenger.Initialize();
+                y = 2;
+                return None;
+            }
+            Int Run() {
+                return y;
+            }
+        }
+        """)
+        result = _make_engine().apply_reduction(challenger, reduction)
+        init = _get_initialize(result)
+        # The challenger's Initialize body ("x = 1; return None;") should be
+        # inlined exactly once into the reduction.  Count assignments to x
+        # (field renaming to challenger@x happens in _get_game_ast, not here).
+        assign_count = sum(
+            1
+            for s in init.block.statements
+            if isinstance(s, frog_ast.Assignment)
+            and isinstance(s.var, frog_ast.Variable)
+            and s.var.name == "x"
+        )
+        assert assign_count == 1
+
+    def test_nonvoid_challenger_with_existing_call(self) -> None:
+        """Reduction calls challenger.Initialize() and uses its return value."""
+        challenger = frog_parser.parse_game("""
+        Game G() {
+            Int pk;
+            Int Initialize() {
+                pk = 42;
+                return pk;
+            }
+            Int Test() {
+                return pk;
+            }
+        }
+        """)
+        reduction = frog_parser.parse_reduction("""
+        Reduction R() compose G() against H().Adversary {
+            Int stored;
+            Int Initialize() {
+                Int v = challenger.Initialize();
+                stored = v;
+                return stored;
+            }
+            Int Run() {
+                return stored;
+            }
+        }
+        """)
+        result = _make_engine().apply_reduction(challenger, reduction)
+        init = _get_initialize(result)
+        # Should not crash and should have a reasonable number of statements
+        assert len(init.block.statements) >= 1
+
+
 class TestNoInitialize:
     """Challenger has Initialize but reduction does not."""
 

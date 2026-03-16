@@ -14,6 +14,7 @@ import {
 } from './wizard.js';
 import { updateGameHopsPanel } from './game-hops.js';
 import { openNewFileModal, closeNewFileModal, createNewFile } from './new-file.js';
+import { connectSSE } from './live-reload.js';
 import './resize.js';
 
 // ── Button handlers ───────────────────────────────────────────────────────────
@@ -78,3 +79,4 @@ updateToolbar();
 loadFileTree();
 updateWizardPanel();
 updateGameHopsPanel();
+connectSSE();

@@ -11,7 +11,7 @@ from proof_frog.web_server import create_app
 def client():
     """Flask test client rooted at the examples directory."""
     examples_dir = os.path.join(os.path.dirname(__file__), "..", "..", "examples")
-    app = create_app(os.path.abspath(examples_dir))
+    app, _observer = create_app(os.path.abspath(examples_dir), watch=False)
     app.config["TESTING"] = True
     with app.test_client() as c:
         yield c

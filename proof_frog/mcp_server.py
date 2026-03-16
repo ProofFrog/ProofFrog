@@ -181,9 +181,11 @@ def prove(proof_path: str) -> dict[str, Any]:
     """Run proof verification on a .proof file.
 
     Returns:
-      output      — Full verification output (all steps, simplified game forms)
-      success     — True only if every game hop passed
-      hop_results — List of {"step_num": int, "valid": bool, "kind": str} per hop
+      output         — Full verification output (all steps, simplified game forms)
+      success        — True only if every game hop passed
+      hop_results    — List of {"step_num": int, "valid": bool, "kind": str,
+                        "failure_detail": str} per hop; failure_detail explains why
+                        a failing step's canonical forms differ
 
     Imports in the proof are resolved relative to the server's working directory.
     Use write_file first to save the proof content to disk, then call prove.

@@ -474,6 +474,7 @@ def _capture_prove(
                 "kind": r.kind,
                 "current_desc": r.current_desc,
                 "next_desc": r.next_desc,
+                "failure_detail": r.failure_detail,
             }
             for r in engine.hop_results
             if r.depth == 0 and r.kind != "induction_rollover"
@@ -517,6 +518,9 @@ def _capture_prove(
         )
 
 
+_IGNORED_DIRS = {"node_modules", "__pycache__", ".venv", "venv"}
+
+
 def _build_tree(path: Path, base: Path) -> dict[str, object]:
     if path.is_dir():
         children = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
@@ -527,7 +531,7 @@ def _build_tree(path: Path, base: Path) -> dict[str, object]:
             "children": [
                 _build_tree(child, base)
                 for child in children
-                if not child.name.startswith(".")
+                if not child.name.startswith(".") and child.name not in _IGNORED_DIRS
             ],
         }
     return {
@@ -699,7 +703,9 @@ def create_app(directory: str, *, watch: bool = True) -> tuple[Flask, Any]:
         dirs: list[str] = [""]
         base = Path(directory)
         for dirpath, dirnames, _ in os.walk(base):
-            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            dirnames[:] = [
+                d for d in dirnames if not d.startswith(".") and d not in _IGNORED_DIRS
+            ]
             dirnames.sort(key=str.lower)
             p = Path(dirpath)
             if p != base:
@@ -925,7 +931,7 @@ def start_server(directory: str) -> None:
     log.setLevel(logging.ERROR)
 
     try:
-        app.run(host="127.0.0.1", port=port, debug=False)
+        app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
     finally:
         observer.stop()
         observer.join()

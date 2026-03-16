@@ -27,7 +27,13 @@ def check_well_formed(
             resolved = frog_parser.resolve_import_path(
                 imp.filename, file_name, allowed_root=allowed_root
             )
-            parsed_file = frog_parser.parse_file(resolved)
+            try:
+                parsed_file = frog_parser.parse_file(resolved)
+            except FileNotFoundError:
+                raise FileNotFoundError(
+                    f"{file_name}:{imp.line_num}: imported file not found: "
+                    f"'{imp.filename}'"
+                ) from None
             name = imp.rename if imp.rename else parsed_file.get_export_name()
             import_namespace[name] = parsed_file
             file_name_mapping[name] = resolved
@@ -58,7 +64,13 @@ def name_resolution(
                     ] = definition
                     continue
 
-                parsed_file = frog_parser.parse_file(resolved)
+                try:
+                    parsed_file = frog_parser.parse_file(resolved)
+                except FileNotFoundError:
+                    raise FileNotFoundError(
+                        f"{file_name}:{imp.line_num}: imported file not found: "
+                        f"'{imp.filename}'"
+                    ) from None
                 do_name_resolution(parsed_file, resolved)
                 name = imp.rename if imp.rename else parsed_file.get_export_name()
                 import_namespace[name] = parsed_file

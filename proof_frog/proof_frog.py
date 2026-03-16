@@ -65,6 +65,9 @@ def check(file: str, json_output: bool) -> None:
         print(f"{file} is well-formed.")
     except semantic_analysis.FailedTypeCheck:
         sys.exit(1)
+    except FileNotFoundError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
 
 
 @cli.command()
@@ -98,6 +101,9 @@ def prove(file: str, verbose: bool, json_output: bool) -> None:
         semantic_analysis.check_well_formed(proof_file, file)
     except semantic_analysis.FailedTypeCheck:
         sys.exit(1)
+    except FileNotFoundError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
 
     for imp in proof_file.imports:
         resolved = frog_parser.resolve_import_path(imp.filename, file)
@@ -113,8 +119,14 @@ def prove(file: str, verbose: bool, json_output: bool) -> None:
                     root = frog_parser.parse_game_file(resolved)
                 case frog_ast.FileType.PROOF:
                     raise TypeError("Cannot import proofs")
-        except (frog_parser.ParseError, FileNotFoundError) as e:
+        except frog_parser.ParseError as e:
             click.echo(str(e), err=True)
+            sys.exit(1)
+        except FileNotFoundError:
+            click.echo(
+                f"{file}:{imp.line_num}: imported file not found: " f"'{imp.filename}'",
+                err=True,
+            )
             sys.exit(1)
 
         name = imp.rename if imp.rename else root.get_export_name()

@@ -5,6 +5,15 @@
 import { state, apiFetch } from './state.js';
 import { loadFileTree } from './file-tree.js';
 
+// ── Suppress file-change events for UI-initiated saves ──────────────────────
+
+const pendingSaves = new Set();
+
+export function suppressFileChange(path) {
+  pendingSaves.add(path);
+  setTimeout(() => pendingSaves.delete(path), 5000);
+}
+
 // ── Notification bar for dirty-tab conflicts ─────────────────────────────────
 
 function showReloadBar(path, name) {
@@ -80,6 +89,7 @@ export function connectSSE() {
     const { type, path } = event;
 
     if (type === "file_changed") {
+      if (pendingSaves.delete(path)) return; // UI-initiated save, ignore
       const tab = state.tabs.get(path);
       if (!tab) return; // File not open, nothing to do
       const currentContent = tab.cm.getValue();

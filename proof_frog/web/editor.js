@@ -14,6 +14,7 @@ import { getModeForFile } from './cm-mode.js';
 import { updateGameHopsPanel } from './game-hops.js';
 import { updateWizardPanel } from './wizard.js';
 import { highlightActiveFile } from './file-tree.js';
+import { suppressFileChange } from './live-reload.js';
 
 // ── Toolbar helpers ───────────────────────────────────────────────────────────
 
@@ -286,6 +287,7 @@ export function closeTab(path) {
 export async function saveFile(path) {
   if (!path) return;
   const content = getTabContent(path);
+  suppressFileChange(path);
   const res = await apiFetch(`/api/file?path=${encodeURIComponent(path)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -332,6 +334,7 @@ export async function runCommand(endpoint, title) {
   if (tab) clearErrorHighlights(tab.cm);
 
   try {
+    suppressFileChange(state.activeTab);
     const data = await apiFetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

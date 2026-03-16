@@ -581,9 +581,9 @@ class _FrogFileHandler(FileSystemEventHandler):
         self._last_events: dict[str, float] = {}
         self._lock = threading.Lock()
 
-    def _should_handle(self, path_str: str) -> bool:
+    def _should_handle(self, path_str: str, *, check_extension: bool = True) -> bool:
         p = Path(path_str)
-        if p.suffix not in _WATCHED_EXTENSIONS:
+        if check_extension and p.suffix not in _WATCHED_EXTENSIONS:
             return False
         try:
             rel = p.relative_to(self._base)
@@ -606,7 +606,9 @@ class _FrogFileHandler(FileSystemEventHandler):
         self._broker.publish({"type": event_type, "path": rel})
 
     def on_modified(self, event: FileSystemEvent) -> None:
-        if not event.is_directory and self._should_handle(str(event.src_path)):
+        if not event.is_directory and self._should_handle(
+            str(event.src_path), check_extension=False
+        ):
             self._debounced_publish("file_changed", str(event.src_path))
 
     def on_created(self, event: FileSystemEvent) -> None:

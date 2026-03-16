@@ -255,6 +255,136 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
         return block
 
 
+class InlineMultiUsePureExpressionTransformer(BlockTransformer):
+    """Inlines a declaration ``Type v = expr`` when expr is a deterministic
+    (function-call-free) expression, even if v is used more than once.
+
+    Unlike ``InlineSingleUseVariableTransformer`` (which only inlines
+    single-use variables), this pass handles multi-use variables by
+    duplicating the expression at each use site.  This is safe because
+    the expression contains no function calls and no free variable of
+    the expression is reassigned anywhere after the declaration.
+
+    This pass normalises the canonical form so that a multi-use pure
+    expression is always represented inline rather than via a named
+    variable, regardless of whether the source code named it.
+
+    Expressions containing ``ArrayAccess`` or ``Slice`` nodes are excluded
+    because inlining them spreads references to the indexed variable,
+    which blocks other transforms (XOR simplification, dead code
+    elimination, single-use inlining of the base variable).
+
+    Example::
+
+        BitString<N> v = a || b;
+        return F(v, v);
+      becomes:
+        return F(a || b, a || b);
+    """
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if not (
+                isinstance(statement, frog_ast.Assignment)
+                and statement.the_type is not None
+                and isinstance(statement.var, frog_ast.Variable)
+                and not isinstance(statement.value, frog_ast.Variable)
+                and not isinstance(statement.value, frog_ast.Tuple)
+            ):
+                continue
+
+            var_name = statement.var.name
+            expr = statement.value
+
+            # Only handle pure expressions (no function calls)
+            if (
+                SearchVisitor(lambda n: isinstance(n, frog_ast.FuncCall)).visit(expr)
+                is not None
+            ):
+                continue
+
+            # Skip expressions containing array access or slicing.
+            # Inlining these spreads references to the base variable,
+            # preventing dead-code elimination and single-use inlining
+            # of function-call results, and breaking algebraic patterns.
+            if (
+                SearchVisitor(
+                    lambda n: isinstance(n, (frog_ast.ArrayAccess, frog_ast.Slice))
+                ).visit(expr)
+                is not None
+            ):
+                continue
+
+            def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(
+                        node,
+                        (
+                            frog_ast.Sample,
+                            frog_ast.Assignment,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
+                    and isinstance(node.var, frog_ast.Variable)
+                    and node.var.name == name
+                )
+
+            def uses_var(name: str, node: frog_ast.ASTNode) -> bool:
+                return isinstance(node, frog_ast.Variable) and node.name == name
+
+            remaining_block = frog_ast.Block(
+                copy.deepcopy(list(block.statements[index + 1 :]))
+            )
+
+            # Skip if var is reassigned
+            if (
+                SearchVisitor(functools.partial(is_written_to, var_name)).visit(
+                    remaining_block
+                )
+                is not None
+            ):
+                continue
+
+            # Skip if var is not used at all
+            if (
+                SearchVisitor(functools.partial(uses_var, var_name)).visit(
+                    remaining_block
+                )
+                is None
+            ):
+                continue
+
+            # Skip if any free variable in expr is reassigned
+            free_vars = VariableCollectionVisitor().visit(copy.deepcopy(expr))
+            if any(
+                SearchVisitor(functools.partial(is_written_to, fv.name)).visit(
+                    remaining_block
+                )
+                is not None
+                for fv in free_vars
+            ):
+                continue
+
+            # Replace all occurrences of var with expr
+            expr_copy = copy.deepcopy(expr)
+            while True:
+                var_node = SearchVisitor(functools.partial(uses_var, var_name)).visit(
+                    remaining_block
+                )
+                if var_node is None:
+                    break
+                remaining_block = ReplaceTransformer(
+                    var_node, copy.deepcopy(expr_copy)
+                ).transform(remaining_block)
+
+            new_block = frog_ast.Block(
+                list(block.statements[:index]) + list(remaining_block.statements)
+            )
+            return self.transform_block(new_block)
+
+        return block
+
+
 class CollapseAssignmentTransformer(BlockTransformer):
     """Collapses a declaration followed by a reassignment into a single statement.
 
@@ -413,6 +543,119 @@ class RedundantFieldCopyTransformer(BlockTransformer):
         return block
 
 
+class ForwardExpressionAliasTransformer(BlockTransformer):
+    """Replaces repeated pure expressions with their named variable.
+
+    When a typed assignment ``Type v = expr`` defines a named alias for a
+    deterministic expression (no function calls) that is not a plain variable
+    or tuple literal, subsequent structurally-identical occurrences of
+    ``expr`` are replaced with ``v``.
+
+    This is safe because the expression is deterministic and neither ``v``
+    nor any free variable in ``expr`` is reassigned between the definition
+    and use site.
+
+    Example::
+
+        PK1Space v3 = v1[0];
+        ...
+        return F(v3, v1[0]);
+      becomes:
+        PK1Space v3 = v1[0];
+        ...
+        return F(v3, v3);
+    """
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if not (
+                isinstance(statement, frog_ast.Assignment)
+                and statement.the_type is not None
+                and isinstance(statement.var, frog_ast.Variable)
+                and not isinstance(statement.value, frog_ast.Variable)
+                and not isinstance(statement.value, frog_ast.Tuple)
+            ):
+                continue
+
+            var_name = statement.var.name
+            expr = statement.value
+
+            # Only handle pure expressions (no function calls)
+            if (
+                SearchVisitor(lambda n: isinstance(n, frog_ast.FuncCall)).visit(expr)
+                is not None
+            ):
+                continue
+
+            remaining_block = frog_ast.Block(
+                copy.deepcopy(block.statements[index + 1 :])
+            )
+
+            def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(
+                        node,
+                        (
+                            frog_ast.Sample,
+                            frog_ast.Assignment,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
+                    and isinstance(node.var, frog_ast.Variable)
+                    and node.var.name == name
+                )
+
+            # Skip if var is reassigned
+            if (
+                SearchVisitor(functools.partial(is_written_to, var_name)).visit(
+                    remaining_block
+                )
+                is not None
+            ):
+                continue
+
+            # Skip if any free variable in expr is reassigned
+            free_vars = VariableCollectionVisitor().visit(copy.deepcopy(expr))
+            if any(
+                SearchVisitor(functools.partial(is_written_to, fv.name)).visit(
+                    remaining_block
+                )
+                is not None
+                for fv in free_vars
+            ):
+                continue
+
+            # Find a structurally-equal occurrence of expr in remaining block
+            def matches_expr(
+                target: frog_ast.Expression, node: frog_ast.ASTNode
+            ) -> bool:
+                return (
+                    isinstance(node, frog_ast.Expression)
+                    and type(node) is type(target)
+                    and node == target
+                )
+
+            match = SearchVisitor(functools.partial(matches_expr, expr)).visit(
+                remaining_block
+            )
+            if match is None:
+                continue
+
+            # Replace this one occurrence (by identity) with the variable
+            remaining_block = ReplaceTransformer(
+                match, frog_ast.Variable(var_name)
+            ).transform(remaining_block)
+
+            return self.transform_block(
+                frog_ast.Block(
+                    copy.deepcopy(block.statements[: index + 1])
+                    + list(remaining_block.statements)
+                )
+            )
+
+        return block
+
+
 # ---------------------------------------------------------------------------
 # TransformPass wrappers
 # ---------------------------------------------------------------------------
@@ -437,6 +680,20 @@ class CollapseAssignment(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return CollapseAssignmentTransformer().transform(game)
+
+
+class ForwardExpressionAlias(TransformPass):
+    name = "Forward Expression Alias"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return ForwardExpressionAliasTransformer().transform(game)
+
+
+class InlineMultiUsePureExpression(TransformPass):
+    name = "Inline Multi-Use Pure Expressions"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return InlineMultiUsePureExpressionTransformer().transform(game)
 
 
 class RedundantFieldCopy(TransformPass):

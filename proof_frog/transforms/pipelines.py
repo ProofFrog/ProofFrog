@@ -19,6 +19,8 @@ from .random_functions import ExtractRFCalls, UniqueRFSimplification, LocalRFToU
 from .inlining import (
     RedundantCopy,
     InlineSingleUseVariable,
+    ForwardExpressionAlias,
+    InlineMultiUsePureExpression,
     CollapseAssignment,
     RedundantFieldCopy,
 )
@@ -44,7 +46,7 @@ from .control_flow import (
     RemoveUnreachable,
 )
 from .types import DeadNullGuardElimination, SubsetTypeNormalization
-from .tuples import ExpandTuple, SimplifyTuple
+from .tuples import FoldTupleIndex, ExpandTuple, SimplifyTuple
 from .standardization import (
     VariableStandardize,
     StandardizeFieldNames,
@@ -60,11 +62,13 @@ CORE_PIPELINE: list[TransformPass] = [
     MergeProductSamples(),
     SplitUniformSamples(),
     TrivialEncodingElimination(),
+    FoldTupleIndex(),
     ExtractRFCalls(),
     UniqueRFSimplification(),
     LocalRFToUniform(),
     RedundantCopy(),
     InlineSingleUseVariable(),
+    ForwardExpressionAlias(),
     UniformXorSimplification(),
     UniformModIntSimplification(),
     TopologicalSort(),
@@ -83,6 +87,7 @@ CORE_PIPELINE: list[TransformPass] = [
     XorIdentity(),
     ModIntSimplification(),
     ReflexiveComparison(),
+    InlineMultiUsePureExpression(),
     RedundantFieldCopy(),
     SimplifyTuple(),
     RemoveUnreachable(),

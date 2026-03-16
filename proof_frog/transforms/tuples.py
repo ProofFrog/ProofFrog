@@ -11,6 +11,7 @@ import copy
 from .. import frog_ast
 from ..visitors import (
     Transformer,
+    SearchVisitor,
     AllConstantFieldAccesses,
     GetTypeMapVisitor,
 )
@@ -165,6 +166,40 @@ class ExpandTupleTransformer(Transformer):
         )
 
 
+class FoldTupleIndexTransformer(Transformer):
+    """Constant-folds indexing a tuple literal: ``[e0, e1, ...][i]`` → ``e_i``.
+
+    Only applies when the index is a constant integer and every discarded
+    element (``e_j`` for ``j != i``) contains no function calls, ensuring
+    that no potentially-randomised computation is silently removed.
+    """
+
+    def transform_array_access(
+        self, array_access: frog_ast.ArrayAccess
+    ) -> frog_ast.Expression:
+        arr = self.transform(array_access.the_array)
+        idx = self.transform(array_access.index)
+
+        if not (isinstance(arr, frog_ast.Tuple) and isinstance(idx, frog_ast.Integer)):
+            return frog_ast.ArrayAccess(arr, idx)
+
+        i = idx.num
+        if i < 0 or i >= len(arr.values):
+            return frog_ast.ArrayAccess(arr, idx)
+
+        # Check that every DISCARDED element is pure (no function calls)
+        for j, elem in enumerate(arr.values):
+            if j == i:
+                continue
+            if (
+                SearchVisitor(lambda n: isinstance(n, frog_ast.FuncCall)).visit(elem)
+                is not None
+            ):
+                return frog_ast.ArrayAccess(arr, idx)
+
+        return arr.values[i]
+
+
 class SimplifyTupleTransformer(Transformer):
     """Collapses a tuple literal back into the original variable.
 
@@ -216,6 +251,13 @@ class ExpandTuple(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return ExpandTupleTransformer().transform(game)
+
+
+class FoldTupleIndex(TransformPass):
+    name = "Fold Tuple Literal Indexing"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return FoldTupleIndexTransformer().transform(game)
 
 
 class SimplifyTuple(TransformPass):

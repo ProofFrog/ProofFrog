@@ -119,7 +119,7 @@ from proof_frog.transforms.sampling import SplitUniformSampleTransformer
             }
             """,
         ),
-        # No split: overlapping slices
+        # Duplicate slices: same bounds are deduplicated and split
         (
             """
             Void f() {
@@ -130,9 +130,26 @@ from proof_frog.transforms.sampling import SplitUniformSampleTransformer
             """,
             """
             Void f() {
-                BitString<2 * lambda> z <- BitString<2 * lambda>;
-                BitString<lambda> a = z[0 : lambda];
-                BitString<lambda> b = z[0 : lambda];
+                BitString<lambda> z_0 <- BitString<lambda>;
+                BitString<lambda> a = z_0;
+                BitString<lambda> b = z_0;
+            }
+            """,
+        ),
+        # No split: truly overlapping slices (different bounds that overlap)
+        (
+            """
+            Void f() {
+                BitString<3 * lambda> z <- BitString<3 * lambda>;
+                BitString<2 * lambda> a = z[0 : 2 * lambda];
+                BitString<2 * lambda> b = z[lambda : 3 * lambda];
+            }
+            """,
+            """
+            Void f() {
+                BitString<3 * lambda> z <- BitString<3 * lambda>;
+                BitString<2 * lambda> a = z[0 : 2 * lambda];
+                BitString<2 * lambda> b = z[lambda : 3 * lambda];
             }
             """,
         ),

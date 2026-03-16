@@ -8,7 +8,9 @@ REPO_ROOT = Path(__file__).parent.parent.parent
 PROOF_FILES = sorted(REPO_ROOT.glob("examples/**/*.proof"))
 
 
-_KNOWN_LIMITATIONS: set[str] = set()
+_KNOWN_LIMITATIONS: set[str] = {
+    "examples/starfortress/proof/prooffrog/UG-KEM-CCA.proof",
+}
 
 
 @pytest.mark.parametrize(

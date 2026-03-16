@@ -673,10 +673,23 @@ class SplitUniformSampleTransformer(BlockTransformer):
             if not all_resolved:
                 continue
 
+            # Deduplicate slices with identical bounds. Multiple occurrences
+            # of the same slice (e.g. v[n:2n] used twice) should map to one
+            # replacement variable, since non-overlapping slices of a uniform
+            # sample are independent.
+            unique_bounds: list[tuple[Symbol | int, Symbol | int]] = []
+            for sb in slice_bounds:
+                if not any(
+                    sympy_simplify(sb[0] - ub[0]) == 0
+                    and sympy_simplify(sb[1] - ub[1]) == 0
+                    for ub in unique_bounds
+                ):
+                    unique_bounds.append(sb)
+
             # BitString parameters are always non-negative. Create
             # positive symbol substitutions for sympy sign reasoning.
             all_syms: set[Symbol] = set()
-            for sb in slice_bounds:
+            for sb in unique_bounds:
                 for expr in sb:
                     if hasattr(expr, "free_symbols"):
                         all_syms.update(expr.free_symbols)
@@ -684,10 +697,10 @@ class SplitUniformSampleTransformer(BlockTransformer):
                 s: Symbol(s.name, positive=True) for s in all_syms if not s.is_positive
             }
 
-            # Check slices are non-overlapping. Two slices [a,b) and [c,d)
-            # don't overlap if b <= c or d <= a. Gaps are allowed (unused
-            # portions are discarded).
-            overlaps = self._check_overlaps(slice_bounds, pos_subs)
+            # Check unique slices are non-overlapping. Two slices [a,b) and
+            # [c,d) don't overlap if b <= c or d <= a. Gaps are allowed
+            # (unused portions are discarded).
+            overlaps = self._check_overlaps(unique_bounds, pos_subs)
             if overlaps:
                 continue
 
@@ -698,7 +711,7 @@ class SplitUniformSampleTransformer(BlockTransformer):
                 []
             )
 
-            for i, (start, end) in enumerate(slice_bounds):
+            for i, (start, end) in enumerate(unique_bounds):
                 part_len = end - start
                 part_len_expr = frog_parser.parse_expression(str(part_len))
                 part_type = frog_ast.BitStringType(part_len_expr)

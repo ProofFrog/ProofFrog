@@ -1,5 +1,7 @@
 from __future__ import annotations
 import copy
+import dataclasses
+import difflib
 import functools
 import shutil
 import warnings
@@ -38,14 +40,110 @@ class WhichGame(Enum):
 
 
 ProcessedAssumption = namedtuple("ProcessedAssumption", ["assumption", "which"])
-HopResult = namedtuple(
-    "HopResult",
-    ["step_num", "valid", "kind", "depth", "current_desc", "next_desc"],
-)
+
+
+@dataclasses.dataclass
+class EquivalenceResult:
+    """Result of an equivalence check between two games."""
+
+    valid: bool
+    failure_detail: str = ""
+
+
+@dataclasses.dataclass
+class HopResult:
+    """Result of a single hop in a game-hopping proof."""
+
+    step_num: int
+    valid: bool
+    kind: str
+    depth: int
+    current_desc: str
+    next_desc: str
+    failure_detail: str = ""
 
 
 class FailedProof(Exception):
     pass
+
+
+def _build_equivalence_diff(current: frog_ast.Game, next_game: frog_ast.Game) -> str:
+    """Build a human-readable diagnostic showing how two canonical games differ."""
+    lines: list[str] = []
+
+    # Compare fields
+    if current.fields != next_game.fields:
+        lines.append("Fields differ:")
+        current_fields = [str(f) for f in current.fields]
+        next_fields = [str(f) for f in next_game.fields]
+        for diff_line in difflib.unified_diff(
+            current_fields,
+            next_fields,
+            lineterm="",
+            fromfile="current",
+            tofile="next",
+        ):
+            lines.append(f"  {diff_line}")
+
+    # Compare methods
+    current_methods = {m.signature.name: m for m in current.methods}
+    next_methods = {m.signature.name: m for m in next_game.methods}
+    all_method_names = list(
+        dict.fromkeys(list(current_methods.keys()) + list(next_methods.keys()))
+    )
+
+    differing: list[str] = []
+    for name in all_method_names:
+        if name not in current_methods:
+            differing.append(name)
+            lines.append(f"Method {name}: only in next game")
+        elif name not in next_methods:
+            differing.append(name)
+            lines.append(f"Method {name}: only in current game")
+        elif current_methods[name] != next_methods[name]:
+            differing.append(name)
+
+    if differing:
+        lines.insert(0, f"Methods that differ: {', '.join(differing)}")
+
+    # Show diff for each differing method present in both games
+    for name in differing:
+        if name in current_methods and name in next_methods:
+            current_lines = str(current_methods[name]).splitlines()
+            next_lines = str(next_methods[name]).splitlines()
+            lines.append("")
+            lines.append(f"--- {name} (current)")
+            lines.append(f"+++ {name} (next)")
+            for diff_line in difflib.unified_diff(
+                current_lines,
+                next_lines,
+                lineterm="",
+                fromfile=f"{name} (current)",
+                tofile=f"{name} (next)",
+                n=3,
+            ):
+                # Skip the --- and +++ lines since we already printed them
+                if diff_line.startswith("---") or diff_line.startswith("+++"):
+                    continue
+                lines.append(f"  {diff_line}")
+
+    if not lines:
+        lines.append("Canonical forms differ but no specific method differences found")
+
+    return "\n".join(lines)
+
+
+def _print_failure_detail(detail: str) -> None:
+    """Print failure diagnostic detail with indentation and dimmed color."""
+    for line in detail.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            print(f"    {Fore.GREEN}{line}{Fore.RESET}")
+        elif line.startswith("-") and not line.startswith("---"):
+            print(f"    {Fore.RED}{line}{Fore.RESET}")
+        elif line.startswith("@@"):
+            print(f"    {Fore.CYAN}{line}{Fore.RESET}")
+        else:
+            print(f"    {line}")
 
 
 class _AllTrueTransformer(visitors.Transformer):
@@ -153,9 +251,16 @@ class ProofEngine:
         assert isinstance(final_step.challenger, frog_ast.ConcreteGame)
 
         if first_step.challenger.game != proof_file.theorem:
-            print(Fore.RED + "Proof must start with a game matching theorem")
-            print(Fore.RED + f"Theorem: {proof_file.theorem}")
-            print(Fore.RED + f"First Game: {first_step.challenger}")
+            print(
+                Fore.RED
+                + "Proof must start with a game matching the theorem's security game"
+            )
+            print(Fore.RED + f"  Theorem expects: {proof_file.theorem}")
+            print(
+                Fore.RED
+                + f"  First step uses: {first_step.challenger.game}"
+                + Fore.RESET
+            )
 
         print(f"Proving: {proof_file.theorem}\n")
 
@@ -168,8 +273,14 @@ class ProofEngine:
         self._print_summary_table()
         print()
 
-        if any(not r.valid for r in self.hop_results):
-            print(Fore.RED + "Proof Failed!")
+        failed_steps = [r for r in self.hop_results if not r.valid]
+        if failed_steps:
+            step_nums = ", ".join(str(r.step_num) for r in failed_steps)
+            print(
+                Fore.RED
+                + f"Proof Failed! ({len(failed_steps)} step(s) failed: {step_nums})"
+                + Fore.RESET
+            )
             raise FailedProof()
 
         if (
@@ -177,9 +288,31 @@ class ProofEngine:
             and first_step.challenger.which != final_step.challenger.which
             and first_step.adversary == final_step.adversary
         ):
-            print(Fore.GREEN + "Proof Succeeded!")
+            print(Fore.GREEN + "Proof Succeeded!" + Fore.RESET)
             return
-        print(Fore.YELLOW + "Proof Succeeded, but is incomplete")
+
+        reasons: list[str] = []
+        if first_step.challenger.game != final_step.challenger.game:
+            reasons.append(
+                f"first and last steps use different games "
+                f"({first_step.challenger.game} vs {final_step.challenger.game})"
+            )
+        elif first_step.challenger.which == final_step.challenger.which:
+            reasons.append(
+                f"first and last steps use the same side "
+                f"({first_step.challenger.which})"
+            )
+        if first_step.adversary != final_step.adversary:
+            reasons.append(
+                f"first and last steps use different adversaries "
+                f"({first_step.adversary} vs {final_step.adversary})"
+            )
+        reason_str = "; ".join(reasons) if reasons else "unknown reason"
+        print(
+            Fore.YELLOW
+            + f"Proof Succeeded, but is incomplete: {reason_str}"
+            + Fore.RESET
+        )
         raise FailedProof()
 
     def _print_step_status(self, hop_desc: str, result: str, color: str) -> None:
@@ -401,22 +534,23 @@ class ProofEngine:
 
             self.set_up_assumptions(assumptions, current_step, next_step)
 
-            hop_valid = self.check_equivalent(current_game_ast, next_game_ast)
+            equiv_result = self.check_equivalent(current_game_ast, next_game_ast)
             hop_desc = f"{current_desc} -> {next_desc}"
-            if hop_valid:
+            if equiv_result.valid:
                 self._print_step_status(hop_desc, "ok", Fore.GREEN)
             else:
                 self._print_step_status(hop_desc, "FAILED", Fore.RED)
-                if self.verbose:
-                    print("Step failed!")
+                if equiv_result.failure_detail:
+                    _print_failure_detail(equiv_result.failure_detail)
             self.hop_results.append(
                 HopResult(
                     step_num=step_num,
-                    valid=hop_valid,
+                    valid=equiv_result.valid,
                     kind="equivalent",
                     depth=_depth,
                     current_desc=current_desc,
                     next_desc=next_desc,
+                    failure_detail=equiv_result.failure_detail,
                 )
             )
             if isinstance(steps[i], frog_ast.Induction):
@@ -463,24 +597,25 @@ class ProofEngine:
                     print(f"Current: {rollover_current_desc}")
                     print(f"Hop To: {rollover_next_desc}\n")
                 self.set_up_assumptions(assumptions, last_step, first_step)
-                rollover_valid = self.check_equivalent(last_step_ast, first_step_ast)
+                rollover_result = self.check_equivalent(last_step_ast, first_step_ast)
                 rollover_hop = (
                     f"[rollover] {rollover_current_desc} -> {rollover_next_desc}"
                 )
-                if rollover_valid:
+                if rollover_result.valid:
                     self._print_step_status(rollover_hop, "ok", Fore.GREEN)
                 else:
                     self._print_step_status(rollover_hop, "FAILED", Fore.RED)
-                    if self.verbose:
-                        print("Step failed!")
+                    if rollover_result.failure_detail:
+                        _print_failure_detail(rollover_result.failure_detail)
                 self.hop_results.append(
                     HopResult(
                         step_num=step_num,
-                        valid=rollover_valid,
+                        valid=rollover_result.valid,
                         kind="induction_rollover",
                         depth=_depth,
                         current_desc=rollover_current_desc,
                         next_desc=rollover_next_desc,
+                        failure_detail=rollover_result.failure_detail,
                     )
                 )
                 self.proof_let_types.remove(the_induction.name)
@@ -562,7 +697,7 @@ class ProofEngine:
 
     def check_equivalent(
         self, current_game_ast: frog_ast.Game, next_game_ast: frog_ast.Game
-    ) -> bool:
+    ) -> EquivalenceResult:
         ctx = self._build_context()
 
         for index, game in enumerate((current_game_ast, next_game_ast)):
@@ -592,19 +727,33 @@ class ProofEngine:
         if current_game_ast == next_game_ast:
             if self.verbose:
                 print("Inline Success!")
-            return True
+            return EquivalenceResult(valid=True)
 
-        return self._z3_conditional_equivalence(current_game_ast, next_game_ast)
+        z3_result = self._z3_conditional_equivalence(current_game_ast, next_game_ast)
+        if z3_result.valid:
+            return z3_result
+
+        # Build diagnostic: combine Z3 reason with method-by-method diff
+        parts: list[str] = []
+        if z3_result.failure_detail:
+            parts.append(z3_result.failure_detail)
+        parts.append(_build_equivalence_diff(current_game_ast, next_game_ast))
+        return EquivalenceResult(valid=False, failure_detail="\n".join(parts))
 
     def _z3_conditional_equivalence(
         self,
         current_game_ast: frog_ast.Game,
         next_game_ast: frog_ast.Game,
-    ) -> bool:
+    ) -> EquivalenceResult:
         all_true_current = _AllTrueTransformer().transform(current_game_ast)
         all_true_next = _AllTrueTransformer().transform(next_game_ast)
         if all_true_current != all_true_next:
-            return False
+            return EquivalenceResult(
+                valid=False,
+                failure_detail=(
+                    "Games differ structurally (not just in if-conditions)"
+                ),
+            )
 
         found_ifs: list[frog_ast.IfStatement] = []
 
@@ -639,16 +788,28 @@ class ProofEngine:
                     )
                     + self.proof_let_types
                 ).visit(if_next.conditions[i])
-                if first_if_formula is None or first_if_formula is None:
-                    return False
+                if first_if_formula is None or next_if_formula is None:
+                    return EquivalenceResult(
+                        valid=False,
+                        failure_detail=(
+                            "Could not convert if-condition to Z3 formula: "
+                            f"{condition} vs {if_next.conditions[i]}"
+                        ),
+                    )
                 solver = z3.Solver()
                 solver.set("timeout", 30000)
                 solver.add(z3.Not(first_if_formula == next_if_formula))
                 if solver.check() != z3.unsat:
-                    return False
+                    return EquivalenceResult(
+                        valid=False,
+                        failure_detail=(
+                            "Could not prove equivalence of if-conditions: "
+                            f"{condition} vs {if_next.conditions[i]}"
+                        ),
+                    )
         if self.verbose:
             print("Inline Success!")
-        return True
+        return EquivalenceResult(valid=True)
 
     def canonicalize_game(self, game: frog_ast.Game) -> frog_ast.Game:
         """Apply the same simplification pipeline as check_equivalent() (without

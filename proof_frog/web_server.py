@@ -468,6 +468,7 @@ def _capture_prove(
                 "kind": r.kind,
                 "current_desc": r.current_desc,
                 "next_desc": r.next_desc,
+                "failure_detail": r.failure_detail,
             }
             for r in engine.hop_results
             if r.depth == 0 and r.kind != "induction_rollover"

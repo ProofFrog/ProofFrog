@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import re
 from typing import Type, Callable
 from antlr4 import (
     FileStream,
@@ -75,6 +76,54 @@ class ParseError(Exception):
         return header
 
 
+# Map ANTLR internal token names to user-friendly descriptions.
+_ANTLR_TOKEN_MAP = {
+    "ID": "identifier",
+    "INT": "integer",
+    "SEMI": "';'",
+    "L_CURLY": "'{'",
+    "R_CURLY": "'}'",
+    "L_PAREN": "'('",
+    "R_PAREN": "')'",
+    "L_SQUARE": "'['",
+    "R_SQUARE": "']'",
+    "L_ANGLE": "'<'",
+    "R_ANGLE": "'>'",
+    "EQUALS": "'='",
+    "SAMPLES": "'<-'",
+    "SAMPUNIQ": "'<-uniq'",
+    "COMMA": "','",
+    "COLON": "':'",
+    "PERIOD": "'.'",
+    "FILESTRING": "file path",
+}
+
+
+def _clean_antlr_token_names(msg: str) -> str:
+    """Replace ANTLR token names with user-friendly descriptions.
+
+    Also strips the curly-brace set notation that ANTLR uses for expected
+    token sets (e.g. ``{ID, SEMI}``), but preserves quoted literal braces
+    like ``'}'``.
+    """
+    # Strip ANTLR set braces, but not quoted literal braces like '}'
+    msg = re.sub(r"(?<!')\{(?!')", "", msg)
+    msg = re.sub(r"(?<!')\}(?!')", "", msg)
+    # Use word-boundary regex to avoid replacing ID inside VOID, etc.
+    for token, friendly in _ANTLR_TOKEN_MAP.items():
+        msg = re.sub(r"\b" + token + r"\b", friendly, msg)
+    return msg
+
+
+def _eof_hint(source_lines: list[str]) -> str:
+    """Generate a hint for unexpected EOF errors by checking brace balance."""
+    opens = sum(line.count("{") for line in source_lines)
+    closes = sum(line.count("}") for line in source_lines)
+    if opens > closes:
+        return f" (file has {opens} opening braces but only {closes} closing braces)"
+    return ""
+
+
 def _read_source_lines(source: str) -> list[str]:
     """Read all lines from *source* (a file path or raw text)."""
     try:
@@ -97,14 +146,14 @@ def _to_parse_error(
         tok = inner.offendingToken
         line, col, token_text = tok.line, tok.column, tok.text or ""
 
+    all_lines = _read_source_lines(source)
+
     if token_text == "<EOF>":
-        msg = "unexpected end of file"
+        msg = "unexpected end of file" + _eof_hint(all_lines)
     elif token_text:
         msg = f"unexpected token '{token_text}'"
     else:
         msg = "syntax error"
-
-    all_lines = _read_source_lines(source)
 
     # Heuristic: if the offending token starts a new line and the previous
     # non-blank line doesn't end with a semicolon, brace, or colon, the
@@ -192,7 +241,7 @@ def _reparse_for_error(
     all_lines = _read_source_lines(source)
 
     if token_text == "<EOF>":
-        display_msg = "unexpected end of file"
+        display_msg = "unexpected end of file" + _eof_hint(all_lines)
     elif token_text:
         display_msg = f"unexpected token '{token_text}'"
     else:
@@ -202,11 +251,9 @@ def _reparse_for_error(
     # or "missing"), but clean up internal token names for readability.
     if antlr_msg and ("expecting" in antlr_msg or "missing" in antlr_msg):
         cleaned = antlr_msg
-        cleaned = cleaned.replace("ID", "identifier")
         cleaned = cleaned.replace("'in', ", "")
-        cleaned = cleaned.replace("{", "")
-        cleaned = cleaned.replace("}", "")
         cleaned = cleaned.replace("extraneous input", "unexpected")
+        cleaned = _clean_antlr_token_names(cleaned)
         display_msg = cleaned
 
     # Apply the same missing-semicolon heuristic as _to_parse_error.
@@ -1115,7 +1162,7 @@ def parse_string_collecting_errors(
     errors: list[ParseError] = []
     for line, col, token_text, antlr_msg in collector.errors:
         if token_text == "<EOF>":
-            msg = "unexpected end of file"
+            msg = "unexpected end of file" + _eof_hint(all_lines)
         elif token_text:
             msg = f"unexpected token '{token_text}'"
         else:
@@ -1123,11 +1170,11 @@ def parse_string_collecting_errors(
 
         if antlr_msg and ("expecting" in antlr_msg or "missing" in antlr_msg):
             cleaned = antlr_msg
-            cleaned = cleaned.replace("ID", "identifier")
             cleaned = cleaned.replace("'in', ", "")
             cleaned = cleaned.replace("{", "")
             cleaned = cleaned.replace("}", "")
             cleaned = cleaned.replace("extraneous input", "unexpected")
+            cleaned = _clean_antlr_token_names(cleaned)
             msg = cleaned
 
         source_line = ""

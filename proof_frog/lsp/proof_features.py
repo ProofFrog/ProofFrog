@@ -165,16 +165,18 @@ def run_proof_verification(state: DocumentState) -> tuple[
 
         # Create diagnostic for failed hops
         if not hop.valid and hop.kind != "by_assumption":
+            msg = (
+                f"Hop {hop.step_num} failed: " f"{hop.current_desc} -> {hop.next_desc}"
+            )
+            if hop.failure_detail:
+                msg += f"\n{hop.failure_detail}"
             diagnostics.append(
                 lsp.Diagnostic(
                     range=lsp.Range(
                         start=lsp.Position(line=max(0, line - 1), character=0),
                         end=lsp.Position(line=max(0, line - 1), character=999),
                     ),
-                    message=(
-                        f"Hop {hop.step_num} failed: "
-                        f"{hop.current_desc} -> {hop.next_desc}"
-                    ),
+                    message=msg,
                     severity=lsp.DiagnosticSeverity.Error,
                     source="prooffrog-prove",
                 )

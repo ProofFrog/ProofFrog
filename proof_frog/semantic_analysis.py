@@ -609,6 +609,14 @@ def _format_type(t: PossibleType) -> str:
     return str(t)
 
 
+def _truncate_expr(expr: object, max_len: int = 60) -> str:
+    """Truncate an expression's string representation for error messages."""
+    s = str(expr)
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 3] + "..."
+
+
 def print_error(
     location: frog_ast.ASTNode, message: str, file_name: str = "Unknown"
 ) -> None:
@@ -1039,7 +1047,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
         over_set = self.get_type_from_ast(generic_for.over)
         if not isinstance(over_set, frog_ast.SetType):
             self.print_error(
-                generic_for, f"Must iterator over finite set, got type {over_set}"
+                generic_for, f"Must iterate over finite set, got type {over_set}"
             )
 
     def visit_reduction(self, reduction: frog_ast.Reduction) -> None:
@@ -1203,7 +1211,8 @@ class CheckTypeVisitor(VariableTypeVisitor):
         end_type_sympy = get_sympy_expression(the_slice.end)
         if start_type_sympy is None or end_type_sympy is None:
             self.print_error(
-                the_slice, "Could not convert start or end to sympy expression"
+                the_slice,
+                "Slice bounds must be integer constants or simple arithmetic expressions",
             )
             return
         total_length = frog_parser.parse_expression(
@@ -1249,7 +1258,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             got_type = self.get_type_from_ast(bad_return.expression)
             self.print_error(
                 bad_return,
-                f"{bad_return.expression} is of type {_format_type(got_type)}, expected {expected_type}",
+                f"{_truncate_expr(bad_return.expression)} has type {_format_type(got_type)}, expected {expected_type}",
             )
 
     def visit_variable(self, variable: frog_ast.Variable) -> None:
@@ -1583,7 +1592,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             else:
                 self.print_error(
                     bin_op,
-                    f"{bin_op.right_expression} is of type"
+                    f"{bin_op.right_expression} has type"
                     f" {_format_type(right_type)}, expected Set or Map",
                 )
                 return
@@ -1613,7 +1622,10 @@ class CheckTypeVisitor(VariableTypeVisitor):
         if field.value:
             the_type = self.get_type_from_ast(field.value)
             if not self.check_types(field.type, the_type):
-                self.print_error(field, f"{the_type} is not of type {field.type}")
+                self.print_error(
+                    field,
+                    f"Field initializer has type {the_type}, expected {field.type}",
+                )
 
     def leave_field_access(self, field_acess: frog_ast.FieldAccess) -> None:
         object_type = self.get_type_from_ast(field_acess.the_object)
@@ -1630,7 +1642,10 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 )
             return
         if not isinstance(object_type, visitors.InstantiableType):
-            self.print_error(field_acess, "Accessing field of non object-type")
+            self.print_error(
+                field_acess,
+                f"Cannot access field '{field_acess.name}' on type {_format_type(object_type)}",
+            )
             return
         member = object_type.members[field_acess.name]  # type: ignore[index]
         # Qualify method signature Int variable references with the object name
@@ -1676,7 +1691,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
         if not self.check_types(expected_type, found_type):
             self.print_error(
                 assignment,
-                f"{assignment.value} has type {found_type}, expected {expected_type}",
+                f"{_truncate_expr(assignment.value)} has type {found_type}, expected {expected_type}",
             )
 
     def leave_sample(self, sample: frog_ast.Sample) -> None:
@@ -1690,7 +1705,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
         if not self.check_types(expected_type, found_type):
             self.print_error(
                 sample,
-                f"{sample.sampled_from} has type {found_type}, expected {expected_type}",
+                f"{_truncate_expr(sample.sampled_from)} has type {found_type}, expected {expected_type}",
             )
 
     def leave_unique_sample(self, unique_sample: frog_ast.UniqueSample) -> None:
@@ -1813,7 +1828,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             if not self.check_types(param.type, arg_types[index]):
                 self.print_error(
                     location,
-                    f"{args[index]} is not of type {param.type}",
+                    f"Argument {args[index]} has type {arg_types[index]}, expected {param.type}",
                 )
 
         # Check cache to avoid redundant instantiation and type-checking
@@ -1929,17 +1944,24 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 if not self.check_types(func_call_type.domain_type, arg_type):
                     self.print_error(
                         func_call,
-                        f"{func_call.args[0]} is of type {_format_type(arg_type)},"
+                        f"{func_call.args[0]} has type {_format_type(arg_type)},"
                         f" expected {func_call_type.domain_type}",
                     )
                 self.ast_type_map.set(func_call, func_call_type.range_type)
                 return
             func_call_signature = func_call_type
             if not isinstance(func_call_signature, frog_ast.MethodSignature):
-                self.print_error(func_call, "Was not able to get method signature")
+                self.print_error(
+                    func_call,
+                    f"Cannot resolve method signature for '{func_call.func}'",
+                )
                 return
             if len(func_call_signature.parameters) != len(func_call.args):
-                self.print_error(func_call, "Incorrect number of args")
+                self.print_error(
+                    func_call,
+                    f"Expected {len(func_call_signature.parameters)} argument(s),"
+                    f" got {len(func_call.args)}",
+                )
             arg_types = [self.get_type_from_ast(arg) for arg in func_call.args]
 
             for index, arg_type in enumerate(arg_types):
@@ -1947,7 +1969,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 if not self.check_types(declared_type, arg_type):
                     self.print_error(
                         func_call,
-                        f"{func_call.args[index]} is of type {_format_type(arg_type)}, expected {declared_type}",
+                        f"{func_call.args[index]} has type {_format_type(arg_type)}, expected {declared_type}",
                     )
             self.ast_type_map.set(func_call, func_call_signature.return_type)
 

@@ -114,7 +114,7 @@ _PRIMITIVE_CASES = [
     ),
     pytest.param(
         "Primitive MismatchedType(Bool x) {\n    Int y = x;\n}\n",
-        "not of type",
+        "field initializer has type",
         id="mismatched_type",
 
     ),
@@ -208,7 +208,7 @@ _SCHEME_CASES = [
             "    Int y = x;\n"
             "}\n"
         ),
-        "not of type",
+        "field initializer has type",
         id="mismatched_type",
 
     ),

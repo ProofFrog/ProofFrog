@@ -1,6 +1,9 @@
+# pylint: disable=duplicate-code  # CLI commands share return-dict patterns with web_server/mcp_server
 import json
-import sys
 import os
+import sys
+import tempfile
+from pathlib import Path
 
 import click
 from colorama import init
@@ -161,6 +164,97 @@ def describe(file: str, json_output: bool) -> None:
     except (ValueError, frog_parser.ParseError, FileNotFoundError) as e:
         click.echo(str(e), err=True)
         sys.exit(1)
+
+
+@cli.command("step-detail")
+@click.argument("file")
+@click.argument("step_index", type=click.INT)
+def step_detail(file: str, step_index: int) -> None:
+    """Get the canonical form of a proof step (JSON output)."""
+    # pylint: disable=import-outside-toplevel
+    from .web_server import _capture_inline
+
+    output, canonical, success, has_reduction, reduction, challenger, scheme = (
+        _capture_inline(file, step_index)
+    )
+    click.echo(
+        json.dumps(
+            {
+                "output": output,
+                "canonical": canonical,
+                "success": success,
+                "has_reduction": has_reduction,
+                "reduction": reduction,
+                "challenger": challenger,
+                "scheme": scheme,
+            }
+        )
+    )
+
+
+@cli.command("inlined-game")
+@click.argument("file")
+@click.argument("step_text")
+def inlined_game(file: str, step_text: str) -> None:
+    """Get the canonical form of a game step expression against a proof's context (JSON output)."""
+    # pylint: disable=import-outside-toplevel
+    from .web_server import _build_minimal_proof, _capture_inline
+
+    try:
+        proof_text = Path(file).read_text(encoding="utf-8")
+        minimal = _build_minimal_proof(proof_text, step_text)
+        if minimal is None:
+            click.echo(
+                json.dumps(
+                    {
+                        "output": "Could not extract theorem: block from proof file.",
+                        "canonical": "",
+                        "success": False,
+                    }
+                )
+            )
+            return
+        fd, tmp_path = tempfile.mkstemp(
+            suffix=".proof", dir=os.path.dirname(os.path.abspath(file))
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(minimal)
+            output, canonical, success, _, _, _, _ = _capture_inline(tmp_path, 0)
+        finally:
+            os.unlink(tmp_path)
+        click.echo(
+            json.dumps({"output": output, "canonical": canonical, "success": success})
+        )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        click.echo(
+            json.dumps({"output": f"Error: {e}", "canonical": "", "success": False})
+        )
+
+
+@cli.command("canonicalization-trace")
+@click.argument("file")
+@click.argument("step_index", type=click.INT)
+def canonicalization_trace(file: str, step_index: int) -> None:
+    """Show which transforms fired per iteration for a proof step (JSON output)."""
+    # pylint: disable=import-outside-toplevel
+    from .web_server import _capture_canonicalization_trace
+
+    result = _capture_canonicalization_trace(file, step_index)
+    click.echo(json.dumps(result))
+
+
+@cli.command("step-after-transform")
+@click.argument("file")
+@click.argument("step_index", type=click.INT)
+@click.argument("transform_name")
+def step_after_transform(file: str, step_index: int, transform_name: str) -> None:
+    """Get game AST after applying transforms up to a named one (JSON output)."""
+    # pylint: disable=import-outside-toplevel
+    from .web_server import _capture_step_after_transform
+
+    result = _capture_step_after_transform(file, step_index, transform_name)
+    click.echo(json.dumps(result))
 
 
 @cli.command()

@@ -75,13 +75,19 @@ example files.
 
 ### Prefer MCP tools over CLI
 
-When the MCP server is connected, **always use the MCP tools instead of running
-CLI commands via Bash**. The MCP tools return structured output that is easier to
-work with and avoids parsing text. Use:
+When the MCP server is connected **and the proof engine has not been modified
+during the current session**, always use the MCP tools instead of running CLI
+commands via Bash. The MCP tools return structured output that is easier to work
+with and avoids parsing text. Use:
 
 - `parse` and `check` instead of `python -m proof_frog parse/check`
 - `prove` instead of `python -m proof_frog prove`
 - `get_step_detail` instead of grepping prover output
+
+**Exception — stale MCP server**: If the proof engine or transforms have been
+modified during the session, the MCP server (a separate long-running process)
+will still use the old code. In that case, fall back to the CLI equivalents
+described in the "CLI fallback" section below.
 
 ### Writing intermediate games
 
@@ -175,6 +181,38 @@ or planning a proof.
 
 ---
 
+
+## CLI Fallback When the MCP Server Is Stale
+
+When the proof engine or canonicalization transforms are modified during a Claude
+session (e.g. fixing an engine bug), the MCP server process still runs the old
+code. Rather than writing ad-hoc Python scripts, use the CLI introspection
+commands — they always use the currently installed engine (after `pip install -e .`).
+
+The CLI commands output JSON with the same fields as the corresponding MCP tools:
+
+| CLI command | MCP equivalent | Usage |
+|-------------|---------------|-------|
+| `python -m proof_frog step-detail <proof> <step_index>` | `get_step_detail` | Canonical form of a proof step |
+| `python -m proof_frog inlined-game <proof> "<step_text>"` | `get_inlined_game` | Canonical form of an arbitrary step expression |
+| `python -m proof_frog canonicalization-trace <proof> <step_index>` | `get_canonicalization_trace` | Which transforms fired per iteration |
+| `python -m proof_frog step-after-transform <proof> <step_index> "<transform_name>"` | `get_step_after_transform` | Game AST after a specific transform |
+
+These complement the existing CLI commands (`parse`, `check`, `prove --json`,
+`describe --json`) which also accept `--json`/`-j` flags for structured output.
+
+### When to use CLI fallback
+
+1. The proof engine or transforms were edited during this session.
+2. The MCP server was not restarted after those edits.
+3. You need accurate canonical forms or transform traces that reflect the latest
+   engine code.
+
+After using the CLI fallback, re-install (`pip install -e .`) if needed, then
+parse the JSON output with `json.loads()` or pipe through `python -m json.tool`
+for readability.
+
+---
 
 ## Starting the server manually (for debugging)
 

@@ -1,18 +1,24 @@
+import atexit
 import copy
 import io
+import json
 import logging
 import os
+import queue
 import re
 import socket
 import threading
+import time
 import webbrowser
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from typing import Any
 
 from sympy import Symbol
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
-from flask import Flask, request, jsonify, send_file, send_from_directory
+from flask import Flask, request, jsonify, send_file, send_from_directory, Response
 
 from . import frog_parser, frog_ast, proof_engine, semantic_analysis
 from . import describe as describe_module
@@ -531,7 +537,93 @@ def _build_tree(path: Path, base: Path) -> dict[str, object]:
     }
 
 
-def create_app(directory: str) -> Flask:
+_WATCHED_EXTENSIONS = {".primitive", ".scheme", ".game", ".proof", ".md"}
+_DEBOUNCE_SECONDS = 0.3
+
+
+class _FileEventBroker:
+    """Thread-safe broker that distributes filesystem events to SSE subscribers."""
+
+    def __init__(self) -> None:
+        self._subscribers: list[queue.Queue[dict[str, str]]] = []
+        self._lock = threading.Lock()
+
+    def subscribe(self) -> queue.Queue[dict[str, str]]:
+        q: queue.Queue[dict[str, str]] = queue.Queue()
+        with self._lock:
+            self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: queue.Queue[dict[str, str]]) -> None:
+        with self._lock:
+            try:
+                self._subscribers.remove(q)
+            except ValueError:
+                pass
+
+    def publish(self, event: dict[str, str]) -> None:
+        with self._lock:
+            for q in self._subscribers:
+                q.put(event)
+
+
+class _FrogFileHandler(FileSystemEventHandler):
+    """Debounced handler that publishes file change events to a broker."""
+
+    def __init__(self, broker: _FileEventBroker, base: Path) -> None:
+        super().__init__()
+        self._broker = broker
+        self._base = base
+        self._last_events: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def _should_handle(self, path_str: str) -> bool:
+        p = Path(path_str)
+        if p.suffix not in _WATCHED_EXTENSIONS:
+            return False
+        try:
+            rel = p.relative_to(self._base)
+        except ValueError:
+            return False
+        return not any(part.startswith(".") for part in rel.parts)
+
+    def _debounced_publish(self, event_type: str, src_path: str) -> None:
+        now = time.monotonic()
+        key = f"{event_type}:{src_path}"
+        with self._lock:
+            last = self._last_events.get(key, 0.0)
+            if now - last < _DEBOUNCE_SECONDS:
+                return
+            self._last_events[key] = now
+        try:
+            rel = str(Path(src_path).relative_to(self._base))
+        except ValueError:
+            return
+        self._broker.publish({"type": event_type, "path": rel})
+
+    def on_modified(self, event: FileSystemEvent) -> None:
+        if not event.is_directory and self._should_handle(str(event.src_path)):
+            self._debounced_publish("file_changed", str(event.src_path))
+
+    def on_created(self, event: FileSystemEvent) -> None:
+        if not event.is_directory and self._should_handle(str(event.src_path)):
+            self._debounced_publish("file_created", str(event.src_path))
+
+    def on_deleted(self, event: FileSystemEvent) -> None:
+        if not event.is_directory and self._should_handle(str(event.src_path)):
+            self._debounced_publish("file_deleted", str(event.src_path))
+
+    def on_moved(self, event: FileSystemEvent) -> None:
+        src = str(event.src_path)
+        dest = str(getattr(event, "dest_path", ""))
+        if not event.is_directory:
+            if self._should_handle(src):
+                self._debounced_publish("file_deleted", src)
+            if dest and self._should_handle(dest):
+                self._debounced_publish("file_created", dest)
+
+
+def create_app(directory: str, *, watch: bool = True) -> tuple[Flask, Any]:
     app = Flask(__name__, static_folder=None)
     app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB
     static_dir = Path(__file__).parent / "web"
@@ -774,7 +866,42 @@ def create_app(directory: str) -> Flask:
         except Exception as e:  # pylint: disable=broad-exception-caught
             return jsonify({"error": f"Error: {e}"}), 400
 
-    return app
+    # ── File watcher + SSE ──────────────────────────────────────────────────
+
+    broker = _FileEventBroker()
+    observer: Any = None
+    if watch:
+        base_path = Path(directory).resolve()
+        handler = _FrogFileHandler(broker, base_path)
+        observer = Observer()
+        observer.schedule(handler, str(base_path), recursive=True)
+        observer.start()
+
+    @app.route("/api/events")
+    def sse_events() -> Any:
+        def _stream() -> Any:
+            q = broker.subscribe()
+            try:
+                while True:
+                    try:
+                        event = q.get(timeout=15)
+                        yield f"data: {json.dumps(event)}\n\n"
+                    except queue.Empty:
+                        # Heartbeat to keep connection alive
+                        yield ": heartbeat\n\n"
+            except GeneratorExit:
+                broker.unsubscribe(q)
+
+        return Response(
+            _stream(),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    return app, observer
 
 
 def start_server(directory: str) -> None:
@@ -783,7 +910,8 @@ def start_server(directory: str) -> None:
         print(f"Error: '{directory}' is not a directory", flush=True)
         return
 
-    app = create_app(directory)
+    app, observer = create_app(directory)
+    atexit.register(observer.stop)
     port = _find_free_port(5173)
     url = f"http://127.0.0.1:{port}"
 
@@ -796,4 +924,8 @@ def start_server(directory: str) -> None:
     log = logging.getLogger("werkzeug")
     log.setLevel(logging.ERROR)
 
-    app.run(host="127.0.0.1", port=port, debug=False)
+    try:
+        app.run(host="127.0.0.1", port=port, debug=False)
+    finally:
+        observer.stop()
+        observer.join()

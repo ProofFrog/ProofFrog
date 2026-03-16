@@ -343,6 +343,32 @@ select.wizard-input { cursor: pointer; }
 /* Error line highlight */
 .cm-error-line { background: rgba(244, 135, 113, 0.15) !important; }
 
+/* ── Reload notification bar ── */
+.reload-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 14px; background: rgba(206,145,120,0.15);
+  border-bottom: 2px solid var(--warn);
+  font-size: 13px; font-weight: 600; color: var(--warn); flex-shrink: 0;
+  z-index: 10; position: relative;
+}
+.reload-bar button {
+  padding: 4px 12px; border: 1px solid var(--warn); border-radius: 3px;
+  background: var(--bg2); color: var(--warn); cursor: pointer; font-size: 12px;
+  font-weight: 600;
+}
+.reload-bar button:first-of-type { background: var(--warn); color: var(--bg); }
+.reload-bar button:first-of-type:hover { opacity: 0.85; }
+.reload-bar button:last-of-type:hover { background: var(--bg3); }
+
+/* ── Disconnected banner ── */
+#disconnected-banner {
+  background: var(--error); color: #fff; text-align: center;
+  padding: 10px 16px; font-size: 14px; font-weight: 700;
+  letter-spacing: 0.02em;
+  flex-shrink: 0; z-index: 9999;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
 /* ── Output pane ── */
 #output-pane {
   background: var(--bg2); border-top: 1px solid var(--border);

@@ -157,6 +157,4 @@ def test_forward_expression_alias(
     expected_ast = frog_parser.parse_method(expected)
 
     transformed_ast = ForwardExpressionAliasTransformer().transform(game_ast)
-    print("EXPECTED", expected_ast)
-    print("TRANSFORMED", transformed_ast)
     assert expected_ast == transformed_ast

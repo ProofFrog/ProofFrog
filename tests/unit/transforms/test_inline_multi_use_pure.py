@@ -140,6 +140,4 @@ def test_inline_multi_use_pure(
     expected_ast = frog_parser.parse_method(expected)
 
     transformed_ast = InlineMultiUsePureExpressionTransformer().transform(game_ast)
-    print("EXPECTED", expected_ast)
-    print("TRANSFORMED", transformed_ast)
     assert expected_ast == transformed_ast

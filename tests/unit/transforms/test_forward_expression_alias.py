@@ -158,3 +158,107 @@ def test_forward_expression_alias(
 
     transformed_ast = ForwardExpressionAliasTransformer().transform(game_ast)
     assert expected_ast == transformed_ast
+
+
+@pytest.mark.parametrize(
+    "game,expected",
+    [
+        # Field assignment propagates expression alias to subsequent code
+        (
+            """
+        Game Test() {
+            Int field1;
+            Void Initialize() {
+                [Int, Int] x = challenger.g();
+                field1 = x[0];
+                Int v = x[0];
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Void Initialize() {
+                [Int, Int] x = challenger.g();
+                field1 = x[0];
+                Int v = field1;
+            }
+        }""",
+        ),
+        # Field-from-variable copy: field1 = v propagates v -> field1
+        (
+            """
+        Game Test() {
+            Int field1;
+            Int Initialize() {
+                Int v = challenger.g();
+                field1 = v;
+                return v;
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Int Initialize() {
+                Int v = challenger.g();
+                field1 = v;
+                return field1;
+            }
+        }""",
+        ),
+        # Should NOT propagate: local is reassigned after field copy
+        (
+            """
+        Game Test() {
+            Int field1;
+            Int Initialize() {
+                Int v = 1;
+                field1 = v;
+                v = 2;
+                return v;
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Int Initialize() {
+                Int v = 1;
+                field1 = v;
+                v = 2;
+                return v;
+            }
+        }""",
+        ),
+        # Should NOT propagate: field is reassigned after copy
+        (
+            """
+        Game Test() {
+            Int field1;
+            Int Initialize() {
+                Int v = 1;
+                field1 = v;
+                field1 = 2;
+                return v;
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Int Initialize() {
+                Int v = 1;
+                field1 = v;
+                field1 = 2;
+                return v;
+            }
+        }""",
+        ),
+    ],
+)
+def test_forward_expression_alias_field(
+    game: str,
+    expected: str,
+) -> None:
+    game_ast = frog_parser.parse_game(game)
+    expected_ast = frog_parser.parse_game(expected)
+
+    transformed_ast = ForwardExpressionAliasTransformer().transform(game_ast)
+    assert expected_ast == transformed_ast

@@ -119,6 +119,13 @@ class DependencyGraph:
         self.nodes.append(new_node)
 
     def get_node(self, statement: frog_ast.Statement) -> Node:
+        # Prefer identity match to avoid returning the wrong node when
+        # two structurally-equal statements exist (e.g. duplicate
+        # if-conditions).  Fall back to equality for callers that pass
+        # a copy.
+        for potential_node in self.nodes:
+            if potential_node.statement is statement:
+                return potential_node
         for potential_node in self.nodes:
             if potential_node.statement == statement:
                 return potential_node

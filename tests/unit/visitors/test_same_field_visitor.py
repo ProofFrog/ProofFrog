@@ -196,6 +196,55 @@ from proof_frog import visitors, frog_parser
             ("x", "y"),
             False,
         ),
+        # Direct field copy after function call: field1 = f(); field2 = field1
+        # This IS a valid duplicate — the copy doesn't replicate the call.
+        (
+            """
+            Game G() {
+                Int field1;
+                Int field2;
+                Void f() {
+                    field1 = challenger.g();
+                    field2 = field1;
+                }
+            }
+            """,
+            ("field1", "field2"),
+            True,
+        ),
+        # Two independent function calls — NOT the same
+        # (each call may return a different value)
+        (
+            """
+            Game G() {
+                Int field1;
+                Int field2;
+                Void f() {
+                    field1 = challenger.g();
+                    field2 = challenger.h();
+                }
+            }
+            """,
+            ("field1", "field2"),
+            False,
+        ),
+        # Direct copy but pair field read before copy — NOT safe
+        (
+            """
+            Game G() {
+                Int field1;
+                Int field2;
+                Int f() {
+                    field1 = challenger.g();
+                    Int x = field2;
+                    field2 = field1;
+                    return x;
+                }
+            }
+            """,
+            ("field1", "field2"),
+            False,
+        ),
     ],
 )
 def test_same_field_visitor(game: str, pair: tuple[str, str], expected: bool) -> None:

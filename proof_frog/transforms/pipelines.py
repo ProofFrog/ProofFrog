@@ -46,7 +46,12 @@ from .control_flow import (
     RemoveUnreachable,
 )
 from .types import DeadNullGuardElimination, SubsetTypeNormalization
-from .tuples import FoldTupleIndex, ExpandTuple, SimplifyTuple
+from .tuples import (
+    FoldTupleIndex,
+    ExpandTuple,
+    SimplifyTuple,
+    CollapseSingleIndexTuple,
+)
 from .standardization import (
     VariableStandardize,
     StandardizeFieldNames,
@@ -81,6 +86,7 @@ CORE_PIPELINE: list[TransformPass] = [
     SimplifyIf(),
     DeadNullGuardElimination(),
     SubsetTypeNormalization(),
+    CollapseSingleIndexTuple(),
     ExpandTuple(),
     SimplifyNotPass(),
     XorCancellation(),

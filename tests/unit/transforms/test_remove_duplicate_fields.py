@@ -139,6 +139,59 @@ from proof_frog import proof_engine, frog_parser
             }
         }""",
         ),
+        # Direct field copy after function call: field1 = f(); field2 = field1
+        # should be merged (the copy is safe, doesn't replicate the call)
+        (
+            """
+        Game Test() {
+            Int field1;
+            Int field2;
+            Void Initialize() {
+                field1 = challenger.g();
+                field2 = field1;
+            }
+            Int f() {
+                return field1 + field2;
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Void Initialize() {
+                field1 = challenger.g();
+            }
+            Int f() {
+                return field1 + field1;
+            }
+        }""",
+        ),
+        # Two independent function calls should NOT be merged
+        (
+            """
+        Game Test() {
+            Int field1;
+            Int field2;
+            Void Initialize() {
+                field1 = challenger.g();
+                field2 = challenger.g();
+            }
+            Int f() {
+                return field1 + field2;
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Int field2;
+            Void Initialize() {
+                field1 = challenger.g();
+                field2 = challenger.g();
+            }
+            Int f() {
+                return field1 + field2;
+            }
+        }""",
+        ),
     ],
 )
 def test_remove_duplicate_fields(

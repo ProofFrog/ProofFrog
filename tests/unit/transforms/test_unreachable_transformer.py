@@ -352,6 +352,104 @@ from proof_frog.transforms.control_flow import RemoveUnreachableTransformer
             }
             """,
         ),
+        # Duplicate if-condition with return: second check is dead code
+        (
+            """
+            Int f(Int x) {
+                if (x == 0) {
+                    return 1;
+                }
+                if (x == 0) {
+                    return 2;
+                }
+                return 3;
+            }
+            """,
+            """
+            Int f(Int x) {
+                if (x == 0) {
+                    return 1;
+                }
+                return 3;
+            }
+            """,
+        ),
+        # Duplicate if-condition with intervening statement
+        (
+            """
+            Int f(Int x) {
+                if (x == 0) {
+                    return 1;
+                }
+                Int y = x + 1;
+                if (x == 0) {
+                    return 2;
+                }
+                return y;
+            }
+            """,
+            """
+            Int f(Int x) {
+                if (x == 0) {
+                    return 1;
+                }
+                Int y = x + 1;
+                return y;
+            }
+            """,
+        ),
+        # Should NOT eliminate: variable reassigned between checks
+        (
+            """
+            Int f(Int x) {
+                if (x == 0) {
+                    return 1;
+                }
+                x = x + 1;
+                if (x == 0) {
+                    return 2;
+                }
+                return 3;
+            }
+            """,
+            """
+            Int f(Int x) {
+                if (x == 0) {
+                    return 1;
+                }
+                x = x + 1;
+                if (x == 0) {
+                    return 2;
+                }
+                return 3;
+            }
+            """,
+        ),
+        # Should NOT eliminate: first if doesn't return
+        (
+            """
+            Int f(Int x) {
+                if (x == 0) {
+                    x = 5;
+                }
+                if (x == 0) {
+                    return 2;
+                }
+                return 3;
+            }
+            """,
+            """
+            Int f(Int x) {
+                if (x == 0) {
+                    x = 5;
+                }
+                if (x == 0) {
+                    return 2;
+                }
+                return 3;
+            }
+            """,
+        ),
     ],
 )
 def test_unreachable_transformer(

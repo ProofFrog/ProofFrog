@@ -10,8 +10,11 @@ import copy
 
 from .. import frog_ast
 from ..visitors import (
+    BlockTransformer,
     Transformer,
+    Visitor,
     SearchVisitor,
+    ReplaceTransformer,
     AllConstantFieldAccesses,
     GetTypeMapVisitor,
 )
@@ -265,3 +268,121 @@ class SimplifyTuple(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return SimplifyTupleTransformer(game).transform(game)
+
+
+class CollapseSingleIndexTupleTransformer(BlockTransformer):
+    """Collapses a product-typed variable accessed at a single constant index.
+
+    When a typed local ``[T0, T1] v = expr`` (where *expr* is not a tuple
+    literal) is only ever used as ``v[i]`` for one fixed index *i*, it is
+    rewritten to ``Ti v = expr[i]`` and every ``v[i]`` is replaced with ``v``.
+
+    This normalises composed-game canonical forms where a function call
+    returning a product is only partially used, matching the form produced
+    when a scheme-inlined game drops unused components.
+    """
+
+    @staticmethod
+    def _analyse_uses(var_name: str, block: frog_ast.Block) -> tuple[bool, set[int]]:
+        """Return (has_bare_use, indices_used) for *var_name* in *block*.
+
+        A "bare use" is any ``Variable(var_name)`` that is NOT the
+        ``the_array`` child of an ``ArrayAccess`` node.
+        """
+
+        class _UsageVisitor(Visitor[None]):
+            """Count total Variable refs and ArrayAccess refs."""
+
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.total_var_refs = 0
+                self.array_access_refs = 0
+                self.indices: set[int] = set()
+
+            def result(self) -> None:
+                pass
+
+            def visit_variable(self, var: frog_ast.Variable) -> None:
+                if var.name == self.name:
+                    self.total_var_refs += 1
+
+            def visit_array_access(self, aa: frog_ast.ArrayAccess) -> None:
+                if (
+                    isinstance(aa.the_array, frog_ast.Variable)
+                    and aa.the_array.name == self.name
+                ):
+                    self.array_access_refs += 1
+                    if isinstance(aa.index, frog_ast.Integer):
+                        self.indices.add(aa.index.num)
+
+        visitor = _UsageVisitor(var_name)
+        visitor.visit(block)
+        # Bare uses = total Variable refs minus those inside ArrayAccess
+        has_bare = visitor.total_var_refs > visitor.array_access_refs
+        return has_bare, visitor.indices
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for stmt_idx, statement in enumerate(block.statements):
+            if not (
+                isinstance(statement, frog_ast.Assignment)
+                and statement.the_type is not None
+                and isinstance(statement.the_type, frog_ast.ProductType)
+                and isinstance(statement.var, frog_ast.Variable)
+                and not isinstance(statement.value, frog_ast.Tuple)
+            ):
+                continue
+
+            var_name = statement.var.name
+            remaining = frog_ast.Block(list(block.statements[stmt_idx + 1 :]))
+
+            has_bare, indices_used = self._analyse_uses(var_name, remaining)
+            if has_bare or len(indices_used) != 1:
+                continue
+
+            idx = next(iter(indices_used))
+            assert isinstance(statement.the_type, frog_ast.ProductType)
+            element_type = statement.the_type.types[idx]
+
+            # Rewrite the declaration to extract just one element
+            new_decl = frog_ast.Assignment(
+                element_type,
+                frog_ast.Variable(var_name),
+                frog_ast.ArrayAccess(
+                    copy.deepcopy(statement.value),
+                    frog_ast.Integer(idx),
+                ),
+            )
+
+            new_stmts = (
+                list(block.statements[:stmt_idx])
+                + [new_decl]
+                + list(block.statements[stmt_idx + 1 :])
+            )
+            new_block = frog_ast.Block(new_stmts)
+
+            # Replace all ArrayAccess(v, idx) with Variable(v)
+            target = frog_ast.ArrayAccess(
+                frog_ast.Variable(var_name), frog_ast.Integer(idx)
+            )
+            while True:
+                found = SearchVisitor(
+                    lambda n, t=target: (  # type: ignore[misc]
+                        isinstance(n, frog_ast.ArrayAccess) and n == t
+                    )
+                ).visit(new_block)
+                if found is None:
+                    break
+                new_block = ReplaceTransformer(
+                    found, frog_ast.Variable(var_name)
+                ).transform(new_block)
+
+            return self.transform(new_block)
+
+        return block
+
+
+class CollapseSingleIndexTuple(TransformPass):
+    name = "Collapse Single-Index Tuple Access"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return CollapseSingleIndexTupleTransformer().transform(game)

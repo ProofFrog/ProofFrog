@@ -1069,15 +1069,17 @@ class ProofEngine:
             )
 
         dfs_stack: list[dependencies.Node] = []
-        dfs_stack_visited = [False] * len(block.statements)
+        # Use identity-keyed visited set to handle duplicate statements
+        dfs_visited_ids: set[int] = set()
         dfs_sorted_statements: list[frog_ast.Statement] = []
 
         def do_dfs() -> None:
             while dfs_stack:
                 node = dfs_stack.pop()
-                if not dfs_stack_visited[block.statements.index(node.statement)]:
+                stmt_id = id(node.statement)
+                if stmt_id not in dfs_visited_ids:
                     dfs_sorted_statements.append(node.statement)
-                    dfs_stack_visited[block.statements.index(node.statement)] = True
+                    dfs_visited_ids.add(stmt_id)
                     for neighbour in node.in_neighbours:
                         dfs_stack.append(neighbour)
 
@@ -1096,7 +1098,7 @@ class ProofEngine:
                 ]
 
             found = visitors.SearchVisitor(uses_field).visit(statement)
-            if statement not in dfs_sorted_statements and found is not None:
+            if id(statement) not in dfs_visited_ids and found is not None:
                 dfs_stack.append(graph.get_node(statement))
                 do_dfs()
 

@@ -789,15 +789,46 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
             def contains_func(node: frog_ast.ASTNode) -> bool:
                 return isinstance(node, frog_ast.FuncCall)
 
-            if SearchVisitor(contains_func).visit(statement) is not None or isinstance(
-                statement, frog_ast.Sample
-            ):
+            has_func_call = SearchVisitor(contains_func).visit(
+                statement
+            ) is not None or isinstance(statement, frog_ast.Sample)
+
+            if has_func_call:
+                # Assignments with function calls can't be matched by
+                # expression equality (the call may return different
+                # values each time).  However, a direct copy of the
+                # field IS safe: field1 = K.f(); field2 = field1.
+                def reads_pair_fc(pn: str, node: frog_ast.ASTNode) -> bool:
+                    return isinstance(node, frog_ast.Variable) and node.name == pn
+
+                copy_paired = False
+                for subsequent_statement in block.statements[index + 1 :]:
+                    if (
+                        isinstance(subsequent_statement, frog_ast.Assignment)
+                        and isinstance(subsequent_statement.var, frog_ast.Variable)
+                        and subsequent_statement.var.name == pair_name
+                        and isinstance(subsequent_statement.value, frog_ast.Variable)
+                        and subsequent_statement.value.name == assigned_name
+                    ):
+                        copy_paired = True
+                        self.paired_statements.append(subsequent_statement)
+                        break
+                    if (
+                        SearchVisitor(
+                            functools.partial(reads_pair_fc, pair_name)
+                        ).visit(subsequent_statement)
+                        is not None
+                    ):
+                        break
+                if copy_paired:
+                    continue
                 self.are_same = False
                 return
 
             def reads_pair(pair_name: str, node: frog_ast.ASTNode) -> bool:
                 return isinstance(node, frog_ast.Variable) and node.name == pair_name
 
+            assert isinstance(statement, frog_ast.Assignment)
             used_variables = VariableCollectionVisitor().visit(statement.value)
 
             assigns_variable_partial = functools.partial(

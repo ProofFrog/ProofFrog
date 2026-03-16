@@ -297,15 +297,66 @@ class RemoveUnreachableTransformer(BlockTransformer):
 
         formula_visitor = Z3FormulaVisitor(NameTypeMap())
 
+        # Track if-conditions with unconditional returns that have
+        # already been seen.  A subsequent if with the same condition
+        # is dead code (the earlier check already returned).
+        seen_return_conditions: list[frog_ast.Expression] = []
+        dead_indices: list[int] = []
         for index, statement in enumerate(block.statements):
             if not isinstance(statement, frog_ast.IfStatement):
+                old_versions = dict(variable_version_map)
                 update_version(statement)
+                # If any variable was modified, invalidate syntactic
+                # condition tracking (the same expression may now
+                # evaluate differently).
+                if variable_version_map != old_versions:
+                    seen_return_conditions.clear()
                 continue
 
             if statement.has_else_block() and all(
                 contains_unconditional_return(if_block) for if_block in statement.blocks
             ):
-                return frog_ast.Block(block.statements[: index + 1])
+                new_stmts = [
+                    s
+                    for i, s in enumerate(block.statements[: index + 1])
+                    if i not in dead_indices
+                ]
+                return frog_ast.Block(new_stmts)
+
+            # Syntactic check: if all conditions match a previously-seen
+            # return condition AND the if has an unconditional return and
+            # no else, the if-statement is dead.
+            if (
+                not statement.has_else_block()
+                and all(contains_unconditional_return(b) for b in statement.blocks)
+                and all(cond in seen_return_conditions for cond in statement.conditions)
+            ):
+                dead_indices.append(index)
+                continue
+
+            # Z3-based check for more complex subsumption
+            if formula_so_far is not None and not statement.has_else_block():
+                type_map = GetTypeMapVisitor(statement).visit(self.ast)
+                formula_visitor.set_type_map(type_map)
+                formula_visitor.set_variable_version_map(variable_version_map)
+                all_conditions_dead = True
+                for condition in statement.conditions:
+                    cond_formula = formula_visitor.visit(condition)
+                    if cond_formula is None:
+                        all_conditions_dead = False
+                        break
+                    dead_solver = z3.Solver()
+                    dead_solver.set("timeout", 30000)
+                    dead_solver.add(z3.And(z3.Not(formula_so_far), cond_formula))
+                    if dead_solver.check() != z3.unsat:
+                        all_conditions_dead = False
+                        break
+                if all_conditions_dead and all(
+                    contains_unconditional_return(b) for b in statement.blocks
+                ):
+                    dead_indices.append(index)
+                    continue
+
             solver = z3.Solver()
             solver.set("timeout", 30000)
 
@@ -336,14 +387,28 @@ class RemoveUnreachableTransformer(BlockTransformer):
                     )
                 condition_formulae.append(individual_formula)
 
+            # Track conditions that lead to unconditional returns
+            for condition_index, condition in enumerate(statement.conditions):
+                if contains_unconditional_return(statement.blocks[condition_index]):
+                    seen_return_conditions.append(condition)
+
             update_version(statement)
             if formula_so_far is not None:
                 solver.add(z3.Not(formula_so_far))
             satisfiable = solver.check()
             solver.reset()
             if satisfiable == z3.unsat:
-                return frog_ast.Block(block.statements[: index + 1])
+                new_stmts = [
+                    s
+                    for i, s in enumerate(block.statements[: index + 1])
+                    if i not in dead_indices
+                ]
+                return frog_ast.Block(new_stmts)
 
+        if dead_indices:
+            return frog_ast.Block(
+                [s for i, s in enumerate(block.statements) if i not in dead_indices]
+            )
         return block
 
 

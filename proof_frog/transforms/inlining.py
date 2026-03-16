@@ -517,9 +517,16 @@ class RedundantFieldCopyTransformer(BlockTransformer):
                         decl_index = other_index
                         decl_statement = other_statement
                         continue
+                    # Check that the local variable being copied has no
+                    # other uses besides the field assignment and its
+                    # own declaration.  We must check uses of the local
+                    # variable (statement.value), not the field
+                    # (statement.var), to avoid leaving dangling
+                    # references when the local is also used elsewhere.
+                    assert isinstance(statement.value, frog_ast.Variable)
                     if (
                         SearchVisitor(
-                            functools.partial(search_for_other_use, statement.var)
+                            functools.partial(search_for_other_use, statement.value)
                         ).visit(other_statement)
                         is not None
                     ):
@@ -546,10 +553,10 @@ class RedundantFieldCopyTransformer(BlockTransformer):
 class ForwardExpressionAliasTransformer(BlockTransformer):
     """Replaces repeated pure expressions with their named variable.
 
-    When a typed assignment ``Type v = expr`` defines a named alias for a
-    deterministic expression (no function calls) that is not a plain variable
-    or tuple literal, subsequent structurally-identical occurrences of
-    ``expr`` are replaced with ``v``.
+    When an assignment ``v = expr`` (typed local or field assignment) defines
+    a named alias for a deterministic expression (no function calls) that is
+    not a plain variable or tuple literal, subsequent structurally-identical
+    occurrences of ``expr`` are replaced with ``v``.
 
     This is safe because the expression is deterministic and neither ``v``
     nor any free variable in ``expr`` is reassigned between the definition
@@ -566,15 +573,92 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
         return F(v3, v3);
     """
 
+    def __init__(self) -> None:
+        self.fields: list[str] = []
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        self.fields = [field.name for field in game.fields]
+        new_game = copy.deepcopy(game)
+        new_game.methods = [self.transform(method) for method in new_game.methods]
+        return new_game
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
-            if not (
+            is_typed_decl = (
                 isinstance(statement, frog_ast.Assignment)
                 and statement.the_type is not None
                 and isinstance(statement.var, frog_ast.Variable)
-                and not isinstance(statement.value, frog_ast.Variable)
-                and not isinstance(statement.value, frog_ast.Tuple)
-            ):
+            )
+            is_field_assign = (
+                isinstance(statement, frog_ast.Assignment)
+                and statement.the_type is None
+                and isinstance(statement.var, frog_ast.Variable)
+                and statement.var.name in self.fields
+            )
+            if not (is_typed_decl or is_field_assign):
+                continue
+            assert isinstance(statement, frog_ast.Assignment)
+            assert isinstance(statement.var, frog_ast.Variable)
+            # For field assignments from a variable (field = v or
+            # field1 = field2), propagate the source name → field name
+            # in subsequent code.
+            if is_field_assign and isinstance(statement.value, frog_ast.Variable):
+                local_name = statement.value.name
+                field_name = statement.var.name
+                remaining_block = frog_ast.Block(
+                    copy.deepcopy(block.statements[index + 1 :])
+                )
+
+                def is_written_to_fv(name: str, node: frog_ast.ASTNode) -> bool:
+                    return (
+                        isinstance(
+                            node,
+                            (
+                                frog_ast.Sample,
+                                frog_ast.Assignment,
+                                frog_ast.UniqueSample,
+                            ),
+                        )
+                        and isinstance(node.var, frog_ast.Variable)
+                        and node.var.name == name
+                    )
+
+                # Only propagate if the local is not reassigned after
+                if (
+                    SearchVisitor(
+                        functools.partial(is_written_to_fv, local_name)
+                    ).visit(remaining_block)
+                    is not None
+                ):
+                    continue
+                # And the field is not reassigned after
+                if (
+                    SearchVisitor(
+                        functools.partial(is_written_to_fv, field_name)
+                    ).visit(remaining_block)
+                    is not None
+                ):
+                    continue
+
+                # Find and replace one occurrence of the local variable
+                def matches_local(name: str, node: frog_ast.ASTNode) -> bool:
+                    return isinstance(node, frog_ast.Variable) and node.name == name
+
+                match = SearchVisitor(
+                    functools.partial(matches_local, local_name)
+                ).visit(remaining_block)
+                if match is not None:
+                    remaining_block = ReplaceTransformer(
+                        match, frog_ast.Variable(field_name)
+                    ).transform(remaining_block)
+                    return self._transform_block_wrapper(
+                        frog_ast.Block(
+                            copy.deepcopy(block.statements[: index + 1])
+                            + list(remaining_block.statements)
+                        )
+                    )
+                continue
+            if isinstance(statement.value, (frog_ast.Variable, frog_ast.Tuple)):
                 continue
 
             var_name = statement.var.name

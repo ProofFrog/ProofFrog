@@ -15,11 +15,17 @@ from .sampling import (
     CounterGuardedFieldToLocal,
     SinkUniformSample,
 )
-from .random_functions import ExtractRFCalls, UniqueRFSimplification, LocalRFToUniform
+from .random_functions import (
+    ExtractRFCalls,
+    UniqueRFSimplification,
+    ChallengeExclusionRFToUniform,
+    LocalRFToUniform,
+)
 from .inlining import (
     RedundantCopy,
     InlineSingleUseVariable,
     ForwardExpressionAlias,
+    HoistFieldPureAlias,
     InlineMultiUsePureExpression,
     CollapseAssignment,
     RedundantFieldCopy,
@@ -40,6 +46,8 @@ from .structural import (
     TrivialEncodingElimination,
 )
 from .control_flow import (
+    IfConditionAliasSubstitution,
+    RedundantConditionalReturn,
     BranchElimination,
     SimplifyReturn,
     SimplifyIf,
@@ -56,6 +64,7 @@ from .standardization import (
     VariableStandardize,
     StandardizeFieldNames,
     BubbleSortFieldAssignments,
+    StabilizeIndependentStatements,
 )
 
 CORE_PIPELINE: list[TransformPass] = [
@@ -70,6 +79,7 @@ CORE_PIPELINE: list[TransformPass] = [
     FoldTupleIndex(),
     ExtractRFCalls(),
     UniqueRFSimplification(),
+    ChallengeExclusionRFToUniform(),
     LocalRFToUniform(),
     RedundantCopy(),
     InlineSingleUseVariable(),
@@ -77,7 +87,10 @@ CORE_PIPELINE: list[TransformPass] = [
     UniformXorSimplification(),
     UniformModIntSimplification(),
     TopologicalSort(),
+    HoistFieldPureAlias(),
     RemoveDuplicateFields(),
+    IfConditionAliasSubstitution(),
+    RedundantConditionalReturn(),
     BranchElimination(),
     RemoveUnnecessaryFields(),
     CollapseAssignment(),
@@ -103,4 +116,6 @@ STANDARDIZATION_PIPELINE: list[TransformPass] = [
     VariableStandardize(),
     StandardizeFieldNames(),
     BubbleSortFieldAssignments(),
+    StabilizeIndependentStatements(),
+    VariableStandardize(),
 ]

@@ -785,3 +785,163 @@ class RedundantFieldCopy(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return RedundantFieldCopyTransformer().transform(game)
+
+
+class HoistFieldPureAliasTransformer(BlockTransformer):
+    """Hoists field assignments of pure expressions before their first use.
+
+    When a field assignment ``field = pure_expr`` (where pure_expr contains no
+    function calls) appears AFTER a statement that uses the same ``pure_expr``
+    as a subexpression, this transform moves the field assignment to just before
+    that earlier use and replaces the subexpression with the field variable.
+
+    This ensures consistent canonical forms between compositions (where
+    the field assignment may be ordered after a function call using the
+    same subexpression) and intermediate games (where the field assignment
+    naturally precedes the function call).
+
+    Example::
+
+        [SS, CT] v3 = KEM1.Encaps(v1[0]);
+        field5 = v1[0];
+      becomes:
+        field5 = v1[0];
+        [SS, CT] v3 = KEM1.Encaps(field5);
+    """
+
+    def __init__(self) -> None:
+        self.fields: list[str] = []
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        self.fields = [field.name for field in game.fields]
+        new_game = copy.deepcopy(game)
+        new_game.methods = [self.transform(method) for method in new_game.methods]
+        return new_game
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for i, statement in enumerate(block.statements):
+            # Only handle field assignments from pure expressions
+            if not (
+                isinstance(statement, frog_ast.Assignment)
+                and statement.the_type is None
+                and isinstance(statement.var, frog_ast.Variable)
+                and statement.var.name in self.fields
+            ):
+                continue
+            expr = statement.value
+            field_name = statement.var.name
+            # Skip if the expression is a plain variable, tuple, or literal
+            if isinstance(
+                expr,
+                (
+                    frog_ast.Variable,
+                    frog_ast.Tuple,
+                    frog_ast.Integer,
+                    frog_ast.Boolean,
+                    frog_ast.NoneExpression,
+                    frog_ast.BitStringLiteral,
+                ),
+            ):
+                continue
+            # Only hoist array accesses (the pattern that causes ordering issues)
+            if not isinstance(expr, frog_ast.ArrayAccess):
+                continue
+            # Only handle pure expressions (no function calls)
+            if (
+                SearchVisitor(lambda n: isinstance(n, frog_ast.FuncCall)).visit(expr)
+                is not None
+            ):
+                continue
+
+            # Look for a structurally-equal subexpression in earlier statements
+            def matches_expr(
+                target: frog_ast.Expression, node: frog_ast.ASTNode
+            ) -> bool:
+                return (
+                    isinstance(node, frog_ast.Expression)
+                    and type(node) is type(target)
+                    and node == target
+                )
+
+            for j in range(i):
+                earlier = block.statements[j]
+                match = SearchVisitor(functools.partial(matches_expr, expr)).visit(
+                    earlier
+                )
+                if match is None:
+                    continue
+
+                # Verify the field is not referenced between j and i
+                def refs_field(name: str, node: frog_ast.ASTNode) -> bool:
+                    return isinstance(node, frog_ast.Variable) and node.name == name
+
+                conflict = False
+                for k in range(j, i):
+                    if (
+                        SearchVisitor(functools.partial(refs_field, field_name)).visit(
+                            block.statements[k]
+                        )
+                        is not None
+                    ):
+                        conflict = True
+                        break
+                if conflict:
+                    continue
+                # Verify free variables of expr are all defined before j
+                free_vars = VariableCollectionVisitor().visit(copy.deepcopy(expr))
+                all_defined = True
+                for fv in free_vars:
+                    if fv.name in self.fields:
+                        continue
+                    # Check that fv is assigned in some statement before j
+
+                    def assigns_var(name: str, node: frog_ast.ASTNode) -> bool:
+                        return (
+                            isinstance(
+                                node,
+                                (
+                                    frog_ast.Sample,
+                                    frog_ast.Assignment,
+                                    frog_ast.UniqueSample,
+                                ),
+                            )
+                            and isinstance(node.var, frog_ast.Variable)
+                            and node.var.name == name
+                        )
+
+                    found_def = False
+                    for k in range(j):
+                        if (
+                            SearchVisitor(
+                                functools.partial(assigns_var, fv.name)
+                            ).visit(block.statements[k])
+                            is not None
+                        ):
+                            found_def = True
+                            break
+                    if not found_def:
+                        all_defined = False
+                        break
+                if not all_defined:
+                    continue
+                # Hoist: move field assignment to before position j,
+                # replace the subexpression in position j with the field
+                new_earlier = ReplaceTransformer(
+                    match, frog_ast.Variable(field_name)
+                ).transform(copy.deepcopy(earlier))
+                new_stmts = (
+                    list(block.statements[:j])
+                    + [copy.deepcopy(statement)]
+                    + [new_earlier]
+                    + list(block.statements[j + 1 : i])
+                    + list(block.statements[i + 1 :])
+                )
+                return self._transform_block_wrapper(frog_ast.Block(new_stmts))
+        return block
+
+
+class HoistFieldPureAlias(TransformPass):
+    name = "Hoist Field Pure Alias"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return HoistFieldPureAliasTransformer().transform(game)

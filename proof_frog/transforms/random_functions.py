@@ -467,3 +467,344 @@ class LocalRFToUniform(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return LocalRFToUniformTransformer().transform(game)
+
+
+# ---------------------------------------------------------------------------
+# Challenge exclusion: RF(unique_input) -> uniform in Initialize
+# ---------------------------------------------------------------------------
+
+
+def _extract_field_names_from_expr(
+    expr: frog_ast.Expression, field_names: list[str]
+) -> set[str]:
+    """Extract field variable names from an expression (recursing into tuples)."""
+    result: set[str] = set()
+    if isinstance(expr, frog_ast.Variable) and expr.name in field_names:
+        result.add(expr.name)
+    elif isinstance(expr, frog_ast.Tuple):
+        for v in expr.values:
+            result.update(_extract_field_names_from_expr(v, field_names))
+    return result
+
+
+def _extract_non_field_vars(
+    expr: frog_ast.Expression, field_names: list[str]
+) -> set[str]:
+    """Extract non-field variable names from an expression (recursing into tuples)."""
+    result: set[str] = set()
+    if isinstance(expr, frog_ast.Variable) and expr.name not in field_names:
+        result.add(expr.name)
+    elif isinstance(expr, frog_ast.Tuple):
+        for v in expr.values:
+            result.update(_extract_non_field_vars(v, field_names))
+    return result
+
+
+def _find_challenge_guard(
+    method: frog_ast.Method,
+    field_names: list[str],
+) -> tuple[set[str], set[str], int] | None:
+    """Find a challenge exclusion guard at the top of an oracle method.
+
+    Looks for the pattern:
+        if (param_expr == [field_a, field_b, ...]) { return None/value; }
+    or:
+        if (param_expr == field_a) { return None/value; }
+
+    at the start of the method body (possibly after local assignments).
+
+    Returns (challenge field names, guard LHS variable names,
+    index of the if-statement) or None.
+    """
+    for idx, stmt in enumerate(method.block.statements):
+        if not isinstance(stmt, frog_ast.IfStatement):
+            continue
+        if not stmt.conditions:
+            continue
+        cond = stmt.conditions[0]
+        if not isinstance(cond, frog_ast.BinaryOperation):
+            continue
+        if cond.operator != frog_ast.BinaryOperators.EQUALS:
+            continue
+
+        # Check if the guard returns early (return in the first block)
+        if not stmt.blocks[0].statements:
+            continue
+        if not isinstance(stmt.blocks[0].statements[-1], frog_ast.ReturnStatement):
+            continue
+
+        # Extract challenge fields from the right side of the comparison
+        rhs = cond.right_expression
+        challenge_fields = _extract_field_names_from_expr(rhs, field_names)
+
+        # Extract LHS variable names (non-field variables constrained by guard)
+        lhs = cond.left_expression
+        guard_lhs_vars = _extract_non_field_vars(lhs, field_names)
+
+        if challenge_fields:
+            return challenge_fields, guard_lhs_vars, idx
+
+    return None
+
+
+def _collect_field_vars(expr: frog_ast.Expression, field_names: list[str]) -> set[str]:
+    """Collect all field variable names referenced in an expression."""
+    found: set[str] = set()
+
+    def searcher(node: frog_ast.ASTNode) -> bool:
+        if isinstance(node, frog_ast.Variable) and node.name in field_names:
+            found.add(node.name)
+        return False
+
+    SearchVisitor(searcher).visit(expr)
+    return found
+
+
+def _collect_rf_call_sites(
+    block: frog_ast.Block,
+    rf_name: str,
+) -> list[frog_ast.FuncCall]:
+    """Collect all RF call sites in a block (recursing into sub-blocks)."""
+    sites: list[frog_ast.FuncCall] = []
+
+    def finder(node: frog_ast.ASTNode) -> bool:
+        if (
+            isinstance(node, frog_ast.FuncCall)
+            and isinstance(node.func, frog_ast.Variable)
+            and node.func.name == rf_name
+        ):
+            sites.append(node)
+        return False
+
+    SearchVisitor(finder).visit(block)
+    return sites
+
+
+def _rf_args_structurally_differ(
+    init_arg: frog_ast.Expression,
+    oracle_arg: frog_ast.Expression,
+    challenge_fields: set[str],
+    field_names: list[str],
+    guard_vars: set[str],
+) -> bool:
+    """Check if Init and oracle RF args differ at a challenge field position.
+
+    For tuple arguments, checks each position. For concatenation sub-expressions,
+    flattens and checks leaf operands.
+    """
+
+    def _flatten_concat(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
+        if (
+            isinstance(expr, frog_ast.BinaryOperation)
+            and expr.operator == frog_ast.BinaryOperators.OR
+        ):
+            return _flatten_concat(expr.left_expression) + _flatten_concat(
+                expr.right_expression
+            )
+        return [expr]
+
+    def _check_leaf_pair(
+        init_leaf: frog_ast.Expression, oracle_leaf: frog_ast.Expression
+    ) -> bool:
+        """True if init_leaf is a challenge field and oracle_leaf is a
+        guard-constrained non-field variable."""
+        if not isinstance(init_leaf, frog_ast.Variable):
+            return False
+        if init_leaf.name not in challenge_fields:
+            return False
+        # Oracle leaf must be a non-field variable that is constrained by the guard
+        if isinstance(oracle_leaf, frog_ast.Variable):
+            return (
+                oracle_leaf.name not in field_names and oracle_leaf.name in guard_vars
+            )
+        return False
+
+    def _check_exprs(
+        init_e: frog_ast.Expression, oracle_e: frog_ast.Expression
+    ) -> bool:
+        # Direct leaf comparison
+        if _check_leaf_pair(init_e, oracle_e):
+            return True
+        # Tuple: check each position
+        if isinstance(init_e, frog_ast.Tuple) and isinstance(oracle_e, frog_ast.Tuple):
+            if len(init_e.values) == len(oracle_e.values):
+                return any(
+                    _check_exprs(a, b) for a, b in zip(init_e.values, oracle_e.values)
+                )
+        # Concatenation: flatten and check leaf pairs
+        init_leaves = _flatten_concat(init_e)
+        oracle_leaves = _flatten_concat(oracle_e)
+        if len(init_leaves) > 1 and len(init_leaves) == len(oracle_leaves):
+            return any(
+                _check_leaf_pair(a, b) for a, b in zip(init_leaves, oracle_leaves)
+            )
+        return False
+
+    return _check_exprs(init_arg, oracle_arg)
+
+
+class ChallengeExclusionRFToUniformTransformer:
+    """Replace an RF field call in Initialize with a uniform sample when the
+    call's input is guaranteed distinct from all oracle RF calls by a
+    challenge exclusion guard.
+
+    See docs/plans/2026-03-16-rf-challenge-exclusion-design.md for the full
+    design and soundness argument.
+    """
+
+    def transform(self, game: frog_ast.Game) -> frog_ast.Game:
+        """Transform a game, replacing qualifying RF calls with uniform samples."""
+        field_names = [f.name for f in game.fields]
+        rf_fields: dict[str, frog_ast.RandomFunctionType] = {}
+        for f in game.fields:
+            if isinstance(f.type, frog_ast.RandomFunctionType):
+                rf_fields[f.name] = f.type
+
+        if not rf_fields:
+            return game
+
+        # Identify Initialize method
+        init_method = None
+        oracle_methods: list[frog_ast.Method] = []
+        for method in game.methods:
+            if method.signature.name == "Initialize":
+                init_method = method
+            else:
+                oracle_methods.append(method)
+
+        if init_method is None:
+            return game
+
+        for rf_name, rf_type in rf_fields.items():
+            # Collect Init RF call sites (only standalone assignments)
+            init_calls: list[tuple[int, frog_ast.Assignment]] = []
+            for idx, stmt in enumerate(init_method.block.statements):
+                if (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and isinstance(stmt.value, frog_ast.FuncCall)
+                    and isinstance(stmt.value.func, frog_ast.Variable)
+                    and stmt.value.func.name == rf_name
+                    and len(stmt.value.args) == 1
+                ):
+                    init_calls.append((idx, stmt))
+
+            if len(init_calls) != 1:
+                continue
+
+            init_idx, init_stmt = init_calls[0]
+            assert isinstance(init_stmt.value, frog_ast.FuncCall)
+            init_arg = init_stmt.value.args[0]
+
+            # Check that Init arg references at least one challenge field
+            init_field_refs = _collect_field_vars(init_arg, field_names)
+
+            # Check each oracle method
+            all_oracle_ok = True
+            for oracle_method in oracle_methods:
+                guard_result = _find_challenge_guard(oracle_method, field_names)
+                if guard_result is None:
+                    # No guard -- check if there are any RF calls at all
+                    oracle_rf_calls = _collect_rf_call_sites(
+                        oracle_method.block, rf_name
+                    )
+                    if oracle_rf_calls:
+                        all_oracle_ok = False
+                        break
+                    continue
+
+                challenge_fields, guard_lhs_vars, guard_idx = guard_result
+
+                # Extend guard vars with variables derived from guard LHS
+                # (e.g., v4 = c[0] where c is the guard parameter)
+                for post_stmt in oracle_method.block.statements[guard_idx + 1 :]:
+                    if (
+                        isinstance(post_stmt, frog_ast.Assignment)
+                        and isinstance(post_stmt.var, frog_ast.Variable)
+                        and isinstance(post_stmt.value, frog_ast.ArrayAccess)
+                        and isinstance(post_stmt.value.the_array, frog_ast.Variable)
+                        and post_stmt.value.the_array.name in guard_lhs_vars
+                    ):
+                        guard_lhs_vars.add(post_stmt.var.name)
+
+                # Init arg must reference at least one challenge field
+                if not init_field_refs & challenge_fields:
+                    all_oracle_ok = False
+                    break
+
+                # All oracle RF calls must be AFTER the guard
+                pre_guard_block = frog_ast.Block(
+                    list(oracle_method.block.statements[:guard_idx])
+                )
+                pre_guard_calls = _collect_rf_call_sites(pre_guard_block, rf_name)
+                if pre_guard_calls:
+                    all_oracle_ok = False
+                    break
+
+                # Check structural difference for post-guard RF calls
+                post_guard_block = frog_ast.Block(
+                    list(oracle_method.block.statements[guard_idx + 1 :])
+                )
+                # Also check inside the guard's else/else-if blocks (not the
+                # return-early block)
+                guard_stmt = oracle_method.block.statements[guard_idx]
+                assert isinstance(guard_stmt, frog_ast.IfStatement)
+                extra_blocks = list(guard_stmt.blocks[1:])
+
+                all_post_calls = _collect_rf_call_sites(post_guard_block, rf_name)
+                for eb in extra_blocks:
+                    all_post_calls.extend(_collect_rf_call_sites(eb, rf_name))
+
+                for call in all_post_calls:
+                    if len(call.args) != 1:
+                        all_oracle_ok = False
+                        break
+                    if not _rf_args_structurally_differ(
+                        init_arg,
+                        call.args[0],
+                        challenge_fields,
+                        field_names,
+                        guard_lhs_vars,
+                    ):
+                        all_oracle_ok = False
+                        break
+
+                if not all_oracle_ok:
+                    break
+
+            if not all_oracle_ok:
+                continue
+
+            # Pattern matched -- replace Init RF call with uniform sample
+            new_game = copy.deepcopy(game)
+            new_init = None
+            for m in new_game.methods:
+                if m.signature.name == "Initialize":
+                    new_init = m
+                    break
+            assert new_init is not None
+
+            old_stmt = new_init.block.statements[init_idx]
+            assert isinstance(old_stmt, frog_ast.Assignment)
+            new_sample = frog_ast.Sample(
+                old_stmt.the_type,
+                copy.deepcopy(old_stmt.var),
+                copy.deepcopy(rf_type.range_type),  # type: ignore[arg-type]
+            )
+            new_stmts = (
+                list(new_init.block.statements[:init_idx])
+                + [new_sample]
+                + list(new_init.block.statements[init_idx + 1 :])
+            )
+            new_init.block = frog_ast.Block(new_stmts)
+            return new_game
+
+        return game
+
+
+class ChallengeExclusionRFToUniform(TransformPass):
+    """Replace RF field calls in Initialize with uniform samples when excluded."""
+
+    name = "Challenge Exclusion RF To Uniform"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return ChallengeExclusionRFToUniformTransformer().transform(game)

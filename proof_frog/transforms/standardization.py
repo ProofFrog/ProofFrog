@@ -130,3 +130,86 @@ class BubbleSortFieldAssignments(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return dependencies.BubbleSortFieldAssignment().transform(game)
+
+
+class _StabilizeIndependentStatementsTransformer(BlockTransformer):
+    """Sorts independent assignment/sample statements by their value expression.
+
+    After variable standardization, two semantically equivalent games may still
+    differ in the order of independent statements (e.g.,
+    ``v1 = KEM2.KeyGen(); v2 = KEM1.KeyGen()`` vs.
+    ``v1 = KEM1.KeyGen(); v2 = KEM2.KeyGen()``).  This transform sorts such
+    independent pairs by a key derived from the value expression (with the
+    assigned variable name replaced by a placeholder), producing a canonical
+    order.  A subsequent ``VariableStandardize`` pass re-normalises variable
+    names after the reordering.
+
+    Only adjacent typed declaration pairs whose values differ and that have no
+    dependency between them are swapped.
+    """
+
+    def __init__(self) -> None:
+        self.fields: list[str] = []
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        self.fields = [f.name for f in game.fields]
+        new_game = copy.deepcopy(game)
+        new_game.methods = [self.transform(m) for m in new_game.methods]
+        return new_game
+
+    @staticmethod
+    def _value_key(stmt: frog_ast.Statement) -> str:
+        """Sort key based on the RHS expression, ignoring the assigned name."""
+        if isinstance(stmt, frog_ast.Assignment) and stmt.the_type is not None:
+            return str(stmt.the_type) + " = " + str(stmt.value)
+        if isinstance(stmt, (frog_ast.Sample, frog_ast.UniqueSample)):
+            if stmt.the_type is not None:
+                return str(stmt.the_type) + " <- " + str(stmt.sampled_from)
+        return ""
+
+    def _is_typed_decl(self, stmt: frog_ast.Statement) -> bool:
+        if not isinstance(
+            stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ):
+            return False
+        if not isinstance(stmt.var, frog_ast.Variable):
+            return False
+        if stmt.the_type is None:
+            return False
+        # Only sort non-field declarations
+        return stmt.var.name not in self.fields
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        graph = dependencies.generate_dependency_graph(
+            block, [frog_ast.Field(frog_ast.Void(), f, None) for f in self.fields], {}
+        )
+        new_stmts = list(block.statements)
+        swapped = True
+        while swapped:
+            swapped = False
+            for i in range(1, len(new_stmts)):
+                first, second = new_stmts[i - 1], new_stmts[i]
+                if not (self._is_typed_decl(first) and self._is_typed_decl(second)):
+                    continue
+                key_a = self._value_key(first)
+                key_b = self._value_key(second)
+                if not key_a or not key_b or key_a <= key_b:
+                    continue
+                # Check independence
+                node_a = graph.get_node(first)
+                node_b = graph.get_node(second)
+                if node_a in node_b.in_neighbours or node_b in node_a.in_neighbours:
+                    continue
+                new_stmts[i - 1] = second
+                new_stmts[i] = first
+                swapped = True
+        if new_stmts == list(block.statements):
+            return block
+        return frog_ast.Block(new_stmts)
+
+
+class StabilizeIndependentStatements(TransformPass):
+    name = "Stabilize Independent Statements"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return _StabilizeIndependentStatementsTransformer().transform(game)

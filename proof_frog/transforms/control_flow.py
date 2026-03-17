@@ -412,9 +412,216 @@ class RemoveUnreachableTransformer(BlockTransformer):
         return block
 
 
+class IfConditionAliasSubstitutionTransformer(BlockTransformer):
+    """Substitutes field references with local/parameter aliases inside if-branches.
+
+    When a condition is ``A == B`` where A is a local variable or method
+    parameter and B is a field (or vice-versa), B is replaced by A within
+    the if-branch body.  This brings the if-branch into the same form as
+    the else-branch, enabling ``SimplifyIf`` to merge identical branches and
+    ``BranchElimination`` to collapse the resulting trivially-true conditional.
+
+    Additionally, when a single-assignment field's definition contains the
+    comparison field, the field reference is first inlined (replaced with
+    its defining expression) in the if-branch before the alias substitution.
+    This handles cross-method patterns like::
+
+        Initialize: field4 = KEM.Decaps(field7, field1);
+        Decaps:     if (v5 == field1) { return F(field4, ...); }
+
+    which becomes ``F(KEM.Decaps(field7, v5), ...)`` after inlining + alias,
+    matching the else-branch ``F(KEM.Decaps(field7, v5), ...)``.
+
+    Only the first (if) branch is rewritten; else-if and else blocks are
+    left untouched because the equality guarantee only holds in the branch
+    whose condition asserts it.
+    """
+
+    def __init__(self) -> None:
+        self.field_names: list[str] = []
+        self.param_names: list[str] = []
+        # Maps field name -> its assigned expression (only for single-assignment fields
+        # whose definition is composed entirely of other fields)
+        self.field_definitions: dict[str, frog_ast.Expression] = {}
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        self.field_names = [field.name for field in game.fields]
+        self._collect_field_definitions(game)
+        new_game = copy.deepcopy(game)
+        new_game.methods = [self._transform_method(m) for m in new_game.methods]
+        return new_game
+
+    def _collect_field_definitions(self, game: frog_ast.Game) -> None:
+        """Collect single-assignment field definitions from top-level statements."""
+        assign_counts: dict[str, int] = {}
+        definitions: dict[str, frog_ast.Expression] = {}
+
+        for method in game.methods:
+            for stmt in method.block.statements:
+                if not isinstance(stmt, frog_ast.Assignment):
+                    continue
+                if not isinstance(stmt.var, frog_ast.Variable):
+                    continue
+                name = stmt.var.name
+                if name not in self.field_names:
+                    continue
+                assign_counts[name] = assign_counts.get(name, 0) + 1
+                definitions[name] = stmt.value
+
+        # Keep only single-assignment fields whose definitions reference
+        # only other fields (not locals/params from the assigning method)
+        self.field_definitions = {}
+        for name, expr in definitions.items():
+            if assign_counts.get(name, 0) != 1:
+                continue
+            used_vars = VariableCollectionVisitor().visit(expr)
+            if not all(v.name in self.field_names for v in used_vars):
+                continue
+            # Referenced fields must also be single-assignment — if a
+            # referenced field is reassigned after this definition, the
+            # stored value diverges from the current field value.
+            if not all(assign_counts.get(v.name, 0) == 1 for v in used_vars):
+                continue
+            self.field_definitions[name] = expr
+
+    def _transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        self.param_names = [p.name for p in method.signature.parameters]
+        return self.transform(method)
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if not isinstance(statement, frog_ast.IfStatement):
+                continue
+            if len(statement.conditions) < 1:
+                continue
+            condition = statement.conditions[0]
+            if not isinstance(condition, frog_ast.BinaryOperation):
+                continue
+            if condition.operator != frog_ast.BinaryOperators.EQUALS:
+                continue
+
+            local_expr, field_expr = self._classify_alias_pair(
+                condition.left_expression, condition.right_expression
+            )
+            if local_expr is None or field_expr is None:
+                continue
+
+            new_branch = copy.deepcopy(statement.blocks[0])
+
+            # Phase 1: Inline single-assignment fields whose definitions
+            # mention the comparison field.
+            assert isinstance(field_expr, frog_ast.Variable)
+            field_var_name = field_expr.name
+            for dep_field, dep_expr in self.field_definitions.items():
+                dep_vars = VariableCollectionVisitor().visit(dep_expr)
+                if not any(v.name == field_var_name for v in dep_vars):
+                    continue
+                inline_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+                inline_map.set(frog_ast.Variable(dep_field), copy.deepcopy(dep_expr))
+                new_branch = SubstitutionTransformer(inline_map).transform(new_branch)
+
+            # Phase 2: Substitute the comparison field with the local/param.
+            alias_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+            alias_map.set(field_expr, local_expr)
+            new_branch = SubstitutionTransformer(alias_map).transform(new_branch)
+
+            if new_branch == statement.blocks[0]:
+                continue
+
+            new_if = copy.deepcopy(statement)
+            new_if.blocks[0] = new_branch
+            return self.transform_block(
+                frog_ast.Block(block.statements[:index])
+                + frog_ast.Block([new_if])
+                + frog_ast.Block(block.statements[index + 1 :])
+            )
+        return block
+
+    def _classify_alias_pair(
+        self,
+        left: frog_ast.Expression,
+        right: frog_ast.Expression,
+    ) -> tuple[frog_ast.Expression | None, frog_ast.Expression | None]:
+        """Return (local_or_param, field) if the pair qualifies, else (None, None)."""
+        left_is_local = self._is_local_or_param(left)
+        right_is_field = self._is_field(right)
+        if left_is_local and right_is_field:
+            return left, right
+
+        right_is_local = self._is_local_or_param(right)
+        left_is_field = self._is_field(left)
+        if right_is_local and left_is_field:
+            return right, left
+
+        return None, None
+
+    def _is_local_or_param(self, expr: frog_ast.Expression) -> bool:
+        return isinstance(expr, frog_ast.Variable) and expr.name not in self.field_names
+
+    def _is_field(self, expr: frog_ast.Expression) -> bool:
+        return isinstance(expr, frog_ast.Variable) and expr.name in self.field_names
+
+
+class RedundantConditionalReturnTransformer(BlockTransformer):
+    """Removes if-without-else blocks whose return duplicates the fall-through.
+
+    Detects the pattern::
+
+        if (cond) { return X; }
+        return X;
+
+    and simplifies it to just ``return X;``, since the if-branch is
+    redundant.
+    """
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if not isinstance(statement, frog_ast.IfStatement):
+                continue
+            if statement.has_else_block():
+                continue
+            if len(statement.conditions) != 1:
+                continue
+            if_body = statement.blocks[0]
+            if not if_body.statements:
+                continue
+            last_if_stmt = if_body.statements[-1]
+            if not isinstance(last_if_stmt, frog_ast.ReturnStatement):
+                continue
+            # Check if the statement after the if is a matching return
+            if index + 1 >= len(block.statements):
+                continue
+            next_stmt = block.statements[index + 1]
+            if not isinstance(next_stmt, frog_ast.ReturnStatement):
+                continue
+            if if_body != frog_ast.Block([next_stmt]):
+                continue
+            # The if-branch body is just `return X;` and the fall-through
+            # is the same `return X;` — remove the if entirely.
+            return self.transform_block(
+                frog_ast.Block(block.statements[:index])
+                + frog_ast.Block(block.statements[index + 1 :])
+            )
+        return block
+
+
 # ---------------------------------------------------------------------------
 # TransformPass wrappers
 # ---------------------------------------------------------------------------
+
+
+class IfConditionAliasSubstitution(TransformPass):
+    name = "If Condition Alias Substitution"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return IfConditionAliasSubstitutionTransformer().transform(game)
+
+
+class RedundantConditionalReturn(TransformPass):
+    name = "Redundant Conditional Return"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return RedundantConditionalReturnTransformer().transform(game)
 
 
 class BranchElimination(TransformPass):

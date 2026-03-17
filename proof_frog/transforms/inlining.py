@@ -852,6 +852,7 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                 is not None
             ):
                 continue
+
             # Look for a structurally-equal subexpression in earlier statements
             def matches_expr(
                 target: frog_ast.Expression, node: frog_ast.ASTNode
@@ -864,27 +865,23 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
 
             for j in range(i):
                 earlier = block.statements[j]
-                match = SearchVisitor(
-                    functools.partial(matches_expr, expr)
-                ).visit(earlier)
+                match = SearchVisitor(functools.partial(matches_expr, expr)).visit(
+                    earlier
+                )
                 if match is None:
                     continue
                 # Verify the field is not referenced between j and i
                 field_var = frog_ast.Variable(field_name)
 
-                def refs_field(
-                    name: str, node: frog_ast.ASTNode
-                ) -> bool:
-                    return (
-                        isinstance(node, frog_ast.Variable) and node.name == name
-                    )
+                def refs_field(name: str, node: frog_ast.ASTNode) -> bool:
+                    return isinstance(node, frog_ast.Variable) and node.name == name
 
                 conflict = False
                 for k in range(j, i):
                     if (
-                        SearchVisitor(
-                            functools.partial(refs_field, field_name)
-                        ).visit(block.statements[k])
+                        SearchVisitor(functools.partial(refs_field, field_name)).visit(
+                            block.statements[k]
+                        )
                         is not None
                     ):
                         conflict = True
@@ -899,9 +896,7 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                         continue
                     # Check that fv is assigned in some statement before j
 
-                    def assigns_var(
-                        name: str, node: frog_ast.ASTNode
-                    ) -> bool:
+                    def assigns_var(name: str, node: frog_ast.ASTNode) -> bool:
                         return (
                             isinstance(
                                 node,

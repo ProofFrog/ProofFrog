@@ -870,9 +870,8 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                 )
                 if match is None:
                     continue
-                # Verify the field is not referenced between j and i
-                field_var = frog_ast.Variable(field_name)
 
+                # Verify the field is not referenced between j and i
                 def refs_field(name: str, node: frog_ast.ASTNode) -> bool:
                     return isinstance(node, frog_ast.Variable) and node.name == name
 
@@ -933,7 +932,7 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                 new_stmts = (
                     list(block.statements[:j])
                     + [copy.deepcopy(statement)]
-                    + [new_stmts_item for new_stmts_item in [new_earlier]]
+                    + [new_earlier]
                     + list(block.statements[j + 1 : i])
                     + list(block.statements[i + 1 :])
                 )

@@ -109,6 +109,45 @@ To check interchangeability of two games, the ProofFrog engine focuses primarily
 
 When modifying the proof engine, be careful to ensure that transformations preserve the intended semantics of the domain-specific language. Introduce both positive and negative unit tests.
 
+### FrogLang Quick Reference
+
+The essentials for writing correct FrogLang:
+
+**Types:**
+- `Int`, `Bool`, `Void` — primitive types
+- `BitString<n>` — bit strings of length `n` (cardinality `2^n`)
+- `ModInt<q>` — integers mod `q` with modular arithmetic
+- `Array<T, n>` — fixed-size arrays indexed `0` to `n-1`
+- `Map<K, V>` — finite partial functions (initially empty; accessing an absent key is undefined)
+- `Set<T>` — finite sets
+- `RandomFunctions<D, R>` — lazily-evaluated truly random function (consistent on repeated inputs, independent across distinct inputs)
+- `T?` — optional type (value of `T` or `None`)
+- `[T1, T2, ..., Tn]` — tuples; access by constant index `t[0]`, `t[1]`
+
+**Operators (key gotchas):**
+- `+` on `BitString<n>` is **XOR**, not addition
+- `||` is overloaded: logical OR on `Bool`, concatenation on `BitString`
+- `^` is right-associative exponentiation
+- `|x|` — cardinality/length (sets, maps, bitstrings, arrays)
+- Set operations: `in`, `subsets`, `union`, `\` (difference)
+- Bitstring slicing: `a[i : j]` yields `BitString<j - i>`
+
+**Sampling:**
+- `Type x <- Type;` — uniform random sample (e.g., `BitString<n> r <- BitString<n>;`)
+- `Type x <-uniq[S] Type;` — sample uniformly from `Type \ S` (rejection sampling)
+- `M[k] <- Type;` — sample into a map entry
+- `RandomFunctions<D, R> RF <- RandomFunctions<D, R>;` — instantiate a fresh random function
+
+**Non-determinism default:** Scheme method calls (e.g., `F.evaluate(k, x)`) are **non-deterministic by default** — each invocation may return a different result even with the same arguments. To make a function deterministic, an explicit assumption game (like `IsDeterministic`) must be added to the proof's `assume:` section.
+
+**What the engine considers semantics-preserving:**
+- XOR/ModInt with uniform: `u <- BitString<n>; return u + m;` ≡ `u <- BitString<n>; return u;` (when `u` used once)
+- XOR cancellation: `x + x` → `0^n`; XOR identity: `x + 0^n` → `x`
+- Sample merge: independent `BitString<n>` and `BitString<m>` used only via concatenation → single `BitString<n+m>`
+- Sample split: `BitString<n>` accessed only via non-overlapping slices → independent samples per slice
+- Random function on distinct inputs (via unique sampling) → independent uniform samples
+- Dead code elimination, constant folding, single-use variable inlining, branch elimination, tuple index folding
+
 ### Guidelines for creating FrogLang files
 
 - **Naming**: Use naming conventions from the cryptographic literature rather than sequentially naming variables `v0`, `v1`, etc.

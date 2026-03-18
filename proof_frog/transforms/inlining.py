@@ -830,11 +830,10 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                 continue
             expr = statement.value
             field_name = statement.var.name
-            # Skip if the expression is a plain variable, tuple, or literal
+            # Skip tuples, literals, and field-to-field copies
             if isinstance(
                 expr,
                 (
-                    frog_ast.Variable,
                     frog_ast.Tuple,
                     frog_ast.Integer,
                     frog_ast.Boolean,
@@ -843,8 +842,24 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                 ),
             ):
                 continue
-            # Only hoist array accesses (the pattern that causes ordering issues)
-            if not isinstance(expr, frog_ast.ArrayAccess):
+            # Allow array accesses (original pattern) and local-variable copies
+            # (scheme-inlining pattern where a local is copied to a field).
+            # Field-to-field copies are skipped to avoid changing canonical forms
+            # of games that are already matching.
+            if isinstance(expr, frog_ast.Variable):
+                if expr.name in self.fields:
+                    continue  # field = other_field: skip
+                # field = local_var: check it has a typed declaration in this block
+                has_typed_decl = any(
+                    isinstance(s, (frog_ast.Assignment, frog_ast.Sample))
+                    and s.the_type is not None
+                    and isinstance(s.var, frog_ast.Variable)
+                    and s.var.name == expr.name
+                    for s in block.statements[:i]
+                )
+                if not has_typed_decl:
+                    continue  # not a local: skip
+            elif not isinstance(expr, frog_ast.ArrayAccess):
                 continue
             # Only handle pure expressions (no function calls)
             if (
@@ -925,10 +940,18 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                 if not all_defined:
                     continue
                 # Hoist: move field assignment to before position j,
-                # replace the subexpression in position j with the field
+                # replace the subexpression in position j with the field.
+                # Re-find the match in a deep copy (ReplaceTransformer uses
+                # identity, so we need a node from the same copy).
+                new_earlier = copy.deepcopy(earlier)
+                match_in_copy = SearchVisitor(
+                    functools.partial(matches_expr, expr)
+                ).visit(new_earlier)
+                if match_in_copy is None:
+                    continue
                 new_earlier = ReplaceTransformer(
-                    match, frog_ast.Variable(field_name)
-                ).transform(copy.deepcopy(earlier))
+                    match_in_copy, frog_ast.Variable(field_name)
+                ).transform(new_earlier)
                 new_stmts = (
                     list(block.statements[:j])
                     + [copy.deepcopy(statement)]
@@ -945,3 +968,233 @@ class HoistFieldPureAlias(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return HoistFieldPureAliasTransformer().transform(game)
+
+
+class InlineSingleUseFieldTransformer(BlockTransformer):
+    """Inlines a field assignment ``fieldA = expr`` when fieldA is used exactly
+    once across all methods and no free variable in expr is modified between the
+    definition and the single use site.
+
+    After inlining, the field declaration is removed from the game.
+
+    This complements ``InlineSingleUseVariableTransformer`` which only handles
+    typed local declarations (``Type v = expr``).  This transform handles
+    untyped field assignments where the field becomes a single-use alias after
+    other transforms (e.g. ``IfConditionAliasSubstitution``) eliminate uses.
+
+    Example::
+
+        Game Test() {
+            Int field4;
+            Int ct_PQ;
+            Void Initialize() {
+                ct_PQ = 42;
+                field4 = ct_PQ;
+            }
+        }
+
+    becomes::
+
+        Game Test() {
+            Int field4;
+            Void Initialize() {
+                field4 = 42;
+            }
+        }
+    """
+
+    def __init__(self) -> None:
+        self.field_names: list[str] = []
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        return block  # All work done in transform_game
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        self.field_names = [field.name for field in game.fields]
+        changed = True
+        result = game
+        while changed:
+            changed = False
+            # Try inlining declared fields
+            for field_name in list(self.field_names):
+                new_game = self._try_inline_field(result, field_name)
+                if new_game is not None:
+                    result = new_game
+                    self.field_names = [f.name for f in result.fields]
+                    changed = True
+                    break
+            if changed:
+                continue
+            # Try inlining orphaned untyped variables: variables that have
+            # untyped assignments but are NOT in the fields list (happens when
+            # RemoveUnnecessaryFields removes a field declaration but leaves
+            # the assignment statement).
+            for orphan in self._find_orphaned_vars(result):
+                new_game = self._try_inline_field(result, orphan)
+                if new_game is not None:
+                    result = new_game
+                    self.field_names = [f.name for f in result.fields]
+                    changed = True
+                    break
+        return result
+
+    def _find_orphaned_vars(self, game: frog_ast.Game) -> list[str]:
+        """Find variables with untyped assignments that are not in the fields list."""
+        orphans: list[str] = []
+        for method in game.methods:
+            for stmt in method.block.statements:
+                if (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and stmt.the_type is None
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name not in self.field_names
+                    and stmt.var.name not in orphans
+                ):
+                    orphans.append(stmt.var.name)
+        return orphans
+
+    def _try_inline_field(
+        self, game: frog_ast.Game, field_name: str
+    ) -> frog_ast.Game | None:
+        """Try to inline a single field. Returns new game or None."""
+
+        # 1. Find the single assignment to this field across all methods
+        assign_count = 0
+        assign_method_idx = -1
+        assign_stmt_idx = -1
+        assign_expr: frog_ast.Expression | None = None
+
+        for mi, method in enumerate(game.methods):
+            for si, stmt in enumerate(method.block.statements):
+                if (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and stmt.the_type is None
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name == field_name
+                ):
+                    assign_count += 1
+                    assign_method_idx = mi
+                    assign_stmt_idx = si
+                    assign_expr = stmt.value
+
+        if assign_count != 1 or assign_expr is None:
+            return None
+
+        # 2. Count total uses of field_name across the entire game
+        def uses_field(node: frog_ast.ASTNode) -> bool:
+            return isinstance(node, frog_ast.Variable) and node.name == field_name
+
+        total_uses = 0
+        count_game = copy.deepcopy(game)
+        # Don't count the definition itself — replace the LHS variable name
+        # so uses_field won't match it.
+        count_def = count_game.methods[assign_method_idx].block.statements[
+            assign_stmt_idx
+        ]
+        assert isinstance(count_def, frog_ast.Assignment)
+        count_def.var = frog_ast.Variable("__placeholder__")
+
+        while True:
+            found = SearchVisitor(uses_field).visit(count_game)
+            if found is None:
+                break
+            total_uses += 1
+            count_game = ReplaceTransformer(
+                found, frog_ast.Variable(field_name + "__counted__")
+            ).transform(count_game)
+
+        if total_uses == 0:
+            return None
+
+        # For multi-use fields, only inline if the expression is pure
+        # (no function calls), so duplicating it is safe.
+        is_pure = (
+            SearchVisitor(lambda n: isinstance(n, frog_ast.FuncCall)).visit(assign_expr)
+            is None
+        )
+        if total_uses > 1 and not is_pure:
+            return None
+
+        # 3. All uses must be in the same method as the definition —
+        # cross-method inlining is wrong because field values are stored once.
+        all_same_method = True
+        for mi, method in enumerate(game.methods):
+            if mi == assign_method_idx:
+                continue
+            for si, stmt in enumerate(method.block.statements):
+                if SearchVisitor(uses_field).visit(stmt) is not None:
+                    all_same_method = False
+                    break
+            if not all_same_method:
+                break
+
+        if not all_same_method:
+            return None
+
+        # 4. Check that no free variable in expr is modified between def and last use
+        last_use_idx = -1
+        for si, stmt in enumerate(game.methods[assign_method_idx].block.statements):
+            if si == assign_stmt_idx:
+                continue
+            if SearchVisitor(uses_field).visit(stmt) is not None:
+                last_use_idx = si
+        if last_use_idx >= 0:
+            free_vars = VariableCollectionVisitor().visit(copy.deepcopy(assign_expr))
+            intermediate_stmts = game.methods[assign_method_idx].block.statements[
+                assign_stmt_idx + 1 : last_use_idx
+            ]
+            intermediate = frog_ast.Block(list(intermediate_stmts))
+
+            def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(node, (frog_ast.Sample, frog_ast.Assignment))
+                    and isinstance(node.var, frog_ast.Variable)
+                    and node.var.name == name
+                )
+
+            if any(
+                SearchVisitor(functools.partial(is_written_to, fv.name)).visit(
+                    intermediate
+                )
+                is not None
+                for fv in free_vars
+            ):
+                return None
+
+        # 5. Perform the inlining — replace ALL occurrences in the method
+        new_game = copy.deepcopy(game)
+
+        method = new_game.methods[assign_method_idx]
+        # Replace in each statement except the definition
+        new_stmts = list(method.block.statements)
+        for si, stmt in enumerate(new_stmts):
+            if si == assign_stmt_idx:
+                continue
+            while True:
+                field_node = SearchVisitor(uses_field).visit(stmt)
+                if field_node is None:
+                    break
+                stmt = ReplaceTransformer(
+                    field_node, copy.deepcopy(assign_expr)
+                ).transform(stmt)
+            new_stmts[si] = stmt
+        method.block = frog_ast.Block(new_stmts)
+
+        # Remove the definition statement
+        method = new_game.methods[assign_method_idx]
+        method.block = frog_ast.Block(
+            list(method.block.statements[:assign_stmt_idx])
+            + list(method.block.statements[assign_stmt_idx + 1 :])
+        )
+
+        # Remove the field declaration
+        new_game.fields = [f for f in new_game.fields if f.name != field_name]
+
+        return new_game
+
+
+class InlineSingleUseField(TransformPass):
+    name = "Inline Single-Use Field"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return InlineSingleUseFieldTransformer().transform(game)

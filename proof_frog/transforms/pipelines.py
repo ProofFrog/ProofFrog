@@ -24,6 +24,7 @@ from .random_functions import (
 from .inlining import (
     RedundantCopy,
     InlineSingleUseVariable,
+    InlineSingleUseField,
     ForwardExpressionAlias,
     HoistFieldPureAlias,
     InlineMultiUsePureExpression,
@@ -92,6 +93,7 @@ CORE_PIPELINE: list[TransformPass] = [
     IfConditionAliasSubstitution(),
     RedundantConditionalReturn(),
     BranchElimination(),
+    InlineSingleUseField(),
     RemoveUnnecessaryFields(),
     CollapseAssignment(),
     SimplifyReturn(),

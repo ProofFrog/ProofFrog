@@ -100,6 +100,9 @@ def standardize_field_names(game: frog_ast.Game) -> frog_ast.Game:
         ast_map.set(frog_ast.Variable(field_name), frog_ast.Variable(normalized_name))
 
     new_game = SubstitutionTransformer(ast_map).transform(game)
+    # Ensure independent copies before mutation — transform may share objects
+    new_game = copy.copy(new_game)
+    new_game.fields = [copy.copy(f) for f in new_game.fields]
     for field in new_game.fields:
         field.name = field_rename_map[field.name]
     new_game.fields.sort(key=lambda element: element.name)

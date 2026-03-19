@@ -978,6 +978,9 @@ class ProofEngine:
         if reduction:
             reduction_ast = self._get_game_ast(reduction)
             assert isinstance(reduction_ast, frog_ast.Reduction)
+            # Ensure independent methods list before mutation
+            game = copy.copy(game)
+            game.methods = list(game.methods)
             for index, method in enumerate(game.methods):
                 ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
                 for field in game.fields:
@@ -1141,7 +1144,9 @@ def instantiate(
     for index, parameter in enumerate(root.parameters):
         ast_map.set(frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
     new_root = visitors.SubstitutionTransformer(ast_map).transform(root)
-    new_root.parameters.clear()
+    # Ensure independent copy before mutation — transform may share lists
+    new_root = copy.copy(new_root)
+    new_root.parameters = []
     return visitors.InstantiationTransformer(namespace).transform(new_root)
 
 

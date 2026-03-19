@@ -28,10 +28,88 @@ class InstantiableType:
     superclass: str
 
 
+@functools.lru_cache(maxsize=None)
 def _to_snake_case(camel_case: str) -> str:
     return "".join(["_" + i.lower() if i.isupper() else i for i in camel_case]).lstrip(
         "_"
     )
+
+
+# ---------------------------------------------------------------------------
+# Dispatch caches — avoid repeated hasattr / getattr / _to_snake_case lookups
+# ---------------------------------------------------------------------------
+
+_NOT_FOUND = object()
+
+# (visitor_class, node_class) -> (visit_method | None, leave_method | None)
+_VISITOR_METHODS_CACHE: dict[tuple[type, type], tuple[Any, Any]] = {}
+
+# (transformer_class, node_class) -> method | _NOT_FOUND
+_TRANSFORM_CACHE: dict[tuple[type, type], Any] = {}
+
+# transformer_class -> method | _NOT_FOUND
+_TRANSFORM_FALLBACK_CACHE: dict[type, Any] = {}
+
+
+def _lookup_visitor_methods(cls: type, node_cls: type) -> tuple[Any, Any]:
+    """Look up visit/leave methods for a (visitor_class, node_class) pair."""
+    key = (cls, node_cls)
+    cached = _VISITOR_METHODS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    snake = _to_snake_case(node_cls.__name__)
+    visit_method = getattr(cls, "visit_" + snake, None) or getattr(
+        cls, "visit_ast_node", None
+    )
+    leave_method = getattr(cls, "leave_" + snake, None) or getattr(
+        cls, "leave_ast_node", None
+    )
+    result = (visit_method, leave_method)
+    _VISITOR_METHODS_CACHE[key] = result
+    return result
+
+
+def _lookup_transform(cls: type, node_cls: type) -> Any:
+    """Look up transform method for a (transformer_class, node_class) pair."""
+    key = (cls, node_cls)
+    cached = _TRANSFORM_CACHE.get(key)
+    if cached is not None:
+        return cached
+    snake = _to_snake_case(node_cls.__name__)
+    method = getattr(cls, "transform_" + snake, _NOT_FOUND)
+    _TRANSFORM_CACHE[key] = method
+    return method
+
+
+def _lookup_transform_fallback(cls: type) -> Any:
+    """Look up transform_ast_node fallback for a transformer class."""
+    cached = _TRANSFORM_FALLBACK_CACHE.get(cls)
+    if cached is not None:
+        return cached
+    method = getattr(cls, "transform_ast_node", _NOT_FOUND)
+    _TRANSFORM_FALLBACK_CACHE[cls] = method
+    return method
+
+
+def _cow_transform_child(transformer: Any, child: Any) -> Any:
+    """Copy-on-write child transformation for Transformer.
+
+    Returns the original object unchanged (by identity) when no
+    descendant was modified, enabling fast equality checks upstream.
+    """
+    if isinstance(child, frog_ast.ASTNode):
+        return transformer.transform(child)
+    if isinstance(child, list):
+        new_items: Optional[list[Any]] = None
+        for i, item in enumerate(child):
+            new_item = _cow_transform_child(transformer, item)
+            if new_item is not item and new_items is None:
+                # First change detected — copy preceding unchanged items
+                new_items = list(child[:i])
+            if new_items is not None:
+                new_items.append(new_item)
+        return child if new_items is None else new_items
+    return child
 
 
 # Used to represent the return value of our generic visitor
@@ -44,12 +122,13 @@ class Visitor(ABC, Generic[U]):
         pass
 
     def visit(self, visiting_node: frog_ast.ASTNode) -> U:
+        cls = type(self)
+
         def visit_helper(node: frog_ast.ASTNode) -> None:
-            visit_name = "visit_" + _to_snake_case(type(node).__name__)
-            if hasattr(self, visit_name):
-                getattr(self, visit_name)(node)
-            elif hasattr(self, "visit_ast_node"):
-                getattr(self, "visit_ast_node")(node)
+            visit_method, leave_method = _lookup_visitor_methods(cls, type(node))
+
+            if visit_method is not None:
+                visit_method(self, node)
 
             def visit_children(child: Any) -> Any:
                 if isinstance(child, frog_ast.ASTNode):
@@ -61,11 +140,8 @@ class Visitor(ABC, Generic[U]):
             for attr in vars(node):
                 visit_children(getattr(node, attr))
 
-            leave_name = "leave_" + _to_snake_case(type(node).__name__)
-            if hasattr(self, leave_name):
-                getattr(self, leave_name)(node)
-            elif hasattr(self, "leave_ast_node"):
-                getattr(self, "leave_ast_node")(node)
+            if leave_method is not None:
+                leave_method(self, node)
 
         visit_helper(visiting_node)
         return self.result()
@@ -78,26 +154,35 @@ T = TypeVar("T", bound=frog_ast.ASTNode)
 
 class Transformer(ABC):
     def transform(self, node: T) -> T:
-        method_name = "transform_" + _to_snake_case(type(node).__name__)
-        if hasattr(self, method_name):
-            returned: T = getattr(self, method_name)(node)
+        cls = type(self)
+        node_cls = type(node)
+
+        method = _lookup_transform(cls, node_cls)
+        if method is not _NOT_FOUND:
+            returned: T = method(self, node)
             return returned
-        if hasattr(self, "transform_ast_node"):
-            returned = getattr(self, "transform_ast_node")(node)
+        fallback = _lookup_transform_fallback(cls)
+        if fallback is not _NOT_FOUND:
+            returned = fallback(self, node)
             if returned:
                 return returned
 
-        node_copy = copy.deepcopy(node)
+        # Copy-on-write: only create a new node if a child changed
+        changed = False
+        new_attrs: dict[str, Any] = {}
+        for attr_name in vars(node):
+            old_val = getattr(node, attr_name)
+            new_val = _cow_transform_child(self, old_val)
+            new_attrs[attr_name] = new_val
+            if new_val is not old_val:
+                changed = True
 
-        def visit_children(child: Any) -> Any:
-            if isinstance(child, frog_ast.ASTNode):
-                return self.transform(child)
-            if isinstance(child, list):
-                return [visit_children(item) for item in child]
-            return child
+        if not changed:
+            return node
 
-        for attr in vars(node_copy):
-            setattr(node_copy, attr, visit_children(getattr(node, attr)))
+        node_copy = copy.copy(node)
+        for attr_name, new_val in new_attrs.items():
+            setattr(node_copy, attr_name, new_val)
         return node_copy
 
 

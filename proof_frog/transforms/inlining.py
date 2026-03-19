@@ -16,10 +16,27 @@ from .. import frog_ast
 from ..visitors import (
     BlockTransformer,
     SearchVisitor,
+    Visitor,
     ReplaceTransformer,
     VariableCollectionVisitor,
 )
 from ._base import TransformPass, PipelineContext
+
+
+class _VarCountVisitor(Visitor[int]):
+    """Count occurrences of a variable name in an AST subtree."""
+
+    def __init__(self, var_name: str) -> None:
+        self._name = var_name
+        self._count = 0
+
+    def result(self) -> int:
+        return self._count
+
+    def leave_variable(self, var: frog_ast.Variable) -> None:
+        if var.name == self._name:
+            self._count += 1
+
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
@@ -197,23 +214,8 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
             if first_use_idx is None:
                 continue  # var not used; other transformers will clean it up
 
-            # Count total occurrences of var in remaining_block.  We use a
-            # replace loop so that multiple uses *within the same statement*
-            # (e.g. `return v3 + v3`) are also detected.
-            total_uses = 0
-            count_block = copy.deepcopy(remaining_block)
-            while True:
-                found = SearchVisitor(functools.partial(uses_var, var_name)).visit(
-                    count_block
-                )
-                if found is None:
-                    break
-                total_uses += 1
-                if total_uses > 1:
-                    break
-                count_block = ReplaceTransformer(
-                    found, frog_ast.Variable(var_name + "__counted__")
-                ).transform(count_block)
+            # Count total occurrences of var in remaining_block.
+            total_uses = _VarCountVisitor(var_name).visit(remaining_block)
 
             if total_uses != 1:
                 continue

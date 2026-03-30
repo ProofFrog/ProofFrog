@@ -304,7 +304,7 @@ class SubstitutionTransformer(Transformer):
 
 class InstantiationTransformer(Transformer):
     def __init__(self, namespace: frog_ast.Namespace) -> None:
-        self.namespace = copy.deepcopy(namespace)
+        self.namespace = dict(namespace)
 
     def transform_field(self, field: frog_ast.Field) -> frog_ast.ASTNode:
         new_field = frog_ast.Field(

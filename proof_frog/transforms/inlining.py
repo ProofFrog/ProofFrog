@@ -20,7 +20,7 @@ from ..visitors import (
     ReplaceTransformer,
     VariableCollectionVisitor,
 )
-from ._base import TransformPass, PipelineContext
+from ._base import TransformPass, PipelineContext, has_nondeterministic_call
 
 
 class _VarCountVisitor(Visitor[int]):
@@ -259,13 +259,15 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
 
 class InlineMultiUsePureExpressionTransformer(BlockTransformer):
     """Inlines a declaration ``Type v = expr`` when expr is a deterministic
-    (function-call-free) expression, even if v is used more than once.
+    (function-call-free, or deterministic-only) expression, even if v is
+    used more than once.
 
     Unlike ``InlineSingleUseVariableTransformer`` (which only inlines
     single-use variables), this pass handles multi-use variables by
     duplicating the expression at each use site.  This is safe because
-    the expression contains no function calls and no free variable of
-    the expression is reassigned anywhere after the declaration.
+    the expression contains no non-deterministic function calls and no
+    free variable of the expression is reassigned anywhere after the
+    declaration.
 
     This pass normalises the canonical form so that a multi-use pure
     expression is always represented inline rather than via a named
@@ -298,7 +300,9 @@ class InlineMultiUsePureExpressionTransformer(BlockTransformer):
             var_name = statement.var.name
             expr = statement.value
 
-            # Only handle pure expressions (no function calls)
+            # Skip ALL function calls (even deterministic ones): multi-use
+            # inlining duplicates the call at every use site, changing
+            # the canonical form.
             if (
                 SearchVisitor(lambda n: isinstance(n, frog_ast.FuncCall)).visit(expr)
                 is not None
@@ -392,8 +396,8 @@ class CollapseAssignmentTransformer(BlockTransformer):
 
     When a variable is declared and later reassigned without its initial value
     being read, the later value is moved into the original declaration.
-    Skips statements whose right-hand side contains function calls, which may
-    have side effects.
+    Skips statements whose right-hand side contains non-deterministic function
+    calls, which may have side effects.
 
     Example::
 
@@ -403,6 +407,9 @@ class CollapseAssignmentTransformer(BlockTransformer):
         Type v = expr2;
     """
 
+    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
             if not isinstance(statement, (frog_ast.Assignment, frog_ast.Sample)):
@@ -410,10 +417,10 @@ class CollapseAssignmentTransformer(BlockTransformer):
             if not isinstance(statement.var, frog_ast.Variable):
                 continue
 
-            def calls_func(node: frog_ast.ASTNode) -> bool:
-                return isinstance(node, frog_ast.FuncCall)
-
-            if SearchVisitor(calls_func).visit(statement) is not None:
+            # Skip if the statement's value has non-deterministic calls
+            if isinstance(statement, frog_ast.Assignment) and has_nondeterministic_call(
+                statement.value, self._proof_namespace
+            ):
                 continue
 
             def uses_var(var: frog_ast.Variable, node: frog_ast.ASTNode) -> bool:
@@ -556,9 +563,9 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
     """Replaces repeated pure expressions with their named variable.
 
     When an assignment ``v = expr`` (typed local or field assignment) defines
-    a named alias for a deterministic expression (no function calls) that is
-    not a plain variable or tuple literal, subsequent structurally-identical
-    occurrences of ``expr`` are replaced with ``v``.
+    a named alias for a deterministic expression (no non-deterministic function
+    calls) that is not a plain variable or tuple literal, subsequent
+    structurally-identical occurrences of ``expr`` are replaced with ``v``.
 
     This is safe because the expression is deterministic and neither ``v``
     nor any free variable in ``expr`` is reassigned between the definition
@@ -575,8 +582,9 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
         return F(v3, v3);
     """
 
-    def __init__(self) -> None:
+    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
         self.fields: list[str] = []
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.fields = [field.name for field in game.fields]
@@ -666,11 +674,8 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
             var_name = statement.var.name
             expr = statement.value
 
-            # Only handle pure expressions (no function calls)
-            if (
-                SearchVisitor(lambda n: isinstance(n, frog_ast.FuncCall)).visit(expr)
-                is not None
-            ):
+            # Only handle pure expressions (no non-deterministic function calls)
+            if has_nondeterministic_call(expr, self._proof_namespace):
                 continue
 
             remaining_block = frog_ast.Block(
@@ -765,14 +770,18 @@ class CollapseAssignment(TransformPass):
     name = "Collapse Assignment"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return CollapseAssignmentTransformer().transform(game)
+        return CollapseAssignmentTransformer(
+            proof_namespace=ctx.proof_namespace
+        ).transform(game)
 
 
 class ForwardExpressionAlias(TransformPass):
     name = "Forward Expression Alias"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return ForwardExpressionAliasTransformer().transform(game)
+        return ForwardExpressionAliasTransformer(
+            proof_namespace=ctx.proof_namespace
+        ).transform(game)
 
 
 class InlineMultiUsePureExpression(TransformPass):
@@ -793,9 +802,10 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
     """Hoists field assignments of pure expressions before their first use.
 
     When a field assignment ``field = pure_expr`` (where pure_expr contains no
-    function calls) appears AFTER a statement that uses the same ``pure_expr``
-    as a subexpression, this transform moves the field assignment to just before
-    that earlier use and replaces the subexpression with the field variable.
+    non-deterministic function calls) appears AFTER a statement that uses the
+    same ``pure_expr`` as a subexpression, this transform moves the field
+    assignment to just before that earlier use and replaces the subexpression
+    with the field variable.
 
     This ensures consistent canonical forms between compositions (where
     the field assignment may be ordered after a function call using the
@@ -811,8 +821,9 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
         [SS, CT] v3 = KEM1.Encaps(field5);
     """
 
-    def __init__(self) -> None:
+    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
         self.fields: list[str] = []
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.fields = [field.name for field in game.fields]
@@ -863,11 +874,8 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                     continue  # not a local: skip
             elif not isinstance(expr, frog_ast.ArrayAccess):
                 continue
-            # Only handle pure expressions (no function calls)
-            if (
-                SearchVisitor(lambda n: isinstance(n, frog_ast.FuncCall)).visit(expr)
-                is not None
-            ):
+            # Only handle pure expressions (no non-deterministic function calls)
+            if has_nondeterministic_call(expr, self._proof_namespace):
                 continue
 
             # Look for a structurally-equal subexpression in earlier statements
@@ -969,7 +977,9 @@ class HoistFieldPureAlias(TransformPass):
     name = "Hoist Field Pure Alias"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return HoistFieldPureAliasTransformer().transform(game)
+        return HoistFieldPureAliasTransformer(
+            proof_namespace=ctx.proof_namespace
+        ).transform(game)
 
 
 class InlineSingleUseFieldTransformer(BlockTransformer):
@@ -1005,8 +1015,9 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
         }
     """
 
-    def __init__(self) -> None:
+    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
         self.field_names: list[str] = []
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         return block  # All work done in transform_game
@@ -1109,11 +1120,8 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
             return None
 
         # For multi-use fields, only inline if the expression is pure
-        # (no function calls), so duplicating it is safe.
-        is_pure = (
-            SearchVisitor(lambda n: isinstance(n, frog_ast.FuncCall)).visit(assign_expr)
-            is None
-        )
+        # (no non-deterministic function calls), so duplicating it is safe.
+        is_pure = not has_nondeterministic_call(assign_expr, self._proof_namespace)
         if total_uses > 1 and not is_pure:
             return None
 
@@ -1199,4 +1207,6 @@ class InlineSingleUseField(TransformPass):
     name = "Inline Single-Use Field"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return InlineSingleUseFieldTransformer().transform(game)
+        return InlineSingleUseFieldTransformer(
+            proof_namespace=ctx.proof_namespace
+        ).transform(game)

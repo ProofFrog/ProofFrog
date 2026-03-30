@@ -739,10 +739,13 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
     def visitMethodSignature(
         self, ctx: PrimitiveParser.MethodSignatureContext
     ) -> frog_ast.MethodSignature:
+        modifiers = {m.getText() for m in ctx.methodModifier()}
         return frog_ast.MethodSignature(
             ctx.id_().getText(),
             self.visit(ctx.type_()),
             [] if not ctx.paramList() else self.visit(ctx.paramList()),
+            deterministic="deterministic" in modifiers,
+            injective="injective" in modifiers,
         )
 
     def visitModuleImport(

@@ -179,6 +179,11 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#methodModifier.
+    def visitMethodModifier(self, ctx:ProofParser.MethodModifierContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#methodSignature.
     def visitMethodSignature(self, ctx:ProofParser.MethodSignatureContext):
         return self.visitChildren(ctx)

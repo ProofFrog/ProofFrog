@@ -355,7 +355,9 @@ _LANGUAGE_REFERENCE = """\
 Primitive Name(Set Param1, Int Param2) {
     Set Field1 = Param1;
     Int Field2 = Param2;
-    ReturnType MethodName(ArgType arg);   // signature only, no body
+    ReturnType MethodName(ArgType arg);                    // non-deterministic by default
+    deterministic ReturnType DetMethod(ArgType arg);       // same inputs -> same output
+    deterministic injective BitString<n> Encode(T val);    // also preserves distinctness
 }
 ```
 

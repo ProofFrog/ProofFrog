@@ -30,6 +30,46 @@ class PipelineContext:
     max_calls: Optional[int] = None
 
 
+def _lookup_primitive_method(
+    func: frog_ast.Expression,
+    proof_namespace: frog_ast.Namespace,
+) -> frog_ast.MethodSignature | None:
+    """Look up the MethodSignature for a call to a primitive method, or None."""
+    if not isinstance(func, frog_ast.FieldAccess):
+        return None
+    if not isinstance(func.the_object, frog_ast.Variable):
+        return None
+    obj = proof_namespace.get(func.the_object.name)
+    if not isinstance(obj, frog_ast.Primitive):
+        return None
+    for method in obj.methods:
+        if method.name == func.name:
+            return method
+    return None
+
+
+def has_nondeterministic_call(
+    expr: frog_ast.Expression,
+    proof_namespace: frog_ast.Namespace,
+) -> bool:
+    """Return True if *expr* contains a FuncCall to a non-deterministic method.
+
+    Calls to primitive methods annotated ``deterministic`` are treated as pure
+    for inlining and CSE purposes.  Any other FuncCall (including calls to
+    scheme methods, game methods, or unannotated primitive methods) is
+    considered non-deterministic.
+    """
+    from ..visitors import SearchVisitor  # pylint: disable=import-outside-toplevel
+
+    def _is_nondeterministic_call(node: frog_ast.ASTNode) -> bool:
+        if not isinstance(node, frog_ast.FuncCall):
+            return False
+        m = _lookup_primitive_method(node.func, proof_namespace)
+        return m is None or not m.deterministic
+
+    return SearchVisitor(_is_nondeterministic_call).visit(expr) is not None
+
+
 class TransformPass(ABC):
     """A single canonicalization pass that can be applied to a Game AST."""
 

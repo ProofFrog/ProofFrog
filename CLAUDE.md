@@ -138,7 +138,9 @@ The essentials for writing correct FrogLang:
 - `M[k] <- Type;` — sample into a map entry
 - `RandomFunctions<D, R> RF <- RandomFunctions<D, R>;` — instantiate a fresh random function
 
-**Non-determinism default:** Scheme method calls (e.g., `F.evaluate(k, x)`) are **non-deterministic by default** — each invocation may return a different result even with the same arguments. To make a function deterministic, an explicit assumption game (like `IsDeterministic`) must be added to the proof's `assume:` section.
+**Non-determinism default:** Scheme method calls (e.g., `F.evaluate(k, x)`) are **non-deterministic by default** — each invocation may return a different result even with the same arguments.
+
+**Method annotations:** Primitive method declarations support `deterministic` and `injective` modifiers (e.g., `deterministic injective BitString<n> Encode(GroupElem g);`). `deterministic` tells the engine the method always returns the same output for the same inputs (enabling expression aliasing, field hoisting, and tuple folding through function calls). `injective` tells the engine the method maps distinct inputs to distinct outputs (enabling the `ChallengeExclusionRFToUniform` transform to see through encoding wrappers). Methods without these annotations are treated conservatively. Note: a `deterministic` annotation does NOT yet eliminate the need for `IsDeterministic` assumption games in proofs (that requires a future "deterministic expression deduplication" transform).
 
 **What the engine considers semantics-preserving:**
 - XOR/ModInt with uniform: `u <- BitString<n>; return u + m;` ≡ `u <- BitString<n>; return u;` (when `u` used once)

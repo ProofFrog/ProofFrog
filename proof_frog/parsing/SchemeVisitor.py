@@ -119,6 +119,11 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SchemeParser#methodModifier.
+    def visitMethodModifier(self, ctx:SchemeParser.MethodModifierContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SchemeParser#methodSignature.
     def visitMethodSignature(self, ctx:SchemeParser.MethodSignatureContext):
         return self.visitChildren(ctx)

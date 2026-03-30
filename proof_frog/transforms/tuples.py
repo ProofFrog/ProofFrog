@@ -18,7 +18,7 @@ from ..visitors import (
     AllConstantFieldAccesses,
     GetTypeMapVisitor,
 )
-from ._base import TransformPass, PipelineContext
+from ._base import TransformPass, PipelineContext, has_nondeterministic_call
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
@@ -173,9 +173,12 @@ class FoldTupleIndexTransformer(Transformer):
     """Constant-folds indexing a tuple literal: ``[e0, e1, ...][i]`` → ``e_i``.
 
     Only applies when the index is a constant integer and every discarded
-    element (``e_j`` for ``j != i``) contains no function calls, ensuring
-    that no potentially-randomised computation is silently removed.
+    element (``e_j`` for ``j != i``) contains no non-deterministic function
+    calls, ensuring that no randomised computation is silently removed.
     """
+
+    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
 
     def transform_array_access(
         self, array_access: frog_ast.ArrayAccess
@@ -190,14 +193,11 @@ class FoldTupleIndexTransformer(Transformer):
         if i < 0 or i >= len(arr.values):
             return frog_ast.ArrayAccess(arr, idx)
 
-        # Check that every DISCARDED element is pure (no function calls)
+        # Check that every DISCARDED element is pure (no non-deterministic calls)
         for j, elem in enumerate(arr.values):
             if j == i:
                 continue
-            if (
-                SearchVisitor(lambda n: isinstance(n, frog_ast.FuncCall)).visit(elem)
-                is not None
-            ):
+            if has_nondeterministic_call(elem, self._proof_namespace):
                 return frog_ast.ArrayAccess(arr, idx)
 
         return arr.values[i]
@@ -260,7 +260,9 @@ class FoldTupleIndex(TransformPass):
     name = "Fold Tuple Literal Indexing"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return FoldTupleIndexTransformer().transform(game)
+        return FoldTupleIndexTransformer(proof_namespace=ctx.proof_namespace).transform(
+            game
+        )
 
 
 class SimplifyTuple(TransformPass):

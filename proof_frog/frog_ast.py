@@ -301,18 +301,33 @@ class Parameter(ASTNode):
         return f"{self.type} {self.name}"
 
 
-class MethodSignature(ASTNode):
+class MethodSignature(
+    ASTNode
+):  # pylint: disable=too-many-arguments,too-many-positional-arguments
     def __init__(
-        self, name: str, return_type: Type, parameters: list[Parameter]
+        self,
+        name: str,
+        return_type: Type,
+        parameters: list[Parameter],
+        deterministic: bool = False,
+        injective: bool = False,
     ) -> None:
         super().__init__()
         self.name = name
         self.return_type = return_type
         self.parameters = parameters
+        self.deterministic = deterministic
+        self.injective = injective
 
     def __str__(self) -> str:
+        modifiers = ""
+        if self.deterministic:
+            modifiers += "deterministic "
+        if self.injective:
+            modifiers += "injective "
         return (
-            f"{self.return_type} {self.name}({_parameter_list_string(self.parameters)})"
+            f"{modifiers}{self.return_type} {self.name}"
+            f"({_parameter_list_string(self.parameters)})"
         )
 
 

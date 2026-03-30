@@ -31,7 +31,9 @@ statement: type id SEMI #varDeclStatement
 lvalue:
 	(id | parameterizedGame | THIS) (PERIOD id | L_SQUARE expression R_SQUARE)*;
 
-methodSignature: type id L_PAREN paramList? R_PAREN;
+methodModifier: DETERMINISTIC | INJECTIVE;
+
+methodSignature: methodModifier* type id L_PAREN paramList? R_PAREN;
 
 paramList: variable (COMMA variable)*;
 
@@ -182,6 +184,8 @@ ORACLES: 'oracles';
 ELSE: 'else';
 NONE: 'None';
 THIS: 'this';
+DETERMINISTIC: 'deterministic';
+INJECTIVE: 'injective';
 
 TRUE: 'true';
 FALSE: 'false';

@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 from .. import frog_ast
 from ..visitors import BlockTransformer, SearchVisitor, ReplaceTransformer
-from ._base import TransformPass, PipelineContext
+from ._base import TransformPass, PipelineContext, _lookup_primitive_method
 
 
 @dataclass
@@ -580,17 +580,29 @@ def _collect_rf_call_sites(
     return sites
 
 
+def _is_injective_call(
+    func: frog_ast.Expression,
+    proof_namespace: frog_ast.Namespace,
+) -> bool:
+    """Check if a FuncCall targets a primitive method marked ``injective``."""
+    m = _lookup_primitive_method(func, proof_namespace)
+    return m is not None and m.injective
+
+
+# pylint: disable=too-many-arguments,too-many-positional-arguments
 def _rf_args_structurally_differ(
     init_arg: frog_ast.Expression,
     oracle_arg: frog_ast.Expression,
     challenge_fields: set[str],
     field_names: list[str],
     guard_vars: set[str],
+    proof_namespace: frog_ast.Namespace,
 ) -> bool:
     """Check if Init and oracle RF args differ at a challenge field position.
 
     For tuple arguments, checks each position. For concatenation sub-expressions,
-    flattens and checks leaf operands.
+    flattens and checks leaf operands. For calls to injective functions, recurses
+    into arguments.
     """
 
     def _flatten_concat(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
@@ -631,13 +643,22 @@ def _rf_args_structurally_differ(
                 return any(
                     _check_exprs(a, b) for a, b in zip(init_e.values, oracle_e.values)
                 )
-        # Concatenation: flatten and check leaf pairs
+        # FuncCall to same injective function: recurse into arguments
+        if isinstance(init_e, frog_ast.FuncCall) and isinstance(
+            oracle_e, frog_ast.FuncCall
+        ):
+            if (
+                init_e.func == oracle_e.func
+                and len(init_e.args) == len(oracle_e.args)
+                and _is_injective_call(init_e.func, proof_namespace)
+            ):
+                if any(_check_exprs(a, b) for a, b in zip(init_e.args, oracle_e.args)):
+                    return True
+        # Concatenation: flatten and check recursively
         init_leaves = _flatten_concat(init_e)
         oracle_leaves = _flatten_concat(oracle_e)
         if len(init_leaves) > 1 and len(init_leaves) == len(oracle_leaves):
-            return any(
-                _check_leaf_pair(a, b) for a, b in zip(init_leaves, oracle_leaves)
-            )
+            return any(_check_exprs(a, b) for a, b in zip(init_leaves, oracle_leaves))
         return False
 
     return _check_exprs(init_arg, oracle_arg)
@@ -652,8 +673,14 @@ class ChallengeExclusionRFToUniformTransformer:
     design and soundness argument.
     """
 
-    def transform(self, game: frog_ast.Game) -> frog_ast.Game:
+    def transform(
+        self,
+        game: frog_ast.Game,
+        proof_namespace: frog_ast.Namespace | None = None,
+    ) -> frog_ast.Game:
         """Transform a game, replacing qualifying RF calls with uniform samples."""
+        if proof_namespace is None:
+            proof_namespace = {}
         field_names = [f.name for f in game.fields]
         rf_fields: dict[str, frog_ast.RandomFunctionType] = {}
         for f in game.fields:
@@ -764,6 +791,7 @@ class ChallengeExclusionRFToUniformTransformer:
                         challenge_fields,
                         field_names,
                         guard_lhs_vars,
+                        proof_namespace,
                     ):
                         all_oracle_ok = False
                         break
@@ -807,4 +835,6 @@ class ChallengeExclusionRFToUniform(TransformPass):
     name = "Challenge Exclusion RF To Uniform"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return ChallengeExclusionRFToUniformTransformer().transform(game)
+        return ChallengeExclusionRFToUniformTransformer().transform(
+            game, proof_namespace=ctx.proof_namespace
+        )

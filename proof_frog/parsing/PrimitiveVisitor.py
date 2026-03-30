@@ -114,6 +114,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#methodModifier.
+    def visitMethodModifier(self, ctx:PrimitiveParser.MethodModifierContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#methodSignature.
     def visitMethodSignature(self, ctx:PrimitiveParser.MethodSignatureContext):
         return self.visitChildren(ctx)

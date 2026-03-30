@@ -114,6 +114,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#methodModifier.
+    def visitMethodModifier(self, ctx:GameParser.MethodModifierContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#methodSignature.
     def visitMethodSignature(self, ctx:GameParser.MethodSignatureContext):
         return self.visitChildren(ctx)

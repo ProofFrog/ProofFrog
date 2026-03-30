@@ -18,7 +18,7 @@ def check_well_formed(
     file_name: str,
     allowed_root: Optional[str] = None,
 ) -> None:
-    name_resolution(root, file_name, allowed_root=allowed_root)
+    parse_cache = name_resolution(root, file_name, allowed_root=allowed_root)
 
     import_namespace: dict[str, frog_ast.Root | frog_ast.Game] = {}
     file_name_mapping: dict[str, str] = {}
@@ -27,13 +27,12 @@ def check_well_formed(
             resolved = frog_parser.resolve_import_path(
                 imp.filename, file_name, allowed_root=allowed_root
             )
-            try:
-                parsed_file = frog_parser.parse_file(resolved)
-            except FileNotFoundError:
+            parsed_file = parse_cache.get(resolved)
+            if parsed_file is None:
                 raise FileNotFoundError(
                     f"{file_name}:{imp.line_num}: imported file not found: "
                     f"'{imp.filename}'"
-                ) from None
+                )
             name = imp.rename if imp.rename else parsed_file.get_export_name()
             import_namespace[name] = parsed_file
             file_name_mapping[name] = resolved
@@ -47,7 +46,7 @@ def name_resolution(
     initial_root: frog_ast.Root,
     initial_file_name: str,
     allowed_root: Optional[str] = None,
-) -> None:
+) -> dict[str, frog_ast.Root]:
     all_imports: dict[str, frog_ast.Root] = {}
 
     def do_name_resolution(root: frog_ast.Root, file_name: str) -> None:
@@ -78,6 +77,7 @@ def name_resolution(
         NameResolutionVisitor(import_namespace, file_name).visit(root)
 
     do_name_resolution(initial_root, initial_file_name)
+    return all_imports
 
 
 T = TypeVar("T", bound=Union[frog_ast.Primitive, frog_ast.Scheme, frog_ast.Game])

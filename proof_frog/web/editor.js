@@ -6,7 +6,7 @@
 import {
   state,
   tabsEl, tabsEmpty, editorsContainer, welcome,
-  btnSave, btnParse, btnProve,
+  btnSave, btnParse, btnProve, proveVerbosity,
   outputPane, outputStatus, outputTitle, outputPre,
   apiFetch, getCmTheme,
 } from './state.js';
@@ -26,6 +26,7 @@ export function updateToolbar() {
   const isProof = hasTab && !isVirtual && state.activeTab.endsWith(".proof");
   btnProve.style.display = isProof ? "" : "none";
   btnProve.disabled = !isProof;
+  proveVerbosity.style.display = isProof ? "" : "none";
 }
 
 export function setRunning(running) {
@@ -335,10 +336,14 @@ export async function runCommand(endpoint, title) {
 
   try {
     suppressFileChange(state.activeTab);
+    const payload = { path: state.activeTab, content };
+    if (endpoint === "/api/prove") {
+      payload.verbosity = parseInt(proveVerbosity.value, 10);
+    }
     const data = await apiFetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: state.activeTab, content }),
+      body: JSON.stringify(payload),
     });
 
     // Update saved state (auto-save happened server-side)

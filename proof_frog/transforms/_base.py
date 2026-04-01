@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -13,9 +14,34 @@ from typing import Callable, Optional
 from sympy import Symbol
 
 from .. import frog_ast
+from ..frog_ast import SourceOrigin
 from ..visitors import NameTypeMap
 
 _MAX_FIXED_POINT_ITERATIONS = 200
+
+
+@dataclass
+class NearMiss:
+    """A transform that almost fired but didn't, with explanation."""
+
+    transform_name: str
+    reason: str
+    location: SourceOrigin | None
+    suggestion: str | None
+    variable: str | None
+    method: str | None
+
+
+def deduplicate_near_misses(misses: list[NearMiss]) -> list[NearMiss]:
+    """Deduplicate near-misses by (transform_name, method, variable)."""
+    seen: set[tuple[str, str | None, str | None]] = set()
+    result: list[NearMiss] = []
+    for nm in misses:
+        key = (nm.transform_name, nm.method, nm.variable)
+        if key not in seen:
+            seen.add(key)
+            result.append(nm)
+    return result
 
 
 @dataclass
@@ -28,6 +54,7 @@ class PipelineContext:
     subsets_pairs: list[tuple[frog_ast.Type, frog_ast.Type]]
     sort_game_fn: Optional[Callable[[frog_ast.Game], frog_ast.Game]] = None
     max_calls: Optional[int] = None
+    near_misses: list[NearMiss] = dataclasses.field(default_factory=list)
 
 
 def _lookup_primitive_method(

@@ -1,7 +1,19 @@
 from __future__ import annotations
+import dataclasses
 from enum import Enum
 from abc import ABC, abstractmethod
 from typing import Optional, TypeAlias, Sequence, TypeVar, Generic, Tuple as PyTuple
+
+
+@dataclasses.dataclass(frozen=True)
+class SourceOrigin:
+    """Tracks where an AST node originated in the user's source code."""
+
+    file: str
+    line: int
+    col: int
+    original_text: str
+    transform_chain: tuple[str, ...]
 
 
 class FileType(Enum):
@@ -15,6 +27,7 @@ class ASTNode(ABC):
     def __init__(self) -> None:
         self.line_num: int = -1
         self.column_num: int = -1
+        self.origin: SourceOrigin | None = None
 
     def __eq__(self, other: object) -> bool:
         if self is other:
@@ -27,7 +40,7 @@ class ASTNode(ABC):
         return all(
             (
                 True
-                if attr in {"line_num", "column_num"}
+                if attr in {"line_num", "column_num", "origin"}
                 else getattr(self, attr) == getattr(other, attr)
             )
             for attr in self.__dict__

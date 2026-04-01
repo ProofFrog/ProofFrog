@@ -475,6 +475,7 @@ def _capture_prove(
                 "current_desc": r.current_desc,
                 "next_desc": r.next_desc,
                 "failure_detail": r.failure_detail,
+                "diagnosis": proof_engine.serialize_diagnosis(r.diagnosis),
             }
             for r in engine.hop_results
             if r.depth == 0 and r.kind != "induction_rollover"

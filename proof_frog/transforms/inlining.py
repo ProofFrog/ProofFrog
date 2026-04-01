@@ -20,7 +20,7 @@ from ..visitors import (
     ReplaceTransformer,
     VariableCollectionVisitor,
 )
-from ._base import TransformPass, PipelineContext, has_nondeterministic_call
+from ._base import TransformPass, PipelineContext, has_nondeterministic_call, NearMiss
 
 
 class _VarCountVisitor(Visitor[int]):
@@ -162,6 +162,9 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
         return v1 + G.evaluate(v2) + mL;
     """
 
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
             if not (
@@ -218,6 +221,23 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
             total_uses = _VarCountVisitor(var_name).visit(remaining_block)
 
             if total_uses != 1:
+                if total_uses > 1 and self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Single-Use Variable",
+                            reason=(
+                                f"Cannot inline '{var_name}': "
+                                f"used {total_uses} times (need exactly 1)"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"If '{var_name}' should be inlined, restructure "
+                                f"so it is used only once"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
                 continue
 
             # Collect free variables in expr and check none are written to
@@ -226,13 +246,36 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
             intermediate = frog_ast.Block(
                 list(remaining_block.statements[:first_use_idx])
             )
-            if any(
-                SearchVisitor(functools.partial(is_written_to, fv.name)).visit(
+            modified_free_vars = [
+                fv.name
+                for fv in free_vars
+                if SearchVisitor(functools.partial(is_written_to, fv.name)).visit(
                     intermediate
                 )
                 is not None
-                for fv in free_vars
-            ):
+            ]
+            if modified_free_vars:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Single-Use Variable",
+                            reason=(
+                                f"Cannot inline '{var_name}': free variable(s) "
+                                f"{', '.join(repr(v) for v in modified_free_vars)} "
+                                f"modified between declaration and use"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"Reorder statements so that "
+                                f"{', '.join(repr(v) for v in modified_free_vars)} "
+                                f"{'is' if len(modified_free_vars) == 1 else 'are'} "
+                                f"not modified between the declaration and use "
+                                f"of '{var_name}'"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
                 continue
 
             # Perform the inlining: replace every occurrence of var in
@@ -763,7 +806,7 @@ class InlineSingleUseVariable(TransformPass):
     name = "Inline Single-Use Variables"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return InlineSingleUseVariableTransformer().transform(game)
+        return InlineSingleUseVariableTransformer(ctx).transform(game)
 
 
 class CollapseAssignment(TransformPass):
@@ -1015,9 +1058,14 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
         }
     """
 
-    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace | None = None,
+        ctx: PipelineContext | None = None,
+    ) -> None:
         self.field_names: list[str] = []
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
+        self.ctx = ctx
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         return block  # All work done in transform_game
@@ -1123,6 +1171,21 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
         # (no non-deterministic function calls), so duplicating it is safe.
         is_pure = not has_nondeterministic_call(assign_expr, self._proof_namespace)
         if total_uses > 1 and not is_pure:
+            if self.ctx is not None:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Inline Single-Use Field",
+                        reason=(
+                            f"Cannot inline field '{field_name}': "
+                            f"used {total_uses} times but expression "
+                            f"contains non-deterministic calls"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=field_name,
+                        method=None,
+                    )
+                )
             return None
 
         # 3. All uses must be in the same method as the definition —
@@ -1139,6 +1202,20 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
                 break
 
         if not all_same_method:
+            if self.ctx is not None:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Inline Single-Use Field",
+                        reason=(
+                            f"Cannot inline field '{field_name}': "
+                            f"used across multiple methods"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=field_name,
+                        method=None,
+                    )
+                )
             return None
 
         # 4. Check that no free variable in expr is modified between def and last use
@@ -1208,5 +1285,5 @@ class InlineSingleUseField(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return InlineSingleUseFieldTransformer(
-            proof_namespace=ctx.proof_namespace
+            proof_namespace=ctx.proof_namespace, ctx=ctx
         ).transform(game)

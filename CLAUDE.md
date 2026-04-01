@@ -70,6 +70,7 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 
 ## Conventions
 
+- **Never commit to git unless explicitly asked by the user.**
 - Python 3.11+, built with Flit (`pyproject.toml`)
 - `parsing/` directory is excluded from black, mypy, and pylint
 - Proof imports use paths relative to the directory where the CLI is invoked

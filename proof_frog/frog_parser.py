@@ -24,6 +24,7 @@ from .parsing.ProofVisitor import ProofVisitor
 from .parsing.ProofParser import ProofParser
 from .parsing.ProofLexer import ProofLexer
 from . import frog_ast
+from . import suggestions as _suggestions
 
 
 class _SilentErrorListener(ErrorListener):  # type: ignore[misc]
@@ -171,37 +172,6 @@ _KNOWN_KEYWORDS = {
     "extends",
 }
 
-# Known FrogLang type names (case-sensitive) for detecting lowercase mistakes
-_KNOWN_TYPE_NAMES = {
-    "int": "Int",
-    "bool": "Bool",
-    "void": "Void",
-    "set": "Set",
-    "map": "Map",
-    "array": "Array",
-    "bitstring": "BitString",
-    "modint": "ModInt",
-    "string": "BitString",
-}
-
-
-def _levenshtein_distance(s1: str, s2: str) -> int:
-    """Compute the Levenshtein edit distance between two strings."""
-    if len(s1) < len(s2):
-        return _levenshtein_distance(s2, s1)  # pylint: disable=arguments-out-of-order
-    if len(s2) == 0:
-        return len(s1)
-    prev_row = list(range(len(s2) + 1))
-    for i, c1 in enumerate(s1):
-        curr_row = [i + 1]
-        for j, c2 in enumerate(s2):
-            cost = 0 if c1 == c2 else 1
-            curr_row.append(
-                min(prev_row[j + 1] + 1, curr_row[j] + 1, prev_row[j] + cost)
-            )
-        prev_row = curr_row
-    return prev_row[-1]
-
 
 def _suggest_keyword(token: str) -> str | None:
     """If *token* is close to a known keyword, return a suggestion."""
@@ -218,7 +188,7 @@ def _suggest_keyword(token: str) -> str | None:
         # Only suggest keywords of similar length
         if abs(len(kw) - len(token)) > 2:
             continue
-        dist = _levenshtein_distance(token, kw)
+        dist = _suggestions.levenshtein_distance(token, kw)
         if dist < best_dist:
             best, best_dist = kw, dist
     return best
@@ -287,8 +257,8 @@ def _enhance_error_message(  # pylint: disable=too-many-arguments,too-many-posit
             )
 
     # --- Heuristic: lowercase type name ---
-    if token_text in _KNOWN_TYPE_NAMES:
-        correct = _KNOWN_TYPE_NAMES[token_text]
+    if token_text in _suggestions.KNOWN_TYPE_NAMES:
+        correct = _suggestions.KNOWN_TYPE_NAMES[token_text]
         return (
             f"unknown identifier '{token_text}'; did you mean '{correct}'? "
             f"(type names are capitalized in FrogLang)",

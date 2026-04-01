@@ -6,6 +6,7 @@ from sympy import Rational, Symbol
 from . import frog_ast
 from . import frog_parser
 from . import proof_engine
+from . import suggestions as _suggestions
 from . import visitors
 
 
@@ -395,10 +396,15 @@ class NameResolutionVisitor(VariableTypeVisitor):
         super().visit_scheme(scheme)
         self._check_duplicate_names(scheme)
         if scheme.primitive_name not in self.import_namespace:
+            suggestion = _suggestions.suggest_identifier(
+                scheme.primitive_name, list(self.import_namespace.keys())
+            )
+            hint = f"did you mean '{suggestion}'?" if suggestion else ""
             print_error(
                 scheme,
                 f"Primitive {scheme.primitive_name} is not defined",
                 self.file_name,
+                hint=hint,
             )
         corresponding_primitive = self.import_namespace[scheme.primitive_name]
         if not isinstance(corresponding_primitive, frog_ast.Primitive):
@@ -463,26 +469,53 @@ class NameResolutionVisitor(VariableTypeVisitor):
         the_type = self.get_type(var.name)
         if the_type is None:
             if self.in_parameter_type:
-                print_error(
-                    var,
-                    f"Type '{var.name}' is not defined; check that it is imported",
-                    self.file_name,
-                )
+                type_hint = _suggestions.suggest_type(var.name)
+                if type_hint:
+                    suffix = (
+                        " (type names are capitalized in FrogLang)"
+                        if var.name == var.name.lower()
+                        else ""
+                    )
+                    print_error(
+                        var,
+                        f"Type '{var.name}' is not defined",
+                        self.file_name,
+                        hint=f"did you mean '{type_hint}'?{suffix}",
+                    )
+                else:
+                    all_type_names = self._gather_type_names()
+                    suggestion = _suggestions.suggest_identifier(
+                        var.name, all_type_names
+                    )
+                    hint = f"did you mean '{suggestion}'?" if suggestion else ""
+                    print_error(
+                        var,
+                        f"Type '{var.name}' is not defined; "
+                        f"check that it is imported",
+                        self.file_name,
+                        hint=hint,
+                    )
             else:
                 qualified_suggestions = self._find_qualified_names(var.name)
                 if qualified_suggestions:
-                    suggestions = " or ".join(f"'{s}'" for s in qualified_suggestions)
+                    suggestions_str = " or ".join(
+                        f"'{s}'" for s in qualified_suggestions
+                    )
                     print_error(
                         var,
                         f"Variable '{var.name}' is not defined."
-                        f" Did you mean {suggestions}?",
+                        f" Did you mean {suggestions_str}?",
                         self.file_name,
                     )
                 else:
+                    all_names = self._gather_variable_names()
+                    suggestion = _suggestions.suggest_identifier(var.name, all_names)
+                    hint = f"did you mean '{suggestion}'?" if suggestion else ""
                     print_error(
                         var,
                         f"Variable '{var.name}' is not defined",
                         self.file_name,
+                        hint=hint,
                     )
 
     def _find_qualified_names(self, field_name: str) -> list[str]:
@@ -497,15 +530,36 @@ class NameResolutionVisitor(VariableTypeVisitor):
                     results.append(f"{var_name}.{field_name}")
         return results
 
+    def _gather_variable_names(self) -> list[str]:
+        """Collect all variable names currently in scope."""
+        names: list[str] = []
+        for scope in self.variable_type_map_stack:
+            names.extend(scope.keys())
+        return names
+
+    def _gather_type_names(self) -> list[str]:
+        """Collect all type/import names currently in scope."""
+        names: list[str] = []
+        for scope in self.variable_type_map_stack:
+            names.extend(scope.keys())
+        names.extend(self.import_namespace.keys())
+        return names
+
     def visit_parameterized_game(
         self, parameterized_game: frog_ast.ParameterizedGame
     ) -> None:
         the_type = self.get_type(parameterized_game.name)
         if the_type is None:
+            all_names = self._gather_type_names()
+            suggestion = _suggestions.suggest_identifier(
+                parameterized_game.name, all_names
+            )
+            hint = f"did you mean '{suggestion}'?" if suggestion else ""
             print_error(
                 parameterized_game,
                 f"Game {parameterized_game.name} is not defined",
                 self.file_name,
+                hint=hint,
             )
 
     def leave_concrete_game(self, concrete_game: frog_ast.ConcreteGame) -> None:
@@ -630,7 +684,10 @@ def _truncate_expr(expr: object, max_len: int = 60) -> str:
 
 
 def print_error(
-    location: frog_ast.ASTNode, message: str, file_name: str = "Unknown"
+    location: frog_ast.ASTNode,
+    message: str,
+    file_name: str = "Unknown",
+    hint: str = "",
 ) -> None:
     line, col = location.line_num, location.column_num
     loc = file_name
@@ -648,6 +705,8 @@ def print_error(
                 print(caret, file=sys.stderr)
         except OSError:
             pass
+    if hint:
+        print(f"  hint: {hint}", file=sys.stderr)
     raise FailedTypeCheck()
 
 
@@ -959,8 +1018,32 @@ class CheckTypeVisitor(VariableTypeVisitor):
         sympy_subs = self._build_sympy_subs()
         return compare_types(declared_type, value_type, resolved_pairs, sympy_subs)
 
-    def print_error(self, location: frog_ast.ASTNode, message: str) -> None:
-        print_error(location, message, self.file_name)
+    def print_error(
+        self, location: frog_ast.ASTNode, message: str, hint: str = ""
+    ) -> None:
+        print_error(location, message, self.file_name, hint=hint)
+
+    def _type_alias(self, type_obj: PossibleType) -> str | None:
+        """Find a user-facing alias for a resolved type (e.g. 'E.Key' for KS)."""
+        if type_obj is None:
+            return None
+        type_str = str(type_obj)
+        for scope in self.variable_type_map_stack:
+            for var_name, var_type in scope.items():
+                if not isinstance(var_type, visitors.InstantiableType):
+                    continue
+                for member_name, member_type in var_type.members.items():
+                    if str(member_type) == type_str:
+                        return f"{var_name}.{member_name}"
+        return None
+
+    def _format_type_with_alias(self, type_obj: PossibleType) -> str:
+        """Format a type, including its alias if one exists."""
+        base = _format_type(type_obj)
+        alias = self._type_alias(type_obj)
+        if alias and alias != base:
+            return f"{base} ({alias})"
+        return base
 
     def get_type_from_ast(self, node: frog_ast.ASTNode) -> PossibleType:
         try:
@@ -1270,7 +1353,10 @@ class CheckTypeVisitor(VariableTypeVisitor):
             got_type = self.get_type_from_ast(bad_return.expression)
             self.print_error(
                 bad_return,
-                f"{_truncate_expr(bad_return.expression)} has type {_format_type(got_type)}, expected {expected_type}",
+                f"{_truncate_expr(bad_return.expression)} has type"
+                f" {self._format_type_with_alias(got_type)},"
+                f" expected {expected_type}"
+                f" (return type of {method.signature.name})",
             )
 
     def visit_variable(self, variable: frog_ast.Variable) -> None:
@@ -1840,7 +1926,9 @@ class CheckTypeVisitor(VariableTypeVisitor):
             if not self.check_types(param.type, arg_types[index]):
                 self.print_error(
                     location,
-                    f"Argument {args[index]} has type {arg_types[index]}, expected {param.type}",
+                    f"Argument {args[index]} has type {arg_types[index]},"
+                    f" expected {param.type}"
+                    f" (parameter '{param.name}' of {scheme.name})",
                 )
 
         # Check cache to avoid redundant instantiation and type-checking
@@ -1979,9 +2067,14 @@ class CheckTypeVisitor(VariableTypeVisitor):
             for index, arg_type in enumerate(arg_types):
                 declared_type = func_call_signature.parameters[index].type
                 if not self.check_types(declared_type, arg_type):
+                    param_name = func_call_signature.parameters[index].name
                     self.print_error(
                         func_call,
-                        f"{func_call.args[index]} has type {_format_type(arg_type)}, expected {declared_type}",
+                        f"{func_call.args[index]} has type"
+                        f" {self._format_type_with_alias(arg_type)},"
+                        f" expected {declared_type}"
+                        f" (parameter '{param_name}'"
+                        f" of {func_call_signature.name})",
                     )
             self.ast_type_map.set(func_call, func_call_signature.return_type)
 

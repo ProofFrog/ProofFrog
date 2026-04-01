@@ -684,10 +684,15 @@ class NameResolutionVisitor(VariableTypeVisitor):
             return
 
         if field_access.name not in the_type.members.keys():
+            suggestion = _suggestions.suggest_identifier(
+                field_access.name, list(the_type.members.keys())
+            )
+            hint = f"did you mean '{suggestion}'?" if suggestion else ""
             print_error(
                 field_access,
                 f"{field_access.name} is not a property of {field_access.the_object}",
                 self.file_name,
+                hint=hint,
             )
 
 

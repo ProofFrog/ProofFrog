@@ -229,3 +229,39 @@ class TestImportPathSuggestions:
         with pytest.raises(FileNotFoundError) as exc_info:
             semantic_analysis.check_well_formed(root, str(file_path))
         assert "MyPrimitive.primitive" in str(exc_info.value)
+
+
+class TestFieldAccessSuggestions:
+    def test_misspelled_method_name_on_primitive(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Misspelled method via field access should suggest the correct one."""
+        prim = tmp_path / "Enc.primitive"
+        prim.write_text(
+            "Primitive Enc(Set KS, Set MS) {\n"
+            "    Set Key = KS;\n"
+            "    Set Message = MS;\n"
+            "    Key KeyGen();\n"
+            "    Message Encrypt(Key k);\n"
+            "}\n"
+        )
+        source = (
+            "import 'Enc.primitive';\n\n"
+            "Game Left(Enc E) {\n"
+            "    E.Message Foo() {\n"
+            "        E.Key k = E.KeyGen();\n"
+            "        return E.Encryt(k);\n"
+            "    }\n"
+            "}\n"
+            "Game Right(Enc E) {\n"
+            "    E.Message Foo() {\n"
+            "        E.Key k = E.KeyGen();\n"
+            "        return E.Encrypt(k);\n"
+            "    }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        stderr = _check_error_stderr(tmp_path, capsys, source, ext=".game")
+        assert "is not a property" in stderr
+        assert "  hint:" in stderr
+        assert "Encrypt" in stderr

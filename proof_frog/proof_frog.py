@@ -75,14 +75,19 @@ def check(file: str, json_output: bool) -> None:
 
 @cli.command()
 @click.argument("file")
-@click.option("-v", "--verbose", is_flag=True, help="Enable verbose output.")
+@click.option(
+    "-v",
+    "--verbose",
+    count=True,
+    help="Increase verbosity (-v for games, -vv for transforms).",
+)
 @click.option("--json", "-j", "json_output", is_flag=True, help="Output JSON.")
 @click.option(
     "--no-diagnose",
     is_flag=True,
     help="Suppress diagnostic analysis on failure (summary only).",
 )
-def prove(file: str, verbose: bool, json_output: bool, no_diagnose: bool) -> None:
+def prove(file: str, verbose: int, json_output: bool, no_diagnose: bool) -> None:
     """Run proof verification on a .proof file."""
     if json_output:
         # pylint: disable=import-outside-toplevel
@@ -97,7 +102,8 @@ def prove(file: str, verbose: bool, json_output: bool, no_diagnose: bool) -> Non
             )
         )
         return
-    engine = proof_engine.ProofEngine(verbose, no_diagnose=no_diagnose)
+    verbosity = proof_engine.Verbosity(min(verbose, 2))
+    engine = proof_engine.ProofEngine(verbosity, no_diagnose=no_diagnose)
     proof_file: frog_ast.ProofFile
     try:
         proof_file = frog_parser.parse_proof_file(file)

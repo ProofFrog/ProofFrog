@@ -61,6 +61,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 #toolbar button:disabled { opacity: 0.4; cursor: default; }
 #toolbar button.primary { border-color: var(--accent2); color: var(--accent2); }
 #toolbar button.running { opacity: 0.6; }
+#toolbar select {
+  padding: 3px 6px; border: 1px solid var(--border); border-radius: 3px;
+  background: var(--bg2); color: var(--text); font-size: 12px;
+}
 #toolbar .spacer { flex: 1; }
 #toolbar .dir-label { color: var(--text-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; }
 

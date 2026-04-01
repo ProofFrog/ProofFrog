@@ -5,7 +5,7 @@ import difflib
 import functools
 import shutil
 import warnings
-from enum import Enum
+from enum import Enum, IntEnum
 from collections import namedtuple
 from typing import TypeAlias, Tuple, Dict, Optional, TypeVar, Union
 import z3
@@ -181,14 +181,27 @@ class _AllTrueTransformer(visitors.Transformer):
         )
 
 
+class Verbosity(IntEnum):
+    """Verbosity levels for proof engine output."""
+
+    QUIET = 0  # Default: summary table only
+    NORMAL = 1  # Show intermediate games (step headers, game forms)
+    VERBOSE = 2  # Show every transform applied
+
+
 class ProofEngine:
-    def __init__(self, verbose: bool, no_diagnose: bool = False) -> None:
+    def __init__(
+        self, verbose: bool | Verbosity = False, no_diagnose: bool = False
+    ) -> None:
         self.definition_namespace: frog_ast.Namespace = {}
         self.proof_namespace: frog_ast.Namespace = {}
         self.proof_let_types: visitors.NameTypeMap = visitors.NameTypeMap()
         self.subsets_pairs: list[tuple[frog_ast.Type, frog_ast.Type]] = []
 
-        self.verbose = verbose
+        if isinstance(verbose, bool):
+            self.verbosity = Verbosity.VERBOSE if verbose else Verbosity.QUIET
+        else:
+            self.verbosity = verbose
         self.no_diagnose = no_diagnose
         self.step_assumptions: list[ProcessedAssumption] = []
         self.hop_results: list[HopResult] = []
@@ -456,9 +469,9 @@ class ProofEngine:
             diag = equiv_result.diagnosis
             indent = "  " + " " * (len(str(self._total_steps)) * 2 + 9)
             print(f"{indent}{Fore.YELLOW}{diag.summary}{Fore.RESET}")
-        if self.verbose and equiv_result.failure_detail:
+        if self.verbosity >= Verbosity.VERBOSE and equiv_result.failure_detail:
             _print_failure_detail(equiv_result.failure_detail)
-        if self.verbose and equiv_result.diagnosis is not None:
+        if self.verbosity >= Verbosity.VERBOSE and equiv_result.diagnosis is not None:
             diag = equiv_result.diagnosis
             if diag.explanations:
                 print("    Near-misses:")
@@ -523,7 +536,7 @@ class ProofEngine:
             next_step = steps[i]
             self._current_step += 1
 
-            if self.verbose:
+            if self.verbosity >= Verbosity.NORMAL:
                 print(f"===STEP {step_num}===")
 
             current_game_ast: frog_ast.Game
@@ -537,7 +550,7 @@ class ProofEngine:
                 ):
                     current_desc = str(current_step)
                     next_desc = str(next_step)
-                    if self.verbose:
+                    if self.verbosity >= Verbosity.NORMAL:
                         print(f"Current: {current_desc}")
                         print(f"Hop To: {next_desc}\n")
                         print("Valid by assumption")
@@ -602,7 +615,7 @@ class ProofEngine:
             current_desc = str(current_step)
             next_desc = str(next_step)
 
-            if self.verbose:
+            if self.verbosity >= Verbosity.NORMAL:
                 print(f"Current: {current_desc}")
                 print(f"Hop To: {next_desc}\n")
 
@@ -669,7 +682,7 @@ class ProofEngine:
                 self._current_step += 1
                 rollover_current_desc = str(last_step)
                 rollover_next_desc = str(first_step)
-                if self.verbose:
+                if self.verbosity >= Verbosity.NORMAL:
                     print("CHECKING INDUCTION ROLLOVER")
                     print(f"Current: {rollover_current_desc}")
                     print(f"Hop To: {rollover_next_desc}\n")
@@ -783,7 +796,7 @@ class ProofEngine:
             which = WhichGame.CURRENT if index == 0 else WhichGame.NEXT
             ctx.near_misses = []  # Reset for each game
 
-            if self.verbose:
+            if self.verbosity >= Verbosity.VERBOSE:
                 label = "CURRENT" if index == 0 else "NEXT"
                 print(f"SIMPLIFYING {label} GAME")
                 print(game)
@@ -791,7 +804,12 @@ class ProofEngine:
             pipeline = list(CORE_PIPELINE) + [
                 ApplyAssumptions(self.step_assumptions, which, self.proof_let_types)
             ]
-            game = run_pipeline(game, pipeline, ctx, verbose=self.verbose)
+            game = run_pipeline(
+                game,
+                pipeline,
+                ctx,
+                verbose=self.verbosity >= Verbosity.VERBOSE,
+            )
             game = run_standardization(game, STANDARDIZATION_PIPELINE, ctx)
 
             if index == 0:
@@ -801,14 +819,14 @@ class ProofEngine:
                 next_game_ast = game
                 next_near_misses = deduplicate_near_misses(ctx.near_misses)
 
-        if self.verbose:
+        if self.verbosity >= Verbosity.NORMAL:
             print("CURRENT")
             print(current_game_ast)
             print("NEXT")
             print(next_game_ast)
 
         if current_game_ast == next_game_ast:
-            if self.verbose:
+            if self.verbosity >= Verbosity.NORMAL:
                 print("Inline Success!")
             return EquivalenceResult(valid=True)
 
@@ -902,7 +920,7 @@ class ProofEngine:
                             f"{condition} vs {if_next.conditions[i]}"
                         ),
                     )
-        if self.verbose:
+        if self.verbosity >= Verbosity.NORMAL:
             print("Inline Success!")
         return EquivalenceResult(valid=True)
 

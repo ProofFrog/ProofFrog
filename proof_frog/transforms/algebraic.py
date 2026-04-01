@@ -684,6 +684,75 @@ class ModIntSimplification(TransformPass):
         return ModIntSimplificationTransformer(type_map).transform(game)
 
 
+def _flatten_chain(
+    expr: frog_ast.Expression, op: frog_ast.BinaryOperators
+) -> list[frog_ast.Expression]:
+    """Flatten an associative chain of *op* into a list of operands."""
+    if isinstance(expr, frog_ast.BinaryOperation) and expr.operator == op:
+        return _flatten_chain(expr.left_expression, op) + _flatten_chain(
+            expr.right_expression, op
+        )
+    return [expr]
+
+
+def _rebuild_chain(
+    terms: list[frog_ast.Expression], op: frog_ast.BinaryOperators
+) -> frog_ast.Expression:
+    """Rebuild a left-associative chain from sorted operands."""
+    result = terms[0]
+    for term in terms[1:]:
+        result = frog_ast.BinaryOperation(op, result, term)
+    return result
+
+
+# Operators that are commutative + associative for all types they apply to.
+# OR (||) is excluded because it means concatenation on BitString.
+_COMMUTATIVE_ASSOCIATIVE_OPS = frozenset(
+    {frog_ast.BinaryOperators.ADD, frog_ast.BinaryOperators.MULTIPLY}
+)
+
+
+class NormalizeCommutativeChainsTransformer(Transformer):
+    """Sort operands of commutative+associative operator chains.
+
+    Flattens chains like ``(c + a) + b`` into ``[a, b, c]`` (sorted by
+    ``str()``), then rebuilds left-associatively as ``(a + b) + c``.
+    This normalizes both operand order (commutativity) and parenthesization
+    (associativity) in a single pass.
+    """
+
+    def transform_binary_operation(
+        self, expr: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        # First, recursively transform children
+        transformed = frog_ast.BinaryOperation(
+            expr.operator,
+            self.transform(expr.left_expression),
+            self.transform(expr.right_expression),
+        )
+
+        if transformed.operator not in _COMMUTATIVE_ASSOCIATIVE_OPS:
+            return transformed
+
+        terms = _flatten_chain(transformed, transformed.operator)
+        if len(terms) < 2:
+            return transformed
+
+        sorted_terms = sorted(terms, key=str)
+        rebuilt = _rebuild_chain(sorted_terms, transformed.operator)
+        if rebuilt == transformed:
+            return transformed  # already in canonical form
+
+        return rebuilt
+
+
+class NormalizeCommutativeChains(TransformPass):
+    name = "Normalize Commutative Chains"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return NormalizeCommutativeChainsTransformer().transform(game)
+
+
 class ReflexiveComparison(TransformPass):
     name = "Reflexive Comparison"
 

@@ -38,6 +38,7 @@ from .algebraic import (
     XorCancellation,
     XorIdentity,
     ModIntSimplification,
+    NormalizeCommutativeChains,
     ReflexiveComparison,
 )
 from .structural import (
@@ -107,6 +108,7 @@ CORE_PIPELINE: list[TransformPass] = [
     XorCancellation(),
     XorIdentity(),
     ModIntSimplification(),
+    NormalizeCommutativeChains(),
     ReflexiveComparison(),
     InlineMultiUsePureExpression(),
     RedundantFieldCopy(),

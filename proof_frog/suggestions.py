@@ -1,3 +1,5 @@
+# pylint: disable=duplicate-code
+# Type keyword lists necessarily overlap with frog_parser.py
 """Shared utilities for generating error message suggestions.
 
 Used by both frog_parser.py (parse-time heuristics) and

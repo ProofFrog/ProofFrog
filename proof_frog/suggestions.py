@@ -6,6 +6,7 @@ semantic_analysis.py (check-time error messages).
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 
 
@@ -98,3 +99,41 @@ def suggest_type(name: str) -> str | None:
         if dist < best_dist:
             best, best_dist = kw, dist
     return best
+
+
+def suggest_path(failed_path: str) -> str | None:
+    """Suggest a corrected path when a file is not found.
+
+    Checks the parent directory for a close match to the filename.
+    If the parent doesn't exist, checks one level up for a close
+    directory name match.
+    """
+    if os.path.exists(failed_path):
+        return None
+    parent = os.path.dirname(failed_path)
+    basename = os.path.basename(failed_path)
+
+    # Case 1: parent exists, filename has a typo
+    if os.path.isdir(parent):
+        siblings = os.listdir(parent)
+        suggestion = suggest_identifier(basename, siblings)
+        if suggestion:
+            return os.path.join(parent, suggestion)
+        return None
+
+    # Case 2: parent doesn't exist, directory name has a typo
+    grandparent = os.path.dirname(parent)
+    parent_name = os.path.basename(parent)
+    if os.path.isdir(grandparent):
+        sibling_dirs = [
+            d
+            for d in os.listdir(grandparent)
+            if os.path.isdir(os.path.join(grandparent, d))
+        ]
+        dir_suggestion = suggest_identifier(parent_name, sibling_dirs)
+        if dir_suggestion:
+            corrected_parent = os.path.join(grandparent, dir_suggestion)
+            corrected_path = os.path.join(corrected_parent, basename)
+            if os.path.exists(corrected_path):
+                return corrected_path
+    return None

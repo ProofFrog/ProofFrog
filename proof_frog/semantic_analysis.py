@@ -30,9 +30,14 @@ def check_well_formed(
             )
             parsed_file = parse_cache.get(resolved)
             if parsed_file is None:
+                path_hint = ""
+                path_suggestion = _suggestions.suggest_path(resolved)
+                if path_suggestion:
+                    suggested_name = os.path.basename(path_suggestion)
+                    path_hint = f" (did you mean '{suggested_name}'?)"
                 raise FileNotFoundError(
                     f"{file_name}:{imp.line_num}: imported file not found: "
-                    f"'{imp.filename}'"
+                    f"'{imp.filename}'{path_hint}"
                 )
             name = imp.rename if imp.rename else parsed_file.get_export_name()
             import_namespace[name] = parsed_file
@@ -67,9 +72,14 @@ def name_resolution(
                 try:
                     parsed_file = frog_parser.parse_file(resolved)
                 except FileNotFoundError:
+                    path_hint = ""
+                    path_suggestion = _suggestions.suggest_path(resolved)
+                    if path_suggestion:
+                        suggested_name = os.path.basename(path_suggestion)
+                        path_hint = f" (did you mean '{suggested_name}'?)"
                     raise FileNotFoundError(
                         f"{file_name}:{imp.line_num}: imported file not found: "
-                        f"'{imp.filename}'"
+                        f"'{imp.filename}'{path_hint}"
                     ) from None
                 do_name_resolution(parsed_file, resolved)
                 name = imp.rename if imp.rename else parsed_file.get_export_name()
@@ -368,23 +378,58 @@ class NameResolutionVisitor(VariableTypeVisitor):
     def visit_game_file(self, game_file: frog_ast.GameFile) -> None:
         for index, game in enumerate(game_file.games):
             other_game = game_file.games[1 - index]
+            other_method_names = [m.signature.name for m in other_game.methods]
             for method_signature in [method.signature for method in game.methods]:
                 if not [
                     other
                     for other in other_game.methods
                     if other.signature == method_signature
                 ]:
-                    print_error(
-                        method_signature,
-                        f"{method_signature} does not exist in paired game",
-                        self.file_name,
-                    )
+                    # Same name but different signature?
+                    if method_signature.name in other_method_names:
+                        other_sig = next(
+                            m.signature
+                            for m in other_game.methods
+                            if m.signature.name == method_signature.name
+                        )
+                        print_error(
+                            method_signature,
+                            f"Method '{method_signature.name}' has different"
+                            f" signatures in {game.name} and"
+                            f" {other_game.name}:"
+                            f" {method_signature} vs {other_sig}",
+                            self.file_name,
+                        )
+                    else:
+                        suggestion = _suggestions.suggest_identifier(
+                            method_signature.name, other_method_names
+                        )
+                        hint = f"did you mean '{suggestion}'?" if suggestion else ""
+                        print_error(
+                            method_signature,
+                            f"{method_signature} does not exist in"
+                            f" paired game {other_game.name}",
+                            self.file_name,
+                            hint=hint,
+                        )
             if len(game.parameters) != len(other_game.parameters):
-                print_error(game, "Games must have matching parameters", self.file_name)
+                print_error(
+                    game,
+                    f"Games must have matching parameters:"
+                    f" {game.name} has {len(game.parameters)}"
+                    f" but {other_game.name} has"
+                    f" {len(other_game.parameters)}",
+                    self.file_name,
+                )
             for param_index, param in enumerate(game.parameters):
                 if param.type != other_game.parameters[param_index].type:
                     print_error(
-                        game, "Games must have matching parameters", self.file_name
+                        game,
+                        f"Parameter {param_index + 1} type mismatch:"
+                        f" {game.name} has {param.type}"
+                        f" but {other_game.name} has"
+                        f" {other_game.parameters[param_index].type}",
+                        self.file_name,
                     )
 
         if game_file.games[0].name == game_file.games[1].name:
@@ -1396,8 +1441,8 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 self.print_error(
                     array_access,
                     f"Map key type mismatch: expected"
-                    f" {_format_type(array_type.key_type)}, got"
-                    f" {_format_type(index_type)}",
+                    f" {self._format_type_with_alias(array_type.key_type)}, got"
+                    f" {self._format_type_with_alias(index_type)}",
                 )
             self.ast_type_map.set(array_access, array_type.value_type)
             return
@@ -1671,8 +1716,8 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 if not self.check_types(right_type.key_type, left_type):
                     self.print_error(
                         bin_op,
-                        f"Cannot see if {_format_type(left_type)} is in"
-                        f" {_format_type(right_type)}",
+                        f"Cannot see if {self._format_type_with_alias(left_type)} is in"
+                        f" {self._format_type_with_alias(right_type)}",
                     )
             elif isinstance(right_type, frog_ast.SetType):
                 if not right_type.parameterization:
@@ -1684,14 +1729,14 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 if not self.check_types(right_type.parameterization, left_type):
                     self.print_error(
                         bin_op,
-                        f"Cannot see if {_format_type(left_type)} is in"
-                        f" {_format_type(right_type)}",
+                        f"Cannot see if {self._format_type_with_alias(left_type)} is in"
+                        f" {self._format_type_with_alias(right_type)}",
                     )
             else:
                 self.print_error(
                     bin_op,
                     f"{bin_op.right_expression} has type"
-                    f" {_format_type(right_type)}, expected Set or Map",
+                    f" {self._format_type_with_alias(right_type)}, expected Set or Map",
                 )
                 return
             self.ast_type_map.set(bin_op, frog_ast.BoolType())
@@ -1742,7 +1787,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
         if not isinstance(object_type, visitors.InstantiableType):
             self.print_error(
                 field_acess,
-                f"Cannot access field '{field_acess.name}' on type {_format_type(object_type)}",
+                f"Cannot access field '{field_acess.name}' on type {self._format_type_with_alias(object_type)}",
             )
             return
         member = object_type.members[field_acess.name]  # type: ignore[index]
@@ -2044,7 +2089,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 if not self.check_types(func_call_type.domain_type, arg_type):
                     self.print_error(
                         func_call,
-                        f"{func_call.args[0]} has type {_format_type(arg_type)},"
+                        f"{func_call.args[0]} has type {self._format_type_with_alias(arg_type)},"
                         f" expected {func_call_type.domain_type}",
                     )
                 self.ast_type_map.set(func_call, func_call_type.range_type)

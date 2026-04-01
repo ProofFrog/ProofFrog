@@ -135,3 +135,97 @@ class TestTypeAliasDisplay:
         # Should show the alias E.Message for the raw type MS
         assert "E.Message" in stderr
         assert "return type of Foo" in stderr
+
+
+class TestMethodNotFoundSuggestions:
+    def test_misspelled_method_in_paired_game(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Misspelled method name should suggest the correct one."""
+        source = (
+            "Game Left() {\n"
+            "    Bool Fooo() {\n"
+            "        return true;\n"
+            "    }\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Bool Foo() {\n"
+            "        return true;\n"
+            "    }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        stderr = _check_error_stderr(tmp_path, capsys, source, ext=".game")
+        assert "does not exist in paired game" in stderr
+        assert "  hint:" in stderr
+        assert "Foo" in stderr
+
+    def test_same_name_different_signature(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Same method name but different params should show both signatures."""
+        source = (
+            "Game Left() {\n"
+            "    Bool Foo(Int x, Bool y) {\n"
+            "        return y;\n"
+            "    }\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Bool Foo(Int x) {\n"
+            "        return true;\n"
+            "    }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        stderr = _check_error_stderr(tmp_path, capsys, source, ext=".game")
+        assert "different signatures" in stderr
+        assert "Left" in stderr
+        assert "Right" in stderr
+
+    def test_game_param_count_mismatch_shows_counts(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Games with different parameter counts should show the counts."""
+        source = (
+            "Game Left(Int a) {\n"
+            "    Bool Foo() {\n"
+            "        return true;\n"
+            "    }\n"
+            "}\n"
+            "Game Right(Int a, Int b) {\n"
+            "    Bool Foo() {\n"
+            "        return true;\n"
+            "    }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        stderr = _check_error_stderr(tmp_path, capsys, source, ext=".game")
+        assert "Left" in stderr
+        assert "Right" in stderr
+        assert "1" in stderr
+        assert "2" in stderr
+
+
+class TestImportPathSuggestions:
+    def test_typo_in_import_filename(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Typo in import filename should suggest the correct file."""
+        prim = tmp_path / "MyPrimitive.primitive"
+        prim.write_text("Primitive MyPrimitive() {\n    Void f();\n}\n")
+        source = (
+            "import 'MyPrimitiv.primitive';\n\n"
+            "Game Left(MyPrimitive P) {\n"
+            "    Void Foo() {}\n"
+            "}\n"
+            "Game Right(MyPrimitive P) {\n"
+            "    Void Foo() {}\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        file_path = tmp_path / "Test.game"
+        file_path.write_text(source)
+        root = frog_parser.parse_file(str(file_path))
+        with pytest.raises(FileNotFoundError) as exc_info:
+            semantic_analysis.check_well_formed(root, str(file_path))
+        assert "MyPrimitive.primitive" in str(exc_info.value)

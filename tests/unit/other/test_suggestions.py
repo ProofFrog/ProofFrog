@@ -1,6 +1,13 @@
 """Tests for the shared suggestions module."""
 
-from proof_frog.suggestions import levenshtein_distance, suggest_identifier, suggest_type
+from pathlib import Path
+
+from proof_frog.suggestions import (
+    levenshtein_distance,
+    suggest_identifier,
+    suggest_path,
+    suggest_type,
+)
 
 
 class TestLevenshteinDistance:
@@ -86,3 +93,29 @@ class TestSuggestType:
 
     def test_short_token(self) -> None:
         assert suggest_type("In") is None
+
+
+class TestSuggestPath:
+    def test_typo_in_filename(self, tmp_path: Path) -> None:
+        (tmp_path / "SymEnc.primitive").write_text("")
+        (tmp_path / "Hash.primitive").write_text("")
+        result = suggest_path(str(tmp_path / "SymEn.primitive"))
+        assert result is not None
+        assert "SymEnc.primitive" in result
+
+    def test_typo_in_directory(self, tmp_path: Path) -> None:
+        subdir = tmp_path / "Primitives"
+        subdir.mkdir()
+        (subdir / "SymEnc.primitive").write_text("")
+        result = suggest_path(str(tmp_path / "Primitves" / "SymEnc.primitive"))
+        assert result is not None
+        assert "Primitives" in result
+
+    def test_no_match(self, tmp_path: Path) -> None:
+        result = suggest_path(str(tmp_path / "nonexistent" / "file.txt"))
+        assert result is None
+
+    def test_exact_match_returns_none(self, tmp_path: Path) -> None:
+        (tmp_path / "file.txt").write_text("")
+        result = suggest_path(str(tmp_path / "file.txt"))
+        assert result is None

@@ -23,7 +23,7 @@ from ..visitors import (
     VariableCollectionVisitor,
     FrogToSympyVisitor,
 )
-from ._base import TransformPass, PipelineContext
+from ._base import TransformPass, PipelineContext, NearMiss
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
@@ -195,8 +195,13 @@ class MergeUniformSamplesTransformer(BlockTransformer):
     combined length.
     """
 
-    def __init__(self, variables: dict[str, Symbol | frog_ast.Expression]) -> None:
+    def __init__(
+        self,
+        variables: dict[str, Symbol | frog_ast.Expression],
+        ctx: PipelineContext | None = None,
+    ) -> None:
         self.variables = variables
+        self.ctx = ctx
 
     @staticmethod
     def _flatten_concat(
@@ -315,6 +320,21 @@ class MergeUniformSamplesTransformer(BlockTransformer):
                     break
 
             if not all_single_use:
+                if self.ctx is not None and len(leaf_vars) >= 2:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Merge Uniform Samples",
+                            reason=(
+                                f"Samples '{leaf_vars[0].name}' and "
+                                f"'{leaf_vars[1].name}' not merged: not "
+                                f"used exclusively via concatenation"
+                            ),
+                            location=None,
+                            suggestion=None,
+                            variable=leaf_vars[0].name,
+                            method=None,
+                        )
+                    )
                 continue
 
             # Compute combined length
@@ -553,8 +573,13 @@ class SplitUniformSampleTransformer(BlockTransformer):
     do not affect the distribution of the used bits.
     """
 
-    def __init__(self, variables: dict[str, Symbol | frog_ast.Expression]) -> None:
+    def __init__(
+        self,
+        variables: dict[str, Symbol | frog_ast.Expression],
+        ctx: PipelineContext | None = None,
+    ) -> None:
         self.variables = variables
+        self.ctx = ctx
 
     @staticmethod
     def _pos(expr: Symbol | int, pos_subs: dict[Symbol, Symbol]) -> Symbol | int:
@@ -702,6 +727,20 @@ class SplitUniformSampleTransformer(BlockTransformer):
             # (unused portions are discarded).
             overlaps = self._check_overlaps(unique_bounds, pos_subs)
             if overlaps:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Split Uniform Samples",
+                            reason=(
+                                f"Sample '{var_name}' not split: "
+                                f"slices are overlapping or incomplete"
+                            ),
+                            location=statement.origin,
+                            suggestion=None,
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
                 continue
 
             # All checks pass - create replacement samples and substitution map
@@ -1247,7 +1286,7 @@ class MergeUniformSamples(TransformPass):
     name = "Merge Uniform Samples"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return MergeUniformSamplesTransformer(ctx.variables).transform(game)
+        return MergeUniformSamplesTransformer(ctx.variables, ctx).transform(game)
 
 
 class MergeProductSamples(TransformPass):
@@ -1261,4 +1300,4 @@ class SplitUniformSamples(TransformPass):
     name = "Split Uniform Samples"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return SplitUniformSampleTransformer(ctx.variables).transform(game)
+        return SplitUniformSampleTransformer(ctx.variables, ctx).transform(game)

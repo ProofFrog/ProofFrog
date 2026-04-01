@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 from .. import frog_ast
 from ..visitors import BlockTransformer, SearchVisitor, ReplaceTransformer
-from ._base import TransformPass, PipelineContext, _lookup_primitive_method
+from ._base import TransformPass, PipelineContext, NearMiss, _lookup_primitive_method
 
 
 @dataclass
@@ -401,6 +401,9 @@ class LocalRFToUniformTransformer(BlockTransformer):
     - RF is not referenced in any other context (e.g., ``RF.domain``)
     """
 
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for sample_idx, stmt in enumerate(block.statements):
             if not (
@@ -430,6 +433,28 @@ class LocalRFToUniformTransformer(BlockTransformer):
             call_count, other_ref_count = _count_rf_calls(remaining, rf_name)
 
             if call_count != 1 or other_ref_count > 0:
+                if self.ctx is not None and call_count > 0:
+                    if call_count != 1:
+                        reason = (
+                            f"Random function call not simplified: "
+                            f"RF '{rf_name}' called {call_count} times "
+                            f"(need exactly 1)"
+                        )
+                    else:
+                        reason = (
+                            "Random function call not simplified: "
+                            f"RF '{rf_name}' has other non-call references"
+                        )
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Local RF To Uniform",
+                            reason=reason,
+                            location=stmt.origin,
+                            suggestion=None,
+                            variable=rf_name,
+                            method=None,
+                        )
+                    )
                 continue
 
             # Reject if the RF call is inside a loop (the single syntactic
@@ -466,7 +491,7 @@ class LocalRFToUniform(TransformPass):
     name = "Local RF To Uniform"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return LocalRFToUniformTransformer().transform(game)
+        return LocalRFToUniformTransformer(ctx).transform(game)
 
 
 # ---------------------------------------------------------------------------

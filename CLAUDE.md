@@ -44,6 +44,7 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 - `proof_frog/semantic_analysis.py` — Type checking / semantic analysis
 - `proof_frog/visitors.py` — AST visitor/transformer base classes (`Visitor[U]`, `Transformer`, `BlockTransformer`) and core utility visitors/transformers (substitution, inlining, Z3/SymPy conversion, type maps)
 - `proof_frog/transforms/` — Modular canonicalization pipeline; each file defines `TransformPass` subclasses in a specific domain (algebraic, sampling, control flow, inlining, symbolic, types, tuples, structural, standardization, assumptions). `pipelines.py` assembles passes into `CORE_PIPELINE` (fixed-point canonicalization) and `STANDARDIZATION_PIPELINE` (post-canonicalization normalization). `_base.py` provides `TransformPass`, `PipelineContext`, and the `run_pipeline()`/`run_standardization()` runners.
+- `proof_frog/diagnostics.py` — Diagnostic engine for proof hop failures (diff classification, near-miss matching, explanation generation, engine limitation detection)
 - `proof_frog/describe.py` — Human-readable descriptions of primitives/schemes/games
 - `proof_frog/dependencies.py` — Dependency resolution for proof files
 - `proof_frog/mcp_server.py` — MCP server for tool-based proof interaction
@@ -78,6 +79,7 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 - Only use ASCII characters in primitive/scheme/game/proof files.
 - LSP server uses `pygls` and communicates over stdio; uses full document sync (`TextDocumentSyncKind.Full`)
 - The LSP caches a `last_good_ast` per document so completion/hover work even when the file has syntax errors
+- When adding or modifying a `TransformPass` in `proof_frog/transforms/`, also add near-miss instrumentation: at key precondition-failure points where the transform almost fires but doesn't, append a `NearMiss` to `ctx.near_misses` (from `PipelineContext`). Update the engine limitation registry in `proof_frog/diagnostics.py` if the transform has known gaps. Add unit tests for near-miss reporting in `tests/unit/transforms/test_near_misses.py`.
 - When making changes that affect architecture, commands, test structure, or conventions, update CLAUDE.md to reflect those changes.
 
 ## Domain Knowledge

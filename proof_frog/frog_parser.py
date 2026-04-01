@@ -711,6 +711,13 @@ def add_line_number(
         if isinstance(result, frog_ast.ASTNode):
             result.line_num = ctx.start.line
             result.column_num = ctx.start.column
+            result.origin = frog_ast.SourceOrigin(
+                file=self.source_file,
+                line=ctx.start.line,
+                col=ctx.start.column,
+                original_text=ctx.getText(),
+                transform_chain=(),
+            )
         return result
 
     return wrapper
@@ -729,6 +736,8 @@ def line_number_decorator(the_class):  # type: ignore
 @line_number_decorator
 # pylint: disable-next=too-many-public-methods
 class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  # type: ignore[misc]
+    source_file: str = "<unknown>"
+
     def visitParamList(
         self, ctx: PrimitiveParser.ParamListContext
     ) -> list[frog_ast.Parameter]:
@@ -1388,7 +1397,9 @@ def _get_parser(
 
 def parse_primitive_file(primitive: str) -> frog_ast.Primitive:
     try:
-        ast: frog_ast.Primitive = _PrimitiveASTGenerator().visit(
+        visitor = _PrimitiveASTGenerator()
+        visitor.source_file = primitive
+        ast: frog_ast.Primitive = visitor.visit(
             _get_parser(primitive, PrimitiveLexer, PrimitiveParser).program()
         )
         return ast
@@ -1399,7 +1410,9 @@ def parse_primitive_file(primitive: str) -> frog_ast.Primitive:
 
 def parse_scheme_file(scheme: str) -> frog_ast.Scheme:
     try:
-        ast: frog_ast.Scheme = _SchemeASTGenerator().visit(
+        visitor = _SchemeASTGenerator()
+        visitor.source_file = scheme
+        ast: frog_ast.Scheme = visitor.visit(
             _get_parser(scheme, SchemeLexer, SchemeParser).program()
         )
         return ast
@@ -1421,7 +1434,9 @@ def parse_expression(expression: str) -> frog_ast.Expression:
 
 def parse_game_file(game_file: str) -> frog_ast.GameFile:
     try:
-        ast: frog_ast.GameFile = _GameASTGenerator().visit(
+        visitor = _GameASTGenerator()
+        visitor.source_file = game_file
+        ast: frog_ast.GameFile = visitor.visit(
             _get_parser(game_file, GameLexer, GameParser).program()
         )
         return ast
@@ -1432,7 +1447,9 @@ def parse_game_file(game_file: str) -> frog_ast.GameFile:
 
 def parse_proof_file(proof_file: str) -> frog_ast.ProofFile:
     try:
-        ast: frog_ast.ProofFile = _ProofASTGenerator().visit(
+        visitor = _ProofASTGenerator()
+        visitor.source_file = proof_file
+        ast: frog_ast.ProofFile = visitor.visit(
             _get_parser(proof_file, ProofLexer, ProofParser).program()
         )
         return ast
@@ -1521,7 +1538,7 @@ def parse_string(content: str, file_type: frog_ast.FileType) -> frog_ast.Root:
         raise (better or _to_parse_error(e, content)) from e
 
 
-def parse_string_collecting_errors(
+def parse_string_collecting_errors(  # pylint: disable=too-many-locals
     content: str,
     file_type: frog_ast.FileType,
     file_name: str = "<input>",
@@ -1547,6 +1564,7 @@ def parse_string_collecting_errors(
         frog_ast.FileType.PROOF: (ProofLexer, ProofParser, _ProofASTGenerator()),
     }
     lexer_cls, parser_cls, visitor = parser_map[file_type]
+    visitor.source_file = file_name
 
     try:
         parser = _get_parser_from_stream(content, lexer_cls, parser_cls)

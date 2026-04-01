@@ -25,7 +25,7 @@ from ..visitors import (
     GetTypeMapVisitor,
     NameTypeMap,
 )
-from ._base import TransformPass, PipelineContext
+from ._base import TransformPass, PipelineContext, NearMiss
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
@@ -40,6 +40,9 @@ class BranchEliminiationTransformer(BlockTransformer):
     literal ``false``, the branch is removed entirely.  If every branch
     is eliminated the whole if-statement is removed.
     """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
 
     def _transform_block_wrapper(
         self,
@@ -87,6 +90,29 @@ class BranchEliminiationTransformer(BlockTransformer):
                         prior_block
                         + frog_ast.Block([new_if_statement])
                         + remaining_block
+                    )
+
+                # Near-miss: if-statement found but no condition is a literal
+                if (
+                    self.ctx is not None
+                    and new_if_statement == if_statement
+                    and all(
+                        not isinstance(c, frog_ast.Boolean)
+                        for c in if_statement.conditions
+                    )
+                ):
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Branch Elimination",
+                            reason=(
+                                "Branch not eliminated: no condition is "
+                                "a compile-time constant"
+                            ),
+                            location=None,
+                            suggestion=None,
+                            variable=None,
+                            method=None,
+                        )
                     )
         return block
 
@@ -628,7 +654,7 @@ class BranchElimination(TransformPass):
     name = "Branch Elimination"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return BranchEliminiationTransformer().transform(game)
+        return BranchEliminiationTransformer(ctx).transform(game)
 
 
 class SimplifyReturn(TransformPass):

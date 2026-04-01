@@ -14,8 +14,11 @@ from sympy import Symbol
 from . import frog_ast
 from . import visitors
 from . import dependencies
+from . import diagnostics
 from .transforms._base import (
+    NearMiss,
     PipelineContext,
+    deduplicate_near_misses,
     run_pipeline,
     run_pipeline_until,
     run_pipeline_with_trace,
@@ -48,6 +51,7 @@ class EquivalenceResult:
 
     valid: bool
     failure_detail: str = ""
+    diagnosis: diagnostics.Diagnosis | None = None
 
 
 @dataclasses.dataclass
@@ -61,10 +65,32 @@ class HopResult:
     current_desc: str
     next_desc: str
     failure_detail: str = ""
+    diagnosis: diagnostics.Diagnosis | None = None
 
 
 class FailedProof(Exception):
     pass
+
+
+def serialize_diagnosis(
+    diag: diagnostics.Diagnosis | None,
+) -> dict[str, object] | None:
+    """Serialize a Diagnosis to a JSON-compatible dict."""
+    if diag is None:
+        return None
+    return {
+        "summary": diag.summary,
+        "explanations": [
+            {
+                "source_description": e.source_description,
+                "reason": e.reason,
+                "suggestion": e.suggestion,
+                "engine_limitation": e.engine_limitation,
+            }
+            for e in diag.explanations
+        ],
+        "engine_limitations": diag.engine_limitations,
+    }
 
 
 def _build_equivalence_diff(current: frog_ast.Game, next_game: frog_ast.Game) -> str:
@@ -156,13 +182,14 @@ class _AllTrueTransformer(visitors.Transformer):
 
 
 class ProofEngine:
-    def __init__(self, verbose: bool) -> None:
+    def __init__(self, verbose: bool, no_diagnose: bool = False) -> None:
         self.definition_namespace: frog_ast.Namespace = {}
         self.proof_namespace: frog_ast.Namespace = {}
         self.proof_let_types: visitors.NameTypeMap = visitors.NameTypeMap()
         self.subsets_pairs: list[tuple[frog_ast.Type, frog_ast.Type]] = []
 
         self.verbose = verbose
+        self.no_diagnose = no_diagnose
         self.step_assumptions: list[ProcessedAssumption] = []
         self.hop_results: list[HopResult] = []
         self.variables: dict[str, Symbol | frog_ast.Expression] = {}
@@ -272,6 +299,10 @@ class ProofEngine:
         print()
         self._print_summary_table()
         print()
+
+        # Level 2: Print full diagnostics for failed hops
+        if not self.no_diagnose:
+            self._print_diagnostics()
 
         failed_steps = [r for r in self.hop_results if not r.valid]
         if failed_steps:
@@ -419,6 +450,52 @@ class ProofEngine:
                     f"{result_str}"
                 )
 
+    def _print_failure_inline(self, equiv_result: EquivalenceResult) -> None:
+        """Print Level 1 inline summary and Level 3 verbose detail for a failure."""
+        if equiv_result.diagnosis is not None:
+            diag = equiv_result.diagnosis
+            indent = "  " + " " * (len(str(self._total_steps)) * 2 + 9)
+            print(f"{indent}{Fore.YELLOW}{diag.summary}{Fore.RESET}")
+        if self.verbose and equiv_result.failure_detail:
+            _print_failure_detail(equiv_result.failure_detail)
+        if self.verbose and equiv_result.diagnosis is not None:
+            diag = equiv_result.diagnosis
+            if diag.explanations:
+                print("    Near-misses:")
+                for expl in diag.explanations:
+                    print(f"      - {expl.reason}")
+
+    def _print_diagnostics(self) -> None:
+        """Print Level 2 diagnostic output for failed hops."""
+        failed = [
+            r for r in self.hop_results if not r.valid and r.diagnosis is not None
+        ]
+        if not failed:
+            return
+
+        for result in failed:
+            assert result.diagnosis is not None
+            diag = result.diagnosis
+            print()
+            print(
+                f"  {Fore.RED}Step {result.step_num} failed:{Fore.RESET} "
+                f"{result.current_desc} -> {result.next_desc}"
+            )
+
+            for expl in diag.explanations:
+                print()
+                print(f"    {expl.source_description}:")
+                print(f"    {Fore.YELLOW}Possible cause:{Fore.RESET} {expl.reason}")
+                if expl.suggestion:
+                    print(f"    {Fore.CYAN}Possible fix:{Fore.RESET} {expl.suggestion}")
+
+            for limitation in diag.engine_limitations:
+                print()
+                print(
+                    f"    {Fore.MAGENTA}Possible engine limitation:{Fore.RESET} "
+                    f"{limitation}"
+                )
+
     def prove_steps(
         self,
         steps: list[frog_ast.ProofStep],
@@ -427,7 +504,7 @@ class ProofEngine:
     ) -> None:
         step_num = 0
 
-        for i in range(0, len(steps) - 1):
+        for i in range(0, len(steps) - 1):  # pylint: disable=too-many-nested-blocks
             assumptions: list[frog_ast.StepAssumption] = []
             if isinstance(steps[i], frog_ast.StepAssumption):
                 continue
@@ -540,8 +617,7 @@ class ProofEngine:
                 self._print_step_status(hop_desc, "ok", Fore.GREEN)
             else:
                 self._print_step_status(hop_desc, "FAILED", Fore.RED)
-                if equiv_result.failure_detail:
-                    _print_failure_detail(equiv_result.failure_detail)
+                self._print_failure_inline(equiv_result)
             self.hop_results.append(
                 HopResult(
                     step_num=step_num,
@@ -551,6 +627,7 @@ class ProofEngine:
                     current_desc=current_desc,
                     next_desc=next_desc,
                     failure_detail=equiv_result.failure_detail,
+                    diagnosis=equiv_result.diagnosis,
                 )
             )
             if isinstance(steps[i], frog_ast.Induction):
@@ -605,8 +682,7 @@ class ProofEngine:
                     self._print_step_status(rollover_hop, "ok", Fore.GREEN)
                 else:
                     self._print_step_status(rollover_hop, "FAILED", Fore.RED)
-                    if rollover_result.failure_detail:
-                        _print_failure_detail(rollover_result.failure_detail)
+                    self._print_failure_inline(rollover_result)
                 self.hop_results.append(
                     HopResult(
                         step_num=step_num,
@@ -616,6 +692,7 @@ class ProofEngine:
                         current_desc=rollover_current_desc,
                         next_desc=rollover_next_desc,
                         failure_detail=rollover_result.failure_detail,
+                        diagnosis=rollover_result.diagnosis,
                     )
                 )
                 self.proof_let_types.remove(the_induction.name)
@@ -699,9 +776,13 @@ class ProofEngine:
         self, current_game_ast: frog_ast.Game, next_game_ast: frog_ast.Game
     ) -> EquivalenceResult:
         ctx = self._build_context()
+        current_near_misses: list[NearMiss] = []
+        next_near_misses: list[NearMiss] = []
 
         for index, game in enumerate((current_game_ast, next_game_ast)):
             which = WhichGame.CURRENT if index == 0 else WhichGame.NEXT
+            ctx.near_misses = []  # Reset for each game
+
             if self.verbose:
                 label = "CURRENT" if index == 0 else "NEXT"
                 print(f"SIMPLIFYING {label} GAME")
@@ -715,8 +796,10 @@ class ProofEngine:
 
             if index == 0:
                 current_game_ast = game
+                current_near_misses = deduplicate_near_misses(ctx.near_misses)
             else:
                 next_game_ast = game
+                next_near_misses = deduplicate_near_misses(ctx.near_misses)
 
         if self.verbose:
             print("CURRENT")
@@ -737,8 +820,20 @@ class ProofEngine:
         parts: list[str] = []
         if z3_result.failure_detail:
             parts.append(z3_result.failure_detail)
-        parts.append(_build_equivalence_diff(current_game_ast, next_game_ast))
-        return EquivalenceResult(valid=False, failure_detail="\n".join(parts))
+        diff_text = _build_equivalence_diff(current_game_ast, next_game_ast)
+        parts.append(diff_text)
+
+        diagnosis: diagnostics.Diagnosis | None = None
+        if not self.no_diagnose:
+            diagnosis = diagnostics.diagnose_failure(
+                diff_text, current_near_misses, next_near_misses
+            )
+
+        return EquivalenceResult(
+            valid=False,
+            failure_detail="\n".join(parts),
+            diagnosis=diagnosis,
+        )
 
     def _z3_conditional_equivalence(
         self,

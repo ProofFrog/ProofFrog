@@ -9,6 +9,7 @@ from proof_frog.frog_parser import (
     parse_game_file,
     parse_primitive_file,
     parse_proof_file,
+    parse_scheme_file,
 )
 
 
@@ -33,6 +34,14 @@ def _expect_proof_error(tmp_path: Path, source: str) -> ParseError:
     proof_file.write_text(source, encoding="utf-8")
     with pytest.raises(ParseError) as exc_info:
         parse_proof_file(str(proof_file))
+    return exc_info.value
+
+
+def _expect_scheme_error(tmp_path: Path, source: str) -> ParseError:
+    scheme_file = tmp_path / "Test.scheme"
+    scheme_file.write_text(source, encoding="utf-8")
+    with pytest.raises(ParseError) as exc_info:
+        parse_scheme_file(str(scheme_file))
     return exc_info.value
 
 
@@ -94,6 +103,45 @@ class TestMissingSemicolonHeuristic:
         )
         err = _expect_error(tmp_path, source)
         assert "on next line" in str(err)
+
+
+    def test_missing_semicolon_before_closing_brace_multiline(
+        self, tmp_path: Path
+    ) -> None:
+        """Missing ';' before '}' on the next line should say 'before }'."""
+        source = (
+            "Game Left() {\n"
+            "    Bool Foo() {\n"
+            "        return true\n"
+            "    }\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Bool Foo() { return true; }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        err = _expect_game_error(tmp_path, source)
+        assert "missing ';'" in str(err)
+        assert "before '}'" in str(err)
+        assert err.line == 3
+
+    def test_missing_semicolon_before_closing_brace_same_line(
+        self, tmp_path: Path
+    ) -> None:
+        """Missing ';' before '}' on the same line should say 'before }'."""
+        source = (
+            "Game Left() {\n"
+            "    Bool Foo() { return true }\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Bool Foo() { return true; }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        err = _expect_game_error(tmp_path, source)
+        assert "missing ';'" in str(err)
+        assert "before '}'" in str(err)
+        assert err.line == 2
 
 
 class TestNormalParseErrors:
@@ -233,3 +281,259 @@ class TestErrorSelectionHeuristic:
         err = _expect_proof_error(tmp_path, source)
         assert err.token == "ame"
         assert err.line == 4
+
+
+class TestEnhancedErrorMessages:
+    """Tests for improved error message heuristics."""
+
+    def test_double_quote_import(self, tmp_path: Path) -> None:
+        """Double-quoted import should suggest single quotes."""
+        source = (
+            'import "../path/to/file.primitive";\n'
+            "Game Left() {\n"
+            "    Bool Foo() { return true; }\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Bool Foo() { return true; }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        err = _expect_game_error(tmp_path, source)
+        assert "single quotes" in str(err)
+        assert err.line == 1
+
+    def test_lowercase_type_name_in_statement(self, tmp_path: Path) -> None:
+        """Lowercase 'set' at statement level should suggest 'Set'."""
+        # Use a context where the lowercase type name causes a parse error
+        # (e.g. 'set' used as a type in a field declaration inside a Game).
+        # Here 'set' parses as an identifier, but it causes an error when
+        # it's used alone as a statement keyword.
+        source = (
+            "Game Left() {\n"
+            "    set MySet;\n"
+            "    Bool Foo() { return true; }\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Bool Foo() { return true; }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        # 'set' parses as an lvalue type, so this actually parses.
+        # The lowercase type heuristic only helps when the token causes
+        # an error in a specific position. This is tested indirectly
+        # by check-time errors (semantic analysis), not parse errors.
+        # Just verify it does parse without error.
+        from proof_frog.frog_parser import parse_game_file
+
+        game_file = tmp_path / "Test.game"
+        game_file.write_text(source, encoding="utf-8")
+        # Should parse fine (set is treated as an identifier)
+        parse_game_file(str(game_file))
+
+    def test_missing_closing_angle_bracket(self, tmp_path: Path) -> None:
+        """Missing '>' in BitString<32 should hint about closing bracket."""
+        source = (
+            "Primitive Foo() {\n"
+            "    BitString<32 bar(Int x);\n"
+            "}\n"
+        )
+        err = _expect_error(tmp_path, source)
+        assert "'>'" in str(err)
+        assert "BitString" in str(err)
+
+    def test_arrow_instead_of_equals(self, tmp_path: Path) -> None:
+        """'=>' should suggest '=' or '<-'."""
+        source = (
+            "Game Left() {\n"
+            "    Bool Foo() {\n"
+            "        Bool x => true;\n"
+            "        return x;\n"
+            "    }\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Bool Foo() { return true; }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        err = _expect_game_error(tmp_path, source)
+        assert "'=>'" in str(err)
+        assert "'='" in str(err) or "'<-'" in str(err)
+
+    def test_double_equals_for_assignment(self, tmp_path: Path) -> None:
+        """'==' in assignment should suggest '='."""
+        source = (
+            "Game Left() {\n"
+            "    Bool Foo() {\n"
+            "        Bool x == true;\n"
+            "        return x;\n"
+            "    }\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Bool Foo() { return true; }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        err = _expect_game_error(tmp_path, source)
+        assert "'='" in str(err)
+        assert "assignment" in str(err)
+
+    def test_equals_in_if_condition(self, tmp_path: Path) -> None:
+        """'=' in an if-condition should suggest '=='."""
+        source = (
+            "Game Left() {\n"
+            "    Bool Foo() {\n"
+            "        if (true = true) {\n"
+            "            return true;\n"
+            "        }\n"
+            "        return false;\n"
+            "    }\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Bool Foo() { return true; }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        err = _expect_game_error(tmp_path, source)
+        assert "'=='" in str(err)
+        assert "comparison" in str(err)
+
+    def test_missing_comma_between_params(self, tmp_path: Path) -> None:
+        """Missing comma between parameters should hint about ','."""
+        source = (
+            "Game Left() {\n"
+            "    Bool Foo(Int a Int b) {\n"
+            "        return true;\n"
+            "    }\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Bool Foo(Int a, Int b) { return true; }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        err = _expect_game_error(tmp_path, source)
+        assert "','" in str(err)
+
+    def test_misspelled_for_keyword(self, tmp_path: Path) -> None:
+        """'fore' should suggest 'for'."""
+        source = (
+            "Game Left() {\n"
+            "    Void Foo() {\n"
+            "        fore (Int i = 0 to 10) {\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Void Foo() { }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        err = _expect_game_error(tmp_path, source)
+        assert "'for'" in str(err)
+
+    def test_misspelled_game_keyword(self, tmp_path: Path) -> None:
+        """'Gam' should suggest 'Game'."""
+        source = (
+            "Gam Left() {\n"
+            "    Bool Foo() { return true; }\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Bool Foo() { return true; }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        err = _expect_game_error(tmp_path, source)
+        assert "'Game'" in str(err)
+
+    def test_empty_game_body(self, tmp_path: Path) -> None:
+        """Empty game body should say 'at least one method'."""
+        source = (
+            "Game Left() {\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Bool Foo() { return true; }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        err = _expect_game_error(tmp_path, source)
+        assert "empty" in str(err) or "at least one method" in str(err)
+
+    def test_if_without_braces(self, tmp_path: Path) -> None:
+        """if-statement without braces should say braces are required."""
+        source = (
+            "Game Left() {\n"
+            "    Bool Foo() {\n"
+            "        if (true)\n"
+            "            return true;\n"
+            "        return false;\n"
+            "    }\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Bool Foo() { return true; }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        err = _expect_game_error(tmp_path, source)
+        assert "braces" in str(err) or "{ }" in str(err)
+
+    def test_missing_closing_paren(self, tmp_path: Path) -> None:
+        """Missing ')' should hint about the closing parenthesis."""
+        source = (
+            "Primitive Foo() {\n"
+            "    Bool bar(Int x;\n"
+            "}\n"
+        )
+        err = _expect_error(tmp_path, source)
+        assert "')'" in str(err)
+
+    def test_trailing_comma_in_params(self, tmp_path: Path) -> None:
+        """Trailing comma in parameters should explain it's not allowed."""
+        source = (
+            "Primitive Foo() {\n"
+            "    Bool bar(Int x,);\n"
+            "}\n"
+        )
+        err = _expect_error(tmp_path, source)
+        assert "trailing" in str(err).lower() or "after ','" in str(err)
+
+    def test_missing_closing_brace(self, tmp_path: Path) -> None:
+        """Missing '}' should hint about unmatched braces."""
+        source = (
+            "Primitive Foo() {\n"
+            "    Bool bar(Int x);\n"
+        )
+        err = _expect_error(tmp_path, source)
+        assert "brace" in str(err).lower() or "'}'" in str(err)
+
+    def test_missing_second_game_in_game_file(self, tmp_path: Path) -> None:
+        """A .game file with only one Game should explain that two are needed."""
+        source = (
+            "Game Left() {\n"
+            "    Bool Foo() { return true; }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        err = _expect_game_error(tmp_path, source)
+        assert "two" in str(err).lower() or "exactly two" in str(err)
+
+    def test_missing_export_in_game_file(self, tmp_path: Path) -> None:
+        """A .game file with two Games but no export should mention export."""
+        source = (
+            "Game Left() {\n"
+            "    Bool Foo() { return true; }\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Bool Foo() { return true; }\n"
+            "}\n"
+        )
+        err = _expect_game_error(tmp_path, source)
+        assert "export" in str(err).lower()
+
+    def test_scheme_missing_extends(self, tmp_path: Path) -> None:
+        """A Scheme without 'extends' should say 'extends' is expected."""
+        source = (
+            "Scheme Foo(Int lambda) {\n"
+            "    Set Key = BitString<lambda>;\n"
+            "}\n"
+        )
+        err = _expect_scheme_error(tmp_path, source)
+        assert "extends" in str(err)

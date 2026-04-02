@@ -1152,6 +1152,31 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 expr.right_expression, frog_ast.Type
             ):
                 self.subsets_pairs.append((expr.left_expression, expr.right_expression))
+                # Warn when a == constraint has the abstract type on the
+                # right, since the type normalizer only fires when the
+                # left side resolves to a Variable after instantiation.
+                # At the AST level, abstract types appear as FieldAccess
+                # (E.Key) or Variable (bare type params), while concrete
+                # types are BitStringType, ModIntType, etc.
+                # E.g. `requires BitString<n> == E.Key` should be written
+                # as `requires E.Key == BitString<n>`.
+                if expr.operator == frog_ast.BinaryOperators.EQUALS:
+                    left_is_concrete = isinstance(
+                        expr.left_expression,
+                        (frog_ast.BitStringType, frog_ast.ModIntType),
+                    )
+                    right_is_abstract = isinstance(
+                        expr.right_expression,
+                        (frog_ast.Variable, frog_ast.FieldAccess),
+                    )
+                    if left_is_concrete and right_is_abstract:
+                        self.print_error(
+                            expr,
+                            "In type equality constraints, write the abstract"
+                            " type parameter on the left: requires"
+                            f" {expr.right_expression}"
+                            f" == {expr.left_expression}",
+                        )
 
     def visit_primitive(self, primitive: frog_ast.Primitive) -> None:
         self._shared_primitive_scheme_checks(primitive)

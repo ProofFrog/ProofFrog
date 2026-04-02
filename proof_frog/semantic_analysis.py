@@ -789,10 +789,20 @@ def _types_comparable(left_type: PossibleType, right_type: PossibleType) -> bool
     )
     if left_base == right_base:
         return True
-    # Two abstract type variables (not unwrapped from optionals) can be compared
-    # for equality — needed for requires clauses like S.Message == S.Ciphertext
+    # Two abstract type variables — needed for requires clauses like
+    # S.Message == S.Ciphertext
     if isinstance(left_type, frog_ast.Variable) and isinstance(
         right_type, frog_ast.Variable
+    ):
+        return True
+    # Abstract type variable compared with a concrete set-like type — needed
+    # for requires clauses like E.Key == BitString<n>
+    if isinstance(left_type, frog_ast.Variable) and isinstance(
+        right_type, (frog_ast.BitStringType, frog_ast.ModIntType, frog_ast.SetType)
+    ):
+        return True
+    if isinstance(right_type, frog_ast.Variable) and isinstance(
+        left_type, (frog_ast.BitStringType, frog_ast.ModIntType, frog_ast.SetType)
     ):
         return True
     return False

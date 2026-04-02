@@ -6,7 +6,11 @@ from proof_frog.transforms.algebraic import (
     XorCancellation,
 )
 from proof_frog.transforms.control_flow import BranchElimination
-from proof_frog.transforms.inlining import InlineSingleUseVariable, InlineSingleUseField
+from proof_frog.transforms.inlining import (
+    InlineSingleUseVariable,
+    InlineSingleUseField,
+    DeduplicateDeterministicCalls,
+)
 from proof_frog.transforms.sampling import MergeUniformSamples, SplitUniformSamples
 from proof_frog.transforms.random_functions import LocalRFToUniform
 from proof_frog.visitors import NameTypeMap
@@ -325,3 +329,86 @@ def test_local_rf_no_near_miss_when_no_rf():
     ctx = _make_ctx()
     LocalRFToUniform().apply(game, ctx)
     assert len(ctx.near_misses) == 0
+
+
+# ---------------------------------------------------------------------------
+# DeduplicateDeterministicCalls near-miss tests
+# ---------------------------------------------------------------------------
+
+
+def _make_nondet_namespace() -> dict:
+    """Namespace with primitive G whose ``evaluate`` is NOT deterministic."""
+    prim = frog_parser.parse_primitive_file(
+        """
+        Primitive G(Int n) {
+            BitString<n> evaluate(BitString<n> x);
+        }
+        """
+    )
+    return {"G": prim}
+
+
+def _make_det_namespace() -> dict:
+    """Namespace with primitive G whose ``evaluate`` is deterministic."""
+    prim = frog_parser.parse_primitive_file(
+        """
+        Primitive G(Int n) {
+            deterministic BitString<n> evaluate(BitString<n> x);
+        }
+        """
+    )
+    return {"G": prim}
+
+
+def test_dedup_near_miss_nondeterministic_duplicates():
+    """DeduplicateDeterministicCalls reports near-miss for duplicate
+    non-deterministic calls."""
+    game_src = (
+        "Game TestGame() {\n"
+        "    BitString<n> Compute(BitString<n> k) {\n"
+        "        return [G.evaluate(k), G.evaluate(k)];\n"
+        "    }\n"
+        "}"
+    )
+    game = frog_parser.parse_game(game_src)
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace=_make_nondet_namespace(),
+        subsets_pairs=[],
+    )
+    DeduplicateDeterministicCalls().apply(game, ctx)
+
+    dedup_misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Deduplicate Deterministic Calls"
+    ]
+    assert len(dedup_misses) >= 1
+    assert "not annotated deterministic" in dedup_misses[0].reason
+
+
+def test_dedup_no_near_miss_when_deterministic():
+    """No near-miss when duplicates ARE deterministic (transform fires)."""
+    game_src = (
+        "Game TestGame() {\n"
+        "    BitString<n> Compute(BitString<n> k) {\n"
+        "        return [G.evaluate(k), G.evaluate(k)];\n"
+        "    }\n"
+        "}"
+    )
+    game = frog_parser.parse_game(game_src)
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace=_make_det_namespace(),
+        subsets_pairs=[],
+    )
+    DeduplicateDeterministicCalls().apply(game, ctx)
+
+    dedup_misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Deduplicate Deterministic Calls"
+    ]
+    assert len(dedup_misses) == 0

@@ -20,7 +20,13 @@ from ..visitors import (
     ReplaceTransformer,
     VariableCollectionVisitor,
 )
-from ._base import TransformPass, PipelineContext, has_nondeterministic_call, NearMiss
+from ._base import (
+    TransformPass,
+    PipelineContext,
+    has_nondeterministic_call,
+    NearMiss,
+    _lookup_primitive_method,
+)
 
 
 class _VarCountVisitor(Visitor[int]):
@@ -1285,5 +1291,339 @@ class InlineSingleUseField(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return InlineSingleUseFieldTransformer(
+            proof_namespace=ctx.proof_namespace, ctx=ctx
+        ).transform(game)
+
+
+class _DeterministicCallCollector(Visitor[list[frog_ast.FuncCall]]):
+    """Collect all FuncCall nodes that call deterministic primitive methods."""
+
+    def __init__(self, proof_namespace: frog_ast.Namespace) -> None:
+        self._proof_namespace = proof_namespace
+        self._calls: list[frog_ast.FuncCall] = []
+
+    def result(self) -> list[frog_ast.FuncCall]:
+        return self._calls
+
+    def visit_func_call(self, node: frog_ast.FuncCall) -> None:
+        m = _lookup_primitive_method(node.func, self._proof_namespace)
+        if m is not None and m.deterministic:
+            self._calls.append(node)
+
+
+class _AllPrimitiveFuncCallCollector(Visitor[list[frog_ast.FuncCall]]):
+    """Collect all FuncCall nodes that call any primitive method."""
+
+    def __init__(self, proof_namespace: frog_ast.Namespace) -> None:
+        self._proof_namespace = proof_namespace
+        self._calls: list[frog_ast.FuncCall] = []
+
+    def result(self) -> list[frog_ast.FuncCall]:
+        return self._calls
+
+    def visit_func_call(self, node: frog_ast.FuncCall) -> None:
+        if _lookup_primitive_method(node.func, self._proof_namespace) is not None:
+            self._calls.append(node)
+
+
+class DeduplicateDeterministicCallsTransformer(BlockTransformer):
+    """Extract duplicate deterministic FuncCalls into a shared local variable.
+
+    Within a single block, finds duplicate calls to ``deterministic`` primitive
+    methods with structurally equal arguments, extracts the first occurrence
+    into a fresh ``__determ_N__`` variable, and replaces all occurrences.
+
+    Example::
+
+        return [G.evaluate(k), G.evaluate(k)];
+      becomes:
+        BitString<n> __determ_0__ = G.evaluate(k);
+        return [__determ_0__, __determ_0__];
+    """
+
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace,
+        ctx: PipelineContext | None = None,
+    ) -> None:
+        self.proof_namespace = proof_namespace
+        self._ctx = ctx
+        self.counter = 0
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        # Collect all deterministic calls from top-level statements only.
+        # Skip parameterless calls (constants) — extracting them changes
+        # variable numbering without benefit, since existing transforms
+        # already handle pure constant expressions.
+        all_calls: list[frog_ast.FuncCall] = []
+        for statement in block.statements:
+            # Skip inner blocks (if-statements); BlockTransformer handles them
+            if isinstance(statement, frog_ast.IfStatement):
+                continue
+            collector = _DeterministicCallCollector(self.proof_namespace)
+            collector.visit(statement)
+            all_calls.extend(c for c in collector.result() if c.args)
+
+        if not all_calls:
+            # Check for near-miss: duplicate non-deterministic calls
+            if self._ctx is not None:
+                self._report_nondet_near_misses(block)
+            return block
+
+        # Group by structural equality; find first group with 2+ occurrences
+        groups: list[list[frog_ast.FuncCall]] = []
+        for call in all_calls:
+            placed = False
+            for group in groups:
+                if call == group[0]:
+                    group.append(call)
+                    placed = True
+                    break
+            if not placed:
+                groups.append([call])
+
+        dup_group: list[frog_ast.FuncCall] | None = None
+        for group in groups:
+            if len(group) >= 2:
+                dup_group = group
+                break
+
+        if dup_group is None:
+            return block
+
+        # Look up the return type for the new assignment
+        representative = dup_group[0]
+        m = _lookup_primitive_method(representative.func, self.proof_namespace)
+        assert m is not None
+        return_type = copy.deepcopy(m.return_type)
+
+        var_name = f"__determ_{self.counter}__"
+        self.counter += 1
+
+        # Create the new assignment statement
+        new_assignment = frog_ast.Assignment(
+            return_type,  # type: ignore[arg-type]
+            frog_ast.Variable(var_name),
+            copy.deepcopy(representative),
+        )
+
+        # Find the first statement containing a duplicate call and insert before it
+        insert_index: int | None = None
+        for index, statement in enumerate(block.statements):
+            if isinstance(statement, frog_ast.IfStatement):
+                continue
+            collector = _DeterministicCallCollector(self.proof_namespace)
+            collector.visit(statement)
+            for found_call in collector.result():
+                if found_call == representative:
+                    insert_index = index
+                    break
+            if insert_index is not None:
+                break
+
+        assert insert_index is not None
+
+        # Replace all occurrences in the block
+        new_block = block
+        for call in dup_group:
+            new_block = ReplaceTransformer(call, frog_ast.Variable(var_name)).transform(
+                new_block
+            )
+
+        # Insert the new assignment before the first occurrence
+        new_stmts = (
+            list(new_block.statements[:insert_index])
+            + [new_assignment]
+            + list(new_block.statements[insert_index:])
+        )
+
+        # Recurse to handle remaining duplicate groups
+        return self.transform_block(frog_ast.Block(new_stmts))
+
+    def _report_nondet_near_misses(self, block: frog_ast.Block) -> None:
+        """Report near-misses for duplicate non-deterministic calls."""
+        assert self._ctx is not None
+
+        all_calls: list[frog_ast.FuncCall] = []
+        for statement in block.statements:
+            if isinstance(statement, frog_ast.IfStatement):
+                continue
+            collector = _AllPrimitiveFuncCallCollector(self.proof_namespace)
+            collector.visit(statement)
+            all_calls.extend(collector.result())
+
+        # Group by structural equality
+        groups: list[list[frog_ast.FuncCall]] = []
+        for call in all_calls:
+            placed = False
+            for group in groups:
+                if call == group[0]:
+                    group.append(call)
+                    placed = True
+                    break
+            if not placed:
+                groups.append([call])
+
+        for group in groups:
+            if len(group) < 2:
+                continue
+            call = group[0]
+            m = _lookup_primitive_method(call.func, self.proof_namespace)
+            if m is None or not m.deterministic:
+                self._ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Deduplicate Deterministic Calls",
+                        reason=(
+                            f"Duplicate call to {call.func} found but method "
+                            f"is not annotated deterministic"
+                        ),
+                        location=None,
+                        suggestion=(
+                            "Add 'deterministic' annotation to the primitive "
+                            "method declaration"
+                        ),
+                        variable=None,
+                        method=None,
+                    )
+                )
+
+
+class DeduplicateDeterministicCalls(TransformPass):
+    name = "Deduplicate Deterministic Calls"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return DeduplicateDeterministicCallsTransformer(
+            proof_namespace=ctx.proof_namespace, ctx=ctx
+        ).transform(game)
+
+
+# ---------------------------------------------------------------------------
+# Cross-method deterministic field alias
+# ---------------------------------------------------------------------------
+
+
+def _is_stable_arg(
+    expr: frog_ast.Expression,
+    field_names: set[str],
+    param_names: set[str],
+) -> bool:
+    """Return True if *expr* is stable across method invocations.
+
+    An expression is stable if it depends only on game fields, game parameters,
+    and constants — never on method-local variables.
+    """
+    if isinstance(
+        expr, (frog_ast.Integer, frog_ast.Boolean, frog_ast.BitStringLiteral)
+    ):
+        return True
+    if isinstance(expr, frog_ast.Variable):
+        return expr.name in field_names or expr.name in param_names
+    if isinstance(expr, frog_ast.FieldAccess):
+        return _is_stable_arg(expr.the_object, field_names, param_names)
+    if isinstance(expr, frog_ast.BinaryOperation):
+        return _is_stable_arg(
+            expr.left_expression, field_names, param_names
+        ) and _is_stable_arg(expr.right_expression, field_names, param_names)
+    if isinstance(expr, frog_ast.UnaryOperation):
+        return _is_stable_arg(expr.expression, field_names, param_names)
+    return False
+
+
+class CrossMethodFieldAliasTransformer:
+    """Replace deterministic calls in oracles with field references.
+
+    When a field assignment ``field_x = det_call(stable_args)`` exists in one
+    method (typically Initialize) and the same ``det_call(stable_args)`` appears
+    in another method, this transformer replaces the call in the other method
+    with ``field_x``.
+
+    This does NOT introduce new fields — it reuses existing field assignments.
+    This is safe because the field already exists in both games being compared,
+    so the canonical form is not structurally altered.
+    """
+
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace,
+        ctx: PipelineContext | None = None,
+    ) -> None:
+        self.proof_namespace = proof_namespace
+        self._ctx = ctx
+
+    def transform(self, game: frog_ast.Game) -> frog_ast.Game:
+        field_names = {f.name for f in game.fields}
+        param_names = {p.name for p in game.parameters}
+
+        # Phase 1: Collect field assignments with deterministic RHS
+        # (field_name, det_call, method_idx)
+        field_aliases: list[tuple[str, frog_ast.FuncCall, int]] = []
+        for midx, method in enumerate(game.methods):
+            for stmt in method.block.statements:
+                if not (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and stmt.the_type is None
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name in field_names
+                    and isinstance(stmt.value, frog_ast.FuncCall)
+                ):
+                    continue
+                call = stmt.value
+                m = _lookup_primitive_method(call.func, self.proof_namespace)
+                if m is None or not m.deterministic:
+                    continue
+                if not call.args:
+                    continue
+                if not all(
+                    _is_stable_arg(a, field_names, param_names) for a in call.args
+                ):
+                    continue
+                field_aliases.append((stmt.var.name, call, midx))
+
+        if not field_aliases:
+            return game
+
+        # Phase 2: For each field alias, check if the same call appears in
+        # other methods and replace it
+        for alias_field_name, alias_call, alias_midx in field_aliases:
+            result = self._try_replace(game, alias_field_name, alias_call, alias_midx)
+            if result is not None:
+                return result
+
+        return game
+
+    def _try_replace(
+        self,
+        game: frog_ast.Game,
+        alias_field_name: str,
+        alias_call: frog_ast.FuncCall,
+        alias_midx: int,
+    ) -> frog_ast.Game | None:
+        """Try to replace *alias_call* with *alias_field_name* in another method."""
+        for midx, method in enumerate(game.methods):
+            if midx == alias_midx:
+                continue
+            collector = _DeterministicCallCollector(self.proof_namespace)
+            collector.visit(method.block)
+            if not any(c == alias_call for c in collector.result()):
+                continue
+            # Found a match — replace and return
+            new_game = copy.deepcopy(game)
+            new_collector = _DeterministicCallCollector(self.proof_namespace)
+            new_collector.visit(new_game.methods[midx].block)
+            for new_call in new_collector.result():
+                if new_call == alias_call:
+                    new_game.methods[midx] = ReplaceTransformer(
+                        new_call,
+                        frog_ast.Variable(alias_field_name),
+                    ).transform(new_game.methods[midx])
+                    return new_game
+        return None
+
+
+class CrossMethodFieldAlias(TransformPass):
+    name = "Cross-Method Field Alias"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return CrossMethodFieldAliasTransformer(
             proof_namespace=ctx.proof_namespace, ctx=ctx
         ).transform(game)

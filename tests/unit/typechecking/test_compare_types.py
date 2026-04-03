@@ -159,3 +159,45 @@ class TestTypesComparable:
             frog_ast.NoneExpression(),
             frog_ast.Variable("Foo"),
         )
+
+    def test_variable_equals_bitstring(self) -> None:
+        """Variable == BitStringType — needed for requires E.Key == BitString<n>."""
+        assert semantic_analysis._types_comparable(
+            frog_ast.Variable("KeySpace"),
+            frog_ast.BitStringType(frog_ast.Integer(128)),
+        )
+
+    def test_bitstring_equals_variable(self) -> None:
+        """BitStringType == Variable — symmetric with above."""
+        assert semantic_analysis._types_comparable(
+            frog_ast.BitStringType(frog_ast.Integer(128)),
+            frog_ast.Variable("KeySpace"),
+        )
+
+    def test_variable_equals_modint(self) -> None:
+        """Variable == ModIntType."""
+        assert semantic_analysis._types_comparable(
+            frog_ast.Variable("GroupElem"),
+            frog_ast.ModIntType(frog_ast.Integer(7)),
+        )
+
+    def test_variable_equals_set(self) -> None:
+        """Variable == SetType."""
+        assert semantic_analysis._types_comparable(
+            frog_ast.Variable("KeySpace"),
+            frog_ast.SetType(),
+        )
+
+    def test_int_not_comparable_to_variable(self) -> None:
+        """IntType is not a set-like type, so not comparable to Variable."""
+        assert not semantic_analysis._types_comparable(
+            frog_ast.IntType(),
+            frog_ast.Variable("Foo"),
+        )
+
+    def test_bool_not_comparable_to_variable(self) -> None:
+        """BoolType is not a set-like type, so not comparable to Variable."""
+        assert not semantic_analysis._types_comparable(
+            frog_ast.BoolType(),
+            frog_ast.Variable("Foo"),
+        )

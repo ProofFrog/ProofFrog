@@ -225,6 +225,98 @@ class TestNoNormalization:
         assert result == method
 
 
+class TestEqualityPairs:
+    """Tests for == constraint pairs (Variable -> concrete type)."""
+
+    @staticmethod
+    def _eq_pair(
+        var_name: str, concrete_type: frog_ast.Type
+    ) -> list[tuple[frog_ast.Type, frog_ast.Type]]:
+        return [(frog_ast.Variable(var_name), concrete_type)]
+
+    def test_variable_to_bitstring(self) -> None:
+        """KeySpace -> BitString<128> via == pair."""
+        method = frog_parser.parse_method(
+            """
+            Void f() {
+                KeySpace x = y;
+            }
+            """
+        )
+        expected = frog_parser.parse_method(
+            """
+            Void f() {
+                BitString<128> x = y;
+            }
+            """
+        )
+        pairs = self._eq_pair("KeySpace", frog_ast.BitStringType(frog_ast.Integer(128)))
+        result = SubsetTypeNormalizer(pairs).transform(method)
+        assert result == expected
+
+    def test_sample_variable_to_bitstring(self) -> None:
+        """Sampling from KeySpace becomes sampling from BitString<n>."""
+        method = frog_parser.parse_method(
+            """
+            Void f() {
+                KeySpace x <- KeySpace;
+            }
+            """
+        )
+        pairs = self._eq_pair("KeySpace", frog_ast.BitStringType(frog_ast.Integer(128)))
+        result = SubsetTypeNormalizer(pairs).transform(method)
+        sample = result.block.statements[0]
+        assert isinstance(sample, frog_ast.Sample)
+        assert isinstance(sample.the_type, frog_ast.BitStringType)
+        assert isinstance(sample.sampled_from, frog_ast.BitStringType)
+
+    def test_return_type_variable_to_bitstring(self) -> None:
+        """Return type normalized from abstract to concrete."""
+        method = frog_parser.parse_method(
+            """
+            KeySpace f() {
+                return x;
+            }
+            """
+        )
+        pairs = self._eq_pair("KeySpace", frog_ast.BitStringType(frog_ast.Integer(128)))
+        result = SubsetTypeNormalizer(pairs).transform(method)
+        assert isinstance(result.signature.return_type, frog_ast.BitStringType)
+
+    def test_concrete_left_not_normalized(self) -> None:
+        """When concrete type is on the left, no replacement is registered."""
+        method = frog_parser.parse_method(
+            """
+            Void f() {
+                KeySpace x = y;
+            }
+            """
+        )
+        # Pair with concrete on left — normalizer won't fire
+        pairs: list[tuple[frog_ast.Type, frog_ast.Type]] = [
+            (frog_ast.BitStringType(frog_ast.Integer(128)), frog_ast.Variable("KeySpace"))
+        ]
+        result = SubsetTypeNormalizer(pairs).transform(method)
+        # KeySpace should remain unchanged
+        assert result == method
+
+    def test_optional_variable_to_bitstring(self) -> None:
+        """Optional type with abstract variable is normalized."""
+        method = frog_parser.parse_method(
+            """
+            Void f() {
+                KeySpace? x = None;
+            }
+            """
+        )
+        pairs = self._eq_pair("KeySpace", frog_ast.BitStringType(frog_ast.Integer(128)))
+        result = SubsetTypeNormalizer(pairs).transform(method)
+        assign = result.block.statements[0]
+        assert isinstance(assign, frog_ast.Assignment)
+        assert isinstance(assign.the_type, frog_ast.OptionalType)
+        assert isinstance(assign.the_type.the_type, frog_ast.BitStringType)
+
+
 class TestMultiplePairs:
     """Tests with multiple subsets pairs."""
 

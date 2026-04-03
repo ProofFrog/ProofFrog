@@ -163,6 +163,8 @@ The [`examples/`](https://github.com/ProofFrog/examples) repository contains pri
 
 ## Editor plugins
 
+**VS Code**. A VS Code extension is available in the ProofFrog repository. Instructions for building and installing it locally are available in the [vscode-extension](https://github.com/ProofFrog/ProofFrog/tree/main/vscode-extension) folder. It is not currently available in the VS Code Extensions Marketplace.
+
 **JetBrains IDE-s**. There's a plugin available for JetBrains IDE-s which provides syntax validation and highlighting, custom color settings, import statement file path references, context-menu actions and other features for the ProofFrog language. You can obtain the plugin from the JetBrains Marketplace inside the IDE. The project is hosted in [this GitHub repository](https://github.com/aabmets/proof-frog-ide-plugin).
 
 ## License

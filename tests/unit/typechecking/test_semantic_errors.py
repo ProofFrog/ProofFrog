@@ -265,3 +265,54 @@ class TestFieldAccessSuggestions:
         assert "is not a property" in stderr
         assert "  hint:" in stderr
         assert "Encrypt" in stderr
+
+
+class TestRequiresEqualityDirection:
+    """Tests for the directionality error on == constraints."""
+
+    def test_correct_direction_accepted(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """requires E.Key == BitString<n> should be accepted."""
+        prim = tmp_path / "Enc.primitive"
+        prim.write_text(
+            "Primitive Enc(Set KS) {\n"
+            "    Set Key = KS;\n"
+            "    Void f();\n"
+            "}\n"
+        )
+        source = (
+            "import 'Enc.primitive';\n\n"
+            "Scheme Sch(Int n, Enc E) extends Enc {\n"
+            "    requires E.Key == BitString<n>;\n"
+            "    Set Key = E.Key;\n"
+            "    Void f() {}\n"
+            "}\n"
+        )
+        file_path = tmp_path / "Sch.scheme"
+        file_path.write_text(source)
+        root = frog_parser.parse_file(str(file_path))
+        # Should not raise — correct direction
+        semantic_analysis.check_well_formed(root, str(file_path))
+
+    def test_wrong_direction_errors(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """requires BitString<n> == E.Key should produce an error."""
+        prim = tmp_path / "Enc.primitive"
+        prim.write_text(
+            "Primitive Enc(Set KS) {\n"
+            "    Set Key = KS;\n"
+            "    Void f();\n"
+            "}\n"
+        )
+        source = (
+            "import 'Enc.primitive';\n\n"
+            "Scheme Sch(Int n, Enc E) extends Enc {\n"
+            "    requires BitString<n> == E.Key;\n"
+            "    Set Key = E.Key;\n"
+            "    Void f() {}\n"
+            "}\n"
+        )
+        stderr = _check_error_stderr(tmp_path, capsys, source, ext=".scheme")
+        assert "abstract type parameter on the left" in stderr

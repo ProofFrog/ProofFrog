@@ -1131,13 +1131,17 @@ class ProofEngine:
                     self.method_lookup[(name, method.signature.name)] = method
 
     def _extract_subsets_pairs(self) -> None:
-        """Extract subsets constraint pairs from all schemes in the proof."""
+        """Extract subsets/equality constraint pairs from all schemes in the proof."""
         for node in self.proof_namespace.values():
             if isinstance(node, frog_ast.Scheme):
                 for req in node.requirements:
                     if (
                         isinstance(req, frog_ast.BinaryOperation)
-                        and req.operator == frog_ast.BinaryOperators.SUBSETS
+                        and req.operator
+                        in (
+                            frog_ast.BinaryOperators.SUBSETS,
+                            frog_ast.BinaryOperators.EQUALS,
+                        )
                         and isinstance(req.left_expression, frog_ast.Type)
                         and isinstance(req.right_expression, frog_ast.Type)
                     ):

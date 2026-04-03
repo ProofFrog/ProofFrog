@@ -789,10 +789,20 @@ def _types_comparable(left_type: PossibleType, right_type: PossibleType) -> bool
     )
     if left_base == right_base:
         return True
-    # Two abstract type variables (not unwrapped from optionals) can be compared
-    # for equality — needed for requires clauses like S.Message == S.Ciphertext
+    # Two abstract type variables — needed for requires clauses like
+    # S.Message == S.Ciphertext
     if isinstance(left_type, frog_ast.Variable) and isinstance(
         right_type, frog_ast.Variable
+    ):
+        return True
+    # Abstract type variable compared with a concrete set-like type — needed
+    # for requires clauses like E.Key == BitString<n>
+    if isinstance(left_type, frog_ast.Variable) and isinstance(
+        right_type, (frog_ast.BitStringType, frog_ast.ModIntType, frog_ast.SetType)
+    ):
+        return True
+    if isinstance(right_type, frog_ast.Variable) and isinstance(
+        left_type, (frog_ast.BitStringType, frog_ast.ModIntType, frog_ast.SetType)
     ):
         return True
     return False
@@ -1142,6 +1152,31 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 expr.right_expression, frog_ast.Type
             ):
                 self.subsets_pairs.append((expr.left_expression, expr.right_expression))
+                # Warn when a == constraint has the abstract type on the
+                # right, since the type normalizer only fires when the
+                # left side resolves to a Variable after instantiation.
+                # At the AST level, abstract types appear as FieldAccess
+                # (E.Key) or Variable (bare type params), while concrete
+                # types are BitStringType, ModIntType, etc.
+                # E.g. `requires BitString<n> == E.Key` should be written
+                # as `requires E.Key == BitString<n>`.
+                if expr.operator == frog_ast.BinaryOperators.EQUALS:
+                    left_is_concrete = isinstance(
+                        expr.left_expression,
+                        (frog_ast.BitStringType, frog_ast.ModIntType),
+                    )
+                    right_is_abstract = isinstance(
+                        expr.right_expression,
+                        (frog_ast.Variable, frog_ast.FieldAccess),
+                    )
+                    if left_is_concrete and right_is_abstract:
+                        self.print_error(
+                            expr,
+                            "In type equality constraints, write the abstract"
+                            " type parameter on the left: requires"
+                            f" {expr.right_expression}"
+                            f" == {expr.left_expression}",
+                        )
 
     def visit_primitive(self, primitive: frog_ast.Primitive) -> None:
         self._shared_primitive_scheme_checks(primitive)

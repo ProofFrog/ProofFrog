@@ -87,7 +87,14 @@ def check(file: str, json_output: bool) -> None:
     is_flag=True,
     help="Suppress diagnostic analysis on failure (summary only).",
 )
-def prove(file: str, verbose: int, json_output: bool, no_diagnose: bool) -> None:
+@click.option(
+    "--skip-lemmas",
+    is_flag=True,
+    help="Skip lemma proof verification (trust without re-checking).",
+)
+def prove(
+    file: str, verbose: int, json_output: bool, no_diagnose: bool, skip_lemmas: bool
+) -> None:
     """Run proof verification on a .proof file."""
     if json_output:
         # pylint: disable=import-outside-toplevel
@@ -103,7 +110,9 @@ def prove(file: str, verbose: int, json_output: bool, no_diagnose: bool) -> None
         )
         return
     verbosity = proof_engine.Verbosity(min(verbose, 2))
-    engine = proof_engine.ProofEngine(verbosity, no_diagnose=no_diagnose)
+    engine = proof_engine.ProofEngine(
+        verbosity, no_diagnose=no_diagnose, skip_lemmas=skip_lemmas
+    )
     proof_file: frog_ast.ProofFile
     try:
         proof_file = frog_parser.parse_proof_file(file)
@@ -111,6 +120,7 @@ def prove(file: str, verbose: int, json_output: bool, no_diagnose: bool) -> None
         click.echo(str(e), err=True)
         sys.exit(1)
 
+    click.echo("Type checking...")
     try:
         semantic_analysis.check_well_formed(proof_file, file)
     except semantic_analysis.FailedTypeCheck:
@@ -118,6 +128,7 @@ def prove(file: str, verbose: int, json_output: bool, no_diagnose: bool) -> None
     except FileNotFoundError as e:
         click.echo(str(e), err=True)
         sys.exit(1)
+    click.echo()
 
     for imp in proof_file.imports:
         resolved = frog_parser.resolve_import_path(imp.filename, file)
@@ -147,7 +158,7 @@ def prove(file: str, verbose: int, json_output: bool, no_diagnose: bool) -> None
         engine.add_definition(name, root)
 
     try:
-        engine.prove(proof_file)
+        engine.prove(proof_file, file)
     except proof_engine.FailedProof:
         sys.exit(1)
     except Exception as e:  # pylint: disable=broad-exception-caught

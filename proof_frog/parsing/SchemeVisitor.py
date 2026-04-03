@@ -84,6 +84,11 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SchemeParser#uniqueSampleStatement.
+    def visitUniqueSampleStatement(self, ctx:SchemeParser.UniqueSampleStatementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SchemeParser#functionCallStatement.
     def visitFunctionCallStatement(self, ctx:SchemeParser.FunctionCallStatementContext):
         return self.visitChildren(ctx)
@@ -111,6 +116,11 @@ class SchemeVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SchemeParser#lvalue.
     def visitLvalue(self, ctx:SchemeParser.LvalueContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#methodModifier.
+    def visitMethodModifier(self, ctx:SchemeParser.MethodModifierContext):
         return self.visitChildren(ctx)
 
 
@@ -209,6 +219,11 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SchemeParser#onesExp.
+    def visitOnesExp(self, ctx:SchemeParser.OnesExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SchemeParser#unionExp.
     def visitUnionExp(self, ctx:SchemeParser.UnionExpContext):
         return self.visitChildren(ctx)
@@ -241,6 +256,16 @@ class SchemeVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SchemeParser#orExp.
     def visitOrExp(self, ctx:SchemeParser.OrExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#zerosExp.
+    def visitZerosExp(self, ctx:SchemeParser.ZerosExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#exponentiationExp.
+    def visitExponentiationExp(self, ctx:SchemeParser.ExponentiationExpContext):
         return self.visitChildren(ctx)
 
 
@@ -319,6 +344,16 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SchemeParser#randomFunctionType.
+    def visitRandomFunctionType(self, ctx:SchemeParser.RandomFunctionTypeContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#modIntType.
+    def visitModIntType(self, ctx:SchemeParser.ModIntTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SchemeParser#setType.
     def visitSetType(self, ctx:SchemeParser.SetTypeContext):
         return self.visitChildren(ctx)
@@ -344,8 +379,18 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SchemeParser#integerAtom.
+    def visitIntegerAtom(self, ctx:SchemeParser.IntegerAtomContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SchemeParser#bitstring.
     def visitBitstring(self, ctx:SchemeParser.BitstringContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#modint.
+    def visitModint(self, ctx:SchemeParser.ModintContext):
         return self.visitChildren(ctx)
 
 

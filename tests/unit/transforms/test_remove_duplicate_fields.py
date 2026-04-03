@@ -1,0 +1,207 @@
+import pytest
+from proof_frog import proof_engine, frog_parser
+
+
+@pytest.mark.parametrize(
+    "method,expected",
+    [
+        (
+            """
+        Game Test() {
+            Int field1;
+            Int field2;
+            Void Initialize() {
+                field1 = 100;
+                field2 = field1;
+            }
+            Int f() {
+                Int value = field1 + field2;
+                return value;
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Void Initialize() {
+                field1 = 100;
+            }
+            Int f() {
+                Int value = field1 + field1;
+                return value;
+            }
+        }""",
+        ),
+        (
+            """
+        Game Test() {
+            Int field1;
+            Int field2;
+            Void Initialize() {
+                field1 = 100;
+                field2 = field1;
+            }
+            Int f() {
+                field1 = 200;
+                Int value = field1 + field2;
+                return value;
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Int field2;
+            Void Initialize() {
+                field1 = 100;
+                field2 = field1;
+            }
+            Int f() {
+                field1 = 200;
+                Int value = field1 + field2;
+                return value;
+            }
+        }""",
+        ),
+        (
+            """
+        Game Test() {
+            Int field1;
+            Int field2;
+            Void Initialize() {
+                field1 = 100;
+                field2 = field1;
+            }
+            Int f() {
+                field2 = 200;
+                Int value = field1 + field2;
+                return value;
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Int field2;
+            Void Initialize() {
+                field1 = 100;
+                field2 = field1;
+            }
+            Int f() {
+                field2 = 200;
+                Int value = field1 + field2;
+                return value;
+            }
+        }""",
+        ),
+        (
+            """
+        Game Test() {
+            Int field1;
+            Void Initialize() {
+                field1 = 100;
+                field1 = field1;
+            }
+            Int f() {
+                Int value = 2 * field1;
+                return value;
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Void Initialize() {
+                field1 = 100;
+                field1 = field1;
+            }
+            Int f() {
+                Int value = 2 * field1;
+                return value;
+            }
+        }""",
+        ),
+        (
+            """
+        Game Test() {
+            BitString field1;
+            BitString field2;
+            BitString Initialize() {
+                field1 <- BitString;
+                field2 <- BitString;
+                return field1;
+            }
+        }""",
+            """
+        Game Test() {
+            BitString field1;
+            BitString field2;
+            BitString Initialize() {
+                field1 <- BitString;
+                field2 <- BitString;
+                return field1;
+            }
+        }""",
+        ),
+        # Direct field copy after function call: field1 = f(); field2 = field1
+        # should be merged (the copy is safe, doesn't replicate the call)
+        (
+            """
+        Game Test() {
+            Int field1;
+            Int field2;
+            Void Initialize() {
+                field1 = challenger.g();
+                field2 = field1;
+            }
+            Int f() {
+                return field1 + field2;
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Void Initialize() {
+                field1 = challenger.g();
+            }
+            Int f() {
+                return field1 + field1;
+            }
+        }""",
+        ),
+        # Two independent function calls should NOT be merged
+        (
+            """
+        Game Test() {
+            Int field1;
+            Int field2;
+            Void Initialize() {
+                field1 = challenger.g();
+                field2 = challenger.g();
+            }
+            Int f() {
+                return field1 + field2;
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Int field2;
+            Void Initialize() {
+                field1 = challenger.g();
+                field2 = challenger.g();
+            }
+            Int f() {
+                return field1 + field2;
+            }
+        }""",
+        ),
+    ],
+)
+def test_remove_duplicate_fields(
+    method: str,
+    expected: str,
+) -> None:
+    game_ast = frog_parser.parse_game(method)
+    expected_ast = frog_parser.parse_game(expected)
+
+    print("EXPECTED", expected_ast)
+    transformed_ast = proof_engine.remove_duplicate_fields(game_ast)
+    print("TRANSFORMED", transformed_ast)
+    assert transformed_ast == expected_ast

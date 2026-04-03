@@ -1,0 +1,29 @@
+PYTHON := .venv/bin/python
+
+.PHONY: lint format test parser vscode-extension vscode-vsix
+
+lint:
+	$(PYTHON) -m black --check proof_frog
+	$(PYTHON) -m mypy proof_frog --no-warn-unused-ignores
+	$(PYTHON) -m pylint proof_frog
+	cd vscode-extension && npx tsc --noEmit
+
+format:
+	$(PYTHON) -m black proof_frog
+
+test:
+	$(PYTHON) -m pytest
+
+vscode-extension:
+	cd vscode-extension && npm install && npm run bundle
+
+vscode-vsix: vscode-extension
+	cd vscode-extension && npm run package
+
+GRAMMARS := Game.g4 Primitive.g4 Proof.g4 Scheme.g4
+
+parser:
+	rm -rf proof_frog/parsing/*
+	touch proof_frog/parsing/__init__.py
+	$(foreach g,$(GRAMMARS),antlr -Dlanguage=Python3 -visitor -no-listener proof_frog/antlr/$(g);)
+	mv proof_frog/antlr/*.interp proof_frog/antlr/*.tokens proof_frog/antlr/*.py proof_frog/parsing/

@@ -20,6 +20,7 @@ statement: type id SEMI #varDeclStatement
 	| type lvalue SAMPLES expression SEMI #varDeclWithSampleStatement
 	| lvalue EQUALS expression SEMI #assignmentStatement
 	| lvalue SAMPLES expression SEMI #sampleStatement
+	| type lvalue SAMPUNIQ L_SQUARE lvalue R_SQUARE type SEMI #uniqueSampleStatement
 	| expression L_PAREN argList? R_PAREN SEMI #functionCallStatement
 	| RETURN expression SEMI #returnStatement
 	| IF L_PAREN expression R_PAREN block (ELSE IF L_PAREN expression R_PAREN block )* (ELSE block )? #ifStatement
@@ -28,9 +29,11 @@ statement: type id SEMI #varDeclStatement
 	;
 
 lvalue:
-	(id | parameterizedGame) (PERIOD id | L_SQUARE expression R_SQUARE)*;
+	(id | parameterizedGame | THIS) (PERIOD id | L_SQUARE expression R_SQUARE)*;
 
-methodSignature: type id L_PAREN paramList? R_PAREN;
+methodModifier: DETERMINISTIC | INJECTIVE;
+
+methodSignature: methodModifier* type id L_PAREN paramList? R_PAREN;
 
 paramList: variable (COMMA variable)*;
 
@@ -39,6 +42,8 @@ expression:
 	| expression L_SQUARE integerExpression COLON integerExpression R_SQUARE #sliceExp
 	| NOT expression #notExp
 	| VBAR expression VBAR #sizeExp
+
+	| <assoc=right> expression CARET expression #exponentiationExp
 
 	| expression TIMES expression #multiplyExp
 	| expression DIVIDE expression #divideExp
@@ -63,6 +68,8 @@ expression:
 	| L_SQUARE (expression (COMMA expression)*)? R_SQUARE #createTupleExp
 	| L_CURLY (expression (COMMA expression)*)? R_CURLY #createSetExp
 	| type #typeExp
+	| ZEROS_CARET integerAtom #zerosExp
+	| ONES_CARET integerAtom #onesExp
 	| BINARYNUM #binaryNumExp
 	| INT #intExp
 	| bool #boolExp
@@ -82,9 +89,11 @@ type: type QUESTION #optionalType
 	| VOID #voidType
 	| MAP L_ANGLE type COMMA type R_ANGLE #mapType
 	| ARRAY L_ANGLE type COMMA integerExpression R_ANGLE #arrayType
+	| RANDOMFUNCTIONS L_ANGLE type COMMA type R_ANGLE #randomFunctionType
 	| INTTYPE #intType
-	| type (TIMES type)+ #productType
+	| L_SQUARE type (COMMA type)+ R_SQUARE #productType
 	| bitstring #bitStringType
+	| modint #modIntType
 	| lvalue # lvalueType
 	;
 
@@ -99,7 +108,15 @@ integerExpression
 	| L_PAREN integerExpression R_PAREN
 	;
 
+integerAtom
+	: lvalue
+	| INT
+	| L_PAREN integerExpression R_PAREN
+	;
+
 bitstring: BITSTRING L_ANGLE integerExpression R_ANGLE | BITSTRING;
+
+modint: MODINT L_ANGLE integerExpression R_ANGLE;
 
 set: SET L_ANGLE type R_ANGLE | SET;
 
@@ -132,10 +149,12 @@ NOTEQUALS: '!=';
 GEQ: '>=';
 LEQ: '<=';
 OR: '||';
+SAMPUNIQ: '<-uniq';
 SAMPLES: '<-';
 AND: '&&';
 BACKSLASH: '\\';
 NOT: '!';
+CARET: '^';
 VBAR: '|';
 
 SET: 'Set';
@@ -147,7 +166,9 @@ MAP: 'Map';
 RETURN: 'return';
 IMPORT: 'import';
 BITSTRING: 'BitString';
+MODINT: 'ModInt';
 ARRAY: 'Array';
+RANDOMFUNCTIONS: 'RandomFunctions';
 PRIMITIVE: 'Primitive';
 SUBSETS: 'subsets';
 IF: 'if';
@@ -162,13 +183,18 @@ PHASE: 'Phase';
 ORACLES: 'oracles';
 ELSE: 'else';
 NONE: 'None';
+THIS: 'this';
+DETERMINISTIC: 'deterministic';
+INJECTIVE: 'injective';
 
 TRUE: 'true';
 FALSE: 'false';
 
 BINARYNUM: '0b'[01]+ ;
+ZEROS_CARET: '0^' ;
+ONES_CARET: '1^' ;
 INT: [0-9]+ ;
 ID: [a-zA-Z_$][a-zA-Z_0-9$]* ;
 WS: [ \t\r\n]+ -> skip ;
-LINE_COMMENT : '//' .*? '\r'? '\n' -> skip ;
+LINE_COMMENT : '//' .*? ('\r'? '\n' | EOF) -> skip ;
 FILESTRING: '\''[-0-9a-zA-Z_$/.=>< ]+'\'' ;

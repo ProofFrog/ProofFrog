@@ -1,43 +1,184 @@
+<p align="center">
+  <img src="https://github.com/ProofFrog/ProofFrog/blob/main/proof_frog/web/prooffrog.png?raw=true" alt="ProofFrog logo" width="120"/>
+</p>
+
 # ProofFrog
-ProofFrog is a work-in-progress tool for verifying cryptographic game-hopping proofs. All security properties in ProofFrog are written via pairs of indistinguishable games. More info can be found on our [wiki](https://prooffrog.github.io/)
 
-## Installation:
+**A tool for checking transitions in cryptographic game-hopping proofs.**
 
-```
-pip3 install -r requirements.txt
-pip3 install -r requirements-dev.txt
-```
+ProofFrog checks the validity of transitions in game-hopping proofs — the standard technique in provable security for showing that a cryptographic scheme satisfies a security property. Proofs are written in FrogLang, a domain-specific language for defining primitives, schemes, security games, and proofs. ProofFrog is designed to handle introductory-level proofs, trading expressivity and power for ease of use. The engine checks each hop by manipulating abstract syntax trees into a canonical form, with some help from other tools like Z3 and SymPy. ProofFrog's engine does not have any formal guarantees: the soundness of its transformations has not been verified.
 
-## Commands:
+ProofFrog can be used via a **command-line interface**, a **browser-based editor**, or an **MCP server** for integration with AI coding assistants. More info at [prooffrog.github.io](https://prooffrog.github.io/).
 
-To use the proof engine: `python3 -m proof_frog prove [proof_file]`. The [examples repo](https://github.com/ProofFrog/examples/]) contains a list of examples largely adapated from [The Joy of Cryptography](https://joyofcryptography.com/). See also our [examples page](https://github.com/ProofFrog/examples) on our wiki.
+![ProofFrog web interface](https://github.com/ProofFrog/ProofFrog/blob/main/media/screenshot-web.png?raw=true)
 
-You can also parse any type of file (scheme, proof, game, or primitive) using `python3 -m proof_frog parse [file]`. It will read the file, transform it into an internal AST representation, stringify the representation, and print it back out to the screen.
+## Installation
 
-The bash files `testParsing.sh` ensures that the ANTLR grammar can parse each file in the examples folder. `testAST.sh` parses each file with proof_frog, strips the whitespace, and diffs it with the original file to ensure that the AST output matches the file input. Finally, `testProofs.sh` runs both the suite of examples and the pytest unit tests.
+Requires **Python 3.11+**.
 
-## Jupyter Notebook
-
-We have a custom kernel that allows a user to interact with proof_frog via a Jupyter notebook. To do so, run the following commands from the base directory.
+### From PyPI
 
 ```
-docker build -f jupyter/Dockerfile -t proof_frog .
-docker run -p 8888:8888 proof_frog
+python3 -m venv .venv
+source .venv/bin/activate
+pip install proof_frog
 ```
 
-The output from the `docker run` command will contain a `localhost:8888` URL containing a token that will allow you to view the jupyter notebook.
+After installing ProofFrog via pip, you may want to download the examples repository:
 
-## Plugin for JetBrains IDE-s
+```
+git clone https://github.com/ProofFrog/examples
+```
 
-There's a plugin available for JetBrains IDE-s which provides syntax validation and highlighting, custom color settings, 
-import statement file path references, context-menu actions and other features for the ProofFrog language. 
-You can obtain the plugin from the JetBrains Marketplace inside the IDE. 
-The project is hosted in [this GitHub repository](https://github.com/aabmets/proof-frog-ide-plugin).
+### From source
 
+```
+git clone https://github.com/ProofFrog/ProofFrog
+cd ProofFrog
+git submodule update --init
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+## Web Interface
+
+```
+proof_frog web [directory]
+```
+
+Starts a local web server (default port 5173) and opens the editor in your browser. The `[directory]` argument specifies the working directory for proof files; it defaults to the current directory.
+
+The web interface lets you edit ProofFrog files (with syntax highlighting), validate proofs from the web editor, and explore the game state at each hop.
+
+## Command-Line Interface
+
+| Command | Description |
+|---------|-------------|
+| `proof_frog parse <file>` | Parse a file and print its AST representation |
+| `proof_frog check <file>` | Type-check a file for well-formedness |
+| `proof_frog prove <file>` | Verify a game-hopping proof (`-v` for verbose output) |
+| `proof_frog web [dir]` | Launch the browser-based editor |
+
+When installed from source, use `python3 -m proof_frog` instead of `proof_frog`.
+
+## Writing a Proof in ProofFrog
+
+Take a look at the [guide](https://github.com/ProofFrog/ProofFrog/blob/main/docs/guide.md) for writing a proof in ProofFrog.
+
+ProofFrog uses four file types to express the components of a cryptographic proof.
+
+### Primitives (`.primitive`)
+
+A **primitive** defines the interface for a cryptographic operation — its parameters, types, and method signatures. Here's an example of the interface for a pseudorandom generator:
+
+```
+Primitive PRG(Int lambda, Int stretch) {
+    Int lambda = lambda;
+    Int stretch = stretch;
+
+    BitString<lambda + stretch> evaluate(BitString<lambda> x);
+}
+```
+
+### Schemes (`.scheme`)
+
+A **scheme** implements a primitive. Schemes can be built generically from other primitives. Here's an example of the one-time pad symmetric encryption scheme:
+
+```
+Scheme OTP(Int lambda) extends SymEnc {
+    Set Key = BitString<lambda>;
+    Set Message = BitString<lambda>;
+    Set Ciphertext = BitString<lambda>;
+
+    Key KeyGen() {
+        Key k <- Key;
+        return k;
+    }
+
+    Ciphertext Enc(Key k, Message m) {
+        return k + m;
+    }
+
+    Message Dec(Key k, Ciphertext c) {
+        return k + c;
+    }
+}
+```
+
+### Games (`.game`)
+
+A **security property** is defined as a pair of games (Left/Right). An adversary's inability to distinguish between the two games constitutes security. Here's an example of the security game for a PRG:
+
+```
+Game Real(PRG G) {
+    BitString<G.lambda + G.stretch> Query() {
+        BitString<G.lambda> s <- BitString<G.lambda>;
+        return G.evaluate(s);
+    }
+}
+
+Game Random(PRG G) {
+    BitString<G.lambda + G.stretch> Query() {
+        BitString<G.lambda + G.stretch> r <- BitString<G.lambda + G.stretch>;
+        return r;
+    }
+}
+
+export as Security;
+```
+
+### Proofs (`.proof`)
+
+A **proof script** declares assumptions, states a theorem, and lists a sequence of games. Each adjacent pair must be justified as either code-equivalent (verified automatically) or a reduction to an assumed security property. The following snippet shows the basic parts of a proof:
+
+```
+proof:
+
+let:
+    SymEnc proofE = SymEnc(ProofMessageSpace, ProofCiphertextSpace, ProofKeySpace);
+
+assume:
+    OneTimeUniformCiphertexts(proofE);
+
+theorem:
+    OneTimeSecrecy(proofE);
+
+games:
+    OneTimeSecrecy(proofE).Left against OneTimeSecrecy(proofE).Adversary;
+    OneTimeUniformCiphertexts(proofE).Real compose R1(proofE) against OneTimeSecrecy(proofE).Adversary;
+    OneTimeUniformCiphertexts(proofE).Random compose R1(proofE) against OneTimeSecrecy(proofE).Adversary;
+    OneTimeUniformCiphertexts(proofE).Random compose R2(proofE) against OneTimeSecrecy(proofE).Adversary;
+    OneTimeUniformCiphertexts(proofE).Real compose R2(proofE) against OneTimeSecrecy(proofE).Adversary;
+    OneTimeSecrecy(proofE).Right against OneTimeSecrecy(proofE).Adversary;
+```
+
+## Vibe-Coding a Proof
+
+ProofFrog also provides an MCP server for integration with AI coding assistants like Claude Code. See the ProofFrog website for an [example of vibe-coding a ProofFrog proof with Claude Code](https://prooffrog.github.io/hacs-2026/vibe/).
+
+## Examples
+
+The [`examples/`](https://github.com/ProofFrog/examples) repository contains primitives, schemes, games, and proofs largely adapted from [*The Joy of Cryptography*](https://joyofcryptography.com/) by Mike Rosulek. See also the [examples and tutorials on the ProofFrog website](https://prooffrog.github.io/).
+
+## License
+
+ProofFrog is released under the [MIT License](https://github.com/ProofFrog/ProofFrog/blob/main/LICENSE).
+
+## Acknowledgements
+
+ProofFrog was created by Ross Evans and Douglas Stebila, building on the pygamehop tool created by Douglas Stebila and Matthew McKague. For more information about ProofFrog's design, see [Ross Evans' master's thesis](https://uwspace.uwaterloo.ca/bitstream/handle/10012/20441/Evans_Ross.pdf) and [eprint 2025/418](https://eprint.iacr.org/2025/418).
+
+ProofFrog's syntax and approach to modelling is heavily inspired by Mike Rosulek's excellent book [*The Joy of Cryptography*](https://joyofcryptography.com/).
+
+## Editor plugins
+
+**JetBrains IDE-s**. There's a plugin available for JetBrains IDE-s which provides syntax validation and highlighting, custom color settings, import statement file path references, context-menu actions and other features for the ProofFrog language. You can obtain the plugin from the JetBrains Marketplace inside the IDE. The project is hosted in [this GitHub repository](https://github.com/aabmets/proof-frog-ide-plugin).
 
 # Acknowledgements
-<img src="media/NSERC.jpg" alt="NSERC signature" width="750"/> 
+
+<img src="https://github.com/ProofFrog/ProofFrog/blob/main/media/NSERC.jpg?raw=true" alt="NSERC logo" width="750"/>
 
 We acknowledge the support of the Natural Sciences and Engineering Research Council of Canada (NSERC).
 
-Nous remercions le Conseil de recherches en sciences naturelles et en génie du Canada (CRSNG) de son soutien.
+Includes icons from the [vscode-codicons](https://github.com/microsoft/vscode-codicons) project.

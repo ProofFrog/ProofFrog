@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ProofFrog</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/codemirror.min.css" integrity="sha512-uf06llspW44/LZpHzHT6qBOIVODjWtv4MxCricRxkzvopAlSWnTf6hpZTFxuuZcuNE9CBQhqE0Seu1CoRk84nQ==" crossorigin="anonymous">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/theme/dracula.min.css" integrity="sha512-gFMl3u9d0xt3WR8ZeW05MWm3yZ+ZfgsBVXLSOiFz2xeVrZ8Neg0+V1kkRIo9LikyA/T9HuS91kDfc2XWse0K0A==" crossorigin="anonymous">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/theme/eclipse.min.css" integrity="sha512-Gv0sGKOVrQcQjUHL+xd9Bpq5AvLKbcQMb8s4J1//caCLxqvj00CLJMzJlqnTHTCQbKFRpPHqzXteq6dSMs7PEw==" crossorigin="anonymous">
+  <link rel="stylesheet" href="/static/style.css">
+
+  <!-- Favicons -->
+  <link rel="icon" href="/static/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/prooffrog-32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/prooffrog-16.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/prooffrog-180.png">
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <span class="logo"><img src="/prooffrog.png" alt="ProofFrog">ProofFrog</span>
+    <button id="btn-new-file" title="New File">New File</button>
+    <button id="btn-save" title="Save (Ctrl+S)" disabled>Save</button>
+    <button id="btn-parse" class="primary" title="Parse current file" disabled>Parse</button>
+    <button id="btn-prove" class="primary" title="Run proof" disabled style="display:none">Run Proof</button>
+    <select id="prove-verbosity" title="Verbosity level" style="display:none">
+      <option value="0">Quiet</option>
+      <option value="1">Verbose</option>
+      <option value="2">Very Verbose</option>
+    </select>
+<span class="spacer"></span>
+    <span class="dir-label" id="dir-label"></span>
+    <button id="btn-theme" title="Toggle light/dark mode">Dark</button>
+  </div>
+  <div id="main">
+    <div id="sidebar">
+      <div id="sidebar-header"><span>Explorer</span><span id="sidebar-header-buttons"><button id="btn-expand-all" title="Expand All"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path fill="currentColor" d="M15 6v5c0 2.21-1.79 4-4 4H6c-.74 0-1.38-.4-1.73-1H11c1.65 0 3-1.35 3-3V4.27c.6.35 1 .99 1 1.73m-4 7H4c-1.103 0-2-.897-2-2V4c0-1.103.897-2 2-2h7c1.103 0 2 .897 2 2v7c0 1.103-.897 2-2 2m-7-1h7c.551 0 1-.448 1-1V4c0-.551-.449-1-1-1H4c-.551 0-1 .449-1 1v7c0 .552.449 1 1 1m5.5-5H8V5.5a.5.5 0 0 0-1 0V7H5.5a.5.5 0 0 0 0 1H7v1.5a.5.5 0 0 0 1 0V8h1.5a.5.5 0 0 0 0-1"/></svg></button><button id="btn-collapse-all" title="Collapse All"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><g fill="currentColor"><path d="M14 4.27c.6.35 1 .99 1 1.73v5c0 2.21-1.79 4-4 4H6c-.74 0-1.38-.4-1.73-1H11c1.65 0 3-1.35 3-3zM9.5 7a.5.5 0 0 1 0 1h-4a.5.5 0 0 1 0-1z"/><path fill-rule="evenodd" d="M11 2c1.103 0 2 .897 2 2v7c0 1.103-.897 2-2 2H4c-1.103 0-2-.897-2-2V4c0-1.103.897-2 2-2zM4 3c-.551 0-1 .449-1 1v7c0 .552.449 1 1 1h7c.551 0 1-.448 1-1V4c0-.551-.449-1-1-1z" clip-rule="evenodd"/></g></svg></button></span></div>
+      <div id="file-tree"></div>
+      <div id="game-hops-panel">
+        <div id="inner-resize-handle"></div>
+        <div id="game-hops-header">Game Hops</div>
+        <div id="game-hops-list"></div>
+      </div>
+      <div id="wizard-panel">
+        <div id="wizard-resize-handle"></div>
+        <div id="wizard-panel-header">Wizard</div>
+        <div id="wizard-body"></div>
+      </div>
+    </div>
+    <div id="sidebar-resize-handle"></div>
+    <div id="editor-area">
+      <div id="tabs"><span id="tabs-empty">Open a file from the explorer</span></div>
+      <div id="editors-container">
+        <div id="welcome">
+          <img src="/prooffrog.png" alt="ProofFrog">
+          <h2>ProofFrog</h2>
+          <p>Select a file from the explorer to start editing.</p>
+        </div>
+      </div>
+      <div id="resize-handle"></div>
+      <div id="output-pane">
+        <div id="output-header">
+          <span id="output-status"></span>
+          <span id="output-title"></span>
+          <button id="output-close" title="Close output">&#x2715;</button>
+        </div>
+        <div id="output-content"><pre id="output-pre"></pre></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="wizard-modal" role="dialog" aria-modal="true" aria-labelledby="wizard-modal-title">
+  <div id="wizard-modal-panel">
+    <div id="wizard-modal-header">
+      <span id="wizard-modal-title">Create New Game</span>
+      <button id="wizard-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="wizard-modal-body">
+      <div>
+        <label class="wizard-label" for="wizard-prop-name">Security property name</label>
+        <input class="wizard-input" id="wizard-prop-name" type="text" placeholder="e.g. CPA" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="wizard-primitive">Primitive</label>
+        <select class="wizard-input" id="wizard-primitive"></select>
+      </div>
+      <div>
+        <label class="wizard-label" for="wizard-left-name">Left side name</label>
+        <input class="wizard-input" id="wizard-left-name" type="text" value="Left" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="wizard-right-name">Right side name</label>
+        <input class="wizard-input" id="wizard-right-name" type="text" value="Right" autocomplete="off">
+      </div>
+    </div>
+    <div id="wizard-modal-footer">
+      <button id="wizard-modal-create" class="primary">Create</button>
+      <button id="wizard-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="primitive-wizard-modal" role="dialog" aria-modal="true" aria-labelledby="primitive-wizard-modal-title">
+  <div id="primitive-wizard-modal-panel">
+    <div id="primitive-wizard-modal-header">
+      <span id="primitive-wizard-modal-title">Create New Primitive</span>
+      <button id="primitive-wizard-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="primitive-wizard-modal-body">
+      <div>
+        <label class="wizard-label" for="primitive-wizard-name">Name</label>
+        <input class="wizard-input" id="primitive-wizard-name" type="text" placeholder="e.g. SKE" autocomplete="off">
+      </div>
+    </div>
+    <div id="primitive-wizard-modal-footer">
+      <button id="primitive-wizard-modal-create" class="primary">Create</button>
+      <button id="primitive-wizard-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="scheme-wizard-modal" role="dialog" aria-modal="true" aria-labelledby="scheme-wizard-modal-title">
+  <div id="scheme-wizard-modal-panel">
+    <div id="scheme-wizard-modal-header">
+      <span id="scheme-wizard-modal-title">Create New Scheme</span>
+      <button id="scheme-wizard-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="scheme-wizard-modal-body">
+      <div>
+        <label class="wizard-label" for="scheme-wizard-name">Name</label>
+        <input class="wizard-input" id="scheme-wizard-name" type="text" placeholder="e.g. MyScheme" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="scheme-wizard-primitive">Primitive</label>
+        <select class="wizard-input" id="scheme-wizard-primitive"></select>
+      </div>
+    </div>
+    <div id="scheme-wizard-modal-footer">
+      <button id="scheme-wizard-modal-create" class="primary">Create</button>
+      <button id="scheme-wizard-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="proof-wizard-modal" role="dialog" aria-modal="true" aria-labelledby="proof-wizard-modal-title">
+  <div id="proof-wizard-modal-panel">
+    <div id="proof-wizard-modal-header">
+      <span id="proof-wizard-modal-title">Create New Proof</span>
+      <button id="proof-wizard-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="proof-wizard-modal-body">
+      <div>
+        <label class="wizard-label" for="proof-wizard-scheme">Scheme</label>
+        <select class="wizard-input" id="proof-wizard-scheme"></select>
+      </div>
+      <div>
+        <label class="wizard-label" for="proof-wizard-game">Security game</label>
+        <select class="wizard-input" id="proof-wizard-game"></select>
+      </div>
+    </div>
+    <div id="proof-wizard-modal-footer">
+      <button id="proof-wizard-modal-create" class="primary">Create</button>
+      <button id="proof-wizard-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="induction-modal" role="dialog" aria-modal="true" aria-labelledby="induction-modal-title">
+  <div id="induction-modal-panel">
+    <div id="induction-modal-header">
+      <span id="induction-modal-title">Warning</span>
+      <button id="induction-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="induction-modal-body">
+      <p>This proof contains induction steps. The web UI does not currently display induction-related elements correctly.</p>
+      <p>For full induction support, please use the command-line interface.</p>
+    </div>
+    <div id="induction-modal-footer">
+      <button id="induction-modal-ok" class="primary">OK</button>
+    </div>
+  </div>
+</div>
+
+<div id="newfile-modal" role="dialog" aria-modal="true" aria-labelledby="newfile-modal-title">
+  <div id="newfile-modal-panel">
+    <div id="newfile-modal-header">
+      <span id="newfile-modal-title">New File</span>
+      <button id="newfile-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="newfile-modal-body">
+      <div>
+        <label class="wizard-label" for="newfile-folder">Folder</label>
+        <select class="wizard-input" id="newfile-folder"></select>
+      </div>
+      <div>
+        <label class="wizard-label" for="newfile-name">File name (without extension)</label>
+        <input class="wizard-input" id="newfile-name" type="text" placeholder="e.g. MyScheme" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="newfile-type">File type</label>
+        <select class="wizard-input" id="newfile-type">
+          <option value=".primitive">.primitive</option>
+          <option value=".scheme">.scheme</option>
+          <option value=".game">.game</option>
+          <option value=".proof">.proof</option>
+          <option value=".md">.md</option>
+        </select>
+      </div>
+      <div id="newfile-error" style="color: var(--error); font-size: 12px; display: none;"></div>
+    </div>
+    <div id="newfile-modal-footer">
+      <button id="newfile-modal-create" class="primary">Create</button>
+      <button id="newfile-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/codemirror.min.js" integrity="sha512-6cPYokihlrofMNApz7OXVQNObWjLiKGIBBb7+UB+AuMiRCLKmFKgrwms21sHq3bdFFZWpfHYRJBJvMFMPj1S9g==" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/16.3.0/lib/marked.umd.min.js" integrity="sha512-V6rGY7jjOEUc7q5Ews8mMlretz1Vn2wLdMW/qgABLWunzsLfluM0FwHuGjGQ1lc8jO5vGpGIGFE+rTzB+63HdA==" crossorigin="anonymous"></script>
+<script src="/static/app.js" type="module"></script>
+</body>
+</html>

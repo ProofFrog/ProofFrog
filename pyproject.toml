@@ -4,22 +4,46 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "proof_frog"
-version = "0.2.0"
-description = "A tool for verifying game-hopping proofs"
+version = "0.3.1"
+description = "A tool for checking transitions in cryptographic game-hopping proofs"
+keywords = ["cryptography", "latex", "game-hopping", "proofs"]
 readme = "README.md"
-authors = [{name = "Ross Evans", email = "rpevans@uwaterloo.ca"}]
+authors = [
+    {name = "Ross Evans", email = "rpevans@uwaterloo.ca"},
+    {name = "Douglas Stebila", email = "dstebila@uwaterloo.ca"},
+]
 requires-python = ">=3.11"
-license={file = "LICENSE"}
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security :: Cryptography",
+]
 dependencies = [
 	"antlr4-python3-runtime >= 4.13",
 	"colorama >= 0.4",
 	"z3-solver >= 4.12",
-	"sympy >= 1.12"
+	"sympy >= 1.12",
+	"flask >= 3.0",
+	"watchdog >= 4.0",
+	"click >= 8.0",
+	"pygls >= 1.3"
 ]
+
+[project.optional-dependencies]
+dev = ["mypy", "pylint", "types-colorama", "pytest", "pytest-xdist", "black"]
+mcp = ["mcp[cli] >= 1.0"]
 
 [project.urls]
 Source = "https://github.com/ProofFrog/ProofFrog"
 Documentation = "https://prooffrog.github.io"
+"Release Notes" = "https://github.com/ProofFrog/ProofFrog/blob/main/RELEASE.md"
 
 [project.scripts]
 proof_frog = "proof_frog:main"
@@ -29,6 +53,7 @@ exclude = 'proof_frog/parsing/'
 
 [tool.pytest.ini_options]
 pythonpath = 'proof_frog'
+addopts = '-n auto'
 
 [tool.mypy]
 exclude = 'parsing'
@@ -49,6 +74,18 @@ module='z3.*'
 ignore_missing_imports = 'True'
 [[tool.mypy.overrides]]
 module='sympy.*'
+ignore_missing_imports = 'True'
+[[tool.mypy.overrides]]
+module='mcp.*'
+ignore_missing_imports = 'True'
+[[tool.mypy.overrides]]
+module='pygls.*'
+ignore_missing_imports = 'True'
+[[tool.mypy.overrides]]
+module='lsprotocol.*'
+ignore_missing_imports = 'True'
+[[tool.mypy.overrides]]
+module='watchdog.*'
 ignore_missing_imports = 'True'
 
 [tool.pylint.MASTER]

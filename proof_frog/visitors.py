@@ -13,14 +13,12 @@ from typing import (
     cast,
     final,
     Tuple,
-    List,
     Dict,
 )
 import z3
 from sympy import Symbol, Rational
 
 from . import frog_ast
-from . import frog_parser
 
 
 @dataclass
@@ -30,10 +28,88 @@ class InstantiableType:
     superclass: str
 
 
+@functools.lru_cache(maxsize=None)
 def _to_snake_case(camel_case: str) -> str:
     return "".join(["_" + i.lower() if i.isupper() else i for i in camel_case]).lstrip(
         "_"
     )
+
+
+# ---------------------------------------------------------------------------
+# Dispatch caches — avoid repeated hasattr / getattr / _to_snake_case lookups
+# ---------------------------------------------------------------------------
+
+_NOT_FOUND = object()
+
+# (visitor_class, node_class) -> (visit_method | None, leave_method | None)
+_VISITOR_METHODS_CACHE: dict[tuple[type, type], tuple[Any, Any]] = {}
+
+# (transformer_class, node_class) -> method | _NOT_FOUND
+_TRANSFORM_CACHE: dict[tuple[type, type], Any] = {}
+
+# transformer_class -> method | _NOT_FOUND
+_TRANSFORM_FALLBACK_CACHE: dict[type, Any] = {}
+
+
+def _lookup_visitor_methods(cls: type, node_cls: type) -> tuple[Any, Any]:
+    """Look up visit/leave methods for a (visitor_class, node_class) pair."""
+    key = (cls, node_cls)
+    cached = _VISITOR_METHODS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    snake = _to_snake_case(node_cls.__name__)
+    visit_method = getattr(cls, "visit_" + snake, None) or getattr(
+        cls, "visit_ast_node", None
+    )
+    leave_method = getattr(cls, "leave_" + snake, None) or getattr(
+        cls, "leave_ast_node", None
+    )
+    result = (visit_method, leave_method)
+    _VISITOR_METHODS_CACHE[key] = result
+    return result
+
+
+def _lookup_transform(cls: type, node_cls: type) -> Any:
+    """Look up transform method for a (transformer_class, node_class) pair."""
+    key = (cls, node_cls)
+    cached = _TRANSFORM_CACHE.get(key)
+    if cached is not None:
+        return cached
+    snake = _to_snake_case(node_cls.__name__)
+    method = getattr(cls, "transform_" + snake, _NOT_FOUND)
+    _TRANSFORM_CACHE[key] = method
+    return method
+
+
+def _lookup_transform_fallback(cls: type) -> Any:
+    """Look up transform_ast_node fallback for a transformer class."""
+    cached = _TRANSFORM_FALLBACK_CACHE.get(cls)
+    if cached is not None:
+        return cached
+    method = getattr(cls, "transform_ast_node", _NOT_FOUND)
+    _TRANSFORM_FALLBACK_CACHE[cls] = method
+    return method
+
+
+def _cow_transform_child(transformer: Any, child: Any) -> Any:
+    """Copy-on-write child transformation for Transformer.
+
+    Returns the original object unchanged (by identity) when no
+    descendant was modified, enabling fast equality checks upstream.
+    """
+    if isinstance(child, frog_ast.ASTNode):
+        return transformer.transform(child)
+    if isinstance(child, list):
+        new_items: Optional[list[Any]] = None
+        for i, item in enumerate(child):
+            new_item = _cow_transform_child(transformer, item)
+            if new_item is not item and new_items is None:
+                # First change detected — copy preceding unchanged items
+                new_items = list(child[:i])
+            if new_items is not None:
+                new_items.append(new_item)
+        return child if new_items is None else new_items
+    return child
 
 
 # Used to represent the return value of our generic visitor
@@ -46,12 +122,13 @@ class Visitor(ABC, Generic[U]):
         pass
 
     def visit(self, visiting_node: frog_ast.ASTNode) -> U:
+        cls = type(self)
+
         def visit_helper(node: frog_ast.ASTNode) -> None:
-            visit_name = "visit_" + _to_snake_case(type(node).__name__)
-            if hasattr(self, visit_name):
-                getattr(self, visit_name)(node)
-            elif hasattr(self, "visit_ast_node"):
-                getattr(self, "visit_ast_node")(node)
+            visit_method, leave_method = _lookup_visitor_methods(cls, type(node))
+
+            if visit_method is not None:
+                visit_method(self, node)
 
             def visit_children(child: Any) -> Any:
                 if isinstance(child, frog_ast.ASTNode):
@@ -63,11 +140,8 @@ class Visitor(ABC, Generic[U]):
             for attr in vars(node):
                 visit_children(getattr(node, attr))
 
-            leave_name = "leave_" + _to_snake_case(type(node).__name__)
-            if hasattr(self, leave_name):
-                getattr(self, leave_name)(node)
-            elif hasattr(self, "leave_ast_node"):
-                getattr(self, "leave_ast_node")(node)
+            if leave_method is not None:
+                leave_method(self, node)
 
         visit_helper(visiting_node)
         return self.result()
@@ -80,26 +154,35 @@ T = TypeVar("T", bound=frog_ast.ASTNode)
 
 class Transformer(ABC):
     def transform(self, node: T) -> T:
-        method_name = "transform_" + _to_snake_case(type(node).__name__)
-        if hasattr(self, method_name):
-            returned: T = getattr(self, method_name)(node)
+        cls = type(self)
+        node_cls = type(node)
+
+        method = _lookup_transform(cls, node_cls)
+        if method is not _NOT_FOUND:
+            returned: T = method(self, node)
             return returned
-        if hasattr(self, "transform_ast_node"):
-            returned = getattr(self, "transform_ast_node")(node)
+        fallback = _lookup_transform_fallback(cls)
+        if fallback is not _NOT_FOUND:
+            returned = fallback(self, node)
             if returned:
                 return returned
 
-        node_copy = copy.deepcopy(node)
+        # Copy-on-write: only create a new node if a child changed
+        changed = False
+        new_attrs: dict[str, Any] = {}
+        for attr_name in vars(node):
+            old_val = getattr(node, attr_name)
+            new_val = _cow_transform_child(self, old_val)
+            new_attrs[attr_name] = new_val
+            if new_val is not old_val:
+                changed = True
 
-        def visit_children(child: Any) -> Any:
-            if isinstance(child, frog_ast.ASTNode):
-                return self.transform(child)
-            if isinstance(child, list):
-                return [visit_children(item) for item in child]
-            return child
+        if not changed:
+            return node
 
-        for attr in vars(node_copy):
-            setattr(node_copy, attr, visit_children(getattr(node, attr)))
+        node_copy = copy.copy(node)
+        for attr_name, new_val in new_attrs.items():
+            setattr(node_copy, attr_name, new_val)
         return node_copy
 
 
@@ -165,137 +248,6 @@ class BlockTransformer(Transformer, ABC):
         pass
 
 
-class RedundantCopyTransformer(BlockTransformer):
-    def _transform_block_wrapper(
-        self,
-        block: frog_ast.Block,
-    ) -> frog_ast.Block:
-        for index, statement in enumerate(block.statements):
-            # Potentially, could be a redundant copy
-            if (
-                isinstance(statement, frog_ast.Assignment)
-                and statement.the_type is not None
-                and isinstance(statement.var, frog_ast.Variable)
-                and isinstance(statement.value, frog_ast.Variable)
-            ):
-                copy_name = statement.var.name
-                original_name = statement.value.name
-
-                def written_to(copy_name: str, node: frog_ast.ASTNode) -> bool:
-                    return (
-                        isinstance(node, (frog_ast.Sample, frog_ast.Assignment))
-                        and isinstance(node.var, frog_ast.Variable)
-                        and node.var.name == copy_name
-                    )
-
-                def original_used(original_name: str, node: frog_ast.ASTNode) -> bool:
-                    return (
-                        isinstance(node, frog_ast.Variable)
-                        and node.name == original_name
-                    )
-
-                remaining_block = frog_ast.Block(
-                    copy.deepcopy(block.statements[index + 1 :])
-                )
-                was_written = SearchVisitor[frog_ast.Variable](
-                    functools.partial(written_to, copy_name)
-                ).visit(remaining_block)
-                used_again = SearchVisitor[frog_ast.Variable](
-                    functools.partial(original_used, original_name)
-                ).visit(remaining_block)
-                # If it was used again, just move on. This ain't gonna work.
-                if was_written or used_again:
-                    continue
-
-                def copy_used(copy_name: str, node: frog_ast.ASTNode) -> bool:
-                    return (
-                        isinstance(node, frog_ast.Variable) and node.name == copy_name
-                    )
-
-                while True:
-                    copy_found = SearchVisitor[frog_ast.Variable](
-                        functools.partial(copy_used, copy_name)
-                    ).visit(remaining_block)
-                    if copy_found is None:
-                        break
-                    remaining_block = ReplaceTransformer(
-                        copy_found, frog_ast.Variable(original_name)
-                    ).transform(remaining_block)
-
-                return self.transform_block(
-                    frog_ast.Block(copy.deepcopy(block.statements[:index]))
-                    + remaining_block
-                )
-        return block
-
-
-class RedundantFieldCopyTransformer(BlockTransformer):
-    def __init__(self) -> None:
-        self.fields: list[str] = []
-
-    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
-        self.fields = [field.name for field in game.fields]
-        new_game = copy.deepcopy(game)
-        new_game.methods = [self.transform(method) for method in new_game.methods]
-        return new_game
-
-    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        for index, statement in enumerate(block.statements):
-            if (
-                isinstance(statement, frog_ast.Assignment)
-                and isinstance(statement.var, frog_ast.Variable)
-                and statement.var.name in self.fields
-            ):
-                if not isinstance(statement.value, frog_ast.Variable):
-                    continue
-
-                def search_for_other_use(
-                    var: frog_ast.Variable, node: frog_ast.ASTNode
-                ) -> bool:
-                    return node == var
-
-                no_other_uses = True
-                decl_index = -1
-                decl_statement: frog_ast.Assignment | frog_ast.Sample
-                for other_index, other_statement in enumerate(block.statements):
-                    if statement == other_statement:
-                        continue
-                    if (
-                        isinstance(
-                            other_statement, (frog_ast.Sample, frog_ast.Assignment)
-                        )
-                        and other_statement.the_type is not None
-                        and other_statement.var == statement.value
-                    ):
-                        decl_index = other_index
-                        decl_statement = other_statement
-                        continue
-                    if (
-                        SearchVisitor(
-                            functools.partial(search_for_other_use, statement.var)
-                        ).visit(other_statement)
-                        is not None
-                    ):
-                        no_other_uses = False
-                # decl_index == -1 implies we weren't able to find
-                # the declaration of the variable on the RHS of the assignment. This means
-                # it is a field, and isn't a redundant copy
-                if not no_other_uses or decl_index == -1:
-                    continue
-                modified_statement = copy.deepcopy(decl_statement)
-                modified_statement.var = statement.var
-                modified_statement.the_type = None
-                return self.transform(
-                    frog_ast.Block(
-                        list(block.statements[:decl_index])
-                        + [modified_statement]
-                        + list(block.statements[decl_index + 1 : index])
-                        + list(block.statements[index + 1 :])
-                    )
-                )
-        return block
-
-
 class FrogToSympyVisitor(Visitor[Optional[Symbol | int]]):
     def __init__(self, variables: dict[str, Symbol]) -> None:
         self.stack: list[Symbol | int] = []
@@ -334,179 +286,9 @@ class FrogToSympyVisitor(Visitor[Optional[Symbol | int]]):
         self.stack.append(integer.num)
 
     def leave_variable(self, var: frog_ast.Variable) -> None:
+        if var.name not in self.variables:
+            raise KeyError(f"Undefined variable '{var.name}' in expression")
         self.stack.append(self.variables[var.name])
-
-
-class SimplifySpliceTransformer(BlockTransformer):
-    def __init__(self, variables: dict[str, Symbol | frog_ast.Expression]) -> None:
-        self.variables = variables
-
-    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        def is_all_concatenated(node: frog_ast.ASTNode) -> bool:
-            if isinstance(node, frog_ast.Variable):
-                return True
-            if not isinstance(node, frog_ast.BinaryOperation):
-                return False
-            if node.operator is not frog_ast.BinaryOperators.OR:
-                return False
-
-            return is_all_concatenated(node.left_expression) and is_all_concatenated(
-                node.right_expression
-            )
-
-        for index, statement in enumerate(block.statements):
-            if not isinstance(statement, frog_ast.Assignment):
-                continue
-            if not isinstance(statement.var, frog_ast.Variable):
-                continue
-            if not isinstance(statement.value, frog_ast.BinaryOperation):
-                continue
-
-            if not is_all_concatenated(statement.value):
-                continue
-
-            # Get variables all concatenated together
-            concatenated_var_names = VariableCollectionVisitor().visit(statement.value)
-
-            def find_declaration(variable: str, node: frog_ast.ASTNode) -> bool:
-                return (
-                    isinstance(node, (frog_ast.Assignment, frog_ast.Sample))
-                    and isinstance(node.var, frog_ast.Variable)
-                    and node.var.name == variable
-                    and isinstance(node.the_type, frog_ast.BitStringType)
-                    and node.the_type.parameterization is not None
-                )
-
-            # Step 1, find type of variables (to get lengths)
-
-            lengths: list[Symbol] = []
-            for var in concatenated_var_names:
-                declaration = SearchVisitor(
-                    functools.partial(find_declaration, var.name)
-                ).visit(block)
-                if declaration is None:
-                    break
-                assert isinstance(declaration, (frog_ast.Assignment, frog_ast.Sample))
-                assert isinstance(declaration.the_type, frog_ast.BitStringType)
-                assert declaration.the_type.parameterization is not None
-                variables_used = VariableCollectionVisitor().visit(
-                    declaration.the_type.parameterization
-                )
-                if len(variables_used) != 1:
-                    break
-                if variables_used[0].name not in self.variables:
-                    break
-                lengths.append(
-                    FrogToSympyVisitor(self.variables).visit(
-                        declaration.the_type.parameterization
-                    )
-                )
-
-            # We quit because we weren't able to find the length of some variable in our concatenation
-            if len(lengths) != len(concatenated_var_names):
-                continue
-
-            # Step 2, create slices that map to these vars
-            partial_sum = 0
-            slices = []
-            for length in lengths:
-                slices.append(
-                    frog_ast.Slice(
-                        frog_ast.Variable(statement.var.name),
-                        frog_parser.parse_expression(str(partial_sum)),
-                        frog_parser.parse_expression(str(partial_sum + length)),
-                    )
-                )
-                partial_sum += length
-
-            # Step 3, replace, so long as none of the variables are changed
-
-            remaining_block = frog_ast.Block(block.statements[index + 1 :])
-
-            def use_or_reassignment(
-                no_touch_vars: list[frog_ast.Variable],
-                slices: list[frog_ast.Slice],
-                node: frog_ast.ASTNode,
-            ) -> bool:
-                return (
-                    isinstance(node, (frog_ast.Assignment, frog_ast.Sample))
-                    and (node.var in no_touch_vars)
-                ) or node in slices
-
-            made_transformation = False
-            while True:
-                to_transform = SearchVisitor[
-                    frog_ast.Assignment | frog_ast.Sample | frog_ast.Slice
-                ](
-                    functools.partial(
-                        use_or_reassignment,
-                        [statement.var] + concatenated_var_names,
-                        slices,
-                    )
-                ).visit(
-                    remaining_block
-                )
-
-                if (
-                    isinstance(to_transform, (frog_ast.Assignment, frog_ast.Sample))
-                    or to_transform is None
-                ):
-                    break
-
-                made_transformation = True
-
-                associated_var = concatenated_var_names[slices.index(to_transform)]
-
-                remaining_block = ReplaceTransformer(
-                    to_transform, associated_var
-                ).transform(remaining_block)
-            if not made_transformation:
-                continue
-            return self.transform_block(
-                frog_ast.Block(copy.deepcopy(block.statements[: index + 1]))
-                + remaining_block
-            )
-
-        return block
-
-
-class VariableStandardizingTransformer(BlockTransformer):
-    def __init__(self) -> None:
-        self.variable_counter = 0
-
-    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        new_block = copy.deepcopy(block)
-        for statement in new_block.statements:
-            if not isinstance(statement, frog_ast.Assignment) and not isinstance(
-                statement, frog_ast.Sample
-            ):
-                continue
-            if not isinstance(statement.var, frog_ast.Variable):
-                continue
-
-            if statement.the_type is None:
-                continue
-
-            self.variable_counter += 1
-            expected_name = f"v{self.variable_counter}"
-            if statement.var.name == expected_name:
-                continue
-
-            def var_used(var: frog_ast.Variable, node: frog_ast.ASTNode) -> bool:
-                return node == var
-
-            while True:
-                to_transform = SearchVisitor[frog_ast.Variable](
-                    functools.partial(var_used, statement.var)
-                ).visit(new_block)
-
-                if to_transform is None:
-                    break
-
-                new_block = ReplaceTransformer(
-                    to_transform, frog_ast.Variable(expected_name)
-                ).transform(new_block)
-        return new_block
 
 
 class SubstitutionTransformer(Transformer):
@@ -522,7 +304,7 @@ class SubstitutionTransformer(Transformer):
 
 class InstantiationTransformer(Transformer):
     def __init__(self, namespace: frog_ast.Namespace) -> None:
-        self.namespace = copy.deepcopy(namespace)
+        self.namespace = dict(namespace)
 
     def transform_field(self, field: frog_ast.Field) -> frog_ast.ASTNode:
         new_field = frog_ast.Field(
@@ -530,7 +312,18 @@ class InstantiationTransformer(Transformer):
             field.name,
             self.transform(field.value) if field.value else None,
         )
-        self.namespace[field.name] = new_field.value
+        # Set field aliases: convert Tuple of types to ProductType so that
+        # Variable substitutions produce a Type node, not an Expression.
+        ns_value: frog_ast.ASTNode | None = new_field.value
+        if (
+            isinstance(ns_value, frog_ast.Tuple)
+            and ns_value.values
+            and all(isinstance(v, frog_ast.Type) for v in ns_value.values)
+        ):
+            ns_value = frog_ast.ProductType(
+                [v for v in ns_value.values if isinstance(v, frog_ast.Type)]
+            )
+        self.namespace[field.name] = ns_value
         return new_field
 
     def transform_variable(self, variable: frog_ast.Variable) -> frog_ast.ASTNode:
@@ -542,7 +335,17 @@ class InstantiationTransformer(Transformer):
                 )
                 and value is not None
             ):
-                return copy.deepcopy(value)
+                result = copy.deepcopy(value)
+                # Convert Tuple of types to ProductType for type-position substitution
+                if (
+                    isinstance(result, frog_ast.Tuple)
+                    and result.values
+                    and all(isinstance(v, frog_ast.Type) for v in result.values)
+                ):
+                    return frog_ast.ProductType(
+                        [v for v in result.values if isinstance(v, frog_ast.Type)]
+                    )
+                return result
         return variable
 
     def transform_field_access(
@@ -558,8 +361,7 @@ class InstantiationTransformer(Transformer):
                     value.members[field_access.name], frog_ast.MethodSignature
                 ):
                     return copy.deepcopy(value.members[field_access.name])
-            else:
-                assert isinstance(value, (frog_ast.Scheme, frog_ast.Primitive))
+            elif isinstance(value, (frog_ast.Scheme, frog_ast.Primitive)):
                 the_field = next(
                     (
                         field.value
@@ -569,100 +371,65 @@ class InstantiationTransformer(Transformer):
                     None,
                 )
                 if the_field is not None:
-                    return copy.deepcopy(the_field)
+                    result = copy.deepcopy(the_field)
+                    # Convert Tuple of types to ProductType for Set field aliases
+                    if (
+                        isinstance(result, frog_ast.Tuple)
+                        and result.values
+                        and all(isinstance(v, frog_ast.Type) for v in result.values)
+                    ):
+                        return frog_ast.ProductType(
+                            [v for v in result.values if isinstance(v, frog_ast.Type)]
+                        )
+                    return result
+        # Handle FuncCall.field case, e.g. UG(K, NG, H, G).EncapsKey.
+        # After SubstitutionTransformer replaces a scheme parameter with a FuncCall,
+        # type-position field accesses like K.EncapsKey become
+        # FuncCall("UG", [K, NG, H, G]).EncapsKey. Look up the field in the named
+        # scheme and substitute the scheme's parameters with the FuncCall's args.
+        if (
+            isinstance(field_access.the_object, frog_ast.FuncCall)
+            and isinstance(field_access.the_object.func, frog_ast.Variable)
+            and field_access.the_object.func.name in self.namespace
+        ):
+            func_call = field_access.the_object
+            assert isinstance(func_call.func, frog_ast.Variable)
+            scheme_def = self.namespace[func_call.func.name]
+            if isinstance(scheme_def, (frog_ast.Scheme, frog_ast.Primitive)):
+                the_field = next(
+                    (
+                        field.value
+                        for field in scheme_def.fields
+                        if field.name == field_access.name
+                    ),
+                    None,
+                )
+                if the_field is not None:
+                    result = copy.deepcopy(the_field)
+                    # Substitute scheme parameters with the FuncCall's actual args
+                    param_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+                    for idx, param in enumerate(scheme_def.parameters):
+                        if idx < len(func_call.args):
+                            param_map.set(
+                                frog_ast.Variable(param.name),
+                                copy.deepcopy(func_call.args[idx]),
+                            )
+                    result = SubstitutionTransformer(param_map).transform(result)
+                    # Further resolve any remaining FieldAccess nodes through the
+                    # current namespace (e.g. Variable("K").EncapsKey -> EncapsKeySpace
+                    # when K is a concrete instantiated scheme in the namespace).
+                    result = InstantiationTransformer(self.namespace).transform(result)
+                    # Convert Tuple of types to ProductType for Set field aliases
+                    if (
+                        isinstance(result, frog_ast.Tuple)
+                        and result.values
+                        and all(isinstance(v, frog_ast.Type) for v in result.values)
+                    ):
+                        return frog_ast.ProductType(
+                            [v for v in result.values if isinstance(v, frog_ast.Type)]
+                        )
+                    return result
         return field_access
-
-
-class SymbolicComputationTransformer(Transformer):
-    def __init__(self, variables: dict[str, Symbol | frog_ast.Expression]) -> None:
-        self.variables = variables
-        self.computation_stack: List[Symbol | int | None] = []
-
-    def transform_variable(self, variable: frog_ast.Variable) -> frog_ast.Variable:
-        if variable.name in self.variables:
-            val = self.variables[variable.name]
-            assert isinstance(val, Symbol)
-            self.computation_stack.append(val)
-        else:
-            self.computation_stack.append(None)
-        return variable
-
-    def transform_integer(self, integer: frog_ast.Integer) -> frog_ast.Integer:
-        self.computation_stack.append(integer.num)
-        return integer
-
-    def transform_bit_string_type(
-        self, bs_type: frog_ast.BitStringType
-    ) -> frog_ast.BitStringType:
-        new_bs = frog_ast.BitStringType(
-            self.transform(bs_type.parameterization)
-            if bs_type.parameterization
-            else bs_type.parameterization
-        )
-        self.computation_stack.append(None)
-        return new_bs
-
-    def transform_binary_operation(
-        self, binary_operation: frog_ast.BinaryOperation
-    ) -> frog_ast.ASTNode:
-        old_len = len(self.computation_stack)
-        transformed_left = self.transform(binary_operation.left_expression)
-        transformed_right = self.transform(binary_operation.right_expression)
-        if len(self.computation_stack) == 2 + old_len:
-            simplified_expression = None
-            operators = {
-                frog_ast.BinaryOperators.ADD: operator.add,
-                frog_ast.BinaryOperators.SUBTRACT: operator.sub,
-                frog_ast.BinaryOperators.MULTIPLY: operator.mul,
-                frog_ast.BinaryOperators.DIVIDE: operator.truediv,
-            }
-            if (
-                binary_operation.operator in operators
-                and self.computation_stack[-1] is not None
-                and self.computation_stack[-2] is not None
-            ):
-                simplified_expression = operators[binary_operation.operator](
-                    self.computation_stack[-1], self.computation_stack[-2]
-                )
-            self.computation_stack.pop()
-            self.computation_stack.pop()
-            if simplified_expression is not None:
-                self.computation_stack.append(simplified_expression)
-                return frog_parser.parse_expression(str(simplified_expression))
-            self.computation_stack.append(None)
-
-        return frog_ast.BinaryOperation(
-            binary_operation.operator, transformed_left, transformed_right
-        )
-
-
-class SimplifyIfTransformer(Transformer):
-    def transform_if_statement(
-        self, if_statement: frog_ast.IfStatement
-    ) -> frog_ast.IfStatement:
-        new_blocks: list[frog_ast.Block] = copy.deepcopy(if_statement.blocks)
-        new_conditions = copy.deepcopy(if_statement.conditions)
-        index = 0
-        while index < len(new_blocks) - (1 if not if_statement.has_else_block() else 2):
-            if new_blocks[index] == new_blocks[index + 1]:
-                del new_blocks[index]
-                new_conditions[index] = frog_ast.BinaryOperation(
-                    frog_ast.BinaryOperators.OR,
-                    copy.deepcopy(new_conditions[index]),
-                    copy.deepcopy(new_conditions[index + 1]),
-                )
-                del new_conditions[index + 1]
-            else:
-                index += 1
-
-        if if_statement.has_else_block():
-            if new_blocks[-1] == new_blocks[-2]:
-                del new_blocks[-1]
-                del new_conditions[-1]
-
-            if not new_conditions:
-                new_conditions = [frog_ast.Boolean(True)]
-        return frog_ast.IfStatement(new_conditions, new_blocks)
 
 
 class InlineTransformer(Transformer):
@@ -734,11 +501,18 @@ class InlineTransformer(Transformer):
 
         statements_so_far += list(transformed_method.block.statements[:-1])
 
-        final_statement = transformed_method.block.statements[-1]
-
         statements_after = list(
             block_to_transform.statements[self.statement_index + 1 :]
         )
+
+        if not transformed_method.block.statements:
+            # Empty method body (e.g. a Void Initialize with no statements):
+            # drop the call site entirely and continue with surrounding statements.
+            self.blocks.append(frog_ast.Block(statements_so_far + statements_after))
+            self.finished = True
+            return exp
+
+        final_statement = transformed_method.block.statements[-1]
 
         if isinstance(final_statement, frog_ast.ReturnStatement):
             returned_exp = final_statement.expression
@@ -800,9 +574,10 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         name = var.name
         if self.variable_version_map and name in self.variable_version_map:
             name = f"{name}@z3@{self.variable_version_map[name]}"
-        if isinstance(self.type_map.get(var.name), frog_ast.IntType):
+        var_type = self.type_map.get(var.name)
+        if isinstance(var_type, (frog_ast.IntType, frog_ast.ModIntType)):
             self.stack.append(z3.Int(name))
-        elif isinstance(self.type_map.get(var.name), frog_ast.BoolType):
+        elif isinstance(var_type, frog_ast.BoolType):
             self.stack.append(z3.Bool(name))
         else:
             self.stack.append(name)
@@ -869,356 +644,11 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
             and left_item is not None
             and not isinstance(left_item, str)
             and not isinstance(right_item, str)
+            and operation.operator in operators
         ):
             self.stack.append(operators[operation.operator](left_item, right_item))
         else:
             self.stack.append(None)
-
-
-class SimplifyRangeTransformer(Transformer):
-    def __init__(
-        self,
-        proof_let_types: NameTypeMap,
-        game: frog_ast.Game,
-        operation: frog_ast.BinaryOperation | frog_ast.UnaryOperation,
-    ) -> None:
-        self.game = game
-        self.proof_let_types = proof_let_types
-        type_map = GetTypeMapVisitor(game.methods[0]).visit(game) + proof_let_types
-        self.assumed_op = operation
-        self.assumed_formula = Z3FormulaVisitor(type_map).visit(operation)
-        if self.assumed_formula is not None:
-            self.solver = z3.Solver()
-            self.solver.add(self.assumed_formula)
-
-    def transform_unary_operation(
-        self, unary_operation: frog_ast.UnaryOperation
-    ) -> frog_ast.Expression:
-        return self._get_op(unary_operation)
-
-    def transform_binary_operation(
-        self, binary_operation: frog_ast.BinaryOperation
-    ) -> frog_ast.Expression:
-        return self._get_op(binary_operation)
-
-    def _get_op(
-        self, operation: frog_ast.BinaryOperation | frog_ast.UnaryOperation
-    ) -> frog_ast.Expression:
-        if operation == self.assumed_op:
-            return frog_ast.Boolean(True)
-        if (
-            operation.operator
-            not in (
-                frog_ast.BinaryOperators.EQUALS,
-                frog_ast.BinaryOperators.NOTEQUALS,
-                frog_ast.BinaryOperators.LEQ,
-                frog_ast.BinaryOperators.LT,
-                frog_ast.BinaryOperators.GT,
-                frog_ast.BinaryOperators.GEQ,
-                frog_ast.BinaryOperators.AND,
-                frog_ast.BinaryOperators.OR,
-                frog_ast.UnaryOperators.NOT,
-                frog_ast.UnaryOperators.MINUS,
-            )
-            or self.assumed_formula is None
-        ):
-            return operation
-        type_map = GetTypeMapVisitor(operation).visit(self.game) + self.proof_let_types
-        statement_formula = Z3FormulaVisitor(type_map).visit(operation)
-        if statement_formula is None:
-            return operation
-        self.solver.push()
-        self.solver.add(statement_formula)
-        satisfied = self.solver.check() == z3.sat
-        self.solver.pop()
-        if not satisfied:
-            return frog_ast.Boolean(False)
-        solver = z3.Solver()
-        solver.add(z3.Not(z3.Implies(self.assumed_formula, statement_formula)))
-        if solver.check() == z3.unsat:
-            return frog_ast.Boolean(True)
-        return operation
-
-
-class BranchEliminiationTransformer(BlockTransformer):
-    def _transform_block_wrapper(
-        self,
-        block: frog_ast.Block,
-    ) -> frog_ast.Block:
-        for index, statement in enumerate(block.statements):
-            if isinstance(statement, frog_ast.IfStatement):
-                if_statement = statement
-                new_if_statement = copy.deepcopy(if_statement)
-
-                i = 0
-                while True:
-                    if i >= len(new_if_statement.conditions):
-                        break
-                    condition = new_if_statement.conditions[i]
-                    if isinstance(condition, frog_ast.Boolean) and condition.bool:
-                        new_if_statement.conditions = if_statement.conditions[: i + 1]
-                        new_if_statement.blocks = if_statement.blocks[: i + 1]
-                        if i == len(new_if_statement.conditions) - 1 and i > 0:
-                            del new_if_statement.conditions[-1]
-                        break
-                    if isinstance(condition, frog_ast.Boolean) and not condition.bool:
-                        del new_if_statement.conditions[i]
-                        del new_if_statement.blocks[i]
-                    else:
-                        i += 1
-
-                prior_block = frog_ast.Block(block.statements[:index])
-                remaining_block = frog_ast.Block(block.statements[index + 1 :])
-
-                if not new_if_statement.blocks:
-                    return prior_block + remaining_block
-
-                if (
-                    len(new_if_statement.conditions) == 1
-                    and isinstance(new_if_statement.conditions[0], frog_ast.Boolean)
-                    and new_if_statement.conditions[0].bool
-                ) or not new_if_statement.conditions:
-                    return self.transform_block(
-                        prior_block + new_if_statement.blocks[0] + remaining_block
-                    )
-
-                if new_if_statement != if_statement:
-                    return self.transform_block(
-                        prior_block
-                        + frog_ast.Block([new_if_statement])
-                        + remaining_block
-                    )
-        return block
-
-
-class CollapseAssignmentTransformer(BlockTransformer):
-    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        for index, statement in enumerate(block.statements):
-            if not isinstance(statement, (frog_ast.Assignment, frog_ast.Sample)):
-                continue
-            if not isinstance(statement.var, frog_ast.Variable):
-                continue
-
-            def calls_func(node: frog_ast.ASTNode) -> bool:
-                return isinstance(node, frog_ast.FuncCall)
-
-            if SearchVisitor(calls_func).visit(statement) is not None:
-                continue
-
-            def uses_var(var: frog_ast.Variable, node: frog_ast.ASTNode) -> bool:
-                return node == var
-
-            uses_var_partial = functools.partial(uses_var, statement.var)
-            for later_index, later_statement in enumerate(
-                block.statements[index + 1 :]
-            ):
-                contains_var = SearchVisitor(uses_var_partial).visit(later_statement)
-                if contains_var is None:
-                    continue
-                if not isinstance(
-                    later_statement, (frog_ast.Assignment, frog_ast.Sample)
-                ):
-                    break
-                if (
-                    contains_var
-                    and SearchVisitor(uses_var_partial).visit(later_statement.value)
-                    is not None
-                ):
-                    break
-                replaced_statement = copy.deepcopy(statement)
-                replaced_statement.value = later_statement.value
-                return self.transform_block(
-                    frog_ast.Block(
-                        block.statements[:index]
-                        + block.statements[index + 1 : index + later_index + 1]
-                        + [replaced_statement]
-                        + block.statements[index + later_index + 2 :]
-                    )
-                )
-
-        return block
-
-
-class SimplifyReturnTransformer(BlockTransformer):
-    def __init__(self) -> None:
-        self.fields: list[str] = []
-
-    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
-        self.fields = [field.name for field in game.fields]
-        new_game = copy.deepcopy(game)
-        new_game.methods = [self.transform(method) for method in new_game.methods]
-        return new_game
-
-    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        if not block.statements:
-            return block
-        last_statement = block.statements[-1]
-        if not isinstance(last_statement, frog_ast.ReturnStatement):
-            return block
-        if not isinstance(last_statement.expression, frog_ast.Variable):
-            return block
-        if last_statement.expression.name in self.fields:
-            return block
-        index = len(block.statements) - 1
-
-        def uses_var(variable: frog_ast.Expression, node: frog_ast.ASTNode) -> bool:
-            return variable == node
-
-        uses_var_partial = functools.partial(uses_var, last_statement.expression)
-        while index >= 0:
-            index -= 1
-            statement = block.statements[index]
-            if SearchVisitor(uses_var_partial).visit(statement) is None:
-                continue
-            if not isinstance(statement, (frog_ast.Variable, frog_ast.Assignment)):
-                break
-            if statement.var != last_statement.expression:
-                break
-            return self.transform_block(
-                frog_ast.Block(block.statements[:index])
-                + frog_ast.Block(block.statements[index + 1 : -1])
-                + frog_ast.Block([frog_ast.ReturnStatement(statement.value)])
-            )
-
-        return block
-
-
-class ExpandTupleTransformer(Transformer):
-    def __init__(self) -> None:
-        self.to_transform: list[str] = []
-        self.lengths: list[int] = []
-
-    def _is_transformable_tuple(
-        self, the_type: frog_ast.Type, name: str, search_space: frog_ast.ASTNode
-    ) -> bool:
-        return (
-            isinstance(the_type, frog_ast.BinaryOperation)
-            and the_type.operator == frog_ast.BinaryOperators.MULTIPLY
-            and AllConstantFieldAccesses(name).visit(search_space)
-        )
-
-    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
-        new_fields = []
-        for field in game.fields:
-            if self._is_transformable_tuple(field.type, field.name, game):
-                assert isinstance(field.type, frog_ast.BinaryOperation)
-                unfolded_types = frog_ast.expand_tuple_type(field.type)
-                for index, the_type in enumerate(unfolded_types):
-                    expression = None
-                    if field.value:
-                        assert isinstance(field.value, frog_ast.Tuple)
-                        expression = field.value.values[index]
-                    new_fields.append(
-                        frog_ast.Field(the_type, f"{field.name}@{index}", expression)
-                    )
-                self.to_transform.append(field.name)
-                self.lengths.append(len(unfolded_types))
-            else:
-                new_fields.append(field)
-        return frog_ast.Game(
-            (
-                game.name,
-                game.parameters,
-                new_fields,
-                [self.transform(method) for method in game.methods],
-                [self.transform(phase) for phase in game.phases],
-            )
-        )
-
-    def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
-        new_statements: list[frog_ast.Statement] = []
-        expanded_tuple_count = 0
-        for index, statement in enumerate(block.statements):
-            # Assigning to the tuple means assigning each individual value
-            if (
-                isinstance(statement, frog_ast.Assignment)
-                and isinstance(statement.var, frog_ast.Variable)
-                and statement.var.name in self.to_transform
-            ):
-                assert isinstance(statement.value, frog_ast.Tuple)
-                for index, tuple_value in enumerate(statement.value.values):
-                    new_statements.append(
-                        frog_ast.Assignment(
-                            None,
-                            frog_ast.Variable(f"{statement.var}@{index}"),
-                            tuple_value,
-                        )
-                    )
-            # Asssigning to a tuple element means assigning to that one element
-            elif (
-                isinstance(statement, (frog_ast.Assignment, frog_ast.Sample))
-                and isinstance(statement.var, frog_ast.ArrayAccess)
-                and isinstance(statement.var.the_array, frog_ast.Variable)
-                and statement.var.the_array.name in self.to_transform
-            ):
-                assert isinstance(statement.var.index, frog_ast.Integer)
-                new_statement = copy.deepcopy(statement)
-                new_statement.var = frog_ast.Variable(
-                    f"{statement.var.the_array.name}@{statement.var.index.num}",
-                )
-                new_statements.append(new_statement)
-            elif (
-                isinstance(statement, frog_ast.Assignment)
-                and statement.the_type is not None
-                and isinstance(statement.var, frog_ast.Variable)
-                and self._is_transformable_tuple(
-                    statement.the_type, statement.var.name, block
-                )
-            ):
-                assert isinstance(statement.the_type, frog_ast.BinaryOperation)
-                unfolded_types = frog_ast.expand_tuple_type(statement.the_type)
-                assert isinstance(statement.value, frog_ast.Tuple)
-                for index, the_type in enumerate(unfolded_types):
-                    new_statements.append(
-                        frog_ast.Assignment(
-                            the_type,
-                            frog_ast.Variable(f"{statement.var.name}@{index}"),
-                            statement.value.values[index],
-                        )
-                    )
-                self.to_transform.append(statement.var.name)
-                self.lengths.append(len(unfolded_types))
-                expanded_tuple_count += 1
-            else:
-                new_statements.append(statement)
-        new_block = frog_ast.Block(
-            [self.transform(statement) for statement in new_statements]
-        )
-        self.to_transform = (
-            self.to_transform[:-expanded_tuple_count]
-            if expanded_tuple_count > 0
-            else self.to_transform
-        )
-        self.lengths = (
-            self.lengths[:-expanded_tuple_count]
-            if expanded_tuple_count > 0
-            else self.lengths
-        )
-        return new_block
-
-    def transform_array_access(
-        self, array_access: frog_ast.ArrayAccess
-    ) -> frog_ast.Expression:
-        if (
-            not isinstance(array_access.the_array, frog_ast.Variable)
-            or array_access.the_array.name not in self.to_transform
-        ):
-            return frog_ast.ArrayAccess(
-                self.transform(array_access.the_array),
-                self.transform(array_access.index),
-            )
-        assert isinstance(array_access.index, frog_ast.Integer)
-        return frog_ast.Variable(
-            f"{array_access.the_array.name}@{array_access.index.num}"
-        )
-
-    def transform_variable(self, var: frog_ast.Variable) -> frog_ast.Expression:
-        if var.name not in self.to_transform:
-            return var
-        length = self.lengths[self.to_transform.index(var.name)]
-        return frog_ast.Tuple(
-            [frog_ast.Variable(f"{var.name}@{index}") for index in range(length)]
-        )
 
 
 class AllConstantFieldAccesses(Visitor[bool]):
@@ -1244,23 +674,6 @@ class AllConstantFieldAccesses(Visitor[bool]):
             return
         if not isinstance(assignment.value, frog_ast.Tuple):
             self.all_constant = False
-
-
-class SimplifyNot(Transformer):
-    def transform_unary_operation(
-        self, unary_op: frog_ast.UnaryOperation
-    ) -> frog_ast.Expression:
-        if (
-            unary_op.operator == frog_ast.UnaryOperators.NOT
-            and isinstance(unary_op.expression, frog_ast.BinaryOperation)
-            and unary_op.expression.operator == frog_ast.BinaryOperators.EQUALS
-        ):
-            return frog_ast.BinaryOperation(
-                frog_ast.BinaryOperators.NOTEQUALS,
-                unary_op.expression.left_expression,
-                unary_op.expression.right_expression,
-            )
-        return unary_op
 
 
 class FieldOrderingVisitor(Visitor[dict[str, str]]):
@@ -1378,6 +791,11 @@ class GetTypeMapVisitor(Visitor[NameTypeMap]):
             self.type_map.set(sample.var.name, sample.the_type)
 
     @_test_stop
+    def visit_unique_sample(self, unique_sample: frog_ast.UniqueSample) -> None:
+        assert isinstance(unique_sample.var, frog_ast.Variable)
+        self.type_map.set(unique_sample.var.name, unique_sample.the_type)
+
+    @_test_stop
     def visit_variable_declaration(
         self, variable_declaration: frog_ast.VariableDeclaration
     ) -> None:
@@ -1392,46 +810,28 @@ class GetTypeMapVisitor(Visitor[NameTypeMap]):
         pass
 
 
-class SimplifyTupleTransformer(Transformer):
-    def __init__(self, ast: frog_ast.ASTNode) -> None:
-        self.ast = ast
+def build_game_type_map(
+    game: frog_ast.Game, proof_let_types: Optional[NameTypeMap] = None
+) -> NameTypeMap:
+    """Build a NameTypeMap containing all variable types declared in a game.
 
-    def transform_tuple(self, the_tuple: frog_ast.Tuple) -> frog_ast.Expression:
-        if not all(
-            isinstance(value, frog_ast.ArrayAccess) for value in the_tuple.values
-        ):
-            return the_tuple
-        if not all(
-            isinstance(value.index, frog_ast.Integer) for value in the_tuple.values  # type: ignore
-        ):
-            return the_tuple
-        if not all(
-            value.index.num == index for index, value in enumerate(the_tuple.values)  # type: ignore
-        ):
-            return the_tuple
-        if not all(
-            isinstance(value.the_array, frog_ast.Variable) for value in the_tuple.values  # type: ignore
-        ):
-            return the_tuple
-        tuple_val_name = the_tuple.values[0].the_array.name  # type: ignore
-        if not all(
-            value.the_array.name == tuple_val_name for value in the_tuple.values  # type: ignore
-        ):
-            return the_tuple
-
-        type_map = GetTypeMapVisitor(the_tuple).visit(self.ast)
-        tuple_type = type_map.get(tuple_val_name)
-        assert isinstance(tuple_type, frog_ast.BinaryOperation)
-        expanded_type_array = frog_ast.expand_tuple_type(tuple_type)
-        if len(expanded_type_array) == len(the_tuple.values):
-            return frog_ast.Variable(tuple_val_name)
-        return the_tuple
+    Collects types from fields, method parameters, assignments, and samples.
+    Optionally merges with proof-level let types.
+    """
+    # Use a dummy stopping point that won't match any real node to collect everything
+    dummy = frog_ast.Boolean(True)
+    type_map = GetTypeMapVisitor(dummy).visit(game)
+    if proof_let_types is not None:
+        type_map = type_map + proof_let_types
+    return type_map
 
 
 def assigns_variable(
     used_variables: list[frog_ast.Variable], node: frog_ast.ASTNode
 ) -> bool:
-    return isinstance(node, (frog_ast.Assignment, frog_ast.Sample)) and (
+    return isinstance(
+        node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+    ) and (
         (node.var in used_variables)
         or (
             isinstance(node.var, frog_ast.ArrayAccess)
@@ -1474,15 +874,46 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
             def contains_func(node: frog_ast.ASTNode) -> bool:
                 return isinstance(node, frog_ast.FuncCall)
 
-            if SearchVisitor(contains_func).visit(statement) is not None or isinstance(
-                statement, frog_ast.Sample
-            ):
+            has_func_call = SearchVisitor(contains_func).visit(
+                statement
+            ) is not None or isinstance(statement, frog_ast.Sample)
+
+            if has_func_call:
+                # Assignments with function calls can't be matched by
+                # expression equality (the call may return different
+                # values each time).  However, a direct copy of the
+                # field IS safe: field1 = K.f(); field2 = field1.
+                def reads_pair_fc(pn: str, node: frog_ast.ASTNode) -> bool:
+                    return isinstance(node, frog_ast.Variable) and node.name == pn
+
+                copy_paired = False
+                for subsequent_statement in block.statements[index + 1 :]:
+                    if (
+                        isinstance(subsequent_statement, frog_ast.Assignment)
+                        and isinstance(subsequent_statement.var, frog_ast.Variable)
+                        and subsequent_statement.var.name == pair_name
+                        and isinstance(subsequent_statement.value, frog_ast.Variable)
+                        and subsequent_statement.value.name == assigned_name
+                    ):
+                        copy_paired = True
+                        self.paired_statements.append(subsequent_statement)
+                        break
+                    if (
+                        SearchVisitor(
+                            functools.partial(reads_pair_fc, pair_name)
+                        ).visit(subsequent_statement)
+                        is not None
+                    ):
+                        break
+                if copy_paired:
+                    continue
                 self.are_same = False
                 return
 
             def reads_pair(pair_name: str, node: frog_ast.ASTNode) -> bool:
                 return isinstance(node, frog_ast.Variable) and node.name == pair_name
 
+            assert isinstance(statement, frog_ast.Assignment)
             used_variables = VariableCollectionVisitor().visit(statement.value)
 
             assigns_variable_partial = functools.partial(
@@ -1517,109 +948,3 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
             if not paired:
                 self.are_same = False
                 return
-
-
-class RemoveStatementTransformer(BlockTransformer):
-    def __init__(self, to_remove: list[frog_ast.Statement]):
-        self.to_remove = to_remove
-
-    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        new_statements = []
-        for statement in block.statements:
-            if statement not in self.to_remove:
-                new_statements.append(statement)
-        return frog_ast.Block(new_statements)
-
-
-# Consider case where else if condition might have a return but then the if condition doesn't
-# Then in order to check whether it's definitely true we need (not A and B) where A is first condition and B is second.
-
-
-class RemoveUnreachableTransformer(BlockTransformer):
-    def __init__(self, ast: frog_ast.ASTNode):
-        self.ast = ast
-
-    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        def contains_unconditional_return(block: frog_ast.Block) -> bool:
-            return any(
-                isinstance(statement, frog_ast.ReturnStatement)
-                for statement in block.statements
-            )
-
-        used_variables = VariableCollectionVisitor().visit(block)
-        variable_version_map = dict((var.name, 0) for var in used_variables)
-
-        def update_version(node: frog_ast.ASTNode) -> None:
-            updated = []
-
-            def assigns_variable_search(search_node: frog_ast.ASTNode) -> bool:
-                if not isinstance(search_node, (frog_ast.Assignment, frog_ast.Sample)):
-                    return False
-                var = None
-                if isinstance(search_node.var, frog_ast.Variable):
-                    var = search_node.var
-                if isinstance(search_node.var, frog_ast.ArrayAccess) and isinstance(
-                    search_node.var.the_array, frog_ast.Variable
-                ):
-                    var = search_node.var.the_array
-
-                if var in used_variables and var not in updated:
-                    variable_version_map[var.name] += 1
-                    updated.append(var)
-                    return True
-                return False
-
-            while SearchVisitor(assigns_variable_search).visit(node) is not None:
-                pass
-
-        formula_so_far = None
-
-        formula_visitor = Z3FormulaVisitor(NameTypeMap())
-
-        for index, statement in enumerate(block.statements):
-            if not isinstance(statement, frog_ast.IfStatement):
-                update_version(statement)
-                continue
-
-            if statement.has_else_block() and all(
-                contains_unconditional_return(if_block) for if_block in statement.blocks
-            ):
-                return frog_ast.Block(block.statements[: index + 1])
-            solver = z3.Solver()
-
-            type_map = GetTypeMapVisitor(statement).visit(self.ast)
-            formula_visitor.set_type_map(type_map)
-            formula_visitor.set_variable_version_map(variable_version_map)
-            condition_formulae: list[z3.AstRef] = []
-            for condition_index, condition in enumerate(statement.conditions):
-                individual_formula = formula_visitor.visit(condition)
-                if individual_formula is None:
-                    break
-                if contains_unconditional_return(statement.blocks[condition_index]):
-                    to_get_here = (
-                        individual_formula
-                        if not condition_formulae
-                        else z3.And(
-                            *(
-                                z3.Not(condition_formula)
-                                for condition_formula in condition_formulae
-                            ),
-                            individual_formula,
-                        )
-                    )
-                    formula_so_far = (
-                        z3.Or(to_get_here, formula_so_far)
-                        if formula_so_far is not None
-                        else to_get_here
-                    )
-                condition_formulae.append(individual_formula)
-
-            update_version(statement)
-            if formula_so_far is not None:
-                solver.add(z3.Not(formula_so_far))
-            satisfiable = solver.check()
-            solver.reset()
-            if satisfiable == z3.unsat:
-                return frog_ast.Block(block.statements[: index + 1])
-
-        return block

@@ -39,6 +39,16 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#lemmas.
+    def visitLemmas(self, ctx:ProofParser.LemmasContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#lemmaEntry.
+    def visitLemmaEntry(self, ctx:ProofParser.LemmaEntryContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#theorem.
     def visitTheorem(self, ctx:ProofParser.TheoremContext):
         return self.visitChildren(ctx)
@@ -144,6 +154,11 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#uniqueSampleStatement.
+    def visitUniqueSampleStatement(self, ctx:ProofParser.UniqueSampleStatementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#functionCallStatement.
     def visitFunctionCallStatement(self, ctx:ProofParser.FunctionCallStatementContext):
         return self.visitChildren(ctx)
@@ -171,6 +186,11 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#lvalue.
     def visitLvalue(self, ctx:ProofParser.LvalueContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#methodModifier.
+    def visitMethodModifier(self, ctx:ProofParser.MethodModifierContext):
         return self.visitChildren(ctx)
 
 
@@ -269,6 +289,11 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#onesExp.
+    def visitOnesExp(self, ctx:ProofParser.OnesExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#unionExp.
     def visitUnionExp(self, ctx:ProofParser.UnionExpContext):
         return self.visitChildren(ctx)
@@ -301,6 +326,16 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#orExp.
     def visitOrExp(self, ctx:ProofParser.OrExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#zerosExp.
+    def visitZerosExp(self, ctx:ProofParser.ZerosExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#exponentiationExp.
+    def visitExponentiationExp(self, ctx:ProofParser.ExponentiationExpContext):
         return self.visitChildren(ctx)
 
 
@@ -379,6 +414,16 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#randomFunctionType.
+    def visitRandomFunctionType(self, ctx:ProofParser.RandomFunctionTypeContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#modIntType.
+    def visitModIntType(self, ctx:ProofParser.ModIntTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#setType.
     def visitSetType(self, ctx:ProofParser.SetTypeContext):
         return self.visitChildren(ctx)
@@ -404,8 +449,18 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#integerAtom.
+    def visitIntegerAtom(self, ctx:ProofParser.IntegerAtomContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#bitstring.
     def visitBitstring(self, ctx:ProofParser.BitstringContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#modint.
+    def visitModint(self, ctx:ProofParser.ModintContext):
         return self.visitChildren(ctx)
 
 

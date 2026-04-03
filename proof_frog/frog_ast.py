@@ -1,7 +1,19 @@
 from __future__ import annotations
+import dataclasses
 from enum import Enum
 from abc import ABC, abstractmethod
 from typing import Optional, TypeAlias, Sequence, TypeVar, Generic, Tuple as PyTuple
+
+
+@dataclasses.dataclass(frozen=True)
+class SourceOrigin:
+    """Tracks where an AST node originated in the user's source code."""
+
+    file: str
+    line: int
+    col: int
+    original_text: str
+    transform_chain: tuple[str, ...]
 
 
 class FileType(Enum):
@@ -15,6 +27,7 @@ class ASTNode(ABC):
     def __init__(self) -> None:
         self.line_num: int = -1
         self.column_num: int = -1
+        self.origin: SourceOrigin | None = None
 
     def __eq__(self, other: object) -> bool:
         if self is other:
@@ -27,7 +40,7 @@ class ASTNode(ABC):
         return all(
             (
                 True
-                if attr in {"line_num", "column_num"}
+                if attr in {"line_num", "column_num", "origin"}
                 else getattr(self, attr) == getattr(other, attr)
             )
             for attr in self.__dict__
@@ -108,6 +121,44 @@ class BitStringType(Type):
         return f'BitString{"" if not self.parameterization else f"<{self.parameterization}>"}'
 
 
+class ModIntType(Type):
+    def __init__(self, modulus: Expression) -> None:
+        super().__init__()
+        self.modulus = modulus
+
+    def __str__(self) -> str:
+        return f"ModInt<{self.modulus}>"
+
+
+class ProductType(Type):
+    def __init__(self, types: list[Type]) -> None:
+        super().__init__()
+        self.types = types
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, ProductType):
+            return self.types == other.types
+        # ProductType([A, B]) == Tuple([A, B]) when elements match,
+        # since Set field aliases produce ProductType in expression positions
+        # where Tuple would normally appear.
+        if isinstance(other, Tuple):
+            return list(self.types) == other.values
+        return False
+
+    def __str__(self) -> str:
+        return f'[{", ".join(str(t) for t in self.types)}]'
+
+
+class RandomFunctionType(Type):
+    def __init__(self, domain_type: Type, range_type: Type) -> None:
+        super().__init__()
+        self.domain_type = domain_type
+        self.range_type = range_type
+
+    def __str__(self) -> str:
+        return f"RandomFunctions<{self.domain_type}, {self.range_type}>"
+
+
 class OptionalType(Type):
     def __init__(self, the_type: Type) -> None:
         super().__init__()
@@ -136,6 +187,29 @@ class BinaryOperators(Enum):
     SUBTRACT = "-"
     MULTIPLY = "*"
     DIVIDE = "/"
+    EXPONENTIATE = "^"
+
+    def precedence(self) -> int:
+        """Return precedence level (higher binds tighter)."""
+        if self == BinaryOperators.EXPONENTIATE:
+            return 5
+        if self in (BinaryOperators.MULTIPLY, BinaryOperators.DIVIDE):
+            return 4
+        if self in (BinaryOperators.ADD, BinaryOperators.SUBTRACT):
+            return 3
+        if self in (
+            BinaryOperators.EQUALS,
+            BinaryOperators.NOTEQUALS,
+            BinaryOperators.GT,
+            BinaryOperators.LT,
+            BinaryOperators.GEQ,
+            BinaryOperators.LEQ,
+            BinaryOperators.IN,
+            BinaryOperators.SUBSETS,
+        ):
+            return 2
+        # AND, OR, UNION, SETMINUS
+        return 1
 
 
 class UnaryOperators(Enum):
@@ -156,8 +230,35 @@ class BinaryOperation(Expression, Type):
         self.left_expression = left_expression
         self.right_expression = right_expression
 
+    @staticmethod
+    def _parenthesize(
+        child: Expression,
+        parent_prec: int,
+        is_right: bool,
+        right_assoc: bool = False,
+    ) -> str:
+        """Wrap child in parens if needed based on precedence."""
+        if isinstance(child, BinaryOperation):
+            child_prec = child.operator.precedence()
+            if child_prec < parent_prec:
+                return f"({child})"
+            if child_prec == parent_prec:
+                # Left-assoc: parenthesize right child at equal prec
+                # Right-assoc: parenthesize left child at equal prec
+                if (not right_assoc and is_right) or (right_assoc and not is_right):
+                    return f"({child})"
+        return str(child)
+
     def __str__(self) -> str:
-        return f"{self.left_expression} {self.operator.value} {self.right_expression}"
+        prec = self.operator.precedence()
+        right_assoc = self.operator == BinaryOperators.EXPONENTIATE
+        left = self._parenthesize(
+            self.left_expression, prec, is_right=False, right_assoc=right_assoc
+        )
+        right = self._parenthesize(
+            self.right_expression, prec, is_right=True, right_assoc=right_assoc
+        )
+        return f"{left} {self.operator.value} {right}"
 
 
 class UnaryOperation(Expression):
@@ -213,18 +314,33 @@ class Parameter(ASTNode):
         return f"{self.type} {self.name}"
 
 
-class MethodSignature(ASTNode):
+class MethodSignature(
+    ASTNode
+):  # pylint: disable=too-many-arguments,too-many-positional-arguments
     def __init__(
-        self, name: str, return_type: Type, parameters: list[Parameter]
+        self,
+        name: str,
+        return_type: Type,
+        parameters: list[Parameter],
+        deterministic: bool = False,
+        injective: bool = False,
     ) -> None:
         super().__init__()
         self.name = name
         self.return_type = return_type
         self.parameters = parameters
+        self.deterministic = deterministic
+        self.injective = injective
 
     def __str__(self) -> str:
+        modifiers = ""
+        if self.deterministic:
+            modifiers += "deterministic "
+        if self.injective:
+            modifiers += "injective "
         return (
-            f"{self.return_type} {self.name}({_parameter_list_string(self.parameters)})"
+            f"{modifiers}{self.return_type} {self.name}"
+            f"({_parameter_list_string(self.parameters)})"
         )
 
 
@@ -282,6 +398,13 @@ class Tuple(Expression):
     def __init__(self, values: list[Expression]) -> None:
         super().__init__()
         self.values = values
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Tuple):
+            return self.values == other.values
+        if isinstance(other, ProductType):
+            return self.values == list(other.types)
+        return False
 
     def __str__(self) -> str:
         return f'[{", ".join(str(value) for value in self.values)}]'
@@ -431,6 +554,26 @@ class Sample(Statement):
         ) + f"{self.var} <- {self.sampled_from};"
 
 
+class UniqueSample(Statement):
+    def __init__(
+        self,
+        the_type: Type,
+        var: Expression,
+        unique_set: Expression,
+        sampled_from: Type,
+    ) -> None:
+        super().__init__()
+        self.the_type = the_type
+        self.var = var
+        self.unique_set = unique_set
+        self.sampled_from = sampled_from
+
+    def __str__(self) -> str:
+        return (
+            f"{self.the_type} {self.var} <-uniq[{self.unique_set}] {self.sampled_from};"
+        )
+
+
 class Assignment(Statement):
     def __init__(
         self, the_type: Optional[Type], var: Expression, value: Expression
@@ -476,6 +619,20 @@ class BinaryNum(Expression):
 
     def __str__(self) -> str:
         return bin(self.num)
+
+
+class BitStringLiteral(Expression):
+    """A bitstring literal: 0^n (all zeros) or 1^n (all ones)."""
+
+    def __init__(self, bit: int, length: Expression) -> None:
+        super().__init__()
+        self.bit = bit
+        self.length = length
+
+    def __str__(self) -> str:
+        if isinstance(self.length, BinaryOperation):
+            return f"{self.bit}^({self.length})"
+        return f"{self.bit}^{self.length}"
 
 
 class Method(ASTNode):
@@ -726,6 +883,18 @@ class Induction(ASTNode):
 ProofStep: TypeAlias = Step | Induction | StepAssumption
 
 
+class Lemma(ASTNode):
+    """A lemma entry: a security property proven by another proof file."""
+
+    def __init__(self, game: ParameterizedGame, proof_path: str) -> None:
+        super().__init__()
+        self.game = game
+        self.proof_path = proof_path
+
+    def __str__(self) -> str:
+        return f"{self.game} by '{self.proof_path}';"
+
+
 class ProofFile(Root):
     # pylint: disable=too-many-positional-arguments,too-many-arguments
     def __init__(
@@ -734,6 +903,7 @@ class ProofFile(Root):
         helpers: list[Game],
         lets: list[Field],
         assumptions: list[ParameterizedGame],
+        lemmas: list[Lemma],
         max_calls: Optional[Variable],
         theorem: ParameterizedGame,
         steps: list[ProofStep],
@@ -744,6 +914,7 @@ class ProofFile(Root):
         self.lets = lets
         self.max_calls = max_calls
         self.assumptions = assumptions
+        self.lemmas = lemmas
         self.theorem = theorem
         self.steps = steps
 
@@ -762,6 +933,12 @@ class ProofFile(Root):
 
         if self.max_calls:
             output_string += f"  calls <= {self.max_calls};\n"
+
+        if self.lemmas:
+            output_string += "\nlemma:\n"
+            for lemma in self.lemmas:
+                output_string += f"  {lemma}\n"
+
         output_string += f"theorem:\n  {self.theorem};\n"
         output_string += "games:\n"
         for step in self.steps:
@@ -825,21 +1002,3 @@ def pretty_print(program: str) -> str:
         if "{" in line:
             indent += 1
     return output_string
-
-
-def expand_tuple_type(the_type: BinaryOperation) -> list[Type]:
-    unfolded_types: list[Type] = []
-    expanded_type: Type | Expression = the_type
-    while isinstance(expanded_type, BinaryOperation):
-        if expanded_type.operator != BinaryOperators.MULTIPLY:
-            raise ValueError("Tuple type must use multiplication operator")
-        left_expr = expanded_type.left_expression
-        if not isinstance(left_expr, Type):
-            raise ValueError("Tuple type has non-type components")
-        unfolded_types.append(left_expr)
-        expanded_type = expanded_type.right_expression
-    if not isinstance(expanded_type, Type):
-        raise ValueError("Tuple type has non-type components")
-    assert isinstance(expanded_type, Type)
-    unfolded_types.append(expanded_type)
-    return unfolded_types

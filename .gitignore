@@ -3,3 +3,11 @@
 dist
 proofOutput.txt
 .venv
+.claude
+.worktrees
+extras
+
+# VSCode extension
+vscode-extension/node_modules/
+vscode-extension/out/
+vscode-extension/*.vsix

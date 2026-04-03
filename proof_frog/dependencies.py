@@ -30,7 +30,8 @@ def generate_dependency_graph(
             for preceding_statement in block.statements[:index]:
                 if (
                     isinstance(
-                        preceding_statement, (frog_ast.Sample, frog_ast.Assignment)
+                        preceding_statement,
+                        (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample),
                     )
                     and isinstance(preceding_statement.var, frog_ast.Variable)
                     and preceding_statement.var.name in [field.name for field in fields]
@@ -48,10 +49,40 @@ def generate_dependency_graph(
                 def search_for_assignment(
                     variable: frog_ast.Variable, node: frog_ast.ASTNode
                 ) -> bool:
-                    return node == variable
+                    return (
+                        isinstance(
+                            node,
+                            (
+                                frog_ast.Assignment,
+                                frog_ast.Sample,
+                                frog_ast.UniqueSample,
+                            ),
+                        )
+                    ) and node.var == variable
 
+                has_write = False
                 if (
                     visitors.SearchVisitor(
+                        functools.partial(search_for_assignment, variable)
+                    ).visit(statement)
+                    is not None
+                ):
+                    has_write = True
+
+                def search_for_any(
+                    variable: frog_ast.Variable, node: frog_ast.ASTNode
+                ) -> bool:
+                    return variable == node
+
+                if (
+                    has_write
+                    and visitors.SearchVisitor(
+                        functools.partial(search_for_any, variable)
+                    ).visit(depends_on)
+                    is not None
+                ) or (
+                    not has_write
+                    and visitors.SearchVisitor(
                         functools.partial(search_for_assignment, variable)
                     ).visit(depends_on)
                     is not None
@@ -88,6 +119,13 @@ class DependencyGraph:
         self.nodes.append(new_node)
 
     def get_node(self, statement: frog_ast.Statement) -> Node:
+        # Prefer identity match to avoid returning the wrong node when
+        # two structurally-equal statements exist (e.g. duplicate
+        # if-conditions).  Fall back to equality for callers that pass
+        # a copy.
+        for potential_node in self.nodes:
+            if potential_node.statement is statement:
+                return potential_node
         for potential_node in self.nodes:
             if potential_node.statement == statement:
                 return potential_node
@@ -134,8 +172,14 @@ class BubbleSortFieldAssignment(visitors.BlockTransformer):
                 first = new_statements[i - 1]
                 second = new_statements[i]
                 if (
-                    isinstance(first, (frog_ast.Assignment, frog_ast.Sample))
-                    and isinstance(second, (frog_ast.Assignment, frog_ast.Sample))
+                    isinstance(
+                        first,
+                        (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+                    )
+                    and isinstance(
+                        second,
+                        (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+                    )
                     and isinstance(first.var, frog_ast.Variable)
                     and isinstance(second.var, frog_ast.Variable)
                     and first.var.name in [field.name for field in self.fields]
@@ -198,7 +242,7 @@ def unnecessary_statement_info(
 def remove_unnecessary_statements(
     fields: list[str], block: frog_ast.Block
 ) -> frog_ast.Block:
-    (required_map, _) = unnecessary_statement_info(fields, block)
+    required_map, _ = unnecessary_statement_info(fields, block)
 
     def construct_new(block: frog_ast.Block) -> frog_ast.Block:
         new_statements: list[frog_ast.Statement] = []
@@ -220,12 +264,49 @@ def remove_unnecessary_statements(
     return construct_new(block)
 
 
+def _collect_field_access_refs(game: frog_ast.Game) -> list[frog_ast.Variable]:
+    """Collect field variables referenced via FieldAccess (e.g. field1.domain).
+
+    VariableCollectionVisitor skips variables inside FieldAccess, so fields
+    referenced only through dotted access (like <-uniq[field1.domain]) would
+    otherwise be considered dead.
+    """
+    refs: list[frog_ast.Variable] = []
+
+    def is_field_ref(node: frog_ast.ASTNode) -> bool:
+        return (
+            isinstance(node, frog_ast.FieldAccess)
+            and isinstance(node.the_object, frog_ast.Variable)
+            and node.the_object.name in {f.name for f in game.fields}
+        )
+
+    for method in game.methods:
+        found = visitors.SearchVisitor(is_field_ref).visit(method.block)
+        while found is not None:
+            assert isinstance(found, frog_ast.FieldAccess)
+            assert isinstance(found.the_object, frog_ast.Variable)
+            var = frog_ast.Variable(found.the_object.name)
+            if var not in refs:
+                refs.append(var)
+            # Replace the found node to continue searching for more
+            method_block = visitors.ReplaceTransformer(
+                found, frog_ast.Variable("__field_access_counted__")
+            ).transform(method.block)
+            found = visitors.SearchVisitor(is_field_ref).visit(method_block)
+
+    return refs
+
+
 def remove_unnecessary_fields(game: frog_ast.Game) -> frog_ast.Game:
     necessary_vars = []
     for method in game.methods:
         # We pass an empty list of fields
         # so that we can determine which fields are necessary based solely on return values
         necessary_vars += unnecessary_statement_info([], method.block)[1]
+
+    # Also include fields referenced via FieldAccess (e.g. field1.domain in
+    # <-uniq expressions), which VariableCollectionVisitor skips.
+    necessary_vars += _collect_field_access_refs(game)
 
     new_game = copy.deepcopy(game)
     new_game.fields = [
@@ -238,4 +319,13 @@ def remove_unnecessary_fields(game: frog_ast.Game) -> frog_ast.Game:
         method.block = remove_unnecessary_statements(
             actually_necessary_field_names, method.block
         )
+    # Remove Void methods with empty bodies (e.g., Initialize after field removal)
+    new_game.methods = [
+        method
+        for method in new_game.methods
+        if not (
+            isinstance(method.signature.return_type, frog_ast.Void)
+            and not method.block.statements
+        )
+    ]
     return new_game

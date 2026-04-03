@@ -1,0 +1,414 @@
+from proof_frog.transforms._base import NearMiss, PipelineContext, deduplicate_near_misses
+from proof_frog import frog_parser
+from proof_frog.transforms.algebraic import (
+    UniformXorSimplification,
+    UniformModIntSimplification,
+    XorCancellation,
+)
+from proof_frog.transforms.control_flow import BranchElimination
+from proof_frog.transforms.inlining import (
+    InlineSingleUseVariable,
+    InlineSingleUseField,
+    DeduplicateDeterministicCalls,
+)
+from proof_frog.transforms.sampling import MergeUniformSamples, SplitUniformSamples
+from proof_frog.transforms.random_functions import LocalRFToUniform
+from proof_frog.visitors import NameTypeMap
+
+
+def test_near_miss_dataclass():
+    nm = NearMiss(
+        transform_name="UniformXorSimplification",
+        reason="Variable 'r' used 2 times (need exactly 1)",
+        location=None,
+        suggestion="Isolate the use of 'r' in a separate intermediate game",
+        variable="r",
+        method="Encrypt",
+    )
+    assert nm.transform_name == "UniformXorSimplification"
+    assert nm.variable == "r"
+
+
+def test_pipeline_context_has_near_misses():
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=None,  # type: ignore[arg-type]
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    assert hasattr(ctx, "near_misses")
+    assert ctx.near_misses == []
+
+
+def test_pipeline_context_near_misses_independent():
+    """Each PipelineContext gets its own near_misses list."""
+    ctx1 = PipelineContext(
+        variables={},
+        proof_let_types=None,  # type: ignore[arg-type]
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    ctx2 = PipelineContext(
+        variables={},
+        proof_let_types=None,  # type: ignore[arg-type]
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    ctx1.near_misses.append(NearMiss("Test", "reason", None, None, None, None))
+    assert len(ctx2.near_misses) == 0
+
+
+def test_deduplicate_near_misses():
+    """Near-misses with same (transform, method, variable) are deduplicated."""
+    misses = [
+        NearMiss("XOR", "reason 1", None, None, "r", "Encrypt"),
+        NearMiss("XOR", "reason 2", None, None, "r", "Encrypt"),  # duplicate key
+        NearMiss("XOR", "reason 3", None, None, "s", "Encrypt"),  # different variable
+        NearMiss("Inline", "reason 4", None, None, "r", "Encrypt"),  # different transform
+    ]
+    deduped = deduplicate_near_misses(misses)
+    assert len(deduped) == 3
+    assert deduped[0].reason == "reason 1"
+    assert deduped[1].variable == "s"
+    assert deduped[2].transform_name == "Inline"
+
+
+def _make_game(method_body: str) -> object:
+    """Parse a minimal game with one method from a method body string."""
+    game_src = (
+        "Game TestGame() {\n"
+        "    BitString<lambda> Encrypt(BitString<lambda> m) {\n"
+        f"        {method_body}\n"
+        "    }\n"
+        "}"
+    )
+    return frog_parser.parse_game(game_src)
+
+
+def _make_ctx() -> PipelineContext:
+    return PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+
+
+def test_xor_near_miss_variable_used_twice():
+    """XOR simplification reports near-miss when uniform var is used > 1 time."""
+    game = _make_game(
+        "BitString<lambda> u <- BitString<lambda>;\n"
+        "        BitString<lambda> x = u + m;\n"
+        "        return x + u;"
+    )
+    ctx = _make_ctx()
+    xform = UniformXorSimplification()
+    result = xform.apply(game, ctx)
+
+    assert result == game  # transform should NOT have fired
+    assert len(ctx.near_misses) >= 1
+    nm = ctx.near_misses[0]
+    assert nm.transform_name == "Uniform XOR Simplification"
+    assert "u" in nm.reason
+    assert nm.variable == "u"
+
+
+def test_xor_no_near_miss_when_no_sample():
+    """No near-miss when there's no uniform sample at all."""
+    game = _make_game("return m;")
+    ctx = _make_ctx()
+    UniformXorSimplification().apply(game, ctx)
+    assert len(ctx.near_misses) == 0
+
+
+def test_inline_near_miss_variable_used_twice():
+    """Inline single-use reports near-miss when variable used > 1 time."""
+    game = _make_game(
+        "BitString<lambda> ct = m + m;\n"
+        "        BitString<lambda> x = ct + ct;\n"
+        "        return x;"
+    )
+    ctx = _make_ctx()
+    InlineSingleUseVariable().apply(game, ctx)
+
+    ct_misses = [nm for nm in ctx.near_misses if nm.variable == "ct"]
+    assert len(ct_misses) >= 1
+    assert "2" in ct_misses[0].reason or "used" in ct_misses[0].reason.lower()
+
+
+def test_inline_near_miss_free_var_modified():
+    """Inline single-use reports near-miss when free var modified between decl and use."""
+    game = _make_game(
+        "BitString<lambda> k <- BitString<lambda>;\n"
+        "        BitString<lambda> ct = k + m;\n"
+        "        k <- BitString<lambda>;\n"
+        "        return ct;"
+    )
+    ctx = _make_ctx()
+    InlineSingleUseVariable().apply(game, ctx)
+
+    ct_misses = [nm for nm in ctx.near_misses if nm.variable == "ct"]
+    assert len(ct_misses) >= 1
+    assert (
+        "k" in ct_misses[0].reason.lower()
+        or "modified" in ct_misses[0].reason.lower()
+    )
+
+
+# ---------------------------------------------------------------------------
+# UniformModIntSimplification near-miss tests
+# ---------------------------------------------------------------------------
+
+
+def _make_modint_game(method_body: str) -> object:
+    """Parse a minimal game with ModInt types."""
+    game_src = (
+        "Game TestGame() {\n"
+        "    ModInt<q> Encrypt(ModInt<q> m) {\n"
+        f"        {method_body}\n"
+        "    }\n"
+        "}"
+    )
+    return frog_parser.parse_game(game_src)
+
+
+def test_modint_near_miss_variable_used_twice():
+    """ModInt simplification reports near-miss when uniform var used > 1 time."""
+    game = _make_modint_game(
+        "ModInt<q> u <- ModInt<q>;\n"
+        "        ModInt<q> x = u + m;\n"
+        "        return x + u;"
+    )
+    ctx = _make_ctx()
+    UniformModIntSimplification().apply(game, ctx)
+
+    assert len(ctx.near_misses) >= 1
+    nm = ctx.near_misses[0]
+    assert nm.transform_name == "Uniform ModInt Simplification"
+    assert "u" in nm.reason
+    assert nm.variable == "u"
+
+
+def test_modint_no_near_miss_when_no_sample():
+    """No near-miss when there's no uniform ModInt sample."""
+    game = _make_modint_game("return m;")
+    ctx = _make_ctx()
+    UniformModIntSimplification().apply(game, ctx)
+    assert len(ctx.near_misses) == 0
+
+
+# ---------------------------------------------------------------------------
+# XorCancellation near-miss tests
+# ---------------------------------------------------------------------------
+
+
+def test_xor_cancellation_near_miss_modint_context():
+    """XOR cancellation reports near-miss when ADD chain is in ModInt context."""
+    game_src = (
+        "Game TestGame() {\n"
+        "    ModInt<q> Compute(ModInt<q> a) {\n"
+        "        return a + a;\n"
+        "    }\n"
+        "}"
+    )
+    game = frog_parser.parse_game(game_src)
+    ctx = _make_ctx()
+    XorCancellation().apply(game, ctx)
+
+    assert len(ctx.near_misses) >= 1
+    nm = ctx.near_misses[0]
+    assert nm.transform_name == "XOR Cancellation"
+    assert "modular arithmetic" in nm.reason.lower()
+
+
+def test_xor_cancellation_no_near_miss_bitstring():
+    """No near-miss when ADD chain is in bitstring context (fires normally)."""
+    game = _make_game(
+        "BitString<lambda> k <- BitString<lambda>;\n"
+        "        return k + k + m;"
+    )
+    ctx = _make_ctx()
+    XorCancellation().apply(game, ctx)
+    # Transform should fire, so no near-miss expected
+    assert len([nm for nm in ctx.near_misses
+                if nm.transform_name == "XOR Cancellation"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# BranchElimination near-miss tests
+# ---------------------------------------------------------------------------
+
+
+def test_branch_elimination_near_miss_non_literal_condition():
+    """Branch elimination reports near-miss when condition is not a literal."""
+    game_src = (
+        "Game TestGame() {\n"
+        "    BitString<lambda> Encrypt(BitString<lambda> m, Bool b) {\n"
+        "        if (b) {\n"
+        "            return m;\n"
+        "        }\n"
+        "        return m;\n"
+        "    }\n"
+        "}"
+    )
+    game = frog_parser.parse_game(game_src)
+    ctx = _make_ctx()
+    BranchElimination().apply(game, ctx)
+
+    assert len(ctx.near_misses) >= 1
+    nm = ctx.near_misses[0]
+    assert nm.transform_name == "Branch Elimination"
+    assert "compile-time constant" in nm.reason.lower()
+
+
+def test_branch_elimination_no_near_miss_when_no_if():
+    """No near-miss when there are no if-statements."""
+    game = _make_game("return m;")
+    ctx = _make_ctx()
+    BranchElimination().apply(game, ctx)
+    assert len(ctx.near_misses) == 0
+
+
+# ---------------------------------------------------------------------------
+# InlineSingleUseField near-miss tests
+# ---------------------------------------------------------------------------
+
+
+def test_inline_field_near_miss_cross_method():
+    """InlineSingleUseField reports near-miss when field used across methods."""
+    game_src = (
+        "Game TestGame() {\n"
+        "    Int myfield;\n"
+        "    Void Initialize() {\n"
+        "        myfield = 42;\n"
+        "    }\n"
+        "    Int Query() {\n"
+        "        return myfield;\n"
+        "    }\n"
+        "}"
+    )
+    game = frog_parser.parse_game(game_src)
+    ctx = _make_ctx()
+    InlineSingleUseField().apply(game, ctx)
+
+    field_misses = [nm for nm in ctx.near_misses if nm.variable == "myfield"]
+    assert len(field_misses) >= 1
+    assert "multiple methods" in field_misses[0].reason.lower()
+
+
+# ---------------------------------------------------------------------------
+# LocalRFToUniform near-miss tests
+# ---------------------------------------------------------------------------
+
+
+def test_local_rf_near_miss_called_twice():
+    """LocalRFToUniform reports near-miss when RF is called more than once."""
+    game_src = (
+        "Game TestGame() {\n"
+        "    BitString<lambda> Encrypt(BitString<lambda> m) {\n"
+        "        RandomFunctions<BitString<lambda>, BitString<lambda>> RF "
+        "<- RandomFunctions<BitString<lambda>, BitString<lambda>>;\n"
+        "        BitString<lambda> a = RF(m);\n"
+        "        BitString<lambda> b = RF(m);\n"
+        "        return a + b;\n"
+        "    }\n"
+        "}"
+    )
+    game = frog_parser.parse_game(game_src)
+    ctx = _make_ctx()
+    LocalRFToUniform().apply(game, ctx)
+
+    rf_misses = [nm for nm in ctx.near_misses if nm.variable == "RF"]
+    assert len(rf_misses) >= 1
+    assert "2" in rf_misses[0].reason or "called" in rf_misses[0].reason.lower()
+
+
+def test_local_rf_no_near_miss_when_no_rf():
+    """No near-miss when there's no RF sample."""
+    game = _make_game("return m;")
+    ctx = _make_ctx()
+    LocalRFToUniform().apply(game, ctx)
+    assert len(ctx.near_misses) == 0
+
+
+# ---------------------------------------------------------------------------
+# DeduplicateDeterministicCalls near-miss tests
+# ---------------------------------------------------------------------------
+
+
+def _make_nondet_namespace() -> dict:
+    """Namespace with primitive G whose ``evaluate`` is NOT deterministic."""
+    prim = frog_parser.parse_primitive_file(
+        """
+        Primitive G(Int n) {
+            BitString<n> evaluate(BitString<n> x);
+        }
+        """
+    )
+    return {"G": prim}
+
+
+def _make_det_namespace() -> dict:
+    """Namespace with primitive G whose ``evaluate`` is deterministic."""
+    prim = frog_parser.parse_primitive_file(
+        """
+        Primitive G(Int n) {
+            deterministic BitString<n> evaluate(BitString<n> x);
+        }
+        """
+    )
+    return {"G": prim}
+
+
+def test_dedup_near_miss_nondeterministic_duplicates():
+    """DeduplicateDeterministicCalls reports near-miss for duplicate
+    non-deterministic calls."""
+    game_src = (
+        "Game TestGame() {\n"
+        "    BitString<n> Compute(BitString<n> k) {\n"
+        "        return [G.evaluate(k), G.evaluate(k)];\n"
+        "    }\n"
+        "}"
+    )
+    game = frog_parser.parse_game(game_src)
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace=_make_nondet_namespace(),
+        subsets_pairs=[],
+    )
+    DeduplicateDeterministicCalls().apply(game, ctx)
+
+    dedup_misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Deduplicate Deterministic Calls"
+    ]
+    assert len(dedup_misses) >= 1
+    assert "not annotated deterministic" in dedup_misses[0].reason
+
+
+def test_dedup_no_near_miss_when_deterministic():
+    """No near-miss when duplicates ARE deterministic (transform fires)."""
+    game_src = (
+        "Game TestGame() {\n"
+        "    BitString<n> Compute(BitString<n> k) {\n"
+        "        return [G.evaluate(k), G.evaluate(k)];\n"
+        "    }\n"
+        "}"
+    )
+    game = frog_parser.parse_game(game_src)
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace=_make_det_namespace(),
+        subsets_pairs=[],
+    )
+    DeduplicateDeterministicCalls().apply(game, ctx)
+
+    dedup_misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Deduplicate Deterministic Calls"
+    ]
+    assert len(dedup_misses) == 0

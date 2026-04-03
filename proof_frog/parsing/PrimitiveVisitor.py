@@ -79,6 +79,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#uniqueSampleStatement.
+    def visitUniqueSampleStatement(self, ctx:PrimitiveParser.UniqueSampleStatementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#functionCallStatement.
     def visitFunctionCallStatement(self, ctx:PrimitiveParser.FunctionCallStatementContext):
         return self.visitChildren(ctx)
@@ -106,6 +111,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by PrimitiveParser#lvalue.
     def visitLvalue(self, ctx:PrimitiveParser.LvalueContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#methodModifier.
+    def visitMethodModifier(self, ctx:PrimitiveParser.MethodModifierContext):
         return self.visitChildren(ctx)
 
 
@@ -204,6 +214,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#onesExp.
+    def visitOnesExp(self, ctx:PrimitiveParser.OnesExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#unionExp.
     def visitUnionExp(self, ctx:PrimitiveParser.UnionExpContext):
         return self.visitChildren(ctx)
@@ -236,6 +251,16 @@ class PrimitiveVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by PrimitiveParser#orExp.
     def visitOrExp(self, ctx:PrimitiveParser.OrExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#zerosExp.
+    def visitZerosExp(self, ctx:PrimitiveParser.ZerosExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#exponentiationExp.
+    def visitExponentiationExp(self, ctx:PrimitiveParser.ExponentiationExpContext):
         return self.visitChildren(ctx)
 
 
@@ -314,6 +339,16 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#randomFunctionType.
+    def visitRandomFunctionType(self, ctx:PrimitiveParser.RandomFunctionTypeContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#modIntType.
+    def visitModIntType(self, ctx:PrimitiveParser.ModIntTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#setType.
     def visitSetType(self, ctx:PrimitiveParser.SetTypeContext):
         return self.visitChildren(ctx)
@@ -339,8 +374,18 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#integerAtom.
+    def visitIntegerAtom(self, ctx:PrimitiveParser.IntegerAtomContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#bitstring.
     def visitBitstring(self, ctx:PrimitiveParser.BitstringContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#modint.
+    def visitModint(self, ctx:PrimitiveParser.ModintContext):
         return self.visitChildren(ctx)
 
 

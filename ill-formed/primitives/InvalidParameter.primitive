@@ -1,5 +1,0 @@
-Primitive InvalidParameter(Bla x) {
-    Int x = 1;
-
-    Void f();
-}

@@ -79,6 +79,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#uniqueSampleStatement.
+    def visitUniqueSampleStatement(self, ctx:GameParser.UniqueSampleStatementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#functionCallStatement.
     def visitFunctionCallStatement(self, ctx:GameParser.FunctionCallStatementContext):
         return self.visitChildren(ctx)
@@ -106,6 +111,11 @@ class GameVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by GameParser#lvalue.
     def visitLvalue(self, ctx:GameParser.LvalueContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#methodModifier.
+    def visitMethodModifier(self, ctx:GameParser.MethodModifierContext):
         return self.visitChildren(ctx)
 
 
@@ -204,6 +214,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#onesExp.
+    def visitOnesExp(self, ctx:GameParser.OnesExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#unionExp.
     def visitUnionExp(self, ctx:GameParser.UnionExpContext):
         return self.visitChildren(ctx)
@@ -236,6 +251,16 @@ class GameVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by GameParser#orExp.
     def visitOrExp(self, ctx:GameParser.OrExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#zerosExp.
+    def visitZerosExp(self, ctx:GameParser.ZerosExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#exponentiationExp.
+    def visitExponentiationExp(self, ctx:GameParser.ExponentiationExpContext):
         return self.visitChildren(ctx)
 
 
@@ -314,6 +339,16 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#randomFunctionType.
+    def visitRandomFunctionType(self, ctx:GameParser.RandomFunctionTypeContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#modIntType.
+    def visitModIntType(self, ctx:GameParser.ModIntTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#setType.
     def visitSetType(self, ctx:GameParser.SetTypeContext):
         return self.visitChildren(ctx)
@@ -339,8 +374,18 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#integerAtom.
+    def visitIntegerAtom(self, ctx:GameParser.IntegerAtomContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#bitstring.
     def visitBitstring(self, ctx:GameParser.BitstringContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#modint.
+    def visitModint(self, ctx:GameParser.ModintContext):
         return self.visitChildren(ctx)
 
 

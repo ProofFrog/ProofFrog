@@ -161,6 +161,10 @@ ProofFrog also provides an MCP server for integration with AI coding assistants 
 
 The [`examples/`](https://github.com/ProofFrog/examples) repository contains primitives, schemes, games, and proofs largely adapted from [*The Joy of Cryptography*](https://joyofcryptography.com/) by Mike Rosulek. See also the [examples and tutorials on the ProofFrog website](https://prooffrog.github.io/).
 
+## Editor plugins
+
+**JetBrains IDE-s**. There's a plugin available for JetBrains IDE-s which provides syntax validation and highlighting, custom color settings, import statement file path references, context-menu actions and other features for the ProofFrog language. You can obtain the plugin from the JetBrains Marketplace inside the IDE. The project is hosted in [this GitHub repository](https://github.com/aabmets/proof-frog-ide-plugin).
+
 ## License
 
 ProofFrog is released under the [MIT License](https://github.com/ProofFrog/ProofFrog/blob/main/LICENSE).

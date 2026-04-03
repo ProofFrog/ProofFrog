@@ -1889,6 +1889,13 @@ class CheckTypeVisitor(VariableTypeVisitor):
 
     def leave_sample(self, sample: frog_ast.Sample) -> None:
         super().leave_sample(sample)
+        if not isinstance(sample.sampled_from, frog_ast.Type):
+            self.print_error(
+                sample,
+                "Right-hand side of '<-' must be a type (for random sampling);"
+                " use '=' for assignment from expressions",
+            )
+            return
         expected_type = (
             sample.the_type
             if sample.the_type is not None

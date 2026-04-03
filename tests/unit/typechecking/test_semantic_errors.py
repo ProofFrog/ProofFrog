@@ -267,6 +267,69 @@ class TestFieldAccessSuggestions:
         assert "Encrypt" in stderr
 
 
+class TestSampleFromNonType:
+    """Tests that '<-' only accepts types on the RHS, not function calls."""
+
+    def test_sample_from_function_call_errors(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Using '<-' with a function call should produce an error."""
+        prim = tmp_path / "Enc.primitive"
+        prim.write_text(
+            "Primitive Enc(Set KS, Set MS) {\n"
+            "    Set Key = KS;\n"
+            "    Set Message = MS;\n"
+            "    Key KeyGen();\n"
+            "    Message Encrypt(Key k);\n"
+            "}\n"
+        )
+        source = (
+            "import 'Enc.primitive';\n\n"
+            "Game Left(Enc E) {\n"
+            "    E.Message Foo() {\n"
+            "        E.Key k <- E.Key;\n"
+            "        E.Message m <- E.Encrypt(k);\n"
+            "        return m;\n"
+            "    }\n"
+            "}\n"
+            "Game Right(Enc E) {\n"
+            "    E.Message Foo() {\n"
+            "        E.Key k <- E.Key;\n"
+            "        return E.Encrypt(k);\n"
+            "    }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        stderr = _check_error_stderr(tmp_path, capsys, source, ext=".game")
+        assert "'<-'" in stderr
+        assert "'='" in stderr
+
+    def test_sample_from_type_accepted(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Using '<-' with a type (valid sampling) should not error."""
+        source = (
+            "Game Left() {\n"
+            "    Bool Foo() {\n"
+            "        BitString<128> r <- BitString<128>;\n"
+            "        return r == r;\n"
+            "    }\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Bool Foo() {\n"
+            "        BitString<128> r <- BitString<128>;\n"
+            "        return r == r;\n"
+            "    }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        file_path = tmp_path / f"Test.game"
+        file_path.write_text(source)
+        root = frog_parser.parse_file(str(file_path))
+        # Should not raise
+        semantic_analysis.check_well_formed(root, str(file_path))
+
+
 class TestRequiresEqualityDirection:
     """Tests for the directionality error on == constraints."""
 

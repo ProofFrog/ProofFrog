@@ -5,7 +5,7 @@ proofOutput.txt
 .venv
 .claude
 .worktrees
-docs/plans
+extras
 
 # VSCode extension
 vscode-extension/node_modules/

@@ -24,6 +24,7 @@ from .parsing.ProofVisitor import ProofVisitor
 from .parsing.ProofParser import ProofParser
 from .parsing.ProofLexer import ProofLexer
 from . import frog_ast
+from . import suggestions as _suggestions
 
 
 class _SilentErrorListener(ErrorListener):  # type: ignore[misc]
@@ -120,7 +121,12 @@ def _eof_hint(source_lines: list[str]) -> str:
     opens = sum(line.count("{") for line in source_lines)
     closes = sum(line.count("}") for line in source_lines)
     if opens > closes:
-        return f" (file has {opens} opening braces but only {closes} closing braces)"
+        open_word = "brace" if opens == 1 else "braces"
+        close_word = "brace" if closes == 1 else "braces"
+        return (
+            f" (file has {opens} opening {open_word} "
+            f"but only {closes} closing {close_word})"
+        )
     return ""
 
 
@@ -133,6 +139,396 @@ def _read_source_lines(source: str) -> list[str]:
         return source.splitlines(keepends=True)
     except OSError:
         return []
+
+
+# Known FrogLang keywords that users might misspell
+_KNOWN_KEYWORDS = {
+    "Game",
+    "Primitive",
+    "Scheme",
+    "Reduction",
+    "Set",
+    "Bool",
+    "Void",
+    "Int",
+    "Map",
+    "BitString",
+    "ModInt",
+    "Array",
+    "RandomFunctions",
+    "return",
+    "import",
+    "export",
+    "if",
+    "else",
+    "for",
+    "true",
+    "false",
+    "None",
+    "this",
+    "Phase",
+    "deterministic",
+    "injective",
+    "extends",
+}
+
+
+def _suggest_keyword(token: str) -> str | None:
+    """If *token* is close to a known keyword, return a suggestion."""
+    if not token or token.startswith(("'", '"')):
+        return None
+    # Require the token to be at least 3 characters to avoid spurious
+    # matches for short identifiers like "mL" matching "if"
+    if len(token) < 3:
+        return None
+    best, best_dist = None, 3  # max edit distance of 2
+    for kw in _KNOWN_KEYWORDS:
+        if kw == token:
+            continue  # don't suggest the exact same word
+        # Only suggest keywords of similar length
+        if abs(len(kw) - len(token)) > 2:
+            continue
+        dist = _suggestions.levenshtein_distance(token, kw)
+        if dist < best_dist:
+            best, best_dist = kw, dist
+    return best
+
+
+def _missing_semi_message(next_token: str) -> str:
+    """Build a 'missing semicolon' message, tailored to the next token."""
+    if next_token in ("}", "]", ")"):
+        return f"missing ';' before '{next_token}'"
+    return f"missing ';' (found '{next_token}' on next line)"
+
+
+def _truncate_expecting(msg: str) -> str:
+    """Shorten long 'expecting X, Y, Z, ...' lists to at most 5 items."""
+    m = re.search(r"expecting (.*)", msg)
+    if not m:
+        return msg
+    items_str = m.group(1)
+    items = [s.strip() for s in items_str.split(",")]
+    if len(items) <= 5:
+        return msg
+    kept = ", ".join(items[:5])
+    return msg[: m.start(1)] + kept + ", ..."
+
+
+def _enhance_error_message(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    display_msg: str,
+    token_text: str,
+    line: int,
+    col: int,
+    all_lines: list[str],
+    source: str,
+) -> tuple[str, int, int, str]:
+    """Apply heuristics to improve a parse error message.
+
+    Returns (improved_message, line, col, source_line) — the line/col/source_line
+    may be adjusted if the heuristic points to a different location.
+    """
+    source_line = ""
+    if 1 <= line <= len(all_lines):
+        source_line = all_lines[line - 1].rstrip()
+
+    # --- Heuristic: '}' where ';' expected (missing semicolon on same line) ---
+    if token_text == "}" and 1 <= line <= len(all_lines):
+        line_text = all_lines[line - 1]
+        before = line_text[:col].rstrip()
+        if before and not before.endswith((";", "{", "}")):
+            return (
+                f"missing ';' before '{token_text}'",
+                line,
+                col,
+                source_line,
+            )
+
+    # --- Heuristic: double-quoted import string ---
+    if 1 <= line <= len(all_lines):
+        stripped = all_lines[line - 1].strip()
+        if stripped.startswith("import ") and '"' in stripped:
+            quote_col = all_lines[line - 1].index('"')
+            return (
+                "import paths must use single quotes, not double quotes "
+                "(e.g. import '../path/to/file';)",
+                line,
+                quote_col,
+                source_line,
+            )
+
+    # --- Heuristic: lowercase type name ---
+    if token_text in _suggestions.KNOWN_TYPE_NAMES:
+        correct = _suggestions.KNOWN_TYPE_NAMES[token_text]
+        return (
+            f"unknown identifier '{token_text}'; did you mean '{correct}'? "
+            f"(type names are capitalized in FrogLang)",
+            line,
+            col,
+            source_line,
+        )
+
+    # --- Heuristic: 'export' where 'Game' expected (missing second game) ---
+    file_ext = os.path.splitext(source)[1] if os.path.isfile(source) else ""
+    if (
+        token_text == "export"
+        and "expecting 'Game'" in display_msg
+        and file_ext == ".game"
+    ):
+        # Count how many 'Game' definitions are in the file
+        game_count = sum(
+            1
+            for ln in all_lines
+            if re.match(r"\s*Game\s+", ln.rstrip() if isinstance(ln, str) else ln)
+        )
+        if game_count < 2:
+            return (
+                "a .game security property file must contain exactly two Game "
+                "definitions (e.g. Left and Right), but only one was found",
+                line,
+                col,
+                source_line,
+            )
+        # If there are 2+ Game keywords but the parser still chokes,
+        # one of them likely has a syntax error
+        return (
+            "expected another Game definition before 'export'; "
+            "check for syntax errors in the Game definitions above",
+            line,
+            col,
+            source_line,
+        )
+
+    # --- Heuristic: missing brace (export with expecting '}') ---
+    if token_text == "export" and "expecting '}'" in display_msg:
+        return (
+            "unexpected 'export'; a closing '}' is missing for a Game "
+            "or method definition above" + _eof_hint(all_lines),
+            line,
+            col,
+            source_line,
+        )
+
+    # --- Heuristic: missing closing '>' in type like BitString<32 ---
+    if 1 <= line <= len(all_lines):
+        line_text = all_lines[line - 1]
+        before_token = line_text[:col]
+        # Check if there's an unmatched '<' before the token on the same line
+        if "<" in before_token:
+            open_angles = before_token.count("<")
+            close_angles = before_token.count(">")
+            if open_angles > close_angles:
+                # Find the position of the last unmatched '<'
+                for type_prefix in ("BitString", "ModInt", "Array", "Map", "Set"):
+                    if type_prefix in before_token:
+                        return (
+                            f"unexpected token '{token_text}'; "
+                            f"did you forget a closing '>' for {type_prefix}<...>?",
+                            line,
+                            col,
+                            source_line,
+                        )
+                return (
+                    f"unexpected token '{token_text}'; "
+                    f"did you forget a closing '>'?",
+                    line,
+                    col,
+                    source_line,
+                )
+
+    # --- Heuristic: '=>' used instead of '=' or '<-' ---
+    if token_text == ">" and 1 <= line <= len(all_lines):
+        line_text = all_lines[line - 1]
+        if col >= 1 and line_text[col - 1 : col] == "=":
+            return (
+                "unexpected '=>'; use '=' for assignment or '<-' for sampling",
+                line,
+                col - 1,
+                source_line,
+            )
+
+    # --- Heuristic: '==' used instead of '=' for assignment ---
+    if token_text == "==" and 1 <= line <= len(all_lines):
+        line_text = all_lines[line - 1]
+        # Check if this looks like a variable declaration (Type name == expr)
+        before = line_text[:col].strip()
+        # If there's a type and identifier before ==, it's likely an assignment
+        if re.search(r"\w+\s+\w+\s*$", before):
+            return (
+                "use '=' for assignment, not '==' (which is the equality operator)",
+                line,
+                col,
+                source_line,
+            )
+
+    # --- Heuristic: '=' used inside if-condition (assignment vs comparison) ---
+    if token_text == "=" and 1 <= line <= len(all_lines):
+        line_text = all_lines[line - 1]
+        if "if" in line_text[:col] and "(" in line_text[:col]:
+            return (
+                "unexpected '=' in condition; use '==' for comparison, not '='",
+                line,
+                col,
+                source_line,
+            )
+
+    # --- Heuristic: missing comma in parameter list ---
+    if (
+        token_text
+        and token_text not in ("<EOF>", ";", "}", ")")
+        and 1 <= line <= len(all_lines)
+    ):
+        line_text = all_lines[line - 1]
+        # If we're inside parentheses and the previous non-space char is
+        # an identifier char, likely a missing comma
+        before = line_text[:col]
+        if "(" in before and ")" not in before:
+            before_stripped = before.rstrip()
+            if before_stripped and re.match(r"[a-zA-Z0-9_]", before_stripped[-1]):
+                # Check that the unexpected token could be a type or identifier
+                if re.match(r"[A-Z]", token_text):
+                    return (
+                        f"unexpected '{token_text}'; "
+                        f"did you forget a ',' between parameters?",
+                        line,
+                        col,
+                        source_line,
+                    )
+
+    # --- Heuristic: misspelled keyword (on the offending token itself) ---
+    if token_text and re.match(r"[a-zA-Z_]", token_text):
+        suggestion = _suggest_keyword(token_text)
+        if suggestion:
+            return (
+                f"unexpected '{token_text}'; did you mean '{suggestion}'?",
+                line,
+                col,
+                source_line,
+            )
+
+    # --- Heuristic: misspelled keyword earlier on the line ---
+    # If the unexpected token is inside a construct that started with a
+    # misspelled keyword (e.g. "fore (Int i = ..." where "fore" should
+    # be "for"), point to the misspelled word instead.  Only check the
+    # first word on the line (the statement keyword position) to avoid
+    # false positives on identifiers like "bar" matching "for".
+    if 1 <= line <= len(all_lines):
+        line_text = all_lines[line - 1]
+        first_word_match = re.match(r"\s*([a-zA-Z_]\w*)", line_text)
+        if first_word_match and first_word_match.end() <= col:
+            word = first_word_match.group(1)
+            suggestion = _suggest_keyword(word)
+            if suggestion:
+                return (
+                    f"'{word}' is not a keyword; did you mean '{suggestion}'?",
+                    line,
+                    first_word_match.start(1),
+                    source_line,
+                )
+
+    # --- Heuristic: 'if' without opening brace ---
+    # Check if the previous non-blank line is an if/for/else without a brace
+    if token_text and token_text not in ("<EOF>",) and 1 <= line <= len(all_lines):
+        prev_idx = line - 2  # 0-indexed
+        while prev_idx >= 0 and not all_lines[prev_idx].strip():
+            prev_idx -= 1
+        if prev_idx >= 0:
+            prev_stripped = all_lines[prev_idx].rstrip()
+            if re.match(r"\s*if\s*\(.*\)\s*$", prev_stripped):
+                return (
+                    "the body of an 'if' statement must be enclosed in braces { }",
+                    prev_idx + 1,
+                    len(prev_stripped),
+                    prev_stripped,
+                )
+            if re.match(r"\s*for\s*\(.*\)\s*$", prev_stripped):
+                return (
+                    "the body of a 'for' loop must be enclosed in braces { }",
+                    prev_idx + 1,
+                    len(prev_stripped),
+                    prev_stripped,
+                )
+            if re.match(r"\s*else\s*$", prev_stripped):
+                return (
+                    "the body of an 'else' clause must be enclosed in braces { }",
+                    prev_idx + 1,
+                    len(prev_stripped),
+                    prev_stripped,
+                )
+
+    # --- Heuristic: empty game body ---
+    if token_text == "}" and "expecting" in display_msg:
+        if 1 <= line <= len(all_lines):
+            # Look backwards for a Game definition
+            for i in range(line - 2, -1, -1):
+                if re.match(r"\s*Game\s+", all_lines[i]):
+                    return (
+                        "Game body cannot be empty; "
+                        "it must contain at least one method",
+                        line,
+                        col,
+                        source_line,
+                    )
+                # Don't look too far back
+                if i < line - 10:
+                    break
+
+    # --- Heuristic: EOF expecting 'Game' in .game file ---
+    if token_text == "<EOF>" and "expecting 'Game'" in display_msg:
+        if file_ext == ".game":
+            game_count = sum(
+                1
+                for ln in all_lines
+                if re.match(r"\s*Game\s+", ln.rstrip() if isinstance(ln, str) else ln)
+            )
+            if game_count < 2:
+                return (
+                    "a .game security property file must contain exactly two "
+                    "Game definitions (e.g. Left and Right) followed by an "
+                    "'export as <Name>;' statement",
+                    line,
+                    col,
+                    source_line,
+                )
+            # Check if export is missing
+            has_export = any(re.match(r"\s*export\s+", ln) for ln in all_lines)
+            if not has_export:
+                return (
+                    "missing 'export as <Name>;' at end of file",
+                    line,
+                    col,
+                    source_line,
+                )
+
+    # --- Heuristic: ';' inside parenthesized expression (missing ')') ---
+    if token_text == ";" and 1 <= line <= len(all_lines):
+        line_text = all_lines[line - 1]
+        before = line_text[:col]
+        open_parens = before.count("(") - before.count(")")
+        if open_parens > 0:
+            return (
+                "unexpected ';'; did you forget a closing ')'?",
+                line,
+                col,
+                source_line,
+            )
+
+    # --- Heuristic: ')' after comma (trailing comma) ---
+    if token_text == ")" and 1 <= line <= len(all_lines):
+        line_text = all_lines[line - 1]
+        before = line_text[:col].rstrip()
+        if before.endswith(","):
+            return (
+                "unexpected ')' after ','; trailing commas are not allowed "
+                "in parameter and argument lists",
+                line,
+                col,
+                source_line,
+            )
+
+    # Truncate long expecting lists
+    display_msg = _truncate_expecting(display_msg)
+
+    return display_msg, line, col, source_line
 
 
 def _to_parse_error(
@@ -165,20 +561,26 @@ def _to_parse_error(
         if prev_idx >= 0:
             prev_stripped = all_lines[prev_idx].rstrip()
             if prev_stripped and not prev_stripped.endswith((";", "{", "}", ":")):
-                prev_line_num = prev_idx + 1  # back to 1-indexed
-                prev_col = len(prev_stripped)
-                return ParseError(
-                    f"missing ';' (found '{token_text}' on next line)",
-                    file_name=file_name,
-                    line=prev_line_num,
-                    column=prev_col,
-                    token=token_text,
-                    source_line=prev_stripped,
-                )
+                # Don't report missing ';' if the previous line is an
+                # if/for/else that requires a block, not a semicolon.
+                if not re.match(
+                    r"\s*(if\s*\(.*\)|for\s*\(.*\)|else)\s*$", prev_stripped
+                ):
+                    prev_line_num = prev_idx + 1  # back to 1-indexed
+                    prev_col = len(prev_stripped)
+                    return ParseError(
+                        _missing_semi_message(token_text),
+                        file_name=file_name,
+                        line=prev_line_num,
+                        column=prev_col,
+                        token=token_text,
+                        source_line=prev_stripped,
+                    )
 
-    source_line = ""
-    if 1 <= line <= len(all_lines):
-        source_line = all_lines[line - 1].rstrip()
+    # Apply enhancement heuristics
+    msg, line, col, source_line = _enhance_error_message(
+        msg, token_text, line, col, all_lines, source
+    )
 
     return ParseError(
         msg,
@@ -264,18 +666,22 @@ def _reparse_for_error(
         if prev_idx >= 0:
             prev_stripped = all_lines[prev_idx].rstrip()
             if prev_stripped and not prev_stripped.endswith((";", "{", "}", ":")):
-                return ParseError(
-                    f"missing ';' (found '{token_text}' on next line)",
-                    file_name=file_name,
-                    line=prev_idx + 1,
-                    column=len(prev_stripped),
-                    token=token_text,
-                    source_line=prev_stripped,
-                )
+                if not re.match(
+                    r"\s*(if\s*\(.*\)|for\s*\(.*\)|else)\s*$", prev_stripped
+                ):
+                    return ParseError(
+                        _missing_semi_message(token_text),
+                        file_name=file_name,
+                        line=prev_idx + 1,
+                        column=len(prev_stripped),
+                        token=token_text,
+                        source_line=prev_stripped,
+                    )
 
-    source_line = ""
-    if 1 <= line <= len(all_lines):
-        source_line = all_lines[line - 1].rstrip()
+    # Apply enhancement heuristics
+    display_msg, line, col, source_line = _enhance_error_message(
+        display_msg, token_text, line, col, all_lines, source
+    )
 
     return ParseError(
         display_msg,
@@ -305,6 +711,13 @@ def add_line_number(
         if isinstance(result, frog_ast.ASTNode):
             result.line_num = ctx.start.line
             result.column_num = ctx.start.column
+            result.origin = frog_ast.SourceOrigin(
+                file=self.source_file,
+                line=ctx.start.line,
+                col=ctx.start.column,
+                original_text=ctx.getText(),
+                transform_chain=(),
+            )
         return result
 
     return wrapper
@@ -323,6 +736,8 @@ def line_number_decorator(the_class):  # type: ignore
 @line_number_decorator
 # pylint: disable-next=too-many-public-methods
 class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  # type: ignore[misc]
+    source_file: str = "<unknown>"
+
     def visitParamList(
         self, ctx: PrimitiveParser.ParamListContext
     ) -> list[frog_ast.Parameter]:
@@ -739,10 +1154,13 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
     def visitMethodSignature(
         self, ctx: PrimitiveParser.MethodSignatureContext
     ) -> frog_ast.MethodSignature:
+        modifiers = {m.getText() for m in ctx.methodModifier()}
         return frog_ast.MethodSignature(
             ctx.id_().getText(),
             self.visit(ctx.type_()),
             [] if not ctx.paramList() else self.visit(ctx.paramList()),
+            deterministic="deterministic" in modifiers,
+            injective="injective" in modifiers,
         )
 
     def visitModuleImport(
@@ -857,11 +1275,20 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
                 assumptions.append(self.visit(assumption))
             if proof.assumptions().CALLS():
                 max_calls = self.visit(proof.assumptions().expression())
+
+        lemmas: list[frog_ast.Lemma] = []
+        if proof.lemmas():
+            for lemma_entry in proof.lemmas().lemmaEntry():
+                game = self.visit(lemma_entry.parameterizedGame())
+                path = lemma_entry.FILESTRING().getText().strip("'")
+                lemmas.append(frog_ast.Lemma(game, path))
+
         return frog_ast.ProofFile(
             [self.visit(im) for im in ctx.moduleImport()],
             game_list,
             lets,
             assumptions,
+            lemmas,
             max_calls,
             self.visit(proof.theorem().parameterizedGame()),
             self.visit(proof.gameList()),
@@ -979,7 +1406,9 @@ def _get_parser(
 
 def parse_primitive_file(primitive: str) -> frog_ast.Primitive:
     try:
-        ast: frog_ast.Primitive = _PrimitiveASTGenerator().visit(
+        visitor = _PrimitiveASTGenerator()
+        visitor.source_file = primitive
+        ast: frog_ast.Primitive = visitor.visit(
             _get_parser(primitive, PrimitiveLexer, PrimitiveParser).program()
         )
         return ast
@@ -990,7 +1419,9 @@ def parse_primitive_file(primitive: str) -> frog_ast.Primitive:
 
 def parse_scheme_file(scheme: str) -> frog_ast.Scheme:
     try:
-        ast: frog_ast.Scheme = _SchemeASTGenerator().visit(
+        visitor = _SchemeASTGenerator()
+        visitor.source_file = scheme
+        ast: frog_ast.Scheme = visitor.visit(
             _get_parser(scheme, SchemeLexer, SchemeParser).program()
         )
         return ast
@@ -1012,7 +1443,9 @@ def parse_expression(expression: str) -> frog_ast.Expression:
 
 def parse_game_file(game_file: str) -> frog_ast.GameFile:
     try:
-        ast: frog_ast.GameFile = _GameASTGenerator().visit(
+        visitor = _GameASTGenerator()
+        visitor.source_file = game_file
+        ast: frog_ast.GameFile = visitor.visit(
             _get_parser(game_file, GameLexer, GameParser).program()
         )
         return ast
@@ -1023,7 +1456,9 @@ def parse_game_file(game_file: str) -> frog_ast.GameFile:
 
 def parse_proof_file(proof_file: str) -> frog_ast.ProofFile:
     try:
-        ast: frog_ast.ProofFile = _ProofASTGenerator().visit(
+        visitor = _ProofASTGenerator()
+        visitor.source_file = proof_file
+        ast: frog_ast.ProofFile = visitor.visit(
             _get_parser(proof_file, ProofLexer, ProofParser).program()
         )
         return ast
@@ -1112,7 +1547,7 @@ def parse_string(content: str, file_type: frog_ast.FileType) -> frog_ast.Root:
         raise (better or _to_parse_error(e, content)) from e
 
 
-def parse_string_collecting_errors(
+def parse_string_collecting_errors(  # pylint: disable=too-many-locals
     content: str,
     file_type: frog_ast.FileType,
     file_name: str = "<input>",
@@ -1138,6 +1573,7 @@ def parse_string_collecting_errors(
         frog_ast.FileType.PROOF: (ProofLexer, ProofParser, _ProofASTGenerator()),
     }
     lexer_cls, parser_cls, visitor = parser_map[file_type]
+    visitor.source_file = file_name
 
     try:
         parser = _get_parser_from_stream(content, lexer_cls, parser_cls)

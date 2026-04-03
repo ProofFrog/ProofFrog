@@ -125,7 +125,7 @@ def run_proof_verification(state: DocumentState) -> tuple[
     # Run proof verification
     try:
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            engine.prove(proof_file)
+            engine.prove(proof_file, file_path)
     except proof_engine.FailedProof:
         pass
     except Exception as e:  # pylint: disable=broad-exception-caught

@@ -177,7 +177,7 @@ def check(path: str) -> dict[str, Any]:
 
 
 @mcp.tool()  # type: ignore[misc, untyped-decorator]
-def prove(proof_path: str) -> dict[str, Any]:
+def prove(proof_path: str, skip_lemmas: bool = False) -> dict[str, Any]:
     """Run proof verification on a .proof file.
 
     Returns:
@@ -189,9 +189,10 @@ def prove(proof_path: str) -> dict[str, Any]:
 
     Imports in the proof are resolved relative to the server's working directory.
     Use write_file first to save the proof content to disk, then call prove.
+    Set skip_lemmas=True to trust lemma proofs without re-checking them.
     """
     output, success, hop_results, _has_induction, _err_line, _err_col = _capture_prove(
-        _safe_resolve(proof_path), allowed_root=_directory
+        _safe_resolve(proof_path), allowed_root=_directory, skip_lemmas=skip_lemmas
     )
     return {"output": output, "success": success, "hop_results": hop_results}
 
@@ -355,7 +356,9 @@ _LANGUAGE_REFERENCE = """\
 Primitive Name(Set Param1, Int Param2) {
     Set Field1 = Param1;
     Int Field2 = Param2;
-    ReturnType MethodName(ArgType arg);   // signature only, no body
+    ReturnType MethodName(ArgType arg);                    // non-deterministic by default
+    deterministic ReturnType DetMethod(ArgType arg);       // same inputs -> same output
+    deterministic injective BitString<n> Encode(T val);    // also preserves distinctness
 }
 ```
 

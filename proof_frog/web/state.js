@@ -21,6 +21,7 @@ export const welcome           = document.getElementById("welcome");
 export const btnSave           = document.getElementById("btn-save");
 export const btnParse          = document.getElementById("btn-parse");
 export const btnProve          = document.getElementById("btn-prove");
+export const proveVerbosity    = document.getElementById("prove-verbosity");
 export const btnTheme          = document.getElementById("btn-theme");
 export const dirLabel          = document.getElementById("dir-label");
 export const outputPane        = document.getElementById("output-pane");

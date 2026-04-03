@@ -44,6 +44,7 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 - `proof_frog/semantic_analysis.py` — Type checking / semantic analysis
 - `proof_frog/visitors.py` — AST visitor/transformer base classes (`Visitor[U]`, `Transformer`, `BlockTransformer`) and core utility visitors/transformers (substitution, inlining, Z3/SymPy conversion, type maps)
 - `proof_frog/transforms/` — Modular canonicalization pipeline; each file defines `TransformPass` subclasses in a specific domain (algebraic, sampling, control flow, inlining, symbolic, types, tuples, structural, standardization, assumptions). `pipelines.py` assembles passes into `CORE_PIPELINE` (fixed-point canonicalization) and `STANDARDIZATION_PIPELINE` (post-canonicalization normalization). `_base.py` provides `TransformPass`, `PipelineContext`, and the `run_pipeline()`/`run_standardization()` runners.
+- `proof_frog/diagnostics.py` — Diagnostic engine for proof hop failures (diff classification, near-miss matching, explanation generation, engine limitation detection)
 - `proof_frog/describe.py` — Human-readable descriptions of primitives/schemes/games
 - `proof_frog/dependencies.py` — Dependency resolution for proof files
 - `proof_frog/mcp_server.py` — MCP server for tool-based proof interaction
@@ -70,6 +71,7 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 
 ## Conventions
 
+- **Never commit to git unless explicitly asked by the user.**
 - Python 3.11+, built with Flit (`pyproject.toml`)
 - `parsing/` directory is excluded from black, mypy, and pylint
 - Proof imports use paths relative to the directory where the CLI is invoked
@@ -77,6 +79,7 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 - Only use ASCII characters in primitive/scheme/game/proof files.
 - LSP server uses `pygls` and communicates over stdio; uses full document sync (`TextDocumentSyncKind.Full`)
 - The LSP caches a `last_good_ast` per document so completion/hover work even when the file has syntax errors
+- When adding or modifying a `TransformPass` in `proof_frog/transforms/`, also add near-miss instrumentation: at key precondition-failure points where the transform almost fires but doesn't, append a `NearMiss` to `ctx.near_misses` (from `PipelineContext`). Update the engine limitation registry in `proof_frog/diagnostics.py` if the transform has known gaps. Add unit tests for near-miss reporting in `tests/unit/transforms/test_near_misses.py`.
 - When making changes that affect architecture, commands, test structure, or conventions, update CLAUDE.md to reflect those changes.
 
 ## Domain Knowledge
@@ -101,6 +104,7 @@ A **game hopping proof** (grammar file: `proof_frog/antlr/Proof.g4`; extension: 
 - Subsequent games may be stated explicitly by providing an **intermediate game**, or implicitly by composing a game (for an underlying primitive) with a **reduction**.
 - Each hop in the game sequence must be justified as either an **interchangeability-based hop**, in which the two adjacent games are **interchangeable** (demonstrated by code equivalence using the ProofFrog engine), or a **reduction-based hop**. A reduction-based hop is justified by exhibiting a reduction to an assumed security property and verifying that the reduction composed with each side of that property is interchangeable with the respective adjacent game.
 - Reductions and intermediate games are separately written out at the top of the proof file.
+- A proof may reference other proof files as **lemmas** via a `lemma:` section between `assume:` and `theorem:`. Each lemma entry has the form `SecurityProperty(params) by 'path/to/proof.proof';`. The engine verifies each lemma proof, checks that its assumptions are available, and adds the lemma's theorem to the available assumptions. Use `--skip-lemmas` on the CLI to bypass lemma verification.
 - An **induction** argument in a game hopping proof involves a loop of games which gradually transition from one game to another.
 
 ### The ProofFrog engine
@@ -138,7 +142,9 @@ The essentials for writing correct FrogLang:
 - `M[k] <- Type;` — sample into a map entry
 - `RandomFunctions<D, R> RF <- RandomFunctions<D, R>;` — instantiate a fresh random function
 
-**Non-determinism default:** Scheme method calls (e.g., `F.evaluate(k, x)`) are **non-deterministic by default** — each invocation may return a different result even with the same arguments. To make a function deterministic, an explicit assumption game (like `IsDeterministic`) must be added to the proof's `assume:` section.
+**Non-determinism default:** Scheme method calls (e.g., `F.evaluate(k, x)`) are **non-deterministic by default** — each invocation may return a different result even with the same arguments.
+
+**Method annotations:** Primitive method declarations support `deterministic` and `injective` modifiers (e.g., `deterministic injective BitString<n> Encode(GroupElem g);`). `deterministic` tells the engine the method always returns the same output for the same inputs (enabling expression aliasing, field hoisting, tuple folding through function calls, same-method call deduplication via `DeduplicateDeterministicCalls`, and cross-method field alias propagation via `CrossMethodFieldAlias`). `injective` tells the engine the method maps distinct inputs to distinct outputs (enabling the `ChallengeExclusionRFToUniform` transform to see through encoding wrappers). Methods without these annotations are treated conservatively.
 
 **What the engine considers semantics-preserving:**
 - XOR/ModInt with uniform: `u <- BitString<n>; return u + m;` ≡ `u <- BitString<n>; return u;` (when `u` used once)

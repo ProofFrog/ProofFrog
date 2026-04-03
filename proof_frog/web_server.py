@@ -416,10 +416,13 @@ def _capture_step_after_transform(
 
 
 def _capture_prove(
-    file_path: str, allowed_root: str | None = None
+    file_path: str,
+    allowed_root: str | None = None,
+    verbosity: proof_engine.Verbosity = proof_engine.Verbosity.QUIET,
+    skip_lemmas: bool = False,
 ) -> tuple[str, bool, list[dict[str, object]], bool, int | None, int | None]:
     buf = io.StringIO()
-    engine = proof_engine.ProofEngine(False)
+    engine = proof_engine.ProofEngine(verbosity, skip_lemmas=skip_lemmas)
     proof_succeeded = False
     has_induction = False
     try:
@@ -462,7 +465,7 @@ def _capture_prove(
                 engine.add_definition(name, root2)
 
             try:
-                engine.prove(proof_file)
+                engine.prove(proof_file, file_path)
                 proof_succeeded = True
             except proof_engine.FailedProof:
                 pass
@@ -475,6 +478,7 @@ def _capture_prove(
                 "current_desc": r.current_desc,
                 "next_desc": r.next_desc,
                 "failure_detail": r.failure_detail,
+                "diagnosis": proof_engine.serialize_diagnosis(r.diagnosis),
             }
             for r in engine.hop_results
             if r.depth == 0 and r.kind != "induction_rollover"
@@ -752,12 +756,18 @@ def create_app(directory: str, *, watch: bool = True) -> tuple[Flask, Any]:
             return jsonify({"error": "No data"}), 400
         rel_path = data.get("path", "")
         content = data.get("content", "")
+        verbosity_val = data.get("verbosity", 0)
+        verbosity = proof_engine.Verbosity(
+            max(0, min(int(verbosity_val), 2))
+            if isinstance(verbosity_val, (int, float))
+            else 0
+        )
         abs_path = _safe_path(directory, rel_path)
         if abs_path is None:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
         output, success, hop_results, has_induction, error_line, error_column = (
-            _capture_prove(str(abs_path), allowed_root=directory)
+            _capture_prove(str(abs_path), allowed_root=directory, verbosity=verbosity)
         )
         prove_resp: dict[str, object] = {
             "output": output,

@@ -1,0 +1,27 @@
+import 'SimplePRG.primitive';
+import 'BaseAssumption.game';
+import 'DerivedSecurity.game';
+
+Reduction R(SimplePRG G) compose BaseAssumption(G) against DerivedSecurity(G).Adversary {
+    BitString<2 * G.lambda> Query() {
+        return challenger.Query();
+    }
+}
+
+proof:
+
+let:
+    Int lambda;
+    SimplePRG G = SimplePRG(lambda);
+
+assume:
+    BaseAssumption(G);
+
+theorem:
+    DerivedSecurity(G);
+
+games:
+    DerivedSecurity(G).Real against DerivedSecurity(G).Adversary;
+    BaseAssumption(G).Real compose R(G) against DerivedSecurity(G).Adversary;
+    BaseAssumption(G).Random compose R(G) against DerivedSecurity(G).Adversary;
+    DerivedSecurity(G).Random against DerivedSecurity(G).Adversary;

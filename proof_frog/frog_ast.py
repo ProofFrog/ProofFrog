@@ -1,7 +1,19 @@
 from __future__ import annotations
+import dataclasses
 from enum import Enum
 from abc import ABC, abstractmethod
 from typing import Optional, TypeAlias, Sequence, TypeVar, Generic, Tuple as PyTuple
+
+
+@dataclasses.dataclass(frozen=True)
+class SourceOrigin:
+    """Tracks where an AST node originated in the user's source code."""
+
+    file: str
+    line: int
+    col: int
+    original_text: str
+    transform_chain: tuple[str, ...]
 
 
 class FileType(Enum):
@@ -15,6 +27,7 @@ class ASTNode(ABC):
     def __init__(self) -> None:
         self.line_num: int = -1
         self.column_num: int = -1
+        self.origin: SourceOrigin | None = None
 
     def __eq__(self, other: object) -> bool:
         if self is other:
@@ -27,7 +40,7 @@ class ASTNode(ABC):
         return all(
             (
                 True
-                if attr in {"line_num", "column_num"}
+                if attr in {"line_num", "column_num", "origin"}
                 else getattr(self, attr) == getattr(other, attr)
             )
             for attr in self.__dict__
@@ -301,18 +314,33 @@ class Parameter(ASTNode):
         return f"{self.type} {self.name}"
 
 
-class MethodSignature(ASTNode):
+class MethodSignature(
+    ASTNode
+):  # pylint: disable=too-many-arguments,too-many-positional-arguments
     def __init__(
-        self, name: str, return_type: Type, parameters: list[Parameter]
+        self,
+        name: str,
+        return_type: Type,
+        parameters: list[Parameter],
+        deterministic: bool = False,
+        injective: bool = False,
     ) -> None:
         super().__init__()
         self.name = name
         self.return_type = return_type
         self.parameters = parameters
+        self.deterministic = deterministic
+        self.injective = injective
 
     def __str__(self) -> str:
+        modifiers = ""
+        if self.deterministic:
+            modifiers += "deterministic "
+        if self.injective:
+            modifiers += "injective "
         return (
-            f"{self.return_type} {self.name}({_parameter_list_string(self.parameters)})"
+            f"{modifiers}{self.return_type} {self.name}"
+            f"({_parameter_list_string(self.parameters)})"
         )
 
 
@@ -855,6 +883,18 @@ class Induction(ASTNode):
 ProofStep: TypeAlias = Step | Induction | StepAssumption
 
 
+class Lemma(ASTNode):
+    """A lemma entry: a security property proven by another proof file."""
+
+    def __init__(self, game: ParameterizedGame, proof_path: str) -> None:
+        super().__init__()
+        self.game = game
+        self.proof_path = proof_path
+
+    def __str__(self) -> str:
+        return f"{self.game} by '{self.proof_path}';"
+
+
 class ProofFile(Root):
     # pylint: disable=too-many-positional-arguments,too-many-arguments
     def __init__(
@@ -863,6 +903,7 @@ class ProofFile(Root):
         helpers: list[Game],
         lets: list[Field],
         assumptions: list[ParameterizedGame],
+        lemmas: list[Lemma],
         max_calls: Optional[Variable],
         theorem: ParameterizedGame,
         steps: list[ProofStep],
@@ -873,6 +914,7 @@ class ProofFile(Root):
         self.lets = lets
         self.max_calls = max_calls
         self.assumptions = assumptions
+        self.lemmas = lemmas
         self.theorem = theorem
         self.steps = steps
 
@@ -891,6 +933,12 @@ class ProofFile(Root):
 
         if self.max_calls:
             output_string += f"  calls <= {self.max_calls};\n"
+
+        if self.lemmas:
+            output_string += "\nlemma:\n"
+            for lemma in self.lemmas:
+                output_string += f"  {lemma}\n"
+
         output_string += f"theorem:\n  {self.theorem};\n"
         output_string += "games:\n"
         for step in self.steps:

@@ -3,9 +3,10 @@ import copy
 import dataclasses
 import difflib
 import functools
+import os
 import shutil
 import warnings
-from enum import Enum
+from enum import Enum, IntEnum
 from collections import namedtuple
 from typing import TypeAlias, Tuple, Dict, Optional, TypeVar, Union
 import z3
@@ -14,8 +15,11 @@ from sympy import Symbol
 from . import frog_ast
 from . import visitors
 from . import dependencies
+from . import diagnostics
 from .transforms._base import (
+    NearMiss,
     PipelineContext,
+    deduplicate_near_misses,
     run_pipeline,
     run_pipeline_until,
     run_pipeline_with_trace,
@@ -48,6 +52,7 @@ class EquivalenceResult:
 
     valid: bool
     failure_detail: str = ""
+    diagnosis: diagnostics.Diagnosis | None = None
 
 
 @dataclasses.dataclass
@@ -61,10 +66,32 @@ class HopResult:
     current_desc: str
     next_desc: str
     failure_detail: str = ""
+    diagnosis: diagnostics.Diagnosis | None = None
 
 
 class FailedProof(Exception):
     pass
+
+
+def serialize_diagnosis(
+    diag: diagnostics.Diagnosis | None,
+) -> dict[str, object] | None:
+    """Serialize a Diagnosis to a JSON-compatible dict."""
+    if diag is None:
+        return None
+    return {
+        "summary": diag.summary,
+        "explanations": [
+            {
+                "source_description": e.source_description,
+                "reason": e.reason,
+                "suggestion": e.suggestion,
+                "engine_limitation": e.engine_limitation,
+            }
+            for e in diag.explanations
+        ],
+        "engine_limitations": diag.engine_limitations,
+    }
 
 
 def _build_equivalence_diff(current: frog_ast.Game, next_game: frog_ast.Game) -> str:
@@ -155,14 +182,32 @@ class _AllTrueTransformer(visitors.Transformer):
         )
 
 
+class Verbosity(IntEnum):
+    """Verbosity levels for proof engine output."""
+
+    QUIET = 0  # Default: summary table only
+    NORMAL = 1  # Show intermediate games (step headers, game forms)
+    VERBOSE = 2  # Show every transform applied
+
+
 class ProofEngine:
-    def __init__(self, verbose: bool) -> None:
+    def __init__(
+        self,
+        verbose: bool | Verbosity = False,
+        no_diagnose: bool = False,
+        skip_lemmas: bool = False,
+    ) -> None:
         self.definition_namespace: frog_ast.Namespace = {}
         self.proof_namespace: frog_ast.Namespace = {}
         self.proof_let_types: visitors.NameTypeMap = visitors.NameTypeMap()
         self.subsets_pairs: list[tuple[frog_ast.Type, frog_ast.Type]] = []
 
-        self.verbose = verbose
+        if isinstance(verbose, bool):
+            self.verbosity = Verbosity.VERBOSE if verbose else Verbosity.QUIET
+        else:
+            self.verbosity = verbose
+        self.no_diagnose = no_diagnose
+        self.skip_lemmas = skip_lemmas
         self.step_assumptions: list[ProcessedAssumption] = []
         self.hop_results: list[HopResult] = []
         self.variables: dict[str, Symbol | frog_ast.Expression] = {}
@@ -173,6 +218,13 @@ class ProofEngine:
 
     def add_definition(self, name: str, root: frog_ast.Root) -> None:
         self.definition_namespace[name] = root
+
+    @staticmethod
+    def _step_display(step: frog_ast.Step) -> str:
+        """Format a step for display, omitting the adversary and semicolon."""
+        if step.reduction:
+            return f"{step.challenger} compose {step.reduction}"
+        return str(step.challenger)
 
     @staticmethod
     def _count_hops(steps: list[frog_ast.ProofStep]) -> int:
@@ -195,7 +247,7 @@ class ProofEngine:
                     count += 1  # induction rollover
         return count
 
-    def prove(self, proof_file: frog_ast.ProofFile) -> None:
+    def prove(self, proof_file: frog_ast.ProofFile, proof_path: str = "") -> None:
         for game in proof_file.helpers:
             self.definition_namespace[game.name] = game
 
@@ -262,16 +314,54 @@ class ProofEngine:
                 + Fore.RESET
             )
 
-        print(f"Proving: {proof_file.theorem}\n")
+        # Process lemmas: verify each lemma proof and add its theorem as an assumption
+        effective_assumptions = list(proof_file.assumptions)
+        lemma_games: set[str] = set()
+        for lemma in proof_file.lemmas:
+            if self.skip_lemmas:
+                print(
+                    f"{Fore.CYAN}Lemma: {lemma.game} "
+                    f"by '{lemma.proof_path}' ... skipped{Fore.RESET}\n"
+                )
+                effective_assumptions.append(lemma.game)
+                lemma_games.add(str(lemma.game))
+                continue
+
+            lemma_path = os.path.join(os.path.dirname(proof_path), lemma.proof_path)
+            print(f"Lemma: {lemma.game} by '{lemma.proof_path}'")
+            try:
+                verify_proof_file(
+                    lemma_path,
+                    verbosity=self.verbosity,
+                    no_diagnose=True,
+                    skip_lemmas=self.skip_lemmas,
+                )
+                print(f"{Fore.GREEN}Lemma verified.{Fore.RESET}\n")
+            except (FailedProof, Exception) as e:
+                print(f"{Fore.RED}Lemma FAILED: {e}{Fore.RESET}")
+                raise FailedProof(f"Lemma {lemma.game} failed verification") from e
+
+            effective_assumptions.append(lemma.game)
+            lemma_games.add(str(lemma.game))
+
+        print(f"Theorem: {proof_file.theorem}\n")
 
         self.hop_results = []
         self._total_steps = self._count_hops(proof_file.steps)
         self._current_step = 0
-        self.prove_steps(proof_file.steps, proof_file.assumptions)
+        self.prove_steps(
+            proof_file.steps,
+            effective_assumptions,
+            lemma_games=lemma_games if lemma_games else None,
+        )
 
         print()
         self._print_summary_table()
         print()
+
+        # Level 2: Print full diagnostics for failed hops
+        if not self.no_diagnose:
+            self._print_diagnostics()
 
         failed_steps = [r for r in self.hop_results if not r.valid]
         if failed_steps:
@@ -349,6 +439,8 @@ class ProofEngine:
         for r in results:
             if r.kind == "by_assumption":
                 type_labels.append("assumption")
+            elif r.kind == "by_lemma":
+                type_labels.append("lemma")
             elif r.kind == "induction_rollover":
                 type_labels.append("rollover")
             else:
@@ -394,6 +486,8 @@ class ProofEngine:
         for r, hop_desc, type_label in zip(results, hop_descs, type_labels):
             if r.kind == "by_assumption":
                 result_str = Fore.CYAN + "assume" + Fore.RESET
+            elif r.kind == "by_lemma":
+                result_str = Fore.CYAN + "lemma" + Fore.RESET
             elif r.valid:
                 result_str = Fore.GREEN + "ok" + Fore.RESET
             else:
@@ -419,15 +513,62 @@ class ProofEngine:
                     f"{result_str}"
                 )
 
+    def _print_failure_inline(self, equiv_result: EquivalenceResult) -> None:
+        """Print Level 1 inline summary and Level 3 verbose detail for a failure."""
+        if equiv_result.diagnosis is not None:
+            diag = equiv_result.diagnosis
+            indent = "  " + " " * (len(str(self._total_steps)) * 2 + 9)
+            print(f"{indent}{Fore.YELLOW}{diag.summary}{Fore.RESET}")
+        if self.verbosity >= Verbosity.VERBOSE and equiv_result.failure_detail:
+            _print_failure_detail(equiv_result.failure_detail)
+        if self.verbosity >= Verbosity.VERBOSE and equiv_result.diagnosis is not None:
+            diag = equiv_result.diagnosis
+            if diag.explanations:
+                print("    Near-misses:")
+                for expl in diag.explanations:
+                    print(f"      - {expl.reason}")
+
+    def _print_diagnostics(self) -> None:
+        """Print Level 2 diagnostic output for failed hops."""
+        failed = [
+            r for r in self.hop_results if not r.valid and r.diagnosis is not None
+        ]
+        if not failed:
+            return
+
+        for result in failed:
+            assert result.diagnosis is not None
+            diag = result.diagnosis
+            print()
+            print(
+                f"  {Fore.RED}Step {result.step_num} failed:{Fore.RESET} "
+                f"{result.current_desc} -> {result.next_desc}"
+            )
+
+            for expl in diag.explanations:
+                print()
+                print(f"    {expl.source_description}:")
+                print(f"    {Fore.YELLOW}Possible cause:{Fore.RESET} {expl.reason}")
+                if expl.suggestion:
+                    print(f"    {Fore.CYAN}Possible fix:{Fore.RESET} {expl.suggestion}")
+
+            for limitation in diag.engine_limitations:
+                print()
+                print(
+                    f"    {Fore.MAGENTA}Possible engine limitation:{Fore.RESET} "
+                    f"{limitation}"
+                )
+
     def prove_steps(
         self,
         steps: list[frog_ast.ProofStep],
         assumed_indistinguishable: list[frog_ast.ParameterizedGame],
         _depth: int = 0,
+        lemma_games: set[str] | None = None,
     ) -> None:
         step_num = 0
 
-        for i in range(0, len(steps) - 1):
+        for i in range(0, len(steps) - 1):  # pylint: disable=too-many-nested-blocks
             assumptions: list[frog_ast.StepAssumption] = []
             if isinstance(steps[i], frog_ast.StepAssumption):
                 continue
@@ -446,7 +587,7 @@ class ProofEngine:
             next_step = steps[i]
             self._current_step += 1
 
-            if self.verbose:
+            if self.verbosity >= Verbosity.NORMAL:
                 print(f"===STEP {step_num}===")
 
             current_game_ast: frog_ast.Game
@@ -458,19 +599,27 @@ class ProofEngine:
                 if self._is_by_indistinguishability(
                     current_step, next_step, assumed_indistinguishable
                 ):
-                    current_desc = str(current_step)
-                    next_desc = str(next_step)
-                    if self.verbose:
+                    current_desc = self._step_display(current_step)
+                    next_desc = self._step_display(next_step)
+                    # Determine if this hop is justified by a lemma or an axiom
+                    is_lemma = (
+                        lemma_games is not None
+                        and isinstance(current_step.challenger, frog_ast.ConcreteGame)
+                        and str(current_step.challenger.game) in lemma_games
+                    )
+                    hop_label = "by lemma" if is_lemma else "by assumption"
+                    hop_kind = "by_lemma" if is_lemma else "by_assumption"
+                    if self.verbosity >= Verbosity.NORMAL:
                         print(f"Current: {current_desc}")
                         print(f"Hop To: {next_desc}\n")
-                        print("Valid by assumption")
+                        print(f"Valid {hop_label}")
                     hop_desc = f"{current_desc} -> {next_desc}"
-                    self._print_step_status(hop_desc, "by assumption", Fore.CYAN)
+                    self._print_step_status(hop_desc, hop_label, Fore.CYAN)
                     self.hop_results.append(
                         HopResult(
                             step_num=step_num,
                             valid=True,
-                            kind="by_assumption",
+                            kind=hop_kind,
                             depth=_depth,
                             current_desc=current_desc,
                             next_desc=next_desc,
@@ -522,10 +671,12 @@ class ProofEngine:
                 )
                 current_step = last_inductive_step
 
-            current_desc = str(current_step)
-            next_desc = str(next_step)
+            assert isinstance(current_step, frog_ast.Step)
+            assert isinstance(next_step, frog_ast.Step)
+            current_desc = self._step_display(current_step)
+            next_desc = self._step_display(next_step)
 
-            if self.verbose:
+            if self.verbosity >= Verbosity.NORMAL:
                 print(f"Current: {current_desc}")
                 print(f"Hop To: {next_desc}\n")
 
@@ -540,8 +691,7 @@ class ProofEngine:
                 self._print_step_status(hop_desc, "ok", Fore.GREEN)
             else:
                 self._print_step_status(hop_desc, "FAILED", Fore.RED)
-                if equiv_result.failure_detail:
-                    _print_failure_detail(equiv_result.failure_detail)
+                self._print_failure_inline(equiv_result)
             self.hop_results.append(
                 HopResult(
                     step_num=step_num,
@@ -551,6 +701,7 @@ class ProofEngine:
                     current_desc=current_desc,
                     next_desc=next_desc,
                     failure_detail=equiv_result.failure_detail,
+                    diagnosis=equiv_result.diagnosis,
                 )
             )
             if isinstance(steps[i], frog_ast.Induction):
@@ -558,7 +709,10 @@ class ProofEngine:
                 assert isinstance(the_induction, frog_ast.Induction)
                 self.proof_let_types.set(the_induction.name, frog_ast.IntType())
                 self.prove_steps(
-                    the_induction.steps, assumed_indistinguishable, _depth=_depth + 1
+                    the_induction.steps,
+                    assumed_indistinguishable,
+                    _depth=_depth + 1,
+                    lemma_games=lemma_games,
                 )
                 # Check induction roll over
                 first_step = the_induction.steps[0]
@@ -590,9 +744,9 @@ class ProofEngine:
                     last_step.challenger, last_step.reduction
                 )
                 self._current_step += 1
-                rollover_current_desc = str(last_step)
-                rollover_next_desc = str(first_step)
-                if self.verbose:
+                rollover_current_desc = self._step_display(last_step)
+                rollover_next_desc = self._step_display(first_step)
+                if self.verbosity >= Verbosity.NORMAL:
                     print("CHECKING INDUCTION ROLLOVER")
                     print(f"Current: {rollover_current_desc}")
                     print(f"Hop To: {rollover_next_desc}\n")
@@ -605,8 +759,7 @@ class ProofEngine:
                     self._print_step_status(rollover_hop, "ok", Fore.GREEN)
                 else:
                     self._print_step_status(rollover_hop, "FAILED", Fore.RED)
-                    if rollover_result.failure_detail:
-                        _print_failure_detail(rollover_result.failure_detail)
+                    self._print_failure_inline(rollover_result)
                 self.hop_results.append(
                     HopResult(
                         step_num=step_num,
@@ -616,6 +769,7 @@ class ProofEngine:
                         current_desc=rollover_current_desc,
                         next_desc=rollover_next_desc,
                         failure_detail=rollover_result.failure_detail,
+                        diagnosis=rollover_result.diagnosis,
                     )
                 )
                 self.proof_let_types.remove(the_induction.name)
@@ -699,10 +853,14 @@ class ProofEngine:
         self, current_game_ast: frog_ast.Game, next_game_ast: frog_ast.Game
     ) -> EquivalenceResult:
         ctx = self._build_context()
+        current_near_misses: list[NearMiss] = []
+        next_near_misses: list[NearMiss] = []
 
         for index, game in enumerate((current_game_ast, next_game_ast)):
             which = WhichGame.CURRENT if index == 0 else WhichGame.NEXT
-            if self.verbose:
+            ctx.near_misses = []  # Reset for each game
+
+            if self.verbosity >= Verbosity.VERBOSE:
                 label = "CURRENT" if index == 0 else "NEXT"
                 print(f"SIMPLIFYING {label} GAME")
                 print(game)
@@ -710,22 +868,29 @@ class ProofEngine:
             pipeline = list(CORE_PIPELINE) + [
                 ApplyAssumptions(self.step_assumptions, which, self.proof_let_types)
             ]
-            game = run_pipeline(game, pipeline, ctx, verbose=self.verbose)
+            game = run_pipeline(
+                game,
+                pipeline,
+                ctx,
+                verbose=self.verbosity >= Verbosity.VERBOSE,
+            )
             game = run_standardization(game, STANDARDIZATION_PIPELINE, ctx)
 
             if index == 0:
                 current_game_ast = game
+                current_near_misses = deduplicate_near_misses(ctx.near_misses)
             else:
                 next_game_ast = game
+                next_near_misses = deduplicate_near_misses(ctx.near_misses)
 
-        if self.verbose:
+        if self.verbosity >= Verbosity.NORMAL:
             print("CURRENT")
             print(current_game_ast)
             print("NEXT")
             print(next_game_ast)
 
         if current_game_ast == next_game_ast:
-            if self.verbose:
+            if self.verbosity >= Verbosity.NORMAL:
                 print("Inline Success!")
             return EquivalenceResult(valid=True)
 
@@ -737,8 +902,20 @@ class ProofEngine:
         parts: list[str] = []
         if z3_result.failure_detail:
             parts.append(z3_result.failure_detail)
-        parts.append(_build_equivalence_diff(current_game_ast, next_game_ast))
-        return EquivalenceResult(valid=False, failure_detail="\n".join(parts))
+        diff_text = _build_equivalence_diff(current_game_ast, next_game_ast)
+        parts.append(diff_text)
+
+        diagnosis: diagnostics.Diagnosis | None = None
+        if not self.no_diagnose:
+            diagnosis = diagnostics.diagnose_failure(
+                diff_text, current_near_misses, next_near_misses
+            )
+
+        return EquivalenceResult(
+            valid=False,
+            failure_detail="\n".join(parts),
+            diagnosis=diagnosis,
+        )
 
     def _z3_conditional_equivalence(
         self,
@@ -807,7 +984,7 @@ class ProofEngine:
                             f"{condition} vs {if_next.conditions[i]}"
                         ),
                     )
-        if self.verbose:
+        if self.verbosity >= Verbosity.NORMAL:
             print("Inline Success!")
         return EquivalenceResult(valid=True)
 
@@ -1018,13 +1195,17 @@ class ProofEngine:
                     self.method_lookup[(name, method.signature.name)] = method
 
     def _extract_subsets_pairs(self) -> None:
-        """Extract subsets constraint pairs from all schemes in the proof."""
+        """Extract subsets/equality constraint pairs from all schemes in the proof."""
         for node in self.proof_namespace.values():
             if isinstance(node, frog_ast.Scheme):
                 for req in node.requirements:
                     if (
                         isinstance(req, frog_ast.BinaryOperation)
-                        and req.operator == frog_ast.BinaryOperators.SUBSETS
+                        and req.operator
+                        in (
+                            frog_ast.BinaryOperators.SUBSETS,
+                            frog_ast.BinaryOperators.EQUALS,
+                        )
                         and isinstance(req.left_expression, frog_ast.Type)
                         and isinstance(req.right_expression, frog_ast.Type)
                     ):
@@ -1172,3 +1353,44 @@ def get_challenger_method_lookup(challenger: frog_ast.Game) -> MethodLookup:
 
 def get_challenger_field_name(name: str) -> str:
     return f"challenger@{name}"
+
+
+def _get_file_type_for_import(file_name: str) -> frog_ast.FileType:
+    """Determine the file type from a file's extension."""
+    extension = os.path.splitext(file_name)[1].strip(".")
+    return frog_ast.FileType(extension)
+
+
+def verify_proof_file(
+    proof_path: str,
+    verbosity: Verbosity = Verbosity.QUIET,
+    no_diagnose: bool = True,
+    skip_lemmas: bool = False,
+) -> frog_ast.ProofFile:
+    """Parse, load imports, and verify a proof file. Returns the ProofFile on success."""
+    # pylint: disable=import-outside-toplevel,cyclic-import
+    from . import frog_parser, semantic_analysis
+
+    proof_file = frog_parser.parse_proof_file(proof_path)
+    semantic_analysis.check_well_formed(proof_file, proof_path)
+
+    engine = ProofEngine(verbosity, no_diagnose=no_diagnose, skip_lemmas=skip_lemmas)
+
+    for imp in proof_file.imports:
+        resolved = frog_parser.resolve_import_path(imp.filename, proof_path)
+        file_type = _get_file_type_for_import(resolved)
+        root: frog_ast.Root
+        match file_type:
+            case frog_ast.FileType.PRIMITIVE:
+                root = frog_parser.parse_primitive_file(resolved)
+            case frog_ast.FileType.SCHEME:
+                root = frog_parser.parse_scheme_file(resolved)
+            case frog_ast.FileType.GAME:
+                root = frog_parser.parse_game_file(resolved)
+            case _:
+                raise FailedProof(f"Cannot import {resolved} in lemma proof")
+        name = imp.rename if imp.rename else root.get_export_name()
+        engine.add_definition(name, root)
+
+    engine.prove(proof_file, proof_path)
+    return proof_file

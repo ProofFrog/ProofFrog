@@ -1,0 +1,17 @@
+import 'SimplePRG.primitive';
+
+Game Real(SimplePRG G) {
+    BitString<2 * G.lambda> Query() {
+        BitString<G.lambda> s <- BitString<G.lambda>;
+        return G.evaluate(s);
+    }
+}
+
+Game Random(SimplePRG G) {
+    BitString<2 * G.lambda> Query() {
+        BitString<2 * G.lambda> r <- BitString<2 * G.lambda>;
+        return r;
+    }
+}
+
+export as BaseAssumption;

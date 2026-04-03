@@ -8,11 +8,14 @@ proofHelpers: (reduction | game)*;
 
 reduction: REDUCTION ID L_PAREN paramList? R_PAREN COMPOSE parameterizedGame AGAINST gameAdversary L_CURLY gameBody R_CURLY;
 
-proof: PROOF COLON (LET COLON lets)? (ASSUME COLON assumptions)? THEOREM COLON theorem  GAMES COLON gameList;
+proof: PROOF COLON (LET COLON lets)? (ASSUME COLON assumptions)? (LEMMA COLON lemmas)? THEOREM COLON theorem  GAMES COLON gameList;
 
 lets: (field SEMI)*;
 
 assumptions: (parameterizedGame SEMI)* (CALLS (LEQ|L_ANGLE) expression SEMI)?;
+
+lemmas: lemmaEntry*;
+lemmaEntry: parameterizedGame BY FILESTRING SEMI;
 
 theorem: parameterizedGame SEMI;
 
@@ -43,4 +46,6 @@ GAMES: 'games';
 LET: 'let';
 CALLS: 'calls';
 INDUCTION: 'induction';
+LEMMA: 'lemma';
+BY: 'by';
 FROM: 'from';

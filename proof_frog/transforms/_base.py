@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -13,9 +14,34 @@ from typing import Callable, Optional
 from sympy import Symbol
 
 from .. import frog_ast
+from ..frog_ast import SourceOrigin
 from ..visitors import NameTypeMap
 
 _MAX_FIXED_POINT_ITERATIONS = 200
+
+
+@dataclass
+class NearMiss:
+    """A transform that almost fired but didn't, with explanation."""
+
+    transform_name: str
+    reason: str
+    location: SourceOrigin | None
+    suggestion: str | None
+    variable: str | None
+    method: str | None
+
+
+def deduplicate_near_misses(misses: list[NearMiss]) -> list[NearMiss]:
+    """Deduplicate near-misses by (transform_name, method, variable)."""
+    seen: set[tuple[str, str | None, str | None]] = set()
+    result: list[NearMiss] = []
+    for nm in misses:
+        key = (nm.transform_name, nm.method, nm.variable)
+        if key not in seen:
+            seen.add(key)
+            result.append(nm)
+    return result
 
 
 @dataclass
@@ -28,6 +54,47 @@ class PipelineContext:
     subsets_pairs: list[tuple[frog_ast.Type, frog_ast.Type]]
     sort_game_fn: Optional[Callable[[frog_ast.Game], frog_ast.Game]] = None
     max_calls: Optional[int] = None
+    near_misses: list[NearMiss] = dataclasses.field(default_factory=list)
+
+
+def _lookup_primitive_method(
+    func: frog_ast.Expression,
+    proof_namespace: frog_ast.Namespace,
+) -> frog_ast.MethodSignature | None:
+    """Look up the MethodSignature for a call to a primitive method, or None."""
+    if not isinstance(func, frog_ast.FieldAccess):
+        return None
+    if not isinstance(func.the_object, frog_ast.Variable):
+        return None
+    obj = proof_namespace.get(func.the_object.name)
+    if not isinstance(obj, frog_ast.Primitive):
+        return None
+    for method in obj.methods:
+        if method.name == func.name:
+            return method
+    return None
+
+
+def has_nondeterministic_call(
+    expr: frog_ast.Expression,
+    proof_namespace: frog_ast.Namespace,
+) -> bool:
+    """Return True if *expr* contains a FuncCall to a non-deterministic method.
+
+    Calls to primitive methods annotated ``deterministic`` are treated as pure
+    for inlining and CSE purposes.  Any other FuncCall (including calls to
+    scheme methods, game methods, or unannotated primitive methods) is
+    considered non-deterministic.
+    """
+    from ..visitors import SearchVisitor  # pylint: disable=import-outside-toplevel
+
+    def _is_nondeterministic_call(node: frog_ast.ASTNode) -> bool:
+        if not isinstance(node, frog_ast.FuncCall):
+            return False
+        m = _lookup_primitive_method(node.func, proof_namespace)
+        return m is None or not m.deterministic
+
+    return SearchVisitor(_is_nondeterministic_call).visit(expr) is not None
 
 
 class TransformPass(ABC):

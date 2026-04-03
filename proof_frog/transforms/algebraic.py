@@ -22,7 +22,7 @@ from ..visitors import (
     NameTypeMap,
     build_game_type_map,
 )
-from ._base import TransformPass, PipelineContext
+from ._base import TransformPass, PipelineContext, NearMiss
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
@@ -44,6 +44,9 @@ class UniformXorSimplificationTransformer(BlockTransformer):
         BitString<n> u <- BitString<n>;
         return u;
     """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -81,6 +84,23 @@ class UniformXorSimplificationTransformer(BlockTransformer):
                 ).transform(count_block)
 
             if total_uses != 1:
+                if total_uses > 1 and self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Uniform XOR Simplification",
+                            reason=(
+                                f"XOR-with-uniform did not fire for '{var_name}': "
+                                f"used {total_uses} times (need exactly 1)"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"Isolate the use of '{var_name}' so it appears "
+                                f"only once after the sample"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
                 continue
 
             # Find a BinaryOperation(ADD, ...) where one operand is our variable
@@ -145,6 +165,9 @@ class UniformModIntSimplificationTransformer(BlockTransformer):
         return u;
     """
 
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
             if not (
@@ -181,6 +204,23 @@ class UniformModIntSimplificationTransformer(BlockTransformer):
                 ).transform(count_block)
 
             if total_uses != 1:
+                if total_uses > 1 and self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Uniform ModInt Simplification",
+                            reason=(
+                                f"Uniform-ModInt did not fire for '{var_name}': "
+                                f"used {total_uses} times (need exactly 1)"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"Isolate the use of '{var_name}' so it appears "
+                                f"only once after the sample"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
                 continue
 
             # Find a BinaryOperation(ADD or SUBTRACT, ...) where one operand
@@ -289,6 +329,15 @@ def _flatten_add_chain(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
     return [expr]
 
 
+def _has_duplicate_terms(terms: list[frog_ast.Expression]) -> bool:
+    """Check if any two terms in the list are structurally equal."""
+    for i, t in enumerate(terms):
+        for j in range(i + 1, len(terms)):
+            if t == terms[j]:
+                return True
+    return False
+
+
 def _rebuild_add_chain(terms: list[frog_ast.Expression]) -> frog_ast.Expression:
     """Rebuild a left-associative ADD chain from a list of terms."""
     result = terms[0]
@@ -309,8 +358,38 @@ class XorCancellationTransformer(Transformer):
         a + b + a  ->  b
     """
 
-    def __init__(self, type_map: Optional[NameTypeMap] = None) -> None:
+    def __init__(
+        self,
+        type_map: Optional[NameTypeMap] = None,
+        ctx: PipelineContext | None = None,
+    ) -> None:
         self.type_map = type_map
+        self.ctx = ctx
+        self._reported_modint_near_miss = False
+
+    def _maybe_report_modint_near_miss(
+        self, transformed: frog_ast.BinaryOperation
+    ) -> None:
+        """Report a near-miss if the ADD chain has duplicate terms in ModInt context."""
+        if self.ctx is None or self._reported_modint_near_miss:
+            return
+        terms = _flatten_add_chain(transformed)
+        if len(terms) >= 2 and _has_duplicate_terms(terms):
+            self._reported_modint_near_miss = True
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="XOR Cancellation",
+                    reason=(
+                        "XOR cancellation does not apply to this "
+                        "ADD chain: operands are in modular "
+                        "arithmetic context, not bitstring XOR"
+                    ),
+                    location=None,
+                    suggestion=None,
+                    variable=None,
+                    method=None,
+                )
+            )
 
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
@@ -324,6 +403,7 @@ class XorCancellationTransformer(Transformer):
             return transformed
 
         if not _is_bitstring_add_chain(transformed, self.type_map):
+            self._maybe_report_modint_near_miss(transformed)
             return transformed
 
         terms = _flatten_add_chain(transformed)
@@ -563,14 +643,14 @@ class UniformXorSimplification(TransformPass):
     name = "Uniform XOR Simplification"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return UniformXorSimplificationTransformer().transform(game)
+        return UniformXorSimplificationTransformer(ctx).transform(game)
 
 
 class UniformModIntSimplification(TransformPass):
     name = "Uniform ModInt Simplification"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return UniformModIntSimplificationTransformer().transform(game)
+        return UniformModIntSimplificationTransformer(ctx).transform(game)
 
 
 class SimplifyNotPass(TransformPass):
@@ -585,7 +665,7 @@ class XorCancellation(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return XorCancellationTransformer(type_map).transform(game)
+        return XorCancellationTransformer(type_map, ctx).transform(game)
 
 
 class XorIdentity(TransformPass):
@@ -602,6 +682,75 @@ class ModIntSimplification(TransformPass):
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
         return ModIntSimplificationTransformer(type_map).transform(game)
+
+
+def _flatten_chain(
+    expr: frog_ast.Expression, op: frog_ast.BinaryOperators
+) -> list[frog_ast.Expression]:
+    """Flatten an associative chain of *op* into a list of operands."""
+    if isinstance(expr, frog_ast.BinaryOperation) and expr.operator == op:
+        return _flatten_chain(expr.left_expression, op) + _flatten_chain(
+            expr.right_expression, op
+        )
+    return [expr]
+
+
+def _rebuild_chain(
+    terms: list[frog_ast.Expression], op: frog_ast.BinaryOperators
+) -> frog_ast.Expression:
+    """Rebuild a left-associative chain from sorted operands."""
+    result = terms[0]
+    for term in terms[1:]:
+        result = frog_ast.BinaryOperation(op, result, term)
+    return result
+
+
+# Operators that are commutative + associative for all types they apply to.
+# OR (||) is excluded because it means concatenation on BitString.
+_COMMUTATIVE_ASSOCIATIVE_OPS = frozenset(
+    {frog_ast.BinaryOperators.ADD, frog_ast.BinaryOperators.MULTIPLY}
+)
+
+
+class NormalizeCommutativeChainsTransformer(Transformer):
+    """Sort operands of commutative+associative operator chains.
+
+    Flattens chains like ``(c + a) + b`` into ``[a, b, c]`` (sorted by
+    ``str()``), then rebuilds left-associatively as ``(a + b) + c``.
+    This normalizes both operand order (commutativity) and parenthesization
+    (associativity) in a single pass.
+    """
+
+    def transform_binary_operation(
+        self, expr: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        # First, recursively transform children
+        transformed = frog_ast.BinaryOperation(
+            expr.operator,
+            self.transform(expr.left_expression),
+            self.transform(expr.right_expression),
+        )
+
+        if transformed.operator not in _COMMUTATIVE_ASSOCIATIVE_OPS:
+            return transformed
+
+        terms = _flatten_chain(transformed, transformed.operator)
+        if len(terms) < 2:
+            return transformed
+
+        sorted_terms = sorted(terms, key=str)
+        rebuilt = _rebuild_chain(sorted_terms, transformed.operator)
+        if rebuilt == transformed:
+            return transformed  # already in canonical form
+
+        return rebuilt
+
+
+class NormalizeCommutativeChains(TransformPass):
+    name = "Normalize Commutative Chains"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return NormalizeCommutativeChainsTransformer().transform(game)
 
 
 class ReflexiveComparison(TransformPass):

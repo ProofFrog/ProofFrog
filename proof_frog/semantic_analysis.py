@@ -6,6 +6,7 @@ from sympy import Rational, Symbol
 from . import frog_ast
 from . import frog_parser
 from . import proof_engine
+from . import suggestions as _suggestions
 from . import visitors
 
 
@@ -18,7 +19,7 @@ def check_well_formed(
     file_name: str,
     allowed_root: Optional[str] = None,
 ) -> None:
-    name_resolution(root, file_name, allowed_root=allowed_root)
+    parse_cache = name_resolution(root, file_name, allowed_root=allowed_root)
 
     import_namespace: dict[str, frog_ast.Root | frog_ast.Game] = {}
     file_name_mapping: dict[str, str] = {}
@@ -27,13 +28,17 @@ def check_well_formed(
             resolved = frog_parser.resolve_import_path(
                 imp.filename, file_name, allowed_root=allowed_root
             )
-            try:
-                parsed_file = frog_parser.parse_file(resolved)
-            except FileNotFoundError:
+            parsed_file = parse_cache.get(resolved)
+            if parsed_file is None:
+                path_hint = ""
+                path_suggestion = _suggestions.suggest_path(resolved)
+                if path_suggestion:
+                    suggested_name = os.path.basename(path_suggestion)
+                    path_hint = f" (did you mean '{suggested_name}'?)"
                 raise FileNotFoundError(
                     f"{file_name}:{imp.line_num}: imported file not found: "
-                    f"'{imp.filename}'"
-                ) from None
+                    f"'{imp.filename}'{path_hint}"
+                )
             name = imp.rename if imp.rename else parsed_file.get_export_name()
             import_namespace[name] = parsed_file
             file_name_mapping[name] = resolved
@@ -47,7 +52,7 @@ def name_resolution(
     initial_root: frog_ast.Root,
     initial_file_name: str,
     allowed_root: Optional[str] = None,
-) -> None:
+) -> dict[str, frog_ast.Root]:
     all_imports: dict[str, frog_ast.Root] = {}
 
     def do_name_resolution(root: frog_ast.Root, file_name: str) -> None:
@@ -67,9 +72,14 @@ def name_resolution(
                 try:
                     parsed_file = frog_parser.parse_file(resolved)
                 except FileNotFoundError:
+                    path_hint = ""
+                    path_suggestion = _suggestions.suggest_path(resolved)
+                    if path_suggestion:
+                        suggested_name = os.path.basename(path_suggestion)
+                        path_hint = f" (did you mean '{suggested_name}'?)"
                     raise FileNotFoundError(
                         f"{file_name}:{imp.line_num}: imported file not found: "
-                        f"'{imp.filename}'"
+                        f"'{imp.filename}'{path_hint}"
                     ) from None
                 do_name_resolution(parsed_file, resolved)
                 name = imp.rename if imp.rename else parsed_file.get_export_name()
@@ -78,6 +88,7 @@ def name_resolution(
         NameResolutionVisitor(import_namespace, file_name).visit(root)
 
     do_name_resolution(initial_root, initial_file_name)
+    return all_imports
 
 
 T = TypeVar("T", bound=Union[frog_ast.Primitive, frog_ast.Scheme, frog_ast.Game])
@@ -367,23 +378,58 @@ class NameResolutionVisitor(VariableTypeVisitor):
     def visit_game_file(self, game_file: frog_ast.GameFile) -> None:
         for index, game in enumerate(game_file.games):
             other_game = game_file.games[1 - index]
+            other_method_names = [m.signature.name for m in other_game.methods]
             for method_signature in [method.signature for method in game.methods]:
                 if not [
                     other
                     for other in other_game.methods
                     if other.signature == method_signature
                 ]:
-                    print_error(
-                        method_signature,
-                        f"{method_signature} does not exist in paired game",
-                        self.file_name,
-                    )
+                    # Same name but different signature?
+                    if method_signature.name in other_method_names:
+                        other_sig = next(
+                            m.signature
+                            for m in other_game.methods
+                            if m.signature.name == method_signature.name
+                        )
+                        print_error(
+                            method_signature,
+                            f"Method '{method_signature.name}' has different"
+                            f" signatures in {game.name} and"
+                            f" {other_game.name}:"
+                            f" {method_signature} vs {other_sig}",
+                            self.file_name,
+                        )
+                    else:
+                        suggestion = _suggestions.suggest_identifier(
+                            method_signature.name, other_method_names
+                        )
+                        hint = f"did you mean '{suggestion}'?" if suggestion else ""
+                        print_error(
+                            method_signature,
+                            f"{method_signature} does not exist in"
+                            f" paired game {other_game.name}",
+                            self.file_name,
+                            hint=hint,
+                        )
             if len(game.parameters) != len(other_game.parameters):
-                print_error(game, "Games must have matching parameters", self.file_name)
+                print_error(
+                    game,
+                    f"Games must have matching parameters:"
+                    f" {game.name} has {len(game.parameters)}"
+                    f" but {other_game.name} has"
+                    f" {len(other_game.parameters)}",
+                    self.file_name,
+                )
             for param_index, param in enumerate(game.parameters):
                 if param.type != other_game.parameters[param_index].type:
                     print_error(
-                        game, "Games must have matching parameters", self.file_name
+                        game,
+                        f"Parameter {param_index + 1} type mismatch:"
+                        f" {game.name} has {param.type}"
+                        f" but {other_game.name} has"
+                        f" {other_game.parameters[param_index].type}",
+                        self.file_name,
                     )
 
         if game_file.games[0].name == game_file.games[1].name:
@@ -395,10 +441,15 @@ class NameResolutionVisitor(VariableTypeVisitor):
         super().visit_scheme(scheme)
         self._check_duplicate_names(scheme)
         if scheme.primitive_name not in self.import_namespace:
+            suggestion = _suggestions.suggest_identifier(
+                scheme.primitive_name, list(self.import_namespace.keys())
+            )
+            hint = f"did you mean '{suggestion}'?" if suggestion else ""
             print_error(
                 scheme,
                 f"Primitive {scheme.primitive_name} is not defined",
                 self.file_name,
+                hint=hint,
             )
         corresponding_primitive = self.import_namespace[scheme.primitive_name]
         if not isinstance(corresponding_primitive, frog_ast.Primitive):
@@ -463,26 +514,53 @@ class NameResolutionVisitor(VariableTypeVisitor):
         the_type = self.get_type(var.name)
         if the_type is None:
             if self.in_parameter_type:
-                print_error(
-                    var,
-                    f"Type '{var.name}' is not defined; check that it is imported",
-                    self.file_name,
-                )
+                type_hint = _suggestions.suggest_type(var.name)
+                if type_hint:
+                    suffix = (
+                        " (type names are capitalized in FrogLang)"
+                        if var.name == var.name.lower()
+                        else ""
+                    )
+                    print_error(
+                        var,
+                        f"Type '{var.name}' is not defined",
+                        self.file_name,
+                        hint=f"did you mean '{type_hint}'?{suffix}",
+                    )
+                else:
+                    all_type_names = self._gather_type_names()
+                    suggestion = _suggestions.suggest_identifier(
+                        var.name, all_type_names
+                    )
+                    hint = f"did you mean '{suggestion}'?" if suggestion else ""
+                    print_error(
+                        var,
+                        f"Type '{var.name}' is not defined; "
+                        f"check that it is imported",
+                        self.file_name,
+                        hint=hint,
+                    )
             else:
                 qualified_suggestions = self._find_qualified_names(var.name)
                 if qualified_suggestions:
-                    suggestions = " or ".join(f"'{s}'" for s in qualified_suggestions)
+                    suggestions_str = " or ".join(
+                        f"'{s}'" for s in qualified_suggestions
+                    )
                     print_error(
                         var,
                         f"Variable '{var.name}' is not defined."
-                        f" Did you mean {suggestions}?",
+                        f" Did you mean {suggestions_str}?",
                         self.file_name,
                     )
                 else:
+                    all_names = self._gather_variable_names()
+                    suggestion = _suggestions.suggest_identifier(var.name, all_names)
+                    hint = f"did you mean '{suggestion}'?" if suggestion else ""
                     print_error(
                         var,
                         f"Variable '{var.name}' is not defined",
                         self.file_name,
+                        hint=hint,
                     )
 
     def _find_qualified_names(self, field_name: str) -> list[str]:
@@ -497,15 +575,36 @@ class NameResolutionVisitor(VariableTypeVisitor):
                     results.append(f"{var_name}.{field_name}")
         return results
 
+    def _gather_variable_names(self) -> list[str]:
+        """Collect all variable names currently in scope."""
+        names: list[str] = []
+        for scope in self.variable_type_map_stack:
+            names.extend(scope.keys())
+        return names
+
+    def _gather_type_names(self) -> list[str]:
+        """Collect all type/import names currently in scope."""
+        names: list[str] = []
+        for scope in self.variable_type_map_stack:
+            names.extend(scope.keys())
+        names.extend(self.import_namespace.keys())
+        return names
+
     def visit_parameterized_game(
         self, parameterized_game: frog_ast.ParameterizedGame
     ) -> None:
         the_type = self.get_type(parameterized_game.name)
         if the_type is None:
+            all_names = self._gather_type_names()
+            suggestion = _suggestions.suggest_identifier(
+                parameterized_game.name, all_names
+            )
+            hint = f"did you mean '{suggestion}'?" if suggestion else ""
             print_error(
                 parameterized_game,
                 f"Game {parameterized_game.name} is not defined",
                 self.file_name,
+                hint=hint,
             )
 
     def leave_concrete_game(self, concrete_game: frog_ast.ConcreteGame) -> None:
@@ -585,10 +684,15 @@ class NameResolutionVisitor(VariableTypeVisitor):
             return
 
         if field_access.name not in the_type.members.keys():
+            suggestion = _suggestions.suggest_identifier(
+                field_access.name, list(the_type.members.keys())
+            )
+            hint = f"did you mean '{suggestion}'?" if suggestion else ""
             print_error(
                 field_access,
                 f"{field_access.name} is not a property of {field_access.the_object}",
                 self.file_name,
+                hint=hint,
             )
 
 
@@ -605,6 +709,16 @@ def check_proof_well_formed(
         type_check_visitor.visit(let)
     for assumption in proof.assumptions:
         type_check_visitor.visit(assumption)
+    for lemma in proof.lemmas:
+        type_check_visitor.visit(lemma.game)
+        lemma_path = os.path.join(os.path.dirname(file_name), lemma.proof_path)
+        if not os.path.isfile(lemma_path):
+            print_error(
+                lemma.game,
+                f"lemma proof file not found: '{lemma.proof_path}'",
+                file_name,
+            )
+            raise FailedTypeCheck()
 
     type_check_visitor.visit(proof.theorem)
 
@@ -630,7 +744,10 @@ def _truncate_expr(expr: object, max_len: int = 60) -> str:
 
 
 def print_error(
-    location: frog_ast.ASTNode, message: str, file_name: str = "Unknown"
+    location: frog_ast.ASTNode,
+    message: str,
+    file_name: str = "Unknown",
+    hint: str = "",
 ) -> None:
     line, col = location.line_num, location.column_num
     loc = file_name
@@ -648,6 +765,8 @@ def print_error(
                 print(caret, file=sys.stderr)
         except OSError:
             pass
+    if hint:
+        print(f"  hint: {hint}", file=sys.stderr)
     raise FailedTypeCheck()
 
 
@@ -680,10 +799,20 @@ def _types_comparable(left_type: PossibleType, right_type: PossibleType) -> bool
     )
     if left_base == right_base:
         return True
-    # Two abstract type variables (not unwrapped from optionals) can be compared
-    # for equality — needed for requires clauses like S.Message == S.Ciphertext
+    # Two abstract type variables — needed for requires clauses like
+    # S.Message == S.Ciphertext
     if isinstance(left_type, frog_ast.Variable) and isinstance(
         right_type, frog_ast.Variable
+    ):
+        return True
+    # Abstract type variable compared with a concrete set-like type — needed
+    # for requires clauses like E.Key == BitString<n>
+    if isinstance(left_type, frog_ast.Variable) and isinstance(
+        right_type, (frog_ast.BitStringType, frog_ast.ModIntType, frog_ast.SetType)
+    ):
+        return True
+    if isinstance(right_type, frog_ast.Variable) and isinstance(
+        left_type, (frog_ast.BitStringType, frog_ast.ModIntType, frog_ast.SetType)
     ):
         return True
     return False
@@ -959,8 +1088,32 @@ class CheckTypeVisitor(VariableTypeVisitor):
         sympy_subs = self._build_sympy_subs()
         return compare_types(declared_type, value_type, resolved_pairs, sympy_subs)
 
-    def print_error(self, location: frog_ast.ASTNode, message: str) -> None:
-        print_error(location, message, self.file_name)
+    def print_error(
+        self, location: frog_ast.ASTNode, message: str, hint: str = ""
+    ) -> None:
+        print_error(location, message, self.file_name, hint=hint)
+
+    def _type_alias(self, type_obj: PossibleType) -> str | None:
+        """Find a user-facing alias for a resolved type (e.g. 'E.Key' for KS)."""
+        if type_obj is None:
+            return None
+        type_str = str(type_obj)
+        for scope in self.variable_type_map_stack:
+            for var_name, var_type in scope.items():
+                if not isinstance(var_type, visitors.InstantiableType):
+                    continue
+                for member_name, member_type in var_type.members.items():
+                    if str(member_type) == type_str:
+                        return f"{var_name}.{member_name}"
+        return None
+
+    def _format_type_with_alias(self, type_obj: PossibleType) -> str:
+        """Format a type, including its alias if one exists."""
+        base = _format_type(type_obj)
+        alias = self._type_alias(type_obj)
+        if alias and alias != base:
+            return f"{base} ({alias})"
+        return base
 
     def get_type_from_ast(self, node: frog_ast.ASTNode) -> PossibleType:
         try:
@@ -1009,6 +1162,31 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 expr.right_expression, frog_ast.Type
             ):
                 self.subsets_pairs.append((expr.left_expression, expr.right_expression))
+                # Warn when a == constraint has the abstract type on the
+                # right, since the type normalizer only fires when the
+                # left side resolves to a Variable after instantiation.
+                # At the AST level, abstract types appear as FieldAccess
+                # (E.Key) or Variable (bare type params), while concrete
+                # types are BitStringType, ModIntType, etc.
+                # E.g. `requires BitString<n> == E.Key` should be written
+                # as `requires E.Key == BitString<n>`.
+                if expr.operator == frog_ast.BinaryOperators.EQUALS:
+                    left_is_concrete = isinstance(
+                        expr.left_expression,
+                        (frog_ast.BitStringType, frog_ast.ModIntType),
+                    )
+                    right_is_abstract = isinstance(
+                        expr.right_expression,
+                        (frog_ast.Variable, frog_ast.FieldAccess),
+                    )
+                    if left_is_concrete and right_is_abstract:
+                        self.print_error(
+                            expr,
+                            "In type equality constraints, write the abstract"
+                            " type parameter on the left: requires"
+                            f" {expr.right_expression}"
+                            f" == {expr.left_expression}",
+                        )
 
     def visit_primitive(self, primitive: frog_ast.Primitive) -> None:
         self._shared_primitive_scheme_checks(primitive)
@@ -1270,7 +1448,10 @@ class CheckTypeVisitor(VariableTypeVisitor):
             got_type = self.get_type_from_ast(bad_return.expression)
             self.print_error(
                 bad_return,
-                f"{_truncate_expr(bad_return.expression)} has type {_format_type(got_type)}, expected {expected_type}",
+                f"{_truncate_expr(bad_return.expression)} has type"
+                f" {self._format_type_with_alias(got_type)},"
+                f" expected {expected_type}"
+                f" (return type of {method.signature.name})",
             )
 
     def visit_variable(self, variable: frog_ast.Variable) -> None:
@@ -1310,8 +1491,8 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 self.print_error(
                     array_access,
                     f"Map key type mismatch: expected"
-                    f" {_format_type(array_type.key_type)}, got"
-                    f" {_format_type(index_type)}",
+                    f" {self._format_type_with_alias(array_type.key_type)}, got"
+                    f" {self._format_type_with_alias(index_type)}",
                 )
             self.ast_type_map.set(array_access, array_type.value_type)
             return
@@ -1585,8 +1766,8 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 if not self.check_types(right_type.key_type, left_type):
                     self.print_error(
                         bin_op,
-                        f"Cannot see if {_format_type(left_type)} is in"
-                        f" {_format_type(right_type)}",
+                        f"Cannot see if {self._format_type_with_alias(left_type)} is in"
+                        f" {self._format_type_with_alias(right_type)}",
                     )
             elif isinstance(right_type, frog_ast.SetType):
                 if not right_type.parameterization:
@@ -1598,14 +1779,14 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 if not self.check_types(right_type.parameterization, left_type):
                     self.print_error(
                         bin_op,
-                        f"Cannot see if {_format_type(left_type)} is in"
-                        f" {_format_type(right_type)}",
+                        f"Cannot see if {self._format_type_with_alias(left_type)} is in"
+                        f" {self._format_type_with_alias(right_type)}",
                     )
             else:
                 self.print_error(
                     bin_op,
                     f"{bin_op.right_expression} has type"
-                    f" {_format_type(right_type)}, expected Set or Map",
+                    f" {self._format_type_with_alias(right_type)}, expected Set or Map",
                 )
                 return
             self.ast_type_map.set(bin_op, frog_ast.BoolType())
@@ -1656,7 +1837,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
         if not isinstance(object_type, visitors.InstantiableType):
             self.print_error(
                 field_acess,
-                f"Cannot access field '{field_acess.name}' on type {_format_type(object_type)}",
+                f"Cannot access field '{field_acess.name}' on type {self._format_type_with_alias(object_type)}",
             )
             return
         member = object_type.members[field_acess.name]  # type: ignore[index]
@@ -1708,6 +1889,13 @@ class CheckTypeVisitor(VariableTypeVisitor):
 
     def leave_sample(self, sample: frog_ast.Sample) -> None:
         super().leave_sample(sample)
+        if not isinstance(sample.sampled_from, frog_ast.Type):
+            self.print_error(
+                sample,
+                "Right-hand side of '<-' must be a type (for random sampling);"
+                " use '=' for assignment from expressions",
+            )
+            return
         expected_type = (
             sample.the_type
             if sample.the_type is not None
@@ -1840,7 +2028,9 @@ class CheckTypeVisitor(VariableTypeVisitor):
             if not self.check_types(param.type, arg_types[index]):
                 self.print_error(
                     location,
-                    f"Argument {args[index]} has type {arg_types[index]}, expected {param.type}",
+                    f"Argument {args[index]} has type {arg_types[index]},"
+                    f" expected {param.type}"
+                    f" (parameter '{param.name}' of {scheme.name})",
                 )
 
         # Check cache to avoid redundant instantiation and type-checking
@@ -1956,7 +2146,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 if not self.check_types(func_call_type.domain_type, arg_type):
                     self.print_error(
                         func_call,
-                        f"{func_call.args[0]} has type {_format_type(arg_type)},"
+                        f"{func_call.args[0]} has type {self._format_type_with_alias(arg_type)},"
                         f" expected {func_call_type.domain_type}",
                     )
                 self.ast_type_map.set(func_call, func_call_type.range_type)
@@ -1979,9 +2169,14 @@ class CheckTypeVisitor(VariableTypeVisitor):
             for index, arg_type in enumerate(arg_types):
                 declared_type = func_call_signature.parameters[index].type
                 if not self.check_types(declared_type, arg_type):
+                    param_name = func_call_signature.parameters[index].name
                     self.print_error(
                         func_call,
-                        f"{func_call.args[index]} has type {_format_type(arg_type)}, expected {declared_type}",
+                        f"{func_call.args[index]} has type"
+                        f" {self._format_type_with_alias(arg_type)},"
+                        f" expected {declared_type}"
+                        f" (parameter '{param_name}'"
+                        f" of {func_call_signature.name})",
                     )
             self.ast_type_map.set(func_call, func_call_signature.return_type)
 

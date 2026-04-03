@@ -20,7 +20,13 @@ from ..visitors import (
     ReplaceTransformer,
     VariableCollectionVisitor,
 )
-from ._base import TransformPass, PipelineContext
+from ._base import (
+    TransformPass,
+    PipelineContext,
+    has_nondeterministic_call,
+    NearMiss,
+    _lookup_primitive_method,
+)
 
 
 class _VarCountVisitor(Visitor[int]):
@@ -162,6 +168,9 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
         return v1 + G.evaluate(v2) + mL;
     """
 
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
             if not (
@@ -218,6 +227,23 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
             total_uses = _VarCountVisitor(var_name).visit(remaining_block)
 
             if total_uses != 1:
+                if total_uses > 1 and self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Single-Use Variable",
+                            reason=(
+                                f"Cannot inline '{var_name}': "
+                                f"used {total_uses} times (need exactly 1)"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"If '{var_name}' should be inlined, restructure "
+                                f"so it is used only once"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
                 continue
 
             # Collect free variables in expr and check none are written to
@@ -226,13 +252,36 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
             intermediate = frog_ast.Block(
                 list(remaining_block.statements[:first_use_idx])
             )
-            if any(
-                SearchVisitor(functools.partial(is_written_to, fv.name)).visit(
+            modified_free_vars = [
+                fv.name
+                for fv in free_vars
+                if SearchVisitor(functools.partial(is_written_to, fv.name)).visit(
                     intermediate
                 )
                 is not None
-                for fv in free_vars
-            ):
+            ]
+            if modified_free_vars:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Single-Use Variable",
+                            reason=(
+                                f"Cannot inline '{var_name}': free variable(s) "
+                                f"{', '.join(repr(v) for v in modified_free_vars)} "
+                                f"modified between declaration and use"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"Reorder statements so that "
+                                f"{', '.join(repr(v) for v in modified_free_vars)} "
+                                f"{'is' if len(modified_free_vars) == 1 else 'are'} "
+                                f"not modified between the declaration and use "
+                                f"of '{var_name}'"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
                 continue
 
             # Perform the inlining: replace every occurrence of var in
@@ -259,13 +308,15 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
 
 class InlineMultiUsePureExpressionTransformer(BlockTransformer):
     """Inlines a declaration ``Type v = expr`` when expr is a deterministic
-    (function-call-free) expression, even if v is used more than once.
+    (function-call-free, or deterministic-only) expression, even if v is
+    used more than once.
 
     Unlike ``InlineSingleUseVariableTransformer`` (which only inlines
     single-use variables), this pass handles multi-use variables by
     duplicating the expression at each use site.  This is safe because
-    the expression contains no function calls and no free variable of
-    the expression is reassigned anywhere after the declaration.
+    the expression contains no non-deterministic function calls and no
+    free variable of the expression is reassigned anywhere after the
+    declaration.
 
     This pass normalises the canonical form so that a multi-use pure
     expression is always represented inline rather than via a named
@@ -298,7 +349,9 @@ class InlineMultiUsePureExpressionTransformer(BlockTransformer):
             var_name = statement.var.name
             expr = statement.value
 
-            # Only handle pure expressions (no function calls)
+            # Skip ALL function calls (even deterministic ones): multi-use
+            # inlining duplicates the call at every use site, changing
+            # the canonical form.
             if (
                 SearchVisitor(lambda n: isinstance(n, frog_ast.FuncCall)).visit(expr)
                 is not None
@@ -392,8 +445,8 @@ class CollapseAssignmentTransformer(BlockTransformer):
 
     When a variable is declared and later reassigned without its initial value
     being read, the later value is moved into the original declaration.
-    Skips statements whose right-hand side contains function calls, which may
-    have side effects.
+    Skips statements whose right-hand side contains non-deterministic function
+    calls, which may have side effects.
 
     Example::
 
@@ -403,6 +456,9 @@ class CollapseAssignmentTransformer(BlockTransformer):
         Type v = expr2;
     """
 
+    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
             if not isinstance(statement, (frog_ast.Assignment, frog_ast.Sample)):
@@ -410,10 +466,10 @@ class CollapseAssignmentTransformer(BlockTransformer):
             if not isinstance(statement.var, frog_ast.Variable):
                 continue
 
-            def calls_func(node: frog_ast.ASTNode) -> bool:
-                return isinstance(node, frog_ast.FuncCall)
-
-            if SearchVisitor(calls_func).visit(statement) is not None:
+            # Skip if the statement's value has non-deterministic calls
+            if isinstance(statement, frog_ast.Assignment) and has_nondeterministic_call(
+                statement.value, self._proof_namespace
+            ):
                 continue
 
             def uses_var(var: frog_ast.Variable, node: frog_ast.ASTNode) -> bool:
@@ -556,9 +612,9 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
     """Replaces repeated pure expressions with their named variable.
 
     When an assignment ``v = expr`` (typed local or field assignment) defines
-    a named alias for a deterministic expression (no function calls) that is
-    not a plain variable or tuple literal, subsequent structurally-identical
-    occurrences of ``expr`` are replaced with ``v``.
+    a named alias for a deterministic expression (no non-deterministic function
+    calls) that is not a plain variable or tuple literal, subsequent
+    structurally-identical occurrences of ``expr`` are replaced with ``v``.
 
     This is safe because the expression is deterministic and neither ``v``
     nor any free variable in ``expr`` is reassigned between the definition
@@ -575,8 +631,9 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
         return F(v3, v3);
     """
 
-    def __init__(self) -> None:
+    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
         self.fields: list[str] = []
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.fields = [field.name for field in game.fields]
@@ -666,11 +723,8 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
             var_name = statement.var.name
             expr = statement.value
 
-            # Only handle pure expressions (no function calls)
-            if (
-                SearchVisitor(lambda n: isinstance(n, frog_ast.FuncCall)).visit(expr)
-                is not None
-            ):
+            # Only handle pure expressions (no non-deterministic function calls)
+            if has_nondeterministic_call(expr, self._proof_namespace):
                 continue
 
             remaining_block = frog_ast.Block(
@@ -758,21 +812,25 @@ class InlineSingleUseVariable(TransformPass):
     name = "Inline Single-Use Variables"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return InlineSingleUseVariableTransformer().transform(game)
+        return InlineSingleUseVariableTransformer(ctx).transform(game)
 
 
 class CollapseAssignment(TransformPass):
     name = "Collapse Assignment"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return CollapseAssignmentTransformer().transform(game)
+        return CollapseAssignmentTransformer(
+            proof_namespace=ctx.proof_namespace
+        ).transform(game)
 
 
 class ForwardExpressionAlias(TransformPass):
     name = "Forward Expression Alias"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return ForwardExpressionAliasTransformer().transform(game)
+        return ForwardExpressionAliasTransformer(
+            proof_namespace=ctx.proof_namespace
+        ).transform(game)
 
 
 class InlineMultiUsePureExpression(TransformPass):
@@ -793,9 +851,10 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
     """Hoists field assignments of pure expressions before their first use.
 
     When a field assignment ``field = pure_expr`` (where pure_expr contains no
-    function calls) appears AFTER a statement that uses the same ``pure_expr``
-    as a subexpression, this transform moves the field assignment to just before
-    that earlier use and replaces the subexpression with the field variable.
+    non-deterministic function calls) appears AFTER a statement that uses the
+    same ``pure_expr`` as a subexpression, this transform moves the field
+    assignment to just before that earlier use and replaces the subexpression
+    with the field variable.
 
     This ensures consistent canonical forms between compositions (where
     the field assignment may be ordered after a function call using the
@@ -811,8 +870,9 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
         [SS, CT] v3 = KEM1.Encaps(field5);
     """
 
-    def __init__(self) -> None:
+    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
         self.fields: list[str] = []
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.fields = [field.name for field in game.fields]
@@ -863,11 +923,8 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                     continue  # not a local: skip
             elif not isinstance(expr, frog_ast.ArrayAccess):
                 continue
-            # Only handle pure expressions (no function calls)
-            if (
-                SearchVisitor(lambda n: isinstance(n, frog_ast.FuncCall)).visit(expr)
-                is not None
-            ):
+            # Only handle pure expressions (no non-deterministic function calls)
+            if has_nondeterministic_call(expr, self._proof_namespace):
                 continue
 
             # Look for a structurally-equal subexpression in earlier statements
@@ -969,7 +1026,9 @@ class HoistFieldPureAlias(TransformPass):
     name = "Hoist Field Pure Alias"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return HoistFieldPureAliasTransformer().transform(game)
+        return HoistFieldPureAliasTransformer(
+            proof_namespace=ctx.proof_namespace
+        ).transform(game)
 
 
 class InlineSingleUseFieldTransformer(BlockTransformer):
@@ -1005,8 +1064,14 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
         }
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace | None = None,
+        ctx: PipelineContext | None = None,
+    ) -> None:
         self.field_names: list[str] = []
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
+        self.ctx = ctx
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         return block  # All work done in transform_game
@@ -1109,12 +1174,24 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
             return None
 
         # For multi-use fields, only inline if the expression is pure
-        # (no function calls), so duplicating it is safe.
-        is_pure = (
-            SearchVisitor(lambda n: isinstance(n, frog_ast.FuncCall)).visit(assign_expr)
-            is None
-        )
+        # (no non-deterministic function calls), so duplicating it is safe.
+        is_pure = not has_nondeterministic_call(assign_expr, self._proof_namespace)
         if total_uses > 1 and not is_pure:
+            if self.ctx is not None:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Inline Single-Use Field",
+                        reason=(
+                            f"Cannot inline field '{field_name}': "
+                            f"used {total_uses} times but expression "
+                            f"contains non-deterministic calls"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=field_name,
+                        method=None,
+                    )
+                )
             return None
 
         # 3. All uses must be in the same method as the definition —
@@ -1131,6 +1208,20 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
                 break
 
         if not all_same_method:
+            if self.ctx is not None:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Inline Single-Use Field",
+                        reason=(
+                            f"Cannot inline field '{field_name}': "
+                            f"used across multiple methods"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=field_name,
+                        method=None,
+                    )
+                )
             return None
 
         # 4. Check that no free variable in expr is modified between def and last use
@@ -1199,4 +1290,340 @@ class InlineSingleUseField(TransformPass):
     name = "Inline Single-Use Field"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return InlineSingleUseFieldTransformer().transform(game)
+        return InlineSingleUseFieldTransformer(
+            proof_namespace=ctx.proof_namespace, ctx=ctx
+        ).transform(game)
+
+
+class _DeterministicCallCollector(Visitor[list[frog_ast.FuncCall]]):
+    """Collect all FuncCall nodes that call deterministic primitive methods."""
+
+    def __init__(self, proof_namespace: frog_ast.Namespace) -> None:
+        self._proof_namespace = proof_namespace
+        self._calls: list[frog_ast.FuncCall] = []
+
+    def result(self) -> list[frog_ast.FuncCall]:
+        return self._calls
+
+    def visit_func_call(self, node: frog_ast.FuncCall) -> None:
+        m = _lookup_primitive_method(node.func, self._proof_namespace)
+        if m is not None and m.deterministic:
+            self._calls.append(node)
+
+
+class _AllPrimitiveFuncCallCollector(Visitor[list[frog_ast.FuncCall]]):
+    """Collect all FuncCall nodes that call any primitive method."""
+
+    def __init__(self, proof_namespace: frog_ast.Namespace) -> None:
+        self._proof_namespace = proof_namespace
+        self._calls: list[frog_ast.FuncCall] = []
+
+    def result(self) -> list[frog_ast.FuncCall]:
+        return self._calls
+
+    def visit_func_call(self, node: frog_ast.FuncCall) -> None:
+        if _lookup_primitive_method(node.func, self._proof_namespace) is not None:
+            self._calls.append(node)
+
+
+class DeduplicateDeterministicCallsTransformer(BlockTransformer):
+    """Extract duplicate deterministic FuncCalls into a shared local variable.
+
+    Within a single block, finds duplicate calls to ``deterministic`` primitive
+    methods with structurally equal arguments, extracts the first occurrence
+    into a fresh ``__determ_N__`` variable, and replaces all occurrences.
+
+    Example::
+
+        return [G.evaluate(k), G.evaluate(k)];
+      becomes:
+        BitString<n> __determ_0__ = G.evaluate(k);
+        return [__determ_0__, __determ_0__];
+    """
+
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace,
+        ctx: PipelineContext | None = None,
+    ) -> None:
+        self.proof_namespace = proof_namespace
+        self._ctx = ctx
+        self.counter = 0
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        # Collect all deterministic calls from top-level statements only.
+        # Skip parameterless calls (constants) — extracting them changes
+        # variable numbering without benefit, since existing transforms
+        # already handle pure constant expressions.
+        all_calls: list[frog_ast.FuncCall] = []
+        for statement in block.statements:
+            # Skip inner blocks (if-statements); BlockTransformer handles them
+            if isinstance(statement, frog_ast.IfStatement):
+                continue
+            collector = _DeterministicCallCollector(self.proof_namespace)
+            collector.visit(statement)
+            all_calls.extend(c for c in collector.result() if c.args)
+
+        if not all_calls:
+            # Check for near-miss: duplicate non-deterministic calls
+            if self._ctx is not None:
+                self._report_nondet_near_misses(block)
+            return block
+
+        # Group by structural equality; find first group with 2+ occurrences
+        groups: list[list[frog_ast.FuncCall]] = []
+        for call in all_calls:
+            placed = False
+            for group in groups:
+                if call == group[0]:
+                    group.append(call)
+                    placed = True
+                    break
+            if not placed:
+                groups.append([call])
+
+        dup_group: list[frog_ast.FuncCall] | None = None
+        for group in groups:
+            if len(group) >= 2:
+                dup_group = group
+                break
+
+        if dup_group is None:
+            return block
+
+        # Look up the return type for the new assignment
+        representative = dup_group[0]
+        m = _lookup_primitive_method(representative.func, self.proof_namespace)
+        assert m is not None
+        return_type = copy.deepcopy(m.return_type)
+
+        var_name = f"__determ_{self.counter}__"
+        self.counter += 1
+
+        # Create the new assignment statement
+        new_assignment = frog_ast.Assignment(
+            return_type,  # type: ignore[arg-type]
+            frog_ast.Variable(var_name),
+            copy.deepcopy(representative),
+        )
+
+        # Find the first statement containing a duplicate call and insert before it
+        insert_index: int | None = None
+        for index, statement in enumerate(block.statements):
+            if isinstance(statement, frog_ast.IfStatement):
+                continue
+            collector = _DeterministicCallCollector(self.proof_namespace)
+            collector.visit(statement)
+            for found_call in collector.result():
+                if found_call == representative:
+                    insert_index = index
+                    break
+            if insert_index is not None:
+                break
+
+        assert insert_index is not None
+
+        # Replace all occurrences in the block
+        new_block = block
+        for call in dup_group:
+            new_block = ReplaceTransformer(call, frog_ast.Variable(var_name)).transform(
+                new_block
+            )
+
+        # Insert the new assignment before the first occurrence
+        new_stmts = (
+            list(new_block.statements[:insert_index])
+            + [new_assignment]
+            + list(new_block.statements[insert_index:])
+        )
+
+        # Recurse to handle remaining duplicate groups
+        return self.transform_block(frog_ast.Block(new_stmts))
+
+    def _report_nondet_near_misses(self, block: frog_ast.Block) -> None:
+        """Report near-misses for duplicate non-deterministic calls."""
+        assert self._ctx is not None
+
+        all_calls: list[frog_ast.FuncCall] = []
+        for statement in block.statements:
+            if isinstance(statement, frog_ast.IfStatement):
+                continue
+            collector = _AllPrimitiveFuncCallCollector(self.proof_namespace)
+            collector.visit(statement)
+            all_calls.extend(collector.result())
+
+        # Group by structural equality
+        groups: list[list[frog_ast.FuncCall]] = []
+        for call in all_calls:
+            placed = False
+            for group in groups:
+                if call == group[0]:
+                    group.append(call)
+                    placed = True
+                    break
+            if not placed:
+                groups.append([call])
+
+        for group in groups:
+            if len(group) < 2:
+                continue
+            call = group[0]
+            m = _lookup_primitive_method(call.func, self.proof_namespace)
+            if m is None or not m.deterministic:
+                self._ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Deduplicate Deterministic Calls",
+                        reason=(
+                            f"Duplicate call to {call.func} found but method "
+                            f"is not annotated deterministic"
+                        ),
+                        location=None,
+                        suggestion=(
+                            "Add 'deterministic' annotation to the primitive "
+                            "method declaration"
+                        ),
+                        variable=None,
+                        method=None,
+                    )
+                )
+
+
+class DeduplicateDeterministicCalls(TransformPass):
+    name = "Deduplicate Deterministic Calls"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return DeduplicateDeterministicCallsTransformer(
+            proof_namespace=ctx.proof_namespace, ctx=ctx
+        ).transform(game)
+
+
+# ---------------------------------------------------------------------------
+# Cross-method deterministic field alias
+# ---------------------------------------------------------------------------
+
+
+def _is_stable_arg(
+    expr: frog_ast.Expression,
+    field_names: set[str],
+    param_names: set[str],
+) -> bool:
+    """Return True if *expr* is stable across method invocations.
+
+    An expression is stable if it depends only on game fields, game parameters,
+    and constants — never on method-local variables.
+    """
+    if isinstance(
+        expr, (frog_ast.Integer, frog_ast.Boolean, frog_ast.BitStringLiteral)
+    ):
+        return True
+    if isinstance(expr, frog_ast.Variable):
+        return expr.name in field_names or expr.name in param_names
+    if isinstance(expr, frog_ast.FieldAccess):
+        return _is_stable_arg(expr.the_object, field_names, param_names)
+    if isinstance(expr, frog_ast.BinaryOperation):
+        return _is_stable_arg(
+            expr.left_expression, field_names, param_names
+        ) and _is_stable_arg(expr.right_expression, field_names, param_names)
+    if isinstance(expr, frog_ast.UnaryOperation):
+        return _is_stable_arg(expr.expression, field_names, param_names)
+    return False
+
+
+class CrossMethodFieldAliasTransformer:
+    """Replace deterministic calls in oracles with field references.
+
+    When a field assignment ``field_x = det_call(stable_args)`` exists in one
+    method (typically Initialize) and the same ``det_call(stable_args)`` appears
+    in another method, this transformer replaces the call in the other method
+    with ``field_x``.
+
+    This does NOT introduce new fields — it reuses existing field assignments.
+    This is safe because the field already exists in both games being compared,
+    so the canonical form is not structurally altered.
+    """
+
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace,
+        ctx: PipelineContext | None = None,
+    ) -> None:
+        self.proof_namespace = proof_namespace
+        self._ctx = ctx
+
+    def transform(self, game: frog_ast.Game) -> frog_ast.Game:
+        field_names = {f.name for f in game.fields}
+        param_names = {p.name for p in game.parameters}
+
+        # Phase 1: Collect field assignments with deterministic RHS
+        # (field_name, det_call, method_idx)
+        field_aliases: list[tuple[str, frog_ast.FuncCall, int]] = []
+        for midx, method in enumerate(game.methods):
+            for stmt in method.block.statements:
+                if not (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and stmt.the_type is None
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name in field_names
+                    and isinstance(stmt.value, frog_ast.FuncCall)
+                ):
+                    continue
+                call = stmt.value
+                m = _lookup_primitive_method(call.func, self.proof_namespace)
+                if m is None or not m.deterministic:
+                    continue
+                if not call.args:
+                    continue
+                if not all(
+                    _is_stable_arg(a, field_names, param_names) for a in call.args
+                ):
+                    continue
+                field_aliases.append((stmt.var.name, call, midx))
+
+        if not field_aliases:
+            return game
+
+        # Phase 2: For each field alias, check if the same call appears in
+        # other methods and replace it
+        for alias_field_name, alias_call, alias_midx in field_aliases:
+            result = self._try_replace(game, alias_field_name, alias_call, alias_midx)
+            if result is not None:
+                return result
+
+        return game
+
+    def _try_replace(
+        self,
+        game: frog_ast.Game,
+        alias_field_name: str,
+        alias_call: frog_ast.FuncCall,
+        alias_midx: int,
+    ) -> frog_ast.Game | None:
+        """Try to replace *alias_call* with *alias_field_name* in another method."""
+        for midx, method in enumerate(game.methods):
+            if midx == alias_midx:
+                continue
+            collector = _DeterministicCallCollector(self.proof_namespace)
+            collector.visit(method.block)
+            if not any(c == alias_call for c in collector.result()):
+                continue
+            # Found a match — replace and return
+            new_game = copy.deepcopy(game)
+            new_collector = _DeterministicCallCollector(self.proof_namespace)
+            new_collector.visit(new_game.methods[midx].block)
+            for new_call in new_collector.result():
+                if new_call == alias_call:
+                    new_game.methods[midx] = ReplaceTransformer(
+                        new_call,
+                        frog_ast.Variable(alias_field_name),
+                    ).transform(new_game.methods[midx])
+                    return new_game
+        return None
+
+
+class CrossMethodFieldAlias(TransformPass):
+    name = "Cross-Method Field Alias"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return CrossMethodFieldAliasTransformer(
+            proof_namespace=ctx.proof_namespace, ctx=ctx
+        ).transform(game)

@@ -419,9 +419,10 @@ def _capture_prove(
     file_path: str,
     allowed_root: str | None = None,
     verbosity: proof_engine.Verbosity = proof_engine.Verbosity.QUIET,
+    skip_lemmas: bool = False,
 ) -> tuple[str, bool, list[dict[str, object]], bool, int | None, int | None]:
     buf = io.StringIO()
-    engine = proof_engine.ProofEngine(verbosity)
+    engine = proof_engine.ProofEngine(verbosity, skip_lemmas=skip_lemmas)
     proof_succeeded = False
     has_induction = False
     try:
@@ -464,7 +465,7 @@ def _capture_prove(
                 engine.add_definition(name, root2)
 
             try:
-                engine.prove(proof_file)
+                engine.prove(proof_file, file_path)
                 proof_succeeded = True
             except proof_engine.FailedProof:
                 pass

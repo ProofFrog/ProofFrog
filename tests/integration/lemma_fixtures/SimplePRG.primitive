@@ -1,0 +1,5 @@
+Primitive SimplePRG(Int lambda) {
+    Int lambda = lambda;
+
+    deterministic BitString<2 * lambda> evaluate(BitString<lambda> x);
+}

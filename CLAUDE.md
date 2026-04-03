@@ -104,6 +104,7 @@ A **game hopping proof** (grammar file: `proof_frog/antlr/Proof.g4`; extension: 
 - Subsequent games may be stated explicitly by providing an **intermediate game**, or implicitly by composing a game (for an underlying primitive) with a **reduction**.
 - Each hop in the game sequence must be justified as either an **interchangeability-based hop**, in which the two adjacent games are **interchangeable** (demonstrated by code equivalence using the ProofFrog engine), or a **reduction-based hop**. A reduction-based hop is justified by exhibiting a reduction to an assumed security property and verifying that the reduction composed with each side of that property is interchangeable with the respective adjacent game.
 - Reductions and intermediate games are separately written out at the top of the proof file.
+- A proof may reference other proof files as **lemmas** via a `lemma:` section between `assume:` and `theorem:`. Each lemma entry has the form `SecurityProperty(params) by 'path/to/proof.proof';`. The engine verifies each lemma proof, checks that its assumptions are available, and adds the lemma's theorem to the available assumptions. Use `--skip-lemmas` on the CLI to bypass lemma verification.
 - An **induction** argument in a game hopping proof involves a loop of games which gradually transition from one game to another.
 
 ### The ProofFrog engine

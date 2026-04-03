@@ -883,6 +883,18 @@ class Induction(ASTNode):
 ProofStep: TypeAlias = Step | Induction | StepAssumption
 
 
+class Lemma(ASTNode):
+    """A lemma entry: a security property proven by another proof file."""
+
+    def __init__(self, game: ParameterizedGame, proof_path: str) -> None:
+        super().__init__()
+        self.game = game
+        self.proof_path = proof_path
+
+    def __str__(self) -> str:
+        return f"{self.game} by '{self.proof_path}';"
+
+
 class ProofFile(Root):
     # pylint: disable=too-many-positional-arguments,too-many-arguments
     def __init__(
@@ -891,6 +903,7 @@ class ProofFile(Root):
         helpers: list[Game],
         lets: list[Field],
         assumptions: list[ParameterizedGame],
+        lemmas: list[Lemma],
         max_calls: Optional[Variable],
         theorem: ParameterizedGame,
         steps: list[ProofStep],
@@ -901,6 +914,7 @@ class ProofFile(Root):
         self.lets = lets
         self.max_calls = max_calls
         self.assumptions = assumptions
+        self.lemmas = lemmas
         self.theorem = theorem
         self.steps = steps
 
@@ -919,6 +933,12 @@ class ProofFile(Root):
 
         if self.max_calls:
             output_string += f"  calls <= {self.max_calls};\n"
+
+        if self.lemmas:
+            output_string += "\nlemma:\n"
+            for lemma in self.lemmas:
+                output_string += f"  {lemma}\n"
+
         output_string += f"theorem:\n  {self.theorem};\n"
         output_string += "games:\n"
         for step in self.steps:

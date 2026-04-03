@@ -39,6 +39,16 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#lemmas.
+    def visitLemmas(self, ctx:ProofParser.LemmasContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#lemmaEntry.
+    def visitLemmaEntry(self, ctx:ProofParser.LemmaEntryContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#theorem.
     def visitTheorem(self, ctx:ProofParser.TheoremContext):
         return self.visitChildren(ctx)

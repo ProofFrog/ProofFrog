@@ -3,6 +3,7 @@ import copy
 import dataclasses
 import difflib
 import functools
+import os
 import shutil
 import warnings
 from enum import Enum, IntEnum
@@ -191,7 +192,10 @@ class Verbosity(IntEnum):
 
 class ProofEngine:
     def __init__(
-        self, verbose: bool | Verbosity = False, no_diagnose: bool = False
+        self,
+        verbose: bool | Verbosity = False,
+        no_diagnose: bool = False,
+        skip_lemmas: bool = False,
     ) -> None:
         self.definition_namespace: frog_ast.Namespace = {}
         self.proof_namespace: frog_ast.Namespace = {}
@@ -203,6 +207,7 @@ class ProofEngine:
         else:
             self.verbosity = verbose
         self.no_diagnose = no_diagnose
+        self.skip_lemmas = skip_lemmas
         self.step_assumptions: list[ProcessedAssumption] = []
         self.hop_results: list[HopResult] = []
         self.variables: dict[str, Symbol | frog_ast.Expression] = {}
@@ -213,6 +218,13 @@ class ProofEngine:
 
     def add_definition(self, name: str, root: frog_ast.Root) -> None:
         self.definition_namespace[name] = root
+
+    @staticmethod
+    def _step_display(step: frog_ast.Step) -> str:
+        """Format a step for display, omitting the adversary and semicolon."""
+        if step.reduction:
+            return f"{step.challenger} compose {step.reduction}"
+        return str(step.challenger)
 
     @staticmethod
     def _count_hops(steps: list[frog_ast.ProofStep]) -> int:
@@ -235,7 +247,7 @@ class ProofEngine:
                     count += 1  # induction rollover
         return count
 
-    def prove(self, proof_file: frog_ast.ProofFile) -> None:
+    def prove(self, proof_file: frog_ast.ProofFile, proof_path: str = "") -> None:
         for game in proof_file.helpers:
             self.definition_namespace[game.name] = game
 
@@ -302,12 +314,46 @@ class ProofEngine:
                 + Fore.RESET
             )
 
-        print(f"Proving: {proof_file.theorem}\n")
+        # Process lemmas: verify each lemma proof and add its theorem as an assumption
+        effective_assumptions = list(proof_file.assumptions)
+        lemma_games: set[str] = set()
+        for lemma in proof_file.lemmas:
+            if self.skip_lemmas:
+                print(
+                    f"{Fore.CYAN}Lemma: {lemma.game} "
+                    f"by '{lemma.proof_path}' ... skipped{Fore.RESET}\n"
+                )
+                effective_assumptions.append(lemma.game)
+                lemma_games.add(str(lemma.game))
+                continue
+
+            lemma_path = os.path.join(os.path.dirname(proof_path), lemma.proof_path)
+            print(f"Lemma: {lemma.game} by '{lemma.proof_path}'")
+            try:
+                verify_proof_file(
+                    lemma_path,
+                    verbosity=self.verbosity,
+                    no_diagnose=True,
+                    skip_lemmas=self.skip_lemmas,
+                )
+                print(f"{Fore.GREEN}Lemma verified.{Fore.RESET}\n")
+            except (FailedProof, Exception) as e:
+                print(f"{Fore.RED}Lemma FAILED: {e}{Fore.RESET}")
+                raise FailedProof(f"Lemma {lemma.game} failed verification") from e
+
+            effective_assumptions.append(lemma.game)
+            lemma_games.add(str(lemma.game))
+
+        print(f"Theorem: {proof_file.theorem}\n")
 
         self.hop_results = []
         self._total_steps = self._count_hops(proof_file.steps)
         self._current_step = 0
-        self.prove_steps(proof_file.steps, proof_file.assumptions)
+        self.prove_steps(
+            proof_file.steps,
+            effective_assumptions,
+            lemma_games=lemma_games if lemma_games else None,
+        )
 
         print()
         self._print_summary_table()
@@ -393,6 +439,8 @@ class ProofEngine:
         for r in results:
             if r.kind == "by_assumption":
                 type_labels.append("assumption")
+            elif r.kind == "by_lemma":
+                type_labels.append("lemma")
             elif r.kind == "induction_rollover":
                 type_labels.append("rollover")
             else:
@@ -438,6 +486,8 @@ class ProofEngine:
         for r, hop_desc, type_label in zip(results, hop_descs, type_labels):
             if r.kind == "by_assumption":
                 result_str = Fore.CYAN + "assume" + Fore.RESET
+            elif r.kind == "by_lemma":
+                result_str = Fore.CYAN + "lemma" + Fore.RESET
             elif r.valid:
                 result_str = Fore.GREEN + "ok" + Fore.RESET
             else:
@@ -514,6 +564,7 @@ class ProofEngine:
         steps: list[frog_ast.ProofStep],
         assumed_indistinguishable: list[frog_ast.ParameterizedGame],
         _depth: int = 0,
+        lemma_games: set[str] | None = None,
     ) -> None:
         step_num = 0
 
@@ -548,19 +599,27 @@ class ProofEngine:
                 if self._is_by_indistinguishability(
                     current_step, next_step, assumed_indistinguishable
                 ):
-                    current_desc = str(current_step)
-                    next_desc = str(next_step)
+                    current_desc = self._step_display(current_step)
+                    next_desc = self._step_display(next_step)
+                    # Determine if this hop is justified by a lemma or an axiom
+                    is_lemma = (
+                        lemma_games is not None
+                        and isinstance(current_step.challenger, frog_ast.ConcreteGame)
+                        and str(current_step.challenger.game) in lemma_games
+                    )
+                    hop_label = "by lemma" if is_lemma else "by assumption"
+                    hop_kind = "by_lemma" if is_lemma else "by_assumption"
                     if self.verbosity >= Verbosity.NORMAL:
                         print(f"Current: {current_desc}")
                         print(f"Hop To: {next_desc}\n")
-                        print("Valid by assumption")
+                        print(f"Valid {hop_label}")
                     hop_desc = f"{current_desc} -> {next_desc}"
-                    self._print_step_status(hop_desc, "by assumption", Fore.CYAN)
+                    self._print_step_status(hop_desc, hop_label, Fore.CYAN)
                     self.hop_results.append(
                         HopResult(
                             step_num=step_num,
                             valid=True,
-                            kind="by_assumption",
+                            kind=hop_kind,
                             depth=_depth,
                             current_desc=current_desc,
                             next_desc=next_desc,
@@ -612,8 +671,10 @@ class ProofEngine:
                 )
                 current_step = last_inductive_step
 
-            current_desc = str(current_step)
-            next_desc = str(next_step)
+            assert isinstance(current_step, frog_ast.Step)
+            assert isinstance(next_step, frog_ast.Step)
+            current_desc = self._step_display(current_step)
+            next_desc = self._step_display(next_step)
 
             if self.verbosity >= Verbosity.NORMAL:
                 print(f"Current: {current_desc}")
@@ -648,7 +709,10 @@ class ProofEngine:
                 assert isinstance(the_induction, frog_ast.Induction)
                 self.proof_let_types.set(the_induction.name, frog_ast.IntType())
                 self.prove_steps(
-                    the_induction.steps, assumed_indistinguishable, _depth=_depth + 1
+                    the_induction.steps,
+                    assumed_indistinguishable,
+                    _depth=_depth + 1,
+                    lemma_games=lemma_games,
                 )
                 # Check induction roll over
                 first_step = the_induction.steps[0]
@@ -680,8 +744,8 @@ class ProofEngine:
                     last_step.challenger, last_step.reduction
                 )
                 self._current_step += 1
-                rollover_current_desc = str(last_step)
-                rollover_next_desc = str(first_step)
+                rollover_current_desc = self._step_display(last_step)
+                rollover_next_desc = self._step_display(first_step)
                 if self.verbosity >= Verbosity.NORMAL:
                     print("CHECKING INDUCTION ROLLOVER")
                     print(f"Current: {rollover_current_desc}")
@@ -1285,3 +1349,44 @@ def get_challenger_method_lookup(challenger: frog_ast.Game) -> MethodLookup:
 
 def get_challenger_field_name(name: str) -> str:
     return f"challenger@{name}"
+
+
+def _get_file_type_for_import(file_name: str) -> frog_ast.FileType:
+    """Determine the file type from a file's extension."""
+    extension = os.path.splitext(file_name)[1].strip(".")
+    return frog_ast.FileType(extension)
+
+
+def verify_proof_file(
+    proof_path: str,
+    verbosity: Verbosity = Verbosity.QUIET,
+    no_diagnose: bool = True,
+    skip_lemmas: bool = False,
+) -> frog_ast.ProofFile:
+    """Parse, load imports, and verify a proof file. Returns the ProofFile on success."""
+    # pylint: disable=import-outside-toplevel,cyclic-import
+    from . import frog_parser, semantic_analysis
+
+    proof_file = frog_parser.parse_proof_file(proof_path)
+    semantic_analysis.check_well_formed(proof_file, proof_path)
+
+    engine = ProofEngine(verbosity, no_diagnose=no_diagnose, skip_lemmas=skip_lemmas)
+
+    for imp in proof_file.imports:
+        resolved = frog_parser.resolve_import_path(imp.filename, proof_path)
+        file_type = _get_file_type_for_import(resolved)
+        root: frog_ast.Root
+        match file_type:
+            case frog_ast.FileType.PRIMITIVE:
+                root = frog_parser.parse_primitive_file(resolved)
+            case frog_ast.FileType.SCHEME:
+                root = frog_parser.parse_scheme_file(resolved)
+            case frog_ast.FileType.GAME:
+                root = frog_parser.parse_game_file(resolved)
+            case _:
+                raise FailedProof(f"Cannot import {resolved} in lemma proof")
+        name = imp.rename if imp.rename else root.get_export_name()
+        engine.add_definition(name, root)
+
+    engine.prove(proof_file, proof_path)
+    return proof_file

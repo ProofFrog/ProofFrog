@@ -1,0 +1,18 @@
+import 'SimplePRG.primitive';
+import 'DerivedSecurity.game';
+
+proof:
+
+let:
+    Int lambda;
+    SimplePRG G = SimplePRG(lambda);
+
+lemma:
+    DerivedSecurity(G) by 'bad_lemma.proof';
+
+theorem:
+    DerivedSecurity(G);
+
+games:
+    DerivedSecurity(G).Real against DerivedSecurity(G).Adversary;
+    DerivedSecurity(G).Random against DerivedSecurity(G).Adversary;

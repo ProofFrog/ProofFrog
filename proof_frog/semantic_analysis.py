@@ -709,6 +709,16 @@ def check_proof_well_formed(
         type_check_visitor.visit(let)
     for assumption in proof.assumptions:
         type_check_visitor.visit(assumption)
+    for lemma in proof.lemmas:
+        type_check_visitor.visit(lemma.game)
+        lemma_path = os.path.join(os.path.dirname(file_name), lemma.proof_path)
+        if not os.path.isfile(lemma_path):
+            print_error(
+                lemma.game,
+                f"lemma proof file not found: '{lemma.proof_path}'",
+                file_name,
+            )
+            raise FailedTypeCheck()
 
     type_check_visitor.visit(proof.theorem)
 

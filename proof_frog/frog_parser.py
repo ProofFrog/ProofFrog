@@ -1275,11 +1275,20 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
                 assumptions.append(self.visit(assumption))
             if proof.assumptions().CALLS():
                 max_calls = self.visit(proof.assumptions().expression())
+
+        lemmas: list[frog_ast.Lemma] = []
+        if proof.lemmas():
+            for lemma_entry in proof.lemmas().lemmaEntry():
+                game = self.visit(lemma_entry.parameterizedGame())
+                path = lemma_entry.FILESTRING().getText().strip("'")
+                lemmas.append(frog_ast.Lemma(game, path))
+
         return frog_ast.ProofFile(
             [self.visit(im) for im in ctx.moduleImport()],
             game_list,
             lets,
             assumptions,
+            lemmas,
             max_calls,
             self.visit(proof.theorem().parameterizedGame()),
             self.visit(proof.gameList()),

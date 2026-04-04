@@ -570,7 +570,7 @@ class RedundantFieldCopyTransformer(BlockTransformer):
                 decl_index = -1
                 decl_statement: frog_ast.Assignment | frog_ast.Sample
                 for other_index, other_statement in enumerate(block.statements):
-                    if statement == other_statement:
+                    if other_index == index:
                         continue
                     if (
                         isinstance(
@@ -600,6 +600,26 @@ class RedundantFieldCopyTransformer(BlockTransformer):
                 # the declaration of the variable on the RHS of the assignment. This means
                 # it is a field, and isn't a redundant copy
                 if not no_other_uses or decl_index == -1:
+                    continue
+                # Check that the field is not accessed (read or written)
+                # between the declaration and the field assignment.
+                # Moving the assignment earlier would change observable
+                # behaviour if the field is referenced in between.
+                assert isinstance(statement.var, frog_ast.Variable)
+                field_var_name = statement.var.name
+
+                def is_field_ref(
+                    node: frog_ast.ASTNode, fn: str = field_var_name
+                ) -> bool:
+                    return isinstance(node, frog_ast.Variable) and node.name == fn
+
+                field_accessed_between = False
+                for between_idx in range(decl_index + 1, index):
+                    between_stmt = block.statements[between_idx]
+                    if SearchVisitor(is_field_ref).visit(between_stmt) is not None:
+                        field_accessed_between = True
+                        break
+                if field_accessed_between:
                     continue
                 modified_statement = copy.deepcopy(decl_statement)
                 modified_statement.var = statement.var

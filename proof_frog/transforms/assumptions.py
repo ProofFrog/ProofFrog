@@ -83,9 +83,9 @@ class SimplifyRangeTransformer(Transformer):
             return operation
         self.solver.push()
         self.solver.add(statement_formula)
-        satisfied = self.solver.check() == z3.sat
+        contradiction_result = self.solver.check()
         self.solver.pop()
-        if not satisfied:
+        if contradiction_result == z3.unsat:
             return frog_ast.Boolean(False)
         solver = z3.Solver()
         solver.set("timeout", 30000)

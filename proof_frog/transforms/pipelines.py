@@ -47,7 +47,7 @@ from .structural import (
     TopologicalSort,
     RemoveDuplicateFields,
     RemoveUnnecessaryFields,
-    TrivialEncodingElimination,
+    UniformBijectionElimination,
 )
 from .control_flow import (
     IfConditionAliasSubstitution,
@@ -79,7 +79,7 @@ CORE_PIPELINE: list[TransformPass] = [
     MergeUniformSamples(),
     MergeProductSamples(),
     SplitUniformSamples(),
-    TrivialEncodingElimination(),
+    UniformBijectionElimination(),
     FoldTupleIndex(),
     ExtractRFCalls(),
     UniqueRFSimplification(),

@@ -24,6 +24,7 @@ from ..visitors import (
     Z3FormulaVisitor,
     GetTypeMapVisitor,
     NameTypeMap,
+    assigns_variable,
 )
 from ._base import TransformPass, PipelineContext, NearMiss
 
@@ -243,6 +244,23 @@ class SimplifyReturnTransformer(BlockTransformer):
                 break
             if statement.var != last_statement.expression:
                 break
+            # Check that no intervening statement modifies a free variable
+            # of the expression being inlined.  Without this check, moving
+            # `expr` from its original evaluation point to the return point
+            # could change its value.
+            expr_free_vars = VariableCollectionVisitor().visit(
+                copy.deepcopy(statement.value)
+            )
+            if expr_free_vars:
+                for skipped_idx in range(index + 1, len(block.statements) - 1):
+                    skipped = block.statements[skipped_idx]
+                    if (
+                        SearchVisitor(
+                            functools.partial(assigns_variable, expr_free_vars)
+                        ).visit(skipped)
+                        is not None
+                    ):
+                        return block
             return self.transform_block(
                 frog_ast.Block(block.statements[:index])
                 + frog_ast.Block(block.statements[index + 1 : -1])

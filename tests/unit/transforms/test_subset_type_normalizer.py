@@ -1,6 +1,7 @@
 """Tests for SubsetTypeNormalizer transformer."""
 
 from proof_frog import frog_parser, frog_ast
+from proof_frog.semantic_analysis import _extract_subsets_pairs
 from proof_frog.transforms.types import SubsetTypeNormalizer
 
 
@@ -315,6 +316,51 @@ class TestEqualityPairs:
         assert isinstance(assign, frog_ast.Assignment)
         assert isinstance(assign.the_type, frog_ast.OptionalType)
         assert isinstance(assign.the_type.the_type, frog_ast.BitStringType)
+
+
+class TestExtractSubsetsPairs:
+    """Tests that _extract_subsets_pairs only extracts equality constraints."""
+
+    def test_equality_constraint_extracted(self) -> None:
+        """An `==` constraint should produce a pair."""
+        scheme = frog_parser.parse_scheme_file(
+            """
+            import '../../Primitives/SymEnc.primitive';
+            Scheme Test(Int n) extends SymEnc {
+                requires BitString<n> == BitString<n>;
+                Set Key = BitString<n>;
+                Set Message = BitString<n>;
+                Set Ciphertext = BitString<n>;
+                Key KeyGen() { Key k <- Key; return k; }
+                Ciphertext Enc(Key k, Message m) { return k; }
+                Message? Dec(Key k, Ciphertext c) { return c; }
+            }
+            """
+        )
+        pairs = _extract_subsets_pairs(scheme)
+        assert len(pairs) == 1
+
+    def test_subsets_constraint_not_extracted(self) -> None:
+        """A `subsets` constraint should NOT produce a type replacement pair,
+        because replacing A with B when A ⊊ B changes sampling distribution."""
+        scheme = frog_parser.parse_scheme_file(
+            """
+            import '../../Primitives/SymEnc.primitive';
+            Scheme Test(Int n) extends SymEnc {
+                requires BitString<n> subsets BitString<n>;
+                Set Key = BitString<n>;
+                Set Message = BitString<n>;
+                Set Ciphertext = BitString<n>;
+                Key KeyGen() { Key k <- Key; return k; }
+                Ciphertext Enc(Key k, Message m) { return k; }
+                Message? Dec(Key k, Ciphertext c) { return c; }
+            }
+            """
+        )
+        pairs = _extract_subsets_pairs(scheme)
+        assert len(pairs) == 0, (
+            "subsets constraints should not produce type replacement pairs"
+        )
 
 
 class TestMultiplePairs:

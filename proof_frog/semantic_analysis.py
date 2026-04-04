@@ -849,19 +849,20 @@ def _block_always_returns(block: frog_ast.Block) -> bool:
 def _extract_subsets_pairs(
     instantiated_scheme: frog_ast.Instantiable,
 ) -> list[tuple[PossibleType, PossibleType]]:
-    """Extract (sub_type, super_type) pairs from requires clauses.
+    """Extract type-equality pairs from ``==`` constraints in requires clauses.
 
-    Handles both ``subsets`` and ``==`` constraints. After instantiation,
-    the requirements have concrete Variable nodes
-    (e.g., KeySpace2 subsets IntermediateSpace).
+    Only ``==`` constraints are used: they guarantee the two types represent
+    the same set, so normalizing one to the other preserves sampling
+    distributions.  ``subsets`` constraints are excluded because if A ⊊ B,
+    replacing ``x <- A`` with ``x <- B`` would change the distribution.
     """
     pairs: list[tuple[PossibleType, PossibleType]] = []
     if not isinstance(instantiated_scheme, frog_ast.Scheme):
         return pairs
     for req in instantiated_scheme.requirements:
-        if isinstance(req, frog_ast.BinaryOperation) and req.operator in (
-            frog_ast.BinaryOperators.SUBSETS,
-            frog_ast.BinaryOperators.EQUALS,
+        if (
+            isinstance(req, frog_ast.BinaryOperation)
+            and req.operator == frog_ast.BinaryOperators.EQUALS
         ):
             if isinstance(req.left_expression, frog_ast.Type) and isinstance(
                 req.right_expression, frog_ast.Type

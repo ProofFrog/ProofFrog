@@ -21,7 +21,10 @@ def _make_scheme_with_requirements(
 class TestExtractSubsetsPairs:
     """Tests for extracting (sub, super) type pairs from requires clauses."""
 
-    def test_single_subsets_pair(self) -> None:
+    def test_subsets_pair_not_extracted(self) -> None:
+        """Subsets constraints are NOT extracted — only equality constraints
+        are safe for type normalization (subsets may be strict, changing
+        sampling distributions)."""
         req = frog_ast.BinaryOperation(
             frog_ast.BinaryOperators.SUBSETS,
             frog_ast.Variable("KeySpace2"),
@@ -29,13 +32,10 @@ class TestExtractSubsetsPairs:
         )
         scheme = _make_scheme_with_requirements([req])
         pairs = semantic_analysis._extract_subsets_pairs(scheme)
-        assert len(pairs) == 1
-        assert pairs[0] == (
-            frog_ast.Variable("KeySpace2"),
-            frog_ast.Variable("IntermediateSpace"),
-        )
+        assert len(pairs) == 0
 
-    def test_multiple_subsets_pairs(self) -> None:
+    def test_multiple_subsets_pairs_not_extracted(self) -> None:
+        """Multiple subsets constraints should all be excluded."""
         req1 = frog_ast.BinaryOperation(
             frog_ast.BinaryOperators.SUBSETS,
             frog_ast.Variable("A"),
@@ -48,7 +48,7 @@ class TestExtractSubsetsPairs:
         )
         scheme = _make_scheme_with_requirements([req1, req2])
         pairs = semantic_analysis._extract_subsets_pairs(scheme)
-        assert len(pairs) == 2
+        assert len(pairs) == 0
 
     def test_equality_requirement_extracted(self) -> None:
         """Equality requirements should be extracted as type pairs."""

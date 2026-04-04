@@ -1589,16 +1589,23 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         if first_idx is None or last_idx is None or first_idx == last_idx:
             return True
 
-        # Check that no argument variable is reassigned in between
+        # Check that no argument variable is reassigned or element-mutated
         def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
-            return (
-                isinstance(
-                    node,
-                    (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample),
-                )
-                and isinstance(node.var, frog_ast.Variable)
-                and node.var.name == name
-            )
+            if not isinstance(
+                node,
+                (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample),
+            ):
+                return False
+            var = node.var
+            if isinstance(var, frog_ast.Variable) and var.name == name:
+                return True
+            # Element mutation: v[i] = expr, M[k] = expr
+            if isinstance(var, frog_ast.ArrayAccess) and isinstance(
+                var.the_array, frog_ast.Variable
+            ):
+                if var.the_array.name == name:
+                    return True
+            return False
 
         intermediate = frog_ast.Block(list(block.statements[first_idx + 1 : last_idx]))
         for var_name in arg_vars:

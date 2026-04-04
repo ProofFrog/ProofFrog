@@ -59,9 +59,23 @@ def _analyze_rf_eligibility(
     Returns a dict mapping RF field name to its analysis result.
     """
     analysis: dict[str, _RFAnalysis] = {name: _RFAnalysis() for name in rf_types}
+    field_names = {f.name for f in game.fields}
 
     for method in game.methods:
-        _analyze_block(method.block, analysis, rf_types)
+        _analyze_block(method.block, analysis, rf_types, field_names)
+
+    # Post-analysis: reject RFs where any argument variable is used more
+    # than once across call sites (RF is a function, so same input must
+    # produce same output — replacing with independent samples is wrong).
+    for rf_analysis in analysis.values():
+        if not rf_analysis.eligible:
+            continue
+        seen_args: set[str] = set()
+        for site in rf_analysis.call_sites:
+            if site.arg_name in seen_args:
+                rf_analysis.eligible = False
+                break
+            seen_args.add(site.arg_name)
 
     return analysis
 
@@ -70,6 +84,7 @@ def _analyze_block(
     block: frog_ast.Block,
     analysis: dict[str, _RFAnalysis],
     rf_types: dict[str, frog_ast.RandomFunctionType],
+    field_names: set[str] | None = None,
 ) -> None:
     """Analyze a block for RF calls and their <-uniq guards."""
     # Build map: variable name -> unique set name (from <-uniq in this block)
@@ -80,7 +95,18 @@ def _analyze_block(
         if isinstance(statement, frog_ast.UniqueSample) and isinstance(
             statement.var, frog_ast.Variable
         ):
-            uniq_guards[statement.var.name] = _get_unique_set_name(statement.unique_set)
+            set_name = _get_unique_set_name(statement.unique_set)
+            # The unique set must be a game field (persistent across oracle
+            # calls) to guarantee cross-call distinctness.  A local set
+            # resets each call, so the same value could be drawn across calls.
+            if field_names is not None:
+                raw_name = set_name.split(".")[0] if "." in set_name else set_name
+                if raw_name not in field_names:
+                    # Local set — don't trust it for cross-call uniqueness.
+                    # Mark any RF whose calls use this argument as ineligible
+                    # (handled below by not adding to uniq_guards).
+                    continue
+            uniq_guards[statement.var.name] = set_name
 
         # Check RF calls in assignments
         if (
@@ -129,9 +155,9 @@ def _analyze_block(
         # Recurse into nested blocks
         if isinstance(statement, frog_ast.IfStatement):
             for nested_block in statement.blocks:
-                _analyze_block(nested_block, analysis, rf_types)
+                _analyze_block(nested_block, analysis, rf_types, field_names)
         elif isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
-            _analyze_block(statement.block, analysis, rf_types)
+            _analyze_block(statement.block, analysis, rf_types, field_names)
 
 
 class _RFCallExtractor(BlockTransformer):
@@ -261,22 +287,11 @@ class UniqueRFSimplificationTransformer(BlockTransformer):
         if not rf_types:
             return block
 
-        # Build a temporary game to run analysis on
-        dummy_game = frog_ast.Game(
-            (
-                "_Dummy",
-                [],
-                [],
-                [
-                    frog_ast.Method(
-                        frog_ast.MethodSignature("f", frog_ast.Void(), []),
-                        block,
-                    )
-                ],
-                [],
-            )
-        )
-        analysis = _analyze_rf_eligibility(dummy_game, rf_types)
+        # Run analysis directly on this block (no field-scope check
+        # since this standalone transformer is used for unit tests
+        # where RF is declared locally in the same block).
+        analysis: dict[str, _RFAnalysis] = {name: _RFAnalysis() for name in rf_types}
+        _analyze_block(block, analysis, rf_types)
         eligible = {
             name: rf_types[name] for name, result in analysis.items() if result.eligible
         }

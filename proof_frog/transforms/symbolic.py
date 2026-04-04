@@ -80,7 +80,7 @@ class SymbolicComputationTransformer(Transformer):
                 frog_ast.BinaryOperators.ADD: operator.add,
                 frog_ast.BinaryOperators.SUBTRACT: operator.sub,
                 frog_ast.BinaryOperators.MULTIPLY: operator.mul,
-                frog_ast.BinaryOperators.DIVIDE: operator.truediv,
+                frog_ast.BinaryOperators.DIVIDE: operator.floordiv,
                 frog_ast.BinaryOperators.EXPONENTIATE: operator.pow,
             }
             if (
@@ -88,9 +88,21 @@ class SymbolicComputationTransformer(Transformer):
                 and self.computation_stack[-1] is not None
                 and self.computation_stack[-2] is not None
             ):
-                simplified_expression = operators[binary_operation.operator](
-                    self.computation_stack[-2], self.computation_stack[-1]
-                )
+                left_val = self.computation_stack[-2]
+                right_val = self.computation_stack[-1]
+                # For division, only simplify when both operands are
+                # concrete integers.  Symbolic floor division produces
+                # floor(expr) which has no FrogLang representation, and
+                # rational arithmetic would violate integer semantics.
+                if (
+                    binary_operation.operator == frog_ast.BinaryOperators.DIVIDE
+                    and not (isinstance(left_val, int) and isinstance(right_val, int))
+                ):
+                    pass  # leave symbolic divisions unsimplified
+                else:
+                    simplified_expression = operators[binary_operation.operator](
+                        left_val, right_val
+                    )
             self.computation_stack.pop()
             self.computation_stack.pop()
             if simplified_expression is not None:

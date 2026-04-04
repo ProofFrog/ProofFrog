@@ -21,6 +21,15 @@ def cli() -> None:
 
 
 @cli.command()
+def version() -> None:
+    """Print the ProofFrog version."""
+    # pylint: disable=import-outside-toplevel
+    from importlib.metadata import version as pkg_version
+
+    click.echo(f"ProofFrog {pkg_version('proof_frog')}")
+
+
+@cli.command()
 @click.argument("file")
 @click.option("--json", "-j", "json_output", is_flag=True, help="Output JSON.")
 def parse(file: str, json_output: bool) -> None:

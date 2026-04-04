@@ -51,6 +51,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 }
 #toolbar .logo { display: flex; align-items: center; gap: 6px; font-weight: 700; color: var(--accent); margin-right: 8px; font-size: 14px; }
 #toolbar .logo img { height: 22px; width: auto; }
+#toolbar .version { color: var(--text-dim); font-size: 11px; margin-right: 8px; }
 #welcome img { height: 80px; width: auto; margin-bottom: 4px; }
 #toolbar button {
   padding: 4px 12px; border: 1px solid var(--border); border-radius: 3px;

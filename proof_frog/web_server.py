@@ -672,6 +672,13 @@ def create_app(directory: str, *, watch: bool = True) -> tuple[Flask, Any]:
     def serve_static(filename: str) -> Any:
         return send_from_directory(str(static_dir), filename)
 
+    @app.route("/api/version")
+    def api_version() -> Any:
+        # pylint: disable=import-outside-toplevel
+        from importlib.metadata import version as pkg_version
+
+        return jsonify({"version": pkg_version("proof_frog")})
+
     @app.route("/api/files")
     def list_files() -> Any:
         tree = _build_tree(Path(directory), Path(directory))

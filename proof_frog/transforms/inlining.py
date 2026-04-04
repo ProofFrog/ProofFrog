@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import functools
+from collections.abc import Callable
 
 from .. import frog_ast
 from ..visitors import (
@@ -971,10 +972,44 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                     and node == target
                 )
 
+            def _search_use_positions(
+                stmt: frog_ast.Statement,
+                matcher: Callable[[frog_ast.ASTNode], bool],
+            ) -> frog_ast.Expression | None:
+                """Search only in use-position sub-expressions, skipping
+                assignment targets (LHS) to avoid corrupting def sites."""
+                if isinstance(stmt, frog_ast.Assignment):
+                    return SearchVisitor(matcher).visit(stmt.value)
+                if isinstance(stmt, (frog_ast.Sample, frog_ast.UniqueSample)):
+                    return None
+                return SearchVisitor(matcher).visit(stmt)
+
+            def _modifies_var(name: str, node: frog_ast.ASTNode) -> bool:
+                """Check if a statement modifies a variable, including
+                element mutations like v[i] = expr."""
+                if not isinstance(
+                    node,
+                    (
+                        frog_ast.Sample,
+                        frog_ast.Assignment,
+                        frog_ast.UniqueSample,
+                    ),
+                ):
+                    return False
+                var = node.var
+                if isinstance(var, frog_ast.Variable) and var.name == name:
+                    return True
+                if isinstance(var, frog_ast.ArrayAccess) and isinstance(
+                    var.the_array, frog_ast.Variable
+                ):
+                    if var.the_array.name == name:
+                        return True
+                return False
+
             for j in range(i):
                 earlier = block.statements[j]
-                match = SearchVisitor(functools.partial(matches_expr, expr)).visit(
-                    earlier
+                match = _search_use_positions(
+                    earlier, functools.partial(matches_expr, expr)
                 )
                 if match is None:
                     continue
@@ -1032,14 +1067,35 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                         break
                 if not all_defined:
                     continue
+                # Verify free variables are not modified between j and i.
+                # This ensures the expression evaluates to the same value
+                # at the hoist target (before j) as at the original
+                # position i.
+                stable = True
+                for fv in free_vars:
+                    if fv.name in self.fields:
+                        continue
+                    for k in range(j, i):
+                        if (
+                            SearchVisitor(
+                                functools.partial(_modifies_var, fv.name)
+                            ).visit(block.statements[k])
+                            is not None
+                        ):
+                            stable = False
+                            break
+                    if not stable:
+                        break
+                if not stable:
+                    continue
                 # Hoist: move field assignment to before position j,
                 # replace the subexpression in position j with the field.
                 # Re-find the match in a deep copy (ReplaceTransformer uses
                 # identity, so we need a node from the same copy).
                 new_earlier = copy.deepcopy(earlier)
-                match_in_copy = SearchVisitor(
-                    functools.partial(matches_expr, expr)
-                ).visit(new_earlier)
+                match_in_copy = _search_use_positions(
+                    new_earlier, functools.partial(matches_expr, expr)
+                )
                 if match_in_copy is None:
                     continue
                 new_earlier = ReplaceTransformer(

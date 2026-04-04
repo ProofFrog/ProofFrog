@@ -111,3 +111,61 @@ def test_field_to_field_copy_not_hoisted() -> None:
     }
     """
     _transform_and_compare(source, source)
+
+
+def test_no_hoist_when_free_variable_reassigned_between_j_and_i() -> None:
+    """Soundness: if a free variable of the hoisted expression is reassigned
+    between the target position j and the original position i, hoisting would
+    change the value of the expression. The transform must not fire."""
+    source = """
+    Game Test() {
+        Int field7;
+        Void Initialize() {
+            Int v4 = 10;
+            Int x = v4 + 1;
+            v4 = 99;
+            field7 = v4;
+        }
+    }
+    """
+    # field7 = v4 should NOT be hoisted before x = v4 + 1 because v4 is
+    # reassigned at position 2 (v4 = 99) between j=1 and i=3.
+    _transform_and_compare(source, source)
+
+
+def test_no_hoist_when_match_is_in_assignment_target() -> None:
+    """Soundness: the search should not match the expression in the LHS
+    (assignment target) of an earlier statement, only in use positions."""
+    source = """
+    Game Test() {
+        Int field7;
+        Void Initialize() {
+            Int v4 = 10;
+            v4 = 100;
+            field7 = v4;
+        }
+    }
+    """
+    # field7 = v4 should NOT be hoisted: at j=1 (v4 = 100), v4 appears
+    # only as the assignment target. v4 is also reassigned there.
+    _transform_and_compare(source, source)
+
+
+def test_no_hoist_when_array_element_modified_between_j_and_i() -> None:
+    """Soundness: if the expression is an ArrayAccess (e.g., v1[0]) and the
+    array element is modified between j and i via v1[0] = expr, the hoisted
+    expression would evaluate to the old value. The transform must not fire."""
+    source = """
+    Game Test() {
+        Int field5;
+        Void Initialize() {
+            Array<Int, 2> v1 = A.make();
+            Int x = v1[0] + 1;
+            v1[0] = 99;
+            field5 = v1[0];
+        }
+    }
+    """
+    # field5 = v1[0] should NOT be hoisted before x = v1[0] + 1 because
+    # v1[0] is modified at position 2.
+    _transform_and_compare(source, source)

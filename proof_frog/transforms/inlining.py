@@ -568,13 +568,20 @@ class RedundantFieldCopyTransformer(BlockTransformer):
 
                 no_other_uses = True
                 decl_index = -1
-                decl_statement: frog_ast.Assignment | frog_ast.Sample
+                decl_statement: (
+                    frog_ast.Assignment | frog_ast.Sample | frog_ast.UniqueSample
+                )
                 for other_index, other_statement in enumerate(block.statements):
                     if other_index == index:
                         continue
                     if (
                         isinstance(
-                            other_statement, (frog_ast.Sample, frog_ast.Assignment)
+                            other_statement,
+                            (
+                                frog_ast.Sample,
+                                frog_ast.Assignment,
+                                frog_ast.UniqueSample,
+                            ),
                         )
                         and other_statement.the_type is not None
                         and other_statement.var == statement.value

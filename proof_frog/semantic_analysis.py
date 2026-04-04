@@ -276,10 +276,11 @@ class VariableTypeVisitor(visitors.Visitor[None]):
             self.variable_type_map_stack[-1][sample.var.name] = sample.the_type
 
     def leave_unique_sample(self, unique_sample: frog_ast.UniqueSample) -> None:
-        assert isinstance(unique_sample.var, frog_ast.Variable)
-        self.variable_type_map_stack[-1][
-            unique_sample.var.name
-        ] = unique_sample.the_type
+        if unique_sample.the_type is not None:
+            assert isinstance(unique_sample.var, frog_ast.Variable)
+            self.variable_type_map_stack[-1][
+                unique_sample.var.name
+            ] = unique_sample.the_type
 
     def visit_variable_declaration(
         self, declaration: frog_ast.VariableDeclaration
@@ -1930,10 +1931,15 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 f"Set element type {set_type.parameterization} does not match"
                 f" sampled type {unique_sample.sampled_from}",
             )
-        if not self.check_types(unique_sample.the_type, unique_sample.sampled_from):
+        expected_type = (
+            unique_sample.the_type
+            if unique_sample.the_type is not None
+            else self.get_type_from_ast(unique_sample.var)
+        )
+        if not self.check_types(expected_type, unique_sample.sampled_from):
             self.print_error(
                 unique_sample,
-                f"Declared type {unique_sample.the_type} does not match"
+                f"Declared type {expected_type} does not match"
                 f" sampled type {unique_sample.sampled_from}",
             )
 

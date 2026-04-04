@@ -179,6 +179,49 @@ from proof_frog.transforms.inlining import RedundantFieldCopyTransformer
             }
         }""",
         ),
+        # UniqueSample — local only used in field copy, should be inlined
+        (
+            """
+        Game Test() {
+            Int field1;
+            Set<Int> S;
+            Void Initialize() {
+                Int v <-uniq[S] Int;
+                field1 = v;
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Set<Int> S;
+            Void Initialize() {
+                field1 <-uniq[S] Int;
+            }
+        }""",
+        ),
+        # UniqueSample — local used elsewhere, must NOT inline
+        (
+            """
+        Game Test() {
+            Int field1;
+            Set<Int> S;
+            Int Initialize() {
+                Int v <-uniq[S] Int;
+                field1 = v;
+                return v;
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Set<Int> S;
+            Int Initialize() {
+                Int v <-uniq[S] Int;
+                field1 = v;
+                return v;
+            }
+        }""",
+        ),
     ],
 )
 def test_redundant_field_copy(

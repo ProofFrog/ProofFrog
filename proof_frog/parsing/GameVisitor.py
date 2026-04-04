@@ -84,6 +84,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#uniqueSampleNoTypeStatement.
+    def visitUniqueSampleNoTypeStatement(self, ctx:GameParser.UniqueSampleNoTypeStatementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#functionCallStatement.
     def visitFunctionCallStatement(self, ctx:GameParser.FunctionCallStatementContext):
         return self.visitChildren(ctx)

@@ -159,6 +159,11 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#uniqueSampleNoTypeStatement.
+    def visitUniqueSampleNoTypeStatement(self, ctx:ProofParser.UniqueSampleNoTypeStatementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#functionCallStatement.
     def visitFunctionCallStatement(self, ctx:ProofParser.FunctionCallStatementContext):
         return self.visitChildren(ctx)

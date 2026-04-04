@@ -557,7 +557,7 @@ class Sample(Statement):
 class UniqueSample(Statement):
     def __init__(
         self,
-        the_type: Type,
+        the_type: Optional[Type],
         var: Expression,
         unique_set: Expression,
         sampled_from: Type,
@@ -570,8 +570,8 @@ class UniqueSample(Statement):
 
     def __str__(self) -> str:
         return (
-            f"{self.the_type} {self.var} <-uniq[{self.unique_set}] {self.sampled_from};"
-        )
+            f"{self.the_type} " if self.the_type else ""
+        ) + f"{self.var} <-uniq[{self.unique_set}] {self.sampled_from};"
 
 
 class Assignment(Statement):

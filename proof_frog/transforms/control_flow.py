@@ -565,9 +565,29 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
                 new_branch = SubstitutionTransformer(inline_map).transform(new_branch)
 
             # Phase 2: Substitute the comparison field with the local/param.
+            # Stop at the first reassignment of the field within the branch,
+            # since after reassignment the field value may differ from the local.
             alias_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
             alias_map.set(field_expr, local_expr)
-            new_branch = SubstitutionTransformer(alias_map).transform(new_branch)
+            new_stmts: list[frog_ast.Statement] = []
+            for branch_stmt in new_branch.statements:
+                # Check if this statement reassigns the field
+                if (
+                    isinstance(
+                        branch_stmt,
+                        (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+                    )
+                    and isinstance(branch_stmt.var, frog_ast.Variable)
+                    and branch_stmt.var.name == field_var_name
+                ):
+                    # Stop substituting: keep this and all remaining as-is
+                    remaining_idx = new_branch.statements.index(branch_stmt)
+                    new_stmts.extend(new_branch.statements[remaining_idx:])
+                    break
+                new_stmts.append(
+                    SubstitutionTransformer(alias_map).transform(branch_stmt)
+                )
+            new_branch = frog_ast.Block(new_stmts)
 
             if new_branch == statement.blocks[0]:
                 continue

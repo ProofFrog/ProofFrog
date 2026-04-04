@@ -132,3 +132,26 @@ class TestPreservesRealNullGuards:
         type_map = visitors.build_game_type_map(game)
         result = DeadNullGuardEliminator(type_map).transform(game)
         assert result == game
+
+    def test_preserves_guard_when_nonnull_var_reassigned_to_none(self) -> None:
+        """If a variable is declared from a non-nullable expr but later
+        reassigned to None, the null guard is reachable and must be kept."""
+        game = frog_parser.parse_game(
+            """
+            Game G() {
+                BitString<8>? Test(BitString<8> x) {
+                    BitString<8>? v = x;
+                    v = None;
+                    if (v == None) {
+                        return 0^8;
+                    }
+                    return v;
+                }
+            }
+            """
+        )
+        type_map = visitors.build_game_type_map(game)
+        result = DeadNullGuardEliminator(type_map).transform(game)
+        assert result == game, (
+            "Guard on variable reassigned to None should not be eliminated"
+        )

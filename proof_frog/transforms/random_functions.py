@@ -796,10 +796,18 @@ class ChallengeExclusionRFToUniformTransformer:
                 post_guard_block = frog_ast.Block(
                     list(oracle_method.block.statements[guard_idx + 1 :])
                 )
-                # Also check inside the guard's else/else-if blocks (not the
-                # return-early block)
                 guard_stmt = oracle_method.block.statements[guard_idx]
                 assert isinstance(guard_stmt, frog_ast.IfStatement)
+
+                # Check inside the guard's return-early block (blocks[0]).
+                # If RF is called there, the input equals the challenge field
+                # (guard condition is true), matching the Initialize RF input.
+                guard_body_calls = _collect_rf_call_sites(guard_stmt.blocks[0], rf_name)
+                if guard_body_calls:
+                    all_oracle_ok = False
+                    break
+
+                # Also check inside the guard's else/else-if blocks
                 extra_blocks = list(guard_stmt.blocks[1:])
 
                 all_post_calls = _collect_rf_call_sites(post_guard_block, rf_name)

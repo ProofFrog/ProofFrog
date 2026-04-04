@@ -50,6 +50,7 @@ class DeadNullGuardEliminator(BlockTransformer):
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         # Pre-pass: for nullable declarations `T? v = expr` where expr is
         # provably non-nullable, record v as effectively non-null.
+        # But invalidate if the variable is later reassigned.
         non_null_locals: set[str] = set()
         for stmt in block.statements:
             if (
@@ -61,6 +62,17 @@ class DeadNullGuardEliminator(BlockTransformer):
                 and self._is_nonnullable_expr(stmt.value)
             ):
                 non_null_locals.add(stmt.var.name)
+            elif (
+                isinstance(
+                    stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+                )
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name in non_null_locals
+                and (not isinstance(stmt, frog_ast.Assignment) or stmt.the_type is None)
+            ):
+                # Variable is reassigned (untyped assignment, sample, or
+                # unique sample) — it may now be nullable.
+                non_null_locals.discard(stmt.var.name)
 
         new_statements: list[frog_ast.Statement] = []
         for statement in block.statements:

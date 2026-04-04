@@ -494,6 +494,13 @@ class CollapseAssignmentTransformer(BlockTransformer):
                     later_statement, (frog_ast.Assignment, frog_ast.Sample)
                 ):
                     break
+                # Skip element mutations (v[i] = expr, M[k] = expr) — the
+                # variable is being used, not fully overwritten.
+                if not (
+                    isinstance(later_statement.var, frog_ast.Variable)
+                    and later_statement.var == statement.var
+                ):
+                    break
                 later_rhs = (
                     later_statement.sampled_from
                     if isinstance(later_statement, frog_ast.Sample)
@@ -1493,8 +1500,11 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         dup_group: list[frog_ast.FuncCall] | None = None
         for group in groups:
             if len(group) >= 2:
-                dup_group = group
-                break
+                # Verify no argument variable is reassigned between the
+                # first and last statement containing a call from this group.
+                if self._args_stable_across_calls(block, group):
+                    dup_group = group
+                    break
 
         if dup_group is None:
             return block
@@ -1547,6 +1557,59 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
 
         # Recurse to handle remaining duplicate groups
         return self.transform_block(frog_ast.Block(new_stmts))
+
+    def _args_stable_across_calls(
+        self,
+        block: frog_ast.Block,
+        call_group: list[frog_ast.FuncCall],
+    ) -> bool:
+        """Check that no argument variable of the call group is reassigned
+        between the first and last statement containing a call."""
+        # Collect all free variable names from call arguments
+        representative = call_group[0]
+        arg_vars: set[str] = set()
+        for arg in representative.args:
+            for fv in VariableCollectionVisitor().visit(copy.deepcopy(arg)):
+                arg_vars.add(fv.name)
+        if not arg_vars:
+            return True
+
+        # Find first and last statement indices containing a call from the group
+        first_idx: int | None = None
+        last_idx: int | None = None
+        for idx, stmt in enumerate(block.statements):
+            if isinstance(stmt, frog_ast.IfStatement):
+                continue
+            collector = _DeterministicCallCollector(self.proof_namespace)
+            collector.visit(stmt)
+            if any(c == representative for c in collector.result()):
+                if first_idx is None:
+                    first_idx = idx
+                last_idx = idx
+        if first_idx is None or last_idx is None or first_idx == last_idx:
+            return True
+
+        # Check that no argument variable is reassigned in between
+        def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
+            return (
+                isinstance(
+                    node,
+                    (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample),
+                )
+                and isinstance(node.var, frog_ast.Variable)
+                and node.var.name == name
+            )
+
+        intermediate = frog_ast.Block(list(block.statements[first_idx + 1 : last_idx]))
+        for var_name in arg_vars:
+            if (
+                SearchVisitor(functools.partial(is_written_to, var_name)).visit(
+                    intermediate
+                )
+                is not None
+            ):
+                return False
+        return True
 
     def _report_nondet_near_misses(self, block: frog_ast.Block) -> None:
         """Report near-misses for duplicate non-deterministic calls."""

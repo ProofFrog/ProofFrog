@@ -394,25 +394,36 @@ class XorCancellationTransformer(Transformer):
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
     ) -> frog_ast.Expression:
-        transformed = frog_ast.BinaryOperation(
-            binary_operation.operator,
-            self.transform(binary_operation.left_expression),
-            self.transform(binary_operation.right_expression),
-        )
-        if transformed.operator != frog_ast.BinaryOperators.ADD:
-            return transformed
+        if binary_operation.operator != frog_ast.BinaryOperators.ADD:
+            return frog_ast.BinaryOperation(
+                binary_operation.operator,
+                self.transform(binary_operation.left_expression),
+                self.transform(binary_operation.right_expression),
+            )
 
-        if not _is_bitstring_add_chain(transformed, self.type_map):
+        if not _is_bitstring_add_chain(binary_operation, self.type_map):
+            transformed = frog_ast.BinaryOperation(
+                binary_operation.operator,
+                self.transform(binary_operation.left_expression),
+                self.transform(binary_operation.right_expression),
+            )
             self._maybe_report_modint_near_miss(transformed)
             return transformed
 
-        terms = _flatten_add_chain(transformed)
+        # Flatten the full ADD chain from the ORIGINAL expression (before
+        # recursing into sub-ADD-expressions).  This ensures multi-term
+        # chains like (k + k) + m are flattened to [k, k, m] and cancelled
+        # as a whole, rather than the inner (k + k) being processed first.
+        terms = _flatten_add_chain(binary_operation)
         if len(terms) < 2:
-            return transformed
+            return self.transform(terms[0]) if terms else binary_operation
+
+        # Transform each leaf term (non-ADD sub-expressions) individually
+        transformed_terms = [self.transform(t) for t in terms]
 
         # Cancel pairs of identical terms
         remaining: list[frog_ast.Expression] = []
-        for term in terms:
+        for term in transformed_terms:
             found = False
             for i, existing in enumerate(remaining):
                 if term == existing:
@@ -422,11 +433,34 @@ class XorCancellationTransformer(Transformer):
             if not found:
                 remaining.append(term)
 
-        if len(remaining) == len(terms):
-            return transformed
+        if len(remaining) == len(transformed_terms):
+            return _rebuild_add_chain(transformed_terms)
         if not remaining:
-            return transformed
+            # All terms cancelled — return 0^n if we can determine the
+            # bitstring length, otherwise return unchanged.
+            zero_len = self._get_bitstring_length(transformed_terms)
+            if zero_len is not None:
+                return frog_ast.BitStringLiteral(0, zero_len)
+            return _rebuild_add_chain(transformed_terms)
         return _rebuild_add_chain(remaining)
+
+    def _get_bitstring_length(
+        self, terms: list[frog_ast.Expression]
+    ) -> frog_ast.Expression | None:
+        """Determine the bitstring length from the terms or type map."""
+        if self.type_map is not None:
+            for term in terms:
+                if isinstance(term, frog_ast.Variable):
+                    var_type = self.type_map.get(term.name)
+                    if (
+                        isinstance(var_type, frog_ast.BitStringType)
+                        and var_type.parameterization is not None
+                    ):
+                        return copy.deepcopy(var_type.parameterization)
+        for term in terms:
+            if isinstance(term, frog_ast.BitStringLiteral):
+                return copy.deepcopy(term.length)
+        return None
 
 
 class XorIdentityTransformer(Transformer):

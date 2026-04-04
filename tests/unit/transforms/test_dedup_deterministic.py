@@ -176,3 +176,33 @@ class TestDeduplicateDeterministicCalls:
             proof_namespace=_make_det_namespace()
         ).transform(method)
         assert result == expected
+
+    def test_arg_reassigned_between_calls_not_deduped(self) -> None:
+        """If an argument is reassigned between two structurally equal calls,
+        they must NOT be deduplicated (the argument has different values)."""
+        method = frog_parser.parse_method(
+            """
+            Void f(BitString<n> k) {
+                BitString<n> a = G.evaluate(k);
+                BitString<n> k <- BitString<n>;
+                BitString<n> b = G.evaluate(k);
+                return [a, b];
+            }
+            """
+        )
+        original = frog_parser.parse_method(
+            """
+            Void f(BitString<n> k) {
+                BitString<n> a = G.evaluate(k);
+                BitString<n> k <- BitString<n>;
+                BitString<n> b = G.evaluate(k);
+                return [a, b];
+            }
+            """
+        )
+        result = DeduplicateDeterministicCallsTransformer(
+            proof_namespace=_make_det_namespace()
+        ).transform(method)
+        assert result == original, (
+            "Calls with reassigned argument variable should not be deduplicated"
+        )

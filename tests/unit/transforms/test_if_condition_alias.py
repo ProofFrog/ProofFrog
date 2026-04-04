@@ -254,3 +254,28 @@ def _transform_and_compare(source: str, expected: str) -> None:
 )
 def test_if_condition_alias_substitution(source: str, expected: str) -> None:
     _transform_and_compare(source, expected)
+
+
+def test_no_substitution_after_field_reassignment_in_branch() -> None:
+    """If the field is reassigned within the if-branch, substitution must
+    stop at the reassignment point.  After `field1 = 99;`, references to
+    field1 should remain as field1, not be replaced by v."""
+    source = """
+    Game Test() {
+        Int field1;
+        Int f(Int v) {
+            if (v == field1) {
+                field1 = 99;
+                return field1;
+            }
+            return 0;
+        }
+    }
+    """
+    game = frog_parser.parse_game(source)
+    result = IfConditionAliasSubstitutionTransformer().transform(game)
+    # After substitution, field1=99 should still be field1=99 (not v=99),
+    # and `return field1` should remain (not become `return v`).
+    assert result == game, (
+        "Field references after field reassignment in branch should not be substituted"
+    )

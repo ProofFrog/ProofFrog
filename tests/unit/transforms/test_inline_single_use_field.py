@@ -385,3 +385,62 @@ def test_inline_orphaned_untyped_variable() -> None:
     }
     """
     _transform_and_compare(source, expected)
+
+
+def test_use_before_definition_not_inlined() -> None:
+    """Field used BEFORE its assignment in the same method must NOT be inlined.
+
+    The use at position 0 reads the field value from a *previous* invocation
+    of the oracle.  Inlining would substitute the current call's expression,
+    which is semantically wrong.
+    """
+    source = """
+    Game Test() {
+        Int field;
+        Int Oracle(Int x) {
+            Int y = field + x;
+            field = x + 1;
+            return y;
+        }
+    }
+    """
+    expected = source  # no change — inlining must be blocked
+    _transform_and_compare(source, expected)
+
+
+def test_use_before_definition_multiple_uses_not_inlined() -> None:
+    """Field used both before and after its assignment must NOT be inlined."""
+    source = """
+    Game Test() {
+        Int field;
+        Int Oracle(Int x) {
+            Int y = field + x;
+            field = x + 1;
+            Int z = field + 2;
+            return y + z;
+        }
+    }
+    """
+    expected = source  # no change
+    _transform_and_compare(source, expected)
+
+
+def test_free_variable_reassigned_via_unique_sample_not_inlined() -> None:
+    """If a free variable in the expression is reassigned via UniqueSample
+    between definition and use, inlining must be blocked."""
+    source = """
+    Game Test(Int n) {
+        Set<BitString<n>> S;
+        BitString<n> field;
+        BitString<n> Oracle() {
+            BitString<n> r <- BitString<n>;
+            field = r;
+            BitString<n> r <-uniq[S] BitString<n>;
+            return field;
+        }
+    }
+    """
+    # field must not be inlined because free var r is reassigned
+    # via UniqueSample between def and use.
+    expected = source
+    _transform_and_compare(source, expected)

@@ -189,7 +189,14 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
 
             def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
                 return (
-                    isinstance(node, (frog_ast.Sample, frog_ast.Assignment))
+                    isinstance(
+                        node,
+                        (
+                            frog_ast.Sample,
+                            frog_ast.Assignment,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
                     and isinstance(node.var, frog_ast.Variable)
                     and node.var.name == name
                 )
@@ -1224,13 +1231,24 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
                 )
             return None
 
-        # 4. Check that no free variable in expr is modified between def and last use
+        # 4. Check that no use occurs before the definition (use-before-def).
+        #    If a field is used at position u < d in the same method, the use
+        #    reads the field value from a *previous* invocation; inlining the
+        #    current call's expression would be semantically wrong.
+        first_use_idx = -1
         last_use_idx = -1
         for si, stmt in enumerate(game.methods[assign_method_idx].block.statements):
             if si == assign_stmt_idx:
                 continue
             if SearchVisitor(uses_field).visit(stmt) is not None:
+                if first_use_idx == -1:
+                    first_use_idx = si
                 last_use_idx = si
+
+        if 0 <= first_use_idx < assign_stmt_idx:
+            return None
+
+        # 5. Check that no free variable in expr is modified between def and last use
         if last_use_idx >= 0:
             free_vars = VariableCollectionVisitor().visit(copy.deepcopy(assign_expr))
             intermediate_stmts = game.methods[assign_method_idx].block.statements[
@@ -1240,7 +1258,14 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
 
             def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
                 return (
-                    isinstance(node, (frog_ast.Sample, frog_ast.Assignment))
+                    isinstance(
+                        node,
+                        (
+                            frog_ast.Sample,
+                            frog_ast.Assignment,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
                     and isinstance(node.var, frog_ast.Variable)
                     and node.var.name == name
                 )
@@ -1254,7 +1279,7 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
             ):
                 return None
 
-        # 5. Perform the inlining — replace ALL occurrences in the method
+        # 6. Perform the inlining — replace ALL occurrences in the method
         new_game = copy.deepcopy(game)
 
         method = new_game.methods[assign_method_idx]

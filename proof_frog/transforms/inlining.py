@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import copy
 import functools
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from .. import frog_ast
 from ..visitors import (
@@ -1637,6 +1637,65 @@ def _is_stable_arg(
     return False
 
 
+def _collect_field_names_in_args(
+    expr: frog_ast.Expression, field_names: set[str]
+) -> set[str]:
+    """Return the set of field names referenced in *expr*."""
+    if isinstance(expr, frog_ast.Variable):
+        if expr.name in field_names:
+            return {expr.name}
+        return set()
+    if isinstance(expr, frog_ast.FieldAccess):
+        return _collect_field_names_in_args(expr.the_object, field_names)
+    if isinstance(expr, frog_ast.BinaryOperation):
+        return _collect_field_names_in_args(
+            expr.left_expression, field_names
+        ) | _collect_field_names_in_args(expr.right_expression, field_names)
+    if isinstance(expr, frog_ast.UnaryOperation):
+        return _collect_field_names_in_args(expr.expression, field_names)
+    return set()
+
+
+def _fields_assigned_in_block(block: frog_ast.Block, field_names: set[str]) -> set[str]:
+    """Return field names that are assigned anywhere in *block* (recursively)."""
+    assigned: set[str] = set()
+    for stmt in block.statements:
+        if isinstance(
+            stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ):
+            var = stmt.var
+            # Direct variable assignment: k = expr, k <- Type
+            if isinstance(var, frog_ast.Variable) and var.name in field_names:
+                assigned.add(var.name)
+            # Element mutation: arr[i] = expr, M[k] = expr
+            if (
+                isinstance(var, frog_ast.ArrayAccess)
+                and isinstance(var.the_array, frog_ast.Variable)
+                and var.the_array.name in field_names
+            ):
+                assigned.add(var.the_array.name)
+        if isinstance(stmt, frog_ast.IfStatement):
+            for blk in stmt.blocks:
+                assigned |= _fields_assigned_in_block(blk, field_names)
+        if isinstance(stmt, (frog_ast.NumericFor, frog_ast.GenericFor)):
+            assigned |= _fields_assigned_in_block(stmt.block, field_names)
+    return assigned
+
+
+def _fields_assigned_after(
+    statements: Sequence[frog_ast.Statement],
+    after_idx: int,
+    field_names: set[str],
+) -> set[str]:
+    """Return field names assigned in *statements* after index *after_idx*.
+
+    Checks both top-level and nested (if/for) statements that appear after
+    the statement at *after_idx*.
+    """
+    tail_block = frog_ast.Block(list(statements[after_idx + 1 :]))
+    return _fields_assigned_in_block(tail_block, field_names)
+
+
 class CrossMethodFieldAliasTransformer:
     """Replace deterministic calls in oracles with field references.
 
@@ -1666,7 +1725,7 @@ class CrossMethodFieldAliasTransformer:
         # (field_name, det_call, method_idx)
         field_aliases: list[tuple[str, frog_ast.FuncCall, int]] = []
         for midx, method in enumerate(game.methods):
-            for stmt in method.block.statements:
+            for sidx, stmt in enumerate(method.block.statements):
                 if not (
                     isinstance(stmt, frog_ast.Assignment)
                     and stmt.the_type is None
@@ -1685,6 +1744,40 @@ class CrossMethodFieldAliasTransformer:
                     _is_stable_arg(a, field_names, param_names) for a in call.args
                 ):
                     continue
+
+                # Soundness check: the alias must be in Initialize.
+                # If it's in an oracle, the adversary could call the
+                # replacement-target oracle before the alias-source oracle,
+                # reading an uninitialized field.
+                if method.signature.name != "Initialize":
+                    continue
+
+                # Soundness check: the alias field and all argument fields
+                # must not be reassigned after the alias statement in this
+                # method, and must not be assigned in any other method.
+                arg_fields = set()
+                for a in call.args:
+                    arg_fields |= _collect_field_names_in_args(a, field_names)
+                guarded_fields = {stmt.var.name} | arg_fields
+
+                # Check no reassignment after the alias in the source method
+                modified_after = _fields_assigned_after(
+                    method.block.statements, sidx, guarded_fields
+                )
+                if modified_after:
+                    continue
+
+                # Check no assignment in any other method
+                modified_elsewhere = False
+                for oidx, other_method in enumerate(game.methods):
+                    if oidx == midx:
+                        continue
+                    if _fields_assigned_in_block(other_method.block, guarded_fields):
+                        modified_elsewhere = True
+                        break
+                if modified_elsewhere:
+                    continue
+
                 field_aliases.append((stmt.var.name, call, midx))
 
         if not field_aliases:

@@ -824,6 +824,7 @@ def _single_call_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
         # Step 1: Find the uniform sample of this field in Initialize
         init_sample: Optional[frog_ast.Sample] = None
         init_sample_idx: Optional[int] = None
+        init_sample_count = 0
         field_used_elsewhere_in_init = False
 
         for idx, stmt in enumerate(init_method.block.statements):
@@ -835,10 +836,12 @@ def _single_call_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
             ):
                 init_sample = stmt
                 init_sample_idx = idx
+                init_sample_count += 1
             elif _references_name(stmt, field.name):
                 field_used_elsewhere_in_init = True
 
-        if init_sample is None or field_used_elsewhere_in_init:
+        # Reject if no sample, multiple samples, or field used elsewhere
+        if init_sample is None or init_sample_count > 1 or field_used_elsewhere_in_init:
             continue
 
         # Step 2: Find which non-Initialize methods reference this field
@@ -853,9 +856,10 @@ def _single_call_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
             continue
 
         # Step 3: Check the field is not written to in the using method
+        # (recursive check to catch assignments inside if-branches etc.)
         target_method_name = using_methods[0]
         target_method = game.get_method(target_method_name)
-        if _is_assigned_in(target_method.block, field.name):
+        if _is_written_in_recursive(target_method.block, field.name):
             continue
 
         assert init_sample_idx is not None
@@ -905,15 +909,6 @@ def _references_name(node: frog_ast.ASTNode, name: str) -> bool:
         return isinstance(n, frog_ast.Variable) and n.name == name
 
     return SearchVisitor(check).visit(node) is not None
-
-
-def _is_assigned_in(block: frog_ast.Block, name: str) -> bool:
-    """Check if a variable is assigned or sampled in a block."""
-    for stmt in block.statements:
-        if isinstance(stmt, (frog_ast.Assignment, frog_ast.Sample)):
-            if isinstance(stmt.var, frog_ast.Variable) and stmt.var.name == name:
-                return True
-    return False
 
 
 class SingleCallFieldToLocal(TransformPass):
@@ -1119,6 +1114,7 @@ def _counter_guarded_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
         # Step 1: Find the uniform sample of this field in Initialize
         init_sample: Optional[frog_ast.Sample] = None
         init_sample_idx: Optional[int] = None
+        init_sample_count = 0
         field_used_elsewhere_in_init = False
 
         for idx, stmt in enumerate(init_method.block.statements):
@@ -1130,10 +1126,12 @@ def _counter_guarded_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
             ):
                 init_sample = stmt
                 init_sample_idx = idx
+                init_sample_count += 1
             elif _references_name(stmt, field.name):
                 field_used_elsewhere_in_init = True
 
-        if init_sample is None or field_used_elsewhere_in_init:
+        # Reject if no sample, multiple samples, or field used elsewhere
+        if init_sample is None or init_sample_count > 1 or field_used_elsewhere_in_init:
             continue
 
         # Step 2: Find which non-Initialize methods reference this field

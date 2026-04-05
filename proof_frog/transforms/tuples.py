@@ -299,6 +299,7 @@ class CollapseSingleIndexTupleTransformer(BlockTransformer):
                 self.name = name
                 self.total_var_refs = 0
                 self.array_access_refs = 0
+                self.non_constant_access = False
                 self.indices: set[int] = set()
 
             def result(self) -> None:
@@ -316,11 +317,17 @@ class CollapseSingleIndexTupleTransformer(BlockTransformer):
                     self.array_access_refs += 1
                     if isinstance(aa.index, frog_ast.Integer):
                         self.indices.add(aa.index.num)
+                    else:
+                        self.non_constant_access = True
 
         visitor = _UsageVisitor(var_name)
         visitor.visit(block)
         # Bare uses = total Variable refs minus those inside ArrayAccess
         has_bare = visitor.total_var_refs > visitor.array_access_refs
+        # If any access uses a non-constant index, treat as bare use
+        # to prevent collapsing (the variable index may access any element)
+        if visitor.non_constant_access:
+            has_bare = True
         return has_bare, visitor.indices
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:

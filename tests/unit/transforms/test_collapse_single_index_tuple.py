@@ -84,6 +84,21 @@ def test_collapse_single_index_tuple_fires(
             return v[1];
         }
         """,
+        # Should NOT transform: variable index (v[x]) mixed with constant (v[0])
+        """
+        Int f(Int x) {
+            [Int, Int] v = challenger.g();
+            Int a = v[0];
+            return v[x];
+        }
+        """,
+        # Should NOT transform: variable-only index
+        """
+        Int f(Int x) {
+            [Int, Int] v = challenger.g();
+            return v[x];
+        }
+        """,
     ],
 )
 def test_collapse_single_index_tuple_no_change(method: str) -> None:

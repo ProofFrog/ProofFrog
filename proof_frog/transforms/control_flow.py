@@ -456,6 +456,24 @@ class RemoveUnreachableTransformer(BlockTransformer):
         return block
 
 
+def _count_field_assigns_recursive(node: frog_ast.ASTNode, field_name: str) -> int:
+    """Count how many times *field_name* is assigned/sampled anywhere in the AST."""
+    count = 0
+
+    def _counter(n: frog_ast.ASTNode) -> bool:
+        nonlocal count
+        if (
+            isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
+            and isinstance(n.var, frog_ast.Variable)
+            and n.var.name == field_name
+        ):
+            count += 1
+        return False  # never stop early — visit all nodes
+
+    SearchVisitor(_counter).visit(node)
+    return count
+
+
 class IfConditionAliasSubstitutionTransformer(BlockTransformer):
     """Substitutes field references with local/parameter aliases inside if-branches.
 
@@ -496,21 +514,28 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
         return new_game
 
     def _collect_field_definitions(self, game: frog_ast.Game) -> None:
-        """Collect single-assignment field definitions from top-level statements."""
+        """Collect single-assignment field definitions across all methods.
+
+        Uses recursive search to count assignments in nested blocks
+        (if-branches, etc.), not just top-level statements.
+        """
         assign_counts: dict[str, int] = {}
         definitions: dict[str, frog_ast.Expression] = {}
 
         for method in game.methods:
+            # Collect top-level definitions (for the expression value)
             for stmt in method.block.statements:
-                if not isinstance(stmt, frog_ast.Assignment):
-                    continue
-                if not isinstance(stmt.var, frog_ast.Variable):
-                    continue
-                name = stmt.var.name
-                if name not in self.field_names:
-                    continue
-                assign_counts[name] = assign_counts.get(name, 0) + 1
-                definitions[name] = stmt.value
+                if (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name in self.field_names
+                ):
+                    definitions[stmt.var.name] = stmt.value
+
+            # Count ALL assignments recursively (including nested blocks)
+            for field_name in self.field_names:
+                count = _count_field_assigns_recursive(method.block, field_name)
+                assign_counts[field_name] = assign_counts.get(field_name, 0) + count
 
         # Keep only single-assignment fields whose definitions reference
         # only other fields (not locals/params from the assigning method)

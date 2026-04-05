@@ -1,5 +1,5 @@
 import pytest
-from proof_frog import frog_parser
+from proof_frog import frog_ast, frog_parser
 from proof_frog.transforms.control_flow import IfConditionAliasSubstitutionTransformer
 
 
@@ -254,6 +254,51 @@ def _transform_and_compare(source: str, expected: str) -> None:
 )
 def test_if_condition_alias_substitution(source: str, expected: str) -> None:
     _transform_and_compare(source, expected)
+
+
+def test_no_phase1_inline_when_field_assigned_in_nested_block() -> None:
+    """If the field is assigned inside an if-branch in another method,
+    _collect_field_definitions must count it. The shallow scan only sees
+    top-level statements, so it misclassifies the field as single-assignment."""
+    source = """
+    Game Test() {
+        Int field1;
+        Int field2;
+        Void Initialize() {
+            field1 = 0;
+            field2 = field1 + 1;
+        }
+        Int f(Int v) {
+            if (v == field1) {
+                return field2;
+            }
+            return 0;
+        }
+        Void g(Int x) {
+            if (x == 0) {
+                field2 = 99;
+            }
+        }
+    }
+    """
+    game = frog_parser.parse_game(source)
+    result = IfConditionAliasSubstitutionTransformer().transform(game)
+    # field2 is assigned in Initialize AND inside an if-branch in g().
+    # It should NOT be treated as single-assignment, so Phase 1
+    # should not inline field2's definition into the if-branch of f().
+    # If Phase 1 fired, field2 would be replaced with (field1 + 1),
+    # then Phase 2 would substitute field1 -> v, producing (v + 1).
+    # This is wrong because field2 could have been changed by g().
+    f_method = result.get_method("f")
+    if_stmt = f_method.block.statements[0]
+    assert isinstance(if_stmt, frog_ast.IfStatement)
+    # The return should still reference field2, not an inlined expression
+    ret_stmt = if_stmt.blocks[0].statements[0]
+    assert isinstance(ret_stmt, frog_ast.ReturnStatement)
+    assert isinstance(ret_stmt.expression, frog_ast.Variable)
+    assert ret_stmt.expression.name == "field2", (
+        "field2 should not be inlined when it has nested assignments in other methods"
+    )
 
 
 def test_no_substitution_after_field_reassignment_in_branch() -> None:

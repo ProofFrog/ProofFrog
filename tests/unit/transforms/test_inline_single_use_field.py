@@ -444,3 +444,49 @@ def test_free_variable_reassigned_via_unique_sample_not_inlined() -> None:
     # via UniqueSample between def and use.
     expected = source
     _transform_and_compare(source, expected)
+
+
+def test_no_inline_when_field_assigned_in_nested_block() -> None:
+    """If a field is assigned at top level AND inside an if-branch in the
+    same method, the shallow assignment count sees assign_count=1 and
+    incorrectly allows inlining. The nested reassignment is missed, so
+    fieldB gets the wrong value (42 instead of 99)."""
+    source = """
+    Game Test() {
+        Int fieldA;
+        Int fieldB;
+        Int fieldC;
+        Void Initialize() {
+            fieldA = 42;
+            fieldC = 0;
+            if (fieldC == 0) {
+                fieldA = 99;
+            }
+            fieldB = fieldA;
+        }
+        Int Query() {
+            return fieldB;
+        }
+    }
+    """
+    # fieldA has 2 assignments: top-level (fieldA=42) and nested (fieldA=99).
+    # The shallow scan only sees the top-level one. But inlining fieldA=42
+    # into fieldB=fieldA would give fieldB=42, when at runtime fieldA is 99.
+    # (fieldC may be inlined - that's fine; we only care that fieldA is not)
+    expected = """
+    Game Test() {
+        Int fieldA;
+        Int fieldB;
+        Void Initialize() {
+            fieldA = 42;
+            if (0 == 0) {
+                fieldA = 99;
+            }
+            fieldB = fieldA;
+        }
+        Int Query() {
+            return fieldB;
+        }
+    }
+    """
+    _transform_and_compare(source, expected)

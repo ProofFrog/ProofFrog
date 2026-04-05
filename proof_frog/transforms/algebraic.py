@@ -314,7 +314,7 @@ def _is_bitstring_add_chain(
                 return False
             if isinstance(var_type, frog_ast.BitStringType):
                 return True
-    return True
+    return False
 
 
 def _flatten_add_chain(expr: frog_ast.Expression) -> list[frog_ast.Expression]:

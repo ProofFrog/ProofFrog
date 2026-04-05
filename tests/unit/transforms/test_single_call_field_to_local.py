@@ -301,6 +301,65 @@ from proof_frog.transforms.sampling import _single_call_field_to_local
             }
         }""",
         ),
+        # Field sampled twice in Initialize: no transformation
+        # (regression: second sample overwrites init_sample_idx, only removing
+        # the second and leaving a dangling first sample)
+        (
+            """
+        Game Test() {
+            BitString<lambda> k;
+            Void Initialize() {
+                k <- BitString<lambda>;
+                k <- BitString<lambda>;
+            }
+            BitString<lambda> CTXT(BitString<lambda> m) {
+                return m + k;
+            }
+        }""",
+            """
+        Game Test() {
+            BitString<lambda> k;
+            Void Initialize() {
+                k <- BitString<lambda>;
+                k <- BitString<lambda>;
+            }
+            BitString<lambda> CTXT(BitString<lambda> m) {
+                return m + k;
+            }
+        }""",
+        ),
+        # Field is written to inside an if-branch in the oracle: no transformation
+        # (regression: shallow _is_assigned_in missed nested assignments)
+        (
+            """
+        Game Test() {
+            BitString<lambda> k;
+            Void Initialize() {
+                k <- BitString<lambda>;
+            }
+            BitString<lambda> CTXT(BitString<lambda> m) {
+                BitString<lambda> result = m + k;
+                if (m == m) {
+                    k <- BitString<lambda>;
+                }
+                return result;
+            }
+        }""",
+            """
+        Game Test() {
+            BitString<lambda> k;
+            Void Initialize() {
+                k <- BitString<lambda>;
+            }
+            BitString<lambda> CTXT(BitString<lambda> m) {
+                BitString<lambda> result = m + k;
+                if (m == m) {
+                    k <- BitString<lambda>;
+                }
+                return result;
+            }
+        }""",
+        ),
     ],
 )
 def test_single_call_field_to_local(

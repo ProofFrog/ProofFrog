@@ -1128,6 +1128,24 @@ class HoistFieldPureAlias(TransformPass):
         ).transform(game)
 
 
+def _count_assigns_recursive(node: frog_ast.ASTNode, name: str) -> int:
+    """Count all assignments/samples to *name* recursively in the AST."""
+    count = 0
+
+    def _counter(n: frog_ast.ASTNode) -> bool:
+        nonlocal count
+        if (
+            isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
+            and isinstance(n.var, frog_ast.Variable)
+            and n.var.name == name
+        ):
+            count += 1
+        return False
+
+    SearchVisitor(_counter).visit(node)
+    return count
+
+
 class InlineSingleUseFieldTransformer(BlockTransformer):
     """Inlines a field assignment ``fieldA = expr`` when fieldA is used exactly
     once across all methods and no free variable in expr is modified between the
@@ -1222,13 +1240,19 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
     ) -> frog_ast.Game | None:
         """Try to inline a single field. Returns new game or None."""
 
-        # 1. Find the single assignment to this field across all methods
+        # 1. Find the single assignment to this field across all methods.
+        #    Count recursively to catch assignments inside nested blocks
+        #    (if-branches, etc.) that a shallow top-level scan would miss.
         assign_count = 0
         assign_method_idx = -1
         assign_stmt_idx = -1
         assign_expr: frog_ast.Expression | None = None
 
         for mi, method in enumerate(game.methods):
+            # Count ALL assignments (including nested) for soundness
+            method_assign_count = _count_assigns_recursive(method.block, field_name)
+            assign_count += method_assign_count
+            # Track the top-level assignment location for inlining
             for si, stmt in enumerate(method.block.statements):
                 if (
                     isinstance(stmt, frog_ast.Assignment)
@@ -1236,7 +1260,6 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
                     and isinstance(stmt.var, frog_ast.Variable)
                     and stmt.var.name == field_name
                 ):
-                    assign_count += 1
                     assign_method_idx = mi
                     assign_stmt_idx = si
                     assign_expr = stmt.value

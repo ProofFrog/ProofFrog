@@ -1,5 +1,5 @@
 import pytest
-from proof_frog import frog_parser
+from proof_frog import frog_ast, frog_parser
 from proof_frog.transforms.algebraic import (
     XorCancellationTransformer,
     ReflexiveComparisonTransformer,
@@ -241,6 +241,33 @@ def test_xor_all_terms_cancel_returns_zero() -> None:
 
     assert expected_ast == transformed_ast, (
         "k + k should simplify to 0^lambda"
+    )
+
+
+def test_no_cancellation_without_type_evidence() -> None:
+    """When the type map exists but has no evidence for the ADD chain terms
+    (e.g. all terms are complex expressions like function calls), XOR
+    cancellation must NOT fire. The default-True fallback is unsound
+    because the chain could be ModInt addition where a + a = 2a, not 0."""
+    from proof_frog.transforms.algebraic import _is_bitstring_add_chain
+
+    # Simulate an ADD chain where all terms are FuncCalls — the type map
+    # has no entry for them, so the loop finds no evidence.
+    func_call = frog_ast.FuncCall(
+        frog_ast.FieldAccess(frog_ast.Variable("G"), "f"),
+        [frog_ast.Variable("a")],
+    )
+    add_chain = frog_ast.BinaryOperation(
+        frog_ast.BinaryOperators.ADD,
+        func_call,
+        func_call,
+    )
+    # Empty type map — no evidence about any variable
+    empty_map: dict[str, frog_ast.Type] = {}
+    result = _is_bitstring_add_chain(add_chain, empty_map)
+    assert result is False, (
+        "_is_bitstring_add_chain should default to False (conservative) "
+        "when no type evidence is found, not True"
     )
 
 

@@ -21,6 +21,7 @@ statement: type id SEMI #varDeclStatement
 	| lvalue EQUALS expression SEMI #assignmentStatement
 	| lvalue SAMPLES expression SEMI #sampleStatement
 	| type lvalue SAMPUNIQ L_SQUARE lvalue R_SQUARE type SEMI #uniqueSampleStatement
+	| lvalue SAMPUNIQ L_SQUARE lvalue R_SQUARE type SEMI #uniqueSampleNoTypeStatement
 	| expression L_PAREN argList? R_PAREN SEMI #functionCallStatement
 	| RETURN expression SEMI #returnStatement
 	| IF L_PAREN expression R_PAREN block (ELSE IF L_PAREN expression R_PAREN block )* (ELSE block )? #ifStatement

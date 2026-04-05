@@ -22,7 +22,7 @@ from ..visitors import (
     NameTypeMap,
     build_game_type_map,
 )
-from ._base import TransformPass, PipelineContext, NearMiss
+from ._base import TransformPass, PipelineContext, NearMiss, has_nondeterministic_call
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
@@ -314,7 +314,7 @@ def _is_bitstring_add_chain(
                 return False
             if isinstance(var_type, frog_ast.BitStringType):
                 return True
-    return True
+    return False
 
 
 def _flatten_add_chain(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
@@ -394,39 +394,74 @@ class XorCancellationTransformer(Transformer):
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
     ) -> frog_ast.Expression:
-        transformed = frog_ast.BinaryOperation(
-            binary_operation.operator,
-            self.transform(binary_operation.left_expression),
-            self.transform(binary_operation.right_expression),
-        )
-        if transformed.operator != frog_ast.BinaryOperators.ADD:
-            return transformed
+        if binary_operation.operator != frog_ast.BinaryOperators.ADD:
+            return frog_ast.BinaryOperation(
+                binary_operation.operator,
+                self.transform(binary_operation.left_expression),
+                self.transform(binary_operation.right_expression),
+            )
 
-        if not _is_bitstring_add_chain(transformed, self.type_map):
+        if not _is_bitstring_add_chain(binary_operation, self.type_map):
+            transformed = frog_ast.BinaryOperation(
+                binary_operation.operator,
+                self.transform(binary_operation.left_expression),
+                self.transform(binary_operation.right_expression),
+            )
             self._maybe_report_modint_near_miss(transformed)
             return transformed
 
-        terms = _flatten_add_chain(transformed)
+        # Flatten the full ADD chain from the ORIGINAL expression (before
+        # recursing into sub-ADD-expressions).  This ensures multi-term
+        # chains like (k + k) + m are flattened to [k, k, m] and cancelled
+        # as a whole, rather than the inner (k + k) being processed first.
+        terms = _flatten_add_chain(binary_operation)
         if len(terms) < 2:
-            return transformed
+            return self.transform(terms[0]) if terms else binary_operation
 
-        # Cancel pairs of identical terms
+        # Transform each leaf term (non-ADD sub-expressions) individually
+        transformed_terms = [self.transform(t) for t in terms]
+
+        # Cancel pairs of identical terms (only when both are pure/deterministic)
+        proof_ns = self.ctx.proof_namespace if self.ctx is not None else {}
         remaining: list[frog_ast.Expression] = []
-        for term in terms:
+        for term in transformed_terms:
             found = False
             for i, existing in enumerate(remaining):
-                if term == existing:
+                if term == existing and not has_nondeterministic_call(term, proof_ns):
                     remaining.pop(i)
                     found = True
                     break
             if not found:
                 remaining.append(term)
 
-        if len(remaining) == len(terms):
-            return transformed
+        if len(remaining) == len(transformed_terms):
+            return _rebuild_add_chain(transformed_terms)
         if not remaining:
-            return transformed
+            # All terms cancelled — return 0^n if we can determine the
+            # bitstring length, otherwise return unchanged.
+            zero_len = self._get_bitstring_length(transformed_terms)
+            if zero_len is not None:
+                return frog_ast.BitStringLiteral(0, zero_len)
+            return _rebuild_add_chain(transformed_terms)
         return _rebuild_add_chain(remaining)
+
+    def _get_bitstring_length(
+        self, terms: list[frog_ast.Expression]
+    ) -> frog_ast.Expression | None:
+        """Determine the bitstring length from the terms or type map."""
+        if self.type_map is not None:
+            for term in terms:
+                if isinstance(term, frog_ast.Variable):
+                    var_type = self.type_map.get(term.name)
+                    if (
+                        isinstance(var_type, frog_ast.BitStringType)
+                        and var_type.parameterization is not None
+                    ):
+                        return copy.deepcopy(var_type.parameterization)
+        for term in terms:
+            if isinstance(term, frog_ast.BitStringLiteral):
+                return copy.deepcopy(term.length)
+        return None
 
 
 class XorIdentityTransformer(Transformer):
@@ -522,13 +557,18 @@ class ModIntSimplificationTransformer(Transformer):
     - Additive identity: a + 0 = a, 0 + a = a
     - Multiplicative identity: a * 1 = a, 1 * a = a
     - Multiplicative zero: a * 0 = 0, 0 * a = 0
-    - Additive inverse: a - a = 0
+    - Additive inverse: a - a = 0 (only when a is pure/deterministic)
     - Double negation: -(-a) = a
     - Exponentiation: a ^ 0 = 1, a ^ 1 = a
     """
 
-    def __init__(self, type_map: NameTypeMap) -> None:
+    def __init__(
+        self,
+        type_map: NameTypeMap,
+        proof_namespace: frog_ast.Namespace | None = None,
+    ) -> None:
         self.type_map = type_map
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
 
     def _is_modint_expr(self, expr: frog_ast.Expression) -> bool:
         return isinstance(
@@ -584,8 +624,10 @@ class ModIntSimplificationTransformer(Transformer):
         if op == frog_ast.BinaryOperators.SUBTRACT:
             if _is_integer_literal(right, 0):
                 return left
-            # a - a = 0
-            if left == right:
+            # a - a = 0 (only when a is pure/deterministic)
+            if left == right and not has_nondeterministic_call(
+                left, self._proof_namespace
+            ):
                 return frog_ast.Integer(0)
 
         # Multiplicative identity: a * 1 = a, 1 * a = a
@@ -611,7 +653,16 @@ class ModIntSimplificationTransformer(Transformer):
 
 
 class ReflexiveComparisonTransformer(Transformer):
-    """Simplifies reflexive comparisons: x == x -> true, x != x -> false."""
+    """Simplifies reflexive comparisons: x == x -> true, x != x -> false.
+
+    Only fires when the repeated sub-expression is pure (no non-deterministic
+    function calls).  Non-deterministic calls may return different values on
+    each invocation, so structural equality of AST nodes does not imply
+    runtime equality.
+    """
+
+    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
 
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
@@ -624,11 +675,17 @@ class ReflexiveComparisonTransformer(Transformer):
         if (
             transformed.operator == frog_ast.BinaryOperators.EQUALS
             and transformed.left_expression == transformed.right_expression
+            and not has_nondeterministic_call(
+                transformed.left_expression, self._proof_namespace
+            )
         ):
             return frog_ast.Boolean(True)
         if (
             transformed.operator == frog_ast.BinaryOperators.NOTEQUALS
             and transformed.left_expression == transformed.right_expression
+            and not has_nondeterministic_call(
+                transformed.left_expression, self._proof_namespace
+            )
         ):
             return frog_ast.Boolean(False)
         return transformed
@@ -681,7 +738,9 @@ class ModIntSimplification(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return ModIntSimplificationTransformer(type_map).transform(game)
+        return ModIntSimplificationTransformer(
+            type_map, proof_namespace=ctx.proof_namespace
+        ).transform(game)
 
 
 def _flatten_chain(
@@ -757,4 +816,6 @@ class ReflexiveComparison(TransformPass):
     name = "Reflexive Comparison"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return ReflexiveComparisonTransformer().transform(game)
+        return ReflexiveComparisonTransformer(
+            proof_namespace=ctx.proof_namespace
+        ).transform(game)

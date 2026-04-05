@@ -108,6 +108,120 @@ from proof_frog.transforms.inlining import RedundantFieldCopyTransformer
             }
         }""",
         ),
+        # Field READ between decl and assignment — must NOT inline.
+        # In original: field2 = field1 reads old value of field1.
+        # If transformed, field1 gets new value before field2 = field1.
+        (
+            """
+        Game Test() {
+            Int field1;
+            Int field2;
+            Void Initialize() {
+                Int v <- Int;
+                field2 = field1;
+                field1 = v;
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Int field2;
+            Void Initialize() {
+                Int v <- Int;
+                field2 = field1;
+                field1 = v;
+            }
+        }""",
+        ),
+        # Field WRITE between decl and assignment — must NOT inline.
+        # In original: field1 ends up with v's value. If transformed,
+        # field1 <- Int then field1 = 42 overwrites it.
+        (
+            """
+        Game Test() {
+            Int field1;
+            Void Initialize() {
+                Int v <- Int;
+                field1 = 42;
+                field1 = v;
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Void Initialize() {
+                Int v <- Int;
+                field1 = 42;
+                field1 = v;
+            }
+        }""",
+        ),
+        # Duplicate field assignment — v is used in another identical
+        # statement, so removing the declaration would leave a dangling
+        # reference. The structural-equality skip must not mask this.
+        (
+            """
+        Game Test() {
+            Int field1;
+            Void Initialize() {
+                Int v <- Int;
+                field1 = v;
+                field1 = v;
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Void Initialize() {
+                Int v <- Int;
+                field1 = v;
+                field1 = v;
+            }
+        }""",
+        ),
+        # UniqueSample — local only used in field copy, should be inlined
+        (
+            """
+        Game Test() {
+            Int field1;
+            Set<Int> S;
+            Void Initialize() {
+                Int v <-uniq[S] Int;
+                field1 = v;
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Set<Int> S;
+            Void Initialize() {
+                field1 <-uniq[S] Int;
+            }
+        }""",
+        ),
+        # UniqueSample — local used elsewhere, must NOT inline
+        (
+            """
+        Game Test() {
+            Int field1;
+            Set<Int> S;
+            Int Initialize() {
+                Int v <-uniq[S] Int;
+                field1 = v;
+                return v;
+            }
+        }""",
+            """
+        Game Test() {
+            Int field1;
+            Set<Int> S;
+            Int Initialize() {
+                Int v <-uniq[S] Int;
+                field1 = v;
+                return v;
+            }
+        }""",
+        ),
     ],
 )
 def test_redundant_field_copy(

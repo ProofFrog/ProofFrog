@@ -6,6 +6,8 @@ import functools
 import os
 import shutil
 import warnings
+import sys
+from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from enum import Enum, IntEnum
 from collections import namedtuple
 from typing import TypeAlias, Tuple, Dict, Optional, TypeVar, Union
@@ -53,6 +55,7 @@ class EquivalenceResult:
     valid: bool
     failure_detail: str = ""
     diagnosis: diagnostics.Diagnosis | None = None
+    verbose_output: str = ""
 
 
 @dataclasses.dataclass
@@ -71,6 +74,174 @@ class HopResult:
 
 class FailedProof(Exception):
     pass
+
+
+@dataclasses.dataclass
+class _EquivalenceTask:
+    """Data needed to check equivalence of two games in a worker process."""
+
+    current_game_ast: frog_ast.Game
+    next_game_ast: frog_ast.Game
+    step_assumptions: list[ProcessedAssumption]
+    ctx: PipelineContext
+    verbosity: Verbosity
+    no_diagnose: bool
+    proof_let_types: visitors.NameTypeMap
+
+
+def _check_equivalent_worker(task: _EquivalenceTask) -> EquivalenceResult:
+    """Top-level function for multiprocessing: check equivalence of two games.
+
+    This must be a module-level function so it is picklable.
+    Verbose output is collected into a list and returned in the result
+    so the main process can print it in step order.
+    """
+    normal = task.verbosity >= Verbosity.NORMAL
+    verbose = task.verbosity >= Verbosity.VERBOSE
+    verbose_lines: list[str] = []
+    ctx = task.ctx
+    current_game_ast = task.current_game_ast
+    next_game_ast = task.next_game_ast
+    current_near_misses: list[NearMiss] = []
+    next_near_misses: list[NearMiss] = []
+
+    for index, game in enumerate((current_game_ast, next_game_ast)):
+        which = WhichGame.CURRENT if index == 0 else WhichGame.NEXT
+        ctx.near_misses = []
+
+        if verbose:
+            label = "CURRENT" if index == 0 else "NEXT"
+            verbose_lines.append(f"SIMPLIFYING {label} GAME")
+            verbose_lines.append(str(game))
+
+        pipeline = list(CORE_PIPELINE) + [
+            ApplyAssumptions(task.step_assumptions, which, task.proof_let_types)
+        ]
+        game = run_pipeline(
+            game,
+            pipeline,
+            ctx,
+            verbose=verbose,
+            verbose_lines=verbose_lines,
+        )
+        game = run_standardization(game, STANDARDIZATION_PIPELINE, ctx)
+
+        if index == 0:
+            current_game_ast = game
+            current_near_misses = deduplicate_near_misses(ctx.near_misses)
+        else:
+            next_game_ast = game
+            next_near_misses = deduplicate_near_misses(ctx.near_misses)
+
+    if normal:
+        verbose_lines.append("CURRENT")
+        verbose_lines.append(str(current_game_ast))
+        verbose_lines.append("NEXT")
+        verbose_lines.append(str(next_game_ast))
+
+    if current_game_ast == next_game_ast:
+        if normal:
+            verbose_lines.append("Inline Success!")
+        captured = "\n".join(verbose_lines) + "\n" if verbose_lines else ""
+        return EquivalenceResult(valid=True, verbose_output=captured)
+
+    captured = "\n".join(verbose_lines) + "\n" if verbose_lines else ""
+
+    z3_result = _z3_conditional_equivalence(
+        current_game_ast, next_game_ast, task.proof_let_types
+    )
+    if z3_result.valid:
+        return dataclasses.replace(z3_result, verbose_output=captured)
+
+    parts: list[str] = []
+    if z3_result.failure_detail:
+        parts.append(z3_result.failure_detail)
+    diff_text = _build_equivalence_diff(current_game_ast, next_game_ast)
+    parts.append(diff_text)
+
+    diagnosis: diagnostics.Diagnosis | None = None
+    if not task.no_diagnose:
+        diagnosis = diagnostics.diagnose_failure(
+            diff_text, current_near_misses, next_near_misses
+        )
+
+    return EquivalenceResult(
+        valid=False,
+        failure_detail="\n".join(parts),
+        diagnosis=diagnosis,
+        verbose_output=captured,
+    )
+
+
+def _z3_conditional_equivalence(
+    current_game_ast: frog_ast.Game,
+    next_game_ast: frog_ast.Game,
+    proof_let_types: visitors.NameTypeMap,
+) -> EquivalenceResult:
+    """Check if two games differ only in if-conditions that are Z3-equivalent.
+
+    Standalone version of ProofEngine._z3_conditional_equivalence for use in
+    worker processes.
+    """
+    all_true_current = _AllTrueTransformer().transform(current_game_ast)
+    all_true_next = _AllTrueTransformer().transform(next_game_ast)
+    if all_true_current != all_true_next:
+        return EquivalenceResult(
+            valid=False,
+            failure_detail="Games differ structurally (not just in if-conditions)",
+        )
+
+    found_ifs: list[frog_ast.IfStatement] = []
+
+    def search_for_if(
+        found_ifs: list[frog_ast.IfStatement], node: frog_ast.ASTNode
+    ) -> bool:
+        return isinstance(node, frog_ast.IfStatement) and node not in found_ifs
+
+    while True:
+        partial = functools.partial(search_for_if, found_ifs)
+        if_current = visitors.SearchVisitor[frog_ast.IfStatement](partial).visit(
+            current_game_ast
+        )
+        if_next = visitors.SearchVisitor[frog_ast.IfStatement](partial).visit(
+            next_game_ast
+        )
+        if if_current is None or if_next is None:
+            break
+        found_ifs.append(if_current)
+        found_ifs.append(if_next)
+        for i, condition in enumerate(if_current.conditions):
+            if condition == if_next.conditions[i]:
+                continue
+
+            first_if_formula = visitors.Z3FormulaVisitor(
+                visitors.GetTypeMapVisitor(condition).visit(current_game_ast)
+                + proof_let_types
+            ).visit(condition)
+            next_if_formula = visitors.Z3FormulaVisitor(
+                visitors.GetTypeMapVisitor(if_next.conditions[i]).visit(next_game_ast)
+                + proof_let_types
+            ).visit(if_next.conditions[i])
+            if first_if_formula is None or next_if_formula is None:
+                return EquivalenceResult(
+                    valid=False,
+                    failure_detail=(
+                        "Could not convert if-condition to Z3 formula: "
+                        f"{condition} vs {if_next.conditions[i]}"
+                    ),
+                )
+            solver = z3.Solver()
+            solver.set("timeout", 30000)
+            solver.add(z3.Not(first_if_formula == next_if_formula))
+            if solver.check() != z3.unsat:
+                return EquivalenceResult(
+                    valid=False,
+                    failure_detail=(
+                        "Could not prove equivalence of if-conditions: "
+                        f"{condition} vs {if_next.conditions[i]}"
+                    ),
+                )
+    return EquivalenceResult(valid=True)
 
 
 def serialize_diagnosis(
@@ -196,11 +367,13 @@ class ProofEngine:
         verbose: bool | Verbosity = False,
         no_diagnose: bool = False,
         skip_lemmas: bool = False,
+        parallel: bool = True,
     ) -> None:
         self.definition_namespace: frog_ast.Namespace = {}
         self.proof_namespace: frog_ast.Namespace = {}
         self.proof_let_types: visitors.NameTypeMap = visitors.NameTypeMap()
         self.subsets_pairs: list[tuple[frog_ast.Type, frog_ast.Type]] = []
+        self.equality_pairs: set[tuple[str, str]] = set()
 
         if isinstance(verbose, bool):
             self.verbosity = Verbosity.VERBOSE if verbose else Verbosity.QUIET
@@ -208,6 +381,7 @@ class ProofEngine:
             self.verbosity = verbose
         self.no_diagnose = no_diagnose
         self.skip_lemmas = skip_lemmas
+        self.parallel = parallel
         self.step_assumptions: list[ProcessedAssumption] = []
         self.hop_results: list[HopResult] = []
         self.variables: dict[str, Symbol | frog_ast.Expression] = {}
@@ -559,17 +733,41 @@ class ProofEngine:
                     f"{limitation}"
                 )
 
-    def prove_steps(
+    @dataclasses.dataclass
+    class _PreparedHop:
+        """A hop prepared for verification (either assumption-based or equivalence)."""
+
+        step_num: int
+        current_desc: str
+        next_desc: str
+        # For assumption/lemma hops:
+        kind: str = ""  # "by_assumption", "by_lemma", or "" for equivalence
+        # For equivalence hops:
+        current_game_ast: frog_ast.Game | None = None
+        next_game_ast: frog_ast.Game | None = None
+        step_assumptions: list[ProcessedAssumption] = dataclasses.field(
+            default_factory=list
+        )
+        # For induction entry hops, the original step index:
+        induction_step_index: int | None = None
+
+    def _prepare_hops(
         self,
         steps: list[frog_ast.ProofStep],
         assumed_indistinguishable: list[frog_ast.ParameterizedGame],
         _depth: int = 0,
         lemma_games: set[str] | None = None,
-    ) -> None:
+    ) -> list[_PreparedHop]:
+        """Walk steps and prepare all hops for verification without running them.
+
+        Returns a list of _PreparedHop in order. Inductions are flagged
+        via induction_step_index so the caller can handle them.
+        """
+        prepared: list[ProofEngine._PreparedHop] = []
         step_num = 0
 
-        for i in range(0, len(steps) - 1):  # pylint: disable=too-many-nested-blocks
-            assumptions: list[frog_ast.StepAssumption] = []
+        for i in range(0, len(steps) - 1):
+            hop_assumptions: list[frog_ast.StepAssumption] = []
             if isinstance(steps[i], frog_ast.StepAssumption):
                 continue
 
@@ -578,17 +776,13 @@ class ProofEngine:
             i += 1
             assumption = steps[i]
             while isinstance(assumption, frog_ast.StepAssumption):
-                assumptions.append(assumption)
+                hop_assumptions.append(assumption)
                 i += 1
                 if i >= len(steps):
-                    return
+                    return prepared
                 assumption = steps[i]
 
             next_step = steps[i]
-            self._current_step += 1
-
-            if self.verbosity >= Verbosity.NORMAL:
-                print(f"===STEP {step_num}===")
 
             current_game_ast: frog_ast.Game
             next_game_ast: frog_ast.Game
@@ -599,30 +793,17 @@ class ProofEngine:
                 if self._is_by_indistinguishability(
                     current_step, next_step, assumed_indistinguishable
                 ):
-                    current_desc = self._step_display(current_step)
-                    next_desc = self._step_display(next_step)
-                    # Determine if this hop is justified by a lemma or an axiom
                     is_lemma = (
                         lemma_games is not None
                         and isinstance(current_step.challenger, frog_ast.ConcreteGame)
                         and str(current_step.challenger.game) in lemma_games
                     )
-                    hop_label = "by lemma" if is_lemma else "by assumption"
-                    hop_kind = "by_lemma" if is_lemma else "by_assumption"
-                    if self.verbosity >= Verbosity.NORMAL:
-                        print(f"Current: {current_desc}")
-                        print(f"Hop To: {next_desc}\n")
-                        print(f"Valid {hop_label}")
-                    hop_desc = f"{current_desc} -> {next_desc}"
-                    self._print_step_status(hop_desc, hop_label, Fore.CYAN)
-                    self.hop_results.append(
-                        HopResult(
+                    prepared.append(
+                        ProofEngine._PreparedHop(
                             step_num=step_num,
-                            valid=True,
-                            kind=hop_kind,
-                            depth=_depth,
-                            current_desc=current_desc,
-                            next_desc=next_desc,
+                            current_desc=self._step_display(current_step),
+                            next_desc=self._step_display(next_step),
+                            kind="by_lemma" if is_lemma else "by_assumption",
                         )
                     )
                     continue
@@ -673,39 +854,205 @@ class ProofEngine:
 
             assert isinstance(current_step, frog_ast.Step)
             assert isinstance(next_step, frog_ast.Step)
-            current_desc = self._step_display(current_step)
-            next_desc = self._step_display(next_step)
 
-            if self.verbosity >= Verbosity.NORMAL:
-                print(f"Current: {current_desc}")
-                print(f"Hop To: {next_desc}\n")
+            self.set_up_assumptions(hop_assumptions, current_step, next_step)
 
-            assert isinstance(current_step, frog_ast.Step)
-            assert isinstance(next_step, frog_ast.Step)
-
-            self.set_up_assumptions(assumptions, current_step, next_step)
-
-            equiv_result = self.check_equivalent(current_game_ast, next_game_ast)
-            hop_desc = f"{current_desc} -> {next_desc}"
-            if equiv_result.valid:
-                self._print_step_status(hop_desc, "ok", Fore.GREEN)
-            else:
-                self._print_step_status(hop_desc, "FAILED", Fore.RED)
-                self._print_failure_inline(equiv_result)
-            self.hop_results.append(
-                HopResult(
+            prepared.append(
+                ProofEngine._PreparedHop(
                     step_num=step_num,
-                    valid=equiv_result.valid,
-                    kind="equivalent",
-                    depth=_depth,
-                    current_desc=current_desc,
-                    next_desc=next_desc,
-                    failure_detail=equiv_result.failure_detail,
-                    diagnosis=equiv_result.diagnosis,
+                    current_desc=self._step_display(current_step),
+                    next_desc=self._step_display(next_step),
+                    current_game_ast=current_game_ast,
+                    next_game_ast=next_game_ast,
+                    step_assumptions=list(self.step_assumptions),
+                    induction_step_index=(
+                        i if isinstance(steps[i], frog_ast.Induction) else None
+                    ),
                 )
             )
-            if isinstance(steps[i], frog_ast.Induction):
-                the_induction = steps[i]
+        return prepared
+
+    def _make_task(self, hop: _PreparedHop) -> _EquivalenceTask:
+        """Build an _EquivalenceTask from a prepared hop."""
+        assert hop.current_game_ast is not None
+        assert hop.next_game_ast is not None
+        return _EquivalenceTask(
+            current_game_ast=hop.current_game_ast,
+            next_game_ast=hop.next_game_ast,
+            step_assumptions=hop.step_assumptions,
+            ctx=self._build_context(),
+            verbosity=self.verbosity,
+            no_diagnose=self.no_diagnose,
+            proof_let_types=self.proof_let_types,
+        )
+
+    def _report_hop(
+        self,
+        hop: _PreparedHop,
+        equiv_result: EquivalenceResult,
+        depth: int,
+    ) -> None:
+        """Print status and append to hop_results for an equivalence hop."""
+        self._current_step += 1
+        hop_desc = f"{hop.current_desc} -> {hop.next_desc}"
+        if self.verbosity >= Verbosity.NORMAL:
+            print(f"===STEP {hop.step_num}===")
+            print(f"Current: {hop.current_desc}")
+            print(f"Hop To: {hop.next_desc}\n")
+        if equiv_result.valid:
+            self._print_step_status(hop_desc, "ok", Fore.GREEN)
+        else:
+            self._print_step_status(hop_desc, "FAILED", Fore.RED)
+            self._print_failure_inline(equiv_result)
+        self.hop_results.append(
+            HopResult(
+                step_num=hop.step_num,
+                valid=equiv_result.valid,
+                kind="equivalent",
+                depth=depth,
+                current_desc=hop.current_desc,
+                next_desc=hop.next_desc,
+                failure_detail=equiv_result.failure_detail,
+                diagnosis=equiv_result.diagnosis,
+            )
+        )
+
+    def _report_assumption_hop(
+        self,
+        hop: _PreparedHop,
+        depth: int,
+    ) -> None:
+        """Print status and append to hop_results for an assumption/lemma hop."""
+        self._current_step += 1
+        hop_label = "by lemma" if hop.kind == "by_lemma" else "by assumption"
+        if self.verbosity >= Verbosity.NORMAL:
+            print(f"===STEP {hop.step_num}===")
+            print(f"Current: {hop.current_desc}")
+            print(f"Hop To: {hop.next_desc}\n")
+            print(f"Valid {hop_label}")
+        hop_desc = f"{hop.current_desc} -> {hop.next_desc}"
+        self._print_step_status(hop_desc, hop_label, Fore.CYAN)
+        self.hop_results.append(
+            HopResult(
+                step_num=hop.step_num,
+                valid=True,
+                kind=hop.kind,
+                depth=depth,
+                current_desc=hop.current_desc,
+                next_desc=hop.next_desc,
+            )
+        )
+
+    def prove_steps(
+        self,
+        steps: list[frog_ast.ProofStep],
+        assumed_indistinguishable: list[frog_ast.ParameterizedGame],
+        _depth: int = 0,
+        lemma_games: set[str] | None = None,
+    ) -> None:
+        prepared = self._prepare_hops(
+            steps, assumed_indistinguishable, _depth, lemma_games
+        )
+
+        has_induction = any(h.induction_step_index is not None for h in prepared)
+        use_parallel = (
+            self.parallel
+            and not has_induction
+            and _depth == 0
+            and sum(1 for h in prepared if not h.kind) >= 4
+        )
+
+        if use_parallel:
+            self._prove_steps_parallel(prepared, _depth)
+        else:
+            self._prove_steps_sequential(
+                prepared, steps, assumed_indistinguishable, _depth, lemma_games
+            )
+
+    def _prove_steps_parallel(
+        self,
+        prepared: list[_PreparedHop],
+        _depth: int,
+    ) -> None:
+        """Dispatch equivalence checks to a process pool."""
+        # Collect equivalence tasks for parallel dispatch
+        equiv_indices: list[int] = []
+        tasks: list[_EquivalenceTask] = []
+        for idx, hop in enumerate(prepared):
+            if not hop.kind:  # equivalence hop
+                equiv_indices.append(idx)
+                tasks.append(self._make_task(hop))
+
+        # Run equivalence checks in parallel with progress bar
+        total = len(tasks)
+        results: dict[int, EquivalenceResult] = {}
+        with ProcessPoolExecutor() as executor:
+            future_to_idx: dict[Future[EquivalenceResult], int] = {}
+            for idx, task in zip(equiv_indices, tasks):
+                future_to_idx[executor.submit(_check_equivalent_worker, task)] = idx
+
+            done_count = 0
+            is_tty = sys.stderr.isatty()
+            if is_tty:
+                self._print_progress_bar(done_count, total)
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                results[idx] = future.result()
+                done_count += 1
+                if is_tty:
+                    self._print_progress_bar(done_count, total)
+            if is_tty:
+                # Clear the progress bar line
+                sys.stderr.write("\r" + " " * shutil.get_terminal_size().columns + "\r")
+                sys.stderr.flush()
+
+        # Report all hops in order, printing captured verbose output
+        for idx, hop in enumerate(prepared):
+            if hop.kind:
+                self._report_assumption_hop(hop, _depth)
+            else:
+                result = results[idx]
+                if result.verbose_output:
+                    sys.stdout.write(result.verbose_output)
+                self._report_hop(hop, result, _depth)
+
+    @staticmethod
+    def _print_progress_bar(done: int, total: int) -> None:
+        """Print a progress bar to stderr."""
+        terminal_width = shutil.get_terminal_size().columns
+        pct = done / total if total > 0 else 1.0
+        label = f"  Checking {done}/{total} "
+        # Reserve space for label + [] + percentage
+        suffix = f" {pct:>4.0%}"
+        bar_width = terminal_width - len(label) - len(suffix) - 2  # 2 for []
+        bar_width = max(bar_width, 10)
+        filled = int(bar_width * pct)
+        progress = "\u2588" * filled + "\u2591" * (bar_width - filled)
+        sys.stderr.write(f"\r{label}[{progress}]{suffix}")
+        sys.stderr.flush()
+
+    def _prove_steps_sequential(
+        self,
+        prepared: list[_PreparedHop],
+        steps: list[frog_ast.ProofStep],
+        assumed_indistinguishable: list[frog_ast.ParameterizedGame],
+        _depth: int,
+        lemma_games: set[str] | None,
+    ) -> None:
+        """Process hops sequentially (original behavior)."""
+        for hop in prepared:
+            if hop.kind:
+                self._report_assumption_hop(hop, _depth)
+                continue
+
+            self.step_assumptions = hop.step_assumptions
+            equiv_result = self.check_equivalent(
+                hop.current_game_ast, hop.next_game_ast  # type: ignore[arg-type]
+            )
+            self._report_hop(hop, equiv_result, _depth)
+
+            if hop.induction_step_index is not None:
+                the_induction = steps[hop.induction_step_index]
                 assert isinstance(the_induction, frog_ast.Induction)
                 self.proof_let_types.set(the_induction.name, frog_ast.IntType())
                 self.prove_steps(
@@ -717,11 +1064,11 @@ class ProofEngine:
                 # Check induction roll over
                 first_step = the_induction.steps[0]
                 assert isinstance(first_step, frog_ast.Step)
-                assumptions = []
+                rollover_assumptions: list[frog_ast.StepAssumption] = []
                 last_step: frog_ast.Step
                 for step in the_induction.steps[::-1]:
                     if isinstance(step, frog_ast.StepAssumption):
-                        assumptions.append(step)
+                        rollover_assumptions.append(step)
                     elif isinstance(step, frog_ast.Step):
                         last_step = step
                         break
@@ -750,7 +1097,7 @@ class ProofEngine:
                     print("CHECKING INDUCTION ROLLOVER")
                     print(f"Current: {rollover_current_desc}")
                     print(f"Hop To: {rollover_next_desc}\n")
-                self.set_up_assumptions(assumptions, last_step, first_step)
+                self.set_up_assumptions(rollover_assumptions, last_step, first_step)
                 rollover_result = self.check_equivalent(last_step_ast, first_step_ast)
                 rollover_hop = (
                     f"[rollover] {rollover_current_desc} -> {rollover_next_desc}"
@@ -762,7 +1109,7 @@ class ProofEngine:
                     self._print_failure_inline(rollover_result)
                 self.hop_results.append(
                     HopResult(
-                        step_num=step_num,
+                        step_num=hop.step_num,
                         valid=rollover_result.valid,
                         kind="induction_rollover",
                         depth=_depth,
@@ -845,6 +1192,7 @@ class ProofEngine:
             proof_let_types=self.proof_let_types,
             proof_namespace=self.proof_namespace,
             subsets_pairs=self.subsets_pairs,
+            equality_pairs=self.equality_pairs,
             sort_game_fn=self.sort_game,
             max_calls=self.max_calls,
         )
@@ -1195,20 +1543,34 @@ class ProofEngine:
                     self.method_lookup[(name, method.signature.name)] = method
 
     def _extract_subsets_pairs(self) -> None:
-        """Extract subsets/equality constraint pairs from all schemes in the proof."""
+        """Extract type constraint pairs from all schemes in the proof.
+
+        Both ``==`` and ``subsets`` constraints are collected.  They are
+        safe for normalizing type annotations (widening is harmless).
+        However, only ``==`` pairs are safe for normalizing sampling
+        distributions (``sampled_from``), because ``subsets`` allows
+        A ⊊ B where replacing ``x <- A`` with ``x <- B`` would change
+        the distribution.  The pair is tagged via ``equality_pairs`` so
+        the normalizer can distinguish them.
+        """
         for node in self.proof_namespace.values():
             if isinstance(node, frog_ast.Scheme):
                 for req in node.requirements:
-                    if (
-                        isinstance(req, frog_ast.BinaryOperation)
-                        and req.operator
-                        in (
-                            frog_ast.BinaryOperators.SUBSETS,
-                            frog_ast.BinaryOperators.EQUALS,
-                        )
-                        and isinstance(req.left_expression, frog_ast.Type)
+                    if not isinstance(req, frog_ast.BinaryOperation):
+                        continue
+                    if not (
+                        isinstance(req.left_expression, frog_ast.Type)
                         and isinstance(req.right_expression, frog_ast.Type)
                     ):
+                        continue
+                    if req.operator == frog_ast.BinaryOperators.EQUALS:
+                        self.subsets_pairs.append(
+                            (req.left_expression, req.right_expression)
+                        )
+                        self.equality_pairs.add(
+                            (str(req.left_expression), str(req.right_expression))
+                        )
+                    elif req.operator == frog_ast.BinaryOperators.SUBSETS:
                         self.subsets_pairs.append(
                             (req.left_expression, req.right_expression)
                         )

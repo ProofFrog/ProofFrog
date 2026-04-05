@@ -12,7 +12,7 @@ python3 -m venv .venv
 - **Run tests**: `pytest` (runs in parallel via `pytest-xdist` `-n auto` by default; use `-n0` to disable)
 - **All CI checks**: `make lint` — runs `black --check`, `mypy`, and `pylint` in sequence (must all pass before committing)
 - **Auto-format**: `make format` — runs `black` to reformat in place, then re-run `make lint`
-- **CLI**: `python -m proof_frog [parse|check|prove|describe|step-detail|inlined-game|canonicalization-trace|step-after-transform|web|lsp|mcp] <file>`
+- **CLI**: `python -m proof_frog [version|parse|check|prove|describe|step-detail|inlined-game|canonicalization-trace|step-after-transform|web|lsp|mcp] <file>`
 - **Build VSCode extension**: `make vscode-extension`
 - **Package VSCode extension**: `make vscode-vsix`
 - **Regenerate parser**: `make parser` — regenerates ANTLR parsing code from grammar files into `proof_frog/parsing/`
@@ -37,7 +37,7 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 
 ## Architecture
 
-- `proof_frog/proof_frog.py` — CLI entry point (`parse`, `check`, `prove`, `describe`, `step-detail`, `inlined-game`, `canonicalization-trace`, `step-after-transform`, `web`, `lsp`, `mcp` commands)
+- `proof_frog/proof_frog.py` — CLI entry point (`version`, `parse`, `check`, `prove`, `describe`, `step-detail`, `inlined-game`, `canonicalization-trace`, `step-after-transform`, `web`, `lsp`, `mcp` commands)
 - `proof_frog/frog_ast.py` — AST node definitions
 - `proof_frog/frog_parser.py` — ANTLR-based parser
 - `proof_frog/proof_engine.py` — Proof verification (Z3 + SymPy)

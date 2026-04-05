@@ -792,8 +792,9 @@ class GetTypeMapVisitor(Visitor[NameTypeMap]):
 
     @_test_stop
     def visit_unique_sample(self, unique_sample: frog_ast.UniqueSample) -> None:
-        assert isinstance(unique_sample.var, frog_ast.Variable)
-        self.type_map.set(unique_sample.var.name, unique_sample.the_type)
+        if unique_sample.the_type is not None:
+            assert isinstance(unique_sample.var, frog_ast.Variable)
+            self.type_map.set(unique_sample.var.name, unique_sample.the_type)
 
     @_test_stop
     def visit_variable_declaration(

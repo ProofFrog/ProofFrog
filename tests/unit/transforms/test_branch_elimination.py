@@ -138,6 +138,50 @@ from proof_frog.transforms.control_flow import BranchEliminiationTransformer
             }
             """,
         ),
+        # false then true: the true branch body must be preserved
+        (
+            """
+            Int f() {
+                Int x = 1;
+                if (false) {
+                    x = 2;
+                } else if (true) {
+                    x = 3;
+                }
+                return x;
+            }
+            """,
+            """
+            Int f() {
+                Int x = 1;
+                x = 3;
+                return x;
+            }
+            """,
+        ),
+        # false then true with else: true branch inlined, else dropped
+        (
+            """
+            Int f() {
+                Int x = 1;
+                if (false) {
+                    x = 2;
+                } else if (true) {
+                    x = 3;
+                } else {
+                    x = 4;
+                }
+                return x;
+            }
+            """,
+            """
+            Int f() {
+                Int x = 1;
+                x = 3;
+                return x;
+            }
+            """,
+        ),
     ],
 )
 def test_branch_elimination(

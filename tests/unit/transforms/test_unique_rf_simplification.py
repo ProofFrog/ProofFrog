@@ -1,10 +1,12 @@
 """Tests for the UniqueRFSimplification transform pass."""
 
 import pytest
-from proof_frog import frog_parser
+from proof_frog import frog_ast, frog_parser
 from proof_frog.transforms.random_functions import (
     UniqueRFSimplificationTransformer,
+    UniqueRFSimplification,
 )
+from proof_frog.transforms._base import PipelineContext
 
 
 @pytest.mark.parametrize(
@@ -161,3 +163,93 @@ def test_unique_rf_simplification(
     print("EXPECTED", expected_ast)
     print("TRANSFORMED", transformed_ast)
     assert expected_ast == transformed_ast
+
+
+def _make_ctx() -> PipelineContext:
+    """Minimal PipelineContext for game-level tests."""
+    return PipelineContext(
+        variables={},
+        proof_let_types={},
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+
+
+def test_local_unique_set_not_simplified() -> None:
+    """If the unique set is a local variable (not a game field), the RF
+    should NOT be simplified.  A local set resets each oracle call, so
+    the same value could be drawn across calls, violating cross-call
+    distinctness required for RF replacement."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            RandomFunctions<BitString<8>, BitString<16>> RF;
+            BitString<16> Query() {
+                Set<BitString<8>> localS;
+                BitString<8> r <-uniq[localS] BitString<8>;
+                BitString<16> z = RF(r);
+                return z;
+            }
+        }
+        """
+    )
+    result = UniqueRFSimplification().apply(game, _make_ctx())
+    # RF(r) should NOT be replaced because localS is not a game field
+    assert result == game, (
+        "RF with local unique set should not be simplified"
+    )
+
+
+def test_exclusion_set_modified_not_simplified() -> None:
+    """If the exclusion set is explicitly modified by user code, the RF
+    should NOT be simplified.  FrogLang semantics implicitly maintain
+    exclusion sets; explicit modification breaks cross-call uniqueness."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Set<BitString<8>> S;
+            RandomFunctions<BitString<8>, BitString<16>> RF;
+            Void Initialize() {
+                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+            }
+            BitString<16> Query() {
+                BitString<8> r <-uniq[S] BitString<8>;
+                BitString<16> z = RF(r);
+                S = S;
+                return z;
+            }
+        }
+        """
+    )
+    result = UniqueRFSimplification().apply(game, _make_ctx())
+    assert result == game, (
+        "RF should not be simplified when the exclusion set is explicitly modified"
+    )
+
+
+def test_duplicate_rf_arg_not_simplified() -> None:
+    """If the same uniquely-sampled variable is used as argument to two
+    RF calls, both calls return the same value (RF is a function).
+    Replacing both with independent samples is wrong."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Set<BitString<8>> S;
+            RandomFunctions<BitString<8>, BitString<16>> RF;
+            Void Initialize() {
+                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+            }
+            [BitString<16>, BitString<16>] Query() {
+                BitString<8> r <-uniq[S] BitString<8>;
+                BitString<16> z1 = RF(r);
+                BitString<16> z2 = RF(r);
+                return [z1, z2];
+            }
+        }
+        """
+    )
+    result = UniqueRFSimplification().apply(game, _make_ctx())
+    # RF(r) should NOT be replaced because r is used for two RF calls
+    assert result == game, (
+        "RF with duplicate argument variable should not be simplified"
+    )

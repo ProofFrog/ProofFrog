@@ -2,6 +2,7 @@
 
 Covers SubstitutionTransformer, InstantiationTransformer, and
 SymbolicComputationTransformer with ModIntType nodes.
+Also tests ModIntSimplificationTransformer soundness with non-deterministic calls.
 """
 
 from proof_frog import frog_ast
@@ -10,6 +11,7 @@ from proof_frog.visitors import (
     InstantiationTransformer,
 )
 from proof_frog.transforms.symbolic import SymbolicComputationTransformer
+from proof_frog.transforms.algebraic import ModIntSimplificationTransformer
 
 
 # ---------------------------------------------------------------------------
@@ -188,3 +190,48 @@ class TestSymbolicComputationTransformerModInt:
         # Should not raise
         result = SymbolicComputationTransformer(variables).transform(sample)
         assert isinstance(result, frog_ast.Sample)
+
+
+# ---------------------------------------------------------------------------
+# ModIntSimplification soundness with non-deterministic calls
+# ---------------------------------------------------------------------------
+
+
+def _sub(
+    left: frog_ast.Expression, right: frog_ast.Expression
+) -> frog_ast.BinaryOperation:
+    return frog_ast.BinaryOperation(frog_ast.BinaryOperators.SUBTRACT, left, right)
+
+
+class TestModIntSimplificationNondeterminism:
+    """The a - a = 0 rule must guard against non-deterministic expressions.
+
+    Currently the type system cannot resolve FuncCall return types, so the
+    rule never fires on raw FuncCalls anyway (defense by type check).  The
+    non-determinism guard is defense-in-depth for future type inference
+    improvements.
+    """
+
+    def test_variable_a_minus_a_still_simplifies(self) -> None:
+        """v - v where v: ModInt<q> should still simplify to 0 (v is pure)."""
+        v = _var("v")
+        expr = _sub(v, v)
+        type_map = {"v": frog_ast.ModIntType(_var("q"))}
+
+        transformed = ModIntSimplificationTransformer(type_map).transform(expr)
+        assert isinstance(transformed, frog_ast.Integer) and transformed.num == 0
+
+    def test_funccall_not_typed_as_modint(self) -> None:
+        """F.eval(x) - F.eval(x) does not simplify because the type system
+        cannot resolve FuncCall as ModInt — the type check blocks it before
+        the non-determinism guard is even reached."""
+        func_call = frog_ast.FuncCall(
+            frog_ast.FieldAccess(frog_ast.Variable("F"), "eval"),
+            [frog_ast.Variable("x")],
+        )
+        expr = _sub(func_call, func_call)
+        type_map: dict[str, frog_ast.Type] = {}
+
+        transformed = ModIntSimplificationTransformer(type_map).transform(expr)
+        # Should remain unchanged (no simplification)
+        assert isinstance(transformed, frog_ast.BinaryOperation)

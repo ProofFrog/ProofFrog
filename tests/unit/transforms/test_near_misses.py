@@ -1,5 +1,5 @@
 from proof_frog.transforms._base import NearMiss, PipelineContext, deduplicate_near_misses
-from proof_frog import frog_parser
+from proof_frog import frog_parser, frog_ast
 from proof_frog.transforms.algebraic import (
     UniformXorSimplification,
     UniformModIntSimplification,
@@ -13,6 +13,7 @@ from proof_frog.transforms.inlining import (
 )
 from proof_frog.transforms.sampling import MergeUniformSamples, SplitUniformSamples
 from proof_frog.transforms.random_functions import LocalRFToUniform
+from proof_frog.transforms.structural import UniformBijectionElimination
 from proof_frog.visitors import NameTypeMap
 
 
@@ -412,3 +413,99 @@ def test_dedup_no_near_miss_when_deterministic():
         if nm.transform_name == "Deduplicate Deterministic Calls"
     ]
     assert len(dedup_misses) == 0
+
+
+# --- Uniform Bijection Elimination near-miss tests ---
+
+
+def _make_bijection_ctx(
+    primitives: dict[str, str] | None = None,
+) -> PipelineContext:
+    ns: dict[str, frog_ast.Primitive | None] = {}
+    if primitives:
+        for name, src in primitives.items():
+            ns[name] = frog_parser.parse_primitive_file(src)
+    return PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace=ns,
+        subsets_pairs=[],
+    )
+
+
+def test_bijection_near_miss_mixed_uses():
+    """Near-miss when uniform var has some qualifying wraps but also bare uses."""
+    game = frog_parser.parse_game(
+        "Game TestGame() {\n"
+        "    BitString<256> Compute() {\n"
+        "        BitString<256> x <- BitString<256>;\n"
+        "        BitString<256> a = K.Encode(x);\n"
+        "        return x;\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_bijection_ctx({
+        "K": (
+            "Primitive K() {"
+            "  deterministic injective BitString<256> Encode(BitString<256> v);"
+            "}"
+        )
+    })
+    UniformBijectionElimination().apply(game, ctx)
+
+    bijection_misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Uniform Bijection Elimination"
+    ]
+    assert len(bijection_misses) == 1
+    assert bijection_misses[0].variable == "x"
+    assert "1 of 2" in bijection_misses[0].reason
+
+
+def test_bijection_no_near_miss_when_eligible():
+    """No near-miss when transform fires (all uses are qualifying wraps)."""
+    game = frog_parser.parse_game(
+        "Game TestGame() {\n"
+        "    BitString<256> Compute() {\n"
+        "        BitString<256> x <- BitString<256>;\n"
+        "        return K.Encode(x);\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_bijection_ctx({
+        "K": (
+            "Primitive K() {"
+            "  deterministic injective BitString<256> Encode(BitString<256> v);"
+            "}"
+        )
+    })
+    UniformBijectionElimination().apply(game, ctx)
+
+    bijection_misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Uniform Bijection Elimination"
+    ]
+    assert len(bijection_misses) == 0
+
+
+def test_bijection_no_near_miss_when_no_wraps():
+    """No near-miss when there are zero qualifying wraps (nothing close)."""
+    game = frog_parser.parse_game(
+        "Game TestGame() {\n"
+        "    BitString<256> Compute() {\n"
+        "        BitString<256> x <- BitString<256>;\n"
+        "        return x;\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_bijection_ctx({})
+    UniformBijectionElimination().apply(game, ctx)
+
+    bijection_misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Uniform Bijection Elimination"
+    ]
+    assert len(bijection_misses) == 0

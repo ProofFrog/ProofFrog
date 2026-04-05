@@ -24,8 +24,9 @@ from ..visitors import (
     Z3FormulaVisitor,
     GetTypeMapVisitor,
     NameTypeMap,
+    assigns_variable,
 )
-from ._base import TransformPass, PipelineContext, NearMiss
+from ._base import TransformPass, PipelineContext, NearMiss, has_nondeterministic_call
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
@@ -59,8 +60,10 @@ class BranchEliminiationTransformer(BlockTransformer):
                         break
                     condition = new_if_statement.conditions[i]
                     if isinstance(condition, frog_ast.Boolean) and condition.bool:
-                        new_if_statement.conditions = if_statement.conditions[: i + 1]
-                        new_if_statement.blocks = if_statement.blocks[: i + 1]
+                        new_if_statement.conditions = new_if_statement.conditions[
+                            : i + 1
+                        ]
+                        new_if_statement.blocks = new_if_statement.blocks[: i + 1]
                         if i == len(new_if_statement.conditions) - 1 and i > 0:
                             del new_if_statement.conditions[-1]
                         break
@@ -243,6 +246,23 @@ class SimplifyReturnTransformer(BlockTransformer):
                 break
             if statement.var != last_statement.expression:
                 break
+            # Check that no intervening statement modifies a free variable
+            # of the expression being inlined.  Without this check, moving
+            # `expr` from its original evaluation point to the return point
+            # could change its value.
+            expr_free_vars = VariableCollectionVisitor().visit(
+                copy.deepcopy(statement.value)
+            )
+            if expr_free_vars:
+                for skipped_idx in range(index + 1, len(block.statements) - 1):
+                    skipped = block.statements[skipped_idx]
+                    if (
+                        SearchVisitor(
+                            functools.partial(assigns_variable, expr_free_vars)
+                        ).visit(skipped)
+                        is not None
+                    ):
+                        return block
             return self.transform_block(
                 frog_ast.Block(block.statements[:index])
                 + frog_ast.Block(block.statements[index + 1 : -1])
@@ -438,6 +458,24 @@ class RemoveUnreachableTransformer(BlockTransformer):
         return block
 
 
+def _count_field_assigns_recursive(node: frog_ast.ASTNode, field_name: str) -> int:
+    """Count how many times *field_name* is assigned/sampled anywhere in the AST."""
+    count = 0
+
+    def _counter(n: frog_ast.ASTNode) -> bool:
+        nonlocal count
+        if (
+            isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
+            and isinstance(n.var, frog_ast.Variable)
+            and n.var.name == field_name
+        ):
+            count += 1
+        return False  # never stop early — visit all nodes
+
+    SearchVisitor(_counter).visit(node)
+    return count
+
+
 class IfConditionAliasSubstitutionTransformer(BlockTransformer):
     """Substitutes field references with local/parameter aliases inside if-branches.
 
@@ -463,12 +501,13 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
     whose condition asserts it.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
         self.field_names: list[str] = []
         self.param_names: list[str] = []
         # Maps field name -> its assigned expression (only for single-assignment fields
         # whose definition is composed entirely of other fields)
         self.field_definitions: dict[str, frog_ast.Expression] = {}
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.field_names = [field.name for field in game.fields]
@@ -478,24 +517,33 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
         return new_game
 
     def _collect_field_definitions(self, game: frog_ast.Game) -> None:
-        """Collect single-assignment field definitions from top-level statements."""
+        """Collect single-assignment field definitions across all methods.
+
+        Uses recursive search to count assignments in nested blocks
+        (if-branches, etc.), not just top-level statements.
+        """
         assign_counts: dict[str, int] = {}
         definitions: dict[str, frog_ast.Expression] = {}
 
         for method in game.methods:
+            # Collect top-level definitions (for the expression value)
             for stmt in method.block.statements:
-                if not isinstance(stmt, frog_ast.Assignment):
-                    continue
-                if not isinstance(stmt.var, frog_ast.Variable):
-                    continue
-                name = stmt.var.name
-                if name not in self.field_names:
-                    continue
-                assign_counts[name] = assign_counts.get(name, 0) + 1
-                definitions[name] = stmt.value
+                if (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name in self.field_names
+                ):
+                    definitions[stmt.var.name] = stmt.value
+
+            # Count ALL assignments recursively (including nested blocks)
+            for field_name in self.field_names:
+                count = _count_field_assigns_recursive(method.block, field_name)
+                assign_counts[field_name] = assign_counts.get(field_name, 0) + count
 
         # Keep only single-assignment fields whose definitions reference
         # only other fields (not locals/params from the assigning method)
+        # and contain no non-deterministic function calls (inlining would
+        # create a fresh evaluation that may return a different value).
         self.field_definitions = {}
         for name, expr in definitions.items():
             if assign_counts.get(name, 0) != 1:
@@ -507,6 +555,8 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
             # referenced field is reassigned after this definition, the
             # stored value diverges from the current field value.
             if not all(assign_counts.get(v.name, 0) == 1 for v in used_vars):
+                continue
+            if has_nondeterministic_call(expr, self._proof_namespace):
                 continue
             self.field_definitions[name] = expr
 
@@ -547,9 +597,29 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
                 new_branch = SubstitutionTransformer(inline_map).transform(new_branch)
 
             # Phase 2: Substitute the comparison field with the local/param.
+            # Stop at the first reassignment of the field within the branch,
+            # since after reassignment the field value may differ from the local.
             alias_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
             alias_map.set(field_expr, local_expr)
-            new_branch = SubstitutionTransformer(alias_map).transform(new_branch)
+            new_stmts: list[frog_ast.Statement] = []
+            for branch_stmt in new_branch.statements:
+                # Check if this statement reassigns the field
+                if (
+                    isinstance(
+                        branch_stmt,
+                        (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+                    )
+                    and isinstance(branch_stmt.var, frog_ast.Variable)
+                    and branch_stmt.var.name == field_var_name
+                ):
+                    # Stop substituting: keep this and all remaining as-is
+                    remaining_idx = new_branch.statements.index(branch_stmt)
+                    new_stmts.extend(new_branch.statements[remaining_idx:])
+                    break
+                new_stmts.append(
+                    SubstitutionTransformer(alias_map).transform(branch_stmt)
+                )
+            new_branch = frog_ast.Block(new_stmts)
 
             if new_branch == statement.blocks[0]:
                 continue
@@ -640,7 +710,9 @@ class IfConditionAliasSubstitution(TransformPass):
     name = "If Condition Alias Substitution"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return IfConditionAliasSubstitutionTransformer().transform(game)
+        return IfConditionAliasSubstitutionTransformer(
+            proof_namespace=ctx.proof_namespace
+        ).transform(game)
 
 
 class RedundantConditionalReturn(TransformPass):

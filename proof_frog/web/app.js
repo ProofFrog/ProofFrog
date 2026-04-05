@@ -80,3 +80,6 @@ loadFileTree();
 updateWizardPanel();
 updateGameHopsPanel();
 connectSSE();
+fetch('/api/version').then(r => r.json()).then(d => {
+  document.getElementById('version-label').textContent = 'v' + d.version;
+});

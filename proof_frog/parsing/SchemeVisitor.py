@@ -89,6 +89,11 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SchemeParser#uniqueSampleNoTypeStatement.
+    def visitUniqueSampleNoTypeStatement(self, ctx:SchemeParser.UniqueSampleNoTypeStatementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SchemeParser#functionCallStatement.
     def visitFunctionCallStatement(self, ctx:SchemeParser.FunctionCallStatementContext):
         return self.visitChildren(ctx)

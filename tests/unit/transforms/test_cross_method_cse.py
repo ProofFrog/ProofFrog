@@ -133,3 +133,267 @@ class TestCrossMethodFieldAlias:
         ).transform(game)
         # Same method -- should not replace (that's DeduplicateDeterministicCalls' job)
         assert result == game
+
+    def test_field_reassigned_after_alias_no_replacement(self) -> None:
+        """If the alias field is overwritten after the det call, don't replace."""
+        game = frog_parser.parse_game(
+            """
+            Game Foo(G GG) {
+                BitString<n> k;
+                BitString<n> stored;
+                Void Initialize() {
+                    stored = GG.evaluate(k);
+                    BitString<n> zero = 0^n;
+                    stored = zero;
+                }
+                BitString<n> Oracle() {
+                    return GG.evaluate(k);
+                }
+            }
+            """
+        )
+        ns = _make_det_namespace()
+        ns["GG"] = ns["G"]
+        result = CrossMethodFieldAliasTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        # stored is overwritten -- must not replace
+        assert result == game
+
+    def test_field_reassigned_in_other_method_no_replacement(self) -> None:
+        """If the alias field is assigned in a different method, don't replace."""
+        game = frog_parser.parse_game(
+            """
+            Game Foo(G GG) {
+                BitString<n> k;
+                BitString<n> stored;
+                Void Initialize() {
+                    stored = GG.evaluate(k);
+                }
+                Void Reset() {
+                    BitString<n> zero = 0^n;
+                    stored = zero;
+                }
+                BitString<n> Oracle() {
+                    return GG.evaluate(k);
+                }
+            }
+            """
+        )
+        ns = _make_det_namespace()
+        ns["GG"] = ns["G"]
+        result = CrossMethodFieldAliasTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        # stored may be overwritten by Reset -- must not replace
+        assert result == game
+
+    def test_arg_field_modified_in_other_method_no_replacement(self) -> None:
+        """If an argument field is modified by another method, don't replace."""
+        game = frog_parser.parse_game(
+            """
+            Game Foo(G GG) {
+                BitString<n> k;
+                BitString<n> stored;
+                Void Initialize() {
+                    stored = GG.evaluate(k);
+                }
+                Void Modify() {
+                    BitString<n> k2 <- BitString<n>;
+                    k = k2;
+                }
+                BitString<n> Oracle() {
+                    return GG.evaluate(k);
+                }
+            }
+            """
+        )
+        ns = _make_det_namespace()
+        ns["GG"] = ns["G"]
+        result = CrossMethodFieldAliasTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        # k may be changed by Modify -- must not replace
+        assert result == game
+
+    def test_arg_field_reassigned_after_alias_no_replacement(self) -> None:
+        """If an argument field is reassigned after the alias, don't replace."""
+        game = frog_parser.parse_game(
+            """
+            Game Foo(G GG) {
+                BitString<n> k;
+                BitString<n> k2;
+                BitString<n> stored;
+                Void Initialize() {
+                    stored = GG.evaluate(k);
+                    BitString<n> fresh <- BitString<n>;
+                    k = fresh;
+                }
+                BitString<n> Oracle() {
+                    return GG.evaluate(k);
+                }
+            }
+            """
+        )
+        ns = _make_det_namespace()
+        ns["GG"] = ns["G"]
+        result = CrossMethodFieldAliasTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        # k is reassigned after stored = GG.evaluate(k) -- must not replace
+        assert result == game
+
+    def test_field_reassigned_in_conditional_no_replacement(self) -> None:
+        """If alias field is reassigned inside a conditional, don't replace."""
+        game = frog_parser.parse_game(
+            """
+            Game Foo(G GG) {
+                BitString<n> k;
+                BitString<n> stored;
+                Bool flag;
+                Void Initialize() {
+                    stored = GG.evaluate(k);
+                    if (flag) {
+                        BitString<n> zero = 0^n;
+                        stored = zero;
+                    }
+                }
+                BitString<n> Oracle() {
+                    return GG.evaluate(k);
+                }
+            }
+            """
+        )
+        ns = _make_det_namespace()
+        ns["GG"] = ns["G"]
+        result = CrossMethodFieldAliasTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        # stored may be overwritten in the if-branch -- must not replace
+        assert result == game
+
+    def test_immutable_field_still_replaced(self) -> None:
+        """Normal case: field and args never modified -> replacement is sound."""
+        game = frog_parser.parse_game(
+            """
+            Game Foo(G GG) {
+                BitString<n> k;
+                BitString<n> stored;
+                Void Initialize() {
+                    BitString<n> key <- BitString<n>;
+                    k = key;
+                    stored = GG.evaluate(k);
+                }
+                BitString<n> Oracle() {
+                    return GG.evaluate(k);
+                }
+            }
+            """
+        )
+        ns = _make_det_namespace()
+        ns["GG"] = ns["G"]
+        result = CrossMethodFieldAliasTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        # k and stored are not reassigned after the alias and not in other methods
+        oracle = result.methods[1]
+        ret = oracle.block.statements[0]
+        assert isinstance(ret, frog_ast.ReturnStatement)
+        assert isinstance(ret.expression, frog_ast.Variable)
+        assert ret.expression.name == "stored"
+
+    def test_alias_in_oracle_not_initialize_no_replacement(self) -> None:
+        """If the alias is in an oracle (not Initialize), don't replace."""
+        game = frog_parser.parse_game(
+            """
+            Game Foo(G GG) {
+                BitString<n> stored;
+                Void Initialize() {
+                }
+                Void Setup() {
+                    stored = GG.evaluate(0^n);
+                }
+                BitString<n> Oracle() {
+                    return GG.evaluate(0^n);
+                }
+            }
+            """
+        )
+        ns = _make_det_namespace()
+        ns["GG"] = ns["G"]
+        result = CrossMethodFieldAliasTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        # Alias is in Setup (oracle), not Initialize -- adversary might
+        # call Oracle before Setup, reading uninitialized stored
+        assert result == game
+
+    def test_arg_field_mutated_via_array_access_no_replacement(self) -> None:
+        """If an argument field is mutated via element assignment, don't replace."""
+        prim = frog_parser.parse_primitive_file(
+            """
+            Primitive H(Int n) {
+                Set DataArray = Array<BitString<n>, 2>;
+                deterministic BitString<n> hash(DataArray d);
+            }
+            """
+        )
+        ns: frog_ast.Namespace = {"H": prim, "HH": prim}
+        game = frog_parser.parse_game(
+            """
+            Game Foo(H HH) {
+                Array<BitString<n>, 2> data;
+                BitString<n> stored;
+                Void Initialize() {
+                    stored = HH.hash(data);
+                }
+                Void Modify() {
+                    BitString<n> x <- BitString<n>;
+                    data[0] = x;
+                }
+                BitString<n> Oracle() {
+                    return HH.hash(data);
+                }
+            }
+            """
+        )
+        result = CrossMethodFieldAliasTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        # data is mutated via data[0] = x in Modify -- must not replace
+        assert result == game
+
+    def test_alias_field_mutated_via_array_access_no_replacement(self) -> None:
+        """If the alias field is mutated via element assignment, don't replace."""
+        prim = frog_parser.parse_primitive_file(
+            """
+            Primitive H(Int n) {
+                Set DataArray = Array<BitString<n>, 2>;
+                deterministic DataArray compute(BitString<n> x);
+            }
+            """
+        )
+        ns: frog_ast.Namespace = {"H": prim, "HH": prim}
+        game = frog_parser.parse_game(
+            """
+            Game Foo(H HH) {
+                BitString<n> k;
+                Array<BitString<n>, 2> stored;
+                Void Initialize() {
+                    stored = HH.compute(k);
+                }
+                Void Modify() {
+                    BitString<n> x <- BitString<n>;
+                    stored[0] = x;
+                }
+                Array<BitString<n>, 2> Oracle() {
+                    return HH.compute(k);
+                }
+            }
+            """
+        )
+        result = CrossMethodFieldAliasTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        # stored is mutated via stored[0] = x in Modify -- must not replace
+        assert result == game

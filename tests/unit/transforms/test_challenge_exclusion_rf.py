@@ -275,3 +275,38 @@ def _transform_and_compare(source: str, expected: str) -> None:
 )
 def test_challenge_exclusion_rf(source: str, expected: str) -> None:
     _transform_and_compare(source, expected)
+
+
+def test_rf_call_inside_guard_block_not_replaced() -> None:
+    """If the guard block (return-early branch) contains an RF call before
+    returning, the Init RF call should NOT be replaced with a uniform sample.
+
+    The guard fires when ct == ct_star, and the RF call inside uses ct
+    (== ct_star), so the RF input matches the Initialize RF input.
+    Replacing the Init call with a uniform sample would break RF consistency.
+    """
+    source = """
+    Game Test() {
+        BitString<8> ct_star;
+        RandomFunctions<BitString<8>, BitString<16>> RF;
+        BitString<16> Initialize() {
+            RF <- RandomFunctions<BitString<8>, BitString<16>>;
+            ct_star = 42;
+            BitString<16> result = RF(ct_star);
+            return result;
+        }
+        BitString<16> Query(BitString<8> ct) {
+            if (ct == ct_star) {
+                BitString<16> leaked = RF(ct);
+                return leaked;
+            }
+            BitString<16> result = RF(ct);
+            return result;
+        }
+    }
+    """
+    game = frog_parser.parse_game(source)
+    result = ChallengeExclusionRFToUniformTransformer().transform(game)
+    assert result == game, (
+        "Init RF call should not be replaced when guard block contains RF call"
+    )

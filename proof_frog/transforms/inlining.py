@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import functools
+from collections.abc import Callable, Sequence
 
 from .. import frog_ast
 from ..visitors import (
@@ -189,7 +190,14 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
 
             def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
                 return (
-                    isinstance(node, (frog_ast.Sample, frog_ast.Assignment))
+                    isinstance(
+                        node,
+                        (
+                            frog_ast.Sample,
+                            frog_ast.Assignment,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
                     and isinstance(node.var, frog_ast.Variable)
                     and node.var.name == name
                 )
@@ -486,6 +494,13 @@ class CollapseAssignmentTransformer(BlockTransformer):
                     later_statement, (frog_ast.Assignment, frog_ast.Sample)
                 ):
                     break
+                # Skip element mutations (v[i] = expr, M[k] = expr) — the
+                # variable is being used, not fully overwritten.
+                if not (
+                    isinstance(later_statement.var, frog_ast.Variable)
+                    and later_statement.var == statement.var
+                ):
+                    break
                 later_rhs = (
                     later_statement.sampled_from
                     if isinstance(later_statement, frog_ast.Sample)
@@ -561,13 +576,20 @@ class RedundantFieldCopyTransformer(BlockTransformer):
 
                 no_other_uses = True
                 decl_index = -1
-                decl_statement: frog_ast.Assignment | frog_ast.Sample
+                decl_statement: (
+                    frog_ast.Assignment | frog_ast.Sample | frog_ast.UniqueSample
+                )
                 for other_index, other_statement in enumerate(block.statements):
-                    if statement == other_statement:
+                    if other_index == index:
                         continue
                     if (
                         isinstance(
-                            other_statement, (frog_ast.Sample, frog_ast.Assignment)
+                            other_statement,
+                            (
+                                frog_ast.Sample,
+                                frog_ast.Assignment,
+                                frog_ast.UniqueSample,
+                            ),
                         )
                         and other_statement.the_type is not None
                         and other_statement.var == statement.value
@@ -593,6 +615,26 @@ class RedundantFieldCopyTransformer(BlockTransformer):
                 # the declaration of the variable on the RHS of the assignment. This means
                 # it is a field, and isn't a redundant copy
                 if not no_other_uses or decl_index == -1:
+                    continue
+                # Check that the field is not accessed (read or written)
+                # between the declaration and the field assignment.
+                # Moving the assignment earlier would change observable
+                # behaviour if the field is referenced in between.
+                assert isinstance(statement.var, frog_ast.Variable)
+                field_var_name = statement.var.name
+
+                def is_field_ref(
+                    node: frog_ast.ASTNode, fn: str = field_var_name
+                ) -> bool:
+                    return isinstance(node, frog_ast.Variable) and node.name == fn
+
+                field_accessed_between = False
+                for between_idx in range(decl_index + 1, index):
+                    between_stmt = block.statements[between_idx]
+                    if SearchVisitor(is_field_ref).visit(between_stmt) is not None:
+                        field_accessed_between = True
+                        break
+                if field_accessed_between:
                     continue
                 modified_statement = copy.deepcopy(decl_statement)
                 modified_statement.var = statement.var
@@ -937,10 +979,44 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                     and node == target
                 )
 
+            def _search_use_positions(
+                stmt: frog_ast.Statement,
+                matcher: Callable[[frog_ast.ASTNode], bool],
+            ) -> frog_ast.Expression | None:
+                """Search only in use-position sub-expressions, skipping
+                assignment targets (LHS) to avoid corrupting def sites."""
+                if isinstance(stmt, frog_ast.Assignment):
+                    return SearchVisitor(matcher).visit(stmt.value)
+                if isinstance(stmt, (frog_ast.Sample, frog_ast.UniqueSample)):
+                    return None
+                return SearchVisitor(matcher).visit(stmt)
+
+            def _modifies_var(name: str, node: frog_ast.ASTNode) -> bool:
+                """Check if a statement modifies a variable, including
+                element mutations like v[i] = expr."""
+                if not isinstance(
+                    node,
+                    (
+                        frog_ast.Sample,
+                        frog_ast.Assignment,
+                        frog_ast.UniqueSample,
+                    ),
+                ):
+                    return False
+                var = node.var
+                if isinstance(var, frog_ast.Variable) and var.name == name:
+                    return True
+                if isinstance(var, frog_ast.ArrayAccess) and isinstance(
+                    var.the_array, frog_ast.Variable
+                ):
+                    if var.the_array.name == name:
+                        return True
+                return False
+
             for j in range(i):
                 earlier = block.statements[j]
-                match = SearchVisitor(functools.partial(matches_expr, expr)).visit(
-                    earlier
+                match = _search_use_positions(
+                    earlier, functools.partial(matches_expr, expr)
                 )
                 if match is None:
                     continue
@@ -998,14 +1074,35 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                         break
                 if not all_defined:
                     continue
+                # Verify free variables are not modified between j and i.
+                # This ensures the expression evaluates to the same value
+                # at the hoist target (before j) as at the original
+                # position i.  Field-type free variables must also be
+                # checked — a field modified between j and i would cause
+                # the hoisted expression to evaluate to a stale value.
+                stable = True
+                for fv in free_vars:
+                    for k in range(j, i):
+                        if (
+                            SearchVisitor(
+                                functools.partial(_modifies_var, fv.name)
+                            ).visit(block.statements[k])
+                            is not None
+                        ):
+                            stable = False
+                            break
+                    if not stable:
+                        break
+                if not stable:
+                    continue
                 # Hoist: move field assignment to before position j,
                 # replace the subexpression in position j with the field.
                 # Re-find the match in a deep copy (ReplaceTransformer uses
                 # identity, so we need a node from the same copy).
                 new_earlier = copy.deepcopy(earlier)
-                match_in_copy = SearchVisitor(
-                    functools.partial(matches_expr, expr)
-                ).visit(new_earlier)
+                match_in_copy = _search_use_positions(
+                    new_earlier, functools.partial(matches_expr, expr)
+                )
                 if match_in_copy is None:
                     continue
                 new_earlier = ReplaceTransformer(
@@ -1029,6 +1126,24 @@ class HoistFieldPureAlias(TransformPass):
         return HoistFieldPureAliasTransformer(
             proof_namespace=ctx.proof_namespace
         ).transform(game)
+
+
+def _count_assigns_recursive(node: frog_ast.ASTNode, name: str) -> int:
+    """Count all assignments/samples to *name* recursively in the AST."""
+    count = 0
+
+    def _counter(n: frog_ast.ASTNode) -> bool:
+        nonlocal count
+        if (
+            isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
+            and isinstance(n.var, frog_ast.Variable)
+            and n.var.name == name
+        ):
+            count += 1
+        return False
+
+    SearchVisitor(_counter).visit(node)
+    return count
 
 
 class InlineSingleUseFieldTransformer(BlockTransformer):
@@ -1125,13 +1240,19 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
     ) -> frog_ast.Game | None:
         """Try to inline a single field. Returns new game or None."""
 
-        # 1. Find the single assignment to this field across all methods
+        # 1. Find the single assignment to this field across all methods.
+        #    Count recursively to catch assignments inside nested blocks
+        #    (if-branches, etc.) that a shallow top-level scan would miss.
         assign_count = 0
         assign_method_idx = -1
         assign_stmt_idx = -1
         assign_expr: frog_ast.Expression | None = None
 
         for mi, method in enumerate(game.methods):
+            # Count ALL assignments (including nested) for soundness
+            method_assign_count = _count_assigns_recursive(method.block, field_name)
+            assign_count += method_assign_count
+            # Track the top-level assignment location for inlining
             for si, stmt in enumerate(method.block.statements):
                 if (
                     isinstance(stmt, frog_ast.Assignment)
@@ -1139,7 +1260,6 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
                     and isinstance(stmt.var, frog_ast.Variable)
                     and stmt.var.name == field_name
                 ):
-                    assign_count += 1
                     assign_method_idx = mi
                     assign_stmt_idx = si
                     assign_expr = stmt.value
@@ -1224,13 +1344,24 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
                 )
             return None
 
-        # 4. Check that no free variable in expr is modified between def and last use
+        # 4. Check that no use occurs before the definition (use-before-def).
+        #    If a field is used at position u < d in the same method, the use
+        #    reads the field value from a *previous* invocation; inlining the
+        #    current call's expression would be semantically wrong.
+        first_use_idx = -1
         last_use_idx = -1
         for si, stmt in enumerate(game.methods[assign_method_idx].block.statements):
             if si == assign_stmt_idx:
                 continue
             if SearchVisitor(uses_field).visit(stmt) is not None:
+                if first_use_idx == -1:
+                    first_use_idx = si
                 last_use_idx = si
+
+        if 0 <= first_use_idx < assign_stmt_idx:
+            return None
+
+        # 5. Check that no free variable in expr is modified between def and last use
         if last_use_idx >= 0:
             free_vars = VariableCollectionVisitor().visit(copy.deepcopy(assign_expr))
             intermediate_stmts = game.methods[assign_method_idx].block.statements[
@@ -1240,7 +1371,14 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
 
             def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
                 return (
-                    isinstance(node, (frog_ast.Sample, frog_ast.Assignment))
+                    isinstance(
+                        node,
+                        (
+                            frog_ast.Sample,
+                            frog_ast.Assignment,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
                     and isinstance(node.var, frog_ast.Variable)
                     and node.var.name == name
                 )
@@ -1254,7 +1392,7 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
             ):
                 return None
 
-        # 5. Perform the inlining — replace ALL occurrences in the method
+        # 6. Perform the inlining — replace ALL occurrences in the method
         new_game = copy.deepcopy(game)
 
         method = new_game.methods[assign_method_idx]
@@ -1385,8 +1523,11 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         dup_group: list[frog_ast.FuncCall] | None = None
         for group in groups:
             if len(group) >= 2:
-                dup_group = group
-                break
+                # Verify no argument variable is reassigned between the
+                # first and last statement containing a call from this group.
+                if self._args_stable_across_calls(block, group):
+                    dup_group = group
+                    break
 
         if dup_group is None:
             return block
@@ -1439,6 +1580,66 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
 
         # Recurse to handle remaining duplicate groups
         return self.transform_block(frog_ast.Block(new_stmts))
+
+    def _args_stable_across_calls(
+        self,
+        block: frog_ast.Block,
+        call_group: list[frog_ast.FuncCall],
+    ) -> bool:
+        """Check that no argument variable of the call group is reassigned
+        between the first and last statement containing a call."""
+        # Collect all free variable names from call arguments
+        representative = call_group[0]
+        arg_vars: set[str] = set()
+        for arg in representative.args:
+            for fv in VariableCollectionVisitor().visit(copy.deepcopy(arg)):
+                arg_vars.add(fv.name)
+        if not arg_vars:
+            return True
+
+        # Find first and last statement indices containing a call from the group
+        first_idx: int | None = None
+        last_idx: int | None = None
+        for idx, stmt in enumerate(block.statements):
+            if isinstance(stmt, frog_ast.IfStatement):
+                continue
+            collector = _DeterministicCallCollector(self.proof_namespace)
+            collector.visit(stmt)
+            if any(c == representative for c in collector.result()):
+                if first_idx is None:
+                    first_idx = idx
+                last_idx = idx
+        if first_idx is None or last_idx is None or first_idx == last_idx:
+            return True
+
+        # Check that no argument variable is reassigned or element-mutated
+        def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
+            if not isinstance(
+                node,
+                (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample),
+            ):
+                return False
+            var = node.var
+            if isinstance(var, frog_ast.Variable) and var.name == name:
+                return True
+            # Element mutation: v[i] = expr, M[k] = expr
+            if isinstance(var, frog_ast.ArrayAccess) and isinstance(
+                var.the_array, frog_ast.Variable
+            ):
+                if var.the_array.name == name:
+                    return True
+            return False
+
+        intermediate = frog_ast.Block(list(block.statements[first_idx + 1 : last_idx]))
+        for var_name in arg_vars:
+            if (
+                SearchVisitor(functools.partial(is_written_to, var_name)).visit(
+                    intermediate
+                )
+                is not None
+            ):
+                return False
+        return True
 
     def _report_nondet_near_misses(self, block: frog_ast.Block) -> None:
         """Report near-misses for duplicate non-deterministic calls."""
@@ -1529,6 +1730,65 @@ def _is_stable_arg(
     return False
 
 
+def _collect_field_names_in_args(
+    expr: frog_ast.Expression, field_names: set[str]
+) -> set[str]:
+    """Return the set of field names referenced in *expr*."""
+    if isinstance(expr, frog_ast.Variable):
+        if expr.name in field_names:
+            return {expr.name}
+        return set()
+    if isinstance(expr, frog_ast.FieldAccess):
+        return _collect_field_names_in_args(expr.the_object, field_names)
+    if isinstance(expr, frog_ast.BinaryOperation):
+        return _collect_field_names_in_args(
+            expr.left_expression, field_names
+        ) | _collect_field_names_in_args(expr.right_expression, field_names)
+    if isinstance(expr, frog_ast.UnaryOperation):
+        return _collect_field_names_in_args(expr.expression, field_names)
+    return set()
+
+
+def _fields_assigned_in_block(block: frog_ast.Block, field_names: set[str]) -> set[str]:
+    """Return field names that are assigned anywhere in *block* (recursively)."""
+    assigned: set[str] = set()
+    for stmt in block.statements:
+        if isinstance(
+            stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ):
+            var = stmt.var
+            # Direct variable assignment: k = expr, k <- Type
+            if isinstance(var, frog_ast.Variable) and var.name in field_names:
+                assigned.add(var.name)
+            # Element mutation: arr[i] = expr, M[k] = expr
+            if (
+                isinstance(var, frog_ast.ArrayAccess)
+                and isinstance(var.the_array, frog_ast.Variable)
+                and var.the_array.name in field_names
+            ):
+                assigned.add(var.the_array.name)
+        if isinstance(stmt, frog_ast.IfStatement):
+            for blk in stmt.blocks:
+                assigned |= _fields_assigned_in_block(blk, field_names)
+        if isinstance(stmt, (frog_ast.NumericFor, frog_ast.GenericFor)):
+            assigned |= _fields_assigned_in_block(stmt.block, field_names)
+    return assigned
+
+
+def _fields_assigned_after(
+    statements: Sequence[frog_ast.Statement],
+    after_idx: int,
+    field_names: set[str],
+) -> set[str]:
+    """Return field names assigned in *statements* after index *after_idx*.
+
+    Checks both top-level and nested (if/for) statements that appear after
+    the statement at *after_idx*.
+    """
+    tail_block = frog_ast.Block(list(statements[after_idx + 1 :]))
+    return _fields_assigned_in_block(tail_block, field_names)
+
+
 class CrossMethodFieldAliasTransformer:
     """Replace deterministic calls in oracles with field references.
 
@@ -1558,7 +1818,7 @@ class CrossMethodFieldAliasTransformer:
         # (field_name, det_call, method_idx)
         field_aliases: list[tuple[str, frog_ast.FuncCall, int]] = []
         for midx, method in enumerate(game.methods):
-            for stmt in method.block.statements:
+            for sidx, stmt in enumerate(method.block.statements):
                 if not (
                     isinstance(stmt, frog_ast.Assignment)
                     and stmt.the_type is None
@@ -1577,6 +1837,40 @@ class CrossMethodFieldAliasTransformer:
                     _is_stable_arg(a, field_names, param_names) for a in call.args
                 ):
                     continue
+
+                # Soundness check: the alias must be in Initialize.
+                # If it's in an oracle, the adversary could call the
+                # replacement-target oracle before the alias-source oracle,
+                # reading an uninitialized field.
+                if method.signature.name != "Initialize":
+                    continue
+
+                # Soundness check: the alias field and all argument fields
+                # must not be reassigned after the alias statement in this
+                # method, and must not be assigned in any other method.
+                arg_fields = set()
+                for a in call.args:
+                    arg_fields |= _collect_field_names_in_args(a, field_names)
+                guarded_fields = {stmt.var.name} | arg_fields
+
+                # Check no reassignment after the alias in the source method
+                modified_after = _fields_assigned_after(
+                    method.block.statements, sidx, guarded_fields
+                )
+                if modified_after:
+                    continue
+
+                # Check no assignment in any other method
+                modified_elsewhere = False
+                for oidx, other_method in enumerate(game.methods):
+                    if oidx == midx:
+                        continue
+                    if _fields_assigned_in_block(other_method.block, guarded_fields):
+                        modified_elsewhere = True
+                        break
+                if modified_elsewhere:
+                    continue
+
                 field_aliases.append((stmt.var.name, call, midx))
 
         if not field_aliases:

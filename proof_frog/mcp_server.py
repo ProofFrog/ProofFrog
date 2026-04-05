@@ -81,6 +81,20 @@ def _safe_resolve(path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Version tool
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()  # type: ignore[misc, untyped-decorator]
+def version() -> str:
+    """Return the ProofFrog version."""
+    # pylint: disable=import-outside-toplevel
+    from importlib.metadata import version as pkg_version
+
+    return pkg_version("proof_frog")
+
+
+# ---------------------------------------------------------------------------
 # File system tools
 # ---------------------------------------------------------------------------
 

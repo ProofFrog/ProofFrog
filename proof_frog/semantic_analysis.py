@@ -276,10 +276,11 @@ class VariableTypeVisitor(visitors.Visitor[None]):
             self.variable_type_map_stack[-1][sample.var.name] = sample.the_type
 
     def leave_unique_sample(self, unique_sample: frog_ast.UniqueSample) -> None:
-        assert isinstance(unique_sample.var, frog_ast.Variable)
-        self.variable_type_map_stack[-1][
-            unique_sample.var.name
-        ] = unique_sample.the_type
+        if unique_sample.the_type is not None:
+            assert isinstance(unique_sample.var, frog_ast.Variable)
+            self.variable_type_map_stack[-1][
+                unique_sample.var.name
+            ] = unique_sample.the_type
 
     def visit_variable_declaration(
         self, declaration: frog_ast.VariableDeclaration
@@ -848,19 +849,20 @@ def _block_always_returns(block: frog_ast.Block) -> bool:
 def _extract_subsets_pairs(
     instantiated_scheme: frog_ast.Instantiable,
 ) -> list[tuple[PossibleType, PossibleType]]:
-    """Extract (sub_type, super_type) pairs from requires clauses.
+    """Extract type-equality pairs from ``==`` constraints in requires clauses.
 
-    Handles both ``subsets`` and ``==`` constraints. After instantiation,
-    the requirements have concrete Variable nodes
-    (e.g., KeySpace2 subsets IntermediateSpace).
+    Only ``==`` constraints are used: they guarantee the two types represent
+    the same set, so normalizing one to the other preserves sampling
+    distributions.  ``subsets`` constraints are excluded because if A ⊊ B,
+    replacing ``x <- A`` with ``x <- B`` would change the distribution.
     """
     pairs: list[tuple[PossibleType, PossibleType]] = []
     if not isinstance(instantiated_scheme, frog_ast.Scheme):
         return pairs
     for req in instantiated_scheme.requirements:
-        if isinstance(req, frog_ast.BinaryOperation) and req.operator in (
-            frog_ast.BinaryOperators.SUBSETS,
-            frog_ast.BinaryOperators.EQUALS,
+        if (
+            isinstance(req, frog_ast.BinaryOperation)
+            and req.operator == frog_ast.BinaryOperators.EQUALS
         ):
             if isinstance(req.left_expression, frog_ast.Type) and isinstance(
                 req.right_expression, frog_ast.Type
@@ -1930,10 +1932,15 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 f"Set element type {set_type.parameterization} does not match"
                 f" sampled type {unique_sample.sampled_from}",
             )
-        if not self.check_types(unique_sample.the_type, unique_sample.sampled_from):
+        expected_type = (
+            unique_sample.the_type
+            if unique_sample.the_type is not None
+            else self.get_type_from_ast(unique_sample.var)
+        )
+        if not self.check_types(expected_type, unique_sample.sampled_from):
             self.print_error(
                 unique_sample,
-                f"Declared type {unique_sample.the_type} does not match"
+                f"Declared type {expected_type} does not match"
                 f" sampled type {unique_sample.sampled_from}",
             )
 

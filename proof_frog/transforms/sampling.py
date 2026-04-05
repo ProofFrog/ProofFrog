@@ -824,6 +824,7 @@ def _single_call_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
         # Step 1: Find the uniform sample of this field in Initialize
         init_sample: Optional[frog_ast.Sample] = None
         init_sample_idx: Optional[int] = None
+        init_sample_count = 0
         field_used_elsewhere_in_init = False
 
         for idx, stmt in enumerate(init_method.block.statements):
@@ -835,10 +836,12 @@ def _single_call_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
             ):
                 init_sample = stmt
                 init_sample_idx = idx
+                init_sample_count += 1
             elif _references_name(stmt, field.name):
                 field_used_elsewhere_in_init = True
 
-        if init_sample is None or field_used_elsewhere_in_init:
+        # Reject if no sample, multiple samples, or field used elsewhere
+        if init_sample is None or init_sample_count > 1 or field_used_elsewhere_in_init:
             continue
 
         # Step 2: Find which non-Initialize methods reference this field
@@ -853,9 +856,10 @@ def _single_call_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
             continue
 
         # Step 3: Check the field is not written to in the using method
+        # (recursive check to catch assignments inside if-branches etc.)
         target_method_name = using_methods[0]
         target_method = game.get_method(target_method_name)
-        if _is_assigned_in(target_method.block, field.name):
+        if _is_written_in_recursive(target_method.block, field.name):
             continue
 
         assert init_sample_idx is not None
@@ -905,15 +909,6 @@ def _references_name(node: frog_ast.ASTNode, name: str) -> bool:
         return isinstance(n, frog_ast.Variable) and n.name == name
 
     return SearchVisitor(check).visit(node) is not None
-
-
-def _is_assigned_in(block: frog_ast.Block, name: str) -> bool:
-    """Check if a variable is assigned or sampled in a block."""
-    for stmt in block.statements:
-        if isinstance(stmt, (frog_ast.Assignment, frog_ast.Sample)):
-            if isinstance(stmt.var, frog_ast.Variable) and stmt.var.name == name:
-                return True
-    return False
 
 
 class SingleCallFieldToLocal(TransformPass):
@@ -978,14 +973,24 @@ def _all_refs_in_counter_guarded_branches(
     block: frog_ast.Block,
     field_name: str,
     counter_name: str,
+    mutable_names: set[str],
 ) -> bool:
     """Check that every reference to *field_name* is inside a branch guarded
-    by ``counter_name == <expr>``.
+    by ``counter_name == <expr>`` where ``<expr>`` is constant across calls.
 
-    Returns ``False`` if the field is referenced outside such branches or in
-    an else block.
+    Returns ``False`` if:
+    - the field is referenced outside counter-guarded branches or in an else block
+    - more than one counter-guarded branch references the field (the field
+      would be read on multiple calls with different counter values)
+    - any if-condition references the field (conditions are evaluated every call)
+    - the guard expression references mutable state (fields or method params),
+      which could let the branch fire on multiple calls
+
+    *mutable_names* is the set of variable names that can change between oracle
+    calls (game fields and method parameters).
     """
     past_increment = False
+    guarded_branch_count = 0
     for stmt in block.statements:
         # Track whether we've passed the counter increment
         if (
@@ -997,6 +1002,13 @@ def _all_refs_in_counter_guarded_branches(
             continue
 
         if isinstance(stmt, frog_ast.IfStatement) and past_increment:
+            # Reject if *any* condition references the field — conditions
+            # are evaluated on every oracle call, so the field would be read
+            # on every call rather than just the guarded one.
+            for condition in stmt.conditions:
+                if _references_name(condition, field_name):
+                    return False
+
             for cond_idx, condition in enumerate(stmt.conditions):
                 branch_block = stmt.blocks[cond_idx]
                 if not _references_name(branch_block, field_name):
@@ -1009,6 +1021,15 @@ def _all_refs_in_counter_guarded_branches(
                     and condition.left_expression.name == counter_name
                 ):
                     return False
+                # The guard expression (RHS of counter == expr) must be
+                # constant across oracle calls.  Reject if it references
+                # any game field or method parameter, since those can differ
+                # between calls and would let the branch fire multiple times.
+                guard_expr = condition.right_expression
+                for mname in mutable_names:
+                    if _references_name(guard_expr, mname):
+                        return False
+                guarded_branch_count += 1
             # Else block must not reference the field
             if stmt.has_else_block() and _references_name(stmt.blocks[-1], field_name):
                 return False
@@ -1017,6 +1038,12 @@ def _all_refs_in_counter_guarded_branches(
         # Reference outside an if-statement
         if _references_name(stmt, field_name):
             return False
+
+    # The field must be read in at most one counter-guarded branch across
+    # the entire method.  Multiple branches (even with different counter
+    # values) means the field is read on multiple calls — unsound.
+    if guarded_branch_count > 1:
+        return False
 
     return past_increment
 
@@ -1087,6 +1114,7 @@ def _counter_guarded_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
         # Step 1: Find the uniform sample of this field in Initialize
         init_sample: Optional[frog_ast.Sample] = None
         init_sample_idx: Optional[int] = None
+        init_sample_count = 0
         field_used_elsewhere_in_init = False
 
         for idx, stmt in enumerate(init_method.block.statements):
@@ -1098,10 +1126,12 @@ def _counter_guarded_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
             ):
                 init_sample = stmt
                 init_sample_idx = idx
+                init_sample_count += 1
             elif _references_name(stmt, field.name):
                 field_used_elsewhere_in_init = True
 
-        if init_sample is None or field_used_elsewhere_in_init:
+        # Reject if no sample, multiple samples, or field used elsewhere
+        if init_sample is None or init_sample_count > 1 or field_used_elsewhere_in_init:
             continue
 
         # Step 2: Find which non-Initialize methods reference this field
@@ -1126,19 +1156,37 @@ def _counter_guarded_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
         if counter_name is None:
             continue
 
-        # The counter must only be assigned once in the method (the increment).
-        # If the counter is reset or modified elsewhere (even inside branches),
-        # the guard branch could fire multiple times, making field-to-local
-        # unsound.
+        # The counter must only be assigned once in the target method (the
+        # increment).  If the counter is reset or modified elsewhere (even
+        # inside branches), the guard branch could fire multiple times,
+        # making field-to-local unsound.
         counter_assign_count = _count_assignments_recursive(
             target_method.block, counter_name
         )
         if counter_assign_count != 1:
             continue
 
+        # The counter must not be written in any other oracle method.
+        # If another method resets or modifies the counter, the
+        # monotonicity argument breaks and the guarded branch could
+        # fire on multiple calls.
+        counter_modified_elsewhere = False
+        for method in game.methods:
+            if method.signature.name in ("Initialize", target_method_name):
+                continue
+            if _is_written_in_recursive(method.block, counter_name):
+                counter_modified_elsewhere = True
+                break
+        if counter_modified_elsewhere:
+            continue
+
         # Step 5: Check all references are inside counter-guarded branches
+        # with constant guard expressions (no fields or method params)
+        mutable_names = {f.name for f in game.fields} | {
+            p.name for p in target_method.signature.parameters
+        }
         if not _all_refs_in_counter_guarded_branches(
-            target_method.block, field.name, counter_name
+            target_method.block, field.name, counter_name, mutable_names
         ):
             continue
 

@@ -1019,6 +1019,16 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             self.visit(ctx.type_()[1]),
         )
 
+    def visitUniqueSampleNoTypeStatement(
+        self, ctx: PrimitiveParser.UniqueSampleNoTypeStatementContext
+    ) -> frog_ast.UniqueSample:
+        return frog_ast.UniqueSample(
+            None,
+            self.visit(ctx.lvalue()[0]),
+            self.visit(ctx.lvalue()[1]),
+            self.visit(ctx.type_()),
+        )
+
     def visitVarDeclStatement(
         self, ctx: PrimitiveParser.VarDeclStatementContext
     ) -> frog_ast.VariableDeclaration:

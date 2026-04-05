@@ -49,6 +49,53 @@ def _get_unique_set_name(expr: frog_ast.Expression) -> str:
     return str(expr)
 
 
+def _exclusion_set_modified(game: frog_ast.Game, set_name: str) -> bool:
+    """Check if the exclusion set is explicitly assigned in any method.
+
+    FrogLang semantics implicitly maintain exclusion sets used in
+    ``<-uniq[S]`` statements.  If user code explicitly assigns to the
+    set variable, the implicit maintenance is compromised.
+
+    For dotted names like ``RF.domain``, the domain is implicitly
+    maintained by the random function's own semantics (querying RF(r)
+    adds r to RF.domain).  The RF itself may be initialized via a
+    Sample statement — that is not a modification.  Only plain set
+    fields (non-dotted names) are checked for modifications.
+
+    Returns True if a problematic modification is found.
+    """
+    # RF.domain sets are implicitly maintained by the RF's semantics.
+    # The RF initialization (Sample) is not a modification.
+    if "." in set_name:
+        return False
+
+    def _is_set_assign(node: frog_ast.ASTNode) -> bool:
+        if not isinstance(
+            node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ):
+            return False
+        var = node.var
+        # Direct assignment: S = ...
+        if isinstance(var, frog_ast.Variable) and var.name == set_name:
+            # Typed declaration (field initializer) is OK — that's the
+            # initial empty set.  Untyped assignment is a modification.
+            if isinstance(node, frog_ast.Assignment) and node.the_type is not None:
+                return False
+            return True
+        # Element assignment: S[k] = ...
+        if isinstance(var, frog_ast.ArrayAccess) and isinstance(
+            var.the_array, frog_ast.Variable
+        ):
+            if var.the_array.name == set_name:
+                return True
+        return False
+
+    for method in game.methods:
+        if SearchVisitor(_is_set_assign).visit(method.block) is not None:
+            return True
+    return False
+
+
 def _analyze_rf_eligibility(
     game: frog_ast.Game,
     rf_types: dict[str, frog_ast.RandomFunctionType],
@@ -59,9 +106,35 @@ def _analyze_rf_eligibility(
     Returns a dict mapping RF field name to its analysis result.
     """
     analysis: dict[str, _RFAnalysis] = {name: _RFAnalysis() for name in rf_types}
+    field_names = {f.name for f in game.fields}
 
     for method in game.methods:
-        _analyze_block(method.block, analysis, rf_types)
+        _analyze_block(method.block, analysis, rf_types, field_names)
+
+    # Post-analysis: reject RFs where any argument variable is used more
+    # than once across call sites (RF is a function, so same input must
+    # produce same output — replacing with independent samples is wrong).
+    for rf_analysis in analysis.values():
+        if not rf_analysis.eligible:
+            continue
+        seen_args: set[str] = set()
+        for site in rf_analysis.call_sites:
+            if site.arg_name in seen_args:
+                rf_analysis.eligible = False
+                break
+            seen_args.add(site.arg_name)
+
+    # Post-analysis: reject RFs whose exclusion set is explicitly modified.
+    # FrogLang semantics implicitly maintain exclusion sets (<-uniq[S] adds
+    # the sampled value to S automatically). If user code explicitly assigns
+    # to S, the implicit maintenance is compromised and cross-call uniqueness
+    # is not guaranteed.
+    for rf_analysis in analysis.values():
+        if not rf_analysis.eligible or rf_analysis.unique_set_name is None:
+            continue
+        set_name = rf_analysis.unique_set_name
+        if _exclusion_set_modified(game, set_name):
+            rf_analysis.eligible = False
 
     return analysis
 
@@ -70,6 +143,7 @@ def _analyze_block(
     block: frog_ast.Block,
     analysis: dict[str, _RFAnalysis],
     rf_types: dict[str, frog_ast.RandomFunctionType],
+    field_names: set[str] | None = None,
 ) -> None:
     """Analyze a block for RF calls and their <-uniq guards."""
     # Build map: variable name -> unique set name (from <-uniq in this block)
@@ -80,7 +154,18 @@ def _analyze_block(
         if isinstance(statement, frog_ast.UniqueSample) and isinstance(
             statement.var, frog_ast.Variable
         ):
-            uniq_guards[statement.var.name] = _get_unique_set_name(statement.unique_set)
+            set_name = _get_unique_set_name(statement.unique_set)
+            # The unique set must be a game field (persistent across oracle
+            # calls) to guarantee cross-call distinctness.  A local set
+            # resets each call, so the same value could be drawn across calls.
+            if field_names is not None:
+                raw_name = set_name.split(".")[0] if "." in set_name else set_name
+                if raw_name not in field_names:
+                    # Local set — don't trust it for cross-call uniqueness.
+                    # Mark any RF whose calls use this argument as ineligible
+                    # (handled below by not adding to uniq_guards).
+                    continue
+            uniq_guards[statement.var.name] = set_name
 
         # Check RF calls in assignments
         if (
@@ -129,9 +214,9 @@ def _analyze_block(
         # Recurse into nested blocks
         if isinstance(statement, frog_ast.IfStatement):
             for nested_block in statement.blocks:
-                _analyze_block(nested_block, analysis, rf_types)
+                _analyze_block(nested_block, analysis, rf_types, field_names)
         elif isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
-            _analyze_block(statement.block, analysis, rf_types)
+            _analyze_block(statement.block, analysis, rf_types, field_names)
 
 
 class _RFCallExtractor(BlockTransformer):
@@ -261,22 +346,11 @@ class UniqueRFSimplificationTransformer(BlockTransformer):
         if not rf_types:
             return block
 
-        # Build a temporary game to run analysis on
-        dummy_game = frog_ast.Game(
-            (
-                "_Dummy",
-                [],
-                [],
-                [
-                    frog_ast.Method(
-                        frog_ast.MethodSignature("f", frog_ast.Void(), []),
-                        block,
-                    )
-                ],
-                [],
-            )
-        )
-        analysis = _analyze_rf_eligibility(dummy_game, rf_types)
+        # Run analysis directly on this block (no field-scope check
+        # since this standalone transformer is used for unit tests
+        # where RF is declared locally in the same block).
+        analysis: dict[str, _RFAnalysis] = {name: _RFAnalysis() for name in rf_types}
+        _analyze_block(block, analysis, rf_types)
         eligible = {
             name: rf_types[name] for name, result in analysis.items() if result.eligible
         }
@@ -796,10 +870,18 @@ class ChallengeExclusionRFToUniformTransformer:
                 post_guard_block = frog_ast.Block(
                     list(oracle_method.block.statements[guard_idx + 1 :])
                 )
-                # Also check inside the guard's else/else-if blocks (not the
-                # return-early block)
                 guard_stmt = oracle_method.block.statements[guard_idx]
                 assert isinstance(guard_stmt, frog_ast.IfStatement)
+
+                # Check inside the guard's return-early block (blocks[0]).
+                # If RF is called there, the input equals the challenge field
+                # (guard condition is true), matching the Initialize RF input.
+                guard_body_calls = _collect_rf_call_sites(guard_stmt.blocks[0], rf_name)
+                if guard_body_calls:
+                    all_oracle_ok = False
+                    break
+
+                # Also check inside the guard's else/else-if blocks
                 extra_blocks = list(guard_stmt.blocks[1:])
 
                 all_post_calls = _collect_rf_call_sites(post_guard_block, rf_name)

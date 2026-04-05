@@ -206,6 +206,48 @@ class TestMethodNotFoundSuggestions:
         assert "2" in stderr
 
 
+    def test_scheme_as_game_parameter_rejected(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Game parameters must be primitives, not schemes."""
+        prim = tmp_path / "MyHash.primitive"
+        prim.write_text(
+            "Primitive MyHash(Int n) {\n"
+            "    Int n = n;\n"
+            "    BitString<n> f(BitString x);\n"
+            "}\n"
+        )
+        scheme = tmp_path / "MyScheme.scheme"
+        scheme.write_text(
+            "import 'MyHash.primitive';\n\n"
+            "Scheme MyScheme(MyHash h) extends MyHash {\n"
+            "    Int n = h.n;\n"
+            "    BitString<n> f(BitString x) {\n"
+            "        return h.f(x);\n"
+            "    }\n"
+            "}\n"
+        )
+        source = (
+            "import 'MyHash.primitive';\n"
+            "import 'MyScheme.scheme';\n\n"
+            "Game Real(MyHash h, MyScheme sch) {\n"
+            "    Bool Query() {\n"
+            "        return true;\n"
+            "    }\n"
+            "}\n"
+            "Game Random(MyHash h, MyScheme sch) {\n"
+            "    Bool Query() {\n"
+            "        return true;\n"
+            "    }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        stderr = _check_error_stderr(tmp_path, capsys, source, ext=".game")
+        assert "which is a scheme" in stderr
+        assert "'sch'" in stderr
+        assert "'MyScheme'" in stderr
+
+
 class TestImportPathSuggestions:
     def test_typo_in_import_filename(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

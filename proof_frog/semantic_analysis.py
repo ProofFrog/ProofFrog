@@ -433,6 +433,18 @@ class NameResolutionVisitor(VariableTypeVisitor):
                         self.file_name,
                     )
 
+        for param in game_file.games[0].parameters:
+            if isinstance(param.type, frog_ast.Variable):
+                imported = self.import_namespace.get(param.type.name)
+                if isinstance(imported, frog_ast.Scheme):
+                    print_error(
+                        param,
+                        f"Game parameter '{param.name}' has type"
+                        f" '{param.type.name}' which is a scheme;"
+                        f" game parameters must be primitives",
+                        self.file_name,
+                    )
+
         if game_file.games[0].name == game_file.games[1].name:
             print_error(
                 game_file, "Cannot have two games with the same name", self.file_name

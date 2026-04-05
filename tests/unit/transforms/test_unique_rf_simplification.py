@@ -200,6 +200,33 @@ def test_local_unique_set_not_simplified() -> None:
     )
 
 
+def test_exclusion_set_modified_not_simplified() -> None:
+    """If the exclusion set is explicitly modified by user code, the RF
+    should NOT be simplified.  FrogLang semantics implicitly maintain
+    exclusion sets; explicit modification breaks cross-call uniqueness."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Set<BitString<8>> S;
+            RandomFunctions<BitString<8>, BitString<16>> RF;
+            Void Initialize() {
+                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+            }
+            BitString<16> Query() {
+                BitString<8> r <-uniq[S] BitString<8>;
+                BitString<16> z = RF(r);
+                S = S;
+                return z;
+            }
+        }
+        """
+    )
+    result = UniqueRFSimplification().apply(game, _make_ctx())
+    assert result == game, (
+        "RF should not be simplified when the exclusion set is explicitly modified"
+    )
+
+
 def test_duplicate_rf_arg_not_simplified() -> None:
     """If the same uniquely-sampled variable is used as argument to two
     RF calls, both calls return the same value (RF is a function).

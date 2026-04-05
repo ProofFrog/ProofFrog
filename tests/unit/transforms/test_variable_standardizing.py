@@ -119,6 +119,61 @@ Game Test() {
 """
 
 
+def test_parameter_name_collision_skipped() -> None:
+    """When a method parameter is named v1, locals must skip v1 and use v2."""
+    game = frog_parser.parse_game("""
+    Game Test() {
+        BitString<n> Oracle(BitString<n> v1) {
+            BitString<n> x = foo();
+            return x + v1;
+        }
+    }
+    """)
+    expected = frog_parser.parse_game("""
+    Game Test() {
+        BitString<n> Oracle(BitString<n> v1) {
+            BitString<n> v2 = foo();
+            return v2 + v1;
+        }
+    }
+    """)
+    result = VariableStandardizingTransformer().transform(game)
+    print("EXPECTED", expected)
+    print("RESULT  ", result)
+    # The local 'x' should become v2 (not v1, which is a parameter)
+    assert result == expected, (
+        "Local variable should skip vN names that collide with parameters"
+    )
+
+
+def test_parameter_v2_with_two_locals() -> None:
+    """With parameter v2 and two locals, should produce v1 and v3 (skip v2)."""
+    game = frog_parser.parse_game("""
+    Game Test() {
+        BitString<n> Oracle(BitString<n> v2) {
+            BitString<n> x = foo();
+            BitString<n> y = x + v2;
+            return y;
+        }
+    }
+    """)
+    expected = frog_parser.parse_game("""
+    Game Test() {
+        BitString<n> Oracle(BitString<n> v2) {
+            BitString<n> v1 = foo();
+            BitString<n> v3 = v1 + v2;
+            return v3;
+        }
+    }
+    """)
+    result = VariableStandardizingTransformer().transform(game)
+    print("EXPECTED", expected)
+    print("RESULT  ", result)
+    assert result == expected, (
+        "Locals should be v1, v3 (skipping v2 which is a parameter)"
+    )
+
+
 def test_equivalent_statement_orderings() -> None:
     """Two games differing only in statement ordering produce the same canonical form."""
     game1 = frog_parser.parse_game(_GAME_SNIPPET1)

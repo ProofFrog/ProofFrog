@@ -33,10 +33,24 @@ class VariableStandardizingTransformer(BlockTransformer):
     two-phase rename is used (first to collision-free intermediates, then
     to final names) to avoid conflicts when user-written names overlap
     with the v1/v2/... namespace.
+
+    Method parameter names are collected before processing each method's
+    block, and the Phase 2 numbering skips any ``vN`` name that would
+    collide with a parameter.
     """
 
     def __init__(self) -> None:
         self.variable_counter = 0
+        self._param_names: set[str] = set()
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        new_game = copy.deepcopy(game)
+        new_game.methods = [self._transform_method(m) for m in new_game.methods]
+        return new_game
+
+    def _transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        self._param_names = {p.name for p in method.signature.parameters}
+        return self.transform(method)
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         new_block = copy.deepcopy(block)
@@ -77,9 +91,13 @@ class VariableStandardizingTransformer(BlockTransformer):
             new_block = replace_all(new_block, old_name, f"__vstandard_{i}__")
 
         # Phase 2: rename intermediate names to v1, v2, v3, ... in order.
-        # Phase 1 guarantees each source name is unique, so no collision is possible.
+        # Phase 1 guarantees each source name is unique, so no collision is
+        # possible among locals.  Skip any vN that collides with a method
+        # parameter to avoid shadowing.
         for i in range(len(ordered_names)):
             self.variable_counter += 1
+            while f"v{self.variable_counter}" in self._param_names:
+                self.variable_counter += 1
             new_block = replace_all(
                 new_block, f"__vstandard_{i}__", f"v{self.variable_counter}"
             )

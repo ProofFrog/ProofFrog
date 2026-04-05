@@ -9,11 +9,16 @@ is on a distinct, previously-unseen input, so each result is an independent
 uniform sample from the range type.
 """
 
+# _ast_to_sympy duplicates semantic_analysis._ast_to_sympy to avoid a
+# cyclic import (proof_engine -> pipelines -> random_functions -> semantic_analysis).
+# pylint: disable=duplicate-code
+
 from __future__ import annotations
 
 import copy
 import functools
 from dataclasses import dataclass, field
+from sympy import Rational, Symbol, simplify as sympy_simplify
 
 from .. import frog_ast
 from ..visitors import BlockTransformer, SearchVisitor, ReplaceTransformer
@@ -599,21 +604,40 @@ def _extract_non_field_vars(
     return result
 
 
+@dataclass
+class _GuardInfo:
+    """Result of finding a challenge exclusion guard in an oracle method."""
+
+    challenge_fields: set[str]
+    guard_lhs_vars: set[str]
+    guard_idx: int
+    # For slice guards: param[start:end] == field
+    slice_param: str | None = None
+    slice_start: frog_ast.Expression | None = None
+    slice_end: frog_ast.Expression | None = None
+
+    @property
+    def is_slice_guard(self) -> bool:
+        """True if this guard uses a slice comparison."""
+        return self.slice_param is not None
+
+
 def _find_challenge_guard(
     method: frog_ast.Method,
     field_names: list[str],
-) -> tuple[set[str], set[str], int] | None:
+) -> _GuardInfo | None:
     """Find a challenge exclusion guard at the top of an oracle method.
 
     Looks for the pattern:
         if (param_expr == [field_a, field_b, ...]) { return None/value; }
     or:
         if (param_expr == field_a) { return None/value; }
+    or (slice guard):
+        if (param[start:end] == field_a) { return None/value; }
 
     at the start of the method body (possibly after local assignments).
 
-    Returns (challenge field names, guard LHS variable names,
-    index of the if-statement) or None.
+    Returns a ``_GuardInfo`` describing the guard, or ``None``.
     """
     for idx, stmt in enumerate(method.block.statements):
         if not isinstance(stmt, frog_ast.IfStatement):
@@ -636,12 +660,29 @@ def _find_challenge_guard(
         rhs = cond.right_expression
         challenge_fields = _extract_field_names_from_expr(rhs, field_names)
 
-        # Extract LHS variable names (non-field variables constrained by guard)
         lhs = cond.left_expression
+
+        # Check for slice guard: param[start:end] == field
+        if challenge_fields and isinstance(lhs, frog_ast.Slice):
+            if isinstance(lhs.the_array, frog_ast.Variable):
+                return _GuardInfo(
+                    challenge_fields=challenge_fields,
+                    guard_lhs_vars={lhs.the_array.name},
+                    guard_idx=idx,
+                    slice_param=lhs.the_array.name,
+                    slice_start=lhs.start,
+                    slice_end=lhs.end,
+                )
+
+        # Extract LHS variable names (non-field variables constrained by guard)
         guard_lhs_vars = _extract_non_field_vars(lhs, field_names)
 
         if challenge_fields:
-            return challenge_fields, guard_lhs_vars, idx
+            return _GuardInfo(
+                challenge_fields=challenge_fields,
+                guard_lhs_vars=guard_lhs_vars,
+                guard_idx=idx,
+            )
 
     return None
 
@@ -688,6 +729,141 @@ def _is_injective_call(
     return m is not None and m.injective
 
 
+def _flatten_concat(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
+    """Flatten nested concatenation (OR) expressions into leaves."""
+    if (
+        isinstance(expr, frog_ast.BinaryOperation)
+        and expr.operator == frog_ast.BinaryOperators.OR
+    ):
+        return _flatten_concat(expr.left_expression) + _flatten_concat(
+            expr.right_expression
+        )
+    return [expr]
+
+
+def _ast_to_sympy(  # pylint: disable=too-many-return-statements
+    node: frog_ast.ASTNode,
+) -> Symbol | int | None:
+    """Convert an AST numeric expression to a SymPy expression."""
+    if isinstance(node, frog_ast.Integer):
+        return node.num
+    if isinstance(node, frog_ast.Variable):
+        return Symbol(node.name)
+    if isinstance(node, frog_ast.FieldAccess):
+        if isinstance(node.the_object, frog_ast.Variable):
+            return Symbol(f"{node.the_object.name}.{node.name}")
+        return None
+    if isinstance(node, frog_ast.BinaryOperation):
+        left = _ast_to_sympy(node.left_expression)
+        right = _ast_to_sympy(node.right_expression)
+        if left is None or right is None:
+            return None
+        if node.operator == frog_ast.BinaryOperators.ADD:
+            return left + right
+        if node.operator == frog_ast.BinaryOperators.SUBTRACT:
+            return left - right
+        if node.operator == frog_ast.BinaryOperators.MULTIPLY:
+            return left * right
+        if node.operator == frog_ast.BinaryOperators.DIVIDE:
+            return Rational(left, right)
+        return None
+    if isinstance(node, frog_ast.UnaryOperation):
+        if node.operator == frog_ast.UnaryOperators.MINUS:
+            val = _ast_to_sympy(node.expression)
+            if val is not None:
+                return -val
+        return None
+    return None
+
+
+def _leaf_bitstring_width(
+    leaf: frog_ast.Expression,
+    field_types: dict[str, frog_ast.Type],
+    proof_namespace: frog_ast.Namespace,
+) -> Symbol | int | None:
+    """Return the SymPy bit-width of a concatenation leaf, or None."""
+    # Variable: look up in game fields
+    if isinstance(leaf, frog_ast.Variable) and leaf.name in field_types:
+        ft = field_types[leaf.name]
+        if isinstance(ft, frog_ast.BitStringType) and ft.parameterization:
+            return _ast_to_sympy(ft.parameterization)
+    # FuncCall to a primitive method: use return type
+    if isinstance(leaf, frog_ast.FuncCall):
+        sig = _lookup_primitive_method(leaf.func, proof_namespace)
+        if sig is not None and isinstance(sig.return_type, frog_ast.BitStringType):
+            if sig.return_type.parameterization:
+                return _ast_to_sympy(sig.return_type.parameterization)
+    return None
+
+
+# pylint: disable=too-many-arguments,too-many-positional-arguments
+def _slice_guard_excludes(
+    init_arg: frog_ast.Expression,
+    oracle_arg: frog_ast.Expression,
+    guard: _GuardInfo,
+    field_names: list[str],
+    field_types: dict[str, frog_ast.Type] | None = None,
+    proof_namespace: frog_ast.Namespace | None = None,
+) -> bool:
+    """Check if a slice guard ensures the oracle RF arg differs from init.
+
+    This handles the case where the oracle RF argument IS the guarded
+    parameter (e.g., ``RF(m)`` with guard ``m[start:end] == challengeField``).
+    The guard guarantees that the sub-range of ``m`` covering the challenge
+    leaf does NOT match the challenge field, so the full RF inputs differ.
+
+    Returns True if the slice guard proves the arguments differ.
+    """
+    if not guard.is_slice_guard:
+        return False
+
+    # Oracle RF arg must be the guarded parameter itself
+    if not isinstance(oracle_arg, frog_ast.Variable):
+        return False
+    if oracle_arg.name != guard.slice_param:
+        return False
+
+    # Flatten Init arg into concatenation leaves
+    init_leaves = _flatten_concat(init_arg)
+    if len(init_leaves) <= 1:
+        return False
+
+    # Need type info to compute leaf widths
+    if field_types is None or proof_namespace is None:
+        return False
+
+    # Convert slice bounds to SymPy
+    assert guard.slice_start is not None and guard.slice_end is not None
+    slice_start_sym = _ast_to_sympy(guard.slice_start)
+    slice_end_sym = _ast_to_sympy(guard.slice_end)
+    if slice_start_sym is None or slice_end_sym is None:
+        return False
+
+    # Compute cumulative leaf positions and find which leaf the slice covers
+    cum_start: Symbol | int = 0
+    for leaf in init_leaves:
+        width = _leaf_bitstring_width(leaf, field_types, proof_namespace)
+        if width is None:
+            return False
+        cum_end = cum_start + width
+
+        # Check if the slice exactly covers this leaf
+        if (
+            sympy_simplify(cum_start - slice_start_sym) == 0
+            and sympy_simplify(cum_end - slice_end_sym) == 0
+        ):
+            # This leaf is at the guarded position — check if it's a
+            # challenge field variable
+            if isinstance(leaf, frog_ast.Variable) and leaf.name in field_names:
+                if leaf.name in guard.challenge_fields:
+                    return True
+            return False
+
+        cum_start = cum_end
+
+    return False
+
+
 # pylint: disable=too-many-arguments,too-many-positional-arguments
 def _rf_args_structurally_differ(
     init_arg: frog_ast.Expression,
@@ -703,16 +879,6 @@ def _rf_args_structurally_differ(
     flattens and checks leaf operands. For calls to injective functions, recurses
     into arguments.
     """
-
-    def _flatten_concat(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
-        if (
-            isinstance(expr, frog_ast.BinaryOperation)
-            and expr.operator == frog_ast.BinaryOperators.OR
-        ):
-            return _flatten_concat(expr.left_expression) + _flatten_concat(
-                expr.right_expression
-            )
-        return [expr]
 
     def _check_leaf_pair(
         init_leaf: frog_ast.Expression, oracle_leaf: frog_ast.Expression
@@ -776,11 +942,13 @@ class ChallengeExclusionRFToUniformTransformer:
         self,
         game: frog_ast.Game,
         proof_namespace: frog_ast.Namespace | None = None,
+        ctx: PipelineContext | None = None,
     ) -> frog_ast.Game:
         """Transform a game, replacing qualifying RF calls with uniform samples."""
         if proof_namespace is None:
             proof_namespace = {}
         field_names = [f.name for f in game.fields]
+        field_types: dict[str, frog_ast.Type] = {f.name: f.type for f in game.fields}
         rf_fields: dict[str, frog_ast.RandomFunctionType] = {}
         for f in game.fields:
             if isinstance(f.type, frog_ast.RandomFunctionType):
@@ -838,7 +1006,10 @@ class ChallengeExclusionRFToUniformTransformer:
                         break
                     continue
 
-                challenge_fields, guard_lhs_vars, guard_idx = guard_result
+                guard = guard_result
+                challenge_fields = guard.challenge_fields
+                guard_lhs_vars = guard.guard_lhs_vars
+                guard_idx = guard.guard_idx
 
                 # Extend guard vars with variables derived from guard LHS
                 # (e.g., v4 = c[0] where c is the guard parameter)
@@ -892,6 +1063,20 @@ class ChallengeExclusionRFToUniformTransformer:
                     if len(call.args) != 1:
                         all_oracle_ok = False
                         break
+
+                    # For slice guards where the oracle RF arg IS the
+                    # guarded parameter (e.g., RF(m) with guard on
+                    # m[start:end]), use slice-based exclusion check
+                    if guard.is_slice_guard and _slice_guard_excludes(
+                        init_arg,
+                        call.args[0],
+                        guard,
+                        field_names,
+                        field_types,
+                        proof_namespace,
+                    ):
+                        continue
+
                     if not _rf_args_structurally_differ(
                         init_arg,
                         call.args[0],
@@ -900,6 +1085,28 @@ class ChallengeExclusionRFToUniformTransformer:
                         guard_lhs_vars,
                         proof_namespace,
                     ):
+                        if ctx is not None and guard.is_slice_guard:
+                            ctx.near_misses.append(
+                                NearMiss(
+                                    transform_name=(
+                                        "Challenge Exclusion RF To Uniform"
+                                    ),
+                                    reason=(
+                                        f"Slice guard on '{guard.slice_param}' "
+                                        f"detected but RF arg structural "
+                                        f"difference could not be verified in "
+                                        f"'{oracle_method.signature.name}'"
+                                    ),
+                                    location=call.origin,
+                                    suggestion=(
+                                        "Check that the oracle RF input is the "
+                                        "guarded parameter and the slice aligns "
+                                        "with a single concatenation leaf"
+                                    ),
+                                    variable=rf_name,
+                                    method=oracle_method.signature.name,
+                                )
+                            )
                         all_oracle_ok = False
                         break
 
@@ -943,5 +1150,5 @@ class ChallengeExclusionRFToUniform(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return ChallengeExclusionRFToUniformTransformer().transform(
-            game, proof_namespace=ctx.proof_namespace
+            game, proof_namespace=ctx.proof_namespace, ctx=ctx
         )

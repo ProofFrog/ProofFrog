@@ -71,15 +71,15 @@ from proof_frog.transforms.standardization import (
             }
             """,
         ),
-        # Field assignments — no change (only typed declarations are swapped)
+        # Independent field assignments sorted by canonical field name
         (
             """
             Game Test() {
                 Int field1;
                 Int field2;
                 Int f() {
-                    field1 = 2;
                     field2 = 1;
+                    field1 = 2;
                     return field1 + field2;
                 }
             }
@@ -92,6 +92,86 @@ from proof_frog.transforms.standardization import (
                     field1 = 2;
                     field2 = 1;
                     return field1 + field2;
+                }
+            }
+            """,
+        ),
+        # Field sample interleaved with local samples — canonical order
+        # regardless of source order (fields sort before locals with same RHS)
+        (
+            """
+            Game Test() {
+                Set T;
+                T field1;
+                T field2;
+                Void f() {
+                    field1 <- T;
+                    T v1 <- T;
+                    field2 <- T;
+                }
+            }
+            """,
+            """
+            Game Test() {
+                Set T;
+                T field1;
+                T field2;
+                Void f() {
+                    field1 <- T;
+                    field2 <- T;
+                    T v1 <- T;
+                }
+            }
+            """,
+        ),
+        # Reverse source order produces same canonical form
+        (
+            """
+            Game Test() {
+                Set T;
+                T field1;
+                T field2;
+                Void f() {
+                    T v1 <- T;
+                    field2 <- T;
+                    field1 <- T;
+                }
+            }
+            """,
+            """
+            Game Test() {
+                Set T;
+                T field1;
+                T field2;
+                Void f() {
+                    field1 <- T;
+                    field2 <- T;
+                    T v1 <- T;
+                }
+            }
+            """,
+        ),
+        # Dependent field assignment not reordered past its dependency
+        (
+            """
+            Game Test() {
+                Int field1;
+                Int field2;
+                Int f() {
+                    field1 = 1;
+                    field2 = field1 + 1;
+                    return field2;
+                }
+            }
+            """,
+            """
+            Game Test() {
+                Int field1;
+                Int field2;
+                Int f() {
+                    field1 = 1;
+                    field2 = field1 + 1;
+                    return field2;
                 }
             }
             """,

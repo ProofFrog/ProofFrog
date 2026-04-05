@@ -691,6 +691,57 @@ class ReflexiveComparisonTransformer(Transformer):
         return transformed
 
 
+class BooleanIdentityTransformer(Transformer):
+    """Simplifies boolean AND/OR with literal true/false operands.
+
+    OR rules (only when at least one operand is a Boolean literal,
+    to avoid firing on BitString concatenation):
+      false || false -> false
+      x || false / false || x -> x
+      x || true  / true || x  -> true
+
+    AND rules (AND is always boolean):
+      true && true -> true
+      x && true / true && x -> x
+      x && false / false && x -> false
+    """
+
+    def transform_binary_operation(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        transformed = frog_ast.BinaryOperation(
+            binary_operation.operator,
+            self.transform(binary_operation.left_expression),
+            self.transform(binary_operation.right_expression),
+        )
+        left = transformed.left_expression
+        right = transformed.right_expression
+
+        if transformed.operator == frog_ast.BinaryOperators.OR:
+            # Only simplify when at least one operand is a Boolean literal
+            # (BitString concatenation uses || but never has Boolean literals)
+            if isinstance(left, frog_ast.Boolean) and left.bool:
+                return frog_ast.Boolean(True)  # true || x -> true
+            if isinstance(right, frog_ast.Boolean) and right.bool:
+                return frog_ast.Boolean(True)  # x || true -> true
+            if isinstance(left, frog_ast.Boolean) and not left.bool:
+                return right  # false || x -> x
+            if isinstance(right, frog_ast.Boolean) and not right.bool:
+                return left  # x || false -> x
+
+        if transformed.operator == frog_ast.BinaryOperators.AND:
+            if isinstance(left, frog_ast.Boolean) and not left.bool:
+                return frog_ast.Boolean(False)  # false && x -> false
+            if isinstance(right, frog_ast.Boolean) and not right.bool:
+                return frog_ast.Boolean(False)  # x && false -> false
+            if isinstance(left, frog_ast.Boolean) and left.bool:
+                return right  # true && x -> x
+            if isinstance(right, frog_ast.Boolean) and right.bool:
+                return left  # x && true -> x
+
+        return transformed
+
+
 # ---------------------------------------------------------------------------
 # TransformPass wrappers
 # ---------------------------------------------------------------------------
@@ -715,6 +766,13 @@ class SimplifyNotPass(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return SimplifyNot().transform(game)
+
+
+class BooleanIdentity(TransformPass):
+    name = "Boolean Identity"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return BooleanIdentityTransformer().transform(game)
 
 
 class XorCancellation(TransformPass):

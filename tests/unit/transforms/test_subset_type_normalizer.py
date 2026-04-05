@@ -131,10 +131,16 @@ class TestBasicNormalization:
 
 
 class TestSampleNormalization:
-    """Tests that sample statements are fully normalized."""
+    """Tests that sample statements are correctly normalized.
 
-    def test_normalizes_sample_type_and_sampled_from(self) -> None:
-        """Both the type annotation and sampled_from should be normalized."""
+    For equality pairs (==), both the type annotation and sampled_from
+    should be normalized.  For subsets-only pairs, only the type
+    annotation is normalized (sampling distribution must not change).
+    """
+
+    def test_normalizes_sample_type_and_sampled_from_for_equality(self) -> None:
+        """Both type annotation and sampled_from should be normalized
+        when the pair comes from an == constraint."""
         method = frog_parser.parse_method(
             """
             Void f() {
@@ -150,11 +156,13 @@ class TestSampleNormalization:
             """
         )
         pairs = _make_pairs(("KeySpace2", "IntermediateSpace"))
-        result = SubsetTypeNormalizer(pairs).transform(method)
+        eq_pairs = {("KeySpace2", "IntermediateSpace")}
+        result = SubsetTypeNormalizer(pairs, equality_pairs=eq_pairs).transform(method)
         assert result == expected
 
-    def test_normalizes_sample_sampled_from_only(self) -> None:
-        """sampled_from should be normalized even if it differs from the type."""
+    def test_subsets_only_normalizes_type_not_sampled_from(self) -> None:
+        """For subsets-only pairs, type annotation is normalized but
+        sampled_from is NOT — A ⊊ B would change the distribution."""
         method = frog_parser.parse_method(
             """
             Void f() {
@@ -163,8 +171,29 @@ class TestSampleNormalization:
             """
         )
         pairs = _make_pairs(("KeySpace2", "IntermediateSpace"))
+        # No equality_pairs — this is a subsets-only pair
         result = SubsetTypeNormalizer(pairs).transform(method)
-        # Check the sampled_from was normalized (not just the type)
+        sample = result.block.statements[0]
+        assert isinstance(sample, frog_ast.Sample)
+        # Type annotation should be normalized
+        assert isinstance(sample.the_type, frog_ast.Variable)
+        assert sample.the_type.name == "IntermediateSpace"
+        # sampled_from should NOT be normalized (subsets-only)
+        assert isinstance(sample.sampled_from, frog_ast.Variable)
+        assert sample.sampled_from.name == "KeySpace2"
+
+    def test_normalizes_sampled_from_for_equality(self) -> None:
+        """sampled_from should be normalized for equality pairs."""
+        method = frog_parser.parse_method(
+            """
+            Void f() {
+                KeySpace2 x <- KeySpace2;
+            }
+            """
+        )
+        pairs = _make_pairs(("KeySpace2", "IntermediateSpace"))
+        eq_pairs = {("KeySpace2", "IntermediateSpace")}
+        result = SubsetTypeNormalizer(pairs, equality_pairs=eq_pairs).transform(method)
         sample = result.block.statements[0]
         assert isinstance(sample, frog_ast.Sample)
         assert isinstance(sample.sampled_from, frog_ast.Variable)
@@ -256,7 +285,7 @@ class TestEqualityPairs:
         assert result == expected
 
     def test_sample_variable_to_bitstring(self) -> None:
-        """Sampling from KeySpace becomes sampling from BitString<n>."""
+        """Sampling from KeySpace becomes sampling from BitString<n> for == pairs."""
         method = frog_parser.parse_method(
             """
             Void f() {
@@ -265,7 +294,8 @@ class TestEqualityPairs:
             """
         )
         pairs = self._eq_pair("KeySpace", frog_ast.BitStringType(frog_ast.Integer(128)))
-        result = SubsetTypeNormalizer(pairs).transform(method)
+        eq_pairs = {("KeySpace", str(frog_ast.BitStringType(frog_ast.Integer(128))))}
+        result = SubsetTypeNormalizer(pairs, equality_pairs=eq_pairs).transform(method)
         sample = result.block.statements[0]
         assert isinstance(sample, frog_ast.Sample)
         assert isinstance(sample.the_type, frog_ast.BitStringType)

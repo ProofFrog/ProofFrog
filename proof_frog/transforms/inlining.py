@@ -1077,11 +1077,11 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                 # Verify free variables are not modified between j and i.
                 # This ensures the expression evaluates to the same value
                 # at the hoist target (before j) as at the original
-                # position i.
+                # position i.  Field-type free variables must also be
+                # checked — a field modified between j and i would cause
+                # the hoisted expression to evaluate to a stale value.
                 stable = True
                 for fv in free_vars:
-                    if fv.name in self.fields:
-                        continue
                     for k in range(j, i):
                         if (
                             SearchVisitor(

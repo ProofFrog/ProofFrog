@@ -22,7 +22,7 @@ from ..visitors import (
     NameTypeMap,
     build_game_type_map,
 )
-from ._base import TransformPass, PipelineContext, NearMiss
+from ._base import TransformPass, PipelineContext, NearMiss, has_nondeterministic_call
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
@@ -421,12 +421,13 @@ class XorCancellationTransformer(Transformer):
         # Transform each leaf term (non-ADD sub-expressions) individually
         transformed_terms = [self.transform(t) for t in terms]
 
-        # Cancel pairs of identical terms
+        # Cancel pairs of identical terms (only when both are pure/deterministic)
+        proof_ns = self.ctx.proof_namespace if self.ctx is not None else {}
         remaining: list[frog_ast.Expression] = []
         for term in transformed_terms:
             found = False
             for i, existing in enumerate(remaining):
-                if term == existing:
+                if term == existing and not has_nondeterministic_call(term, proof_ns):
                     remaining.pop(i)
                     found = True
                     break
@@ -556,13 +557,18 @@ class ModIntSimplificationTransformer(Transformer):
     - Additive identity: a + 0 = a, 0 + a = a
     - Multiplicative identity: a * 1 = a, 1 * a = a
     - Multiplicative zero: a * 0 = 0, 0 * a = 0
-    - Additive inverse: a - a = 0
+    - Additive inverse: a - a = 0 (only when a is pure/deterministic)
     - Double negation: -(-a) = a
     - Exponentiation: a ^ 0 = 1, a ^ 1 = a
     """
 
-    def __init__(self, type_map: NameTypeMap) -> None:
+    def __init__(
+        self,
+        type_map: NameTypeMap,
+        proof_namespace: frog_ast.Namespace | None = None,
+    ) -> None:
         self.type_map = type_map
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
 
     def _is_modint_expr(self, expr: frog_ast.Expression) -> bool:
         return isinstance(
@@ -618,8 +624,10 @@ class ModIntSimplificationTransformer(Transformer):
         if op == frog_ast.BinaryOperators.SUBTRACT:
             if _is_integer_literal(right, 0):
                 return left
-            # a - a = 0
-            if left == right:
+            # a - a = 0 (only when a is pure/deterministic)
+            if left == right and not has_nondeterministic_call(
+                left, self._proof_namespace
+            ):
                 return frog_ast.Integer(0)
 
         # Multiplicative identity: a * 1 = a, 1 * a = a
@@ -645,7 +653,16 @@ class ModIntSimplificationTransformer(Transformer):
 
 
 class ReflexiveComparisonTransformer(Transformer):
-    """Simplifies reflexive comparisons: x == x -> true, x != x -> false."""
+    """Simplifies reflexive comparisons: x == x -> true, x != x -> false.
+
+    Only fires when the repeated sub-expression is pure (no non-deterministic
+    function calls).  Non-deterministic calls may return different values on
+    each invocation, so structural equality of AST nodes does not imply
+    runtime equality.
+    """
+
+    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
 
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
@@ -658,11 +675,17 @@ class ReflexiveComparisonTransformer(Transformer):
         if (
             transformed.operator == frog_ast.BinaryOperators.EQUALS
             and transformed.left_expression == transformed.right_expression
+            and not has_nondeterministic_call(
+                transformed.left_expression, self._proof_namespace
+            )
         ):
             return frog_ast.Boolean(True)
         if (
             transformed.operator == frog_ast.BinaryOperators.NOTEQUALS
             and transformed.left_expression == transformed.right_expression
+            and not has_nondeterministic_call(
+                transformed.left_expression, self._proof_namespace
+            )
         ):
             return frog_ast.Boolean(False)
         return transformed
@@ -715,7 +738,9 @@ class ModIntSimplification(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return ModIntSimplificationTransformer(type_map).transform(game)
+        return ModIntSimplificationTransformer(
+            type_map, proof_namespace=ctx.proof_namespace
+        ).transform(game)
 
 
 def _flatten_chain(
@@ -791,4 +816,6 @@ class ReflexiveComparison(TransformPass):
     name = "Reflexive Comparison"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return ReflexiveComparisonTransformer().transform(game)
+        return ReflexiveComparisonTransformer(
+            proof_namespace=ctx.proof_namespace
+        ).transform(game)

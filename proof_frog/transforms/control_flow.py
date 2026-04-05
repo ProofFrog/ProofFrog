@@ -26,7 +26,7 @@ from ..visitors import (
     NameTypeMap,
     assigns_variable,
 )
-from ._base import TransformPass, PipelineContext, NearMiss
+from ._base import TransformPass, PipelineContext, NearMiss, has_nondeterministic_call
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
@@ -60,8 +60,10 @@ class BranchEliminiationTransformer(BlockTransformer):
                         break
                     condition = new_if_statement.conditions[i]
                     if isinstance(condition, frog_ast.Boolean) and condition.bool:
-                        new_if_statement.conditions = if_statement.conditions[: i + 1]
-                        new_if_statement.blocks = if_statement.blocks[: i + 1]
+                        new_if_statement.conditions = new_if_statement.conditions[
+                            : i + 1
+                        ]
+                        new_if_statement.blocks = new_if_statement.blocks[: i + 1]
                         if i == len(new_if_statement.conditions) - 1 and i > 0:
                             del new_if_statement.conditions[-1]
                         break
@@ -499,12 +501,13 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
     whose condition asserts it.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
         self.field_names: list[str] = []
         self.param_names: list[str] = []
         # Maps field name -> its assigned expression (only for single-assignment fields
         # whose definition is composed entirely of other fields)
         self.field_definitions: dict[str, frog_ast.Expression] = {}
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.field_names = [field.name for field in game.fields]
@@ -539,6 +542,8 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
 
         # Keep only single-assignment fields whose definitions reference
         # only other fields (not locals/params from the assigning method)
+        # and contain no non-deterministic function calls (inlining would
+        # create a fresh evaluation that may return a different value).
         self.field_definitions = {}
         for name, expr in definitions.items():
             if assign_counts.get(name, 0) != 1:
@@ -550,6 +555,8 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
             # referenced field is reassigned after this definition, the
             # stored value diverges from the current field value.
             if not all(assign_counts.get(v.name, 0) == 1 for v in used_vars):
+                continue
+            if has_nondeterministic_call(expr, self._proof_namespace):
                 continue
             self.field_definitions[name] = expr
 
@@ -703,7 +710,9 @@ class IfConditionAliasSubstitution(TransformPass):
     name = "If Condition Alias Substitution"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return IfConditionAliasSubstitutionTransformer().transform(game)
+        return IfConditionAliasSubstitutionTransformer(
+            proof_namespace=ctx.proof_namespace
+        ).transform(game)
 
 
 class RedundantConditionalReturn(TransformPass):

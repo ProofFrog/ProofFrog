@@ -151,6 +151,94 @@ def test_no_hoist_when_match_is_in_assignment_target() -> None:
     _transform_and_compare(source, source)
 
 
+def test_no_hoist_when_field_free_var_modified_between_j_and_i() -> None:
+    """Soundness: if the expression references a field that is modified
+    between the match position j and the field assignment position i,
+    hoisting would evaluate the expression at an earlier state of the field.
+
+    Example: field5 = field_arr[0] where field_arr[0] is modified in between.
+    The stability check must not skip field-type free variables."""
+    from proof_frog import frog_ast
+
+    # Build: field_arr is a field, field5 is a field.
+    # Initialize:
+    #   Int x = field_arr[0] + 1;    // j=0: uses field_arr[0]
+    #   field_arr[0] = 99;            // modifies field_arr
+    #   field5 = field_arr[0];        // i=2: field assignment to hoist
+    game = frog_ast.Game((
+        "Test",
+        [],
+        [
+            frog_ast.Field(
+                frog_ast.Variable("Array"),  # simplified type
+                "field_arr",
+                None,
+            ),
+            frog_ast.Field(frog_ast.Variable("Int"), "field5", None),
+        ],
+        [
+            frog_ast.Method(
+                frog_ast.MethodSignature(
+                    "Initialize", frog_ast.Variable("Void"), []
+                ),
+                frog_ast.Block([
+                    # Int x = field_arr[0] + 1;
+                    frog_ast.Assignment(
+                        frog_ast.Variable("Int"),
+                        frog_ast.Variable("x"),
+                        frog_ast.BinaryOperation(
+                            frog_ast.BinaryOperators.ADD,
+                            frog_ast.ArrayAccess(
+                                frog_ast.Variable("field_arr"),
+                                frog_ast.Integer(0),
+                            ),
+                            frog_ast.Integer(1),
+                        ),
+                    ),
+                    # field_arr[0] = 99;
+                    frog_ast.Assignment(
+                        None,
+                        frog_ast.ArrayAccess(
+                            frog_ast.Variable("field_arr"),
+                            frog_ast.Integer(0),
+                        ),
+                        frog_ast.Integer(99),
+                    ),
+                    # field5 = field_arr[0];
+                    frog_ast.Assignment(
+                        None,
+                        frog_ast.Variable("field5"),
+                        frog_ast.ArrayAccess(
+                            frog_ast.Variable("field_arr"),
+                            frog_ast.Integer(0),
+                        ),
+                    ),
+                ]),
+            ),
+        ],
+        [],  # phases
+    ))
+
+    result = HoistFieldPureAliasTransformer().transform(game)
+
+    # field5 = field_arr[0] must NOT be hoisted before the modification
+    init_method = result.get_method("Initialize")
+    stmts = init_method.block.statements
+    # If hoisted, the field5 assignment would be at index 0.
+    # It should still be at the end (index 2).
+    last_stmt = stmts[-1]
+    assert isinstance(last_stmt, frog_ast.Assignment), (
+        "Last statement should still be the field5 assignment"
+    )
+    assert (
+        isinstance(last_stmt.var, frog_ast.Variable)
+        and last_stmt.var.name == "field5"
+    ), (
+        "field5 = field_arr[0] should NOT be hoisted when field_arr is "
+        "modified between the match position and the assignment position"
+    )
+
+
 def test_no_hoist_when_array_element_modified_between_j_and_i() -> None:
     """Soundness: if the expression is an ArrayAccess (e.g., v1[0]) and the
     array element is modified between j and i via v1[0] = expr, the hoisted

@@ -1,6 +1,7 @@
 import pytest
 from proof_frog import frog_ast, frog_parser
 from proof_frog.transforms.control_flow import IfConditionAliasSubstitutionTransformer
+from proof_frog.visitors import SearchVisitor
 
 
 def _transform_game(source: str) -> str:
@@ -298,6 +299,107 @@ def test_no_phase1_inline_when_field_assigned_in_nested_block() -> None:
     assert isinstance(ret_stmt.expression, frog_ast.Variable)
     assert ret_stmt.expression.name == "field2", (
         "field2 should not be inlined when it has nested assignments in other methods"
+    )
+
+
+def test_no_phase1_inline_when_field_def_has_nondeterministic_call() -> None:
+    """If a field definition contains a non-deterministic function call,
+    Phase 1 must NOT inline it — inlining would create a fresh call that
+    may return a different value than the stored one.
+
+    Setup: field4 = F.eval(field1) in Initialize, and another method
+    has if (v == field1) { return field4; }.  Without the guard, Phase 1
+    would replace field4 with F.eval(field1), producing a fresh
+    non-deterministic evaluation.
+    """
+    # Build the game AST manually since we need a FuncCall
+    func_call = frog_ast.FuncCall(
+        frog_ast.FieldAccess(frog_ast.Variable("F"), "eval"),
+        [frog_ast.Variable("field1")],
+    )
+    game = frog_ast.Game((
+        "Test",
+        [frog_ast.Parameter(frog_ast.Variable("SomePrimitive"), "F")],
+        [
+            frog_ast.Field(frog_ast.Variable("Int"), "field1", None),
+            frog_ast.Field(frog_ast.Variable("Int"), "field4", None),
+        ],
+        [
+            frog_ast.Method(
+                frog_ast.MethodSignature("Initialize", frog_ast.Variable("Void"), []),
+                frog_ast.Block([
+                    frog_ast.Assignment(
+                        None,
+                        frog_ast.Variable("field1"),
+                        frog_ast.Integer(5),
+                    ),
+                    frog_ast.Assignment(
+                        None,
+                        frog_ast.Variable("field4"),
+                        func_call,
+                    ),
+                ]),
+            ),
+            frog_ast.Method(
+                frog_ast.MethodSignature(
+                    "f",
+                    frog_ast.Variable("Int"),
+                    [frog_ast.Parameter(frog_ast.Variable("Int"), "v")],
+                ),
+                frog_ast.Block([
+                    frog_ast.IfStatement(
+                        [
+                            frog_ast.BinaryOperation(
+                                frog_ast.BinaryOperators.EQUALS,
+                                frog_ast.Variable("v"),
+                                frog_ast.Variable("field1"),
+                            )
+                        ],
+                        [
+                            frog_ast.Block([
+                                frog_ast.ReturnStatement(frog_ast.Variable("field4")),
+                            ]),
+                        ],
+                    ),
+                    frog_ast.ReturnStatement(frog_ast.Integer(0)),
+                ]),
+            ),
+        ],
+        [],  # phases
+    ))
+
+    # F is a primitive with a non-deterministic eval method
+    f_primitive = frog_ast.Primitive(
+        "SomePrimitive",
+        [],
+        [],
+        [
+            frog_ast.MethodSignature(
+                "eval",
+                frog_ast.Variable("Int"),
+                [frog_ast.Parameter(frog_ast.Variable("Int"), "x")],
+            ),
+        ],
+    )
+    proof_namespace: frog_ast.Namespace = {"F": f_primitive}
+
+    result = IfConditionAliasSubstitutionTransformer(
+        proof_namespace=proof_namespace
+    ).transform(game)
+
+    # field4 should NOT have been replaced with F.eval(...)
+    f_method = result.get_method("f")
+    if_stmt = f_method.block.statements[0]
+    assert isinstance(if_stmt, frog_ast.IfStatement)
+    ret_in_branch = if_stmt.blocks[0].statements[0]
+    assert isinstance(ret_in_branch, frog_ast.ReturnStatement)
+
+    def is_func_call(node: frog_ast.ASTNode) -> bool:
+        return isinstance(node, frog_ast.FuncCall)
+
+    assert SearchVisitor(is_func_call).visit(ret_in_branch) is None, (
+        "Phase 1 should not inline field definitions containing "
+        "non-deterministic function calls"
     )
 
 

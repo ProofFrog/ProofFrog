@@ -201,6 +201,7 @@ class ProofEngine:
         self.proof_namespace: frog_ast.Namespace = {}
         self.proof_let_types: visitors.NameTypeMap = visitors.NameTypeMap()
         self.subsets_pairs: list[tuple[frog_ast.Type, frog_ast.Type]] = []
+        self.equality_pairs: set[tuple[str, str]] = set()
 
         if isinstance(verbose, bool):
             self.verbosity = Verbosity.VERBOSE if verbose else Verbosity.QUIET
@@ -845,6 +846,7 @@ class ProofEngine:
             proof_let_types=self.proof_let_types,
             proof_namespace=self.proof_namespace,
             subsets_pairs=self.subsets_pairs,
+            equality_pairs=self.equality_pairs,
             sort_game_fn=self.sort_game,
             max_calls=self.max_calls,
         )
@@ -1195,20 +1197,34 @@ class ProofEngine:
                     self.method_lookup[(name, method.signature.name)] = method
 
     def _extract_subsets_pairs(self) -> None:
-        """Extract subsets/equality constraint pairs from all schemes in the proof."""
+        """Extract type constraint pairs from all schemes in the proof.
+
+        Both ``==`` and ``subsets`` constraints are collected.  They are
+        safe for normalizing type annotations (widening is harmless).
+        However, only ``==`` pairs are safe for normalizing sampling
+        distributions (``sampled_from``), because ``subsets`` allows
+        A ⊊ B where replacing ``x <- A`` with ``x <- B`` would change
+        the distribution.  The pair is tagged via ``equality_pairs`` so
+        the normalizer can distinguish them.
+        """
         for node in self.proof_namespace.values():
             if isinstance(node, frog_ast.Scheme):
                 for req in node.requirements:
-                    if (
-                        isinstance(req, frog_ast.BinaryOperation)
-                        and req.operator
-                        in (
-                            frog_ast.BinaryOperators.SUBSETS,
-                            frog_ast.BinaryOperators.EQUALS,
-                        )
-                        and isinstance(req.left_expression, frog_ast.Type)
+                    if not isinstance(req, frog_ast.BinaryOperation):
+                        continue
+                    if not (
+                        isinstance(req.left_expression, frog_ast.Type)
                         and isinstance(req.right_expression, frog_ast.Type)
                     ):
+                        continue
+                    if req.operator == frog_ast.BinaryOperators.EQUALS:
+                        self.subsets_pairs.append(
+                            (req.left_expression, req.right_expression)
+                        )
+                        self.equality_pairs.add(
+                            (str(req.left_expression), str(req.right_expression))
+                        )
+                    elif req.operator == frog_ast.BinaryOperators.SUBSETS:
                         self.subsets_pairs.append(
                             (req.left_expression, req.right_expression)
                         )

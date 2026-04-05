@@ -31,6 +31,13 @@ class SymbolicComputationTransformer(Transformer):
     of an arithmetic binary operation (+, -, *, /, ^) resolve to known
     symbolic or integer values, the expression is replaced with the
     simplified result.
+
+    **Soundness invariant:** The ``variables`` dict must contain only ``Int``
+    typed proof parameters (not ``BitString`` or other types).  This is
+    critical because the transform treats ``ADD`` as arithmetic addition, but
+    in FrogLang ``ADD`` on ``BitString`` is XOR.  The proof engine enforces
+    this by gating on ``isinstance(let.type, frog_ast.IntType)`` when
+    populating the dict.
     """
 
     def __init__(self, variables: dict[str, Symbol | frog_ast.Expression]) -> None:
@@ -124,4 +131,13 @@ class SymbolicComputation(TransformPass):
     name = "Symbolic Computation"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        # Soundness check: all variables must be Int-typed (Symbol or Integer
+        # literal).  Non-Int values (e.g. BitString) would cause ADD to be
+        # incorrectly treated as arithmetic addition instead of XOR.
+        for name, val in ctx.variables.items():
+            assert isinstance(val, (Symbol, frog_ast.Integer)), (
+                f"SymbolicComputation variable '{name}' has type "
+                f"{type(val).__name__}, expected Symbol or Integer.  "
+                f"Only Int-typed proof parameters may enter the variables dict."
+            )
         return SymbolicComputationTransformer(ctx.variables).transform(game)

@@ -160,15 +160,27 @@ class SubsetTypeNormalizer(Transformer):
     KeySpace2 with IntermediateSpace in type annotations. This ensures
     canonical forms match when the same value has different but
     subsets-equivalent type annotations in different games.
+
+    For sampling distributions (``sampled_from`` in Sample statements),
+    only equality pairs (``==``) are used, because ``subsets`` allows
+    A ⊊ B where replacing ``x <- A`` with ``x <- B`` would change the
+    distribution.
     """
 
     def __init__(
-        self, subsets_pairs: list[tuple[frog_ast.Type, frog_ast.Type]]
+        self,
+        subsets_pairs: list[tuple[frog_ast.Type, frog_ast.Type]],
+        equality_pairs: set[tuple[str, str]] | None = None,
     ) -> None:
         self.type_replacements: dict[str, frog_ast.Type] = {}
+        self._sampling_replacements: dict[str, frog_ast.Type] = {}
+        eq_pairs = equality_pairs or set()
         for sub_type, super_type in subsets_pairs:
             if isinstance(sub_type, frog_ast.Variable):
                 self.type_replacements[sub_type.name] = super_type
+                # Only allow sampling normalization for equality pairs
+                if (str(sub_type), str(super_type)) in eq_pairs:
+                    self._sampling_replacements[sub_type.name] = super_type
 
     def transform_assignment(
         self, assignment: frog_ast.Assignment
@@ -183,10 +195,11 @@ class SubsetTypeNormalizer(Transformer):
     def transform_sample(self, sample: frog_ast.Sample) -> frog_ast.Sample:
         new_type = self._normalize(sample.the_type) if sample.the_type else None
         sampled = sample.sampled_from
-        # sampled_from can be a Type (e.g. BitStringType) used as a set expression;
-        # normalize it the same way as type annotations.
+        # sampled_from determines the sampling distribution — only normalize
+        # with equality pairs (not subsets pairs, since A ⊊ B would change
+        # the distribution).
         new_sampled: frog_ast.Expression = (
-            self._normalize(sampled)  # type: ignore[assignment]
+            self._normalize_sampling(sampled)  # type: ignore[assignment]
             if isinstance(sampled, frog_ast.Type)
             else self.transform(sampled)
         )
@@ -219,6 +232,25 @@ class SubsetTypeNormalizer(Transformer):
             self._normalize(sig.return_type),
             [self.transform(p) for p in sig.parameters],
         )
+
+    def _normalize_sampling(self, the_type: frog_ast.Type) -> frog_ast.Type:
+        """Normalize a type used in a sampling distribution.
+
+        Only equality pairs are used, because subsets pairs could change
+        the distribution.
+        """
+        if isinstance(the_type, frog_ast.OptionalType):
+            return frog_ast.OptionalType(self._normalize_sampling(the_type.the_type))
+        if (
+            isinstance(the_type, frog_ast.Variable)
+            and the_type.name in self._sampling_replacements
+        ):
+            return copy.deepcopy(self._sampling_replacements[the_type.name])
+        if isinstance(the_type, frog_ast.ProductType):
+            return frog_ast.ProductType(
+                [self._normalize_sampling(t) for t in the_type.types]
+            )
+        return the_type
 
     def _normalize(self, the_type: frog_ast.Type) -> frog_ast.Type:
         if isinstance(the_type, frog_ast.OptionalType):
@@ -255,4 +287,6 @@ class SubsetTypeNormalization(TransformPass):
     name = "Subset Type Normalization"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return SubsetTypeNormalizer(ctx.subsets_pairs).transform(game)
+        return SubsetTypeNormalizer(
+            ctx.subsets_pairs, equality_pairs=ctx.equality_pairs
+        ).transform(game)

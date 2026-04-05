@@ -52,6 +52,7 @@ class PipelineContext:
     proof_let_types: NameTypeMap
     proof_namespace: frog_ast.Namespace
     subsets_pairs: list[tuple[frog_ast.Type, frog_ast.Type]]
+    equality_pairs: set[tuple[str, str]] = dataclasses.field(default_factory=set)
     sort_game_fn: Optional[Callable[[frog_ast.Game], frog_ast.Game]] = None
     max_calls: Optional[int] = None
     near_misses: list[NearMiss] = dataclasses.field(default_factory=list)

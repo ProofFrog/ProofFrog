@@ -271,6 +271,100 @@ def test_no_cancellation_without_type_evidence() -> None:
     )
 
 
+def test_reflexive_comparison_skips_nondeterministic_calls() -> None:
+    """F.eval(x) == F.eval(x) must NOT simplify to true when F.eval is
+    non-deterministic, because each call may return a different value."""
+    # Build: F.eval(x) == F.eval(x) where F.eval is non-deterministic
+    func_call = frog_ast.FuncCall(
+        frog_ast.FieldAccess(frog_ast.Variable("F"), "eval"),
+        [frog_ast.Variable("x")],
+    )
+    eq_expr = frog_ast.BinaryOperation(
+        frog_ast.BinaryOperators.EQUALS,
+        func_call,
+        func_call,
+    )
+    method_ast = frog_ast.Method(
+        frog_ast.MethodSignature(
+            "f",
+            frog_ast.Variable("Bool"),
+            [frog_ast.Parameter(frog_ast.Variable("Int"), "x")],
+        ),
+        frog_ast.Block([frog_ast.ReturnStatement(eq_expr)]),
+    )
+    # F is a primitive with a non-deterministic eval method
+    f_primitive = frog_ast.Primitive(
+        "F_Prim",
+        [frog_ast.Parameter(frog_ast.Variable("Int"), "n")],
+        [],
+        [
+            frog_ast.MethodSignature(
+                "eval",
+                frog_ast.Variable("Int"),
+                [frog_ast.Parameter(frog_ast.Variable("Int"), "x")],
+            ),
+        ],
+    )
+    proof_namespace: frog_ast.Namespace = {"F": f_primitive}
+
+    transformed = ReflexiveComparisonTransformer(
+        proof_namespace=proof_namespace
+    ).transform(method_ast)
+
+    # The expression should NOT have been simplified to true
+    ret_stmt = transformed.block.statements[0]
+    assert isinstance(ret_stmt, frog_ast.ReturnStatement)
+    assert not isinstance(ret_stmt.expression, frog_ast.Boolean), (
+        "F.eval(x) == F.eval(x) should NOT simplify to true when F.eval is "
+        "non-deterministic"
+    )
+
+
+def test_reflexive_comparison_allows_deterministic_calls() -> None:
+    """F.eval(x) == F.eval(x) SHOULD simplify to true when F.eval is
+    annotated as deterministic."""
+    func_call = frog_ast.FuncCall(
+        frog_ast.FieldAccess(frog_ast.Variable("F"), "eval"),
+        [frog_ast.Variable("x")],
+    )
+    eq_expr = frog_ast.BinaryOperation(
+        frog_ast.BinaryOperators.EQUALS,
+        func_call,
+        func_call,
+    )
+    method_ast = frog_ast.Method(
+        frog_ast.MethodSignature(
+            "f",
+            frog_ast.Variable("Bool"),
+            [frog_ast.Parameter(frog_ast.Variable("Int"), "x")],
+        ),
+        frog_ast.Block([frog_ast.ReturnStatement(eq_expr)]),
+    )
+    # F is a primitive with a deterministic eval method
+    f_primitive = frog_ast.Primitive(
+        "F_Prim",
+        [frog_ast.Parameter(frog_ast.Variable("Int"), "n")],
+        [],
+        [
+            frog_ast.MethodSignature(
+                "eval",
+                frog_ast.Variable("Int"),
+                [frog_ast.Parameter(frog_ast.Variable("Int"), "x")],
+                deterministic=True,
+            ),
+        ],
+    )
+    proof_namespace: frog_ast.Namespace = {"F": f_primitive}
+
+    transformed = ReflexiveComparisonTransformer(
+        proof_namespace=proof_namespace
+    ).transform(method_ast)
+
+    ret_stmt = transformed.block.statements[0]
+    assert isinstance(ret_stmt, frog_ast.ReturnStatement)
+    assert isinstance(ret_stmt.expression, frog_ast.Boolean) and ret_stmt.expression.bool
+
+
 def test_xor_cancellation_with_reflexive_comparison() -> None:
     """Combined: k + k + m == m -> true (XOR cancellation then reflexive comparison)."""
     method_ast = frog_parser.parse_method("""
@@ -293,3 +387,70 @@ def test_xor_cancellation_with_reflexive_comparison() -> None:
         transformed_ast = new_ast
 
     assert expected_ast == transformed_ast
+
+
+def test_xor_cancellation_skips_nondeterministic_pairs() -> None:
+    """F.eval(x) + v + F.eval(x) must NOT cancel F.eval(x) when F.eval is
+    non-deterministic — the two calls may return different values."""
+    from proof_frog.transforms._base import PipelineContext
+    from proof_frog.visitors import build_game_type_map
+
+    func_call = frog_ast.FuncCall(
+        frog_ast.FieldAccess(frog_ast.Variable("F"), "eval"),
+        [frog_ast.Variable("x")],
+    )
+    game_ast = frog_parser.parse_game("""
+        Game G(Int n) {
+            BitString<n> f(BitString<n> v, Int x) {
+                return v;
+            }
+        }
+    """)
+    # Manually build: F.eval(x) + v + F.eval(x)
+    xor_expr = frog_ast.BinaryOperation(
+        frog_ast.BinaryOperators.ADD,
+        frog_ast.BinaryOperation(
+            frog_ast.BinaryOperators.ADD,
+            func_call,
+            frog_ast.Variable("v"),
+        ),
+        func_call,
+    )
+    game_ast.methods[0].block.statements[0] = frog_ast.ReturnStatement(xor_expr)
+
+    type_map = build_game_type_map(game_ast)
+
+    # F has a non-deterministic eval method
+    f_primitive = frog_ast.Primitive(
+        "F_Prim",
+        [frog_ast.Parameter(frog_ast.Variable("Int"), "n")],
+        [],
+        [
+            frog_ast.MethodSignature(
+                "eval",
+                frog_ast.BitStringType(frog_ast.Variable("n")),
+                [frog_ast.Parameter(frog_ast.Variable("Int"), "x")],
+            ),
+        ],
+    )
+    proof_namespace: frog_ast.Namespace = {"F": f_primitive}
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types={},
+        proof_namespace=proof_namespace,
+        subsets_pairs=[],
+    )
+
+    transformed = XorCancellationTransformer(type_map, ctx).transform(game_ast)
+
+    # The F.eval(x) terms should NOT have been cancelled
+    ret_stmt = transformed.methods[0].block.statements[0]
+    assert isinstance(ret_stmt, frog_ast.ReturnStatement)
+    # If cancelled incorrectly, result would be just `v`
+    assert not (
+        isinstance(ret_stmt.expression, frog_ast.Variable)
+        and ret_stmt.expression.name == "v"
+    ), (
+        "F.eval(x) + v + F.eval(x) should NOT cancel F.eval(x) terms when "
+        "F.eval is non-deterministic"
+    )

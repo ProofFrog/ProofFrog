@@ -8,6 +8,7 @@ produce identical ASTs.
 from __future__ import annotations
 
 import copy
+import heapq
 import functools
 
 from .. import frog_ast
@@ -178,14 +179,30 @@ class _StabilizeIndependentStatementsTransformer(BlockTransformer):
         new_game.methods = [self.transform(m) for m in new_game.methods]
         return new_game
 
-    @staticmethod
-    def _value_key(stmt: frog_ast.Statement) -> str:
-        """Sort key based on the RHS expression, ignoring the assigned name."""
-        if isinstance(stmt, frog_ast.Assignment) and stmt.the_type is not None:
-            return str(stmt.the_type) + " = " + str(stmt.value)
+    def _value_key(self, stmt: frog_ast.Statement) -> str:
+        """Sort key based on the RHS expression, ignoring the assigned name.
+
+        A prefix distinguishes field declarations from locals so that
+        fields sort deterministically before locals with the same RHS.
+        For field statements where the_type is None (type comes from the
+        field definition), sampled_from is used as the type component.
+        """
+        is_field = (
+            isinstance(
+                stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+            )
+            and isinstance(stmt.var, frog_ast.Variable)
+            and stmt.var.name in self.fields
+        )
+        prefix = "0_" if is_field else "1_"
+        if isinstance(stmt, frog_ast.Assignment):
+            type_str = str(stmt.the_type) if stmt.the_type else ""
+            if stmt.value is not None:
+                return prefix + type_str + " = " + str(stmt.value)
+            return ""
         if isinstance(stmt, (frog_ast.Sample, frog_ast.UniqueSample)):
-            if stmt.the_type is not None:
-                return str(stmt.the_type) + " <- " + str(stmt.sampled_from)
+            type_str = str(stmt.the_type) if stmt.the_type else str(stmt.sampled_from)
+            return prefix + type_str + " <- " + str(stmt.sampled_from)
         return ""
 
     def _is_typed_decl(self, stmt: frog_ast.Statement) -> bool:
@@ -195,36 +212,217 @@ class _StabilizeIndependentStatementsTransformer(BlockTransformer):
             return False
         if not isinstance(stmt.var, frog_ast.Variable):
             return False
+        # Include field declarations even if the_type is None (field type
+        # comes from the field definition, not the statement).
+        if stmt.var.name in self.fields:
+            return True
         if stmt.the_type is None:
             return False
-        # Only sort non-field declarations
-        return stmt.var.name not in self.fields
+        return True
+
+    @staticmethod
+    def _collect_vars_ltr(expr: frog_ast.Expression, result: list[str]) -> None:
+        """Collect variable names from *expr* in left-to-right order."""
+        if isinstance(expr, frog_ast.Variable):
+            if expr.name not in result:
+                result.append(expr.name)
+        elif isinstance(expr, frog_ast.Tuple):
+            for val in expr.values:
+                _StabilizeIndependentStatementsTransformer._collect_vars_ltr(
+                    val, result
+                )
+        elif isinstance(expr, frog_ast.BinaryOperation):
+            _StabilizeIndependentStatementsTransformer._collect_vars_ltr(
+                expr.left_expression, result
+            )
+            _StabilizeIndependentStatementsTransformer._collect_vars_ltr(
+                expr.right_expression, result
+            )
+        elif isinstance(expr, frog_ast.FuncCall):
+            if isinstance(expr.func, frog_ast.Expression):
+                _StabilizeIndependentStatementsTransformer._collect_vars_ltr(
+                    expr.func, result
+                )
+            for arg in expr.args:
+                _StabilizeIndependentStatementsTransformer._collect_vars_ltr(
+                    arg, result
+                )
+        elif isinstance(expr, frog_ast.ArrayAccess):
+            _StabilizeIndependentStatementsTransformer._collect_vars_ltr(
+                expr.the_array, result
+            )
+        elif isinstance(expr, frog_ast.UnaryOperation):
+            _StabilizeIndependentStatementsTransformer._collect_vars_ltr(
+                expr.expression, result
+            )
+        elif isinstance(expr, frog_ast.Slice):
+            _StabilizeIndependentStatementsTransformer._collect_vars_ltr(
+                expr.the_array, result
+            )
+
+    def _compute_return_ranks(
+        self,
+        block: frog_ast.Block,
+        stmts: list[frog_ast.Statement],
+        sortable_indices: list[int],
+        adj: dict[int, list[int]],
+    ) -> dict[int, int]:
+        """Compute a canonical rank for each sortable statement based on the
+        return expression.
+
+        Ranks are derived from the **top-level tuple position** in the
+        return expression.  All variables within the same top-level tuple
+        element share a rank, so value-key sorting still resolves ties.
+        Ranks propagate backwards through the dependency graph so that a
+        statement inherits the minimum rank of any statement that
+        (transitively) depends on it.
+        """
+        # Find the return expression
+        return_expr: frog_ast.Expression | None = None
+        for s in block.statements:
+            if isinstance(s, frog_ast.ReturnStatement):
+                return_expr = s.expression
+                break
+        if return_expr is None:
+            return {}
+
+        # Split return into top-level groups; non-tuple returns are one group.
+        groups: list[frog_ast.Expression]
+        if isinstance(return_expr, frog_ast.Tuple):
+            groups = list(return_expr.values)
+        else:
+            groups = [return_expr]
+
+        if len(groups) < 2:
+            # Single return value or non-tuple: every variable gets rank 0,
+            # which is equivalent to no ranking (value-key decides).
+            return {}
+
+        # Collect variables from each group
+        var_to_rank: dict[str, int] = {}
+        for rank, group_expr in enumerate(groups):
+            group_vars: list[str] = []
+            self._collect_vars_ltr(group_expr, group_vars)
+            for var_name in group_vars:
+                if var_name not in var_to_rank:
+                    var_to_rank[var_name] = rank
+                else:
+                    var_to_rank[var_name] = min(var_to_rank[var_name], rank)
+
+        if not var_to_rank:
+            return {}
+
+        # Map variable names to sortable statement indices
+        var_to_idx: dict[str, int] = {}
+        for i in sortable_indices:
+            s = stmts[i]
+            if isinstance(
+                s, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+            ) and isinstance(s.var, frog_ast.Variable):
+                var_to_idx[s.var.name] = i
+
+        # Assign direct return ranks
+        ranks: dict[int, int] = {}
+        for var_name, rank in var_to_rank.items():
+            if var_name in var_to_idx:
+                idx = var_to_idx[var_name]
+                if idx not in ranks:
+                    ranks[idx] = rank
+                else:
+                    ranks[idx] = min(ranks[idx], rank)
+
+        # Build reverse adjacency: reverse_adj[j] = list of i that j
+        # depends on (i.e. i must come before j).
+        reverse_adj: dict[int, list[int]] = {i: [] for i in sortable_indices}
+        for i in sortable_indices:
+            for j in adj[i]:
+                reverse_adj[j].append(i)
+
+        # BFS backward propagation: if j has rank R, all statements i
+        # that j depends on get min(current rank, R).
+        from collections import deque  # pylint: disable=import-outside-toplevel
+
+        queue: deque[int] = deque(idx for idx in ranks)
+        while queue:
+            j = queue.popleft()
+            for i in reverse_adj[j]:
+                new_rank = ranks[j]
+                if i not in ranks or ranks[i] > new_rank:
+                    ranks[i] = new_rank
+                    queue.append(i)
+
+        return ranks
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         graph = dependencies.generate_dependency_graph(
             block, [frog_ast.Field(frog_ast.Void(), f, None) for f in self.fields], {}
         )
-        new_stmts = list(block.statements)
-        swapped = True
-        while swapped:
-            swapped = False
-            for i in range(1, len(new_stmts)):
-                first, second = new_stmts[i - 1], new_stmts[i]
-                if not (self._is_typed_decl(first) and self._is_typed_decl(second)):
-                    continue
-                key_a = self._value_key(first)
-                key_b = self._value_key(second)
-                if not key_a or not key_b or key_a <= key_b:
-                    continue
-                # Check independence
-                node_a = graph.get_node(first)
-                node_b = graph.get_node(second)
-                if node_a in node_b.in_neighbours or node_b in node_a.in_neighbours:
-                    continue
-                new_stmts[i - 1] = second
-                new_stmts[i] = first
-                swapped = True
-        if new_stmts == list(block.statements):
+        stmts = list(block.statements)
+        # Collect sortable statement indices
+        sortable_indices = [i for i, s in enumerate(stmts) if self._is_typed_decl(s)]
+        if len(sortable_indices) < 2:
+            return block
+
+        # Build dependency edges among sortable statements
+        # adj[i] = list of sortable indices j that depend on i
+        in_deg: dict[int, int] = {i: 0 for i in sortable_indices}
+        adj: dict[int, list[int]] = {i: [] for i in sortable_indices}
+        for i in sortable_indices:
+            node_i = graph.get_node(stmts[i])
+            for j in sortable_indices:
+                if i != j:
+                    node_j = graph.get_node(stmts[j])
+                    if node_i in node_j.in_neighbours:
+                        adj[i].append(j)
+                        in_deg[j] += 1
+
+        # Compute return-statement-based ranks.  Statements contributing
+        # to earlier return values sort first, giving a canonical order
+        # independent of source-code ordering.
+        return_ranks = self._compute_return_ranks(block, stmts, sortable_indices, adj)
+
+        # Canonical topological sort (Kahn's with min-heap).
+        # Primary key: return rank (earlier return position first).
+        # For fields: sort by canonical field name (assigned by
+        #   FieldOrderingVisitor, independent of source order).
+        # For locals: sort by value expression, then variable name.
+        max_rank = len(stmts)
+
+        def _heap_key(i: int) -> tuple[int, int, str, str, int]:
+            rank = return_ranks.get(i, max_rank)
+            s = stmts[i]
+            name = ""
+            if isinstance(
+                s, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+            ) and isinstance(s.var, frog_ast.Variable):
+                name = s.var.name
+            is_field = name in self.fields
+            if is_field:
+                # Field name is canonical — use it as primary tiebreaker
+                return (rank, 0, name, self._value_key(stmts[i]), i)
+            # Local: value key is canonical (references primitives), name
+            # is secondary (will be restandardised by the next pass).
+            return (rank, 1, self._value_key(stmts[i]), name, i)
+
+        heap = [_heap_key(i) for i in sortable_indices if in_deg[i] == 0]
+        heapq.heapify(heap)
+        topo_order: list[int] = []
+        while heap:
+            _, _, _, _, idx = heapq.heappop(heap)
+            topo_order.append(idx)
+            for j in adj[idx]:
+                in_deg[j] -= 1
+                if in_deg[j] == 0:
+                    heapq.heappush(heap, _heap_key(j))
+
+        # Place sorted statements back into the positions occupied by
+        # sortable statements, preserving non-sortable statement positions.
+        positions = sorted(sortable_indices)
+        new_stmts = list(stmts)
+        for pos, orig_idx in zip(positions, topo_order):
+            new_stmts[pos] = stmts[orig_idx]
+
+        if new_stmts == stmts:
             return block
         return frog_ast.Block(new_stmts)
 

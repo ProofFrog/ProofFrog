@@ -108,21 +108,33 @@ class TransformPass(ABC):
         """Apply this transformation pass. Return the (possibly new) game AST."""
 
 
-def run_pipeline(
+def run_pipeline(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     game: frog_ast.Game,
     pipeline: list[TransformPass],
     ctx: PipelineContext,
     verbose: bool = False,
     max_iterations: int = _MAX_FIXED_POINT_ITERATIONS,
+    verbose_lines: list[str] | None = None,
 ) -> frog_ast.Game:
-    """Run transform passes in a fixed-point loop until convergence."""
+    """Run transform passes in a fixed-point loop until convergence.
+
+    If *verbose_lines* is provided, verbose output is appended there instead
+    of being printed directly.  This allows callers (e.g. parallel workers)
+    to collect output for later ordered printing.
+    """
     for _ in range(max_iterations):
         new_game = game
         for pass_ in pipeline:
             result = pass_.apply(new_game, ctx)
             if verbose and result != new_game:
-                print(f"APPLIED {pass_.name}")
-                print(result)
+                msg1 = f"APPLIED {pass_.name}"
+                msg2 = str(result)
+                if verbose_lines is not None:
+                    verbose_lines.append(msg1)
+                    verbose_lines.append(msg2)
+                else:
+                    print(msg1)
+                    print(msg2)
             new_game = result
         if new_game == game:
             break

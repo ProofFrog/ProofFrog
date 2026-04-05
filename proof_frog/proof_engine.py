@@ -55,6 +55,7 @@ class EquivalenceResult:
     valid: bool
     failure_detail: str = ""
     diagnosis: diagnostics.Diagnosis | None = None
+    verbose_output: str = ""
 
 
 @dataclasses.dataclass
@@ -92,7 +93,12 @@ def _check_equivalent_worker(task: _EquivalenceTask) -> EquivalenceResult:
     """Top-level function for multiprocessing: check equivalence of two games.
 
     This must be a module-level function so it is picklable.
+    Verbose output is collected into a list and returned in the result
+    so the main process can print it in step order.
     """
+    normal = task.verbosity >= Verbosity.NORMAL
+    verbose = task.verbosity >= Verbosity.VERBOSE
+    verbose_lines: list[str] = []
     ctx = task.ctx
     current_game_ast = task.current_game_ast
     next_game_ast = task.next_game_ast
@@ -103,6 +109,11 @@ def _check_equivalent_worker(task: _EquivalenceTask) -> EquivalenceResult:
         which = WhichGame.CURRENT if index == 0 else WhichGame.NEXT
         ctx.near_misses = []
 
+        if verbose:
+            label = "CURRENT" if index == 0 else "NEXT"
+            verbose_lines.append(f"SIMPLIFYING {label} GAME")
+            verbose_lines.append(str(game))
+
         pipeline = list(CORE_PIPELINE) + [
             ApplyAssumptions(task.step_assumptions, which, task.proof_let_types)
         ]
@@ -110,7 +121,8 @@ def _check_equivalent_worker(task: _EquivalenceTask) -> EquivalenceResult:
             game,
             pipeline,
             ctx,
-            verbose=task.verbosity >= Verbosity.VERBOSE,
+            verbose=verbose,
+            verbose_lines=verbose_lines,
         )
         game = run_standardization(game, STANDARDIZATION_PIPELINE, ctx)
 
@@ -121,14 +133,25 @@ def _check_equivalent_worker(task: _EquivalenceTask) -> EquivalenceResult:
             next_game_ast = game
             next_near_misses = deduplicate_near_misses(ctx.near_misses)
 
+    if normal:
+        verbose_lines.append("CURRENT")
+        verbose_lines.append(str(current_game_ast))
+        verbose_lines.append("NEXT")
+        verbose_lines.append(str(next_game_ast))
+
     if current_game_ast == next_game_ast:
-        return EquivalenceResult(valid=True)
+        if normal:
+            verbose_lines.append("Inline Success!")
+        captured = "\n".join(verbose_lines) + "\n" if verbose_lines else ""
+        return EquivalenceResult(valid=True, verbose_output=captured)
+
+    captured = "\n".join(verbose_lines) + "\n" if verbose_lines else ""
 
     z3_result = _z3_conditional_equivalence(
         current_game_ast, next_game_ast, task.proof_let_types
     )
     if z3_result.valid:
-        return z3_result
+        return dataclasses.replace(z3_result, verbose_output=captured)
 
     parts: list[str] = []
     if z3_result.failure_detail:
@@ -146,6 +169,7 @@ def _check_equivalent_worker(task: _EquivalenceTask) -> EquivalenceResult:
         valid=False,
         failure_detail="\n".join(parts),
         diagnosis=diagnosis,
+        verbose_output=captured,
     )
 
 
@@ -982,12 +1006,15 @@ class ProofEngine:
                 sys.stderr.write("\r" + " " * shutil.get_terminal_size().columns + "\r")
                 sys.stderr.flush()
 
-        # Report all hops in order
+        # Report all hops in order, printing captured verbose output
         for idx, hop in enumerate(prepared):
             if hop.kind:
                 self._report_assumption_hop(hop, _depth)
             else:
-                self._report_hop(hop, results[idx], _depth)
+                result = results[idx]
+                if result.verbose_output:
+                    sys.stdout.write(result.verbose_output)
+                self._report_hop(hop, result, _depth)
 
     @staticmethod
     def _print_progress_bar(done: int, total: int) -> None:

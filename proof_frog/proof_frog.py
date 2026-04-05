@@ -101,8 +101,18 @@ def check(file: str, json_output: bool) -> None:
     is_flag=True,
     help="Skip lemma proof verification (trust without re-checking).",
 )
-def prove(
-    file: str, verbose: int, json_output: bool, no_diagnose: bool, skip_lemmas: bool
+@click.option(
+    "--sequential",
+    is_flag=True,
+    help="Disable parallel equivalence checking (use a single process).",
+)
+def prove(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    file: str,
+    verbose: int,
+    json_output: bool,
+    no_diagnose: bool,
+    skip_lemmas: bool,
+    sequential: bool,
 ) -> None:
     """Run proof verification on a .proof file."""
     if json_output:
@@ -120,7 +130,10 @@ def prove(
         return
     verbosity = proof_engine.Verbosity(min(verbose, 2))
     engine = proof_engine.ProofEngine(
-        verbosity, no_diagnose=no_diagnose, skip_lemmas=skip_lemmas
+        verbosity,
+        no_diagnose=no_diagnose,
+        skip_lemmas=skip_lemmas,
+        parallel=not sequential,
     )
     proof_file: frog_ast.ProofFile
     try:

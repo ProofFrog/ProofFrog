@@ -17,6 +17,10 @@ python3 -m venv .venv
 - **Package VSCode extension**: `make vscode-vsix`
 - **Regenerate parser**: `make parser` — regenerates ANTLR parsing code from grammar files into `proof_frog/parsing/`
 
+## Sandbox compatibility
+
+Claude Code's sandbox blocks `ProcessPoolExecutor`, which the proof engine uses for parallel equivalence checking. To work around this, the engine honors the `PROOFFROG_SEQUENTIAL` environment variable: if set, `ProofEngine.__init__` forces `parallel=False` regardless of the constructor argument. This variable is set in `.claude/settings.local.json` so every command Claude spawns in this repo runs the engine sequentially. Users running the engine outside Claude are unaffected. If you need to test parallel behavior from a Claude-spawned shell, prefix the command with `env -u PROOFFROG_SEQUENTIAL`.
+
 ## CI Checks (must pass before committing)
 
 The CI runs three checks on every push/PR to `main`. Always run `make lint` locally first.

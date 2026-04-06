@@ -966,7 +966,10 @@ class ProofFile(Root):
         output_string += "proof:\n"
         output_string += "let:\n"
         for let in self.lets:
-            output_string += f"  {let}\n"
+            if let.name in self.sampled_let_names:
+                output_string += f"  {let.type} {let.name} <- {let.type};\n"
+            else:
+                output_string += f"  {let}\n"
 
         output_string += "\nassume:\n"
         for assumption in self.assumptions:

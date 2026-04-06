@@ -427,7 +427,11 @@ class XorCancellationTransformer(Transformer):
         for term in transformed_terms:
             found = False
             for i, existing in enumerate(remaining):
-                if term == existing and not has_nondeterministic_call(term, proof_ns):
+                if term == existing and not has_nondeterministic_call(
+                    term,
+                    proof_ns,
+                    self.ctx.proof_let_types if self.ctx else None,
+                ):
                     remaining.pop(i)
                     found = True
                     break
@@ -626,9 +630,11 @@ class ModIntSimplificationTransformer(Transformer):
         self,
         type_map: NameTypeMap,
         proof_namespace: frog_ast.Namespace | None = None,
+        proof_let_types: Optional[NameTypeMap] = None,
     ) -> None:
         self.type_map = type_map
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
+        self._proof_let_types = proof_let_types
 
     def _is_modint_expr(self, expr: frog_ast.Expression) -> bool:
         return isinstance(
@@ -686,7 +692,7 @@ class ModIntSimplificationTransformer(Transformer):
                 return left
             # a - a = 0 (only when a is pure/deterministic)
             if left == right and not has_nondeterministic_call(
-                left, self._proof_namespace
+                left, self._proof_namespace, self._proof_let_types
             ):
                 return frog_ast.Integer(0)
 
@@ -721,8 +727,13 @@ class ReflexiveComparisonTransformer(Transformer):
     runtime equality.
     """
 
-    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace | None = None,
+        proof_let_types: Optional[NameTypeMap] = None,
+    ) -> None:
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
+        self._proof_let_types = proof_let_types
 
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
@@ -736,7 +747,9 @@ class ReflexiveComparisonTransformer(Transformer):
             transformed.operator == frog_ast.BinaryOperators.EQUALS
             and transformed.left_expression == transformed.right_expression
             and not has_nondeterministic_call(
-                transformed.left_expression, self._proof_namespace
+                transformed.left_expression,
+                self._proof_namespace,
+                self._proof_let_types,
             )
         ):
             return frog_ast.Boolean(True)
@@ -744,7 +757,9 @@ class ReflexiveComparisonTransformer(Transformer):
             transformed.operator == frog_ast.BinaryOperators.NOTEQUALS
             and transformed.left_expression == transformed.right_expression
             and not has_nondeterministic_call(
-                transformed.left_expression, self._proof_namespace
+                transformed.left_expression,
+                self._proof_namespace,
+                self._proof_let_types,
             )
         ):
             return frog_ast.Boolean(False)
@@ -986,7 +1001,9 @@ class ModIntSimplification(TransformPass):
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
         return ModIntSimplificationTransformer(
-            type_map, proof_namespace=ctx.proof_namespace
+            type_map,
+            proof_namespace=ctx.proof_namespace,
+            proof_let_types=ctx.proof_let_types,
         ).transform(game)
 
 
@@ -1064,7 +1081,8 @@ class ReflexiveComparison(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return ReflexiveComparisonTransformer(
-            proof_namespace=ctx.proof_namespace
+            proof_namespace=ctx.proof_namespace,
+            proof_let_types=ctx.proof_let_types,
         ).transform(game)
 
 
@@ -1233,9 +1251,11 @@ class GroupElemCancellationTransformer(Transformer):
         self,
         type_map: Optional[NameTypeMap] = None,
         proof_namespace: frog_ast.Namespace | None = None,
+        proof_let_types: Optional[NameTypeMap] = None,
     ) -> None:
         self.type_map = type_map
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
+        self._proof_let_types = proof_let_types
 
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
@@ -1259,11 +1279,13 @@ class GroupElemCancellationTransformer(Transformer):
 
         for ni in range(len(remaining_neg) - 1, -1, -1):
             neg_term = remaining_neg[ni]
-            if has_nondeterministic_call(neg_term, self._proof_namespace):
+            if has_nondeterministic_call(
+                neg_term, self._proof_namespace, self._proof_let_types
+            ):
                 continue
             for pi, pos_term in enumerate(remaining_pos):
                 if pos_term == neg_term and not has_nondeterministic_call(
-                    pos_term, self._proof_namespace
+                    pos_term, self._proof_namespace, self._proof_let_types
                 ):
                     remaining_pos.pop(pi)
                     remaining_neg.pop(ni)
@@ -1291,7 +1313,9 @@ class GroupElemCancellation(TransformPass):
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
         return GroupElemCancellationTransformer(
-            type_map, proof_namespace=ctx.proof_namespace
+            type_map,
+            proof_namespace=ctx.proof_namespace,
+            proof_let_types=ctx.proof_let_types,
         ).transform(game)
 
 
@@ -1320,9 +1344,11 @@ class GroupElemExponentCombinationTransformer(Transformer):
         self,
         type_map: Optional[NameTypeMap] = None,
         proof_namespace: frog_ast.Namespace | None = None,
+        proof_let_types: Optional[NameTypeMap] = None,
     ) -> None:
         self.type_map = type_map
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
+        self._proof_let_types = proof_let_types
 
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
@@ -1349,7 +1375,9 @@ class GroupElemExponentCombinationTransformer(Transformer):
             pair = _get_exponent_base(term)
             if pair is not None:
                 base, exp = pair
-                if not has_nondeterministic_call(base, self._proof_namespace):
+                if not has_nondeterministic_call(
+                    base, self._proof_namespace, self._proof_let_types
+                ):
                     for i, existing in enumerate(new_pos):
                         ex_pair = _get_exponent_base(existing)
                         if (
@@ -1380,7 +1408,9 @@ class GroupElemExponentCombinationTransformer(Transformer):
             neg_pair = _get_exponent_base(neg_term)
             if neg_pair is not None:
                 neg_base, neg_exp = neg_pair
-                if not has_nondeterministic_call(neg_base, self._proof_namespace):
+                if not has_nondeterministic_call(
+                    neg_base, self._proof_namespace, self._proof_let_types
+                ):
                     for i, pos_term in enumerate(new_pos):
                         pos_pair = _get_exponent_base(pos_term)
                         if (
@@ -1420,5 +1450,7 @@ class GroupElemExponentCombination(TransformPass):
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
         return GroupElemExponentCombinationTransformer(
-            type_map, proof_namespace=ctx.proof_namespace
+            type_map,
+            proof_namespace=ctx.proof_namespace,
+            proof_let_types=ctx.proof_let_types,
         ).transform(game)

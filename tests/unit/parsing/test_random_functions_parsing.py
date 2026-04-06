@@ -1,55 +1,55 @@
-"""Tests for RandomFunctions<D, R> and <-uniq grammar, AST nodes, and parsing."""
+"""Tests for Function<D, R> and <-uniq grammar, AST nodes, and parsing."""
 
 import pytest
 
 from proof_frog import frog_ast, frog_parser
 
 
-class TestRandomFunctionTypeInFieldDeclaration:
+class TestFunctionTypeInFieldDeclaration:
     def test_parses_as_random_function_type(self) -> None:
         game = frog_parser.parse_game("""
             Game G() {
-                RandomFunctions<BitString<8>, BitString<8>> RF;
+                Function<BitString<8>, BitString<8>> RF;
                 Void Initialize() { }
             }
             """)
-        assert isinstance(game.fields[0].type, frog_ast.RandomFunctionType)
+        assert isinstance(game.fields[0].type, frog_ast.FunctionType)
 
     def test_correct_domain_and_range(self) -> None:
         game = frog_parser.parse_game("""
             Game G() {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
+                Function<BitString<8>, BitString<16>> RF;
                 Void Initialize() { }
             }
             """)
         rf_type = game.fields[0].type
-        assert isinstance(rf_type, frog_ast.RandomFunctionType)
+        assert isinstance(rf_type, frog_ast.FunctionType)
         assert rf_type.domain_type == frog_ast.BitStringType(frog_ast.Integer(8))
         assert rf_type.range_type == frog_ast.BitStringType(frog_ast.Integer(16))
 
 
-class TestRandomFunctionSampleInInitialize:
+class TestFunctionSampleInInitialize:
     def test_parses_as_sample(self) -> None:
         game = frog_parser.parse_game("""
             Game G() {
-                RandomFunctions<BitString<8>, BitString<8>> RF;
+                Function<BitString<8>, BitString<8>> RF;
                 Void Initialize() {
-                    RF <- RandomFunctions<BitString<8>, BitString<8>>;
+                    RF <- Function<BitString<8>, BitString<8>>;
                 }
             }
             """)
         stmt = game.methods[0].block.statements[0]
         assert isinstance(stmt, frog_ast.Sample)
-        assert isinstance(stmt.sampled_from, frog_ast.RandomFunctionType)
+        assert isinstance(stmt.sampled_from, frog_ast.FunctionType)
 
 
-class TestRandomFunctionCallExpression:
+class TestFunctionCallExpression:
     def test_parses_as_func_call(self) -> None:
         game = frog_parser.parse_game("""
             Game G() {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
+                Function<BitString<8>, BitString<16>> RF;
                 Void Initialize() {
-                    RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                    RF <- Function<BitString<8>, BitString<16>>;
                 }
                 BitString<16> Lookup(BitString<8> x) {
                     BitString<16> z = RF(x);
@@ -65,7 +65,7 @@ class TestRandomFunctionCallExpression:
         assert len(stmt.value.args) == 1
 
 
-class TestRandomFunctionDomainFieldAccess:
+class TestFunctionDomainFieldAccess:
     def test_parses_as_field_access(self) -> None:
         expr = frog_parser.parse_expression("RF.domain")
         assert isinstance(expr, frog_ast.FieldAccess)
@@ -97,9 +97,9 @@ class TestUniqueSampleWithFieldAccessSet:
     def test_parses_with_rf_domain(self) -> None:
         game = frog_parser.parse_game("""
             Game G() {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
+                Function<BitString<8>, BitString<16>> RF;
                 Void Initialize() {
-                    RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                    RF <- Function<BitString<8>, BitString<16>>;
                 }
                 BitString<16> Lookup(BitString<8> x) {
                     BitString<8> r <-uniq[RF.domain] BitString<8>;
@@ -114,12 +114,12 @@ class TestUniqueSampleWithFieldAccessSet:
         assert stmt.unique_set.name == "domain"
 
 
-class TestMalformedRandomFunctionsType:
+class TestMalformedFunctionType:
     def test_missing_type_params_is_parse_error(self) -> None:
         with pytest.raises(frog_parser.ParseError):
             frog_parser.parse_game("""
                 Game G() {
-                    RandomFunctions RF;
+                    Function RF;
                     Void Initialize() { }
                 }
                 """)
@@ -128,37 +128,37 @@ class TestMalformedRandomFunctionsType:
         with pytest.raises(frog_parser.ParseError):
             frog_parser.parse_game("""
                 Game G() {
-                    RandomFunctions<BitString<8>> RF;
+                    Function<BitString<8>> RF;
                     Void Initialize() { }
                 }
                 """)
 
 
-class TestRandomFunctionTypeStr:
+class TestFunctionTypeStr:
     def test_str_representation(self) -> None:
-        rf = frog_ast.RandomFunctionType(
+        rf = frog_ast.FunctionType(
             frog_ast.BitStringType(frog_ast.Integer(8)),
             frog_ast.BitStringType(frog_ast.Integer(16)),
         )
-        assert str(rf) == "RandomFunctions<BitString<8>, BitString<16>>"
+        assert str(rf) == "Function<BitString<8>, BitString<16>>"
 
     def test_equality(self) -> None:
-        rf1 = frog_ast.RandomFunctionType(
+        rf1 = frog_ast.FunctionType(
             frog_ast.BitStringType(frog_ast.Integer(8)),
             frog_ast.BitStringType(frog_ast.Integer(16)),
         )
-        rf2 = frog_ast.RandomFunctionType(
+        rf2 = frog_ast.FunctionType(
             frog_ast.BitStringType(frog_ast.Integer(8)),
             frog_ast.BitStringType(frog_ast.Integer(16)),
         )
         assert rf1 == rf2
 
     def test_inequality_different_range(self) -> None:
-        rf1 = frog_ast.RandomFunctionType(
+        rf1 = frog_ast.FunctionType(
             frog_ast.BitStringType(frog_ast.Integer(8)),
             frog_ast.BitStringType(frog_ast.Integer(16)),
         )
-        rf2 = frog_ast.RandomFunctionType(
+        rf2 = frog_ast.FunctionType(
             frog_ast.BitStringType(frog_ast.Integer(8)),
             frog_ast.BitStringType(frog_ast.Integer(8)),
         )

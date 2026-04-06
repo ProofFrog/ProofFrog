@@ -17,25 +17,21 @@ from proof_frog.transforms.inlining import (
 
 def _make_det_namespace() -> frog_ast.Namespace:
     """Namespace with primitive G whose ``evaluate`` is deterministic."""
-    prim = frog_parser.parse_primitive_file(
-        """
+    prim = frog_parser.parse_primitive_file("""
         Primitive G(Int n) {
             deterministic BitString<n> evaluate(BitString<n> x);
         }
-        """
-    )
+        """)
     return {"G": prim}
 
 
 def _make_nondet_namespace() -> frog_ast.Namespace:
     """Namespace with primitive G whose ``evaluate`` is NOT deterministic."""
-    prim = frog_parser.parse_primitive_file(
-        """
+    prim = frog_parser.parse_primitive_file("""
         Primitive G(Int n) {
             BitString<n> evaluate(BitString<n> x);
         }
-        """
-    )
+        """)
     return {"G": prim}
 
 
@@ -48,22 +44,18 @@ class TestForwardExpressionAliasDeterministic:
     def test_deterministic_call_aliased(self) -> None:
         """v = G.evaluate(x); ... G.evaluate(x) -> v when G.evaluate is
         deterministic."""
-        method = frog_parser.parse_method(
-            """
+        method = frog_parser.parse_method("""
             Int f(Int x) {
                 Int v = G.evaluate(x);
                 return v + G.evaluate(x);
             }
-            """
-        )
-        expected = frog_parser.parse_method(
-            """
+            """)
+        expected = frog_parser.parse_method("""
             Int f(Int x) {
                 Int v = G.evaluate(x);
                 return v + v;
             }
-            """
-        )
+            """)
         result = ForwardExpressionAliasTransformer(
             proof_namespace=_make_det_namespace()
         ).transform(method)
@@ -72,22 +64,18 @@ class TestForwardExpressionAliasDeterministic:
     def test_nondeterministic_call_not_aliased(self) -> None:
         """v = G.evaluate(x); ... G.evaluate(x) should NOT be aliased when
         G.evaluate is not deterministic."""
-        method = frog_parser.parse_method(
-            """
+        method = frog_parser.parse_method("""
             Int f(Int x) {
                 Int v = G.evaluate(x);
                 return v + G.evaluate(x);
             }
-            """
-        )
-        expected = frog_parser.parse_method(
-            """
+            """)
+        expected = frog_parser.parse_method("""
             Int f(Int x) {
                 Int v = G.evaluate(x);
                 return v + G.evaluate(x);
             }
-            """
-        )
+            """)
         result = ForwardExpressionAliasTransformer(
             proof_namespace=_make_nondet_namespace()
         ).transform(method)
@@ -95,22 +83,18 @@ class TestForwardExpressionAliasDeterministic:
 
     def test_no_namespace_call_not_aliased(self) -> None:
         """Without namespace, function calls are not aliased (conservative)."""
-        method = frog_parser.parse_method(
-            """
+        method = frog_parser.parse_method("""
             Int f(Int x) {
                 Int v = G.evaluate(x);
                 return v + G.evaluate(x);
             }
-            """
-        )
-        expected = frog_parser.parse_method(
-            """
+            """)
+        expected = frog_parser.parse_method("""
             Int f(Int x) {
                 Int v = G.evaluate(x);
                 return v + G.evaluate(x);
             }
-            """
-        )
+            """)
         result = ForwardExpressionAliasTransformer().transform(method)
         assert result == expected
 
@@ -125,23 +109,19 @@ class TestCollapseAssignmentDeterministic:
     def test_deterministic_initial_collapsed(self) -> None:
         """Int a = G.evaluate(x); a = 3; -> Int a = 3; when G.evaluate is
         deterministic (the initial call is discarded safely)."""
-        method = frog_parser.parse_method(
-            """
+        method = frog_parser.parse_method("""
             Int f(Int x) {
                 Int a = G.evaluate(x);
                 a = 3;
                 return a;
             }
-            """
-        )
-        expected = frog_parser.parse_method(
-            """
+            """)
+        expected = frog_parser.parse_method("""
             Int f(Int x) {
                 Int a = 3;
                 return a;
             }
-            """
-        )
+            """)
         result = CollapseAssignmentTransformer(
             proof_namespace=_make_det_namespace()
         ).transform(method)
@@ -150,24 +130,20 @@ class TestCollapseAssignmentDeterministic:
     def test_nondeterministic_initial_not_collapsed(self) -> None:
         """Int a = G.evaluate(x); a = 3; should NOT collapse when G.evaluate
         is not deterministic (the initial call may have side effects)."""
-        method = frog_parser.parse_method(
-            """
+        method = frog_parser.parse_method("""
             Int f(Int x) {
                 Int a = G.evaluate(x);
                 a = 3;
                 return a;
             }
-            """
-        )
-        expected = frog_parser.parse_method(
-            """
+            """)
+        expected = frog_parser.parse_method("""
             Int f(Int x) {
                 Int a = G.evaluate(x);
                 a = 3;
                 return a;
             }
-            """
-        )
+            """)
         result = CollapseAssignmentTransformer(
             proof_namespace=_make_nondet_namespace()
         ).transform(method)
@@ -175,15 +151,13 @@ class TestCollapseAssignmentDeterministic:
 
     def test_no_namespace_not_collapsed(self) -> None:
         """Without namespace, calls block collapsing (conservative)."""
-        method = frog_parser.parse_method(
-            """
+        method = frog_parser.parse_method("""
             Int f(Int x) {
                 Int a = G.evaluate(x);
                 a = 3;
                 return a;
             }
-            """
-        )
+            """)
         result = CollapseAssignmentTransformer().transform(method)
         # Should be unchanged
         assert result == method
@@ -235,9 +209,7 @@ class TestHoistFieldPureAliasDeterministic:
 # ---- InlineSingleUseField ----
 
 
-def _inline_field_transform(
-    source: str, ns: frog_ast.Namespace
-) -> frog_ast.Game:
+def _inline_field_transform(source: str, ns: frog_ast.Namespace) -> frog_ast.Game:
     game = frog_parser.parse_game(source)
     return InlineSingleUseFieldTransformer(proof_namespace=ns).transform(game)
 

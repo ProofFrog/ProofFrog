@@ -128,9 +128,9 @@ def test_slice_simplification(
     game_ast = frog_parser.parse_method(method)
     expected_ast = frog_parser.parse_method(expected)
 
-    transformed_ast = SimplifySpliceTransformer(
-        {"lambda": Symbol("lambda")}
-    ).transform(game_ast)
+    transformed_ast = SimplifySpliceTransformer({"lambda": Symbol("lambda")}).transform(
+        game_ast
+    )
     print("EXPECTED", expected_ast)
     print("TRANSFORMED", transformed_ast)
     assert expected_ast == transformed_ast

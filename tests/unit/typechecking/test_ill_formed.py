@@ -116,7 +116,6 @@ _PRIMITIVE_CASES = [
         "Primitive MismatchedType(Bool x) {\n    Int y = x;\n}\n",
         "field initializer has type",
         id="mismatched_type",
-
     ),
 ]
 
@@ -210,7 +209,6 @@ _SCHEME_CASES = [
         ),
         "field initializer has type",
         id="mismatched_type",
-
     ),
     pytest.param(
         (
@@ -226,7 +224,6 @@ _SCHEME_CASES = [
         ),
         "expected",
         id="bad_if",
-
     ),
     pytest.param(
         (
@@ -240,7 +237,6 @@ _SCHEME_CASES = [
         ),
         "expected",
         id="incorrect_return",
-
     ),
     pytest.param(
         "Scheme InvalidExtend() extends NonExistent {\n    Void f() {}\n}\n",
@@ -269,7 +265,6 @@ _SCHEME_CASES = [
         ),
         "does not correctly implement",
         id="not_overriding_fields",
-
     ),
     pytest.param(
         (

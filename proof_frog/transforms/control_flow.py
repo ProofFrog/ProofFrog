@@ -501,13 +501,18 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
     whose condition asserts it.
     """
 
-    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace | None = None,
+        proof_let_types: NameTypeMap | None = None,
+    ) -> None:
         self.field_names: list[str] = []
         self.param_names: list[str] = []
         # Maps field name -> its assigned expression (only for single-assignment fields
         # whose definition is composed entirely of other fields)
         self.field_definitions: dict[str, frog_ast.Expression] = {}
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
+        self._proof_let_types = proof_let_types
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.field_names = [field.name for field in game.fields]
@@ -556,7 +561,9 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
             # stored value diverges from the current field value.
             if not all(assign_counts.get(v.name, 0) == 1 for v in used_vars):
                 continue
-            if has_nondeterministic_call(expr, self._proof_namespace):
+            if has_nondeterministic_call(
+                expr, self._proof_namespace, self._proof_let_types
+            ):
                 continue
             self.field_definitions[name] = expr
 
@@ -711,7 +718,8 @@ class IfConditionAliasSubstitution(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return IfConditionAliasSubstitutionTransformer(
-            proof_namespace=ctx.proof_namespace
+            proof_namespace=ctx.proof_namespace,
+            proof_let_types=ctx.proof_let_types,
         ).transform(game)
 
 

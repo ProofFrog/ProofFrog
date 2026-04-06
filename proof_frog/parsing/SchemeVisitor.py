@@ -349,11 +349,6 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SchemeParser#randomFunctionType.
-    def visitRandomFunctionType(self, ctx:SchemeParser.RandomFunctionTypeContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by SchemeParser#modIntType.
     def visitModIntType(self, ctx:SchemeParser.ModIntTypeContext):
         return self.visitChildren(ctx)
@@ -381,6 +376,11 @@ class SchemeVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SchemeParser#voidType.
     def visitVoidType(self, ctx:SchemeParser.VoidTypeContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#functionType.
+    def visitFunctionType(self, ctx:SchemeParser.FunctionTypeContext):
         return self.visitChildren(ctx)
 
 

@@ -10,6 +10,7 @@ is also named "v1", so the next rename step incorrectly renames both.
 
 Fix: two-phase rename — first to collision-safe intermediates, then to v1, v2, ...
 """
+
 import pytest
 from proof_frog import frog_parser, proof_engine
 from proof_frog.transforms.standardization import VariableStandardizingTransformer
@@ -141,9 +142,9 @@ def test_parameter_name_collision_skipped() -> None:
     print("EXPECTED", expected)
     print("RESULT  ", result)
     # The local 'x' should become v2 (not v1, which is a parameter)
-    assert result == expected, (
-        "Local variable should skip vN names that collide with parameters"
-    )
+    assert (
+        result == expected
+    ), "Local variable should skip vN names that collide with parameters"
 
 
 def test_parameter_v2_with_two_locals() -> None:
@@ -169,9 +170,9 @@ def test_parameter_v2_with_two_locals() -> None:
     result = VariableStandardizingTransformer().transform(game)
     print("EXPECTED", expected)
     print("RESULT  ", result)
-    assert result == expected, (
-        "Locals should be v1, v3 (skipping v2 which is a parameter)"
-    )
+    assert (
+        result == expected
+    ), "Locals should be v1, v3 (skipping v2 which is a parameter)"
 
 
 def test_equivalent_statement_orderings() -> None:

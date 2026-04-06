@@ -55,6 +55,7 @@ class PipelineContext:
     equality_pairs: set[tuple[str, str]] = dataclasses.field(default_factory=set)
     sort_game_fn: Optional[Callable[[frog_ast.Game], frog_ast.Game]] = None
     max_calls: Optional[int] = None
+    sampled_let_names: set[str] = dataclasses.field(default_factory=set)
     near_misses: list[NearMiss] = dataclasses.field(default_factory=list)
 
 
@@ -79,21 +80,30 @@ def _lookup_primitive_method(
 def has_nondeterministic_call(
     expr: frog_ast.Expression,
     proof_namespace: frog_ast.Namespace,
+    proof_let_types: Optional[NameTypeMap] = None,
 ) -> bool:
     """Return True if *expr* contains a FuncCall to a non-deterministic method.
 
-    Calls to primitive methods annotated ``deterministic`` are treated as pure
-    for inlining and CSE purposes.  Any other FuncCall (including calls to
-    scheme methods, game methods, or unannotated primitive methods) is
-    considered non-deterministic.
+    Calls to primitive methods annotated ``deterministic`` and calls to
+    ``Function<D, R>`` variables are treated as pure for inlining and CSE
+    purposes.  Any other FuncCall (including calls to scheme methods, game
+    methods, or unannotated primitive methods) is considered non-deterministic.
     """
     from ..visitors import SearchVisitor  # pylint: disable=import-outside-toplevel
 
     def _is_nondeterministic_call(node: frog_ast.ASTNode) -> bool:
         if not isinstance(node, frog_ast.FuncCall):
             return False
+        # Primitive methods annotated ``deterministic`` are pure
         m = _lookup_primitive_method(node.func, proof_namespace)
-        return m is None or not m.deterministic
+        if m is not None:
+            return not m.deterministic
+        # Function<D, R> calls are always deterministic (same input → same output)
+        if proof_let_types is not None and isinstance(node.func, frog_ast.Variable):
+            var_type = proof_let_types.get(node.func.name)
+            if isinstance(var_type, frog_ast.FunctionType):
+                return False
+        return True
 
     return SearchVisitor(_is_nondeterministic_call).visit(expr) is not None
 

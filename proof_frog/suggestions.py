@@ -53,7 +53,7 @@ _TYPE_KEYWORDS = {
     "BitString",
     "ModInt",
     "Array",
-    "RandomFunctions",
+    "Function",
 }
 
 

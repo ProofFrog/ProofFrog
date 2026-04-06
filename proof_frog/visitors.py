@@ -467,7 +467,10 @@ class InlineTransformer(Transformer):
 
         for var_statement in called_method.block.statements:
             if (
-                isinstance(var_statement, (frog_ast.Assignment, frog_ast.Sample))
+                isinstance(
+                    var_statement,
+                    (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+                )
                 and var_statement.the_type is not None
                 and isinstance(var_statement.var, frog_ast.Variable)
             ):

@@ -16,8 +16,8 @@ from proof_frog.transforms._base import PipelineContext
         (
             """
             BitString<16> f() {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 BitString<8> r <-uniq[RF.domain] BitString<8>;
                 BitString<16> z = RF(r);
                 return z;
@@ -25,8 +25,8 @@ from proof_frog.transforms._base import PipelineContext
             """,
             """
             BitString<16> f() {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 BitString<8> r <-uniq[RF.domain] BitString<8>;
                 BitString<16> z <- BitString<16>;
                 return z;
@@ -37,8 +37,8 @@ from proof_frog.transforms._base import PipelineContext
         (
             """
             [BitString<8>, BitString<16>] f(BitString<16> m) {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 BitString<8> r <-uniq[RF.domain] BitString<8>;
                 BitString<16> z = RF(r);
                 return [r, m + z];
@@ -46,8 +46,8 @@ from proof_frog.transforms._base import PipelineContext
             """,
             """
             [BitString<8>, BitString<16>] f(BitString<16> m) {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 BitString<8> r <-uniq[RF.domain] BitString<8>;
                 BitString<16> z <- BitString<16>;
                 return [r, m + z];
@@ -58,8 +58,8 @@ from proof_frog.transforms._base import PipelineContext
         (
             """
             BitString<16> f() {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 Set<BitString<8>> Q;
                 BitString<8> r <-uniq[Q] BitString<8>;
                 BitString<16> z = RF(r);
@@ -68,8 +68,8 @@ from proof_frog.transforms._base import PipelineContext
             """,
             """
             BitString<16> f() {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 Set<BitString<8>> Q;
                 BitString<8> r <-uniq[Q] BitString<8>;
                 BitString<16> z <- BitString<16>;
@@ -81,10 +81,10 @@ from proof_frog.transforms._base import PipelineContext
         (
             """
             BitString<16> f() {
-                RandomFunctions<BitString<8>, BitString<16>> RF1;
-                RandomFunctions<BitString<8>, BitString<16>> RF2;
-                RF1 <- RandomFunctions<BitString<8>, BitString<16>>;
-                RF2 <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF1;
+                Function<BitString<8>, BitString<16>> RF2;
+                RF1 <- Function<BitString<8>, BitString<16>>;
+                RF2 <- Function<BitString<8>, BitString<16>>;
                 BitString<8> r <-uniq[RF1.domain] BitString<8>;
                 BitString<16> z = RF2(r);
                 return z;
@@ -92,10 +92,10 @@ from proof_frog.transforms._base import PipelineContext
             """,
             """
             BitString<16> f() {
-                RandomFunctions<BitString<8>, BitString<16>> RF1;
-                RandomFunctions<BitString<8>, BitString<16>> RF2;
-                RF1 <- RandomFunctions<BitString<8>, BitString<16>>;
-                RF2 <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF1;
+                Function<BitString<8>, BitString<16>> RF2;
+                RF1 <- Function<BitString<8>, BitString<16>>;
+                RF2 <- Function<BitString<8>, BitString<16>>;
                 BitString<8> r <-uniq[RF1.domain] BitString<8>;
                 BitString<16> z = RF2(r);
                 return z;
@@ -106,8 +106,8 @@ from proof_frog.transforms._base import PipelineContext
         (
             """
             BitString<16> f(BitString<8> x) {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 BitString<8> r <-uniq[RF.domain] BitString<8>;
                 BitString<16> z = RF(x);
                 return z;
@@ -115,8 +115,8 @@ from proof_frog.transforms._base import PipelineContext
             """,
             """
             BitString<16> f(BitString<8> x) {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 BitString<8> r <-uniq[RF.domain] BitString<8>;
                 BitString<16> z = RF(x);
                 return z;
@@ -127,8 +127,8 @@ from proof_frog.transforms._base import PipelineContext
         (
             """
             BitString<16> f() {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 BitString<8> r <- BitString<8>;
                 BitString<16> z = RF(r);
                 return z;
@@ -136,8 +136,8 @@ from proof_frog.transforms._base import PipelineContext
             """,
             """
             BitString<16> f() {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 BitString<8> r <- BitString<8>;
                 BitString<16> z = RF(r);
                 return z;
@@ -180,10 +180,9 @@ def test_local_unique_set_not_simplified() -> None:
     should NOT be simplified.  A local set resets each oracle call, so
     the same value could be drawn across calls, violating cross-call
     distinctness required for RF replacement."""
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G() {
-            RandomFunctions<BitString<8>, BitString<16>> RF;
+            Function<BitString<8>, BitString<16>> RF;
             BitString<16> Query() {
                 Set<BitString<8>> localS;
                 BitString<8> r <-uniq[localS] BitString<8>;
@@ -191,26 +190,22 @@ def test_local_unique_set_not_simplified() -> None:
                 return z;
             }
         }
-        """
-    )
+        """)
     result = UniqueRFSimplification().apply(game, _make_ctx())
     # RF(r) should NOT be replaced because localS is not a game field
-    assert result == game, (
-        "RF with local unique set should not be simplified"
-    )
+    assert result == game, "RF with local unique set should not be simplified"
 
 
 def test_exclusion_set_modified_not_simplified() -> None:
     """If the exclusion set is explicitly modified by user code, the RF
     should NOT be simplified.  FrogLang semantics implicitly maintain
     exclusion sets; explicit modification breaks cross-call uniqueness."""
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G() {
             Set<BitString<8>> S;
-            RandomFunctions<BitString<8>, BitString<16>> RF;
+            Function<BitString<8>, BitString<16>> RF;
             Void Initialize() {
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                RF <- Function<BitString<8>, BitString<16>>;
             }
             BitString<16> Query() {
                 BitString<8> r <-uniq[S] BitString<8>;
@@ -219,25 +214,23 @@ def test_exclusion_set_modified_not_simplified() -> None:
                 return z;
             }
         }
-        """
-    )
+        """)
     result = UniqueRFSimplification().apply(game, _make_ctx())
-    assert result == game, (
-        "RF should not be simplified when the exclusion set is explicitly modified"
-    )
+    assert (
+        result == game
+    ), "RF should not be simplified when the exclusion set is explicitly modified"
 
 
 def test_duplicate_rf_arg_not_simplified() -> None:
     """If the same uniquely-sampled variable is used as argument to two
     RF calls, both calls return the same value (RF is a function).
     Replacing both with independent samples is wrong."""
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G() {
             Set<BitString<8>> S;
-            RandomFunctions<BitString<8>, BitString<16>> RF;
+            Function<BitString<8>, BitString<16>> RF;
             Void Initialize() {
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                RF <- Function<BitString<8>, BitString<16>>;
             }
             [BitString<16>, BitString<16>] Query() {
                 BitString<8> r <-uniq[S] BitString<8>;
@@ -246,10 +239,9 @@ def test_duplicate_rf_arg_not_simplified() -> None:
                 return [z1, z2];
             }
         }
-        """
-    )
+        """)
     result = UniqueRFSimplification().apply(game, _make_ctx())
     # RF(r) should NOT be replaced because r is used for two RF calls
-    assert result == game, (
-        "RF with duplicate argument variable should not be simplified"
-    )
+    assert (
+        result == game
+    ), "RF with duplicate argument variable should not be simplified"

@@ -6,7 +6,6 @@ import pytest
 
 from proof_frog import frog_parser, semantic_analysis
 
-
 _HELPER_PRIMITIVE = """\
 Primitive HelperPrimitive(Set KeySpace) {
     Set Key = KeySpace;

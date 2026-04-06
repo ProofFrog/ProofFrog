@@ -90,7 +90,7 @@ type: type QUESTION #optionalType
 	| VOID #voidType
 	| MAP L_ANGLE type COMMA type R_ANGLE #mapType
 	| ARRAY L_ANGLE type COMMA integerExpression R_ANGLE #arrayType
-	| RANDOMFUNCTIONS L_ANGLE type COMMA type R_ANGLE #randomFunctionType
+	| FUNCTION L_ANGLE type COMMA type R_ANGLE #functionType
 	| INTTYPE #intType
 	| L_SQUARE type (COMMA type)+ R_SQUARE #productType
 	| bitstring #bitStringType
@@ -175,7 +175,7 @@ MODINT: 'ModInt';
 GROUP: 'Group';
 GROUPELEM: 'GroupElem';
 ARRAY: 'Array';
-RANDOMFUNCTIONS: 'RandomFunctions';
+FUNCTION: 'Function';
 PRIMITIVE: 'Primitive';
 SUBSETS: 'subsets';
 IF: 'if';

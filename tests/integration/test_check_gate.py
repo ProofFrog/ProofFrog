@@ -43,9 +43,7 @@ theorem:
 games:
     G1 against G1;
 """
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".proof", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".proof", delete=False) as f:
         f.write(proof_content)
         f.flush()
         try:

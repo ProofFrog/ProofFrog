@@ -60,7 +60,7 @@ class TestSuggestIdentifier:
         assert suggest_identifier("Encr", ["Enc", "Dec", "KeyGen"]) == "Enc"
 
     def test_length_filter(self) -> None:
-        assert suggest_identifier("ab", ["RandomFunctions"]) is None
+        assert suggest_identifier("ab", ["Function"]) is None
 
     def test_single_char_difference(self) -> None:
         assert suggest_identifier("Kee", ["Key", "Enc"]) == "Key"

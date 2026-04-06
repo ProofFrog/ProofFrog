@@ -387,6 +387,7 @@ class ProofEngine:
         self.variables: dict[str, Symbol | frog_ast.Expression] = {}
         self.method_lookup: MethodLookup = {}
         self.max_calls: Optional[int] = None
+        self.sampled_let_names: set[str] = set()
         self._total_steps = 0
         self._current_step = 0
 
@@ -426,8 +427,13 @@ class ProofEngine:
             self.definition_namespace[game.name] = game
 
         # Here, we are substituting the lets with the parameters they are given
+        self.sampled_let_names = proof_file.sampled_let_names
         for let in proof_file.lets:
             self.proof_let_types.set(let.name, let.type)
+            # Sampled lets (e.g. Function<D,R> H <- Function<D,R>) have no value
+            if let.name in self.sampled_let_names:
+                self.proof_namespace[let.name] = None
+                continue
             if isinstance(let.value, frog_ast.FuncCall) and isinstance(
                 let.value.func, frog_ast.Variable
             ):
@@ -1195,6 +1201,7 @@ class ProofEngine:
             equality_pairs=self.equality_pairs,
             sort_game_fn=self.sort_game,
             max_calls=self.max_calls,
+            sampled_let_names=self.sampled_let_names,
         )
 
     def check_equivalent(

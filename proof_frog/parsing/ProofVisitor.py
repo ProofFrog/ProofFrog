@@ -34,6 +34,16 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#letField.
+    def visitLetField(self, ctx:ProofParser.LetFieldContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#letSample.
+    def visitLetSample(self, ctx:ProofParser.LetSampleContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#assumptions.
     def visitAssumptions(self, ctx:ProofParser.AssumptionsContext):
         return self.visitChildren(ctx)
@@ -419,11 +429,6 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#randomFunctionType.
-    def visitRandomFunctionType(self, ctx:ProofParser.RandomFunctionTypeContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by ProofParser#modIntType.
     def visitModIntType(self, ctx:ProofParser.ModIntTypeContext):
         return self.visitChildren(ctx)
@@ -451,6 +456,11 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#voidType.
     def visitVoidType(self, ctx:ProofParser.VoidTypeContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#functionType.
+    def visitFunctionType(self, ctx:ProofParser.FunctionTypeContext):
         return self.visitChildren(ctx)
 
 

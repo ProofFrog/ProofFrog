@@ -19,9 +19,7 @@ def _run_prove_json(proof_path: str, cwd: Path = REPO_ROOT) -> dict:
         timeout=120,
     )
     # The command should always produce JSON on stdout, even for failing proofs
-    assert result.stdout.strip(), (
-        f"No JSON output produced.\nstderr: {result.stderr}"
-    )
+    assert result.stdout.strip(), f"No JSON output produced.\nstderr: {result.stderr}"
     return json.loads(result.stdout)
 
 
@@ -132,14 +130,13 @@ games:
 
     # Find the failing hop
     failing_hops = [h for h in data["hop_results"] if not h["valid"]]
-    assert len(failing_hops) >= 1, (
-        f"Expected at least one failing hop but all passed: {data['hop_results']}"
-    )
+    assert (
+        len(failing_hops) >= 1
+    ), f"Expected at least one failing hop but all passed: {data['hop_results']}"
 
     diag = failing_hops[0]["diagnosis"]
     assert diag is not None, (
-        f"Failing hop should have a diagnosis but got None. "
-        f"Hop: {failing_hops[0]}"
+        f"Failing hop should have a diagnosis but got None. " f"Hop: {failing_hops[0]}"
     )
     assert "summary" in diag
     assert isinstance(diag["summary"], str)

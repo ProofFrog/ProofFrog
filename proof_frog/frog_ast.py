@@ -167,14 +167,14 @@ class ProductType(Type):
         return f'[{", ".join(str(t) for t in self.types)}]'
 
 
-class RandomFunctionType(Type):
+class FunctionType(Type):
     def __init__(self, domain_type: Type, range_type: Type) -> None:
         super().__init__()
         self.domain_type = domain_type
         self.range_type = range_type
 
     def __str__(self) -> str:
-        return f"RandomFunctions<{self.domain_type}, {self.range_type}>"
+        return f"Function<{self.domain_type}, {self.range_type}>"
 
 
 class OptionalType(Type):
@@ -952,6 +952,7 @@ class ProofFile(Root):
         self.imports = imports
         self.helpers = helpers
         self.lets = lets
+        self.sampled_let_names: set[str] = set()
         self.max_calls = max_calls
         self.assumptions = assumptions
         self.lemmas = lemmas

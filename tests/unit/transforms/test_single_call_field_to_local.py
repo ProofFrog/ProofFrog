@@ -132,13 +132,13 @@ from proof_frog.transforms.sampling import _single_call_field_to_local
             }
         }""",
         ),
-        # RandomFunctionType field: skip (structured type)
+        # FunctionType field: skip (structured type)
         (
             """
         Game Test() {
-            RandomFunctions<BitString<lambda>, BitString<lambda>> RF;
+            Function<BitString<lambda>, BitString<lambda>> RF;
             Void Initialize() {
-                RF <- RandomFunctions<BitString<lambda>, BitString<lambda>>;
+                RF <- Function<BitString<lambda>, BitString<lambda>>;
             }
             BitString<lambda> CTXT(BitString<lambda> r) {
                 BitString<lambda> z = RF(r);
@@ -147,9 +147,9 @@ from proof_frog.transforms.sampling import _single_call_field_to_local
         }""",
             """
         Game Test() {
-            RandomFunctions<BitString<lambda>, BitString<lambda>> RF;
+            Function<BitString<lambda>, BitString<lambda>> RF;
             Void Initialize() {
-                RF <- RandomFunctions<BitString<lambda>, BitString<lambda>>;
+                RF <- Function<BitString<lambda>, BitString<lambda>>;
             }
             BitString<lambda> CTXT(BitString<lambda> r) {
                 BitString<lambda> z = RF(r);
@@ -254,10 +254,10 @@ from proof_frog.transforms.sampling import _single_call_field_to_local
             """
         Game Test() {
             BitString<lambda> k;
-            RandomFunctions<BitString<lambda>, BitString<lambda>> RF;
+            Function<BitString<lambda>, BitString<lambda>> RF;
             Void Initialize() {
                 k <- BitString<lambda>;
-                RF <- RandomFunctions<BitString<lambda>, BitString<lambda>>;
+                RF <- Function<BitString<lambda>, BitString<lambda>>;
             }
             BitString<lambda> CTXT(BitString<lambda> m) {
                 BitString<lambda> z = RF(m);
@@ -266,9 +266,9 @@ from proof_frog.transforms.sampling import _single_call_field_to_local
         }""",
             """
         Game Test() {
-            RandomFunctions<BitString<lambda>, BitString<lambda>> RF;
+            Function<BitString<lambda>, BitString<lambda>> RF;
             Void Initialize() {
-                RF <- RandomFunctions<BitString<lambda>, BitString<lambda>>;
+                RF <- Function<BitString<lambda>, BitString<lambda>>;
             }
             BitString<lambda> CTXT(BitString<lambda> m) {
                 BitString<lambda> k <- BitString<lambda>;

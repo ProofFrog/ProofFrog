@@ -108,25 +108,21 @@ def test_collapse_assignment(
 def test_element_mutation_not_collapsed() -> None:
     """An element mutation like v[0] = expr should NOT be treated as a
     full reassignment that allows collapsing the original declaration."""
-    method_ast = frog_parser.parse_method(
-        """
+    method_ast = frog_parser.parse_method("""
         Void f() {
             Map<Int, Int> M = {};
             M[0] = 42;
             return M;
         }
-        """
-    )
-    expected_ast = frog_parser.parse_method(
-        """
+        """)
+    expected_ast = frog_parser.parse_method("""
         Void f() {
             Map<Int, Int> M = {};
             M[0] = 42;
             return M;
         }
-        """
-    )
+        """)
     transformed_ast = CollapseAssignmentTransformer().transform(method_ast)
-    assert transformed_ast == expected_ast, (
-        "Element mutation M[0]=42 should not collapse the declaration of M"
-    )
+    assert (
+        transformed_ast == expected_ast
+    ), "Element mutation M[0]=42 should not collapse the declaration of M"

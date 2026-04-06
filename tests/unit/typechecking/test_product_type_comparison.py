@@ -29,9 +29,7 @@ class TestCompareTypesProducts:
 
     def test_nested_product_components(self) -> None:
         """[[A, B], [C, D, E]] matches [[A, B], [C, D, E]]."""
-        inner1 = frog_ast.ProductType(
-            [frog_ast.Variable("A"), frog_ast.Variable("B")]
-        )
+        inner1 = frog_ast.ProductType([frog_ast.Variable("A"), frog_ast.Variable("B")])
         inner2 = frog_ast.ProductType(
             [frog_ast.Variable("C"), frog_ast.Variable("D"), frog_ast.Variable("E")]
         )

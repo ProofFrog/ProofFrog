@@ -165,59 +165,63 @@ def test_no_hoist_when_field_free_var_modified_between_j_and_i() -> None:
     #   Int x = field_arr[0] + 1;    // j=0: uses field_arr[0]
     #   field_arr[0] = 99;            // modifies field_arr
     #   field5 = field_arr[0];        // i=2: field assignment to hoist
-    game = frog_ast.Game((
-        "Test",
-        [],
-        [
-            frog_ast.Field(
-                frog_ast.Variable("Array"),  # simplified type
-                "field_arr",
-                None,
-            ),
-            frog_ast.Field(frog_ast.Variable("Int"), "field5", None),
-        ],
-        [
-            frog_ast.Method(
-                frog_ast.MethodSignature(
-                    "Initialize", frog_ast.Variable("Void"), []
+    game = frog_ast.Game(
+        (
+            "Test",
+            [],
+            [
+                frog_ast.Field(
+                    frog_ast.Variable("Array"),  # simplified type
+                    "field_arr",
+                    None,
                 ),
-                frog_ast.Block([
-                    # Int x = field_arr[0] + 1;
-                    frog_ast.Assignment(
-                        frog_ast.Variable("Int"),
-                        frog_ast.Variable("x"),
-                        frog_ast.BinaryOperation(
-                            frog_ast.BinaryOperators.ADD,
-                            frog_ast.ArrayAccess(
-                                frog_ast.Variable("field_arr"),
-                                frog_ast.Integer(0),
+                frog_ast.Field(frog_ast.Variable("Int"), "field5", None),
+            ],
+            [
+                frog_ast.Method(
+                    frog_ast.MethodSignature(
+                        "Initialize", frog_ast.Variable("Void"), []
+                    ),
+                    frog_ast.Block(
+                        [
+                            # Int x = field_arr[0] + 1;
+                            frog_ast.Assignment(
+                                frog_ast.Variable("Int"),
+                                frog_ast.Variable("x"),
+                                frog_ast.BinaryOperation(
+                                    frog_ast.BinaryOperators.ADD,
+                                    frog_ast.ArrayAccess(
+                                        frog_ast.Variable("field_arr"),
+                                        frog_ast.Integer(0),
+                                    ),
+                                    frog_ast.Integer(1),
+                                ),
                             ),
-                            frog_ast.Integer(1),
-                        ),
+                            # field_arr[0] = 99;
+                            frog_ast.Assignment(
+                                None,
+                                frog_ast.ArrayAccess(
+                                    frog_ast.Variable("field_arr"),
+                                    frog_ast.Integer(0),
+                                ),
+                                frog_ast.Integer(99),
+                            ),
+                            # field5 = field_arr[0];
+                            frog_ast.Assignment(
+                                None,
+                                frog_ast.Variable("field5"),
+                                frog_ast.ArrayAccess(
+                                    frog_ast.Variable("field_arr"),
+                                    frog_ast.Integer(0),
+                                ),
+                            ),
+                        ]
                     ),
-                    # field_arr[0] = 99;
-                    frog_ast.Assignment(
-                        None,
-                        frog_ast.ArrayAccess(
-                            frog_ast.Variable("field_arr"),
-                            frog_ast.Integer(0),
-                        ),
-                        frog_ast.Integer(99),
-                    ),
-                    # field5 = field_arr[0];
-                    frog_ast.Assignment(
-                        None,
-                        frog_ast.Variable("field5"),
-                        frog_ast.ArrayAccess(
-                            frog_ast.Variable("field_arr"),
-                            frog_ast.Integer(0),
-                        ),
-                    ),
-                ]),
-            ),
-        ],
-        [],  # phases
-    ))
+                ),
+            ],
+            [],  # phases
+        )
+    )
 
     result = HoistFieldPureAliasTransformer().transform(game)
 
@@ -227,12 +231,11 @@ def test_no_hoist_when_field_free_var_modified_between_j_and_i() -> None:
     # If hoisted, the field5 assignment would be at index 0.
     # It should still be at the end (index 2).
     last_stmt = stmts[-1]
-    assert isinstance(last_stmt, frog_ast.Assignment), (
-        "Last statement should still be the field5 assignment"
-    )
+    assert isinstance(
+        last_stmt, frog_ast.Assignment
+    ), "Last statement should still be the field5 assignment"
     assert (
-        isinstance(last_stmt.var, frog_ast.Variable)
-        and last_stmt.var.name == "field5"
+        isinstance(last_stmt.var, frog_ast.Variable) and last_stmt.var.name == "field5"
     ), (
         "field5 = field_arr[0] should NOT be hoisted when field_arr is "
         "modified between the match position and the assignment position"

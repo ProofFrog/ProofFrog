@@ -42,13 +42,15 @@ def test_basic_local_bijection_elimination() -> None:
             }
         }
     """)
-    ctx = _make_ctx({
-        "K": _prim(
-            "Primitive K() {"
-            "  deterministic injective BitString<256> Encode(BitString<256> x);"
-            "}"
-        )
-    })
+    ctx = _make_ctx(
+        {
+            "K": _prim(
+                "Primitive K() {"
+                "  deterministic injective BitString<256> Encode(BitString<256> x);"
+                "}"
+            )
+        }
+    )
     result = UniformBijectionElimination().apply(game, ctx)
     assert result == expected
 
@@ -79,13 +81,15 @@ def test_field_cross_method_bijection_elimination() -> None:
             }
         }
     """)
-    ctx = _make_ctx({
-        "K": _prim(
-            "Primitive K() {"
-            "  deterministic injective BitString<256> Encode(BitString<256> x);"
-            "}"
-        )
-    })
+    ctx = _make_ctx(
+        {
+            "K": _prim(
+                "Primitive K() {"
+                "  deterministic injective BitString<256> Encode(BitString<256> x);"
+                "}"
+            )
+        }
+    )
     result = UniformBijectionElimination().apply(game, ctx)
     assert result == expected
 
@@ -110,13 +114,15 @@ def test_multiple_uses_all_wrapped_same_function() -> None:
             }
         }
     """)
-    ctx = _make_ctx({
-        "K": _prim(
-            "Primitive K() {"
-            "  deterministic injective BitString<256> Encode(BitString<256> x);"
-            "}"
-        )
-    })
+    ctx = _make_ctx(
+        {
+            "K": _prim(
+                "Primitive K() {"
+                "  deterministic injective BitString<256> Encode(BitString<256> x);"
+                "}"
+            )
+        }
+    )
     result = UniformBijectionElimination().apply(game, ctx)
     assert result == expected
 
@@ -136,13 +142,15 @@ def test_not_deterministic() -> None:
             }
         }
     """)
-    ctx = _make_ctx({
-        "K": _prim(
-            "Primitive K() {"
-            "  injective BitString<256> Encode(BitString<256> x);"
-            "}"
-        )
-    })
+    ctx = _make_ctx(
+        {
+            "K": _prim(
+                "Primitive K() {"
+                "  injective BitString<256> Encode(BitString<256> x);"
+                "}"
+            )
+        }
+    )
     result = UniformBijectionElimination().apply(game, ctx)
     assert result == game
 
@@ -157,13 +165,15 @@ def test_not_injective() -> None:
             }
         }
     """)
-    ctx = _make_ctx({
-        "K": _prim(
-            "Primitive K() {"
-            "  deterministic BitString<256> Encode(BitString<256> x);"
-            "}"
-        )
-    })
+    ctx = _make_ctx(
+        {
+            "K": _prim(
+                "Primitive K() {"
+                "  deterministic BitString<256> Encode(BitString<256> x);"
+                "}"
+            )
+        }
+    )
     result = UniformBijectionElimination().apply(game, ctx)
     assert result == game
 
@@ -179,13 +189,15 @@ def test_mixed_uses_bare_and_wrapped() -> None:
             }
         }
     """)
-    ctx = _make_ctx({
-        "K": _prim(
-            "Primitive K() {"
-            "  deterministic injective BitString<256> Encode(BitString<256> x);"
-            "}"
-        )
-    })
+    ctx = _make_ctx(
+        {
+            "K": _prim(
+                "Primitive K() {"
+                "  deterministic injective BitString<256> Encode(BitString<256> x);"
+                "}"
+            )
+        }
+    )
     result = UniformBijectionElimination().apply(game, ctx)
     assert result == game
 
@@ -201,18 +213,20 @@ def test_different_functions() -> None:
             }
         }
     """)
-    ctx = _make_ctx({
-        "K": _prim(
-            "Primitive K() {"
-            "  deterministic injective BitString<256> Encode(BitString<256> x);"
-            "}"
-        ),
-        "H": _prim(
-            "Primitive H() {"
-            "  deterministic injective BitString<256> Hash(BitString<256> x);"
-            "}"
-        ),
-    })
+    ctx = _make_ctx(
+        {
+            "K": _prim(
+                "Primitive K() {"
+                "  deterministic injective BitString<256> Encode(BitString<256> x);"
+                "}"
+            ),
+            "H": _prim(
+                "Primitive H() {"
+                "  deterministic injective BitString<256> Hash(BitString<256> x);"
+                "}"
+            ),
+        }
+    )
     result = UniformBijectionElimination().apply(game, ctx)
     assert result == game
 
@@ -227,13 +241,15 @@ def test_type_mismatch() -> None:
             }
         }
     """)
-    ctx = _make_ctx({
-        "K": _prim(
-            "Primitive K() {"
-            "  deterministic injective BitString<512> Encode(BitString<256> x);"
-            "}"
-        )
-    })
+    ctx = _make_ctx(
+        {
+            "K": _prim(
+                "Primitive K() {"
+                "  deterministic injective BitString<512> Encode(BitString<256> x);"
+                "}"
+            )
+        }
+    )
     result = UniformBijectionElimination().apply(game, ctx)
     assert result == game
 
@@ -247,14 +263,16 @@ def test_two_argument_method() -> None:
             }
         }
     """)
-    ctx = _make_ctx({
-        "K": _prim(
-            "Primitive K() {"
-            "  deterministic injective BitString<256>"
-            "    Encode(BitString<256> a, BitString<256> b);"
-            "}"
-        )
-    })
+    ctx = _make_ctx(
+        {
+            "K": _prim(
+                "Primitive K() {"
+                "  deterministic injective BitString<256>"
+                "    Encode(BitString<256> a, BitString<256> b);"
+                "}"
+            )
+        }
+    )
     result = UniformBijectionElimination().apply(game, ctx)
     assert result == game
 
@@ -284,13 +302,15 @@ def test_not_a_sample() -> None:
             }
         }
     """)
-    ctx = _make_ctx({
-        "K": _prim(
-            "Primitive K() {"
-            "  deterministic injective BitString<256> Encode(BitString<256> x);"
-            "}"
-        )
-    })
+    ctx = _make_ctx(
+        {
+            "K": _prim(
+                "Primitive K() {"
+                "  deterministic injective BitString<256> Encode(BitString<256> x);"
+                "}"
+            )
+        }
+    )
     result = UniformBijectionElimination().apply(game, ctx)
     assert result == game
 
@@ -305,12 +325,8 @@ def test_no_annotations() -> None:
             }
         }
     """)
-    ctx = _make_ctx({
-        "K": _prim(
-            "Primitive K() {"
-            "  BitString<256> Encode(BitString<256> x);"
-            "}"
-        )
-    })
+    ctx = _make_ctx(
+        {"K": _prim("Primitive K() {" "  BitString<256> Encode(BitString<256> x);" "}")}
+    )
     result = UniformBijectionElimination().apply(game, ctx)
     assert result == game

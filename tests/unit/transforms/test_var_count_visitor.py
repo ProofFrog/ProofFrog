@@ -154,24 +154,20 @@ class TestCOWSharedReferences:
         if the underlying AST has COW-shared Variable nodes."""
         from proof_frog.transforms.inlining import InlineSingleUseVariableTransformer
 
-        method = frog_parser.parse_method(
-            """
+        method = frog_parser.parse_method("""
             BitString<lambda> f(BitString<lambda> k) {
                 BitString<2 * lambda> result = G.evaluate(k);
                 BitString<lambda> a = result[0 : lambda];
                 BitString<lambda> b = result[lambda : 2 * lambda];
                 return a + G.evaluate(b);
             }
-            """
-        )
-        expected = frog_parser.parse_method(
-            """
+            """)
+        expected = frog_parser.parse_method("""
             BitString<lambda> f(BitString<lambda> k) {
                 BitString<2 * lambda> result = G.evaluate(k);
                 return result[0 : lambda] + G.evaluate(result[lambda : 2 * lambda]);
             }
-            """
-        )
+            """)
         result = InlineSingleUseVariableTransformer().transform(method)
         # 'a' and 'b' are single-use → inlined
         # 'result' is used twice → NOT inlined

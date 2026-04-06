@@ -1,4 +1,8 @@
-from proof_frog.transforms._base import NearMiss, PipelineContext, deduplicate_near_misses
+from proof_frog.transforms._base import (
+    NearMiss,
+    PipelineContext,
+    deduplicate_near_misses,
+)
 from proof_frog import frog_parser, frog_ast
 from proof_frog.transforms.algebraic import (
     UniformXorSimplification,
@@ -65,7 +69,9 @@ def test_deduplicate_near_misses():
         NearMiss("XOR", "reason 1", None, None, "r", "Encrypt"),
         NearMiss("XOR", "reason 2", None, None, "r", "Encrypt"),  # duplicate key
         NearMiss("XOR", "reason 3", None, None, "s", "Encrypt"),  # different variable
-        NearMiss("Inline", "reason 4", None, None, "r", "Encrypt"),  # different transform
+        NearMiss(
+            "Inline", "reason 4", None, None, "r", "Encrypt"
+        ),  # different transform
     ]
     deduped = deduplicate_near_misses(misses)
     assert len(deduped) == 3
@@ -151,8 +157,7 @@ def test_inline_near_miss_free_var_modified():
     ct_misses = [nm for nm in ctx.near_misses if nm.variable == "ct"]
     assert len(ct_misses) >= 1
     assert (
-        "k" in ct_misses[0].reason.lower()
-        or "modified" in ct_misses[0].reason.lower()
+        "k" in ct_misses[0].reason.lower() or "modified" in ct_misses[0].reason.lower()
     )
 
 
@@ -225,14 +230,15 @@ def test_xor_cancellation_near_miss_modint_context():
 def test_xor_cancellation_no_near_miss_bitstring():
     """No near-miss when ADD chain is in bitstring context (fires normally)."""
     game = _make_game(
-        "BitString<lambda> k <- BitString<lambda>;\n"
-        "        return k + k + m;"
+        "BitString<lambda> k <- BitString<lambda>;\n" "        return k + k + m;"
     )
     ctx = _make_ctx()
     XorCancellation().apply(game, ctx)
     # Transform should fire, so no near-miss expected
-    assert len([nm for nm in ctx.near_misses
-                if nm.transform_name == "XOR Cancellation"]) == 0
+    assert (
+        len([nm for nm in ctx.near_misses if nm.transform_name == "XOR Cancellation"])
+        == 0
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -309,8 +315,8 @@ def test_local_rf_near_miss_called_twice():
     game_src = (
         "Game TestGame() {\n"
         "    BitString<lambda> Encrypt(BitString<lambda> m) {\n"
-        "        RandomFunctions<BitString<lambda>, BitString<lambda>> RF "
-        "<- RandomFunctions<BitString<lambda>, BitString<lambda>>;\n"
+        "        Function<BitString<lambda>, BitString<lambda>> RF "
+        "<- Function<BitString<lambda>, BitString<lambda>>;\n"
         "        BitString<lambda> a = RF(m);\n"
         "        BitString<lambda> b = RF(m);\n"
         "        return a + b;\n"
@@ -341,25 +347,21 @@ def test_local_rf_no_near_miss_when_no_rf():
 
 def _make_nondet_namespace() -> dict:
     """Namespace with primitive G whose ``evaluate`` is NOT deterministic."""
-    prim = frog_parser.parse_primitive_file(
-        """
+    prim = frog_parser.parse_primitive_file("""
         Primitive G(Int n) {
             BitString<n> evaluate(BitString<n> x);
         }
-        """
-    )
+        """)
     return {"G": prim}
 
 
 def _make_det_namespace() -> dict:
     """Namespace with primitive G whose ``evaluate`` is deterministic."""
-    prim = frog_parser.parse_primitive_file(
-        """
+    prim = frog_parser.parse_primitive_file("""
         Primitive G(Int n) {
             deterministic BitString<n> evaluate(BitString<n> x);
         }
-        """
-    )
+        """)
     return {"G": prim}
 
 
@@ -446,13 +448,15 @@ def test_bijection_near_miss_mixed_uses():
         "    }\n"
         "}"
     )
-    ctx = _make_bijection_ctx({
-        "K": (
-            "Primitive K() {"
-            "  deterministic injective BitString<256> Encode(BitString<256> v);"
-            "}"
-        )
-    })
+    ctx = _make_bijection_ctx(
+        {
+            "K": (
+                "Primitive K() {"
+                "  deterministic injective BitString<256> Encode(BitString<256> v);"
+                "}"
+            )
+        }
+    )
     UniformBijectionElimination().apply(game, ctx)
 
     bijection_misses = [
@@ -475,13 +479,15 @@ def test_bijection_no_near_miss_when_eligible():
         "    }\n"
         "}"
     )
-    ctx = _make_bijection_ctx({
-        "K": (
-            "Primitive K() {"
-            "  deterministic injective BitString<256> Encode(BitString<256> v);"
-            "}"
-        )
-    })
+    ctx = _make_bijection_ctx(
+        {
+            "K": (
+                "Primitive K() {"
+                "  deterministic injective BitString<256> Encode(BitString<256> v);"
+                "}"
+            )
+        }
+    )
     UniformBijectionElimination().apply(game, ctx)
 
     bijection_misses = [

@@ -76,9 +76,7 @@ def _apply(source: str) -> str:
     ],
     ids=["init-only", "used-in-oracle", "init-return"],
 )
-def test_localize_init_only_field_sample(
-    source: str, expected_has_field: bool
-) -> None:
+def test_localize_init_only_field_sample(source: str, expected_has_field: bool) -> None:
     game = frog_parser.parse_game(source)
     ctx = _make_ctx()
     result = LocalizeInitOnlyFieldSample().apply(game, ctx)

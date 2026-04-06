@@ -94,9 +94,7 @@ def test_parser_populates_origin():
     """The parser should set origin on AST nodes it creates."""
     from proof_frog import frog_parser
 
-    method = frog_parser.parse_method(
-        "BitString<n> f(BitString<n> m) { return m; }"
-    )
+    method = frog_parser.parse_method("BitString<n> f(BitString<n> m) { return m; }")
     assert method.origin is not None
     assert method.origin.file == "<unknown>"
     assert method.origin.line >= 1
@@ -107,9 +105,7 @@ def test_parser_populates_origin_on_expressions():
     """Origin should be set on expression nodes too."""
     from proof_frog import frog_parser
 
-    method = frog_parser.parse_method(
-        "BitString<n> f(BitString<n> m) { return m; }"
-    )
+    method = frog_parser.parse_method("BitString<n> f(BitString<n> m) { return m; }")
     # The return statement's expression should have origin
     ret = method.block.statements[0]
     assert ret.origin is not None

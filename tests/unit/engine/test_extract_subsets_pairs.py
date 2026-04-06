@@ -53,9 +53,9 @@ def test_subsets_constraint_not_in_equality_pairs() -> None:
         frog_ast.BitStringType(frog_ast.Integer(128)),
     )
     engine = _make_engine_with_scheme(_make_scheme(req))
-    assert len(engine.subsets_pairs) == 1, (
-        "subsets constraints should be in subsets_pairs for annotation normalization"
-    )
+    assert (
+        len(engine.subsets_pairs) == 1
+    ), "subsets constraints should be in subsets_pairs for annotation normalization"
     assert len(engine.equality_pairs) == 0, (
         "subsets constraints must NOT be in equality_pairs — "
         "replacing sampling from A with B when A ⊊ B changes distribution"

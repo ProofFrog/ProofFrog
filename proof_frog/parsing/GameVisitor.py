@@ -344,11 +344,6 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by GameParser#randomFunctionType.
-    def visitRandomFunctionType(self, ctx:GameParser.RandomFunctionTypeContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by GameParser#modIntType.
     def visitModIntType(self, ctx:GameParser.ModIntTypeContext):
         return self.visitChildren(ctx)
@@ -376,6 +371,11 @@ class GameVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by GameParser#voidType.
     def visitVoidType(self, ctx:GameParser.VoidTypeContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#functionType.
+    def visitFunctionType(self, ctx:GameParser.FunctionTypeContext):
         return self.visitChildren(ctx)
 
 

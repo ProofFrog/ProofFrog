@@ -6,7 +6,6 @@ from click.testing import CliRunner
 
 from proof_frog.proof_frog import cli
 
-
 _PRIMITIVE = """\
 Primitive TwoMethodPrimitive(Set KeySpace, Set SeedSpace) {
     Set Key = KeySpace;

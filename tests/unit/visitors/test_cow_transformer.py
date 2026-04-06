@@ -11,7 +11,6 @@ import copy
 import pytest
 from proof_frog import frog_ast, frog_parser, visitors
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -47,58 +46,48 @@ class TestCOWIdentity:
     """When nothing changes, the Transformer should return the same object."""
 
     def test_unchanged_node_is_same_object(self) -> None:
-        method = _parse_method(
-            """
+        method = _parse_method("""
             Void f() {
                 return true;
             }
-            """
-        )
+            """)
         result = _IdentityTransformer().transform(method)
         assert result is method
 
     def test_unchanged_block_is_same_object(self) -> None:
-        method = _parse_method(
-            """
+        method = _parse_method("""
             Void f(Int x) {
                 Int y = x;
                 return y;
             }
-            """
-        )
+            """)
         result = _IdentityTransformer().transform(method)
         assert result.block is method.block
 
     def test_changed_child_produces_new_parent(self) -> None:
-        method = _parse_method(
-            """
+        method = _parse_method("""
             Void f() {
                 Int a = x;
                 return a;
             }
-            """
-        )
+            """)
         result = _RenameVarTransformer("x", "y").transform(method)
         assert result is not method
-        assert result == _parse_method(
-            """
+        assert result == _parse_method("""
             Void f() {
                 Int a = y;
                 return a;
             }
-            """
-        )
+            """)
 
     def test_unmodified_sibling_shared_with_original(self) -> None:
         """Siblings that weren't modified share the same object."""
-        method = _parse_method(
-            """
+        method = _parse_method("""
             Void f() {
                 Int a = x;
                 return true;
             }
-            """
-        )
+            """)
         result = _RenameVarTransformer("x", "y").transform(method)
         # The return statement was not affected by the rename
         original_return = method.block.statements[1]
@@ -163,8 +152,7 @@ class TestCOWMutationSafety:
     def test_shared_list_after_cow_transform(self) -> None:
         """A transform that changes one method leaves the fields list
         shared between original and result."""
-        game = frog_parser.parse_game(
-            """
+        game = frog_parser.parse_game("""
             Game G() {
                 Int x;
 
@@ -176,8 +164,7 @@ class TestCOWMutationSafety:
                     return a;
                 }
             }
-            """
-        )
+            """)
         result = _RenameVarTransformer("a", "b").transform(game)
         # Result is a new Game (Query method changed), but fields list
         # is shared because it wasn't modified
@@ -187,8 +174,7 @@ class TestCOWMutationSafety:
     def test_safe_mutation_pattern(self) -> None:
         """Demonstrate the correct pattern: copy.copy + reassign before
         mutating."""
-        game = frog_parser.parse_game(
-            """
+        game = frog_parser.parse_game("""
             Game G() {
                 Int x;
 
@@ -200,8 +186,7 @@ class TestCOWMutationSafety:
                     return a;
                 }
             }
-            """
-        )
+            """)
         result = _RenameVarTransformer("a", "b").transform(game)
         # Safe mutation: copy before clearing
         result = copy.copy(result)

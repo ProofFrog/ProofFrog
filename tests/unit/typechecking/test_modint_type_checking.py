@@ -25,27 +25,23 @@ def _check_game_fails(source: str) -> None:
 
 class TestModIntSampling:
     def test_uniform_sampling(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G(Int q) {
                 Void Initialize() {
                     ModInt<q> r <- ModInt<q>;
                 }
             }
-            """
-        )
+            """)
 
     def test_sampling_result_usable(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G(Int q) {
                 ModInt<q> Test() {
                     ModInt<q> r <- ModInt<q>;
                     return r;
                 }
             }
-            """
-        )
+            """)
 
 
 # ---------------------------------------------------------------------------
@@ -55,37 +51,31 @@ class TestModIntSampling:
 
 class TestModIntLiteralPromotion:
     def test_zero_assignment(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G(Int q) {
                 Void Initialize() {
                     ModInt<q> x = 0;
                 }
             }
-            """
-        )
+            """)
 
     def test_one_assignment(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G(Int q) {
                 Void Initialize() {
                     ModInt<q> x = 1;
                 }
             }
-            """
-        )
+            """)
 
     def test_literal_return(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G(Int q) {
                 ModInt<q> Test() {
                     return 0;
                 }
             }
-            """
-        )
+            """)
 
 
 # ---------------------------------------------------------------------------
@@ -95,19 +85,16 @@ class TestModIntLiteralPromotion:
 
 class TestModIntAddition:
     def test_add_same_modulus(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G(Int q) {
                 ModInt<q> Test(ModInt<q> a, ModInt<q> b) {
                     return a + b;
                 }
             }
-            """
-        )
+            """)
 
     def test_add_result_type(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G(Int q) {
                 Void Initialize() {
                     ModInt<q> a <- ModInt<q>;
@@ -115,12 +102,10 @@ class TestModIntAddition:
                     ModInt<q> c = a + b;
                 }
             }
-            """
-        )
+            """)
 
     def test_add_mismatched_modulus_fails(self) -> None:
-        _check_game_fails(
-            """
+        _check_game_fails("""
             Game G(Int p, Int q) {
                 Void Initialize() {
                     ModInt<p> a <- ModInt<p>;
@@ -128,12 +113,10 @@ class TestModIntAddition:
                     ModInt<p> c = a + b;
                 }
             }
-            """
-        )
+            """)
 
     def test_add_modint_and_int_fails(self) -> None:
-        _check_game_fails(
-            """
+        _check_game_fails("""
             Game G(Int q) {
                 Void Initialize() {
                     ModInt<q> a <- ModInt<q>;
@@ -141,25 +124,21 @@ class TestModIntAddition:
                     ModInt<q> c = a + n;
                 }
             }
-            """
-        )
+            """)
 
 
 class TestModIntSubtraction:
     def test_subtract_same_modulus(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G(Int q) {
                 ModInt<q> Test(ModInt<q> a, ModInt<q> b) {
                     return a - b;
                 }
             }
-            """
-        )
+            """)
 
     def test_subtract_result_is_modint(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G(Int q) {
                 Void Initialize() {
                     ModInt<q> a <- ModInt<q>;
@@ -167,12 +146,10 @@ class TestModIntSubtraction:
                     ModInt<q> c = a - b;
                 }
             }
-            """
-        )
+            """)
 
     def test_subtract_mismatched_modulus_fails(self) -> None:
-        _check_game_fails(
-            """
+        _check_game_fails("""
             Game G(Int p, Int q) {
                 Void Initialize() {
                     ModInt<p> a <- ModInt<p>;
@@ -180,36 +157,30 @@ class TestModIntSubtraction:
                     ModInt<p> c = a - b;
                 }
             }
-            """
-        )
+            """)
 
     def test_int_subtract_still_works(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G() {
                 Int Test(Int a, Int b) {
                     return a - b;
                 }
             }
-            """
-        )
+            """)
 
 
 class TestModIntMultiplication:
     def test_multiply_same_modulus(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G(Int q) {
                 ModInt<q> Test(ModInt<q> a, ModInt<q> b) {
                     return a * b;
                 }
             }
-            """
-        )
+            """)
 
     def test_multiply_result_is_modint(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G(Int q) {
                 Void Initialize() {
                     ModInt<q> a <- ModInt<q>;
@@ -217,12 +188,10 @@ class TestModIntMultiplication:
                     ModInt<q> c = a * b;
                 }
             }
-            """
-        )
+            """)
 
     def test_multiply_mismatched_modulus_fails(self) -> None:
-        _check_game_fails(
-            """
+        _check_game_fails("""
             Game G(Int p, Int q) {
                 Void Initialize() {
                     ModInt<p> a <- ModInt<p>;
@@ -230,25 +199,21 @@ class TestModIntMultiplication:
                     ModInt<p> c = a * b;
                 }
             }
-            """
-        )
+            """)
 
 
 class TestModIntDivision:
     def test_divide_same_modulus(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G(Int q) {
                 ModInt<q> Test(ModInt<q> a, ModInt<q> b) {
                     return a / b;
                 }
             }
-            """
-        )
+            """)
 
     def test_divide_mismatched_modulus_fails(self) -> None:
-        _check_game_fails(
-            """
+        _check_game_fails("""
             Game G(Int p, Int q) {
                 Void Initialize() {
                     ModInt<p> a <- ModInt<p>;
@@ -256,48 +221,40 @@ class TestModIntDivision:
                     ModInt<p> c = a / b;
                 }
             }
-            """
-        )
+            """)
 
 
 class TestModIntExponentiation:
     def test_exp_modint_base_int_exponent(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G(Int q) {
                 ModInt<q> Test(ModInt<q> base, Int exp) {
                     return base ^ exp;
                 }
             }
-            """
-        )
+            """)
 
     def test_exp_result_is_modint(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G(Int q) {
                 Void Initialize() {
                     ModInt<q> g <- ModInt<q>;
                     ModInt<q> h = g ^ 3;
                 }
             }
-            """
-        )
+            """)
 
     def test_exp_negative_one_inverse(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G(Int q) {
                 ModInt<q> Test(ModInt<q> a) {
                     return a ^ (-1);
                 }
             }
-            """
-        )
+            """)
 
     def test_exp_modint_modint_exponent_fails(self) -> None:
-        _check_game_fails(
-            """
+        _check_game_fails("""
             Game G(Int q) {
                 Void Initialize() {
                     ModInt<q> a <- ModInt<q>;
@@ -305,8 +262,7 @@ class TestModIntExponentiation:
                     ModInt<q> c = a ^ b;
                 }
             }
-            """
-        )
+            """)
 
 
 # ---------------------------------------------------------------------------
@@ -316,38 +272,32 @@ class TestModIntExponentiation:
 
 class TestModIntNegation:
     def test_negate_modint(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G(Int q) {
                 ModInt<q> Test(ModInt<q> a) {
                     return -a;
                 }
             }
-            """
-        )
+            """)
 
     def test_negate_int_still_works(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G() {
                 Int Test(Int a) {
                     return -a;
                 }
             }
-            """
-        )
+            """)
 
     def test_negate_bitstring_fails(self) -> None:
-        _check_game_fails(
-            """
+        _check_game_fails("""
             Game G(Int n) {
                 Void Initialize() {
                     BitString<n> b <- BitString<n>;
                     BitString<n> c = -b;
                 }
             }
-            """
-        )
+            """)
 
 
 # ---------------------------------------------------------------------------
@@ -357,34 +307,28 @@ class TestModIntNegation:
 
 class TestModIntComparison:
     def test_equals_same_modulus(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G(Int q) {
                 Bool Test(ModInt<q> a, ModInt<q> b) {
                     return a == b;
                 }
             }
-            """
-        )
+            """)
 
     def test_notequals_same_modulus(self) -> None:
-        _check_game(
-            """
+        _check_game("""
             Game G(Int q) {
                 Bool Test(ModInt<q> a, ModInt<q> b) {
                     return a != b;
                 }
             }
-            """
-        )
+            """)
 
     def test_equals_mismatched_modulus_fails(self) -> None:
-        _check_game_fails(
-            """
+        _check_game_fails("""
             Game G(Int p, Int q) {
                 Bool Test(ModInt<p> a, ModInt<q> b) {
                     return a == b;
                 }
             }
-            """
-        )
+            """)

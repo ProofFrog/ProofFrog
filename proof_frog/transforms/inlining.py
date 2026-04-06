@@ -1327,89 +1327,187 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
             if not all_same_method:
                 break
 
+        # Cross-method inlining is allowed when the expression is pure and
+        # all its free variables are other fields (which persist across method
+        # calls with the same value), so substitution is semantics-preserving.
+        cross_method = False
         if not all_same_method:
-            if self.ctx is not None:
-                self.ctx.near_misses.append(
-                    NearMiss(
-                        transform_name="Inline Single-Use Field",
-                        reason=(
-                            f"Cannot inline field '{field_name}': "
-                            f"used across multiple methods"
-                        ),
-                        location=None,
-                        suggestion=None,
-                        variable=field_name,
-                        method=None,
+            if not is_pure:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Single-Use Field",
+                            reason=(
+                                f"Cannot inline field '{field_name}': "
+                                f"used across multiple methods and expression "
+                                f"contains non-deterministic calls"
+                            ),
+                            location=None,
+                            suggestion=None,
+                            variable=field_name,
+                            method=None,
+                        )
                     )
-                )
-            return None
-
-        # 4. Check that no use occurs before the definition (use-before-def).
-        #    If a field is used at position u < d in the same method, the use
-        #    reads the field value from a *previous* invocation; inlining the
-        #    current call's expression would be semantically wrong.
-        first_use_idx = -1
-        last_use_idx = -1
-        for si, stmt in enumerate(game.methods[assign_method_idx].block.statements):
-            if si == assign_stmt_idx:
-                continue
-            if SearchVisitor(uses_field).visit(stmt) is not None:
-                if first_use_idx == -1:
-                    first_use_idx = si
-                last_use_idx = si
-
-        if 0 <= first_use_idx < assign_stmt_idx:
-            return None
-
-        # 5. Check that no free variable in expr is modified between def and last use
-        if last_use_idx >= 0:
+                return None
+            # All free variables in the expression must be fields (accessible
+            # from any method) — local variables would be out of scope.
+            # Additionally, each free-variable field must:
+            #   - be assigned at most once in the entire game (stable value)
+            #   - be assigned in the same method and BEFORE the current
+            #     field's assignment (so its value was already determined)
             free_vars = VariableCollectionVisitor().visit(copy.deepcopy(assign_expr))
-            intermediate_stmts = game.methods[assign_method_idx].block.statements[
-                assign_stmt_idx + 1 : last_use_idx
-            ]
-            intermediate = frog_ast.Block(list(intermediate_stmts))
-
-            def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
-                return (
-                    isinstance(
-                        node,
-                        (
-                            frog_ast.Sample,
-                            frog_ast.Assignment,
-                            frog_ast.UniqueSample,
-                        ),
+            field_name_set = set(self.field_names)
+            can_cross_method = True
+            for fv in free_vars:
+                if fv.name not in field_name_set:
+                    can_cross_method = False
+                    break
+                # Check that this free-variable field is assigned/sampled
+                # at most once across the whole game (stable value).
+                fv_assign_count = sum(
+                    _count_assigns_recursive(m.block, fv.name) for m in game.methods
+                )
+                if fv_assign_count > 1:
+                    can_cross_method = False
+                    break
+                # The free var's assignment must be in the same method and
+                # before the current field's assignment, so the value was
+                # determined before capture.
+                fv_assigned_before = False
+                method_stmts = game.methods[assign_method_idx].block.statements
+                for si in range(assign_stmt_idx):
+                    stmt = method_stmts[si]
+                    if (
+                        isinstance(
+                            stmt,
+                            (
+                                frog_ast.Assignment,
+                                frog_ast.Sample,
+                                frog_ast.UniqueSample,
+                            ),
+                        )
+                        and isinstance(stmt.var, frog_ast.Variable)
+                        and stmt.var.name == fv.name
+                    ):
+                        fv_assigned_before = True
+                        break
+                if not fv_assigned_before:
+                    can_cross_method = False
+                    break
+            if not can_cross_method:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Single-Use Field",
+                            reason=(
+                                f"Cannot inline field '{field_name}': "
+                                f"used across multiple methods and expression "
+                                f"references non-field or reassigned variables"
+                            ),
+                            location=None,
+                            suggestion=None,
+                            variable=field_name,
+                            method=None,
+                        )
                     )
-                    and isinstance(node.var, frog_ast.Variable)
-                    and node.var.name == name
-                )
+                return None
+            # Also check: no use of the field before its assignment in
+            # the assignment method (same as step 4 for same-method path).
+            for si in range(assign_stmt_idx):
+                stmt = game.methods[assign_method_idx].block.statements[si]
+                if SearchVisitor(uses_field).visit(stmt) is not None:
+                    can_cross_method = False
+                    break
+            if not can_cross_method:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Single-Use Field",
+                            reason=(
+                                f"Cannot inline field '{field_name}': "
+                                f"used across multiple methods with "
+                                f"use-before-def in assignment method"
+                            ),
+                            location=None,
+                            suggestion=None,
+                            variable=field_name,
+                            method=None,
+                        )
+                    )
+                return None
+            cross_method = True
 
-            if any(
-                SearchVisitor(functools.partial(is_written_to, fv.name)).visit(
-                    intermediate
-                )
-                is not None
-                for fv in free_vars
-            ):
+        if not cross_method:
+            # 4. Check that no use occurs before the definition (use-before-def).
+            #    If a field is used at position u < d in the same method, the use
+            #    reads the field value from a *previous* invocation; inlining the
+            #    current call's expression would be semantically wrong.
+            first_use_idx = -1
+            last_use_idx = -1
+            for si, stmt in enumerate(game.methods[assign_method_idx].block.statements):
+                if si == assign_stmt_idx:
+                    continue
+                if SearchVisitor(uses_field).visit(stmt) is not None:
+                    if first_use_idx == -1:
+                        first_use_idx = si
+                    last_use_idx = si
+
+            if 0 <= first_use_idx < assign_stmt_idx:
                 return None
 
-        # 6. Perform the inlining — replace ALL occurrences in the method
+            # 5. Check that no free variable in expr is modified between
+            #    def and last use
+            if last_use_idx >= 0:
+                free_vars = VariableCollectionVisitor().visit(
+                    copy.deepcopy(assign_expr)
+                )
+                intermediate_stmts = game.methods[assign_method_idx].block.statements[
+                    assign_stmt_idx + 1 : last_use_idx
+                ]
+                intermediate = frog_ast.Block(list(intermediate_stmts))
+
+                def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
+                    return (
+                        isinstance(
+                            node,
+                            (
+                                frog_ast.Sample,
+                                frog_ast.Assignment,
+                                frog_ast.UniqueSample,
+                            ),
+                        )
+                        and isinstance(node.var, frog_ast.Variable)
+                        and node.var.name == name
+                    )
+
+                if any(
+                    SearchVisitor(functools.partial(is_written_to, fv.name)).visit(
+                        intermediate
+                    )
+                    is not None
+                    for fv in free_vars
+                ):
+                    return None
+
+        # 6. Perform the inlining — replace occurrences across methods.
+        #    In the assignment method, only replace uses AFTER the assignment
+        #    (uses before the def read a prior value and must not be replaced).
         new_game = copy.deepcopy(game)
 
-        method = new_game.methods[assign_method_idx]
-        # Replace in each statement except the definition
-        new_stmts = list(method.block.statements)
-        for si, stmt in enumerate(new_stmts):
-            if si == assign_stmt_idx:
-                continue
-            while True:
-                field_node = SearchVisitor(uses_field).visit(stmt)
-                if field_node is None:
-                    break
-                stmt = ReplaceTransformer(
-                    field_node, copy.deepcopy(assign_expr)
-                ).transform(stmt)
-            new_stmts[si] = stmt
-        method.block = frog_ast.Block(new_stmts)
+        for mi, method in enumerate(new_game.methods):
+            new_stmts = list(method.block.statements)
+            for si, stmt in enumerate(new_stmts):
+                if mi == assign_method_idx and si <= assign_stmt_idx:
+                    continue
+                while True:
+                    field_node = SearchVisitor(uses_field).visit(stmt)
+                    if field_node is None:
+                        break
+                    stmt = ReplaceTransformer(
+                        field_node, copy.deepcopy(assign_expr)
+                    ).transform(stmt)
+                new_stmts[si] = stmt
+            method.block = frog_ast.Block(new_stmts)
 
         # Remove the definition statement
         method = new_game.methods[assign_method_idx]

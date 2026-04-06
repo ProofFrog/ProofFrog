@@ -773,6 +773,16 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
     ) -> frog_ast.ModIntType:
         return frog_ast.ModIntType(self.visit(ctx.modint().integerExpression()))
 
+    def visitGroupElemType(
+        self, ctx: PrimitiveParser.GroupElemTypeContext
+    ) -> frog_ast.GroupElemType:
+        return frog_ast.GroupElemType(self.visit(ctx.groupelem().lvalue()))
+
+    def visitGroupType(
+        self, ctx: PrimitiveParser.GroupTypeContext
+    ) -> frog_ast.GroupType:
+        return frog_ast.GroupType()
+
     def visitProductType(
         self, ctx: PrimitiveParser.ProductTypeContext
     ) -> frog_ast.ProductType:
@@ -1203,7 +1213,7 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
 @line_number_decorator
 class _PrimitiveASTGenerator(_SharedAST, PrimitiveVisitor):  # type: ignore[misc]
     def visitProgram(self, ctx: PrimitiveParser.ProgramContext) -> frog_ast.Primitive:
-        name = ctx.ID().getText()
+        name = ctx.id_().getText()
         param_list = [] if not ctx.paramList() else self.visit(ctx.paramList())
         field_list = []
         if ctx.primitiveBody().initializedField():
@@ -1225,11 +1235,11 @@ class _SchemeASTGenerator(_SharedAST, SchemeVisitor):  # type: ignore[misc]
 
         imports = [self.visit(im) for im in ctx.moduleImport()]
 
-        name = scheme_ctx.ID()[0].getText()
+        name = scheme_ctx.id_()[0].getText()
         param_list = (
             [] if not scheme_ctx.paramList() else self.visit(scheme_ctx.paramList())
         )
-        primitive_name = scheme_ctx.ID()[1].getText()
+        primitive_name = scheme_ctx.id_()[1].getText()
         field_list = []
         requirement_list = []
         method_list = []
@@ -1261,7 +1271,7 @@ class _GameASTGenerator(_SharedAST, GameVisitor):  # type: ignore[misc]
         game1: frog_ast.Game = self.visit(ctx.game()[0])
         game2: frog_ast.Game = self.visit(ctx.game()[1])
         return frog_ast.GameFile(
-            imports, (game1, game2), ctx.gameExport().ID().getText()
+            imports, (game1, game2), ctx.gameExport().id_().getText()
         )
 
 
@@ -1308,7 +1318,7 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
         self, ctx: ProofParser.ParameterizedGameContext
     ) -> frog_ast.ParameterizedGame:
         return frog_ast.ParameterizedGame(
-            ctx.ID().getText(), self.visit(ctx.argList()) if ctx.argList() else []
+            ctx.id_().getText(), self.visit(ctx.argList()) if ctx.argList() else []
         )
 
     def visitReduction(self, ctx: ProofParser.ReductionContext) -> frog_ast.Reduction:
@@ -1341,7 +1351,7 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
         self, ctx: ProofParser.ConcreteGameContext
     ) -> frog_ast.ConcreteGame:
         return frog_ast.ConcreteGame(
-            self.visit(ctx.parameterizedGame()), ctx.ID().getText()
+            self.visit(ctx.parameterizedGame()), ctx.id_().getText()
         )
 
     def visitStepAssumption(
@@ -1360,7 +1370,7 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
 
     def visitInduction(self, ctx: ProofParser.InductionContext) -> frog_ast.Induction:
         return frog_ast.Induction(
-            ctx.ID().getText(),
+            ctx.id_().getText(),
             self.visit(ctx.integerExpression()[0]),
             self.visit(ctx.integerExpression()[1]),
             self.visit(ctx.gameList()),
@@ -1370,7 +1380,7 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
 def _parse_game_body(
     visit: Type[PrimitiveVisitor.visit], ctx: ProofParser.GameContext
 ) -> frog_ast.GameBody:
-    name: str = ctx.ID().getText()
+    name: str = ctx.id_().getText()
     param_list: list[frog_ast.Parameter] = (
         visit(ctx.paramList()) if ctx.paramList() else []
     )

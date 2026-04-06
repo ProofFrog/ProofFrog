@@ -276,12 +276,14 @@ def test_branch_elimination_no_near_miss_when_no_if():
 
 
 def test_inline_field_near_miss_cross_method():
-    """InlineSingleUseField reports near-miss when field used across methods."""
+    """InlineSingleUseField reports near-miss when a non-pure field with
+    local free vars is used across methods."""
     game_src = (
         "Game TestGame() {\n"
         "    Int myfield;\n"
         "    Void Initialize() {\n"
-        "        myfield = 42;\n"
+        "        Int x = 42;\n"
+        "        myfield = x + 1;\n"
         "    }\n"
         "    Int Query() {\n"
         "        return myfield;\n"

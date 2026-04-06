@@ -6,7 +6,7 @@ program: moduleImport* proofHelpers proof EOF;
 
 proofHelpers: (reduction | game)*;
 
-reduction: REDUCTION ID L_PAREN paramList? R_PAREN COMPOSE parameterizedGame AGAINST gameAdversary L_CURLY gameBody R_CURLY;
+reduction: REDUCTION id L_PAREN paramList? R_PAREN COMPOSE parameterizedGame AGAINST gameAdversary L_CURLY gameBody R_CURLY;
 
 proof: PROOF COLON (LET COLON lets)? (ASSUME COLON assumptions)? (LEMMA COLON lemmas)? THEOREM COLON theorem  GAMES COLON gameList;
 
@@ -25,13 +25,13 @@ gameStep: concreteGame COMPOSE parameterizedGame AGAINST gameAdversary # reducti
 	| (concreteGame|parameterizedGame) AGAINST gameAdversary # regularStep
 	;
 
-induction: INDUCTION L_PAREN ID FROM integerExpression TO integerExpression R_PAREN L_CURLY gameList R_CURLY;
+induction: INDUCTION L_PAREN id FROM integerExpression TO integerExpression R_PAREN L_CURLY gameList R_CURLY;
 
 stepAssumption: ASSUME expression SEMI;
 
-gameField: (concreteGame | parameterizedGame) PERIOD ID;
+gameField: (concreteGame | parameterizedGame) PERIOD id;
 
-concreteGame: parameterizedGame PERIOD ID;
+concreteGame: parameterizedGame PERIOD id;
 gameAdversary: parameterizedGame PERIOD ADVERSARY;
 
 

@@ -688,6 +688,16 @@ class NameResolutionVisitor(VariableTypeVisitor):
                 )
             return
 
+        if isinstance(the_type, frog_ast.GroupType):
+            if field_access.name not in ("generator", "order", "identity"):
+                print_error(
+                    field_access,
+                    f"Group has no field '{field_access.name}'"
+                    " (only 'generator', 'order', and 'identity' are available)",
+                    self.file_name,
+                )
+            return
+
         if not isinstance(the_type, visitors.InstantiableType):
             print_error(
                 field_access,
@@ -1496,6 +1506,15 @@ class CheckTypeVisitor(VariableTypeVisitor):
             )
         self.ast_type_map.set(mod_int_type, mod_int_type)
 
+    def leave_group_elem_type(self, group_elem_type: frog_ast.GroupElemType) -> None:
+        group_type = self.get_type_from_ast(group_elem_type.group)
+        if not isinstance(group_type, frog_ast.GroupType):
+            self.print_error(
+                group_elem_type,
+                f"GroupElem must be parameterized with a Group, got type {group_type}",
+            )
+        self.ast_type_map.set(group_elem_type, group_elem_type)
+
     def leave_array_access(self, array_access: frog_ast.ArrayAccess) -> None:
         array_type = self.get_type_from_ast(array_access.the_array)
         # Map subscript: T[key] returns the value type
@@ -1627,6 +1646,15 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 self.ast_type_map.set(bin_op, left_type)
             elif left_type == frog_ast.IntType() and right_type == frog_ast.IntType():
                 self.ast_type_map.set(bin_op, frog_ast.IntType())
+            elif isinstance(left_type, frog_ast.GroupElemType) and isinstance(
+                right_type, frog_ast.GroupElemType
+            ):
+                if not self.check_types(left_type, right_type):
+                    self.print_error(
+                        bin_op,
+                        f"GroupElem multiplication requires matching groups, got {left_type} and {right_type}",
+                    )
+                self.ast_type_map.set(bin_op, left_type)
             else:
                 self.print_error(
                     bin_op,
@@ -1644,6 +1672,15 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 self.ast_type_map.set(bin_op, left_type)
             elif left_type == frog_ast.IntType() and right_type == frog_ast.IntType():
                 self.ast_type_map.set(bin_op, frog_ast.IntType())
+            elif isinstance(left_type, frog_ast.GroupElemType) and isinstance(
+                right_type, frog_ast.GroupElemType
+            ):
+                if not self.check_types(left_type, right_type):
+                    self.print_error(
+                        bin_op,
+                        f"GroupElem division requires matching groups, got {left_type} and {right_type}",
+                    )
+                self.ast_type_map.set(bin_op, left_type)
             else:
                 self.print_error(
                     bin_op,
@@ -1654,10 +1691,14 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 right_type, frog_ast.IntType
             ):
                 self.ast_type_map.set(bin_op, left_type)
+            elif isinstance(left_type, frog_ast.GroupElemType) and isinstance(
+                right_type, (frog_ast.ModIntType, frog_ast.IntType)
+            ):
+                self.ast_type_map.set(bin_op, left_type)
             else:
                 self.print_error(
                     bin_op,
-                    f"Exponentiation requires ModInt base and Int exponent, got {left_type} and {right_type}",
+                    f"Exponentiation requires ModInt or GroupElem base, got {left_type} ^ {right_type}",
                 )
         elif bin_op.operator == frog_ast.BinaryOperators.AND:
             if left_type == frog_ast.BoolType() and right_type == frog_ast.BoolType():
@@ -1846,6 +1887,21 @@ class CheckTypeVisitor(VariableTypeVisitor):
                     field_acess,
                     f"RandomFunctions has no field '{field_acess.name}'"
                     " (only 'domain' is available)",
+                )
+            return
+        if isinstance(object_type, frog_ast.GroupType):
+            if field_acess.name in ("generator", "identity"):
+                self.ast_type_map.set(
+                    field_acess,
+                    frog_ast.GroupElemType(field_acess.the_object),
+                )
+            elif field_acess.name == "order":
+                self.ast_type_map.set(field_acess, frog_ast.IntType())
+            else:
+                self.print_error(
+                    field_acess,
+                    f"Group has no field '{field_acess.name}'"
+                    " (only 'generator', 'order', and 'identity' are available)",
                 )
             return
         if not isinstance(object_type, visitors.InstantiableType):
@@ -2420,6 +2476,11 @@ def compare_types(
     ):
         return True
 
+    if isinstance(declared_type, frog_ast.GroupElemType) and isinstance(
+        value_type, frog_ast.GroupElemType
+    ):
+        return str(declared_type.group) == str(value_type.group)
+
     if isinstance(declared_type, frog_ast.ArrayType) and isinstance(
         value_type, frog_ast.ArrayType
     ):
@@ -2493,6 +2554,27 @@ def _substitute_type_node(
             result_un.line_num = node.line_num
             result_un.column_num = node.column_num
             return result_un
+    if isinstance(node, frog_ast.ModIntType):
+        new_modulus = _substitute_type_node(node.modulus, aliases)
+        if isinstance(new_modulus, frog_ast.Expression):
+            result_mi = frog_ast.ModIntType(new_modulus)
+            result_mi.line_num = node.line_num
+            result_mi.column_num = node.column_num
+            return result_mi
+    if isinstance(node, frog_ast.GroupElemType):
+        new_group = _substitute_type_node(node.group, aliases)
+        if isinstance(new_group, frog_ast.Expression):
+            result_ge = frog_ast.GroupElemType(new_group)
+            result_ge.line_num = node.line_num
+            result_ge.column_num = node.column_num
+            return result_ge
+    if isinstance(node, frog_ast.FieldAccess):
+        new_obj = _substitute_type_node(node.the_object, aliases)
+        if isinstance(new_obj, frog_ast.Expression):
+            result_fa = frog_ast.FieldAccess(new_obj, node.name)
+            result_fa.line_num = node.line_num
+            result_fa.column_num = node.column_num
+            return result_fa
     return node
 
 

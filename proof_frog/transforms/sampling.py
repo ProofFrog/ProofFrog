@@ -922,6 +922,90 @@ class SingleCallFieldToLocal(TransformPass):
         return _single_call_field_to_local(game)
 
 
+def _localize_init_only_field_samples(game: frog_ast.Game) -> frog_ast.Game:
+    """Convert field samples to typed local samples when the field is only
+    used within Initialize.
+
+    A field is eligible if:
+    - It is uniformly sampled (<-) in Initialize (exactly once)
+    - It is NOT referenced in any non-Initialize method
+    - Initialize is called at most once (which is always true)
+
+    The sample ``fieldX <- Type;`` becomes ``Type fieldX <- Type;`` (a typed
+    local sample) and the field declaration is removed.
+    """
+    if not game.has_method("Initialize"):
+        return game
+
+    init_method = game.get_method("Initialize")
+    eligible: list[tuple[frog_ast.Field, int]] = []
+
+    for field in game.fields:
+        # Find the sample of this field in Initialize
+        init_sample_idx: Optional[int] = None
+        sample_count = 0
+
+        for idx, stmt in enumerate(init_method.block.statements):
+            if (
+                isinstance(stmt, frog_ast.Sample)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name == field.name
+                and stmt.the_type is None
+            ):
+                init_sample_idx = idx
+                sample_count += 1
+
+        if sample_count != 1 or init_sample_idx is None:
+            continue
+
+        # Check: field NOT referenced in any non-Initialize method
+        used_outside = False
+        for method in game.methods:
+            if method.signature.name == "Initialize":
+                continue
+            if _references_name(method.block, field.name):
+                used_outside = True
+                break
+
+        if used_outside:
+            continue
+
+        eligible.append((field, init_sample_idx))
+
+    if not eligible:
+        return game
+
+    eligible_names = {f.name for f, _ in eligible}
+
+    new_game = copy.deepcopy(game)
+    new_game.fields = [f for f in new_game.fields if f.name not in eligible_names]
+
+    # Convert untyped field samples to typed local samples
+    new_init = new_game.get_method("Initialize")
+    new_stmts = list(new_init.block.statements)
+    for f, idx in eligible:
+        stmt = new_stmts[idx]
+        assert isinstance(stmt, frog_ast.Sample)
+        new_stmts[idx] = frog_ast.Sample(
+            copy.deepcopy(f.type),
+            frog_ast.Variable(f.name),
+            copy.deepcopy(stmt.sampled_from),
+        )
+    new_init.block = frog_ast.Block(new_stmts)
+
+    return new_game
+
+
+class LocalizeInitOnlyFieldSample(TransformPass):
+    """Convert field samples to local samples when the field is only used
+    in Initialize."""
+
+    name = "Localize Init-Only Field Sample"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return _localize_init_only_field_samples(game)
+
+
 # ---------------------------------------------------------------------------
 # Counter-guarded field to local
 # ---------------------------------------------------------------------------

@@ -324,6 +324,11 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SchemeParser#groupType.
+    def visitGroupType(self, ctx:SchemeParser.GroupTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SchemeParser#intType.
     def visitIntType(self, ctx:SchemeParser.IntTypeContext):
         return self.visitChildren(ctx)
@@ -341,11 +346,6 @@ class SchemeVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SchemeParser#mapType.
     def visitMapType(self, ctx:SchemeParser.MapTypeContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SchemeParser#voidType.
-    def visitVoidType(self, ctx:SchemeParser.VoidTypeContext):
         return self.visitChildren(ctx)
 
 
@@ -374,6 +374,16 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SchemeParser#groupElemType.
+    def visitGroupElemType(self, ctx:SchemeParser.GroupElemTypeContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#voidType.
+    def visitVoidType(self, ctx:SchemeParser.VoidTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SchemeParser#productType.
     def visitProductType(self, ctx:SchemeParser.ProductTypeContext):
         return self.visitChildren(ctx)
@@ -396,6 +406,11 @@ class SchemeVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SchemeParser#modint.
     def visitModint(self, ctx:SchemeParser.ModintContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#groupelem.
+    def visitGroupelem(self, ctx:SchemeParser.GroupelemContext):
         return self.visitChildren(ctx)
 
 

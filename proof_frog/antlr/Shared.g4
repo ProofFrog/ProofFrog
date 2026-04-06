@@ -1,6 +1,6 @@
 grammar Shared;
 
-game: GAME ID L_PAREN paramList? R_PAREN L_CURLY gameBody R_CURLY;
+game: GAME id L_PAREN paramList? R_PAREN L_CURLY gameBody R_CURLY;
 
 gameBody: (field SEMI)* method+
 	| (field SEMI)* method* gamePhase+;
@@ -82,7 +82,7 @@ argList: expression (COMMA expression)*;
 
 variable: type id;
 
-parameterizedGame: ID L_PAREN argList? R_PAREN;
+parameterizedGame: id L_PAREN argList? R_PAREN;
 
 type: type QUESTION #optionalType
 	| set #setType
@@ -95,6 +95,8 @@ type: type QUESTION #optionalType
 	| L_SQUARE type (COMMA type)+ R_SQUARE #productType
 	| bitstring #bitStringType
 	| modint #modIntType
+	| groupelem #groupElemType
+	| GROUP #groupType
 	| lvalue # lvalueType
 	;
 
@@ -119,13 +121,15 @@ bitstring: BITSTRING L_ANGLE integerExpression R_ANGLE | BITSTRING;
 
 modint: MODINT L_ANGLE integerExpression R_ANGLE;
 
+groupelem: GROUPELEM L_ANGLE lvalue R_ANGLE;
+
 set: SET L_ANGLE type R_ANGLE | SET;
 
 bool: TRUE | FALSE;
 
 moduleImport: IMPORT FILESTRING (AS ID)? SEMI;
 
-id: ID | IN;
+id: ID | IN | GROUP | GROUPELEM;
 
 L_CURLY: '{';
 R_CURLY: '}';
@@ -168,6 +172,8 @@ RETURN: 'return';
 IMPORT: 'import';
 BITSTRING: 'BitString';
 MODINT: 'ModInt';
+GROUP: 'Group';
+GROUPELEM: 'GroupElem';
 ARRAY: 'Array';
 RANDOMFUNCTIONS: 'RandomFunctions';
 PRIMITIVE: 'Primitive';

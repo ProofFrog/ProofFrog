@@ -13,7 +13,7 @@ def _transform_and_compare(source: str, expected: str) -> None:
 @pytest.mark.parametrize(
     "source,expected",
     [
-        # Basic: field ct_PQ assigned once, used once in another field assignment
+        # Basic: ct_PQ inlined within Initialize, then field4 cross-method
         (
             """
             Game Test() {
@@ -33,20 +33,18 @@ def _transform_and_compare(source: str, expected: str) -> None:
             """,
             """
             Game Test() {
-                Int field4;
                 Void Initialize() {
-                    field4 = 42;
                 }
                 Int PK() {
-                    return field4;
+                    return 42;
                 }
                 Int CT() {
-                    return field4;
+                    return 42;
                 }
             }
             """,
         ),
-        # Field used in expression (not just plain copy)
+        # Field used in expression — cascades to cross-method
         (
             """
             Game Test() {
@@ -66,20 +64,18 @@ def _transform_and_compare(source: str, expected: str) -> None:
             """,
             """
             Game Test() {
-                Int field3;
                 Void Initialize() {
-                    field3 = 42 + 1;
                 }
                 Int PK() {
-                    return field3;
+                    return 42 + 1;
                 }
                 Int CT() {
-                    return field3;
+                    return 42 + 1;
                 }
             }
             """,
         ),
-        # Pure field used in two places within same method — SHOULD be inlined
+        # Pure field used in two places — cascades
         (
             """
             Game Test() {
@@ -101,22 +97,18 @@ def _transform_and_compare(source: str, expected: str) -> None:
             """,
             """
             Game Test() {
-                Int field3;
-                Int field4;
                 Void Initialize() {
-                    field3 = 42 + 1;
-                    field4 = 42;
                 }
                 Int PK() {
-                    return field3 + field4;
+                    return 42 + 1 + 42;
                 }
                 Int CT() {
-                    return field3 + field4;
+                    return 42 + 1 + 42;
                 }
             }
             """,
         ),
-        # Field used across methods — should NOT be inlined
+        # Pure field used across methods with no free vars
         (
             """
             Game Test() {
@@ -136,17 +128,13 @@ def _transform_and_compare(source: str, expected: str) -> None:
             """,
             """
             Game Test() {
-                Int field4;
-                Int ct_PQ;
                 Void Initialize() {
-                    ct_PQ = 42;
-                    field4 = ct_PQ;
                 }
                 Int PK() {
-                    return ct_PQ + field4;
+                    return 42 + 42;
                 }
                 Int CT() {
-                    return field4;
+                    return 42;
                 }
             }
             """,
@@ -188,7 +176,8 @@ def _transform_and_compare(source: str, expected: str) -> None:
             }
             """,
         ),
-        # Expression with function call — still inlinable if single use
+        # Non-pure expression: field4 aliases ct_PQ cross-method,
+        # ct_PQ (non-pure, multi-use) stays
         (
             """
             Game Test() {
@@ -208,20 +197,21 @@ def _transform_and_compare(source: str, expected: str) -> None:
             """,
             """
             Game Test() {
-                Int field4;
+                Int ct_PQ;
                 Void Initialize() {
-                    field4 = F.evaluate(1);
+                    ct_PQ = F.evaluate(1);
                 }
                 Int PK() {
-                    return field4;
+                    return ct_PQ;
                 }
                 Int CT() {
-                    return field4;
+                    return ct_PQ;
                 }
             }
             """,
         ),
-        # Free variable modified between def and use — should NOT be inlined
+        # Free variable modified between def and use — field4 aliases ct_PQ
+        # cross-method (ct_PQ stable); field3 NOT cross-method (use-before-def)
         (
             """
             Game Test() {
@@ -244,18 +234,16 @@ def _transform_and_compare(source: str, expected: str) -> None:
             """
             Game Test() {
                 Int field3;
-                Int field4;
                 Int ct_PQ;
                 Void Initialize() {
                     ct_PQ = field3 + 1;
                     field3 = 99;
-                    field4 = ct_PQ;
                 }
                 Int PK() {
-                    return field4 + field3;
+                    return ct_PQ + field3;
                 }
                 Int CT() {
-                    return field4 + field3;
+                    return ct_PQ + field3;
                 }
             }
             """,
@@ -269,7 +257,7 @@ def test_inline_single_use_field(source: str, expected: str) -> None:
 @pytest.mark.parametrize(
     "source,expected",
     [
-        # Pure expression (tuple index) used twice in same method — should be inlined
+        # Pure expression used twice — cascades fully
         (
             """
             Game Test() {
@@ -291,22 +279,18 @@ def test_inline_single_use_field(source: str, expected: str) -> None:
             """,
             """
             Game Test() {
-                Int field3;
-                Int field4;
                 Void Initialize() {
-                    field3 = 42 + 1;
-                    field4 = 42;
                 }
                 Int PK() {
-                    return field3 + field4;
+                    return 42 + 1 + 42;
                 }
                 Int CT() {
-                    return field3 + field4;
+                    return 42 + 1 + 42;
                 }
             }
             """,
         ),
-        # Non-pure expression (function call) used twice — should NOT be inlined
+        # Non-pure expression: field3/field4 alias ct_PQ cross-method
         (
             """
             Game Test() {
@@ -328,19 +312,15 @@ def test_inline_single_use_field(source: str, expected: str) -> None:
             """,
             """
             Game Test() {
-                Int field3;
-                Int field4;
                 Int ct_PQ;
                 Void Initialize() {
                     ct_PQ = F.evaluate(1);
-                    field3 = ct_PQ + 1;
-                    field4 = ct_PQ;
                 }
                 Int PK() {
-                    return field3 + field4;
+                    return ct_PQ + 1 + ct_PQ;
                 }
                 Int CT() {
-                    return field3 + field4;
+                    return ct_PQ + 1 + ct_PQ;
                 }
             }
             """,
@@ -384,6 +364,54 @@ def test_inline_orphaned_untyped_variable() -> None:
         }
     }
     """
+    _transform_and_compare(source, expected)
+
+
+def test_cross_method_pure_field_referencing_field() -> None:
+    """A pure field used across methods where the expression's free variables
+    are all fields should be inlined — cascades fully."""
+    source = """
+    Game Test() {
+        Int fieldA;
+        Int fieldB;
+        Void Initialize() {
+            fieldA = 42;
+            fieldB = fieldA + 1;
+        }
+        Int Query() {
+            return fieldB;
+        }
+    }
+    """
+    expected = """
+    Game Test() {
+        Void Initialize() {
+        }
+        Int Query() {
+            return 42 + 1;
+        }
+    }
+    """
+    _transform_and_compare(source, expected)
+
+
+def test_cross_method_field_referencing_local_not_inlined() -> None:
+    """A field used across methods whose expression references a local
+    variable (not a field) should NOT be inlined, since the local would
+    be out of scope in other methods."""
+    source = """
+    Game Test() {
+        Int fieldB;
+        Void Initialize() {
+            Int x = 42;
+            fieldB = x + 1;
+        }
+        Int Query() {
+            return fieldB;
+        }
+    }
+    """
+    expected = source  # no change
     _transform_and_compare(source, expected)
 
 
@@ -470,8 +498,6 @@ def test_no_inline_when_field_assigned_in_nested_block() -> None:
     }
     """
     # fieldA has 2 assignments: top-level (fieldA=42) and nested (fieldA=99).
-    # The shallow scan only sees the top-level one. But inlining fieldA=42
-    # into fieldB=fieldA would give fieldB=42, when at runtime fieldA is 99.
     # (fieldC may be inlined - that's fine; we only care that fieldA is not)
     expected = """
     Game Test() {

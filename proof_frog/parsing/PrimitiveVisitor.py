@@ -319,6 +319,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#groupType.
+    def visitGroupType(self, ctx:PrimitiveParser.GroupTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#intType.
     def visitIntType(self, ctx:PrimitiveParser.IntTypeContext):
         return self.visitChildren(ctx)
@@ -336,11 +341,6 @@ class PrimitiveVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by PrimitiveParser#mapType.
     def visitMapType(self, ctx:PrimitiveParser.MapTypeContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#voidType.
-    def visitVoidType(self, ctx:PrimitiveParser.VoidTypeContext):
         return self.visitChildren(ctx)
 
 
@@ -369,6 +369,16 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#groupElemType.
+    def visitGroupElemType(self, ctx:PrimitiveParser.GroupElemTypeContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#voidType.
+    def visitVoidType(self, ctx:PrimitiveParser.VoidTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#productType.
     def visitProductType(self, ctx:PrimitiveParser.ProductTypeContext):
         return self.visitChildren(ctx)
@@ -391,6 +401,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by PrimitiveParser#modint.
     def visitModint(self, ctx:PrimitiveParser.ModintContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#groupelem.
+    def visitGroupelem(self, ctx:PrimitiveParser.GroupelemContext):
         return self.visitChildren(ctx)
 
 

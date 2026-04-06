@@ -247,8 +247,8 @@ class TestInlineSingleUseFieldDeterministic:
     the expression is a deterministic call (safe to duplicate)."""
 
     def test_deterministic_multi_use_inlined(self) -> None:
-        """field = G.evaluate(x) used twice should be inlined when
-        G.evaluate is deterministic."""
+        """field = G.evaluate(x) used twice should be inlined cross-method
+        when G.evaluate is deterministic (pure, no free variable deps)."""
         source = """
         Game Test() {
             Int field1;
@@ -263,18 +263,26 @@ class TestInlineSingleUseFieldDeterministic:
             }
         }
         """
+        expected = """
+        Game Test() {
+            Void Initialize() {
+            }
+            Int PK() {
+                return G.evaluate(1);
+            }
+            Int CT() {
+                return G.evaluate(1);
+            }
+        }
+        """
         ns = _make_det_namespace()
         result = _inline_field_transform(source, ns)
-        # field1 is used in two methods — it should NOT be inlined
-        # because cross-method inlining of multi-use fields is not safe
-        # (field values are stored once in Initialize, read in oracles).
-        # InlineSingleUseField only inlines when total_uses == 1.
-        expected_ast = frog_parser.parse_game(source)
+        expected_ast = frog_parser.parse_game(expected)
         assert result == expected_ast
 
     def test_deterministic_single_use_inlined(self) -> None:
-        """field = G.evaluate(x) used once should be inlined when
-        G.evaluate is deterministic."""
+        """field1 inlined within Initialize, then field2 inlined cross-method
+        (pure deterministic expression with no free vars)."""
         source = """
         Game Test() {
             Int field1;
@@ -290,12 +298,10 @@ class TestInlineSingleUseFieldDeterministic:
         """
         expected = """
         Game Test() {
-            Int field2;
             Void Initialize() {
-                field2 = G.evaluate(1) + 1;
             }
             Int PK() {
-                return field2;
+                return G.evaluate(1) + 1;
             }
         }
         """

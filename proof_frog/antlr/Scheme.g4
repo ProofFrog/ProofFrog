@@ -4,7 +4,7 @@ import Shared;
 
 program: moduleImport* scheme EOF;
 
-scheme: SCHEME ID L_PAREN paramList? R_PAREN EXTENDS ID L_CURLY schemeBody R_CURLY;
+scheme: SCHEME id L_PAREN paramList? R_PAREN EXTENDS id L_CURLY schemeBody R_CURLY;
 
 schemeBody: (REQUIRES expression SEMI)* (field SEMI | method)+;
 

@@ -394,6 +394,11 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#groupType.
+    def visitGroupType(self, ctx:ProofParser.GroupTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#intType.
     def visitIntType(self, ctx:ProofParser.IntTypeContext):
         return self.visitChildren(ctx)
@@ -411,11 +416,6 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#mapType.
     def visitMapType(self, ctx:ProofParser.MapTypeContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#voidType.
-    def visitVoidType(self, ctx:ProofParser.VoidTypeContext):
         return self.visitChildren(ctx)
 
 
@@ -444,6 +444,16 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#groupElemType.
+    def visitGroupElemType(self, ctx:ProofParser.GroupElemTypeContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#voidType.
+    def visitVoidType(self, ctx:ProofParser.VoidTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#productType.
     def visitProductType(self, ctx:ProofParser.ProductTypeContext):
         return self.visitChildren(ctx)
@@ -466,6 +476,11 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#modint.
     def visitModint(self, ctx:ProofParser.ModintContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#groupelem.
+    def visitGroupelem(self, ctx:ProofParser.GroupelemContext):
         return self.visitChildren(ctx)
 
 

@@ -130,6 +130,24 @@ class ModIntType(Type):
         return f"ModInt<{self.modulus}>"
 
 
+class GroupType(Type):
+    """The ``Group`` declaration type (like ``Int`` or ``Set``)."""
+
+    def __str__(self) -> str:
+        return "Group"
+
+
+class GroupElemType(Type):
+    """Element of an abelian cyclic group: ``GroupElem<G>``."""
+
+    def __init__(self, group: Expression) -> None:
+        super().__init__()
+        self.group = group
+
+    def __str__(self) -> str:
+        return f"GroupElem<{self.group}>"
+
+
 class ProductType(Type):
     def __init__(self, types: list[Type]) -> None:
         super().__init__()
@@ -633,6 +651,28 @@ class BitStringLiteral(Expression):
         if isinstance(self.length, BinaryOperation):
             return f"{self.bit}^({self.length})"
         return f"{self.bit}^{self.length}"
+
+
+class GroupGenerator(Expression):
+    """The canonical generator of a cyclic group: ``G.generator``."""
+
+    def __init__(self, group: Expression) -> None:
+        super().__init__()
+        self.group = group
+
+    def __str__(self) -> str:
+        return f"{self.group}.generator"
+
+
+class GroupOrder(Expression):
+    """The order of a cyclic group: ``G.order``."""
+
+    def __init__(self, group: Expression) -> None:
+        super().__init__()
+        self.group = group
+
+    def __str__(self) -> str:
+        return f"{self.group}.order"
 
 
 class Method(ASTNode):

@@ -14,6 +14,7 @@ from .sampling import (
     SingleCallFieldToLocal,
     CounterGuardedFieldToLocal,
     SinkUniformSample,
+    LocalizeInitOnlyFieldSample,
 )
 from .random_functions import (
     ExtractRFCalls,
@@ -36,6 +37,7 @@ from .inlining import (
 from .algebraic import (
     UniformXorSimplification,
     UniformModIntSimplification,
+    UniformGroupElemSimplification,
     SimplifyNotPass,
     BooleanIdentity,
     XorCancellation,
@@ -43,6 +45,9 @@ from .algebraic import (
     ModIntSimplification,
     NormalizeCommutativeChains,
     ReflexiveComparison,
+    GroupElemSimplification,
+    GroupElemCancellation,
+    GroupElemExponentCombination,
 )
 from .structural import (
     TopologicalSort,
@@ -92,6 +97,7 @@ CORE_PIPELINE: list[TransformPass] = [
     ForwardExpressionAlias(),
     UniformXorSimplification(),
     UniformModIntSimplification(),
+    UniformGroupElemSimplification(),
     TopologicalSort(),
     HoistFieldPureAlias(),
     RemoveDuplicateFields(),
@@ -100,6 +106,7 @@ CORE_PIPELINE: list[TransformPass] = [
     RedundantConditionalReturn(),
     BranchElimination(),
     InlineSingleUseField(),
+    LocalizeInitOnlyFieldSample(),
     RemoveUnnecessaryFields(),
     CollapseAssignment(),
     SimplifyReturn(),
@@ -114,6 +121,9 @@ CORE_PIPELINE: list[TransformPass] = [
     XorCancellation(),
     XorIdentity(),
     ModIntSimplification(),
+    GroupElemSimplification(),
+    GroupElemCancellation(),
+    GroupElemExponentCombination(),
     NormalizeCommutativeChains(),
     ReflexiveComparison(),
     InlineMultiUsePureExpression(),
@@ -125,6 +135,7 @@ CORE_PIPELINE: list[TransformPass] = [
 STANDARDIZATION_PIPELINE: list[TransformPass] = [
     VariableStandardize(),
     StandardizeFieldNames(),
+    NormalizeCommutativeChains(),
     BubbleSortFieldAssignments(),
     StabilizeIndependentStatements(),
     VariableStandardize(),

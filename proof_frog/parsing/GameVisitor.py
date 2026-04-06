@@ -319,6 +319,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#groupType.
+    def visitGroupType(self, ctx:GameParser.GroupTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#intType.
     def visitIntType(self, ctx:GameParser.IntTypeContext):
         return self.visitChildren(ctx)
@@ -336,11 +341,6 @@ class GameVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by GameParser#mapType.
     def visitMapType(self, ctx:GameParser.MapTypeContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#voidType.
-    def visitVoidType(self, ctx:GameParser.VoidTypeContext):
         return self.visitChildren(ctx)
 
 
@@ -369,6 +369,16 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#groupElemType.
+    def visitGroupElemType(self, ctx:GameParser.GroupElemTypeContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#voidType.
+    def visitVoidType(self, ctx:GameParser.VoidTypeContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#productType.
     def visitProductType(self, ctx:GameParser.ProductTypeContext):
         return self.visitChildren(ctx)
@@ -391,6 +401,11 @@ class GameVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by GameParser#modint.
     def visitModint(self, ctx:GameParser.ModintContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#groupelem.
+    def visitGroupelem(self, ctx:GameParser.GroupelemContext):
         return self.visitChildren(ctx)
 
 

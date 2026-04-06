@@ -460,8 +460,6 @@ def test_unreachable_transformer(
     expected_ast = frog_parser.parse_method(expected)
 
     print("EXPECTED: ", expected_ast)
-    transformed_ast = RemoveUnreachableTransformer(method_ast).transform(
-        method_ast
-    )
+    transformed_ast = RemoveUnreachableTransformer(method_ast).transform(method_ast)
     print("TRANSFORMED: ", transformed_ast)
     assert expected_ast == transformed_ast

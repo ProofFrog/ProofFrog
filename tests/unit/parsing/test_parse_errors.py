@@ -104,7 +104,6 @@ class TestMissingSemicolonHeuristic:
         err = _expect_error(tmp_path, source)
         assert "on next line" in str(err)
 
-
     def test_missing_semicolon_before_closing_brace_multiline(
         self, tmp_path: Path
     ) -> None:
@@ -332,11 +331,7 @@ class TestEnhancedErrorMessages:
 
     def test_missing_closing_angle_bracket(self, tmp_path: Path) -> None:
         """Missing '>' in BitString<32 should hint about closing bracket."""
-        source = (
-            "Primitive Foo() {\n"
-            "    BitString<32 bar(Int x);\n"
-            "}\n"
-        )
+        source = "Primitive Foo() {\n" "    BitString<32 bar(Int x);\n" "}\n"
         err = _expect_error(tmp_path, source)
         assert "'>'" in str(err)
         assert "BitString" in str(err)
@@ -477,30 +472,19 @@ class TestEnhancedErrorMessages:
 
     def test_missing_closing_paren(self, tmp_path: Path) -> None:
         """Missing ')' should hint about the closing parenthesis."""
-        source = (
-            "Primitive Foo() {\n"
-            "    Bool bar(Int x;\n"
-            "}\n"
-        )
+        source = "Primitive Foo() {\n" "    Bool bar(Int x;\n" "}\n"
         err = _expect_error(tmp_path, source)
         assert "')'" in str(err)
 
     def test_trailing_comma_in_params(self, tmp_path: Path) -> None:
         """Trailing comma in parameters should explain it's not allowed."""
-        source = (
-            "Primitive Foo() {\n"
-            "    Bool bar(Int x,);\n"
-            "}\n"
-        )
+        source = "Primitive Foo() {\n" "    Bool bar(Int x,);\n" "}\n"
         err = _expect_error(tmp_path, source)
         assert "trailing" in str(err).lower() or "after ','" in str(err)
 
     def test_missing_closing_brace(self, tmp_path: Path) -> None:
         """Missing '}' should hint about unmatched braces."""
-        source = (
-            "Primitive Foo() {\n"
-            "    Bool bar(Int x);\n"
-        )
+        source = "Primitive Foo() {\n" "    Bool bar(Int x);\n"
         err = _expect_error(tmp_path, source)
         assert "brace" in str(err).lower() or "'}'" in str(err)
 
@@ -530,10 +514,6 @@ class TestEnhancedErrorMessages:
 
     def test_scheme_missing_extends(self, tmp_path: Path) -> None:
         """A Scheme without 'extends' should say 'extends' is expected."""
-        source = (
-            "Scheme Foo(Int lambda) {\n"
-            "    Set Key = BitString<lambda>;\n"
-            "}\n"
-        )
+        source = "Scheme Foo(Int lambda) {\n" "    Set Key = BitString<lambda>;\n" "}\n"
         err = _expect_scheme_error(tmp_path, source)
         assert "extends" in str(err)

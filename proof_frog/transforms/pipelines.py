@@ -21,6 +21,7 @@ from .random_functions import (
     UniqueRFSimplification,
     ChallengeExclusionRFToUniform,
     LocalRFToUniform,
+    FreshInputRFToUniform,
 )
 from .inlining import (
     RedundantCopy,
@@ -91,6 +92,7 @@ CORE_PIPELINE: list[TransformPass] = [
     UniqueRFSimplification(),
     ChallengeExclusionRFToUniform(),
     LocalRFToUniform(),
+    FreshInputRFToUniform(),
     RedundantCopy(),
     InlineSingleUseVariable(),
     DeduplicateDeterministicCalls(),

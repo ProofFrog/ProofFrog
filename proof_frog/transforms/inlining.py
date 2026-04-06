@@ -16,6 +16,7 @@ from collections.abc import Callable, Sequence
 from .. import frog_ast
 from ..visitors import (
     BlockTransformer,
+    NameTypeMap,
     SearchVisitor,
     Visitor,
     ReplaceTransformer,
@@ -464,8 +465,13 @@ class CollapseAssignmentTransformer(BlockTransformer):
         Type v = expr2;
     """
 
-    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace | None = None,
+        proof_let_types: NameTypeMap | None = None,
+    ) -> None:
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
+        self._proof_let_types = proof_let_types
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -476,7 +482,7 @@ class CollapseAssignmentTransformer(BlockTransformer):
 
             # Skip if the statement's value has non-deterministic calls
             if isinstance(statement, frog_ast.Assignment) and has_nondeterministic_call(
-                statement.value, self._proof_namespace
+                statement.value, self._proof_namespace, self._proof_let_types
             ):
                 continue
 
@@ -673,9 +679,14 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
         return F(v3, v3);
     """
 
-    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace | None = None,
+        proof_let_types: NameTypeMap | None = None,
+    ) -> None:
         self.fields: list[str] = []
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
+        self._proof_let_types = proof_let_types
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.fields = [field.name for field in game.fields]
@@ -766,7 +777,9 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
             expr = statement.value
 
             # Only handle pure expressions (no non-deterministic function calls)
-            if has_nondeterministic_call(expr, self._proof_namespace):
+            if has_nondeterministic_call(
+                expr, self._proof_namespace, self._proof_let_types
+            ):
                 continue
 
             remaining_block = frog_ast.Block(
@@ -862,7 +875,8 @@ class CollapseAssignment(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return CollapseAssignmentTransformer(
-            proof_namespace=ctx.proof_namespace
+            proof_namespace=ctx.proof_namespace,
+            proof_let_types=ctx.proof_let_types,
         ).transform(game)
 
 
@@ -871,7 +885,8 @@ class ForwardExpressionAlias(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return ForwardExpressionAliasTransformer(
-            proof_namespace=ctx.proof_namespace
+            proof_namespace=ctx.proof_namespace,
+            proof_let_types=ctx.proof_let_types,
         ).transform(game)
 
 
@@ -912,9 +927,14 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
         [SS, CT] v3 = KEM1.Encaps(field5);
     """
 
-    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace | None = None,
+        proof_let_types: NameTypeMap | None = None,
+    ) -> None:
         self.fields: list[str] = []
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
+        self._proof_let_types: NameTypeMap | None = proof_let_types
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.fields = [field.name for field in game.fields]
@@ -966,7 +986,9 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
             elif not isinstance(expr, frog_ast.ArrayAccess):
                 continue
             # Only handle pure expressions (no non-deterministic function calls)
-            if has_nondeterministic_call(expr, self._proof_namespace):
+            if has_nondeterministic_call(
+                expr, self._proof_namespace, self._proof_let_types
+            ):
                 continue
 
             # Look for a structurally-equal subexpression in earlier statements
@@ -1124,7 +1146,8 @@ class HoistFieldPureAlias(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return HoistFieldPureAliasTransformer(
-            proof_namespace=ctx.proof_namespace
+            proof_namespace=ctx.proof_namespace,
+            proof_let_types=ctx.proof_let_types,
         ).transform(game)
 
 
@@ -1295,7 +1318,11 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
 
         # For multi-use fields, only inline if the expression is pure
         # (no non-deterministic function calls), so duplicating it is safe.
-        is_pure = not has_nondeterministic_call(assign_expr, self._proof_namespace)
+        is_pure = not has_nondeterministic_call(
+            assign_expr,
+            self._proof_namespace,
+            self.ctx.proof_let_types if self.ctx else None,
+        )
         if total_uses > 1 and not is_pure:
             if self.ctx is not None:
                 self.ctx.near_misses.append(

@@ -678,11 +678,11 @@ class NameResolutionVisitor(VariableTypeVisitor):
                 else the_type[1]
             )
 
-        if isinstance(the_type, frog_ast.RandomFunctionType):
+        if isinstance(the_type, frog_ast.FunctionType):
             if field_access.name != "domain":
                 print_error(
                     field_access,
-                    f"RandomFunctions has no field '{field_access.name}'"
+                    f"Function has no field '{field_access.name}'"
                     " (only 'domain' is available)",
                     self.file_name,
                 )
@@ -729,6 +729,16 @@ def check_proof_well_formed(
         import_namespace, file_name, file_name_mapping
     )
     for let in proof.lets:
+        if let.name in proof.sampled_let_names:
+            # Sampled let entries must have FunctionType
+            if not isinstance(let.type, frog_ast.FunctionType):
+                print_error(
+                    let,
+                    f"only Function types can be sampled in let blocks, "
+                    f"got {let.type}",
+                    file_name,
+                )
+        # Always visit to register the type in the checker's scope
         type_check_visitor.visit(let)
     for assumption in proof.assumptions:
         type_check_visitor.visit(assumption)
@@ -925,13 +935,19 @@ class CheckTypeVisitor(VariableTypeVisitor):
         """Resolve Variable and FieldAccess types through known aliases."""
         if _seen is None:
             _seen = frozenset()
-        if isinstance(t, frog_ast.Variable) and t.name in self.instantiation_namespace:
-            if t.name in _seen:
-                return t  # Avoid infinite recursion on self-referencing aliases
-            resolved = self.instantiation_namespace[t.name]
-            if isinstance(resolved, frog_ast.Type):
-                # Recursively resolve in case the alias is itself a FieldAccess
-                return self._resolve_type_alias(resolved, _seen | {t.name})
+        if isinstance(t, frog_ast.Variable):
+            if t.name in self.instantiation_namespace:
+                if t.name in _seen:
+                    return t  # Avoid infinite recursion on self-referencing aliases
+                resolved = self.instantiation_namespace[t.name]
+                if isinstance(resolved, frog_ast.Type):
+                    # Recursively resolve in case the alias is itself a FieldAccess
+                    return self._resolve_type_alias(resolved, _seen | {t.name})
+            # Also resolve through the variable type map (game/scheme parameters)
+            if t.name not in _seen:
+                var_type = self.get_type(t.name)
+                if var_type is not None and isinstance(var_type, frog_ast.Type):
+                    return self._resolve_type_alias(var_type, _seen | {t.name})
         if isinstance(t, frog_ast.FieldAccess) and isinstance(
             t.the_object, frog_ast.Variable
         ):
@@ -957,6 +973,42 @@ class CheckTypeVisitor(VariableTypeVisitor):
             resolved_elem = self._resolve_type_alias(t.element_type, _seen)
             if isinstance(resolved_elem, frog_ast.Type):
                 return frog_ast.ArrayType(resolved_elem, t.count)
+        if isinstance(t, frog_ast.FunctionType):
+            resolved_domain = self._resolve_type_alias(t.domain_type, _seen)
+            resolved_range = self._resolve_type_alias(t.range_type, _seen)
+            if isinstance(resolved_domain, frog_ast.Type) or isinstance(
+                resolved_range, frog_ast.Type
+            ):
+                return frog_ast.FunctionType(
+                    (
+                        resolved_domain
+                        if isinstance(resolved_domain, frog_ast.Type)
+                        else t.domain_type
+                    ),
+                    (
+                        resolved_range
+                        if isinstance(resolved_range, frog_ast.Type)
+                        else t.range_type
+                    ),
+                )
+        if isinstance(t, frog_ast.MapType):
+            resolved_key = self._resolve_type_alias(t.key_type, _seen)
+            resolved_value = self._resolve_type_alias(t.value_type, _seen)
+            if isinstance(resolved_key, frog_ast.Type) or isinstance(
+                resolved_value, frog_ast.Type
+            ):
+                return frog_ast.MapType(
+                    (
+                        resolved_key
+                        if isinstance(resolved_key, frog_ast.Type)
+                        else t.key_type
+                    ),
+                    (
+                        resolved_value
+                        if isinstance(resolved_value, frog_ast.Type)
+                        else t.value_type
+                    ),
+                )
         return t
 
     def _normalize_bitstring_params(self, t: PossibleType) -> PossibleType:
@@ -1494,7 +1546,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 )
         self.ast_type_map.set(bit_string_type, bit_string_type)
 
-    def leave_random_function_type(self, rf_type: frog_ast.RandomFunctionType) -> None:
+    def leave_function_type(self, rf_type: frog_ast.FunctionType) -> None:
         self.ast_type_map.set(rf_type, rf_type)
 
     def leave_mod_int_type(self, mod_int_type: frog_ast.ModIntType) -> None:
@@ -1877,7 +1929,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
 
     def leave_field_access(self, field_acess: frog_ast.FieldAccess) -> None:
         object_type = self.get_type_from_ast(field_acess.the_object)
-        if isinstance(object_type, frog_ast.RandomFunctionType):
+        if isinstance(object_type, frog_ast.FunctionType):
             if field_acess.name == "domain":
                 self.ast_type_map.set(
                     field_acess, frog_ast.SetType(object_type.domain_type)
@@ -1885,7 +1937,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             else:
                 self.print_error(
                     field_acess,
-                    f"RandomFunctions has no field '{field_acess.name}'"
+                    f"Function has no field '{field_acess.name}'"
                     " (only 'domain' is available)",
                 )
             return
@@ -2099,14 +2151,31 @@ class CheckTypeVisitor(VariableTypeVisitor):
 
         arg_types = [self.get_type_from_ast(arg) for arg in args]
 
+        # Build parameter bindings sequentially so that later parameters
+        # (e.g., Function<D, R>) can be resolved using earlier ones
+        # (e.g., Set D = GroupElem<G>).
+        param_bindings: dict[str, frog_ast.Expression] = {}
         for index, param in enumerate(scheme.parameters):
-            if not self.check_types(param.type, arg_types[index]):
+            # Resolve the expected type using bindings accumulated so far
+            expected_type = param.type
+            if param_bindings:
+                old_ns = self.instantiation_namespace
+                self.instantiation_namespace = {**old_ns, **param_bindings}
+                resolved = self._resolve_type_alias(expected_type)
+                self.instantiation_namespace = old_ns
+                if isinstance(resolved, frog_ast.Type):
+                    expected_type = resolved
+            if not self.check_types(expected_type, arg_types[index]):
                 self.print_error(
                     location,
                     f"Argument {args[index]} has type {arg_types[index]},"
-                    f" expected {param.type}"
+                    f" expected {expected_type}"
                     f" (parameter '{param.name}' of {scheme.name})",
                 )
+            # Record binding for subsequent parameters
+            arg_t = arg_types[index]
+            if isinstance(arg_t, frog_ast.Type):
+                param_bindings[param.name] = arg_t  # type: ignore[assignment]
 
         # Check cache to avoid redundant instantiation and type-checking
         cache_key = (scheme.name, tuple(str(a) for a in args))
@@ -2211,10 +2280,15 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 )
         else:
             func_call_type = self.get_type_from_ast(func_call.func)
-            if isinstance(func_call_type, frog_ast.RandomFunctionType):
+            if isinstance(func_call_type, frog_ast.FunctionType):
+                # Resolve aliases in domain/range (e.g., Set parameters
+                # used as type arguments: Function<D, R>)
+                resolved_rf = self._resolve_type_alias(func_call_type)
+                if isinstance(resolved_rf, frog_ast.FunctionType):
+                    func_call_type = resolved_rf
                 if len(func_call.args) != 1:
                     self.print_error(
-                        func_call, "RandomFunctions call requires exactly 1 argument"
+                        func_call, "Function call requires exactly 1 argument"
                     )
                     return
                 arg_type = self.get_type_from_ast(func_call.args[0])

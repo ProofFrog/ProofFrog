@@ -238,7 +238,7 @@ class PrimitiveParser ( Parser ):
                      "'<='", "'||'", "'<-uniq'", "'<-'", "'&&'", "'\\'", 
                      "'!'", "'^'", "'|'", "'Set'", "'Bool'", "'Void'", "'Int'", 
                      "'Map'", "'return'", "'import'", "'BitString'", "'ModInt'", 
-                     "'Group'", "'GroupElem'", "'Array'", "'RandomFunctions'", 
+                     "'Group'", "'GroupElem'", "'Array'", "'Function'", 
                      "'Primitive'", "'subsets'", "'if'", "'for'", "'to'", 
                      "'in'", "'union'", "'Game'", "'export'", "'as'", "'Phase'", 
                      "'oracles'", "'else'", "'None'", "'this'", "'deterministic'", 
@@ -253,11 +253,11 @@ class PrimitiveParser ( Parser ):
                       "AND", "BACKSLASH", "NOT", "CARET", "VBAR", "SET", 
                       "BOOL", "VOID", "INTTYPE", "MAP", "RETURN", "IMPORT", 
                       "BITSTRING", "MODINT", "GROUP", "GROUPELEM", "ARRAY", 
-                      "RANDOMFUNCTIONS", "PRIMITIVE", "SUBSETS", "IF", "FOR", 
-                      "TO", "IN", "UNION", "GAME", "EXPORT", "AS", "PHASE", 
-                      "ORACLES", "ELSE", "NONE", "THIS", "DETERMINISTIC", 
-                      "INJECTIVE", "TRUE", "FALSE", "BINARYNUM", "ZEROS_CARET", 
-                      "ONES_CARET", "INT", "ID", "WS", "LINE_COMMENT", "FILESTRING" ]
+                      "FUNCTION", "PRIMITIVE", "SUBSETS", "IF", "FOR", "TO", 
+                      "IN", "UNION", "GAME", "EXPORT", "AS", "PHASE", "ORACLES", 
+                      "ELSE", "NONE", "THIS", "DETERMINISTIC", "INJECTIVE", 
+                      "TRUE", "FALSE", "BINARYNUM", "ZEROS_CARET", "ONES_CARET", 
+                      "INT", "ID", "WS", "LINE_COMMENT", "FILESTRING" ]
 
     RULE_program = 0
     RULE_primitiveBody = 1
@@ -339,7 +339,7 @@ class PrimitiveParser ( Parser ):
     GROUP=40
     GROUPELEM=41
     ARRAY=42
-    RANDOMFUNCTIONS=43
+    FUNCTION=43
     PRIMITIVE=44
     SUBSETS=45
     IF=46
@@ -3544,34 +3544,6 @@ class PrimitiveParser ( Parser ):
                 return visitor.visitChildren(self)
 
 
-    class RandomFunctionTypeContext(TypeContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.TypeContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def RANDOMFUNCTIONS(self):
-            return self.getToken(PrimitiveParser.RANDOMFUNCTIONS, 0)
-        def L_ANGLE(self):
-            return self.getToken(PrimitiveParser.L_ANGLE, 0)
-        def type_(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(PrimitiveParser.TypeContext)
-            else:
-                return self.getTypedRuleContext(PrimitiveParser.TypeContext,i)
-
-        def COMMA(self):
-            return self.getToken(PrimitiveParser.COMMA, 0)
-        def R_ANGLE(self):
-            return self.getToken(PrimitiveParser.R_ANGLE, 0)
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitRandomFunctionType" ):
-                return visitor.visitRandomFunctionType(self)
-            else:
-                return visitor.visitChildren(self)
-
-
     class ModIntTypeContext(TypeContext):
 
         def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.TypeContext
@@ -3668,6 +3640,34 @@ class PrimitiveParser ( Parser ):
         def accept(self, visitor:ParseTreeVisitor):
             if hasattr( visitor, "visitVoidType" ):
                 return visitor.visitVoidType(self)
+            else:
+                return visitor.visitChildren(self)
+
+
+    class FunctionTypeContext(TypeContext):
+
+        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.TypeContext
+            super().__init__(parser)
+            self.copyFrom(ctx)
+
+        def FUNCTION(self):
+            return self.getToken(PrimitiveParser.FUNCTION, 0)
+        def L_ANGLE(self):
+            return self.getToken(PrimitiveParser.L_ANGLE, 0)
+        def type_(self, i:int=None):
+            if i is None:
+                return self.getTypedRuleContexts(PrimitiveParser.TypeContext)
+            else:
+                return self.getTypedRuleContext(PrimitiveParser.TypeContext,i)
+
+        def COMMA(self):
+            return self.getToken(PrimitiveParser.COMMA, 0)
+        def R_ANGLE(self):
+            return self.getToken(PrimitiveParser.R_ANGLE, 0)
+
+        def accept(self, visitor:ParseTreeVisitor):
+            if hasattr( visitor, "visitFunctionType" ):
+                return visitor.visitFunctionType(self)
             else:
                 return visitor.visitChildren(self)
 
@@ -3777,11 +3777,11 @@ class PrimitiveParser ( Parser ):
                 pass
 
             elif la_ == 6:
-                localctx = PrimitiveParser.RandomFunctionTypeContext(self, localctx)
+                localctx = PrimitiveParser.FunctionTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
                 self.state = 459
-                self.match(PrimitiveParser.RANDOMFUNCTIONS)
+                self.match(PrimitiveParser.FUNCTION)
                 self.state = 460
                 self.match(PrimitiveParser.L_ANGLE)
                 self.state = 461

@@ -12,16 +12,16 @@ from proof_frog.transforms.random_functions import LocalRFToUniformTransformer
         (
             """
             BitString<16> f(BitString<8> x) {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 BitString<16> z = RF(x);
                 return z;
             }
             """,
             """
             BitString<16> f(BitString<8> x) {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 BitString<16> z <- BitString<16>;
                 return z;
             }
@@ -31,8 +31,8 @@ from proof_frog.transforms.random_functions import LocalRFToUniformTransformer
         (
             """
             BitString<16> f(BitString<8> x, Int count) {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 if (count == 1) {
                     BitString<16> z = RF(x);
                     return z;
@@ -44,8 +44,8 @@ from proof_frog.transforms.random_functions import LocalRFToUniformTransformer
             """,
             """
             BitString<16> f(BitString<8> x, Int count) {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 if (count == 1) {
                     BitString<16> z <- BitString<16>;
                     return z;
@@ -60,8 +60,8 @@ from proof_frog.transforms.random_functions import LocalRFToUniformTransformer
         (
             """
             [BitString<16>, BitString<16>] f(BitString<8> x, BitString<8> y) {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 BitString<16> z1 = RF(x);
                 BitString<16> z2 = RF(y);
                 return [z1, z2];
@@ -69,8 +69,8 @@ from proof_frog.transforms.random_functions import LocalRFToUniformTransformer
             """,
             """
             [BitString<16>, BitString<16>] f(BitString<8> x, BitString<8> y) {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 BitString<16> z1 = RF(x);
                 BitString<16> z2 = RF(y);
                 return [z1, z2];
@@ -81,8 +81,8 @@ from proof_frog.transforms.random_functions import LocalRFToUniformTransformer
         (
             """
             BitString<16> f(BitString<8> x) {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 BitString<8> r <-uniq[RF.domain] BitString<8>;
                 BitString<16> z = RF(r);
                 return z;
@@ -90,8 +90,8 @@ from proof_frog.transforms.random_functions import LocalRFToUniformTransformer
             """,
             """
             BitString<16> f(BitString<8> x) {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 BitString<8> r <-uniq[RF.domain] BitString<8>;
                 BitString<16> z = RF(r);
                 return z;
@@ -102,8 +102,8 @@ from proof_frog.transforms.random_functions import LocalRFToUniformTransformer
         (
             """
             BitString<16> f(BitString<8> x) {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 BitString<16> z = RF(x);
                 for (Int i = 0 to 5) {
                     z = RF(x);
@@ -113,8 +113,8 @@ from proof_frog.transforms.random_functions import LocalRFToUniformTransformer
             """,
             """
             BitString<16> f(BitString<8> x) {
-                RandomFunctions<BitString<8>, BitString<16>> RF;
-                RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF;
+                RF <- Function<BitString<8>, BitString<16>>;
                 BitString<16> z = RF(x);
                 for (Int i = 0 to 5) {
                     z = RF(x);

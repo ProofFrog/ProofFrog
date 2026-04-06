@@ -813,11 +813,11 @@ def _single_call_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
     eligible: list[tuple[frog_ast.Field, int, frog_ast.Sample, str]] = []
 
     for field in game.fields:
-        # Skip fields with structured types (RandomFunctions, Sets, Maps)
+        # Skip fields with structured types (Function, Sets, Maps)
         # that interact with other transforms in ways that depend on being fields
         if isinstance(
             field.type,
-            (frog_ast.RandomFunctionType, frog_ast.SetType, frog_ast.MapType),
+            (frog_ast.FunctionType, frog_ast.SetType, frog_ast.MapType),
         ):
             continue
 

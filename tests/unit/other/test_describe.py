@@ -85,14 +85,14 @@ class TestDescribeProof:
         assert "Right" in out
 
 
-class TestDescribeRandomFunctionType:
+class TestDescribeFunctionType:
     def test_random_function_type_in_game(self, tmp_path: Path) -> None:
         game_file = tmp_path / "RFTest.game"
         game_file.write_text(
             "Game Left() {\n"
-            "    RandomFunctions<BitString<8>, BitString<16>> RF;\n"
+            "    Function<BitString<8>, BitString<16>> RF;\n"
             "    Void Initialize() {\n"
-            "        RF <- RandomFunctions<BitString<8>, BitString<16>>;\n"
+            "        RF <- Function<BitString<8>, BitString<16>>;\n"
             "    }\n"
             "    BitString<16> Lookup(BitString<8> x) {\n"
             "        BitString<16> z = RF(x);\n"
@@ -112,7 +112,7 @@ class TestDescribeRandomFunctionType:
             encoding="utf-8",
         )
         out = describe_file(str(game_file))
-        assert "RandomFunctions" in out
+        assert "Function" in out
         assert "RF" in out
 
 

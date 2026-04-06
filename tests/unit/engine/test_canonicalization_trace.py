@@ -40,9 +40,7 @@ def test_trace_matches_canonicalize_game() -> None:
 
 
 def test_trace_has_iterations() -> None:
-    result = _capture_canonicalization_trace(
-        PROOF_PATH, 0, allowed_root=str(EXAMPLES)
-    )
+    result = _capture_canonicalization_trace(PROOF_PATH, 0, allowed_root=str(EXAMPLES))
     assert result["success"] is True
     assert result["converged"] is True
     assert result["total_iterations"] >= 1

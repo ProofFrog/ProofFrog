@@ -10,7 +10,11 @@ reduction: REDUCTION id L_PAREN paramList? R_PAREN COMPOSE parameterizedGame AGA
 
 proof: PROOF COLON (LET COLON lets)? (ASSUME COLON assumptions)? (LEMMA COLON lemmas)? THEOREM COLON theorem  GAMES COLON gameList;
 
-lets: (field SEMI)*;
+lets: (letEntry SEMI)*;
+
+letEntry: field                                    # letField
+	| variable SAMPLES expression                  # letSample
+	;
 
 assumptions: (parameterizedGame SEMI)* (CALLS (LEQ|L_ANGLE) expression SEMI)?;
 

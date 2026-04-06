@@ -11,9 +11,7 @@ REPO_ROOT = Path(__file__).parent.parent.parent
 _WIP_PROOFS = {"UG-KEM-CCA-SDH.proof"}
 
 PROOF_FILES = sorted(
-    p
-    for p in REPO_ROOT.glob("**/examples/**/*.proof")
-    if p.name not in _WIP_PROOFS
+    p for p in REPO_ROOT.glob("**/examples/**/*.proof") if p.name not in _WIP_PROOFS
 )
 
 

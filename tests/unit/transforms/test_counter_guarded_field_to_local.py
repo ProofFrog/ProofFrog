@@ -86,10 +86,10 @@ from proof_frog.transforms.sampling import _counter_guarded_field_to_local
         (
             """
         Game Test() {
-            RandomFunctions<BitString<lambda>, BitString<lambda>> RF;
+            Function<BitString<lambda>, BitString<lambda>> RF;
             Int count;
             Void Initialize() {
-                RF <- RandomFunctions<BitString<lambda>, BitString<lambda>>;
+                RF <- Function<BitString<lambda>, BitString<lambda>>;
                 count = 0;
             }
             BitString<lambda> Oracle(BitString<lambda> x) {
@@ -110,7 +110,7 @@ from proof_frog.transforms.sampling import _counter_guarded_field_to_local
                 count = 0;
             }
             BitString<lambda> Oracle(BitString<lambda> x) {
-                RandomFunctions<BitString<lambda>, BitString<lambda>> RF <- RandomFunctions<BitString<lambda>, BitString<lambda>>;
+                Function<BitString<lambda>, BitString<lambda>> RF <- Function<BitString<lambda>, BitString<lambda>>;
                 count = count + 1;
                 if (count == 1) {
                     BitString<lambda> z = RF(x);

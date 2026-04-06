@@ -248,7 +248,7 @@ class SchemeParser ( Parser ):
                      "'<-uniq'", "'<-'", "'&&'", "'\\'", "'!'", "'^'", "'|'", 
                      "'Set'", "'Bool'", "'Void'", "'Int'", "'Map'", "'return'", 
                      "'import'", "'BitString'", "'ModInt'", "'Group'", "'GroupElem'", 
-                     "'Array'", "'RandomFunctions'", "'Primitive'", "'subsets'", 
+                     "'Array'", "'Function'", "'Primitive'", "'subsets'", 
                      "'if'", "'for'", "'to'", "'in'", "'union'", "'Game'", 
                      "'export'", "'as'", "'Phase'", "'oracles'", "'else'", 
                      "'None'", "'this'", "'deterministic'", "'injective'", 
@@ -262,12 +262,12 @@ class SchemeParser ( Parser ):
                       "SAMPUNIQ", "SAMPLES", "AND", "BACKSLASH", "NOT", 
                       "CARET", "VBAR", "SET", "BOOL", "VOID", "INTTYPE", 
                       "MAP", "RETURN", "IMPORT", "BITSTRING", "MODINT", 
-                      "GROUP", "GROUPELEM", "ARRAY", "RANDOMFUNCTIONS", 
-                      "PRIMITIVE", "SUBSETS", "IF", "FOR", "TO", "IN", "UNION", 
-                      "GAME", "EXPORT", "AS", "PHASE", "ORACLES", "ELSE", 
-                      "NONE", "THIS", "DETERMINISTIC", "INJECTIVE", "TRUE", 
-                      "FALSE", "BINARYNUM", "ZEROS_CARET", "ONES_CARET", 
-                      "INT", "ID", "WS", "LINE_COMMENT", "FILESTRING" ]
+                      "GROUP", "GROUPELEM", "ARRAY", "FUNCTION", "PRIMITIVE", 
+                      "SUBSETS", "IF", "FOR", "TO", "IN", "UNION", "GAME", 
+                      "EXPORT", "AS", "PHASE", "ORACLES", "ELSE", "NONE", 
+                      "THIS", "DETERMINISTIC", "INJECTIVE", "TRUE", "FALSE", 
+                      "BINARYNUM", "ZEROS_CARET", "ONES_CARET", "INT", "ID", 
+                      "WS", "LINE_COMMENT", "FILESTRING" ]
 
     RULE_program = 0
     RULE_scheme = 1
@@ -353,7 +353,7 @@ class SchemeParser ( Parser ):
     GROUP=43
     GROUPELEM=44
     ARRAY=45
-    RANDOMFUNCTIONS=46
+    FUNCTION=46
     PRIMITIVE=47
     SUBSETS=48
     IF=49
@@ -3655,34 +3655,6 @@ class SchemeParser ( Parser ):
                 return visitor.visitChildren(self)
 
 
-    class RandomFunctionTypeContext(TypeContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a SchemeParser.TypeContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def RANDOMFUNCTIONS(self):
-            return self.getToken(SchemeParser.RANDOMFUNCTIONS, 0)
-        def L_ANGLE(self):
-            return self.getToken(SchemeParser.L_ANGLE, 0)
-        def type_(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(SchemeParser.TypeContext)
-            else:
-                return self.getTypedRuleContext(SchemeParser.TypeContext,i)
-
-        def COMMA(self):
-            return self.getToken(SchemeParser.COMMA, 0)
-        def R_ANGLE(self):
-            return self.getToken(SchemeParser.R_ANGLE, 0)
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitRandomFunctionType" ):
-                return visitor.visitRandomFunctionType(self)
-            else:
-                return visitor.visitChildren(self)
-
-
     class ModIntTypeContext(TypeContext):
 
         def __init__(self, parser, ctx:ParserRuleContext): # actually a SchemeParser.TypeContext
@@ -3779,6 +3751,34 @@ class SchemeParser ( Parser ):
         def accept(self, visitor:ParseTreeVisitor):
             if hasattr( visitor, "visitVoidType" ):
                 return visitor.visitVoidType(self)
+            else:
+                return visitor.visitChildren(self)
+
+
+    class FunctionTypeContext(TypeContext):
+
+        def __init__(self, parser, ctx:ParserRuleContext): # actually a SchemeParser.TypeContext
+            super().__init__(parser)
+            self.copyFrom(ctx)
+
+        def FUNCTION(self):
+            return self.getToken(SchemeParser.FUNCTION, 0)
+        def L_ANGLE(self):
+            return self.getToken(SchemeParser.L_ANGLE, 0)
+        def type_(self, i:int=None):
+            if i is None:
+                return self.getTypedRuleContexts(SchemeParser.TypeContext)
+            else:
+                return self.getTypedRuleContext(SchemeParser.TypeContext,i)
+
+        def COMMA(self):
+            return self.getToken(SchemeParser.COMMA, 0)
+        def R_ANGLE(self):
+            return self.getToken(SchemeParser.R_ANGLE, 0)
+
+        def accept(self, visitor:ParseTreeVisitor):
+            if hasattr( visitor, "visitFunctionType" ):
+                return visitor.visitFunctionType(self)
             else:
                 return visitor.visitChildren(self)
 
@@ -3888,11 +3888,11 @@ class SchemeParser ( Parser ):
                 pass
 
             elif la_ == 6:
-                localctx = SchemeParser.RandomFunctionTypeContext(self, localctx)
+                localctx = SchemeParser.FunctionTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
                 self.state = 477
-                self.match(SchemeParser.RANDOMFUNCTIONS)
+                self.match(SchemeParser.FUNCTION)
                 self.state = 478
                 self.match(SchemeParser.L_ANGLE)
                 self.state = 479

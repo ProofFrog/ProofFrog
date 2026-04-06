@@ -235,7 +235,7 @@ class GameParser ( Parser ):
                      "'<='", "'||'", "'<-uniq'", "'<-'", "'&&'", "'\\'", 
                      "'!'", "'^'", "'|'", "'Set'", "'Bool'", "'Void'", "'Int'", 
                      "'Map'", "'return'", "'import'", "'BitString'", "'ModInt'", 
-                     "'Group'", "'GroupElem'", "'Array'", "'RandomFunctions'", 
+                     "'Group'", "'GroupElem'", "'Array'", "'Function'", 
                      "'Primitive'", "'subsets'", "'if'", "'for'", "'to'", 
                      "'in'", "'union'", "'Game'", "'export'", "'as'", "'Phase'", 
                      "'oracles'", "'else'", "'None'", "'this'", "'deterministic'", 
@@ -250,11 +250,11 @@ class GameParser ( Parser ):
                       "AND", "BACKSLASH", "NOT", "CARET", "VBAR", "SET", 
                       "BOOL", "VOID", "INTTYPE", "MAP", "RETURN", "IMPORT", 
                       "BITSTRING", "MODINT", "GROUP", "GROUPELEM", "ARRAY", 
-                      "RANDOMFUNCTIONS", "PRIMITIVE", "SUBSETS", "IF", "FOR", 
-                      "TO", "IN", "UNION", "GAME", "EXPORT", "AS", "PHASE", 
-                      "ORACLES", "ELSE", "NONE", "THIS", "DETERMINISTIC", 
-                      "INJECTIVE", "TRUE", "FALSE", "BINARYNUM", "ZEROS_CARET", 
-                      "ONES_CARET", "INT", "ID", "WS", "LINE_COMMENT", "FILESTRING" ]
+                      "FUNCTION", "PRIMITIVE", "SUBSETS", "IF", "FOR", "TO", 
+                      "IN", "UNION", "GAME", "EXPORT", "AS", "PHASE", "ORACLES", 
+                      "ELSE", "NONE", "THIS", "DETERMINISTIC", "INJECTIVE", 
+                      "TRUE", "FALSE", "BINARYNUM", "ZEROS_CARET", "ONES_CARET", 
+                      "INT", "ID", "WS", "LINE_COMMENT", "FILESTRING" ]
 
     RULE_program = 0
     RULE_gameExport = 1
@@ -336,7 +336,7 @@ class GameParser ( Parser ):
     GROUP=40
     GROUPELEM=41
     ARRAY=42
-    RANDOMFUNCTIONS=43
+    FUNCTION=43
     PRIMITIVE=44
     SUBSETS=45
     IF=46
@@ -3502,34 +3502,6 @@ class GameParser ( Parser ):
                 return visitor.visitChildren(self)
 
 
-    class RandomFunctionTypeContext(TypeContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a GameParser.TypeContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def RANDOMFUNCTIONS(self):
-            return self.getToken(GameParser.RANDOMFUNCTIONS, 0)
-        def L_ANGLE(self):
-            return self.getToken(GameParser.L_ANGLE, 0)
-        def type_(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(GameParser.TypeContext)
-            else:
-                return self.getTypedRuleContext(GameParser.TypeContext,i)
-
-        def COMMA(self):
-            return self.getToken(GameParser.COMMA, 0)
-        def R_ANGLE(self):
-            return self.getToken(GameParser.R_ANGLE, 0)
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitRandomFunctionType" ):
-                return visitor.visitRandomFunctionType(self)
-            else:
-                return visitor.visitChildren(self)
-
-
     class ModIntTypeContext(TypeContext):
 
         def __init__(self, parser, ctx:ParserRuleContext): # actually a GameParser.TypeContext
@@ -3626,6 +3598,34 @@ class GameParser ( Parser ):
         def accept(self, visitor:ParseTreeVisitor):
             if hasattr( visitor, "visitVoidType" ):
                 return visitor.visitVoidType(self)
+            else:
+                return visitor.visitChildren(self)
+
+
+    class FunctionTypeContext(TypeContext):
+
+        def __init__(self, parser, ctx:ParserRuleContext): # actually a GameParser.TypeContext
+            super().__init__(parser)
+            self.copyFrom(ctx)
+
+        def FUNCTION(self):
+            return self.getToken(GameParser.FUNCTION, 0)
+        def L_ANGLE(self):
+            return self.getToken(GameParser.L_ANGLE, 0)
+        def type_(self, i:int=None):
+            if i is None:
+                return self.getTypedRuleContexts(GameParser.TypeContext)
+            else:
+                return self.getTypedRuleContext(GameParser.TypeContext,i)
+
+        def COMMA(self):
+            return self.getToken(GameParser.COMMA, 0)
+        def R_ANGLE(self):
+            return self.getToken(GameParser.R_ANGLE, 0)
+
+        def accept(self, visitor:ParseTreeVisitor):
+            if hasattr( visitor, "visitFunctionType" ):
+                return visitor.visitFunctionType(self)
             else:
                 return visitor.visitChildren(self)
 
@@ -3735,11 +3735,11 @@ class GameParser ( Parser ):
                 pass
 
             elif la_ == 6:
-                localctx = GameParser.RandomFunctionTypeContext(self, localctx)
+                localctx = GameParser.FunctionTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
                 self.state = 452
-                self.match(GameParser.RANDOMFUNCTIONS)
+                self.match(GameParser.FUNCTION)
                 self.state = 453
                 self.match(GameParser.L_ANGLE)
                 self.state = 454

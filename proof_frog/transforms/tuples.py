@@ -11,6 +11,7 @@ import copy
 from .. import frog_ast
 from ..visitors import (
     BlockTransformer,
+    NameTypeMap,
     Transformer,
     Visitor,
     SearchVisitor,
@@ -177,8 +178,13 @@ class FoldTupleIndexTransformer(Transformer):
     calls, ensuring that no randomised computation is silently removed.
     """
 
-    def __init__(self, proof_namespace: frog_ast.Namespace | None = None) -> None:
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace | None = None,
+        proof_let_types: NameTypeMap | None = None,
+    ) -> None:
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
+        self._proof_let_types = proof_let_types
 
     def transform_array_access(
         self, array_access: frog_ast.ArrayAccess
@@ -197,7 +203,9 @@ class FoldTupleIndexTransformer(Transformer):
         for j, elem in enumerate(arr.values):
             if j == i:
                 continue
-            if has_nondeterministic_call(elem, self._proof_namespace):
+            if has_nondeterministic_call(
+                elem, self._proof_namespace, self._proof_let_types
+            ):
                 return frog_ast.ArrayAccess(arr, idx)
 
         return arr.values[i]
@@ -260,9 +268,10 @@ class FoldTupleIndex(TransformPass):
     name = "Fold Tuple Literal Indexing"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return FoldTupleIndexTransformer(proof_namespace=ctx.proof_namespace).transform(
-            game
-        )
+        return FoldTupleIndexTransformer(
+            proof_namespace=ctx.proof_namespace,
+            proof_let_types=ctx.proof_let_types,
+        ).transform(game)
 
 
 class SimplifyTuple(TransformPass):

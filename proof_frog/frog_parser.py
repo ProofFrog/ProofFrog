@@ -155,7 +155,7 @@ _KNOWN_KEYWORDS = {
     "BitString",
     "ModInt",
     "Array",
-    "RandomFunctions",
+    "Function",
     "return",
     "import",
     "export",
@@ -1056,10 +1056,10 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
     def visitMapType(self, ctx: PrimitiveParser.MapTypeContext) -> frog_ast.MapType:
         return frog_ast.MapType(self.visit(ctx.type_()[0]), self.visit(ctx.type_()[1]))
 
-    def visitRandomFunctionType(
-        self, ctx: PrimitiveParser.RandomFunctionTypeContext
-    ) -> frog_ast.RandomFunctionType:
-        return frog_ast.RandomFunctionType(
+    def visitFunctionType(
+        self, ctx: PrimitiveParser.FunctionTypeContext
+    ) -> frog_ast.FunctionType:
+        return frog_ast.FunctionType(
             self.visit(ctx.type_()[0]), self.visit(ctx.type_()[1])
         )
 
@@ -1283,10 +1283,20 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
             game_list.append(self.visit(ctx.proofHelpers().getChild(i)))
 
         proof = ctx.proof()
-        lets = []
+        lets: list[frog_ast.Field] = []
+        sampled_let_names: set[str] = set()
         if proof.lets():
-            for let in proof.lets().field():
-                lets.append(self.visit(let))
+            for entry in proof.lets().letEntry():
+                if isinstance(entry, ProofParser.LetFieldContext):
+                    lets.append(self.visit(entry.field()))
+                elif isinstance(entry, ProofParser.LetSampleContext):
+                    var_type = self.visit(entry.variable().type_())
+                    var_name = entry.variable().id_().getText()
+                    field = frog_ast.Field(var_type, var_name, None)
+                    field.line_num = entry.start.line
+                    field.column_num = entry.start.column
+                    lets.append(field)
+                    sampled_let_names.add(var_name)
 
         assumptions = []
         max_calls = None
@@ -1303,7 +1313,7 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
                 path = lemma_entry.FILESTRING().getText().strip("'")
                 lemmas.append(frog_ast.Lemma(game, path))
 
-        return frog_ast.ProofFile(
+        proof_file = frog_ast.ProofFile(
             [self.visit(im) for im in ctx.moduleImport()],
             game_list,
             lets,
@@ -1313,6 +1323,8 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
             self.visit(proof.theorem().parameterizedGame()),
             self.visit(proof.gameList()),
         )
+        proof_file.sampled_let_names = sampled_let_names
+        return proof_file
 
     def visitParameterizedGame(
         self, ctx: ProofParser.ParameterizedGameContext

@@ -239,9 +239,7 @@ def test_xor_all_terms_cancel_returns_zero() -> None:
             break
         transformed_ast = new_ast
 
-    assert expected_ast == transformed_ast, (
-        "k + k should simplify to 0^lambda"
-    )
+    assert expected_ast == transformed_ast, "k + k should simplify to 0^lambda"
 
 
 def test_no_cancellation_without_type_evidence() -> None:
@@ -362,7 +360,9 @@ def test_reflexive_comparison_allows_deterministic_calls() -> None:
 
     ret_stmt = transformed.block.statements[0]
     assert isinstance(ret_stmt, frog_ast.ReturnStatement)
-    assert isinstance(ret_stmt.expression, frog_ast.Boolean) and ret_stmt.expression.bool
+    assert (
+        isinstance(ret_stmt.expression, frog_ast.Boolean) and ret_stmt.expression.bool
+    )
 
 
 def test_xor_cancellation_with_reflexive_comparison() -> None:

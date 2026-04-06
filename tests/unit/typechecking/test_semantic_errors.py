@@ -50,10 +50,7 @@ class TestUndefinedVariableSuggestions:
     ) -> None:
         """Undefined variable with no close match should have no hint."""
         source = (
-            "Primitive Foo() {\n"
-            "    Set Test = xyzzy;\n\n"
-            "    Int f();\n"
-            "}\n"
+            "Primitive Foo() {\n" "    Set Test = xyzzy;\n\n" "    Int f();\n" "}\n"
         )
         stderr = _check_error_stderr(tmp_path, capsys, source)
         assert "not defined" in stderr
@@ -65,12 +62,7 @@ class TestUndefinedVariableSuggestions:
         """Lowercase type name in a parameter should suggest the capitalized form."""
         # Use a primitive where 'int' appears as a parameter type —
         # this hits the in_parameter_type branch of visit_variable.
-        source = (
-            "Primitive Foo(int x) {\n"
-            "    Int y = x;\n\n"
-            "    Void f();\n"
-            "}\n"
-        )
+        source = "Primitive Foo(int x) {\n" "    Int y = x;\n\n" "    Void f();\n" "}\n"
         stderr = _check_error_stderr(tmp_path, capsys, source)
         assert "not defined" in stderr
         assert "  hint:" in stderr
@@ -204,7 +196,6 @@ class TestMethodNotFoundSuggestions:
         assert "Right" in stderr
         assert "1" in stderr
         assert "2" in stderr
-
 
     def test_scheme_as_game_parameter_rejected(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -381,10 +372,7 @@ class TestRequiresEqualityDirection:
         """requires E.Key == BitString<n> should be accepted."""
         prim = tmp_path / "Enc.primitive"
         prim.write_text(
-            "Primitive Enc(Set KS) {\n"
-            "    Set Key = KS;\n"
-            "    Void f();\n"
-            "}\n"
+            "Primitive Enc(Set KS) {\n" "    Set Key = KS;\n" "    Void f();\n" "}\n"
         )
         source = (
             "import 'Enc.primitive';\n\n"
@@ -406,10 +394,7 @@ class TestRequiresEqualityDirection:
         """requires BitString<n> == E.Key should produce an error."""
         prim = tmp_path / "Enc.primitive"
         prim.write_text(
-            "Primitive Enc(Set KS) {\n"
-            "    Set Key = KS;\n"
-            "    Void f();\n"
-            "}\n"
+            "Primitive Enc(Set KS) {\n" "    Set Key = KS;\n" "    Void f();\n" "}\n"
         )
         source = (
             "import 'Enc.primitive';\n\n"

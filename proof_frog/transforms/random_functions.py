@@ -1,6 +1,6 @@
 """Random-function simplification pass.
 
-When every call to a ``RandomFunctions`` field ``RF`` in a game uses an
+When every call to a ``Function`` field ``RF`` in a game uses an
 argument that was uniquely sampled (via ``<-uniq``) from a consistent set,
 each ``z = RF(r)`` can be replaced with ``z <- R``.
 
@@ -103,7 +103,7 @@ def _exclusion_set_modified(game: frog_ast.Game, set_name: str) -> bool:
 
 def _analyze_rf_eligibility(
     game: frog_ast.Game,
-    rf_types: dict[str, frog_ast.RandomFunctionType],
+    rf_types: dict[str, frog_ast.FunctionType],
 ) -> dict[str, _RFAnalysis]:
     """Check whether each RF field's calls are all guarded by <-uniq on a
     consistent set.
@@ -147,7 +147,7 @@ def _analyze_rf_eligibility(
 def _analyze_block(
     block: frog_ast.Block,
     analysis: dict[str, _RFAnalysis],
-    rf_types: dict[str, frog_ast.RandomFunctionType],
+    rf_types: dict[str, frog_ast.FunctionType],
     field_names: set[str] | None = None,
 ) -> None:
     """Analyze a block for RF calls and their <-uniq guards."""
@@ -238,7 +238,7 @@ class _RFCallExtractor(BlockTransformer):
     def __init__(
         self,
         rf_names: set[str],
-        rf_types: dict[str, frog_ast.RandomFunctionType],
+        rf_types: dict[str, frog_ast.FunctionType],
     ) -> None:
         self.rf_names = rf_names
         self.rf_types = rf_types
@@ -299,7 +299,7 @@ class _RFCallReplacer(BlockTransformer):
 
     def __init__(
         self,
-        eligible_rfs: dict[str, frog_ast.RandomFunctionType],
+        eligible_rfs: dict[str, frog_ast.FunctionType],
     ) -> None:
         self.eligible_rfs = eligible_rfs
 
@@ -339,11 +339,11 @@ class UniqueRFSimplificationTransformer(BlockTransformer):
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         # Discover RF types from Sample statements in this block
-        rf_types: dict[str, frog_ast.RandomFunctionType] = {}
+        rf_types: dict[str, frog_ast.FunctionType] = {}
         for stmt in block.statements:
             if (
                 isinstance(stmt, frog_ast.Sample)
-                and isinstance(stmt.sampled_from, frog_ast.RandomFunctionType)
+                and isinstance(stmt.sampled_from, frog_ast.FunctionType)
                 and isinstance(stmt.var, frog_ast.Variable)
             ):
                 rf_types[stmt.var.name] = stmt.sampled_from
@@ -370,9 +370,9 @@ class UniqueRFSimplification(TransformPass):
     name = "Unique RF Simplification"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        rf_types: dict[str, frog_ast.RandomFunctionType] = {}
+        rf_types: dict[str, frog_ast.FunctionType] = {}
         for rf_field in game.fields:
-            if isinstance(rf_field.type, frog_ast.RandomFunctionType):
+            if isinstance(rf_field.type, frog_ast.FunctionType):
                 rf_types[rf_field.name] = rf_field.type
 
         if not rf_types:
@@ -395,9 +395,9 @@ class ExtractRFCalls(TransformPass):
     name = "Extract RF Calls"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        rf_types: dict[str, frog_ast.RandomFunctionType] = {}
+        rf_types: dict[str, frog_ast.FunctionType] = {}
         for rf_field in game.fields:
-            if isinstance(rf_field.type, frog_ast.RandomFunctionType):
+            if isinstance(rf_field.type, frog_ast.FunctionType):
                 rf_types[rf_field.name] = rf_field.type
 
         if not rf_types:
@@ -468,7 +468,7 @@ def _count_rf_calls(block: frog_ast.Block, rf_name: str) -> tuple[int, int]:
 class LocalRFToUniformTransformer(BlockTransformer):
     """Replace a locally-sampled RF called exactly once with a uniform sample.
 
-    A ``RandomFunctions`` variable that is sampled locally and called once on
+    A ``Function`` variable that is sampled locally and called once on
     any input produces a uniform sample from its range type, because a fresh
     random function evaluated on a single input is an independent uniform draw.
 
@@ -487,7 +487,7 @@ class LocalRFToUniformTransformer(BlockTransformer):
         for sample_idx, stmt in enumerate(block.statements):
             if not (
                 isinstance(stmt, frog_ast.Sample)
-                and isinstance(stmt.sampled_from, frog_ast.RandomFunctionType)
+                and isinstance(stmt.sampled_from, frog_ast.FunctionType)
                 and isinstance(stmt.var, frog_ast.Variable)
             ):
                 continue
@@ -501,7 +501,7 @@ class LocalRFToUniformTransformer(BlockTransformer):
                 has_decl = any(
                     isinstance(s, frog_ast.VariableDeclaration)
                     and s.name == rf_name
-                    and isinstance(s.type, frog_ast.RandomFunctionType)
+                    and isinstance(s.type, frog_ast.FunctionType)
                     for s in block.statements[:sample_idx]
                 )
                 if not has_decl:
@@ -571,6 +571,207 @@ class LocalRFToUniform(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return LocalRFToUniformTransformer(ctx).transform(game)
+
+
+# ---------------------------------------------------------------------------
+# RF on fresh random local input -> uniform sample
+# ---------------------------------------------------------------------------
+
+
+def _count_var_uses(block: frog_ast.Block, var_name: str) -> int:
+    """Count all references to a variable name in a block."""
+    count: list[int] = [0]
+
+    def counter(node: frog_ast.ASTNode) -> bool:
+        if isinstance(node, frog_ast.Variable) and node.name == var_name:
+            count[0] += 1
+        return False
+
+    SearchVisitor(counter).visit(block)
+    return count[0]
+
+
+def _find_rf_call_of_var(
+    block: frog_ast.Block,
+    var_name: str,
+    rf_names: set[str],
+) -> frog_ast.FuncCall | None:
+    """Find ``RF(v)`` where *v* is the given variable and RF is a known RF."""
+
+    def matcher(node: frog_ast.ASTNode) -> bool:
+        return (
+            isinstance(node, frog_ast.FuncCall)
+            and isinstance(node.func, frog_ast.Variable)
+            and node.func.name in rf_names
+            and len(node.args) == 1
+            and isinstance(node.args[0], frog_ast.Variable)
+            and node.args[0].name == var_name
+        )
+
+    result = SearchVisitor(matcher).visit(block)
+    if result is not None:
+        assert isinstance(result, frog_ast.FuncCall)
+    return result  # type: ignore[return-value]
+
+
+class _FreshInputRFTransformer(BlockTransformer):
+    """Replace ``RF(v)`` with ``z <- RangeType`` when *v* is a ``<-uniq[S]``
+    sampled variable used only in that one RF call.
+
+    The exclusion set ``S`` guarantees that *v* differs from all inputs on
+    which the RF has been queried elsewhere (e.g., via an adversary oracle).
+    Therefore RF(v) is an independent uniform draw from the range type.
+    This is exactly sound — no guessing loss.
+    """
+
+    def __init__(
+        self,
+        rf_types: dict[str, frog_ast.FunctionType],
+        ctx: PipelineContext | None = None,
+    ) -> None:
+        self.rf_types = rf_types
+        self.ctx = ctx
+        self._loop_depth = 0
+
+    def transform_numeric_for(  # type: ignore[override]
+        self, node: frog_ast.NumericFor
+    ) -> frog_ast.NumericFor:
+        """Track loop depth so _transform_block_wrapper skips loop bodies."""
+        self._loop_depth += 1
+        new_block = self.transform_block(node.block)
+        self._loop_depth -= 1
+        if new_block is node.block:
+            return node
+        new_node = copy.copy(node)
+        new_node.block = new_block
+        return new_node
+
+    def transform_generic_for(  # type: ignore[override]
+        self, node: frog_ast.GenericFor
+    ) -> frog_ast.GenericFor:
+        """Track loop depth so _transform_block_wrapper skips loop bodies."""
+        self._loop_depth += 1
+        new_block = self.transform_block(node.block)
+        self._loop_depth -= 1
+        if new_block is node.block:
+            return node
+        new_node = copy.copy(node)
+        new_node.block = new_block
+        return new_node
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        # Don't transform inside loop bodies — the same <-uniq sample
+        # would be evaluated multiple times per game execution.
+        if self._loop_depth > 0:
+            return block
+        for sample_idx, stmt in enumerate(block.statements):
+            # Look for unique samples: T v <-uniq[S] T;
+            # Only <-uniq inputs are eligible — the exclusion set guarantees
+            # the input hasn't been queried on the RF elsewhere, making the
+            # replacement exactly sound.  Plain uniform samples (T v <- T)
+            # would introduce a security loss that must be accounted for
+            # explicitly via a UniqueSampling assumption hop.
+            if not isinstance(stmt, frog_ast.UniqueSample):
+                continue
+            if not isinstance(stmt.var, frog_ast.Variable):
+                continue
+
+            var_name = stmt.var.name
+            remaining = frog_ast.Block(block.statements[sample_idx + 1 :])
+
+            # Variable must be used exactly once in the remaining block
+            if _count_var_uses(remaining, var_name) != 1:
+                continue
+
+            # That single use must be as the sole argument to an RF call
+            rf_call = _find_rf_call_of_var(
+                remaining, var_name, set(self.rf_types.keys())
+            )
+            if rf_call is None:
+                continue
+
+            assert isinstance(rf_call.func, frog_ast.Variable)
+            rf_name = rf_call.func.name
+
+            # Don't simplify if the RF call is inside a loop
+            if _rf_call_in_loop(remaining, rf_name):
+                continue
+
+            range_type = copy.deepcopy(self.rf_types[rf_name].range_type)
+
+            # Replace the RF call node with a fresh variable, and add a
+            # Sample statement for it — effectively RF(v) -> z <- Range.
+            result_var_name = f"__fresh_rf_{var_name}__"
+            result_var = frog_ast.Variable(result_var_name)
+            new_remaining = ReplaceTransformer(rf_call, result_var).transform(remaining)
+
+            sample_stmt = frog_ast.Sample(
+                range_type,  # type: ignore[arg-type]
+                frog_ast.Variable(result_var_name),
+                copy.deepcopy(range_type),  # type: ignore[arg-type]
+            )
+
+            # Drop the original v sample (now dead) and prepend the
+            # fresh-result sample.
+            new_stmts = (
+                list(block.statements[:sample_idx])
+                + [sample_stmt]
+                + list(new_remaining.statements)
+            )
+            return self.transform_block(frog_ast.Block(new_stmts))
+
+        return block
+
+
+class FreshInputRFToUniform(TransformPass):
+    """Replace RF(v) with uniform when v is a ``<-uniq`` single-use local.
+
+    When the input is sampled via ``<-uniq[S]``, the exclusion set
+    guarantees it differs from all other RF inputs.  This makes the
+    replacement exactly sound — no guessing loss.
+    """
+
+    name = "Fresh Input RF To Uniform"
+
+    @staticmethod
+    def _sampled_function_fields(game: frog_ast.Game) -> set[str]:
+        """Return names of Function fields that are sampled in Initialize."""
+        sampled: set[str] = set()
+        for method in game.methods:
+            if method.signature.name != "Initialize":
+                continue
+            for stmt in method.block.statements:
+                if (
+                    isinstance(stmt, frog_ast.Sample)
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and isinstance(stmt.sampled_from, frog_ast.FunctionType)
+                ):
+                    sampled.add(stmt.var.name)
+        return sampled
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        # Collect RF types from sampled game fields and sampled proof-level
+        # Functions.  Only Functions that are explicitly sampled (via <-)
+        # are random functions; unsampled ones are known deterministic.
+        rf_types: dict[str, frog_ast.FunctionType] = {}
+        sampled_fields = self._sampled_function_fields(game)
+        for rf_field in game.fields:
+            if (
+                isinstance(rf_field.type, frog_ast.FunctionType)
+                and rf_field.name in sampled_fields
+            ):
+                rf_types[rf_field.name] = rf_field.type
+        for entry in ctx.proof_let_types.type_map:
+            if (
+                isinstance(entry.type, frog_ast.FunctionType)
+                and entry.name in ctx.sampled_let_names
+            ):
+                rf_types[entry.name] = entry.type
+
+        if not rf_types:
+            return game
+
+        return _FreshInputRFTransformer(rf_types, ctx).transform(game)
 
 
 # ---------------------------------------------------------------------------
@@ -949,9 +1150,9 @@ class ChallengeExclusionRFToUniformTransformer:
             proof_namespace = {}
         field_names = [f.name for f in game.fields]
         field_types: dict[str, frog_ast.Type] = {f.name: f.type for f in game.fields}
-        rf_fields: dict[str, frog_ast.RandomFunctionType] = {}
+        rf_fields: dict[str, frog_ast.FunctionType] = {}
         for f in game.fields:
-            if isinstance(f.type, frog_ast.RandomFunctionType):
+            if isinstance(f.type, frog_ast.FunctionType):
                 rf_fields[f.name] = f.type
 
         if not rf_fields:

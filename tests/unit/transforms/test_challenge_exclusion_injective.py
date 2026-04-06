@@ -19,25 +19,21 @@ def _make_namespace_with_injective() -> frog_ast.Namespace:
     Primitive ``E`` has method ``Encode(BitString<8>) -> BitString<8>``
     marked ``deterministic injective``.
     """
-    prim = frog_parser.parse_primitive_file(
-        """
+    prim = frog_parser.parse_primitive_file("""
         Primitive E(Int n) {
             deterministic injective BitString<n> Encode(BitString<n> x);
         }
-        """
-    )
+        """)
     return {"E": prim}
 
 
 def _make_namespace_no_injective() -> frog_ast.Namespace:
     """Build a namespace where the method is NOT injective."""
-    prim = frog_parser.parse_primitive_file(
-        """
+    prim = frog_parser.parse_primitive_file("""
         Primitive E(Int n) {
             BitString<n> Encode(BitString<n> x);
         }
-        """
-    )
+        """)
     return {"E": prim}
 
 
@@ -59,9 +55,9 @@ def test_injective_encode_wrapping_challenge_field() -> None:
     source = """
     Game Test() {
         BitString<8> ct_star;
-        RandomFunctions<BitString<8>, BitString<16>> RF;
+        Function<BitString<8>, BitString<16>> RF;
         BitString<16> Initialize() {
-            RF <- RandomFunctions<BitString<8>, BitString<16>>;
+            RF <- Function<BitString<8>, BitString<16>>;
             ct_star = 42;
             BitString<16> result = RF(E.Encode(ct_star));
             return result;
@@ -78,9 +74,9 @@ def test_injective_encode_wrapping_challenge_field() -> None:
     expected = """
     Game Test() {
         BitString<8> ct_star;
-        RandomFunctions<BitString<8>, BitString<16>> RF;
+        Function<BitString<8>, BitString<16>> RF;
         BitString<16> Initialize() {
-            RF <- RandomFunctions<BitString<8>, BitString<16>>;
+            RF <- Function<BitString<8>, BitString<16>>;
             ct_star = 42;
             BitString<16> result <- BitString<16>;
             return result;
@@ -108,9 +104,9 @@ def test_injective_in_concatenation() -> None:
     Game Test() {
         BitString<8> field1;
         BitString<8> field2;
-        RandomFunctions<BitString<16>, BitString<16>> RF;
+        Function<BitString<16>, BitString<16>> RF;
         BitString<16> Initialize() {
-            RF <- RandomFunctions<BitString<16>, BitString<16>>;
+            RF <- Function<BitString<16>, BitString<16>>;
             field1 = 1;
             field2 = 2;
             BitString<16> result = RF(E.Encode(field1) || E.Encode(field2));
@@ -129,9 +125,9 @@ def test_injective_in_concatenation() -> None:
     Game Test() {
         BitString<8> field1;
         BitString<8> field2;
-        RandomFunctions<BitString<16>, BitString<16>> RF;
+        Function<BitString<16>, BitString<16>> RF;
         BitString<16> Initialize() {
-            RF <- RandomFunctions<BitString<16>, BitString<16>>;
+            RF <- Function<BitString<16>, BitString<16>>;
             field1 = 1;
             field2 = 2;
             BitString<16> result <- BitString<16>;
@@ -161,9 +157,9 @@ def test_non_injective_encode_blocks_transform() -> None:
     source = """
     Game Test() {
         BitString<8> ct_star;
-        RandomFunctions<BitString<8>, BitString<16>> RF;
+        Function<BitString<8>, BitString<16>> RF;
         BitString<16> Initialize() {
-            RF <- RandomFunctions<BitString<8>, BitString<16>>;
+            RF <- Function<BitString<8>, BitString<16>>;
             ct_star = 42;
             BitString<16> result = RF(E.Encode(ct_star));
             return result;
@@ -190,9 +186,9 @@ def test_no_namespace_blocks_transform() -> None:
     source = """
     Game Test() {
         BitString<8> ct_star;
-        RandomFunctions<BitString<8>, BitString<16>> RF;
+        Function<BitString<8>, BitString<16>> RF;
         BitString<16> Initialize() {
-            RF <- RandomFunctions<BitString<8>, BitString<16>>;
+            RF <- Function<BitString<8>, BitString<16>>;
             ct_star = 42;
             BitString<16> result = RF(E.Encode(ct_star));
             return result;
@@ -217,9 +213,9 @@ def test_different_functions_block_transform() -> None:
     source = """
     Game Test() {
         BitString<8> ct_star;
-        RandomFunctions<BitString<8>, BitString<16>> RF;
+        Function<BitString<8>, BitString<16>> RF;
         BitString<16> Initialize() {
-            RF <- RandomFunctions<BitString<8>, BitString<16>>;
+            RF <- Function<BitString<8>, BitString<16>>;
             ct_star = 42;
             BitString<16> result = RF(E.Encode(ct_star));
             return result;

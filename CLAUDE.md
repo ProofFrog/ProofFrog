@@ -124,7 +124,7 @@ The essentials for writing correct FrogLang:
 - `Array<T, n>` — fixed-size arrays indexed `0` to `n-1`
 - `Map<K, V>` — finite partial functions (initially empty; accessing an absent key is undefined)
 - `Set<T>` — finite sets
-- `RandomFunctions<D, R>` — lazily-evaluated truly random function (consistent on repeated inputs, independent across distinct inputs)
+- `Function<D, R>` — deterministic function from D to R; when sampled (`<-`), produces a random function (consistent on repeated inputs, independent across distinct inputs)
 - `T?` — optional type (value of `T` or `None`)
 - `[T1, T2, ..., Tn]` — tuples; access by constant index `t[0]`, `t[1]`
 
@@ -140,9 +140,11 @@ The essentials for writing correct FrogLang:
 - `Type x <- Type;` — uniform random sample (e.g., `BitString<n> r <- BitString<n>;`)
 - `Type x <-uniq[S] Type;` — sample uniformly from `Type \ S` (rejection sampling)
 - `M[k] <- Type;` — sample into a map entry
-- `RandomFunctions<D, R> RF <- RandomFunctions<D, R>;` — instantiate a fresh random function
+- `Function<D, R> H <- Function<D, R>;` — sample a random function (ROM)
 
 **Non-determinism default:** Scheme method calls (e.g., `F.evaluate(k, x)`) are **non-deterministic by default** — each invocation may return a different result even with the same arguments.
+
+**Function<D, R> in proofs:** In a proof's `let:` block, `Function<D, R> H;` declares a known deterministic function (standard model — the adversary can compute it). `Function<D, R> H <- Function<D, R>;` samples a random function (ROM). The engine treats `Function` calls as deterministic (same input → same output) and only applies random-function simplifications to sampled Functions.
 
 **Method annotations:** Primitive method declarations support `deterministic` and `injective` modifiers (e.g., `deterministic injective BitString<n> Encode(GroupElem g);`). `deterministic` tells the engine the method always returns the same output for the same inputs (enabling expression aliasing, field hoisting, tuple folding through function calls, same-method call deduplication via `DeduplicateDeterministicCalls`, and cross-method field alias propagation via `CrossMethodFieldAlias`). `injective` tells the engine the method maps distinct inputs to distinct outputs (enabling the `ChallengeExclusionRFToUniform` transform to see through encoding wrappers). Methods without these annotations are treated conservatively.
 
@@ -151,7 +153,8 @@ The essentials for writing correct FrogLang:
 - XOR cancellation: `x + x` → `0^n`; XOR identity: `x + 0^n` → `x`
 - Sample merge: independent `BitString<n>` and `BitString<m>` used only via concatenation → single `BitString<n+m>`
 - Sample split: `BitString<n>` accessed only via non-overlapping slices → independent samples per slice
-- Random function on distinct inputs (via unique sampling) → independent uniform samples
+- Random function on distinct inputs (via `<-uniq` sampling) → independent uniform samples
+- Random function on fresh `<-uniq` input used only in that call → independent uniform sample (`FreshInputRFToUniform`)
 - Dead code elimination, constant folding, single-use variable inlining, branch elimination, tuple index folding
 
 ### Guidelines for creating FrogLang files

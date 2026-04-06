@@ -10,9 +10,7 @@ def _groupelem_type() -> frog_ast.GroupElemType:
 
 
 def _modint_type() -> frog_ast.ModIntType:
-    return frog_ast.ModIntType(
-        frog_ast.FieldAccess(frog_ast.Variable("G"), "order")
-    )
+    return frog_ast.ModIntType(frog_ast.FieldAccess(frog_ast.Variable("G"), "order"))
 
 
 def _type_map() -> dict[str, frog_ast.Type]:

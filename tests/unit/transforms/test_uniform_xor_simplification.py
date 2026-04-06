@@ -174,9 +174,7 @@ def test_uniform_xor_simplification(
     # Apply repeatedly to handle nested XOR (mirroring engine's iterative pipeline)
     transformed_ast = method_ast
     while True:
-        new_ast = UniformXorSimplificationTransformer().transform(
-            transformed_ast
-        )
+        new_ast = UniformXorSimplificationTransformer().transform(transformed_ast)
         if new_ast == transformed_ast:
             break
         transformed_ast = new_ast

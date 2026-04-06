@@ -21,9 +21,9 @@ def _transform_and_compare(source: str, expected: str) -> None:
             """
             Game Test() {
                 BitString<8> ct_star;
-                RandomFunctions<BitString<8>, BitString<16>> RF;
+                Function<BitString<8>, BitString<16>> RF;
                 BitString<16> Initialize() {
-                    RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                    RF <- Function<BitString<8>, BitString<16>>;
                     ct_star = 42;
                     BitString<16> result = RF(ct_star);
                     return result;
@@ -40,9 +40,9 @@ def _transform_and_compare(source: str, expected: str) -> None:
             """
             Game Test() {
                 BitString<8> ct_star;
-                RandomFunctions<BitString<8>, BitString<16>> RF;
+                Function<BitString<8>, BitString<16>> RF;
                 BitString<16> Initialize() {
-                    RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                    RF <- Function<BitString<8>, BitString<16>>;
                     ct_star = 42;
                     BitString<16> result <- BitString<16>;
                     return result;
@@ -64,9 +64,9 @@ def _transform_and_compare(source: str, expected: str) -> None:
             Game Test() {
                 BitString<8> field1;
                 BitString<8> field2;
-                RandomFunctions<[BitString<8>, BitString<16>], BitString<16>> RF;
+                Function<[BitString<8>, BitString<16>], BitString<16>> RF;
                 BitString<16> Initialize() {
-                    RF <- RandomFunctions<[BitString<8>, BitString<16>], BitString<16>>;
+                    RF <- Function<[BitString<8>, BitString<16>], BitString<16>>;
                     field1 = 1;
                     field2 = 2;
                     BitString<16> result = RF([field1, field1 || field2]);
@@ -85,9 +85,9 @@ def _transform_and_compare(source: str, expected: str) -> None:
             Game Test() {
                 BitString<8> field1;
                 BitString<8> field2;
-                RandomFunctions<[BitString<8>, BitString<16>], BitString<16>> RF;
+                Function<[BitString<8>, BitString<16>], BitString<16>> RF;
                 BitString<16> Initialize() {
-                    RF <- RandomFunctions<[BitString<8>, BitString<16>], BitString<16>>;
+                    RF <- Function<[BitString<8>, BitString<16>], BitString<16>>;
                     field1 = 1;
                     field2 = 2;
                     BitString<16> result <- BitString<16>;
@@ -108,9 +108,9 @@ def _transform_and_compare(source: str, expected: str) -> None:
             """
             Game Test() {
                 BitString<8> ct_star;
-                RandomFunctions<BitString<8>, BitString<16>> RF;
+                Function<BitString<8>, BitString<16>> RF;
                 BitString<16> Initialize() {
-                    RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                    RF <- Function<BitString<8>, BitString<16>>;
                     ct_star = 42;
                     BitString<16> result = RF(ct_star);
                     return result;
@@ -124,9 +124,9 @@ def _transform_and_compare(source: str, expected: str) -> None:
             """
             Game Test() {
                 BitString<8> ct_star;
-                RandomFunctions<BitString<8>, BitString<16>> RF;
+                Function<BitString<8>, BitString<16>> RF;
                 BitString<16> Initialize() {
-                    RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                    RF <- Function<BitString<8>, BitString<16>>;
                     ct_star = 42;
                     BitString<16> result = RF(ct_star);
                     return result;
@@ -143,9 +143,9 @@ def _transform_and_compare(source: str, expected: str) -> None:
             """
             Game Test() {
                 BitString<8> ct_star;
-                RandomFunctions<BitString<8>, BitString<16>> RF;
+                Function<BitString<8>, BitString<16>> RF;
                 BitString<16> Initialize() {
-                    RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                    RF <- Function<BitString<8>, BitString<16>>;
                     ct_star = 42;
                     BitString<16> result = RF(ct_star);
                     return result;
@@ -162,9 +162,9 @@ def _transform_and_compare(source: str, expected: str) -> None:
             """
             Game Test() {
                 BitString<8> ct_star;
-                RandomFunctions<BitString<8>, BitString<16>> RF;
+                Function<BitString<8>, BitString<16>> RF;
                 BitString<16> Initialize() {
-                    RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                    RF <- Function<BitString<8>, BitString<16>>;
                     ct_star = 42;
                     BitString<16> result = RF(ct_star);
                     return result;
@@ -186,9 +186,9 @@ def _transform_and_compare(source: str, expected: str) -> None:
             Game Test() {
                 BitString<8> ct_star;
                 BitString<8> other_field;
-                RandomFunctions<BitString<8>, BitString<16>> RF;
+                Function<BitString<8>, BitString<16>> RF;
                 BitString<16> Initialize() {
-                    RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                    RF <- Function<BitString<8>, BitString<16>>;
                     ct_star = 42;
                     other_field = 99;
                     BitString<16> result = RF(other_field);
@@ -207,9 +207,9 @@ def _transform_and_compare(source: str, expected: str) -> None:
             Game Test() {
                 BitString<8> ct_star;
                 BitString<8> other_field;
-                RandomFunctions<BitString<8>, BitString<16>> RF;
+                Function<BitString<8>, BitString<16>> RF;
                 BitString<16> Initialize() {
-                    RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                    RF <- Function<BitString<8>, BitString<16>>;
                     ct_star = 42;
                     other_field = 99;
                     BitString<16> result = RF(other_field);
@@ -232,9 +232,9 @@ def _transform_and_compare(source: str, expected: str) -> None:
             Game Test() {
                 BitString<8> field_A;
                 BitString<8> field_B;
-                RandomFunctions<[BitString<8>, BitString<8>], BitString<16>> RF;
+                Function<[BitString<8>, BitString<8>], BitString<16>> RF;
                 BitString<16> Initialize() {
-                    RF <- RandomFunctions<[BitString<8>, BitString<8>], BitString<16>>;
+                    RF <- Function<[BitString<8>, BitString<8>], BitString<16>>;
                     field_A = 1;
                     field_B = 2;
                     BitString<16> result = RF([field_A, field_B]);
@@ -253,9 +253,9 @@ def _transform_and_compare(source: str, expected: str) -> None:
             Game Test() {
                 BitString<8> field_A;
                 BitString<8> field_B;
-                RandomFunctions<[BitString<8>, BitString<8>], BitString<16>> RF;
+                Function<[BitString<8>, BitString<8>], BitString<16>> RF;
                 BitString<16> Initialize() {
-                    RF <- RandomFunctions<[BitString<8>, BitString<8>], BitString<16>>;
+                    RF <- Function<[BitString<8>, BitString<8>], BitString<16>>;
                     field_A = 1;
                     field_B = 2;
                     BitString<16> result = RF([field_A, field_B]);
@@ -288,9 +288,9 @@ def test_rf_call_inside_guard_block_not_replaced() -> None:
     source = """
     Game Test() {
         BitString<8> ct_star;
-        RandomFunctions<BitString<8>, BitString<16>> RF;
+        Function<BitString<8>, BitString<16>> RF;
         BitString<16> Initialize() {
-            RF <- RandomFunctions<BitString<8>, BitString<16>>;
+            RF <- Function<BitString<8>, BitString<16>>;
             ct_star = 42;
             BitString<16> result = RF(ct_star);
             return result;
@@ -307,6 +307,6 @@ def test_rf_call_inside_guard_block_not_replaced() -> None:
     """
     game = frog_parser.parse_game(source)
     result = ChallengeExclusionRFToUniformTransformer().transform(game)
-    assert result == game, (
-        "Init RF call should not be replaced when guard block contains RF call"
-    )
+    assert (
+        result == game
+    ), "Init RF call should not be replaced when guard block contains RF call"

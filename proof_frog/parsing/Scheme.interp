@@ -45,7 +45,7 @@ null
 'Group'
 'GroupElem'
 'Array'
-'RandomFunctions'
+'Function'
 'Primitive'
 'subsets'
 'if'
@@ -121,7 +121,7 @@ MODINT
 GROUP
 GROUPELEM
 ARRAY
-RANDOMFUNCTIONS
+FUNCTION
 PRIMITIVE
 SUBSETS
 IF

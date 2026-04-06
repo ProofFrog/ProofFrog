@@ -9,9 +9,7 @@ class TestCompareTypesBasic:
     """Basic compare_types behavior unchanged from before."""
 
     def test_same_type(self) -> None:
-        assert semantic_analysis.compare_types(
-            frog_ast.IntType(), frog_ast.IntType()
-        )
+        assert semantic_analysis.compare_types(frog_ast.IntType(), frog_ast.IntType())
 
     def test_different_types(self) -> None:
         assert not semantic_analysis.compare_types(
@@ -66,7 +64,9 @@ class TestCompareTypesSubsets:
     """Tests for compare_types with subsets pairs."""
 
     @staticmethod
-    def _pairs() -> list[tuple[semantic_analysis.PossibleType, semantic_analysis.PossibleType]]:
+    def _pairs() -> (
+        list[tuple[semantic_analysis.PossibleType, semantic_analysis.PossibleType]]
+    ):
         return [
             (frog_ast.Variable("KeySpace2"), frog_ast.Variable("IntermediateSpace"))
         ]

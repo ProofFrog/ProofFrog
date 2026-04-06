@@ -12,7 +12,6 @@ from proof_frog.transforms.random_functions import (
 )
 from proof_frog.visitors import NameTypeMap
 
-
 # -----------------------------------------------------------------------
 # Helper
 # -----------------------------------------------------------------------
@@ -41,13 +40,12 @@ class TestFindChallengeGuardSlice:
 
     def test_detects_slice_guard(self):
         """Detect if (m[start:end] == field) { return ...; }."""
-        game = frog_parser.parse_game(
-            """
+        game = frog_parser.parse_game("""
             Game Test() {
                 BitString<4> challengeField;
-                RandomFunctions<BitString<12>, BitString<8>> RF;
+                Function<BitString<12>, BitString<8>> RF;
                 BitString<8> Initialize() {
-                    RF <- RandomFunctions<BitString<12>, BitString<8>>;
+                    RF <- Function<BitString<12>, BitString<8>>;
                     challengeField = 0;
                     BitString<8> r = RF(challengeField || challengeField || challengeField);
                     return r;
@@ -59,8 +57,7 @@ class TestFindChallengeGuardSlice:
                     return RF(m);
                 }
             }
-            """
-        )
+            """)
         field_names = [f.name for f in game.fields]
         oracle = [m for m in game.methods if m.signature.name == "Oracle"][0]
         result = _find_challenge_guard(oracle, field_names)
@@ -71,13 +68,12 @@ class TestFindChallengeGuardSlice:
 
     def test_direct_guard_not_slice(self):
         """Direct param == field guard is NOT a slice guard."""
-        game = frog_parser.parse_game(
-            """
+        game = frog_parser.parse_game("""
             Game Test() {
                 BitString<8> ct_star;
-                RandomFunctions<BitString<8>, BitString<16>> RF;
+                Function<BitString<8>, BitString<16>> RF;
                 BitString<16> Initialize() {
-                    RF <- RandomFunctions<BitString<8>, BitString<16>>;
+                    RF <- Function<BitString<8>, BitString<16>>;
                     ct_star = 42;
                     BitString<16> r = RF(ct_star);
                     return r;
@@ -90,8 +86,7 @@ class TestFindChallengeGuardSlice:
                     return r;
                 }
             }
-            """
-        )
+            """)
         field_names = [f.name for f in game.fields]
         query = [m for m in game.methods if m.signature.name == "Query"][0]
         result = _find_challenge_guard(query, field_names)
@@ -100,13 +95,12 @@ class TestFindChallengeGuardSlice:
 
     def test_slice_guard_with_sample_then_return(self):
         """Slice guard with sample-then-return body is accepted."""
-        game = frog_parser.parse_game(
-            """
+        game = frog_parser.parse_game("""
             Game Test() {
                 BitString<4> challengeField;
-                RandomFunctions<BitString<12>, BitString<8>> RF;
+                Function<BitString<12>, BitString<8>> RF;
                 BitString<8> Initialize() {
-                    RF <- RandomFunctions<BitString<12>, BitString<8>>;
+                    RF <- Function<BitString<12>, BitString<8>>;
                     challengeField = 0;
                     BitString<8> r = RF(challengeField || challengeField || challengeField);
                     return r;
@@ -119,8 +113,7 @@ class TestFindChallengeGuardSlice:
                     return RF(m);
                 }
             }
-            """
-        )
+            """)
         field_names = [f.name for f in game.fields]
         oracle = [m for m in game.methods if m.signature.name == "Oracle"][0]
         result = _find_challenge_guard(oracle, field_names)
@@ -142,9 +135,9 @@ class TestSliceGuardTransformPositive:
             """
             Game Test() {
                 BitString<4> challengeField;
-                RandomFunctions<BitString<12>, BitString<8>> RF;
+                Function<BitString<12>, BitString<8>> RF;
                 BitString<8> Initialize() {
-                    RF <- RandomFunctions<BitString<12>, BitString<8>>;
+                    RF <- Function<BitString<12>, BitString<8>>;
                     challengeField = 0;
                     BitString<8> result = RF(challengeField || challengeField || challengeField);
                     return result;
@@ -160,9 +153,9 @@ class TestSliceGuardTransformPositive:
             """
             Game Test() {
                 BitString<4> challengeField;
-                RandomFunctions<BitString<12>, BitString<8>> RF;
+                Function<BitString<12>, BitString<8>> RF;
                 BitString<8> Initialize() {
-                    RF <- RandomFunctions<BitString<12>, BitString<8>>;
+                    RF <- Function<BitString<12>, BitString<8>>;
                     challengeField = 0;
                     BitString<8> result <- BitString<8>;
                     return result;
@@ -183,9 +176,9 @@ class TestSliceGuardTransformPositive:
             """
             Game Test() {
                 BitString<4> challengeField;
-                RandomFunctions<BitString<8>, BitString<8>> RF;
+                Function<BitString<8>, BitString<8>> RF;
                 BitString<8> Initialize() {
-                    RF <- RandomFunctions<BitString<8>, BitString<8>>;
+                    RF <- Function<BitString<8>, BitString<8>>;
                     challengeField = 0;
                     BitString<8> result = RF(challengeField || challengeField);
                     return result;
@@ -201,9 +194,9 @@ class TestSliceGuardTransformPositive:
             """
             Game Test() {
                 BitString<4> challengeField;
-                RandomFunctions<BitString<8>, BitString<8>> RF;
+                Function<BitString<8>, BitString<8>> RF;
                 BitString<8> Initialize() {
-                    RF <- RandomFunctions<BitString<8>, BitString<8>>;
+                    RF <- Function<BitString<8>, BitString<8>>;
                     challengeField = 0;
                     BitString<8> result <- BitString<8>;
                     return result;
@@ -224,9 +217,9 @@ class TestSliceGuardTransformPositive:
             """
             Game Test() {
                 BitString<4> challengeField;
-                RandomFunctions<BitString<12>, BitString<8>> RF;
+                Function<BitString<12>, BitString<8>> RF;
                 BitString<8> Initialize() {
-                    RF <- RandomFunctions<BitString<12>, BitString<8>>;
+                    RF <- Function<BitString<12>, BitString<8>>;
                     challengeField = 0;
                     BitString<8> result = RF(challengeField || challengeField || challengeField);
                     return result;
@@ -243,9 +236,9 @@ class TestSliceGuardTransformPositive:
             """
             Game Test() {
                 BitString<4> challengeField;
-                RandomFunctions<BitString<12>, BitString<8>> RF;
+                Function<BitString<12>, BitString<8>> RF;
                 BitString<8> Initialize() {
-                    RF <- RandomFunctions<BitString<12>, BitString<8>>;
+                    RF <- Function<BitString<12>, BitString<8>>;
                     challengeField = 0;
                     BitString<8> result <- BitString<8>;
                     return result;
@@ -267,9 +260,9 @@ class TestSliceGuardTransformPositive:
             """
             Game Test() {
                 BitString<4> challengeField;
-                RandomFunctions<BitString<12>, BitString<8>> RF;
+                Function<BitString<12>, BitString<8>> RF;
                 BitString<8> Initialize() {
-                    RF <- RandomFunctions<BitString<12>, BitString<8>>;
+                    RF <- Function<BitString<12>, BitString<8>>;
                     challengeField = 0;
                     BitString<8> result = RF(challengeField || challengeField || challengeField);
                     return result;
@@ -292,9 +285,9 @@ class TestSliceGuardTransformPositive:
             """
             Game Test() {
                 BitString<4> challengeField;
-                RandomFunctions<BitString<12>, BitString<8>> RF;
+                Function<BitString<12>, BitString<8>> RF;
                 BitString<8> Initialize() {
-                    RF <- RandomFunctions<BitString<12>, BitString<8>>;
+                    RF <- Function<BitString<12>, BitString<8>>;
                     challengeField = 0;
                     BitString<8> result <- BitString<8>;
                     return result;
@@ -327,13 +320,12 @@ class TestSliceGuardTransformNegative:
 
     def test_slice_misaligned(self):
         """Slice doesn't align with any single leaf -- not replaced."""
-        _transform_unchanged(
-            """
+        _transform_unchanged("""
             Game Test() {
                 BitString<4> challengeField;
-                RandomFunctions<BitString<12>, BitString<8>> RF;
+                Function<BitString<12>, BitString<8>> RF;
                 BitString<8> Initialize() {
-                    RF <- RandomFunctions<BitString<12>, BitString<8>>;
+                    RF <- Function<BitString<12>, BitString<8>>;
                     challengeField = 0;
                     BitString<8> result = RF(challengeField || challengeField || challengeField);
                     return result;
@@ -345,18 +337,16 @@ class TestSliceGuardTransformNegative:
                     return RF(m);
                 }
             }
-            """
-        )
+            """)
 
     def test_oracle_rf_arg_not_guarded_param(self):
         """Oracle RF arg is not the guarded parameter -- not replaced."""
-        _transform_unchanged(
-            """
+        _transform_unchanged("""
             Game Test() {
                 BitString<4> challengeField;
-                RandomFunctions<BitString<12>, BitString<8>> RF;
+                Function<BitString<12>, BitString<8>> RF;
                 BitString<8> Initialize() {
-                    RF <- RandomFunctions<BitString<12>, BitString<8>>;
+                    RF <- Function<BitString<12>, BitString<8>>;
                     challengeField = 0;
                     BitString<8> result = RF(challengeField || challengeField || challengeField);
                     return result;
@@ -368,19 +358,17 @@ class TestSliceGuardTransformNegative:
                     return RF(other);
                 }
             }
-            """
-        )
+            """)
 
     def test_slice_guard_on_non_challenge_leaf(self):
         """Slice covers a leaf that is NOT the challenge field -- not replaced."""
-        _transform_unchanged(
-            """
+        _transform_unchanged("""
             Game Test() {
                 BitString<4> challengeField;
                 BitString<4> otherField;
-                RandomFunctions<BitString<12>, BitString<8>> RF;
+                Function<BitString<12>, BitString<8>> RF;
                 BitString<8> Initialize() {
-                    RF <- RandomFunctions<BitString<12>, BitString<8>>;
+                    RF <- Function<BitString<12>, BitString<8>>;
                     challengeField = 0;
                     otherField = 1;
                     BitString<8> result = RF(otherField || challengeField || otherField);
@@ -393,8 +381,7 @@ class TestSliceGuardTransformNegative:
                     return RF(m);
                 }
             }
-            """
-        )
+            """)
 
 
 # -----------------------------------------------------------------------
@@ -407,13 +394,12 @@ class TestSliceGuardNearMiss:
 
     def test_near_miss_on_slice_guard_failure(self):
         """When slice guard is detected but RF arg isn't guarded param."""
-        game = frog_parser.parse_game(
-            """
+        game = frog_parser.parse_game("""
             Game Test() {
                 BitString<4> challengeField;
-                RandomFunctions<BitString<12>, BitString<8>> RF;
+                Function<BitString<12>, BitString<8>> RF;
                 BitString<8> Initialize() {
-                    RF <- RandomFunctions<BitString<12>, BitString<8>>;
+                    RF <- Function<BitString<12>, BitString<8>>;
                     challengeField = 0;
                     BitString<8> result = RF(challengeField || challengeField || challengeField);
                     return result;
@@ -425,8 +411,7 @@ class TestSliceGuardNearMiss:
                     return RF(other);
                 }
             }
-            """
-        )
+            """)
         ctx = PipelineContext(
             variables={},
             proof_let_types=None,  # type: ignore[arg-type]

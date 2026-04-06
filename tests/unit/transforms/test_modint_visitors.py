@@ -13,7 +13,6 @@ from proof_frog.visitors import (
 from proof_frog.transforms.symbolic import SymbolicComputationTransformer
 from proof_frog.transforms.algebraic import ModIntSimplificationTransformer
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -31,11 +30,15 @@ def _int(n: int) -> frog_ast.Integer:
     return frog_ast.Integer(n)
 
 
-def _add(left: frog_ast.Expression, right: frog_ast.Expression) -> frog_ast.BinaryOperation:
+def _add(
+    left: frog_ast.Expression, right: frog_ast.Expression
+) -> frog_ast.BinaryOperation:
     return frog_ast.BinaryOperation(frog_ast.BinaryOperators.ADD, left, right)
 
 
-def _mul(left: frog_ast.Expression, right: frog_ast.Expression) -> frog_ast.BinaryOperation:
+def _mul(
+    left: frog_ast.Expression, right: frog_ast.Expression
+) -> frog_ast.BinaryOperation:
     return frog_ast.BinaryOperation(frog_ast.BinaryOperators.MULTIPLY, left, right)
 
 

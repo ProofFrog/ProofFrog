@@ -52,9 +52,9 @@ class TestContradictionCheckSoundness:
             }
             """,
         )
-        result = SimplifyRangeTransformer(
-            NameTypeMap(), game, assumption
-        ).transform(game)
+        result = SimplifyRangeTransformer(NameTypeMap(), game, assumption).transform(
+            game
+        )
         cond = _get_first_condition(result)
         assert isinstance(cond, frog_ast.Boolean)
         assert cond.bool is False
@@ -77,9 +77,9 @@ class TestContradictionCheckSoundness:
             }
             """,
         )
-        result = SimplifyRangeTransformer(
-            NameTypeMap(), game, assumption
-        ).transform(game)
+        result = SimplifyRangeTransformer(NameTypeMap(), game, assumption).transform(
+            game
+        )
         cond = _get_first_condition(result)
         assert isinstance(cond, frog_ast.BinaryOperation)
 
@@ -100,9 +100,9 @@ class TestContradictionCheckSoundness:
             }
             """,
         )
-        result = SimplifyRangeTransformer(
-            NameTypeMap(), game, assumption
-        ).transform(game)
+        result = SimplifyRangeTransformer(NameTypeMap(), game, assumption).transform(
+            game
+        )
         cond = _get_first_condition(result)
         assert isinstance(cond, frog_ast.Boolean)
         assert cond.bool is True
@@ -136,9 +136,7 @@ class TestContradictionCheckSoundness:
 
         cond = _get_first_condition(result)
         # CRITICAL: condition must NOT be Boolean(False)
-        assert not (
-            isinstance(cond, frog_ast.Boolean) and cond.bool is False
-        ), (
+        assert not (isinstance(cond, frog_ast.Boolean) and cond.bool is False), (
             "Soundness bug: Z3 timeout (unknown) caused condition to be "
             "replaced with false"
         )
@@ -160,9 +158,9 @@ class TestContradictionCheckSoundness:
             }
             """,
         )
-        result = SimplifyRangeTransformer(
-            NameTypeMap(), game, assumption
-        ).transform(game)
+        result = SimplifyRangeTransformer(NameTypeMap(), game, assumption).transform(
+            game
+        )
         cond = _get_first_condition(result)
         assert isinstance(cond, frog_ast.Boolean)
         assert cond.bool is True

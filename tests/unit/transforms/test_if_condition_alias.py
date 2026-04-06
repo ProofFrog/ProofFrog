@@ -297,9 +297,9 @@ def test_no_phase1_inline_when_field_assigned_in_nested_block() -> None:
     ret_stmt = if_stmt.blocks[0].statements[0]
     assert isinstance(ret_stmt, frog_ast.ReturnStatement)
     assert isinstance(ret_stmt.expression, frog_ast.Variable)
-    assert ret_stmt.expression.name == "field2", (
-        "field2 should not be inlined when it has nested assignments in other methods"
-    )
+    assert (
+        ret_stmt.expression.name == "field2"
+    ), "field2 should not be inlined when it has nested assignments in other methods"
 
 
 def test_no_phase1_inline_when_field_def_has_nondeterministic_call() -> None:
@@ -317,56 +317,68 @@ def test_no_phase1_inline_when_field_def_has_nondeterministic_call() -> None:
         frog_ast.FieldAccess(frog_ast.Variable("F"), "eval"),
         [frog_ast.Variable("field1")],
     )
-    game = frog_ast.Game((
-        "Test",
-        [frog_ast.Parameter(frog_ast.Variable("SomePrimitive"), "F")],
-        [
-            frog_ast.Field(frog_ast.Variable("Int"), "field1", None),
-            frog_ast.Field(frog_ast.Variable("Int"), "field4", None),
-        ],
-        [
-            frog_ast.Method(
-                frog_ast.MethodSignature("Initialize", frog_ast.Variable("Void"), []),
-                frog_ast.Block([
-                    frog_ast.Assignment(
-                        None,
-                        frog_ast.Variable("field1"),
-                        frog_ast.Integer(5),
+    game = frog_ast.Game(
+        (
+            "Test",
+            [frog_ast.Parameter(frog_ast.Variable("SomePrimitive"), "F")],
+            [
+                frog_ast.Field(frog_ast.Variable("Int"), "field1", None),
+                frog_ast.Field(frog_ast.Variable("Int"), "field4", None),
+            ],
+            [
+                frog_ast.Method(
+                    frog_ast.MethodSignature(
+                        "Initialize", frog_ast.Variable("Void"), []
                     ),
-                    frog_ast.Assignment(
-                        None,
-                        frog_ast.Variable("field4"),
-                        func_call,
-                    ),
-                ]),
-            ),
-            frog_ast.Method(
-                frog_ast.MethodSignature(
-                    "f",
-                    frog_ast.Variable("Int"),
-                    [frog_ast.Parameter(frog_ast.Variable("Int"), "v")],
-                ),
-                frog_ast.Block([
-                    frog_ast.IfStatement(
+                    frog_ast.Block(
                         [
-                            frog_ast.BinaryOperation(
-                                frog_ast.BinaryOperators.EQUALS,
-                                frog_ast.Variable("v"),
+                            frog_ast.Assignment(
+                                None,
                                 frog_ast.Variable("field1"),
-                            )
-                        ],
-                        [
-                            frog_ast.Block([
-                                frog_ast.ReturnStatement(frog_ast.Variable("field4")),
-                            ]),
-                        ],
+                                frog_ast.Integer(5),
+                            ),
+                            frog_ast.Assignment(
+                                None,
+                                frog_ast.Variable("field4"),
+                                func_call,
+                            ),
+                        ]
                     ),
-                    frog_ast.ReturnStatement(frog_ast.Integer(0)),
-                ]),
-            ),
-        ],
-        [],  # phases
-    ))
+                ),
+                frog_ast.Method(
+                    frog_ast.MethodSignature(
+                        "f",
+                        frog_ast.Variable("Int"),
+                        [frog_ast.Parameter(frog_ast.Variable("Int"), "v")],
+                    ),
+                    frog_ast.Block(
+                        [
+                            frog_ast.IfStatement(
+                                [
+                                    frog_ast.BinaryOperation(
+                                        frog_ast.BinaryOperators.EQUALS,
+                                        frog_ast.Variable("v"),
+                                        frog_ast.Variable("field1"),
+                                    )
+                                ],
+                                [
+                                    frog_ast.Block(
+                                        [
+                                            frog_ast.ReturnStatement(
+                                                frog_ast.Variable("field4")
+                                            ),
+                                        ]
+                                    ),
+                                ],
+                            ),
+                            frog_ast.ReturnStatement(frog_ast.Integer(0)),
+                        ]
+                    ),
+                ),
+            ],
+            [],  # phases
+        )
+    )
 
     # F is a primitive with a non-deterministic eval method
     f_primitive = frog_ast.Primitive(
@@ -423,6 +435,6 @@ def test_no_substitution_after_field_reassignment_in_branch() -> None:
     result = IfConditionAliasSubstitutionTransformer().transform(game)
     # After substitution, field1=99 should still be field1=99 (not v=99),
     # and `return field1` should remain (not become `return v`).
-    assert result == game, (
-        "Field references after field reassignment in branch should not be substituted"
-    )
+    assert (
+        result == game
+    ), "Field references after field reassignment in branch should not be substituted"

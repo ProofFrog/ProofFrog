@@ -173,17 +173,13 @@ class TestResolveImportPath:
         proof = inner / "test.proof"
         proof.touch()
         with pytest.raises(ValueError, match="resolves outside"):
-            resolve_import_path(
-                "../../etc/passwd", str(proof), allowed_root=str(inner)
-            )
+            resolve_import_path("../../etc/passwd", str(proof), allowed_root=str(inner))
 
     def test_allowed_root_rejects_absolute_outside(self, tmp_path: Path) -> None:
         proof = tmp_path / "test.proof"
         proof.touch()
         with pytest.raises(ValueError, match="resolves outside"):
-            resolve_import_path(
-                "/etc/passwd", str(proof), allowed_root=str(tmp_path)
-            )
+            resolve_import_path("/etc/passwd", str(proof), allowed_root=str(tmp_path))
 
     def test_allowed_root_accepts_absolute_inside(self, tmp_path: Path) -> None:
         (tmp_path / "file.primitive").touch()

@@ -6,33 +6,62 @@
 import {
   state,
   tabsEl, tabsEmpty, editorsContainer, welcome,
-  btnSave, btnParse, btnProve, proveVerbosity,
+  btnSave, btnSaveAll, btnParse, btnProve, proveVerbosity,
+  btnDescribe, btnCheck, btnInlinedGame, insertSelect,
   outputPane, outputStatus, outputTitle, outputPre,
   apiFetch, getCmTheme,
 } from './state.js';
 import { getModeForFile } from './cm-mode.js';
 import { updateGameHopsPanel } from './game-hops.js';
-import { updateWizardPanel } from './wizard.js';
+import { updateInsertSelect } from './wizard.js';
 import { highlightActiveFile } from './file-tree.js';
 import { suppressFileChange } from './live-reload.js';
 
 // ── Toolbar helpers ───────────────────────────────────────────────────────────
 
+export function hasAnyDirtyTab() {
+  for (const [path, tab] of state.tabs) {
+    if (path.startsWith(":inline:")) continue;
+    if (tab.cm.getValue() !== tab.savedContent) return true;
+  }
+  return false;
+}
+
+export function isActiveProofTab() {
+  if (!state.activeTab) return false;
+  if (state.activeTab.startsWith(":inline:")) {
+    // Inline tabs reference a proof file in their suffix
+    return state.activeTab.endsWith(".proof");
+  }
+  return state.activeTab.endsWith(".proof");
+}
+
 export function updateToolbar() {
   const hasTab = state.activeTab !== null;
   const isVirtual = hasTab && state.activeTab.startsWith(":inline:");
   btnSave.disabled = !hasTab || isVirtual;
+  btnSaveAll.disabled = !hasAnyDirtyTab();
   btnParse.disabled = !hasTab || isVirtual;
+  btnCheck.disabled = !hasTab || isVirtual;
   const isProof = hasTab && !isVirtual && state.activeTab.endsWith(".proof");
-  btnProve.style.display = isProof ? "" : "none";
+  btnProve.style.visibility = isProof ? "visible" : "hidden";
   btnProve.disabled = !isProof;
-  proveVerbosity.style.display = isProof ? "" : "none";
+  proveVerbosity.style.visibility = isProof ? "visible" : "hidden";
+  btnDescribe.disabled = !hasTab || isVirtual;
+  btnInlinedGame.disabled = !isProof;
+  insertSelect.disabled = !state.activeTab || state.activeTab.startsWith(":inline:");
+  updateInsertSelect();
 }
 
 export function setRunning(running) {
   btnParse.disabled = running || !state.activeTab;
+  btnCheck.disabled = running || !state.activeTab;
   btnProve.disabled = running || !(state.activeTab && state.activeTab.endsWith(".proof"));
   btnSave.disabled = running || !state.activeTab;
+  btnSaveAll.disabled = running || !hasAnyDirtyTab();
+  btnDescribe.disabled = running || !state.activeTab;
+  btnInlinedGame.disabled = running || !(state.activeTab && state.activeTab.endsWith(".proof") && !state.activeTab.startsWith(":inline:"));
+  insertSelect.disabled = running || !state.activeTab || state.activeTab.startsWith(":inline:");
   if (running) {
     btnParse.classList.add("running");
     btnProve.classList.add("running");
@@ -58,9 +87,12 @@ export function isModified(path) {
 
 export function updateTabEl(path) {
   const el = document.querySelector(`.tab[data-path="${CSS.escape(path)}"]`);
-  if (!el) return;
-  const dot = el.querySelector(".tab-dot");
-  dot.style.visibility = isModified(path) ? "visible" : "hidden";
+  if (el) {
+    const dot = el.querySelector(".tab-dot");
+    dot.style.visibility = isModified(path) ? "visible" : "hidden";
+  }
+  // Save All enablement depends on any tab being dirty, so refresh it here.
+  btnSaveAll.disabled = !hasAnyDirtyTab();
 }
 
 export function scrollTabIntoView(path) {
@@ -94,7 +126,6 @@ export function activateTab(path) {
   updateToolbar();
   scrollTabIntoView(path);
   updateGameHopsPanel();
-  updateWizardPanel();
 
   // Show warning modal for proofs containing induction steps
   if (path.endsWith(".proof") && /\binduction\s*\(/.test(cm.getValue())) {
@@ -215,7 +246,7 @@ export async function openFile(path, name) {
   const { cm, wrap } = createEditor(content, () => {
     updateTabEl(path);
     if (state.activeTab === path && path.endsWith(".proof")) updateGameHopsPanel();
-    if (state.activeTab === path) updateWizardPanel();
+    if (state.activeTab === path) updateInsertSelect();
     if (isMarkdown) updateMarkdownPreview(path);
   }, path);
 
@@ -280,13 +311,13 @@ export function closeTab(path) {
   updateToolbar();
   highlightActiveFile(state.activeTab);
   updateGameHopsPanel();
-  updateWizardPanel();
 }
 
 // ── Save ──────────────────────────────────────────────────────────────────────
 
 export async function saveFile(path) {
   if (!path) return;
+  if (path.startsWith(":inline:")) return;
   const content = getTabContent(path);
   suppressFileChange(path);
   const res = await apiFetch(`/api/file?path=${encodeURIComponent(path)}`, {
@@ -299,6 +330,19 @@ export async function saveFile(path) {
     if (tab) tab.savedContent = content;
     updateTabEl(path);
   }
+}
+
+export async function saveAllDirtyTabs() {
+  const dirty = [];
+  for (const [path, tab] of state.tabs) {
+    if (path.startsWith(":inline:")) continue;
+    if (tab.cm.getValue() !== tab.savedContent) dirty.push(path);
+  }
+  for (const path of dirty) {
+    // eslint-disable-next-line no-await-in-loop
+    await saveFile(path);
+  }
+  updateToolbar();
 }
 
 // ── Error line highlighting ───────────────────────────────────────────────────

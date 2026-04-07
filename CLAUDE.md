@@ -52,7 +52,9 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 - `proof_frog/describe.py` — Human-readable descriptions of primitives/schemes/games
 - `proof_frog/dependencies.py` — Dependency resolution for proof files
 - `proof_frog/mcp_server.py` — MCP server for tool-based proof interaction
-- `proof_frog/web_server.py` — Flask web server (`web` command, branch `ds-web`)
+- `proof_frog/web_server.py` — Flask web server (`web` command, branch `ds-web`). Exposes `/api/file-metadata` (GET + POST), `/api/parse`, `/api/check`, `/api/prove`, `/api/inline`, `/api/describe`, `/api/inlined-game`, and `/api/scaffold/{intermediate-game,reduction,reduction-hop}` for the toolbar Insert dropdown
+- `proof_frog/scaffolding.py` — AST-based code-generation helpers used by the web wizard scaffold endpoints. Uses `visitors.SubstitutionTransformer` to do formal-parameter substitution when cloning game/reduction stubs (avoids `proof_engine.instantiate` because that inlines field-level type aliases too eagerly)
+- `proof_frog/web/` — Vanilla ES module web client. The toolbar exposes file actions, an Insert ▾ dropdown listing wizards applicable to the active file, Parse / Type Check / Run Proof, and engine introspection actions (Describe, Inlined Game). `wizard.js` registers all wizards in `wizardConfig` and provides modal HTML helpers; modal HTML lives in `index.html`; `insertion.js` has line-scanning helpers for client-side structural insertion points
 - `proof_frog/lsp/` — Language Server Protocol implementation (`lsp` command)
   - `server.py` — pygls-based LSP server, feature registration, event handlers
   - `document_state.py` — per-document state tracking (AST, source, parse errors)
@@ -79,7 +81,7 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 - Python 3.11+, built with Flit (`pyproject.toml`)
 - `parsing/` directory is excluded from black, mypy, and pylint
 - Proof imports use paths relative to the directory where the CLI is invoked
-- Tests live in `tests/`, organized into `tests/integration/` (proof runs, CLI, AST checks) and `tests/unit/` (by area: engine, transforms, typechecking, visitors, parsing, other); `tests/integration/test_proofs.py` runs all `examples/**/*.proof` files as subprocesses
+- Tests live in `tests/`, organized into `tests/integration/` (proof runs, CLI, AST checks, web server endpoints, wizard scaffolding) and `tests/unit/` (by area: engine, transforms, typechecking, visitors, parsing, other); `tests/integration/test_proofs.py` runs all `examples/**/*.proof` files as subprocesses; `tests/integration/test_web_server.py` covers `/api/file-metadata`; `tests/integration/test_scaffolding.py` covers wizard scaffold endpoints with smoke / parse-splice / type-check-splice levels
 - Only use ASCII characters in primitive/scheme/game/proof files.
 - LSP server uses `pygls` and communicates over stdio; uses full document sync (`TextDocumentSyncKind.Full`)
 - The LSP caches a `last_good_ast` per document so completion/hover work even when the file has syntax errors

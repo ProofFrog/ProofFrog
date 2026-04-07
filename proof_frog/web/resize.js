@@ -1,6 +1,6 @@
 // ── Resize handle setup (side effects only) ───────────────────────────────────
 
-import { outputPane, wizardPanel } from './state.js';
+import { outputPane } from './state.js';
 
 (function initPanelHeights() {
   const sidebar = document.getElementById("sidebar");
@@ -9,7 +9,6 @@ import { outputPane, wizardPanel } from './state.js';
     const h = sidebar.offsetHeight;
     if (h > 0) {
       gameHopsPanel.style.height = Math.round(h * 0.25) + "px";
-      wizardPanel.style.height = Math.round(h * 0.10) + "px";
     }
   }
   if (sidebar.offsetHeight > 0) {
@@ -82,26 +81,3 @@ import { outputPane, wizardPanel } from './state.js';
   });
 })();
 
-(function setupWizardResize() {
-  const handle = document.getElementById("wizard-resize-handle");
-  let startY, startH;
-  handle.addEventListener("mousedown", e => {
-    startY = e.clientY;
-    startH = wizardPanel.offsetHeight;
-    handle.classList.add("dragging");
-    function onMove(e) {
-      const sidebar = document.getElementById("sidebar");
-      const maxH = sidebar.offsetHeight - 100;
-      const delta = startY - e.clientY;
-      const newH = Math.max(60, Math.min(maxH, startH + delta));
-      wizardPanel.style.height = newH + "px";
-    }
-    function onUp() {
-      handle.classList.remove("dragging");
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-    }
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  });
-})();

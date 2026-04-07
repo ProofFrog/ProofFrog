@@ -10,7 +10,7 @@ from proof_frog.proof_frog import cli
 EXAMPLES = os.path.join(os.path.dirname(__file__), "..", "..", "examples")
 PRIMITIVE = os.path.join(EXAMPLES, "Primitives", "PRG.primitive")
 GAME = os.path.join(EXAMPLES, "Games", "PRG", "PRGSecurity.game")
-PROOF = os.path.join(EXAMPLES, "Book", "5", "5_3.proof")
+PROOF = os.path.join(EXAMPLES, "joy_old", "5", "5_3.proof")
 
 
 def _run(*args: str) -> tuple[int, dict]:  # type: ignore[type-arg]

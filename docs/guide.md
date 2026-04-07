@@ -731,4 +731,4 @@ A VSCode extension is available that provides syntax highlighting and LSP integr
 
 - [ProofFrog website](https://prooffrog.github.io) -- documentation and examples
 - The `examples/` directory in this repository contains many complete working examples
-- [Mike Rosulek, *The Joy of Cryptography*](https://joyofcryptography.com/) -- the `examples/Book/` directory contains ProofFrog proofs corresponding to the textbook
+- [Mike Rosulek, *The Joy of Cryptography*](https://joyofcryptography.com/) -- the `examples/joy_old/` directory contains ProofFrog proofs corresponding to the textbook

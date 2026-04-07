@@ -57,7 +57,7 @@ games:
 def test_prove_succeeds_on_valid_proof() -> None:
     """A valid proof should pass both check and prove."""
     examples = os.path.join(os.path.dirname(__file__), "..", "..", "examples")
-    proof = os.path.join(examples, "Book", "5", "5_3.proof")
+    proof = os.path.join(examples, "joy_old", "5", "5_3.proof")
     if not os.path.exists(proof):
         return  # Skip if examples not available
     result = CliRunner().invoke(cli, ["prove", proof])

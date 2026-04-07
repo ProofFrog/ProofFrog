@@ -30,6 +30,32 @@ Primitive VoidFPrimitive() {
 }
 """
 
+_DETERMINISTIC_PRIMITIVE = """\
+Primitive DeterministicPrimitive() {
+    deterministic Int f();
+}
+"""
+
+_INJECTIVE_PRIMITIVE = """\
+Primitive InjectivePrimitive() {
+    deterministic injective Int f(Int x);
+}
+"""
+
+_OPTIONAL_PRIMITIVE = """\
+Primitive OptionalPrimitive() {
+    Int? f();
+}
+"""
+
+_INT_FIELD_PRIMITIVE = """\
+Primitive IntFieldPrimitive(Int x) {
+    Int field = x;
+
+    Int f();
+}
+"""
+
 # ---------------------------------------------------------------------------
 # Ill-formed primitives
 # ---------------------------------------------------------------------------
@@ -276,6 +302,65 @@ _SCHEME_CASES = [
         "does not correctly implement",
         id="not_overriding_methods",
     ),
+    pytest.param(
+        (
+            "import 'fixtures/DeterministicPrimitive.primitive';\n\n"
+            "Scheme MissingDet() extends DeterministicPrimitive {\n"
+            "    Int f() {\n"
+            "        return 1;\n"
+            "    }\n"
+            "}\n"
+        ),
+        "missing the 'deterministic'",
+        id="missing_deterministic_modifier",
+    ),
+    pytest.param(
+        (
+            "import 'fixtures/VoidFPrimitive.primitive';\n\n"
+            "Scheme ExtraDet() extends VoidFPrimitive {\n"
+            "    deterministic Void f() {}\n"
+            "}\n"
+        ),
+        "'deterministic' modifier not declared",
+        id="extra_deterministic_modifier",
+    ),
+    pytest.param(
+        (
+            "import 'fixtures/InjectivePrimitive.primitive';\n\n"
+            "Scheme MissingInj() extends InjectivePrimitive {\n"
+            "    deterministic Int f(Int x) {\n"
+            "        return x;\n"
+            "    }\n"
+            "}\n"
+        ),
+        "missing the 'injective'",
+        id="missing_injective_modifier",
+    ),
+    pytest.param(
+        (
+            "import 'fixtures/IntFieldPrimitive.primitive';\n\n"
+            "Scheme FieldTypeMismatch(Bool b) extends IntFieldPrimitive {\n"
+            "    Bool field = b;\n\n"
+            "    Int f() {\n"
+            "        return 1;\n"
+            "    }\n"
+            "}\n"
+        ),
+        "field 'field' has type",
+        id="field_type_mismatch",
+    ),
+    pytest.param(
+        (
+            "import 'fixtures/OptionalPrimitive.primitive';\n\n"
+            "Scheme OptionalOverpromise() extends OptionalPrimitive {\n"
+            "    Int f() {\n"
+            "        return 1;\n"
+            "    }\n"
+            "}\n"
+        ),
+        "return type",
+        id="optional_overpromise",
+    ),
 ]
 
 
@@ -306,6 +391,10 @@ def _write_fixture_primitives(tmp_path: Path) -> None:
     (fixtures / "EmptyPrimitive.primitive").write_text(_EMPTY_PRIMITIVE)
     (fixtures / "SimplePrimitive.primitive").write_text(_SIMPLE_PRIMITIVE)
     (fixtures / "VoidFPrimitive.primitive").write_text(_VOID_F_PRIMITIVE)
+    (fixtures / "DeterministicPrimitive.primitive").write_text(_DETERMINISTIC_PRIMITIVE)
+    (fixtures / "InjectivePrimitive.primitive").write_text(_INJECTIVE_PRIMITIVE)
+    (fixtures / "OptionalPrimitive.primitive").write_text(_OPTIONAL_PRIMITIVE)
+    (fixtures / "IntFieldPrimitive.primitive").write_text(_INT_FIELD_PRIMITIVE)
 
 
 @pytest.mark.parametrize("content,expected_error", _SCHEME_CASES)

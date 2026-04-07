@@ -381,6 +381,10 @@ class ProofEngine:
             self.verbosity = verbose
         self.no_diagnose = no_diagnose
         self.skip_lemmas = skip_lemmas
+        # Allow disabling parallelism via env var (e.g. for sandboxed
+        # environments that block ProcessPoolExecutor).
+        if os.environ.get("PROOFFROG_SEQUENTIAL"):
+            parallel = False
         self.parallel = parallel
         self.step_assumptions: list[ProcessedAssumption] = []
         self.hop_results: list[HopResult] = []

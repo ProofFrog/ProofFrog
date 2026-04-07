@@ -104,7 +104,10 @@ def check(file: str, json_output: bool) -> None:
 @click.option(
     "--sequential",
     is_flag=True,
-    help="Disable parallel equivalence checking (use a single process).",
+    help=(
+        "Disable parallel equivalence checking (use a single process). "
+        "Can also be forced via the PROOFFROG_SEQUENTIAL environment variable."
+    ),
 )
 def prove(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     file: str,

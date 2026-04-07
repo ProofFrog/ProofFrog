@@ -147,6 +147,41 @@ from proof_frog.transforms.inlining import ForwardExpressionAliasTransformer
             }
             """,
         ),
+        # Trivial literal aliases (Integer, Boolean, None) are NOT
+        # propagated.  Replacing a constant like ``0`` with a named alias is
+        # lossy: subsequent passes (e.g. tuple expansion, branch elimination)
+        # rely on seeing the constant directly to decide whether to fire.
+        # Regression test for the OTDDH=>OTHashedDDH proof that broke when
+        # ``count = 0;`` caused later ``triple[0]`` to be rewritten as
+        # ``triple[count]``.
+        (
+            """
+            Int f([Int, Int] v1) {
+                Int v3 = 0;
+                return v1[0];
+            }
+            """,
+            """
+            Int f([Int, Int] v1) {
+                Int v3 = 0;
+                return v1[0];
+            }
+            """,
+        ),
+        (
+            """
+            Bool f(Bool x) {
+                Bool v3 = false;
+                return x || false;
+            }
+            """,
+            """
+            Bool f(Bool x) {
+                Bool v3 = false;
+                return x || false;
+            }
+            """,
+        ),
     ],
 )
 def test_forward_expression_alias(

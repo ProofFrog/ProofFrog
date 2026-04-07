@@ -132,8 +132,13 @@
         <input class="wizard-input" id="scheme-wizard-name" type="text" placeholder="e.g. MyScheme" autocomplete="off">
       </div>
       <div>
-        <label class="wizard-label" for="scheme-wizard-primitive">Primitive</label>
+        <label class="wizard-label" for="scheme-wizard-primitive">Extends primitive</label>
         <select class="wizard-input" id="scheme-wizard-primitive"></select>
+      </div>
+      <div>
+        <label class="wizard-label">Ingredient primitives</label>
+        <div id="scheme-wizard-ingredients"></div>
+        <button type="button" id="scheme-wizard-add-ingredient">Add ingredient</button>
       </div>
     </div>
     <div id="scheme-wizard-modal-footer">
@@ -151,7 +156,7 @@
     </div>
     <div id="proof-wizard-modal-body">
       <div>
-        <label class="wizard-label" for="proof-wizard-scheme">Scheme</label>
+        <label class="wizard-label" for="proof-wizard-scheme">Scheme (optional)</label>
         <select class="wizard-input" id="proof-wizard-scheme"></select>
       </div>
       <div>
@@ -178,6 +183,283 @@
     </div>
     <div id="induction-modal-footer">
       <button id="induction-modal-ok" class="primary">OK</button>
+    </div>
+  </div>
+</div>
+
+<div id="add-import-modal" role="dialog" aria-modal="true" aria-labelledby="add-import-modal-title">
+  <div id="add-import-modal-panel">
+    <div id="add-import-modal-header">
+      <span id="add-import-modal-title">Add Import</span>
+      <button id="add-import-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="add-import-modal-body">
+      <div>
+        <label class="wizard-label" for="add-import-file">File to import</label>
+        <select class="wizard-input" id="add-import-file"></select>
+      </div>
+    </div>
+    <div id="add-import-modal-footer">
+      <button id="add-import-modal-create" class="primary">Insert</button>
+      <button id="add-import-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="add-prim-method-modal" role="dialog" aria-modal="true" aria-labelledby="add-prim-method-modal-title">
+  <div id="add-prim-method-modal-panel">
+    <div id="add-prim-method-modal-header">
+      <span id="add-prim-method-modal-title">Add Primitive Method</span>
+      <button id="add-prim-method-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="add-prim-method-modal-body">
+      <div>
+        <label class="wizard-label" for="add-prim-method-name">Method name</label>
+        <input class="wizard-input" id="add-prim-method-name" type="text" placeholder="e.g. Encrypt" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="add-prim-method-return">Return type</label>
+        <input class="wizard-input" id="add-prim-method-return" type="text" placeholder="e.g. BitString<n>" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="add-prim-method-params">Parameters</label>
+        <input class="wizard-input" id="add-prim-method-params" type="text" placeholder="e.g. Key k, BitString<n> m" autocomplete="off">
+      </div>
+      <div>
+        <label><input type="checkbox" id="add-prim-method-det"> deterministic</label>
+        <label style="margin-left:1em;"><input type="checkbox" id="add-prim-method-inj"> injective</label>
+      </div>
+    </div>
+    <div id="add-prim-method-modal-footer">
+      <button id="add-prim-method-modal-create" class="primary">Insert</button>
+      <button id="add-prim-method-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="add-game-oracle-modal" role="dialog" aria-modal="true" aria-labelledby="add-game-oracle-modal-title">
+  <div id="add-game-oracle-modal-panel">
+    <div id="add-game-oracle-modal-header">
+      <span id="add-game-oracle-modal-title">Add Game Oracle</span>
+      <button id="add-game-oracle-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="add-game-oracle-modal-body">
+      <div>
+        <label class="wizard-label" for="add-game-oracle-target">Target game</label>
+        <select class="wizard-input" id="add-game-oracle-target"></select>
+      </div>
+      <div>
+        <label class="wizard-label" for="add-game-oracle-name">Oracle name</label>
+        <input class="wizard-input" id="add-game-oracle-name" type="text" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="add-game-oracle-return">Return type</label>
+        <input class="wizard-input" id="add-game-oracle-return" type="text" placeholder="e.g. Void" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="add-game-oracle-params">Parameters</label>
+        <input class="wizard-input" id="add-game-oracle-params" type="text" placeholder="e.g. BitString<n> m" autocomplete="off">
+      </div>
+      <div id="add-game-oracle-error" style="color: var(--error); font-size: 12px; display: none;"></div>
+    </div>
+    <div id="add-game-oracle-modal-footer">
+      <button id="add-game-oracle-modal-create" class="primary">Insert</button>
+      <button id="add-game-oracle-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="add-assumption-modal" role="dialog" aria-modal="true" aria-labelledby="add-assumption-modal-title">
+  <div id="add-assumption-modal-panel">
+    <div id="add-assumption-modal-header">
+      <span id="add-assumption-modal-title">Add Assumption</span>
+      <button id="add-assumption-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="add-assumption-modal-body">
+      <div>
+        <label class="wizard-label" for="add-assumption-game">Security property</label>
+        <select class="wizard-input" id="add-assumption-game"></select>
+      </div>
+      <div>
+        <label class="wizard-label" for="add-assumption-params">Arguments</label>
+        <input class="wizard-input" id="add-assumption-params" type="text" placeholder="e.g. S" autocomplete="off">
+      </div>
+    </div>
+    <div id="add-assumption-modal-footer">
+      <button id="add-assumption-modal-create" class="primary">Insert</button>
+      <button id="add-assumption-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="add-scheme-method-modal" role="dialog" aria-modal="true" aria-labelledby="add-scheme-method-modal-title">
+  <div id="add-scheme-method-modal-panel">
+    <div id="add-scheme-method-modal-header">
+      <span id="add-scheme-method-modal-title">Add Scheme Method</span>
+      <button id="add-scheme-method-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="add-scheme-method-modal-body">
+      <div>
+        <label class="wizard-label" for="add-scheme-method-inherited">Implement inherited method</label>
+        <select class="wizard-input" id="add-scheme-method-inherited"></select>
+      </div>
+      <div>
+        <label><input type="checkbox" id="add-scheme-method-freeform-toggle"> Or define a new method</label>
+      </div>
+      <div id="add-scheme-method-freeform-fields" style="display:none;">
+        <div>
+          <label class="wizard-label" for="add-scheme-method-name">Method name</label>
+          <input class="wizard-input" id="add-scheme-method-name" type="text" autocomplete="off">
+        </div>
+        <div>
+          <label class="wizard-label" for="add-scheme-method-return">Return type</label>
+          <input class="wizard-input" id="add-scheme-method-return" type="text" autocomplete="off">
+        </div>
+        <div>
+          <label class="wizard-label" for="add-scheme-method-params">Parameters</label>
+          <input class="wizard-input" id="add-scheme-method-params" type="text" autocomplete="off">
+        </div>
+      </div>
+      <div id="add-scheme-method-error" style="color: var(--error); font-size: 12px; display: none;"></div>
+    </div>
+    <div id="add-scheme-method-modal-footer">
+      <button id="add-scheme-method-modal-create" class="primary">Insert</button>
+      <button id="add-scheme-method-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="add-lemma-modal" role="dialog" aria-modal="true" aria-labelledby="add-lemma-modal-title">
+  <div id="add-lemma-modal-panel">
+    <div id="add-lemma-modal-header">
+      <span id="add-lemma-modal-title">Add Lemma</span>
+      <button id="add-lemma-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="add-lemma-modal-body">
+      <div>
+        <label class="wizard-label" for="add-lemma-file">Proof file</label>
+        <select class="wizard-input" id="add-lemma-file"></select>
+      </div>
+      <div>
+        <label class="wizard-label" for="add-lemma-theorem">Theorem (preview)</label>
+        <input class="wizard-input" id="add-lemma-theorem" type="text" disabled>
+      </div>
+      <div>
+        <label class="wizard-label" for="add-lemma-params">Arguments</label>
+        <input class="wizard-input" id="add-lemma-params" type="text" placeholder="override parameters" autocomplete="off">
+      </div>
+    </div>
+    <div id="add-lemma-modal-footer">
+      <button id="add-lemma-modal-create" class="primary">Insert</button>
+      <button id="add-lemma-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="insert-reduction-hop-modal" role="dialog" aria-modal="true" aria-labelledby="insert-reduction-hop-modal-title">
+  <div id="insert-reduction-hop-modal-panel">
+    <div id="insert-reduction-hop-modal-header">
+      <span id="insert-reduction-hop-modal-title">Insert Reduction Hop</span>
+      <button id="insert-reduction-hop-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="insert-reduction-hop-modal-body">
+      <div>
+        <label class="wizard-label">Previous game line</label>
+        <input class="wizard-input" id="insert-reduction-hop-prev" type="text" disabled>
+      </div>
+      <div>
+        <label class="wizard-label">Next game line</label>
+        <input class="wizard-input" id="insert-reduction-hop-next" type="text" disabled>
+      </div>
+      <div>
+        <label class="wizard-label" for="insert-reduction-hop-assumption">Assumption</label>
+        <select class="wizard-input" id="insert-reduction-hop-assumption"></select>
+      </div>
+      <div>
+        <label class="wizard-label" for="insert-reduction-hop-direction">Direction</label>
+        <select class="wizard-input" id="insert-reduction-hop-direction"></select>
+      </div>
+      <div>
+        <label class="wizard-label" for="insert-reduction-hop-reduction">Reduction</label>
+        <select class="wizard-input" id="insert-reduction-hop-reduction"></select>
+      </div>
+      <div id="insert-reduction-hop-manual-row" style="display:none;">
+        <label class="wizard-label" for="insert-reduction-hop-manual">Reduction name</label>
+        <input class="wizard-input" id="insert-reduction-hop-manual" type="text" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="insert-reduction-hop-args">Reduction arguments</label>
+        <input class="wizard-input" id="insert-reduction-hop-args" type="text" placeholder="e.g. F, h" autocomplete="off">
+      </div>
+      <div id="insert-reduction-hop-error" style="color: var(--error); font-size: 12px; display: none;"></div>
+    </div>
+    <div id="insert-reduction-hop-modal-footer">
+      <button id="insert-reduction-hop-modal-create" class="primary">Insert</button>
+      <button id="insert-reduction-hop-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="new-reduction-modal" role="dialog" aria-modal="true" aria-labelledby="new-reduction-modal-title">
+  <div id="new-reduction-modal-panel">
+    <div id="new-reduction-modal-header">
+      <span id="new-reduction-modal-title">New Reduction Stub</span>
+      <button id="new-reduction-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="new-reduction-modal-body">
+      <div>
+        <label class="wizard-label" for="new-reduction-name">Name</label>
+        <input class="wizard-input" id="new-reduction-name" type="text" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="new-reduction-game">Composed security game</label>
+        <select class="wizard-input" id="new-reduction-game"></select>
+      </div>
+      <div>
+        <label class="wizard-label" for="new-reduction-side">Side</label>
+        <select class="wizard-input" id="new-reduction-side"></select>
+      </div>
+      <div>
+        <label class="wizard-label" for="new-reduction-scheme">Against scheme</label>
+        <select class="wizard-input" id="new-reduction-scheme"></select>
+      </div>
+      <div>
+        <label class="wizard-label" for="new-reduction-params">Parameters</label>
+        <input class="wizard-input" id="new-reduction-params" type="text" placeholder="e.g. SymEnc E" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="new-reduction-compose-args">Compose arguments</label>
+        <input class="wizard-input" id="new-reduction-compose-args" type="text" placeholder="e.g. P" autocomplete="off">
+      </div>
+      <div id="new-reduction-warning" style="color: var(--warning, #a70); font-size: 12px; display: none;"></div>
+    </div>
+    <div id="new-reduction-modal-footer">
+      <button id="new-reduction-modal-create" class="primary">Insert</button>
+      <button id="new-reduction-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="new-intermediate-game-modal" role="dialog" aria-modal="true" aria-labelledby="new-intermediate-game-modal-title">
+  <div id="new-intermediate-game-modal-panel">
+    <div id="new-intermediate-game-modal-header">
+      <span id="new-intermediate-game-modal-title">New Intermediate Game Stub</span>
+      <button id="new-intermediate-game-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="new-intermediate-game-modal-body">
+      <div>
+        <label class="wizard-label" for="new-intermediate-game-name">Name</label>
+        <input class="wizard-input" id="new-intermediate-game-name" type="text" autocomplete="off">
+      </div>
+      <div>
+        <label class="wizard-label" for="new-intermediate-game-params">Parameters</label>
+        <input class="wizard-input" id="new-intermediate-game-params" type="text" autocomplete="off">
+      </div>
+      <div id="new-intermediate-game-warning" style="color: var(--warning, #a70); font-size: 12px; display: none;"></div>
+    </div>
+    <div id="new-intermediate-game-modal-footer">
+      <button id="new-intermediate-game-modal-create" class="primary">Insert</button>
+      <button id="new-intermediate-game-modal-cancel">Close</button>
     </div>
   </div>
 </div>

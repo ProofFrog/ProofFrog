@@ -9,7 +9,10 @@ import { outputPane, wizardPanel } from './state.js';
     const h = sidebar.offsetHeight;
     if (h > 0) {
       gameHopsPanel.style.height = Math.round(h * 0.25) + "px";
-      wizardPanel.style.height = Math.round(h * 0.10) + "px";
+      // Wizard panel auto-sizes to its content via autosizeWizardPanel()
+      // (called from updateWizardPanel). Set a sensible initial value so
+      // the layout doesn't jump.
+      wizardPanel.style.height = Math.round(h * 0.20) + "px";
     }
   }
   if (sidebar.offsetHeight > 0) {

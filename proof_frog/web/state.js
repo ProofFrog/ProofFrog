@@ -9,6 +9,7 @@ export const state = {
 primitiveFiles: [],        // { path, name } for all .primitive files, sorted by name
   schemeFiles: [],           // { path, name } for all .scheme files, sorted by name
   gameFiles: [],             // { path, name } for all .game files, sorted by name
+  proofFiles: [],            // { path, name } for all .proof files, sorted by name
   darkMode: localStorage.getItem("theme") === "dark",
 };
 

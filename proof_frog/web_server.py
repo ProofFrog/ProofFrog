@@ -236,6 +236,28 @@ def _setup_engine_for_proof(
     return engine, proof_file
 
 
+def _resolve_game_reference(
+    engine: proof_engine.ProofEngine,
+    parameterized_game: frog_ast.ParameterizedGame,
+) -> dict[str, Any]:
+    """Resolve a ParameterizedGame against the engine's import namespace.
+
+    Returns a dict with `name` (str), `args` (list[str]), and `sides`
+    (list[str]). `sides` is empty when the game cannot be resolved (e.g. the
+    name is not in the namespace, or it resolves to something other than a
+    GameFile). The lookup respects `import '...' as Alias;` and `export as
+    Name;` because both end up keyed under their final name in
+    `engine.definition_namespace`.
+    """
+    name = parameterized_game.name
+    args = [str(a) for a in parameterized_game.args]
+    sides: list[str] = []
+    resolved = engine.definition_namespace.get(name)
+    if isinstance(resolved, frog_ast.GameFile):
+        sides = [g.name for g in resolved.games]
+    return {"name": name, "args": args, "sides": sides}
+
+
 def _resolve_step_game(
     engine: proof_engine.ProofEngine,
     proof_file: frog_ast.ProofFile,
@@ -815,12 +837,7 @@ def create_app(directory: str, *, watch: bool = True) -> tuple[Flask, Any]:
             }
         )
 
-    @app.route("/api/file-metadata")
-    def file_metadata() -> Any:
-        rel_path = request.args.get("path", "")
-        abs_path = _safe_path(directory, rel_path)
-        if abs_path is None:
-            return jsonify({"error": "Invalid path"}), 403
+    def _file_metadata_response(abs_path: Path) -> Any:
         file_path_str = str(abs_path)
         try:
             file_type = _get_file_type(file_path_str)
@@ -872,11 +889,50 @@ def create_app(directory: str, *, watch: bool = True) -> tuple[Flask, Any]:
                 }
             elif file_type == frog_ast.FileType.PROOF:
                 proof_file = frog_parser.parse_proof_file(file_path_str)
+                # Try to set up the engine to resolve assumption/theorem game
+                # references through the proof's import namespace. This handles
+                # `import '...' as Alias;` clauses and `export as Name;` cases
+                # uniformly. If engine setup fails (broken imports, missing
+                # dependencies, etc.) we still return the string-only metadata.
+                assumption_details: list[dict[str, Any]] = []
+                theorem_details: dict[str, Any] | None = None
+                try:
+                    suppress = io.StringIO()
+                    with redirect_stdout(suppress), redirect_stderr(suppress):
+                        engine, _ = _setup_engine_for_proof(
+                            file_path_str, allowed_root=directory
+                        )
+                    for assumption in proof_file.assumptions:
+                        assumption_details.append(
+                            _resolve_game_reference(engine, assumption)
+                        )
+                    if proof_file.theorem is not None:
+                        theorem_details = _resolve_game_reference(
+                            engine, proof_file.theorem
+                        )
+                except Exception:  # pylint: disable=broad-exception-caught
+                    # Leave details empty/None — caller still gets string forms.
+                    pass
+                # Top-level Reduction declarations: name + formal parameters.
+                # The Insert Reduction Hop wizard uses this to populate the
+                # reduction dropdown and pre-fill argument placeholders.
+                reductions: list[dict[str, Any]] = []
+                for helper in proof_file.helpers:
+                    if isinstance(helper, frog_ast.Reduction):
+                        reductions.append(
+                            {
+                                "name": helper.name,
+                                "parameters": _params(helper.parameters),
+                            }
+                        )
                 result = {
                     "type": "proof",
                     "lets": [str(let) for let in proof_file.lets],
                     "assumptions": [str(a) for a in proof_file.assumptions],
+                    "assumption_details": assumption_details,
                     "theorem": str(proof_file.theorem),
+                    "theorem_details": theorem_details,
+                    "reductions": reductions,
                     "steps": [str(s) for s in proof_file.steps],
                 }
             else:
@@ -886,6 +942,165 @@ def create_app(directory: str, *, watch: bool = True) -> tuple[Flask, Any]:
             frog_parser.ParseError,
             FileNotFoundError,
             semantic_analysis.FailedTypeCheck,
+        ) as e:
+            return jsonify({"error": str(e)}), 400
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            return jsonify({"error": f"Error: {e}"}), 400
+
+    @app.route("/api/file-metadata")
+    def file_metadata() -> Any:
+        rel_path = request.args.get("path", "")
+        abs_path = _safe_path(directory, rel_path)
+        if abs_path is None:
+            return jsonify({"error": "Invalid path"}), 403
+        return _file_metadata_response(abs_path)
+
+    @app.route("/api/file-metadata", methods=["POST"])
+    def file_metadata_post() -> Any:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data"}), 400
+        rel_path = data.get("path", "")
+        content = data.get("content", "")
+        abs_path = _safe_path(directory, rel_path)
+        if abs_path is None:
+            return jsonify({"error": "Invalid path"}), 403
+        abs_path.write_text(content, encoding="utf-8")
+        return _file_metadata_response(abs_path)
+
+    @app.route("/api/scaffold/intermediate-game", methods=["POST"])
+    def scaffold_intermediate_game_endpoint() -> Any:
+        # pylint: disable=import-outside-toplevel
+        from . import scaffolding
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data"}), 400
+        rel_path = data.get("path", "")
+        content = data.get("content", "")
+        name = (data.get("name") or "").strip()
+        params_override = data.get("params")
+        if not name:
+            return jsonify({"error": "Name is required"}), 400
+        abs_path = _safe_path(directory, rel_path)
+        if abs_path is None:
+            return jsonify({"error": "Invalid path"}), 403
+        abs_path.write_text(content, encoding="utf-8")
+        try:
+            suppress = io.StringIO()
+            with redirect_stdout(suppress), redirect_stderr(suppress):
+                engine, proof_file = _setup_engine_for_proof(
+                    str(abs_path), allowed_root=directory
+                )
+                result = scaffolding.scaffold_intermediate_game(
+                    engine, proof_file, name, params_override
+                )
+            return jsonify({"block": result.block, "params_used": result.params_used})
+        except (
+            frog_parser.ParseError,
+            FileNotFoundError,
+            semantic_analysis.FailedTypeCheck,
+            ValueError,
+        ) as e:
+            return jsonify({"error": str(e)}), 400
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            return jsonify({"error": f"Error: {e}"}), 400
+
+    @app.route("/api/scaffold/reduction", methods=["POST"])
+    def scaffold_reduction_endpoint() -> Any:
+        # pylint: disable=import-outside-toplevel
+        from . import scaffolding
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data"}), 400
+        rel_path = data.get("path", "")
+        content = data.get("content", "")
+        name = (data.get("name") or "").strip()
+        security_game_name = (data.get("security_game_name") or "").strip()
+        side = (data.get("side") or "").strip()
+        params = data.get("params") or ""
+        compose_args = data.get("compose_args") or ""
+        if not name:
+            return jsonify({"error": "Name is required"}), 400
+        if not security_game_name:
+            return jsonify({"error": "Security game name is required"}), 400
+        if not side:
+            return jsonify({"error": "Side is required"}), 400
+        abs_path = _safe_path(directory, rel_path)
+        if abs_path is None:
+            return jsonify({"error": "Invalid path"}), 403
+        abs_path.write_text(content, encoding="utf-8")
+        try:
+            suppress = io.StringIO()
+            with redirect_stdout(suppress), redirect_stderr(suppress):
+                engine, proof_file = _setup_engine_for_proof(
+                    str(abs_path), allowed_root=directory
+                )
+                result = scaffolding.scaffold_reduction(
+                    engine,
+                    proof_file,
+                    name,
+                    security_game_name,
+                    side,
+                    params,
+                    compose_args,
+                )
+            return jsonify({"block": result.block})
+        except (
+            frog_parser.ParseError,
+            FileNotFoundError,
+            semantic_analysis.FailedTypeCheck,
+            ValueError,
+        ) as e:
+            return jsonify({"error": str(e)}), 400
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            return jsonify({"error": f"Error: {e}"}), 400
+
+    @app.route("/api/scaffold/reduction-hop", methods=["POST"])
+    def scaffold_reduction_hop_endpoint() -> Any:
+        # pylint: disable=import-outside-toplevel
+        from . import scaffolding
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data"}), 400
+        rel_path = data.get("path", "")
+        content = data.get("content", "")
+        assumption_index = data.get("assumption_index")
+        side1 = (data.get("side1") or "").strip()
+        side2 = (data.get("side2") or "").strip()
+        reduction_name = (data.get("reduction_name") or "").strip()
+        if not isinstance(assumption_index, int):
+            return jsonify({"error": "assumption_index must be an integer"}), 400
+        if not side1 or not side2:
+            return jsonify({"error": "side1 and side2 are required"}), 400
+        if not reduction_name:
+            return jsonify({"error": "reduction_name is required"}), 400
+        abs_path = _safe_path(directory, rel_path)
+        if abs_path is None:
+            return jsonify({"error": "Invalid path"}), 403
+        abs_path.write_text(content, encoding="utf-8")
+        try:
+            suppress = io.StringIO()
+            with redirect_stdout(suppress), redirect_stderr(suppress):
+                engine, proof_file = _setup_engine_for_proof(
+                    str(abs_path), allowed_root=directory
+                )
+                result = scaffolding.scaffold_reduction_hop(
+                    engine,
+                    proof_file,
+                    assumption_index,
+                    side1,
+                    side2,
+                    reduction_name,
+                )
+            return jsonify({"lines": result.lines})
+        except (
+            frog_parser.ParseError,
+            FileNotFoundError,
+            semantic_analysis.FailedTypeCheck,
+            ValueError,
         ) as e:
             return jsonify({"error": str(e)}), 400
         except Exception as e:  # pylint: disable=broad-exception-caught

@@ -470,23 +470,12 @@ class NameResolutionVisitor(VariableTypeVisitor):
                 scheme, f"{scheme.primitive_name} is not a primitive", self.file_name
             )
             return
-        primitive_definition = get_type_from_instantiable(
-            scheme.primitive_name, corresponding_primitive, True
-        )
-        scheme_definition = get_type_from_instantiable(scheme.name, scheme, True)
-        non_matching_method = has_matching_methods(
-            primitive_definition, scheme_definition
-        )
-        if non_matching_method is not True:
+        scheme_errors = _check_scheme_against_primitive(scheme, corresponding_primitive)
+        for err in scheme_errors:
             print_error(
                 scheme,
-                f"Scheme does not correctly implement primitive {scheme.primitive_name}",
-                self.file_name,
-            )
-        if not has_matching_fields(corresponding_primitive, scheme):
-            print_error(
-                scheme,
-                f"Scheme does not correctly implement primitive {scheme.primitive_name}",
+                f"Scheme {scheme.name} does not correctly implement primitive "
+                f"{scheme.primitive_name}: {err}",
                 self.file_name,
             )
 
@@ -2391,6 +2380,104 @@ def _ast_to_sympy(  # pylint: disable=too-many-return-statements
     return None
 
 
+def _check_scheme_against_primitive(
+    scheme: frog_ast.Scheme, primitive: frog_ast.Primitive
+) -> list[str]:
+    """Check that a scheme correctly implements its primitive's interface.
+
+    Returns a list of human-readable mismatch messages (empty if consistent).
+    Stricter than has_matching_methods/has_matching_fields:
+
+    - method modifiers (deterministic, injective) must match exactly,
+    - return and parameter types are compared with strict_optional=True
+      so a scheme returning T cannot satisfy a primitive declaring T?,
+    - field declared types must match.
+
+    Initialize/Finalize methods are skipped (mirroring has_matching_methods).
+    """
+    errors: list[str] = []
+
+    # Field checks: every primitive field must have a same-name scheme field
+    # whose declared type matches.
+    scheme_fields_by_name = {field.name: field for field in scheme.fields}
+    for prim_field in primitive.fields:
+        scheme_field = scheme_fields_by_name.get(prim_field.name)
+        if scheme_field is None:
+            errors.append(
+                f"missing field '{prim_field.name}' required by primitive "
+                f"{primitive.name}"
+            )
+            continue
+        if not compare_types(prim_field.type, scheme_field.type):
+            errors.append(
+                f"field '{prim_field.name}' has type {scheme_field.type} but "
+                f"primitive {primitive.name} declares type {prim_field.type}"
+            )
+
+    # Method checks: every primitive method (besides Initialize/Finalize) must
+    # have a same-name scheme method with matching modifiers and types.
+    scheme_methods_by_name = {
+        method.signature.name: method.signature for method in scheme.methods
+    }
+    for prim_method in primitive.methods:
+        if prim_method.name in ("Initialize", "Finalize"):
+            continue
+        scheme_sig = scheme_methods_by_name.get(prim_method.name)
+        if scheme_sig is None:
+            errors.append(
+                f"missing method '{prim_method.name}' required by primitive "
+                f"{primitive.name}"
+            )
+            continue
+        if prim_method.deterministic and not scheme_sig.deterministic:
+            errors.append(
+                f"method '{prim_method.name}' is missing the 'deterministic' "
+                f"modifier required by primitive {primitive.name}"
+            )
+        if scheme_sig.deterministic and not prim_method.deterministic:
+            errors.append(
+                f"method '{prim_method.name}' has a 'deterministic' modifier "
+                f"not declared by primitive {primitive.name}"
+            )
+        if prim_method.injective and not scheme_sig.injective:
+            errors.append(
+                f"method '{prim_method.name}' is missing the 'injective' "
+                f"modifier required by primitive {primitive.name}"
+            )
+        if scheme_sig.injective and not prim_method.injective:
+            errors.append(
+                f"method '{prim_method.name}' has an 'injective' modifier "
+                f"not declared by primitive {primitive.name}"
+            )
+        if not compare_types(
+            prim_method.return_type, scheme_sig.return_type, strict_optional=True
+        ):
+            errors.append(
+                f"method '{prim_method.name}' return type {scheme_sig.return_type} "
+                f"does not match primitive {primitive.name} return type "
+                f"{prim_method.return_type}"
+            )
+        if len(prim_method.parameters) != len(scheme_sig.parameters):
+            errors.append(
+                f"method '{prim_method.name}' has {len(scheme_sig.parameters)} "
+                f"parameter(s) but primitive {primitive.name} declares "
+                f"{len(prim_method.parameters)}"
+            )
+            continue
+        for index, prim_param in enumerate(prim_method.parameters):
+            scheme_param = scheme_sig.parameters[index]
+            if not compare_types(
+                prim_param.type, scheme_param.type, strict_optional=True
+            ):
+                errors.append(
+                    f"method '{prim_method.name}' parameter {index} has type "
+                    f"{scheme_param.type} but primitive {primitive.name} declares "
+                    f"type {prim_param.type}"
+                )
+
+    return errors
+
+
 def has_matching_methods(
     needed_methods: visitors.InstantiableType, search_through: visitors.InstantiableType
 ) -> bool | frog_ast.MethodSignature:
@@ -2436,6 +2523,7 @@ def compare_types(
     value_type: PossibleType,
     subsets_pairs: Optional[list[tuple[PossibleType, PossibleType]]] = None,
     sympy_subs: Optional[dict[Symbol, Symbol | int]] = None,
+    strict_optional: bool = False,
 ) -> bool:
     if declared_type == value_type:
         return True
@@ -2459,8 +2547,10 @@ def compare_types(
         return True
 
     if isinstance(declared_type, frog_ast.OptionalType):
-        # T? can hold T
-        if compare_types(declared_type.the_type, value_type, subsets_pairs, sympy_subs):
+        # T? can hold T (relaxation disabled when strict_optional is True)
+        if not strict_optional and compare_types(
+            declared_type.the_type, value_type, subsets_pairs, sympy_subs
+        ):
             return True
         # T? can hold S? if T can hold S
         if isinstance(value_type, frog_ast.OptionalType) and compare_types(
@@ -2468,6 +2558,7 @@ def compare_types(
             value_type.the_type,
             subsets_pairs,
             sympy_subs,
+            strict_optional,
         ):
             return True
 

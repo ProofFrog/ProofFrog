@@ -19,18 +19,66 @@
 <div id="app">
   <div id="toolbar">
     <span class="logo"><img src="/prooffrog.png" alt="ProofFrog">ProofFrog</span><span class="version" id="version-label"></span>
-    <button id="btn-new-file" title="New File">New File</button>
-    <button id="btn-save" title="Save (Ctrl+S)" disabled>Save</button>
-    <button id="btn-parse" class="primary" title="Parse current file" disabled>Parse</button>
-    <button id="btn-prove" class="primary" title="Run proof" disabled style="display:none">Run Proof</button>
-    <select id="prove-verbosity" title="Verbosity level" style="display:none">
-      <option value="0">Quiet</option>
-      <option value="1">Verbose</option>
-      <option value="2">Very Verbose</option>
-    </select>
-<span class="spacer"></span>
+
+    <div class="toolbar-group">
+      <button id="btn-new-file" title="New File">
+        <svg class="toolbar-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor"><path d="M9.5 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V4.5L9.5 0zM9 1.5V4a1 1 0 0 0 1 1h2.5L9 1.5zM8.5 7a.5.5 0 0 1 .5.5V9h1.5a.5.5 0 0 1 0 1H9v1.5a.5.5 0 0 1-1 0V10H6.5a.5.5 0 0 1 0-1H8V7.5a.5.5 0 0 1 .5-.5z"/></svg>New File
+      </button>
+      <button id="btn-save" title="Save (Cmd/Ctrl+S)" disabled>
+        <svg class="toolbar-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2a2 2 0 0 1 2-2h8.586a1 1 0 0 1 .707.293l2.414 2.414A1 1 0 0 1 16 3.414V14a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V2zm3 0v4a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1V2H5zm6 0h1v3a.5.5 0 0 1-.5.5h-4a.5.5 0 0 1 0-1H10V2zM4 10a1 1 0 0 0-1 1v4h10v-4a1 1 0 0 0-1-1H4z"/></svg>Save
+      </button>
+      <button id="btn-save-all" title="Save All" disabled>
+        <svg class="toolbar-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor"><path d="M0 4a2 2 0 0 1 2-2h.5a.5.5 0 0 1 0 1H2a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-.5a.5.5 0 0 1 1 0v.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V4z"/><path d="M4 2a2 2 0 0 1 2-2h6.586a1 1 0 0 1 .707.293l1.414 1.414A1 1 0 0 1 15 2.414V11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V2zm3 0v3a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1V2H7zm5 0v2.5a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1 0-1H11V2h1zM7 9a1 1 0 0 0-1 1v2h7v-2a1 1 0 0 0-1-1H7z"/></svg>Save All
+      </button>
+    </div>
+
+    <div class="toolbar-divider"></div>
+
+    <div class="toolbar-group">
+      <select id="insert-select" title="Insert wizard" disabled>
+        <option value="">Insert...</option>
+      </select>
+    </div>
+
+    <div class="toolbar-divider"></div>
+
+    <div class="toolbar-group">
+      <button id="btn-parse" title="Parse current file" disabled>
+        <svg class="toolbar-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor"><path d="M14 1a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1h12zM2 0a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2H2z"/><path d="M10.97 4.97a.75.75 0 0 1 1.07 1.05l-3.99 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425.02-.022z"/></svg>Parse
+      </button>
+      <button id="btn-check" title="Type check current file" disabled>
+        <svg class="toolbar-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor"><path d="M2.5 8a5.5 5.5 0 0 1 8.25-4.764.5.5 0 0 0 .5-.866A6.5 6.5 0 1 0 14.5 8a.5.5 0 0 0-1 0 5.5 5.5 0 1 1-11 0z"/><path d="M15.354 3.354a.5.5 0 0 0-.708-.708L8 9.293 5.354 6.646a.5.5 0 1 0-.708.708l3 3a.5.5 0 0 0 .708 0l7-7z"/></svg>Type Check
+      </button>
+      <button id="btn-prove" title="Run proof" disabled style="visibility:hidden">
+        <svg class="toolbar-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor"><path d="M10.804 8 5 4.633v6.734L10.804 8zm.792-.696a.802.802 0 0 1 0 1.392l-6.363 3.692C4.713 12.69 4 12.345 4 11.692V4.308c0-.653.713-.998 1.233-.696l6.363 3.692z"/></svg>Run Proof
+      </button>
+      <select id="prove-verbosity" title="Verbosity level" style="visibility:hidden">
+        <option value="0">Quiet</option>
+        <option value="1">Verbose</option>
+        <option value="2">Very Verbose</option>
+      </select>
+    </div>
+
+    <div class="toolbar-divider"></div>
+
+    <div class="toolbar-group">
+      <button id="btn-describe" title="Describe current file" disabled>
+        <svg class="toolbar-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor"><path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/></svg>Describe
+      </button>
+      <button id="btn-inlined-game" title="Inlined game for an arbitrary expression" disabled>
+        <svg class="toolbar-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor"><path d="M16 8s-3-5.5-8-5.5S0 8 0 8s3 5.5 8 5.5S16 8 16 8zM1.173 8a13.133 13.133 0 0 1 1.66-2.043C4.12 4.668 5.88 3.5 8 3.5c2.12 0 3.879 1.168 5.168 2.457A13.133 13.133 0 0 1 14.828 8c-.058.087-.122.183-.195.288-.335.48-.83 1.12-1.465 1.755C11.879 11.332 10.119 12.5 8 12.5c-2.12 0-3.879-1.168-5.168-2.457A13.134 13.134 0 0 1 1.172 8z"/><path d="M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM4.5 8a3.5 3.5 0 1 1 7 0 3.5 3.5 0 0 1-7 0z"/></svg>Inlined Game
+      </button>
+    </div>
+
+    <span class="spacer"></span>
     <span class="dir-label" id="dir-label"></span>
-    <button id="btn-theme" title="Toggle light/dark mode">Dark</button>
+
+    <div class="toolbar-divider"></div>
+
+    <button id="btn-theme" class="icon-only" title="Toggle light/dark mode">
+      <svg id="theme-icon-dark" class="toolbar-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor"><path d="M6 .278a.77.77 0 0 1 .08.858 7.2 7.2 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277.527 0 1.04-.055 1.533-.16a.78.78 0 0 1 .81.316.73.73 0 0 1-.031.893A8.35 8.35 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.75.75 0 0 1 6 .278z"/></svg>
+      <svg id="theme-icon-light" class="toolbar-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" style="display:none"><path d="M8 11a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm0 1a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM8 0a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 0zm0 13a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 13zm8-5a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2a.5.5 0 0 1 .5.5zM3 8a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2A.5.5 0 0 1 3 8zm10.657-5.657a.5.5 0 0 1 0 .707l-1.414 1.415a.5.5 0 1 1-.707-.708l1.414-1.414a.5.5 0 0 1 .707 0zm-9.193 9.193a.5.5 0 0 1 0 .707L3.05 13.657a.5.5 0 0 1-.707-.707l1.414-1.414a.5.5 0 0 1 .707 0zm9.193 2.121a.5.5 0 0 1-.707 0l-1.414-1.414a.5.5 0 0 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .707zM4.464 4.465a.5.5 0 0 1-.707 0L2.343 3.05a.5.5 0 1 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .708z"/></svg>
+    </button>
   </div>
   <div id="main">
     <div id="sidebar">
@@ -40,11 +88,6 @@
         <div id="inner-resize-handle"></div>
         <div id="game-hops-header">Game Hops</div>
         <div id="game-hops-list"></div>
-      </div>
-      <div id="wizard-panel">
-        <div id="wizard-resize-handle"></div>
-        <div id="wizard-panel-header">Wizard</div>
-        <div id="wizard-body"></div>
       </div>
     </div>
     <div id="sidebar-resize-handle"></div>
@@ -460,6 +503,26 @@
     <div id="new-intermediate-game-modal-footer">
       <button id="new-intermediate-game-modal-create" class="primary">Insert</button>
       <button id="new-intermediate-game-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="inlined-game-modal" role="dialog" aria-modal="true" aria-labelledby="inlined-game-modal-title">
+  <div id="inlined-game-modal-panel">
+    <div id="inlined-game-modal-header">
+      <span id="inlined-game-modal-title">Inlined Game</span>
+      <button id="inlined-game-modal-close" title="Close">&times;</button>
+    </div>
+    <div id="inlined-game-modal-body">
+      <div>
+        <label class="wizard-label" for="inlined-game-step">Game expression</label>
+        <input class="wizard-input" id="inlined-game-step" type="text" placeholder="e.g. CPA(H).Left against CPA(H).Adversary" autocomplete="off">
+      </div>
+      <div id="inlined-game-error" style="color: var(--error); font-size: 12px; display: none;"></div>
+    </div>
+    <div id="inlined-game-modal-footer">
+      <button id="inlined-game-modal-create" class="primary">Show</button>
+      <button id="inlined-game-modal-cancel">Close</button>
     </div>
   </div>
 </div>

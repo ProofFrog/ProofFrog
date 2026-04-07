@@ -1,6 +1,6 @@
 // ── Wizard panel and modals ──────────────────────────────────────────────────
 
-import { state, wizardPanel, wizardBody, apiFetch } from './state.js';
+import { state, apiFetch } from './state.js';
 import { getTabContent } from './editor.js';
 import { findImportInsertionPoint, findBlockClosingLine, insertAtLine, findSectionLine, findSectionLastMemberLine, findFirstReferenceInGames, findOrderedBlockInsertionLine } from './insertion.js';
 
@@ -59,7 +59,7 @@ function applyTemplate(template) {
   const tab = state.tabs.get(state.activeTab);
   if (!tab) return;
   tab.cm.setValue(template);
-  updateWizardPanel();
+  updateInsertSelect();
 }
 
 /**
@@ -77,10 +77,11 @@ export function wireModal(modalId, closeFn, createFn) {
   });
 }
 
-// ── Wizard panel ─────────────────────────────────────────────────────────────
+// ── Wizard registry ──────────────────────────────────────────────────────────
 
 // Each entry: { label, ext (file extension matcher or "any"), opener,
 // emptyOnly (true = only show when buffer is empty) }
+// Consumed by the toolbar Insert dropdown via applicableWizards().
 const wizardConfig = [
   // Creation wizards — empty file only
   { label: "Create new primitive", ext: "primitive", opener: openPrimitiveWizardModal, emptyOnly: true },
@@ -99,65 +100,62 @@ const wizardConfig = [
   { label: "Add lemma",                  ext: "proof",     opener: openAddLemmaModal },
 ];
 
-export function updateWizardPanel() {
-  wizardPanel.style.display = "";
-  wizardBody.replaceChildren();
-
-  if (!state.activeTab || state.activeTab.startsWith(":inline:")) {
-    appendEmpty("No suggestions");
-    return;
-  }
-
+// Compute the wizards applicable to the active tab. Returns an empty array if
+// there is no active tab or it's a virtual (inline) tab.
+function applicableWizards() {
+  if (!state.activeTab || state.activeTab.startsWith(":inline:")) return [];
   const ext = state.activeTab.split(".").pop();
   const content = getTabContent(state.activeTab);
   const isEmpty = content !== null && content.trim() === "";
-
-  const applicable = wizardConfig.filter(cfg => {
+  return wizardConfig.filter(cfg => {
     if (cfg.ext !== "any" && cfg.ext !== ext) return false;
     if (cfg.emptyOnly && !isEmpty) return false;
     return true;
   });
-
-  if (applicable.length === 0) {
-    appendEmpty("No suggestions");
-    return;
-  }
-
-  for (const cfg of applicable) {
-    const btn = document.createElement("button");
-    btn.className = "wizard-suggestion";
-    btn.textContent = cfg.label;
-    btn.addEventListener("click", cfg.opener);
-    wizardBody.appendChild(btn);
-  }
-  autosizeWizardPanel();
 }
 
-// Resize the wizard panel to fit its current content, capped at half the
-// sidebar height. Called whenever updateWizardPanel re-renders. The user can
-// still manually drag the resize handle afterwards.
-function autosizeWizardPanel() {
-  const sidebar = document.getElementById("sidebar");
-  if (!sidebar || sidebar.offsetHeight === 0) return;
-  // Defer one frame so the just-appended children have layout.
-  requestAnimationFrame(() => {
-    const headerEl = document.getElementById("wizard-panel-header");
-    const handleEl = document.getElementById("wizard-resize-handle");
-    const chrome = (headerEl?.offsetHeight || 0) + (handleEl?.offsetHeight || 0);
-    // scrollHeight gives the natural content height including overflow.
-    const contentHeight = wizardBody.scrollHeight;
-    const desired = contentHeight + chrome + 8; // small visual padding
-    const maxH = Math.floor(sidebar.offsetHeight * 0.5);
-    const minH = 60;
-    wizardPanel.style.height = Math.max(minH, Math.min(desired, maxH)) + "px";
+
+// ── Insert dropdown (native select) ──────────────────────────────────────────
+
+// Populate the toolbar's Insert select with the wizards applicable to the
+// current file type. Called from updateToolbar (editor.js) on every tab
+// switch / save / dirty change so the menu reflects the active file.
+export function updateInsertSelect() {
+  const sel = document.getElementById("insert-select");
+  if (!sel) return;
+  sel.replaceChildren();
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Insert...";
+  sel.appendChild(placeholder);
+  const applicable = applicableWizards();
+  if (applicable.length === 0) {
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = "(no wizards for this file type)";
+    empty.disabled = true;
+    sel.appendChild(empty);
+    return;
+  }
+  applicable.forEach((cfg, idx) => {
+    const opt = document.createElement("option");
+    opt.value = String(idx);
+    opt.textContent = cfg.label;
+    sel.appendChild(opt);
   });
 }
 
-function appendEmpty(text) {
-  const msg = document.createElement("span");
-  msg.className = "wizard-empty";
-  msg.textContent = text;
-  wizardBody.appendChild(msg);
+// Click handler wired in app.js. Reads the picked option, opens the
+// corresponding wizard, then resets the select to the placeholder.
+export function handleInsertSelect() {
+  const sel = document.getElementById("insert-select");
+  if (!sel) return;
+  const idx = parseInt(sel.value, 10);
+  sel.value = ""; // reset to placeholder before opening the wizard
+  if (Number.isNaN(idx)) return;
+  const applicable = applicableWizards();
+  const cfg = applicable[idx];
+  if (cfg) cfg.opener();
 }
 
 // ── Game wizard ─────────────────────────────────────────────────────────────

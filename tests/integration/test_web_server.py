@@ -111,3 +111,154 @@ def test_file_metadata_proof_resolves_theorem_with_export_rename(examples_client
     assert theorem["name"] == "MultiKeyPRFSecurity"
     assert "Real" in theorem["sides"]
     assert "Random" in theorem["sides"]
+
+
+POST_HEADERS = {"Origin": "http://127.0.0.1:localhost"}
+
+
+def test_describe_endpoint(examples_client):
+    c, examples_root = examples_client
+    rel = "Primitives/KEM.primitive"
+    content = (examples_root / rel).read_text(encoding="utf-8")
+    resp = c.post(
+        "/api/describe",
+        data=json.dumps({"path": rel, "content": content}),
+        content_type="application/json",
+        headers=POST_HEADERS,
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["success"] is True
+    assert body["output"]
+    assert "KEM" in body["output"]
+
+
+def test_describe_endpoint_missing_data(examples_client):
+    c, _ = examples_client
+    resp = c.post(
+        "/api/describe",
+        data="",
+        content_type="application/json",
+        headers=POST_HEADERS,
+    )
+    assert resp.status_code == 400
+
+
+def test_describe_endpoint_invalid_path(examples_client):
+    c, _ = examples_client
+    resp = c.post(
+        "/api/describe",
+        data=json.dumps({"path": "../escape.primitive", "content": ""}),
+        content_type="application/json",
+        headers=POST_HEADERS,
+    )
+    assert resp.status_code == 403
+
+
+def test_check_endpoint(examples_client):
+    c, examples_root = examples_client
+    rel = "Primitives/KEM.primitive"
+    content = (examples_root / rel).read_text(encoding="utf-8")
+    resp = c.post(
+        "/api/check",
+        data=json.dumps({"path": rel, "content": content}),
+        content_type="application/json",
+        headers=POST_HEADERS,
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["success"] is True
+    assert body["output"]
+
+
+def test_check_endpoint_reports_failure(examples_client):
+    c, examples_root = examples_client
+    rel = "Primitives/KEM.primitive"
+    bad_content = (
+        "Primitive KEM() {\n"
+        "    Bool BadMethod(NoSuchType x);\n"
+        "}\n"
+    )
+    resp = c.post(
+        "/api/check",
+        data=json.dumps({"path": rel, "content": bad_content}),
+        content_type="application/json",
+        headers=POST_HEADERS,
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["success"] is False
+
+
+def test_inlined_game_endpoint(examples_client):
+    c, examples_root = examples_client
+    rel = "Proofs/PRG/TriplingPRGSecure.proof"
+    content = (examples_root / rel).read_text(encoding="utf-8")
+    step_text = "Security(T).Real against Security(T).Adversary"
+    resp = c.post(
+        "/api/inlined-game",
+        data=json.dumps(
+            {"path": rel, "content": content, "step_text": step_text}
+        ),
+        content_type="application/json",
+        headers=POST_HEADERS,
+    )
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body.get("success") is True, body
+    assert body.get("canonical")
+
+
+def test_inlined_game_endpoint_with_reduction_reference(examples_client):
+    """Regression: the minimal proof must include Reduction blocks so that
+    step_text expressions like `compose R_DDH(...)` resolve. Previously the
+    minimal-proof builder skipped Reduction blocks and the user got an
+    `Error: \\`R_DDH'` parser failure."""
+    c, examples_root = examples_client
+    rel = "Proofs/Group/DDHImpliesHashedDDH.proof"
+    content = (examples_root / rel).read_text(encoding="utf-8")
+    step_text = (
+        "DDH(G).Left compose R_DDH(G, n, H) against HashedDDH(G, n, H).Adversary"
+    )
+    resp = c.post(
+        "/api/inlined-game",
+        data=json.dumps(
+            {"path": rel, "content": content, "step_text": step_text}
+        ),
+        content_type="application/json",
+        headers=POST_HEADERS,
+    )
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body.get("success") is True, body
+    assert body.get("canonical")
+
+
+def test_inlined_game_endpoint_missing_step_text(examples_client):
+    c, examples_root = examples_client
+    rel = "Proofs/PRG/TriplingPRGSecure.proof"
+    content = (examples_root / rel).read_text(encoding="utf-8")
+    resp = c.post(
+        "/api/inlined-game",
+        data=json.dumps({"path": rel, "content": content, "step_text": "   "}),
+        content_type="application/json",
+        headers=POST_HEADERS,
+    )
+    assert resp.status_code == 400
+
+
+def test_inlined_game_endpoint_invalid_path(examples_client):
+    c, _ = examples_client
+    resp = c.post(
+        "/api/inlined-game",
+        data=json.dumps(
+            {
+                "path": "../escape.proof",
+                "content": "",
+                "step_text": "X against Y",
+            }
+        ),
+        content_type="application/json",
+        headers=POST_HEADERS,
+    )
+    assert resp.status_code == 403

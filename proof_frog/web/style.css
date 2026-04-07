@@ -60,7 +60,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 }
 #toolbar button:hover:not(:disabled) { background: var(--bg3); border-color: var(--accent2); }
 #toolbar button:disabled { opacity: 0.4; cursor: default; }
-#toolbar button.primary { border-color: var(--accent2); color: var(--accent2); }
 #toolbar button.running { opacity: 0.6; }
 #toolbar select {
   padding: 3px 6px; border: 1px solid var(--border); border-radius: 3px;
@@ -68,7 +67,18 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 }
 #toolbar .spacer { flex: 1; }
 #toolbar .dir-label { color: var(--text-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; }
+#toolbar .toolbar-group { display: flex; gap: 6px; align-items: center; }
+#toolbar .toolbar-divider {
+  width: 1px; background: var(--border); align-self: center;
+  height: 60%; margin: 0 8px;
+}
+#toolbar .toolbar-icon {
+  width: 14px; height: 14px; margin-right: 4px; vertical-align: -2px;
+}
+#toolbar button.icon-only { padding: 4px 6px; display: inline-flex; align-items: center; justify-content: center; }
+#toolbar button.icon-only .toolbar-icon { margin-right: 0; }
 
+/* ── Toolbar dropdown (Insert menu) ── */
 #main { display: flex; flex: 1; overflow: hidden; }
 
 /* ── Sidebar ── */
@@ -124,26 +134,6 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .hop-item.hop-invalid { color: var(--error); }
 .hop-item.hop-valid .hop-status { background: rgba(78,201,176,0.18); }
 .hop-item.hop-invalid .hop-status { background: rgba(244,135,113,0.18); }
-
-/* ── Wizard panel ── */
-#wizard-panel { flex-shrink: 0; display: flex; flex-direction: column; }
-#wizard-resize-handle {
-  height: 4px; cursor: ns-resize; background: transparent; flex-shrink: 0;
-  border-top: 1px solid var(--border);
-}
-#wizard-resize-handle:hover, #wizard-resize-handle.dragging { background: var(--accent2); }
-#wizard-panel-header {
-  padding: 6px 10px; font-size: 11px; font-weight: 600;
-  text-transform: uppercase; color: var(--text-dim); letter-spacing: 0.08em; flex-shrink: 0;
-}
-#wizard-body { overflow-y: auto; padding: 6px 10px; flex: 1; min-height: 0; font-size: 12px; }
-.wizard-suggestion {
-  display: block; text-align: left;
-  color: var(--accent2); cursor: pointer; text-decoration: underline;
-  background: none; border: none; padding: 2px 0; font-size: 12px; font-family: inherit;
-}
-.wizard-suggestion:hover { color: var(--accent); }
-.wizard-empty { color: var(--text-dim); font-style: italic; }
 
 /* ── Wizard modal ── */
 #wizard-modal {
@@ -240,51 +230,51 @@ select.wizard-input { cursor: pointer; }
 }
 
 /* ── Context-sensitive wizard modals ── */
-#add-import-modal, #add-prim-method-modal, #add-scheme-method-modal, #add-game-oracle-modal, #add-assumption-modal, #add-lemma-modal, #insert-reduction-hop-modal, #new-reduction-modal, #new-intermediate-game-modal {
+#add-import-modal, #add-prim-method-modal, #add-scheme-method-modal, #add-game-oracle-modal, #add-assumption-modal, #add-lemma-modal, #insert-reduction-hop-modal, #new-reduction-modal, #new-intermediate-game-modal, #inlined-game-modal {
   position: fixed; inset: 0; z-index: 1000;
   background: rgba(0,0,0,0.5);
   display: none; align-items: center; justify-content: center;
 }
-#add-import-modal.visible, #add-prim-method-modal.visible, #add-scheme-method-modal.visible, #add-game-oracle-modal.visible, #add-assumption-modal.visible, #add-lemma-modal.visible, #insert-reduction-hop-modal.visible, #new-reduction-modal.visible, #new-intermediate-game-modal.visible {
+#add-import-modal.visible, #add-prim-method-modal.visible, #add-scheme-method-modal.visible, #add-game-oracle-modal.visible, #add-assumption-modal.visible, #add-lemma-modal.visible, #insert-reduction-hop-modal.visible, #new-reduction-modal.visible, #new-intermediate-game-modal.visible, #inlined-game-modal.visible {
   display: flex;
 }
-#add-import-modal-panel, #add-prim-method-modal-panel, #add-scheme-method-modal-panel, #add-game-oracle-modal-panel, #add-assumption-modal-panel, #add-lemma-modal-panel, #insert-reduction-hop-modal-panel, #new-reduction-modal-panel, #new-intermediate-game-modal-panel {
+#add-import-modal-panel, #add-prim-method-modal-panel, #add-scheme-method-modal-panel, #add-game-oracle-modal-panel, #add-assumption-modal-panel, #add-lemma-modal-panel, #insert-reduction-hop-modal-panel, #new-reduction-modal-panel, #new-intermediate-game-modal-panel, #inlined-game-modal-panel {
   background: var(--bg2); border: 1px solid var(--border); border-radius: 5px;
   width: 340px; max-width: 90vw; display: flex; flex-direction: column;
   box-shadow: 0 8px 32px rgba(0,0,0,0.4);
 }
-#add-import-modal-header, #add-prim-method-modal-header, #add-scheme-method-modal-header, #add-game-oracle-modal-header, #add-assumption-modal-header, #add-lemma-modal-header, #insert-reduction-hop-modal-header, #new-reduction-modal-header, #new-intermediate-game-modal-header {
+#add-import-modal-header, #add-prim-method-modal-header, #add-scheme-method-modal-header, #add-game-oracle-modal-header, #add-assumption-modal-header, #add-lemma-modal-header, #insert-reduction-hop-modal-header, #new-reduction-modal-header, #new-intermediate-game-modal-header, #inlined-game-modal-header {
   display: flex; align-items: center; padding: 10px 14px;
   border-bottom: 1px solid var(--border);
 }
-#add-import-modal-title, #add-prim-method-modal-title, #add-scheme-method-modal-title, #add-game-oracle-modal-title, #add-assumption-modal-title, #add-lemma-modal-title, #insert-reduction-hop-modal-title, #new-reduction-modal-title, #new-intermediate-game-modal-title {
+#add-import-modal-title, #add-prim-method-modal-title, #add-scheme-method-modal-title, #add-game-oracle-modal-title, #add-assumption-modal-title, #add-lemma-modal-title, #insert-reduction-hop-modal-title, #new-reduction-modal-title, #new-intermediate-game-modal-title, #inlined-game-modal-title {
   flex: 1; font-weight: 600; font-size: 13px;
 }
-#add-import-modal-close, #add-prim-method-modal-close, #add-scheme-method-modal-close, #add-game-oracle-modal-close, #add-assumption-modal-close, #add-lemma-modal-close, #insert-reduction-hop-modal-close, #new-reduction-modal-close, #new-intermediate-game-modal-close {
+#add-import-modal-close, #add-prim-method-modal-close, #add-scheme-method-modal-close, #add-game-oracle-modal-close, #add-assumption-modal-close, #add-lemma-modal-close, #insert-reduction-hop-modal-close, #new-reduction-modal-close, #new-intermediate-game-modal-close, #inlined-game-modal-close {
   background: none; border: none; color: var(--text-dim); cursor: pointer;
   font-size: 18px; padding: 0 2px; line-height: 1;
 }
-#add-import-modal-close:hover, #add-prim-method-modal-close:hover, #add-scheme-method-modal-close:hover, #add-game-oracle-modal-close:hover, #add-assumption-modal-close:hover, #add-lemma-modal-close:hover, #insert-reduction-hop-modal-close:hover, #new-reduction-modal-close:hover, #new-intermediate-game-modal-close:hover {
+#add-import-modal-close:hover, #add-prim-method-modal-close:hover, #add-scheme-method-modal-close:hover, #add-game-oracle-modal-close:hover, #add-assumption-modal-close:hover, #add-lemma-modal-close:hover, #insert-reduction-hop-modal-close:hover, #new-reduction-modal-close:hover, #new-intermediate-game-modal-close:hover, #inlined-game-modal-close:hover {
   color: var(--text);
 }
-#add-import-modal-body, #add-prim-method-modal-body, #add-scheme-method-modal-body, #add-game-oracle-modal-body, #add-assumption-modal-body, #add-lemma-modal-body, #insert-reduction-hop-modal-body, #new-reduction-modal-body, #new-intermediate-game-modal-body {
+#add-import-modal-body, #add-prim-method-modal-body, #add-scheme-method-modal-body, #add-game-oracle-modal-body, #add-assumption-modal-body, #add-lemma-modal-body, #insert-reduction-hop-modal-body, #new-reduction-modal-body, #new-intermediate-game-modal-body, #inlined-game-modal-body {
   padding: 14px; display: flex; flex-direction: column; gap: 8px;
 }
-#add-import-modal-footer, #add-prim-method-modal-footer, #add-scheme-method-modal-footer, #add-game-oracle-modal-footer, #add-assumption-modal-footer, #add-lemma-modal-footer, #insert-reduction-hop-modal-footer, #new-reduction-modal-footer, #new-intermediate-game-modal-footer {
+#add-import-modal-footer, #add-prim-method-modal-footer, #add-scheme-method-modal-footer, #add-game-oracle-modal-footer, #add-assumption-modal-footer, #add-lemma-modal-footer, #insert-reduction-hop-modal-footer, #new-reduction-modal-footer, #new-intermediate-game-modal-footer, #inlined-game-modal-footer {
   display: flex; gap: 8px; padding: 10px 14px;
   border-top: 1px solid var(--border); justify-content: flex-end;
 }
-#add-import-modal-footer button, #add-prim-method-modal-footer button, #add-scheme-method-modal-footer button, #add-game-oracle-modal-footer button, #add-assumption-modal-footer button, #add-lemma-modal-footer button, #insert-reduction-hop-modal-footer button, #new-reduction-modal-footer button, #new-intermediate-game-modal-footer button {
+#add-import-modal-footer button, #add-prim-method-modal-footer button, #add-scheme-method-modal-footer button, #add-game-oracle-modal-footer button, #add-assumption-modal-footer button, #add-lemma-modal-footer button, #insert-reduction-hop-modal-footer button, #new-reduction-modal-footer button, #new-intermediate-game-modal-footer button, #inlined-game-modal-footer button {
   padding: 5px 14px; border: 1px solid var(--border); border-radius: 3px;
   background: var(--bg3); color: var(--text); cursor: pointer; font-size: 12px;
 }
-#add-import-modal-footer button:hover, #add-prim-method-modal-footer button:hover, #add-scheme-method-modal-footer button:hover, #add-game-oracle-modal-footer button:hover, #add-assumption-modal-footer button:hover, #add-lemma-modal-footer button:hover, #insert-reduction-hop-modal-footer button:hover, #new-reduction-modal-footer button:hover, #new-intermediate-game-modal-footer button:hover {
+#add-import-modal-footer button:hover, #add-prim-method-modal-footer button:hover, #add-scheme-method-modal-footer button:hover, #add-game-oracle-modal-footer button:hover, #add-assumption-modal-footer button:hover, #add-lemma-modal-footer button:hover, #insert-reduction-hop-modal-footer button:hover, #new-reduction-modal-footer button:hover, #new-intermediate-game-modal-footer button:hover, #inlined-game-modal-footer button:hover {
   background: var(--bg2); border-color: var(--accent2);
 }
-#add-import-modal-footer button.primary, #add-prim-method-modal-footer button.primary, #add-scheme-method-modal-footer button.primary, #add-game-oracle-modal-footer button.primary, #add-assumption-modal-footer button.primary, #add-lemma-modal-footer button.primary, #insert-reduction-hop-modal-footer button.primary, #new-reduction-modal-footer button.primary, #new-intermediate-game-modal-footer button.primary {
+#add-import-modal-footer button.primary, #add-prim-method-modal-footer button.primary, #add-scheme-method-modal-footer button.primary, #add-game-oracle-modal-footer button.primary, #add-assumption-modal-footer button.primary, #add-lemma-modal-footer button.primary, #insert-reduction-hop-modal-footer button.primary, #new-reduction-modal-footer button.primary, #new-intermediate-game-modal-footer button.primary, #inlined-game-modal-footer button.primary {
   border-color: var(--accent2); color: var(--accent2);
 }
-#add-import-modal-footer button.primary:hover, #add-prim-method-modal-footer button.primary:hover, #add-scheme-method-modal-footer button.primary:hover, #add-game-oracle-modal-footer button.primary:hover, #add-assumption-modal-footer button.primary:hover, #add-lemma-modal-footer button.primary:hover, #insert-reduction-hop-modal-footer button.primary:hover, #new-reduction-modal-footer button.primary:hover, #new-intermediate-game-modal-footer button.primary:hover {
+#add-import-modal-footer button.primary:hover, #add-prim-method-modal-footer button.primary:hover, #add-scheme-method-modal-footer button.primary:hover, #add-game-oracle-modal-footer button.primary:hover, #add-assumption-modal-footer button.primary:hover, #add-lemma-modal-footer button.primary:hover, #insert-reduction-hop-modal-footer button.primary:hover, #new-reduction-modal-footer button.primary:hover, #new-intermediate-game-modal-footer button.primary:hover, #inlined-game-modal-footer button.primary:hover {
   background: rgba(86,156,214,0.12);
 }
 

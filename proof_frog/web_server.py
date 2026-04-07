@@ -7,6 +7,7 @@ import os
 import queue
 import re
 import socket
+import tempfile
 import threading
 import time
 import webbrowser
@@ -117,9 +118,10 @@ def _get_file_type(file_name: str) -> frog_ast.FileType:
 def _build_minimal_proof(proof_text: str, step_text: str) -> str | None:
     """Build a minimal parseable proof containing only one game step.
 
-    Extracts imports, intermediate Game definitions (skipping Reduction stubs),
-    the let:/assume:/theorem: blocks from *proof_text*, then wraps *step_text*
-    as the only step (listed twice so the grammar's two-game requirement is met).
+    Extracts imports, intermediate Game definitions, Reduction definitions,
+    and the let:/assume:/theorem: blocks from *proof_text*, then wraps
+    *step_text* as the only step (listed twice so the grammar's two-game
+    requirement is met).
 
     Returns the minimal proof as a string, or None if a theorem could not be
     extracted from *proof_text*.
@@ -129,9 +131,10 @@ def _build_minimal_proof(proof_text: str, step_text: str) -> str | None:
         re.findall(r"^import\s+'[^']+'(?:\s+as\s+\w+)?\s*;", proof_text, re.MULTILINE)
     )
 
-    # Intermediate Game blocks (skip Reduction blocks)
+    # Top-level Game and Reduction blocks. We must include Reductions because
+    # *step_text* may reference them via `compose ... compose Reduction(...)`.
     game_defs: list[str] = []
-    for match in re.finditer(r"^Game\s+", proof_text, re.MULTILINE):
+    for match in re.finditer(r"^(Game|Reduction)\s+", proof_text, re.MULTILINE):
         start = match.start()
         brace_start = proof_text.find("{", start)
         if brace_start == -1:
@@ -778,6 +781,27 @@ def create_app(directory: str, *, watch: bool = True) -> tuple[Flask, Any]:
             resp["error_column"] = error_column
         return jsonify(resp)
 
+    @app.route("/api/check", methods=["POST"])
+    def run_check() -> Any:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data"}), 400
+        rel_path = data.get("path", "")
+        content = data.get("content", "")
+        abs_path = _safe_path(directory, rel_path)
+        if abs_path is None:
+            return jsonify({"error": "Invalid path"}), 403
+        abs_path.write_text(content, encoding="utf-8")
+        output, success, error_line, error_column = _capture_check(
+            str(abs_path), allowed_root=directory
+        )
+        resp: dict[str, object] = {"output": output, "success": success}
+        if error_line is not None:
+            resp["error_line"] = error_line
+        if error_column is not None:
+            resp["error_column"] = error_column
+        return jsonify(resp)
+
     @app.route("/api/prove", methods=["POST"])
     def run_prove() -> Any:
         data = request.get_json()
@@ -836,6 +860,82 @@ def create_app(directory: str, *, watch: bool = True) -> tuple[Flask, Any]:
                 "scheme": scheme,
             }
         )
+
+    @app.route("/api/describe", methods=["POST"])
+    def run_describe() -> Any:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data"}), 400
+        rel_path = data.get("path", "")
+        content = data.get("content", "")
+        abs_path = _safe_path(directory, rel_path)
+        if abs_path is None:
+            return jsonify({"error": "Invalid path"}), 403
+        abs_path.write_text(content, encoding="utf-8")
+        output, success = _capture_describe(str(abs_path))
+        return jsonify({"output": output, "success": success})
+
+    @app.route("/api/inlined-game", methods=["POST"])
+    def run_inlined_game() -> Any:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data"}), 400
+        rel_path = data.get("path", "")
+        content = data.get("content", "")
+        step_text = data.get("step_text", "")
+        if not isinstance(step_text, str) or not step_text.strip():
+            return jsonify({"error": "Missing or empty step_text"}), 400
+        abs_path = _safe_path(directory, rel_path)
+        if abs_path is None:
+            return jsonify({"error": "Invalid path"}), 403
+        try:
+            abs_path.write_text(content, encoding="utf-8")
+            minimal = _build_minimal_proof(content, step_text)
+            if minimal is None:
+                return (
+                    jsonify(
+                        {"error": "Could not extract theorem: block from proof file."}
+                    ),
+                    400,
+                )
+            # Dot-prefixed name so the file watcher ignores this transient
+            # file (otherwise its create + delete would cause the file tree
+            # in connected web clients to refresh and lose expansion state).
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=".inlinedgame_",
+                suffix=".proof",
+                dir=os.path.dirname(str(abs_path)),
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(minimal)
+                (
+                    output,
+                    canonical,
+                    success,
+                    has_reduction,
+                    reduction,
+                    challenger,
+                    scheme,
+                ) = _capture_inline(tmp_path, 0, allowed_root=directory)
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            return jsonify(
+                {
+                    "output": output,
+                    "canonical": canonical,
+                    "success": success,
+                    "has_reduction": has_reduction,
+                    "reduction": reduction,
+                    "challenger": challenger,
+                    "scheme": scheme,
+                }
+            )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            return jsonify({"error": f"Error: {e}"}), 400
 
     def _file_metadata_response(abs_path: Path) -> Any:
         file_path_str = str(abs_path)

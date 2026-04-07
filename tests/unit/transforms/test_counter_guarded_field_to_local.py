@@ -346,6 +346,87 @@ from proof_frog.transforms.sampling import _counter_guarded_field_to_local
             }
         }""",
         ),
+        # Counter increment with operands in flipped order: `count = 1 + count`.
+        # NormalizeCommutativeChains rewrites `count + 1` into `1 + count`
+        # (integer literal first), so the pattern matcher must accept either
+        # operand order.  Regression test for the CDH=>OneTimeHashedDDH proof
+        # which only canonicalized correctly after this fix.
+        (
+            """
+        Game Test() {
+            BitString<lambda> k;
+            Int count;
+            Void Initialize() {
+                k <- BitString<lambda>;
+                count = 0;
+            }
+            BitString<lambda> Oracle(BitString<lambda> x) {
+                count = 1 + count;
+                if (count == 1) {
+                    return k + x;
+                } else {
+                    BitString<lambda> r <- BitString<lambda>;
+                    return r + x;
+                }
+            }
+        }""",
+            """
+        Game Test() {
+            Int count;
+            Void Initialize() {
+                count = 0;
+            }
+            BitString<lambda> Oracle(BitString<lambda> x) {
+                BitString<lambda> k <- BitString<lambda>;
+                count = 1 + count;
+                if (count == 1) {
+                    return k + x;
+                } else {
+                    BitString<lambda> r <- BitString<lambda>;
+                    return r + x;
+                }
+            }
+        }""",
+        ),
+        # Equality guard with operands in flipped order: `1 == count`.
+        # Equality is commutative; the pattern matcher must accept it.
+        (
+            """
+        Game Test() {
+            BitString<lambda> k;
+            Int count;
+            Void Initialize() {
+                k <- BitString<lambda>;
+                count = 0;
+            }
+            BitString<lambda> Oracle(BitString<lambda> x) {
+                count = count + 1;
+                if (1 == count) {
+                    return k + x;
+                } else {
+                    BitString<lambda> r <- BitString<lambda>;
+                    return r + x;
+                }
+            }
+        }""",
+            """
+        Game Test() {
+            Int count;
+            Void Initialize() {
+                count = 0;
+            }
+            BitString<lambda> Oracle(BitString<lambda> x) {
+                BitString<lambda> k <- BitString<lambda>;
+                count = count + 1;
+                if (1 == count) {
+                    return k + x;
+                } else {
+                    BitString<lambda> r <- BitString<lambda>;
+                    return r + x;
+                }
+            }
+        }""",
+        ),
     ],
 )
 def test_counter_guarded_field_to_local(

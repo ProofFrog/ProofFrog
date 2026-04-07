@@ -772,6 +772,21 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
                 continue
             if isinstance(statement.value, (frog_ast.Variable, frog_ast.Tuple)):
                 continue
+            # Skip trivial literals.  Replacing a constant like ``0`` with a
+            # named alias is lossy: subsequent passes (e.g. tuple expansion,
+            # branch elimination) rely on seeing the constant directly to
+            # decide whether to fire.  Aliasing literals also never reduces
+            # complexity.
+            if isinstance(
+                statement.value,
+                (
+                    frog_ast.Integer,
+                    frog_ast.Boolean,
+                    frog_ast.BinaryNum,
+                    frog_ast.NoneExpression,
+                ),
+            ):
+                continue
 
             var_name = statement.var.name
             expr = statement.value

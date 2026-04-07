@@ -1035,7 +1035,8 @@ def _find_counter_fields(game: frog_ast.Game) -> set[str]:
 def _has_counter_increment(
     block: frog_ast.Block, counter_names: set[str]
 ) -> Optional[str]:
-    """Check if a block contains ``counter = counter + 1`` and return the name."""
+    """Check if a block contains ``counter = counter + 1`` (in either
+    operand order) and return the name."""
     for stmt in block.statements:
         if (
             isinstance(stmt, frog_ast.Assignment)
@@ -1044,12 +1045,32 @@ def _has_counter_increment(
             and stmt.the_type is None
             and isinstance(stmt.value, frog_ast.BinaryOperation)
             and stmt.value.operator is frog_ast.BinaryOperators.ADD
-            and isinstance(stmt.value.left_expression, frog_ast.Variable)
-            and stmt.value.left_expression.name == stmt.var.name
-            and isinstance(stmt.value.right_expression, frog_ast.Integer)
-            and stmt.value.right_expression.num == 1
         ):
-            return stmt.var.name
+            left = stmt.value.left_expression
+            right = stmt.value.right_expression
+            # Accept both `counter + 1` and `1 + counter`
+            # (NormalizeCommutativeChains reorders integer literals to the
+            # left of variables, so after canonicalization the shape may be
+            # `1 + counter`).
+            var_operand: Optional[frog_ast.ASTNode] = None
+            int_operand: Optional[frog_ast.ASTNode] = None
+            if isinstance(left, frog_ast.Variable) and isinstance(
+                right, frog_ast.Integer
+            ):
+                var_operand, int_operand = left, right
+            elif isinstance(right, frog_ast.Variable) and isinstance(
+                left, frog_ast.Integer
+            ):
+                var_operand, int_operand = right, left
+            if (
+                var_operand is not None
+                and int_operand is not None
+                and isinstance(var_operand, frog_ast.Variable)
+                and var_operand.name == stmt.var.name
+                and isinstance(int_operand, frog_ast.Integer)
+                and int_operand.num == 1
+            ):
+                return stmt.var.name
     return None
 
 
@@ -1098,18 +1119,27 @@ def _all_refs_in_counter_guarded_branches(
                 if not _references_name(branch_block, field_name):
                     continue
                 # Branch uses the field — condition must be counter == expr
+                # (equality is commutative; accept either operand order).
                 if not (
                     isinstance(condition, frog_ast.BinaryOperation)
                     and condition.operator is frog_ast.BinaryOperators.EQUALS
-                    and isinstance(condition.left_expression, frog_ast.Variable)
-                    and condition.left_expression.name == counter_name
                 ):
                     return False
-                # The guard expression (RHS of counter == expr) must be
-                # constant across oracle calls.  Reject if it references
+                left = condition.left_expression
+                right = condition.right_expression
+                guard_expr: Optional[frog_ast.ASTNode] = None
+                if isinstance(left, frog_ast.Variable) and left.name == counter_name:
+                    guard_expr = right
+                elif (
+                    isinstance(right, frog_ast.Variable) and right.name == counter_name
+                ):
+                    guard_expr = left
+                if guard_expr is None:
+                    return False
+                # The guard expression (the non-counter side of the ==) must
+                # be constant across oracle calls.  Reject if it references
                 # any game field or method parameter, since those can differ
                 # between calls and would let the branch fire multiple times.
-                guard_expr = condition.right_expression
                 for mname in mutable_names:
                     if _references_name(guard_expr, mname):
                         return False

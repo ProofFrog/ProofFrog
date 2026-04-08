@@ -2,7 +2,7 @@ import os
 import sys
 import copy
 from typing import Optional, TypeVar, Union, TypeAlias
-from sympy import Rational, Symbol
+from sympy import Integer, Rational, Symbol
 from . import frog_ast
 from . import frog_parser
 from . import proof_engine
@@ -911,6 +911,14 @@ class CheckTypeVisitor(VariableTypeVisitor):
         self.subsets_pairs: list[tuple[PossibleType, PossibleType]] = (
             subsets_pairs if subsets_pairs is not None else []
         )
+        # Expression-level equality constraints from `requires e1 == e2;`
+        # where e1 and e2 are numeric expressions (e.g. `F.in == 1`).  These
+        # feed into the SymPy substitution dictionary used by compare_types
+        # to unify concrete BitString<n> against BitString<symbol> when a
+        # constraint pins the symbol to a concrete value.
+        self.expression_equality_pairs: list[
+            tuple[frog_ast.Expression, frog_ast.Expression]
+        ] = []
         self._instantiation_cache: dict[
             tuple[str, tuple[str, ...]], frog_ast.Instantiable
         ] = {}
@@ -1114,7 +1122,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             sym_val = _ast_to_sympy(ns_val)
             if sym_val is not None:
                 subs[Symbol(ns_name)] = sym_val
-        # From requires equality pairs
+        # From requires equality pairs (type-level)
         for left, right in self.subsets_pairs:
             if not isinstance(left, frog_ast.ASTNode) or not isinstance(
                 right, frog_ast.ASTNode
@@ -1128,6 +1136,16 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 and isinstance(left_sym, Symbol)
             ):
                 subs[left_sym] = right_sym
+        # From requires equality pairs (expression-level, e.g. F.in == 1)
+        for left_expr, right_expr in self.expression_equality_pairs:
+            left_sym = _ast_to_sympy(left_expr)
+            right_sym = _ast_to_sympy(right_expr)
+            if left_sym is None or right_sym is None:
+                continue
+            if isinstance(left_sym, Symbol):
+                subs[left_sym] = right_sym
+            elif isinstance(right_sym, Symbol):
+                subs[right_sym] = left_sym
         return subs
 
     def check_types(
@@ -1223,10 +1241,22 @@ class CheckTypeVisitor(VariableTypeVisitor):
             frog_ast.BinaryOperators.SUBSETS,
             frog_ast.BinaryOperators.EQUALS,
         ):
-            if isinstance(expr.left_expression, frog_ast.Type) and isinstance(
-                expr.right_expression, frog_ast.Type
+            left = expr.left_expression
+            right = expr.right_expression
+            # Value-level equality such as `requires F.in == 1`: at least
+            # one operand is a pure Expression (Integer, BinaryOperation,
+            # etc.) that is not a Type node.  Record for SymPy substitution
+            # in compare_types.  Note: FieldAccess is both an Expression and
+            # a Type in the AST hierarchy, so we detect value-level pairs by
+            # the presence of a non-Type operand.
+            if expr.operator == frog_ast.BinaryOperators.EQUALS and (
+                not isinstance(left, frog_ast.Type)
+                or not isinstance(right, frog_ast.Type)
             ):
-                self.subsets_pairs.append((expr.left_expression, expr.right_expression))
+                self.expression_equality_pairs.append((left, right))
+                return
+            if isinstance(left, frog_ast.Type) and isinstance(right, frog_ast.Type):
+                self.subsets_pairs.append((left, right))
                 # Warn when a == constraint has the abstract type on the
                 # right, since the type normalizer only fires when the
                 # left side resolves to a Variable after instantiation.
@@ -1975,7 +2005,9 @@ class CheckTypeVisitor(VariableTypeVisitor):
         self.ast_type_map.set(field_acess, member)  # type: ignore[arg-type]
 
     def leave_binary_num(self, binary_num: frog_ast.BinaryNum) -> None:
-        self.ast_type_map.set(binary_num, frog_ast.BitStringType())
+        self.ast_type_map.set(
+            binary_num, frog_ast.BitStringType(frog_ast.Integer(binary_num.length))
+        )
 
     def leave_bit_string_literal(
         self, bit_string_literal: frog_ast.BitStringLiteral
@@ -2603,6 +2635,13 @@ def compare_types(
                 declared_type.parameterization
             )
             value_type_expression = get_sympy_expression(value_type.parameterization)
+            # get_sympy_expression returns a raw Python int for Integer
+            # literals; wrap so both sides expose .subs() for the
+            # substitution loop below.
+            if isinstance(declared_type_expression, int):
+                declared_type_expression = Integer(declared_type_expression)
+            if isinstance(value_type_expression, int):
+                value_type_expression = Integer(value_type_expression)
             if sympy_subs and declared_type_expression != value_type_expression:
                 # Apply Int field definitions and requires equalities
                 # iteratively until fixed point for transitive chains
@@ -2622,8 +2661,7 @@ def compare_types(
                         and value_type_expression == prev_v
                     ):
                         break
-            bool_value = declared_type_expression == value_type_expression
-            return bool_value
+            return bool(declared_type_expression == value_type_expression)
         return True
 
     if isinstance(declared_type, frog_ast.ModIntType) and isinstance(
@@ -2660,6 +2698,11 @@ def compare_types(
         v_count = get_sympy_expression(value_type.count)
         if d_count is None or v_count is None:
             return declared_type.count == value_type.count
+        # Wrap raw ints so both sides expose .subs() below.
+        if isinstance(d_count, int):
+            d_count = Integer(d_count)
+        if isinstance(v_count, int):
+            v_count = Integer(v_count)
         if sympy_subs and d_count != v_count:
             for _ in range(10):
                 prev_d, prev_v = d_count, v_count
@@ -2667,7 +2710,7 @@ def compare_types(
                 v_count = v_count.subs(sympy_subs)  # type: ignore[union-attr]
                 if d_count == prev_d and v_count == prev_v:
                     break
-        return d_count == v_count
+        return bool(d_count == v_count)
 
     return False
 

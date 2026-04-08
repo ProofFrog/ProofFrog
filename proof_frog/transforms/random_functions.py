@@ -574,6 +574,300 @@ class LocalRFToUniform(TransformPass):
 
 
 # ---------------------------------------------------------------------------
+# Local RF called on distinct literal constants -> independent uniform samples
+# ---------------------------------------------------------------------------
+
+
+def _literal_key(expr: frog_ast.Expression) -> tuple[str, ...] | None:
+    """Return a canonical key for a literal bitstring expression.
+
+    The key is a tuple ``("bits", length_str, value_str)`` where:
+
+    - ``length_str`` stringifies the bit length (concrete integer or
+      symbolic expression).
+    - ``value_str`` stringifies the integer value that the literal
+      represents as an unsigned big-endian bitstring.
+
+    This unifies the two source-level literal forms:
+
+    - ``BinaryNum(num, length)`` directly provides the integer value.
+    - ``BitStringLiteral(bit=0, length=n)`` is the all-zero n-bit string,
+      integer value 0.
+    - ``BitStringLiteral(bit=1, length=n)`` is the all-one n-bit string,
+      integer value ``2^n - 1`` when ``n`` is a concrete integer.  When
+      ``n`` is symbolic (e.g. ``0^lambda``), the all-one value is also
+      symbolic; we encode it as ``"allones:<length_str>"`` to keep the
+      namespace disjoint from concrete values.
+
+    Two literals at the same call site have equal keys iff they represent
+    the same bitstring (the typechecker has already ensured they live in
+    the same type, so distinct keys imply distinct bitstring values).
+
+    Returns ``None`` if *expr* is not a recognized literal form.
+    """
+    if isinstance(expr, frog_ast.BinaryNum):
+        return ("bits", str(expr.length), str(expr.num))
+    if isinstance(expr, frog_ast.BitStringLiteral):
+        length_str = str(expr.length)
+        if expr.bit == 0:
+            return ("bits", length_str, "0")
+        # All-ones: if length is a concrete Integer literal, compute
+        # 2^n - 1; otherwise keep the symbolic marker so it does not
+        # collide with any numeric value.
+        if isinstance(expr.length, frog_ast.Integer):
+            value = (1 << expr.length.num) - 1
+            return ("bits", length_str, str(value))
+        return ("bits", length_str, f"allones:{length_str}")
+    return None
+
+
+def _collect_rf_call_args(
+    block: frog_ast.Block, rf_name: str
+) -> list[frog_ast.Expression] | None:
+    """Collect every argument expression passed to ``rf_name`` in *block*.
+
+    Returns ``None`` if the RF is referenced in any non-call position (e.g.,
+    ``RF.domain``, bare variable reference), which would block the transform.
+    """
+    args: list[frog_ast.Expression] = []
+    call_count, field_access_count = _count_rf_calls(block, rf_name)
+    if field_access_count > 0:
+        return None
+
+    # Walk the block to collect arguments in order.
+    def walk(node: frog_ast.ASTNode) -> bool:
+        if (
+            isinstance(node, frog_ast.FuncCall)
+            and isinstance(node.func, frog_ast.Variable)
+            and node.func.name == rf_name
+        ):
+            if len(node.args) == 1:
+                args.append(node.args[0])
+            # Return False so SearchVisitor continues searching elsewhere,
+            # but the call's own children will also be visited.  We tolerate
+            # that because the Variable child just gets ignored here — the
+            # conservative bare-reference check is handled separately below.
+            return False
+        return False
+
+    SearchVisitor(walk).visit(block)
+    if len(args) != call_count:
+        # Some call had a non-1-argument shape (should not happen for a
+        # Function<D, R> type, but guard defensively).
+        return None
+
+    # Ensure there are no bare references to the RF outside of FuncCall
+    # positions.  Every Variable("RF") inside the block is either the
+    # ``func`` field of a FuncCall we just collected (total ``call_count``
+    # of these) or a bare reference (which blocks us).
+    bare_refs = _count_variable_refs(block, rf_name)
+    if bare_refs != call_count:
+        return None
+
+    return args
+
+
+def _count_variable_refs(block: frog_ast.Block, name: str) -> int:
+    """Count every ``Variable(name)`` node appearing in *block*."""
+    count = [0]
+
+    def visitor(node: frog_ast.ASTNode) -> bool:
+        if isinstance(node, frog_ast.Variable) and node.name == name:
+            count[0] += 1
+        return False
+
+    SearchVisitor(visitor).visit(block)
+    return count[0]
+
+
+class _DistinctConstRFTransformer(BlockTransformer):
+    """Replace ``RF(c1), RF(c2), ..., RF(ck)`` with independent uniform
+    samples when RF is a locally-sampled random function, the ``ci`` are
+    pairwise-distinct literal constants, and RF has no other references.
+
+    Soundness: a freshly sampled ``Function<D, R>`` evaluated on *k*
+    pairwise-distinct domain points is distributed identically to *k*
+    independent uniform draws from ``R``.  The preconditions ensure this
+    equivalence:
+
+    - Local sample (not a field): each method invocation re-samples, so we
+      cannot violate consistency across oracle calls.
+    - No references other than the *k* call sites: the RF does not escape.
+    - No calls inside loop bodies: a single syntactic call inside a loop
+      would execute multiple times with the same input, yielding a single
+      shared value — independent samples would be unsound.
+    - All arguments are literal constants (``BinaryNum`` or
+      ``BitStringLiteral``) with pairwise-distinct canonical keys.  Both
+      forms carry explicit bit lengths in the AST (``BinaryNum.length`` from
+      the parser, ``BitStringLiteral.length`` from the source syntax), so
+      pairwise distinctness of keys is decided purely from the AST.  Since
+      typechecking has already enforced that every argument at the same
+      call site has the same width, distinct keys always represent distinct
+      bitstrings.
+    """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+
+    def _transform_block_wrapper(
+        self, block: frog_ast.Block
+    ) -> frog_ast.Block:  # pylint: disable=too-many-locals,too-many-branches
+        for sample_idx, stmt in enumerate(block.statements):
+            if not (
+                isinstance(stmt, frog_ast.Sample)
+                and isinstance(stmt.sampled_from, frog_ast.FunctionType)
+                and isinstance(stmt.var, frog_ast.Variable)
+            ):
+                continue
+
+            rf_name = stmt.var.name
+            rf_type = stmt.sampled_from
+
+            if stmt.the_type is None:
+                has_decl = any(
+                    isinstance(s, frog_ast.VariableDeclaration)
+                    and s.name == rf_name
+                    and isinstance(s.type, frog_ast.FunctionType)
+                    for s in block.statements[:sample_idx]
+                )
+                if not has_decl:
+                    continue
+
+            remaining = frog_ast.Block(block.statements[sample_idx + 1 :])
+
+            call_args = _collect_rf_call_args(remaining, rf_name)
+            if call_args is None:
+                continue
+
+            # Need at least 2 calls to be interesting (k=1 is handled by
+            # LocalRFToUniform).
+            if len(call_args) < 2:
+                continue
+
+            if _rf_call_in_loop(remaining, rf_name):
+                continue
+
+            # All args must be literal constants with pairwise-distinct keys.
+            # Also require that every literal's declared length expression is
+            # structurally identical to every other: the typechecker has
+            # already accepted the call, so they should unify, but different
+            # structural forms could coincidentally represent the same length
+            # (e.g. `0^lambda` and `0^(F.in)` with `requires lambda == F.in`).
+            # Reject such cases conservatively since the equality check on
+            # the _literal_key value assumes a shared length namespace.
+            keys: list[tuple[str, ...]] = []
+            all_literal = True
+            literal_lengths: list[frog_ast.Expression] = []
+            for arg in call_args:
+                key = _literal_key(arg)
+                if key is None:
+                    all_literal = False
+                    break
+                keys.append(key)
+                if isinstance(arg, frog_ast.BinaryNum):
+                    literal_lengths.append(frog_ast.Integer(arg.length))
+                else:
+                    assert isinstance(arg, frog_ast.BitStringLiteral)
+                    literal_lengths.append(arg.length)
+            if all_literal and literal_lengths:
+                first_length = literal_lengths[0]
+                if not all(length == first_length for length in literal_lengths[1:]):
+                    if self.ctx is not None:
+                        self.ctx.near_misses.append(
+                            NearMiss(
+                                transform_name="Distinct Const RF To Uniform",
+                                reason=(
+                                    f"RF '{rf_name}' called with literal "
+                                    "arguments whose declared bit lengths "
+                                    "are not structurally identical"
+                                ),
+                                location=stmt.origin,
+                                suggestion=None,
+                                variable=rf_name,
+                                method=None,
+                            )
+                        )
+                    continue
+            if not all_literal:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Distinct Const RF To Uniform",
+                            reason=(
+                                f"RF '{rf_name}' called multiple times but at "
+                                "least one argument is not a literal constant"
+                            ),
+                            location=stmt.origin,
+                            suggestion=(
+                                "Use literal constants (e.g., 0b0, 0b1) as RF "
+                                "arguments so distinctness can be decided "
+                                "syntactically"
+                            ),
+                            variable=rf_name,
+                            method=None,
+                        )
+                    )
+                continue
+
+            if len(set(keys)) != len(keys):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Distinct Const RF To Uniform",
+                            reason=(
+                                f"RF '{rf_name}' called on duplicate literal "
+                                "arguments — cannot replace with independent "
+                                "samples"
+                            ),
+                            location=stmt.origin,
+                            suggestion=None,
+                            variable=rf_name,
+                            method=None,
+                        )
+                    )
+                continue
+
+            # No overflow guard is needed here: the typechecker assigns
+            # every BinaryNum its concrete source-level width, every
+            # BitStringLiteral its declared length, and the well-formedness
+            # of the call site guarantees every argument typechecks against
+            # the RF's declared domain type.  Two arguments at the same call
+            # site therefore always have the same bit width, and pairwise
+            # distinct keys always represent pairwise distinct bitstrings.
+
+            # Extract every RF call into a standalone assignment so that
+            # _RFCallReplacer can rewrite them uniformly into fresh samples.
+            extracted = _RFCallExtractor({rf_name}, {rf_name: rf_type}).transform(
+                remaining
+            )
+            replaced = _RFCallReplacer({rf_name: rf_type}).transform(extracted)
+
+            if replaced == remaining:
+                continue
+
+            # Drop the original RF sample (now dead) and splice in replaced.
+            new_stmts = list(block.statements[:sample_idx]) + list(replaced.statements)
+            return self.transform_block(frog_ast.Block(new_stmts))
+
+        return block
+
+
+class DistinctConstRFToUniform(TransformPass):
+    """Replace locally-sampled RFs called on distinct literal constants with
+    independent uniform samples.
+
+    Generalizes :class:`LocalRFToUniform` from k=1 to arbitrary k when the
+    arguments are syntactically-distinct literal constants (currently
+    ``BinaryNum`` only).
+    """
+
+    name = "Distinct Const RF To Uniform"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return _DistinctConstRFTransformer(ctx).transform(game)
+
+
+# ---------------------------------------------------------------------------
 # RF on fresh random local input -> uniform sample
 # ---------------------------------------------------------------------------
 

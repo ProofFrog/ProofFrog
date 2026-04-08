@@ -909,7 +909,10 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         if ctx.INT():
             return frog_ast.Integer(int(ctx.INT().getText()))
         if ctx.BINARYNUM():
-            return frog_ast.BinaryNum(int(ctx.BINARYNUM().getText(), 2))
+            text = ctx.BINARYNUM().getText()
+            # text has form "0bXYZ"; the bit length is the number of digits
+            # after the "0b" prefix.
+            return frog_ast.BinaryNum(int(text, 2), len(text) - 2)
 
         if ctx.lvalue():
             exp = self.visit(ctx.lvalue())
@@ -986,7 +989,8 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
     def visitBinaryNumExp(
         self, ctx: PrimitiveParser.BinaryNumExpContext
     ) -> frog_ast.BinaryNum:
-        return frog_ast.BinaryNum(int(ctx.BINARYNUM().getText(), 2))
+        text = ctx.BINARYNUM().getText()
+        return frog_ast.BinaryNum(int(text, 2), len(text) - 2)
 
     def visitZerosExp(
         self, ctx: PrimitiveParser.ZerosExpContext

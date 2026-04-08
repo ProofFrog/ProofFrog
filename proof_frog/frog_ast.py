@@ -631,12 +631,24 @@ class NoneExpression(Expression, Type):
 
 
 class BinaryNum(Expression):
-    def __init__(self, num: int):
+    """A binary literal written as ``0bXYZ``.
+
+    Carries both the integer value and the explicit bit length.  The length
+    is the number of ``0``/``1`` digits after ``0b`` in the source, so
+    ``0b0`` has length 1, ``0b00`` has length 2, ``0b101`` has length 3.
+    Two ``BinaryNum`` nodes with the same ``num`` but different ``length``
+    represent different bitstrings (they live in different ``BitString<n>``
+    types).
+    """
+
+    def __init__(self, num: int, length: int):
         super().__init__()
         self.num = num
+        self.length = length
 
     def __str__(self) -> str:
-        return bin(self.num)
+        # Render with leading zeros to preserve the explicit length.
+        return "0b" + format(self.num, f"0{self.length}b")
 
 
 class BitStringLiteral(Expression):

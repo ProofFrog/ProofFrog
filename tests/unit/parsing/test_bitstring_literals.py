@@ -43,6 +43,29 @@ class TestParsing:
         expr = frog_parser.parse_expression("0b101")
         assert isinstance(expr, frog_ast.BinaryNum)
         assert expr.num == 5
+        assert expr.length == 3
+
+    def test_binary_num_length_zero_bit(self) -> None:
+        """0b0 is a 1-bit literal, not an unspecified-width literal."""
+        expr = frog_parser.parse_expression("0b0")
+        assert isinstance(expr, frog_ast.BinaryNum)
+        assert expr.num == 0
+        assert expr.length == 1
+
+    def test_binary_num_length_matches_source(self) -> None:
+        """The parser records the number of digits as the bit length."""
+        for src, expected_num, expected_length in [
+            ("0b00", 0, 2),
+            ("0b01", 1, 2),
+            ("0b10", 2, 2),
+            ("0b11", 3, 2),
+            ("0b000", 0, 3),
+            ("0b1000", 8, 4),
+        ]:
+            expr = frog_parser.parse_expression(src)
+            assert isinstance(expr, frog_ast.BinaryNum)
+            assert expr.num == expected_num, src
+            assert expr.length == expected_length, src
 
     def test_in_add_expression(self) -> None:
         expr = frog_parser.parse_expression("x + 0^3")

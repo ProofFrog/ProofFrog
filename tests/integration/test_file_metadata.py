@@ -131,31 +131,31 @@ class TestGameMetadata:
 
 class TestProofMetadata:
     def test_basic_fields(self, client):
-        resp = client.get("/api/file-metadata?path=Book/2/2_13.proof")
+        resp = client.get("/api/file-metadata?path=joy_old/2/2_13.proof")
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["type"] == "proof"
 
     def test_lets(self, client):
-        resp = client.get("/api/file-metadata?path=Book/2/2_13.proof")
+        resp = client.get("/api/file-metadata?path=joy_old/2/2_13.proof")
         data = resp.get_json()
         assert isinstance(data["lets"], list)
         assert len(data["lets"]) >= 1
 
     def test_theorem(self, client):
-        resp = client.get("/api/file-metadata?path=Book/2/2_13.proof")
+        resp = client.get("/api/file-metadata?path=joy_old/2/2_13.proof")
         data = resp.get_json()
         assert isinstance(data["theorem"], str)
         assert len(data["theorem"]) > 0
 
     def test_steps(self, client):
-        resp = client.get("/api/file-metadata?path=Book/2/2_13.proof")
+        resp = client.get("/api/file-metadata?path=joy_old/2/2_13.proof")
         data = resp.get_json()
         assert isinstance(data["steps"], list)
         assert len(data["steps"]) >= 2
 
     def test_assumptions(self, client):
-        resp = client.get("/api/file-metadata?path=Book/2/2_13.proof")
+        resp = client.get("/api/file-metadata?path=joy_old/2/2_13.proof")
         data = resp.get_json()
         assert isinstance(data["assumptions"], list)
 

@@ -29,11 +29,6 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by GameParser#gamePhase.
-    def visitGamePhase(self, ctx:GameParser.GamePhaseContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by GameParser#field.
     def visitField(self, ctx:GameParser.FieldContext):
         return self.visitChildren(ctx)

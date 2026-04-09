@@ -59,11 +59,11 @@
         },
         {
           "name": "keyword.proof.prooffrog",
-          "match": "\\b(proof|assume|theorem|games|let|induction|from|against|compose|Phase)\\b"
+          "match": "\\b(proof|assume|theorem|games|let|induction|from|against|compose)\\b"
         },
         {
           "name": "keyword.other.prooffrog",
-          "match": "\\b(import|export|as|requires|extends|calls|oracles|subsets|union)\\b"
+          "match": "\\b(import|export|as|requires|extends|calls|subsets|union)\\b"
         }
       ]
     },

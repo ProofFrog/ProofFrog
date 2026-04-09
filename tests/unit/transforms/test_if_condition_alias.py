@@ -376,7 +376,6 @@ def test_no_phase1_inline_when_field_def_has_nondeterministic_call() -> None:
                     ),
                 ),
             ],
-            [],  # phases
         )
     )
 

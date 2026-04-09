@@ -166,7 +166,6 @@ _KNOWN_KEYWORDS = {
     "false",
     "None",
     "this",
-    "Phase",
     "deterministic",
     "injective",
     "extends",
@@ -1203,13 +1202,6 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             [self.visit(block) for block in ctx.block()],
         )
 
-    def visitGamePhase(self, ctx: PrimitiveParser.GamePhaseContext) -> frog_ast.Phase:
-        oracles = [oracle.getText() for oracle in ctx.id_()]
-        method_list = []
-        for method in ctx.method():
-            method_list.append(self.visit(method))
-        return frog_ast.Phase(oracles, method_list)
-
     def visitGame(self, ctx: PrimitiveParser.GameContext) -> frog_ast.Game:
         return frog_ast.Game(_parse_game_body(self.visit, ctx))
 
@@ -1409,12 +1401,7 @@ def _parse_game_body(
         for method in ctx.gameBody().method():
             methods.append(visit(method))
 
-    phase_list: list[frog_ast.Phase] = []
-    if ctx.gameBody().gamePhase():
-        for phase in ctx.gameBody().gamePhase():
-            phase_list.append(visit(phase))
-
-    return (name, param_list, field_list, methods, phase_list)
+    return (name, param_list, field_list, methods)
 
 
 def _get_parser(

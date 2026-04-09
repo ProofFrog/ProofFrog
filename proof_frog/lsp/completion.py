@@ -40,7 +40,7 @@ _PRIMITIVE_KEYWORDS = ["Primitive"]
 
 _SCHEME_KEYWORDS = ["Scheme", "extends", "requires", "import", "this"]
 
-_GAME_KEYWORDS = ["Game", "Phase", "oracles", "export", "as", "import"]
+_GAME_KEYWORDS = ["Game", "export", "as", "import"]
 
 _PROOF_KEYWORDS = [
     "Game",

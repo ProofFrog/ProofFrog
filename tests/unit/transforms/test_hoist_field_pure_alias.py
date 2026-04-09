@@ -219,7 +219,6 @@ def test_no_hoist_when_field_free_var_modified_between_j_and_i() -> None:
                     ),
                 ),
             ],
-            [],  # phases
         )
     )
 

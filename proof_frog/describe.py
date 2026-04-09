@@ -85,13 +85,6 @@ def _describe_game_file(game_file: frog_ast.GameFile) -> str:
             lines.append("  Methods:")
             for method in game.methods:
                 lines.append(f"    {method.signature}")
-        if game.phases:
-            lines.append("  Phases:")
-            for phase in game.phases:
-                oracle_str = ", ".join(phase.oracles) if phase.oracles else ""
-                lines.append(f"    oracles: [{oracle_str}]")
-                for method in phase.methods:
-                    lines.append(f"    {method.signature}")
     return "\n".join(lines)
 
 

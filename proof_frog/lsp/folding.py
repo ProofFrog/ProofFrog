@@ -34,10 +34,6 @@ def _game_range(game: frog_ast.Game) -> lsp.FoldingRange | None:
     for method in game.methods:
         if method.block.statements:
             last_line = max(last_line, method.block.statements[-1].line_num)
-    for phase in game.phases:
-        for method in phase.methods:
-            if method.block.statements:
-                last_line = max(last_line, method.block.statements[-1].line_num)
     if last_line > game.line_num:
         return lsp.FoldingRange(
             start_line=game.line_num - 1,
@@ -109,8 +105,6 @@ def get_folding_ranges(state: DocumentState) -> list[lsp.FoldingRange]:
             if game_range:
                 ranges.append(game_range)
             ranges.extend(_method_ranges(game.methods))
-            for phase in game.phases:
-                ranges.extend(_method_ranges(phase.methods))
 
     elif isinstance(ast, frog_ast.ProofFile):
         # Fold helper games and reductions

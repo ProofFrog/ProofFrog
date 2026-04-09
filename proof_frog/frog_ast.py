@@ -755,24 +755,7 @@ class Scheme(Root):
         return self.name
 
 
-class Phase(ASTNode):
-    def __init__(self, oracles: list[str], methods: list[Method]):
-        super().__init__()
-        self.oracles = oracles
-        self.methods = methods
-
-    def __str__(self) -> str:
-        output_string = "Phase {\n"
-        output_string += "\n".join(f"{method}" for method in self.methods)
-        oracle_list_str = ", ".join(self.oracles) if self.oracles else ""
-        output_string += f"oracles: [{oracle_list_str}];"
-        output_string += "}"
-        return output_string
-
-
-GameBody: TypeAlias = tuple[
-    str, list[Parameter], list[Field], list[Method], list[Phase]
-]
+GameBody: TypeAlias = tuple[str, list[Parameter], list[Field], list[Method]]
 
 
 class Game(ASTNode):
@@ -782,7 +765,6 @@ class Game(ASTNode):
         self.parameters = body[1]
         self.fields = body[2]
         self.methods = body[3]
-        self.phases = body[4]
 
     def __eq__(self, __value: object) -> bool:
         if not isinstance(__value, Game):
@@ -791,7 +773,6 @@ class Game(ASTNode):
             self.parameters == __value.parameters
             and self.fields == __value.fields
             and self.methods == __value.methods
-            and self.phases == __value.phases
         )
 
     def __str__(self) -> str:
@@ -801,9 +782,6 @@ class Game(ASTNode):
         output_string += "\n"
         for method in self.methods:
             output_string += f"{method}\n"
-        if self.phases:
-            for phase in self.phases:
-                output_string += f"{phase}\n"
         output_string += "}"
         return pretty_print(output_string)
 

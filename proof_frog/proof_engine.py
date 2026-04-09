@@ -1401,9 +1401,8 @@ class ProofEngine:
             for field in challenger.fields
         ]
         fields = new_fields + copy.deepcopy(reduction.fields)
-        phases = challenger.phases
         methods = copy.deepcopy(reduction.methods)
-        reduced_game = frog_ast.Game((name, parameters, fields, methods, phases))
+        reduced_game = frog_ast.Game((name, parameters, fields, methods))
 
         if challenger.has_method("Initialize") and not reduced_game.has_method(
             "Initialize"

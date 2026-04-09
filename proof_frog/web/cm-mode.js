@@ -14,8 +14,19 @@ CodeMirror.defineMode("prooffrog", function () {
   var atoms = new Set(["true","false","None"]);
 
   return {
-    token: function (stream) {
+    startState: function () { return { inBlockComment: false }; },
+    token: function (stream, state) {
+      // Inside a block comment — look for closing */
+      if (state.inBlockComment) {
+        while (!stream.eol()) {
+          if (stream.match("*/")) { state.inBlockComment = false; return "comment"; }
+          stream.next();
+        }
+        return "comment";
+      }
       if (stream.eatSpace()) return null;
+      // Block comment
+      if (stream.match("/*")) { state.inBlockComment = true; return "comment"; }
       // Line comment
       if (stream.match("//")) { stream.skipToEnd(); return "comment"; }
       // Single-quoted string (import paths)

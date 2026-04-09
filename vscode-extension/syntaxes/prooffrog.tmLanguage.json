@@ -17,6 +17,11 @@
         {
           "name": "comment.line.double-slash.prooffrog",
           "match": "//.*$"
+        },
+        {
+          "name": "comment.block.prooffrog",
+          "begin": "/\\*",
+          "end": "\\*/"
         }
       ]
     },

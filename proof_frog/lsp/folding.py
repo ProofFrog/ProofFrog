@@ -55,11 +55,32 @@ def get_folding_ranges(state: DocumentState) -> list[lsp.FoldingRange]:
 
     ranges: list[lsp.FoldingRange] = []
 
-    # Also fold comment blocks (3+ consecutive comment lines)
+    # Fold comment blocks (3+ consecutive line comments, and block comments)
     lines = state.source.splitlines()
     comment_start: int | None = None
+    block_comment_start: int | None = None
     for i, line in enumerate(lines):
         stripped = line.strip()
+
+        # Track /* ... */ block comments
+        if block_comment_start is None and "/*" in stripped:
+            block_comment_start = i
+        if block_comment_start is not None and "*/" in stripped:
+            if i > block_comment_start:
+                ranges.append(
+                    lsp.FoldingRange(
+                        start_line=block_comment_start,
+                        end_line=i,
+                        kind=lsp.FoldingRangeKind.Comment,
+                    )
+                )
+            block_comment_start = None
+            continue
+
+        if block_comment_start is not None:
+            continue
+
+        # Track consecutive // line comments
         if stripped.startswith("//"):
             if comment_start is None:
                 comment_start = i

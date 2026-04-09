@@ -1936,6 +1936,36 @@ class CheckTypeVisitor(VariableTypeVisitor):
             types.append(expression_type)
         self.ast_type_map.set(the_tuple, frog_ast.ProductType(types))
 
+    def leave_set(self, the_set: frog_ast.Set) -> None:
+        if not the_set.elements:
+            self.print_error(
+                the_set,
+                "Empty set literal {} is not supported;"
+                " set state variables are implicitly initialized to empty",
+            )
+            return
+        element_types: list[frog_ast.Type] = []
+        for element in the_set.elements:
+            element_type = self.get_type_from_ast(element)
+            if not isinstance(element_type, frog_ast.Type):
+                self.print_error(
+                    the_set,
+                    f"{element} should evaluate to a simple type,"
+                    f" received {element_type}",
+                )
+                return
+            element_types.append(element_type)
+        first_type = element_types[0]
+        for i, etype in enumerate(element_types[1:], start=1):
+            if not self.check_types(first_type, etype):
+                self.print_error(
+                    the_set,
+                    f"Set element {the_set.elements[i]} has type {etype},"
+                    f" expected {first_type}",
+                )
+                return
+        self.ast_type_map.set(the_set, frog_ast.SetType(first_type))
+
     def leave_field(self, field: frog_ast.Field) -> None:
         super().leave_field(field)
         if field.value:

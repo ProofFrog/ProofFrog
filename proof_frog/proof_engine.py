@@ -583,8 +583,9 @@ class ProofEngine:
             )
         reason_str = "; ".join(reasons) if reasons else "unknown reason"
         print(
-            Fore.YELLOW
-            + f"Proof Succeeded, but is incomplete: {reason_str}"
+            Fore.RED
+            + "Proof Failed! Individual hops verified, but the proof is "
+            + f"incomplete: {reason_str}"
             + Fore.RESET
         )
         raise FailedProof()

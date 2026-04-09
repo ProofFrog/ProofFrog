@@ -42,6 +42,9 @@ def _strip_whitespace(text: str) -> str:
 
 
 def _strip_comments(text: str) -> str:
+    import re  # pylint: disable=import-outside-toplevel
+
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
     return "\n".join(line for line in text.splitlines() if "//" not in line)
 
 

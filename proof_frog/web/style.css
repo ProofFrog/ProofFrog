@@ -57,6 +57,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
   padding: 4px 12px; border: 1px solid var(--border); border-radius: 3px;
   background: var(--bg2); color: var(--text); cursor: pointer; font-size: 12px;
   transition: background 0.15s;
+  white-space: nowrap; flex-shrink: 0;
 }
 #toolbar button:hover:not(:disabled) { background: var(--bg3); border-color: var(--accent2); }
 #toolbar button:disabled { opacity: 0.4; cursor: default; }
@@ -64,10 +65,11 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 #toolbar select {
   padding: 3px 6px; border: 1px solid var(--border); border-radius: 3px;
   background: var(--bg2); color: var(--text); font-size: 12px;
+  flex-shrink: 0;
 }
 #toolbar .spacer { flex: 1; }
 #toolbar .dir-label { color: var(--text-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; }
-#toolbar .toolbar-group { display: flex; gap: 6px; align-items: center; }
+#toolbar .toolbar-group { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
 #toolbar .toolbar-divider {
   width: 1px; background: var(--border); align-self: center;
   height: 60%; margin: 0 8px;

@@ -413,6 +413,38 @@ class TestFieldAliasSubstitution:
         )
 
 
+class TestMissingReturnStatement:
+    """Tests that non-Void methods without a return statement are rejected."""
+
+    def test_missing_return_in_non_void_method(self) -> None:
+        _check_game_fails("""
+            Game G() {
+                Bool Test() {
+                    Bool x = true;
+                }
+            }
+            """)
+
+    def test_void_method_without_return_is_ok(self) -> None:
+        _check_game("""
+            Game G() {
+                Bool flag;
+                Void Initialize() {
+                    flag = true;
+                }
+            }
+            """)
+
+    def test_missing_return_in_reduction(self) -> None:
+        _check_reduction_fails("""
+            Reduction R() compose SecurityGame() against SecurityGame().Adversary {
+                BitString<8> Challenge() {
+                    BitString<8> x = 0^8;
+                }
+            }
+            """)
+
+
 class TestFieldAccessInBitStringParam:
     """Fix 2: FieldAccess in BitString parameterizations."""
 

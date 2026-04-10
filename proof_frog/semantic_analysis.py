@@ -1528,6 +1528,17 @@ class CheckTypeVisitor(VariableTypeVisitor):
         super().leave_method(method)
         expected_type = method.signature.return_type
 
+        if not isinstance(expected_type, frog_ast.Void):
+            has_return = visitors.SearchVisitor[frog_ast.ReturnStatement](
+                lambda node: isinstance(node, frog_ast.ReturnStatement)
+            ).visit(method)
+            if has_return is None:
+                self.print_error(
+                    method,
+                    f"method '{method.signature.name}' has return type"
+                    f" {expected_type} but is missing a return statement",
+                )
+
         def is_bad_return(node: frog_ast.ASTNode) -> bool:
             if not isinstance(node, frog_ast.ReturnStatement):
                 return False

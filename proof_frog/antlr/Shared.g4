@@ -2,10 +2,7 @@ grammar Shared;
 
 game: GAME id L_PAREN paramList? R_PAREN L_CURLY gameBody R_CURLY;
 
-gameBody: (field SEMI)* method+
-	| (field SEMI)* method* gamePhase+;
-
-gamePhase: PHASE L_CURLY (method)+ ORACLES COLON L_SQUARE id (COMMA id)* R_SQUARE SEMI R_CURLY;
+gameBody: (field SEMI)* method+;
 
 field: variable (EQUALS expression)?;
 
@@ -186,8 +183,6 @@ UNION: 'union';
 GAME: 'Game';
 EXPORT: 'export';
 AS: 'as';
-PHASE: 'Phase';
-ORACLES: 'oracles';
 ELSE: 'else';
 NONE: 'None';
 THIS: 'this';
@@ -204,4 +199,5 @@ INT: [0-9]+ ;
 ID: [a-zA-Z_$][a-zA-Z_0-9$]* ;
 WS: [ \t\r\n]+ -> skip ;
 LINE_COMMENT : '//' .*? ('\r'? '\n' | EOF) -> skip ;
+BLOCK_COMMENT : '/*' .*? '*/' -> skip ;
 FILESTRING: '\''[-0-9a-zA-Z_$/.=>< ]+'\'' ;

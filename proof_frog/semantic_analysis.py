@@ -1528,6 +1528,17 @@ class CheckTypeVisitor(VariableTypeVisitor):
         super().leave_method(method)
         expected_type = method.signature.return_type
 
+        if not isinstance(expected_type, frog_ast.Void):
+            has_return = visitors.SearchVisitor[frog_ast.ReturnStatement](
+                lambda node: isinstance(node, frog_ast.ReturnStatement)
+            ).visit(method)
+            if has_return is None:
+                self.print_error(
+                    method,
+                    f"method '{method.signature.name}' has return type"
+                    f" {expected_type} but is missing a return statement",
+                )
+
         def is_bad_return(node: frog_ast.ASTNode) -> bool:
             if not isinstance(node, frog_ast.ReturnStatement):
                 return False
@@ -1935,6 +1946,36 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 return
             types.append(expression_type)
         self.ast_type_map.set(the_tuple, frog_ast.ProductType(types))
+
+    def leave_set(self, the_set: frog_ast.Set) -> None:
+        if not the_set.elements:
+            self.print_error(
+                the_set,
+                "Empty set literal {} is not supported;"
+                " set state variables are implicitly initialized to empty",
+            )
+            return
+        element_types: list[frog_ast.Type] = []
+        for element in the_set.elements:
+            element_type = self.get_type_from_ast(element)
+            if not isinstance(element_type, frog_ast.Type):
+                self.print_error(
+                    the_set,
+                    f"{element} should evaluate to a simple type,"
+                    f" received {element_type}",
+                )
+                return
+            element_types.append(element_type)
+        first_type = element_types[0]
+        for i, etype in enumerate(element_types[1:], start=1):
+            if not self.check_types(first_type, etype):
+                self.print_error(
+                    the_set,
+                    f"Set element {the_set.elements[i]} has type {etype},"
+                    f" expected {first_type}",
+                )
+                return
+        self.ast_type_map.set(the_set, frog_ast.SetType(first_type))
 
     def leave_field(self, field: frog_ast.Field) -> None:
         super().leave_field(field)

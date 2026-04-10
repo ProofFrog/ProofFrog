@@ -47,6 +47,76 @@ function populateSelect(selectEl, items, emptyText) {
   }
 }
 
+// Built-in types that can be used as game/scheme parameters.
+const BUILTIN_PARAM_TYPES = ["Int", "Bool", "Group", "Set"];
+
+/**
+ * Build a <select> with optgroups for built-in types, primitives, and schemes.
+ * Each option's value encodes the category so the caller can distinguish them:
+ *   - "builtin:Int"          — built-in type (no import needed)
+ *   - "primitive:path/Foo.primitive" — primitive file
+ *   - "scheme:path/Bar.scheme"      — scheme file
+ */
+function createTypedParamSelect() {
+  const select = document.createElement("select");
+  select.className = "wizard-input";
+
+  const builtinGroup = document.createElement("optgroup");
+  builtinGroup.label = "Built-in types";
+  for (const t of BUILTIN_PARAM_TYPES) {
+    const opt = document.createElement("option");
+    opt.value = `builtin:${t}`;
+    opt.textContent = t;
+    builtinGroup.appendChild(opt);
+  }
+  select.appendChild(builtinGroup);
+
+  if (state.primitiveFiles.length > 0) {
+    const primGroup = document.createElement("optgroup");
+    primGroup.label = "Primitives";
+    for (const item of state.primitiveFiles) {
+      const opt = document.createElement("option");
+      opt.value = `primitive:${item.path}`;
+      opt.textContent = item.displayName || item.name;
+      primGroup.appendChild(opt);
+    }
+    select.appendChild(primGroup);
+  }
+
+  if (state.schemeFiles.length > 0) {
+    const schemeGroup = document.createElement("optgroup");
+    schemeGroup.label = "Schemes";
+    for (const item of state.schemeFiles) {
+      const opt = document.createElement("option");
+      opt.value = `scheme:${item.path}`;
+      opt.textContent = item.displayName || item.name;
+      schemeGroup.appendChild(opt);
+    }
+    select.appendChild(schemeGroup);
+  }
+
+  return select;
+}
+
+/**
+ * Parse a typed param select value into { category, typeName, path }.
+ * - builtin:  { category: "builtin",   typeName: "Int",  path: null }
+ * - primitive: { category: "primitive", typeName: "Foo",  path: "Games/Foo.primitive" }
+ * - scheme:   { category: "scheme",    typeName: "Bar",  path: "Schemes/Bar.scheme" }
+ */
+function parseTypedParamValue(val) {
+  const colon = val.indexOf(":");
+  if (colon < 0) return null;
+  const category = val.substring(0, colon);
+  const rest = val.substring(colon + 1);
+  if (category === "builtin") {
+    return { category, typeName: rest, path: null };
+  }
+  const ext = category === "primitive" ? /\.primitive$/ : /\.scheme$/;
+  const typeName = rest.split("/").pop().replace(ext, "");
+  return { category, typeName, path: rest };
+}
+
 function openModal(modalId) {
   document.getElementById(modalId).classList.add("visible");
 }
@@ -161,11 +231,7 @@ export function handleInsertSelect() {
 // ── Game wizard ─────────────────────────────────────────────────────────────
 
 export function openWizardModal() {
-  populateSelect(
-    document.getElementById("wizard-primitive"),
-    state.primitiveFiles,
-    "(no primitives found)"
-  );
+  document.getElementById("wizard-params").replaceChildren();
   document.getElementById("wizard-prop-name").value = "";
   document.getElementById("wizard-left-name").value = "Left";
   document.getElementById("wizard-right-name").value = "Right";
@@ -175,25 +241,68 @@ export function openWizardModal() {
 
 export function closeWizardModal() { closeModal("wizard-modal"); }
 
+export function addGameParamRow() {
+  const container = document.getElementById("wizard-params");
+  const row = document.createElement("div");
+  row.className = "wizard-param-row";
+  row.style.display = "flex";
+  row.style.gap = "0.5em";
+  row.style.marginTop = "0.25em";
+
+  const select = createTypedParamSelect();
+
+  const name = document.createElement("input");
+  name.type = "text";
+  name.className = "wizard-input";
+  name.placeholder = "param name";
+  name.autocomplete = "off";
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.textContent = "\u00d7";
+  remove.addEventListener("click", () => row.remove());
+
+  row.appendChild(select);
+  row.appendChild(name);
+  row.appendChild(remove);
+  container.appendChild(row);
+  name.focus();
+}
+
 export function createGameFromWizard() {
   const propName  = document.getElementById("wizard-prop-name").value.trim();
-  const primPath  = document.getElementById("wizard-primitive").value;
   const leftName  = document.getElementById("wizard-left-name").value.trim() || "Left";
   const rightName = document.getElementById("wizard-right-name").value.trim() || "Right";
 
   if (!propName) { document.getElementById("wizard-prop-name").focus(); return; }
-  if (!primPath) return;
 
-  const primName = primPath.split("/").pop().replace(/\.primitive$/, "");
+  const paramRows = document.getElementById("wizard-params").children;
+  const params = [];      // { typeName, paramName }
+  const importPaths = new Set();
+
+  for (const row of paramRows) {
+    const sel = row.querySelector("select");
+    const inp = row.querySelector("input");
+    if (!sel.value || !inp.value.trim()) continue;
+    const parsed = parseTypedParamValue(sel.value);
+    if (!parsed) continue;
+    params.push({ typeName: parsed.typeName, paramName: inp.value.trim() });
+    if (parsed.path) {
+      importPaths.add(relativePath(state.activeTab, parsed.path));
+    }
+  }
+
+  const imports = [...importPaths].map(p => `import '${p}';`).join("\n");
+  const paramStr = params.map(p => `${p.typeName} ${p.paramName}`).join(", ");
+  const importBlock = imports ? imports + "\n\n" : "";
+
   const template =
-`import '${primPath}';
-
-Game ${leftName}(${primName} E) {
+`${importBlock}Game ${leftName}(${paramStr}) {
     Void Initialize() {
     }
 }
 
-Game ${rightName}(${primName} E) {
+Game ${rightName}(${paramStr}) {
     Void Initialize() {
     }
 }
@@ -247,9 +356,7 @@ export function addSchemeIngredientRow() {
   row.style.gap = "0.5em";
   row.style.marginTop = "0.25em";
 
-  const select = document.createElement("select");
-  select.className = "wizard-input";
-  populateSelect(select, state.primitiveFiles, "(no primitives found)");
+  const select = createTypedParamSelect();
 
   const name = document.createElement("input");
   name.type = "text";
@@ -259,7 +366,7 @@ export function addSchemeIngredientRow() {
 
   const remove = document.createElement("button");
   remove.type = "button";
-  remove.textContent = "×";
+  remove.textContent = "\u00d7";
   remove.addEventListener("click", () => row.remove());
 
   row.appendChild(select);
@@ -277,23 +384,27 @@ export function createSchemeFromWizard() {
 
   const extName = extPath.split("/").pop().replace(/\.primitive$/, "");
   const ingredientRows = document.getElementById("scheme-wizard-ingredients").children;
-  const ingredients = []; // { path, primName, paramName }
+  const ingredients = []; // { typeName, paramName, path (or null) }
   for (const row of ingredientRows) {
     const sel = row.querySelector("select");
     const inp = row.querySelector("input");
     if (!sel.value || !inp.value.trim()) continue;
+    const parsed = parseTypedParamValue(sel.value);
+    if (!parsed) continue;
     ingredients.push({
-      path: sel.value,
-      primName: sel.value.split("/").pop().replace(/\.primitive$/, ""),
+      typeName: parsed.typeName,
       paramName: inp.value.trim(),
+      path: parsed.path,
     });
   }
 
   const importPaths = new Set([relativePath(state.activeTab, extPath)]);
-  for (const ing of ingredients) importPaths.add(relativePath(state.activeTab, ing.path));
+  for (const ing of ingredients) {
+    if (ing.path) importPaths.add(relativePath(state.activeTab, ing.path));
+  }
   const imports = [...importPaths].map(p => `import '${p}';`).join("\n");
 
-  const params = [`${extName} E`, ...ingredients.map(i => `${i.primName} ${i.paramName}`)].join(", ");
+  const params = [`${extName} E`, ...ingredients.map(i => `${i.typeName} ${i.paramName}`)].join(", ");
 
   applyTemplate(
 `${imports}

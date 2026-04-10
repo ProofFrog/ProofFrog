@@ -114,11 +114,6 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#gamePhase.
-    def visitGamePhase(self, ctx:ProofParser.GamePhaseContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by ProofParser#field.
     def visitField(self, ctx:ProofParser.FieldContext):
         return self.visitChildren(ctx)

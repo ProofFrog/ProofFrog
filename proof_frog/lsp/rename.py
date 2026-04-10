@@ -50,7 +50,6 @@ def prepare_rename(state: DocumentState, position: lsp.Position) -> lsp.Range | 
         "Scheme",
         "Game",
         "Reduction",
-        "Phase",
         "proof",
         "let",
         "assume",
@@ -66,7 +65,6 @@ def prepare_rename(state: DocumentState, position: lsp.Position) -> lsp.Range | 
         "as",
         "extends",
         "requires",
-        "oracles",
         "subsets",
         "union",
         "Int",
@@ -112,10 +110,20 @@ def rename(
     # Find all whole-word occurrences in the document
     pattern = re.compile(r"\b" + re.escape(word) + r"\b")
     edits: list[lsp.TextEdit] = []
+    in_block_comment = False
 
     for line_num, line_text in enumerate(state.source.splitlines()):
+        # Track block comment state across lines
+        if in_block_comment:
+            if "*/" in line_text:
+                in_block_comment = False
+            continue
+        if "/*" in line_text:
+            in_block_comment = "*/" not in line_text
+            continue
+
         for match in pattern.finditer(line_text):
-            # Skip occurrences inside comments
+            # Skip occurrences inside line comments
             comment_pos = line_text.find("//")
             if 0 <= comment_pos <= match.start():
                 continue

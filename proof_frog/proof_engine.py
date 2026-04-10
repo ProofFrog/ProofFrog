@@ -583,8 +583,9 @@ class ProofEngine:
             )
         reason_str = "; ".join(reasons) if reasons else "unknown reason"
         print(
-            Fore.YELLOW
-            + f"Proof Succeeded, but is incomplete: {reason_str}"
+            Fore.RED
+            + "Proof Failed! Individual hops verified, but the proof is "
+            + f"incomplete: {reason_str}"
             + Fore.RESET
         )
         raise FailedProof()
@@ -1400,9 +1401,8 @@ class ProofEngine:
             for field in challenger.fields
         ]
         fields = new_fields + copy.deepcopy(reduction.fields)
-        phases = challenger.phases
         methods = copy.deepcopy(reduction.methods)
-        reduced_game = frog_ast.Game((name, parameters, fields, methods, phases))
+        reduced_game = frog_ast.Game((name, parameters, fields, methods))
 
         if challenger.has_method("Initialize") and not reduced_game.has_method(
             "Initialize"

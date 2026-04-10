@@ -17,7 +17,7 @@ import { suppressFileChange } from './live-reload.js';
 import { loadFileTree, collapseAll, expandAll } from './file-tree.js';
 import {
   wireModal,
-  closeWizardModal, createGameFromWizard,
+  closeWizardModal, createGameFromWizard, addGameParamRow,
   closePrimitiveWizardModal, createPrimitiveFromWizard,
   closeSchemeWizardModal, createSchemeFromWizard, addSchemeIngredientRow,
   closeProofWizardModal, createProofFromWizard,
@@ -154,6 +154,7 @@ document.getElementById("btn-collapse-all").addEventListener("click", collapseAl
 document.getElementById("btn-expand-all").addEventListener("click", expandAll);
 
 wireModal("wizard-modal", closeWizardModal, createGameFromWizard);
+document.getElementById("wizard-add-param").addEventListener("click", addGameParamRow);
 wireModal("primitive-wizard-modal", closePrimitiveWizardModal, createPrimitiveFromWizard);
 wireModal("scheme-wizard-modal", closeSchemeWizardModal, createSchemeFromWizard);
 document.getElementById("scheme-wizard-add-ingredient").addEventListener("click", addSchemeIngredientRow);

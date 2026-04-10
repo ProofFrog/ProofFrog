@@ -70,7 +70,6 @@ class ExpandTupleTransformer(Transformer):
                 game.parameters,
                 new_fields,
                 [self.transform(method) for method in game.methods],
-                [self.transform(phase) for phase in game.phases],
             )
         )
 

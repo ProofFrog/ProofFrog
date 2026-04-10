@@ -34,10 +34,6 @@ def _game_range(game: frog_ast.Game) -> lsp.FoldingRange | None:
     for method in game.methods:
         if method.block.statements:
             last_line = max(last_line, method.block.statements[-1].line_num)
-    for phase in game.phases:
-        for method in phase.methods:
-            if method.block.statements:
-                last_line = max(last_line, method.block.statements[-1].line_num)
     if last_line > game.line_num:
         return lsp.FoldingRange(
             start_line=game.line_num - 1,
@@ -55,11 +51,32 @@ def get_folding_ranges(state: DocumentState) -> list[lsp.FoldingRange]:
 
     ranges: list[lsp.FoldingRange] = []
 
-    # Also fold comment blocks (3+ consecutive comment lines)
+    # Fold comment blocks (3+ consecutive line comments, and block comments)
     lines = state.source.splitlines()
     comment_start: int | None = None
+    block_comment_start: int | None = None
     for i, line in enumerate(lines):
         stripped = line.strip()
+
+        # Track /* ... */ block comments
+        if block_comment_start is None and "/*" in stripped:
+            block_comment_start = i
+        if block_comment_start is not None and "*/" in stripped:
+            if i > block_comment_start:
+                ranges.append(
+                    lsp.FoldingRange(
+                        start_line=block_comment_start,
+                        end_line=i,
+                        kind=lsp.FoldingRangeKind.Comment,
+                    )
+                )
+            block_comment_start = None
+            continue
+
+        if block_comment_start is not None:
+            continue
+
+        # Track consecutive // line comments
         if stripped.startswith("//"):
             if comment_start is None:
                 comment_start = i
@@ -109,8 +126,6 @@ def get_folding_ranges(state: DocumentState) -> list[lsp.FoldingRange]:
             if game_range:
                 ranges.append(game_range)
             ranges.extend(_method_ranges(game.methods))
-            for phase in game.phases:
-                ranges.extend(_method_ranges(phase.methods))
 
     elif isinstance(ast, frog_ast.ProofFile):
         # Fold helper games and reductions

@@ -406,3 +406,80 @@ class TestRequiresEqualityDirection:
         )
         stderr = _check_error_stderr(tmp_path, capsys, source, ext=".scheme")
         assert "abstract type parameter on the left" in stderr
+
+
+class TestSetLiterals:
+    """Tests for set literal type checking."""
+
+    def test_empty_set_literal_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Empty set literal {} should produce a specific error message."""
+        source = (
+            "Game Left() {\n"
+            "    Set<Int> s;\n"
+            "    Void Initialize() {\n"
+            "        s = {};\n"
+            "    }\n"
+            "    Int Foo() { return |s|; }\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Set<Int> s;\n"
+            "    Void Initialize() {\n"
+            "        s = {};\n"
+            "    }\n"
+            "    Int Foo() { return |s|; }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        stderr = _check_error_stderr(tmp_path, capsys, source, ext=".game")
+        assert "Empty set literal {} is not supported" in stderr
+        assert "implicitly initialized to empty" in stderr
+
+    def test_nonempty_set_literal_accepted(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Non-empty set literal {1, 2, 3} should type-check successfully."""
+        source = (
+            "Game Left() {\n"
+            "    Set<Int> s;\n"
+            "    Void Initialize() {\n"
+            "        s = {1, 2, 3};\n"
+            "    }\n"
+            "    Int Foo() { return |s|; }\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Set<Int> s;\n"
+            "    Void Initialize() {\n"
+            "        s = {1, 2, 3};\n"
+            "    }\n"
+            "    Int Foo() { return |s|; }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        file_path = tmp_path / "Test.game"
+        file_path.write_text(source)
+        root = frog_parser.parse_file(str(file_path))
+        # Should not raise
+        semantic_analysis.check_well_formed(root, str(file_path))
+
+    def test_mixed_type_set_literal_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Set literal with mixed types {1, true} should produce a type error."""
+        source = (
+            "Game Left() {\n"
+            "    Bool Foo() {\n"
+            "        Set<Int> s = {1, true};\n"
+            "        return true;\n"
+            "    }\n"
+            "}\n"
+            "Game Right() {\n"
+            "    Bool Foo() {\n"
+            "        return true;\n"
+            "    }\n"
+            "}\n"
+            "export as Test;\n"
+        )
+        stderr = _check_error_stderr(tmp_path, capsys, source, ext=".game")
+        assert "has type" in stderr

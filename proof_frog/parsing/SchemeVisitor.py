@@ -34,11 +34,6 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SchemeParser#gamePhase.
-    def visitGamePhase(self, ctx:SchemeParser.GamePhaseContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by SchemeParser#field.
     def visitField(self, ctx:SchemeParser.FieldContext):
         return self.visitChildren(ctx)

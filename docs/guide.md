@@ -284,7 +284,7 @@ CPA security is like one-time secrecy but the key persists across multiple queri
 
 ### Helper games
 
-Some games capture simple probabilistic facts rather than cryptographic security properties. These are placed in `Games/Misc/` and often appear as assumptions in proofs.
+Some games capture simple probabilistic facts rather than cryptographic security properties. These are placed in `Games/Helpers/`, organized by subcategory (e.g. `Games/Helpers/Probability/`), and often appear as assumptions in proofs.
 
 ### Testing a game
 
@@ -456,7 +456,7 @@ assume:
     Security(G);                          // PRG security
 ```
 
-Helper assumptions from `Games/Misc/` capture simple probabilistic facts and can be freely added as needed.
+Helper assumptions from `Games/Helpers/` capture simple probabilistic facts and can be freely added as needed.
 
 ### The `theorem:` section
 
@@ -720,7 +720,7 @@ A reduction's parameter list must include every parameter needed to instantiate 
 ### Common patterns
 
 - **Symmetric proofs**: Many proofs are symmetric around a midpoint. The first half transitions from the theorem's Left/Real game toward a "neutral" middle (often with all randomness replaced), and the second half transitions from the middle to the Right/Random game.
-- **Helper assumptions**: The `Games/Misc/` directory contains helper games that capture basic probabilistic facts. These can be assumed freely in proofs since they hold unconditionally.
+- **Helper assumptions**: The `Games/Helpers/` directory contains helper games that capture basic probabilistic facts. These can be assumed freely in proofs since they hold unconditionally. Genuine cryptographic assumptions about specific primitives live under the primitive's own directory (e.g. `Games/Hash/Regularity.game`).
 - **Incremental development**: Build proofs one hop at a time. Write the reduction, add the corresponding game steps, and verify before moving on.
 
 ## VSCode Extension

@@ -23,6 +23,7 @@ from ..visitors import (
     build_game_type_map,
 )
 from ._base import TransformPass, PipelineContext, NearMiss, has_nondeterministic_call
+from ._ordering import node_sort_key
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
@@ -1034,14 +1035,23 @@ _COMMUTATIVE_ASSOCIATIVE_OPS = frozenset(
     {frog_ast.BinaryOperators.ADD, frog_ast.BinaryOperators.MULTIPLY}
 )
 
+# Operators that are commutative but NOT associative.
+# ==  and != are commutative (a == b iff b == a) but chaining them
+# ((a == b) == c) is not meaningful, so we only swap the two operands.
+_COMMUTATIVE_ONLY_OPS = frozenset(
+    {frog_ast.BinaryOperators.EQUALS, frog_ast.BinaryOperators.NOTEQUALS}
+)
+
 
 class NormalizeCommutativeChainsTransformer(Transformer):
-    """Sort operands of commutative+associative operator chains.
+    """Sort operands of commutative operator chains.
 
-    Flattens chains like ``(c + a) + b`` into ``[a, b, c]`` (sorted by
-    ``str()``), then rebuilds left-associatively as ``(a + b) + c``.
-    This normalizes both operand order (commutativity) and parenthesization
-    (associativity) in a single pass.
+    For commutative+associative operators (``+``, ``*``): flattens chains
+    like ``(c + a) + b`` into ``[a, b, c]`` (sorted by structural key),
+    then rebuilds left-associatively as ``(a + b) + c``.
+
+    For commutative-only operators (``==``, ``!=``): swaps operands so the
+    structurally smaller one is on the left.
     """
 
     def transform_binary_operation(
@@ -1054,19 +1064,30 @@ class NormalizeCommutativeChainsTransformer(Transformer):
             self.transform(expr.right_expression),
         )
 
-        if transformed.operator not in _COMMUTATIVE_ASSOCIATIVE_OPS:
-            return transformed
+        # Commutative + associative: flatten and sort the full chain.
+        if transformed.operator in _COMMUTATIVE_ASSOCIATIVE_OPS:
+            terms = _flatten_chain(transformed, transformed.operator)
+            if len(terms) < 2:
+                return transformed
 
-        terms = _flatten_chain(transformed, transformed.operator)
-        if len(terms) < 2:
-            return transformed
+            sorted_terms = sorted(terms, key=node_sort_key)
+            rebuilt = _rebuild_chain(sorted_terms, transformed.operator)
+            if rebuilt == transformed:
+                return transformed
+            return rebuilt
 
-        sorted_terms = sorted(terms, key=str)
-        rebuilt = _rebuild_chain(sorted_terms, transformed.operator)
-        if rebuilt == transformed:
-            return transformed  # already in canonical form
+        # Commutative only (== / !=): swap if left > right.
+        if transformed.operator in _COMMUTATIVE_ONLY_OPS:
+            left_key = node_sort_key(transformed.left_expression)
+            right_key = node_sort_key(transformed.right_expression)
+            if left_key > right_key:
+                return frog_ast.BinaryOperation(
+                    transformed.operator,
+                    transformed.right_expression,
+                    transformed.left_expression,
+                )
 
-        return rebuilt
+        return transformed
 
 
 class NormalizeCommutativeChains(TransformPass):

@@ -112,6 +112,58 @@ from proof_frog.transforms.algebraic import NormalizeCommutativeChainsTransforme
             }
             """,
         ),
+        # Equality: b == a -> a == b
+        (
+            """
+            Bool f(BitString<lambda> a, BitString<lambda> b) {
+                return b == a;
+            }
+            """,
+            """
+            Bool f(BitString<lambda> a, BitString<lambda> b) {
+                return a == b;
+            }
+            """,
+        ),
+        # Equality: already sorted unchanged
+        (
+            """
+            Bool f(BitString<lambda> a, BitString<lambda> b) {
+                return a == b;
+            }
+            """,
+            """
+            Bool f(BitString<lambda> a, BitString<lambda> b) {
+                return a == b;
+            }
+            """,
+        ),
+        # Inequality: b != a -> a != b
+        (
+            """
+            Bool f(BitString<lambda> a, BitString<lambda> b) {
+                return b != a;
+            }
+            """,
+            """
+            Bool f(BitString<lambda> a, BitString<lambda> b) {
+                return a != b;
+            }
+            """,
+        ),
+        # Structural ordering for equality: FuncCall sorts after Variable
+        (
+            """
+            Bool f(Int a, Int b) {
+                return f(a) == a;
+            }
+            """,
+            """
+            Bool f(Int a, Int b) {
+                return a == f(a);
+            }
+            """,
+        ),
     ],
 )
 def test_normalize_commutative_chains(method: str, expected: str) -> None:

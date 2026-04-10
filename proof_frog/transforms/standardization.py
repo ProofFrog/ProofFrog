@@ -21,6 +21,7 @@ from ..visitors import (
     FieldOrderingVisitor,
 )
 from ._base import TransformPass, PipelineContext
+from ._ordering import node_sort_key
 
 # ---------------------------------------------------------------------------
 # Transformer class (moved from visitors.py)
@@ -179,13 +180,13 @@ class _StabilizeIndependentStatementsTransformer(BlockTransformer):
         new_game.methods = [self.transform(m) for m in new_game.methods]
         return new_game
 
-    def _value_key(self, stmt: frog_ast.Statement) -> str:
-        """Sort key based on the RHS expression, ignoring the assigned name.
+    def _value_key(self, stmt: frog_ast.Statement) -> tuple:  # type: ignore[type-arg]
+        """Structural sort key for the RHS expression, ignoring the assigned name.
 
-        A prefix distinguishes field declarations from locals so that
-        fields sort deterministically before locals with the same RHS.
-        For field statements where the_type is None (type comes from the
-        field definition), sampled_from is used as the type component.
+        Returns a tuple built from ``node_sort_key`` so that ordering is
+        based on AST shape rather than ``__str__`` output.  A numeric
+        prefix distinguishes field declarations (0) from locals (1) so
+        that fields sort deterministically before locals.
         """
         is_field = (
             isinstance(
@@ -194,16 +195,20 @@ class _StabilizeIndependentStatementsTransformer(BlockTransformer):
             and isinstance(stmt.var, frog_ast.Variable)
             and stmt.var.name in self.fields
         )
-        prefix = "0_" if is_field else "1_"
+        prefix = (0,) if is_field else (1,)
         if isinstance(stmt, frog_ast.Assignment):
-            type_str = str(stmt.the_type) if stmt.the_type else ""
+            type_key = node_sort_key(stmt.the_type) if stmt.the_type else ()
             if stmt.value is not None:
-                return prefix + type_str + " = " + str(stmt.value)
-            return ""
+                return prefix + (type_key, node_sort_key(stmt.value))
+            return ()
         if isinstance(stmt, (frog_ast.Sample, frog_ast.UniqueSample)):
-            type_str = str(stmt.the_type) if stmt.the_type else str(stmt.sampled_from)
-            return prefix + type_str + " <- " + str(stmt.sampled_from)
-        return ""
+            type_key = (
+                node_sort_key(stmt.the_type)
+                if stmt.the_type
+                else node_sort_key(stmt.sampled_from)
+            )
+            return prefix + (type_key, node_sort_key(stmt.sampled_from))
+        return ()
 
     def _is_typed_decl(self, stmt: frog_ast.Statement) -> bool:
         if not isinstance(
@@ -388,7 +393,7 @@ class _StabilizeIndependentStatementsTransformer(BlockTransformer):
         # For locals: sort by value expression, then variable name.
         max_rank = len(stmts)
 
-        def _heap_key(i: int) -> tuple[int, int, str, str, int]:
+        def _heap_key(i: int) -> tuple:  # type: ignore[type-arg]
             rank = return_ranks.get(i, max_rank)
             s = stmts[i]
             name = ""

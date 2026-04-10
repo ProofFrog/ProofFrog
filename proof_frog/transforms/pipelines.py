@@ -46,10 +46,12 @@ from .algebraic import (
     XorIdentity,
     ModIntSimplification,
     NormalizeCommutativeChains,
+    NormalizeEquality,
     ReflexiveComparison,
     GroupElemSimplification,
     GroupElemCancellation,
     GroupElemExponentCombination,
+    MaterializeFieldExponentiation,
 )
 from .structural import (
     TopologicalSort,
@@ -104,6 +106,7 @@ CORE_PIPELINE: list[TransformPass] = [
     UniformGroupElemSimplification(),
     TopologicalSort(),
     HoistFieldPureAlias(),
+    MaterializeFieldExponentiation(),
     RemoveDuplicateFields(),
     CrossMethodFieldAlias(),
     IfConditionAliasSubstitution(),
@@ -140,7 +143,12 @@ STANDARDIZATION_PIPELINE: list[TransformPass] = [
     VariableStandardize(),
     StandardizeFieldNames(),
     NormalizeCommutativeChains(),
+    NormalizeEquality(),
     BubbleSortFieldAssignments(),
     StabilizeIndependentStatements(),
+    VariableStandardize(),
+    # Re-run field+variable standardization after equality normalization
+    # changed the == operand order (which affects field first-use ordering).
+    StandardizeFieldNames(),
     VariableStandardize(),
 ]

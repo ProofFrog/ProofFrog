@@ -8,6 +8,7 @@ from proof_frog.transforms.algebraic import (
     UniformXorSimplification,
     UniformModIntSimplification,
     XorCancellation,
+    MaterializeFieldExponentiation,
 )
 from proof_frog.transforms.control_flow import BranchElimination
 from proof_frog.transforms.inlining import (
@@ -583,3 +584,99 @@ def test_bijection_no_near_miss_when_no_wraps():
         if nm.transform_name == "Uniform Bijection Elimination"
     ]
     assert len(bijection_misses) == 0
+
+
+# ---------------------------------------------------------------------------
+# MaterializeFieldExponentiation near-misses
+# ---------------------------------------------------------------------------
+
+
+def _make_materialize_ctx() -> PipelineContext:
+    plt = NameTypeMap()
+    plt.set("G", frog_ast.GroupType())
+    return PipelineContext(
+        variables={},
+        proof_let_types=plt,
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+
+
+def test_materialize_near_miss_not_sampled():
+    """ModInt field used as exponent but not uniformly sampled — reports near-miss."""
+    game = frog_parser.parse_game(
+        "Game Test(Group G) {"
+        "    ModInt<G.order> a;"
+        "    GroupElem<G> Initialize() {"
+        "        a = 42;"
+        "        return G.generator ^ a;"
+        "    }"
+        "    Bool Check(ModInt<G.order> x) {"
+        "        return G.generator ^ (a * x) == G.generator ^ a;"
+        "    }"
+        "}"
+    )
+    ctx = _make_materialize_ctx()
+    MaterializeFieldExponentiation().apply(game, ctx)
+
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Materialize Field Exponentiation"
+    ]
+    assert len(misses) == 1
+    assert "not a single uniform sample" in misses[0].reason
+    assert misses[0].variable == "a"
+
+
+def test_materialize_near_miss_reassigned_in_oracle():
+    """ModInt field used as exponent but reassigned in oracle — reports near-miss."""
+    game = frog_parser.parse_game(
+        "Game Test(Group G) {"
+        "    ModInt<G.order> a;"
+        "    GroupElem<G> Initialize() {"
+        "        a <- ModInt<G.order>;"
+        "        return G.generator ^ a;"
+        "    }"
+        "    Bool Check(ModInt<G.order> x) {"
+        "        a = x;"
+        "        return G.generator ^ a == G.generator ^ x;"
+        "    }"
+        "}"
+    )
+    ctx = _make_materialize_ctx()
+    MaterializeFieldExponentiation().apply(game, ctx)
+
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Materialize Field Exponentiation"
+    ]
+    assert len(misses) == 1
+    assert "reassigned" in misses[0].reason
+    assert misses[0].variable == "a"
+
+
+def test_materialize_no_near_miss_when_fires():
+    """When the transform fires successfully, no near-miss should be reported."""
+    game = frog_parser.parse_game(
+        "Game Test(Group G) {"
+        "    ModInt<G.order> a;"
+        "    GroupElem<G> Initialize() {"
+        "        a <- ModInt<G.order>;"
+        "        return G.generator ^ a;"
+        "    }"
+        "    Bool Check(ModInt<G.order> x) {"
+        "        return G.generator ^ (a * x) == G.generator ^ a;"
+        "    }"
+        "}"
+    )
+    ctx = _make_materialize_ctx()
+    MaterializeFieldExponentiation().apply(game, ctx)
+
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Materialize Field Exponentiation"
+    ]
+    assert len(misses) == 0

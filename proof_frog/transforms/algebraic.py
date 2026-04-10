@@ -1076,6 +1076,51 @@ class NormalizeCommutativeChains(TransformPass):
         return NormalizeCommutativeChainsTransformer().transform(game)
 
 
+class _NormalizeEqualityTransformer(Transformer):
+    """Sort operands of ``==`` and ``!=`` by (length, string).
+
+    Shorter expressions come first so that a bare field variable precedes
+    a compound expression like ``field ^ aprime``.  This is a separate
+    pass from ``NormalizeCommutativeChains`` because it must run in the
+    **standardization** pipeline (after field names are set) to ensure
+    consistent field numbering.
+    """
+
+    def transform_binary_operation(
+        self, expr: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        transformed = frog_ast.BinaryOperation(
+            expr.operator,
+            self.transform(expr.left_expression),
+            self.transform(expr.right_expression),
+        )
+        if transformed.operator not in (
+            frog_ast.BinaryOperators.EQUALS,
+            frog_ast.BinaryOperators.NOTEQUALS,
+        ):
+            return transformed
+        left_str = str(transformed.left_expression)
+        right_str = str(transformed.right_expression)
+        left_key = (len(left_str), left_str)
+        right_key = (len(right_str), right_str)
+        if left_key > right_key:
+            return frog_ast.BinaryOperation(
+                transformed.operator,
+                transformed.right_expression,
+                transformed.left_expression,
+            )
+        return transformed
+
+
+class NormalizeEquality(TransformPass):
+    """Sort ``==`` / ``!=`` operands by (length, string)."""
+
+    name = "Normalize Equality"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return _NormalizeEqualityTransformer().transform(game)
+
+
 class ReflexiveComparison(TransformPass):
     name = "Reflexive Comparison"
 
@@ -1454,3 +1499,509 @@ class GroupElemExponentCombination(TransformPass):
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
         ).transform(game)
+
+
+# ---------------------------------------------------------------------------
+# Field expression materialization
+# ---------------------------------------------------------------------------
+
+
+def _is_generator_power(
+    expr: frog_ast.Expression,
+) -> Optional[tuple[frog_ast.Expression, frog_ast.Expression]]:
+    """If *expr* is ``G.generator ^ exp``, return ``(G_var, exp)``.
+
+    Handles both ``GroupGenerator(G)`` and ``FieldAccess(G, "generator")``
+    representations of the group generator.
+    """
+    if not (
+        isinstance(expr, frog_ast.BinaryOperation)
+        and expr.operator == frog_ast.BinaryOperators.EXPONENTIATE
+    ):
+        return None
+    base = expr.left_expression
+    if isinstance(base, frog_ast.GroupGenerator):
+        return (base.group, expr.right_expression)
+    if isinstance(base, frog_ast.FieldAccess) and base.name == "generator":
+        return (base.the_object, expr.right_expression)
+    return None
+
+
+def _extract_field_factor(
+    exponent: frog_ast.Expression,
+    field_name: str,
+) -> Optional[frog_ast.Expression]:
+    """If *exponent* is ``field * rest`` or ``rest * field``, return *rest*.
+
+    If *exponent* is exactly ``field``, return ``None`` (caller should use
+    the dedicated "direct" branch).  If field does not appear as a top-level
+    multiplicative factor, return ``None``.
+    """
+    if not (
+        isinstance(exponent, frog_ast.BinaryOperation)
+        and exponent.operator == frog_ast.BinaryOperators.MULTIPLY
+    ):
+        return None
+    left = exponent.left_expression
+    right = exponent.right_expression
+    if isinstance(left, frog_ast.Variable) and left.name == field_name:
+        return right
+    if isinstance(right, frog_ast.Variable) and right.name == field_name:
+        return left
+    return None
+
+
+def _references_variable(node: frog_ast.ASTNode, name: str) -> bool:
+    """Check if *node* contains any ``Variable`` with the given *name*."""
+
+    def check(n: frog_ast.ASTNode) -> bool:
+        return isinstance(n, frog_ast.Variable) and n.name == name
+
+    return SearchVisitor(check).visit(node) is not None
+
+
+def _is_written_in(node: frog_ast.ASTNode, name: str) -> bool:
+    """Check if *name* is assigned or sampled anywhere inside *node*."""
+
+    def check(n: frog_ast.ASTNode) -> bool:
+        return (
+            isinstance(n, (frog_ast.Assignment, frog_ast.Sample))
+            and isinstance(n.var, frog_ast.Variable)
+            and n.var.name == name
+        )
+
+    return SearchVisitor(check).visit(node) is not None
+
+
+class _GeneratorPowerReplacer(Transformer):
+    """Replace ``G.generator ^ field`` and ``G.generator ^ (field * e)``
+    with a new GroupElem field variable (and ``new_field ^ e``)."""
+
+    def __init__(
+        self,
+        group_var: frog_ast.Expression,
+        field_name: str,
+        new_field_name: str,
+    ) -> None:
+        self._group_var = group_var
+        self._field_name = field_name
+        self._new_field_name = new_field_name
+
+    def transform_binary_operation(
+        self, node: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        # First recurse into children
+        transformed = frog_ast.BinaryOperation(
+            node.operator,
+            self.transform(node.left_expression),
+            self.transform(node.right_expression),
+        )
+        if transformed.operator != frog_ast.BinaryOperators.EXPONENTIATE:
+            return transformed
+
+        gp = _is_generator_power(transformed)
+        if gp is None:
+            return transformed
+        g_var, exponent = gp
+        if g_var != self._group_var:
+            return transformed
+
+        # Direct: G.generator ^ field  -->  new_field
+        if (
+            isinstance(exponent, frog_ast.Variable)
+            and exponent.name == self._field_name
+        ):
+            return frog_ast.Variable(self._new_field_name)
+
+        # Factored: G.generator ^ (field * expr)  -->  new_field ^ expr
+        rest = _extract_field_factor(exponent, self._field_name)
+        if rest is not None:
+            return frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.EXPONENTIATE,
+                frog_ast.Variable(self._new_field_name),
+                rest,
+            )
+
+        return transformed
+
+
+def _find_field_power_in_oracles(
+    game: frog_ast.Game,
+    base_field_name: str,
+    exp_field_name: str,
+) -> bool:
+    """Check if ``base_field ^ exp_field`` appears in a non-Initialize method."""
+
+    def check(n: frog_ast.ASTNode) -> bool:
+        if not (
+            isinstance(n, frog_ast.BinaryOperation)
+            and n.operator == frog_ast.BinaryOperators.EXPONENTIATE
+        ):
+            return False
+        return (
+            isinstance(n.left_expression, frog_ast.Variable)
+            and n.left_expression.name == base_field_name
+            and isinstance(n.right_expression, frog_ast.Variable)
+            and n.right_expression.name == exp_field_name
+        )
+
+    for method in game.methods:
+        if method.signature.name == "Initialize":
+            continue
+        if SearchVisitor(check).visit(method.block) is not None:
+            return True
+    return False
+
+
+class _FieldPowerReplacer(Transformer):
+    """Replace ``base_field ^ exp_field`` with a new field variable."""
+
+    def __init__(
+        self,
+        base_field_name: str,
+        exp_field_name: str,
+        new_field_name: str,
+    ) -> None:
+        self._base_name = base_field_name
+        self._exp_name = exp_field_name
+        self._new_name = new_field_name
+
+    def transform_binary_operation(
+        self, node: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        transformed = frog_ast.BinaryOperation(
+            node.operator,
+            self.transform(node.left_expression),
+            self.transform(node.right_expression),
+        )
+        if (
+            transformed.operator == frog_ast.BinaryOperators.EXPONENTIATE
+            and isinstance(transformed.left_expression, frog_ast.Variable)
+            and transformed.left_expression.name == self._base_name
+            and isinstance(transformed.right_expression, frog_ast.Variable)
+            and transformed.right_expression.name == self._exp_name
+        ):
+            return frog_ast.Variable(self._new_name)
+        return transformed
+
+
+def _materialize_field_exponentiation(
+    game: frog_ast.Game, ctx: PipelineContext
+) -> frog_ast.Game:
+    """Introduce GroupElem fields for exponentiation patterns involving fields.
+
+    Handles two cases:
+    1. ``G.generator ^ modint_field`` -> new GroupElem field
+    2. ``groupelem_field ^ modint_field`` -> new GroupElem field (second-order)
+
+    For each eligible field, creates a new GroupElem field in Initialize and
+    replaces all occurrences.  Processes one candidate per invocation.
+    """
+    if not game.has_method("Initialize"):
+        return game
+
+    init_method = game.get_method("Initialize")
+    field_names = {f.name for f in game.fields}
+    all_names = field_names | {
+        p.name for m in game.methods for p in m.signature.parameters
+    }
+
+    # --- Case 1: G.generator ^ modint_field ---
+    for field in game.fields:
+        if not isinstance(field.type, frog_ast.ModIntType):
+            continue
+        modulus = field.type.modulus
+        if isinstance(modulus, frog_ast.GroupOrder):
+            group_var = modulus.group
+        elif isinstance(modulus, frog_ast.FieldAccess) and modulus.name == "order":
+            group_var = modulus.the_object
+        else:
+            continue
+
+        # Must be uniformly sampled exactly once in Initialize, with no other
+        # assignments to this field in Initialize
+        sample_idx: Optional[int] = None
+        sample_count = 0
+        assigned_elsewhere_in_init = False
+        for idx, stmt in enumerate(init_method.block.statements):
+            if (
+                isinstance(stmt, frog_ast.Sample)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name == field.name
+                and stmt.the_type is None
+            ):
+                sample_idx = idx
+                sample_count += 1
+            elif (
+                isinstance(stmt, frog_ast.Assignment)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name == field.name
+            ):
+                assigned_elsewhere_in_init = True
+
+        if sample_count != 1 or assigned_elsewhere_in_init:
+            for method in game.methods:
+                if method.signature.name == "Initialize":
+                    continue
+                if _has_generator_power_of(method.block, group_var, field.name):
+                    ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Materialize Field Exponentiation",
+                            reason=(
+                                f"ModInt field '{field.name}' appears as "
+                                f"G.generator ^ {field.name} in oracle but "
+                                f"is not a single uniform sample in Initialize"
+                            ),
+                            location=None,
+                            suggestion=(
+                                "Ensure the field is sampled exactly once with "
+                                "no other assignments in Initialize"
+                            ),
+                            variable=field.name,
+                            method=None,
+                        )
+                    )
+                    break
+            continue
+
+        oracle_reassigned = False
+        for method in game.methods:
+            if method.signature.name == "Initialize":
+                continue
+            if _is_written_in(method.block, field.name):
+                oracle_reassigned = True
+                break
+        if oracle_reassigned:
+            ctx.near_misses.append(
+                NearMiss(
+                    transform_name="Materialize Field Exponentiation",
+                    reason=(
+                        f"ModInt field '{field.name}' is reassigned in an "
+                        f"oracle method, preventing materialization"
+                    ),
+                    location=None,
+                    suggestion="Remove or avoid reassigning the field in oracles",
+                    variable=field.name,
+                    method=None,
+                )
+            )
+            continue
+
+        used_in_oracle = False
+        for method in game.methods:
+            if method.signature.name == "Initialize":
+                continue
+            if _has_generator_power_of(method.block, group_var, field.name):
+                used_in_oracle = True
+                break
+        if not used_in_oracle:
+            continue
+
+        # --- All preconditions met: convert ModInt field to GroupElem ---
+        # Convert the field from ModInt to GroupElem and localize the
+        # sample to a typed local variable.  Using a local prevents
+        # InlineSingleUseField from inlining the field back (it requires
+        # all free variables in the RHS to be fields for cross-method
+        # inlining, and locals are out of scope).
+        assert sample_idx is not None
+
+        new_game = copy.deepcopy(game)
+
+        # 1. Replace G.generator ^ field in all methods (before modifying
+        #    the Initialize block so the replacer sees the original state)
+        replacer = _GeneratorPowerReplacer(group_var, field.name, field.name)
+        for method in new_game.methods:
+            method.block = replacer.transform(method.block)
+
+        # 2. Change the field declaration type from ModInt to GroupElem
+        for f in new_game.fields:
+            if f.name == field.name:
+                f.type = frog_ast.GroupElemType(copy.deepcopy(group_var))
+                break
+
+        # 3. In Initialize, convert the untyped field sample
+        #    ``field <- ModInt<G.order>;`` to a typed local sample
+        #    ``ModInt<G.order> field_exp <- ModInt<G.order>;``
+        #    and add an assignment ``field = G.generator ^ field_exp;``
+        new_init = new_game.get_method("Initialize")
+        old_sample = new_init.block.statements[sample_idx]
+        assert isinstance(old_sample, frog_ast.Sample)
+
+        # Choose a unique name for the local exponent variable
+        local_name = f"{field.name}_exp"
+        suffix = 0
+        while local_name in all_names:
+            local_name = f"{field.name}_exp_{suffix}"
+            suffix += 1
+
+        local_sample = frog_ast.Sample(
+            copy.deepcopy(field.type),  # original ModInt type
+            frog_ast.Variable(local_name),
+            copy.deepcopy(old_sample.sampled_from),
+        )
+        field_assign = frog_ast.Assignment(
+            None,
+            frog_ast.Variable(field.name),
+            frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.EXPONENTIATE,
+                frog_ast.FieldAccess(copy.deepcopy(group_var), "generator"),
+                frog_ast.Variable(local_name),
+            ),
+        )
+        stmts = list(new_init.block.statements)
+        stmts[sample_idx] = local_sample
+        stmts.insert(sample_idx + 1, field_assign)
+        new_init.block = frog_ast.Block(stmts)
+
+        return new_game
+
+    # --- Case 2: groupelem_field ^ modint_field ---
+    # After case 1, expressions like ``ge_field ^ mi_field`` may remain in
+    # oracles.  Trace back through ge_field's assignment in Initialize to
+    # find the underlying exponent local (from case 1's conversion), then
+    # express the product field as ``G.generator ^ (local_exp * mi_field)``.
+    # Since local_exp is a local variable, InlineSingleUseField cannot
+    # inline the new field cross-method.
+    for ge_field in game.fields:
+        if not isinstance(ge_field.type, frog_ast.GroupElemType):
+            continue
+        # Find ge_field's assignment in Initialize: ge_field = base ^ exp
+        ge_assign_idx: Optional[int] = None
+        ge_assign_base: Optional[frog_ast.Expression] = None
+        ge_assign_exp: Optional[frog_ast.Expression] = None
+        for idx, stmt in enumerate(init_method.block.statements):
+            if (
+                isinstance(stmt, frog_ast.Assignment)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name == ge_field.name
+                and stmt.the_type is None
+            ):
+                ge_assign_idx = idx
+                pair = _get_exponent_base(stmt.value)
+                if pair is not None:
+                    ge_assign_base, ge_assign_exp = pair
+        if ge_assign_idx is None or ge_assign_base is None:
+            continue
+        if any(
+            _is_written_in(m.block, ge_field.name)
+            for m in game.methods
+            if m.signature.name != "Initialize"
+        ):
+            continue
+
+        for mi_field in game.fields:
+            if not isinstance(mi_field.type, frog_ast.ModIntType):
+                continue
+            if mi_field.name == ge_field.name:
+                continue
+            if any(
+                _is_written_in(m.block, mi_field.name)
+                for m in game.methods
+                if m.signature.name != "Initialize"
+            ):
+                continue
+            if not _find_field_power_in_oracles(game, ge_field.name, mi_field.name):
+                continue
+
+            mi_set_idx: Optional[int] = None
+            for idx, stmt in enumerate(init_method.block.statements):
+                if (
+                    isinstance(stmt, (frog_ast.Sample, frog_ast.Assignment))
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name == mi_field.name
+                ):
+                    mi_set_idx = idx
+            if mi_set_idx is None:
+                continue
+
+            insert_after = max(ge_assign_idx, mi_set_idx)
+
+            new_name = f"__gp_{ge_field.name}_{mi_field.name}"
+            suffix = 0
+            while new_name in all_names:
+                new_name = f"__gp_{ge_field.name}_{mi_field.name}_{suffix}"
+                suffix += 1
+
+            new_game = copy.deepcopy(game)
+
+            replacer2 = _FieldPowerReplacer(ge_field.name, mi_field.name, new_name)
+            for method in new_game.methods:
+                method.block = replacer2.transform(method.block)
+
+            new_field_decl = frog_ast.Field(
+                copy.deepcopy(ge_field.type),
+                new_name,
+                None,
+            )
+            new_game.fields.append(new_field_decl)
+
+            # Express as base ^ (exp * mi_field) using the underlying
+            # exponent from ge_field's assignment, keeping the local
+            # variable reference that prevents cross-method inlining.
+            assert ge_assign_exp is not None
+            new_init = new_game.get_method("Initialize")
+            assign_stmt = frog_ast.Assignment(
+                None,
+                frog_ast.Variable(new_name),
+                frog_ast.BinaryOperation(
+                    frog_ast.BinaryOperators.EXPONENTIATE,
+                    copy.deepcopy(ge_assign_base),
+                    frog_ast.BinaryOperation(
+                        frog_ast.BinaryOperators.MULTIPLY,
+                        copy.deepcopy(ge_assign_exp),
+                        frog_ast.Variable(mi_field.name),
+                    ),
+                ),
+            )
+            stmts = list(new_init.block.statements)
+            stmts.insert(insert_after + 1, assign_stmt)
+            new_init.block = frog_ast.Block(stmts)
+
+            return new_game
+
+    return game
+
+
+def _has_generator_power_of(
+    node: frog_ast.ASTNode,
+    group_var: frog_ast.Expression,
+    field_name: str,
+) -> bool:
+    """Check if *node* contains ``G.generator ^ field`` or
+    ``G.generator ^ (field * ...)``."""
+
+    def check(n: frog_ast.ASTNode) -> bool:
+        if not isinstance(n, frog_ast.BinaryOperation):
+            return False
+        gp = _is_generator_power(n)
+        if gp is None:
+            return False
+        g_var, exponent = gp
+        if g_var != group_var:
+            return False
+        if isinstance(exponent, frog_ast.Variable) and exponent.name == field_name:
+            return True
+        if _extract_field_factor(exponent, field_name) is not None:
+            return True
+        return False
+
+    return SearchVisitor(check).visit(node) is not None
+
+
+class MaterializeFieldExponentiation(TransformPass):
+    """Introduce GroupElem fields for ``G.generator ^ modint_field`` patterns.
+
+    When a ``ModInt<G.order>`` field ``f`` is uniformly sampled in Initialize
+    and the expression ``G.generator ^ f`` (or ``G.generator ^ (f * expr)``)
+    appears in a non-Initialize method, this transform introduces a new
+    ``GroupElem<G>`` field initialized to ``G.generator ^ f`` and replaces all
+    occurrences:
+
+    - ``G.generator ^ f``           -> ``new_field``
+    - ``G.generator ^ (f * expr)``  -> ``new_field ^ expr``
+    """
+
+    name = "Materialize Field Exponentiation"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return _materialize_field_exponentiation(game, ctx)

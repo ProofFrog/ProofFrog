@@ -349,7 +349,7 @@ from proof_frog.transforms.sampling import _counter_guarded_field_to_local
         # Counter increment with operands in flipped order: `count = 1 + count`.
         # NormalizeCommutativeChains rewrites `count + 1` into `1 + count`
         # (integer literal first), so the pattern matcher must accept either
-        # operand order.  Regression test for the CDH=>OneTimeHashedDDH proof
+        # operand order.  Regression test for the CDH=>HashedDDH proof
         # which only canonicalized correctly after this fix.
         (
             """

@@ -215,10 +215,11 @@ def test_inlined_game_endpoint_with_reduction_reference(examples_client):
     minimal-proof builder skipped Reduction blocks and the user got an
     `Error: \\`R_DDH'` parser failure."""
     c, examples_root = examples_client
-    rel = "Proofs/Group/DDHImpliesHashedDDH.proof"
+    rel = "Proofs/Group/DDHMultiChalImpliesHashedDDHMultiChal.proof"
     content = (examples_root / rel).read_text(encoding="utf-8")
     step_text = (
-        "DDH(G).Left compose R_DDH(G, n, H) against HashedDDH(G, n, H).Adversary"
+        "DDHMultiChal(G).Left compose R_DDH(G, n, H)"
+        " against HashedDDHMultiChal(G, n, H).Adversary"
     )
     resp = c.post(
         "/api/inlined-game",

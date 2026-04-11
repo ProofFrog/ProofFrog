@@ -25,7 +25,7 @@ def _run_prove_json(proof_path: str, cwd: Path = REPO_ROOT) -> dict:
 
 def test_passing_proof_has_null_diagnosis() -> None:
     """A passing proof should have hop_results where every diagnosis is null."""
-    proof_path = "examples/Proofs/SymEnc/ModOTPSecure.proof"
+    proof_path = "examples/Proofs/SymEnc/ModOTP_INDOT.proof"
     data = _run_prove_json(proof_path)
 
     assert data["success"] is True

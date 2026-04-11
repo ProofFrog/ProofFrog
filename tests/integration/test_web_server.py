@@ -56,22 +56,12 @@ def test_file_metadata_post_uses_request_content(client):
 
 
 def test_file_metadata_proof_resolves_renamed_import_assumption(examples_client):
-    """Regression test: an `import '...' as Alias;` clause must let the proof
-    metadata resolve assumption game references via the alias and return the
-    game's side names. This is what the Insert Reduction Hop wizard relies on
-    to populate its Direction dropdown.
-
-    `examples/Proofs/PRF/MultiKeyFromPRF.proof` has:
-        import '../../Games/PRF/Security.game' as PRFSecurity;
-        ...
-        assume:
-            PRFSecurity(F);
-
-    The basename of the imported file is `Security`, but the proof references
-    it via the alias `PRFSecurity`. Resolution must use the alias.
+    """The proof file imports PRFSecurity.game and references PRFSecurity(F)
+    in its assume: block. The metadata must resolve this and return the
+    game's side names for the Insert Reduction Hop wizard.
     """
     c, examples_root = examples_client
-    rel = "Proofs/PRF/MultiKeyFromPRF.proof"
+    rel = "Proofs/PRF/PRFSecurity_implies_PRFSecurity_MultiKey.proof"
     content = (examples_root / rel).read_text(encoding="utf-8")
     resp = c.post(
         "/api/file-metadata",
@@ -87,16 +77,15 @@ def test_file_metadata_proof_resolves_renamed_import_assumption(examples_client)
     assumption_names = [d["name"] for d in details]
     assert "PRFSecurity" in assumption_names
     prf_entry = next(d for d in details if d["name"] == "PRFSecurity")
-    # The imported Security.game has Real and Random sides.
     assert "Real" in prf_entry["sides"]
     assert "Random" in prf_entry["sides"]
 
 
 def test_file_metadata_proof_resolves_theorem_with_export_rename(examples_client):
-    """The theorem of MultiKeyFromPRF.proof references MultiKeyPRFSecurity,
-    which is the export name of MultiKey.game (filename != export name)."""
+    """The theorem of PRFSecurity_implies_PRFSecurity_MultiKey.proof
+    references PRFSecurity_MultiKey, which is the export name of the game."""
     c, examples_root = examples_client
-    rel = "Proofs/PRF/MultiKeyFromPRF.proof"
+    rel = "Proofs/PRF/PRFSecurity_implies_PRFSecurity_MultiKey.proof"
     content = (examples_root / rel).read_text(encoding="utf-8")
     resp = c.post(
         "/api/file-metadata",
@@ -108,7 +97,7 @@ def test_file_metadata_proof_resolves_theorem_with_export_rename(examples_client
     body = resp.get_json()
     theorem = body.get("theorem_details")
     assert theorem is not None
-    assert theorem["name"] == "MultiKeyPRFSecurity"
+    assert theorem["name"] == "PRFSecurity_MultiKey"
     assert "Real" in theorem["sides"]
     assert "Random" in theorem["sides"]
 
@@ -192,9 +181,9 @@ def test_check_endpoint_reports_failure(examples_client):
 
 def test_inlined_game_endpoint(examples_client):
     c, examples_root = examples_client
-    rel = "Proofs/PRG/TriplingPRGSecure.proof"
+    rel = "Proofs/PRG/TriplingPRG_PRGSecurity.proof"
     content = (examples_root / rel).read_text(encoding="utf-8")
-    step_text = "Security(T).Real against Security(T).Adversary"
+    step_text = "PRGSecurity(T).Real against PRGSecurity(T).Adversary"
     resp = c.post(
         "/api/inlined-game",
         data=json.dumps(
@@ -215,7 +204,7 @@ def test_inlined_game_endpoint_with_reduction_reference(examples_client):
     minimal-proof builder skipped Reduction blocks and the user got an
     `Error: \\`R_DDH'` parser failure."""
     c, examples_root = examples_client
-    rel = "Proofs/Group/DDHMultiChalImpliesHashedDDHMultiChal.proof"
+    rel = "Proofs/Group/DDHMultiChal_implies_HashedDDHMultiChal.proof"
     content = (examples_root / rel).read_text(encoding="utf-8")
     step_text = (
         "DDHMultiChal(G).Left compose R_DDH(G, n, H)"
@@ -237,7 +226,7 @@ def test_inlined_game_endpoint_with_reduction_reference(examples_client):
 
 def test_inlined_game_endpoint_missing_step_text(examples_client):
     c, examples_root = examples_client
-    rel = "Proofs/PRG/TriplingPRGSecure.proof"
+    rel = "Proofs/PRG/TriplingPRG_PRGSecurity.proof"
     content = (examples_root / rel).read_text(encoding="utf-8")
     resp = c.post(
         "/api/inlined-game",

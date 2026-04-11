@@ -85,19 +85,19 @@ class TestSchemeMetadata:
 
 class TestGameMetadata:
     def test_basic_fields(self, client):
-        resp = client.get("/api/file-metadata?path=Games/PRG/Security.game")
+        resp = client.get("/api/file-metadata?path=Games/PRG/PRGSecurity.game")
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["type"] == "game"
-        assert data["export_name"] == "Security"
+        assert data["export_name"] == "PRGSecurity"
 
     def test_sides(self, client):
-        resp = client.get("/api/file-metadata?path=Games/PRG/Security.game")
+        resp = client.get("/api/file-metadata?path=Games/PRG/PRGSecurity.game")
         data = resp.get_json()
         assert data["sides"] == ["Real", "Random"]
 
     def test_games_list(self, client):
-        resp = client.get("/api/file-metadata?path=Games/PRG/Security.game")
+        resp = client.get("/api/file-metadata?path=Games/PRG/PRGSecurity.game")
         data = resp.get_json()
         assert len(data["games"]) == 2
         game_names = [g["name"] for g in data["games"]]
@@ -105,7 +105,7 @@ class TestGameMetadata:
         assert "Random" in game_names
 
     def test_game_structure(self, client):
-        resp = client.get("/api/file-metadata?path=Games/PRG/Security.game")
+        resp = client.get("/api/file-metadata?path=Games/PRG/PRGSecurity.game")
         data = resp.get_json()
         for g in data["games"]:
             assert "name" in g
@@ -116,14 +116,14 @@ class TestGameMetadata:
             assert isinstance(g["methods"], list)
 
     def test_game_parameters(self, client):
-        resp = client.get("/api/file-metadata?path=Games/PRG/Security.game")
+        resp = client.get("/api/file-metadata?path=Games/PRG/PRGSecurity.game")
         data = resp.get_json()
         real_game = data["games"][0]
         assert len(real_game["parameters"]) >= 1
         assert real_game["parameters"][0]["name"] == "G"
 
     def test_game_methods(self, client):
-        resp = client.get("/api/file-metadata?path=Games/PRG/Security.game")
+        resp = client.get("/api/file-metadata?path=Games/PRG/PRGSecurity.game")
         data = resp.get_json()
         real_game = data["games"][0]
         assert any("Query" in m for m in real_game["methods"])

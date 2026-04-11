@@ -15,7 +15,7 @@ from proof_frog.web_server import (
 REPO_ROOT = Path(__file__).parent.parent.parent.parent
 EXAMPLES = REPO_ROOT / "examples"
 # A simple proof with multiple steps that all pass
-PROOF_PATH = str(EXAMPLES / "Proofs" / "SymEnc" / "OTUCimpliesOTS.proof")
+PROOF_PATH = str(EXAMPLES / "Proofs" / "SymEnc" / "INDOT$_implies_INDOT.proof")
 
 
 # -- canonicalize_game_with_trace -------------------------------------------

@@ -4,6 +4,11 @@
 
 # ProofFrog
 
+[![Tests](https://github.com/ProofFrog/ProofFrog/actions/workflows/test.yml/badge.svg)](https://github.com/ProofFrog/ProofFrog/actions/workflows/test.yml)
+[![PyPI](https://img.shields.io/pypi/v/proof_frog)](https://pypi.org/project/proof_frog/)
+[![Python](https://img.shields.io/pypi/pyversions/proof_frog)](https://pypi.org/project/proof_frog/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/ProofFrog/ProofFrog/blob/main/LICENSE)
+
 **A tool for checking transitions in cryptographic game-hopping proofs.**
 
 ProofFrog checks the validity of game hops for cryptographic game-hopping proofs in the reduction-based security paradigm: it checks that the starting and ending games match the security definition, and that each adjacent pair of games is either interchangeable (by code equivalence) or justified by a stated assumption. Proofs are written in FrogLang, a small C/Java-style domain-specific language designed to look like a pen-and-paper proof. ProofFrog can be used from the command line, a browser-based editor, or an MCP server for integration with AI coding assistants. ProofFrog is suitable for introductory level proofs, but is not as expressive for advanced concepts as other verification tools like EasyCrypt.

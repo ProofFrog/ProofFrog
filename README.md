@@ -27,7 +27,7 @@ pip install proof_frog
 After installing ProofFrog via pip, you may want to download the examples repository:
 
 ```
-git clone https://github.com/ProofFrog/examples
+proof_frog download-examples
 ```
 
 ### From source
@@ -58,6 +58,7 @@ The web interface lets you edit ProofFrog files (with syntax highlighting), vali
 | `proof_frog parse <file>` | Parse a file and print its AST representation |
 | `proof_frog check <file>` | Type-check a file for well-formedness |
 | `proof_frog prove <file>` | Verify a game-hopping proof (`-v` for verbose output) |
+| `proof_frog download-examples [dir]` | Download the examples at the pinned version (default: `examples/`) |
 | `proof_frog web [dir]` | Launch the browser-based editor |
 
 When installed from source, use `python3 -m proof_frog` instead of `proof_frog`.

@@ -323,6 +323,86 @@ def lsp() -> None:
     run_server()
 
 
+@cli.command("download-examples")
+@click.argument("directory", default="examples")
+@click.option(
+    "--force", is_flag=True, help="Overwrite the directory if it already exists."
+)
+@click.option(
+    "--ref",
+    default=None,
+    help="Git ref (commit SHA, tag, or branch) to download. Defaults to the pinned version.",
+)
+def download_examples(directory: str, force: bool, ref: str | None) -> None:
+    """Download the examples repository at the version pinned to this build."""
+    # pylint: disable=import-outside-toplevel
+    import io
+    import shutil
+    import tarfile
+    import urllib.error
+    import urllib.request
+
+    examples_repo: str
+    examples_ref: str
+    if ref is not None:
+        examples_repo = "https://github.com/ProofFrog/examples"
+        examples_ref = ref
+    else:
+        try:
+            from proof_frog._examples_pin import EXAMPLES_REPO, EXAMPLES_SHA
+
+            examples_repo = EXAMPLES_REPO
+            examples_ref = EXAMPLES_SHA
+        except ImportError:
+            click.echo(
+                "Examples pin not found. "
+                "This build was not stamped with submodule info.\n"
+                "If building from source, run: make examples-pin\n"
+                "Or specify a ref explicitly with --ref",
+                err=True,
+            )
+            sys.exit(1)
+
+    target = Path(directory)
+    if target.exists() and not force:
+        click.echo(
+            f"Directory '{directory}' already exists. " "Use --force to overwrite.",
+            err=True,
+        )
+        sys.exit(1)
+
+    url = f"{examples_repo}/archive/{examples_ref}.tar.gz"
+    click.echo(f"Downloading examples ({examples_ref[:12]})...")
+
+    try:
+        with urllib.request.urlopen(url) as response:  # noqa: S310
+            archive_bytes = response.read()
+    except urllib.error.URLError as e:
+        click.echo(f"Download failed: {e}", err=True)
+        sys.exit(1)
+
+    if target.exists():
+        shutil.rmtree(target)
+
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+            # The archive has a top-level directory like examples-<sha>/
+            # Strip it so files land directly in the target directory.
+            prefix = tar.getmembers()[0].name.split("/")[0] + "/"
+            for member in tar.getmembers():
+                if not member.name.startswith(prefix):
+                    continue
+                member.name = member.name[len(prefix) :]
+                if not member.name:
+                    continue
+                tar.extract(member, target, filter="data")
+    except tarfile.TarError as e:
+        click.echo(f"Extraction failed: {e}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Examples downloaded to '{directory}'.")
+
+
 @cli.command()
 @click.argument("directory", default=".")
 def mcp(directory: str) -> None:

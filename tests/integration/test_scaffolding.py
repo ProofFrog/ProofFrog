@@ -12,8 +12,8 @@ from proof_frog.web_server import create_app
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES_DIR = REPO_ROOT / "examples"
-HYBRID_REL = "Proofs/PubEnc/Hybrid.proof"
-MULTIKEY_REL = "Proofs/PRF/MultiKeyFromPRF.proof"
+HYBRID_REL = "Proofs/PubKeyEnc/HybridPKEDEM_INDCPA_MultiChal.proof"
+MULTIKEY_REL = "Proofs/PRF/PRFSecurity_implies_PRFSecurity_MultiKey.proof"
 
 
 @pytest.fixture
@@ -156,7 +156,7 @@ def _reduction_payload(content, **overrides):
         "path": HYBRID_REL,
         "content": content,
         "name": "R_test",
-        "security_game_name": "CPA",
+        "security_game_name": "INDCPA_MultiChal",
         "side": "Left",
         "params": "SymEnc E, PubKeyEnc P, Hybrid H",
         "compose_args": "P",
@@ -176,8 +176,8 @@ def test_scaffold_reduction_smoke(client):
     assert "Reduction R_test(SymEnc E, PubKeyEnc P, Hybrid H)" in block
     # Reduction declarations don't carry the side — that's chosen at the
     # use site in the games: list. The side argument is validated only.
-    assert "compose CPA(P)" in block
-    assert "against CPA(H).Adversary" in block
+    assert "compose INDCPA_MultiChal(P)" in block
+    assert "against INDCPA_MultiChal(H).Adversary" in block
     # Substitution test: theorem-substituted form, not the security game's
     # formal `E`. This is the bug-fix assertion.
     assert "H.Ciphertext Challenge(H.Message mL, H.Message mR)" in block
@@ -274,11 +274,11 @@ def test_scaffold_reduction_hop_smoke(client):
     lines = body["lines"]
     assert len(lines) == 2
     assert (
-        "PRFSecurity(F).Real compose R_Hybrid against MultiKeyPRFSecurity(F).Adversary;"
+        "PRFSecurity(F).Real compose R_Hybrid against PRFSecurity_MultiKey(F).Adversary;"
         in lines[0]
     )
     assert (
-        "PRFSecurity(F).Random compose R_Hybrid against MultiKeyPRFSecurity(F).Adversary;"
+        "PRFSecurity(F).Random compose R_Hybrid against PRFSecurity_MultiKey(F).Adversary;"
         in lines[1]
     )
     # 4-space indentation matching games: block.
@@ -299,13 +299,13 @@ def test_scaffold_reduction_hop_parses_when_spliced(client):
     lines = resp.get_json()["lines"]
 
     # Splice the two lines in just after the first existing games: line.
-    marker = "MultiKeyPRFSecurity(F).Real against MultiKeyPRFSecurity(F).Adversary;"
+    marker = "PRFSecurity_MultiKey(F).Real against PRFSecurity_MultiKey(F).Adversary;"
     spliced = content.replace(
         marker,
         marker + "\n" + lines[0] + "\n" + lines[1],
         1,
     )
-    spliced_path = proof_path.with_name("MultiKeyFromPRF_hop_spliced.proof")
+    spliced_path = proof_path.with_name("PRFSecurity_MultiKey_hop_spliced.proof")
     spliced_path.write_text(spliced, encoding="utf-8")
     frog_parser.parse_proof_file(str(spliced_path))
 
@@ -322,13 +322,13 @@ def test_scaffold_reduction_hop_typechecks_when_spliced(client):
     assert resp.status_code == 200
     lines = resp.get_json()["lines"]
 
-    marker = "MultiKeyPRFSecurity(F).Real against MultiKeyPRFSecurity(F).Adversary;"
+    marker = "PRFSecurity_MultiKey(F).Real against PRFSecurity_MultiKey(F).Adversary;"
     spliced = content.replace(
         marker,
         marker + "\n" + lines[0] + "\n" + lines[1],
         1,
     )
-    spliced_path = proof_path.with_name("MultiKeyFromPRF_hop_typed.proof")
+    spliced_path = proof_path.with_name("PRFSecurity_MultiKey_hop_typed.proof")
     spliced_path.write_text(spliced, encoding="utf-8")
 
     parsed = frog_parser.parse_proof_file(str(spliced_path))

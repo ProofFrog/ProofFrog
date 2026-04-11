@@ -48,26 +48,26 @@ class TestDescribeScheme:
 
 class TestDescribeGame:
     def test_onetimesecrecy_structure(self) -> None:
-        out = describe_file(str(EXAMPLES / "Games/SymEnc/OneTimeSecrecy.game"))
-        assert "GameFile (export as: OneTimeSecrecy)" in out
+        out = describe_file(str(EXAMPLES / "Games/SymEnc/INDOT.game"))
+        assert "GameFile (export as: INDOT)" in out
         assert "Game Left" in out
         assert "Game Right" in out
         assert "Eavesdrop" in out
 
     def test_both_games_present(self) -> None:
-        out = describe_file(str(EXAMPLES / "Games/SymEnc/OneTimeSecrecy.game"))
+        out = describe_file(str(EXAMPLES / "Games/SymEnc/INDOT.game"))
         lines = out.splitlines()
         game_lines = [l for l in lines if l.startswith("Game ")]
         assert len(game_lines) == 2
 
     def test_no_implementations(self) -> None:
-        out = describe_file(str(EXAMPLES / "Games/SymEnc/OneTimeSecrecy.game"))
+        out = describe_file(str(EXAMPLES / "Games/SymEnc/INDOT.game"))
         assert "return" not in out
 
 
 class TestDescribeProof:
     def test_proof_structure(self) -> None:
-        out = describe_file(str(EXAMPLES / "Proofs/SymEnc/OTUCimpliesOTS.proof"))
+        out = describe_file(str(EXAMPLES / "Proofs/SymEnc/INDOT$_implies_INDOT.proof"))
         assert "Proof:" in out
         assert "Let:" in out
         assert "Assume:" in out
@@ -75,11 +75,11 @@ class TestDescribeProof:
         assert "Games:" in out
 
     def test_theorem_present(self) -> None:
-        out = describe_file(str(EXAMPLES / "Proofs/SymEnc/OTUCimpliesOTS.proof"))
-        assert "OneTimeSecrecy" in out
+        out = describe_file(str(EXAMPLES / "Proofs/SymEnc/INDOT$_implies_INDOT.proof"))
+        assert "INDOT" in out
 
     def test_game_hops_listed(self) -> None:
-        out = describe_file(str(EXAMPLES / "Proofs/SymEnc/OTUCimpliesOTS.proof"))
+        out = describe_file(str(EXAMPLES / "Proofs/SymEnc/INDOT$_implies_INDOT.proof"))
         # Should list at least the first and last game steps
         assert "Left" in out
         assert "Right" in out

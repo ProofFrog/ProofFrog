@@ -356,14 +356,20 @@ _LANGUAGE_REFERENCE = """\
 - .game       Pair of Left/Right security games (defines a security notion)
 - .proof      Game-hopping proof script
 
-## Primitive Types
+## Types
 - Int, Bool, Void
 - BitString<N>        Fixed-length bit string of length N (N is an Int expression)
+- ModInt<q>           Integers mod q with modular arithmetic
 - Set                 Abstract untyped set
+- Set<T>              Typed finite set
 - T?                  Optional type (may be None)
-- T1 * T2 * ...       Product/tuple type
-- Array<T, N>         Array
-- Map<K, V>           Map
+- [T1, T2, ..., Tn]  Tuple type; access by constant index t[0], t[1]
+- Array<T, N>         Fixed-size array indexed 0 to N-1
+- Map<K, V>           Finite partial map (initially empty)
+- Function<D, R>      Deterministic function from D to R; when sampled (<-), produces \
+a random function
+- Group               Abstract cyclic group
+- GroupElem<G>        Element of group G
 
 ## Primitive Syntax
 ```
@@ -384,7 +390,7 @@ Scheme Name(PrimType P) extends PrimitiveName {
     requires P.field1 == P.field2;   // optional precondition
     Set Field = P.SomeField;
     ReturnType MethodName(ArgType arg) {
-        // full implementation
+        // full implementation; use `this.OtherMethod(x)` for self-references
     }
 }
 ```
@@ -413,39 +419,48 @@ export as SecurityGame;
 ```
 
 ## Statements
-- `Type name;`             Declaration (uninitialized field)
-- `Type name = expr;`      Declaration + assignment
-- `name = expr;`           Assignment (no type annotation)
-- `Type name <- expr;`     Random sample from set (declaration)
-- `name <- expr;`          Random sample (no type annotation)
+- `Type name;`                            Declaration (uninitialized field)
+- `Type name = expr;`                     Declaration + assignment
+- `name = expr;`                          Assignment (no type annotation)
+- `Type name <- expr;`                    Random sample from set (declaration)
+- `name <- expr;`                         Random sample (no type annotation)
+- `Type name <-uniq[S] Type;`            Sample uniformly from Type \\ S (rejection sampling)
+- `name <-uniq[S] Type;`                 Unique sample (no type annotation)
 - `return expr;`
 - `if (cond) { ... } else if (...) { ... } else { ... }`
 - `for (Int i = start to end) { ... }`   Numeric for loop
 - `for (Type x in set) { ... }`          Set iteration
 
 ## Expressions
-- Arithmetic:     +  -  *  /
-- Comparison:     ==  !=  <  >  <=  >=
-- Logical:        &&  ||  !
-- XOR / add:      a + b       (BitString<N> + BitString<N> → XOR)
-- Concatenation:  a || b      (BitString<M> || BitString<N> → BitString<M+N>)
-- Slicing:        a[s : e]    (BitString, s and e are Int expressions)
-- Size:           |a|
-- Field access:   obj.field
-- Array index:    arr[i]
-- Tuple literal:  [a, b, c]
-- Tuple index:    tup[0]
-- Set literal:    {a, b, c}
-- Set ops:        A union B,  A \\ B,  x in S,  A subsets B
-- Optional:       None        (the None value for T? types)
+- Arithmetic:       +  -  *  /
+- Exponentiation:   ^          (right-associative)
+- Comparison:       ==  !=  <  >  <=  >=
+- Logical:          &&  ||  !
+- XOR / add:        a + b      (BitString<N> + BitString<N> is XOR)
+- Concatenation:    a || b     (BitString<M> || BitString<N> -> BitString<M+N>; \
+|| is also logical OR on Bool)
+- Slicing:          a[s : e]   (BitString, s and e are Int expressions -> BitString<e-s>)
+- Size:             |a|        (cardinality/length of sets, maps, bitstrings, arrays)
+- Field access:     obj.field
+- Array/map index:  arr[i]  /  m[k]
+- Tuple literal:    [a, b, c]
+- Tuple index:      tup[0]
+- Set literal:      {a, b, c}
+- Set ops:          A union B,  A \\ B,  x in S,  A subsets B
+- Optional:         None       (the None value for T? types)
+- Bitstring zeros:  0^n        (BitString<n> of all zeros)
+- Bitstring ones:   1^n        (BitString<n> of all ones)
+- Binary literal:   0b101...   (literal bit string)
+- Boolean:          true, false
 
 ## Proof Syntax
 ```
 import 'path/to/Primitive.primitive';
 import 'path/to/Game.game';
 import 'path/to/Scheme.scheme';
+import 'path/to/Other.game' as Alias;   // import with alias
 
-// Optional reductions (adapters between security games)
+// Optional intermediate games and reductions
 Reduction R(PrimType E) compose ChallengerGame(E) against AdversaryGame(E).Adversary {
     ReturnType OracleMethod(ArgType arg) {
         // `challenger` calls the ChallengerGame's methods
@@ -459,9 +474,14 @@ let:
     Set MessageSpace;
     PrimType E = PrimType(MessageSpace, ...);
     SchemeType S = SchemeType(E);
+    Function<D, R> H <- Function<D, R>;   // sample random function (ROM)
 
 assume:
     AssumedSecureGame(E);
+    calls <= 42;                           // optional bound on oracle calls
+
+lemma:
+    LemmaGame(E) by 'path/to/lemma.proof';   // verify and use another proof
 
 theorem:
     TargetGame(S);
@@ -471,14 +491,20 @@ games:
     AssumedSecureGame(E).Real compose R(E) against TargetGame(S).Adversary;
     AssumedSecureGame(E).Random compose R(E) against TargetGame(S).Adversary;
     TargetGame(S).Right against TargetGame(S).Adversary;
+    // Induction block (for loop-based game transitions):
+    // induction (Int i from 0 to n) { gameStep; ... }
+    // Step assumptions: assume expr;
 ```
 
 ## Game Hop Rules
 - Consecutive steps are equivalent iff their canonical (simplified) forms match.
 - A step can also be an assumed-secure transition (uses a security assumption).
+- Assumption hops are bidirectional (Real->Random or Random->Real).
 - The first step must be the theorem game's Left variant.
 - The last step must be the theorem game's Right variant.
 - Reductions use `compose` to plug a game in as challenger for another.
+- A reduction's parameter list must include every parameter needed to instantiate \
+the composed security game.
 
 ## Import Paths
 Paths in import statements are relative to where `proof_frog` is invoked,

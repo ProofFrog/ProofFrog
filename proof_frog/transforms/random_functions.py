@@ -890,7 +890,27 @@ def _find_rf_call_of_var(
     var_name: str,
     rf_names: set[str],
 ) -> frog_ast.FuncCall | None:
-    """Find ``RF(v)`` where *v* is the given variable and RF is a known RF."""
+    """Find ``RF(v)``, ``RF([..., v, ...])``, or ``RF(... || v || ...)``
+    where *v* is the given variable and RF is a known RF."""
+
+    def _arg_contains_var(arg: frog_ast.Expression) -> bool:
+        """Check if the RF argument contains the target variable."""
+        if isinstance(arg, frog_ast.Variable):
+            return arg.name == var_name
+        if isinstance(arg, frog_ast.Tuple):
+            return any(
+                isinstance(elem, frog_ast.Variable) and elem.name == var_name
+                for elem in arg.values
+            )
+        if (
+            isinstance(arg, frog_ast.BinaryOperation)
+            and arg.operator == frog_ast.BinaryOperators.OR
+        ):
+            return any(
+                isinstance(leaf, frog_ast.Variable) and leaf.name == var_name
+                for leaf in _flatten_concat(arg)
+            )
+        return False
 
     def matcher(node: frog_ast.ASTNode) -> bool:
         return (
@@ -898,8 +918,7 @@ def _find_rf_call_of_var(
             and isinstance(node.func, frog_ast.Variable)
             and node.func.name in rf_names
             and len(node.args) == 1
-            and isinstance(node.args[0], frog_ast.Variable)
-            and node.args[0].name == var_name
+            and _arg_contains_var(node.args[0])
         )
 
     result = SearchVisitor(matcher).visit(block)
@@ -909,13 +928,15 @@ def _find_rf_call_of_var(
 
 
 class _FreshInputRFTransformer(BlockTransformer):
-    """Replace ``RF(v)`` with ``z <- RangeType`` when *v* is a ``<-uniq[S]``
-    sampled variable used only in that one RF call.
+    """Replace ``RF(v)`` (or ``RF([..., v, ...])`` / ``RF(... || v || ...)``)
+    with ``z <- RangeType`` when *v* is a ``<-uniq[S]`` sampled variable used
+    only in that one RF call.
 
     The exclusion set ``S`` guarantees that *v* differs from all inputs on
     which the RF has been queried elsewhere (e.g., via an adversary oracle).
-    Therefore RF(v) is an independent uniform draw from the range type.
-    This is exactly sound — no guessing loss.
+    When *v* appears inside a tuple or concatenation, varying *v* produces a
+    distinct composite argument, so the RF output is still an independent
+    uniform draw.
     """
 
     def __init__(
@@ -1019,6 +1040,9 @@ class _FreshInputRFTransformer(BlockTransformer):
 
 class FreshInputRFToUniform(TransformPass):
     """Replace RF(v) with uniform when v is a ``<-uniq`` single-use local.
+
+    Handles bare variables, tuples containing the variable, and
+    concatenations containing the variable.
 
     When the input is sampled via ``<-uniq[S]``, the exclusion set
     guarantees it differs from all other RF inputs.  This makes the

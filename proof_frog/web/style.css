@@ -68,7 +68,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
   flex-shrink: 0;
 }
 #toolbar .spacer { flex: 1; }
-#toolbar .dir-label { color: var(--text-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; }
+#toolbar .dir-label { display: none; }
 #toolbar .toolbar-group { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
 #toolbar .toolbar-divider {
   width: 1px; background: var(--border); align-self: center;
@@ -518,6 +518,35 @@ select.wizard-input { cursor: pointer; }
 #welcome.hidden { display: none; }
 #welcome h2 { font-size: 22px; color: var(--accent); font-weight: 300; }
 #welcome p { font-size: 13px; }
+#welcome .welcome-links {
+  display: flex; gap: 16px; margin-top: 8px; pointer-events: auto;
+}
+#welcome .welcome-links a {
+  color: var(--accent); font-size: 13px; text-decoration: none;
+  border-bottom: 1px solid transparent; transition: border-color 0.15s;
+}
+#welcome .welcome-links a:hover { border-bottom-color: var(--accent); }
+
+/* ── Help dropdown ── */
+.help-dropdown { position: relative; }
+.help-menu {
+  display: none; position: absolute; right: 0; top: 100%; margin-top: 4px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15); min-width: 200px; z-index: 1000;
+  padding: 4px 0;
+}
+.help-menu.open { display: block; }
+.help-menu-section { padding: 4px 0; }
+.help-menu-section + .help-menu-section { border-top: 1px solid var(--border); }
+.help-menu-heading {
+  padding: 4px 12px; font-size: 11px; font-weight: 600;
+  color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px;
+}
+.help-menu a {
+  display: block; padding: 4px 12px; font-size: 12px;
+  color: var(--text); text-decoration: none; transition: background 0.1s;
+}
+.help-menu a:hover { background: var(--bg3); color: var(--accent); }
 
 /* ── Resize handle ── */
 #resize-handle {

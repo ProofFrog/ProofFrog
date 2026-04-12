@@ -12,6 +12,3 @@ extras
 vscode-extension/node_modules/
 vscode-extension/out/
 vscode-extension/*.vsix
-
-# Auto-generated build artifacts
-proof_frog/_examples_pin.py

@@ -4,9 +4,9 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "proof_frog"
-version = "0.4.0.dev0"
+version = "0.4.0"
 description = "A tool for checking transitions in cryptographic game-hopping proofs"
-keywords = ["cryptography", "latex", "game-hopping", "proofs"]
+keywords = ["cryptography", "game-hopping", "proofs"]
 readme = "README.md"
 authors = [
     {name = "Ross Evans", email = "rpevans@uwaterloo.ca"},
@@ -37,7 +37,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["mypy", "pylint", "types-colorama", "pytest", "pytest-xdist", "black"]
+dev = ["mypy", "pylint", "types-colorama", "pytest", "pytest-xdist", "black", "flit", "twine"]
 mcp = ["mcp[cli] >= 1.0"]
 
 [project.urls]

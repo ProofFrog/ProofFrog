@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from urllib.parse import unquote
 
 from proof_frog import frog_ast
 from proof_frog.frog_parser import ParseError
@@ -26,8 +27,8 @@ class DocumentState:
 def uri_to_path(uri: str) -> str:
     """Convert a file:// URI to a local filesystem path."""
     if uri.startswith("file://"):
-        return uri[7:]
-    return uri
+        return unquote(uri[7:])
+    return unquote(uri)
 
 
 def file_type_from_path(path: str) -> frog_ast.FileType | None:

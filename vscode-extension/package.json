@@ -3,8 +3,10 @@
   "displayName": "ProofFrog",
   "description": "Language support for ProofFrog's FrogLang cryptographic proof DSL",
   "version": "0.1.0",
-  "publisher": "prooffrog",
+  "publisher": "ProofFrog",
   "license": "MIT",
+  "icon": "prooffrog.png",
+  "keywords": ["cryptography", "proofs"],
   "repository": {
     "type": "git",
     "url": "https://github.com/ProofFrog/ProofFrog"
@@ -53,6 +55,7 @@
         {
           "id": "prooffrogProofSteps",
           "name": "ProofFrog: Proof Hops",
+          "icon": "prooffrog.png",
           "when": "resourceExtname == .proof"
         }
       ]

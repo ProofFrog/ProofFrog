@@ -1,6 +1,12 @@
 # ProofFrog VSCode Extension
 
-Language support for [ProofFrog](https://github.com/ProofFrog/ProofFrog)'s FrogLang cryptographic proof DSL.
+**[ProofFrog](https://github.com/ProofFrog/ProofFrog) is a tool for checking transitions in cryptographic game-hopping proofs.**
+
+This VSCode extension provides language support for ProofFrog's domain-specific language, FrogLang.
+
+## About ProofFrog
+
+ProofFrog checks the validity of game hops for cryptographic game-hopping proofs in the reduction-based security paradigm: it checks that the starting and ending games match the security definition, and that each adjacent pair of games is either interchangeable (by code equivalence) or justified by a stated assumption. Proofs are written in FrogLang, a small C/Java-style domain-specific language designed to look like a pen-and-paper proof. ProofFrog can be used from the command line, a browser-based editor, or an MCP server for integration with AI coding assistants. ProofFrog is suitable for introductory level proofs, but is not as expressive for advanced concepts as other verification tools like EasyCrypt.
 
 ## Features
 
@@ -17,7 +23,7 @@ Language support for [ProofFrog](https://github.com/ProofFrog/ProofFrog)'s FrogL
 
 - Python 3.11+ with ProofFrog installed:
   ```bash
-  pip install -e .
+  pip install prooffrog
   ```
 - The extension connects to a Python LSP server (`python -m proof_frog lsp`), so ProofFrog must be installed in the Python environment that the extension uses.
 
@@ -31,31 +37,6 @@ If you use a virtual environment, set this to the full path:
 
 ```json
 {
-  "prooffrog.pythonPath": "/path/to/ProofFrog/.venv/bin/python"
+  "prooffrog.pythonPath": "/path/to/venv/bin/python"
 }
 ```
-
-## Building from source
-
-From the repository root:
-
-```bash
-# Build the extension
-make vscode-extension
-
-# Package as .vsix
-make vscode-vsix
-```
-
-Then install the `.vsix` in VSCode: Extensions > `...` menu > "Install from VSIX..."
-
-## Development
-
-To run the extension in development mode:
-
-1. Open the `vscode-extension/` folder in VSCode
-2. Run `npm install`
-3. Press F5 to launch an Extension Development Host window
-4. Open a ProofFrog project in the new window
-
-Check **Output > ProofFrog** for LSP server logs.

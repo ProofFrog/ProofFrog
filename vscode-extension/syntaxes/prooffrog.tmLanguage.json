@@ -64,11 +64,11 @@
         },
         {
           "name": "keyword.proof.prooffrog",
-          "match": "\\b(proof|assume|theorem|games|let|induction|from|against|compose)\\b"
+          "match": "\\b(proof|assume|theorem|games|let|induction|from|against|compose|lemma|by)\\b"
         },
         {
           "name": "keyword.other.prooffrog",
-          "match": "\\b(import|export|as|requires|extends|calls|subsets|union)\\b"
+          "match": "\\b(import|export|as|requires|extends|calls|subsets|union|deterministic|injective)\\b"
         }
       ]
     },
@@ -76,7 +76,7 @@
       "patterns": [
         {
           "name": "support.type.prooffrog",
-          "match": "\\b(Set|Bool|Void|Int|BitString|ModInt|Array|Map)\\b"
+          "match": "\\b(Set|Bool|Void|Int|BitString|ModInt|Array|Map|Function|Group|GroupElem)\\b"
         }
       ]
     },
@@ -92,7 +92,7 @@
         },
         {
           "name": "keyword.operator.assignment.prooffrog",
-          "match": "<-|="
+          "match": "<-uniq|<-|="
         },
         {
           "name": "keyword.operator.arithmetic.prooffrog",

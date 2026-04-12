@@ -150,6 +150,57 @@ document.getElementById("output-close").addEventListener("click", () => {
   document.getElementById("output-pane").classList.remove("visible");
 });
 btnTheme.addEventListener("click", () => applyTheme(!state.darkMode));
+
+// ── Help menu ────────────────────────────────────────────────────────────────
+const btnHelp = document.getElementById("btn-help");
+const helpMenu = document.getElementById("help-menu");
+btnHelp.addEventListener("click", (e) => {
+  e.stopPropagation();
+  updateHelpContext();
+  helpMenu.classList.toggle("open");
+});
+document.addEventListener("click", (e) => {
+  if (!helpMenu.contains(e.target) && e.target !== btnHelp) {
+    helpMenu.classList.remove("open");
+  }
+});
+
+const HELP_FILE_TYPES = {
+  ".primitive": {
+    heading: "Primitives",
+    label: "Primitives Reference",
+    url: "https://prooffrog.github.io/manual/language-reference/primitives",
+  },
+  ".scheme": {
+    heading: "Schemes",
+    label: "Schemes Reference",
+    url: "https://prooffrog.github.io/manual/language-reference/schemes",
+  },
+  ".game": {
+    heading: "Games",
+    label: "Games Reference",
+    url: "https://prooffrog.github.io/manual/language-reference/games",
+  },
+  ".proof": {
+    heading: "Proofs",
+    label: "Proofs Reference",
+    url: "https://prooffrog.github.io/manual/language-reference/proofs",
+  },
+};
+function updateHelpContext() {
+  const section = document.getElementById("help-context-section");
+  const heading = document.getElementById("help-context-heading");
+  const link = document.getElementById("help-context-link");
+  const tab = state.activeTab;
+  if (!tab) { section.style.display = "none"; return; }
+  const ext = Object.keys(HELP_FILE_TYPES).find(e => tab.endsWith(e));
+  if (!ext) { section.style.display = "none"; return; }
+  const info = HELP_FILE_TYPES[ext];
+  section.style.display = "";
+  heading.textContent = info.heading;
+  link.textContent = info.label;
+  link.href = info.url;
+}
 document.getElementById("btn-collapse-all").addEventListener("click", collapseAll);
 document.getElementById("btn-expand-all").addEventListener("click", expandAll);
 

@@ -962,6 +962,22 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 else:
                     resolved_types.append(sub)
             return frog_ast.ProductType(resolved_types)
+        # Tuple-of-types can appear in type positions after parameter
+        # substitution (e.g., Set D = [T1, T2] parsed as Tuple in
+        # expression position).  Resolve elements and normalize to
+        # ProductType so FieldAccess aliases inside are resolved.
+        if isinstance(t, frog_ast.Tuple) and all(
+            isinstance(v, frog_ast.Type) for v in t.values
+        ):
+            resolved_types_t: list[frog_ast.Type] = []
+            for sub in t.values:
+                resolved_sub = self._resolve_type_alias(sub, _seen)
+                if isinstance(resolved_sub, frog_ast.Type):
+                    resolved_types_t.append(resolved_sub)
+                else:
+                    assert isinstance(sub, frog_ast.Type)
+                    resolved_types_t.append(sub)
+            return frog_ast.ProductType(resolved_types_t)
         if isinstance(t, frog_ast.OptionalType):
             resolved_inner = self._resolve_type_alias(t.the_type, _seen)
             if isinstance(resolved_inner, frog_ast.Type):

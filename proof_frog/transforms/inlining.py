@@ -368,7 +368,7 @@ class InlineMultiUsePureExpressionTransformer(BlockTransformer):
                 continue
 
             # Skip expressions containing array access or slicing.
-            # Inlining these spreads references to the base variable,
+            # Inlining these spreads references to the indexed variable,
             # preventing dead-code elimination and single-use inlining
             # of function-call results, and breaking algebraic patterns.
             if (
@@ -903,6 +903,138 @@ class ForwardExpressionAlias(TransformPass):
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
         ).transform(game)
+
+
+class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
+    """Extract repeated ``var[constant]`` accesses into named variables.
+
+    When ``v[i]`` (variable + integer index) appears 2+ times in a block
+    and ``v`` is declared with a product (tuple) type, inserts a local
+    declaration ``Ti __cse_v_i__ = v[i];`` right after ``v``'s assignment
+    and replaces every occurrence with the new variable.
+
+    This normalises games that destructure tuples explicitly
+    (``pk = k[0]``) against games that use inline access
+    (``Encaps(k[0])``).
+    """
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        # Build map: var_name -> declared type (from assignments in this block)
+        var_types: dict[str, frog_ast.Type] = {}
+        var_def_idx: dict[str, int] = {}
+        for idx, stmt in enumerate(block.statements):
+            if (
+                isinstance(stmt, frog_ast.Assignment)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.the_type is not None
+            ):
+                var_types[stmt.var.name] = stmt.the_type
+                var_def_idx[stmt.var.name] = idx
+
+        # Count occurrences of each (var_name, index) ArrayAccess pattern
+        access_counts: dict[tuple[str, int], int] = {}
+        for stmt in block.statements:
+
+            def counter(node: frog_ast.ASTNode) -> bool:
+                if (
+                    isinstance(node, frog_ast.ArrayAccess)
+                    and isinstance(node.the_array, frog_ast.Variable)
+                    and isinstance(node.index, frog_ast.Integer)
+                ):
+                    key = (node.the_array.name, node.index.num)
+                    access_counts[key] = access_counts.get(key, 0) + 1
+                return False
+
+            SearchVisitor(counter).visit(stmt)
+
+        # Find first pattern with 2+ uses whose base var has a product type
+        for (var_name, idx_val), count in access_counts.items():
+            if count < 2:
+                continue
+            if var_name not in var_types:
+                continue
+            base_type = var_types[var_name]
+            if not isinstance(base_type, frog_ast.ProductType):
+                continue
+            if idx_val < 0 or idx_val >= len(base_type.types):
+                continue
+
+            # Skip if the base variable is reassigned after its definition
+            def _is_reassigned(name: str, node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(
+                        node,
+                        (
+                            frog_ast.Assignment,
+                            frog_ast.Sample,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
+                    and isinstance(node.var, frog_ast.Variable)
+                    and node.var.name == name
+                )
+
+            remaining_after_def = frog_ast.Block(
+                list(block.statements[var_def_idx[var_name] + 1 :])
+            )
+            if (
+                SearchVisitor(functools.partial(_is_reassigned, var_name)).visit(
+                    remaining_after_def
+                )
+                is not None
+            ):
+                continue
+
+            elem_type = base_type.types[idx_val]
+            cse_name = f"__cse_{var_name}_{idx_val}__"
+            target_access = frog_ast.ArrayAccess(
+                frog_ast.Variable(var_name), frog_ast.Integer(idx_val)
+            )
+
+            # Create the extraction: elem_type cse_name = var[idx];
+            new_assignment = frog_ast.Assignment(
+                elem_type,
+                frog_ast.Variable(cse_name),
+                copy.deepcopy(target_access),
+            )
+
+            # Insert after the base variable's definition
+            insert_at = var_def_idx[var_name] + 1
+
+            # Replace all occurrences of var[idx] with the CSE variable
+            new_stmts = list(block.statements[:insert_at])
+            new_stmts.append(new_assignment)
+
+            remaining = frog_ast.Block(list(block.statements[insert_at:]))
+
+            def _match_access(
+                target: frog_ast.Expression, node: frog_ast.ASTNode
+            ) -> bool:
+                return node == target
+
+            while True:
+                match = SearchVisitor(
+                    functools.partial(_match_access, target_access)
+                ).visit(remaining)
+                if match is None:
+                    break
+                remaining = ReplaceTransformer(
+                    match, frog_ast.Variable(cse_name)
+                ).transform(remaining)
+
+            new_stmts.extend(remaining.statements)
+            return self.transform_block(frog_ast.Block(new_stmts))
+
+        return block
+
+
+class ExtractRepeatedTupleAccess(TransformPass):
+    """Extract repeated tuple element accesses into named variables."""
+
+    name = "Extract Repeated Tuple Access"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return ExtractRepeatedTupleAccessTransformer().transform(game)
 
 
 class InlineMultiUsePureExpression(TransformPass):

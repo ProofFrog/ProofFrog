@@ -659,7 +659,17 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
         return None, None
 
     def _is_local_or_param(self, expr: frog_ast.Expression) -> bool:
-        return isinstance(expr, frog_ast.Variable) and expr.name not in self.field_names
+        if isinstance(expr, frog_ast.Variable):
+            return expr.name not in self.field_names
+        # Also accept parameter[constant] (tuple-element access on a param)
+        if (
+            isinstance(expr, frog_ast.ArrayAccess)
+            and isinstance(expr.the_array, frog_ast.Variable)
+            and isinstance(expr.index, frog_ast.Integer)
+            and expr.the_array.name in self.param_names
+        ):
+            return True
+        return False
 
     def _is_field(self, expr: frog_ast.Expression) -> bool:
         return isinstance(expr, frog_ast.Variable) and expr.name in self.field_names

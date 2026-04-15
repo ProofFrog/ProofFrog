@@ -26,6 +26,7 @@ from .random_functions import (
 )
 from .inlining import (
     RedundantCopy,
+    IfSplitBranchAssignment,
     InlineSingleUseVariable,
     DeduplicateDeterministicCalls,
     CrossMethodFieldAlias,
@@ -62,6 +63,7 @@ from .control_flow import (
     IfConditionAliasSubstitution,
     RedundantConditionalReturn,
     BranchElimination,
+    ElseUnwrap,
     SimplifyReturn,
     SimplifyIf,
     RemoveUnreachable,
@@ -98,6 +100,7 @@ CORE_PIPELINE: list[TransformPass] = [
     DistinctConstRFToUniform(),
     FreshInputRFToUniform(),
     RedundantCopy(),
+    IfSplitBranchAssignment(),
     InlineSingleUseVariable(),
     DeduplicateDeterministicCalls(),
     ForwardExpressionAlias(),
@@ -111,6 +114,7 @@ CORE_PIPELINE: list[TransformPass] = [
     IfConditionAliasSubstitution(),
     RedundantConditionalReturn(),
     BranchElimination(),
+    ElseUnwrap(),
     InlineSingleUseField(),
     LocalizeInitOnlyFieldSample(),
     RemoveUnnecessaryFields(),

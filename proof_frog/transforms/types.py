@@ -129,25 +129,27 @@ class DeadNullGuardEliminator(BlockTransformer):
             return False
         if condition.operator != frog_ast.BinaryOperators.EQUALS:
             return False
-        var_name: Optional[str] = None
-        if isinstance(condition.left_expression, frog_ast.Variable) and isinstance(
-            condition.right_expression, frog_ast.NoneExpression
-        ):
-            var_name = condition.left_expression.name
-        elif isinstance(condition.right_expression, frog_ast.Variable) and isinstance(
-            condition.left_expression, frog_ast.NoneExpression
-        ):
-            var_name = condition.right_expression.name
-        if var_name is None:
+
+        # Identify which side is None and which is the tested expression.
+        if isinstance(condition.right_expression, frog_ast.NoneExpression):
+            tested_expr = condition.left_expression
+        elif isinstance(condition.left_expression, frog_ast.NoneExpression):
+            tested_expr = condition.right_expression
+        else:
             return False
 
-        # Case 1: variable has non-nullable declared type.
-        var_type = self.type_map.get(var_name)
-        if var_type is not None and not isinstance(var_type, frog_ast.OptionalType):
-            return True
+        # Case 1: tested expression is a variable with non-nullable type.
+        if isinstance(tested_expr, frog_ast.Variable):
+            var_type = self.type_map.get(tested_expr.name)
+            if var_type is not None and not isinstance(var_type, frog_ast.OptionalType):
+                return True
+            # Case 2: nullable var was assigned from a provably non-nullable expr.
+            if non_null_locals and tested_expr.name in non_null_locals:
+                return True
 
-        # Case 2: nullable var was assigned from a provably non-nullable expr.
-        if non_null_locals and var_name in non_null_locals:
+        # Case 3: tested expression is itself provably non-nullable
+        # (e.g. a method call on a known primitive/scheme).
+        if self._is_nonnullable_expr(tested_expr):
             return True
 
         return False

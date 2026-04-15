@@ -432,6 +432,89 @@ class InstantiationTransformer(Transformer):
         return field_access
 
 
+def block_unconditionally_returns(block: frog_ast.Block) -> bool:
+    """True if every execution path through *block* ends with a return."""
+    if not block.statements:
+        return False
+    last = block.statements[-1]
+    if isinstance(last, frog_ast.ReturnStatement):
+        return True
+    if isinstance(last, frog_ast.IfStatement) and last.has_else_block():
+        return all(block_unconditionally_returns(b) for b in last.blocks)
+    return False
+
+
+def _normalize_early_returns(
+    stmts: list[frog_ast.Statement],
+) -> list[frog_ast.Statement]:
+    """Fold statements after an if-with-return into else branches.
+
+    Converts::
+
+        [if (C) { return X; }, S1, ..., return Y]
+
+    into::
+
+        [if (C) { return X; } else { S1; ...; return Y; }]
+
+    Only fires when every execution path through the if-block
+    unconditionally returns (not merely when *some* path returns).
+    Applied recursively for chains of early returns.
+    """
+    for i, stmt in enumerate(stmts):
+        if (
+            isinstance(stmt, frog_ast.IfStatement)
+            and not stmt.has_else_block()
+            and all(block_unconditionally_returns(block) for block in stmt.blocks)
+            and i < len(stmts) - 1
+        ):
+            remaining = stmts[i + 1 :]
+            folded = _normalize_early_returns(remaining)
+            new_blocks = list(stmt.blocks) + [frog_ast.Block(folded)]
+            new_if = frog_ast.IfStatement(list(stmt.conditions), new_blocks)
+            return stmts[:i] + [new_if]
+    return stmts
+
+
+def _replace_returns_in_if(
+    if_stmt: frog_ast.IfStatement,
+    call_exp: frog_ast.FuncCall,
+    call_site_stmt: frog_ast.Statement,
+) -> frog_ast.IfStatement:
+    """Replace each leaf return in an IfStatement with the call-site
+    statement, substituting the call expression with the return value."""
+    new_blocks: list[frog_ast.Block] = []
+    for block in if_stmt.blocks:
+        if not block.statements:
+            new_blocks.append(block)
+            continue
+        last = block.statements[-1]
+        if isinstance(last, frog_ast.ReturnStatement):
+            # deepcopy creates a fresh statement; find the FuncCall in the
+            # copy by equality so ReplaceTransformer can match by identity.
+            copied_stmt = copy.deepcopy(call_site_stmt)
+
+            def _matches_call(
+                n: frog_ast.ASTNode, target: frog_ast.FuncCall = call_exp
+            ) -> bool:
+                return isinstance(n, frog_ast.FuncCall) and n == target
+
+            call_in_copy = SearchVisitor(_matches_call).visit(copied_stmt)
+            if call_in_copy is not None:
+                changed = ReplaceTransformer(call_in_copy, last.expression).transform(
+                    copied_stmt
+                )
+            else:
+                changed = copied_stmt
+            new_blocks.append(frog_ast.Block(list(block.statements[:-1]) + [changed]))
+        elif isinstance(last, frog_ast.IfStatement):
+            inner = _replace_returns_in_if(last, call_exp, call_site_stmt)
+            new_blocks.append(frog_ast.Block(list(block.statements[:-1]) + [inner]))
+        else:
+            new_blocks.append(block)
+    return frog_ast.IfStatement(list(if_stmt.conditions), new_blocks)
+
+
 class InlineTransformer(Transformer):
     def __init__(self, method_lookup: Dict[Tuple[str, str], frog_ast.Method]) -> None:
         self.blocks: list[frog_ast.Block] = []
@@ -502,8 +585,6 @@ class InlineTransformer(Transformer):
 
         statements_so_far = list(block_to_transform.statements[: self.statement_index])
 
-        statements_so_far += list(transformed_method.block.statements[:-1])
-
         statements_after = list(
             block_to_transform.statements[self.statement_index + 1 :]
         )
@@ -515,19 +596,37 @@ class InlineTransformer(Transformer):
             self.finished = True
             return exp
 
-        final_statement = transformed_method.block.statements[-1]
+        call_site_stmt = block_to_transform.statements[self.statement_index]
+
+        # Normalize early returns: fold remaining statements into else
+        # branches so that normalized[:-1] contains no returns.
+        normalized = _normalize_early_returns(list(transformed_method.block.statements))
+
+        statements_so_far += list(normalized[:-1])
+
+        final_statement = normalized[-1]
 
         if isinstance(final_statement, frog_ast.ReturnStatement):
             returned_exp = final_statement.expression
 
             changed_statement = ReplaceTransformer(exp, returned_exp).transform(
-                block_to_transform.statements[self.statement_index]
+                call_site_stmt
             )
 
             self.blocks.append(
                 frog_ast.Block(
                     statements_so_far + [changed_statement] + statements_after
                 )
+            )
+        elif isinstance(final_statement, frog_ast.IfStatement):
+            # All returns are at leaves of this if-else tree.
+            new_if = _replace_returns_in_if(
+                final_statement,
+                exp,
+                call_site_stmt,
+            )
+            self.blocks.append(
+                frog_ast.Block(statements_so_far + [new_if] + statements_after)
             )
         else:
             self.blocks.append(

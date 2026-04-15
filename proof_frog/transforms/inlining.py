@@ -18,6 +18,7 @@ from ..visitors import (
     BlockTransformer,
     NameTypeMap,
     SearchVisitor,
+    SubstitutionTransformer,
     Visitor,
     ReplaceTransformer,
     VariableCollectionVisitor,
@@ -311,6 +312,129 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
                 list(block.statements[:index]) + list(remaining_block.statements)
             )
             return self.transform_block(new_block)
+
+        return block
+
+
+class IfSplitBranchAssignmentTransformer(BlockTransformer):
+    """Moves subsequent statements into if-else branches when all branches
+    assign the same variable.
+
+    When an if-else has every branch ending with an assignment to the same
+    variable ``x``, and subsequent statements use ``x`` without reassigning
+    it, those subsequent statements are moved into each branch with ``x``
+    replaced by the branch's assigned value.
+
+    Example::
+
+        if (C) { x = A; } else { x = B; }
+        return f(x);
+      becomes:
+        if (C) { return f(A); } else { return f(B); }
+    """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if not isinstance(statement, frog_ast.IfStatement):
+                continue
+            if not statement.has_else_block():
+                continue
+
+            # Check all branches end with an assignment to the same variable.
+            var_name: str | None = None
+            branch_values: list[frog_ast.Expression] = []
+            all_match = True
+            for blk in statement.blocks:
+                if not blk.statements:
+                    all_match = False
+                    break
+                last = blk.statements[-1]
+                if not (
+                    isinstance(last, frog_ast.Assignment)
+                    and isinstance(last.var, frog_ast.Variable)
+                ):
+                    all_match = False
+                    break
+                if var_name is None:
+                    var_name = last.var.name
+                elif last.var.name != var_name:
+                    all_match = False
+                    break
+                branch_values.append(last.value)
+
+            if not all_match or var_name is None:
+                continue
+
+            # Must have subsequent statements
+            subsequent = block.statements[index + 1 :]
+            if not subsequent:
+                continue
+
+            # Variable must not be reassigned in subsequent statements
+            def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(
+                        node,
+                        (
+                            frog_ast.Assignment,
+                            frog_ast.Sample,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
+                    and isinstance(node.var, frog_ast.Variable)
+                    and node.var.name == name
+                )
+
+            if (
+                SearchVisitor(functools.partial(is_written_to, var_name)).visit(
+                    frog_ast.Block(list(subsequent))
+                )
+                is not None
+            ):
+                continue
+
+            # If any branch value contains a non-deterministic call,
+            # the variable must be used at most once in subsequent code.
+            # Otherwise substitution would duplicate the call, changing
+            # single-evaluation to multi-evaluation semantics.
+            proof_ns: frog_ast.Namespace = self.ctx.proof_namespace if self.ctx else {}
+            proof_let_types = self.ctx.proof_let_types if self.ctx else None
+            has_nondet = any(
+                has_nondeterministic_call(v, proof_ns, proof_let_types)
+                for v in branch_values
+            )
+            if has_nondet:
+                counter = _VarCountVisitor(var_name)
+                counter.visit(frog_ast.Block(list(subsequent)))
+                if counter.result() > 1:
+                    continue
+
+            # Build new blocks: for each branch, replace trailing assignment
+            # with subsequent statements where var is substituted by value
+            new_blocks: list[frog_ast.Block] = []
+            for blk_idx, blk in enumerate(statement.blocks):
+                prefix = list(blk.statements[:-1])
+                value = branch_values[blk_idx]
+                ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+                ast_map.set(frog_ast.Variable(var_name), copy.deepcopy(value))
+                substituted = SubstitutionTransformer(ast_map).transform(
+                    copy.deepcopy(frog_ast.Block(list(subsequent)))
+                )
+                new_blocks.append(frog_ast.Block(prefix + list(substituted.statements)))
+
+            new_if = frog_ast.IfStatement(list(statement.conditions), new_blocks)
+            # Also remove the declaration of var_name before the if, if any
+            prior = list(block.statements[:index])
+            cleaned_prior: list[frog_ast.Statement] = []
+            for s in prior:
+                if isinstance(s, frog_ast.VariableDeclaration) and s.name == var_name:
+                    continue
+                cleaned_prior.append(s)
+
+            return self.transform_block(frog_ast.Block(cleaned_prior + [new_if]))
 
         return block
 
@@ -876,6 +1000,13 @@ class RedundantCopy(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return RedundantCopyTransformer().transform(game)
+
+
+class IfSplitBranchAssignment(TransformPass):
+    name = "If-Split Branch Assignment"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return IfSplitBranchAssignmentTransformer(ctx).transform(game)
 
 
 class InlineSingleUseVariable(TransformPass):

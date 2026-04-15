@@ -25,6 +25,7 @@ from ..visitors import (
     GetTypeMapVisitor,
     NameTypeMap,
     assigns_variable,
+    block_unconditionally_returns,
 )
 from ._base import TransformPass, PipelineContext, NearMiss, has_nondeterministic_call
 
@@ -718,6 +719,51 @@ class RedundantConditionalReturnTransformer(BlockTransformer):
         return block
 
 
+class ElseUnwrapTransformer(BlockTransformer):
+    """Unwraps else blocks when the if-branch unconditionally returns.
+
+    Converts::
+
+        if (C) { ...; return X; } else { S1; S2; }
+
+    into::
+
+        if (C) { ...; return X; }
+        S1;
+        S2;
+
+    This recovers the ``if-return-then-rest`` pattern used in canonical forms.
+    """
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if not isinstance(statement, frog_ast.IfStatement):
+                continue
+            # Only single-condition if-else (no else-if chains)
+            if len(statement.conditions) != 1:
+                continue
+            if not statement.has_else_block():
+                continue
+            # True branch must unconditionally return
+            if not block_unconditionally_returns(statement.blocks[0]):
+                continue
+
+            # Remove the else block, splice its statements after the if
+            else_block = statement.blocks[1]
+            new_if = frog_ast.IfStatement(
+                list(statement.conditions), [statement.blocks[0]]
+            )
+            return self.transform_block(
+                frog_ast.Block(
+                    list(block.statements[:index])
+                    + [new_if]
+                    + list(else_block.statements)
+                    + list(block.statements[index + 1 :])
+                )
+            )
+        return block
+
+
 # ---------------------------------------------------------------------------
 # TransformPass wrappers
 # ---------------------------------------------------------------------------
@@ -745,6 +791,13 @@ class BranchElimination(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return BranchEliminiationTransformer(ctx).transform(game)
+
+
+class ElseUnwrap(TransformPass):
+    name = "Else Unwrap"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return ElseUnwrapTransformer().transform(game)
 
 
 class SimplifyReturn(TransformPass):

@@ -638,6 +638,18 @@ class InlineTransformer(Transformer):
         return exp
 
 
+_OPAQUE_Z3_SORT = z3.DeclareSort("Opaque")
+
+
+def _z3_var_for_type(name: str, var_type: frog_ast.Type) -> z3.ExprRef:
+    """Create a Z3 variable of the appropriate sort for a FrogLang type."""
+    if isinstance(var_type, (frog_ast.IntType, frog_ast.ModIntType)):
+        return z3.Int(name)
+    if isinstance(var_type, frog_ast.BoolType):
+        return z3.Bool(name)
+    return z3.Const(name, _OPAQUE_Z3_SORT)
+
+
 class Z3FormulaVisitor(Visitor[z3.AstRef]):
     # Don't just append Int(var.name), need mapping from name to new name in this formula
     def __init__(
@@ -645,7 +657,7 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         type_map: NameTypeMap,
         variable_version_map: Optional[dict[str, int]] = None,
     ) -> None:
-        self.stack: list[Optional[z3.AstRef]] = []
+        self.stack: list[Any] = []
         self.type_map = type_map
         self.variable_version_map = variable_version_map
         self.bool_num = 0
@@ -681,14 +693,42 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
             self.stack.append(z3.Int(name))
         elif isinstance(var_type, frog_ast.BoolType):
             self.stack.append(z3.Bool(name))
+        elif isinstance(var_type, frog_ast.ProductType):
+            components = tuple(
+                _z3_var_for_type(f"{name}@{i}", t) for i, t in enumerate(var_type.types)
+            )
+            self.stack.append(components)
         else:
-            self.stack.append(name)
+            self.stack.append(z3.Const(name, _OPAQUE_Z3_SORT))
 
     def visit_integer(self, node: frog_ast.Integer) -> None:
         self.stack.append(node.num)
 
     def visit_boolean(self, node: frog_ast.Boolean) -> None:
         self.stack.append(node.bool)
+
+    def leave_tuple(self, node: frog_ast.Tuple) -> None:
+        n = len(node.values)
+        items = []
+        for _ in range(n):
+            items.append(self.stack.pop() if self.stack else None)
+        items.reverse()
+        if any(item is None for item in items):
+            self.stack.append(None)
+        else:
+            self.stack.append(tuple(items))
+
+    def leave_array_access(self, _node: frog_ast.ArrayAccess) -> None:
+        index = self.stack.pop() if self.stack else None
+        array = self.stack.pop() if self.stack else None
+        if (
+            isinstance(array, tuple)
+            and isinstance(index, int)
+            and 0 <= index < len(array)
+        ):
+            self.stack.append(array[index])
+        else:
+            self.stack.append(None)
 
     def leave_unary_operation(self, operation: frog_ast.UnaryOperation) -> None:
         if not self.stack or operation.operator == frog_ast.UnaryOperators.SIZE:
@@ -741,14 +781,37 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
             self.stack.append(z3_bool)
             return
 
+        # Handle tuple equality/inequality
+        if isinstance(left_item, tuple) and isinstance(right_item, tuple):
+            if len(left_item) != len(right_item):
+                self.stack.append(None)
+                return
+            if operation.operator == frog_ast.BinaryOperators.EQUALS:
+                self.stack.append(
+                    z3.And(*(l == r for l, r in zip(left_item, right_item)))
+                )
+                return
+            if operation.operator == frog_ast.BinaryOperators.NOTEQUALS:
+                self.stack.append(
+                    z3.Or(*(l != r for l, r in zip(left_item, right_item)))
+                )
+                return
+            self.stack.append(None)
+            return
+
         if (
             right_item is not None
             and left_item is not None
             and not isinstance(left_item, str)
             and not isinstance(right_item, str)
+            and not isinstance(left_item, tuple)
+            and not isinstance(right_item, tuple)
             and operation.operator in operators
         ):
-            self.stack.append(operators[operation.operator](left_item, right_item))
+            try:
+                self.stack.append(operators[operation.operator](left_item, right_item))
+            except (z3.Z3Exception, TypeError):
+                self.stack.append(None)
         else:
             self.stack.append(None)
 

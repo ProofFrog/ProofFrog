@@ -450,6 +450,102 @@ from proof_frog.transforms.control_flow import RemoveUnreachableTransformer
             }
             """,
         ),
+        # Should NOT eliminate: no tuple guard present
+        (
+            """
+            Int f([Int, Int] c, Int a, Int b) {
+                Int x = c[0];
+                Int y = c[1];
+                if (y == b) {
+                    if (x == a) {
+                        return 2;
+                    }
+                    return 3;
+                }
+                return 4;
+            }
+            """,
+            """
+            Int f([Int, Int] c, Int a, Int b) {
+                Int x = c[0];
+                Int y = c[1];
+                if (y == b) {
+                    if (x == a) {
+                        return 2;
+                    }
+                    return 3;
+                }
+                return 4;
+            }
+            """,
+        ),
+        # Should NOT eliminate: guard checks different tuple
+        (
+            """
+            Int f([Int, Int] c, [Int, Int] d, Int a, Int b) {
+                if (d == [a, b]) {
+                    return 1;
+                }
+                Int x = c[0];
+                Int y = c[1];
+                if (y == b) {
+                    if (x == a) {
+                        return 2;
+                    }
+                    return 3;
+                }
+                return 4;
+            }
+            """,
+            """
+            Int f([Int, Int] c, [Int, Int] d, Int a, Int b) {
+                if (d == [a, b]) {
+                    return 1;
+                }
+                Int x = c[0];
+                Int y = c[1];
+                if (y == b) {
+                    if (x == a) {
+                        return 2;
+                    }
+                    return 3;
+                }
+                return 4;
+            }
+            """,
+        ),
+        # Tuple equality guard: nested branch on component is dead
+        (
+            """
+            Int f([Int, Int] c, Int a, Int b) {
+                if (c == [a, b]) {
+                    return 1;
+                }
+                Int x = c[0];
+                Int y = c[1];
+                if (y == b) {
+                    if (x == a) {
+                        return 2;
+                    }
+                    return 3;
+                }
+                return 4;
+            }
+            """,
+            """
+            Int f([Int, Int] c, Int a, Int b) {
+                if (c == [a, b]) {
+                    return 1;
+                }
+                Int x = c[0];
+                Int y = c[1];
+                if (y == b) {
+                    return 3;
+                }
+                return 4;
+            }
+            """,
+        ),
     ],
 )
 def test_unreachable_transformer(

@@ -1,9 +1,10 @@
 """Translate FrogLang statements to EasyCrypt statements.
 
-Walking-skeleton scope: VariableDeclaration, Sample, ReturnStatement,
-and Assignment whose RHS is a FuncCall on a parameter (E.method).
-All ``var`` decls for locally-declared variables are hoisted to the
-top of the enclosing proc (handled by translate_block).
+Supported: VariableDeclaration, Sample, ReturnStatement (including
+return-value lifting for module calls), and Assignment whose RHS is a
+FuncCall on a module parameter (e.g. ``E.method(...)``). All ``var``
+decls for locally-declared variables are hoisted to the top of the
+enclosing proc (handled by translate_block).
 """
 
 from __future__ import annotations
@@ -31,9 +32,11 @@ class StatementTranslator:
         self,
         types: tc.TypeCollector,
         exprs: expr_translator.ExpressionTranslator,
+        module_var_aliases: dict[str, str] | None = None,
     ) -> None:
         self._types = types
         self._exprs = exprs
+        self._module_var_aliases: dict[str, str] = dict(module_var_aliases or {})
 
     def translate_block(self, block: frog_ast.Block) -> TranslatedBlock:
         """Translate every statement; hoist all var decls to the front."""
@@ -59,6 +62,18 @@ class StatementTranslator:
             self._handle_assign(stmt, decls, stmts)
             return
         if isinstance(stmt, frog_ast.ReturnStatement):
+            if _is_module_call(stmt.expression):
+                call = stmt.expression
+                assert isinstance(call, frog_ast.FuncCall)
+                fresh = _fresh_name(decls, stmts)
+                ret_type = self._exprs.type_of(call)
+                ec_type = self._types.translate_type(ret_type)
+                decls.append(ec_ast.VarDecl(fresh, ec_type))
+                callee = self._render_module_call_target(call.func)
+                args = ", ".join(self._exprs.translate(a) for a in call.args)
+                stmts.append(ec_ast.Call(fresh, callee, args))
+                stmts.append(ec_ast.Return(fresh))
+                return
             stmts.append(ec_ast.Return(self._exprs.translate(stmt.expression)))
             return
         raise NotImplementedError(
@@ -103,12 +118,34 @@ class StatementTranslator:
         if _is_module_call(stmt.value):
             call = stmt.value
             assert isinstance(call, frog_ast.FuncCall)
-            callee = _render_module_call_target(call.func)
+            callee = self._render_module_call_target(call.func)
             args = ", ".join(self._exprs.translate(a) for a in call.args)
             stmts.append(ec_ast.Call(var.name, callee, args))
             return
         rhs = self._exprs.translate(stmt.value)
         stmts.append(ec_ast.Assign(var.name, rhs))
+
+    def _render_module_call_target(self, func: frog_ast.Expression) -> str:
+        """Render ``E.KeyGen`` as ``E.keygen``; apply module-var aliases."""
+        assert isinstance(func, frog_ast.FieldAccess)
+        obj = func.the_object
+        assert isinstance(obj, frog_ast.Variable)
+        obj_name = self._module_var_aliases.get(obj.name, obj.name)
+        return f"{obj_name}.{func.name.lower()}"
+
+
+def _fresh_name(decls: list[ec_ast.VarDecl], stmts: list[ec_ast.EcStmt]) -> str:
+    """Return a var name not used by any decl or stmt in the current block."""
+    used = {d.name for d in decls}
+    for s in stmts:
+        if isinstance(s, (ec_ast.Assign, ec_ast.Sample, ec_ast.Call)):
+            used.add(s.var)
+    i = 0
+    while True:
+        candidate = f"_r{i}"
+        if candidate not in used:
+            return candidate
+        i += 1
 
 
 def _require_variable(expr: frog_ast.Expression) -> frog_ast.Variable:
@@ -124,11 +161,3 @@ def _is_module_call(expr: frog_ast.Expression) -> bool:
     if not isinstance(expr, frog_ast.FuncCall):
         return False
     return isinstance(expr.func, frog_ast.FieldAccess)
-
-
-def _render_module_call_target(func: frog_ast.Expression) -> str:
-    """Render ``E.KeyGen`` as ``E.keygen`` (lowercasing method name)."""
-    assert isinstance(func, frog_ast.FieldAccess)
-    obj = func.the_object
-    assert isinstance(obj, frog_ast.Variable)
-    return f"{obj.name}.{func.name.lower()}"

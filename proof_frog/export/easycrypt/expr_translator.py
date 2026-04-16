@@ -28,6 +28,10 @@ class ExpressionTranslator:
         self._types = types
         self._type_of = type_of
 
+    def type_of(self, expr: frog_ast.Expression) -> frog_ast.Type:
+        """Return the FrogLang type of ``expr`` using the configured resolver."""
+        return self._type_of(expr)
+
     def translate(self, expr: frog_ast.Expression) -> str:
         """Render `expr` as an EC expression string."""
         if isinstance(expr, frog_ast.Variable):

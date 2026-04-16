@@ -246,6 +246,31 @@ def prove(  # pylint: disable=too-many-arguments,too-many-positional-arguments
 
 @cli.command()
 @click.argument("file")
+@click.option(
+    "--output",
+    "-o",
+    default=None,
+    help="Output path for the .ec file (default: alongside the input, .ec extension).",
+)
+def export(file: str, output: str | None) -> None:
+    """Export a .proof file to EasyCrypt (.ec) source (Phase 1: stubs)."""
+    # pylint: disable=import-outside-toplevel
+    from .export.easycrypt.exporter import export_proof_file
+
+    try:
+        source = export_proof_file(file)
+    except (frog_parser.ParseError, FileNotFoundError, ValueError) as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
+
+    if output is None:
+        output = str(Path(file).with_suffix(".ec"))
+    Path(output).write_text(source, encoding="utf-8")
+    click.echo(f"Wrote {output}")
+
+
+@cli.command()
+@click.argument("file")
 @click.option("--json", "-j", "json_output", is_flag=True, help="Output JSON.")
 def describe(file: str, json_output: bool) -> None:
     """Print a concise interface description of a FrogLang file."""

@@ -18,6 +18,7 @@ python3 -m venv .venv
 - **Package VSCode extension**: `make vscode-vsix`
 - **Regenerate parser**: `make parser` — regenerates ANTLR parsing code from grammar files into `proof_frog/parsing/`
 - **Stamp examples pin**: `make examples-pin` — writes `proof_frog/_examples_pin.py` with the git submodule commit SHA (used by `download-examples` command). Run automatically by `make build`.
+- **Stamp git SHA**: `make git-sha` — writes `proof_frog/_git_sha.py` with the short commit SHA of `HEAD` (used by the `version` command to annotate dev builds). Run automatically by `make build`. The `version` command prefers a live `git rev-parse` and falls back to this stamped file.
 
 ## Sandbox compatibility
 

@@ -1,8 +1,8 @@
 """Translate proof hop structure into EC lemmas.
 
-Skeleton scope: interchangeability hops only. Each hop emits one
-``equiv[...]`` lemma whose body is ``admit``. Reductions, assumptions,
-and inductions are not supported.
+Phase 2 scope: plain steps (``Game(E).Side``) and composed steps
+(``Game(E).Side compose R(args)``). Every hop becomes one
+``admit``-bodied equiv lemma. Induction is not supported.
 """
 
 from __future__ import annotations
@@ -14,67 +14,76 @@ from ... import frog_ast
 
 
 @dataclass
-class GameSideRef:
-    """Reference to a concrete game side (what the lemma compares)."""
+class ResolvedStep:
+    """The EC module expression and oracle name referenced by a step."""
 
-    ec_module_name: str
+    module_expr: str
     oracle_name: str
 
 
-class ProofTranslator:
-    """Emit one admit-bodied equiv lemma per adjacent proof-step pair."""
+class StepResolver:
+    """Resolve a FrogLang proof step to its EC module expression."""
 
-    def __init__(self, primitive_name: str) -> None:
+    def __init__(
+        self,
+        module_name_by_concrete_game: dict[tuple[str, str], str],
+        oracle_name_by_game_file: dict[str, str],
+        primitive_name: str,
+    ) -> None:
+        self._module_names = module_name_by_concrete_game
+        self._oracle_names = oracle_name_by_game_file
         self._primitive_name = primitive_name
 
-    def translate_hops(
-        self,
-        game_refs: dict[str, GameSideRef],
-        steps: list[frog_ast.ProofStep],
-    ) -> list[ec_ast.Lemma]:
-        """Produce one lemma per adjacent-step pair of interchangeability hops."""
-        lemmas: list[ec_ast.Lemma] = []
-        hop_index = 0
-        for i in range(len(steps) - 1):
-            step_a, step_b = steps[i], steps[i + 1]
-            if not isinstance(step_a, frog_ast.Step) or not isinstance(
-                step_b, frog_ast.Step
-            ):
-                raise NotImplementedError(
-                    "Skeleton handles only simple interchangeability hops"
-                )
-            ref_a = _step_key(step_a)
-            ref_b = _step_key(step_b)
-            if ref_a not in game_refs or ref_b not in game_refs:
-                raise ValueError(
-                    f"Step references unknown game side: {ref_a} or {ref_b}"
-                )
-            left = game_refs[ref_a]
-            right = game_refs[ref_b]
-            lemmas.append(
-                ec_ast.Lemma(
-                    name=f"hop_{hop_index}",
-                    module_args=[
-                        ec_ast.ModuleParam("E", self._primitive_name),
-                    ],
-                    left=f"{left.ec_module_name}(E).{left.oracle_name}",
-                    right=f"{right.ec_module_name}(E).{right.oracle_name}",
-                    precondition="true",
-                    postcondition="={res}",
-                )
+    @property
+    def primitive_name(self) -> str:
+        return self._primitive_name
+
+    def resolve(self, step: frog_ast.Step) -> ResolvedStep:
+        concrete = step.challenger
+        if not isinstance(concrete, frog_ast.ConcreteGame):
+            raise NotImplementedError(
+                f"Only ConcreteGame steps are supported; got {type(concrete).__name__}"
             )
-            hop_index += 1
-        return lemmas
+        game_file_name = concrete.game.name
+        side = concrete.which
+        key = (game_file_name, side)
+        if key not in self._module_names:
+            raise ValueError(
+                f"Step references unknown game side: {game_file_name}.{side}"
+            )
+        game_module_expr = f"{self._module_names[key]}(E)"
+        oracle = self._oracle_names[game_file_name]
+
+        if step.reduction is None:
+            return ResolvedStep(module_expr=game_module_expr, oracle_name=oracle)
+
+        red = step.reduction
+        module_expr = f"{red.name}(E, {game_module_expr})"
+        return ResolvedStep(module_expr=module_expr, oracle_name=oracle)
 
 
-def _step_key(step: frog_ast.Step) -> str:
-    """Produce a stable key identifying which game side this step refers to.
-
-    For ``OneTimeSecrecy(E).Real``, returns ``'Real'``.
-    """
-    challenger = step.challenger
-    if isinstance(challenger, frog_ast.ConcreteGame):
-        return challenger.which
-    raise NotImplementedError(
-        "Phase 1 skeleton only handles ConcreteGame steps (Game.Side)"
-    )
+def translate_hops(
+    resolver: StepResolver,
+    steps: list[frog_ast.ProofStep],
+) -> list[ec_ast.Lemma]:
+    """Produce one admit-bodied equiv lemma per adjacent-step pair."""
+    lemmas: list[ec_ast.Lemma] = []
+    for i in range(len(steps) - 1):
+        a, b = steps[i], steps[i + 1]
+        if not isinstance(a, frog_ast.Step) or not isinstance(b, frog_ast.Step):
+            raise NotImplementedError(
+                "Only simple Step entries are supported (no Induction)."
+            )
+        ra = resolver.resolve(a)
+        rb = resolver.resolve(b)
+        lemmas.append(
+            ec_ast.Lemma(
+                name=f"hop_{i}",
+                module_args=[ec_ast.ModuleParam("E", resolver.primitive_name)],
+                left=f"{ra.module_expr}.{ra.oracle_name}",
+                right=f"{rb.module_expr}.{rb.oracle_name}",
+                precondition="true",
+                postcondition="={res}",
+            )
+        )
+    return lemmas

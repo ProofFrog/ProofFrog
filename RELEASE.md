@@ -1,49 +1,31 @@
-# Release Notes — v0.4.0
+# Release Notes — v0.4.1
 
-This is a major release with significant language additions, many engine soundness fixes and new transforms, a redesigned web interface, and new tooling features.
+This release focuses on proof engine improvements, adding new canonicalization transforms and fixing correctness bugs in the inliner and type resolver. The main driver is a complete IND-CCA proof of the CK hybrid KEM combiner from the StarHunters paper, which required extending the engine to handle tuple reasoning, cross-scope dead branch elimination, and deterministic call hoisting.
 
-## Language
+## New canonicalization transforms
 
-- Added built-in `Function<D, R>` type replacing `RandomFunctions`, with random oracle model (ROM) support (#177).
-- Added built-in `Group` type and group algebra engine transforms (#176).
-- Added `deterministic` and `injective` method annotations for primitives and schemes, with typechecker enforcement of consistency (#179).
-- Added support for type equality constraints between abstract and concrete types (#165).
-- Added multi-line block comment syntax (`/* ... */`).
-- Removed `Phase` support from the grammar and engine.
+- **`HoistDeterministicCallToInitialize`** (#206): Hoists a repeated deterministic call out of oracle methods into `Initialize`, caching the result in a new field. Enables proofs where the reduction caches a challenger response while the scheme re-expands it at each oracle site.
+- **`ExtractRepeatedTupleAccess`** (#204): Extracts repeated `variable[constant]` tuple accesses into named locals, normalizing explicit tuple destructuring against inline access.
+- **`IfSplitBranchAssignment`** (#204): Moves subsequent code into if/else branches when all branches assign the same variable.
+- **`ElseUnwrap`** (#204): Unwraps else blocks when the if-branch unconditionally returns.
 
-## Proof Engine
+## Engine improvements
 
-- Parallelized proof hop verification for faster proof checking.
-- Added lemma support for modular proof composition via `lemma:` sections (#166).
-- Added diagnostic engine for proof failure explanations, including diff classification, near-miss matching, and engine limitation detection (#162).
-- Added multi-level verbosity to the `prove` command and web UI (#163).
-- Fixed over 30 soundness bugs across numerous transforms, including `CrossMethodFieldAlias`, `HoistFieldPureAlias`, `RedundantFieldCopy`, `InlineSingleUseField`, `CounterGuardedFieldToLocal`, `SimplifyReturn`, `ApplyAssumptions`, and others.
+- **Z3 tuple support** (#204): Z3 can now reason about tuple equality, opaque types, and array access.
+- **Nested dead branch elimination** (#204): `RemoveUnreachableTransformer` now propagates path constraints into nested blocks, eliminating branches that require cross-scope reasoning.
+- Extended `IfConditionAliasSubstitution` to accept `parameter[constant]` patterns (#204).
+- Extended `ChallengeExclusionRFToUniform` to resolve local aliases through intermediate cast variables (#204).
+- Extended `DeadNullGuardElimination` to handle provably non-nullable expressions (not just variables) (#204).
 
-### New and Extended Transforms
+## Bug fixes
 
-- `DeduplicateDeterministicCalls` and `CrossMethodFieldAlias` for deterministic method optimization (#164).
-- `NormalizeCommutativeChains` for canonical ordering of `+` and `*` operators.
-- `BooleanIdentity` for AND/OR constant folding (#173).
-- `DistinctConstRFToUniform` with length-carrying `BinaryNum` refactor (#187).
-- `UniformBijectionElimination` replacing the unsound `TrivialEncodingElimination`.
-- `ChallengeExclusionRFToUniform` extended for slice-based guards.
-- `FreshInputRFToUniform` extended for tuple and concatenation arguments.
-- Replaced bubble sort with canonical topological sort in `StabilizeIndependentStatements`.
-- Replaced `str()`-based sort keys with structural AST sort keys (#190).
+- **Fix inliner early-return handling** (#204): The inliner leaked bare `ReturnStatement` nodes from callees with early returns into the caller's block. Now correctly normalizes early returns via else-branch folding.
+- **Fix `_resolve_type_alias` for tuple-of-types** (#203): Tuple arguments substituted for game parameters caused false type mismatches on `FieldAccess` nodes; fixed by adding a `Tuple` case that normalizes to `ProductType`.
 
-## CLI
+## Tooling
 
-- Added `version` command.
-- Added `download-examples` command for fetching example files (#193).
-- Added `--skip-lemmas` flag for bypassing lemma verification.
-- Improved error messages for parse and check commands, including typo suggestions for field access errors (#161).
+- **Dev builds annotated with git SHA** (#205): `proof_frog version` now appends the short commit SHA to dev builds (e.g. `0.4.1.dev0+d3de90e`).
 
-## Web Interface
+## New examples
 
-- Redesigned toolbar with Insert dropdown and engine introspection actions (Describe, Inlined Game).
-- Added wizard system with server-side scaffolding for intermediate games, reductions, and reduction hops.
-- Added help menu with links to manual pages.
-
-## MCP Server
-
-- Updated language reference to cover full FrogLang syntax.
+- **CK hybrid KEM combiner** (#204): Complete IND-CCA proof for the CK hybrid KEM combiner from the StarHunters paper, verifying all 17 game hops.

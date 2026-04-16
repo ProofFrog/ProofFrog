@@ -20,13 +20,66 @@ def cli() -> None:
     init(autoreset=True)
 
 
+def _resolve_git_sha() -> str | None:
+    """Return a short git SHA for dev builds, or None if unavailable.
+
+    Appends ``-dirty`` when tracked files have uncommitted changes. Prefers a
+    live ``git rev-parse`` (accurate for editable installs) and falls back to
+    the SHA stamped into ``_git_sha.py`` at build time (for wheels)."""
+    # pylint: disable=import-outside-toplevel
+    import subprocess
+
+    try:
+        pkg_dir = Path(__file__).resolve().parent
+        sha_result = subprocess.run(
+            ["git", "-C", str(pkg_dir), "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+        sha = sha_result.stdout.strip()
+        if sha_result.returncode == 0 and sha:
+            status_result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(pkg_dir),
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=no",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=2,
+            )
+            if status_result.returncode == 0 and status_result.stdout.strip():
+                sha += "-dirty"
+            return sha
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        from ._git_sha import GIT_SHA
+
+        return GIT_SHA
+    except ImportError:
+        return None
+
+
 @cli.command()
 def version() -> None:
     """Print the ProofFrog version."""
     # pylint: disable=import-outside-toplevel
     from importlib.metadata import version as pkg_version
 
-    click.echo(f"ProofFrog {pkg_version('proof_frog')}")
+    v = pkg_version("proof_frog")
+    suffix = ""
+    if "dev" in v:
+        sha = _resolve_git_sha()
+        if sha:
+            suffix = f" ({sha})"
+    click.echo(f"ProofFrog {v}{suffix}")
 
 
 @cli.command()

@@ -1837,10 +1837,22 @@ class InlineSingleUseField(TransformPass):
 
 
 class _DeterministicCallCollector(Visitor[list[frog_ast.FuncCall]]):
-    """Collect all FuncCall nodes that call deterministic primitive methods."""
+    """Collect all FuncCall nodes that call deterministic primitive methods.
 
-    def __init__(self, proof_namespace: frog_ast.Namespace) -> None:
+    When *function_var_names* is non-empty, also collect FuncCall nodes whose
+    callee is a ``Variable(name)`` with ``name in function_var_names`` — these
+    represent calls to ``Function<D, R>`` variables, which FrogLang treats as
+    deterministic (SEMANTICS.md: calling a sampled Function<D,R> twice with
+    the same input returns the same output).
+    """
+
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace,
+        function_var_names: set[str] | None = None,
+    ) -> None:
         self._proof_namespace = proof_namespace
+        self._function_var_names = function_var_names or set()
         self._calls: list[frog_ast.FuncCall] = []
 
     def result(self) -> list[frog_ast.FuncCall]:
@@ -1849,6 +1861,12 @@ class _DeterministicCallCollector(Visitor[list[frog_ast.FuncCall]]):
     def visit_func_call(self, node: frog_ast.FuncCall) -> None:
         m = _lookup_primitive_method(node.func, self._proof_namespace)
         if m is not None and m.deterministic:
+            self._calls.append(node)
+            return
+        if (
+            isinstance(node.func, frog_ast.Variable)
+            and node.func.name in self._function_var_names
+        ):
             self._calls.append(node)
 
 
@@ -2315,6 +2333,217 @@ class CrossMethodFieldAliasTransformer:
                     ).transform(new_game.methods[midx])
                     return new_game
         return None
+
+
+class HoistDeterministicCallToInitializeTransformer:
+    """Hoist a deterministic call into Initialize and cache it in a new field.
+
+    When a deterministic call ``f(stable_args)`` appears in a non-Initialize
+    method and none of its fields are reassigned outside Initialize, introduce
+    a new field ``<fresh> = f(stable_args);`` at the end of Initialize and
+    replace every structurally-equal occurrence of the call with ``<fresh>``.
+
+    This is the create-field counterpart of ``CrossMethodFieldAlias``, which
+    only reuses fields that already exist.
+    """
+
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace,
+        ctx: PipelineContext | None = None,
+        proof_let_types: NameTypeMap | None = None,
+    ) -> None:
+        self.proof_namespace = proof_namespace
+        self._ctx = ctx
+        self._proof_let_types = proof_let_types
+
+    def _function_var_types(self, game: frog_ast.Game) -> dict[str, frog_ast.Type]:
+        """Return name->range_type for every Function<D,R> variable in scope.
+
+        Includes game fields, game parameters, and proof-level let-bindings.
+        """
+        out: dict[str, frog_ast.Type] = {}
+        for f in game.fields:
+            if isinstance(f.type, frog_ast.FunctionType):
+                out[f.name] = f.type.range_type
+        for p in game.parameters:
+            if isinstance(p.type, frog_ast.FunctionType):
+                out[p.name] = p.type.range_type
+        if self._proof_let_types is not None:
+            for pair in self._proof_let_types.type_map:
+                if isinstance(pair.type, frog_ast.FunctionType):
+                    out[pair.name] = pair.type.range_type
+        return out
+
+    def transform(self, game: frog_ast.Game) -> frog_ast.Game:
+        field_names = {f.name for f in game.fields}
+        param_names = {p.name for p in game.parameters}
+        function_var_return_types = self._function_var_types(game)
+        function_var_names = set(function_var_return_types)
+
+        init_idx: int | None = None
+        for midx, method in enumerate(game.methods):
+            if method.signature.name == "Initialize":
+                init_idx = midx
+                break
+        if init_idx is None:
+            return game
+
+        # Soundness guard: if Initialize contains any ReturnStatement, an
+        # appended hoisted assignment could be skipped on the early-return
+        # path, leaving the new field uninitialized while oracles still read
+        # it. Well-typed FrogLang rejects `return expr;` in Void methods, so
+        # this should never occur in practice, but guarding is strictly
+        # conservative.
+        if (
+            SearchVisitor(lambda n: isinstance(n, frog_ast.ReturnStatement)).visit(
+                game.methods[init_idx].block
+            )
+            is not None
+        ):
+            return game
+
+        existing_aliased_calls: list[frog_ast.FuncCall] = []
+        for stmt in game.methods[init_idx].block.statements:
+            if (
+                isinstance(stmt, frog_ast.Assignment)
+                and stmt.the_type is None
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name in field_names
+                and isinstance(stmt.value, frog_ast.FuncCall)
+            ):
+                existing_aliased_calls.append(stmt.value)
+
+        candidate: frog_ast.FuncCall | None = None
+        candidate_return_type: frog_ast.Type | None = None
+        for midx, method in enumerate(game.methods):
+            if midx == init_idx:
+                continue
+            collector = _DeterministicCallCollector(
+                self.proof_namespace, function_var_names=function_var_names
+            )
+            collector.visit(method.block)
+            for call in collector.result():
+                # Resolve return type: primitive method or Function<D,R> variable
+                return_type: frog_ast.Type | None = None
+                m = _lookup_primitive_method(call.func, self.proof_namespace)
+                if m is not None:
+                    return_type = m.return_type
+                elif (
+                    isinstance(call.func, frog_ast.Variable)
+                    and call.func.name in function_var_return_types
+                ):
+                    return_type = function_var_return_types[call.func.name]
+                if return_type is None:
+                    continue
+                if not call.args:
+                    continue
+                if not all(
+                    _is_stable_arg(a, field_names, param_names) for a in call.args
+                ):
+                    continue
+                if any(call == ea for ea in existing_aliased_calls):
+                    continue
+                arg_fields: set[str] = set()
+                for a in call.args:
+                    arg_fields |= _collect_field_names_in_args(a, field_names)
+                # For Function<D,R> calls, the callee variable itself is state
+                # we depend on — if it's a game field it must not be mutated
+                # outside Initialize, same requirement as the arguments.
+                if (
+                    isinstance(call.func, frog_ast.Variable)
+                    and call.func.name in field_names
+                ):
+                    arg_fields.add(call.func.name)
+                mutated = self._fields_mutated_outside_init(game, init_idx, arg_fields)
+                if mutated:
+                    if self._ctx is not None:
+                        self._ctx.near_misses.append(
+                            NearMiss(
+                                transform_name=(
+                                    "Hoist Deterministic Call to Initialize"
+                                ),
+                                reason=(
+                                    f"Cannot hoist call: field "
+                                    f"{sorted(mutated)[0]!r} is reassigned "
+                                    "outside Initialize"
+                                ),
+                                location=call.origin,
+                                suggestion=(
+                                    "Stop reassigning the field, or move the "
+                                    "call into the same method that reassigns it"
+                                ),
+                                variable=sorted(mutated)[0],
+                                method=method.signature.name,
+                            )
+                        )
+                    continue
+                candidate = call
+                candidate_return_type = return_type
+                break
+            if candidate is not None:
+                break
+
+        if candidate is None or candidate_return_type is None:
+            return game
+
+        new_name = self._fresh_field_name(field_names)
+        new_game = copy.deepcopy(game)
+        new_game.fields.append(frog_ast.Field(candidate_return_type, new_name, None))
+        init_method = new_game.methods[init_idx]
+        hoisted_stmt = frog_ast.Assignment(
+            None, frog_ast.Variable(new_name), copy.deepcopy(candidate)
+        )
+        init_method.block = frog_ast.Block(
+            list(init_method.block.statements) + [hoisted_stmt]
+        )
+        for midx, _ in enumerate(new_game.methods):
+            if midx == init_idx:
+                continue
+            while True:
+                collector = _DeterministicCallCollector(
+                    self.proof_namespace, function_var_names=function_var_names
+                )
+                collector.visit(new_game.methods[midx].block)
+                target = next((c for c in collector.result() if c == candidate), None)
+                if target is None:
+                    break
+                new_game.methods[midx] = ReplaceTransformer(
+                    target, frog_ast.Variable(new_name)
+                ).transform(new_game.methods[midx])
+
+        return new_game
+
+    @staticmethod
+    def _fields_mutated_outside_init(
+        game: frog_ast.Game, init_idx: int, fields: set[str]
+    ) -> set[str]:
+        mutated: set[str] = set()
+        if not fields:
+            return mutated
+        for midx, method in enumerate(game.methods):
+            if midx == init_idx:
+                continue
+            mutated |= _fields_assigned_in_block(method.block, fields)
+        return mutated
+
+    @staticmethod
+    def _fresh_field_name(existing: set[str]) -> str:
+        i = 0
+        while f"_hoisted_{i}" in existing:
+            i += 1
+        return f"_hoisted_{i}"
+
+
+class HoistDeterministicCallToInitialize(TransformPass):
+    name = "Hoist Deterministic Call to Initialize"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ctx.proof_namespace,
+            ctx=ctx,
+            proof_let_types=ctx.proof_let_types,
+        ).transform(game)
 
 
 class CrossMethodFieldAlias(TransformPass):

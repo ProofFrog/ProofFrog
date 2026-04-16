@@ -14,6 +14,7 @@ from proof_frog.transforms.inlining import (
     InlineSingleUseVariable,
     InlineSingleUseField,
     DeduplicateDeterministicCalls,
+    HoistDeterministicCallToInitialize,
 )
 from proof_frog.transforms.sampling import MergeUniformSamples, SplitUniformSamples
 from proof_frog.transforms.random_functions import (
@@ -583,3 +584,73 @@ def test_bijection_no_near_miss_when_no_wraps():
         if nm.transform_name == "Uniform Bijection Elimination"
     ]
     assert len(bijection_misses) == 0
+
+
+def _make_hoist_ctx() -> PipelineContext:
+    prim = frog_parser.parse_primitive_file("""
+        Primitive G(Int n) {
+            deterministic BitString<n> evaluate(BitString<n> x);
+        }
+        """)
+    return PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"G": prim, "GG": prim},
+        subsets_pairs=[],
+    )
+
+
+def test_hoist_near_miss_field_reassigned_in_oracle():
+    """Hoist reports a near-miss when an arg-field is reassigned outside Initialize."""
+    game = frog_parser.parse_game("""
+        Game Foo(G GG) {
+            BitString<n> seed;
+            Void Initialize() {
+                seed <- BitString<n>;
+            }
+            BitString<n> Get1() {
+                return GG.evaluate(seed);
+            }
+            Void Reset() {
+                seed <- BitString<n>;
+            }
+        }
+        """)
+    ctx = _make_hoist_ctx()
+    HoistDeterministicCallToInitialize().apply(game, ctx)
+
+    hoist_misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Hoist Deterministic Call to Initialize"
+    ]
+    assert len(hoist_misses) >= 1
+    nm = hoist_misses[0]
+    assert "seed" in nm.reason
+
+
+def test_hoist_no_near_miss_when_hoisting_succeeds():
+    """No near-miss is reported when the transform fires."""
+    game = frog_parser.parse_game("""
+        Game Foo(G GG) {
+            BitString<n> seed;
+            Void Initialize() {
+                seed <- BitString<n>;
+            }
+            BitString<n> Get1() {
+                return GG.evaluate(seed);
+            }
+            BitString<n> Get2() {
+                return GG.evaluate(seed);
+            }
+        }
+        """)
+    ctx = _make_hoist_ctx()
+    HoistDeterministicCallToInitialize().apply(game, ctx)
+
+    hoist_misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Hoist Deterministic Call to Initialize"
+    ]
+    assert len(hoist_misses) == 0

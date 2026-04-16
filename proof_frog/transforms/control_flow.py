@@ -25,6 +25,7 @@ from ..visitors import (
     GetTypeMapVisitor,
     NameTypeMap,
     assigns_variable,
+    block_unconditionally_returns,
 )
 from ._base import TransformPass, PipelineContext, NearMiss, has_nondeterministic_call
 
@@ -305,6 +306,8 @@ class RemoveUnreachableTransformer(BlockTransformer):
 
     def __init__(self, ast: frog_ast.ASTNode):
         self.ast = ast
+        self._block_path: dict[int, list[z3.AstRef]] = {}
+        self._block_versions: dict[int, dict[str, int]] = {}
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         def contains_unconditional_return(block: frog_ast.Block) -> bool:
@@ -314,7 +317,12 @@ class RemoveUnreachableTransformer(BlockTransformer):
             )
 
         used_variables = VariableCollectionVisitor().visit(block)
-        variable_version_map = dict((var.name, 0) for var in used_variables)
+        inherited_versions = self._block_versions.pop(id(block), None)
+        variable_version_map = (
+            dict(inherited_versions)
+            if inherited_versions is not None
+            else dict((var.name, 0) for var in used_variables)
+        )
 
         def update_version(node: frog_ast.ASTNode) -> None:
             updated = []
@@ -343,6 +351,9 @@ class RemoveUnreachableTransformer(BlockTransformer):
 
         formula_visitor = Z3FormulaVisitor(NameTypeMap())
 
+        # Inherit path constraints from enclosing block (if any)
+        path_constraints: list[z3.AstRef] = self._block_path.pop(id(block), [])
+
         # Track if-conditions with unconditional returns that have
         # already been seen.  A subsequent if with the same condition
         # is dead code (the earlier check already returned).
@@ -351,7 +362,35 @@ class RemoveUnreachableTransformer(BlockTransformer):
         for index, statement in enumerate(block.statements):
             if not isinstance(statement, frog_ast.IfStatement):
                 old_versions = dict(variable_version_map)
-                update_version(statement)
+                # Track assignments as path constraints for nested reasoning
+                if isinstance(statement, frog_ast.Assignment):
+                    type_map = GetTypeMapVisitor(statement).visit(self.ast)
+                    # The stopping point excludes the assignment itself,
+                    # so manually add the declared type for the LHS.
+                    if statement.the_type is not None and isinstance(
+                        statement.var, frog_ast.Variable
+                    ):
+                        type_map.set(statement.var.name, statement.the_type)
+                    formula_visitor.set_type_map(type_map)
+                    # Compute RHS with current (pre-assignment) version map
+                    formula_visitor.set_variable_version_map(variable_version_map)
+                    rhs_formula = formula_visitor.visit(statement.value)
+                    # Update version so LHS gets the new version
+                    update_version(statement)
+                    formula_visitor.set_variable_version_map(variable_version_map)
+                    lhs_formula = formula_visitor.visit(statement.var)
+                    if (
+                        lhs_formula is not None
+                        and rhs_formula is not None
+                        and not isinstance(lhs_formula, str)
+                        and not isinstance(rhs_formula, str)
+                    ):
+                        try:
+                            path_constraints.append(lhs_formula == rhs_formula)
+                        except (z3.Z3Exception, TypeError):
+                            pass
+                else:
+                    update_version(statement)
                 # If any variable was modified, invalidate syntactic
                 # condition tracking (the same expression may now
                 # evaluate differently).
@@ -381,7 +420,9 @@ class RemoveUnreachableTransformer(BlockTransformer):
                 continue
 
             # Z3-based check for more complex subsumption
-            if formula_so_far is not None and not statement.has_else_block():
+            if (
+                formula_so_far is not None or path_constraints
+            ) and not statement.has_else_block():
                 type_map = GetTypeMapVisitor(statement).visit(self.ast)
                 formula_visitor.set_type_map(type_map)
                 formula_visitor.set_variable_version_map(variable_version_map)
@@ -393,7 +434,11 @@ class RemoveUnreachableTransformer(BlockTransformer):
                         break
                     dead_solver = z3.Solver()
                     dead_solver.set("timeout", 30000)
-                    dead_solver.add(z3.And(z3.Not(formula_so_far), cond_formula))
+                    dead_constraints = list(path_constraints)
+                    if formula_so_far is not None:
+                        dead_constraints.append(z3.Not(formula_so_far))
+                    dead_constraints.append(cond_formula)
+                    dead_solver.add(z3.And(*dead_constraints))
                     if dead_solver.check() != z3.unsat:
                         all_conditions_dead = False
                         break
@@ -409,6 +454,9 @@ class RemoveUnreachableTransformer(BlockTransformer):
             type_map = GetTypeMapVisitor(statement).visit(self.ast)
             formula_visitor.set_type_map(type_map)
             formula_visitor.set_variable_version_map(variable_version_map)
+            # Save formula_so_far before this statement's return guards are added,
+            # so inner block tagging uses only constraints from prior statements.
+            formula_before_stmt = formula_so_far
             condition_formulae: list[z3.AstRef] = []
             for condition_index, condition in enumerate(statement.conditions):
                 individual_formula = formula_visitor.visit(condition)
@@ -437,6 +485,29 @@ class RemoveUnreachableTransformer(BlockTransformer):
             for condition_index, condition in enumerate(statement.conditions):
                 if contains_unconditional_return(statement.blocks[condition_index]):
                     seen_return_conditions.append(condition)
+
+            # Tag inner blocks with accumulated path constraints
+            for cond_idx, cond in enumerate(statement.conditions):
+                if cond_idx < len(statement.blocks):
+                    inner_path = list(path_constraints)
+                    if formula_before_stmt is not None:
+                        inner_path.append(z3.Not(formula_before_stmt))
+                    # Add preceding if-conditions as negated (we didn't take those branches)
+                    for prev_idx in range(cond_idx):
+                        prev_formula = formula_visitor.visit(
+                            statement.conditions[prev_idx]
+                        )
+                        if prev_formula is not None and not isinstance(
+                            prev_formula, str
+                        ):
+                            inner_path.append(z3.Not(prev_formula))
+                    cond_formula = formula_visitor.visit(cond)
+                    if cond_formula is not None and not isinstance(cond_formula, str):
+                        inner_path.append(cond_formula)
+                    self._block_path[id(statement.blocks[cond_idx])] = inner_path
+                    self._block_versions[id(statement.blocks[cond_idx])] = dict(
+                        variable_version_map
+                    )
 
             update_version(statement)
             if formula_so_far is not None:
@@ -659,7 +730,17 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
         return None, None
 
     def _is_local_or_param(self, expr: frog_ast.Expression) -> bool:
-        return isinstance(expr, frog_ast.Variable) and expr.name not in self.field_names
+        if isinstance(expr, frog_ast.Variable):
+            return expr.name not in self.field_names
+        # Also accept parameter[constant] (tuple-element access on a param)
+        if (
+            isinstance(expr, frog_ast.ArrayAccess)
+            and isinstance(expr.the_array, frog_ast.Variable)
+            and isinstance(expr.index, frog_ast.Integer)
+            and expr.the_array.name in self.param_names
+        ):
+            return True
+        return False
 
     def _is_field(self, expr: frog_ast.Expression) -> bool:
         return isinstance(expr, frog_ast.Variable) and expr.name in self.field_names
@@ -708,6 +789,51 @@ class RedundantConditionalReturnTransformer(BlockTransformer):
         return block
 
 
+class ElseUnwrapTransformer(BlockTransformer):
+    """Unwraps else blocks when the if-branch unconditionally returns.
+
+    Converts::
+
+        if (C) { ...; return X; } else { S1; S2; }
+
+    into::
+
+        if (C) { ...; return X; }
+        S1;
+        S2;
+
+    This recovers the ``if-return-then-rest`` pattern used in canonical forms.
+    """
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if not isinstance(statement, frog_ast.IfStatement):
+                continue
+            # Only single-condition if-else (no else-if chains)
+            if len(statement.conditions) != 1:
+                continue
+            if not statement.has_else_block():
+                continue
+            # True branch must unconditionally return
+            if not block_unconditionally_returns(statement.blocks[0]):
+                continue
+
+            # Remove the else block, splice its statements after the if
+            else_block = statement.blocks[1]
+            new_if = frog_ast.IfStatement(
+                list(statement.conditions), [statement.blocks[0]]
+            )
+            return self.transform_block(
+                frog_ast.Block(
+                    list(block.statements[:index])
+                    + [new_if]
+                    + list(else_block.statements)
+                    + list(block.statements[index + 1 :])
+                )
+            )
+        return block
+
+
 # ---------------------------------------------------------------------------
 # TransformPass wrappers
 # ---------------------------------------------------------------------------
@@ -735,6 +861,13 @@ class BranchElimination(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return BranchEliminiationTransformer(ctx).transform(game)
+
+
+class ElseUnwrap(TransformPass):
+    name = "Else Unwrap"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return ElseUnwrapTransformer().transform(game)
 
 
 class SimplifyReturn(TransformPass):

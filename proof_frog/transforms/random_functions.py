@@ -1206,6 +1206,57 @@ def _find_challenge_guard(
     return None
 
 
+def _build_local_assignments(
+    block: frog_ast.Block,
+) -> dict[str, frog_ast.Expression]:
+    """Build a map of ``{var_name: rhs}`` for simple local assignments."""
+    result: dict[str, frog_ast.Expression] = {}
+    for stmt in block.statements:
+        if isinstance(stmt, frog_ast.Assignment) and isinstance(
+            stmt.var, frog_ast.Variable
+        ):
+            result[stmt.var.name] = stmt.value
+    return result
+
+
+def _resolve_var_aliases(
+    expr: frog_ast.Expression,
+    aliases: dict[str, frog_ast.Expression],
+    stop_names: set[str],
+    _depth: int = 0,
+) -> frog_ast.Expression:
+    """Resolve variable references through local assignments.
+
+    Replaces Variable references with their assigned RHS, recursively
+    (up to a depth limit).  Variables whose names are in *stop_names*
+    and variables without an assignment are left as-is.
+    """
+    if _depth > 10:
+        return expr
+    if isinstance(expr, frog_ast.Variable):
+        if expr.name not in stop_names and expr.name in aliases:
+            return _resolve_var_aliases(
+                aliases[expr.name], aliases, stop_names, _depth + 1
+            )
+        return expr
+    if isinstance(expr, frog_ast.BinaryOperation):
+        new_left = _resolve_var_aliases(
+            expr.left_expression, aliases, stop_names, _depth + 1
+        )
+        new_right = _resolve_var_aliases(
+            expr.right_expression, aliases, stop_names, _depth + 1
+        )
+        if new_left is expr.left_expression and new_right is expr.right_expression:
+            return expr
+        return frog_ast.BinaryOperation(expr.operator, new_left, new_right)
+    if isinstance(expr, frog_ast.ArrayAccess):
+        new_arr = _resolve_var_aliases(expr.the_array, aliases, stop_names, _depth + 1)
+        if new_arr is expr.the_array:
+            return expr
+        return frog_ast.ArrayAccess(new_arr, expr.index)
+    return expr
+
+
 def _collect_field_vars(expr: frog_ast.Expression, field_names: list[str]) -> set[str]:
     """Collect all field variable names referenced in an expression."""
     found: set[str] = set()
@@ -1508,8 +1559,17 @@ class ChallengeExclusionRFToUniformTransformer:
             assert isinstance(init_stmt.value, frog_ast.FuncCall)
             init_arg = init_stmt.value.args[0]
 
+            # Resolve local variable aliases in the Init RF arg so that
+            # intermediate cast variables (e.g. bct2 = ct2Star) are traced
+            # back to their field references.
+            init_aliases = _build_local_assignments(init_method.block)
+            field_name_set = set(field_names)
+            resolved_init_arg = _resolve_var_aliases(
+                init_arg, init_aliases, field_name_set
+            )
+
             # Check that Init arg references at least one challenge field
-            init_field_refs = _collect_field_vars(init_arg, field_names)
+            init_field_refs = _collect_field_vars(resolved_init_arg, field_names)
 
             # Check each oracle method
             all_oracle_ok = True
@@ -1578,17 +1638,28 @@ class ChallengeExclusionRFToUniformTransformer:
                 for eb in extra_blocks:
                     all_post_calls.extend(_collect_rf_call_sites(eb, rf_name))
 
+                # Resolve oracle local aliases once for structural comparison.
+                # Stop at field names AND guard variables so that guard-
+                # constrained variables (like ct2) are preserved as leaves
+                # for _check_leaf_pair to recognize.
+                oracle_aliases = _build_local_assignments(oracle_method.block)
+                oracle_stop = field_name_set | guard_lhs_vars
+
                 for call in all_post_calls:
                     if len(call.args) != 1:
                         all_oracle_ok = False
                         break
 
+                    resolved_oracle_arg = _resolve_var_aliases(
+                        call.args[0], oracle_aliases, oracle_stop
+                    )
+
                     # For slice guards where the oracle RF arg IS the
                     # guarded parameter (e.g., RF(m) with guard on
                     # m[start:end]), use slice-based exclusion check
                     if guard.is_slice_guard and _slice_guard_excludes(
-                        init_arg,
-                        call.args[0],
+                        resolved_init_arg,
+                        resolved_oracle_arg,
                         guard,
                         field_names,
                         field_types,
@@ -1596,14 +1667,15 @@ class ChallengeExclusionRFToUniformTransformer:
                     ):
                         continue
 
-                    if not _rf_args_structurally_differ(
-                        init_arg,
-                        call.args[0],
+                    differs = _rf_args_structurally_differ(
+                        resolved_init_arg,
+                        resolved_oracle_arg,
                         challenge_fields,
                         field_names,
                         guard_lhs_vars,
                         proof_namespace,
-                    ):
+                    )
+                    if not differs:
                         if ctx is not None and guard.is_slice_guard:
                             ctx.near_misses.append(
                                 NearMiss(

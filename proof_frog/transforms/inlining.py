@@ -18,6 +18,7 @@ from ..visitors import (
     BlockTransformer,
     NameTypeMap,
     SearchVisitor,
+    SubstitutionTransformer,
     Visitor,
     ReplaceTransformer,
     VariableCollectionVisitor,
@@ -315,6 +316,129 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
         return block
 
 
+class IfSplitBranchAssignmentTransformer(BlockTransformer):
+    """Moves subsequent statements into if-else branches when all branches
+    assign the same variable.
+
+    When an if-else has every branch ending with an assignment to the same
+    variable ``x``, and subsequent statements use ``x`` without reassigning
+    it, those subsequent statements are moved into each branch with ``x``
+    replaced by the branch's assigned value.
+
+    Example::
+
+        if (C) { x = A; } else { x = B; }
+        return f(x);
+      becomes:
+        if (C) { return f(A); } else { return f(B); }
+    """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if not isinstance(statement, frog_ast.IfStatement):
+                continue
+            if not statement.has_else_block():
+                continue
+
+            # Check all branches end with an assignment to the same variable.
+            var_name: str | None = None
+            branch_values: list[frog_ast.Expression] = []
+            all_match = True
+            for blk in statement.blocks:
+                if not blk.statements:
+                    all_match = False
+                    break
+                last = blk.statements[-1]
+                if not (
+                    isinstance(last, frog_ast.Assignment)
+                    and isinstance(last.var, frog_ast.Variable)
+                ):
+                    all_match = False
+                    break
+                if var_name is None:
+                    var_name = last.var.name
+                elif last.var.name != var_name:
+                    all_match = False
+                    break
+                branch_values.append(last.value)
+
+            if not all_match or var_name is None:
+                continue
+
+            # Must have subsequent statements
+            subsequent = block.statements[index + 1 :]
+            if not subsequent:
+                continue
+
+            # Variable must not be reassigned in subsequent statements
+            def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(
+                        node,
+                        (
+                            frog_ast.Assignment,
+                            frog_ast.Sample,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
+                    and isinstance(node.var, frog_ast.Variable)
+                    and node.var.name == name
+                )
+
+            if (
+                SearchVisitor(functools.partial(is_written_to, var_name)).visit(
+                    frog_ast.Block(list(subsequent))
+                )
+                is not None
+            ):
+                continue
+
+            # If any branch value contains a non-deterministic call,
+            # the variable must be used at most once in subsequent code.
+            # Otherwise substitution would duplicate the call, changing
+            # single-evaluation to multi-evaluation semantics.
+            proof_ns: frog_ast.Namespace = self.ctx.proof_namespace if self.ctx else {}
+            proof_let_types = self.ctx.proof_let_types if self.ctx else None
+            has_nondet = any(
+                has_nondeterministic_call(v, proof_ns, proof_let_types)
+                for v in branch_values
+            )
+            if has_nondet:
+                counter = _VarCountVisitor(var_name)
+                counter.visit(frog_ast.Block(list(subsequent)))
+                if counter.result() > 1:
+                    continue
+
+            # Build new blocks: for each branch, replace trailing assignment
+            # with subsequent statements where var is substituted by value
+            new_blocks: list[frog_ast.Block] = []
+            for blk_idx, blk in enumerate(statement.blocks):
+                prefix = list(blk.statements[:-1])
+                value = branch_values[blk_idx]
+                ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+                ast_map.set(frog_ast.Variable(var_name), copy.deepcopy(value))
+                substituted = SubstitutionTransformer(ast_map).transform(
+                    copy.deepcopy(frog_ast.Block(list(subsequent)))
+                )
+                new_blocks.append(frog_ast.Block(prefix + list(substituted.statements)))
+
+            new_if = frog_ast.IfStatement(list(statement.conditions), new_blocks)
+            # Also remove the declaration of var_name before the if, if any
+            prior = list(block.statements[:index])
+            cleaned_prior: list[frog_ast.Statement] = []
+            for s in prior:
+                if isinstance(s, frog_ast.VariableDeclaration) and s.name == var_name:
+                    continue
+                cleaned_prior.append(s)
+
+            return self.transform_block(frog_ast.Block(cleaned_prior + [new_if]))
+
+        return block
+
+
 class InlineMultiUsePureExpressionTransformer(BlockTransformer):
     """Inlines a declaration ``Type v = expr`` when expr is a deterministic
     (function-call-free, or deterministic-only) expression, even if v is
@@ -368,7 +492,7 @@ class InlineMultiUsePureExpressionTransformer(BlockTransformer):
                 continue
 
             # Skip expressions containing array access or slicing.
-            # Inlining these spreads references to the base variable,
+            # Inlining these spreads references to the indexed variable,
             # preventing dead-code elimination and single-use inlining
             # of function-call results, and breaking algebraic patterns.
             if (
@@ -878,6 +1002,13 @@ class RedundantCopy(TransformPass):
         return RedundantCopyTransformer().transform(game)
 
 
+class IfSplitBranchAssignment(TransformPass):
+    name = "If-Split Branch Assignment"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return IfSplitBranchAssignmentTransformer(ctx).transform(game)
+
+
 class InlineSingleUseVariable(TransformPass):
     name = "Inline Single-Use Variables"
 
@@ -903,6 +1034,138 @@ class ForwardExpressionAlias(TransformPass):
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
         ).transform(game)
+
+
+class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
+    """Extract repeated ``var[constant]`` accesses into named variables.
+
+    When ``v[i]`` (variable + integer index) appears 2+ times in a block
+    and ``v`` is declared with a product (tuple) type, inserts a local
+    declaration ``Ti __cse_v_i__ = v[i];`` right after ``v``'s assignment
+    and replaces every occurrence with the new variable.
+
+    This normalises games that destructure tuples explicitly
+    (``pk = k[0]``) against games that use inline access
+    (``Encaps(k[0])``).
+    """
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        # Build map: var_name -> declared type (from assignments in this block)
+        var_types: dict[str, frog_ast.Type] = {}
+        var_def_idx: dict[str, int] = {}
+        for idx, stmt in enumerate(block.statements):
+            if (
+                isinstance(stmt, frog_ast.Assignment)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.the_type is not None
+            ):
+                var_types[stmt.var.name] = stmt.the_type
+                var_def_idx[stmt.var.name] = idx
+
+        # Count occurrences of each (var_name, index) ArrayAccess pattern
+        access_counts: dict[tuple[str, int], int] = {}
+        for stmt in block.statements:
+
+            def counter(node: frog_ast.ASTNode) -> bool:
+                if (
+                    isinstance(node, frog_ast.ArrayAccess)
+                    and isinstance(node.the_array, frog_ast.Variable)
+                    and isinstance(node.index, frog_ast.Integer)
+                ):
+                    key = (node.the_array.name, node.index.num)
+                    access_counts[key] = access_counts.get(key, 0) + 1
+                return False
+
+            SearchVisitor(counter).visit(stmt)
+
+        # Find first pattern with 2+ uses whose base var has a product type
+        for (var_name, idx_val), count in access_counts.items():
+            if count < 2:
+                continue
+            if var_name not in var_types:
+                continue
+            base_type = var_types[var_name]
+            if not isinstance(base_type, frog_ast.ProductType):
+                continue
+            if idx_val < 0 or idx_val >= len(base_type.types):
+                continue
+
+            # Skip if the base variable is reassigned after its definition
+            def _is_reassigned(name: str, node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(
+                        node,
+                        (
+                            frog_ast.Assignment,
+                            frog_ast.Sample,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
+                    and isinstance(node.var, frog_ast.Variable)
+                    and node.var.name == name
+                )
+
+            remaining_after_def = frog_ast.Block(
+                list(block.statements[var_def_idx[var_name] + 1 :])
+            )
+            if (
+                SearchVisitor(functools.partial(_is_reassigned, var_name)).visit(
+                    remaining_after_def
+                )
+                is not None
+            ):
+                continue
+
+            elem_type = base_type.types[idx_val]
+            cse_name = f"__cse_{var_name}_{idx_val}__"
+            target_access = frog_ast.ArrayAccess(
+                frog_ast.Variable(var_name), frog_ast.Integer(idx_val)
+            )
+
+            # Create the extraction: elem_type cse_name = var[idx];
+            new_assignment = frog_ast.Assignment(
+                elem_type,
+                frog_ast.Variable(cse_name),
+                copy.deepcopy(target_access),
+            )
+
+            # Insert after the base variable's definition
+            insert_at = var_def_idx[var_name] + 1
+
+            # Replace all occurrences of var[idx] with the CSE variable
+            new_stmts = list(block.statements[:insert_at])
+            new_stmts.append(new_assignment)
+
+            remaining = frog_ast.Block(list(block.statements[insert_at:]))
+
+            def _match_access(
+                target: frog_ast.Expression, node: frog_ast.ASTNode
+            ) -> bool:
+                return node == target
+
+            while True:
+                match = SearchVisitor(
+                    functools.partial(_match_access, target_access)
+                ).visit(remaining)
+                if match is None:
+                    break
+                remaining = ReplaceTransformer(
+                    match, frog_ast.Variable(cse_name)
+                ).transform(remaining)
+
+            new_stmts.extend(remaining.statements)
+            return self.transform_block(frog_ast.Block(new_stmts))
+
+        return block
+
+
+class ExtractRepeatedTupleAccess(TransformPass):
+    """Extract repeated tuple element accesses into named variables."""
+
+    name = "Extract Repeated Tuple Access"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return ExtractRepeatedTupleAccessTransformer().transform(game)
 
 
 class InlineMultiUsePureExpression(TransformPass):

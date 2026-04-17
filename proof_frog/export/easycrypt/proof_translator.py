@@ -7,11 +7,17 @@ Phase 2 scope: plain steps (``Game(E).Side``) and composed steps
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass
 from typing import Callable
 
 from . import ec_ast
 from ... import frog_ast
+
+
+class HopKind(enum.Enum):
+    INLINING = "inlining"
+    ASSUMPTION = "assumption"
 
 
 @dataclass
@@ -223,6 +229,59 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     body.append("qed.")
     return ec_ast.ProbLemma(
         name=f"hop_{hop_index}_pr",
+        module_args=[
+            ec_ast.ModuleParam(
+                name="A",
+                module_type=f"{adversary_type_name} {{-{scheme_module_expr}}}",
+            )
+        ],
+        memory_args=["&m"],
+        statement=statement,
+        body=body,
+    )
+
+
+def translate_main_theorem(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    adversary_type_name: str,
+    scheme_module_expr: str,
+    first_wrapper_name: str,
+    last_wrapper_name: str,
+    hop_kinds: list[HopKind],
+    assumption_names_by_hop: dict[int, str],
+    n_hops: int,
+) -> ec_ast.ProbLemma:
+    """Emit the chained main theorem for a sequence of hops.
+
+    The bound is the sum of ``eps_<name>`` for each assumption hop;
+    inlining hops contribute zero. If there are no assumption hops, the
+    statement is an equality (``Pr[L] = Pr[R]``) rather than a bound.
+    """
+    eps_terms: list[str] = []
+    for i, kind in enumerate(hop_kinds):
+        if kind is HopKind.ASSUMPTION:
+            eps_terms.append(f"eps_{assumption_names_by_hop[i]}")
+
+    have_lines = [f"have h{i} := hop_{i}_pr A &m." for i in range(n_hops)]
+    if not eps_terms:
+        statement = (
+            f"Pr[{first_wrapper_name}(A).main() @ &m : res]"
+            f" = Pr[{last_wrapper_name}(A).main() @ &m : res]"
+        )
+        body = [*have_lines, "smt().", "qed."]
+    else:
+        bound = " + ".join(eps_terms)
+        statement = (
+            f"`| Pr[{first_wrapper_name}(A).main() @ &m : res]"
+            f" - Pr[{last_wrapper_name}(A).main() @ &m : res] |"
+            f" <= {bound}"
+        )
+        pos_args = " ".join(
+            f"eps_{name}_pos" for name in sorted(set(assumption_names_by_hop.values()))
+        )
+        body = [*have_lines, f"smt({pos_args}).", "qed."]
+
+    return ec_ast.ProbLemma(
+        name="main_theorem",
         module_args=[
             ec_ast.ModuleParam(
                 name="A",

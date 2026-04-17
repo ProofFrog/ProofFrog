@@ -128,3 +128,52 @@ def test_translate_assumption_hop_pr() -> None:
     assert "OneTimeSecrecy_advantage" in body
     assert "byequiv" in body
     assert "qed." in body
+
+
+def test_translate_main_theorem_otpsecurelr_shape() -> None:
+    """Main theorem statement: bound is sum of eps for assumption hops only."""
+    from proof_frog.export.easycrypt import proof_translator as pt
+    from proof_frog.export.easycrypt import ec_ast
+
+    hop_kinds = [
+        pt.HopKind.INLINING,
+        pt.HopKind.ASSUMPTION,
+        pt.HopKind.INLINING,
+        pt.HopKind.ASSUMPTION,
+        pt.HopKind.INLINING,
+    ]
+    assumption_names_by_hop = {1: "OneTimeSecrecy", 3: "OneTimeSecrecy"}
+    lemma = pt.translate_main_theorem(
+        adversary_type_name="OneTimeSecrecyLR_Adv",
+        scheme_module_expr="OTP",
+        first_wrapper_name="Game_step_0",
+        last_wrapper_name="Game_step_5",
+        hop_kinds=hop_kinds,
+        assumption_names_by_hop=assumption_names_by_hop,
+        n_hops=5,
+    )
+    assert isinstance(lemma, ec_ast.ProbLemma)
+    assert lemma.name == "main_theorem"
+    assert "Pr[Game_step_0(A).main() @ &m : res]" in lemma.statement
+    assert "Pr[Game_step_5(A).main() @ &m : res]" in lemma.statement
+    assert "<= eps_OneTimeSecrecy + eps_OneTimeSecrecy" in lemma.statement
+    body = "\n".join(lemma.body)
+    assert "qed." in body
+
+
+def test_translate_main_theorem_no_assumption_hops_uses_equality() -> None:
+    """If there are no assumption hops, the bound is 0 -- emit Pr equality directly."""
+    from proof_frog.export.easycrypt import proof_translator as pt
+
+    lemma = pt.translate_main_theorem(
+        adversary_type_name="OTPSecure_Adv",
+        scheme_module_expr="OTP",
+        first_wrapper_name="Game_step_0",
+        last_wrapper_name="Game_step_1",
+        hop_kinds=[pt.HopKind.INLINING],
+        assumption_names_by_hop={},
+        n_hops=1,
+    )
+    assert "=" in lemma.statement
+    assert "<=" not in lemma.statement
+    assert "eps_" not in lemma.statement

@@ -307,6 +307,8 @@ def export_proof_file(proof_path: str) -> str:
     decls.extend(lemmas)
 
     ec_pr_lemmas: list[ec_ast.EcTopDecl] = []
+    hop_kinds: list[pt.HopKind] = []
+    assumption_names_by_hop: dict[int, str] = {}
     for i in range(len(proof.steps) - 1):
         step_a = proof.steps[i]
         step_b = proof.steps[i + 1]
@@ -319,6 +321,8 @@ def export_proof_file(proof_path: str) -> str:
             reduction_name = step_a.reduction.name
             assert isinstance(step_a.challenger, frog_ast.ConcreteGame)
             assumption_game_file_name = step_a.challenger.game.name
+            hop_kinds.append(pt.HopKind.ASSUMPTION)
+            assumption_names_by_hop[i] = assumption_game_file_name
             gf_a = next(g for g in game_files if g.name == assumption_game_file_name)
             left_side = step_a.challenger.which
             assert isinstance(step_b.challenger, frog_ast.ConcreteGame)
@@ -347,6 +351,7 @@ def export_proof_file(proof_path: str) -> str:
                 )
             )
         else:
+            hop_kinds.append(pt.HopKind.INLINING)
             ec_pr_lemmas.append(
                 pt.translate_inlining_hop_pr_lemma(
                     hop_index=i,
@@ -357,6 +362,19 @@ def export_proof_file(proof_path: str) -> str:
                 )
             )
     decls.extend(ec_pr_lemmas)
+
+    n_hops = len(proof.steps) - 1
+    if n_hops > 0:
+        main_theorem = pt.translate_main_theorem(
+            adversary_type_name=outer_adv_type_name,
+            scheme_module_expr=scheme.name,
+            first_wrapper_name="Game_step_0",
+            last_wrapper_name=f"Game_step_{n_hops}",
+            hop_kinds=hop_kinds,
+            assumption_names_by_hop=assumption_names_by_hop,
+            n_hops=n_hops,
+        )
+        decls.append(main_theorem)
 
     ec_file = ec_ast.EcFile(
         requires=["AllCore", "Distr"],

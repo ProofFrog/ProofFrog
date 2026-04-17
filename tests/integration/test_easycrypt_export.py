@@ -139,3 +139,14 @@ def test_export_otpsecurelr_emits_pr_lemmas() -> None:
     assert output.count("lemma hop_") == 8
     for i in range(5):
         assert f"lemma hop_{i}_pr" in output
+
+
+def test_export_otpsecurelr_emits_main_theorem() -> None:
+    """The exported file declares a chained main_theorem lemma."""
+    output = exporter.export_proof_file(str(OTP_LR_PROOF))
+    assert "lemma main_theorem" in output
+    # Bound: two assumption hops, each contributing eps_OneTimeSecrecy.
+    assert "eps_OneTimeSecrecy + eps_OneTimeSecrecy" in output
+    # Endpoints: step_0 (Game_OTSLR_Left) and step_5 (Game_OTSLR_Right).
+    assert "Pr[Game_step_0(A).main() @ &m : res]" in output
+    assert "Pr[Game_step_5(A).main() @ &m : res] |" in output

@@ -98,16 +98,154 @@ class StepResolver:
         return ResolvedStep(module_expr=module_expr, oracle_name=oracle)
 
 
+def translate_assumption_axioms(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    assumption_name: str,
+    adversary_type_name: str,
+    scheme_module_expr: str,
+    real_wrapper_name: str,
+    random_wrapper_name: str,
+) -> list[ec_ast.EcTopDecl]:
+    """Emit Style B advantage axiom + supporting declarations for an assumption.
+
+    Returns a list ``[op eps_<name>, axiom eps_<name>_pos, axiom <name>_advantage]``.
+    """
+    eps_name = f"eps_{assumption_name}"
+    advantage_name = f"{assumption_name}_advantage"
+    pos_axiom_name = f"{eps_name}_pos"
+    formula = (
+        f"`| Pr[{real_wrapper_name}(A).main() @ &m : res]"
+        f" - Pr[{random_wrapper_name}(A).main() @ &m : res] |"
+        f" <= {eps_name}"
+    )
+    return [
+        ec_ast.OpDecl(name=eps_name, signature="real"),
+        ec_ast.Axiom(
+            name=pos_axiom_name,
+            formula=f"0%r <= {eps_name}",
+        ),
+        ec_ast.Axiom(
+            name=advantage_name,
+            formula=formula,
+            module_args=[
+                ec_ast.ModuleParam(
+                    name="A",
+                    module_type=f"{adversary_type_name} {{-{scheme_module_expr}}}",
+                )
+            ],
+            memory_args=["&m"],
+        ),
+    ]
+
+
+def translate_inlining_hop_pr_lemma(
+    hop_index: int,
+    adversary_type_name: str,
+    scheme_module_expr: str,
+    left_wrapper_name: str,
+    right_wrapper_name: str,
+) -> ec_ast.ProbLemma:
+    """Emit a ``hop_<i>_pr`` lemma for an inlining hop.
+
+    The proof discharges ``Pr[L] = Pr[R]`` via ``byequiv`` over the
+    existing ``hop_<i>`` equiv lemma.
+    """
+    statement = (
+        f"Pr[{left_wrapper_name}(A).main() @ &m : res]"
+        f" = Pr[{right_wrapper_name}(A).main() @ &m : res]"
+    )
+    body = [
+        "byequiv => //; proc.",
+        f"call (_: true); first by conseq hop_{hop_index}.",
+        "auto.",
+        "qed.",
+    ]
+    return ec_ast.ProbLemma(
+        name=f"hop_{hop_index}_pr",
+        module_args=[
+            ec_ast.ModuleParam(
+                name="A",
+                module_type=f"{adversary_type_name} {{-{scheme_module_expr}}}",
+            )
+        ],
+        memory_args=["&m"],
+        statement=statement,
+        body=body,
+    )
+
+
+def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    hop_index: int,
+    adversary_type_name: str,
+    scheme_module_expr: str,
+    left_wrapper_name: str,
+    right_wrapper_name: str,
+    assumption_name: str,
+    reduction_adv_name: str,
+    left_assumption_wrapper: str,
+    right_assumption_wrapper: str,
+    reverse_direction: bool,
+) -> ec_ast.ProbLemma:
+    """Emit a ``hop_<i>_pr`` lemma for an assumption hop.
+
+    The proof rewrites each side to the corresponding assumption-game
+    wrapper instantiated on the reduction-adversary lift, then applies
+    the advantage axiom. When ``reverse_direction`` is true the hop goes
+    Random->Real (opposite of the axiom) and we normalize via absolute-
+    value symmetry before applying the axiom.
+    """
+    statement = (
+        f"`| Pr[{left_wrapper_name}(A).main() @ &m : res]"
+        f" - Pr[{right_wrapper_name}(A).main() @ &m : res] |"
+        f" <= eps_{assumption_name}"
+    )
+    body = [
+        f"have hL : Pr[{left_wrapper_name}(A).main() @ &m : res]",
+        f"        = Pr[{left_assumption_wrapper}({reduction_adv_name}(A)).main() "
+        f"@ &m : res]",
+        "  by byequiv => //; proc; inline *; sim.",
+        f"have hR : Pr[{right_wrapper_name}(A).main() @ &m : res]",
+        f"        = Pr[{right_assumption_wrapper}({reduction_adv_name}(A)).main() "
+        f"@ &m : res]",
+        "  by byequiv => //; proc; inline *; sim.",
+        "rewrite hL hR.",
+    ]
+    if reverse_direction:
+        body.extend(
+            [
+                f"have H := {assumption_name}_advantage ({reduction_adv_name}(A)) &m.",
+                "smt().",
+            ]
+        )
+    else:
+        body.append(
+            f"apply ({assumption_name}_advantage ({reduction_adv_name}(A)) &m)."
+        )
+    body.append("qed.")
+    return ec_ast.ProbLemma(
+        name=f"hop_{hop_index}_pr",
+        module_args=[
+            ec_ast.ModuleParam(
+                name="A",
+                module_type=f"{adversary_type_name} {{-{scheme_module_expr}}}",
+            )
+        ],
+        memory_args=["&m"],
+        statement=statement,
+        body=body,
+    )
+
+
 def translate_hops(
     resolver: StepResolver,
     steps: list[frog_ast.ProofStep],
-    body_for_hop: Callable[[int, frog_ast.Step, frog_ast.Step], list[str]],
+    body_for_hop: Callable[[int, frog_ast.Step, frog_ast.Step], list[str] | None],
 ) -> list[ec_ast.Lemma]:
     """Produce one equiv lemma per adjacent-step pair.
 
     ``body_for_hop(i, step_a, step_b)`` returns the list of tactic lines
-    (ending with ``"qed."``) for hop ``i``. The body is wrapped by the
-    lemma's ``proof. ... qed.`` framing in the pretty-printer.
+    (ending with ``"qed."``) for hop ``i``, or ``None`` to skip the
+    equiv lemma entirely for that hop (e.g. for assumption hops whose
+    two sides are genuinely non-equivalent).
     """
     lemmas: list[ec_ast.Lemma] = []
     for i in range(len(steps) - 1):
@@ -116,9 +254,11 @@ def translate_hops(
             raise NotImplementedError(
                 "Only simple Step entries are supported (no Induction)."
             )
+        body = body_for_hop(i, a, b)
+        if body is None:
+            continue
         ra = resolver.resolve(a)
         rb = resolver.resolve(b)
-        body = body_for_hop(i, a, b)
         lemmas.append(
             ec_ast.Lemma(
                 name=f"hop_{i}",

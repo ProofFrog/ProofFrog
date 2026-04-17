@@ -81,7 +81,14 @@ class TypeCollector:
             decls.append(ec_ast.Axiom(f"{distr}_ll", f"is_lossless {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
         for name in self._names:
-            decls.append(ec_ast.OpDecl(_xor_name(name), f"{name} -> {name} -> {name}"))
+            xor_op = _xor_name(name)
+            decls.append(ec_ast.OpDecl(xor_op, f"{name} -> {name} -> {name}"))
+            decls.append(
+                ec_ast.Axiom(
+                    f"{xor_op}_invol",
+                    f"forall (a b : {name}), {xor_op} ({xor_op} a b) b = a",
+                )
+            )
         return decls
 
 

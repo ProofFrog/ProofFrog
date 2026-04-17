@@ -26,6 +26,7 @@ def _resolver() -> pt.StepResolver:
             "OneTimeSecrecy": "enc",
         },
         primitive_name="SymEnc",
+        scheme_name="OTP",
     )
 
 
@@ -33,7 +34,7 @@ def test_step_resolver_plain_step() -> None:
     steps = _steps_of_otpsecurelr()
     resolver = _resolver()
     resolved = resolver.resolve(steps[0])
-    assert resolved.module_expr == "OneTimeSecrecyLR_Left(E)"
+    assert resolved.module_expr == "OneTimeSecrecyLR_Left(OTP)"
     assert resolved.oracle_name == "enc"
 
 
@@ -41,14 +42,17 @@ def test_step_resolver_composed_step() -> None:
     steps = _steps_of_otpsecurelr()
     resolver = _resolver()
     resolved = resolver.resolve(steps[1])
-    assert resolved.module_expr == "R1(E, OneTimeSecrecy_Real(E))"
+    assert resolved.module_expr == "R1(OTP, OneTimeSecrecy_Real(OTP))"
     assert resolved.oracle_name == "enc"
 
 
 def test_translate_hops_emits_admit_per_hop() -> None:
     steps = _steps_of_otpsecurelr()
     resolver = _resolver()
-    lemmas = pt.translate_hops(resolver, steps)
+    lemmas = pt.translate_hops(
+        resolver, steps, lambda _i, _a, _b: ["admit.", "qed."]
+    )
     assert len(lemmas) == 5
     assert all(lemma.postcondition == "={res}" for lemma in lemmas)
     assert all(lemma.precondition == "true" for lemma in lemmas)
+    assert all(lemma.body == ["admit.", "qed."] for lemma in lemmas)

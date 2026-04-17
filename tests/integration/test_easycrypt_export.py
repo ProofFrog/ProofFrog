@@ -38,7 +38,6 @@ def test_export_otpsecure_produces_nonempty_output() -> None:
     assert "require import" in output
     assert "module" in output
     assert "lemma" in output
-    assert "admit" in output
 
 
 @pytest.mark.skipif(
@@ -79,9 +78,8 @@ def test_export_otpsecurelr_produces_expected_structure() -> None:
     # Two reductions as parameterized modules.
     assert "module R1" in output
     assert "module R2" in output
-    # One admit-bodied lemma per hop; 6 steps -> 5 hops.
+    # One lemma per hop; 6 steps -> 5 hops.
     assert output.count("lemma hop_") == 5
-    assert output.count("admit") >= 5
 
 
 @pytest.mark.skipif(
@@ -104,4 +102,31 @@ def test_export_otpsecurelr_typechecks_in_easycrypt(tmp_path: Path) -> None:
         f"Exported file:\n{output}\n"
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout}\n"
+    )
+
+
+def test_export_otpsecure_lemma_has_no_admit() -> None:
+    """OTPSecure's one hop must be discharged with real tactics."""
+    output = exporter.export_proof_file(str(OTP_PROOF))
+    assert "admit" not in output, (
+        f"OTPSecure export still contains admit:\n{output}"
+    )
+
+
+def test_export_otpsecurelr_inlining_hops_have_no_admit() -> None:
+    """OTPSecureLR has 5 hops; hops 1 and 3 are assumption hops.
+
+    Hop 0: Left -> Real compose R1           (inlining)
+    Hop 1: Real compose R1 -> Random compose R1   (assumption)
+    Hop 2: Random compose R1 -> Random compose R2 (inlining)
+    Hop 3: Random compose R2 -> Real compose R2   (assumption)
+    Hop 4: Real compose R2 -> Right          (inlining)
+
+    The three inlining hops (0, 2, 4) must carry real tactic scripts;
+    the two assumption hops (1, 3) remain admit.
+    """
+    output = exporter.export_proof_file(str(OTP_LR_PROOF))
+    assert output.count("admit") == 2, (
+        f"Expected exactly two admits (assumption hops 1 and 3), got "
+        f"{output.count('admit')}.\nOutput:\n{output}"
     )

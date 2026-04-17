@@ -153,13 +153,21 @@ class Module:
 
 @dataclass
 class Lemma:
-    """An equiv lemma with admit body.
+    """An equiv lemma.
 
     Renders as::
 
         lemma <name> [<module_args>] :
           equiv [ <left> ~ <right> : <pre> ==> <post> ].
-        proof. admit. qed.
+        proof.
+          <body line 1>
+          <body line 2>
+          ...
+        qed.
+
+    The ``body`` list contains tactic lines without the surrounding
+    ``proof.`` and ``qed.``; the pretty-printer adds those. If the body
+    is empty, the lemma renders ``proof. admit. qed.`` as a fallback.
     """
 
     name: str
@@ -168,6 +176,7 @@ class Lemma:
     right: str
     precondition: str
     postcondition: str
+    body: list[str] = field(default_factory=list)
 
 
 # --- The whole file ------------------------------------------------------
@@ -278,5 +287,10 @@ def _render_lemma(lemma: Lemma) -> list[str]:
     out = [f"{header} :"]
     out.append(f"  equiv [ {lemma.left} ~ {lemma.right} :")
     out.append(f"          {lemma.precondition} ==> {lemma.postcondition} ].")
-    out.append("proof. admit. qed.")
+    if not lemma.body:
+        out.append("proof. admit. qed.")
+        return out
+    out.append("proof.")
+    for line in lemma.body:
+        out.append(f"  {line}")
     return out

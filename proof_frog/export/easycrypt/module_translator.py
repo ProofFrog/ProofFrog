@@ -132,6 +132,107 @@ class ModuleTranslator:
             params=module_params,
         )
 
+    def translate_adversary_type(
+        self, game_file: frog_ast.GameFile, oracle_type_name: str
+    ) -> ec_ast.ModuleType:
+        """Emit ``module type <Gf>_Adv (O : <oracle>) = { proc distinguish() : bool }``.
+
+        The adversary's interface is a single ``distinguish`` procedure
+        returning a bool. This matches the standard EC pattern for
+        games whose adversaries make adaptive oracle queries.
+        """
+        return ec_ast.ModuleType(
+            name=f"{game_file.name}_Adv",
+            procs=[
+                ec_ast.ProcSig(
+                    name="distinguish",
+                    params=[],
+                    return_type=ec_ast.EcType("bool"),
+                )
+            ],
+            params=[ec_ast.ModuleParam(name="O", module_type=oracle_type_name)],
+        )
+
+    def translate_reduction_adversary(
+        self,
+        reduction: frog_ast.Reduction,
+        outer_adversary_type_name: str,
+        inner_oracle_type_name: str,
+        scheme_module_expr: str,
+    ) -> ec_ast.Module:
+        """Lift a Reduction into an adversary against the inner game.
+
+        The resulting module has signature
+        ``module <R>_Adv (A : <Outer>_Adv) (C : <Inner>_Oracle)`` and its
+        ``distinguish`` procedure runs ``A`` against the reduction
+        ``<R>(<scheme>, C)``.
+        """
+        body: list[ec_ast.EcStmt] = [
+            ec_ast.VarDecl(name="b", type=ec_ast.EcType("bool")),
+            ec_ast.Call(
+                var="b",
+                callee=f"A({reduction.name}({scheme_module_expr}, C)).distinguish",
+                args="",
+            ),
+            ec_ast.Return(expr="b"),
+        ]
+        return ec_ast.Module(
+            name=f"{reduction.name}_Adv",
+            procs=[
+                ec_ast.Proc(
+                    name="distinguish",
+                    params=[],
+                    return_type=ec_ast.EcType("bool"),
+                    body=body,
+                )
+            ],
+            params=[
+                ec_ast.ModuleParam(name="A", module_type=outer_adversary_type_name),
+                ec_ast.ModuleParam(name="C", module_type=inner_oracle_type_name),
+            ],
+        )
+
+    def translate_game_wrapper(
+        self,
+        wrapper_name: str,
+        adversary_type_name: str,
+        oracle_module_expr: str,
+    ) -> ec_ast.Module:
+        """Emit a ``main()``-wrapper module for one step in the proof.
+
+        The wrapper takes an adversary parameter ``A`` and a single ``main``
+        procedure that runs ``A`` against the given oracle module expression.
+
+        Args:
+            wrapper_name: e.g. ``"Game_step_0"``.
+            adversary_type_name: e.g. ``"OneTimeSecrecyLR_Adv"``.
+            oracle_module_expr: rendered EC expression for the oracle the
+                adversary should be given, e.g.
+                ``"OneTimeSecrecyLR_Left(OTP)"`` or
+                ``"R1(OTP, OneTimeSecrecy_Real(OTP))"``.
+        """
+        body: list[ec_ast.EcStmt] = [
+            ec_ast.VarDecl(name="b", type=ec_ast.EcType("bool")),
+            ec_ast.Call(
+                var="b",
+                callee=f"A({oracle_module_expr}).distinguish",
+                args="",
+            ),
+            ec_ast.Return(expr="b"),
+        ]
+        return ec_ast.Module(
+            name=wrapper_name,
+            procs=[
+                ec_ast.Proc(
+                    name="main",
+                    params=[],
+                    return_type=ec_ast.EcType("bool"),
+                    body=body,
+                )
+            ],
+            params=[ec_ast.ModuleParam(name="A", module_type=adversary_type_name)],
+        )
+
     def translate_game_file_oracle(
         self, game_file: frog_ast.GameFile, oracle_type_name: str
     ) -> ec_ast.ModuleType:

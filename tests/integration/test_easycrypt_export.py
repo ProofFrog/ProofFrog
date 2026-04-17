@@ -78,8 +78,10 @@ def test_export_otpsecurelr_produces_expected_structure() -> None:
     # Two reductions as parameterized modules.
     assert "module R1" in output
     assert "module R2" in output
-    # One lemma per hop; 6 steps -> 5 hops.
-    assert output.count("lemma hop_") == 5
+    # Inlining hops emit an equiv lemma; assumption hops do not (their
+    # two sides are genuinely non-equivalent). Plus one _pr lemma per hop.
+    # OTPSecureLR: 3 inlining + 2 assumption hops -> 3 equiv + 5 pr = 8.
+    assert output.count("lemma hop_") == 8
 
 
 @pytest.mark.skipif(
@@ -113,20 +115,27 @@ def test_export_otpsecure_lemma_has_no_admit() -> None:
     )
 
 
-def test_export_otpsecurelr_inlining_hops_have_no_admit() -> None:
-    """OTPSecureLR has 5 hops; hops 1 and 3 are assumption hops.
-
-    Hop 0: Left -> Real compose R1           (inlining)
-    Hop 1: Real compose R1 -> Random compose R1   (assumption)
-    Hop 2: Random compose R1 -> Random compose R2 (inlining)
-    Hop 3: Random compose R2 -> Real compose R2   (assumption)
-    Hop 4: Real compose R2 -> Right          (inlining)
-
-    The three inlining hops (0, 2, 4) must carry real tactic scripts;
-    the two assumption hops (1, 3) remain admit.
-    """
+def test_export_otpsecurelr_no_admit() -> None:
+    """OTPSecureLR has 5 hops; after Phase 4a, all are discharged in probability form."""
     output = exporter.export_proof_file(str(OTP_LR_PROOF))
-    assert output.count("admit") == 2, (
-        f"Expected exactly two admits (assumption hops 1 and 3), got "
-        f"{output.count('admit')}.\nOutput:\n{output}"
+    assert "admit" not in output, (
+        f"OTPSecureLR export still contains admit:\n{output}"
     )
+
+
+def test_export_otpsecurelr_emits_advantage_axiom() -> None:
+    """The exported file declares the Style B assumption axiom."""
+    output = exporter.export_proof_file(str(OTP_LR_PROOF))
+    assert "op eps_OneTimeSecrecy : real." in output
+    assert "axiom eps_OneTimeSecrecy_pos" in output
+    assert "axiom OneTimeSecrecy_advantage" in output
+
+
+def test_export_otpsecurelr_emits_pr_lemmas() -> None:
+    """One probability corollary per hop (5 hops -> 5 _pr lemmas)."""
+    output = exporter.export_proof_file(str(OTP_LR_PROOF))
+    # 3 inlining-hop equiv lemmas + 5 _pr lemmas = 8. Assumption hops get
+    # no equiv lemma (their two sides are genuinely non-equivalent).
+    assert output.count("lemma hop_") == 8
+    for i in range(5):
+        assert f"lemma hop_{i}_pr" in output

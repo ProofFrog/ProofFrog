@@ -185,9 +185,9 @@ def export_proof_file(proof_path: str) -> str:
 
     def _body_for_hop(
         _i: int, step_a: frog_ast.Step, step_b: frog_ast.Step
-    ) -> list[str]:
+    ) -> list[str] | None:
         if _is_assumption_hop(step_a, step_b):
-            return ["admit. (* assumption hop *)", "qed."]
+            return None
         assert isinstance(step_a.challenger, frog_ast.ConcreteGame)
         method_name = oracle_name_by_game_file[step_a.challenger.game.name]
         # pylint: disable=protected-access
@@ -206,13 +206,157 @@ def export_proof_file(proof_path: str) -> str:
 
     lemmas = pt.translate_hops(resolver, proof.steps, _body_for_hop)
 
+    ec_adversary_types: list[ec_ast.EcTopDecl] = []
+    adv_type_name_by_game_file: dict[str, str] = {}
+    for gf in game_files:
+        oracle_type_name = oracle_type_by_game_file[gf.name]
+        adv = modules.translate_adversary_type(gf, oracle_type_name)
+        adv_type_name_by_game_file[gf.name] = adv.name
+        ec_adversary_types.append(adv)
+
+    ec_reduction_advs: list[ec_ast.EcTopDecl] = []
+    outer_game_file_name = proof.theorem.name
+    outer_adv_type_name = adv_type_name_by_game_file[outer_game_file_name]
+    for helper in proof.helpers:
+        if not isinstance(helper, frog_ast.Reduction):
+            continue
+        inner_oracle_type = oracle_type_by_game_file[helper.to_use.name]
+        ec_reduction_advs.append(
+            modules.translate_reduction_adversary(
+                reduction=helper,
+                outer_adversary_type_name=outer_adv_type_name,
+                inner_oracle_type_name=inner_oracle_type,
+                scheme_module_expr=scheme.name,
+            )
+        )
+
+    ec_game_wrappers: list[ec_ast.EcTopDecl] = []
+    for i, step in enumerate(proof.steps):
+        if not isinstance(step, frog_ast.Step):
+            raise NotImplementedError("Induction steps not supported yet.")
+        resolved_step = resolver.resolve(step)
+        assert isinstance(step.challenger, frog_ast.ConcreteGame)
+        if step.reduction is None:
+            step_game_file = step.challenger.game.name
+            adv_type = adv_type_name_by_game_file[step_game_file]
+        else:
+            adv_type = outer_adv_type_name
+        ec_game_wrappers.append(
+            modules.translate_game_wrapper(
+                wrapper_name=f"Game_step_{i}",
+                adversary_type_name=adv_type,
+                oracle_module_expr=resolved_step.module_expr,
+            )
+        )
+
+    ec_assumption_wrappers: list[ec_ast.EcTopDecl] = []
+    assumption_wrapper_names: dict[tuple[str, str], str] = {}
+    for assumption in proof.assumptions:
+        game_file_name = assumption.name
+        if game_file_name not in oracle_type_by_game_file:
+            continue
+        adv_type = adv_type_name_by_game_file[game_file_name]
+        gf = next(g for g in game_files if g.name == game_file_name)
+        for side in gf.games:
+            side_name = side.name
+            wrapper_name = f"Game_{game_file_name}_{side_name}"
+            oracle_module_expr = (
+                f"{module_name_by_concrete_game[(game_file_name, side_name)]}"
+                f"({scheme.name})"
+            )
+            ec_assumption_wrappers.append(
+                modules.translate_game_wrapper(
+                    wrapper_name=wrapper_name,
+                    adversary_type_name=adv_type,
+                    oracle_module_expr=oracle_module_expr,
+                )
+            )
+            assumption_wrapper_names[(game_file_name, side_name)] = wrapper_name
+
+    ec_axioms: list[ec_ast.EcTopDecl] = []
+    for assumption in proof.assumptions:
+        game_file_name = assumption.name
+        if game_file_name not in oracle_type_by_game_file:
+            continue
+        adv_type = adv_type_name_by_game_file[game_file_name]
+        gf = next(g for g in game_files if g.name == game_file_name)
+        real_side, random_side = gf.games[0].name, gf.games[1].name
+        real_wrapper = assumption_wrapper_names[(game_file_name, real_side)]
+        random_wrapper = assumption_wrapper_names[(game_file_name, random_side)]
+        ec_axioms.extend(
+            pt.translate_assumption_axioms(
+                assumption_name=game_file_name,
+                adversary_type_name=adv_type,
+                scheme_module_expr=scheme.name,
+                real_wrapper_name=real_wrapper,
+                random_wrapper_name=random_wrapper,
+            )
+        )
+
     decls: list[ec_ast.EcTopDecl] = []
     decls.extend(types.emit())
     decls.append(ec_primitive)
     decls.append(ec_scheme)
     decls.extend(ec_game_decls)
     decls.extend(ec_reductions)
+    decls.extend(ec_adversary_types)
+    decls.extend(ec_reduction_advs)
+    decls.extend(ec_game_wrappers)
+    decls.extend(ec_assumption_wrappers)
+    decls.extend(ec_axioms)
     decls.extend(lemmas)
+
+    ec_pr_lemmas: list[ec_ast.EcTopDecl] = []
+    for i in range(len(proof.steps) - 1):
+        step_a = proof.steps[i]
+        step_b = proof.steps[i + 1]
+        assert isinstance(step_a, frog_ast.Step)
+        assert isinstance(step_b, frog_ast.Step)
+        left_wrapper = f"Game_step_{i}"
+        right_wrapper = f"Game_step_{i + 1}"
+        if _is_assumption_hop(step_a, step_b):
+            assert step_a.reduction is not None
+            reduction_name = step_a.reduction.name
+            assert isinstance(step_a.challenger, frog_ast.ConcreteGame)
+            assumption_game_file_name = step_a.challenger.game.name
+            gf_a = next(g for g in game_files if g.name == assumption_game_file_name)
+            left_side = step_a.challenger.which
+            assert isinstance(step_b.challenger, frog_ast.ConcreteGame)
+            right_side = step_b.challenger.which
+            left_assumption_wrapper = assumption_wrapper_names[
+                (assumption_game_file_name, left_side)
+            ]
+            right_assumption_wrapper = assumption_wrapper_names[
+                (assumption_game_file_name, right_side)
+            ]
+            # The advantage axiom is stated as |Pr[side0] - Pr[side1]|;
+            # if this hop goes side1 -> side0 we must normalize.
+            reverse_direction = left_side == gf_a.games[1].name
+            ec_pr_lemmas.append(
+                pt.translate_assumption_hop_pr_lemma(
+                    hop_index=i,
+                    adversary_type_name=outer_adv_type_name,
+                    scheme_module_expr=scheme.name,
+                    left_wrapper_name=left_wrapper,
+                    right_wrapper_name=right_wrapper,
+                    assumption_name=assumption_game_file_name,
+                    reduction_adv_name=f"{reduction_name}_Adv",
+                    left_assumption_wrapper=left_assumption_wrapper,
+                    right_assumption_wrapper=right_assumption_wrapper,
+                    reverse_direction=reverse_direction,
+                )
+            )
+        else:
+            ec_pr_lemmas.append(
+                pt.translate_inlining_hop_pr_lemma(
+                    hop_index=i,
+                    adversary_type_name=outer_adv_type_name,
+                    scheme_module_expr=scheme.name,
+                    left_wrapper_name=left_wrapper,
+                    right_wrapper_name=right_wrapper,
+                )
+            )
+    decls.extend(ec_pr_lemmas)
 
     ec_file = ec_ast.EcFile(
         requires=["AllCore", "Distr"],

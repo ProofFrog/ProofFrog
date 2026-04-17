@@ -40,10 +40,12 @@ class OpDecl:
 
 @dataclass
 class Axiom:
-    """`axiom <name> : <formula>.`"""
+    """``axiom <name> [(<module_args>)] [<memory_args>] : <formula>.``"""
 
     name: str
     formula: str
+    module_args: list[ModuleParam] = field(default_factory=list)
+    memory_args: list[str] = field(default_factory=list)
 
 
 # --- Module type members -------------------------------------------------
@@ -127,10 +129,11 @@ class Proc:
 
 @dataclass
 class ModuleType:
-    """`module type <name> = { <procs> }.`"""
+    """``module type <name> [(<params>)] = { <procs> }.``"""
 
     name: str
     procs: list[ProcSig]
+    params: list[ModuleParam] = field(default_factory=list)
 
 
 @dataclass
@@ -149,6 +152,29 @@ class Module:
     procs: list[Proc]
     params: list[ModuleParam] = field(default_factory=list)
     implements: str | None = None
+
+
+@dataclass
+class ProbLemma:
+    """A lemma with module / memory params and a free-form statement.
+
+    Renders as::
+
+        lemma <name> [<module_args>] [<memory_args>] :
+          <statement>.
+        proof.
+          <body line 1>
+          <body line 2>
+          ...
+
+    The body must end with ``"qed."``.
+    """
+
+    name: str
+    module_args: list[ModuleParam]
+    memory_args: list[str]
+    statement: str
+    body: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -182,7 +208,7 @@ class Lemma:
 # --- The whole file ------------------------------------------------------
 
 
-EcTopDecl = Union[TypeDecl, OpDecl, Axiom, ModuleType, Module, Lemma, str]
+EcTopDecl = Union[TypeDecl, OpDecl, Axiom, ModuleType, Module, Lemma, ProbLemma, str]
 
 
 @dataclass
@@ -222,9 +248,21 @@ def _render_decl(decl: EcTopDecl) -> list[str]:
     if isinstance(decl, OpDecl):
         return [f"op {decl.name} : {decl.signature}."]
     if isinstance(decl, Axiom):
-        return [f"axiom {decl.name} : {decl.formula}."]
+        header = f"axiom {decl.name}"
+        if decl.module_args:
+            args = ", ".join(f"({p.name} <: {p.module_type})" for p in decl.module_args)
+            header += f" {args}"
+        if decl.memory_args:
+            header += " " + " ".join(decl.memory_args)
+        if not decl.module_args and not decl.memory_args:
+            return [f"{header} : {decl.formula}."]
+        return [f"{header} :", f"  {decl.formula}."]
     if isinstance(decl, ModuleType):
-        out = [f"module type {decl.name} = {{"]
+        header = f"module type {decl.name}"
+        if decl.params:
+            param_str = ", ".join(f"{p.name} : {p.module_type}" for p in decl.params)
+            header += f" ({param_str})"
+        out = [f"{header} = {{"]
         for proc in decl.procs:
             out.append(f"  {_render_proc_sig(proc)}")
         out.append("}.")
@@ -233,7 +271,27 @@ def _render_decl(decl: EcTopDecl) -> list[str]:
         return _render_module(decl)
     if isinstance(decl, Lemma):
         return _render_lemma(decl)
+    if isinstance(decl, ProbLemma):
+        return _render_prob_lemma(decl)
     raise TypeError(f"Unknown top-level decl: {type(decl).__name__}")
+
+
+def _render_prob_lemma(lemma: ProbLemma) -> list[str]:
+    header = f"lemma {lemma.name}"
+    if lemma.module_args:
+        args = ", ".join(f"({p.name} <: {p.module_type})" for p in lemma.module_args)
+        header += f" {args}"
+    if lemma.memory_args:
+        header += " " + " ".join(lemma.memory_args)
+    out = [f"{header} :"]
+    out.append(f"  {lemma.statement}.")
+    if not lemma.body:
+        out.append("proof. admit. qed.")
+        return out
+    out.append("proof.")
+    for line in lemma.body:
+        out.append(f"  {line}")
+    return out
 
 
 def _render_proc_sig(proc: ProcSig) -> str:

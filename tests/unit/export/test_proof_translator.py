@@ -59,12 +59,13 @@ def test_translate_hops_emits_admit_per_hop() -> None:
     assert all(lemma.body == ["admit.", "qed."] for lemma in lemmas)
 
 
-def test_translate_assumption_axioms() -> None:
-    """One op + two axioms per assumption."""
-    decls = pt.translate_assumption_axioms(
+def test_translate_assumption_axioms_theory() -> None:
+    """One op + two axioms, quantified over abstract scheme Em."""
+    decls = pt.translate_assumption_axioms_theory(
         assumption_name="OneTimeSecrecy",
         adversary_type_name="OneTimeSecrecy_Adv",
-        scheme_module_expr="OTP",
+        scheme_type_name="Scheme",
+        scheme_param_name="Em",
         real_wrapper_name="Game_OneTimeSecrecy_Real",
         random_wrapper_name="Game_OneTimeSecrecy_Random",
     )
@@ -77,11 +78,14 @@ def test_translate_assumption_axioms() -> None:
     pos_axiom = next(a for a in axiom_decls if a.name == "eps_OneTimeSecrecy_pos")
     assert pos_axiom.formula == "0%r <= eps_OneTimeSecrecy"
     adv_axiom = next(a for a in axiom_decls if a.name == "OneTimeSecrecy_advantage")
-    assert adv_axiom.module_args[0].name == "A"
-    assert adv_axiom.module_args[0].module_type == "OneTimeSecrecy_Adv {-OTP}"
+    # Scheme param declared first so adversary can reference {-Em}.
+    assert adv_axiom.module_args[0].name == "Em"
+    assert adv_axiom.module_args[0].module_type == "Scheme"
+    assert adv_axiom.module_args[1].name == "A"
+    assert adv_axiom.module_args[1].module_type == "OneTimeSecrecy_Adv {-Em}"
     assert "&m" in adv_axiom.memory_args
-    assert "Game_OneTimeSecrecy_Real(A)" in adv_axiom.formula
-    assert "Game_OneTimeSecrecy_Random(A)" in adv_axiom.formula
+    assert "Game_OneTimeSecrecy_Real(Em, A)" in adv_axiom.formula
+    assert "Game_OneTimeSecrecy_Random(Em, A)" in adv_axiom.formula
     assert "<= eps_OneTimeSecrecy" in adv_axiom.formula
 
 
@@ -123,9 +127,9 @@ def test_translate_assumption_hop_pr() -> None:
     assert lemma.name == "hop_1_pr"
     assert "<= eps_OneTimeSecrecy" in lemma.statement
     body = "\n".join(lemma.body)
-    assert "Game_OneTimeSecrecy_Real(R1_Adv(A))" in body
-    assert "Game_OneTimeSecrecy_Random(R1_Adv(A))" in body
-    assert "OneTimeSecrecy_advantage" in body
+    assert "Game_OneTimeSecrecy_Real(OTP, R1_Adv(A))" in body
+    assert "Game_OneTimeSecrecy_Random(OTP, R1_Adv(A))" in body
+    assert "OneTimeSecrecy_advantage OTP (R1_Adv(A))" in body
     assert "byequiv" in body
     assert "qed." in body
 

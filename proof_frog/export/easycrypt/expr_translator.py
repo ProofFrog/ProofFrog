@@ -38,6 +38,15 @@ class ExpressionTranslator:
             return expr.name
         if isinstance(expr, frog_ast.BinaryOperation):
             return self._translate_binop(expr)
+        if isinstance(expr, frog_ast.Tuple):
+            parts = [self.translate(v) for v in expr.values]
+            return "(" + ", ".join(parts) + ")"
+        if isinstance(expr, frog_ast.ArrayAccess) and isinstance(
+            expr.index, frog_ast.Integer
+        ):
+            inner = self.translate(expr.the_array)
+            # EC tuples are 1-indexed via ``t.`N``; FrogLang is 0-indexed.
+            return f"{_paren(inner)}.`{expr.index.num + 1}"
         raise NotImplementedError(
             f"Expression translation not implemented for "
             f"{type(expr).__name__}: {expr}"

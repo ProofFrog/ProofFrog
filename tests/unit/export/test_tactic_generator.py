@@ -56,7 +56,7 @@ def test_absorbed_only_trace_emits_universal_template() -> None:
         right_ast=right,
         method_name="enc",
     )
-    assert body == ["proc.", "inline *.", "wp.", "auto.", "qed."]
+    assert body == ["proc.", "inline *.", "sim.", "qed."]
     # sanity: no handler output for absorbed-only traces
     assert all("rnd" not in line for line in body)
 

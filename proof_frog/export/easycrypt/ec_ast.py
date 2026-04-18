@@ -25,9 +25,10 @@ class EcType:
 
 @dataclass
 class TypeDecl:
-    """`type <name>.`"""
+    """`type <name>.` or `type <name> = <definition>.`"""
 
     name: str
+    definition: str | None = None
 
 
 @dataclass
@@ -208,7 +209,71 @@ class Lemma:
 # --- The whole file ------------------------------------------------------
 
 
-EcTopDecl = Union[TypeDecl, OpDecl, Axiom, ModuleType, Module, Lemma, ProbLemma, str]
+@dataclass
+class AbstractTheory:
+    """``abstract theory <name>. <decls...> end <name>.``"""
+
+    name: str
+    decls: list[EcTopDecl] = field(default_factory=list)
+
+
+@dataclass
+class Clone:
+    """``clone <source_theory> as <alias> [with <bindings>].``"""
+
+    source_theory: str
+    alias: str
+    type_bindings: list[tuple[str, str]] = field(default_factory=list)
+    op_bindings: list[tuple[str, str]] = field(default_factory=list)
+
+
+def qualified(clone_alias: str, local_name: str) -> str:
+    """Return ``<clone_alias>.<local_name>`` for referencing cloned names."""
+    return f"{clone_alias}.{local_name}"
+
+
+@dataclass
+class DeclareModule:
+    """``declare module <name> <: <module_type> [{-<m1>, -<m2>, ...}].``
+
+    Only valid inside a ``Section``. At ``end section.``, EasyCrypt
+    generalizes all lemmas in the section over these abstract modules.
+    ``disjoint_from`` lists other declared module names whose state must
+    be disjoint from this one (needed for ``swap`` to commute calls across
+    modules in proofs).
+    """
+
+    name: str
+    module_type: str
+    disjoint_from: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Section:
+    """``section [<name>]. <decls...> end [<name>].``
+
+    Wraps a block of declarations. Lemmas inside a section are
+    generalized over any ``declare module`` names at ``end``.
+    """
+
+    name: str | None
+    decls: list[EcTopDecl] = field(default_factory=list)
+
+
+EcTopDecl = Union[
+    TypeDecl,
+    OpDecl,
+    Axiom,
+    ModuleType,
+    Module,
+    Lemma,
+    ProbLemma,
+    DeclareModule,
+    "AbstractTheory",
+    "Clone",
+    "Section",
+    str,
+]
 
 
 @dataclass
@@ -244,13 +309,15 @@ def _render_decl(decl: EcTopDecl) -> list[str]:
     if isinstance(decl, str):
         return [decl]
     if isinstance(decl, TypeDecl):
+        if decl.definition is not None:
+            return [f"type {decl.name} = {decl.definition}."]
         return [f"type {decl.name}."]
     if isinstance(decl, OpDecl):
         return [f"op {decl.name} : {decl.signature}."]
     if isinstance(decl, Axiom):
         header = f"axiom {decl.name}"
         if decl.module_args:
-            args = ", ".join(f"({p.name} <: {p.module_type})" for p in decl.module_args)
+            args = " ".join(f"({p.name} <: {p.module_type})" for p in decl.module_args)
             header += f" {args}"
         if decl.memory_args:
             header += " " + " ".join(decl.memory_args)
@@ -273,13 +340,63 @@ def _render_decl(decl: EcTopDecl) -> list[str]:
         return _render_lemma(decl)
     if isinstance(decl, ProbLemma):
         return _render_prob_lemma(decl)
+    if isinstance(decl, AbstractTheory):
+        return _render_abstract_theory(decl)
+    if isinstance(decl, Clone):
+        return _render_clone(decl)
+    if isinstance(decl, DeclareModule):
+        suffix = ""
+        if decl.disjoint_from:
+            suffix = " {" + ", ".join(f"-{n}" for n in decl.disjoint_from) + "}"
+        return [f"declare module {decl.name} <: {decl.module_type}{suffix}."]
+    if isinstance(decl, Section):
+        return _render_section(decl)
     raise TypeError(f"Unknown top-level decl: {type(decl).__name__}")
+
+
+def _render_section(section: Section) -> list[str]:
+    header = "section" if section.name is None else f"section {section.name}"
+    out = [f"{header}."]
+    for i, inner in enumerate(section.decls):
+        if i > 0:
+            out.append("")
+        for line in _render_decl(inner):
+            out.append(f"  {line}" if line else line)
+    footer = "end section" if section.name is None else f"end section {section.name}"
+    out.append(f"{footer}.")
+    return out
+
+
+def _render_abstract_theory(theory: AbstractTheory) -> list[str]:
+    out = [f"abstract theory {theory.name}."]
+    for i, inner in enumerate(theory.decls):
+        if i > 0:
+            out.append("")
+        for line in _render_decl(inner):
+            out.append(f"  {line}" if line else line)
+    out.append(f"end {theory.name}.")
+    return out
+
+
+def _render_clone(clone: Clone) -> list[str]:
+    bindings: list[str] = []
+    for name, concrete in clone.type_bindings:
+        bindings.append(f"type {name} <- {concrete}")
+    for name, concrete in clone.op_bindings:
+        bindings.append(f"op {name} <- {concrete}")
+    if not bindings:
+        return [f"clone {clone.source_theory} as {clone.alias}."]
+    out = [f"clone {clone.source_theory} as {clone.alias} with"]
+    for i, binding in enumerate(bindings):
+        terminator = "." if i == len(bindings) - 1 else ","
+        out.append(f"  {binding}{terminator}")
+    return out
 
 
 def _render_prob_lemma(lemma: ProbLemma) -> list[str]:
     header = f"lemma {lemma.name}"
     if lemma.module_args:
-        args = ", ".join(f"({p.name} <: {p.module_type})" for p in lemma.module_args)
+        args = " ".join(f"({p.name} <: {p.module_type})" for p in lemma.module_args)
         header += f" {args}"
     if lemma.memory_args:
         header += " " + " ".join(lemma.memory_args)
@@ -340,7 +457,7 @@ def _render_stmt(stmt: EcStmt) -> str:
 def _render_lemma(lemma: Lemma) -> list[str]:
     header = f"lemma {lemma.name}"
     if lemma.module_args:
-        arg_str = ", ".join(f"({p.name} <: {p.module_type})" for p in lemma.module_args)
+        arg_str = " ".join(f"({p.name} <: {p.module_type})" for p in lemma.module_args)
         header += f" {arg_str}"
     out = [f"{header} :"]
     out.append(f"  equiv [ {lemma.left} ~ {lemma.right} :")

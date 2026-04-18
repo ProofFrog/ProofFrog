@@ -12,8 +12,10 @@ from proof_frog.export.easycrypt import exporter
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+EXAMPLES = REPO_ROOT / "examples"
 OTP_PROOF = REPO_ROOT / "examples" / "joy" / "Proofs" / "Ch2" / "OTPSecure.proof"
 OTP_LR_PROOF = REPO_ROOT / "examples" / "joy" / "Proofs" / "Ch2" / "OTPSecureLR.proof"
+CES_PROOF = EXAMPLES / "joy" / "Proofs" / "Ch2" / "ChainedEncryptionSecure.proof"
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
 
@@ -145,8 +147,50 @@ def test_export_otpsecurelr_emits_main_theorem() -> None:
     """The exported file declares a chained main_theorem lemma."""
     output = exporter.export_proof_file(str(OTP_LR_PROOF))
     assert "lemma main_theorem" in output
-    # Bound: two assumption hops, each contributing eps_OneTimeSecrecy.
-    assert "eps_OneTimeSecrecy + eps_OneTimeSecrecy" in output
+    # Bound: two assumption hops, each contributing eps_OneTimeSecrecy,
+    # now qualified through the clone alias E.
+    assert "E_c.eps_OneTimeSecrecy + E_c.eps_OneTimeSecrecy" in output
     # Endpoints: step_0 (Game_OTSLR_Left) and step_5 (Game_OTSLR_Right).
     assert "Pr[Game_step_0(A).main() @ &m : res]" in output
     assert "Pr[Game_step_5(A).main() @ &m : res] |" in output
+
+
+def test_export_otpsecurelr_uses_theory_and_clone() -> None:
+    """The exported file wraps the primitive/games in an abstract theory
+    and instantiates it via clone for the scheme."""
+    output = exporter.export_proof_file(str(OTP_LR_PROOF))
+    assert "abstract theory SymEnc_Theory." in output
+    assert "end SymEnc_Theory." in output
+    assert "clone SymEnc_Theory as E_c" in output
+    # Scheme implements the cloned Scheme module type.
+    assert "module OTP : E_c.Scheme" in output
+    # Adversary / oracle types are qualified externally through the clone.
+    assert "E_c.OneTimeSecrecyLR_Adv" in output
+    assert "E_c.OneTimeSecrecy_Oracle" in output
+    # Axiom and epsilon are referenced through the clone alias.
+    assert "E_c.eps_OneTimeSecrecy" in output
+    assert "E_c.OneTimeSecrecy_advantage" in output
+
+
+def test_export_chained_encryption_emits_set_abstract_types() -> None:
+    """Set let-bindings in CES become top-level EC type decls (abstract or alias)."""
+    output = exporter.export_proof_file(str(CES_PROOF))
+    for ty in (
+        "IntermediateSpace",
+        "KeySpace1",
+        "KeySpace2",
+        "MessageSpace",
+        "CiphertextSpace1",
+        "CiphertextSpace2",
+    ):
+        assert f"type {ty}." in output or f"type {ty} =" in output, (
+            f"missing `type {ty}` in:\n{output}"
+        )
+
+
+def test_export_chained_encryption_does_not_crash() -> None:
+    """ChainedEncryptionSecure exports without raising."""
+    output = exporter.export_proof_file(str(CES_PROOF))
+    assert "module" in output  # sanity: got some EC output
+    # Two distinct assumption hops; each produces an eps term.
+    assert "eps_OneTimeSecrecy" in output

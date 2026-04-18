@@ -54,21 +54,45 @@ _Handler = Callable[
 _HANDLERS: dict[str, _Handler] = {}  # populated below
 
 
-def generate(
+def generate(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     left_trace: dict[str, object],
     right_trace: dict[str, object],
     left_ast: frog_ast.Game,
     right_ast: frog_ast.Game,
     method_name: str,
+    has_multi_module: bool = False,
 ) -> list[str]:
     """Produce EC tactic lines for an interchangeability hop.
 
     Returns a list of lines suitable to assign to ``ec_ast.Lemma.body``.
     Always ends with ``"qed."``. May contain an admit fallback when the
     trace contains an unhandled transform.
+
+    ``has_multi_module`` indicates the hop involves multi-module
+    composition (reduction + scheme), where ``inline *`` produces
+    different statement structures that ``sim``/``auto`` cannot close.
     """
+    if has_multi_module:
+        return [
+            (
+                "admit. (* multi-module composition;"
+                " needs manual swap/call tactics *)"
+            ),
+            "qed.",
+        ]
     left_fired = _flatten_transforms(left_trace)
     right_fired = _flatten_transforms(right_trace)
+    # Topological Sorting fires on both sides during canonicalization
+    # but cancels in the residual. EC's ``inline *`` doesn't reorder
+    # statements, so the proof needs ``swap`` tactics that we cannot
+    # reliably emit yet. Detect and fall back to admit.
+    all_fired = set(left_fired) | set(right_fired)
+    if "Topological Sorting" in all_fired:
+        return [
+            "admit. (* statement reordering (Topological Sorting); "
+            "needs swap tactic *)",
+            "qed.",
+        ]
     # When the same non-absorbed transform fires on both sides, the two
     # simplifications cancel out at the EC level (both EC programs shrink
     # by the same step); emit the handler only for the asymmetric residue.
@@ -94,7 +118,7 @@ def generate(
         handled_lines.extend(produced)
     if handled_lines:
         return ["proc.", "inline *.", "wp.", *handled_lines, "qed."]
-    return ["proc.", "inline *.", "wp.", "auto.", "qed."]
+    return ["proc.", "inline *.", "sim.", "qed."]
 
 
 def _flatten_transforms(trace: dict[str, object]) -> list[str]:

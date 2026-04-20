@@ -140,3 +140,52 @@ def test_reindex_with_scan_loop() -> None:
         }
         """,
     )
+
+
+def test_declines_when_f_not_injective() -> None:
+    _apply_and_expect_unchanged(
+        """
+        Game G(T TT) {
+            Map<TT.Input, BitString<16>> M;
+            Void Store(TT.Input a, BitString<16> s) { M[a] = s; }
+            BitString<16>? Lookup(TT.Input a) {
+                if (TT.Eval(a) in M) { return M[TT.Eval(a)]; }
+                return None;
+            }
+        }
+        """,
+        _ctx_with_primitive(_NON_INJECTIVE_PRIMITIVE),
+    )
+
+
+def test_declines_when_f_not_deterministic() -> None:
+    _apply_and_expect_unchanged(
+        """
+        Game G(T TT) {
+            Map<TT.Input, BitString<16>> M;
+            Void Store(TT.Input a, BitString<16> s) { M[a] = s; }
+            BitString<16>? Lookup(TT.Input a) {
+                if (TT.Eval(a) in M) { return M[TT.Eval(a)]; }
+                return None;
+            }
+        }
+        """,
+        _ctx_with_primitive(_NON_DETERMINISTIC_PRIMITIVE),
+    )
+
+
+def test_declines_when_key_used_as_raw_A() -> None:
+    _apply_and_expect_unchanged(
+        """
+        Game G(T TT) {
+            Map<TT.Input, BitString<16>> M;
+            Void Store(TT.Input a, BitString<16> s) { M[a] = s; }
+            TT.Input Leak() {
+                for ([TT.Input, BitString<16>] e in M.entries) {
+                    return e[0];
+                }
+                return 0;
+            }
+        }
+        """,
+    )

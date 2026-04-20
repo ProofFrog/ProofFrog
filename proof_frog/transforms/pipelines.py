@@ -25,6 +25,7 @@ from .random_functions import (
     FreshInputRFToUniform,
     LazyMapToSampledFunction,
 )
+from .map_iteration import LazyMapScan
 from .inlining import (
     RedundantCopy,
     IfSplitBranchAssignment,
@@ -95,6 +96,7 @@ CORE_PIPELINE: list[TransformPass] = [
     UniformBijectionElimination(),
     FoldTupleIndex(),
     ExtractRepeatedTupleAccess(),
+    LazyMapScan(),
     LazyMapToSampledFunction(),
     ExtractRFCalls(),
     UniqueRFSimplification(),

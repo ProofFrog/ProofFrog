@@ -457,6 +457,15 @@ class ProofEngine:
                     raise TypeError("Must instantiate either a Primitive or Scheme ")
             else:
                 self.proof_namespace[let.name] = copy.deepcopy(let.value)
+                # For abstract primitive-typed lets (e.g. `TrapdoorTest T;`
+                # with no initializer), bind the primitive itself into
+                # proof_namespace[let.name] so that method-annotation
+                # lookups on calls like `T.Eval(...)` resolve to the
+                # primitive's method signatures.
+                if let.value is None and isinstance(let.type, frog_ast.Variable):
+                    defn = self.definition_namespace.get(let.type.name)
+                    if isinstance(defn, (frog_ast.Primitive, frog_ast.Scheme)):
+                        self.proof_namespace[let.name] = copy.deepcopy(defn)
                 if isinstance(let.type, frog_ast.IntType):
                     if let.value is not None:
                         self.variables[let.name] = let.value

@@ -189,3 +189,157 @@ def test_declines_when_key_used_as_raw_A() -> None:
         }
         """,
     )
+
+
+# ---------------------------------------------------------------------------
+# Multi-arg f: f(Secret sk, Input x) with sk a read-only post-Initialize field
+# ---------------------------------------------------------------------------
+
+
+_MULTIARG_PRIMITIVE = """
+Primitive T(Set I, Set Y, Set K) {
+    Set Input = I;
+    Set Image = Y;
+    Set Secret = K;
+    deterministic injective Image Eval(Secret sk, Input x);
+}
+"""
+
+
+def test_basic_reindex_multi_arg() -> None:
+    _apply_and_expect(
+        """
+        Game G(T TT) {
+            TT.Secret sk;
+            Map<TT.Input, BitString<16>> M;
+            Void Initialize() {
+                sk <- TT.Secret;
+            }
+            Void Store(TT.Input a, BitString<16> s) {
+                M[a] = s;
+            }
+            BitString<16>? Lookup(TT.Input a) {
+                if (TT.Eval(sk, a) in M) {
+                    return M[TT.Eval(sk, a)];
+                }
+                return None;
+            }
+        }
+        """,
+        """
+        Game G(T TT) {
+            TT.Secret sk;
+            Map<TT.Image, BitString<16>> M;
+            Void Initialize() {
+                sk <- TT.Secret;
+            }
+            Void Store(TT.Input a, BitString<16> s) {
+                M[TT.Eval(sk, a)] = s;
+            }
+            BitString<16>? Lookup(TT.Input a) {
+                if (TT.Eval(sk, a) in M) {
+                    return M[TT.Eval(sk, a)];
+                }
+                return None;
+            }
+        }
+        """,
+        ctx=_ctx_with_primitive(_MULTIARG_PRIMITIVE),
+    )
+
+
+def test_reindex_multi_arg_with_scan_loop() -> None:
+    _apply_and_expect(
+        """
+        Game G(T TT) {
+            TT.Secret sk;
+            Map<TT.Input, BitString<16>> M;
+            Void Initialize() {
+                sk <- TT.Secret;
+            }
+            Void Store(TT.Input a, BitString<16> s) {
+                M[a] = s;
+            }
+            BitString<16>? Scan(TT.Image y) {
+                for ([TT.Input, BitString<16>] e in M.entries) {
+                    if (TT.Eval(sk, e[0]) == y) {
+                        return e[1];
+                    }
+                }
+                return None;
+            }
+        }
+        """,
+        """
+        Game G(T TT) {
+            TT.Secret sk;
+            Map<TT.Image, BitString<16>> M;
+            Void Initialize() {
+                sk <- TT.Secret;
+            }
+            Void Store(TT.Input a, BitString<16> s) {
+                M[TT.Eval(sk, a)] = s;
+            }
+            BitString<16>? Scan(TT.Image y) {
+                for ([TT.Image, BitString<16>] e in M.entries) {
+                    if (e[0] == y) {
+                        return e[1];
+                    }
+                }
+                return None;
+            }
+        }
+        """,
+        ctx=_ctx_with_primitive(_MULTIARG_PRIMITIVE),
+    )
+
+
+def test_declines_when_context_arg_assigned_outside_initialize() -> None:
+    _apply_and_expect_unchanged(
+        """
+        Game G(T TT) {
+            TT.Secret sk;
+            Map<TT.Input, BitString<16>> M;
+            Void Initialize() {
+                sk <- TT.Secret;
+            }
+            Void Rotate() {
+                sk <- TT.Secret;
+            }
+            Void Store(TT.Input a, BitString<16> s) { M[a] = s; }
+            BitString<16>? Lookup(TT.Input a) {
+                if (TT.Eval(sk, a) in M) {
+                    return M[TT.Eval(sk, a)];
+                }
+                return None;
+            }
+        }
+        """,
+        ctx=_ctx_with_primitive(_MULTIARG_PRIMITIVE),
+    )
+
+
+def test_declines_when_call_sites_disagree_on_context_arg() -> None:
+    _apply_and_expect_unchanged(
+        """
+        Game G(T TT) {
+            TT.Secret sk;
+            TT.Secret sk2;
+            Map<TT.Input, BitString<16>> M;
+            Void Initialize() {
+                sk <- TT.Secret;
+                sk2 <- TT.Secret;
+            }
+            Void Store(TT.Input a, BitString<16> s) { M[a] = s; }
+            BitString<16>? Lookup1(TT.Input a) {
+                if (TT.Eval(sk, a) in M) { return M[TT.Eval(sk, a)]; }
+                return None;
+            }
+            BitString<16>? Lookup2(TT.Input a) {
+                if (TT.Eval(sk2, a) in M) { return M[TT.Eval(sk2, a)]; }
+                return None;
+            }
+        }
+        """,
+        ctx=_ctx_with_primitive(_MULTIARG_PRIMITIVE),
+    )

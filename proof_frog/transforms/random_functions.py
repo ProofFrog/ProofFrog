@@ -2091,3 +2091,20 @@ class LazyMapToSampledFunction(TransformPass):
                 list(target.block.statements[:if_idx]) + [new_return]
             )
         return new_game
+
+
+_LAZY_MAP_PAIR_NAME = "Lazy Map Pair to Sampled Function"
+
+
+class LazyMapPairToSampledFunction(TransformPass):
+    """Generalize LazyMapToSampledFunction to a pair of maps with
+    mutually-disjoint lazy-lookup guards (design §4).
+
+    Preconditions (P2-1 .. P2-5 from design §4.2): see docstring of
+    ``_try_rewrite_pair``.
+    """
+
+    name = _LAZY_MAP_PAIR_NAME
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return game

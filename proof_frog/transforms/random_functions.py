@@ -1743,3 +1743,351 @@ class ChallengeExclusionRFToUniform(TransformPass):
         return ChallengeExclusionRFToUniformTransformer().transform(
             game, proof_namespace=ctx.proof_namespace, ctx=ctx
         )
+
+
+# ---------------------------------------------------------------------------
+# Lazy map -> sampled Function canonicalization (design spec §5.3)
+# ---------------------------------------------------------------------------
+
+
+_LAZY_MAP_NAME = "Lazy Map To Sampled Function"
+
+
+def _is_idiom_if(stmt: frog_ast.ASTNode, map_name: str, key_name: str) -> bool:
+    """Return True if *stmt* is ``if (key in map) return map[key];`` with no
+    else and a single-statement body."""
+    if not isinstance(stmt, frog_ast.IfStatement):
+        return False
+    if len(stmt.conditions) != 1 or len(stmt.blocks) != 1:
+        return False
+    cond = stmt.conditions[0]
+    if not (
+        isinstance(cond, frog_ast.BinaryOperation)
+        and cond.operator == frog_ast.BinaryOperators.IN
+        and isinstance(cond.left_expression, frog_ast.Variable)
+        and cond.left_expression.name == key_name
+        and isinstance(cond.right_expression, frog_ast.Variable)
+        and cond.right_expression.name == map_name
+    ):
+        return False
+    body = list(stmt.blocks[0].statements)
+    if len(body) != 1 or not isinstance(body[0], frog_ast.ReturnStatement):
+        return False
+    ret = body[0].expression
+    return (
+        isinstance(ret, frog_ast.ArrayAccess)
+        and isinstance(ret.the_array, frog_ast.Variable)
+        and ret.the_array.name == map_name
+        and isinstance(ret.index, frog_ast.Variable)
+        and ret.index.name == key_name
+    )
+
+
+def _match_idiom_suffix(
+    method: frog_ast.Method,
+    map_name: str,
+    value_type: frog_ast.Type,
+) -> tuple[int, str, str] | None:
+    """Match the 4-statement lazy-lookup idiom suffix of *method*'s body."""
+    stmts = list(method.block.statements)
+    if len(stmts) < 4:
+        return None
+    if_idx = len(stmts) - 4
+    if_stmt, sample_stmt, assign_stmt, ret_stmt = stmts[if_idx:]
+
+    if not (
+        isinstance(sample_stmt, frog_ast.Sample)
+        and isinstance(sample_stmt.var, frog_ast.Variable)
+        and sample_stmt.the_type is not None
+        and sample_stmt.the_type == value_type
+        and sample_stmt.sampled_from == value_type
+    ):
+        return None
+    sample_var = sample_stmt.var.name
+
+    if not (
+        isinstance(assign_stmt, frog_ast.Assignment)
+        and isinstance(assign_stmt.var, frog_ast.ArrayAccess)
+        and isinstance(assign_stmt.var.the_array, frog_ast.Variable)
+        and assign_stmt.var.the_array.name == map_name
+        and isinstance(assign_stmt.var.index, frog_ast.Variable)
+        and isinstance(assign_stmt.value, frog_ast.Variable)
+        and assign_stmt.value.name == sample_var
+    ):
+        return None
+    key_name = assign_stmt.var.index.name
+
+    if not (
+        isinstance(ret_stmt, frog_ast.ReturnStatement)
+        and isinstance(ret_stmt.expression, frog_ast.Variable)
+        and ret_stmt.expression.name == sample_var
+    ):
+        return None
+
+    if not _is_idiom_if(if_stmt, map_name, key_name):
+        return None
+
+    param_names = {p.name for p in method.signature.parameters}
+    if key_name not in param_names:
+        return None
+
+    return if_idx, key_name, sample_var
+
+
+def _references_map(node: frog_ast.ASTNode, map_name: str) -> bool:
+    """Return True if *node* syntactically references ``Variable(map_name)``."""
+
+    def matcher(n: frog_ast.ASTNode) -> bool:
+        return isinstance(n, frog_ast.Variable) and n.name == map_name
+
+    return SearchVisitor(matcher).visit(node) is not None
+
+
+class LazyMapToSampledFunction(TransformPass):
+    """Rewrite a ``Map<K, V>`` field used exclusively as a lazy lookup
+    table into a sampled ``Function<K, V>`` field.
+
+    Preconditions (design spec §S3):
+
+    - (a) Every reference to the map field lies inside the idiom suffix of
+      some method.
+    - (b) The map field is not explicitly initialized in ``Initialize``
+      (maps default to empty per SEMANTICS.md §6.7).
+    - (c) No method uses ``|M|``, ``M.keys``, ``M.values``, or ``M.entries``
+      (follows from (a)).
+
+    On success:
+
+    1. Change the field type from ``Map<K, V>`` to ``Function<K, V>``.
+    2. Prepend ``M <- Function<K, V>;`` to ``Initialize`` (creating the
+       method if absent).
+    3. Replace each idiom suffix with ``return M(key);``.
+    """
+
+    name = _LAZY_MAP_NAME
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        for fld in game.fields:
+            if not isinstance(fld.type, frog_ast.MapType):
+                continue
+            rewritten = self._try_rewrite(game, fld, ctx)
+            if rewritten is not None:
+                return rewritten
+        return game
+
+    def _try_rewrite(
+        self,
+        game: frog_ast.Game,
+        fld: frog_ast.Field,
+        ctx: PipelineContext,
+    ) -> frog_ast.Game | None:
+        map_name = fld.name
+        assert isinstance(fld.type, frog_ast.MapType)
+        key_type = fld.type.key_type
+        value_type = fld.type.value_type
+
+        any_idiom = any(
+            _match_idiom_suffix(m, map_name, value_type) is not None
+            for m in game.methods
+        )
+
+        if self._initialize_touches_map(game, map_name, value_type, ctx):
+            return None
+
+        rewrites = self._collect_method_rewrites(
+            game, map_name, value_type, any_idiom, ctx
+        )
+        if rewrites is None:
+            return None
+
+        return self._build_rewritten_game(
+            game, map_name, key_type, value_type, rewrites
+        )
+
+    def _emit_near_miss(
+        self,
+        ctx: PipelineContext,
+        reason: str,
+        location: frog_ast.SourceOrigin | None,
+        variable: str,
+        method_name: str | None,
+        suggestion: str | None = None,
+    ) -> None:
+        ctx.near_misses.append(
+            NearMiss(
+                transform_name=_LAZY_MAP_NAME,
+                reason=reason,
+                location=location,
+                suggestion=suggestion,
+                variable=variable,
+                method=method_name,
+            )
+        )
+
+    def _initialize_touches_map(
+        self,
+        game: frog_ast.Game,
+        map_name: str,
+        value_type: frog_ast.Type,
+        ctx: PipelineContext,
+    ) -> bool:
+        """Return True (and optionally emit a near-miss) if Initialize
+        explicitly touches the map field."""
+        for method in game.methods:
+            if method.signature.name != "Initialize":
+                continue
+            for stmt in method.block.statements:
+                if not isinstance(stmt, (frog_ast.Assignment, frog_ast.Sample)):
+                    continue
+                v = stmt.var
+                target_var: frog_ast.Variable | None = None
+                if isinstance(v, frog_ast.Variable):
+                    target_var = v
+                elif isinstance(v, frog_ast.ArrayAccess) and isinstance(
+                    v.the_array, frog_ast.Variable
+                ):
+                    target_var = v.the_array
+                if target_var is None or target_var.name != map_name:
+                    continue
+                if any(
+                    _match_idiom_suffix(m, map_name, value_type) is not None
+                    for m in game.methods
+                ):
+                    self._emit_near_miss(
+                        ctx,
+                        (
+                            f"Map '{map_name}' is explicitly initialized in "
+                            "Initialize; lazy-map canonicalization requires "
+                            "an empty initial map"
+                        ),
+                        stmt.origin,
+                        map_name,
+                        "Initialize",
+                    )
+                return True
+        return False
+
+    def _collect_method_rewrites(
+        self,
+        game: frog_ast.Game,
+        map_name: str,
+        value_type: frog_ast.Type,
+        any_idiom: bool,
+        ctx: PipelineContext,
+    ) -> list[tuple[int, int, str]] | None:
+        """For each non-Initialize method, classify as idiom / disqualifying /
+        unrelated, and return the list of ``(method_idx, if_idx, key_name)``
+        rewrite sites.  Returns None if a disqualifying use is found."""
+        rewrites: list[tuple[int, int, str]] = []
+        found_any = False
+        for m_idx, method in enumerate(game.methods):
+            method_name = method.signature.name
+            if method_name == "Initialize":
+                for stmt in method.block.statements:
+                    if _references_map(stmt, map_name):
+                        if any_idiom:
+                            self._emit_near_miss(
+                                ctx,
+                                (
+                                    f"Map '{map_name}' is referenced in "
+                                    "Initialize outside the lazy-lookup idiom"
+                                ),
+                                stmt.origin,
+                                map_name,
+                                "Initialize",
+                            )
+                        return None
+                continue
+            match = _match_idiom_suffix(method, map_name, value_type)
+            if match is None:
+                for stmt in method.block.statements:
+                    if _references_map(stmt, map_name):
+                        if any_idiom:
+                            self._emit_near_miss(
+                                ctx,
+                                (
+                                    f"Map '{map_name}' is referenced in "
+                                    f"method '{method_name}' outside the "
+                                    "lazy-lookup idiom"
+                                ),
+                                stmt.origin,
+                                map_name,
+                                method_name,
+                            )
+                        return None
+                continue
+            if_idx, key_name, _sv = match
+            for stmt in method.block.statements[:if_idx]:
+                if _references_map(stmt, map_name):
+                    if any_idiom:
+                        self._emit_near_miss(
+                            ctx,
+                            (
+                                f"Map '{map_name}' is referenced in method "
+                                f"'{method_name}' outside the lazy-lookup "
+                                "idiom"
+                            ),
+                            stmt.origin,
+                            map_name,
+                            method_name,
+                        )
+                    return None
+            rewrites.append((m_idx, if_idx, key_name))
+            found_any = True
+        if not found_any:
+            return None
+        return rewrites
+
+    def _build_rewritten_game(
+        self,
+        game: frog_ast.Game,
+        map_name: str,
+        key_type: frog_ast.Type,
+        value_type: frog_ast.Type,
+        rewrites: list[tuple[int, int, str]],
+    ) -> frog_ast.Game:
+        new_game = copy.deepcopy(game)
+
+        for f in new_game.fields:
+            if f.name == map_name:
+                f.type = frog_ast.FunctionType(
+                    copy.deepcopy(key_type), copy.deepcopy(value_type)
+                )
+                break
+
+        sample_stmt = frog_ast.Sample(
+            None,
+            frog_ast.Variable(map_name),
+            frog_ast.FunctionType(
+                copy.deepcopy(key_type), copy.deepcopy(value_type)
+            ),  # type: ignore[arg-type]
+        )
+        init_method: frog_ast.Method | None = None
+        for m in new_game.methods:
+            if m.signature.name == "Initialize":
+                init_method = m
+                break
+        if init_method is None:
+            init_sig = frog_ast.MethodSignature("Initialize", frog_ast.Void(), [])
+            init_method = frog_ast.Method(init_sig, frog_ast.Block([sample_stmt]))
+            new_game.methods = [init_method] + list(new_game.methods)
+        else:
+            init_method.block = frog_ast.Block(
+                [sample_stmt] + list(init_method.block.statements)
+            )
+
+        for m_idx, if_idx, key_name in rewrites:
+            target_name = game.methods[m_idx].signature.name
+            target = next(
+                m for m in new_game.methods if m.signature.name == target_name
+            )
+            new_return = frog_ast.ReturnStatement(
+                frog_ast.FuncCall(
+                    frog_ast.Variable(map_name),
+                    [frog_ast.Variable(key_name)],
+                )
+            )
+            target.block = frog_ast.Block(
+                list(target.block.statements[:if_idx]) + [new_return]
+            )
+        return new_game

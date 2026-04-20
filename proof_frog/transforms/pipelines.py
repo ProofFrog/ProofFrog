@@ -23,6 +23,7 @@ from .random_functions import (
     LocalRFToUniform,
     DistinctConstRFToUniform,
     FreshInputRFToUniform,
+    LazyMapToSampledFunction,
 )
 from .inlining import (
     RedundantCopy,
@@ -94,6 +95,7 @@ CORE_PIPELINE: list[TransformPass] = [
     UniformBijectionElimination(),
     FoldTupleIndex(),
     ExtractRepeatedTupleAccess(),
+    LazyMapToSampledFunction(),
     ExtractRFCalls(),
     UniqueRFSimplification(),
     ChallengeExclusionRFToUniform(),

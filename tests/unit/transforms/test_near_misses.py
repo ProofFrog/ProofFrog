@@ -654,3 +654,93 @@ def test_hoist_no_near_miss_when_hoisting_succeeds():
         if nm.transform_name == "Hoist Deterministic Call to Initialize"
     ]
     assert len(hoist_misses) == 0
+
+
+from proof_frog.transforms.random_functions import LazyMapToSampledFunction
+
+
+def _lazy_map_ctx() -> PipelineContext:
+    return PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+
+
+def test_lazy_map_near_miss_cardinality_use() -> None:
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Map<BitString<8>, BitString<16>> T;
+            Int Size() {
+                return |T|;
+            }
+            BitString<16> Hash(BitString<8> x) {
+                if (x in T) {
+                    return T[x];
+                }
+                BitString<16> s <- BitString<16>;
+                T[x] = s;
+                return s;
+            }
+        }
+        """
+    )
+    ctx = _lazy_map_ctx()
+    result = LazyMapToSampledFunction().apply(game, ctx)
+    assert result == game
+    assert any(
+        nm.transform_name == "Lazy Map To Sampled Function"
+        and nm.method == "Size"
+        and nm.variable == "T"
+        for nm in ctx.near_misses
+    )
+
+
+def test_lazy_map_near_miss_explicit_initialize() -> None:
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Map<BitString<8>, BitString<16>> T;
+            Void Initialize() {
+                T[0b00000000] = 0b0000000000000000;
+            }
+            BitString<16> Hash(BitString<8> x) {
+                if (x in T) {
+                    return T[x];
+                }
+                BitString<16> s <- BitString<16>;
+                T[x] = s;
+                return s;
+            }
+        }
+        """
+    )
+    ctx = _lazy_map_ctx()
+    LazyMapToSampledFunction().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Lazy Map To Sampled Function"
+        and nm.method == "Initialize"
+        and nm.variable == "T"
+        for nm in ctx.near_misses
+    )
+
+
+def test_lazy_map_no_near_miss_when_no_idiom() -> None:
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Map<BitString<8>, BitString<16>> T;
+            Int Size() {
+                return |T|;
+            }
+        }
+        """
+    )
+    ctx = _lazy_map_ctx()
+    LazyMapToSampledFunction().apply(game, ctx)
+    assert not any(
+        nm.transform_name == "Lazy Map To Sampled Function"
+        for nm in ctx.near_misses
+    )

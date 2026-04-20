@@ -103,3 +103,40 @@ def test_basic_reindex() -> None:
         }
         """,
     )
+
+
+def test_reindex_with_scan_loop() -> None:
+    _apply_and_expect(
+        """
+        Game G(T TT) {
+            Map<TT.Input, BitString<16>> M;
+            Void Store(TT.Input a, BitString<16> s) {
+                M[a] = s;
+            }
+            BitString<16>? Scan(TT.Image y) {
+                for ([TT.Input, BitString<16>] e in M.entries) {
+                    if (TT.Eval(e[0]) == y) {
+                        return e[1];
+                    }
+                }
+                return None;
+            }
+        }
+        """,
+        """
+        Game G(T TT) {
+            Map<TT.Image, BitString<16>> M;
+            Void Store(TT.Input a, BitString<16> s) {
+                M[TT.Eval(a)] = s;
+            }
+            BitString<16>? Scan(TT.Image y) {
+                for ([TT.Image, BitString<16>] e in M.entries) {
+                    if (e[0] == y) {
+                        return e[1];
+                    }
+                }
+                return None;
+            }
+        }
+        """,
+    )

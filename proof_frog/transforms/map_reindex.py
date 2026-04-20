@@ -155,17 +155,85 @@ def _extract_read_key(hit: frog_ast.ASTNode) -> Optional[frog_ast.Expression]:
     return None
 
 
+def _collect_e0_wrapper_fs(
+    loop: frog_ast.GenericFor,
+    ctx: PipelineContext,
+) -> Optional[list[frog_ast.MethodSignature]]:
+    """For each ``f(e[0])`` call in the loop body, record ``f``.
+
+    Returns the list on success.  Returns ``None`` if any use of ``e[0]`` is
+    bare, or if any wrapping call ``f(e[0])`` resolves to a non-primitive or
+    non-deterministic / non-injective method.
+    """
+    loop_var = loop.var_name
+    fs: list[frog_ast.MethodSignature] = []
+    ok = True
+    allowed_ids: set[int] = set()
+
+    def _scan_calls(n: frog_ast.ASTNode) -> bool:
+        nonlocal ok
+        if not ok:
+            return False
+        if isinstance(n, frog_ast.FuncCall) and len(n.args) == 1:
+            a = n.args[0]
+            if (
+                isinstance(a, frog_ast.ArrayAccess)
+                and isinstance(a.the_array, frog_ast.Variable)
+                and a.the_array.name == loop_var
+                and isinstance(a.index, frog_ast.Integer)
+                and a.index.num == 0
+            ):
+                looked_up = _lookup_primitive_method(n.func, ctx.proof_namespace)
+                if looked_up is None:
+                    ok = False
+                    return False
+                if not (looked_up.deterministic and looked_up.injective):
+                    ok = False
+                    return False
+                fs.append(looked_up)
+                allowed_ids.add(id(a))
+        return False
+
+    SearchVisitor(_scan_calls).visit(loop.block)
+    if not ok:
+        return None
+
+    def _bare(n: frog_ast.ASTNode) -> bool:
+        return (
+            isinstance(n, frog_ast.ArrayAccess)
+            and isinstance(n.the_array, frog_ast.Variable)
+            and n.the_array.name == loop_var
+            and isinstance(n.index, frog_ast.Integer)
+            and n.index.num == 0
+            and id(n) not in allowed_ids
+        )
+
+    if SearchVisitor(_bare).visit(loop.block) is not None:
+        return None
+    return fs
+
+
 def _find_candidate_f(
     game: frog_ast.Game,
     map_name: str,
     ctx: PipelineContext,
 ) -> Optional[frog_ast.MethodSignature]:
     """Scan all read-site key expressions of M across all methods.  Return the
-    unique primitive method ``f`` used at every read site, or ``None`` if no
-    such f exists (too many candidates, non-injective, not deterministic, or a
+    unique primitive method ``f`` used at every read site (including
+    ``f(e[0])`` in loop bodies over ``M.entries``), or ``None`` if no such
+    f exists (too many candidates, non-injective, not deterministic, or a
     read site uses a raw key).
     """
     read_site_f: Optional[frog_ast.MethodSignature] = None
+
+    def _record(m: frog_ast.MethodSignature) -> bool:
+        """Return True on success, False if the candidate changes."""
+        nonlocal read_site_f
+        if read_site_f is None:
+            read_site_f = m
+            return True
+        return read_site_f is m
+
     for method in game.methods:
         write_ids = _write_lhs_ids(method, map_name)
         for hit in _all_accesses_of_map(method, map_name):
@@ -183,10 +251,16 @@ def _find_candidate_f(
                 return None
             if len(key_expr.args) != 1:
                 return None
-            if read_site_f is None:
-                read_site_f = looked_up
-            elif read_site_f is not looked_up:
+            if not _record(looked_up):
                 return None
+        # Also inspect loop bodies over M.entries.
+        for loop in _find_entries_loops(method, map_name):
+            loop_fs = _collect_e0_wrapper_fs(loop, ctx)
+            if loop_fs is None:
+                return None
+            for m_sig in loop_fs:
+                if not _record(m_sig):
+                    return None
     return read_site_f
 
 
@@ -441,7 +515,7 @@ class MapKeyReindex(TransformPass):
 
             # Rewrite loop bodies: wrap e[0] element type and strip f(e[0]).
             for loop in _find_entries_loops(method, map_name):
-                self._rewrite_loop(loop, f_sig, ctx)
+                self._rewrite_loop(loop, f_sig, ctx, new_key_type)
 
     def _infer_new_key_type(  # pylint: disable=unused-argument
         self,
@@ -473,11 +547,12 @@ class MapKeyReindex(TransformPass):
                         )
         return copy.deepcopy(ret)
 
-    def _rewrite_loop(
+    def _rewrite_loop(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         loop: frog_ast.GenericFor,
         f_sig: frog_ast.MethodSignature,
         ctx: PipelineContext,
+        new_key_type: frog_ast.Type,
     ) -> None:
         # Strip f(e[0]) -> e[0] inside the body.
         wrapper = _WrapKeyTransformer(f_sig, loop.var_name, ctx)
@@ -487,7 +562,7 @@ class MapKeyReindex(TransformPass):
         if isinstance(loop.var_type, frog_ast.ProductType):
             new_types = list(loop.var_type.types)
             if new_types:
-                new_types[0] = copy.deepcopy(f_sig.return_type)
+                new_types[0] = copy.deepcopy(new_key_type)
             loop.var_type = frog_ast.ProductType(new_types)
 
 

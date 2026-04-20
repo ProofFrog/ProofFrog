@@ -118,6 +118,53 @@ def _classify_key_expr(
     return _expr_is_call_of(key_expr, candidate_f, ctx) is not None
 
 
+def _extract_read_key(hit: frog_ast.ASTNode) -> Optional[frog_ast.Expression]:
+    """Given a hit from _all_accesses_of_map, return the key expression at a
+    read site (``M[k]``, ``k in M``, etc.), or None for cardinality/iteration
+    sites (which have no key expression).
+
+    Note: this returns the index of **any** ``ArrayAccess`` including write
+    LHSes; the caller is responsible for disambiguating.
+    """
+    if isinstance(hit, frog_ast.ArrayAccess):
+        return hit.index
+    if isinstance(hit, frog_ast.BinaryOperation):
+        return hit.left_expression
+    return None
+
+
+def _find_candidate_f(
+    game: frog_ast.Game,
+    map_name: str,
+    ctx: PipelineContext,
+) -> Optional[frog_ast.MethodSignature]:
+    """Scan all read-site key expressions of M across all methods.  Return the
+    unique primitive method ``f`` used at every read site, or ``None`` if no
+    such f exists (too many candidates, non-injective, not deterministic, or a
+    read site uses a raw key).
+    """
+    read_site_f: Optional[frog_ast.MethodSignature] = None
+    for method in game.methods:
+        for hit in _all_accesses_of_map(method, map_name):
+            key_expr = _extract_read_key(hit)
+            if key_expr is None:
+                continue
+            if not isinstance(key_expr, frog_ast.FuncCall):
+                return None
+            looked_up = _lookup_primitive_method(key_expr.func, ctx.proof_namespace)
+            if looked_up is None:
+                return None
+            if not (looked_up.deterministic and looked_up.injective):
+                return None
+            if len(key_expr.args) != 1:
+                return None
+            if read_site_f is None:
+                read_site_f = looked_up
+            elif read_site_f is not looked_up:
+                return None
+    return read_site_f
+
+
 class MapKeyReindex(TransformPass):
     """Re-index a ``Map<A, V>`` field to ``Map<B, V>`` under a ``deterministic
     injective`` primitive method ``f : A -> B`` (design §3)."""

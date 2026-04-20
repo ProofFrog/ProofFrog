@@ -687,6 +687,21 @@ class NameResolutionVisitor(VariableTypeVisitor):
                 )
             return
 
+        if isinstance(the_type, frog_ast.MapType):
+            if field_access.name not in ("keys", "values", "entries"):
+                suggestion = _suggestions.suggest_identifier(
+                    field_access.name, ["keys", "values", "entries"]
+                )
+                hint = f"did you mean '{suggestion}'?" if suggestion else ""
+                print_error(
+                    field_access,
+                    f"Map has no field '{field_access.name}'"
+                    " (only 'keys', 'values', and 'entries' are available)",
+                    self.file_name,
+                    hint=hint,
+                )
+            return
+
         if not isinstance(the_type, visitors.InstantiableType):
             print_error(
                 field_access,
@@ -1345,10 +1360,26 @@ class CheckTypeVisitor(VariableTypeVisitor):
 
     def leave_generic_for(self, generic_for: frog_ast.GenericFor) -> None:
         super().leave_generic_for(generic_for)
-        over_set = self.get_type_from_ast(generic_for.over)
-        if not isinstance(over_set, frog_ast.SetType):
+        over_type = self.get_type_from_ast(generic_for.over)
+        element_type: PossibleType
+        if isinstance(over_type, frog_ast.SetType):
+            element_type = over_type.parameterization
+        elif isinstance(over_type, frog_ast.ArrayType):
+            element_type = over_type.element_type
+        else:
             self.print_error(
-                generic_for, f"Must iterate over finite set, got type {over_set}"
+                generic_for,
+                f"Must iterate over Set, Array, Map.keys, Map.values, or Map.entries;"
+                f" got type {over_type}",
+            )
+            return
+        if element_type is not None and not self.check_types(
+            generic_for.var_type, element_type
+        ):
+            self.print_error(
+                generic_for,
+                f"Loop variable has type {generic_for.var_type},"
+                f" but iteration yields elements of type {element_type}",
             )
 
     def visit_reduction(self, reduction: frog_ast.Reduction) -> None:
@@ -2030,6 +2061,31 @@ class CheckTypeVisitor(VariableTypeVisitor):
                     field_acess,
                     f"Group has no field '{field_acess.name}'"
                     " (only 'generator', 'order', and 'identity' are available)",
+                )
+            return
+        if isinstance(object_type, frog_ast.MapType):
+            if field_acess.name == "keys":
+                self.ast_type_map.set(
+                    field_acess, frog_ast.SetType(object_type.key_type)
+                )
+            elif field_acess.name == "values":
+                self.ast_type_map.set(
+                    field_acess, frog_ast.SetType(object_type.value_type)
+                )
+            elif field_acess.name == "entries":
+                self.ast_type_map.set(
+                    field_acess,
+                    frog_ast.SetType(
+                        frog_ast.ProductType(
+                            [object_type.key_type, object_type.value_type]
+                        )
+                    ),
+                )
+            else:
+                self.print_error(
+                    field_acess,
+                    f"Map has no field '{field_acess.name}'"
+                    " (only 'keys', 'values', and 'entries' are available)",
                 )
             return
         if not isinstance(object_type, visitors.InstantiableType):

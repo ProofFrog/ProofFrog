@@ -21,11 +21,12 @@ oracle-patching plan, not here.
 from __future__ import annotations
 
 import copy
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, Union
 
 from .. import frog_ast
 from ..visitors import SearchVisitor, Transformer
-from ._base import NearMiss, PipelineContext, TransformPass
+from ._base import NearMiss, PipelineContext, TransformPass, _lookup_primitive_method
 
 _LAZY_MAP_SCAN_NAME = "Lazy Map Scan"
 
@@ -117,13 +118,77 @@ def _bare_references(expr: frog_ast.Expression, var_name: str) -> bool:
     return SearchVisitor(_is_bare).visit(expr) is not None
 
 
+@dataclass(frozen=True)
+class _LiteralEqualityMatch:
+    key_expr: frog_ast.Expression
+    body_expr: frog_ast.Expression
+
+
+@dataclass(frozen=True)
+class _InjectiveCallMatch:
+    pass
+
+
+_MatchResult = Union[_LiteralEqualityMatch, _InjectiveCallMatch, str]
+
+
+def _try_match_literal_equality(
+    cond: frog_ast.Expression, e_name: str
+) -> Optional[frog_ast.Expression]:
+    """Return the key expression if *cond* is ``e[0] == key`` or ``key == e[0]``,
+    else ``None``."""
+    if not (
+        isinstance(cond, frog_ast.BinaryOperation)
+        and cond.operator == frog_ast.BinaryOperators.EQUALS
+    ):
+        return None
+    left, right = cond.left_expression, cond.right_expression
+    if _is_tuple_index(left, e_name, 0):
+        return right
+    if _is_tuple_index(right, e_name, 0):
+        return left
+    return None
+
+
+def _try_match_injective_call(
+    cond: frog_ast.Expression,
+    e_name: str,
+    ctx: PipelineContext,
+) -> "_InjectiveCallMatch | str | None":
+    """Dispatch helper for the injective-call predicate shape.
+
+    Returns ``_InjectiveCallMatch()`` on success, a ``str`` reason when the
+    shape is recognizably injective-call-like but fails a precondition, or
+    ``None`` when the shape is not injective-call-like (caller falls through).
+    """
+    if not isinstance(cond, frog_ast.FuncCall):
+        return None
+    if len(cond.args) != 2:
+        return None
+    arg_expr, second_arg = cond.args
+    if not _is_tuple_index(second_arg, e_name, 0):
+        return None
+    method = _lookup_primitive_method(cond.func, ctx.proof_namespace)
+    if method is None:
+        return "injective-call predicate callee is not a primitive method"
+    if _references_var(arg_expr, e_name):
+        return "injective-call predicate argument references loop variable"
+    if not method.deterministic:
+        return "injective-call predicate method is not annotated deterministic"
+    if not method.injective:
+        return "injective-call predicate method is not annotated injective"
+    return _InjectiveCallMatch()
+
+
 def _match_scan_body(
     gf: frog_ast.GenericFor,
-) -> "tuple[frog_ast.Expression, frog_ast.Expression] | str":
-    """Check S1 body shape.
+    ctx: PipelineContext,
+) -> _MatchResult:
+    """Check S1 body shape and dispatch on predicate form.
 
-    Return ``(key_expr, body_expr)`` on success, or a string describing the
-    first failure (for near-miss reasons).
+    Returns a ``_LiteralEqualityMatch`` (rewrite to direct lookup), an
+    ``_InjectiveCallMatch`` (validated but identity-rewrite), or a string
+    reason for the first failure (near-miss).
     """
     stmts = gf.block.statements
     if len(stmts) != 1 or not isinstance(stmts[0], frog_ast.IfStatement):
@@ -133,22 +198,7 @@ def _match_scan_body(
         return "if-statement has else or else-if branches"
     if if_stmt.has_else_block():
         return "if-statement has else or else-if branches"
-    cond = if_stmt.conditions[0]
-    if not (
-        isinstance(cond, frog_ast.BinaryOperation)
-        and cond.operator == frog_ast.BinaryOperators.EQUALS
-    ):
-        return "if condition is not a literal equality"
     e_name = gf.var_name
-    left, right = cond.left_expression, cond.right_expression
-    if _is_tuple_index(left, e_name, 0):
-        key_expr = right
-    elif _is_tuple_index(right, e_name, 0):
-        key_expr = left
-    else:
-        return "if condition is not of the form e[0] == <expr>"
-    if _references_var(key_expr, e_name):
-        return "key expression references the loop variable"
     body = if_stmt.blocks[0].statements
     if len(body) != 1 or not isinstance(body[0], frog_ast.ReturnStatement):
         return "if body is not a single return"
@@ -158,7 +208,19 @@ def _match_scan_body(
     body_expr = ret.expression
     if _bare_references(body_expr, e_name):
         return "return expression references loop variable outside e[0]/e[1]"
-    return key_expr, body_expr
+
+    cond = if_stmt.conditions[0]
+    key_expr = _try_match_literal_equality(cond, e_name)
+    if key_expr is not None:
+        if _references_var(key_expr, e_name):
+            return "key expression references the loop variable"
+        return _LiteralEqualityMatch(key_expr, body_expr)
+    inj = _try_match_injective_call(cond, e_name, ctx)
+    if isinstance(inj, _InjectiveCallMatch):
+        return inj
+    if isinstance(inj, str):
+        return inj
+    return "if condition is not a recognized scan predicate"
 
 
 class LazyMapScan(TransformPass):
@@ -217,11 +279,15 @@ class LazyMapScan(TransformPass):
         map_name = _is_entries_access(stmt.over, map_fields)
         if map_name is None:
             return None
-        match = _match_scan_body(stmt)
+        match = _match_scan_body(stmt, ctx)
         if isinstance(match, str):
             self._emit_near_miss(ctx, match, stmt, map_name, method_name)
             return None
-        key_expr, body_expr = match
+        if isinstance(match, _InjectiveCallMatch):
+            # Identity rewrite: shape validated, no syntactic simplification
+            # available (see the §5.2 injective-extension plan's design notes).
+            return None
+        key_expr, body_expr = match.key_expr, match.body_expr
         one_repl = frog_ast.ArrayAccess(
             frog_ast.Variable(map_name), copy.deepcopy(key_expr)
         )

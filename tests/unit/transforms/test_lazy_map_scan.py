@@ -32,6 +32,58 @@ def _apply_and_expect_unchanged(game_src: str) -> None:
     assert got == original, f"\nGOT:\n{got}\n\nEXPECTED UNCHANGED:\n{original}"
 
 
+_TRAPDOOR_TEST_PRIMITIVE = """
+Primitive T(Set I, Set Y) {
+    Set Input = I;
+    Set Image = Y;
+    deterministic injective Bool Test(Input x, Image y);
+}
+"""
+
+
+_NON_INJECTIVE_PRIMITIVE = """
+Primitive T(Set I, Set Y) {
+    Set Input = I;
+    Set Image = Y;
+    deterministic Bool Test(Input x, Image y);
+}
+"""
+
+
+_NON_DETERMINISTIC_PRIMITIVE = """
+Primitive T(Set I, Set Y) {
+    Set Input = I;
+    Set Image = Y;
+    injective Bool Test(Input x, Image y);
+}
+"""
+
+
+def _apply_with_ctx(
+    game_src: str,
+    primitive_src: str = "",
+) -> tuple[frog_ast.Game, PipelineContext]:
+    """Apply LazyMapScan with an optional Primitive installed in proof_namespace."""
+    game = frog_parser.parse_game(game_src)
+    ctx = _ctx()
+    if primitive_src:
+        prim = frog_parser.parse_string(
+            primitive_src, frog_ast.FileType.PRIMITIVE
+        )
+        ctx.proof_namespace[prim.name] = prim
+        # Also register under the conventional game-parameter alias "TT" used
+        # in these unit tests (the real pipeline populates proof_namespace from
+        # the proof's let: block).
+        ctx.proof_namespace["TT"] = prim
+    result = LazyMapScan().apply(game, ctx)
+    return result, ctx
+
+
+def _assert_no_near_miss(ctx: PipelineContext) -> None:
+    lms = [nm for nm in ctx.near_misses if nm.transform_name == "Lazy Map Scan"]
+    assert not lms, f"Unexpected LazyMapScan near-miss(es): {lms}"
+
+
 def test_basic_scan_to_direct_lookup() -> None:
     _apply_and_expect(
         """
@@ -339,3 +391,235 @@ def test_integration_via_core_pipeline() -> None:
         lambda n: isinstance(n, frog_ast.GenericFor)
     ).visit(result)
     assert found is None, f"GenericFor should be eliminated, got:\n{result}"
+
+
+# ---------------------------------------------------------------------------
+# Injective-call predicate variant (design spec §5.2, injective extension).
+# The pass validates the scan shape and emits no near-miss on success, but
+# does NOT rewrite (no direct-lookup form available without a syntactic
+# inverse of the predicate method).
+# ---------------------------------------------------------------------------
+
+
+def test_injective_call_scan_identity_rewrite() -> None:
+    game_src = """
+        Game G(T TT) {
+            Map<TT.Image, BitString<8>> M;
+            BitString<8> Oracle(TT.Input c) {
+                for ([TT.Image, BitString<8>] e in M.entries) {
+                    if (TT.Test(c, e[0])) {
+                        return e[1];
+                    }
+                }
+                return 0b00000000;
+            }
+        }
+    """
+    result, ctx = _apply_with_ctx(game_src, _TRAPDOOR_TEST_PRIMITIVE)
+    expected = frog_parser.parse_game(game_src)
+    assert result == expected, f"\nGOT:\n{result}\n\nEXPECTED UNCHANGED:\n{expected}"
+    _assert_no_near_miss(ctx)
+
+
+def test_injective_call_with_trailing_statements_unchanged() -> None:
+    game_src = """
+        Game G(T TT) {
+            Map<TT.Image, BitString<8>> M;
+            BitString<8> Oracle(TT.Input c) {
+                for ([TT.Image, BitString<8>] e in M.entries) {
+                    if (TT.Test(c, e[0])) {
+                        return e[1];
+                    }
+                }
+                BitString<8> s <- BitString<8>;
+                return s;
+            }
+        }
+    """
+    result, ctx = _apply_with_ctx(game_src, _TRAPDOOR_TEST_PRIMITIVE)
+    expected = frog_parser.parse_game(game_src)
+    assert result == expected
+    _assert_no_near_miss(ctx)
+
+
+def test_injective_call_scan_with_second_map_idle_unchanged() -> None:
+    game_src = """
+        Game G(T TT) {
+            Map<TT.Image, BitString<8>> M;
+            Map<TT.Image, BitString<8>> N;
+            BitString<8> Oracle(TT.Input c) {
+                for ([TT.Image, BitString<8>] e in M.entries) {
+                    if (TT.Test(c, e[0])) {
+                        return e[1];
+                    }
+                }
+                return 0b00000000;
+            }
+        }
+    """
+    result, ctx = _apply_with_ctx(game_src, _TRAPDOOR_TEST_PRIMITIVE)
+    expected = frog_parser.parse_game(game_src)
+    assert result == expected
+    _assert_no_near_miss(ctx)
+
+
+def test_mixed_literal_and_injective_in_same_game() -> None:
+    before = """
+        Game G(T TT) {
+            Map<BitString<8>, BitString<16>> L;
+            Map<TT.Image, BitString<16>> M;
+            BitString<16> LitOracle(BitString<8> k) {
+                for ([BitString<8>, BitString<16>] e in L.entries) {
+                    if (e[0] == k) {
+                        return e[1];
+                    }
+                }
+                return 0b0000000000000000;
+            }
+            BitString<16> InjOracle(TT.Input c) {
+                for ([TT.Image, BitString<16>] e in M.entries) {
+                    if (TT.Test(c, e[0])) {
+                        return e[1];
+                    }
+                }
+                return 0b0000000000000000;
+            }
+        }
+    """
+    after = """
+        Game G(T TT) {
+            Map<BitString<8>, BitString<16>> L;
+            Map<TT.Image, BitString<16>> M;
+            BitString<16> LitOracle(BitString<8> k) {
+                if (k in L) {
+                    return L[k];
+                }
+                return 0b0000000000000000;
+            }
+            BitString<16> InjOracle(TT.Input c) {
+                for ([TT.Image, BitString<16>] e in M.entries) {
+                    if (TT.Test(c, e[0])) {
+                        return e[1];
+                    }
+                }
+                return 0b0000000000000000;
+            }
+        }
+    """
+    result, ctx = _apply_with_ctx(before, _TRAPDOOR_TEST_PRIMITIVE)
+    expected = frog_parser.parse_game(after)
+    assert result == expected, f"\nGOT:\n{result}\n\nEXPECTED:\n{expected}"
+    _assert_no_near_miss(ctx)
+
+
+def test_injective_call_fails_when_method_not_injective() -> None:
+    game_src = """
+        Game G(T TT) {
+            Map<TT.Image, BitString<8>> M;
+            BitString<8> Oracle(TT.Input c) {
+                for ([TT.Image, BitString<8>] e in M.entries) {
+                    if (TT.Test(c, e[0])) {
+                        return e[1];
+                    }
+                }
+                return 0b00000000;
+            }
+        }
+    """
+    result, ctx = _apply_with_ctx(game_src, _NON_INJECTIVE_PRIMITIVE)
+    assert result == frog_parser.parse_game(game_src)
+    assert any(
+        nm.transform_name == "Lazy Map Scan"
+        and "not annotated injective" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_injective_call_fails_when_method_not_deterministic() -> None:
+    game_src = """
+        Game G(T TT) {
+            Map<TT.Image, BitString<8>> M;
+            BitString<8> Oracle(TT.Input c) {
+                for ([TT.Image, BitString<8>] e in M.entries) {
+                    if (TT.Test(c, e[0])) {
+                        return e[1];
+                    }
+                }
+                return 0b00000000;
+            }
+        }
+    """
+    result, ctx = _apply_with_ctx(game_src, _NON_DETERMINISTIC_PRIMITIVE)
+    assert result == frog_parser.parse_game(game_src)
+    assert any(
+        nm.transform_name == "Lazy Map Scan"
+        and "not annotated deterministic" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_injective_call_fails_when_arg_references_loop_variable() -> None:
+    game_src = """
+        Game G(T TT) {
+            Map<TT.Image, BitString<8>> M;
+            BitString<8> Oracle() {
+                for ([TT.Image, BitString<8>] e in M.entries) {
+                    if (TT.Test(e[0], e[0])) {
+                        return e[1];
+                    }
+                }
+                return 0b00000000;
+            }
+        }
+    """
+    result, ctx = _apply_with_ctx(game_src, _TRAPDOOR_TEST_PRIMITIVE)
+    assert result == frog_parser.parse_game(game_src)
+    assert any(
+        nm.transform_name == "Lazy Map Scan"
+        and "argument references loop variable" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_injective_call_fails_when_callee_is_not_primitive_method() -> None:
+    game_src = """
+        Game G() {
+            Map<BitString<8>, BitString<8>> M;
+            BitString<8> Oracle(BitString<8> c) {
+                for ([BitString<8>, BitString<8>] e in M.entries) {
+                    if (TT.Test(c, e[0])) {
+                        return e[1];
+                    }
+                }
+                return 0b00000000;
+            }
+        }
+    """
+    result, ctx = _apply_with_ctx(game_src)  # no primitive registered
+    assert result == frog_parser.parse_game(game_src)
+    assert any(
+        nm.transform_name == "Lazy Map Scan"
+        and "not a primitive method" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_injective_call_with_e1_in_predicate_is_silent() -> None:
+    game_src = """
+        Game G(T TT) {
+            Map<TT.Image, BitString<8>> M;
+            BitString<8> Oracle(TT.Input c) {
+                for ([TT.Image, BitString<8>] e in M.entries) {
+                    if (TT.Test(c, e[1])) {
+                        return e[1];
+                    }
+                }
+                return 0b00000000;
+            }
+        }
+    """
+    result, ctx = _apply_with_ctx(game_src, _TRAPDOOR_TEST_PRIMITIVE)
+    assert result == frog_parser.parse_game(game_src)
+    nms = [nm for nm in ctx.near_misses if nm.transform_name == "Lazy Map Scan"]
+    assert len(nms) == 1
+    assert "injective" not in nms[0].reason

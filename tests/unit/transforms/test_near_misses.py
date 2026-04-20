@@ -830,3 +830,106 @@ def test_lazy_scan_no_near_miss_when_no_scan() -> None:
     assert not any(
         nm.transform_name == "Lazy Map Scan" for nm in ctx.near_misses
     )
+
+
+
+_TRAPDOOR_TEST_PRIMITIVE_SRC = """
+Primitive T(Set I, Set Y) {
+    Set Input = I;
+    Set Image = Y;
+    deterministic injective Bool Test(Input x, Image y);
+}
+"""
+
+
+_NON_INJECTIVE_PRIMITIVE_SRC = """
+Primitive T(Set I, Set Y) {
+    Set Input = I;
+    Set Image = Y;
+    deterministic Bool Test(Input x, Image y);
+}
+"""
+
+
+def _register_primitive(ctx: PipelineContext, src: str) -> None:
+    prim = frog_parser.parse_string(src, frog_ast.FileType.PRIMITIVE)
+    ctx.proof_namespace[prim.name] = prim
+    ctx.proof_namespace["TT"] = prim
+
+
+def test_lazy_scan_injective_near_miss_not_injective() -> None:
+    game = frog_parser.parse_game(
+        """
+        Game G(T TT) {
+            Map<TT.Image, BitString<8>> M;
+            BitString<8> Oracle(TT.Input c) {
+                for ([TT.Image, BitString<8>] e in M.entries) {
+                    if (TT.Test(c, e[0])) {
+                        return e[1];
+                    }
+                }
+                return 0b00000000;
+            }
+        }
+        """
+    )
+    ctx = _lazy_scan_ctx()
+    _register_primitive(ctx, _NON_INJECTIVE_PRIMITIVE_SRC)
+    LazyMapScan().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Lazy Map Scan"
+        and nm.method == "Oracle"
+        and nm.variable == "M"
+        and "not annotated injective" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_lazy_scan_injective_near_miss_callee_not_primitive() -> None:
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Map<BitString<8>, BitString<8>> M;
+            BitString<8> Oracle(BitString<8> c) {
+                for ([BitString<8>, BitString<8>] e in M.entries) {
+                    if (TT.Test(c, e[0])) {
+                        return e[1];
+                    }
+                }
+                return 0b00000000;
+            }
+        }
+        """
+    )
+    ctx = _lazy_scan_ctx()
+    LazyMapScan().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Lazy Map Scan"
+        and nm.method == "Oracle"
+        and "not a primitive method" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_lazy_scan_injective_no_near_miss_when_valid() -> None:
+    game = frog_parser.parse_game(
+        """
+        Game G(T TT) {
+            Map<TT.Image, BitString<8>> M;
+            BitString<8> Oracle(TT.Input c) {
+                for ([TT.Image, BitString<8>] e in M.entries) {
+                    if (TT.Test(c, e[0])) {
+                        return e[1];
+                    }
+                }
+                return 0b00000000;
+            }
+        }
+        """
+    )
+    ctx = _lazy_scan_ctx()
+    _register_primitive(ctx, _TRAPDOOR_TEST_PRIMITIVE_SRC)
+    LazyMapScan().apply(game, ctx)
+    assert not any(
+        nm.transform_name == "Lazy Map Scan" for nm in ctx.near_misses
+    )

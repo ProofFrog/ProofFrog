@@ -933,3 +933,99 @@ def test_lazy_scan_injective_no_near_miss_when_valid() -> None:
     assert not any(
         nm.transform_name == "Lazy Map Scan" for nm in ctx.near_misses
     )
+
+
+# --- MapKeyReindex near-miss tests --------------------------------------------
+
+
+from proof_frog.transforms.map_reindex import MapKeyReindex  # noqa: E402
+
+
+def _ctx_for_map_reindex(prim_src: str) -> PipelineContext:
+    prim = frog_parser.parse_string(prim_src, frog_ast.FileType.PRIMITIVE)
+    return PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"T": prim, "TT": prim},
+        subsets_pairs=[],
+    )
+
+
+def test_map_key_reindex_near_miss_non_injective():
+    prim_src = """
+    Primitive T(Set I, Set Y) {
+        Set Input = I;
+        Set Image = Y;
+        deterministic Image Eval(Input x);
+    }
+    """
+    game_src = """
+    Game G(T TT) {
+        Map<TT.Input, BitString<16>> M;
+        Void Store(TT.Input a, BitString<16> s) { M[a] = s; }
+        BitString<16>? Lookup(TT.Input a) {
+            if (TT.Eval(a) in M) { return M[TT.Eval(a)]; }
+            return None;
+        }
+    }
+    """
+    ctx = _ctx_for_map_reindex(prim_src)
+    game = frog_parser.parse_game(game_src)
+    MapKeyReindex().apply(game, ctx)
+    misses = [nm for nm in ctx.near_misses if nm.transform_name == "Map Key Reindex"]
+    assert misses, "expected a near-miss for non-injective f"
+    assert any("injective" in nm.reason for nm in misses)
+
+
+def test_map_key_reindex_near_miss_non_deterministic():
+    prim_src = """
+    Primitive T(Set I, Set Y) {
+        Set Input = I;
+        Set Image = Y;
+        injective Image Eval(Input x);
+    }
+    """
+    game_src = """
+    Game G(T TT) {
+        Map<TT.Input, BitString<16>> M;
+        Void Store(TT.Input a, BitString<16> s) { M[a] = s; }
+        BitString<16>? Lookup(TT.Input a) {
+            if (TT.Eval(a) in M) { return M[TT.Eval(a)]; }
+            return None;
+        }
+    }
+    """
+    ctx = _ctx_for_map_reindex(prim_src)
+    game = frog_parser.parse_game(game_src)
+    MapKeyReindex().apply(game, ctx)
+    misses = [nm for nm in ctx.near_misses if nm.transform_name == "Map Key Reindex"]
+    assert misses, "expected a near-miss for non-deterministic f"
+    assert any("deterministic" in nm.reason for nm in misses)
+
+
+def test_map_key_reindex_near_miss_bare_e0():
+    prim_src = """
+    Primitive T(Set I, Set Y) {
+        Set Input = I;
+        Set Image = Y;
+        deterministic injective Image Eval(Input x);
+    }
+    """
+    game_src = """
+    Game G(T TT) {
+        Map<TT.Input, BitString<16>> M;
+        Void Store(TT.Input a, BitString<16> s) { M[a] = s; }
+        TT.Input Leak() {
+            for ([TT.Input, BitString<16>] e in M.entries) {
+                return e[0];
+            }
+            return 0;
+        }
+    }
+    """
+    ctx = _ctx_for_map_reindex(prim_src)
+    game = frog_parser.parse_game(game_src)
+    MapKeyReindex().apply(game, ctx)
+    misses = [nm for nm in ctx.near_misses if nm.transform_name == "Map Key Reindex"]
+    assert misses, "expected a near-miss for bare e[0] use"
+    assert any("e[0]" in nm.reason or "wrapper" in nm.reason for nm in misses)

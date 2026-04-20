@@ -18,7 +18,7 @@ from typing import Optional, Union
 
 from .. import frog_ast
 from ..visitors import SearchVisitor, Transformer
-from ._base import PipelineContext, TransformPass, _lookup_primitive_method
+from ._base import NearMiss, PipelineContext, TransformPass, _lookup_primitive_method
 
 _NAME = "Map Key Reindex"
 
@@ -213,21 +213,22 @@ def _collect_e0_wrapper_fs(
     return fs
 
 
-def _find_candidate_f(
+@dataclass
+class _DiscoveryResult:
+    f_sig: Optional[frog_ast.MethodSignature]
+    reason: Optional[str]  # near-miss reason when f_sig is None
+    method_name: Optional[str]  # method in which the failure occurred
+
+
+def _find_candidate_f_with_reason(
     game: frog_ast.Game,
     map_name: str,
     ctx: PipelineContext,
-) -> Optional[frog_ast.MethodSignature]:
-    """Scan all read-site key expressions of M across all methods.  Return the
-    unique primitive method ``f`` used at every read site (including
-    ``f(e[0])`` in loop bodies over ``M.entries``), or ``None`` if no such
-    f exists (too many candidates, non-injective, not deterministic, or a
-    read site uses a raw key).
-    """
+) -> _DiscoveryResult:
+    """Like :func:`_find_candidate_f` but also reports why discovery failed."""
     read_site_f: Optional[frog_ast.MethodSignature] = None
 
     def _record(m: frog_ast.MethodSignature) -> bool:
-        """Return True on success, False if the candidate changes."""
         nonlocal read_site_f
         if read_site_f is None:
             read_site_f = m
@@ -235,6 +236,7 @@ def _find_candidate_f(
         return read_site_f is m
 
     for method in game.methods:
+        mname = method.signature.name
         write_ids = _write_lhs_ids(method, map_name)
         for hit in _all_accesses_of_map(method, map_name):
             if id(hit) in write_ids:
@@ -243,25 +245,68 @@ def _find_candidate_f(
             if key_expr is None:
                 continue
             if not isinstance(key_expr, frog_ast.FuncCall):
-                return None
+                return _DiscoveryResult(
+                    None,
+                    "read-site key is not a function call wrapping the raw key",
+                    mname,
+                )
             looked_up = _lookup_primitive_method(key_expr.func, ctx.proof_namespace)
             if looked_up is None:
-                return None
-            if not (looked_up.deterministic and looked_up.injective):
-                return None
+                return _DiscoveryResult(
+                    None,
+                    "read-site key wrapper is not a primitive method",
+                    mname,
+                )
+            if not looked_up.deterministic:
+                return _DiscoveryResult(
+                    None,
+                    "read-site key wrapper method is not annotated deterministic",
+                    mname,
+                )
+            if not looked_up.injective:
+                return _DiscoveryResult(
+                    None,
+                    "read-site key wrapper method is not annotated injective",
+                    mname,
+                )
             if len(key_expr.args) != 1:
-                return None
+                return _DiscoveryResult(
+                    None,
+                    "read-site key wrapper does not take exactly one argument",
+                    mname,
+                )
             if not _record(looked_up):
-                return None
-        # Also inspect loop bodies over M.entries.
+                return _DiscoveryResult(
+                    None,
+                    "read sites disagree on which wrapper method to use",
+                    mname,
+                )
         for loop in _find_entries_loops(method, map_name):
             loop_fs = _collect_e0_wrapper_fs(loop, ctx)
             if loop_fs is None:
-                return None
+                return _DiscoveryResult(
+                    None,
+                    "loop body over M.entries uses e[0] outside a "
+                    "deterministic injective wrapper",
+                    mname,
+                )
             for m_sig in loop_fs:
                 if not _record(m_sig):
-                    return None
-    return read_site_f
+                    return _DiscoveryResult(
+                        None,
+                        "loop-body wrapper disagrees with read-site wrapper",
+                        mname,
+                    )
+    return _DiscoveryResult(read_site_f, None, None)
+
+
+def _find_candidate_f(
+    game: frog_ast.Game,
+    map_name: str,
+    ctx: PipelineContext,
+) -> Optional[frog_ast.MethodSignature]:
+    """Backward-compatible thin wrapper around :func:`_find_candidate_f_with_reason`."""
+    return _find_candidate_f_with_reason(game, map_name, ctx).f_sig
 
 
 @dataclass
@@ -421,11 +466,46 @@ def _collect_writes(
     return plans if ok else None
 
 
+def _map_has_any_access(game: frog_ast.Game, map_name: str) -> bool:
+    """Return True if any method of *game* syntactically touches ``M``."""
+    for method in game.methods:
+        if _all_accesses_of_map(method, map_name):
+            return True
+    return False
+
+
 class MapKeyReindex(TransformPass):
     """Re-index a ``Map<A, V>`` field to ``Map<B, V>`` under a ``deterministic
     injective`` primitive method ``f : A -> B`` (design §3)."""
 
     name = _NAME
+
+    def _emit_near_miss(
+        self,
+        ctx: PipelineContext,
+        reason: str,
+        map_name: str,
+        method_name: Optional[str],
+    ) -> None:
+        ctx.near_misses.append(
+            NearMiss(
+                transform_name=_NAME,
+                reason=(
+                    f"Map '{map_name}'"
+                    + (f" in method '{method_name}'" if method_name else "")
+                    + f": {reason}"
+                ),
+                location=None,
+                suggestion=(
+                    "MapKeyReindex fires only when every use of the map's "
+                    "keys is wrapped in a single deterministic injective "
+                    "primitive method f(·), and write keys are either f(·) "
+                    "or a simple parameter variable."
+                ),
+                variable=map_name,
+                method=method_name,
+            )
+        )
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         for fld in game.fields:
@@ -443,18 +523,36 @@ class MapKeyReindex(TransformPass):
         ctx: PipelineContext,
     ) -> Optional[frog_ast.Game]:
         map_name = fld.name
-        f_sig = _find_candidate_f(game, map_name, ctx)
-        if f_sig is None:
+        disc = _find_candidate_f_with_reason(game, map_name, ctx)
+        if disc.f_sig is None:
+            # Only emit a near-miss if the map is actually touched somewhere,
+            # so we don't spam near-misses for unrelated maps.
+            if disc.reason is not None and _map_has_any_access(game, map_name):
+                self._emit_near_miss(ctx, disc.reason, map_name, disc.method_name)
             return None
+        f_sig = disc.f_sig
 
         # Validate all writes and loops on the ORIGINAL game, bail out if any
         # write has an unsupported key shape or any loop has a bare e[0].
         for method in game.methods:
             write_plans = _collect_writes(method, map_name, f_sig, ctx)
             if write_plans is None:
+                self._emit_near_miss(
+                    ctx,
+                    "write to the map has a key that is neither f(·) nor a "
+                    "simple variable",
+                    map_name,
+                    method.signature.name,
+                )
                 return None
             for loop in _find_entries_loops(method, map_name):
                 if _loop_body_has_bare_e0(loop, f_sig, ctx):
+                    self._emit_near_miss(
+                        ctx,
+                        "loop body over M.entries uses e[0] outside f(e[0])",
+                        map_name,
+                        method.signature.name,
+                    )
                     return None
 
         # We need a reference call expression like ``TT.Eval`` to clone when

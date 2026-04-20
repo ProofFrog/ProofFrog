@@ -15,6 +15,39 @@ from ... import frog_parser
 from ... import proof_engine as pe
 
 
+def _distr_binding_for(
+    distr: str,
+    abstract_types_map: dict[str, str],
+    concretized_fields: dict[str, frog_ast.Type],
+    top_types: tc.TypeCollector,
+) -> tuple[str, str] | None:
+    """Compute the clone op-binding for a primitive distribution symbol.
+
+    For a scalar concretized field, returns ``(distr, d<concrete>)``.
+    For a :class:`~proof_frog.frog_ast.ProductType`, returns
+    ``(distr, "d1 `*` d2 ...")`` using EC's ``dprod`` notation. Returns
+    ``None`` when no binding is applicable (e.g. nested products).
+    """
+    abstract_type = distr[1:]
+    for pf_name, abs_name in abstract_types_map.items():
+        if abs_name != abstract_type or pf_name not in concretized_fields:
+            continue
+        concrete_field = concretized_fields[pf_name]
+        if isinstance(concrete_field, frog_ast.ProductType):
+            component_distrs: list[str] = []
+            for sub in concrete_field.types:
+                sub_ec = top_types.translate_type(sub)
+                if " * " in sub_ec.text:
+                    return None
+                component_distrs.append(top_types.distr_for(sub_ec))
+            if not component_distrs:
+                return None
+            return (distr, " `*` ".join(component_distrs))
+        ec_concrete = top_types.translate_type(concrete_field)
+        return (distr, top_types.distr_for(ec_concrete))
+    return None
+
+
 def _is_assumption_hop(a: frog_ast.Step, b: frog_ast.Step) -> bool:
     """Detect a hop that flips a security side under the same reduction."""
     if a.reduction is None or b.reduction is None:
@@ -412,6 +445,7 @@ def export_proof_file(proof_path: str) -> str:
             module_name_by_instance_game[(inst.let_name, gf_name, side_name)] = (
                 f"{inst.clone_alias}.{name}"
             )
+    declared_module_names = [inst.let_name for inst in instances if inst is not primary]
     resolver = pt.StepResolver(
         module_name_by_concrete_game=qualified_module_names,
         oracle_name_by_game_file=oracle_name_by_game_file,
@@ -421,6 +455,7 @@ def export_proof_file(proof_path: str) -> str:
         scheme_name=primary_module_expr,
         instance_module_expr_by_let_name=instance_module_expr,
         module_name_by_instance_game=module_name_by_instance_game,
+        declared_module_names=declared_module_names,
     )
 
     # Validate proof via the engine (same as before).
@@ -621,21 +656,11 @@ def export_proof_file(proof_path: str) -> str:
                 type_bindings_.append((abs_name, ec_concrete.text))
         op_bindings_: list[tuple[str, str]] = []
         for distr in theory_types.abstract_distrs_seen:
-            abstract_type = distr[1:]
-            for pf_name, abs_name in abstract_types_map.items():
-                if abs_name == abstract_type and pf_name in inst.concretized_fields:
-                    ec_concrete = top_types.translate_type(
-                        inst.concretized_fields[pf_name]
-                    )
-                    # Distributions only make sense for atomic types
-                    # (abstract or bitstring); skip tuple-ciphertext
-                    # components since EC's clone wouldn't have a
-                    # matching concrete distribution.
-                    if " * " in ec_concrete.text:
-                        break
-                    concrete_distr = top_types.distr_for(ec_concrete)
-                    op_bindings_.append((distr, concrete_distr))
-                    break
+            binding = _distr_binding_for(
+                distr, abstract_types_map, inst.concretized_fields, top_types
+            )
+            if binding is not None:
+                op_bindings_.append(binding)
         return ec_ast.Clone(
             source_theory=theory_name,
             alias=inst.clone_alias,

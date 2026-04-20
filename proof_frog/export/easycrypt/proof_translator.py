@@ -48,6 +48,7 @@ class StepResolver:
         oracle_params_by_reduction: dict[str, list[str]] | None = None,
         instance_module_expr_by_let_name: dict[str, str] | None = None,
         module_name_by_instance_game: dict[tuple[str, str, str], str] | None = None,
+        declared_module_names: list[str] | None = None,
     ) -> None:
         self._module_names = module_name_by_concrete_game
         self._oracle_names = oracle_name_by_game_file
@@ -60,6 +61,11 @@ class StepResolver:
         # expressions.
         self._instance_module_expr = instance_module_expr_by_let_name or {}
         self._module_name_by_instance_game = module_name_by_instance_game or {}
+        # Names of section-level ``declare module`` parameters. Reserved
+        # for future multi-module tactic emission (``glob X`` equalities
+        # and wrapper-level call invariants); not used by the current
+        # precondition/postcondition emission.
+        self._declared_modules = declared_module_names or []  # noqa: F841
 
     def precondition_for(self, step: frog_ast.Step) -> str:
         """Return the EC precondition: ``={arg1, arg2, ...}`` or ``true``.

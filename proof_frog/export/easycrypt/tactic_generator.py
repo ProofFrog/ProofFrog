@@ -73,9 +73,10 @@ def generate(  # pylint: disable=too-many-arguments,too-many-positional-argument
     different statement structures that ``sim``/``auto`` cannot close.
     """
     if has_multi_module:
+        pattern = _classify_multi_module_pattern(left_ast, right_ast, method_name)
         return [
             (
-                "admit. (* multi-module composition;"
+                f"admit. (* multi-module composition ({pattern});"
                 " needs manual swap/call tactics *)"
             ),
             "qed.",
@@ -119,6 +120,52 @@ def generate(  # pylint: disable=too-many-arguments,too-many-positional-argument
     if handled_lines:
         return ["proc.", "inline *.", "wp.", *handled_lines, "qed."]
     return ["proc.", "inline *.", "sim.", "qed."]
+
+
+def _classify_multi_module_pattern(
+    left: frog_ast.Game, right: frog_ast.Game, method_name: str
+) -> str:
+    """Produce a short label describing the multi-module hop's shape.
+
+    Inspects the first method matching ``method_name`` on each side and
+    summarizes the counts of abstract-module calls and uniform samples.
+    This label is embedded in the ``admit`` comment so future tactic
+    work can see at a glance which pattern a hop matches (permutation /
+    dead-sample / sample-merge).
+    """
+    left_m = _method_by_name(left, method_name)
+    right_m = _method_by_name(right, method_name)
+    if left_m is None or right_m is None:
+        return "shape unknown"
+    lc, ls = _count_calls_samples(left_m)
+    rc, rs = _count_calls_samples(right_m)
+    return f"LHS {lc}c/{ls}s, RHS {rc}c/{rs}s"
+
+
+def _method_by_name(game: frog_ast.Game, name: str) -> frog_ast.Method | None:
+    return next(
+        (m for m in game.methods if m.signature.name.lower() == name),
+        None,
+    )
+
+
+def _count_calls_samples(method: frog_ast.Method) -> tuple[int, int]:
+    calls = 0
+    samples = 0
+    for stmt in method.block.statements:
+        if isinstance(stmt, frog_ast.Sample):
+            samples += 1
+        elif isinstance(stmt, frog_ast.Assignment) and _is_scheme_call(stmt.value):
+            calls += 1
+    return calls, samples
+
+
+def _is_scheme_call(expr: frog_ast.ASTNode | None) -> bool:
+    return (
+        isinstance(expr, frog_ast.FuncCall)
+        and isinstance(expr.func, frog_ast.FieldAccess)
+        and isinstance(expr.func.the_object, frog_ast.Variable)
+    )
 
 
 def _flatten_transforms(trace: dict[str, object]) -> list[str]:

@@ -2250,11 +2250,87 @@ class LazyMapPairToSampledFunction(TransformPass):
         for i, m1 in enumerate(map_fields):
             for m2 in map_fields[i + 1 :]:
                 if m1.type != m2.type:
+                    # (P2-3) Key/value type mismatch. Emit a near-miss only
+                    # if both maps individually look like lazy-lookup
+                    # candidates (single-map idiom) -- otherwise the pair is
+                    # unrelated to this pass.
+                    if self._both_have_single_map_idiom(game, m1, m2):
+                        self._emit_near_miss(
+                            ctx,
+                            (
+                                f"Maps '{m1.name}' and '{m2.name}' have "
+                                "mismatched key/value types; lazy-map-pair "
+                                "canonicalization requires the same type"
+                            ),
+                            m1.origin,
+                            m1.name,
+                            None,
+                        )
                     continue
                 rewritten = self._try_rewrite_pair(game, m1, m2, ctx)
                 if rewritten is not None:
                     return rewritten
+                # If no pair-idiom match but both maps individually look
+                # like single-map idioms, that's the "missing disjointness
+                # guard" shape -- emit a near-miss.
+                self._maybe_emit_missing_guard(game, m1, m2, ctx)
         return game
+
+    @staticmethod
+    def _both_have_single_map_idiom(
+        game: frog_ast.Game,
+        m1: frog_ast.Field,
+        m2: frog_ast.Field,
+    ) -> bool:
+        assert isinstance(m1.type, frog_ast.MapType)
+        assert isinstance(m2.type, frog_ast.MapType)
+        v1 = m1.type.value_type
+        v2 = m2.type.value_type
+        has_m1 = any(
+            _match_idiom_suffix(meth, m1.name, v1) is not None
+            for meth in game.methods
+            if meth.signature.name != "Initialize"
+        )
+        has_m2 = any(
+            _match_idiom_suffix(meth, m2.name, v2) is not None
+            for meth in game.methods
+            if meth.signature.name != "Initialize"
+        )
+        return has_m1 and has_m2
+
+    def _maybe_emit_missing_guard(
+        self,
+        game: frog_ast.Game,
+        m1: frog_ast.Field,
+        m2: frog_ast.Field,
+        ctx: PipelineContext,
+    ) -> None:
+        """If no pair-idiom fired but each map is individually used in a
+        single-map lazy-lookup idiom, emit a near-miss pointing out the
+        missing disjointness guard."""
+        assert isinstance(m1.type, frog_ast.MapType)
+        value_type = m1.type.value_type
+        any_pair = any(
+            _match_pair_idiom_suffix(meth, m1.name, m2.name, value_type) is not None
+            for meth in game.methods
+            if meth.signature.name != "Initialize"
+        )
+        if any_pair:
+            return
+        if not self._both_have_single_map_idiom(game, m1, m2):
+            return
+        self._emit_near_miss(
+            ctx,
+            (
+                f"Maps '{m1.name}' and '{m2.name}' look like a lazy-map pair "
+                "but each method's idiom lacks the disjointness guard "
+                "'k in <other map>' needed to merge them into a sampled "
+                "Function"
+            ),
+            m1.origin,
+            m1.name,
+            None,
+        )
 
     def _emit_near_miss(
         self,

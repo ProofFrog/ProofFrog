@@ -20,6 +20,7 @@ from proof_frog.transforms.sampling import MergeUniformSamples, SplitUniformSamp
 from proof_frog.transforms.random_functions import (
     LocalRFToUniform,
     DistinctConstRFToUniform,
+    LazyMapPairToSampledFunction,
 )
 from proof_frog.transforms.structural import UniformBijectionElimination
 from proof_frog.visitors import NameTypeMap
@@ -1029,3 +1030,103 @@ def test_map_key_reindex_near_miss_bare_e0():
     misses = [nm for nm in ctx.near_misses if nm.transform_name == "Map Key Reindex"]
     assert misses, "expected a near-miss for bare e[0] use"
     assert any("e[0]" in nm.reason or "wrapper" in nm.reason for nm in misses)
+
+
+def _lazy_pair_ctx() -> PipelineContext:
+    return PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+
+
+def test_lazy_map_pair_near_miss_cardinality():
+    game_src = """
+    Game G() {
+        Map<BitString<8>, BitString<16>> M1;
+        Map<BitString<8>, BitString<16>> M2;
+        Int Count() { return |M1|; }
+        BitString<16> Query(BitString<8> k) {
+            if (k in M1) { return M1[k]; }
+            else if (k in M2) { return M2[k]; }
+            BitString<16> s <- BitString<16>;
+            M1[k] = s;
+            return s;
+        }
+    }
+    """
+    game = frog_parser.parse_game(game_src)
+    ctx = _lazy_pair_ctx()
+    LazyMapPairToSampledFunction().apply(game, ctx)
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Lazy Map Pair to Sampled Function"
+    ]
+    assert misses
+    assert any("outside the lazy-lookup idiom" in nm.reason for nm in misses)
+
+
+def test_lazy_map_pair_near_miss_missing_guard():
+    game_src = """
+    Game G() {
+        Map<BitString<8>, BitString<16>> M1;
+        Map<BitString<8>, BitString<16>> M2;
+        BitString<16> QueryA(BitString<8> k) {
+            if (k in M1) { return M1[k]; }
+            BitString<16> s <- BitString<16>;
+            M1[k] = s;
+            return s;
+        }
+        BitString<16> QueryB(BitString<8> k) {
+            if (k in M2) { return M2[k]; }
+            BitString<16> s <- BitString<16>;
+            M2[k] = s;
+            return s;
+        }
+    }
+    """
+    game = frog_parser.parse_game(game_src)
+    ctx = _lazy_pair_ctx()
+    LazyMapPairToSampledFunction().apply(game, ctx)
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Lazy Map Pair to Sampled Function"
+    ]
+    assert misses
+    assert any(
+        "disjointness" in nm.reason or "guard" in nm.reason for nm in misses
+    )
+
+
+def test_lazy_map_pair_near_miss_mismatched_types():
+    game_src = """
+    Game G() {
+        Map<BitString<8>, BitString<16>> M1;
+        Map<BitString<8>, BitString<32>> M2;
+        BitString<16> QueryA(BitString<8> k) {
+            if (k in M1) { return M1[k]; }
+            BitString<16> s <- BitString<16>;
+            M1[k] = s;
+            return s;
+        }
+        BitString<32> QueryB(BitString<8> k) {
+            if (k in M2) { return M2[k]; }
+            BitString<32> s <- BitString<32>;
+            M2[k] = s;
+            return s;
+        }
+    }
+    """
+    game = frog_parser.parse_game(game_src)
+    ctx = _lazy_pair_ctx()
+    LazyMapPairToSampledFunction().apply(game, ctx)
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Lazy Map Pair to Sampled Function"
+    ]
+    assert misses
+    assert any("type" in nm.reason for nm in misses)

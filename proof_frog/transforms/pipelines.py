@@ -26,6 +26,7 @@ from .random_functions import (
     LazyMapToSampledFunction,
 )
 from .map_iteration import LazyMapScan
+from .map_reindex import MapKeyReindex
 from .inlining import (
     RedundantCopy,
     IfSplitBranchAssignment,
@@ -97,6 +98,7 @@ CORE_PIPELINE: list[TransformPass] = [
     FoldTupleIndex(),
     ExtractRepeatedTupleAccess(),
     LazyMapScan(),
+    MapKeyReindex(),
     LazyMapToSampledFunction(),
     ExtractRFCalls(),
     UniqueRFSimplification(),

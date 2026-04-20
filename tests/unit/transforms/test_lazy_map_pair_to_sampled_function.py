@@ -32,6 +32,88 @@ def _apply_and_expect_unchanged(game_src: str) -> None:
     assert got == original
 
 
+def test_declines_missing_disjointness_guard() -> None:
+    # The write to M1 is not guarded by "!in M2".
+    _apply_and_expect_unchanged(
+        """
+        Game G() {
+            Map<BitString<8>, BitString<16>> M1;
+            Map<BitString<8>, BitString<16>> M2;
+            BitString<16> QueryA(BitString<8> k) {
+                if (k in M1) { return M1[k]; }
+                BitString<16> s <- BitString<16>;
+                M1[k] = s;
+                return s;
+            }
+            BitString<16> QueryB(BitString<8> k) {
+                if (k in M2) { return M2[k]; }
+                BitString<16> s <- BitString<16>;
+                M2[k] = s;
+                return s;
+            }
+        }
+        """,
+    )
+
+
+def test_declines_mismatched_value_types() -> None:
+    _apply_and_expect_unchanged(
+        """
+        Game G() {
+            Map<BitString<8>, BitString<16>> M1;
+            Map<BitString<8>, BitString<32>> M2;
+            BitString<16> QueryA(BitString<8> k) {
+                if (k in M1) { return M1[k]; }
+                else if (k in M2) { return M2[k]; }
+                BitString<16> s <- BitString<16>;
+                M1[k] = s;
+                return s;
+            }
+        }
+        """,
+    )
+
+
+def test_declines_cardinality_read() -> None:
+    # P2-1: a cardinality read on one map disqualifies the pass.
+    _apply_and_expect_unchanged(
+        """
+        Game G() {
+            Map<BitString<8>, BitString<16>> M1;
+            Map<BitString<8>, BitString<16>> M2;
+            Int Count() { return |M1|; }
+            BitString<16> Query(BitString<8> k) {
+                if (k in M1) { return M1[k]; }
+                else if (k in M2) { return M2[k]; }
+                BitString<16> s <- BitString<16>;
+                M1[k] = s;
+                return s;
+            }
+        }
+        """,
+    )
+
+
+def test_declines_initialize_touches_map() -> None:
+    # P2-2: a map assignment in Initialize disqualifies the pass.
+    _apply_and_expect_unchanged(
+        """
+        Game G() {
+            Map<BitString<8>, BitString<16>> M1;
+            Map<BitString<8>, BitString<16>> M2;
+            Void Initialize() { M1[0b00000000] = 0b0000000000000000; }
+            BitString<16> Query(BitString<8> k) {
+                if (k in M1) { return M1[k]; }
+                else if (k in M2) { return M2[k]; }
+                BitString<16> s <- BitString<16>;
+                M1[k] = s;
+                return s;
+            }
+        }
+        """,
+    )
+
+
 def test_basic_two_map_merge() -> None:
     _apply_and_expect(
         """

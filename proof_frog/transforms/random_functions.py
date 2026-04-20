@@ -2096,6 +2096,120 @@ class LazyMapToSampledFunction(TransformPass):
 _LAZY_MAP_PAIR_NAME = "Lazy Map Pair to Sampled Function"
 
 
+@dataclass(frozen=True)
+class _PairIdiomMatch:
+    if_idx: int  # index of the if-statement in method.block.statements
+    key_name: str  # parameter name k
+    writes_to: str  # "M1" or "M2"
+
+
+def _match_pair_idiom_suffix(
+    method: frog_ast.Method,
+    map1: str,
+    map2: str,
+    value_type: frog_ast.Type,
+) -> _PairIdiomMatch | None:
+    """Recognize the 4-statement guarded-pair lazy-lookup idiom suffix.
+
+    Matches a suffix of the method block starting at some index ``j``:
+
+    1. ``if (k in M1) { return M1[k]; } else if (k in M2) { return M2[k]; }``
+       (no else-block)
+    2. ``V s <- V;``
+    3. ``Mi[k] = s;`` for ``i in {1, 2}``
+    4. ``return s;``
+    """
+    stmts = list(method.block.statements)
+    if len(stmts) < 4:
+        return None
+    if_idx = len(stmts) - 4
+    if_stmt = stmts[if_idx]
+    if not isinstance(if_stmt, frog_ast.IfStatement):
+        return None
+    if len(if_stmt.conditions) != 2 or len(if_stmt.blocks) != 2:
+        return None
+    if if_stmt.has_else_block():
+        return None
+
+    def _extract_in(cond: frog_ast.Expression, map_name: str) -> str | None:
+        if not (
+            isinstance(cond, frog_ast.BinaryOperation)
+            and cond.operator == frog_ast.BinaryOperators.IN
+            and isinstance(cond.right_expression, frog_ast.Variable)
+            and cond.right_expression.name == map_name
+            and isinstance(cond.left_expression, frog_ast.Variable)
+        ):
+            return None
+        return cond.left_expression.name
+
+    k1 = _extract_in(if_stmt.conditions[0], map1)
+    k2 = _extract_in(if_stmt.conditions[1], map2)
+    if k1 is None or k2 is None or k1 != k2:
+        return None
+    k = k1
+
+    def _is_return_map_k(block: frog_ast.Block, map_name: str) -> bool:
+        if len(block.statements) != 1:
+            return False
+        s = block.statements[0]
+        if not isinstance(s, frog_ast.ReturnStatement) or s.expression is None:
+            return False
+        e = s.expression
+        return (
+            isinstance(e, frog_ast.ArrayAccess)
+            and isinstance(e.the_array, frog_ast.Variable)
+            and e.the_array.name == map_name
+            and isinstance(e.index, frog_ast.Variable)
+            and e.index.name == k
+        )
+
+    if not _is_return_map_k(if_stmt.blocks[0], map1):
+        return None
+    if not _is_return_map_k(if_stmt.blocks[1], map2):
+        return None
+
+    sample = stmts[if_idx + 1]
+    if not isinstance(sample, frog_ast.Sample):
+        return None
+    if not isinstance(sample.var, frog_ast.Variable):
+        return None
+    s_name = sample.var.name
+    if sample.the_type != value_type:
+        return None
+    if sample.sampled_from != value_type:
+        return None
+
+    asgn = stmts[if_idx + 2]
+    if not isinstance(asgn, frog_ast.Assignment):
+        return None
+    target = asgn.var
+    if not (
+        isinstance(target, frog_ast.ArrayAccess)
+        and isinstance(target.the_array, frog_ast.Variable)
+        and target.the_array.name in (map1, map2)
+        and isinstance(target.index, frog_ast.Variable)
+        and target.index.name == k
+    ):
+        return None
+    writes_to = target.the_array.name
+    if not (isinstance(asgn.value, frog_ast.Variable) and asgn.value.name == s_name):
+        return None
+
+    ret = stmts[if_idx + 3]
+    if not (
+        isinstance(ret, frog_ast.ReturnStatement)
+        and isinstance(ret.expression, frog_ast.Variable)
+        and ret.expression.name == s_name
+    ):
+        return None
+
+    param_names = {p.name for p in method.signature.parameters}
+    if k not in param_names:
+        return None
+
+    return _PairIdiomMatch(if_idx=if_idx, key_name=k, writes_to=writes_to)
+
+
 class LazyMapPairToSampledFunction(TransformPass):
     """Generalize LazyMapToSampledFunction to a pair of maps with
     mutually-disjoint lazy-lookup guards (design §4).

@@ -151,6 +151,8 @@ is interchangeable with `Function<D, R> F <- Function<D, R>; return F(x);`. Soun
 
 ### 5.4 Oracle-patching canonicalization (the hard one)
 
+> **Elaborated and implemented in** `docs/superpowers/specs/2026-04-20-lazy-rom-cross-method-canonicalization-design.md` (§5.4 of that design covers the cross-method oracle-patching canonicalization via two new passes, `MapKeyReindex` and `LazyMapPairToSampledFunction`). The implementation plan is `docs/superpowers/plans/2026-04-20-lazy-rom-cross-method-canonicalization.md`.
+
 Recognize the cross-method pair:
 
 - **Method α** (e.g., `Decaps`): sample `y <- Range` fresh, log `(x, y)` in some `Map<Input, Range> StoreA`, return `y`.
@@ -281,6 +283,21 @@ Theorem 1) is deferred until the case-study proofs verify.
   key-references-loop-variable, and else-branch violations; the pass emits no
   near-miss when no scan-over-`.entries` pattern is present (silent skip). No
   entry added to `proof_frog/diagnostics.py` — near-miss path is sufficient.
+
+- **§5.2 `LazyMapScan` injective-call extension (landed 2026-04-20):** the
+  landed `LazyMapScan` pass was extended to additionally *recognize* (but
+  not rewrite) the injective-call scan shape
+  `for e in M.entries { if (P.M(arg, e[0])) return Body(e); }` where
+  `P.M` is annotated `deterministic injective` and `arg` does not
+  reference the loop variable. S1 body shape and S2 injective-uniqueness
+  are both verified; precondition failures (method not `injective`, not
+  `deterministic`, argument references loop variable, callee not a
+  primitive method) emit `NearMiss`es. Rewrite target is the identity
+  (no direct-lookup form is available without a syntactic inverse of
+  `P.M` — see the implementation plan's "Design decision" section). This
+  narrow slice unblocks the §4.1 `R.Decaps` scan validation; §4.1
+  `R.Hash` (cross-method pair) remains gated on the full §5.4 oracle-
+  patching plan.
 
 ## 8. Success criteria
 

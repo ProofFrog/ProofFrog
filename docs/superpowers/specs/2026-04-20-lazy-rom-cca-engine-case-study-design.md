@@ -258,6 +258,30 @@ The implementation plan may need to be **split** into sub-plans, since §5.4 alo
   when no idiom is present anywhere in the game (silent skip). No entry was
   added to `proof_frog/diagnostics.py` — the near-miss path is sufficient.
 
+**Next step (chosen 2026-04-20):** write the §4.1 `DecapsIter` CCA proof
+and the §4.3 Hashed ElGamal CCA validation proof as FrogLang artifacts
+under `extras/examples/engine-case-studies/lazy-rom-cca/`, then run them
+through `prove` end-to-end. This exercises §5.1 + §5.2 + §5.3 as a set and
+catches any load-bearing gap in the MVP before §5.4 oracle-patching
+compounds on it. §5.4 (and therefore §4.2 `HashIter` + StarFortress
+Theorem 1) is deferred until the case-study proofs verify.
+
+- **§5.2 `LazyMapScan` (landed 2026-04-20):** registered in `CORE_PIPELINE`
+  immediately before `LazyMapToSampledFunction` (in
+  `proof_frog/transforms/map_iteration.py`). The MVP handles the
+  literal-equality scan shape
+  `for ([K, V] e in M.entries) { if (e[0] == key) { return Body(e); } }` →
+  `if (key in M) { return Body[e[0]:=key, e[1]:=M[key]]; }`. Soundness: S1
+  (body shape) verified syntactically; S2 uniqueness comes from map-key
+  uniqueness in this MVP — no `injective` annotation required. The
+  injective-challenger-call variant of S2 remains for the §5.4 oracle-patching
+  plan, which will extend `LazyMapScan` (or add a sibling pass) to also match
+  `challenger.TestOracle(arg, e[0])` predicates when `Test` is annotated
+  `deterministic injective`. Near-miss instrumentation covers body-shape,
+  key-references-loop-variable, and else-branch violations; the pass emits no
+  near-miss when no scan-over-`.entries` pattern is present (silent skip). No
+  entry added to `proof_frog/diagnostics.py` — near-miss path is sufficient.
+
 ## 8. Success criteria
 
 - `prove` verifies A1 (`DecapsIter` CCA proof) end-to-end after (1) and (2) land.

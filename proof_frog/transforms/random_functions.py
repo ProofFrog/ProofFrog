@@ -2210,6 +2210,29 @@ def _match_pair_idiom_suffix(
     return _PairIdiomMatch(if_idx=if_idx, key_name=k, writes_to=writes_to)
 
 
+def _method_references_maps(method: frog_ast.Method, m1: str, m2: str) -> bool:
+    """Return True if any statement in *method* references either map name."""
+    return any(
+        _references_map(stmt, m1) or _references_map(stmt, m2)
+        for stmt in method.block.statements
+    )
+
+
+def _stmt_references_maps(stmt: frog_ast.ASTNode, m1: str, m2: str) -> bool:
+    """Return True if *stmt* references either map name."""
+    return _references_map(stmt, m1) or _references_map(stmt, m2)
+
+
+def _fresh_field_name(game: frog_ast.Game, base: str) -> str:
+    existing = {f.name for f in game.fields}
+    if base not in existing:
+        return base
+    i = 1
+    while f"{base}{i}" in existing:
+        i += 1
+    return f"{base}{i}"
+
+
 class LazyMapPairToSampledFunction(TransformPass):
     """Generalize LazyMapToSampledFunction to a pair of maps with
     mutually-disjoint lazy-lookup guards (design §4).
@@ -2221,4 +2244,201 @@ class LazyMapPairToSampledFunction(TransformPass):
     name = _LAZY_MAP_PAIR_NAME
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        # Find all Map<K, V> fields; try every unordered pair with matching
+        # key/value types.
+        map_fields = [f for f in game.fields if isinstance(f.type, frog_ast.MapType)]
+        for i, m1 in enumerate(map_fields):
+            for m2 in map_fields[i + 1 :]:
+                if m1.type != m2.type:
+                    continue
+                rewritten = self._try_rewrite_pair(game, m1, m2, ctx)
+                if rewritten is not None:
+                    return rewritten
         return game
+
+    def _emit_near_miss(
+        self,
+        ctx: PipelineContext,
+        reason: str,
+        location: frog_ast.SourceOrigin | None,
+        variable: str,
+        method_name: str | None,
+        suggestion: str | None = None,
+    ) -> None:
+        ctx.near_misses.append(
+            NearMiss(
+                transform_name=_LAZY_MAP_PAIR_NAME,
+                reason=reason,
+                location=location,
+                suggestion=suggestion,
+                variable=variable,
+                method=method_name,
+            )
+        )
+
+    def _try_rewrite_pair(
+        self,
+        game: frog_ast.Game,
+        m1: frog_ast.Field,
+        m2: frog_ast.Field,
+        ctx: PipelineContext,
+    ) -> frog_ast.Game | None:
+        """Attempt to merge ``m1``, ``m2`` into a single sampled Function.
+
+        Preconditions (design §4.2):
+
+        - (P2-1) Every reference to ``m1`` or ``m2`` lies inside the
+          guarded-pair idiom suffix of some method.
+        - (P2-2) Neither map is explicitly initialized in ``Initialize``.
+        - (P2-3) Both maps share the same key and value types.
+        - (P2-4) Each method that references either map matches the
+          guarded-pair idiom, and the write inside that method lands on one
+          of the two maps with the same key parameter used in the guards.
+        - (P2-5) At least one method matches the idiom.
+        """
+        assert isinstance(m1.type, frog_ast.MapType)
+        assert isinstance(m2.type, frog_ast.MapType)
+        key_type = m1.type.key_type
+        value_type = m1.type.value_type
+
+        # Precompute whether any method is a pair-idiom candidate; gate
+        # near-miss emissions on this so we don't spam for unrelated pairs.
+        any_idiom = any(
+            _match_pair_idiom_suffix(m, m1.name, m2.name, value_type) is not None
+            for m in game.methods
+            if m.signature.name != "Initialize"
+        )
+
+        matches: dict[str, _PairIdiomMatch] = {}
+        for method in game.methods:
+            method_name = method.signature.name
+            if method_name == "Initialize":
+                # (P2-2) Initialize must not reference either map.
+                for stmt in method.block.statements:
+                    if _stmt_references_maps(stmt, m1.name, m2.name):
+                        if any_idiom:
+                            self._emit_near_miss(
+                                ctx,
+                                (
+                                    f"Maps '{m1.name}'/'{m2.name}' are "
+                                    "referenced in Initialize; lazy-map-pair "
+                                    "canonicalization requires empty initial "
+                                    "maps"
+                                ),
+                                stmt.origin,
+                                m1.name,
+                                "Initialize",
+                            )
+                        return None
+                continue
+            match = _match_pair_idiom_suffix(method, m1.name, m2.name, value_type)
+            if match is None:
+                # (P2-1) Methods that don't match must not reference
+                # either map.
+                if _method_references_maps(method, m1.name, m2.name):
+                    if any_idiom:
+                        self._emit_near_miss(
+                            ctx,
+                            (
+                                f"Maps '{m1.name}'/'{m2.name}' are referenced "
+                                f"in method '{method_name}' outside the "
+                                "lazy-lookup idiom"
+                            ),
+                            method.block.origin,
+                            m1.name,
+                            method_name,
+                        )
+                    return None
+                continue
+            # (P2-1) No references to either map before the idiom suffix.
+            for stmt in method.block.statements[: match.if_idx]:
+                if _stmt_references_maps(stmt, m1.name, m2.name):
+                    if any_idiom:
+                        self._emit_near_miss(
+                            ctx,
+                            (
+                                f"Maps '{m1.name}'/'{m2.name}' are referenced "
+                                f"in method '{method_name}' outside the "
+                                "lazy-lookup idiom"
+                            ),
+                            stmt.origin,
+                            m1.name,
+                            method_name,
+                        )
+                    return None
+            matches[method_name] = match
+        if not matches:
+            return None
+        _ = key_type  # forwarded to the builder below
+        return self._build_rewritten_game(
+            game, m1.name, m2.name, key_type, value_type, matches
+        )
+
+    def _build_rewritten_game(
+        self,
+        game: frog_ast.Game,
+        m1_name: str,
+        m2_name: str,
+        key_type: frog_ast.Type,
+        value_type: frog_ast.Type,
+        matches: dict[str, _PairIdiomMatch],
+    ) -> frog_ast.Game:
+        new_game = copy.deepcopy(game)
+
+        # 1. Replace the two map fields with a single Function<K, V> field.
+        f_name = _fresh_field_name(new_game, "F")
+        new_fields: list[frog_ast.Field] = []
+        seen = False
+        for fld in new_game.fields:
+            if fld.name in (m1_name, m2_name):
+                if not seen:
+                    new_fields.append(
+                        frog_ast.Field(
+                            frog_ast.FunctionType(
+                                copy.deepcopy(key_type),
+                                copy.deepcopy(value_type),
+                            ),
+                            f_name,
+                            None,
+                        )
+                    )
+                    seen = True
+                continue
+            new_fields.append(fld)
+        new_game.fields = new_fields
+
+        # 2. Prepend ``F <- Function<K, V>;`` to Initialize (create if absent).
+        sample_stmt = frog_ast.Sample(
+            None,
+            frog_ast.Variable(f_name),
+            frog_ast.FunctionType(
+                copy.deepcopy(key_type), copy.deepcopy(value_type)
+            ),  # type: ignore[arg-type]
+        )
+        init: frog_ast.Method | None = None
+        for m in new_game.methods:
+            if m.signature.name == "Initialize":
+                init = m
+                break
+        if init is None:
+            init_sig = frog_ast.MethodSignature("Initialize", frog_ast.Void(), [])
+            init = frog_ast.Method(init_sig, frog_ast.Block([sample_stmt]))
+            new_game.methods = [init] + list(new_game.methods)
+        else:
+            init.block = frog_ast.Block([sample_stmt] + list(init.block.statements))
+
+        # 3. Replace each matched method's suffix with ``return F(k);``.
+        for method in new_game.methods:
+            match = matches.get(method.signature.name)
+            if match is None:
+                continue
+            new_return = frog_ast.ReturnStatement(
+                frog_ast.FuncCall(
+                    frog_ast.Variable(f_name),
+                    [frog_ast.Variable(match.key_name)],
+                )
+            )
+            method.block = frog_ast.Block(
+                list(method.block.statements[: match.if_idx]) + [new_return]
+            )
+        return new_game

@@ -92,3 +92,72 @@ def test_exercise_2_26a_double_ciphertext_not_ror() -> None:
         "Exercise 2.26a: c||c should NOT be interchangeable with uniform "
         "— the two halves are always equal"
     )
+
+
+def test_early_return_guard_is_a_reorder_barrier() -> None:
+    """A side-effecting assignment must not be reordered past an early
+    return inside an if-statement.
+
+    Left:  on z == target, returns ssStar without modifying T.
+           Repeated calls always return ssStar.
+    Right: on z == target, inserts T[z] = h FIRST then returns ssStar.
+           Repeated calls return T[z] = h, not ssStar.
+
+    These games are observably distinct (the adversary can call Hash(z)
+    twice on the same z and compare the results). Canonicalizing them
+    to the same form would be unsound.
+    """
+    left = frog_parser.parse_game("""
+    Game Left() {
+        BitString<8> ssStar;
+        BitString<8> target;
+        Map<BitString<8>, BitString<8>> T;
+
+        Void Initialize() {
+            ssStar <- BitString<8>;
+            target <- BitString<8>;
+        }
+
+        BitString<8> Hash(BitString<8> z) {
+            if (z in T) {
+                return T[z];
+            }
+            if (z == target) {
+                return ssStar;
+            }
+            BitString<8> h <- BitString<8>;
+            T[z] = h;
+            return h;
+        }
+    }
+    """)
+    right = frog_parser.parse_game("""
+    Game Right() {
+        BitString<8> ssStar;
+        BitString<8> target;
+        Map<BitString<8>, BitString<8>> T;
+
+        Void Initialize() {
+            ssStar <- BitString<8>;
+            target <- BitString<8>;
+        }
+
+        BitString<8> Hash(BitString<8> z) {
+            if (z in T) {
+                return T[z];
+            }
+            BitString<8> h <- BitString<8>;
+            T[z] = h;
+            if (z == target) {
+                return ssStar;
+            }
+            return h;
+        }
+    }
+    """)
+    engine = _make_engine()
+    assert engine.canonicalize_game(left) != engine.canonicalize_game(right), (
+        "Topological sort must not reorder T[z] = h past the early-return "
+        "guard `if (z == target) return ssStar;` — doing so changes the "
+        "observable behavior on a second Hash query at the same z."
+    )

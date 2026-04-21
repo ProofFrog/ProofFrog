@@ -29,6 +29,16 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#requirements.
+    def visitRequirements(self, ctx:ProofParser.RequirementsContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#primeRequirement.
+    def visitPrimeRequirement(self, ctx:ProofParser.PrimeRequirementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#lets.
     def visitLets(self, ctx:ProofParser.LetsContext):
         return self.visitChildren(ctx)

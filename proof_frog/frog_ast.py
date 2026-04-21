@@ -925,6 +925,22 @@ class Lemma(ASTNode):
         return f"{self.game} by '{self.proof_path}';"
 
 
+class StructuralRequirement(ASTNode):
+    """A structural fact declared in a proof's ``requires:`` block.
+
+    ``kind`` is a tag naming the predicate (initially only ``"prime"``);
+    ``target`` is the expression the predicate applies to (e.g. ``G.order``).
+    """
+
+    def __init__(self, kind: str, target: Expression) -> None:
+        super().__init__()
+        self.kind = kind
+        self.target = target
+
+    def __str__(self) -> str:
+        return f"{self.target} is {self.kind}"
+
+
 class ProofFile(Root):
     # pylint: disable=too-many-positional-arguments,too-many-arguments
     def __init__(
@@ -937,6 +953,7 @@ class ProofFile(Root):
         max_calls: Optional[Variable],
         theorem: ParameterizedGame,
         steps: list[ProofStep],
+        requirements: Optional[list[StructuralRequirement]] = None,
     ) -> None:
         super().__init__()
         self.imports = imports
@@ -948,6 +965,7 @@ class ProofFile(Root):
         self.lemmas = lemmas
         self.theorem = theorem
         self.steps = steps
+        self.requirements = requirements if requirements is not None else []
 
     def __str__(self) -> str:
         output_string = ("\n".join(str(im) for im in self.imports)) + "\n\n"
@@ -967,6 +985,11 @@ class ProofFile(Root):
 
         if self.max_calls:
             output_string += f"  calls <= {self.max_calls};\n"
+
+        if self.requirements:
+            output_string += "\nrequires:\n"
+            for req in self.requirements:
+                output_string += f"  {req};\n"
 
         if self.lemmas:
             output_string += "\nlemma:\n"

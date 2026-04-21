@@ -1027,8 +1027,8 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
     ) -> frog_ast.UniqueSample:
         return frog_ast.UniqueSample(
             self.visit(ctx.type_()[0]),
-            self.visit(ctx.lvalue()[0]),
-            self.visit(ctx.lvalue()[1]),
+            self.visit(ctx.lvalue()),
+            self.visit(ctx.expression()),
             self.visit(ctx.type_()[1]),
         )
 
@@ -1037,8 +1037,8 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
     ) -> frog_ast.UniqueSample:
         return frog_ast.UniqueSample(
             None,
-            self.visit(ctx.lvalue()[0]),
-            self.visit(ctx.lvalue()[1]),
+            self.visit(ctx.lvalue()),
+            self.visit(ctx.expression()),
             self.visit(ctx.type_()),
         )
 
@@ -1309,6 +1309,11 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
                 path = lemma_entry.FILESTRING().getText().strip("'")
                 lemmas.append(frog_ast.Lemma(game, path))
 
+        requirements: list[frog_ast.StructuralRequirement] = []
+        if proof.requirements():
+            for req_entry in proof.requirements().requirement():
+                requirements.append(self.visit(req_entry))
+
         proof_file = frog_ast.ProofFile(
             [self.visit(im) for im in ctx.moduleImport()],
             game_list,
@@ -1318,6 +1323,7 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
             max_calls,
             self.visit(proof.theorem().parameterizedGame()),
             self.visit(proof.gameList()),
+            requirements,
         )
         proof_file.sampled_let_names = sampled_let_names
         return proof_file
@@ -1366,6 +1372,16 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
         self, ctx: ProofParser.StepAssumptionContext
     ) -> frog_ast.StepAssumption:
         return frog_ast.StepAssumption(self.visit(ctx.expression()))
+
+    def visitPrimeRequirement(
+        self, ctx: ProofParser.PrimeRequirementContext
+    ) -> frog_ast.StructuralRequirement:
+        req = frog_ast.StructuralRequirement(
+            kind="prime", target=self.visit(ctx.expression())
+        )
+        req.line_num = ctx.start.line
+        req.column_num = ctx.start.column
+        return req
 
     def visitRegularStep(
         self, ctx: ProofParser.RegularStepContext

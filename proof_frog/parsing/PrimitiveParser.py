@@ -84,9 +84,9 @@ def serializedATN():
         0,139,140,5,14,0,0,140,141,3,26,13,0,141,142,5,9,0,0,142,219,1,0,
         0,0,143,144,3,18,9,0,144,145,5,25,0,0,145,146,3,26,13,0,146,147,
         5,9,0,0,147,219,1,0,0,0,148,149,3,34,17,0,149,150,3,18,9,0,150,151,
-        5,24,0,0,151,152,5,3,0,0,152,153,3,18,9,0,153,154,5,4,0,0,154,155,
+        5,24,0,0,151,152,5,3,0,0,152,153,3,26,13,0,153,154,5,4,0,0,154,155,
         3,34,17,0,155,156,5,9,0,0,156,219,1,0,0,0,157,158,3,18,9,0,158,159,
-        5,24,0,0,159,160,5,3,0,0,160,161,3,18,9,0,161,162,5,4,0,0,162,163,
+        5,24,0,0,159,160,5,3,0,0,160,161,3,26,13,0,161,162,5,4,0,0,162,163,
         3,34,17,0,163,164,5,9,0,0,164,219,1,0,0,0,165,166,3,26,13,0,166,
         168,5,5,0,0,167,169,3,28,14,0,168,167,1,0,0,0,168,169,1,0,0,0,169,
         170,1,0,0,0,170,171,5,6,0,0,171,172,5,9,0,0,172,219,1,0,0,0,173,
@@ -934,16 +934,16 @@ class PrimitiveParser ( Parser ):
             else:
                 return self.getTypedRuleContext(PrimitiveParser.TypeContext,i)
 
-        def lvalue(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(PrimitiveParser.LvalueContext)
-            else:
-                return self.getTypedRuleContext(PrimitiveParser.LvalueContext,i)
+        def lvalue(self):
+            return self.getTypedRuleContext(PrimitiveParser.LvalueContext,0)
 
         def SAMPUNIQ(self):
             return self.getToken(PrimitiveParser.SAMPUNIQ, 0)
         def L_SQUARE(self):
             return self.getToken(PrimitiveParser.L_SQUARE, 0)
+        def expression(self):
+            return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,0)
+
         def R_SQUARE(self):
             return self.getToken(PrimitiveParser.R_SQUARE, 0)
         def SEMI(self):
@@ -1227,16 +1227,16 @@ class PrimitiveParser ( Parser ):
             super().__init__(parser)
             self.copyFrom(ctx)
 
-        def lvalue(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(PrimitiveParser.LvalueContext)
-            else:
-                return self.getTypedRuleContext(PrimitiveParser.LvalueContext,i)
+        def lvalue(self):
+            return self.getTypedRuleContext(PrimitiveParser.LvalueContext,0)
 
         def SAMPUNIQ(self):
             return self.getToken(PrimitiveParser.SAMPUNIQ, 0)
         def L_SQUARE(self):
             return self.getToken(PrimitiveParser.L_SQUARE, 0)
+        def expression(self):
+            return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,0)
+
         def R_SQUARE(self):
             return self.getToken(PrimitiveParser.R_SQUARE, 0)
         def type_(self):
@@ -1365,7 +1365,7 @@ class PrimitiveParser ( Parser ):
                 self.state = 151
                 self.match(PrimitiveParser.L_SQUARE)
                 self.state = 152
-                self.lvalue()
+                self.expression(0)
                 self.state = 153
                 self.match(PrimitiveParser.R_SQUARE)
                 self.state = 154
@@ -1384,7 +1384,7 @@ class PrimitiveParser ( Parser ):
                 self.state = 159
                 self.match(PrimitiveParser.L_SQUARE)
                 self.state = 160
-                self.lvalue()
+                self.expression(0)
                 self.state = 161
                 self.match(PrimitiveParser.R_SQUARE)
                 self.state = 162

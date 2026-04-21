@@ -81,9 +81,9 @@ def serializedATN():
         18,9,0,132,133,5,14,0,0,133,134,3,26,13,0,134,135,5,9,0,0,135,212,
         1,0,0,0,136,137,3,18,9,0,137,138,5,25,0,0,138,139,3,26,13,0,139,
         140,5,9,0,0,140,212,1,0,0,0,141,142,3,34,17,0,142,143,3,18,9,0,143,
-        144,5,24,0,0,144,145,5,3,0,0,145,146,3,18,9,0,146,147,5,4,0,0,147,
+        144,5,24,0,0,144,145,5,3,0,0,145,146,3,26,13,0,146,147,5,4,0,0,147,
         148,3,34,17,0,148,149,5,9,0,0,149,212,1,0,0,0,150,151,3,18,9,0,151,
-        152,5,24,0,0,152,153,5,3,0,0,153,154,3,18,9,0,154,155,5,4,0,0,155,
+        152,5,24,0,0,152,153,5,3,0,0,153,154,3,26,13,0,154,155,5,4,0,0,155,
         156,3,34,17,0,156,157,5,9,0,0,157,212,1,0,0,0,158,159,3,26,13,0,
         159,161,5,5,0,0,160,162,3,28,14,0,161,160,1,0,0,0,161,162,1,0,0,
         0,162,163,1,0,0,0,163,164,5,6,0,0,164,165,5,9,0,0,165,212,1,0,0,
@@ -892,16 +892,16 @@ class GameParser ( Parser ):
             else:
                 return self.getTypedRuleContext(GameParser.TypeContext,i)
 
-        def lvalue(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(GameParser.LvalueContext)
-            else:
-                return self.getTypedRuleContext(GameParser.LvalueContext,i)
+        def lvalue(self):
+            return self.getTypedRuleContext(GameParser.LvalueContext,0)
 
         def SAMPUNIQ(self):
             return self.getToken(GameParser.SAMPUNIQ, 0)
         def L_SQUARE(self):
             return self.getToken(GameParser.L_SQUARE, 0)
+        def expression(self):
+            return self.getTypedRuleContext(GameParser.ExpressionContext,0)
+
         def R_SQUARE(self):
             return self.getToken(GameParser.R_SQUARE, 0)
         def SEMI(self):
@@ -1185,16 +1185,16 @@ class GameParser ( Parser ):
             super().__init__(parser)
             self.copyFrom(ctx)
 
-        def lvalue(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(GameParser.LvalueContext)
-            else:
-                return self.getTypedRuleContext(GameParser.LvalueContext,i)
+        def lvalue(self):
+            return self.getTypedRuleContext(GameParser.LvalueContext,0)
 
         def SAMPUNIQ(self):
             return self.getToken(GameParser.SAMPUNIQ, 0)
         def L_SQUARE(self):
             return self.getToken(GameParser.L_SQUARE, 0)
+        def expression(self):
+            return self.getTypedRuleContext(GameParser.ExpressionContext,0)
+
         def R_SQUARE(self):
             return self.getToken(GameParser.R_SQUARE, 0)
         def type_(self):
@@ -1323,7 +1323,7 @@ class GameParser ( Parser ):
                 self.state = 144
                 self.match(GameParser.L_SQUARE)
                 self.state = 145
-                self.lvalue()
+                self.expression(0)
                 self.state = 146
                 self.match(GameParser.R_SQUARE)
                 self.state = 147
@@ -1342,7 +1342,7 @@ class GameParser ( Parser ):
                 self.state = 152
                 self.match(GameParser.L_SQUARE)
                 self.state = 153
-                self.lvalue()
+                self.expression(0)
                 self.state = 154
                 self.match(GameParser.R_SQUARE)
                 self.state = 155

@@ -46,6 +46,7 @@ _EXCLUDED = {
     frog_ast.StepAssumption,
     frog_ast.Induction,
     frog_ast.Lemma,
+    frog_ast.StructuralRequirement,
 }
 
 # Factory functions that build a minimal instance of each covered type.

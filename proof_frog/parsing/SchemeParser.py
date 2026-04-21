@@ -91,9 +91,9 @@ def serializedATN():
         159,160,5,12,0,0,160,237,1,0,0,0,161,162,3,20,10,0,162,163,5,28,
         0,0,163,164,3,28,14,0,164,165,5,12,0,0,165,237,1,0,0,0,166,167,3,
         36,18,0,167,168,3,20,10,0,168,169,5,27,0,0,169,170,5,6,0,0,170,171,
-        3,20,10,0,171,172,5,7,0,0,172,173,3,36,18,0,173,174,5,12,0,0,174,
+        3,28,14,0,171,172,5,7,0,0,172,173,3,36,18,0,173,174,5,12,0,0,174,
         237,1,0,0,0,175,176,3,20,10,0,176,177,5,27,0,0,177,178,5,6,0,0,178,
-        179,3,20,10,0,179,180,5,7,0,0,180,181,3,36,18,0,181,182,5,12,0,0,
+        179,3,28,14,0,179,180,5,7,0,0,180,181,3,36,18,0,181,182,5,12,0,0,
         182,237,1,0,0,0,183,184,3,28,14,0,184,186,5,8,0,0,185,187,3,30,15,
         0,186,185,1,0,0,0,186,187,1,0,0,0,187,188,1,0,0,0,188,189,5,9,0,
         0,189,190,5,12,0,0,190,237,1,0,0,0,191,192,5,39,0,0,192,193,3,28,
@@ -1045,16 +1045,16 @@ class SchemeParser ( Parser ):
             else:
                 return self.getTypedRuleContext(SchemeParser.TypeContext,i)
 
-        def lvalue(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(SchemeParser.LvalueContext)
-            else:
-                return self.getTypedRuleContext(SchemeParser.LvalueContext,i)
+        def lvalue(self):
+            return self.getTypedRuleContext(SchemeParser.LvalueContext,0)
 
         def SAMPUNIQ(self):
             return self.getToken(SchemeParser.SAMPUNIQ, 0)
         def L_SQUARE(self):
             return self.getToken(SchemeParser.L_SQUARE, 0)
+        def expression(self):
+            return self.getTypedRuleContext(SchemeParser.ExpressionContext,0)
+
         def R_SQUARE(self):
             return self.getToken(SchemeParser.R_SQUARE, 0)
         def SEMI(self):
@@ -1338,16 +1338,16 @@ class SchemeParser ( Parser ):
             super().__init__(parser)
             self.copyFrom(ctx)
 
-        def lvalue(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(SchemeParser.LvalueContext)
-            else:
-                return self.getTypedRuleContext(SchemeParser.LvalueContext,i)
+        def lvalue(self):
+            return self.getTypedRuleContext(SchemeParser.LvalueContext,0)
 
         def SAMPUNIQ(self):
             return self.getToken(SchemeParser.SAMPUNIQ, 0)
         def L_SQUARE(self):
             return self.getToken(SchemeParser.L_SQUARE, 0)
+        def expression(self):
+            return self.getTypedRuleContext(SchemeParser.ExpressionContext,0)
+
         def R_SQUARE(self):
             return self.getToken(SchemeParser.R_SQUARE, 0)
         def type_(self):
@@ -1476,7 +1476,7 @@ class SchemeParser ( Parser ):
                 self.state = 169
                 self.match(SchemeParser.L_SQUARE)
                 self.state = 170
-                self.lvalue()
+                self.expression(0)
                 self.state = 171
                 self.match(SchemeParser.R_SQUARE)
                 self.state = 172
@@ -1495,7 +1495,7 @@ class SchemeParser ( Parser ):
                 self.state = 177
                 self.match(SchemeParser.L_SQUARE)
                 self.state = 178
-                self.lvalue()
+                self.expression(0)
                 self.state = 179
                 self.match(SchemeParser.R_SQUARE)
                 self.state = 180

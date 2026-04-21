@@ -759,6 +759,24 @@ def check_proof_well_formed(
 
     type_check_visitor.visit(proof.theorem)
 
+    for req in proof.requirements:
+        type_check_visitor.visit(req.target)
+        target_type = type_check_visitor.get_type_from_ast(req.target)
+        if req.kind == "prime":
+            if not isinstance(target_type, frog_ast.IntType):
+                print_error(
+                    req,
+                    f"`is prime` requires an integer-typed target, "
+                    f"got {_format_type(target_type)}",
+                    file_name,
+                )
+        else:
+            print_error(
+                req,
+                f"unknown structural predicate: `{req.kind}`",
+                file_name,
+            )
+
     for helper in proof.helpers:
         import_namespace[helper.name] = helper
     for step in proof.steps:

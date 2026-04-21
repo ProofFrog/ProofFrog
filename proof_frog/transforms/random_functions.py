@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from sympy import Rational, Symbol, simplify as sympy_simplify
 
 from .. import frog_ast
-from ..visitors import BlockTransformer, SearchVisitor, ReplaceTransformer
+from ..visitors import BlockTransformer, SearchVisitor, ReplaceTransformer, Transformer
 from ._base import (
     TransformPass,
     PipelineContext,
@@ -2561,3 +2561,454 @@ class LazyMapPairToSampledFunction(TransformPass):
                 list(method.block.statements[: match.if_idx]) + [new_return]
             )
         return new_game
+
+
+# ---------------------------------------------------------------------------
+# Unify game-local sampled Function<K, V> with let-bound sampled H
+# ---------------------------------------------------------------------------
+
+_LOCAL_FN_TO_LET_NAME = "Local Function Field To Let"
+
+
+def _resolve_fn_type(
+    t: frog_ast.FunctionType, proof_namespace: frog_ast.Namespace
+) -> frog_ast.FunctionType:
+    """Return a FunctionType with domain/range resolved through primitive
+    type aliases reachable via *proof_namespace*.  Leaves unresolvable
+    sub-types untouched."""
+    return frog_ast.FunctionType(
+        _resolve_type_ref(t.domain_type, proof_namespace),
+        _resolve_type_ref(t.range_type, proof_namespace),
+    )
+
+
+def _resolve_type_ref(
+    t: frog_ast.Type,
+    proof_namespace: frog_ast.Namespace,
+    _seen: frozenset[str] = frozenset(),
+) -> frog_ast.Type:
+    """Recursively resolve ``FieldAccess(Variable(P), name)`` via a
+    Primitive's field definitions in *proof_namespace*.  Falls through
+    on any unsupported shape."""
+    if isinstance(t, frog_ast.FieldAccess) and isinstance(
+        t.the_object, frog_ast.Variable
+    ):
+        obj = proof_namespace.get(t.the_object.name)
+        if isinstance(obj, frog_ast.Primitive):
+            for fld in obj.fields:
+                if fld.name == t.name and fld.value is not None:
+                    value = fld.value
+                    if isinstance(value, frog_ast.Type):
+                        return _resolve_type_ref(value, proof_namespace, _seen)
+    if isinstance(t, frog_ast.FunctionType):
+        return frog_ast.FunctionType(
+            _resolve_type_ref(t.domain_type, proof_namespace, _seen),
+            _resolve_type_ref(t.range_type, proof_namespace, _seen),
+        )
+    if isinstance(t, frog_ast.MapType):
+        return frog_ast.MapType(
+            _resolve_type_ref(t.key_type, proof_namespace, _seen),
+            _resolve_type_ref(t.value_type, proof_namespace, _seen),
+        )
+    if isinstance(t, frog_ast.ArrayType):
+        return frog_ast.ArrayType(
+            _resolve_type_ref(t.element_type, proof_namespace, _seen), t.count
+        )
+    if isinstance(t, frog_ast.OptionalType):
+        return frog_ast.OptionalType(
+            _resolve_type_ref(t.the_type, proof_namespace, _seen)
+        )
+    if isinstance(t, frog_ast.ProductType):
+        return frog_ast.ProductType(
+            [_resolve_type_ref(s, proof_namespace, _seen) for s in t.types]
+        )
+    return t
+
+
+class LocalFunctionFieldToLet(TransformPass):
+    """Unify a game-local sampled ``Function<K, V>`` field with a let-bound
+    sampled ``H : Function<K, V>`` of identical type.
+
+    Preconditions (plan §2):
+
+    - P-1. The field ``F`` is sampled exactly once in ``Initialize`` via
+      ``F <- Function<K, V>;``.
+    - P-2. ``F`` is not otherwise assigned anywhere in the game body.
+    - P-3. Every reference to ``F`` outside its defining sample is the
+      callee of a ``FuncCall``.
+    - P-4. The proof's ``let:`` namespace contains a sampled name ``H``
+      with type ``Function<K', V'>`` equal to ``(K, V)``.
+    - P-5. ``H`` does not appear syntactically anywhere in the game body.
+
+    Soundness: a uniform random function is observably characterized by
+    its outputs on queried inputs; under P-5, no prior observation of
+    ``H`` constrains its distribution in this game, so calls to ``F``
+    and calls to ``H`` on the same inputs are identically distributed.
+    See SEMANTICS.md §6.5 and §9.3.
+    """
+
+    name = _LOCAL_FN_TO_LET_NAME
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        # Candidate let targets: sampled Function-typed let bindings.  We
+        # resolve type aliases through the proof namespace so that a let
+        # declared as ``Function<T.Image, BitString<n>>`` matches a field
+        # typed ``Function<ImageSet, BitString<n>>`` (where the primitive
+        # ``T`` has ``Set Image = ImageSet``).
+        let_candidates: dict[str, frog_ast.FunctionType] = {}
+        for entry in ctx.proof_let_types.type_map:
+            if (
+                isinstance(entry.type, frog_ast.FunctionType)
+                and entry.name in ctx.sampled_let_names
+            ):
+                resolved = _resolve_fn_type(entry.type, ctx.proof_namespace)
+                let_candidates[entry.name] = resolved
+
+        for fld in game.fields:
+            if not isinstance(fld.type, frog_ast.FunctionType):
+                continue
+            rewritten = self._try_rewrite(game, fld, let_candidates, ctx)
+            if rewritten is not None:
+                return rewritten
+        return game
+
+    def _emit_near_miss(
+        self,
+        ctx: PipelineContext,
+        reason: str,
+        location: frog_ast.SourceOrigin | None,
+        variable: str,
+        method_name: str | None,
+        suggestion: str | None = None,
+    ) -> None:
+        ctx.near_misses.append(
+            NearMiss(
+                transform_name=_LOCAL_FN_TO_LET_NAME,
+                reason=reason,
+                location=location,
+                suggestion=suggestion,
+                variable=variable,
+                method=method_name,
+            )
+        )
+
+    def _try_rewrite(
+        self,
+        game: frog_ast.Game,
+        fld: frog_ast.Field,
+        let_candidates: dict[str, frog_ast.FunctionType],
+        ctx: PipelineContext,
+    ) -> frog_ast.Game | None:
+        f_name = fld.name
+        assert isinstance(fld.type, frog_ast.FunctionType)
+        f_type = _resolve_fn_type(fld.type, ctx.proof_namespace)
+
+        # P-1, P-2: find unique `F <- Function<K, V>;` sample in Initialize
+        # and check there are no other assignments/samples to F anywhere.
+        init_sample_idx = self._locate_initialize_sample(game, f_name, f_type, ctx)
+        if init_sample_idx is None:
+            return None
+        if self._has_other_assignments(game, f_name, init_sample_idx, ctx):
+            return None
+
+        # P-3: every non-defining reference to F is a call callee.
+        if not self._only_call_shaped(game, f_name, init_sample_idx, ctx):
+            return None
+
+        # P-4: find a sampled let-bound H with matching type.
+        h_name = self._find_matching_let(f_name, f_type, let_candidates, ctx)
+        if h_name is None:
+            return None
+
+        # P-5: H must not appear anywhere in the game body.
+        if self._h_referenced_in_game(game, h_name, ctx, f_name):
+            return None
+
+        return self._build_rewritten_game(game, f_name, h_name, init_sample_idx)
+
+    def _locate_initialize_sample(
+        self,
+        game: frog_ast.Game,
+        f_name: str,
+        f_type: frog_ast.FunctionType,
+        ctx: PipelineContext,
+    ) -> int | None:
+        """Return the index of the unique ``F <- Function<K, V>;`` in
+        Initialize, or None."""
+        init: frog_ast.Method | None = None
+        for m in game.methods:
+            if m.signature.name == "Initialize":
+                init = m
+                break
+        if init is None:
+            return None
+        found_idx: int | None = None
+        for idx, stmt in enumerate(init.block.statements):
+            if (
+                isinstance(stmt, frog_ast.Sample)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name == f_name
+            ):
+                if not isinstance(stmt.sampled_from, frog_ast.FunctionType):
+                    self._emit_near_miss(
+                        ctx,
+                        (
+                            f"Field '{f_name}' is sampled from a non-Function "
+                            "type; LocalFunctionFieldToLet requires "
+                            "sampling from Function<K, V>"
+                        ),
+                        stmt.origin,
+                        f_name,
+                        "Initialize",
+                    )
+                    return None
+                if _resolve_fn_type(stmt.sampled_from, ctx.proof_namespace) != f_type:
+                    self._emit_near_miss(
+                        ctx,
+                        (
+                            f"Field '{f_name}' sampled-from type does not "
+                            "match field type"
+                        ),
+                        stmt.origin,
+                        f_name,
+                        "Initialize",
+                    )
+                    return None
+                if found_idx is not None:
+                    self._emit_near_miss(
+                        ctx,
+                        (
+                            f"Field '{f_name}' is sampled more than once in "
+                            "Initialize"
+                        ),
+                        stmt.origin,
+                        f_name,
+                        "Initialize",
+                    )
+                    return None
+                found_idx = idx
+        return found_idx
+
+    def _has_other_assignments(
+        self,
+        game: frog_ast.Game,
+        f_name: str,
+        init_sample_idx: int,
+        ctx: PipelineContext,
+    ) -> bool:
+        """Check for any assignment-like use of F other than the
+        Initialize sample at ``init_sample_idx``."""
+        for method in game.methods:
+            is_init = method.signature.name == "Initialize"
+            for idx, stmt in enumerate(method.block.statements):
+                if is_init and idx == init_sample_idx:
+                    continue
+                if self._stmt_writes_to(stmt, f_name):
+                    self._emit_near_miss(
+                        ctx,
+                        (
+                            f"Field '{f_name}' is assigned outside the "
+                            "unique Initialize sample; "
+                            "LocalFunctionFieldToLet requires a single sample"
+                        ),
+                        stmt.origin,
+                        f_name,
+                        method.signature.name,
+                    )
+                    return True
+        return False
+
+    @staticmethod
+    def _stmt_writes_to(stmt: frog_ast.Statement, name: str) -> bool:
+        """Return True if *stmt* assigns/samples into a target named
+        ``name`` (direct variable, or array/field access on it)."""
+        if isinstance(stmt, (frog_ast.Assignment, frog_ast.Sample)):
+            return LocalFunctionFieldToLet._target_touches(stmt.var, name)
+        if isinstance(stmt, frog_ast.UniqueSample):
+            return LocalFunctionFieldToLet._target_touches(stmt.var, name)
+        return False
+
+    @staticmethod
+    def _target_touches(target: frog_ast.Expression, name: str) -> bool:
+        if isinstance(target, frog_ast.Variable):
+            return target.name == name
+        if isinstance(target, frog_ast.ArrayAccess) and isinstance(
+            target.the_array, frog_ast.Variable
+        ):
+            return target.the_array.name == name
+        if isinstance(target, frog_ast.FieldAccess) and isinstance(
+            target.the_object, frog_ast.Variable
+        ):
+            return target.the_object.name == name
+        return False
+
+    def _only_call_shaped(
+        self,
+        game: frog_ast.Game,
+        f_name: str,
+        init_sample_idx: int,
+        ctx: PipelineContext,
+    ) -> bool:
+        """Return True iff every occurrence of ``Variable(f_name)``
+        outside the defining sample appears as ``FuncCall.func``."""
+        call_count, field_access_count = _count_rf_calls(
+            self._body_excluding_init_sample(game, init_sample_idx), f_name
+        )
+        if field_access_count > 0:
+            self._emit_near_miss(
+                ctx,
+                (
+                    f"Field '{f_name}' is used via field access; "
+                    "LocalFunctionFieldToLet requires only call-shaped uses"
+                ),
+                None,
+                f_name,
+                None,
+            )
+            return False
+        bare_refs = _count_variable_refs(
+            self._body_excluding_init_sample(game, init_sample_idx), f_name
+        )
+        if bare_refs != call_count:
+            self._emit_near_miss(
+                ctx,
+                (
+                    f"Field '{f_name}' is referenced in a non-call position; "
+                    "LocalFunctionFieldToLet requires only call-shaped uses"
+                ),
+                None,
+                f_name,
+                None,
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _body_excluding_init_sample(
+        game: frog_ast.Game, init_sample_idx: int
+    ) -> frog_ast.Block:
+        """Return a Block concatenating every method body, replacing the
+        Initialize method body with a copy that has the sample stmt
+        elided.  Used for non-defining-reference accounting."""
+        stmts: list[frog_ast.Statement] = []
+        for method in game.methods:
+            if method.signature.name == "Initialize":
+                for idx, s in enumerate(method.block.statements):
+                    if idx == init_sample_idx:
+                        continue
+                    stmts.append(s)
+            else:
+                stmts.extend(method.block.statements)
+        return frog_ast.Block(stmts)
+
+    def _find_matching_let(
+        self,
+        f_name: str,
+        f_type: frog_ast.FunctionType,
+        let_candidates: dict[str, frog_ast.FunctionType],
+        ctx: PipelineContext,
+    ) -> str | None:
+        matches = [name for name, t in let_candidates.items() if t == f_type]
+        if not matches:
+            # Record near-miss if a same-named let declared but not sampled.
+            declared_but_not_sampled = [
+                entry.name
+                for entry in ctx.proof_let_types.type_map
+                if isinstance(entry.type, frog_ast.FunctionType)
+                and entry.type == f_type
+                and entry.name not in ctx.sampled_let_names
+            ]
+            if declared_but_not_sampled:
+                self._emit_near_miss(
+                    ctx,
+                    (
+                        f"Let binding(s) {declared_but_not_sampled} match the "
+                        f"type of field '{f_name}' but are declared (known "
+                        "deterministic) rather than sampled; "
+                        "LocalFunctionFieldToLet requires a sampled let"
+                    ),
+                    None,
+                    f_name,
+                    None,
+                )
+            return None
+        # Deterministic pick: first by type_map order.
+        for entry in ctx.proof_let_types.type_map:
+            if entry.name in matches:
+                return entry.name
+        return matches[0]
+
+    def _h_referenced_in_game(
+        self,
+        game: frog_ast.Game,
+        h_name: str,
+        ctx: PipelineContext,
+        f_name: str,
+    ) -> bool:
+        for method in game.methods:
+            if _count_variable_refs(method.block, h_name) > 0:
+                self._emit_near_miss(
+                    ctx,
+                    (
+                        f"Candidate let binding '{h_name}' is referenced in "
+                        f"method '{method.signature.name}'; "
+                        "LocalFunctionFieldToLet requires H to be unused in "
+                        "the game body"
+                    ),
+                    method.block.origin,
+                    f_name,
+                    method.signature.name,
+                )
+                return True
+        return False
+
+    def _build_rewritten_game(
+        self,
+        game: frog_ast.Game,
+        f_name: str,
+        h_name: str,
+        init_sample_idx: int,
+    ) -> frog_ast.Game:
+        new_game = copy.deepcopy(game)
+
+        # 1. Drop the field F.
+        new_game.fields = [f for f in new_game.fields if f.name != f_name]
+
+        # 2. Drop the `F <- Function<...>;` from Initialize.
+        for method in new_game.methods:
+            if method.signature.name != "Initialize":
+                continue
+            method.block = frog_ast.Block(
+                [
+                    s
+                    for idx, s in enumerate(method.block.statements)
+                    if idx != init_sample_idx
+                ]
+            )
+            break
+
+        # 3. Rewrite every remaining reference to F (all of which, under
+        #    P-3, are in FuncCall callee position) to H.
+        for method in new_game.methods:
+            method.block = _RenameVariableTransformer(f_name, h_name).transform(
+                method.block
+            )
+
+        return new_game
+
+
+class _RenameVariableTransformer(Transformer):
+    """Rename every ``Variable(from_name)`` occurrence to
+    ``Variable(to_name)``.  Intended for cases where the caller has
+    already verified that every such occurrence is semantically a
+    reference that should be renamed (e.g. after P-3 has confirmed all
+    non-defining uses are call-position)."""
+
+    def __init__(self, from_name: str, to_name: str) -> None:
+        self.from_name = from_name
+        self.to_name = to_name
+
+    def transform_variable(self, node: frog_ast.Variable) -> frog_ast.Variable:
+        if node.name == self.from_name:
+            return frog_ast.Variable(self.to_name)
+        return node

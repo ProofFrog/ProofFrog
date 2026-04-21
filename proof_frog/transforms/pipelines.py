@@ -25,6 +25,7 @@ from .random_functions import (
     FreshInputRFToUniform,
     LazyMapToSampledFunction,
     LazyMapPairToSampledFunction,
+    LocalFunctionFieldToLet,
 )
 from .map_iteration import LazyMapScan
 from .map_reindex import MapKeyReindex
@@ -102,6 +103,7 @@ CORE_PIPELINE: list[TransformPass] = [
     MapKeyReindex(),
     LazyMapToSampledFunction(),
     LazyMapPairToSampledFunction(),
+    LocalFunctionFieldToLet(),
     ExtractRFCalls(),
     UniqueRFSimplification(),
     ChallengeExclusionRFToUniform(),

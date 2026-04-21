@@ -21,6 +21,7 @@ from proof_frog.transforms.random_functions import (
     LocalRFToUniform,
     DistinctConstRFToUniform,
     LazyMapPairToSampledFunction,
+    LocalFunctionFieldToLet,
 )
 from proof_frog.transforms.structural import UniformBijectionElimination
 from proof_frog.visitors import NameTypeMap
@@ -1130,3 +1131,124 @@ def test_lazy_map_pair_near_miss_mismatched_types():
     ]
     assert misses
     assert any("type" in nm.reason for nm in misses)
+
+
+# ---------------------------------------------------------------------------
+# LocalFunctionFieldToLet near-misses
+# ---------------------------------------------------------------------------
+
+
+_BS8_TO_BS16 = frog_ast.FunctionType(
+    frog_ast.BitStringType(frog_ast.Integer(8)),
+    frog_ast.BitStringType(frog_ast.Integer(16)),
+)
+
+
+def _local_fn_ctx(
+    *, sampled: set[str] = frozenset(), declared: set[str] = frozenset()
+) -> PipelineContext:
+    types = NameTypeMap()
+    for name in sampled:
+        types.set(name, _BS8_TO_BS16)
+    for name in declared:
+        types.set(name, _BS8_TO_BS16)
+    return PipelineContext(
+        variables={},
+        proof_let_types=types,
+        proof_namespace={},
+        subsets_pairs=[],
+        sampled_let_names=set(sampled),
+    )
+
+
+def _local_fn_misses(ctx: PipelineContext) -> list:
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Local Function Field To Let"
+    ]
+
+
+def test_local_fn_near_miss_reassigned() -> None:
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Function<BitString<8>, BitString<16>> F;
+            Void Initialize() {
+                F <- Function<BitString<8>, BitString<16>>;
+            }
+            BitString<16> Hash(BitString<8> x) {
+                F <- Function<BitString<8>, BitString<16>>;
+                return F(x);
+            }
+        }
+        """
+    )
+    ctx = _local_fn_ctx(sampled={"H"})
+    LocalFunctionFieldToLet().apply(game, ctx)
+    misses = _local_fn_misses(ctx)
+    assert misses
+    assert any("assigned outside" in nm.reason for nm in misses)
+
+
+def test_local_fn_near_miss_non_call_use() -> None:
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Function<BitString<8>, BitString<16>> F;
+            Void Initialize() {
+                F <- Function<BitString<8>, BitString<16>>;
+            }
+            Bool Eq() {
+                return F == F;
+            }
+            BitString<16> Hash(BitString<8> x) { return F(x); }
+        }
+        """
+    )
+    ctx = _local_fn_ctx(sampled={"H"})
+    LocalFunctionFieldToLet().apply(game, ctx)
+    misses = _local_fn_misses(ctx)
+    assert misses
+    assert any("non-call" in nm.reason for nm in misses)
+
+
+def test_local_fn_near_miss_h_referenced() -> None:
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Function<BitString<8>, BitString<16>> F;
+            Void Initialize() {
+                F <- Function<BitString<8>, BitString<16>>;
+            }
+            BitString<16> Hash(BitString<8> x) { return F(x); }
+            BitString<16> Other(BitString<8> y) { return H(y); }
+        }
+        """
+    )
+    ctx = _local_fn_ctx(sampled={"H"})
+    LocalFunctionFieldToLet().apply(game, ctx)
+    misses = _local_fn_misses(ctx)
+    assert misses
+    assert any("referenced in method" in nm.reason for nm in misses)
+
+
+def test_local_fn_near_miss_declared_not_sampled() -> None:
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Function<BitString<8>, BitString<16>> F;
+            Void Initialize() {
+                F <- Function<BitString<8>, BitString<16>>;
+            }
+            BitString<16> Hash(BitString<8> x) { return F(x); }
+        }
+        """
+    )
+    ctx = _local_fn_ctx(declared={"H"})
+    LocalFunctionFieldToLet().apply(game, ctx)
+    misses = _local_fn_misses(ctx)
+    assert misses
+    assert any(
+        "declared (known deterministic)" in nm.reason for nm in misses
+    )

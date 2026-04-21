@@ -397,3 +397,53 @@ def test_integration_via_core_pipeline() -> None:
         m for m in result.methods if m.signature.name == "Hash"
     )
     assert len(hash_method.block.statements) == 1
+
+
+def test_defensive_guard_sample_var_in_key_expr() -> None:
+    """AST-level defense: if the sample variable name `s` appears
+    syntactically inside `key_expr`, the three structural occurrences of
+    `key_expr` straddle the sample statement (if-condition occurrence is
+    pre-sample, assign-index occurrence is post-sample). Collapsing them
+    into a single evaluation would be unsound. Not reachable from
+    well-typed FrogLang (no block-scoped shadowing), but guarded at the
+    AST level per PROMPT.md skepticism item (4). This test directly
+    constructs the pathological AST to verify the transform declines."""
+    bs8 = frog_ast.BitStringType(frog_ast.Integer(8))
+    map_type = frog_ast.MapType(bs8, bs8)
+    # Parameter named "s" so key_expr = Variable("s") passes the
+    # parameter-reference check; sample also declared as "s" to trigger
+    # the shadowing shape.
+    in_check = frog_ast.BinaryOperation(
+        frog_ast.BinaryOperators.IN,
+        frog_ast.Variable("s"),
+        frog_ast.Variable("T"),
+    )
+    guard_body = frog_ast.Block(
+        [
+            frog_ast.ReturnStatement(
+                frog_ast.ArrayAccess(
+                    frog_ast.Variable("T"), frog_ast.Variable("s")
+                )
+            )
+        ]
+    )
+    if_stmt = frog_ast.IfStatement([in_check], [guard_body])
+    sample_stmt = frog_ast.Sample(bs8, frog_ast.Variable("s"), bs8)
+    assign_stmt = frog_ast.Assignment(
+        None,
+        frog_ast.ArrayAccess(frog_ast.Variable("T"), frog_ast.Variable("s")),
+        frog_ast.Variable("s"),
+    )
+    ret_stmt = frog_ast.ReturnStatement(frog_ast.Variable("s"))
+    method = frog_ast.Method(
+        frog_ast.MethodSignature("Hash", bs8, [frog_ast.Parameter(bs8, "s")]),
+        frog_ast.Block([if_stmt, sample_stmt, assign_stmt, ret_stmt]),
+    )
+    game = frog_ast.Game(
+        ("G", [], [frog_ast.Field(map_type, "T", None)], [method])
+    )
+    got = LazyMapToSampledFunction().apply(game, _ctx())
+    assert got == game, (
+        "Transform must decline when the sample variable name appears in "
+        "the key expression."
+    )

@@ -1873,6 +1873,16 @@ def _match_idiom_suffix(
     ):
         return None
 
+    # Defensive: if `sample_var` appeared syntactically in `key_expr`, the
+    # three structural occurrences of `key_expr` would straddle the sample
+    # statement (if-condition pre-sample, assign-index post-sample), and the
+    # Variable(sample_var) occurrences would refer to different bindings —
+    # collapsing them to one evaluation would be unsound.  Not reachable from
+    # well-typed FrogLang (the sample is a declaration; no block shadowing),
+    # but guarded at the AST level.
+    if _expr_references_any(key_expr, {sample_var}):
+        return None
+
     return if_idx, key_expr, sample_var
 
 

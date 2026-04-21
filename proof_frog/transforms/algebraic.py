@@ -22,7 +22,13 @@ from ..visitors import (
     NameTypeMap,
     build_game_type_map,
 )
-from ._base import TransformPass, PipelineContext, NearMiss, has_nondeterministic_call
+from ._base import (
+    TransformPass,
+    PipelineContext,
+    NearMiss,
+    has_nondeterministic_call,
+    _lookup_primitive_method,
+)
 from ._ordering import node_sort_key
 
 # ---------------------------------------------------------------------------
@@ -1105,6 +1111,91 @@ class ReflexiveComparison(TransformPass):
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
         ).transform(game)
+
+
+class InjectiveEqualitySimplifyTransformer(Transformer):
+    """Rewrites ``f(a1,...,an) == f(b1,...,bn)`` to ``(a1==b1) && ... && (an==bn)``
+    when ``f`` is a primitive method annotated ``deterministic injective``.
+
+    The ``!=`` variant becomes the corresponding disjunction of per-argument
+    ``!=`` comparisons.  Zero-argument calls are left to ``ReflexiveComparison``.
+    """
+
+    def __init__(self, ctx: PipelineContext) -> None:
+        self.ctx = ctx
+
+    def transform_binary_operation(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        transformed = frog_ast.BinaryOperation(
+            binary_operation.operator,
+            self.transform(binary_operation.left_expression),
+            self.transform(binary_operation.right_expression),
+        )
+        op = transformed.operator
+        if op not in (
+            frog_ast.BinaryOperators.EQUALS,
+            frog_ast.BinaryOperators.NOTEQUALS,
+        ):
+            return transformed
+        left = transformed.left_expression
+        right = transformed.right_expression
+        if not (
+            isinstance(left, frog_ast.FuncCall) and isinstance(right, frog_ast.FuncCall)
+        ):
+            return transformed
+        # I-1: callees must be structurally equal.
+        if left.func != right.func:
+            return transformed
+        # I-3: arg list lengths must match.
+        if len(left.args) != len(right.args):
+            return transformed
+        # Zero-arg: f() == f() -> reflexive; let ReflexiveComparison handle it.
+        if not left.args:
+            return transformed
+        # I-2: resolve primitive method; must be deterministic + injective.
+        method = _lookup_primitive_method(left.func, self.ctx.proof_namespace)
+        if method is None:
+            return transformed
+        if not (method.deterministic and method.injective):
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="Injective Equality Simplify",
+                    reason=(
+                        f"comparison of calls to '{method.name}' did not simplify: "
+                        "method is not annotated 'deterministic injective'"
+                    ),
+                    location=binary_operation.origin,
+                    suggestion=(
+                        "If distinct inputs must map to distinct outputs, "
+                        "annotate the primitive method 'deterministic injective'."
+                    ),
+                    variable=None,
+                    method=method.name,
+                )
+            )
+            return transformed
+        pair_op = op  # EQUALS or NOTEQUALS
+        combiner = (
+            frog_ast.BinaryOperators.AND
+            if op == frog_ast.BinaryOperators.EQUALS
+            else frog_ast.BinaryOperators.OR
+        )
+        pairs = [
+            frog_ast.BinaryOperation(pair_op, a, b)
+            for a, b in zip(left.args, right.args)
+        ]
+        result: frog_ast.Expression = pairs[0]
+        for pair in pairs[1:]:
+            result = frog_ast.BinaryOperation(combiner, result, pair)
+        return result
+
+
+class InjectiveEqualitySimplify(TransformPass):
+    name = "Injective Equality Simplify"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return InjectiveEqualitySimplifyTransformer(ctx).transform(game)
 
 
 # ---------------------------------------------------------------------------

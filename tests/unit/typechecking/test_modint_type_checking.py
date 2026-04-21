@@ -49,6 +49,45 @@ class TestModIntSampling:
 # ---------------------------------------------------------------------------
 
 
+class TestModIntUniqSample:
+    def test_uniq_excludes_zero_literal(self) -> None:
+        _check_game("""
+            Game G(Int q) {
+                Void Initialize() {
+                    ModInt<q> a <-uniq[{0}] ModInt<q>;
+                }
+            }
+            """)
+
+    def test_uniq_excludes_multiple_literals(self) -> None:
+        _check_game("""
+            Game G(Int q) {
+                Void Initialize() {
+                    ModInt<q> a <-uniq[{0, 1, 2}] ModInt<q>;
+                }
+            }
+            """)
+
+    def test_uniq_with_backslash_sugar(self) -> None:
+        _check_game("""
+            Game G(Int q) {
+                Void Initialize() {
+                    ModInt<q> a <- ModInt<q> \\ {0};
+                }
+            }
+            """)
+
+    def test_uniq_wrong_elem_type_still_fails(self) -> None:
+        _check_game_fails("""
+            Game G(Int q) {
+                Void Initialize() {
+                    Bool b = true;
+                    ModInt<q> a <-uniq[{b}] ModInt<q>;
+                }
+            }
+            """)
+
+
 class TestModIntLiteralPromotion:
     def test_zero_assignment(self) -> None:
         _check_game("""

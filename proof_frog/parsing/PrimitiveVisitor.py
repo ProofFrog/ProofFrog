@@ -59,6 +59,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#varDeclWithSampleMinusStatement.
+    def visitVarDeclWithSampleMinusStatement(self, ctx:PrimitiveParser.VarDeclWithSampleMinusStatementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#varDeclWithSampleStatement.
     def visitVarDeclWithSampleStatement(self, ctx:PrimitiveParser.VarDeclWithSampleStatementContext):
         return self.visitChildren(ctx)
@@ -66,6 +71,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by PrimitiveParser#assignmentStatement.
     def visitAssignmentStatement(self, ctx:PrimitiveParser.AssignmentStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#sampleMinusStatement.
+    def visitSampleMinusStatement(self, ctx:PrimitiveParser.SampleMinusStatementContext):
         return self.visitChildren(ctx)
 
 

@@ -14,8 +14,10 @@ block: L_CURLY statement* R_CURLY;
 
 statement: type id SEMI #varDeclStatement
 	| type lvalue EQUALS expression SEMI #varDeclWithValueStatement
+	| type lvalue SAMPLES expression BACKSLASH expression SEMI #varDeclWithSampleMinusStatement
 	| type lvalue SAMPLES expression SEMI #varDeclWithSampleStatement
 	| lvalue EQUALS expression SEMI #assignmentStatement
+	| lvalue SAMPLES expression BACKSLASH expression SEMI #sampleMinusStatement
 	| lvalue SAMPLES expression SEMI #sampleStatement
 	| type lvalue SAMPUNIQ L_SQUARE expression R_SQUARE type SEMI #uniqueSampleStatement
 	| lvalue SAMPUNIQ L_SQUARE expression R_SQUARE type SEMI #uniqueSampleNoTypeStatement

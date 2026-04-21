@@ -2198,7 +2198,10 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 "Unique sample set must be a parameterized Set<D>",
             )
             return
-        if not self.check_types(set_type.parameterization, unique_sample.sampled_from):
+        # Exclusion-set elements must be values in the sampled-from type,
+        # so the sampled type plays the 'declared' role (mirrors
+        # `ModInt<q> x = 0;` where ModInt accepts an Int literal).
+        if not self.check_types(unique_sample.sampled_from, set_type.parameterization):
             self.print_error(
                 unique_sample,
                 f"Set element type {set_type.parameterization} does not match"
@@ -2809,6 +2812,25 @@ def compare_types(
         value_type, frog_ast.IntType
     ):
         return True
+
+    # Covariance of Set<_> under element-type coercion: Set<A> accepts Set<B>
+    # whenever A accepts B. This mirrors the ModInt/Int coercion above at the
+    # set-type level so e.g. passing `{0}` (Set<Int>) where Set<ModInt<q>> is
+    # expected type-checks.
+    if (
+        isinstance(declared_type, frog_ast.SetType)
+        and isinstance(value_type, frog_ast.SetType)
+        and declared_type.parameterization is not None
+        and value_type.parameterization is not None
+    ):
+        if compare_types(
+            declared_type.parameterization,
+            value_type.parameterization,
+            subsets_pairs,
+            sympy_subs,
+            strict_optional,
+        ):
+            return True
 
     if isinstance(declared_type, frog_ast.GroupElemType) and isinstance(
         value_type, frog_ast.GroupElemType

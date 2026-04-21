@@ -282,6 +282,92 @@ def test_initialize_present_no_map_refs_ok() -> None:
     )
 
 
+def test_expression_keyed_idiom() -> None:
+    """Key is a pure, parameter-referencing expression — matcher should match."""
+    _apply_and_expect(
+        """
+        Game G() {
+            Map<BitString<4>, BitString<16>> T;
+            BitString<16> Hash(BitString<8> x) {
+                if (x[0:4] in T) {
+                    return T[x[0:4]];
+                }
+                BitString<16> s <- BitString<16>;
+                T[x[0:4]] = s;
+                return s;
+            }
+        }
+        """,
+        """
+        Game G() {
+            Function<BitString<4>, BitString<16>> T;
+            Void Initialize() {
+                T <- Function<BitString<4>, BitString<16>>;
+            }
+            BitString<16> Hash(BitString<8> x) {
+                return T(x[0:4]);
+            }
+        }
+        """,
+    )
+
+
+def test_expression_keyed_idiom_needs_parameter() -> None:
+    """Key expression must reference a parameter (otherwise the 'map entry
+    per caller input' interpretation is invalid)."""
+    _apply_and_expect_unchanged(
+        """
+        Game G() {
+            BitString<4> c;
+            Map<BitString<4>, BitString<16>> T;
+            BitString<16> Hash(BitString<8> x) {
+                if (c in T) {
+                    return T[c];
+                }
+                BitString<16> s <- BitString<16>;
+                T[c] = s;
+                return s;
+            }
+        }
+        """
+    )
+
+
+def test_pipeline_collapses_sample_between_duplicate_in_checks() -> None:
+    """When the sample is hoisted between two identical `k in M` checks
+    (as produced by LazyMapScan iterations), the pipeline should still
+    canonicalize the map to a sampled Function."""
+    # pylint: disable=import-outside-toplevel
+    from proof_frog.transforms._base import run_pipeline
+    from proof_frog.transforms.pipelines import CORE_PIPELINE
+
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Map<BitString<8>, BitString<16>> T;
+            BitString<16> Hash(BitString<8> x) {
+                if (x in T) {
+                    return T[x];
+                }
+                BitString<16> s <- BitString<16>;
+                if (x in T) {
+                    return T[x];
+                }
+                T[x] = s;
+                return s;
+            }
+        }
+        """
+    )
+    result = run_pipeline(game, CORE_PIPELINE, _ctx())
+    t_field = next(f for f in result.fields if f.name == "T")
+    assert isinstance(t_field.type, frog_ast.FunctionType)
+    hash_method = next(
+        m for m in result.methods if m.signature.name == "Hash"
+    )
+    assert len(hash_method.block.statements) == 1
+
+
 def test_integration_via_core_pipeline() -> None:
     """With LazyMapToSampledFunction in the pipeline, a lazy Hash oracle
     canonicalizes such that the Map field becomes a sampled Function."""

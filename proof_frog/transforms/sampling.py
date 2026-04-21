@@ -1398,8 +1398,7 @@ class SinkUniformSampleTransformer(BlockTransformer):
                 continue
 
             after_if = frog_ast.Block(block.statements[next_idx + 1 :])
-            if _references_name(after_if, var_name):
-                continue
+            after_uses = _references_name(after_if, var_name)
 
             # Find which branches reference the variable
             using_branches: list[int] = []
@@ -1407,23 +1406,37 @@ class SinkUniformSampleTransformer(BlockTransformer):
                 if _references_name(branch_block, var_name):
                     using_branches.append(bi)
 
-            if len(using_branches) != 1:
-                continue
+            if len(using_branches) == 1 and not after_uses:
+                # Sink into the one branch that uses the variable.
+                target_bi = using_branches[0]
+                new_if = copy.deepcopy(next_stmt)
+                new_if.blocks[target_bi] = (
+                    frog_ast.Block([copy.deepcopy(stmt)]) + new_if.blocks[target_bi]
+                )
 
-            # Move sample into the one branch
-            target_bi = using_branches[0]
-            new_if = copy.deepcopy(next_stmt)
-            new_if.blocks[target_bi] = (
-                frog_ast.Block([copy.deepcopy(stmt)]) + new_if.blocks[target_bi]
-            )
+                new_stmts = (
+                    list(block.statements[:idx])
+                    + list(block.statements[idx + 1 : next_idx])
+                    + [new_if]
+                    + list(block.statements[next_idx + 1 :])
+                )
+                return self.transform_block(frog_ast.Block(new_stmts))
 
-            new_stmts = (
-                list(block.statements[:idx])
-                + list(block.statements[idx + 1 : next_idx])
-                + [new_if]
-                + list(block.statements[next_idx + 1 :])
-            )
-            return self.transform_block(frog_ast.Block(new_stmts))
+            if not using_branches and after_uses:
+                # Sink past the if-stmt: the sample is used only after the
+                # if, and the if references nothing that involves the sample
+                # variable (checked: not in conditions, not in any branch).
+                # Moving a uniform sample past control flow that does not
+                # observe it is sound (sampling is independent of branch
+                # outcomes). Any early-return path in the if makes the
+                # sample dead code anyway.
+                new_stmts = (
+                    list(block.statements[:idx])
+                    + list(block.statements[idx + 1 : next_idx])
+                    + [next_stmt, stmt]
+                    + list(block.statements[next_idx + 1 :])
+                )
+                return self.transform_block(frog_ast.Block(new_stmts))
 
         return block
 

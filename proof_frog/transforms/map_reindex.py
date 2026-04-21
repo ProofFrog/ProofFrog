@@ -806,7 +806,9 @@ class MapKeyReindex(TransformPass):
             # game refer to the same underlying set.
             for fld in prim.fields:
                 if fld.name == ret.name and fld.value is not None:
-                    return copy.deepcopy(fld.value)
+                    # Primitive ``Set Alias = X;`` fields carry the
+                    # underlying type as an Expression-shaped node.
+                    return copy.deepcopy(fld.value)  # type: ignore[return-value]
         return copy.deepcopy(ret)
 
     def _rewrite_loop(  # pylint: disable=too-many-arguments,too-many-positional-arguments

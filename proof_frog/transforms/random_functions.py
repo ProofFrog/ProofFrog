@@ -22,7 +22,13 @@ from sympy import Rational, Symbol, simplify as sympy_simplify
 
 from .. import frog_ast
 from ..visitors import BlockTransformer, SearchVisitor, ReplaceTransformer
-from ._base import TransformPass, PipelineContext, NearMiss, _lookup_primitive_method
+from ._base import (
+    TransformPass,
+    PipelineContext,
+    NearMiss,
+    _lookup_primitive_method,
+    has_nondeterministic_call,
+)
 
 
 @dataclass
@@ -1753,9 +1759,15 @@ class ChallengeExclusionRFToUniform(TransformPass):
 _LAZY_MAP_NAME = "Lazy Map To Sampled Function"
 
 
-def _is_idiom_if(stmt: frog_ast.ASTNode, map_name: str, key_name: str) -> bool:
-    """Return True if *stmt* is ``if (key in map) return map[key];`` with no
-    else and a single-statement body."""
+def _is_idiom_if_expr(
+    stmt: frog_ast.ASTNode,
+    map_name: str,
+    key_expr: frog_ast.Expression,
+) -> bool:
+    """Return True if *stmt* is ``if (key_expr in map) return map[key_expr];``
+    with no else and a single-statement body.  Structural equality is used
+    between the ``in``-check's left operand and the embedded ``M[.]``'s
+    index, and both must equal *key_expr*."""
     if not isinstance(stmt, frog_ast.IfStatement):
         return False
     if len(stmt.conditions) != 1 or len(stmt.blocks) != 1:
@@ -1764,8 +1776,7 @@ def _is_idiom_if(stmt: frog_ast.ASTNode, map_name: str, key_name: str) -> bool:
     if not (
         isinstance(cond, frog_ast.BinaryOperation)
         and cond.operator == frog_ast.BinaryOperators.IN
-        and isinstance(cond.left_expression, frog_ast.Variable)
-        and cond.left_expression.name == key_name
+        and cond.left_expression == key_expr
         and isinstance(cond.right_expression, frog_ast.Variable)
         and cond.right_expression.name == map_name
     ):
@@ -1778,17 +1789,39 @@ def _is_idiom_if(stmt: frog_ast.ASTNode, map_name: str, key_name: str) -> bool:
         isinstance(ret, frog_ast.ArrayAccess)
         and isinstance(ret.the_array, frog_ast.Variable)
         and ret.the_array.name == map_name
-        and isinstance(ret.index, frog_ast.Variable)
-        and ret.index.name == key_name
+        and ret.index == key_expr
     )
+
+
+def _expr_references_any(expr: frog_ast.Expression, names: set[str]) -> bool:
+    """Return True if *expr* syntactically references any ``Variable`` whose
+    name is in *names*."""
+
+    def matcher(n: frog_ast.ASTNode) -> bool:
+        return isinstance(n, frog_ast.Variable) and n.name in names
+
+    return SearchVisitor(matcher).visit(expr) is not None
 
 
 def _match_idiom_suffix(
     method: frog_ast.Method,
     map_name: str,
     value_type: frog_ast.Type,
-) -> tuple[int, str, str] | None:
-    """Match the 4-statement lazy-lookup idiom suffix of *method*'s body."""
+    ctx: PipelineContext | None = None,
+) -> tuple[int, frog_ast.Expression, str] | None:
+    """Match the 4-statement lazy-lookup idiom suffix of *method*'s body.
+
+    The *key* is any expression ``e`` appearing identically (by structural
+    equality) at all three sites:
+
+    - the ``in`` check's left operand,
+    - the ``M[.]`` index inside the check's embedded return, and
+    - the ``M[.]`` index of the assign statement.
+
+    The key expression must (a) reference at least one parameter of
+    *method*, and (b) contain no non-deterministic calls (checked when
+    *ctx* is supplied).
+    """
     stmts = list(method.block.statements)
     if len(stmts) < 4:
         return None
@@ -1810,12 +1843,11 @@ def _match_idiom_suffix(
         and isinstance(assign_stmt.var, frog_ast.ArrayAccess)
         and isinstance(assign_stmt.var.the_array, frog_ast.Variable)
         and assign_stmt.var.the_array.name == map_name
-        and isinstance(assign_stmt.var.index, frog_ast.Variable)
         and isinstance(assign_stmt.value, frog_ast.Variable)
         and assign_stmt.value.name == sample_var
     ):
         return None
-    key_name = assign_stmt.var.index.name
+    key_expr = assign_stmt.var.index
 
     if not (
         isinstance(ret_stmt, frog_ast.ReturnStatement)
@@ -1824,14 +1856,24 @@ def _match_idiom_suffix(
     ):
         return None
 
-    if not _is_idiom_if(if_stmt, map_name, key_name):
+    if not _is_idiom_if_expr(if_stmt, map_name, key_expr):
         return None
 
+    # The key expression must reference at least one method parameter: a
+    # constant (field-only) key would mean the idiom samples once per game
+    # rather than once per caller input, which is a different semantics.
     param_names = {p.name for p in method.signature.parameters}
-    if key_name not in param_names:
+    if not _expr_references_any(key_expr, param_names):
         return None
 
-    return if_idx, key_name, sample_var
+    # Purity: if any embedded FuncCall is non-deterministic, rewriting the
+    # three occurrences of the key into one is unsound.
+    if ctx is not None and has_nondeterministic_call(
+        key_expr, ctx.proof_namespace, ctx.proof_let_types
+    ):
+        return None
+
+    return if_idx, key_expr, sample_var
 
 
 def _references_map(node: frog_ast.ASTNode, map_name: str) -> bool:
@@ -1887,7 +1929,7 @@ class LazyMapToSampledFunction(TransformPass):
         value_type = fld.type.value_type
 
         any_idiom = any(
-            _match_idiom_suffix(m, map_name, value_type) is not None
+            _match_idiom_suffix(m, map_name, value_type, ctx) is not None
             for m in game.methods
         )
 
@@ -1950,7 +1992,7 @@ class LazyMapToSampledFunction(TransformPass):
                 if target_var is None or target_var.name != map_name:
                     continue
                 if any(
-                    _match_idiom_suffix(m, map_name, value_type) is not None
+                    _match_idiom_suffix(m, map_name, value_type, ctx) is not None
                     for m in game.methods
                 ):
                     self._emit_near_miss(
@@ -1974,11 +2016,11 @@ class LazyMapToSampledFunction(TransformPass):
         value_type: frog_ast.Type,
         any_idiom: bool,
         ctx: PipelineContext,
-    ) -> list[tuple[int, int, str]] | None:
+    ) -> list[tuple[int, int, frog_ast.Expression]] | None:
         """For each non-Initialize method, classify as idiom / disqualifying /
         unrelated, and return the list of ``(method_idx, if_idx, key_name)``
         rewrite sites.  Returns None if a disqualifying use is found."""
-        rewrites: list[tuple[int, int, str]] = []
+        rewrites: list[tuple[int, int, frog_ast.Expression]] = []
         found_any = False
         for m_idx, method in enumerate(game.methods):
             method_name = method.signature.name
@@ -1998,7 +2040,7 @@ class LazyMapToSampledFunction(TransformPass):
                             )
                         return None
                 continue
-            match = _match_idiom_suffix(method, map_name, value_type)
+            match = _match_idiom_suffix(method, map_name, value_type, ctx)
             if match is None:
                 for stmt in method.block.statements:
                     if _references_map(stmt, map_name):
@@ -2016,7 +2058,7 @@ class LazyMapToSampledFunction(TransformPass):
                             )
                         return None
                 continue
-            if_idx, key_name, _sv = match
+            if_idx, key_expr, _sv = match
             for stmt in method.block.statements[:if_idx]:
                 if _references_map(stmt, map_name):
                     if any_idiom:
@@ -2032,7 +2074,7 @@ class LazyMapToSampledFunction(TransformPass):
                             method_name,
                         )
                     return None
-            rewrites.append((m_idx, if_idx, key_name))
+            rewrites.append((m_idx, if_idx, key_expr))
             found_any = True
         if not found_any:
             return None
@@ -2044,7 +2086,7 @@ class LazyMapToSampledFunction(TransformPass):
         map_name: str,
         key_type: frog_ast.Type,
         value_type: frog_ast.Type,
-        rewrites: list[tuple[int, int, str]],
+        rewrites: list[tuple[int, int, frog_ast.Expression]],
     ) -> frog_ast.Game:
         new_game = copy.deepcopy(game)
 
@@ -2076,7 +2118,7 @@ class LazyMapToSampledFunction(TransformPass):
                 [sample_stmt] + list(init_method.block.statements)
             )
 
-        for m_idx, if_idx, key_name in rewrites:
+        for m_idx, if_idx, key_expr in rewrites:
             target_name = game.methods[m_idx].signature.name
             target = next(
                 m for m in new_game.methods if m.signature.name == target_name
@@ -2084,7 +2126,7 @@ class LazyMapToSampledFunction(TransformPass):
             new_return = frog_ast.ReturnStatement(
                 frog_ast.FuncCall(
                     frog_ast.Variable(map_name),
-                    [frog_ast.Variable(key_name)],
+                    [copy.deepcopy(key_expr)],
                 )
             )
             target.block = frog_ast.Block(
@@ -2254,7 +2296,7 @@ class LazyMapPairToSampledFunction(TransformPass):
                     # if both maps individually look like lazy-lookup
                     # candidates (single-map idiom) -- otherwise the pair is
                     # unrelated to this pass.
-                    if self._both_have_single_map_idiom(game, m1, m2):
+                    if self._both_have_single_map_idiom(game, m1, m2, ctx):
                         self._emit_near_miss(
                             ctx,
                             (
@@ -2281,18 +2323,19 @@ class LazyMapPairToSampledFunction(TransformPass):
         game: frog_ast.Game,
         m1: frog_ast.Field,
         m2: frog_ast.Field,
+        ctx: PipelineContext,
     ) -> bool:
         assert isinstance(m1.type, frog_ast.MapType)
         assert isinstance(m2.type, frog_ast.MapType)
         v1 = m1.type.value_type
         v2 = m2.type.value_type
         has_m1 = any(
-            _match_idiom_suffix(meth, m1.name, v1) is not None
+            _match_idiom_suffix(meth, m1.name, v1, ctx) is not None
             for meth in game.methods
             if meth.signature.name != "Initialize"
         )
         has_m2 = any(
-            _match_idiom_suffix(meth, m2.name, v2) is not None
+            _match_idiom_suffix(meth, m2.name, v2, ctx) is not None
             for meth in game.methods
             if meth.signature.name != "Initialize"
         )
@@ -2317,7 +2360,7 @@ class LazyMapPairToSampledFunction(TransformPass):
         )
         if any_pair:
             return
-        if not self._both_have_single_map_idiom(game, m1, m2):
+        if not self._both_have_single_map_idiom(game, m1, m2, ctx):
             return
         self._emit_near_miss(
             ctx,

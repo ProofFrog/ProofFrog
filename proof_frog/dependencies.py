@@ -18,26 +18,47 @@ def generate_dependency_graph(
     def add_dependency(node_in_graph: Node, statement: frog_ast.Statement) -> None:
         node_in_graph.add_neighbour(dependency_graph.get_node(statement))
 
+    field_names = [field.name for field in fields]
+
+    def contains_return(node: frog_ast.ASTNode) -> bool:
+        return isinstance(node, frog_ast.ReturnStatement)
+
+    def mutates_field(stmt: frog_ast.Statement) -> bool:
+        if not isinstance(
+            stmt, (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample)
+        ):
+            return False
+        target = stmt.var
+        if isinstance(target, frog_ast.Variable):
+            return target.name in field_names
+        if isinstance(target, frog_ast.ArrayAccess) and isinstance(
+            target.the_array, frog_ast.Variable
+        ):
+            return target.the_array.name in field_names
+        return False
+
     for index, statement in enumerate(block.statements):
         node_in_graph = dependency_graph.get_node(statement)
         earlier_statements = list(block.statements[:index])
         earlier_statements.reverse()
 
-        def contains_return(node: frog_ast.ASTNode) -> bool:
-            return isinstance(node, frog_ast.ReturnStatement)
-
         if visitors.SearchVisitor(contains_return).visit(statement):
             for preceding_statement in block.statements[:index]:
                 if (
-                    isinstance(
-                        preceding_statement,
-                        (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample),
+                    mutates_field(preceding_statement)
+                    or visitors.SearchVisitor(contains_return).visit(
+                        preceding_statement
                     )
-                    and isinstance(preceding_statement.var, frog_ast.Variable)
-                    and preceding_statement.var.name in [field.name for field in fields]
-                ) or visitors.SearchVisitor(contains_return).visit(
-                    preceding_statement
-                ) is not None:
+                    is not None
+                ):
+                    add_dependency(node_in_graph, preceding_statement)
+
+        if mutates_field(statement):
+            for preceding_statement in block.statements[:index]:
+                if (
+                    visitors.SearchVisitor(contains_return).visit(preceding_statement)
+                    is not None
+                ):
                     add_dependency(node_in_graph, preceding_statement)
 
         variables = visitors.VariableCollectionVisitor().visit(statement)

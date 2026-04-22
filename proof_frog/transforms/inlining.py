@@ -1499,8 +1499,16 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
         result = game
         while changed:
             changed = False
-            # Try inlining declared fields
+            # Try inlining declared fields. Skip ``_hge_*`` fields:
+            # ``HoistGroupExpToInitialize`` creates them specifically to
+            # serve as the canonical container for a ``base ^ X``
+            # expression, and inlining them immediately re-exposes the
+            # pattern, which causes Hoist to re-fire on the next
+            # iteration (fixed-point oscillation — see
+            # ``2026-04-21-continuation-prompt-v2.md``).
             for field_name in list(self.field_names):
+                if field_name.startswith("_hge_"):
+                    continue
                 new_game = self._try_inline_field(result, field_name)
                 if new_game is not None:
                     result = new_game

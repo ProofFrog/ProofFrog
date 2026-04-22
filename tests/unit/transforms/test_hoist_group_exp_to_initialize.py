@@ -200,3 +200,37 @@ def test_no_hoist_when_no_field_caret_x_pattern_in_oracle() -> None:
     """
     got = _apply(source)
     assert got == frog_parser.parse_game(source), str(got)
+
+
+def test_core_pipeline_converges_on_hoist_refactor_shape() -> None:
+    """Regression: ``HoistGroupExpToInitialize`` and
+    ``RefactorGroupElemFieldExp`` used to form a stable inverse pair under
+    the fixed-point loop when the hoisted field was single-use, because
+    ``InlineSingleUseField`` would re-inline it every iteration.
+    ``InlineSingleUseField`` now skips ``_hge_*`` fields; the pipeline
+    must converge rather than hit the 200-iteration cap.
+    """
+    # pylint: disable=import-outside-toplevel
+    import warnings
+    from proof_frog.transforms._base import run_pipeline
+    from proof_frog.transforms.pipelines import CORE_PIPELINE
+
+    source = """
+    Game G(Group G) {
+        ModInt<G.order> sk;
+        GroupElem<G> pk;
+
+        Void Initialize() {
+            sk <-uniq[{0}] ModInt<G.order>;
+            ModInt<G.order> b <- ModInt<G.order>;
+            pk = G.generator ^ b;
+        }
+        Bool Q(GroupElem<G> z) {
+            return z == pk ^ sk;
+        }
+    }
+    """
+    game = frog_parser.parse_game(source)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # non-convergence becomes an error
+        run_pipeline(game, CORE_PIPELINE, _ctx())

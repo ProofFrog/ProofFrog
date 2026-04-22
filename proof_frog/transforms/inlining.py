@@ -1038,27 +1038,36 @@ class ForwardExpressionAlias(TransformPass):
 
 
 class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
-    """Extract repeated ``var[constant]`` accesses into named variables.
+    """Extract repeated ``var[constant]`` accesses and slice expressions.
 
-    When ``v[i]`` (variable + integer index) appears 2+ times in a block
-    and ``v`` is declared with a product (tuple) type, inserts a local
-    declaration ``Ti __cse_v_i__ = v[i];`` right after ``v``'s assignment
-    and replaces every occurrence with the new variable.
-
+    **Tuple phase.** When ``v[i]`` (variable + integer index) appears
+    2+ times in a block and ``v`` is declared with a product (tuple)
+    type, inserts ``Ti __cse_v_i__ = v[i];`` right after ``v``'s
+    assignment and replaces every occurrence with the new variable.
     Also fires when ``v`` is a ``GenericFor`` loop binder, inserting the
     extraction at the top of the loop body. This symmetrises games whose
     loop body source writes ``m = e[0]`` explicitly against games whose
-    loop body obtains the same accesses via inlining a helper method
-    (and so has ``e[0]`` uses scattered inline).
+    loop body obtains the same accesses via inlining a helper method.
 
-    (Method parameters are intentionally NOT hoisted here: doing so
-    prematurely breaks the ``[v[0], v[1], ...] -> v`` fold in
+    (Method parameters are intentionally NOT eligible for tuple
+    extraction: doing so breaks the ``[v[0], v[1], ...] -> v`` fold in
     ``SimplifyTuple`` when a reconstructed tuple literal elsewhere
     references the same indices.)
 
-    This normalises games that destructure tuples explicitly
-    (``pk = k[0]``) against games that use inline access
-    (``Encaps(k[0])``).
+    **Slice phase.** When a ``v[A:B]`` slice expression (variable base,
+    syntactically-equal bounds) appears 2+ times in a block, inserts
+    ``BitString<B - A> __cse_slice_v_N__ = v[A:B];`` at the definition
+    point (after ``v``'s block-local assignment, or at position 0 for
+    method parameters / fields / enclosing-scope bases) and replaces
+    every matching slice with the new variable. Unlike the tuple phase,
+    method parameters ARE eligible, because no canonicalization pass
+    folds a concatenation of slices back into the base variable.
+
+    The slice phase symmetrises canonical forms between games that
+    hoist a named slice at source level (``k2enc = m[A:B];`` then using
+    ``k2enc`` in multiple branches) against games whose scan-loop body
+    obtains the same slice via inlining a helper + concat-equality
+    decomposition.
     """
 
     def __init__(self) -> None:
@@ -1189,11 +1198,142 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
             new_stmts.extend(remaining.statements)
             return self.transform_block(frog_ast.Block(new_stmts))
 
+        # Slice-extraction phase: extract repeated ``v[A:B]`` slices
+        # (variable base, syntactically-equal bounds) into a local
+        # ``BitString<B - A> cse = v[A:B];``. Mirrors the tuple path
+        # but uses structural equality on the full Slice expression.
+        # Unlike the tuple path, method parameters are eligible as
+        # bases (SimplifyTuple only folds ArrayAccess, not Slice, so
+        # hoisting a slice of a param doesn't interact).
+        slice_occurrences: list[frog_ast.Slice] = []
+        for stmt in block.statements:
+
+            def slice_collector(node: frog_ast.ASTNode) -> bool:
+                if isinstance(node, frog_ast.Slice) and isinstance(
+                    node.the_array, frog_ast.Variable
+                ):
+                    slice_occurrences.append(node)
+                return False
+
+            SearchVisitor(slice_collector).visit(stmt)
+
+        # Group by structural equality.
+        slice_groups: list[tuple[frog_ast.Slice, int]] = []
+        for sl in slice_occurrences:
+            for idx, (rep, cnt) in enumerate(slice_groups):
+                if sl == rep:
+                    slice_groups[idx] = (rep, cnt + 1)
+                    break
+            else:
+                slice_groups.append((sl, 1))
+
+        for rep_slice, count in slice_groups:
+            if count < 2:
+                continue
+            assert isinstance(rep_slice.the_array, frog_ast.Variable)
+            var_name = rep_slice.the_array.name
+
+            # Determine insertion point: after block-local def if any,
+            # else at top (scope-external: param / field / enclosing).
+            def_idx = -1
+            for idx, stmt in enumerate(block.statements):
+                if (
+                    isinstance(
+                        stmt,
+                        (
+                            frog_ast.Assignment,
+                            frog_ast.Sample,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name == var_name
+                    and stmt.the_type is not None
+                ):
+                    def_idx = idx
+                    break
+
+            # Skip if base is reassigned anywhere after def (or anywhere
+            # in block for scope-external case). Reassignment would
+            # invalidate the hoist.
+            def _is_reassigned_slice(name: str, node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(
+                        node,
+                        (
+                            frog_ast.Assignment,
+                            frog_ast.Sample,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
+                    and isinstance(node.var, frog_ast.Variable)
+                    and node.var.name == name
+                )
+
+            check_from = def_idx + 1 if def_idx >= 0 else 0
+            remaining_block = frog_ast.Block(list(block.statements[check_from:]))
+            if (
+                SearchVisitor(functools.partial(_is_reassigned_slice, var_name)).visit(
+                    remaining_block
+                )
+                is not None
+            ):
+                continue
+
+            insert_at = def_idx + 1 if def_idx >= 0 else 0
+
+            # Build a CSE name that does not collide with prior hoists
+            # on the same base variable (different (start, end) pairs in
+            # the same block would otherwise alias). Use a counter over
+            # existing assignments whose name matches the prefix.
+            prefix = f"__cse_slice_{var_name}_"
+            existing = 0
+            for stmt in block.statements:
+                if (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name.startswith(prefix)
+                ):
+                    existing += 1
+            cse_name = f"{prefix}{existing}__"
+            length_expr = frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.SUBTRACT,
+                copy.deepcopy(rep_slice.end),
+                copy.deepcopy(rep_slice.start),
+            )
+            elem_type = frog_ast.BitStringType(length_expr)
+
+            new_assignment = frog_ast.Assignment(
+                elem_type,
+                frog_ast.Variable(cse_name),
+                copy.deepcopy(rep_slice),
+            )
+
+            new_stmts = list(block.statements[:insert_at])
+            new_stmts.append(new_assignment)
+            remaining = frog_ast.Block(list(block.statements[insert_at:]))
+
+            def _match_slice(target: frog_ast.Slice, node: frog_ast.ASTNode) -> bool:
+                return node == target
+
+            while True:
+                match = SearchVisitor(functools.partial(_match_slice, rep_slice)).visit(
+                    remaining
+                )
+                if match is None:
+                    break
+                remaining = ReplaceTransformer(
+                    match, frog_ast.Variable(cse_name)
+                ).transform(remaining)
+
+            new_stmts.extend(remaining.statements)
+            return self.transform_block(frog_ast.Block(new_stmts))
+
         return block
 
 
 class ExtractRepeatedTupleAccess(TransformPass):
-    """Extract repeated tuple element accesses into named variables."""
+    """Extract repeated tuple element accesses and slice expressions."""
 
     name = "Extract Repeated Tuple Access"
 

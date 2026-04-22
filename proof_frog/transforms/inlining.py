@@ -1497,17 +1497,17 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
         self.field_names = [field.name for field in game.fields]
         changed = True
         result = game
+        pinned = self.ctx.pinned_fields if self.ctx is not None else set()
         while changed:
             changed = False
-            # Try inlining declared fields. Skip ``_hge_*`` fields:
-            # ``HoistGroupExpToInitialize`` creates them specifically to
-            # serve as the canonical container for a ``base ^ X``
-            # expression, and inlining them immediately re-exposes the
-            # pattern, which causes Hoist to re-fire on the next
-            # iteration (fixed-point oscillation — see
-            # ``2026-04-21-continuation-prompt-v2.md``).
+            # Try inlining declared fields. Skip any field that a
+            # producing pass has registered as pinned (see
+            # ``PipelineContext.pinned_fields``): inlining a pinned
+            # field re-exposes the pattern its producer was canonicalizing,
+            # and the producer re-fires on the next iteration, which
+            # prevents the fixed-point loop from converging.
             for field_name in list(self.field_names):
-                if field_name.startswith("_hge_"):
+                if field_name in pinned:
                     continue
                 new_game = self._try_inline_field(result, field_name)
                 if new_game is not None:
@@ -1973,6 +1973,9 @@ class HoistGroupExpToInitializeTransformer:
                 if any(n == fld.name for n in _free_var_names(exp_x)):
                     continue  # avoid degenerate self-reference
                 fresh = self._fresh_name(field_names)
+                # Mark as pinned so ``InlineSingleUseField`` leaves it
+                # alone — see ``PipelineContext.pinned_fields``.
+                self.ctx.pinned_fields.add(fresh)
                 return self._build_hoisted_game(
                     game,
                     init_idx,

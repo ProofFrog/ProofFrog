@@ -548,6 +548,21 @@ def _expr_is_group_elem_on_game(
                 ):
                     return param.type.group
         return None
+    if isinstance(expr, frog_ast.GroupGenerator):
+        return expr.group
+    # Surface form ``G.generator`` parses as ``FieldAccess(Variable(G), "generator")``.
+    if (
+        isinstance(expr, frog_ast.FieldAccess)
+        and expr.name == "generator"
+        and isinstance(expr.the_object, frog_ast.Variable)
+    ):
+        return expr.the_object
+    if (
+        isinstance(expr, frog_ast.BinaryOperation)
+        and expr.operator == frog_ast.BinaryOperators.EXPONENTIATE
+    ):
+        # ``base ^ exp`` is GroupElem<G> iff ``base`` is.
+        return _expr_is_group_elem_on_game(expr.left_expression, game)
     if (
         isinstance(expr, frog_ast.ArrayAccess)
         and isinstance(expr.the_array, frog_ast.Variable)

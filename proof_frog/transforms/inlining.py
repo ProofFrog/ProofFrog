@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import functools
 from collections.abc import Callable, Sequence
+from typing import Optional
 
 from .. import frog_ast
 from ..visitors import (
@@ -1834,6 +1835,459 @@ class InlineSingleUseField(TransformPass):
         return InlineSingleUseFieldTransformer(
             proof_namespace=ctx.proof_namespace, ctx=ctx
         ).transform(game)
+
+
+# ---------------------------------------------------------------------------
+# HoistGroupExpToInitialize — cache field^X computations as new fields
+# ---------------------------------------------------------------------------
+
+
+def _is_groupelem_field(fld: frog_ast.Field) -> bool:
+    return isinstance(fld.type, frog_ast.GroupElemType)
+
+
+def _free_var_names(expr: frog_ast.Expression) -> set[str]:
+    return {v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(expr))}
+
+
+def _stmt_writes_var(stmt: frog_ast.Statement, name: str) -> bool:
+    """True if *stmt* (top-level only) assigns/samples to ``name``."""
+    return (
+        isinstance(stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
+        and isinstance(stmt.var, frog_ast.Variable)
+        and stmt.var.name == name
+    )
+
+
+class _GroupExpFinder(Visitor[Optional[frog_ast.BinaryOperation]]):
+    """Find the first ``Variable(name) ^ <expr>`` BinaryOperation in a tree."""
+
+    def __init__(self, base_field_name: str) -> None:
+        self._base_field_name = base_field_name
+        self._found: Optional[frog_ast.BinaryOperation] = None
+
+    def result(self) -> Optional[frog_ast.BinaryOperation]:
+        return self._found
+
+    def leave_binary_operation(self, node: frog_ast.BinaryOperation) -> None:
+        if self._found is not None:
+            return
+        if node.operator != frog_ast.BinaryOperators.EXPONENTIATE:
+            return
+        if (
+            isinstance(node.left_expression, frog_ast.Variable)
+            and node.left_expression.name == self._base_field_name
+        ):
+            self._found = node
+
+
+class HoistGroupExpToInitializeTransformer:
+    """Hoist ``<F> ^ <X>`` expressions into a fresh field assigned in Init,
+    where ``F`` is a single-write ``GroupElem<G>`` field with a pure
+    deterministic RHS and ``X`` is a stable expression.
+
+    Soundness: the new field captures the value of ``F.rhs ^ X`` at
+    Initialize-end.  This is semantics-preserving when:
+
+    1. ``F`` is assigned exactly once, at top level of ``Initialize``.
+    2. ``F``'s RHS contains no non-deterministic call.
+    3. Every free variable of ``X`` is a game field or game parameter
+       (cross-method-visible, stable across oracle calls).
+    4. None of the free variables of ``F.rhs`` or ``X`` are reassigned
+       after ``F``'s definition (in or outside ``Initialize``).
+
+    The new field's RHS is the inlined form ``F.rhs ^ X`` so that the
+    immediately-following ``GroupElem Simplification`` pass can fold any
+    nested power-of-power.
+
+    Motivation: closes the gap where ``field1 = G.generator ^ v1`` and a
+    use site ``field1 ^ field2`` would otherwise hide the nested
+    ``(g^v1)^field2`` pattern from the algebraic simplifier.
+    """
+
+    def __init__(self, ctx: PipelineContext) -> None:
+        self.ctx = ctx
+
+    def transform(self, game: frog_ast.Game) -> frog_ast.Game:
+        result = game
+        changed = True
+        while changed:
+            changed = False
+            new_game = self._try_one_hoist(result)
+            if new_game is not None:
+                result = new_game
+                changed = True
+        return result
+
+    # pylint: disable-next=too-many-return-statements,too-many-locals,too-many-branches
+    def _try_one_hoist(self, game: frog_ast.Game) -> frog_ast.Game | None:
+        # Locate Initialize.
+        init_idx: int | None = None
+        for mi, method in enumerate(game.methods):
+            if method.signature.name == "Initialize":
+                init_idx = mi
+                break
+        if init_idx is None:
+            return None
+
+        field_names = {f.name for f in game.fields}
+        param_names = {p.name for p in game.parameters}
+
+        # Walk every GroupElem field eligible to be a base.
+        for fld in game.fields:
+            if not _is_groupelem_field(fld):
+                continue
+            base_info = self._eligible_base(game, fld.name, init_idx)
+            if base_info is None:
+                continue
+            base_assign_idx, base_rhs = base_info
+
+            # Look for `<base> ^ X` in any non-Init method.
+            for mi, method in enumerate(game.methods):
+                if mi == init_idx:
+                    continue
+                hit = _GroupExpFinder(fld.name).visit(method.block)
+                if hit is None:
+                    continue
+                exp_x = hit.right_expression
+                # X must be stable: free vars all in fields or params.
+                if not all(
+                    n in field_names or n in param_names for n in _free_var_names(exp_x)
+                ):
+                    continue
+                # Free vars of base_rhs and X must not be mutated after the
+                # base's definition.
+                free_all = _free_var_names(base_rhs) | _free_var_names(exp_x)
+                if not self._free_vars_stable_after_base(
+                    game, init_idx, base_assign_idx, free_all
+                ):
+                    continue
+                if any(n == fld.name for n in _free_var_names(exp_x)):
+                    continue  # avoid degenerate self-reference
+                fresh = self._fresh_name(field_names)
+                return self._build_hoisted_game(
+                    game,
+                    init_idx,
+                    base_assign_idx,
+                    base_rhs,
+                    exp_x,
+                    fresh,
+                    target_method_idx=mi,
+                    target_node=hit,
+                )
+        return None
+
+    @staticmethod
+    def _fresh_name(existing: set[str]) -> str:
+        i = 0
+        while True:
+            name = f"_hge_{i}"
+            if name not in existing:
+                return name
+            i += 1
+
+    def _eligible_base(
+        self, game: frog_ast.Game, field_name: str, init_idx: int
+    ) -> tuple[int, frog_ast.Expression] | None:
+        total = sum(_count_assigns_recursive(m.block, field_name) for m in game.methods)
+        if total != 1:
+            return None
+        init_stmts = list(game.methods[init_idx].block.statements)
+        for si, stmt in enumerate(init_stmts):
+            if (
+                isinstance(stmt, frog_ast.Assignment)
+                and stmt.the_type is None
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name == field_name
+            ):
+                if has_nondeterministic_call(
+                    stmt.value, self.ctx.proof_namespace, self.ctx.proof_let_types
+                ):
+                    return None
+                return si, stmt.value
+        return None
+
+    @staticmethod
+    def _free_vars_stable_after_base(
+        game: frog_ast.Game,
+        init_idx: int,
+        base_assign_idx: int,
+        names: set[str],
+    ) -> bool:
+        if not names:
+            return True
+
+        def writes_any(node: frog_ast.ASTNode) -> bool:
+            hits: list[bool] = []
+
+            def _visit(n: frog_ast.ASTNode) -> bool:
+                if (
+                    isinstance(
+                        n,
+                        (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+                    )
+                    and isinstance(n.var, frog_ast.Variable)
+                    and n.var.name in names
+                ):
+                    hits.append(True)
+                return False
+
+            SearchVisitor(_visit).visit(node)
+            return bool(hits)
+
+        init_stmts = game.methods[init_idx].block.statements
+        for si in range(base_assign_idx + 1, len(init_stmts)):
+            if writes_any(init_stmts[si]):
+                return False
+        for mi, method in enumerate(game.methods):
+            if mi == init_idx:
+                continue
+            for stmt in method.block.statements:
+                if writes_any(stmt):
+                    return False
+        return True
+
+    # pylint: disable-next=too-many-arguments,too-many-positional-arguments
+    def _build_hoisted_game(
+        self,
+        game: frog_ast.Game,
+        init_idx: int,
+        base_assign_idx: int,
+        base_rhs: frog_ast.Expression,
+        exp_x: frog_ast.Expression,
+        fresh_name: str,
+        target_method_idx: int,
+        target_node: frog_ast.BinaryOperation,
+    ) -> frog_ast.Game:
+        new_game = copy.deepcopy(game)
+        # Append field declaration.
+        new_field = frog_ast.Field(
+            the_type=frog_ast.GroupElemType(
+                copy.deepcopy(_first_group_arg(base_rhs, exp_x))
+            ),
+            name=fresh_name,
+            value=None,
+        )
+        new_game.fields = list(new_game.fields) + [new_field]
+        # Insert assignment in Initialize right after base's def.
+        init = new_game.methods[init_idx]
+        init_stmts = list(init.block.statements)
+        new_assign = frog_ast.Assignment(
+            the_type=None,
+            var=frog_ast.Variable(fresh_name),
+            value=frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.EXPONENTIATE,
+                copy.deepcopy(base_rhs),
+                copy.deepcopy(exp_x),
+            ),
+        )
+        init_stmts.insert(base_assign_idx + 1, new_assign)
+        init.block = frog_ast.Block(init_stmts)
+        # Replace the matched expression in the target method with the new
+        # field reference.  Re-find by structural equality (target_node was
+        # found on the original `game`, not on `new_game`).
+        target_method = new_game.methods[target_method_idx]
+
+        def _matches_target(n: frog_ast.ASTNode) -> bool:
+            return isinstance(n, frog_ast.BinaryOperation) and n == target_node
+
+        match = SearchVisitor(_matches_target).visit(target_method.block)
+        if match is not None:
+            target_method.block = ReplaceTransformer(
+                match, frog_ast.Variable(fresh_name)
+            ).transform(target_method.block)
+        return new_game
+
+
+def _first_group_arg(
+    *exprs: frog_ast.Expression,
+) -> frog_ast.Expression:
+    """Best-effort: extract the ``G`` from a ``GroupGenerator(G)`` if any of
+    *exprs* contains one; else default to ``Variable('G')``.
+
+    The new field's type only needs to be a syntactic ``GroupElem<G>`` for
+    the typechecker; later passes infer types from context.
+    """
+    for e in exprs:
+
+        def _find(n: frog_ast.ASTNode) -> bool:
+            return isinstance(n, frog_ast.GroupGenerator)
+
+        gen = SearchVisitor(_find).visit(e)
+        if isinstance(gen, frog_ast.GroupGenerator):
+            return copy.deepcopy(gen.group)
+    return frog_ast.Variable("G")
+
+
+class HoistGroupExpToInitialize(TransformPass):
+    name = "Hoist GroupElem Exponent To Initialize"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return HoistGroupExpToInitializeTransformer(ctx).transform(game)
+
+
+# ---------------------------------------------------------------------------
+# RefactorGroupElemFieldExp — rewrite ``g^(a*b)`` field RHS as ``F^b`` when
+# another field already holds ``g^a``.
+# ---------------------------------------------------------------------------
+
+
+def _exp_with_generator_base(
+    expr: frog_ast.Expression,
+) -> Optional[frog_ast.Expression]:
+    """If *expr* is ``<group>.generator ^ <e>``, return ``<e>``."""
+    if not isinstance(expr, frog_ast.BinaryOperation):
+        return None
+    if expr.operator != frog_ast.BinaryOperators.EXPONENTIATE:
+        return None
+    base = expr.left_expression
+    if (
+        isinstance(base, frog_ast.FieldAccess)
+        and base.name == "generator"
+        and isinstance(base.the_object, frog_ast.Variable)
+    ):
+        return expr.right_expression
+    if isinstance(base, frog_ast.GroupGenerator):
+        return expr.right_expression
+    return None
+
+
+class RefactorGroupElemFieldExpTransformer:
+    """Express ``Field1 = g^(a*b)`` as ``Field1 = Field2 ^ b`` when there
+    is a separate ``Field2 = g^a`` already, both assigned at top level of
+    ``Initialize`` and ``Field2`` defined first.
+
+    Bridges otherwise-canonical games where one side directly uses
+    ``Field1`` in a comparison against ``c^b`` and the other side has the
+    comparison structurally eliminated.  After refactoring, the
+    :class:`InjectiveEqualitySimplify` field-RHS substitution path can
+    re-express the comparison using cross-method-visible fields only.
+
+    Soundness: ``g^(a*b) = (g^a)^b = Field2^b`` and both fields'
+    Initialize-time values are otherwise identical to before.
+    """
+
+    def __init__(self, ctx: PipelineContext) -> None:
+        self.ctx = ctx
+
+    def transform(self, game: frog_ast.Game) -> frog_ast.Game:
+        result = game
+        changed = True
+        while changed:
+            changed = False
+            new_game = self._try_one(result)
+            if new_game is not None:
+                result = new_game
+                changed = True
+        return result
+
+    def _try_one(self, game: frog_ast.Game) -> frog_ast.Game | None:
+        init_idx: int | None = None
+        for mi, method in enumerate(game.methods):
+            if method.signature.name == "Initialize":
+                init_idx = mi
+                break
+        if init_idx is None:
+            return None
+        init_stmts = list(game.methods[init_idx].block.statements)
+        gen_field_assigns: dict[str, tuple[int, frog_ast.Expression]] = {}
+        for si, stmt in enumerate(init_stmts):
+            if not (
+                isinstance(stmt, frog_ast.Assignment)
+                and stmt.the_type is None
+                and isinstance(stmt.var, frog_ast.Variable)
+            ):
+                continue
+            name = stmt.var.name
+            fld = next((f for f in game.fields if f.name == name), None)
+            if fld is None or not isinstance(fld.type, frog_ast.GroupElemType):
+                continue
+            total = sum(_count_assigns_recursive(m.block, name) for m in game.methods)
+            if total != 1:
+                continue
+            exponent = _exp_with_generator_base(stmt.value)
+            if exponent is None:
+                continue
+            gen_field_assigns[name] = (si, exponent)
+
+        for f1_name, (f1_idx, f1_exp) in gen_field_assigns.items():
+            if not isinstance(f1_exp, frog_ast.BinaryOperation):
+                continue
+            if f1_exp.operator != frog_ast.BinaryOperators.MULTIPLY:
+                continue
+            for f2_name, (f2_idx, f2_exp) in gen_field_assigns.items():
+                if f2_name == f1_name:
+                    continue
+                a, b = f1_exp.left_expression, f1_exp.right_expression
+                other: Optional[frog_ast.Expression] = None
+                if f2_exp == a:
+                    other = b
+                elif f2_exp == b:
+                    other = a
+                if other is None:
+                    continue
+                # Soundness: at f1's def, f2 must already hold its value.
+                # If f2 is currently after f1, try to move f2 just before f1
+                # — provided f2's free vars are all defined strictly before
+                # f1's current position.
+                stmts = list(init_stmts)
+                f1_target_idx = f1_idx
+                if f2_idx > f1_idx:
+                    f2_free = {
+                        v.name
+                        for v in VariableCollectionVisitor().visit(
+                            copy.deepcopy(stmts[f2_idx])
+                        )
+                    }
+                    f2_free.discard(f2_name)
+                    if not self._defined_before(stmts, f1_idx, f2_free):
+                        continue
+                    f2_stmt = stmts.pop(f2_idx)
+                    # f2 was after f1; insert before f1 at f1_idx (new index).
+                    stmts.insert(f1_idx, f2_stmt)
+                    f1_target_idx = f1_idx + 1
+                new_assign = copy.deepcopy(stmts[f1_target_idx])
+                assert isinstance(new_assign, frog_ast.Assignment)
+                new_assign.value = frog_ast.BinaryOperation(
+                    frog_ast.BinaryOperators.EXPONENTIATE,
+                    frog_ast.Variable(f2_name),
+                    copy.deepcopy(other),
+                )
+                stmts[f1_target_idx] = new_assign
+                new_game = copy.deepcopy(game)
+                new_game.methods[init_idx].block = frog_ast.Block(stmts)
+                return new_game
+        return None
+
+    @staticmethod
+    def _defined_before(
+        stmts: list[frog_ast.Statement], idx: int, names: set[str]
+    ) -> bool:
+        """True if every name in *names* is assigned by some statement in
+        ``stmts[:idx]``."""
+        if not names:
+            return True
+        remaining = set(names)
+        for i in range(idx):
+            stmt = stmts[i]
+            if (
+                isinstance(
+                    stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+                )
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name in remaining
+            ):
+                remaining.remove(stmt.var.name)
+                if not remaining:
+                    return True
+        return not remaining
+
+
+class RefactorGroupElemFieldExp(TransformPass):
+    name = "Refactor GroupElem Field Exponent"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return RefactorGroupElemFieldExpTransformer(ctx).transform(game)
 
 
 class _DeterministicCallCollector(Visitor[list[frog_ast.FuncCall]]):

@@ -20,6 +20,7 @@ from ..visitors import (
     SearchVisitor,
     ReplaceTransformer,
     NameTypeMap,
+    VariableCollectionVisitor,
     build_game_type_map,
 )
 from ._base import (
@@ -30,6 +31,26 @@ from ._base import (
     _lookup_primitive_method,
 )
 from ._ordering import node_sort_key
+from ._wrappers import GroupExponentWrapper, WrapperShape, _GroupExpShape
+
+
+def _count_field_assigns(node: frog_ast.ASTNode, name: str) -> int:
+    """Count assignments/samples to *name* recursively in *node*."""
+    count = 0
+
+    def _visit(n: frog_ast.ASTNode) -> bool:
+        nonlocal count
+        if (
+            isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
+            and isinstance(n.var, frog_ast.Variable)
+            and n.var.name == name
+        ):
+            count += 1
+        return False
+
+    SearchVisitor(_visit).visit(node)
+    return count
+
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
@@ -1121,8 +1142,9 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
     ``!=`` comparisons.  Zero-argument calls are left to ``ReflexiveComparison``.
     """
 
-    def __init__(self, ctx: PipelineContext) -> None:
+    def __init__(self, ctx: PipelineContext, game: frog_ast.Game) -> None:
         self.ctx = ctx
+        self.game = game
 
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
@@ -1143,7 +1165,7 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         if not (
             isinstance(left, frog_ast.FuncCall) and isinstance(right, frog_ast.FuncCall)
         ):
-            return transformed
+            return self._try_wrapper_simplification(transformed, op, left, right)
         # I-1: callees must be structurally equal.
         if left.func != right.func:
             return transformed
@@ -1190,12 +1212,210 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
             result = frog_ast.BinaryOperation(combiner, result, pair)
         return result
 
+    def _try_wrapper_simplification(
+        self,
+        transformed: frog_ast.BinaryOperation,
+        op: frog_ast.BinaryOperators,
+        left: frog_ast.Expression,
+        right: frog_ast.Expression,
+    ) -> frog_ast.Expression:
+        """Wrapper-protocol fallback: ``wrap(a) op wrap(b) → a op b`` when
+        both sides are recognized as the same injective wrapper shape.
+
+        Currently consults :class:`GroupExponentWrapper` only (the
+        primitive-call case is already covered by the FuncCall branch
+        above).  Two preprocessing steps before the wrapper match:
+
+        1. **Field RHS substitution**: ``Variable(F) → F.rhs`` when ``F`` is
+           a single-write Init-only pure-deterministic ``GroupElem<G>``
+           field.  Closes the gap where one side of the equality is held in
+           a hoisted field.
+        2. **Exponent factoring**: ``base ^ (k * x)`` viewed as
+           ``(base ^ x) ^ k`` when ``k`` matches the wrapper exponent on
+           the other side.  Closes the gap where ``GroupElem
+           Simplification`` has already power-of-power-folded one side.
+        """
+        recognizer = GroupExponentWrapper()
+        left_resolved = self._resolve_field_rhs(left)
+        right_resolved = self._resolve_field_rhs(right)
+        match = self._match_with_factoring(recognizer, left_resolved, right_resolved)
+        if match is None:
+            return transformed
+        left_resolved, right_resolved, left_shape, right_shape = match
+        # Preconditions (prime-order + nonzero exponent) — emit near-miss if
+        # the shape was recognized but a precondition blocks the rewrite.
+        misses = left_shape.precondition_misses(self.game, self.ctx)
+        if misses:
+            for miss in misses:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Injective Equality Simplify",
+                        reason=(f"{left_shape.recognizer_label}: {miss}"),
+                        location=transformed.origin,
+                        suggestion=(
+                            "Declare `requires <group>.order is prime;` and "
+                            "sample the exponent via `<-uniq[{0}] T` (or "
+                            "`<- T \\ {0}`) so the engine treats x^k as "
+                            "injective."
+                        ),
+                        variable=None,
+                        method=None,
+                    )
+                )
+            return transformed
+        left_varying = left_shape.varying_at(left_resolved)
+        right_varying = right_shape.varying_at(right_resolved)
+        if left_varying is None or right_varying is None:
+            return transformed
+        return frog_ast.BinaryOperation(op, left_varying, right_varying)
+
+    def _match_with_factoring(
+        self,
+        recognizer: GroupExponentWrapper,
+        left: frog_ast.Expression,
+        right: frog_ast.Expression,
+    ) -> Optional[
+        tuple[
+            frog_ast.Expression,
+            frog_ast.Expression,
+            WrapperShape,
+            WrapperShape,
+        ]
+    ]:
+        """Try to match both sides as the same group-exp wrapper, possibly
+        factoring one side's exponent.
+
+        Returns ``(left_resolved, right_resolved, left_shape, right_shape)``
+        on success; ``None`` if no consistent shape pair is found.
+        """
+        l0 = recognizer.match_whole(left, self.ctx, self.game)
+        r0 = recognizer.match_whole(right, self.ctx, self.game)
+        # Direct agreement.
+        if l0 is not None and r0 is not None and l0.identity_key == r0.identity_key:
+            return left, right, l0, r0
+        # Try each candidate k_expr (from whichever side matched first) and
+        # attempt to refactor the other side to match.
+        candidates: list[frog_ast.Expression] = []
+        if isinstance(l0, _GroupExpShape):
+            candidates.append(l0.k_expr)
+        if isinstance(r0, _GroupExpShape):
+            candidates.append(r0.k_expr)
+        for k in candidates:
+            l_try = (
+                left
+                if (isinstance(l0, _GroupExpShape) and l0.k_expr == k)
+                else (self._try_factor_exponent(left, k) or left)
+            )
+            r_try = (
+                right
+                if (isinstance(r0, _GroupExpShape) and r0.k_expr == k)
+                else (self._try_factor_exponent(right, k) or right)
+            )
+            ls = recognizer.match_whole(l_try, self.ctx, self.game)
+            rs = recognizer.match_whole(r_try, self.ctx, self.game)
+            if ls is not None and rs is not None and ls.identity_key == rs.identity_key:
+                return l_try, r_try, ls, rs
+        return None
+
+    def _resolve_field_rhs(self, expr: frog_ast.Expression) -> frog_ast.Expression:
+        """If *expr* is ``Variable(F)`` where ``F`` is a single-write
+        Init-only ``GroupElem<G>`` field with a pure deterministic RHS
+        whose free variables are all cross-method-visible
+        (fields/parameters), return that RHS.  Otherwise return *expr*
+        unchanged.
+
+        The cross-method-visibility check is mandatory: the resolved
+        expression replaces *expr* in a comparison whose surrounding
+        context might be in a non-Init method, where Init-local variables
+        are out of scope.
+        """
+        if not isinstance(expr, frog_ast.Variable):
+            return expr
+        name = expr.name
+        fld = next((f for f in self.game.fields if f.name == name), None)
+        if fld is None or not isinstance(fld.type, frog_ast.GroupElemType):
+            return expr
+        init = next(
+            (m for m in self.game.methods if m.signature.name == "Initialize"),
+            None,
+        )
+        if init is None:
+            return expr
+        rhs: Optional[frog_ast.Expression] = None
+        for stmt in init.block.statements:
+            if (
+                isinstance(stmt, frog_ast.Assignment)
+                and stmt.the_type is None
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name == name
+            ):
+                if rhs is not None:
+                    return expr  # multiple top-level assignments
+                rhs = stmt.value
+        if rhs is None:
+            return expr
+        # No assignment may exist anywhere else in the game.
+        for method in self.game.methods:
+            if method is init:
+                continue
+            if _count_field_assigns(method.block, name) > 0:
+                return expr
+        if has_nondeterministic_call(
+            rhs, self.ctx.proof_namespace, self.ctx.proof_let_types
+        ):
+            return expr
+        # Free vars in rhs must be cross-method visible.  Anything else
+        # (Init-local declarations) cannot legally be referenced from the
+        # site where this resolved expression will be substituted in.
+        visible = {f.name for f in self.game.fields} | {
+            p.name for p in self.game.parameters
+        }
+        free = {v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(rhs))}
+        if not free.issubset(visible):
+            return expr
+        return rhs
+
+    @staticmethod
+    def _try_factor_exponent(
+        expr: frog_ast.Expression,
+        k_expr: Optional[frog_ast.Expression],
+    ) -> Optional[frog_ast.Expression]:
+        """If *expr* is ``base ^ (k * x)`` or ``base ^ (x * k)`` with ``k``
+        equal to *k_expr*, return ``(base ^ x) ^ k_expr``.  Else None."""
+        if k_expr is None:
+            return None
+        if not isinstance(expr, frog_ast.BinaryOperation):
+            return None
+        if expr.operator != frog_ast.BinaryOperators.EXPONENTIATE:
+            return None
+        right = expr.right_expression
+        if not isinstance(right, frog_ast.BinaryOperation):
+            return None
+        if right.operator != frog_ast.BinaryOperators.MULTIPLY:
+            return None
+        a, b = right.left_expression, right.right_expression
+        if a == k_expr:
+            other = b
+        elif b == k_expr:
+            other = a
+        else:
+            return None
+        return frog_ast.BinaryOperation(
+            frog_ast.BinaryOperators.EXPONENTIATE,
+            frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.EXPONENTIATE,
+                copy.deepcopy(expr.left_expression),
+                copy.deepcopy(other),
+            ),
+            copy.deepcopy(k_expr),
+        )
+
 
 class InjectiveEqualitySimplify(TransformPass):
     name = "Injective Equality Simplify"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return InjectiveEqualitySimplifyTransformer(ctx).transform(game)
+        return InjectiveEqualitySimplifyTransformer(ctx, game).transform(game)
 
 
 # ---------------------------------------------------------------------------

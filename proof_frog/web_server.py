@@ -15,7 +15,6 @@ from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from typing import Any
 
-from sympy import Symbol
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
@@ -207,42 +206,7 @@ def _setup_engine_for_proof(
                 raise TypeError(f"Cannot import {file_type}")
         name = imp.rename if imp.rename else root.get_export_name()
         engine.add_definition(name, root)
-    for game in proof_file.helpers:
-        engine.definition_namespace[game.name] = game
-    for let in proof_file.lets:
-        engine.proof_let_types.set(let.name, let.type)
-        if isinstance(let.value, frog_ast.FuncCall) and isinstance(
-            let.value.func, frog_ast.Variable
-        ):
-            definition = copy.deepcopy(engine.definition_namespace[let.value.func.name])
-            if isinstance(definition, (frog_ast.Primitive, frog_ast.Scheme)):
-                engine.proof_namespace[let.name] = proof_engine.instantiate(
-                    definition, let.value.args, engine.proof_namespace
-                )
-            else:
-                raise TypeError("Must instantiate either a Primitive or Scheme")
-        else:
-            engine.proof_namespace[let.name] = copy.deepcopy(let.value)
-            # For abstract primitive-typed lets, bind the primitive itself
-            # so method-annotation lookups on calls like ``T.Eval(...)``
-            # resolve to the primitive's method signatures.
-            if let.value is None and isinstance(let.type, frog_ast.Variable):
-                defn = engine.definition_namespace.get(let.type.name)
-                if isinstance(defn, (frog_ast.Primitive, frog_ast.Scheme)):
-                    engine.proof_namespace[let.name] = copy.deepcopy(defn)
-            if isinstance(let.type, frog_ast.IntType):
-                if let.value is not None:
-                    engine.variables[let.name] = let.value
-                else:
-                    engine.variables[let.name] = Symbol(let.name)  # type: ignore
-    if proof_file.max_calls is not None:
-        if isinstance(proof_file.max_calls, frog_ast.Integer):
-            engine.max_calls = proof_file.max_calls.num
-        elif isinstance(proof_file.max_calls, frog_ast.Variable):
-            val = engine.variables.get(proof_file.max_calls.name)
-            if isinstance(val, frog_ast.Integer):
-                engine.max_calls = val.num
-    engine.get_method_lookup()
+    engine.set_up_proof_context(proof_file)
     return engine, proof_file
 
 

@@ -1419,6 +1419,178 @@ class InjectiveEqualitySimplify(TransformPass):
 
 
 # ---------------------------------------------------------------------------
+# Concat-equality decomposition
+# ---------------------------------------------------------------------------
+
+
+def _flatten_concat(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
+    """Flatten a left- or right-nested ``||`` (BitString concat) chain.
+
+    ``a || b || c`` returns ``[a, b, c]`` regardless of associativity.
+    Non-concat expressions return a singleton list.
+    """
+    if (
+        isinstance(expr, frog_ast.BinaryOperation)
+        and expr.operator == frog_ast.BinaryOperators.OR
+    ):
+        return _flatten_concat(expr.left_expression) + _flatten_concat(
+            expr.right_expression
+        )
+    return [expr]
+
+
+def _bitstring_length(
+    expr: frog_ast.Expression,
+    ctx: PipelineContext,
+    type_map: NameTypeMap,
+) -> Optional[frog_ast.Expression]:
+    """Return the BitString length of *expr* as a length Expression, or None.
+
+    Handles slices (``end - start``), variables/parameters with declared
+    ``BitString<L>`` type, calls to primitive methods returning
+    ``BitString<L>``, and concatenations (sum of part lengths). Returns
+    ``None`` for any expression whose length cannot be statically derived
+    from these sources.
+    """
+    if isinstance(expr, frog_ast.Slice):
+        return frog_ast.BinaryOperation(
+            frog_ast.BinaryOperators.SUBTRACT,
+            copy.deepcopy(expr.end),
+            copy.deepcopy(expr.start),
+        )
+    if isinstance(expr, frog_ast.Variable):
+        t = type_map.get(expr.name)
+        if isinstance(t, frog_ast.BitStringType) and t.parameterization is not None:
+            return copy.deepcopy(t.parameterization)
+        return None
+    if isinstance(expr, frog_ast.FuncCall):
+        method = _lookup_primitive_method(expr.func, ctx.proof_namespace)
+        if method is None:
+            return None
+        rt = method.return_type
+        if isinstance(rt, frog_ast.BitStringType) and rt.parameterization is not None:
+            return copy.deepcopy(rt.parameterization)
+        return None
+    if (
+        isinstance(expr, frog_ast.BinaryOperation)
+        and expr.operator == frog_ast.BinaryOperators.OR
+    ):
+        left = _bitstring_length(expr.left_expression, ctx, type_map)
+        right = _bitstring_length(expr.right_expression, ctx, type_map)
+        if left is None or right is None:
+            return None
+        return frog_ast.BinaryOperation(frog_ast.BinaryOperators.ADD, left, right)
+    return None
+
+
+class ConcatEqualityDecomposeTransformer(Transformer):
+    """Rewrites ``x == (a1 || a2 || ... || ak)`` (or the mirror form)
+    to ``x[0:n1] == a1 && x[n1:n1+n2] == a2 && ... && x[s:s+nk] == ak``,
+    where ``ni`` is the statically-derivable BitString length of ``ai``.
+
+    The ``!=`` variant becomes the disjunction of per-slice disequalities.
+
+    The rewrite fires only when every concatenation term has a derivable
+    length (via :func:`_bitstring_length`) AND the concat contains at
+    least two terms. The other side of the equality must NOT itself be a
+    concat (which would already be handled by ``SimplifySplice`` or by
+    term-wise matching); if both sides are concats, no rewrite happens.
+    """
+
+    def __init__(self, ctx: PipelineContext, type_map: NameTypeMap) -> None:
+        self.ctx = ctx
+        self.type_map = type_map
+
+    def transform_binary_operation(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        transformed = frog_ast.BinaryOperation(
+            binary_operation.operator,
+            self.transform(binary_operation.left_expression),
+            self.transform(binary_operation.right_expression),
+        )
+        op = transformed.operator
+        if op not in (
+            frog_ast.BinaryOperators.EQUALS,
+            frog_ast.BinaryOperators.NOTEQUALS,
+        ):
+            return transformed
+        left = transformed.left_expression
+        right = transformed.right_expression
+
+        def is_concat(e: frog_ast.Expression) -> bool:
+            return (
+                isinstance(e, frog_ast.BinaryOperation)
+                and e.operator == frog_ast.BinaryOperators.OR
+            )
+
+        if is_concat(left) and is_concat(right):
+            # Ambiguous; leave for term-wise matching via other passes.
+            return transformed
+        if is_concat(right):
+            concat_expr, other = right, left
+        elif is_concat(left):
+            concat_expr, other = left, right
+        else:
+            return transformed
+
+        terms = _flatten_concat(concat_expr)
+        if len(terms) < 2:
+            return transformed
+        lengths: list[frog_ast.Expression] = []
+        for term in terms:
+            length = _bitstring_length(term, self.ctx, self.type_map)
+            if length is None:
+                return transformed
+            lengths.append(length)
+
+        combiner = (
+            frog_ast.BinaryOperators.AND
+            if op == frog_ast.BinaryOperators.EQUALS
+            else frog_ast.BinaryOperators.OR
+        )
+        # Build slice pairs.  Partial sum is accumulated as a syntactic
+        # ADD chain; SymbolicComputation / NormalizeCommutativeChains
+        # will collapse it on subsequent iterations.
+        acc: Optional[frog_ast.Expression] = None
+        pairs: list[frog_ast.Expression] = []
+        for term, length in zip(terms, lengths):
+            start = frog_ast.Integer(0) if acc is None else copy.deepcopy(acc)
+            end = (
+                copy.deepcopy(length)
+                if acc is None
+                else frog_ast.BinaryOperation(
+                    frog_ast.BinaryOperators.ADD,
+                    copy.deepcopy(acc),
+                    copy.deepcopy(length),
+                )
+            )
+            slice_expr = frog_ast.Slice(copy.deepcopy(other), start, end)
+            pairs.append(frog_ast.BinaryOperation(op, slice_expr, copy.deepcopy(term)))
+            acc = (
+                copy.deepcopy(length)
+                if acc is None
+                else frog_ast.BinaryOperation(
+                    frog_ast.BinaryOperators.ADD,
+                    acc,
+                    copy.deepcopy(length),
+                )
+            )
+        result: frog_ast.Expression = pairs[0]
+        for p in pairs[1:]:
+            result = frog_ast.BinaryOperation(combiner, result, p)
+        return result
+
+
+class ConcatEqualityDecompose(TransformPass):
+    name = "Concat Equality Decompose"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        type_map = build_game_type_map(game, ctx.proof_let_types)
+        return ConcatEqualityDecomposeTransformer(ctx, type_map).transform(game)
+
+
+# ---------------------------------------------------------------------------
 # GroupElem algebra transforms
 # ---------------------------------------------------------------------------
 

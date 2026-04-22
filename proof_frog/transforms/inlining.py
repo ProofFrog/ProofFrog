@@ -1045,15 +1045,47 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
     declaration ``Ti __cse_v_i__ = v[i];`` right after ``v``'s assignment
     and replaces every occurrence with the new variable.
 
+    Also fires when ``v`` is a ``GenericFor`` loop binder, inserting the
+    extraction at the top of the loop body. This symmetrises games whose
+    loop body source writes ``m = e[0]`` explicitly against games whose
+    loop body obtains the same accesses via inlining a helper method
+    (and so has ``e[0]`` uses scattered inline).
+
+    (Method parameters are intentionally NOT hoisted here: doing so
+    prematurely breaks the ``[v[0], v[1], ...] -> v`` fold in
+    ``SimplifyTuple`` when a reconstructed tuple literal elsewhere
+    references the same indices.)
+
     This normalises games that destructure tuples explicitly
     (``pk = k[0]``) against games that use inline access
     (``Encaps(k[0])``).
     """
 
+    def __init__(self) -> None:
+        super().__init__()
+        # Loop-binder types visible from the enclosing ``GenericFor``.
+        # Extraction for these is inserted at position 0 of the loop body.
+        self._scope_types: dict[str, frog_ast.Type] = {}
+
+    def transform_generic_for(self, gf: frog_ast.GenericFor) -> frog_ast.GenericFor:
+        new_over = self.transform(gf.over)
+        saved = dict(self._scope_types)
+        try:
+            self._scope_types[gf.var_name] = gf.var_type
+            new_block = self.transform(gf.block)
+        finally:
+            self._scope_types = saved
+        if new_block is gf.block and new_over is gf.over:
+            return gf
+        return frog_ast.GenericFor(gf.var_type, gf.var_name, new_over, new_block)
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        # Build map: var_name -> declared type (from assignments in this block)
-        var_types: dict[str, frog_ast.Type] = {}
-        var_def_idx: dict[str, int] = {}
+        # Build map: var_name -> declared type. Start with scope extras
+        # (enclosing loop binders), then overlay block-local assignments.
+        # Block-locals shadow scope on name collision.
+        var_types: dict[str, frog_ast.Type] = dict(self._scope_types)
+        # Sentinel -1 = scope-external (insert at top of this block).
+        var_def_idx: dict[str, int] = {name: -1 for name in var_types}
         for idx, stmt in enumerate(block.statements):
             if (
                 isinstance(stmt, frog_ast.Assignment)

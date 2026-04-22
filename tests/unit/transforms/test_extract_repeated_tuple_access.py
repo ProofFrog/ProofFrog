@@ -77,6 +77,52 @@ def _transform_and_compare(source: str, expected: str) -> None:
             }
             """,
         ),
+        # 4. GenericFor loop binder as tuple: e[0] used twice inside loop
+        # body -> extracted at top of loop body
+        (
+            """
+            Game Test() {
+                Set<[Int, Int]> T;
+                Int Loop() {
+                    Int acc = 0;
+                    for ([Int, Int] e in T) {
+                        acc = e[0] + e[0];
+                    }
+                    return acc;
+                }
+            }
+            """,
+            """
+            Game Test() {
+                Set<[Int, Int]> T;
+                Int Loop() {
+                    Int acc = 0;
+                    for ([Int, Int] e in T) {
+                        Int __cse_e_0__ = e[0];
+                        acc = __cse_e_0__ + __cse_e_0__;
+                    }
+                    return acc;
+                }
+            }
+            """,
+        ),
+        # 5. Method parameters are NOT hoisted (would break tuple fold).
+        (
+            """
+            Game Test() {
+                Int Decaps([Int, Int] c) {
+                    return c[0] + c[0];
+                }
+            }
+            """,
+            """
+            Game Test() {
+                Int Decaps([Int, Int] c) {
+                    return c[0] + c[0];
+                }
+            }
+            """,
+        ),
     ],
 )
 def test_extract_repeated_tuple_access(source: str, expected: str) -> None:

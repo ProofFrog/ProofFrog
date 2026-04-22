@@ -538,8 +538,32 @@ class InlineTransformer(Transformer):
             and isinstance(exp.func.the_object, frog_ast.Variable)
             and (exp.func.the_object.name, exp.func.name) in self.method_lookup
         )
-        if not is_inlinable_call or self.finished:
+        if self.finished:
             return exp
+
+        if not is_inlinable_call:
+            # The call itself isn't inlinable, but its arguments (or function
+            # expression) may contain nested inlinable scheme-method calls.
+            # Fall through to copy-on-write recursion so those get inlined.
+            new_func = self.transform(exp.func)
+            new_args: list[frog_ast.Expression] = []
+            changed = new_func is not exp.func
+            for arg in exp.args:
+                if self.finished:
+                    # A nested inline has fired; preserve remaining args as-is
+                    # so the single-inline-per-pass invariant is maintained.
+                    new_args.append(arg)
+                    continue
+                new_arg = self.transform(arg)
+                if new_arg is not arg:
+                    changed = True
+                new_args.append(new_arg)
+            if not changed:
+                return exp
+            new_exp = copy.copy(exp)
+            new_exp.func = new_func
+            new_exp.args = new_args
+            return new_exp
 
         assert isinstance(exp.func, frog_ast.FieldAccess)
         assert isinstance(exp.func.the_object, frog_ast.Variable)

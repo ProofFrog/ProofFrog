@@ -1165,8 +1165,24 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 ),
             ):
                 continue
-            # Skip instantiated schemes/primitives/games stored as AST nodes
-            if isinstance(ns_val, (frog_ast.Primitive, frog_ast.Scheme, frog_ast.Game)):
+            # For instantiated schemes/primitives, expand each Int field into
+            # a qualified symbol mapping: e.g. K's Int field Nss with value
+            # kem_nss gives Symbol("K.Nss") -> Symbol("kem_nss"). This lets
+            # BitString size expressions written as K.Nss + ... (using a
+            # scheme/primitive parameter's field access) canonicalize to the
+            # same form as expressions using the concrete let-level Int
+            # variables.
+            if isinstance(ns_val, (frog_ast.Primitive, frog_ast.Scheme)):
+                for nested_field in ns_val.fields:
+                    if (
+                        isinstance(nested_field.type, frog_ast.IntType)
+                        and nested_field.value is not None
+                    ):
+                        nested_sym = _ast_to_sympy(nested_field.value)
+                        if nested_sym is not None:
+                            subs[Symbol(f"{ns_name}.{nested_field.name}")] = nested_sym
+                continue
+            if isinstance(ns_val, frog_ast.Game):
                 continue
             sym_val = _ast_to_sympy(ns_val)
             if sym_val is not None:
@@ -2836,6 +2852,23 @@ def compare_types(
         value_type, frog_ast.GroupElemType
     ):
         return str(declared_type.group) == str(value_type.group)
+
+    if isinstance(declared_type, frog_ast.FunctionType) and isinstance(
+        value_type, frog_ast.FunctionType
+    ):
+        return compare_types(
+            declared_type.domain_type,
+            value_type.domain_type,
+            subsets_pairs,
+            sympy_subs,
+            strict_optional,
+        ) and compare_types(
+            declared_type.range_type,
+            value_type.range_type,
+            subsets_pairs,
+            sympy_subs,
+            strict_optional,
+        )
 
     if isinstance(declared_type, frog_ast.ArrayType) and isinstance(
         value_type, frog_ast.ArrayType

@@ -2592,6 +2592,82 @@ def _resolve_fn_type(
     )
 
 
+def _type_sym_equal(
+    a: frog_ast.Type, b: frog_ast.Type, proof_namespace: frog_ast.Namespace
+) -> bool:
+    """Semantic type equality that, for BitString parameterizations,
+    resolves FieldAccess nodes through the namespace and compares the
+    resulting index expressions via sympy. Falls back to AST ``==`` for
+    other shapes."""
+    if isinstance(a, frog_ast.FunctionType) and isinstance(b, frog_ast.FunctionType):
+        return _type_sym_equal(
+            a.domain_type, b.domain_type, proof_namespace
+        ) and _type_sym_equal(a.range_type, b.range_type, proof_namespace)
+    if isinstance(a, frog_ast.BitStringType) and isinstance(b, frog_ast.BitStringType):
+        if a.parameterization is None or b.parameterization is None:
+            return a.parameterization is None and b.parameterization is None
+        a_expr = _resolve_expr_ref(a.parameterization, proof_namespace)
+        b_expr = _resolve_expr_ref(b.parameterization, proof_namespace)
+        a_sym = _ast_to_sympy(a_expr)
+        b_sym = _ast_to_sympy(b_expr)
+        if a_sym is not None and b_sym is not None:
+            try:
+                return bool(sympy_simplify(a_sym - b_sym) == 0)
+            except (TypeError, AttributeError):
+                pass
+        return a == b
+    return a == b
+
+
+def _resolve_expr_ref(
+    e: frog_ast.ASTNode,
+    proof_namespace: frog_ast.Namespace,
+) -> frog_ast.ASTNode:
+    """Recursively resolve ``FieldAccess`` / ``Variable`` references through
+    ``proof_namespace`` into their concrete values.  Used to normalize the
+    index expression inside ``BitString<...>`` so that a let-bound H's
+    symbolic ``K.Nss + ...`` matches a field's expanded ``kem_nss + ...``.
+    """
+    if isinstance(e, frog_ast.FieldAccess) and isinstance(
+        e.the_object, frog_ast.Variable
+    ):
+        obj = proof_namespace.get(e.the_object.name)
+        if isinstance(obj, (frog_ast.Primitive, frog_ast.Scheme)):
+            for fld in obj.fields:
+                if fld.name == e.name and fld.value is not None:
+                    return _resolve_expr_ref(fld.value, proof_namespace)
+        return e
+    if isinstance(e, frog_ast.Variable):
+        val = proof_namespace.get(e.name)
+        if (
+            val is not None
+            and isinstance(val, frog_ast.ASTNode)
+            and not isinstance(
+                val,
+                (
+                    frog_ast.Primitive,
+                    frog_ast.Scheme,
+                    frog_ast.Game,
+                    frog_ast.Type,
+                ),
+            )
+        ):
+            return _resolve_expr_ref(val, proof_namespace)
+        return e
+    if isinstance(e, frog_ast.BinaryOperation):
+        new_left = _resolve_expr_ref(e.left_expression, proof_namespace)
+        new_right = _resolve_expr_ref(e.right_expression, proof_namespace)
+        if isinstance(new_left, frog_ast.Expression) and isinstance(
+            new_right, frog_ast.Expression
+        ):
+            return frog_ast.BinaryOperation(e.operator, new_left, new_right)
+    if isinstance(e, frog_ast.UnaryOperation):
+        new_operand = _resolve_expr_ref(e.expression, proof_namespace)
+        if isinstance(new_operand, frog_ast.Expression):
+            return frog_ast.UnaryOperation(e.operator, new_operand)
+    return e
+
+
 def _resolve_type_ref(
     t: frog_ast.Type,
     proof_namespace: frog_ast.Namespace,
@@ -2604,12 +2680,16 @@ def _resolve_type_ref(
         t.the_object, frog_ast.Variable
     ):
         obj = proof_namespace.get(t.the_object.name)
-        if isinstance(obj, frog_ast.Primitive):
+        if isinstance(obj, (frog_ast.Primitive, frog_ast.Scheme)):
             for fld in obj.fields:
                 if fld.name == t.name and fld.value is not None:
                     value = fld.value
                     if isinstance(value, frog_ast.Type):
                         return _resolve_type_ref(value, proof_namespace, _seen)
+    if isinstance(t, frog_ast.BitStringType) and t.parameterization is not None:
+        new_param = _resolve_expr_ref(t.parameterization, proof_namespace)
+        if isinstance(new_param, frog_ast.Expression):
+            return frog_ast.BitStringType(new_param)
     if isinstance(t, frog_ast.FunctionType):
         return frog_ast.FunctionType(
             _resolve_type_ref(t.domain_type, proof_namespace, _seen),
@@ -2772,7 +2852,11 @@ class LocalFunctionFieldToLet(TransformPass):
                         "Initialize",
                     )
                     return None
-                if _resolve_fn_type(stmt.sampled_from, ctx.proof_namespace) != f_type:
+                if not _type_sym_equal(
+                    _resolve_fn_type(stmt.sampled_from, ctx.proof_namespace),
+                    f_type,
+                    ctx.proof_namespace,
+                ):
                     self._emit_near_miss(
                         ctx,
                         (
@@ -2918,7 +3002,11 @@ class LocalFunctionFieldToLet(TransformPass):
         let_candidates: dict[str, frog_ast.FunctionType],
         ctx: PipelineContext,
     ) -> str | None:
-        matches = [name for name, t in let_candidates.items() if t == f_type]
+        matches = [
+            name
+            for name, t in let_candidates.items()
+            if _type_sym_equal(t, f_type, ctx.proof_namespace)
+        ]
         if not matches:
             # Record near-miss if a same-named let declared but not sampled.
             declared_but_not_sampled = [

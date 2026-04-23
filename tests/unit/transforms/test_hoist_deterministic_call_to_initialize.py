@@ -400,3 +400,163 @@ class TestHoistFunctionDRCalls:
             proof_namespace={}
         ).transform(game)
         assert result == game
+
+
+def _make_group_namespace() -> frog_ast.Namespace:
+    """Namespace with primitive NG whose ``Exp`` and ``Generator`` are deterministic."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive NG(Int n) {
+            deterministic BitString<n> Generator();
+            deterministic BitString<n> Exp(BitString<n> base, BitString<n> exponent);
+        }
+        """)
+    return {"NG": prim}
+
+
+class TestNestedDeterministicStableArgs:
+    """Nested deterministic calls as stable arguments (design 2026-04-23)."""
+
+    def test_nested_zero_arg_det_call_hoisted(self) -> None:
+        """``NG.Exp(NG.Generator(), field_x)`` is hoisted into Initialize."""
+        game = frog_parser.parse_game("""
+            Game Foo(NG GG) {
+                BitString<n> field_x;
+                Void Initialize() {
+                    field_x <- BitString<n>;
+                }
+                BitString<n> Get1() {
+                    return GG.Exp(GG.Generator(), field_x);
+                }
+                BitString<n> Get2() {
+                    return GG.Exp(GG.Generator(), field_x);
+                }
+            }
+            """)
+        ns = _make_group_namespace()
+        ns["GG"] = ns["NG"]
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        assert len(result.fields) == len(game.fields) + 1
+        new_field_name = next(
+            f.name for f in result.fields if f.name not in {"field_x"}
+        )
+        init = result.methods[0]
+        last_stmt = init.block.statements[-1]
+        assert isinstance(last_stmt, frog_ast.Assignment)
+        assert isinstance(last_stmt.var, frog_ast.Variable)
+        assert last_stmt.var.name == new_field_name
+        assert isinstance(last_stmt.value, frog_ast.FuncCall)
+        for oracle in result.methods[1:]:
+            ret = oracle.block.statements[0]
+            assert isinstance(ret, frog_ast.ReturnStatement)
+            assert isinstance(ret.expression, frog_ast.Variable)
+            assert ret.expression.name == new_field_name
+
+    def test_doubly_nested_det_calls_hoisted(self) -> None:
+        """``F.inner(G.evaluate(field_x))`` hoists when both are deterministic."""
+        ns = _make_det_namespace()
+        prim_f = frog_parser.parse_primitive_file("""
+            Primitive F(Int n) {
+                deterministic BitString<n> inner(BitString<n> x);
+            }
+            """)
+        ns["F"] = prim_f
+        ns["FF"] = prim_f
+        ns["GG"] = ns["G"]
+        game = frog_parser.parse_game("""
+            Game Foo(G GG, F FF) {
+                BitString<n> field_x;
+                Void Initialize() {
+                    field_x <- BitString<n>;
+                }
+                BitString<n> Get1() {
+                    return FF.inner(GG.evaluate(field_x));
+                }
+                BitString<n> Get2() {
+                    return FF.inner(GG.evaluate(field_x));
+                }
+            }
+            """)
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        assert len(result.fields) == len(game.fields) + 1
+
+    def test_nested_nondet_call_not_hoisted(self) -> None:
+        """A nested non-deterministic call disqualifies the outer candidate."""
+        prim = frog_parser.parse_primitive_file("""
+            Primitive NG(Int n) {
+                BitString<n> Generator();
+                deterministic BitString<n> Exp(BitString<n> base, BitString<n> exponent);
+            }
+            """)
+        ns = {"NG": prim, "GG": prim}
+        game = frog_parser.parse_game("""
+            Game Foo(NG GG) {
+                BitString<n> field_x;
+                Void Initialize() {
+                    field_x <- BitString<n>;
+                }
+                BitString<n> Get1() {
+                    return GG.Exp(GG.Generator(), field_x);
+                }
+                BitString<n> Get2() {
+                    return GG.Exp(GG.Generator(), field_x);
+                }
+            }
+            """)
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        assert result == game
+
+    def test_nested_field_reassigned_not_hoisted(self) -> None:
+        """If a field appearing in a nested arg is reassigned, hoisting is unsound."""
+        prim_f = frog_parser.parse_primitive_file("""
+            Primitive F(Int n) {
+                deterministic BitString<n> wrap(BitString<n> x);
+            }
+            """)
+        ns = {"F": prim_f, "FF": prim_f}
+        game = frog_parser.parse_game("""
+            Game Foo(F FF) {
+                BitString<n> field_x;
+                Void Initialize() {
+                    field_x <- BitString<n>;
+                }
+                BitString<n> Get1() {
+                    return FF.wrap(FF.wrap(field_x));
+                }
+                Void Reset() {
+                    field_x <- BitString<n>;
+                }
+            }
+            """)
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        assert result == game
+
+    def test_nested_function_var_callee_reassigned_not_hoisted(self) -> None:
+        """Nested ``RF(field_x)`` with RF reassigned outside Initialize: not hoisted."""
+        game = frog_parser.parse_game("""
+            Game Foo() {
+                BitString<8> seed;
+                Function<BitString<8>, BitString<8>> RF;
+                Void Initialize() {
+                    seed <- BitString<8>;
+                    RF <- Function<BitString<8>, BitString<8>>;
+                }
+                BitString<8> Get() {
+                    return RF(RF(seed));
+                }
+                Void Reset() {
+                    RF <- Function<BitString<8>, BitString<8>>;
+                }
+            }
+            """)
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace={}
+        ).transform(game)
+        assert result == game

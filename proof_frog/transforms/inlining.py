@@ -3000,33 +3000,96 @@ def _is_stable_arg(
     expr: frog_ast.Expression,
     field_names: set[str],
     param_names: set[str],
+    proof_namespace: frog_ast.Namespace | None = None,
+    function_var_names: set[str] | None = None,
 ) -> bool:
     """Return True if *expr* is stable across method invocations.
 
     An expression is stable if it depends only on game fields, game parameters,
-    and constants — never on method-local variables.
+    constants, and deterministic calls whose arguments are themselves stable.
+
+    When *proof_namespace* / *function_var_names* are provided, nested
+    ``FuncCall`` nodes are accepted as stable iff the callee is a primitive
+    method annotated ``deterministic`` or a ``Function<D, R>`` variable named
+    in *function_var_names*, and every argument is recursively stable.
     """
     if isinstance(
-        expr, (frog_ast.Integer, frog_ast.Boolean, frog_ast.BitStringLiteral)
+        expr,
+        (
+            frog_ast.Integer,
+            frog_ast.Boolean,
+            frog_ast.BitStringLiteral,
+            frog_ast.NoneExpression,
+        ),
     ):
         return True
     if isinstance(expr, frog_ast.Variable):
         return expr.name in field_names or expr.name in param_names
     if isinstance(expr, frog_ast.FieldAccess):
-        return _is_stable_arg(expr.the_object, field_names, param_names)
+        return _is_stable_arg(
+            expr.the_object,
+            field_names,
+            param_names,
+            proof_namespace,
+            function_var_names,
+        )
     if isinstance(expr, frog_ast.BinaryOperation):
         return _is_stable_arg(
-            expr.left_expression, field_names, param_names
-        ) and _is_stable_arg(expr.right_expression, field_names, param_names)
+            expr.left_expression,
+            field_names,
+            param_names,
+            proof_namespace,
+            function_var_names,
+        ) and _is_stable_arg(
+            expr.right_expression,
+            field_names,
+            param_names,
+            proof_namespace,
+            function_var_names,
+        )
     if isinstance(expr, frog_ast.UnaryOperation):
-        return _is_stable_arg(expr.expression, field_names, param_names)
+        return _is_stable_arg(
+            expr.expression,
+            field_names,
+            param_names,
+            proof_namespace,
+            function_var_names,
+        )
+    if isinstance(expr, frog_ast.FuncCall):
+        is_det_primitive = False
+        if proof_namespace is not None:
+            m = _lookup_primitive_method(expr.func, proof_namespace)
+            if m is not None and m.deterministic:
+                is_det_primitive = True
+        is_function_var = (
+            function_var_names is not None
+            and isinstance(expr.func, frog_ast.Variable)
+            and expr.func.name in function_var_names
+        )
+        if not (is_det_primitive or is_function_var):
+            return False
+        return all(
+            _is_stable_arg(
+                a,
+                field_names,
+                param_names,
+                proof_namespace,
+                function_var_names,
+            )
+            for a in expr.args
+        )
     return False
 
 
 def _collect_field_names_in_args(
     expr: frog_ast.Expression, field_names: set[str]
 ) -> set[str]:
-    """Return the set of field names referenced in *expr*."""
+    """Return the set of field names referenced in *expr*.
+
+    Descends through field accesses, unary/binary operators, and nested
+    ``FuncCall`` nodes (including the callee variable itself, so that a
+    ``Function<D, R>`` game field used as a nested callee is reported).
+    """
     if isinstance(expr, frog_ast.Variable):
         if expr.name in field_names:
             return {expr.name}
@@ -3039,6 +3102,13 @@ def _collect_field_names_in_args(
         ) | _collect_field_names_in_args(expr.right_expression, field_names)
     if isinstance(expr, frog_ast.UnaryOperation):
         return _collect_field_names_in_args(expr.expression, field_names)
+    if isinstance(expr, frog_ast.FuncCall):
+        result: set[str] = set()
+        if isinstance(expr.func, frog_ast.Variable) and expr.func.name in field_names:
+            result.add(expr.func.name)
+        for a in expr.args:
+            result |= _collect_field_names_in_args(a, field_names)
+        return result
     return set()
 
 
@@ -3127,7 +3197,13 @@ class CrossMethodFieldAliasTransformer:
                 if not call.args:
                     continue
                 if not all(
-                    _is_stable_arg(a, field_names, param_names) for a in call.args
+                    _is_stable_arg(
+                        a,
+                        field_names,
+                        param_names,
+                        proof_namespace=self.proof_namespace,
+                    )
+                    for a in call.args
                 ):
                     continue
 
@@ -3311,7 +3387,14 @@ class HoistDeterministicCallToInitializeTransformer:
                 if not call.args:
                     continue
                 if not all(
-                    _is_stable_arg(a, field_names, param_names) for a in call.args
+                    _is_stable_arg(
+                        a,
+                        field_names,
+                        param_names,
+                        proof_namespace=self.proof_namespace,
+                        function_var_names=function_var_names,
+                    )
+                    for a in call.args
                 ):
                     continue
                 if any(call == ea for ea in existing_aliased_calls):

@@ -989,6 +989,7 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             self.visit(ctx.lvalue()),
             exclusion,
             sampled_from_type,
+            surface_form="minus",
         )
 
     def visitBlock(self, ctx: PrimitiveParser.BlockContext) -> frog_ast.Block:
@@ -1069,6 +1070,7 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             self.visit(ctx.lvalue()),
             exclusion,
             sampled_from_type,
+            surface_form="minus",
         )
 
     def visitUniqueSampleStatement(

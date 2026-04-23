@@ -2,7 +2,15 @@ from __future__ import annotations
 import dataclasses
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Optional, TypeAlias, Sequence, TypeVar, Generic, Tuple as PyTuple
+from typing import (
+    Literal,
+    Optional,
+    TypeAlias,
+    Sequence,
+    TypeVar,
+    Generic,
+    Tuple as PyTuple,
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -40,7 +48,7 @@ class ASTNode(ABC):
         return all(
             (
                 True
-                if attr in {"line_num", "column_num", "origin"}
+                if attr in {"line_num", "column_num", "origin", "surface_form"}
                 else getattr(self, attr) == getattr(other, attr)
             )
             for attr in self.__dict__
@@ -589,23 +597,30 @@ class Sample(Statement):
 
 
 class UniqueSample(Statement):
+    # pylint: disable=too-many-positional-arguments,too-many-arguments
     def __init__(
         self,
         the_type: Optional[Type],
         var: Expression,
         unique_set: Expression,
         sampled_from: Type,
+        surface_form: Literal["uniq", "minus"] = "uniq",
     ) -> None:
         super().__init__()
         self.the_type = the_type
         self.var = var
         self.unique_set = unique_set
         self.sampled_from = sampled_from
+        # Purely presentational; preserves author's chosen surface syntax
+        # through parse/unparse. Not compared in __eq__ (inherited from AST
+        # base, which ignores non-semantic metadata like `origin`).
+        self.surface_form = surface_form
 
     def __str__(self) -> str:
-        return (
-            f"{self.the_type} " if self.the_type else ""
-        ) + f"{self.var} <-uniq[{self.unique_set}] {self.sampled_from};"
+        prefix = f"{self.the_type} " if self.the_type else ""
+        if self.surface_form == "minus":
+            return prefix + f"{self.var} <- {self.sampled_from} \\ {self.unique_set};"
+        return prefix + f"{self.var} <-uniq[{self.unique_set}] {self.sampled_from};"
 
 
 class Assignment(Statement):

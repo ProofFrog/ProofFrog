@@ -440,7 +440,7 @@ def tuple_literal_values(node: object) -> list[Expression] | None:
     if isinstance(node, Tuple):
         return list(node.values)
     if isinstance(node, ProductType):
-        return list(node.types)  # type: ignore[return-value]
+        return list(node.types)  # type: ignore[arg-type,return-value]
     return None
 
 

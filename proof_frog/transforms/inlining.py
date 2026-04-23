@@ -1842,7 +1842,43 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
             #   - be assigned in the same method and BEFORE the current
             #     field's assignment (so its value was already determined)
             free_vars = VariableCollectionVisitor().visit(copy.deepcopy(assign_expr))
-            field_name_set = set(self.field_names)
+            # Use the game's actual fields (not ``self.field_names``,
+            # which is only refreshed at the ``transform_game`` level).
+            field_name_set = {f.name for f in game.fields}
+            # Promotion branch: when some free vars are Initialize-locals
+            # rather than fields, try to promote them to fields so the
+            # cross-method inline can then fire.  See
+            # ``InlineSingleUseFieldViaLocalPromotion.md``.
+            #
+            # Gate: only attempt promotion when the field's RHS is a
+            # top-level bitstring concatenation (``||`` chain).  This is
+            # the shape used for Hash-input layouts that
+            # ``ConcatEqualityDecompose`` matches against a slice-wise
+            # equality on the use side.  Other shapes (e.g. tuple
+            # projections ``v[0]``) do not benefit from promotion and
+            # can perturb the canonical form that already works via
+            # other routes.
+            is_concat_chain = (
+                isinstance(assign_expr, frog_ast.BinaryOperation)
+                and assign_expr.operator == frog_ast.BinaryOperators.OR
+            )
+            local_fv_names: list[str] = []
+            seen: set[str] = set()
+            for fv in free_vars:
+                if fv.name not in field_name_set and fv.name not in seen:
+                    local_fv_names.append(fv.name)
+                    seen.add(fv.name)
+            if local_fv_names and is_concat_chain:
+                promoted = self._try_promote_locals(
+                    game,
+                    field_name,
+                    local_fv_names,
+                    assign_method_idx,
+                    assign_stmt_idx,
+                )
+                if promoted is None:
+                    return None
+                return self._try_inline_field(promoted, field_name)
             can_cross_method = True
             for fv in free_vars:
                 if fv.name not in field_name_set:
@@ -2005,6 +2041,205 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
         # Remove the field declaration
         new_game.fields = [f for f in new_game.fields if f.name != field_name]
 
+        return new_game
+
+    # pylint: disable=too-many-arguments,too-many-positional-arguments
+    def _try_promote_locals(
+        self,
+        game: frog_ast.Game,
+        field_name: str,
+        local_names: list[str],
+        assign_method_idx: int,
+        assign_stmt_idx: int,
+    ) -> frog_ast.Game | None:
+        """Promote each local in ``local_names`` to a game field so the
+        cross-method inlining path can treat its RHS as referencing only
+        fields.  Returns the promoted game, or ``None`` if any local is
+        not a promotion candidate (emitting a ``NearMiss`` describing
+        which precondition failed).
+
+        A local ``L`` is a promotion candidate iff:
+
+        1. Its sole defining statement is a top-level ``Sample``,
+           ``UniqueSample``, or typed ``Assignment`` in the same method
+           as the field being inlined, at an index strictly less than
+           ``assign_stmt_idx``.
+        2. ``_count_assigns_recursive`` over the whole game returns 1 for
+           ``L`` (no reassignments anywhere).
+
+        The soundness argument (see design doc
+        ``2026-04-22-promote-locals-for-cross-method-inline-design.md``)
+        relies on Initialize executing exactly once per game lifecycle,
+        so a single top-level definition in Initialize has the same
+        lifetime as a field assigned in Initialize.
+        """
+        method = game.methods[assign_method_idx]
+        method_stmts = method.block.statements
+        existing_field_names = {f.name for f in game.fields}
+        reserved = set(existing_field_names)
+        promotions: list[tuple[str, str, frog_ast.Type, int, frog_ast.Statement]] = []
+        for local_name in local_names:
+            # Total assignments across whole game must equal 1.
+            total = sum(
+                _count_assigns_recursive(m.block, local_name) for m in game.methods
+            )
+            if total != 1:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Single-Use Field",
+                            reason=(
+                                f"Cannot promote local '{local_name}' for "
+                                f"cross-method inlining of field "
+                                f"'{field_name}': reassigned {total} times "
+                                f"(need exactly 1)"
+                            ),
+                            location=None,
+                            suggestion=None,
+                            variable=local_name,
+                            method=None,
+                        )
+                    )
+                return None
+            # Locate the defining statement: top-level typed
+            # Sample/UniqueSample/Assignment in the same method, before
+            # the field's assignment.
+            def_idx = -1
+            def_stmt: frog_ast.Statement | None = None
+            for si in range(assign_stmt_idx):
+                stmt = method_stmts[si]
+                if (
+                    isinstance(
+                        stmt,
+                        (
+                            frog_ast.Sample,
+                            frog_ast.UniqueSample,
+                            frog_ast.Assignment,
+                        ),
+                    )
+                    and stmt.the_type is not None
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name == local_name
+                ):
+                    def_idx = si
+                    def_stmt = stmt
+                    break
+            if def_stmt is None:
+                # Distinguish: defined later (in this method, after the
+                # field) vs not at top level in this method at all.
+                defined_later = False
+                defined_nested = False
+                for si in range(assign_stmt_idx, len(method_stmts)):
+                    stmt = method_stmts[si]
+                    if (
+                        isinstance(
+                            stmt,
+                            (
+                                frog_ast.Sample,
+                                frog_ast.UniqueSample,
+                                frog_ast.Assignment,
+                            ),
+                        )
+                        and stmt.the_type is not None
+                        and isinstance(stmt.var, frog_ast.Variable)
+                        and stmt.var.name == local_name
+                    ):
+                        defined_later = True
+                        break
+                if not defined_later:
+                    # Count == 1, but no top-level typed def in this
+                    # method at all — it must be inside a nested block
+                    # or be an untyped assignment.
+                    defined_nested = True
+                if self.ctx is not None:
+                    if defined_later:
+                        reason = (
+                            f"Cannot promote local '{local_name}' for "
+                            f"cross-method inlining of field "
+                            f"'{field_name}': defined after field's "
+                            f"assignment"
+                        )
+                    elif defined_nested:
+                        reason = (
+                            f"Cannot promote local '{local_name}' for "
+                            f"cross-method inlining of field "
+                            f"'{field_name}': defined in a nested block "
+                            f"or via an untyped assignment, not at top "
+                            f"level"
+                        )
+                    else:
+                        reason = (
+                            f"Cannot promote local '{local_name}' for "
+                            f"cross-method inlining of field "
+                            f"'{field_name}': defining statement is not "
+                            f"a sample or typed assignment"
+                        )
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Single-Use Field",
+                            reason=reason,
+                            location=None,
+                            suggestion=None,
+                            variable=local_name,
+                            method=None,
+                        )
+                    )
+                return None
+            assert isinstance(
+                def_stmt,
+                (frog_ast.Sample, frog_ast.UniqueSample, frog_ast.Assignment),
+            )
+            assert def_stmt.the_type is not None
+            i = 0
+            while f"_promoted_{local_name}_{i}" in reserved:
+                i += 1
+            new_name = f"_promoted_{local_name}_{i}"
+            reserved.add(new_name)
+            promotions.append(
+                (local_name, new_name, def_stmt.the_type, def_idx, def_stmt)
+            )
+
+        # Build the promoted game.
+        new_game = copy.deepcopy(game)
+        for local_name, new_name, ftype, _, _ in promotions:
+            new_game.fields.append(frog_ast.Field(copy.deepcopy(ftype), new_name, None))
+        new_stmts = list(new_game.methods[assign_method_idx].block.statements)
+        for local_name, new_name, _, def_idx, _ in promotions:
+            old = new_stmts[def_idx]
+            if isinstance(old, frog_ast.Sample):
+                new_stmts[def_idx] = frog_ast.Sample(
+                    None,
+                    frog_ast.Variable(new_name),
+                    copy.deepcopy(old.sampled_from),
+                )
+            elif isinstance(old, frog_ast.UniqueSample):
+                new_stmts[def_idx] = frog_ast.UniqueSample(
+                    None,
+                    frog_ast.Variable(new_name),
+                    copy.deepcopy(old.unique_set),
+                    copy.deepcopy(old.sampled_from),
+                )
+            elif isinstance(old, frog_ast.Assignment):
+                new_stmts[def_idx] = frog_ast.Assignment(
+                    None,
+                    frog_ast.Variable(new_name),
+                    copy.deepcopy(old.value),
+                )
+        new_game.methods[assign_method_idx].block = frog_ast.Block(new_stmts)
+        for local_name, new_name, _, _, _ in promotions:
+            matcher = functools.partial(
+                lambda name, node: (
+                    isinstance(node, frog_ast.Variable) and node.name == name
+                ),
+                local_name,
+            )
+            while True:
+                found = SearchVisitor(matcher).visit(new_game)
+                if found is None:
+                    break
+                new_game = ReplaceTransformer(
+                    found, frog_ast.Variable(new_name)
+                ).transform(new_game)
         return new_game
 
 

@@ -397,8 +397,10 @@ def test_cross_method_pure_field_referencing_field() -> None:
 
 def test_cross_method_field_referencing_local_not_inlined() -> None:
     """A field used across methods whose expression references a local
-    variable (not a field) should NOT be inlined, since the local would
-    be out of scope in other methods."""
+    variable (not a field) is NOT inlined unless the local-promotion
+    branch fires.  With the concat-shape gate, promotion only applies
+    to bitstring-concatenation RHS; this pure-arithmetic case does not
+    qualify, so the game is unchanged."""
     source = """
     Game Test() {
         Int fieldB;

@@ -2783,9 +2783,6 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         # Collect all deterministic calls from top-level statements only.
-        # Skip parameterless calls (constants) — extracting them changes
-        # variable numbering without benefit, since existing transforms
-        # already handle pure constant expressions.
         all_calls: list[frog_ast.FuncCall] = []
         for statement in block.statements:
             # Skip inner blocks (if-statements); BlockTransformer handles them
@@ -2793,7 +2790,7 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
                 continue
             collector = _DeterministicCallCollector(self.proof_namespace)
             collector.visit(statement)
-            all_calls.extend(c for c in collector.result() if c.args)
+            all_calls.extend(collector.result())
 
         if not all_calls:
             # Check for near-miss: duplicate non-deterministic calls

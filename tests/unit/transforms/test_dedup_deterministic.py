@@ -31,6 +31,28 @@ def _make_nondet_namespace() -> frog_ast.Namespace:
     return {"G": prim}
 
 
+def _make_zeroarg_det_namespace() -> frog_ast.Namespace:
+    """Namespace with primitive NG whose ``Generator`` is a zero-arg deterministic call."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive NG(Set GroupElemSpace) {
+            Set GroupElem = GroupElemSpace;
+            deterministic GroupElem Generator();
+        }
+        """)
+    return {"NG": prim}
+
+
+def _make_zeroarg_nondet_namespace() -> frog_ast.Namespace:
+    """Namespace with primitive NG whose ``Generator`` is zero-arg but NOT deterministic."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive NG(Set GroupElemSpace) {
+            Set GroupElem = GroupElemSpace;
+            GroupElem Generator();
+        }
+        """)
+    return {"NG": prim}
+
+
 class TestDeduplicateDeterministicCalls:
     """Tests for DeduplicateDeterministicCallsTransformer."""
 
@@ -200,3 +222,63 @@ class TestDeduplicateDeterministicCalls:
         assert (
             result == original
         ), "Calls with reassigned argument variable should not be deduplicated"
+
+    def test_zero_arg_duplicate_deduped(self) -> None:
+        """Two zero-arg deterministic calls in a block are extracted."""
+        method = frog_parser.parse_method("""
+            Void f() {
+                GroupElemSpace a = NG.Generator();
+                GroupElemSpace b = NG.Generator();
+                return [a, b];
+            }
+            """)
+        expected = frog_parser.parse_method("""
+            Void f() {
+                GroupElem __determ_0__ = NG.Generator();
+                GroupElemSpace a = __determ_0__;
+                GroupElemSpace b = __determ_0__;
+                return [a, b];
+            }
+            """)
+        result = DeduplicateDeterministicCallsTransformer(
+            proof_namespace=_make_zeroarg_det_namespace()
+        ).transform(method)
+        assert result == expected
+
+    def test_zero_arg_nondeterministic_not_deduped(self) -> None:
+        """Zero-arg non-deterministic calls should NOT be deduplicated."""
+        method = frog_parser.parse_method("""
+            Void f() {
+                GroupElemSpace a = NG.Generator();
+                GroupElemSpace b = NG.Generator();
+                return [a, b];
+            }
+            """)
+        original = frog_parser.parse_method("""
+            Void f() {
+                GroupElemSpace a = NG.Generator();
+                GroupElemSpace b = NG.Generator();
+                return [a, b];
+            }
+            """)
+        result = DeduplicateDeterministicCallsTransformer(
+            proof_namespace=_make_zeroarg_nondet_namespace()
+        ).transform(method)
+        assert result == original
+
+    def test_zero_arg_single_occurrence_unchanged(self) -> None:
+        """A single zero-arg deterministic call should not be extracted."""
+        method = frog_parser.parse_method("""
+            Void f() {
+                return NG.Generator();
+            }
+            """)
+        expected = frog_parser.parse_method("""
+            Void f() {
+                return NG.Generator();
+            }
+            """)
+        result = DeduplicateDeterministicCallsTransformer(
+            proof_namespace=_make_zeroarg_det_namespace()
+        ).transform(method)
+        assert result == expected

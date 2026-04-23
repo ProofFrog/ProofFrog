@@ -20,6 +20,7 @@ from ..visitors import (
     NameTypeMap,
     SearchVisitor,
     SubstitutionTransformer,
+    Transformer,
     Visitor,
     ReplaceTransformer,
     VariableCollectionVisitor,
@@ -2706,6 +2707,250 @@ class RefactorGroupElemFieldExp(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return RefactorGroupElemFieldExpTransformer(ctx).transform(game)
+
+
+# ---------------------------------------------------------------------------
+# ContractGeneratorExpToField — rewrite subexpressions ``G.generator ^ v``
+# and ``G.generator ^ (v * X)`` to ``F`` / ``F ^ X`` when a same-game field
+# ``F`` has RHS ``G.generator ^ v``.
+# ---------------------------------------------------------------------------
+
+
+class _GenExpFieldContractor(Transformer):
+    """Rewrite ``G.generator ^ v`` → ``F``, and ``G.generator ^ (v*X)`` or
+    ``G.generator ^ (X*v)`` → ``F ^ X``, given a mapping
+    ``{exp_var_name: field_name}``."""
+
+    def __init__(self, exp_to_field: dict[str, str]) -> None:
+        self._map = exp_to_field
+
+    def transform_binary_operation(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        transformed = frog_ast.BinaryOperation(
+            binary_operation.operator,
+            self.transform(binary_operation.left_expression),
+            self.transform(binary_operation.right_expression),
+        )
+        if transformed.operator != frog_ast.BinaryOperators.EXPONENTIATE:
+            return transformed
+        exp = _exp_with_generator_base(transformed)
+        if exp is None:
+            return transformed
+        if isinstance(exp, frog_ast.Variable) and exp.name in self._map:
+            return frog_ast.Variable(self._map[exp.name])
+        if (
+            isinstance(exp, frog_ast.BinaryOperation)
+            and exp.operator == frog_ast.BinaryOperators.MULTIPLY
+        ):
+            if (
+                isinstance(exp.left_expression, frog_ast.Variable)
+                and exp.left_expression.name in self._map
+            ):
+                return frog_ast.BinaryOperation(
+                    frog_ast.BinaryOperators.EXPONENTIATE,
+                    frog_ast.Variable(self._map[exp.left_expression.name]),
+                    copy.deepcopy(exp.right_expression),
+                )
+            if (
+                isinstance(exp.right_expression, frog_ast.Variable)
+                and exp.right_expression.name in self._map
+            ):
+                return frog_ast.BinaryOperation(
+                    frog_ast.BinaryOperators.EXPONENTIATE,
+                    frog_ast.Variable(self._map[exp.right_expression.name]),
+                    copy.deepcopy(exp.left_expression),
+                )
+        return transformed
+
+
+class ContractGeneratorExpToFieldTransformer:
+    """Rewrite ``G.generator ^ v`` subexpressions as ``F`` (and
+    ``G.generator ^ (v*X)`` as ``F ^ X``) wherever they appear outside
+    ``F``'s own defining assignment, when a same-game field ``F`` holds
+    ``G.generator ^ v`` and stable prerequisites hold.
+
+    Complements :class:`RefactorGroupElemFieldExp`, which performs the
+    analogous rewrite only at field-RHS level inside Initialize.  This
+    pass walks every expression in every method, so it can close the
+    gap where post-inlining code places a ``g^v`` or ``g^(v*X)``
+    subexpression in a field RHS or oracle body that isn't itself a
+    whole-field assignment.
+
+    Soundness.  ``G.generator ^ v`` equals ``F`` at every use site
+    provided:
+
+    1. ``F`` is a same-game ``GroupElem`` field.
+    2. ``F`` is assigned exactly once across the entire game, at the
+       top level of ``Initialize``, with RHS ``G.generator ^ v`` where
+       ``v`` is a bare :class:`frog_ast.Variable`.
+    3. ``v`` is not reassigned anywhere after ``F``'s definition.
+    4. ``F`` is multi-use (appears at least twice across the game).
+       This ensures :class:`InlineSingleUseField` will not substitute
+       ``F``'s RHS back into the contraction site, which would restart
+       the power-of-power / contraction cycle.
+
+    Motivation.  Without this pass, a reduction inlining an assumption
+    game with ``pk = G.generator ^ a`` and ``H(pk ^ r)`` ends up, after
+    :class:`GroupElemSimplification`'s power-of-power fold, with
+    ``H(G.generator ^ (a * r))`` at field-assignment level.  The free
+    variable ``a`` then appears both in ``pk``'s RHS and in the chain
+    dependency graph, blocking :class:`CounterGuardedChainToLocal`.
+    Contracting back to ``H(pk ^ r)`` keeps ``a`` contained to ``pk``'s
+    RHS and unblocks chain-hoisting.
+    """
+
+    def __init__(self, ctx: PipelineContext) -> None:
+        self.ctx = ctx
+
+    def transform(self, game: frog_ast.Game) -> frog_ast.Game:
+        candidates = self._collect_candidates(game)
+        if not candidates:
+            return game
+        # Map each candidate field to (exponent_var_name, init_position).
+        field_to_pos: dict[str, int] = {f: p for f, (_, p) in candidates.items()}
+        exp_to_field_all: dict[str, str] = {v: f for f, (v, _) in candidates.items()}
+        init_idx: int | None = None
+        for mi, m in enumerate(game.methods):
+            if m.signature.name == "Initialize":
+                init_idx = mi
+                break
+        new_methods: list[frog_ast.Method] = []
+        changed = False
+        for mi, method in enumerate(game.methods):
+            new_stmts: list[frog_ast.Statement] = []
+            stmt_changed = False
+            for si, stmt in enumerate(method.block.statements):
+                # Never rewrite the field's own defining assignment — its
+                # RHS ``g^v`` is the reference we are contracting against.
+                if (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name in candidates
+                ):
+                    new_stmts.append(stmt)
+                    continue
+                # In Initialize, only contract using fields whose defining
+                # assignment strictly precedes this statement (dominance /
+                # use-before-define safety).  In non-Init methods, all
+                # candidates are active because Initialize runs first.
+                if mi == init_idx:
+                    active = {
+                        v: f
+                        for v, f in exp_to_field_all.items()
+                        if field_to_pos[f] < si
+                    }
+                else:
+                    active = exp_to_field_all
+                if not active:
+                    new_stmts.append(stmt)
+                    continue
+                contractor = _GenExpFieldContractor(active)
+                new_stmt = contractor.transform(stmt)
+                if new_stmt is not stmt:
+                    stmt_changed = True
+                new_stmts.append(new_stmt)
+            if stmt_changed:
+                changed = True
+                new_method = copy.copy(method)
+                new_method.block = frog_ast.Block(new_stmts)
+                new_methods.append(new_method)
+            else:
+                new_methods.append(method)
+        if not changed:
+            return game
+        new_game = copy.copy(game)
+        new_game.methods = new_methods
+        return new_game
+
+    def _collect_candidates(self, game: frog_ast.Game) -> dict[str, tuple[str, int]]:
+        """Return ``{field_name: (exponent_var_name, init_position)}``."""
+        init_method: frog_ast.Method | None = None
+        for m in game.methods:
+            if m.signature.name == "Initialize":
+                init_method = m
+                break
+        if init_method is None:
+            return {}
+        result: dict[str, tuple[str, int]] = {}
+        for fld in game.fields:
+            if not isinstance(fld.type, frog_ast.GroupElemType):
+                continue
+            assign: frog_ast.Assignment | None = None
+            assign_pos: int = -1
+            for si, stmt in enumerate(init_method.block.statements):
+                if (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name == fld.name
+                ):
+                    assign = stmt
+                    assign_pos = si
+                    break
+            if assign is None:
+                continue
+            total_assigns = sum(
+                _count_assigns_recursive(m.block, fld.name) for m in game.methods
+            )
+            if total_assigns != 1:
+                self._record_near_miss(
+                    fld.name,
+                    f"field '{fld.name}' assigned {total_assigns} times "
+                    f"(need exactly 1)",
+                    assign.origin,
+                )
+                continue
+            exp = _exp_with_generator_base(assign.value)
+            if exp is None or not isinstance(exp, frog_ast.Variable):
+                continue
+            v_assigns = sum(
+                _count_assigns_recursive(m.block, exp.name) for m in game.methods
+            )
+            if v_assigns != 1:
+                self._record_near_miss(
+                    fld.name,
+                    f"exponent variable '{exp.name}' is reassigned "
+                    f"({v_assigns} writes); cannot safely contract",
+                    assign.origin,
+                )
+                continue
+            total_reads = sum(
+                _VarCountVisitor(fld.name).visit(m.block) for m in game.methods
+            )
+            if total_reads < 2:
+                self._record_near_miss(
+                    fld.name,
+                    f"field '{fld.name}' is single-use; contraction would "
+                    f"thrash with InlineSingleUseField",
+                    assign.origin,
+                )
+                continue
+            result[fld.name] = (exp.name, assign_pos)
+        return result
+
+    def _record_near_miss(
+        self,
+        field_name: str,
+        reason: str,
+        origin: frog_ast.SourceOrigin | None,
+    ) -> None:
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Contract Generator Exponent To Field",
+                reason=reason,
+                location=origin,
+                suggestion=None,
+                variable=field_name,
+                method=None,
+            )
+        )
+
+
+class ContractGeneratorExpToField(TransformPass):
+    name = "Contract Generator Exponent To Field"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return ContractGeneratorExpToFieldTransformer(ctx).transform(game)
 
 
 class _DeterministicCallCollector(Visitor[list[frog_ast.FuncCall]]):

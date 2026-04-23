@@ -1351,6 +1351,360 @@ class CounterGuardedFieldToLocal(TransformPass):
         return _counter_guarded_field_to_local(game)
 
 
+# ---------------------------------------------------------------------------
+# Counter-guarded chain to local
+# ---------------------------------------------------------------------------
+
+
+def _collect_variable_names(node: frog_ast.ASTNode) -> set[str]:
+    """Return the set of Variable names (identifiers) referenced in *node*."""
+    names: set[str] = set()
+
+    def visit(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, frog_ast.Variable):
+            names.add(n.name)
+        return False
+
+    SearchVisitor(visit).visit(node)
+    return names
+
+
+def _contains_sample(node: frog_ast.ASTNode) -> bool:
+    """Return True iff *node* syntactically contains a Sample or UniqueSample."""
+    return (
+        SearchVisitor(
+            lambda n: isinstance(n, (frog_ast.Sample, frog_ast.UniqueSample))
+        ).visit(node)
+        is not None
+    )
+
+
+def _insert_into_counter_guard_branch(
+    block: frog_ast.Block,
+    field_name: str,
+    counter_name: str,
+    new_stmts: list[frog_ast.Statement],
+) -> frog_ast.Block:
+    """Return a copy of *block* with *new_stmts* prepended to the body of the
+    counter-guarded branch that references *field_name*.
+
+    Assumes preconditions already verified by
+    ``_all_refs_in_counter_guarded_branches`` (exactly one such branch after
+    the counter increment, top-level in the method block).
+    """
+    new_statements: list[frog_ast.Statement] = []
+    past_increment = False
+    for stmt in block.statements:
+        if (
+            isinstance(stmt, frog_ast.Assignment)
+            and isinstance(stmt.var, frog_ast.Variable)
+            and stmt.var.name == counter_name
+        ):
+            past_increment = True
+            new_statements.append(stmt)
+            continue
+        if isinstance(stmt, frog_ast.IfStatement) and past_increment:
+            new_blocks: list[frog_ast.Block] = []
+            rewrote = False
+            for branch_block in stmt.blocks:
+                if not rewrote and _references_name(branch_block, field_name):
+                    new_branch = frog_ast.Block(
+                        [copy.deepcopy(s) for s in new_stmts]
+                        + list(branch_block.statements)
+                    )
+                    new_blocks.append(new_branch)
+                    rewrote = True
+                else:
+                    new_blocks.append(branch_block)
+            new_if = frog_ast.IfStatement(list(stmt.conditions), new_blocks)
+            new_statements.append(new_if)
+            continue
+        new_statements.append(stmt)
+    return frog_ast.Block(new_statements)
+
+
+def _counter_guarded_chain_to_local(  # pylint: disable=too-many-branches,too-many-locals,too-many-statements
+    game: frog_ast.Game,
+) -> frog_ast.Game:
+    """Hoist a chain of Init-sampled local + derived fields into a
+    counter-guarded branch.
+
+    Generalization of ``_counter_guarded_field_to_local``. A *chain* is a set
+    ``{v, f_1, ..., f_k}`` where:
+
+    - ``v`` is a bare typed local sample (``T v <- T;``) at Initialize's
+      top-level block, appearing exactly once.
+    - Each ``f_i`` is a game field whose only top-level Init assignment is
+      ``f_i = expr_i``, where ``expr_i`` is deterministic (no Sample) and
+      references only ``v``, other chain fields, game fields not in the
+      chain, or game parameters/builtins.
+    - Every use of ``v`` outside its own Sample statement is inside one of
+      the ``f_i`` Init assignments (not elsewhere in Init, not in any other
+      method).
+    - Every use of each ``f_i`` outside chain Init assignments lies inside a
+      single counter-guarded branch in exactly one non-Initialize method
+      (same ``_all_refs_in_counter_guarded_branches`` invariant as the
+      field-to-local pass).
+
+    The rewrite removes the chain from Initialize and from the game's field
+    list, and prepends ``v``'s sample and each ``f_i = expr_i`` assignment
+    (as typed locals) at the top of the counter-guarded branch body, in
+    Initialize order.
+    """
+    if not game.has_method("Initialize"):
+        return game
+
+    counter_fields = _find_counter_fields(game)
+    if not counter_fields:
+        return game
+
+    init_method = game.get_method("Initialize")
+    field_names_all = {f.name for f in game.fields}
+
+    # Identify typed local samples in Initialize's top-level block.
+    init_sampled_locals: dict[str, tuple[int, frog_ast.Sample]] = {}
+    for idx, stmt in enumerate(init_method.block.statements):
+        if (
+            isinstance(stmt, frog_ast.Sample)
+            and isinstance(stmt.var, frog_ast.Variable)
+            and stmt.the_type is not None
+            and stmt.var.name not in field_names_all
+        ):
+            init_sampled_locals[stmt.var.name] = (idx, stmt)
+
+    if not init_sampled_locals:
+        return game
+
+    # Try each non-Init method as the candidate target method.
+    for target_method in game.methods:
+        if target_method.signature.name == "Initialize":
+            continue
+
+        counter_name = _has_counter_increment(target_method.block, counter_fields)
+        if counter_name is None:
+            continue
+        if _count_assignments_recursive(target_method.block, counter_name) != 1:
+            continue
+        counter_modified_elsewhere = False
+        for m in game.methods:
+            if m.signature.name in ("Initialize", target_method.signature.name):
+                continue
+            if _is_written_in_recursive(m.block, counter_name):
+                counter_modified_elsewhere = True
+                break
+        if counter_modified_elsewhere:
+            continue
+
+        mutable_names = field_names_all | {
+            p.name for p in target_method.signature.parameters
+        }
+
+        # Find candidate chain fields: each has a single Init top-level
+        # assignment, no other Init references, not referenced in any
+        # non-target non-Init method, and all target-method references are
+        # inside one counter-guarded branch.
+        candidate_inits: dict[str, tuple[int, frog_ast.Assignment]] = {}
+        candidate_fields: list[frog_ast.Field] = []
+
+        for field in game.fields:
+            if field.name in counter_fields:
+                continue
+            assign_idx: Optional[int] = None
+            assign_stmt: Optional[frog_ast.Assignment] = None
+            other_init_ref = False
+            for idx, stmt in enumerate(init_method.block.statements):
+                if (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name == field.name
+                    and stmt.the_type is None
+                ):
+                    if assign_idx is not None:
+                        other_init_ref = True
+                        break
+                    assign_idx = idx
+                    assign_stmt = stmt
+                elif _references_name(stmt, field.name):
+                    other_init_ref = True
+                    break
+            if other_init_ref or assign_idx is None or assign_stmt is None:
+                continue
+            if _contains_sample(assign_stmt.value):
+                continue
+            used_in_other_method = False
+            for m in game.methods:
+                if m.signature.name in (
+                    "Initialize",
+                    target_method.signature.name,
+                ):
+                    continue
+                if _references_name(m.block, field.name):
+                    used_in_other_method = True
+                    break
+            if used_in_other_method:
+                continue
+            if _is_written_in_recursive(target_method.block, field.name):
+                continue
+            if not _all_refs_in_counter_guarded_branches(
+                target_method.block, field.name, counter_name, mutable_names
+            ):
+                continue
+            candidate_fields.append(field)
+            candidate_inits[field.name] = (assign_idx, assign_stmt)
+
+        if not candidate_fields:
+            continue
+
+        # For each sampled local root, try to form a chain.
+        best_root: Optional[str] = None
+        best_chain_names: set[str] = set()
+
+        for root_name, (root_idx, _) in init_sampled_locals.items():
+            # Seed chain with candidate fields whose RHS references the root.
+            chain_names: set[str] = set()
+            for field in candidate_fields:
+                refs = _collect_variable_names(candidate_inits[field.name][1].value)
+                if root_name in refs:
+                    chain_names.add(field.name)
+            if not chain_names:
+                continue
+            # Transitive closure: add fields whose RHS references already-in-chain fields.
+            changed = True
+            while changed:
+                changed = False
+                for field in candidate_fields:
+                    if field.name in chain_names:
+                        continue
+                    refs = _collect_variable_names(candidate_inits[field.name][1].value)
+                    if refs & chain_names:
+                        chain_names.add(field.name)
+                        changed = True
+
+            # Verify root is used only inside chain Init assignments.
+            root_ok = True
+            for idx, stmt in enumerate(init_method.block.statements):
+                if idx == root_idx:
+                    continue
+                if not _references_name(stmt, root_name):
+                    continue
+                if not (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name in chain_names
+                ):
+                    root_ok = False
+                    break
+            if not root_ok:
+                continue
+            # Root must not appear in any non-Initialize method.
+            for m in game.methods:
+                if m.signature.name == "Initialize":
+                    continue
+                if _references_name(m.block, root_name):
+                    root_ok = False
+                    break
+            if not root_ok:
+                continue
+
+            # Verify each chain field's RHS references only: root, other chain
+            # members, non-chain fields, and non-local names. No OTHER
+            # init-sampled locals are allowed.
+            chain_ok = True
+            for fname in chain_names:
+                refs = _collect_variable_names(candidate_inits[fname][1].value)
+                for ref in refs:
+                    if ref == root_name:
+                        continue
+                    if ref in chain_names:
+                        continue
+                    if ref in field_names_all:
+                        continue
+                    if ref in init_sampled_locals:
+                        # Another sampled local not in chain — reject.
+                        chain_ok = False
+                        break
+                if not chain_ok:
+                    break
+            if not chain_ok:
+                continue
+
+            if len(chain_names) > len(best_chain_names):
+                best_chain_names = chain_names
+                best_root = root_name
+
+        if best_root is None or not best_chain_names:
+            continue
+
+        # Sort chain fields by their Init assignment index to preserve ordering.
+        chain_fields_with_idx = [
+            (candidate_inits[f.name][0], f)
+            for f in candidate_fields
+            if f.name in best_chain_names
+        ]
+        chain_fields_with_idx.sort(key=lambda p: p[0])
+        chain_fields_sorted = [f for _, f in chain_fields_with_idx]
+
+        root_idx, root_sample = init_sampled_locals[best_root]
+
+        # Build the statements to prepend into the counter-guarded branch,
+        # in Initialize order: root sample first, then each chain field's
+        # assignment converted to a typed-local declaration.
+        hoisted: list[frog_ast.Statement] = [copy.deepcopy(root_sample)]
+        for field in chain_fields_sorted:
+            _, assign = candidate_inits[field.name]
+            hoisted.append(
+                frog_ast.Assignment(
+                    copy.deepcopy(field.type),
+                    copy.deepcopy(assign.var),
+                    copy.deepcopy(assign.value),
+                )
+            )
+
+        # Build a new Initialize with the chain removed.
+        remove_indices = {root_idx} | {
+            candidate_inits[f.name][0] for f in chain_fields_sorted
+        }
+
+        new_game = copy.deepcopy(game)
+        # Remove the chain fields from the field list.
+        new_game.fields = [f for f in new_game.fields if f.name not in best_chain_names]
+        new_init = new_game.get_method("Initialize")
+        new_init.block = frog_ast.Block(
+            [
+                s
+                for i, s in enumerate(new_init.block.statements)
+                if i not in remove_indices
+            ]
+        )
+        # Hoist into the target method's counter-guarded branch. Any of the
+        # chain fields identifies the same branch; use the first.
+        rep_name = chain_fields_sorted[0].name
+        new_target = new_game.get_method(target_method.signature.name)
+        new_target.block = _insert_into_counter_guard_branch(
+            new_target.block, rep_name, counter_name, hoisted
+        )
+
+        return new_game
+
+    return game
+
+
+class CounterGuardedChainToLocal(TransformPass):
+    """Hoist an Init-sampled local plus its derived fields into a
+    counter-guarded branch when the whole chain is confined to that branch.
+
+    Generalization of :class:`CounterGuardedFieldToLocal` that handles chains
+    of the form ``v <- T;  f1 = expr(v);  f2 = expr(v, f1); ...`` when ``v``
+    and every ``fi`` are referenced only inside a single counter-guarded
+    branch in one non-Initialize method.
+    """
+
+    name = "Counter Guarded Chain To Local"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return _counter_guarded_chain_to_local(game)
+
+
 class SinkUniformSampleTransformer(BlockTransformer):
     """Move a uniform sample from before an if/else into the branch that uses it.
 

@@ -55,8 +55,9 @@ class ExpandTupleTransformer(Transformer):
                 for index, the_type in enumerate(unfolded_types):
                     expression = None
                     if field.value:
-                        assert isinstance(field.value, frog_ast.Tuple)
-                        expression = field.value.values[index]
+                        field_values = frog_ast.tuple_literal_values(field.value)
+                        assert field_values is not None
+                        expression = field_values[index]
                     new_fields.append(
                         frog_ast.Field(the_type, f"{field.name}@{index}", expression)
                     )
@@ -83,8 +84,9 @@ class ExpandTupleTransformer(Transformer):
                 and isinstance(statement.var, frog_ast.Variable)
                 and statement.var.name in self.to_transform
             ):
-                assert isinstance(statement.value, frog_ast.Tuple)
-                for index, tuple_value in enumerate(statement.value.values):
+                stmt_values = frog_ast.tuple_literal_values(statement.value)
+                assert stmt_values is not None
+                for index, tuple_value in enumerate(stmt_values):
                     new_statements.append(
                         frog_ast.Assignment(
                             None,
@@ -115,13 +117,14 @@ class ExpandTupleTransformer(Transformer):
             ):
                 assert isinstance(statement.the_type, frog_ast.ProductType)
                 unfolded_types = statement.the_type.types
-                assert isinstance(statement.value, frog_ast.Tuple)
+                stmt_values = frog_ast.tuple_literal_values(statement.value)
+                assert stmt_values is not None
                 for index, the_type in enumerate(unfolded_types):
                     new_statements.append(
                         frog_ast.Assignment(
                             the_type,
                             frog_ast.Variable(f"{statement.var.name}@{index}"),
-                            statement.value.values[index],
+                            stmt_values[index],
                         )
                     )
                 self.to_transform.append(statement.var.name)
@@ -345,7 +348,7 @@ class CollapseSingleIndexTupleTransformer(BlockTransformer):
                 and statement.the_type is not None
                 and isinstance(statement.the_type, frog_ast.ProductType)
                 and isinstance(statement.var, frog_ast.Variable)
-                and not isinstance(statement.value, frog_ast.Tuple)
+                and frog_ast.tuple_literal_values(statement.value) is None
             ):
                 continue
 

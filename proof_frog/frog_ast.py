@@ -428,6 +428,22 @@ class Tuple(Expression):
         return f'[{", ".join(str(value) for value in self.values)}]'
 
 
+def tuple_literal_values(node: object) -> list[Expression] | None:
+    """Return the element list if *node* is a tuple literal, else ``None``.
+
+    Set-alias fields whose type is a ``ProductType`` may carry tuple literals
+    in expression positions (field initialisers, assignment RHS) as
+    ``ProductType`` nodes rather than ``Tuple`` nodes, with the elements
+    stored on ``.types``.  This helper hides that quirk so callers can treat
+    both representations uniformly.
+    """
+    if isinstance(node, Tuple):
+        return list(node.values)
+    if isinstance(node, ProductType):
+        return list(node.types)  # type: ignore[return-value]
+    return None
+
+
 class ReturnStatement(Statement):
     def __init__(self, expression: Expression):
         super().__init__()

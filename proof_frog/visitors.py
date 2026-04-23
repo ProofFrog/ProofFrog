@@ -861,7 +861,7 @@ class AllConstantFieldAccesses(Visitor[bool]):
             return
         if assignment.var.name != self.tuple_name:
             return
-        if not isinstance(assignment.value, frog_ast.Tuple):
+        if frog_ast.tuple_literal_values(assignment.value) is None:
             self.all_constant = False
 
 

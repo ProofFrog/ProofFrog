@@ -13,7 +13,6 @@ from .sampling import (
     SplitUniformSamples,
     SingleCallFieldToLocal,
     CounterGuardedFieldToLocal,
-    CounterGuardedChainToLocal,
     SinkUniformSample,
     LocalizeInitOnlyFieldSample,
 )
@@ -40,7 +39,6 @@ from .inlining import (
     InlineSingleUseField,
     HoistGroupExpToInitialize,
     RefactorGroupElemFieldExp,
-    ContractGeneratorExpToField,
     ForwardExpressionAlias,
     HoistFieldPureAlias,
     ExtractRepeatedTupleAccess,
@@ -97,8 +95,6 @@ from .standardization import (
 CORE_PIPELINE: list[TransformPass] = [
     SingleCallFieldToLocal(),
     CounterGuardedFieldToLocal(),
-    ContractGeneratorExpToField(),
-    CounterGuardedChainToLocal(),
     SymbolicComputation(),
     SimplifySplice(),
     MergeUniformSamples(),

@@ -3283,6 +3283,68 @@ class CrossMethodFieldAliasTransformer:
         return None
 
 
+class _AliasAwareReplacer(ReplaceTransformer):
+    """Replace any node whose alias-expanded form equals *match_node*.
+
+    Used by HoistDeterministicCallToInitialize to rewrite occurrences of a
+    hoisted call in Initialize's return expression even when the candidate
+    is reached only through one or more local-variable aliases defined
+    earlier in Initialize.
+    """
+
+    def __init__(
+        self,
+        match_node: frog_ast.ASTNode,
+        replacement: frog_ast.ASTNode,
+        expand: Callable[[frog_ast.ASTNode], frog_ast.ASTNode],
+    ) -> None:
+        super().__init__(match_node, replacement)
+        self._match_expanded = match_node
+        self._expand = expand
+
+    def transform_ast_node(self, exp: frog_ast.ASTNode) -> Optional[frog_ast.ASTNode]:
+        # Cheap pre-check: avoid expanding leaves that clearly can't match.
+        if isinstance(exp, (frog_ast.FuncCall, frog_ast.Variable)):
+            if self._expand(exp) == self._match_expanded:
+                return copy.deepcopy(self.replace_with)
+        return None
+
+
+def _has_early_return_in_init(stmts: Sequence[frog_ast.Statement]) -> bool:
+    """Return True if *stmts* contains a ReturnStatement that is not the
+    terminal top-level statement. Any return nested inside an if/for block
+    counts as "early"; a ReturnStatement at the end of the top-level list
+    does not.
+    """
+    for i, stmt in enumerate(stmts):
+        if isinstance(stmt, frog_ast.ReturnStatement):
+            if i != len(stmts) - 1:
+                return True
+            continue
+        if isinstance(stmt, frog_ast.IfStatement):
+            for blk in stmt.blocks:
+                if _contains_return(blk.statements):
+                    return True
+        elif isinstance(stmt, (frog_ast.NumericFor, frog_ast.GenericFor)):
+            if _contains_return(stmt.block.statements):
+                return True
+    return False
+
+
+def _contains_return(stmts: Sequence[frog_ast.Statement]) -> bool:
+    for stmt in stmts:
+        if isinstance(stmt, frog_ast.ReturnStatement):
+            return True
+        if isinstance(stmt, frog_ast.IfStatement):
+            for blk in stmt.blocks:
+                if _contains_return(blk.statements):
+                    return True
+        elif isinstance(stmt, (frog_ast.NumericFor, frog_ast.GenericFor)):
+            if _contains_return(stmt.block.statements):
+                return True
+    return False
+
+
 class HoistDeterministicCallToInitializeTransformer:
     """Hoist a deterministic call into Initialize and cache it in a new field.
 
@@ -3337,19 +3399,39 @@ class HoistDeterministicCallToInitializeTransformer:
         if init_idx is None:
             return game
 
-        # Soundness guard: if Initialize contains any ReturnStatement, an
-        # appended hoisted assignment could be skipped on the early-return
-        # path, leaving the new field uninitialized while oracles still read
-        # it. Well-typed FrogLang rejects `return expr;` in Void methods, so
-        # this should never occur in practice, but guarding is strictly
-        # conservative.
-        if (
-            SearchVisitor(lambda n: isinstance(n, frog_ast.ReturnStatement)).visit(
-                game.methods[init_idx].block
-            )
-            is not None
-        ):
+        # Soundness guard: an "early" return (nested inside if/for) would
+        # skip an appended hoisted assignment and leave the new field
+        # uninitialized while oracles still read it. A terminal top-level
+        # return (the common case for non-Void Initialize in composed
+        # reductions) is safe: we insert the hoisted assignment *before* it.
+        init_block_stmts = list(game.methods[init_idx].block.statements)
+        if _has_early_return_in_init(init_block_stmts):
+            if self._ctx is not None:
+                self._ctx.near_misses.append(
+                    NearMiss(
+                        transform_name=("Hoist Deterministic Call to Initialize"),
+                        reason=(
+                            "Initialize has an early return (nested in "
+                            "if/for); appending a hoisted assignment would "
+                            "be skipped on the early-return path"
+                        ),
+                        location=None,
+                        suggestion=(
+                            "Restructure Initialize so any return is the "
+                            "terminal top-level statement"
+                        ),
+                        variable=None,
+                        method="Initialize",
+                    )
+                )
             return game
+        # Locate the terminal return (if present). Any hoisted assignment
+        # will be spliced just before it.
+        init_terminal_return_idx: int | None = None
+        if init_block_stmts and isinstance(
+            init_block_stmts[-1], frog_ast.ReturnStatement
+        ):
+            init_terminal_return_idx = len(init_block_stmts) - 1
 
         existing_aliased_calls: list[frog_ast.FuncCall] = []
         for stmt in game.methods[init_idx].block.statements:
@@ -3445,13 +3527,94 @@ class HoistDeterministicCallToInitializeTransformer:
         new_name = self._fresh_field_name(field_names)
         new_game = copy.deepcopy(game)
         new_game.fields.append(frog_ast.Field(candidate_return_type, new_name, None))
+        # Pin the newly introduced field so ``Inline Single-Use Field`` leaves
+        # it alone on subsequent iterations — inlining it back would just
+        # re-expose the pattern and cause this pass to re-fire, preventing
+        # the fixed-point loop from converging.
+        if self._ctx is not None:
+            self._ctx.pinned_fields.add(new_name)
         init_method = new_game.methods[init_idx]
         hoisted_stmt = frog_ast.Assignment(
             None, frog_ast.Variable(new_name), copy.deepcopy(candidate)
         )
-        init_method.block = frog_ast.Block(
-            list(init_method.block.statements) + [hoisted_stmt]
-        )
+        init_stmts = list(init_method.block.statements)
+        if init_terminal_return_idx is not None:
+            # Insert just before the terminal return so the new field is set
+            # on every path that reaches the return.
+            init_stmts.insert(init_terminal_return_idx, hoisted_stmt)
+        else:
+            init_stmts.append(hoisted_stmt)
+        init_method.block = frog_ast.Block(init_stmts)
+
+        # When Initialize has a terminal return, rewrite matches of the
+        # candidate inside that return expression — including through local
+        # aliases defined earlier in Initialize (e.g. ``x = e; return f(x);``
+        # where f(expand(x)) == candidate). Without this, the hoisted field
+        # has only a single use on one side of an interchangeability hop,
+        # allowing Inline Single-Use Field to fold it back and introducing
+        # asymmetry.
+        if init_terminal_return_idx is not None:
+            new_init = new_game.methods[init_idx]
+            new_stmts = list(new_init.block.statements)
+            ret_stmt = new_stmts[-1]
+            assert isinstance(ret_stmt, frog_ast.ReturnStatement)
+            # Build alias map: local single-assignment bindings in Initialize
+            # (before the hoisted/terminal statements).
+            aliases: dict[str, frog_ast.Expression] = {}
+            alias_assign_counts: dict[str, int] = {}
+            for stmt in new_stmts[:-1]:
+                if stmt is hoisted_stmt:
+                    continue
+                if (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name not in field_names
+                    and stmt.var.name not in param_names
+                ):
+                    # Ignore self-assignments (``x = x;``) which are no-ops
+                    # that other transforms sometimes leave behind; counting
+                    # them would disqualify x from being treated as a stable
+                    # alias.
+                    if (
+                        isinstance(stmt.value, frog_ast.Variable)
+                        and stmt.value.name == stmt.var.name
+                    ):
+                        continue
+                    name = stmt.var.name
+                    alias_assign_counts[name] = alias_assign_counts.get(name, 0) + 1
+                    aliases[name] = stmt.value
+            # Only use aliases for variables assigned exactly once.
+            stable_aliases = {
+                n: v for n, v in aliases.items() if alias_assign_counts[n] == 1
+            }
+
+            def _expand(expr: frog_ast.ASTNode) -> frog_ast.ASTNode:
+                """Recursively expand local aliases in *expr* to a fixed point."""
+                prev: frog_ast.ASTNode | None = None
+                current: frog_ast.ASTNode = expr
+                for _ in range(32):  # bound in case of pathological aliases
+                    if prev is not None and prev == current:
+                        break
+                    prev = current
+                    sm: frog_ast.ASTMap[frog_ast.ASTNode] = frog_ast.ASTMap(
+                        identity=False
+                    )
+                    for n, v in stable_aliases.items():
+                        sm.set(frog_ast.Variable(n), copy.deepcopy(v))
+                    current = SubstitutionTransformer(sm).transform(current)
+                return current
+
+            expanded_candidate = _expand(copy.deepcopy(candidate))
+
+            replacer = _AliasAwareReplacer(
+                match_node=expanded_candidate,
+                replacement=frog_ast.Variable(new_name),
+                expand=_expand,
+            )
+            new_ret_expr = replacer.transform(ret_stmt.expression)
+            new_stmts[-1] = frog_ast.ReturnStatement(new_ret_expr)
+            new_init.block = frog_ast.Block(new_stmts)
+
         for midx, _ in enumerate(new_game.methods):
             if midx == init_idx:
                 continue

@@ -266,6 +266,33 @@ class TestDeduplicateDeterministicCalls:
         ).transform(method)
         assert result == original
 
+    def test_counter_advances_past_existing_names(self) -> None:
+        """If the block already contains a ``__determ_N__`` declaration (e.g.
+        from an earlier pipeline iteration), the fresh name must not collide
+        with it, even though the transformer's counter starts at 0.
+        """
+        method = frog_parser.parse_method("""
+            Void f(BitString<n> x, BitString<n> y) {
+                BitString<n> __determ_0__ = G.evaluate(x);
+                BitString<n> a = G.evaluate(y);
+                BitString<n> b = G.evaluate(y);
+                return [__determ_0__, a, b];
+            }
+            """)
+        expected = frog_parser.parse_method("""
+            Void f(BitString<n> x, BitString<n> y) {
+                BitString<n> __determ_0__ = G.evaluate(x);
+                BitString<n> __determ_1__ = G.evaluate(y);
+                BitString<n> a = __determ_1__;
+                BitString<n> b = __determ_1__;
+                return [__determ_0__, a, b];
+            }
+            """)
+        result = DeduplicateDeterministicCallsTransformer(
+            proof_namespace=_make_det_namespace()
+        ).transform(method)
+        assert result == expected
+
     def test_zero_arg_single_occurrence_unchanged(self) -> None:
         """A single zero-arg deterministic call should not be extracted."""
         method = frog_parser.parse_method("""

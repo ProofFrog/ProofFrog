@@ -2843,6 +2843,21 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         assert m is not None
         return_type = copy.deepcopy(m.return_type)
 
+        # Advance counter past any existing __determ_N__ names in the block
+        # to avoid colliding with names created by earlier pipeline iterations.
+        for stmt in block.statements:
+            if isinstance(
+                stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+            ) and isinstance(stmt.var, frog_ast.Variable):
+                existing = stmt.var.name
+                if existing.startswith("__determ_") and existing.endswith("__"):
+                    try:
+                        n = int(existing[len("__determ_") : -len("__")])
+                    except ValueError:
+                        continue
+                    if n >= self.counter:
+                        self.counter = n + 1
+
         var_name = f"__determ_{self.counter}__"
         self.counter += 1
 

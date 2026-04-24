@@ -202,6 +202,70 @@ def test_no_hoist_when_no_field_caret_x_pattern_in_oracle() -> None:
     assert got == frog_parser.parse_game(source), str(got)
 
 
+def test_no_hoist_when_array_field_element_mutated_in_oracle() -> None:
+    """Precondition-6 regression: if an array field is referenced by the
+    hoist-candidate expression (here, via the base's RHS) and an oracle
+    mutates an element of that array with ``arr[i] = v``, the transform
+    must decline — the hoisted field would cache the pre-mutation value.
+    """
+    source = """
+    Game G(Group G) {
+        Array<ModInt<G.order>, 4> factors;
+        ModInt<G.order> sk;
+        GroupElem<G> pk;
+
+        Void Initialize() {
+            sk <-uniq[{0}] ModInt<G.order>;
+            pk = G.generator ^ factors[0];
+        }
+        Void Update() {
+            factors[0] = 999;
+        }
+        Bool Q(GroupElem<G> z) {
+            return z == pk ^ sk;
+        }
+    }
+    """
+    got = _apply(source)
+    assert got == frog_parser.parse_game(source), str(got)
+
+
+def test_no_hoist_when_initialize_has_early_return() -> None:
+    """AST-constructible (not surface-reachable) regression: if Initialize
+    contains an early return nested in an if, splicing a hoisted assignment
+    after the base could be skipped on the early-return path.  The guard
+    mirrors HoistDeterministicCallToInitialize's early-return check.
+    """
+    # Build the AST directly — well-typed Void Initialize cannot have a
+    # ReturnStatement in surface syntax, but an AST consumer could.
+    source = """
+    Game G(Group G) {
+        ModInt<G.order> sk;
+        GroupElem<G> pk;
+
+        Void Initialize() {
+            sk <-uniq[{0}] ModInt<G.order>;
+            ModInt<G.order> b <- ModInt<G.order>;
+            pk = G.generator ^ b;
+        }
+        Bool Q(GroupElem<G> z) {
+            return z == pk ^ sk;
+        }
+    }
+    """
+    game = frog_parser.parse_game(source)
+    # Inject an early ReturnStatement into Initialize, nested inside an if.
+    init = next(m for m in game.methods if m.signature.name == "Initialize")
+    early_return_if = frog_ast.IfStatement(
+        [frog_ast.Boolean(False)],
+        [frog_ast.Block([frog_ast.ReturnStatement(None)])],
+    )
+    init.block = frog_ast.Block([early_return_if] + list(init.block.statements))
+    got = HoistGroupExpToInitialize().apply(game, _ctx())
+    # The transform must decline, leaving the early-return AST intact.
+    assert got == game, str(got)
+
+
 def test_core_pipeline_converges_on_hoist_refactor_shape() -> None:
     """Regression: ``HoistGroupExpToInitialize`` and
     ``RefactorGroupElemFieldExp`` used to form a stable inverse pair under

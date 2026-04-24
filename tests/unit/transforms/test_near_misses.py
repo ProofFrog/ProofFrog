@@ -1252,3 +1252,67 @@ def test_local_fn_near_miss_declared_not_sampled() -> None:
     assert any(
         "declared (known deterministic)" in nm.reason for nm in misses
     )
+
+
+# ---------------------------------------------------------------------------
+# ConcatEqualityDecompose near-miss
+# ---------------------------------------------------------------------------
+
+
+from proof_frog.transforms.algebraic import (  # noqa: E402
+    ConcatEqualityDecompose,
+)
+
+
+def _concat_ctx() -> PipelineContext:
+    return PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+
+
+def test_concat_equality_decompose_near_miss_unknown_length() -> None:
+    """A term without a statically-derivable BitString length should emit
+    a near-miss explaining that length derivation failed."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Bool Q(BitString<16> x, BitString<8> a) {
+                return x == (a || unknown);
+            }
+        }
+        """
+    )
+    ctx = _concat_ctx()
+    ConcatEqualityDecompose().apply(game, ctx)
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Concat Equality Decompose"
+    ]
+    assert misses
+    assert any("statically-derivable" in nm.reason for nm in misses)
+
+
+def test_concat_equality_decompose_no_near_miss_when_fires() -> None:
+    """When every term has a derivable length, the transform fires and
+    emits no near-miss."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Bool Q(BitString<16> x, BitString<8> a, BitString<8> b) {
+                return x == (a || b);
+            }
+        }
+        """
+    )
+    ctx = _concat_ctx()
+    ConcatEqualityDecompose().apply(game, ctx)
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Concat Equality Decompose"
+    ]
+    assert not misses

@@ -2345,6 +2345,15 @@ class HoistGroupExpToInitializeTransformer:
         if init_idx is None:
             return None
 
+        # Defensive guard: if Initialize has an early return (nested in if/for,
+        # or any non-terminal ReturnStatement), splicing a new assignment could
+        # be skipped on the early-return path.  Well-typed FrogLang Void
+        # Initialize methods cannot produce this shape through the parser, but
+        # AST-level consumers could.  Mirrors HoistDeterministicCallToInitialize.
+        init_stmts_for_guard = game.methods[init_idx].block.statements
+        if _has_early_return_in_init(init_stmts_for_guard):
+            return None
+
         field_names = {f.name for f in game.fields}
         param_names = {p.name for p in game.parameters}
 
@@ -2439,15 +2448,21 @@ class HoistGroupExpToInitializeTransformer:
             hits: list[bool] = []
 
             def _visit(n: frog_ast.ASTNode) -> bool:
-                if (
-                    isinstance(
-                        n,
-                        (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
-                    )
-                    and isinstance(n.var, frog_ast.Variable)
-                    and n.var.name in names
+                if isinstance(
+                    n,
+                    (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
                 ):
-                    hits.append(True)
+                    if isinstance(n.var, frog_ast.Variable) and n.var.name in names:
+                        hits.append(True)
+                    else:
+                        # ``arr[i] = v`` / ``M[k] = v`` mutates the base
+                        # container named by the root Variable — treat as a
+                        # write to that name.
+                        root = n.var
+                        while isinstance(root, frog_ast.ArrayAccess):
+                            root = root.the_array
+                        if isinstance(root, frog_ast.Variable) and root.name in names:
+                            hits.append(True)
                 return False
 
             SearchVisitor(_visit).visit(node)

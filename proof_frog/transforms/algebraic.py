@@ -1541,6 +1541,28 @@ class ConcatEqualityDecomposeTransformer(Transformer):
         for term in terms:
             length = _bitstring_length(term, self.ctx, self.type_map)
             if length is None:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Concat Equality Decompose",
+                        reason=(
+                            f"concatenation term '{term}' has no "
+                            "statically-derivable BitString length; "
+                            "decomposition requires every term to be a "
+                            "slice, a typed BitString variable, a primitive "
+                            "method returning BitString<L>, or a concat of "
+                            "such terms"
+                        ),
+                        location=binary_operation.origin,
+                        suggestion=(
+                            "Annotate or wrap the term so its BitString "
+                            "length is derivable (e.g., declare a typed "
+                            "local, or ensure the primitive method's "
+                            "return type is BitString<L>)."
+                        ),
+                        variable=None,
+                        method=None,
+                    )
+                )
                 return transformed
             lengths.append(length)
 

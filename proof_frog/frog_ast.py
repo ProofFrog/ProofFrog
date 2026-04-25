@@ -985,6 +985,7 @@ class ProofFile(Root):
         theorem: ParameterizedGame,
         steps: list[ProofStep],
         requirements: Optional[list[StructuralRequirement]] = None,
+        helpers_after_theorem_count: int = 0,
     ) -> None:
         super().__init__()
         self.imports = imports
@@ -997,10 +998,15 @@ class ProofFile(Root):
         self.theorem = theorem
         self.steps = steps
         self.requirements = requirements if requirements is not None else []
+        self.helpers_after_theorem_count = helpers_after_theorem_count
 
     def __str__(self) -> str:
         output_string = ("\n".join(str(im) for im in self.imports)) + "\n\n"
-        output_string += ("\n".join(str(game) for game in self.helpers)) + "\n\n"
+        split = len(self.helpers) - self.helpers_after_theorem_count
+        helpers_before = self.helpers[:split]
+        helpers_after = self.helpers[split:]
+        if helpers_before:
+            output_string += ("\n".join(str(game) for game in helpers_before)) + "\n\n"
 
         output_string += "proof:\n"
         output_string += "let:\n"
@@ -1031,6 +1037,10 @@ class ProofFile(Root):
         output_string += "games:\n"
         for step in self.steps:
             output_string += f"  {step}\n"
+        if helpers_after:
+            output_string += (
+                "\n" + ("\n".join(str(game) for game in helpers_after)) + "\n"
+            )
         return output_string
 
     def get_export_name(self) -> str:

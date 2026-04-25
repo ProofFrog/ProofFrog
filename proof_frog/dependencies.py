@@ -302,18 +302,19 @@ def _collect_field_access_refs(game: frog_ast.Game) -> list[frog_ast.Variable]:
         )
 
     for method in game.methods:
-        found = visitors.SearchVisitor(is_field_ref).visit(method.block)
+        current_block = method.block
+        found = visitors.SearchVisitor(is_field_ref).visit(current_block)
         while found is not None:
             assert isinstance(found, frog_ast.FieldAccess)
             assert isinstance(found.the_object, frog_ast.Variable)
             var = frog_ast.Variable(found.the_object.name)
             if var not in refs:
                 refs.append(var)
-            # Replace the found node to continue searching for more
-            method_block = visitors.ReplaceTransformer(
+            # Replace the found node and continue searching the updated tree.
+            current_block = visitors.ReplaceTransformer(
                 found, frog_ast.Variable("__field_access_counted__")
-            ).transform(method.block)
-            found = visitors.SearchVisitor(is_field_ref).visit(method_block)
+            ).transform(current_block)
+            found = visitors.SearchVisitor(is_field_ref).visit(current_block)
 
     return refs
 

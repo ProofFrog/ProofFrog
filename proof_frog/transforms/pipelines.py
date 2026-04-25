@@ -74,6 +74,7 @@ from .structural import (
 from .control_flow import (
     IfConditionAliasSubstitution,
     RedundantConditionalReturn,
+    AbsorbRedundantEarlyReturn,
     BranchElimination,
     ElseUnwrap,
     SimplifyReturn,
@@ -164,6 +165,7 @@ CORE_PIPELINE: list[TransformPass] = [
     RedundantFieldCopy(),
     SimplifyTuple(),
     RemoveUnreachable(),
+    AbsorbRedundantEarlyReturn(),
 ]
 
 STANDARDIZATION_PIPELINE: list[TransformPass] = [

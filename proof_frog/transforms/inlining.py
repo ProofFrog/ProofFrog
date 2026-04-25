@@ -2793,6 +2793,14 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
     methods with structurally equal arguments, extracts the first occurrence
     into a fresh ``__determ_N__`` variable, and replaces all occurrences.
 
+    Scans top-level statements *and* if-statement conditions. If-conditions
+    are always evaluated when the if-statement is reached, so extracting a
+    deterministic call from a condition to a let-binding immediately before
+    the if-statement is semantics-preserving (under argument stability) — the
+    call evaluates the same number of times and on the same argument values.
+    If-statement *bodies* are not scanned at this level; they are nested
+    blocks handled by ``BlockTransformer`` recursion.
+
     Example::
 
         return [G.evaluate(k), G.evaluate(k)];
@@ -2811,14 +2819,20 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         self.counter = 0
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        # Collect all deterministic calls from top-level statements only.
+        # Collect all deterministic calls from top-level statements, plus
+        # if-statement *conditions* (always evaluated when the if is reached,
+        # so extracting a deterministic call from a condition to a top-level
+        # let preserves the number of evaluations and the value, given
+        # argument stability). If-statement *bodies* are not scanned here:
+        # BlockTransformer recurses into them as their own blocks.
         all_calls: list[frog_ast.FuncCall] = []
         for statement in block.statements:
-            # Skip inner blocks (if-statements); BlockTransformer handles them
-            if isinstance(statement, frog_ast.IfStatement):
-                continue
             collector = _DeterministicCallCollector(self.proof_namespace)
-            collector.visit(statement)
+            if isinstance(statement, frog_ast.IfStatement):
+                for condition in statement.conditions:
+                    collector.visit(condition)
+            else:
+                collector.visit(statement)
             all_calls.extend(collector.result())
 
         if not all_calls:
@@ -2882,13 +2896,16 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
             copy.deepcopy(representative),
         )
 
-        # Find the first statement containing a duplicate call and insert before it
+        # Find the first statement containing a duplicate call (in a top-level
+        # statement or an if-condition) and insert before it.
         insert_index: int | None = None
         for index, statement in enumerate(block.statements):
-            if isinstance(statement, frog_ast.IfStatement):
-                continue
             collector = _DeterministicCallCollector(self.proof_namespace)
-            collector.visit(statement)
+            if isinstance(statement, frog_ast.IfStatement):
+                for condition in statement.conditions:
+                    collector.visit(condition)
+            else:
+                collector.visit(statement)
             for found_call in collector.result():
                 if found_call == representative:
                     insert_index = index
@@ -2931,14 +2948,17 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         if not arg_vars:
             return True
 
-        # Find first and last statement indices containing a call from the group
+        # Find first and last statement indices containing a call from the
+        # group. Scan top-level statements and if-conditions.
         first_idx: int | None = None
         last_idx: int | None = None
         for idx, stmt in enumerate(block.statements):
-            if isinstance(stmt, frog_ast.IfStatement):
-                continue
             collector = _DeterministicCallCollector(self.proof_namespace)
-            collector.visit(stmt)
+            if isinstance(stmt, frog_ast.IfStatement):
+                for cond in stmt.conditions:
+                    collector.visit(cond)
+            else:
+                collector.visit(stmt)
             if any(c == representative for c in collector.result()):
                 if first_idx is None:
                     first_idx = idx
@@ -2964,7 +2984,19 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
                     return True
             return False
 
-        intermediate = frog_ast.Block(list(block.statements[first_idx + 1 : last_idx]))
+        # The intermediate region (between the first and last call's evaluation
+        # points) excludes the call statements themselves. When the first
+        # statement is an IfStatement with the call in its condition, the
+        # if-body executes *after* the condition's call but *before* any
+        # subsequent call, so include those branch blocks in the scan.
+        intermediate_stmts: list[frog_ast.Statement] = list(
+            block.statements[first_idx + 1 : last_idx]
+        )
+        first_stmt = block.statements[first_idx]
+        if isinstance(first_stmt, frog_ast.IfStatement):
+            for branch in first_stmt.blocks:
+                intermediate_stmts.extend(branch.statements)
+        intermediate = frog_ast.Block(intermediate_stmts)
         for var_name in arg_vars:
             if (
                 SearchVisitor(functools.partial(is_written_to, var_name)).visit(
@@ -2981,10 +3013,12 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
 
         all_calls: list[frog_ast.FuncCall] = []
         for statement in block.statements:
-            if isinstance(statement, frog_ast.IfStatement):
-                continue
             collector = _AllPrimitiveFuncCallCollector(self.proof_namespace)
-            collector.visit(statement)
+            if isinstance(statement, frog_ast.IfStatement):
+                for condition in statement.conditions:
+                    collector.visit(condition)
+            else:
+                collector.visit(statement)
             all_calls.extend(collector.result())
 
         # Group by structural equality

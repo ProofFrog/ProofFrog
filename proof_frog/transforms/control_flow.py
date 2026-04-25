@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import functools
+from typing import Sequence
 
 import z3
 
@@ -789,6 +790,206 @@ class RedundantConditionalReturnTransformer(BlockTransformer):
         return block
 
 
+class AbsorbRedundantEarlyReturnTransformer(BlockTransformer):
+    """Absorbs an early ``if (P) { return X; }`` into following if-statements
+    when the trailing top-level return value is structurally identical to ``X``.
+
+    Pattern (left → right within a single block)::
+
+        if (P) { return X; }
+        if (Q1) { ... }    // intervening if-statements (no else block)
+        ...
+        if (Qk) { ... }
+        return X;          // structurally identical X
+
+    is rewritten to::
+
+        if (!P && Q1) { ... }
+        ...
+        if (!P && Qk) { ... }
+        return X;
+
+    Soundness: when ``P`` holds, the original returns ``X`` immediately at the
+    early return. In the rewrite, every intervening condition becomes
+    ``!P && Qi``, which is false because ``!P`` is false; control falls
+    through to the trailing ``return X``. ``X`` evaluates to the same value
+    in both cases because no top-level statement between the early return
+    and the trailing return modifies its free variables -- only
+    if-statements appear there, and their bodies do not run when ``P``
+    holds (their guards include ``!P``). When ``!P`` holds, the rewritten
+    guards reduce to ``Qi``, matching the original.
+
+    Scope: this transform fires only on the outermost block of each method
+    body, never on nested if-bodies. When the same pattern arises inside
+    a nested if-body, the enclosing condition typically already constrains
+    ``P`` to be unreachable, and ``RemoveUnreachable`` will eliminate the
+    early-return branch entirely (preserving canonical equivalence with
+    proofs whose intermediate games omit the redundant ``!P`` conjunct).
+    Absorbing the conjunct in nested contexts would introduce a stale
+    ``!P`` that no other transform can drop.
+    """
+
+    def __init__(self) -> None:
+        self._nesting_depth = 0
+
+    def transform_if_statement(
+        self, if_statement: frog_ast.IfStatement
+    ) -> frog_ast.IfStatement:
+        # Recurse into branches with depth incremented so the nested blocks
+        # don't trigger absorption.
+        self._nesting_depth += 1
+        try:
+            new_blocks = [self.transform_block(b) for b in if_statement.blocks]
+            new_conditions = [self.transform(c) for c in if_statement.conditions]
+        finally:
+            self._nesting_depth -= 1
+        return frog_ast.IfStatement(new_conditions, new_blocks)
+
+    def transform_numeric_for(
+        self, for_stmt: frog_ast.NumericFor
+    ) -> frog_ast.NumericFor:
+        self._nesting_depth += 1
+        try:
+            new_block = self.transform_block(for_stmt.block)
+            new_start = self.transform(for_stmt.start)
+            new_end = self.transform(for_stmt.end)
+        finally:
+            self._nesting_depth -= 1
+        return frog_ast.NumericFor(for_stmt.name, new_start, new_end, new_block)
+
+    def transform_generic_for(
+        self, for_stmt: frog_ast.GenericFor
+    ) -> frog_ast.GenericFor:
+        self._nesting_depth += 1
+        try:
+            new_block = self.transform_block(for_stmt.block)
+            new_over = self.transform(for_stmt.over)
+        finally:
+            self._nesting_depth -= 1
+        return frog_ast.GenericFor(
+            for_stmt.var_type, for_stmt.var_name, new_over, new_block
+        )
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        if self._nesting_depth > 0:
+            return block
+        for index, statement in enumerate(block.statements):
+            if not _is_simple_early_return_if(statement):
+                continue
+            assert isinstance(statement, frog_ast.IfStatement)
+            early_p = statement.conditions[0]
+            return_stmt = statement.blocks[0].statements[0]
+            assert isinstance(return_stmt, frog_ast.ReturnStatement)
+            early_x = return_stmt.expression
+
+            # Find the first top-level trailing return whose expression
+            # structurally equals X. Allow only IfStatements (no else
+            # block) between the early return and that trailing return.
+            trailing_idx = _find_matching_trailing_return(
+                block.statements, index + 1, early_x
+            )
+            if trailing_idx is None:
+                continue
+
+            # Build !P with light surface simplification (== ↔ !=); deeper
+            # simplification happens via SimplifyNot / NormalizeCommutativeChains.
+            neg_p = _negate_condition(early_p)
+
+            new_intermediate: list[frog_ast.Statement] = []
+            for k in range(index + 1, trailing_idx):
+                inner_if = block.statements[k]
+                assert isinstance(inner_if, frog_ast.IfStatement)
+                new_conditions: list[frog_ast.Expression] = [
+                    frog_ast.BinaryOperation(
+                        frog_ast.BinaryOperators.AND,
+                        copy.deepcopy(neg_p),
+                        cond,
+                    )
+                    for cond in inner_if.conditions
+                ]
+                new_intermediate.append(
+                    frog_ast.IfStatement(new_conditions, list(inner_if.blocks))
+                )
+
+            new_stmts: list[frog_ast.Statement] = (
+                list(block.statements[:index])
+                + new_intermediate
+                + list(block.statements[trailing_idx:])
+            )
+            return self.transform_block(frog_ast.Block(new_stmts))
+        return block
+
+
+def _is_simple_early_return_if(stmt: frog_ast.Statement) -> bool:
+    """True iff ``stmt`` is ``if (P) { return X; }`` with no else, no else-if,
+    body of length 1, and the body's sole statement is a value-bearing
+    ReturnStatement.
+    """
+    if not isinstance(stmt, frog_ast.IfStatement):
+        return False
+    if len(stmt.conditions) != 1:
+        return False
+    if stmt.has_else_block():
+        return False
+    body = stmt.blocks[0]
+    if len(body.statements) != 1:
+        return False
+    only = body.statements[0]
+    return isinstance(only, frog_ast.ReturnStatement) and only.expression is not None
+
+
+def _find_matching_trailing_return(
+    statements: Sequence[frog_ast.Statement],
+    start: int,
+    expected: frog_ast.Expression,
+) -> int | None:
+    """Find the index of the first top-level ``return X'`` statement at or
+    after ``start`` whose expression structurally equals ``expected``,
+    provided every statement strictly before it (from ``start``) is an
+    ``IfStatement`` without a final else block. Returns ``None`` if any
+    other statement type, an else-bearing if, or a non-matching return is
+    encountered first.
+    """
+    for k in range(start, len(statements)):
+        s = statements[k]
+        if isinstance(s, frog_ast.ReturnStatement):
+            if s.expression is not None and s.expression == expected:
+                return k
+            return None
+        if not isinstance(s, frog_ast.IfStatement):
+            return None
+        if s.has_else_block():
+            return None
+    return None
+
+
+def _negate_condition(cond: frog_ast.Expression) -> frog_ast.Expression:
+    """Build a logical negation of ``cond``, preferring the surface form the
+    canonicalization pipeline already favors: ``a == b`` ↔ ``a != b``, and
+    eliminating a leading ``!`` if present. Otherwise wrap in ``!(cond)`` and
+    let ``SimplifyNot`` rewrite further.
+    """
+    if isinstance(cond, frog_ast.BinaryOperation):
+        if cond.operator == frog_ast.BinaryOperators.EQUALS:
+            return frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.NOTEQUALS,
+                copy.deepcopy(cond.left_expression),
+                copy.deepcopy(cond.right_expression),
+            )
+        if cond.operator == frog_ast.BinaryOperators.NOTEQUALS:
+            return frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.EQUALS,
+                copy.deepcopy(cond.left_expression),
+                copy.deepcopy(cond.right_expression),
+            )
+    if (
+        isinstance(cond, frog_ast.UnaryOperation)
+        and cond.operator == frog_ast.UnaryOperators.NOT
+    ):
+        return copy.deepcopy(cond.expression)
+    return frog_ast.UnaryOperation(frog_ast.UnaryOperators.NOT, copy.deepcopy(cond))
+
+
 class ElseUnwrapTransformer(BlockTransformer):
     """Unwraps else blocks when the if-branch unconditionally returns.
 
@@ -854,6 +1055,13 @@ class RedundantConditionalReturn(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return RedundantConditionalReturnTransformer().transform(game)
+
+
+class AbsorbRedundantEarlyReturn(TransformPass):
+    name = "Absorb Redundant Early Return"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return AbsorbRedundantEarlyReturnTransformer().transform(game)
 
 
 class BranchElimination(TransformPass):

@@ -309,3 +309,84 @@ class TestDeduplicateDeterministicCalls:
             proof_namespace=_make_zeroarg_det_namespace()
         ).transform(method)
         assert result == expected
+
+    def test_duplicate_across_if_condition_and_return(self) -> None:
+        """A deterministic call appearing in an if-condition and a later
+        return is deduplicated by extracting before the if-statement."""
+        method = frog_parser.parse_method("""
+            Void f(BitString<n> k, BitString<n> target) {
+                if (G.evaluate(k) == target) {
+                    return target;
+                }
+                return G.evaluate(k);
+            }
+            """)
+        expected = frog_parser.parse_method("""
+            Void f(BitString<n> k, BitString<n> target) {
+                BitString<n> __determ_0__ = G.evaluate(k);
+                if (__determ_0__ == target) {
+                    return target;
+                }
+                return __determ_0__;
+            }
+            """)
+        result = DeduplicateDeterministicCallsTransformer(
+            proof_namespace=_make_det_namespace()
+        ).transform(method)
+        assert result == expected
+
+    def test_duplicate_in_two_if_conditions(self) -> None:
+        """A deterministic call appearing in two separate if-conditions is
+        deduplicated."""
+        method = frog_parser.parse_method("""
+            Void f(BitString<n> k, BitString<n> target) {
+                if (G.evaluate(k) == target) {
+                    return target;
+                }
+                if (G.evaluate(k) == k) {
+                    return k;
+                }
+                return target;
+            }
+            """)
+        expected = frog_parser.parse_method("""
+            Void f(BitString<n> k, BitString<n> target) {
+                BitString<n> __determ_0__ = G.evaluate(k);
+                if (__determ_0__ == target) {
+                    return target;
+                }
+                if (__determ_0__ == k) {
+                    return k;
+                }
+                return target;
+            }
+            """)
+        result = DeduplicateDeterministicCallsTransformer(
+            proof_namespace=_make_det_namespace()
+        ).transform(method)
+        assert result == expected
+
+    def test_if_body_writes_to_arg_blocks_dedup(self) -> None:
+        """When the first call is in an if-condition and the if-body
+        reassigns an argument variable, dedup must not fire (a later call
+        would see the new value, not the captured one)."""
+        method = frog_parser.parse_method("""
+            Void f(BitString<n> k, BitString<n> target) {
+                if (G.evaluate(k) == target) {
+                    k = target;
+                }
+                return G.evaluate(k);
+            }
+            """)
+        expected = frog_parser.parse_method("""
+            Void f(BitString<n> k, BitString<n> target) {
+                if (G.evaluate(k) == target) {
+                    k = target;
+                }
+                return G.evaluate(k);
+            }
+            """)
+        result = DeduplicateDeterministicCallsTransformer(
+            proof_namespace=_make_det_namespace()
+        ).transform(method)
+        assert result == expected

@@ -1124,6 +1124,44 @@ class NormalizeCommutativeChains(TransformPass):
         return NormalizeCommutativeChainsTransformer().transform(game)
 
 
+class FlattenConcatChainTransformer(Transformer):
+    """Left-associate ``||`` chains.
+
+    ``||`` is the OR operator in FrogLang, overloaded between Boolean OR
+    (associative + commutative) and BitString concatenation (associative,
+    NOT commutative). Both readings are associative, so left-associating
+    is semantics-preserving in either case. We rewrite
+    ``a || (b || c)`` to ``(a || b) || c`` recursively to a fixed point so
+    inliner-introduced right-grouped concat chains canonicalize to the
+    parser's natural left-associative shape.
+    """
+
+    def transform_binary_operation(
+        self, expr: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        transformed = frog_ast.BinaryOperation(
+            expr.operator,
+            self.transform(expr.left_expression),
+            self.transform(expr.right_expression),
+        )
+        if transformed.operator != frog_ast.BinaryOperators.OR:
+            return transformed
+        terms = _flatten_chain(transformed, frog_ast.BinaryOperators.OR)
+        if len(terms) < 2:
+            return transformed
+        rebuilt = _rebuild_chain(terms, frog_ast.BinaryOperators.OR)
+        if rebuilt == transformed:
+            return transformed
+        return rebuilt
+
+
+class FlattenConcatChain(TransformPass):
+    name = "Flatten Concat Chain"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return FlattenConcatChainTransformer().transform(game)
+
+
 class ReflexiveComparison(TransformPass):
     name = "Reflexive Comparison"
 

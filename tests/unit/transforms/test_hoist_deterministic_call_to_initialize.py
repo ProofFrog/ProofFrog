@@ -691,6 +691,128 @@ class TestNestedDeterministicStableArgs:
         assert isinstance(arg, frog_ast.Variable)
         assert arg.name == new_field_name
 
+    def test_hoist_with_slice_of_field_arg(self) -> None:
+        """Call whose argument is a Slice of a field gets hoisted.
+
+        This is the pattern that blocks hybrid-KEM seed-form Decaps from
+        canonicalizing: ``DeriveKeyPair(seed_full[0 : n])`` in Decaps, with
+        ``seed_full`` a field set in Initialize.
+        """
+        game = frog_parser.parse_game("""
+            Game Foo(G GG) {
+                BitString<16> seed_full;
+                Void Initialize() {
+                    seed_full <- BitString<16>;
+                }
+                BitString<8> Get() {
+                    return GG.evaluate(seed_full[0 : 8]);
+                }
+            }
+            """)
+        ns = _make_det_namespace()
+        ns["GG"] = ns["G"]
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        assert len(result.fields) == len(game.fields) + 1
+        new_field_name = next(
+            f.name for f in result.fields if f.name not in {"seed_full"}
+        )
+        # Initialize gains ``<new> = GG.evaluate(seed_full[0:n]);``
+        init = result.methods[0]
+        last_stmt = init.block.statements[-1]
+        assert isinstance(last_stmt, frog_ast.Assignment)
+        assert isinstance(last_stmt.var, frog_ast.Variable)
+        assert last_stmt.var.name == new_field_name
+        # Get's body should no longer contain any FuncCall.
+        get_body = result.methods[1].block
+        assert _walk_funccalls(get_body) == []
+
+    def test_hoist_with_array_access_of_field_arg(self) -> None:
+        """Call whose argument is an ArrayAccess (tuple projection) of a
+        field gets hoisted.
+        """
+        game = frog_parser.parse_game("""
+            Game Foo(G GG) {
+                [BitString<8>, BitString<8>] pair;
+                Void Initialize() {
+                    BitString<8> a <- BitString<8>;
+                    BitString<8> b <- BitString<8>;
+                    pair = [a, b];
+                }
+                BitString<8> Get() {
+                    return GG.evaluate(pair[0]);
+                }
+            }
+            """)
+        ns = _make_det_namespace()
+        ns["GG"] = ns["G"]
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        assert len(result.fields) == len(game.fields) + 1
+        new_field_name = next(
+            f.name for f in result.fields if f.name not in {"pair"}
+        )
+        init = result.methods[0]
+        stmts = list(init.block.statements)
+        # The hoisted assignment should be the last statement (no terminal
+        # return in this Void Initialize).
+        last_stmt = stmts[-1]
+        assert isinstance(last_stmt, frog_ast.Assignment)
+        assert isinstance(last_stmt.var, frog_ast.Variable)
+        assert last_stmt.var.name == new_field_name
+        get_body = result.methods[1].block
+        assert _walk_funccalls(get_body) == []
+
+    def test_slice_of_reassigned_local_not_hoisted(self) -> None:
+        """A Slice whose underlying array is a local (not a field/param)
+        is not stable -- the hoist must not fire.
+        """
+        game = frog_parser.parse_game("""
+            Game Foo(G GG) {
+                Void Initialize() {
+                }
+                BitString<8> Get() {
+                    BitString<16> x <- BitString<16>;
+                    return GG.evaluate(x[0 : 8]);
+                }
+            }
+            """)
+        ns = _make_det_namespace()
+        ns["GG"] = ns["G"]
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        # x is a local in Get, not a field. Slice should not be treated as
+        # stable; hoist must not fire.
+        assert result == game
+
+    def test_slice_of_field_reassigned_outside_init_not_hoisted(self) -> None:
+        """A Slice of a field that *is* reassigned outside Initialize must
+        not be hoisted -- each oracle call would see a different slice.
+        """
+        game = frog_parser.parse_game("""
+            Game Foo(G GG) {
+                BitString<16> seed_full;
+                Void Initialize() {
+                    seed_full <- BitString<16>;
+                }
+                BitString<8> Get() {
+                    return GG.evaluate(seed_full[0 : 8]);
+                }
+                Void Reset() {
+                    seed_full <- BitString<16>;
+                }
+            }
+            """)
+        ns = _make_det_namespace()
+        ns["GG"] = ns["G"]
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        assert result == game
+
     def test_nested_function_var_callee_reassigned_not_hoisted(self) -> None:
         """Nested ``RF(field_x)`` with RF reassigned outside Initialize: not hoisted."""
         game = frog_parser.parse_game("""

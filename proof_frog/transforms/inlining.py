@@ -1672,16 +1672,17 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
         pinned = self.ctx.pinned_fields if self.ctx is not None else set()
         while changed:
             changed = False
-            # Try inlining declared fields. Skip any field that a
-            # producing pass has registered as pinned (see
-            # ``PipelineContext.pinned_fields``): inlining a pinned
-            # field re-exposes the pattern its producer was canonicalizing,
-            # and the producer re-fires on the next iteration, which
-            # prevents the fixed-point loop from converging.
+            # Try inlining declared fields. Pinned fields (registered by a
+            # producing pass via ``PipelineContext.pinned_fields``) are
+            # considered only for same-method inlining; cross-method inlining
+            # of a pinned field would re-expose the pattern the producer was
+            # canonicalizing, preventing the fixed-point loop from converging.
+            # ``_try_inline_field`` enforces the same-method-only restriction
+            # when the field is pinned.
             for field_name in list(self.field_names):
-                if field_name in pinned:
-                    continue
-                new_game = self._try_inline_field(result, field_name)
+                new_game = self._try_inline_field(
+                    result, field_name, is_pinned=field_name in pinned
+                )
                 if new_game is not None:
                     result = new_game
                     self.field_names = [f.name for f in result.fields]
@@ -1694,7 +1695,7 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
             # RemoveUnnecessaryFields removes a field declaration but leaves
             # the assignment statement).
             for orphan in self._find_orphaned_vars(result):
-                new_game = self._try_inline_field(result, orphan)
+                new_game = self._try_inline_field(result, orphan, is_pinned=False)
                 if new_game is not None:
                     result = new_game
                     self.field_names = [f.name for f in result.fields]
@@ -1718,9 +1719,18 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
         return orphans
 
     def _try_inline_field(
-        self, game: frog_ast.Game, field_name: str
+        self, game: frog_ast.Game, field_name: str, is_pinned: bool = False
     ) -> frog_ast.Game | None:
-        """Try to inline a single field. Returns new game or None."""
+        """Try to inline a single field. Returns new game or None.
+
+        When *is_pinned* is True, cross-method inlining is rejected: a
+        producing pass (e.g. ``HoistDeterministicCallToInitialize``) has
+        asked that this field survive because re-inlining it across
+        methods would re-expose the pattern the producer was canonicalizing,
+        causing the fixed-point loop to oscillate. Same-method inlining is
+        still allowed because the producer targets non-Initialize calls,
+        and same-method substitution doesn't introduce such calls.
+        """
 
         # 1. Find the single assignment to this field across all methods.
         #    Count recursively to catch assignments inside nested blocks
@@ -1818,6 +1828,10 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
         # calls with the same value), so substitution is semantics-preserving.
         cross_method = False
         if not all_same_method:
+            if is_pinned:
+                # Producer pinned this field; reject cross-method inline to
+                # avoid oscillation with the producer's re-fire.
+                return None
             if not is_pure:
                 if self.ctx is not None:
                     self.ctx.near_misses.append(
@@ -3023,12 +3037,13 @@ class DeduplicateDeterministicCalls(TransformPass):
 # ---------------------------------------------------------------------------
 
 
-def _is_stable_arg(
+def _is_stable_arg(  # pylint: disable=too-many-arguments, too-many-positional-arguments
     expr: frog_ast.Expression,
     field_names: set[str],
     param_names: set[str],
     proof_namespace: frog_ast.Namespace | None = None,
     function_var_names: set[str] | None = None,
+    proof_let_names: set[str] | None = None,
 ) -> bool:
     """Return True if *expr* is stable across method invocations.
 
@@ -3039,6 +3054,10 @@ def _is_stable_arg(
     ``FuncCall`` nodes are accepted as stable iff the callee is a primitive
     method annotated ``deterministic`` or a ``Function<D, R>`` variable named
     in *function_var_names*, and every argument is recursively stable.
+
+    When *proof_let_names* is provided, ``Variable`` nodes whose name appears
+    in that set are treated as stable: proof-level ``let:`` bindings are
+    compile-time constants from the game's perspective.
     """
     if isinstance(
         expr,
@@ -3051,7 +3070,11 @@ def _is_stable_arg(
     ):
         return True
     if isinstance(expr, frog_ast.Variable):
-        return expr.name in field_names or expr.name in param_names
+        return (
+            expr.name in field_names
+            or expr.name in param_names
+            or (proof_let_names is not None and expr.name in proof_let_names)
+        )
     if isinstance(expr, frog_ast.FieldAccess):
         return _is_stable_arg(
             expr.the_object,
@@ -3059,6 +3082,7 @@ def _is_stable_arg(
             param_names,
             proof_namespace,
             function_var_names,
+            proof_let_names,
         )
     if isinstance(expr, frog_ast.BinaryOperation):
         return _is_stable_arg(
@@ -3067,12 +3091,14 @@ def _is_stable_arg(
             param_names,
             proof_namespace,
             function_var_names,
+            proof_let_names,
         ) and _is_stable_arg(
             expr.right_expression,
             field_names,
             param_names,
             proof_namespace,
             function_var_names,
+            proof_let_names,
         )
     if isinstance(expr, frog_ast.UnaryOperation):
         return _is_stable_arg(
@@ -3081,6 +3107,50 @@ def _is_stable_arg(
             param_names,
             proof_namespace,
             function_var_names,
+            proof_let_names,
+        )
+    if isinstance(expr, frog_ast.ArrayAccess):
+        return _is_stable_arg(
+            expr.the_array,
+            field_names,
+            param_names,
+            proof_namespace,
+            function_var_names,
+            proof_let_names,
+        ) and _is_stable_arg(
+            expr.index,
+            field_names,
+            param_names,
+            proof_namespace,
+            function_var_names,
+            proof_let_names,
+        )
+    if isinstance(expr, frog_ast.Slice):
+        return (
+            _is_stable_arg(
+                expr.the_array,
+                field_names,
+                param_names,
+                proof_namespace,
+                function_var_names,
+                proof_let_names,
+            )
+            and _is_stable_arg(
+                expr.start,
+                field_names,
+                param_names,
+                proof_namespace,
+                function_var_names,
+                proof_let_names,
+            )
+            and _is_stable_arg(
+                expr.end,
+                field_names,
+                param_names,
+                proof_namespace,
+                function_var_names,
+                proof_let_names,
+            )
         )
     if isinstance(expr, frog_ast.FuncCall):
         is_det_primitive = False
@@ -3102,6 +3172,7 @@ def _is_stable_arg(
                 param_names,
                 proof_namespace,
                 function_var_names,
+                proof_let_names,
             )
             for a in expr.args
         )
@@ -3129,6 +3200,16 @@ def _collect_field_names_in_args(
         ) | _collect_field_names_in_args(expr.right_expression, field_names)
     if isinstance(expr, frog_ast.UnaryOperation):
         return _collect_field_names_in_args(expr.expression, field_names)
+    if isinstance(expr, frog_ast.ArrayAccess):
+        return _collect_field_names_in_args(
+            expr.the_array, field_names
+        ) | _collect_field_names_in_args(expr.index, field_names)
+    if isinstance(expr, frog_ast.Slice):
+        return (
+            _collect_field_names_in_args(expr.the_array, field_names)
+            | _collect_field_names_in_args(expr.start, field_names)
+            | _collect_field_names_in_args(expr.end, field_names)
+        )
     if isinstance(expr, frog_ast.FuncCall):
         result: set[str] = set()
         if isinstance(expr.func, frog_ast.Variable) and expr.func.name in field_names:
@@ -3196,13 +3277,20 @@ class CrossMethodFieldAliasTransformer:
         self,
         proof_namespace: frog_ast.Namespace,
         ctx: PipelineContext | None = None,
+        proof_let_types: NameTypeMap | None = None,
     ) -> None:
         self.proof_namespace = proof_namespace
         self._ctx = ctx
+        self._proof_let_types = proof_let_types
 
     def transform(self, game: frog_ast.Game) -> frog_ast.Game:
         field_names = {f.name for f in game.fields}
         param_names = {p.name for p in game.parameters}
+        proof_let_names: set[str] = (
+            {pair.name for pair in self._proof_let_types.type_map}
+            if self._proof_let_types is not None
+            else set()
+        )
 
         # Phase 1: Collect field assignments with deterministic RHS
         # (field_name, det_call, method_idx)
@@ -3229,6 +3317,7 @@ class CrossMethodFieldAliasTransformer:
                         field_names,
                         param_names,
                         proof_namespace=self.proof_namespace,
+                        proof_let_names=proof_let_names,
                     )
                     for a in call.args
                 ):
@@ -3417,6 +3506,11 @@ class HoistDeterministicCallToInitializeTransformer:
         param_names = {p.name for p in game.parameters}
         function_var_return_types = self._function_var_types(game)
         function_var_names = set(function_var_return_types)
+        proof_let_names: set[str] = (
+            {pair.name for pair in self._proof_let_types.type_map}
+            if self._proof_let_types is not None
+            else set()
+        )
 
         init_idx: int | None = None
         for midx, method in enumerate(game.methods):
@@ -3502,6 +3596,7 @@ class HoistDeterministicCallToInitializeTransformer:
                         param_names,
                         proof_namespace=self.proof_namespace,
                         function_var_names=function_var_names,
+                        proof_let_names=proof_let_names,
                     )
                     for a in call.args
                 ):
@@ -3696,5 +3791,341 @@ class CrossMethodFieldAlias(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return CrossMethodFieldAliasTransformer(
-            proof_namespace=ctx.proof_namespace, ctx=ctx
+            proof_namespace=ctx.proof_namespace,
+            ctx=ctx,
+            proof_let_types=ctx.proof_let_types,
         ).transform(game)
+
+
+class SplitOpaqueTupleFieldTransformer:
+    """Split a tuple-typed field whose RHS is an opaque (non-literal) call.
+
+    Symmetrises canonical forms across reductions where a tuple-returning
+    deterministic call is stored in a field and only individual components
+    are projected. ``ExtractRepeatedTupleAccess`` and ``TupleIndexFolding``
+    handle tuple *literals* (``[a, b]``); they do not see through opaque
+    function-call RHSs that happen to return a tuple, e.g.
+    ``pq_keys = challenger.Generate();`` where ``pq_keys`` is later used
+    only as ``pq_keys[0]`` and ``pq_keys[1]``.
+    """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self._ctx = ctx
+
+    def transform(self, game: frog_ast.Game) -> frog_ast.Game:
+        # Iterate over a copy of the field list since we mutate fields.
+        for field in list(game.fields):
+            if not isinstance(field.type, frog_ast.ProductType):
+                continue
+            new_game = self._try_split_field(game, field)
+            if new_game is not None:
+                # Splitting one field per pass keeps the diff small and
+                # lets the fixed-point loop reach this transform again
+                # on the next iteration to handle further fields.
+                return new_game
+        return game
+
+    def _try_split_field(
+        self, game: frog_ast.Game, field: frog_ast.Field
+    ) -> frog_ast.Game | None:
+        # 1. Find every assignment to *field* across all methods. Reject if
+        # any sits at non-top level (inside if/for) or if there is more than
+        # one top-level assignment in total.
+        top_level_assigns: list[tuple[int, int, frog_ast.Assignment]] = []
+        total_assigns = 0
+        for midx, method in enumerate(game.methods):
+            for sidx, stmt in enumerate(method.block.statements):
+                if (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name == field.name
+                ):
+                    top_level_assigns.append((midx, sidx, stmt))
+            nested_match = SearchVisitor(
+                functools.partial(_is_field_assignment, field.name)
+            ).visit(method.block)
+            # Count of assignments to field anywhere in the method. We use a
+            # second scan to compute the total because SearchVisitor.visit
+            # returns only the first hit.
+            total_assigns += _count_field_assignments(method.block, field.name)
+            if nested_match is None:
+                continue
+        if total_assigns != len(top_level_assigns):
+            # Some assignment is inside a nested block.
+            return None
+        if len(top_level_assigns) != 1:
+            return None
+        assign_midx, assign_sidx, assignment = top_level_assigns[0]
+
+        # 2. Reject literal-tuple RHS: existing TupleIndexFolding handles it.
+        if isinstance(assignment.value, frog_ast.Tuple):
+            return None
+
+        # 3. Reject if RHS references the field itself (would create a dangling
+        # reference once the field is removed).
+        if _VarCountVisitor(field.name).visit(assignment.value) > 0:
+            return None
+
+        # 4. Collect all read-uses of *field*. Every read must be of the
+        # form ``field[k]`` with constant integer ``k``. Whole-tuple reads
+        # (``return field;``, ``field == other_field``) disqualify.
+        used_indices: set[int] = set()
+        if not _all_reads_are_const_indexed(
+            game, field.name, assign_midx, assign_sidx, used_indices
+        ):
+            return None
+        if not used_indices:
+            # No reads at all -- leave it for RemoveUnnecessaryFields.
+            return None
+
+        # 4. Soundness guard: if the assignment lives in Initialize and
+        # Initialize has an early return, splitting could leave per-index
+        # fields uninitialized while other methods still read them.
+        if game.methods[assign_midx].signature.name == "Initialize":
+            init_stmts = list(game.methods[assign_midx].block.statements)
+            if _has_early_return_in_init(init_stmts):
+                if self._ctx is not None:
+                    self._ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Split Opaque Tuple Field",
+                            reason=(
+                                "Initialize has an early return (nested in "
+                                "if/for); splitting would leave per-index "
+                                "fields uninitialized on the early-return path"
+                            ),
+                            location=assignment.origin,
+                            suggestion=(
+                                "Restructure Initialize so any return is the "
+                                "terminal top-level statement"
+                            ),
+                            variable=field.name,
+                            method="Initialize",
+                        )
+                    )
+                return None
+
+        # 5. Build the rewritten game.
+        assert isinstance(field.type, frog_ast.ProductType)
+        component_types = field.type.types
+        new_field_names: dict[int, str] = {}
+        existing_names = {f.name for f in game.fields}
+        for k in sorted(used_indices):
+            new_field_names[k] = self._fresh_name(f"{field.name}_{k}", existing_names)
+            existing_names.add(new_field_names[k])
+
+        new_game = copy.deepcopy(game)
+        # Replace the original field with per-index fields (preserve order).
+        new_fields: list[frog_ast.Field] = []
+        for f in new_game.fields:
+            if f.name == field.name:
+                for k in sorted(used_indices):
+                    new_fields.append(
+                        frog_ast.Field(component_types[k], new_field_names[k], None)
+                    )
+            else:
+                new_fields.append(f)
+        new_game.fields = new_fields
+
+        # Pin the new fields to prevent oscillation with InlineSingleUseField.
+        if self._ctx is not None:
+            for k in sorted(used_indices):
+                self._ctx.pinned_fields.add(new_field_names[k])
+
+        # Rewrite the assignment site: introduce ``_tup`` local, then set
+        # each per-index field. ``_tup`` name avoids collision with fields
+        # and existing method-locals.
+        method = new_game.methods[assign_midx]
+        local_names = _collect_local_names(method.block)
+        tup_name = self._fresh_name("_tup", existing_names | local_names)
+        new_stmts = list(method.block.statements)
+        # Keep the same RHS expression (deepcopy via the new_game copy).
+        original_assign = new_stmts[assign_sidx]
+        assert isinstance(original_assign, frog_ast.Assignment)
+        rhs = original_assign.value
+        replacement_stmts: list[frog_ast.Statement] = [
+            frog_ast.Assignment(
+                copy.deepcopy(field.type),
+                frog_ast.Variable(tup_name),
+                rhs,
+            )
+        ]
+        for k in sorted(used_indices):
+            replacement_stmts.append(
+                frog_ast.Assignment(
+                    None,
+                    frog_ast.Variable(new_field_names[k]),
+                    frog_ast.ArrayAccess(
+                        frog_ast.Variable(tup_name), frog_ast.Integer(k)
+                    ),
+                )
+            )
+        new_stmts = (
+            new_stmts[:assign_sidx] + replacement_stmts + new_stmts[assign_sidx + 1 :]
+        )
+        method.block = frog_ast.Block(new_stmts)
+
+        # Rewrite every ``field[k]`` read across all methods to ``field_k``.
+        # The replacement statements we just inserted contain no references
+        # to the original field (RHS guard above), so no skip is needed.
+        for m in new_game.methods:
+            new_block = _rewrite_indexed_reads(m.block, field.name, new_field_names)
+            if new_block is not m.block:
+                m.block = new_block
+
+        return new_game
+
+    @staticmethod
+    def _fresh_name(prefix: str, existing: set[str]) -> str:
+        if prefix not in existing:
+            return prefix
+        i = 0
+        while f"{prefix}_{i}" in existing:
+            i += 1
+        return f"{prefix}_{i}"
+
+
+def _is_field_assignment(field_name: str, node: frog_ast.ASTNode) -> bool:
+    return (
+        isinstance(node, frog_ast.Assignment)
+        and isinstance(node.var, frog_ast.Variable)
+        and node.var.name == field_name
+    )
+
+
+def _count_field_assignments(node: frog_ast.ASTNode, field_name: str) -> int:
+    count = 0
+
+    def visit(n: frog_ast.ASTNode) -> bool:
+        nonlocal count
+        if _is_field_assignment(field_name, n):
+            count += 1
+        return False
+
+    SearchVisitor(visit).visit(node)
+    return count
+
+
+def _all_reads_are_const_indexed(
+    game: frog_ast.Game,
+    field_name: str,
+    assign_midx: int,
+    assign_sidx: int,
+    used_indices: set[int],
+) -> bool:
+    """Return True if every read of ``field_name`` is ``field_name[k]`` for
+    integer-constant ``k`` (and record those ``k`` in *used_indices*).
+
+    The unique top-level assignment at (assign_midx, assign_sidx) is excluded
+    from the scan: it writes the field, and a write inside its own RHS is not
+    a read of the field for our purposes (and the RHS being a non-literal
+    is enforced separately).
+    """
+    for midx, method in enumerate(game.methods):
+        for sidx, stmt in enumerate(method.block.statements):
+            if midx == assign_midx and sidx == assign_sidx:
+                # The assignment statement itself: scan only its RHS.
+                assert isinstance(stmt, frog_ast.Assignment)
+                if not _check_reads_in(stmt.value, field_name, used_indices):
+                    return False
+                continue
+            if not _check_reads_in(stmt, field_name, used_indices):
+                return False
+    return True
+
+
+def _check_reads_in(
+    node: frog_ast.ASTNode, field_name: str, used_indices: set[int]
+) -> bool:
+    """Walk *node*; for every Variable(field_name) ensure its parent is
+    ArrayAccess(_, Integer(k)) and record k. Return False on any other
+    occurrence.
+    """
+    # We do this by looking for every Variable occurrence and walking the
+    # parent chain via a custom recursive descent: instead, simpler is to
+    # find every Variable and require that occurrence to be inside an
+    # ArrayAccess whose base is that variable. Implementation: scan all
+    # ArrayAccess(field, Integer(k)) and record; then count remaining
+    # Variable(field) occurrences and compare.
+    indexed_count = 0
+
+    def collect_indexed(n: frog_ast.ASTNode) -> bool:
+        nonlocal indexed_count
+        if (
+            isinstance(n, frog_ast.ArrayAccess)
+            and isinstance(n.the_array, frog_ast.Variable)
+            and n.the_array.name == field_name
+            and isinstance(n.index, frog_ast.Integer)
+        ):
+            used_indices.add(n.index.num)
+            indexed_count += 1
+        return False
+
+    SearchVisitor(collect_indexed).visit(node)
+
+    # Now count all Variable occurrences with this name.
+    total = _VarCountVisitor(field_name).visit(node)
+    # Each indexed access contains one Variable(field) occurrence. If the
+    # count of bare Variable occurrences exceeds the indexed-access count,
+    # there's a non-projection use.
+    return total == indexed_count
+
+
+def _collect_local_names(block: frog_ast.Block) -> set[str]:
+    names: set[str] = set()
+
+    def visit(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, frog_ast.Variable):
+            names.add(n.name)
+        return False
+
+    SearchVisitor(visit).visit(block)
+    return names
+
+
+def _rewrite_indexed_reads(
+    block: frog_ast.Block,
+    field_name: str,
+    new_field_names: dict[int, str],
+) -> frog_ast.Block:
+    """Replace every ``field_name[k]`` (constant ``k``) with
+    ``Variable(new_field_names[k])`` everywhere in *block*.
+    """
+    changed = False
+    new_stmts: list[frog_ast.Statement] = []
+    for stmt in block.statements:
+        new_stmt: frog_ast.Statement = stmt
+        while True:
+            target = SearchVisitor(
+                functools.partial(_match_indexed_read, field_name, set(new_field_names))
+            ).visit(new_stmt)
+            if target is None:
+                break
+            assert isinstance(target, frog_ast.ArrayAccess)
+            assert isinstance(target.index, frog_ast.Integer)
+            new_stmt = ReplaceTransformer(
+                target, frog_ast.Variable(new_field_names[target.index.num])
+            ).transform(new_stmt)
+            changed = True
+        new_stmts.append(new_stmt)
+    if not changed:
+        return block
+    return frog_ast.Block(new_stmts)
+
+
+def _match_indexed_read(
+    field_name: str, valid_indices: set[int], node: frog_ast.ASTNode
+) -> bool:
+    return (
+        isinstance(node, frog_ast.ArrayAccess)
+        and isinstance(node.the_array, frog_ast.Variable)
+        and node.the_array.name == field_name
+        and isinstance(node.index, frog_ast.Integer)
+        and node.index.num in valid_indices
+    )
+
+
+class SplitOpaqueTupleField(TransformPass):
+    name = "Split Opaque Tuple Field"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return SplitOpaqueTupleFieldTransformer(ctx=ctx).transform(game)

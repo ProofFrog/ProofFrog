@@ -537,23 +537,39 @@ class _SliceReplacer(Transformer):
         self.bound_to_var = bound_to_var
         self.variables = variables
 
-    def transform_slice(self, node: frog_ast.Slice) -> Optional[frog_ast.ASTNode]:
+    def transform_slice(self, node: frog_ast.Slice) -> frog_ast.ASTNode:
+        # Default: recurse into children (the_array, start, end) so nested
+        # slices of the target variable are still found.  Returning ``None``
+        # here would propagate as the new value via Transformer.transform's
+        # specific-method dispatch and corrupt the AST.
+        def _fallthrough() -> frog_ast.ASTNode:
+            new_array = self.transform(node.the_array)
+            new_start = self.transform(node.start)
+            new_end = self.transform(node.end)
+            if (
+                new_array is node.the_array
+                and new_start is node.start
+                and new_end is node.end
+            ):
+                return node
+            return frog_ast.Slice(new_array, new_start, new_end)
+
         if not (
             isinstance(node.the_array, frog_ast.Variable)
             and node.the_array.name == self.var_name
         ):
-            return None
+            return _fallthrough()
         start = FrogToSympyVisitor(self.variables).visit(node.start)
         end = FrogToSympyVisitor(self.variables).visit(node.end)
         if start is None or end is None:
-            return None
+            return _fallthrough()
         for b_start, b_end, new_var in self.bound_to_var:
             if (
                 sympy_simplify(start - b_start) == 0
                 and sympy_simplify(end - b_end) == 0
             ):
                 return copy.deepcopy(new_var)
-        return None
+        return _fallthrough()
 
 
 class SplitUniformSampleTransformer(BlockTransformer):

@@ -78,6 +78,7 @@ from .control_flow import (
     RedundantConditionalReturn,
     AbsorbRedundantEarlyReturn,
     IfFalseReturnToConjunction,
+    FoldEquivalentReturnBranch,
     BranchElimination,
     ElseUnwrap,
     SimplifyReturn,
@@ -172,6 +173,7 @@ CORE_PIPELINE: list[TransformPass] = [
     RemoveUnreachable(),
     AbsorbRedundantEarlyReturn(),
     IfFalseReturnToConjunction(),
+    FoldEquivalentReturnBranch(),
 ]
 
 STANDARDIZATION_PIPELINE: list[TransformPass] = [

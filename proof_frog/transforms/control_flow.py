@@ -1112,6 +1112,242 @@ class IfFalseReturnToConjunctionTransformer(BlockTransformer):
         return None
 
 
+class FoldEquivalentReturnBranchTransformer(BlockTransformer):
+    """Folds ``if (P) { return X; } return Y;`` to ``return Y;`` when Z3
+    proves ``P ⇒ (X ↔ Y)`` with FuncCalls modelled as opaque atoms.
+
+    Pattern (left → right within a single block, only when the if has no
+    else and the body is exactly a single ``return X;``)::
+
+        if (P) { return X; }
+        return Y;
+
+    is rewritten to::
+
+        return Y;
+
+    Soundness: when P holds, the original returns X; the rewrite returns Y.
+    The Z3 check establishes ``P ⇒ X == Y``, so X and Y agree under P.
+    When !P holds, the original falls through to ``return Y;`` (the if-body
+    is skipped); the rewrite also returns Y. Equivalence holds because no
+    statement between the if and the trailing return modifies free
+    variables — the pattern requires the if to be IMMEDIATELY followed by
+    the trailing return.
+
+    Gap-F guard: refuses to fold if any of P, X, Y contains a non-
+    deterministic call (mirroring ``BooleanAbsorption`` and the
+    equivalence-engine escape hatch). Without this guard, dropping an
+    early return could elide a counter advance or other observable
+    side-effect in the if-body's evaluation of X.
+
+    Z3 modelling: this pass uses ``opaque_func_call_fallback=True`` so
+    deterministic ``FuncCall`` and BitString-concat shapes that Z3 cannot
+    mix become memoized opaque atoms keyed on ``str(node)``. To bridge
+    the common pattern where P contains direct equalities ``a == b`` and
+    Y references ``b`` while X references ``a`` (or vice versa), the pass
+    first applies syntactic substitution from the top-level conjuncts of P
+    to both X and Y. After substitution, ``H(b)`` and ``H(a)`` become
+    structurally identical and intern to the same opaque atom — a sound
+    consequence of treating each conjunct ``a == b`` from P as a Z3
+    assertion ``a == b`` in the model under which X and Y are evaluated.
+
+    Closes the canonical-form gap where the bare-game side of a binding
+    proof is branchless but the reduction-composed side carries an
+    explicit case-split if-statement whose body is semantically equal to
+    the trailing return under the case-B condition.
+    """
+
+    def __init__(self, ctx: PipelineContext, ast: frog_ast.ASTNode) -> None:
+        self.ctx = ctx
+        self.ast = ast
+        self._init_field_rhs: list[tuple[frog_ast.Variable, frog_ast.Expression]] = []
+        if isinstance(ast, frog_ast.Game):
+            self._init_field_rhs = self._collect_init_field_rhs(ast)
+
+    @staticmethod
+    def _collect_init_field_rhs(
+        game: frog_ast.Game,
+    ) -> list[tuple[frog_ast.Variable, frog_ast.Expression]]:
+        """Collect ``F → rhs`` substitutions for fields F that are
+        single-write in Initialize with a deterministic FuncCall RHS and
+        no other writes in the game.
+        """
+        field_names = {f.name for f in game.fields}
+        # Count assignments per field across all methods.
+        counts: dict[str, int] = {}
+        for method in game.methods:
+            for name in field_names:
+                counts[name] = counts.get(name, 0) + _count_field_assigns_recursive(
+                    method.block, name
+                )
+        init = next((m for m in game.methods if m.signature.name == "Initialize"), None)
+        if init is None:
+            return []
+        result: list[tuple[frog_ast.Variable, frog_ast.Expression]] = []
+        for stmt in init.block.statements:
+            if not (
+                isinstance(stmt, frog_ast.Assignment)
+                and stmt.the_type is None
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name in field_names
+            ):
+                continue
+            if counts.get(stmt.var.name, 0) != 1:
+                continue
+            if not isinstance(stmt.value, frog_ast.FuncCall):
+                continue
+            result.append((stmt.var, stmt.value))
+        return result
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index in range(len(block.statements) - 1):
+            stmt = block.statements[index]
+            if not isinstance(stmt, frog_ast.IfStatement):
+                continue
+            if stmt.has_else_block() or len(stmt.conditions) != 1:
+                continue
+            body = stmt.blocks[0]
+            if len(body.statements) != 1:
+                continue
+            inner = body.statements[0]
+            if not isinstance(inner, frog_ast.ReturnStatement):
+                continue
+            x_expr = inner.expression
+            if x_expr is None:
+                continue
+            trailing = block.statements[index + 1]
+            if not isinstance(trailing, frog_ast.ReturnStatement):
+                continue
+            y_expr = trailing.expression
+            if y_expr is None:
+                continue
+            p_expr = stmt.conditions[0]
+            # Gap-F: refuse on any non-deterministic call.
+            if (
+                has_nondeterministic_call(
+                    p_expr,
+                    self.ctx.proof_namespace,
+                    self.ctx.proof_let_types,
+                )
+                or has_nondeterministic_call(
+                    x_expr,
+                    self.ctx.proof_namespace,
+                    self.ctx.proof_let_types,
+                )
+                or has_nondeterministic_call(
+                    y_expr,
+                    self.ctx.proof_namespace,
+                    self.ctx.proof_let_types,
+                )
+            ):
+                continue
+            # Apply syntactic equality substitution from top-level
+            # conjuncts of P. For each conjunct of the form `a == b`
+            # (where one side is a Variable), replace that Variable with
+            # the other side in X and Y. This bridges the common case
+            # where Y references one side of an equality stated in P and
+            # X references the other.
+            sub_pairs: list[tuple[frog_ast.Expression, frog_ast.Expression]] = []
+            for conjunct in _flatten_top_level_and(p_expr):
+                if (
+                    isinstance(conjunct, frog_ast.BinaryOperation)
+                    and conjunct.operator == frog_ast.BinaryOperators.EQUALS
+                ):
+                    a = conjunct.left_expression
+                    b = conjunct.right_expression
+                    if isinstance(b, frog_ast.Variable) and not isinstance(
+                        a, frog_ast.Variable
+                    ):
+                        sub_pairs.append((b, a))
+                    elif isinstance(a, frog_ast.Variable) and not isinstance(
+                        b, frog_ast.Variable
+                    ):
+                        sub_pairs.append((a, b))
+                    elif isinstance(a, frog_ast.Variable) and isinstance(
+                        b, frog_ast.Variable
+                    ):
+                        if a.name < b.name:
+                            sub_pairs.append((b, a))
+                        else:
+                            sub_pairs.append((a, b))
+            # Augment with single-write Init-only field RHS expansions
+            # so the comparison can see through hoisted-call fields.
+            all_sub_pairs: list[tuple[frog_ast.Expression, frog_ast.Expression]] = list(
+                sub_pairs
+            ) + list(self._init_field_rhs)
+            if all_sub_pairs:
+                # Iterate substitution to a fixed point so chains like
+                # `_hoisted_0 → EncodeEK(ek_T_0)` followed by P's
+                # `ek_T_1 → ek_T_0` propagate fully.
+                x_sub = copy.deepcopy(x_expr)
+                y_sub = copy.deepcopy(y_expr)
+                for _ in range(8):
+                    sub_map: frog_ast.ASTMap[frog_ast.ASTNode] = frog_ast.ASTMap(
+                        identity=False
+                    )
+                    for k, v in all_sub_pairs:
+                        sub_map.set(k, copy.deepcopy(v))
+                    new_x = SubstitutionTransformer(sub_map).transform(
+                        copy.deepcopy(x_sub)
+                    )
+                    new_y = SubstitutionTransformer(sub_map).transform(
+                        copy.deepcopy(y_sub)
+                    )
+                    if new_x == x_sub and new_y == y_sub:
+                        break
+                    x_sub = new_x
+                    y_sub = new_y
+            else:
+                x_sub = x_expr
+                y_sub = y_expr
+            # Build Z3 formulas with opaque-FuncCall fallback.
+            type_map = GetTypeMapVisitor(stmt).visit(self.ast)
+            visitor = Z3FormulaVisitor(
+                type_map + (self.ctx.proof_let_types or NameTypeMap()),
+                variable_version_map={},
+                opaque_func_call_fallback=True,
+            )
+            p_formula = visitor.visit(p_expr)
+            x_formula = visitor.visit(x_sub)
+            y_formula = visitor.visit(y_sub)
+            if (
+                p_formula is None
+                or x_formula is None
+                or y_formula is None
+                or isinstance(p_formula, str)
+                or isinstance(x_formula, str)
+                or isinstance(y_formula, str)
+            ):
+                continue
+            try:
+                solver = z3.Solver()
+                solver.set("timeout", 30000)
+                # Check Not(P => (X == Y)) is UNSAT, i.e., P AND X != Y is UNSAT.
+                solver.add(z3.And(p_formula, x_formula != y_formula))
+                if solver.check() != z3.unsat:
+                    continue
+            except (z3.Z3Exception, TypeError):
+                continue
+            # Fold: drop the if-statement entirely, keep the trailing return.
+            new_stmts = list(block.statements[:index]) + list(
+                block.statements[index + 1 :]
+            )
+            return self.transform_block(frog_ast.Block(new_stmts))
+        return block
+
+
+def _flatten_top_level_and(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
+    """Flatten a left-associated ``A && B && C`` chain into [A, B, C]."""
+    if (
+        isinstance(expr, frog_ast.BinaryOperation)
+        and expr.operator == frog_ast.BinaryOperators.AND
+    ):
+        return _flatten_top_level_and(expr.left_expression) + _flatten_top_level_and(
+            expr.right_expression
+        )
+    return [expr]
+
+
 class ElseUnwrapTransformer(BlockTransformer):
     """Unwraps else blocks when the if-branch unconditionally returns.
 
@@ -1191,6 +1427,13 @@ class IfFalseReturnToConjunction(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return IfFalseReturnToConjunctionTransformer(ctx).transform(game)
+
+
+class FoldEquivalentReturnBranch(TransformPass):
+    name = "Fold Equivalent Return Branch"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return FoldEquivalentReturnBranchTransformer(ctx, game).transform(game)
 
 
 class BranchElimination(TransformPass):

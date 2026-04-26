@@ -1416,6 +1416,13 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
             ):
                 return expr
             return bound
+        # Field-RHS resolution: a Variable(F) for a single-write Init-only
+        # field whose RHS is a deterministic FuncCall resolves to that call.
+        # The injectivity contract on the RHS callee then authorizes the
+        # downstream rewrite via the FuncCall == FuncCall branch.
+        field_rhs = self._resolve_field_rhs(expr)
+        if field_rhs is not expr and isinstance(field_rhs, frog_ast.FuncCall):
+            return field_rhs
         return expr
 
     def transform_binary_operation(
@@ -1591,21 +1598,30 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
 
     def _resolve_field_rhs(self, expr: frog_ast.Expression) -> frog_ast.Expression:
         """If *expr* is ``Variable(F)`` where ``F`` is a single-write
-        Init-only ``GroupElem<G>`` field with a pure deterministic RHS
-        whose free variables are all cross-method-visible
-        (fields/parameters), return that RHS.  Otherwise return *expr*
-        unchanged.
+        Init-only field with a pure deterministic RHS whose free variables
+        are all cross-method-visible (fields/parameters), return that RHS.
+        Otherwise return *expr* unchanged.
 
         The cross-method-visibility check is mandatory: the resolved
         expression replaces *expr* in a comparison whose surrounding
         context might be in a non-Init method, where Init-local variables
         are out of scope.
+
+        Used by both the FuncCall == FuncCall path (via
+        ``_resolve_to_funccall``, to unwrap ``inj(x) == inj(y)`` written
+        through hoisted-field aliases into ``x == y``) and the wrapper
+        path (``_try_wrapper_simplification``, to recognize a
+        ``GroupExponentWrapper`` shape held in a hoisted field).  The
+        helper is intentionally type-agnostic: type-specific recognition
+        happens at each call site (the FuncCall path checks the resolved
+        callee for ``deterministic injective``; the wrapper path checks
+        the resolved expression against ``GroupExponentWrapper``).
         """
         if not isinstance(expr, frog_ast.Variable):
             return expr
         name = expr.name
         fld = next((f for f in self.game.fields if f.name == name), None)
-        if fld is None or not isinstance(fld.type, frog_ast.GroupElemType):
+        if fld is None:
             return expr
         init = next(
             (m for m in self.game.methods if m.signature.name == "Initialize"),

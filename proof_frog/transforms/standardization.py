@@ -113,7 +113,20 @@ class VariableStandardizingTransformer(BlockTransformer):
 
 
 def standardize_field_names(game: frog_ast.Game) -> frog_ast.Game:
-    """Normalize field names to canonical ordering."""
+    """Normalize field names to canonical ordering.
+
+    Two-phase pass: (1) rename fields to ``fieldN`` based on first-read
+    order in oracle methods (via :class:`FieldOrderingVisitor`); then
+    (2) regroup the resulting fields by type so that fields of the same
+    type receive consecutive numbers regardless of how oracle predicates
+    end up sorting them. The second phase keeps the relative order within
+    each type group from the first phase, so fields that share a type
+    still sort by oracle read-order. This stabilises field naming across
+    semantically equivalent games whose oracle predicates differ only in
+    AND/OR-chain ordering of conjuncts referencing different-typed
+    fields (a common shape after ``NormalizeCommutativeChains`` selects
+    different sort orders for two structurally similar reductions).
+    """
     field_rename_map = FieldOrderingVisitor().visit(game)
     ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
     for field_name, normalized_name in field_rename_map.items():
@@ -126,6 +139,57 @@ def standardize_field_names(game: frog_ast.Game) -> frog_ast.Game:
     for field in new_game.fields:
         field.name = field_rename_map[field.name]
     new_game.fields.sort(key=lambda element: element.name)
+
+    # Phase 2: group by type, preserving relative order within each group.
+    # This re-numbers fields so that two semantically equivalent games whose
+    # oracle predicates ordered conjuncts differently still end up assigning
+    # the same field number to the same (type, within-type-rank) slot.
+    def _field_num(name: str) -> int:
+        try:
+            return int(name[len("field") :])
+        except (ValueError, TypeError):
+            return -1
+
+    # Sort keys: (type_key, original_field_number_within_phase_1)
+    type_sorted = sorted(
+        new_game.fields,
+        key=lambda f: (str(f.type), _field_num(f.name)),
+    )
+    second_rename: dict[str, str] = {}
+    for new_idx, field in enumerate(type_sorted):
+        canonical = f"field{new_idx + 1}"
+        if field.name != canonical:
+            second_rename[field.name] = canonical
+    if second_rename:
+        # Avoid overwrite collisions: rename via stable temporaries first.
+        # Build a temporary->final map, then apply both renames.
+        temp_map: dict[str, str] = {
+            old: f"__field_temp_{i}__" for i, old in enumerate(second_rename)
+        }
+        rev_temp: dict[str, str] = {
+            temp_map[old]: second_rename[old] for old in second_rename
+        }
+        # Apply temp rename
+        ast_map_temp = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+        for old, tmp in temp_map.items():
+            ast_map_temp.set(frog_ast.Variable(old), frog_ast.Variable(tmp))
+        new_game = SubstitutionTransformer(ast_map_temp).transform(new_game)
+        new_game = copy.copy(new_game)
+        new_game.fields = [copy.copy(f) for f in new_game.fields]
+        for field in new_game.fields:
+            if field.name in temp_map:
+                field.name = temp_map[field.name]
+        # Apply final rename
+        ast_map_final = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+        for tmp, final in rev_temp.items():
+            ast_map_final.set(frog_ast.Variable(tmp), frog_ast.Variable(final))
+        new_game = SubstitutionTransformer(ast_map_final).transform(new_game)
+        new_game = copy.copy(new_game)
+        new_game.fields = [copy.copy(f) for f in new_game.fields]
+        for field in new_game.fields:
+            if field.name in rev_temp:
+                field.name = rev_temp[field.name]
+        new_game.fields.sort(key=lambda element: element.name)
     return new_game
 
 

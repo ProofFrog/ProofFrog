@@ -212,6 +212,62 @@ def test_reflexive_same_args_unchanged_by_this_pass() -> None:
     assert result == frog_parser.parse_game(expected)
 
 
+# --------------------------------------------------------------------------
+# Soundness gap regression tests (Gap C: Sample-write detection;
+# Gap D: free-variable stability)
+# --------------------------------------------------------------------------
+
+
+NS_INJECTIVE_PLUS_SAMPLABLE = """
+Primitive T(Set SecretSet, Set InputSet, Set ImageSet) {
+    deterministic injective ImageSet Eval(SecretSet sk, InputSet x);
+}
+"""
+
+
+def test_gap_c_sample_rebinding_blocks_resolution() -> None:
+    """Gap C distinguisher: a typed-local FuncCall binding that is later
+    *sampled* (e.g. ``v <- ImageSet;``) must be dropped from the resolver
+    map; otherwise the comparison would be rewritten using the original
+    Eval call's args, but the actual value at the comparison is the sample."""
+    source = """
+    Game G() {
+        T.SecretSet sk;
+        T.InputSet a;
+        Bool Query(T.InputSet b) {
+            T.ImageSet v = T.Eval(sk, a);
+            v <- T.ImageSet;
+            return v == T.Eval(sk, b);
+        }
+    }
+    """
+    # Post-fix: transform refuses to resolve `v`, leaves comparison unchanged.
+    result, _ = _apply(source, _ns(NS_INJECTIVE_PLUS_SAMPLABLE))
+    assert result == frog_parser.parse_game(source)
+
+
+def test_gap_d_unstable_free_var_blocks_resolution() -> None:
+    """Gap D: when the FuncCall binding's free variables include a field
+    that is mutated between the binding site and the comparison site, the
+    resolver must not substitute (the comparison would evaluate against a
+    different environment)."""
+    source = """
+    Game G() {
+        T.SecretSet sk;
+        T.InputSet xfld;
+        Bool Query(T.InputSet b) {
+            T.ImageSet v = T.Eval(sk, xfld);
+            xfld = b;
+            return v == T.Eval(sk, b);
+        }
+    }
+    """
+    # Post-fix: the field `xfld` is written between binding and use, so the
+    # transform refuses to resolve `v`.
+    result, _ = _apply(source, _ns(NS_INJECTIVE_PLUS_SAMPLABLE))
+    assert result == frog_parser.parse_game(source)
+
+
 def test_single_arg_call_rewrites() -> None:
     source = """
     Game G() {

@@ -146,7 +146,9 @@ def test_single_term_does_not_fire() -> None:
     assert _apply(source) == frog_parser.parse_game(source)
 
 
-def test_both_sides_concat_does_not_fire() -> None:
+def test_both_sides_concat_termwise_decomposes() -> None:
+    # Two concat chains with matching term count and per-position lengths
+    # decompose into per-slot equalities.
     source = """
     Game G(Int Nss, Int Nct) {
         T.SecretSet s1;
@@ -158,7 +160,198 @@ def test_both_sides_concat_does_not_fire() -> None:
         }
     }
     """
+    expected = """
+    Game G(Int Nss, Int Nct) {
+        T.SecretSet s1;
+        T.SecretSet s2;
+        T.CtxSet c1;
+        T.CtxSet c2;
+        Bool Check() {
+            return T.EncSS(s1) == T.EncSS(s2) && T.EncCT(c1) == T.EncCT(c2);
+        }
+    }
+    """
+    assert _apply(source) == frog_parser.parse_game(expected)
+
+
+def test_both_sides_concat_termwise_disjunction_for_neq() -> None:
+    source = """
+    Game G(Int Nss, Int Nct) {
+        T.SecretSet s1;
+        T.SecretSet s2;
+        T.CtxSet c1;
+        T.CtxSet c2;
+        Bool Check() {
+            return (T.EncSS(s1) || T.EncCT(c1)) != (T.EncSS(s2) || T.EncCT(c2));
+        }
+    }
+    """
+    expected = """
+    Game G(Int Nss, Int Nct) {
+        T.SecretSet s1;
+        T.SecretSet s2;
+        T.CtxSet c1;
+        T.CtxSet c2;
+        Bool Check() {
+            return T.EncSS(s1) != T.EncSS(s2) || T.EncCT(c1) != T.EncCT(c2);
+        }
+    }
+    """
+    assert _apply(source) == frog_parser.parse_game(expected)
+
+
+def test_both_sides_concat_term_count_mismatch_does_not_fire() -> None:
+    # Same total length, different term counts → no rewrite.
+    source = """
+    Game G(Int Nss, Int Nct) {
+        T.SecretSet s1;
+        T.SecretSet s2;
+        T.CtxSet c1;
+        Bool Check(BitString<Nss + Nss> a) {
+            return (T.EncSS(s1) || T.EncSS(s2)) == (a);
+        }
+    }
+    """
+    # The right side is a single variable, not a concat — distinct case.
+    # (The bare-variable branch on the right will fire normally.) Use a
+    # genuinely concat-mismatched case instead:
+    source2 = """
+    Game G(Int Nss, Int Nct) {
+        T.SecretSet s1;
+        T.SecretSet s2;
+        T.SecretSet s3;
+        Bool Check() {
+            return (T.EncSS(s1) || T.EncSS(s2) || T.EncSS(s3))
+                 == (T.EncSS(s1) || T.EncSS(s2));
+        }
+    }
+    """
+    assert _apply(source2) == frog_parser.parse_game(source2)
+
+
+def test_both_sides_concat_length_mismatch_does_not_fire() -> None:
+    # Same term count, different per-position lengths → no rewrite.
+    source = """
+    Game G(Int Nss, Int Nct) {
+        T.SecretSet s1;
+        T.CtxSet c1;
+        T.CtxSet c2;
+        T.SecretSet s2;
+        Bool Check() {
+            return (T.EncSS(s1) || T.EncCT(c1)) == (T.EncCT(c2) || T.EncSS(s2));
+        }
+    }
+    """
     assert _apply(source) == frog_parser.parse_game(source)
+
+
+# --------------------------------------------------------------------------
+# Soundness gap regression tests
+# --------------------------------------------------------------------------
+
+
+NS_NONDET_SRC = """
+Primitive T(Int Nss, Int Nct, Set SecretSet, Set CtxSet) {
+    deterministic injective BitString<Nss> EncSS(SecretSet s);
+    deterministic injective BitString<Nct> EncCT(CtxSet c);
+    BitString<Nss> NondetEncSS(SecretSet s);
+    BitString<Nct> NondetEncCT(CtxSet c);
+}
+"""
+
+
+def _apply_with_ns(source: str, ns_src: str) -> frog_ast.Game:
+    prim = frog_parser.parse_primitive_file(ns_src)
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"T": prim},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game(source)
+    return ConcatEqualityDecompose().apply(game, ctx)
+
+
+def test_gap_a_nondet_var_rhs_blocks_resolution() -> None:
+    """Gap A distinguisher: a Variable bound to a concat whose RHS calls
+    non-deterministic primitive methods cannot be safely substituted into
+    a comparison; doing so duplicates the calls."""
+    source = """
+    Game G(Int Nss, Int Nct) {
+        T.SecretSet s1;
+        T.CtxSet c1;
+        Bool Check(BitString<Nss + Nct> m) {
+            BitString<Nss + Nct> v = T.NondetEncSS(s1) || T.NondetEncCT(c1);
+            return m == v;
+        }
+    }
+    """
+    # Post-fix: transform refuses to resolve `v`, leaves comparison unchanged.
+    assert _apply_with_ns(source, NS_NONDET_SRC) == frog_parser.parse_game(source)
+
+
+def test_gap_a_deterministic_var_rhs_still_resolves() -> None:
+    """Sibling positive case: deterministic-call concat RHS still resolves."""
+    source = """
+    Game G(Int Nss, Int Nct) {
+        T.SecretSet s1;
+        T.CtxSet c1;
+        Bool Check(BitString<Nss + Nct> m) {
+            BitString<Nss + Nct> v = T.EncSS(s1) || T.EncCT(c1);
+            return m == v;
+        }
+    }
+    """
+    expected = """
+    Game G(Int Nss, Int Nct) {
+        T.SecretSet s1;
+        T.CtxSet c1;
+        Bool Check(BitString<Nss + Nct> m) {
+            BitString<Nss + Nct> v = T.EncSS(s1) || T.EncCT(c1);
+            return m[0 : Nss] == T.EncSS(s1) && m[Nss : Nss + Nct] == T.EncCT(c1);
+        }
+    }
+    """
+    assert _apply_with_ns(source, NS_NONDET_SRC) == frog_parser.parse_game(expected)
+
+
+def test_gap_b_numeric_for_loop_rebinding_blocks_resolution() -> None:
+    """Gap B: a NumericFor loop variable shadowing a concat-bound local
+    must be detected as a write so the binding is dropped."""
+    source = """
+    Game G(Int Nss, Int Nct) {
+        T.SecretSet s1;
+        T.CtxSet c1;
+        Bool Check(BitString<Nss + Nct> m, Int n) {
+            BitString<Nss + Nct> v = T.EncSS(s1) || T.EncCT(c1);
+            for (Int v = 0 to n) {
+            }
+            return m == v;
+        }
+    }
+    """
+    # The for-loop variable rebinds `v`, so the binding map must be dropped.
+    assert _apply_with_ns(source, NS_NONDET_SRC) == frog_parser.parse_game(source)
+
+
+def test_gap_e_nested_scope_binding_not_visible_outside() -> None:
+    """Gap E: a binding declared inside an if-branch is not visible to a
+    comparison outside that branch — the resolver must not pick it up."""
+    source = """
+    Game G(Int Nss, Int Nct) {
+        T.SecretSet s1;
+        T.CtxSet c1;
+        Bool Check(BitString<Nss + Nct> m, Bool flag) {
+            if (flag) {
+                BitString<Nss + Nct> v = T.EncSS(s1) || T.EncCT(c1);
+            }
+            return m == v;
+        }
+    }
+    """
+    # The binding inside the if body is not in scope at the trailing return;
+    # surface FrogLang would reject this, but we defensively guard at AST level.
+    assert _apply_with_ns(source, NS_NONDET_SRC) == frog_parser.parse_game(source)
 
 
 def test_slice_term_resolves_via_end_minus_start() -> None:

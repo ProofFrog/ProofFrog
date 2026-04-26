@@ -990,6 +990,128 @@ def _negate_condition(cond: frog_ast.Expression) -> frog_ast.Expression:
     return frog_ast.UnaryOperation(frog_ast.UnaryOperators.NOT, copy.deepcopy(cond))
 
 
+class IfFalseReturnToConjunctionTransformer(BlockTransformer):
+    """Absorbs an early ``if (P) { return false; }`` into a trailing
+    ``return BoolExpr;`` at the top level of the same block.
+
+    Pattern (left → right within a single block)::
+
+        if (P) { return false; }
+        return BoolExpr;
+
+    is rewritten to::
+
+        return !P && BoolExpr;
+
+    Soundness: when ``P`` holds, the original returns ``false``
+    immediately; in the rewrite the locals execute unconditionally and
+    the return becomes ``false && BoolExpr = false``. When ``!P`` holds,
+    both forms run the same locals and return ``BoolExpr``. Equivalence
+    therefore holds iff the intervening statements are side-effect-free,
+    which we approximate by accepting only typed-local declarations
+    (``Type v = expr;``) — these introduce a fresh local from a pure
+    expression and have no observable effect outside the method.
+    Sample statements, field writes, and reassignments are rejected.
+
+    Companion to ``AbsorbRedundantEarlyReturn``: that pass handles the
+    case where the trailing return value is structurally identical to
+    the early return value; this pass handles the specific case where
+    the early return value is the literal ``false``.
+
+    Gap G guard: each accepted typed-local declaration's RHS expression
+    must be evaluation-pure (no non-deterministic / state-mutating
+    FuncCall). Without this guard, a helper that mutates a game-visible
+    field-typed Map (e.g. a manually-written guarded-lazy-RO) could be
+    hoisted past the early return, populating state that the original
+    skipped on the ``P`` branch.
+    """
+
+    def __init__(self, ctx: PipelineContext) -> None:
+        self.ctx = ctx
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        n = len(block.statements)
+        for index in range(n - 1):
+            stmt = block.statements[index]
+            if not isinstance(stmt, frog_ast.IfStatement):
+                continue
+            if len(stmt.conditions) != 1 or stmt.has_else_block():
+                continue
+            body = stmt.blocks[0]
+            if len(body.statements) != 1:
+                continue
+            inner = body.statements[0]
+            if not isinstance(inner, frog_ast.ReturnStatement):
+                continue
+            if not (
+                isinstance(inner.expression, frog_ast.Boolean)
+                and inner.expression.bool is False
+            ):
+                continue
+            # Trailing return must be the last statement in the block,
+            # with only side-effect-free typed-local declarations between
+            # the if and it.
+            trailing_idx = self._find_pure_trailing_return(block.statements, index + 1)
+            if trailing_idx is None:
+                continue
+            trailing = block.statements[trailing_idx]
+            assert isinstance(trailing, frog_ast.ReturnStatement)
+            if trailing.expression is None:
+                continue
+            neg_p = _negate_condition(stmt.conditions[0])
+            # Place the original return expression FIRST and the
+            # negated guard last; this matches the natural order in
+            # which the source-level "Q && ct != ctStar"-style
+            # binding-game checks are written, so canonicalization of
+            # the two sides of a hop converges without needing a
+            # global AND-chain sort (which proved too disruptive to
+            # other proofs).
+            new_return_expr = frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.AND,
+                copy.deepcopy(trailing.expression),
+                neg_p,
+            )
+            new_stmts: list[frog_ast.Statement] = (
+                list(block.statements[:index])
+                + list(block.statements[index + 1 : trailing_idx])
+                + [frog_ast.ReturnStatement(new_return_expr)]
+                + list(block.statements[trailing_idx + 1 :])
+            )
+            return self.transform_block(frog_ast.Block(new_stmts))
+        return block
+
+    def _find_pure_trailing_return(
+        self,
+        statements: Sequence[frog_ast.Statement],
+        start: int,
+    ) -> int | None:
+        for idx in range(start, len(statements)):
+            s = statements[idx]
+            if isinstance(s, frog_ast.ReturnStatement):
+                return idx
+            if (
+                isinstance(s, frog_ast.Assignment)
+                and s.the_type is not None
+                and isinstance(s.var, frog_ast.Variable)
+            ):
+                # Typed-local declaration; the RHS must additionally be
+                # evaluation-pure. ``has_nondeterministic_call`` flags any
+                # FuncCall whose callee is not an annotated-deterministic
+                # primitive method or a ``Function<D, R>`` variable, which
+                # is exactly the set of calls that may mutate game-visible
+                # state (Sample, field assignment, map/array writes
+                # through helper bodies).
+                if has_nondeterministic_call(
+                    s.value,
+                    self.ctx.proof_namespace,
+                    self.ctx.proof_let_types,
+                ):
+                    return None
+                continue
+            return None
+        return None
+
+
 class ElseUnwrapTransformer(BlockTransformer):
     """Unwraps else blocks when the if-branch unconditionally returns.
 
@@ -1062,6 +1184,13 @@ class AbsorbRedundantEarlyReturn(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return AbsorbRedundantEarlyReturnTransformer().transform(game)
+
+
+class IfFalseReturnToConjunction(TransformPass):
+    name = "If False Return To Conjunction"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return IfFalseReturnToConjunctionTransformer(ctx).transform(game)
 
 
 class BranchElimination(TransformPass):

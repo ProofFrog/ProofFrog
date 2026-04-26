@@ -3078,6 +3078,7 @@ def _is_stable_arg(  # pylint: disable=too-many-arguments, too-many-positional-a
     proof_namespace: frog_ast.Namespace | None = None,
     function_var_names: set[str] | None = None,
     proof_let_names: set[str] | None = None,
+    local_alias_names: set[str] | None = None,
 ) -> bool:
     """Return True if *expr* is stable across method invocations.
 
@@ -3092,6 +3093,12 @@ def _is_stable_arg(  # pylint: disable=too-many-arguments, too-many-positional-a
     When *proof_let_names* is provided, ``Variable`` nodes whose name appears
     in that set are treated as stable: proof-level ``let:`` bindings are
     compile-time constants from the game's perspective.
+
+    When *local_alias_names* is provided, ``Variable`` nodes whose name appears
+    in that set are treated as stable. The caller is responsible for ensuring
+    each name in this set is bound exactly once (in the relevant method's top
+    level) to an expression that is itself stable, so that the variable's value
+    is invariant across the lifetime of the game state it depends on.
     """
     if isinstance(
         expr,
@@ -3103,89 +3110,35 @@ def _is_stable_arg(  # pylint: disable=too-many-arguments, too-many-positional-a
         ),
     ):
         return True
+
+    def _recurse(sub: frog_ast.Expression) -> bool:
+        return _is_stable_arg(
+            sub,
+            field_names,
+            param_names,
+            proof_namespace,
+            function_var_names,
+            proof_let_names,
+            local_alias_names,
+        )
+
     if isinstance(expr, frog_ast.Variable):
         return (
             expr.name in field_names
             or expr.name in param_names
             or (proof_let_names is not None and expr.name in proof_let_names)
+            or (local_alias_names is not None and expr.name in local_alias_names)
         )
     if isinstance(expr, frog_ast.FieldAccess):
-        return _is_stable_arg(
-            expr.the_object,
-            field_names,
-            param_names,
-            proof_namespace,
-            function_var_names,
-            proof_let_names,
-        )
+        return _recurse(expr.the_object)
     if isinstance(expr, frog_ast.BinaryOperation):
-        return _is_stable_arg(
-            expr.left_expression,
-            field_names,
-            param_names,
-            proof_namespace,
-            function_var_names,
-            proof_let_names,
-        ) and _is_stable_arg(
-            expr.right_expression,
-            field_names,
-            param_names,
-            proof_namespace,
-            function_var_names,
-            proof_let_names,
-        )
+        return _recurse(expr.left_expression) and _recurse(expr.right_expression)
     if isinstance(expr, frog_ast.UnaryOperation):
-        return _is_stable_arg(
-            expr.expression,
-            field_names,
-            param_names,
-            proof_namespace,
-            function_var_names,
-            proof_let_names,
-        )
+        return _recurse(expr.expression)
     if isinstance(expr, frog_ast.ArrayAccess):
-        return _is_stable_arg(
-            expr.the_array,
-            field_names,
-            param_names,
-            proof_namespace,
-            function_var_names,
-            proof_let_names,
-        ) and _is_stable_arg(
-            expr.index,
-            field_names,
-            param_names,
-            proof_namespace,
-            function_var_names,
-            proof_let_names,
-        )
+        return _recurse(expr.the_array) and _recurse(expr.index)
     if isinstance(expr, frog_ast.Slice):
-        return (
-            _is_stable_arg(
-                expr.the_array,
-                field_names,
-                param_names,
-                proof_namespace,
-                function_var_names,
-                proof_let_names,
-            )
-            and _is_stable_arg(
-                expr.start,
-                field_names,
-                param_names,
-                proof_namespace,
-                function_var_names,
-                proof_let_names,
-            )
-            and _is_stable_arg(
-                expr.end,
-                field_names,
-                param_names,
-                proof_namespace,
-                function_var_names,
-                proof_let_names,
-            )
-        )
+        return _recurse(expr.the_array) and _recurse(expr.start) and _recurse(expr.end)
     if isinstance(expr, frog_ast.FuncCall):
         is_det_primitive = False
         if proof_namespace is not None:
@@ -3199,17 +3152,7 @@ def _is_stable_arg(  # pylint: disable=too-many-arguments, too-many-positional-a
         )
         if not (is_det_primitive or is_function_var):
             return False
-        return all(
-            _is_stable_arg(
-                a,
-                field_names,
-                param_names,
-                proof_namespace,
-                function_var_names,
-                proof_let_names,
-            )
-            for a in expr.args
-        )
+        return all(_recurse(a) for a in expr.args)
     return False
 
 
@@ -3294,6 +3237,101 @@ def _fields_assigned_after(
     return _fields_assigned_in_block(tail_block, field_names)
 
 
+def _build_local_stable_alias_map(  # pylint: disable=too-many-arguments, too-many-positional-arguments
+    method: frog_ast.Method,
+    field_names: set[str],
+    param_names: set[str],
+    proof_namespace: frog_ast.Namespace | None,
+    function_var_names: set[str] | None,
+    proof_let_names: set[str] | None,
+) -> dict[str, frog_ast.Expression]:
+    """Return a map from local variable name -> RHS expression for top-level
+    single-assignment locals in *method* whose RHS is stable.
+
+    "Stable" means the RHS depends only on game fields, parameters, proof-level
+    let-bindings, constants, deterministic primitive calls (over stable args),
+    Function<D,R> calls (over stable args), and other locals already proven
+    stable. Iterates to a fixed point so chains like ``a = NG.Generator();
+    b = NG.Exp(a, field2);`` produce both ``a`` and ``b`` as aliases.
+
+    Excluded:
+    - Locals re-assigned more than once.
+    - Sampled / UniqueSample-bound locals (their value is non-deterministic).
+    - Locals shadowed by fields or parameters.
+    - Self-assignments (``x = x``), which are no-ops left by other transforms.
+    """
+    counts: dict[str, int] = {}
+    bindings: dict[str, frog_ast.Expression] = {}
+    sampled: set[str] = set()
+    for stmt in method.block.statements:
+        if isinstance(stmt, (frog_ast.Sample, frog_ast.UniqueSample)) and isinstance(
+            stmt.var, frog_ast.Variable
+        ):
+            sampled.add(stmt.var.name)
+            counts[stmt.var.name] = counts.get(stmt.var.name, 0) + 1
+            continue
+        if not isinstance(stmt, frog_ast.Assignment):
+            continue
+        if not isinstance(stmt.var, frog_ast.Variable):
+            continue
+        name = stmt.var.name
+        if name in field_names or name in param_names:
+            continue
+        if isinstance(stmt.value, frog_ast.Variable) and stmt.value.name == name:
+            # Skip self-assignments.
+            continue
+        counts[name] = counts.get(name, 0) + 1
+        bindings[name] = stmt.value
+
+    aliases: dict[str, frog_ast.Expression] = {}
+    while True:
+        changed = False
+        for name, expr in bindings.items():
+            if name in aliases:
+                continue
+            if counts.get(name, 0) != 1:
+                continue
+            if name in sampled:
+                continue
+            if _is_stable_arg(
+                expr,
+                field_names,
+                param_names,
+                proof_namespace,
+                function_var_names,
+                proof_let_names,
+                local_alias_names=set(aliases),
+            ):
+                aliases[name] = expr
+                changed = True
+        if not changed:
+            break
+    return aliases
+
+
+def _expand_aliases(
+    expr: frog_ast.ASTNode,
+    aliases: dict[str, frog_ast.Expression],
+) -> frog_ast.ASTNode:
+    """Recursively expand local stable aliases in *expr* to a fixed point.
+
+    Pure substitution. No side-effects on the input.
+    """
+    if not aliases:
+        return expr
+    prev: frog_ast.ASTNode | None = None
+    current: frog_ast.ASTNode = expr
+    for _ in range(32):  # bound in case of pathological aliases
+        if prev is not None and prev == current:
+            break
+        prev = current
+        sm: frog_ast.ASTMap[frog_ast.ASTNode] = frog_ast.ASTMap(identity=False)
+        for n, v in aliases.items():
+            sm.set(frog_ast.Variable(n), copy.deepcopy(v))
+        current = SubstitutionTransformer(sm).transform(current)
+    return current
+
+
 class CrossMethodFieldAliasTransformer:
     """Replace deterministic calls in oracles with field references.
 
@@ -3326,10 +3364,30 @@ class CrossMethodFieldAliasTransformer:
             else set()
         )
 
+        # Build per-method stable-alias maps once. A "stable alias" is a
+        # top-level single-assignment local whose RHS depends only on stable
+        # things (fields, params, let-bindings, constants, deterministic
+        # calls over stable args, and other already-stable aliases).
+        # Common case: CSE introduces ``v1 = NG.Generator();`` and reuses v1
+        # in multiple field RHSs and oracle expressions; expanding through v1
+        # makes the cross-method match succeed.
+        method_aliases: list[dict[str, frog_ast.Expression]] = [
+            _build_local_stable_alias_map(
+                m,
+                field_names,
+                param_names,
+                self.proof_namespace,
+                None,
+                proof_let_names,
+            )
+            for m in game.methods
+        ]
+
         # Phase 1: Collect field assignments with deterministic RHS
-        # (field_name, det_call, method_idx)
-        field_aliases: list[tuple[str, frog_ast.FuncCall, int]] = []
+        # (field_name, det_call, method_idx, expanded_call)
+        field_aliases: list[tuple[str, frog_ast.FuncCall, int, frog_ast.FuncCall]] = []
         for midx, method in enumerate(game.methods):
+            init_aliases = method_aliases[midx]
             for sidx, stmt in enumerate(method.block.statements):
                 if not (
                     isinstance(stmt, frog_ast.Assignment)
@@ -3352,6 +3410,7 @@ class CrossMethodFieldAliasTransformer:
                         param_names,
                         proof_namespace=self.proof_namespace,
                         proof_let_names=proof_let_names,
+                        local_alias_names=set(init_aliases),
                     )
                     for a in call.args
                 ):
@@ -3364,11 +3423,19 @@ class CrossMethodFieldAliasTransformer:
                 if method.signature.name != "Initialize":
                     continue
 
+                # Compute the expanded form of the call (with stable locals
+                # resolved). Use this for downstream cross-method matching
+                # and for collecting the underlying field dependencies, so
+                # that the no-reassignment guards apply to the real fields.
+                expanded_call_node = _expand_aliases(copy.deepcopy(call), init_aliases)
+                assert isinstance(expanded_call_node, frog_ast.FuncCall)
+                expanded_call = expanded_call_node
+
                 # Soundness check: the alias field and all argument fields
                 # must not be reassigned after the alias statement in this
                 # method, and must not be assigned in any other method.
-                arg_fields = set()
-                for a in call.args:
+                arg_fields: set[str] = set()
+                for a in expanded_call.args:
                     arg_fields |= _collect_field_names_in_args(a, field_names)
                 guarded_fields = {stmt.var.name} | arg_fields
 
@@ -3390,41 +3457,69 @@ class CrossMethodFieldAliasTransformer:
                 if modified_elsewhere:
                     continue
 
-                field_aliases.append((stmt.var.name, call, midx))
+                field_aliases.append((stmt.var.name, call, midx, expanded_call))
 
         if not field_aliases:
             return game
 
-        # Phase 2: For each field alias, check if the same call appears in
-        # other methods and replace it
-        for alias_field_name, alias_call, alias_midx in field_aliases:
-            result = self._try_replace(game, alias_field_name, alias_call, alias_midx)
+        # Phase 2: For each field alias, check if the same call (modulo local
+        # alias expansion) appears in other methods and replace it.
+        for alias_field_name, alias_call, alias_midx, expanded_call in field_aliases:
+            result = self._try_replace(
+                game,
+                alias_field_name,
+                alias_call,
+                alias_midx,
+                expanded_call,
+                method_aliases,
+            )
             if result is not None:
                 return result
 
         return game
 
-    def _try_replace(
+    def _try_replace(  # pylint: disable=too-many-arguments, too-many-positional-arguments
         self,
         game: frog_ast.Game,
         alias_field_name: str,
         alias_call: frog_ast.FuncCall,
         alias_midx: int,
+        expanded_call: frog_ast.FuncCall,
+        method_aliases: list[dict[str, frog_ast.Expression]],
     ) -> frog_ast.Game | None:
-        """Try to replace *alias_call* with *alias_field_name* in another method."""
+        """Try to replace *alias_call* with *alias_field_name* in another method.
+
+        Matches calls modulo stable-local-alias expansion: a target call ``c``
+        matches if either ``c == alias_call`` literally, or
+        ``expand(c, target_aliases) == expand(alias_call, init_aliases)``.
+        """
+        del alias_call  # alias_call is referenced only via expanded_call now
         for midx, method in enumerate(game.methods):
             if midx == alias_midx:
                 continue
+            target_aliases = method_aliases[midx]
             collector = _DeterministicCallCollector(self.proof_namespace)
             collector.visit(method.block)
-            if not any(c == alias_call for c in collector.result()):
+            target_call = next(
+                (
+                    c
+                    for c in collector.result()
+                    if _expand_aliases(copy.deepcopy(c), target_aliases)
+                    == expanded_call
+                ),
+                None,
+            )
+            if target_call is None:
                 continue
             # Found a match — replace and return
             new_game = copy.deepcopy(game)
             new_collector = _DeterministicCallCollector(self.proof_namespace)
             new_collector.visit(new_game.methods[midx].block)
             for new_call in new_collector.result():
-                if new_call == alias_call:
+                if (
+                    _expand_aliases(copy.deepcopy(new_call), target_aliases)
+                    == expanded_call
+                ):
                     new_game.methods[midx] = ReplaceTransformer(
                         new_call,
                         frog_ast.Variable(alias_field_name),

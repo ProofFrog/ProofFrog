@@ -1272,9 +1272,17 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
                             sub_pairs.append((a, b))
             # Augment with single-write Init-only field RHS expansions
             # so the comparison can see through hoisted-call fields.
+            # ``ASTMap.set`` is last-write-wins, so we put init_field_rhs
+            # first and sub_pairs last: where both cover the same field
+            # (e.g. P asserts ``field_a == field_b`` while init also
+            # rewrites ``field_b`` to a hoisted-call RHS), the equality
+            # from P takes priority. This keeps P's connection between
+            # field atoms intact in Z3 — overriding with the hoisted-call
+            # RHS would replace one side of the equality with a structure
+            # Z3 cannot relate to the other side's atom.
             all_sub_pairs: list[tuple[frog_ast.Expression, frog_ast.Expression]] = list(
-                sub_pairs
-            ) + list(self._init_field_rhs)
+                self._init_field_rhs
+            ) + list(sub_pairs)
             if all_sub_pairs:
                 # Iterate substitution to a fixed point so chains like
                 # `_hoisted_0 → EncodeEK(ek_T_0)` followed by P's

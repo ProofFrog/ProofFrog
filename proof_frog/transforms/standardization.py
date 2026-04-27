@@ -112,20 +112,139 @@ class VariableStandardizingTransformer(BlockTransformer):
 # ---------------------------------------------------------------------------
 
 
+def _apply_field_rename(game: frog_ast.Game, rename: dict[str, str]) -> frog_ast.Game:
+    """Apply a field-name rename map via the temp-then-final pattern.
+
+    Using a single substitution would corrupt the AST when two field
+    names swap (e.g. ``field9 → field10`` and ``field10 → field9``); the
+    temp pass disambiguates.
+    """
+    if not rename:
+        return game
+    temp_map: dict[str, str] = {
+        old: f"__field_temp_{i}__" for i, old in enumerate(rename)
+    }
+    rev_temp: dict[str, str] = {temp_map[old]: rename[old] for old in rename}
+
+    ast_map_temp = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+    for old, tmp in temp_map.items():
+        ast_map_temp.set(frog_ast.Variable(old), frog_ast.Variable(tmp))
+    new_game = SubstitutionTransformer(ast_map_temp).transform(game)
+    new_game = copy.copy(new_game)
+    new_game.fields = [copy.copy(f) for f in new_game.fields]
+    for field in new_game.fields:
+        if field.name in temp_map:
+            field.name = temp_map[field.name]
+
+    ast_map_final = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+    for tmp, final in rev_temp.items():
+        ast_map_final.set(frog_ast.Variable(tmp), frog_ast.Variable(final))
+    new_game = SubstitutionTransformer(ast_map_final).transform(new_game)
+    new_game = copy.copy(new_game)
+    new_game.fields = [copy.copy(f) for f in new_game.fields]
+    for field in new_game.fields:
+        if field.name in rev_temp:
+            field.name = rev_temp[field.name]
+    new_game.fields.sort(key=lambda element: element.name)
+    return new_game
+
+
+def _phase3_lex_min_within_type(game: frog_ast.Game) -> frog_ast.Game:
+    """Phase 3: within each contiguous same-type group of fields, swap
+    field-number assignments so that the field with the lex-smaller
+    ``Initialize``-body RHS gets the smaller field number.
+
+    Stabilises canonical form across two semantically equivalent games
+    that differ only in which interchangeable position holds which value
+    (e.g. when KEM_PQ has two parallel keypairs whose ``[ek, dk]`` slots
+    are bound in opposite orders by two reductions, leaving fields like
+    ``field9 = v1[1]; field10 = v4[1]`` in one game and the swap in
+    the other).
+    """
+    init_method: frog_ast.Method | None = None
+    for m in game.methods:
+        if m.signature.name == "Initialize":
+            init_method = m
+            break
+    if init_method is None:
+        return game
+
+    field_names = {f.name for f in game.fields}
+    field_rhs_key: dict[str, tuple] = {}  # type: ignore[type-arg]
+    for stmt in init_method.block.statements:
+        if not isinstance(
+            stmt,
+            (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+        ):
+            continue
+        if not isinstance(stmt.var, frog_ast.Variable):
+            continue
+        if stmt.var.name not in field_names:
+            continue
+        if stmt.the_type is not None:
+            # Typed local with the same name as a field — not a field assignment.
+            continue
+        if stmt.var.name in field_rhs_key:
+            # Use the FIRST assignment to a field as its canonical RHS.
+            continue
+        if isinstance(stmt, frog_ast.Assignment):
+            field_rhs_key[stmt.var.name] = ("a",) + node_sort_key(stmt.value)
+        elif isinstance(stmt, frog_ast.Sample):
+            field_rhs_key[stmt.var.name] = ("s",) + node_sort_key(stmt.sampled_from)
+        else:  # UniqueSample
+            field_rhs_key[stmt.var.name] = ("u",) + node_sort_key(stmt.sampled_from)
+
+    # Group fields by type (the field list may be alphabetically sorted, so
+    # same-type fields aren't necessarily contiguous in the list).  Within
+    # each group we re-rank by Initialize-RHS sort key.
+    def _field_num(name: str) -> int:
+        try:
+            return int(name[len("field") :])
+        except (ValueError, TypeError):
+            return -1
+
+    groups: dict[str, list[str]] = {}
+    for f in game.fields:
+        groups.setdefault(str(f.type), []).append(f.name)
+
+    rename: dict[str, str] = {}
+    for names in groups.values():
+        if len(names) <= 1:
+            continue
+        # Slots: sorted ascending by their numeric suffix.  These are the
+        # available field-numbers for this type group.
+        slots = sorted(names, key=_field_num)
+        # Sort current names by their Initialize RHS, ties broken by
+        # numeric suffix (so a stable result when RHS keys tie).
+        sorted_names = sorted(
+            names, key=lambda n: (field_rhs_key.get(n, ()), _field_num(n))
+        )
+        if sorted_names == slots:
+            continue
+        # The k-th sorted name should occupy slots[k].
+        for k, sn in enumerate(sorted_names):
+            if sn != slots[k]:
+                rename[sn] = slots[k]
+
+    return _apply_field_rename(game, rename)
+
+
 def standardize_field_names(game: frog_ast.Game) -> frog_ast.Game:
     """Normalize field names to canonical ordering.
 
-    Two-phase pass: (1) rename fields to ``fieldN`` based on first-read
-    order in oracle methods (via :class:`FieldOrderingVisitor`); then
-    (2) regroup the resulting fields by type so that fields of the same
-    type receive consecutive numbers regardless of how oracle predicates
-    end up sorting them. The second phase keeps the relative order within
-    each type group from the first phase, so fields that share a type
-    still sort by oracle read-order. This stabilises field naming across
-    semantically equivalent games whose oracle predicates differ only in
-    AND/OR-chain ordering of conjuncts referencing different-typed
-    fields (a common shape after ``NormalizeCommutativeChains`` selects
-    different sort orders for two structurally similar reductions).
+    Three-phase pass:
+
+    1. Rename fields to ``fieldN`` based on first-read order in oracle
+       methods (via :class:`FieldOrderingVisitor`).
+    2. Regroup the resulting fields by type so that fields of the same
+       type receive consecutive numbers regardless of how oracle
+       predicates end up sorting them.  Preserves Phase-1 relative
+       order within each type group.
+    3. Within each contiguous same-type group, sort field-number
+       assignments by the lex-min sort key of the field's ``Initialize``
+       RHS, so two semantically equivalent games whose interchangeable
+       positions are filled in opposite orders converge to the same
+       field assignment.
     """
     field_rename_map = FieldOrderingVisitor().visit(game)
     ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
@@ -160,36 +279,12 @@ def standardize_field_names(game: frog_ast.Game) -> frog_ast.Game:
         canonical = f"field{new_idx + 1}"
         if field.name != canonical:
             second_rename[field.name] = canonical
-    if second_rename:
-        # Avoid overwrite collisions: rename via stable temporaries first.
-        # Build a temporary->final map, then apply both renames.
-        temp_map: dict[str, str] = {
-            old: f"__field_temp_{i}__" for i, old in enumerate(second_rename)
-        }
-        rev_temp: dict[str, str] = {
-            temp_map[old]: second_rename[old] for old in second_rename
-        }
-        # Apply temp rename
-        ast_map_temp = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-        for old, tmp in temp_map.items():
-            ast_map_temp.set(frog_ast.Variable(old), frog_ast.Variable(tmp))
-        new_game = SubstitutionTransformer(ast_map_temp).transform(new_game)
-        new_game = copy.copy(new_game)
-        new_game.fields = [copy.copy(f) for f in new_game.fields]
-        for field in new_game.fields:
-            if field.name in temp_map:
-                field.name = temp_map[field.name]
-        # Apply final rename
-        ast_map_final = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-        for tmp, final in rev_temp.items():
-            ast_map_final.set(frog_ast.Variable(tmp), frog_ast.Variable(final))
-        new_game = SubstitutionTransformer(ast_map_final).transform(new_game)
-        new_game = copy.copy(new_game)
-        new_game.fields = [copy.copy(f) for f in new_game.fields]
-        for field in new_game.fields:
-            if field.name in rev_temp:
-                field.name = rev_temp[field.name]
-        new_game.fields.sort(key=lambda element: element.name)
+    new_game = _apply_field_rename(new_game, second_rename)
+
+    # Phase 3 lex-min runs as a separate `FieldLexMinByRHS` pass after
+    # the second `VariableStandardize`, where RHS sort keys see the
+    # final local-variable names.
+
     return new_game
 
 
@@ -210,6 +305,18 @@ class StandardizeFieldNames(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return standardize_field_names(game)
+
+
+class FieldLexMinByRHS(TransformPass):
+    """Run only Phase-3 of field standardization (lex-min within type
+    groups by Initialize RHS).  Used as a post-VariableStandardize pass
+    so the RHS sort keys see the final local-variable names rather than
+    the pre-rename ones."""
+
+    name = "Field Lex-Min By RHS"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return _phase3_lex_min_within_type(game)
 
 
 class BubbleSortFieldAssignments(TransformPass):

@@ -18,6 +18,7 @@ from .. import frog_parser
 from ..visitors import (
     Transformer,
     BlockTransformer,
+    NameTypeMap,
     SearchVisitor,
     ReplaceTransformer,
     VariableCollectionVisitor,
@@ -177,6 +178,193 @@ class SimplifySpliceTransformer(BlockTransformer):
             )
 
         return block
+
+
+class SliceOfInlineConcatTransformer(Transformer):
+    """Simplifies ``(a || b)[start:end]`` to ``a`` (or ``b``) when the slice
+    bounds match exactly the boundaries of one operand.
+
+    Generalizes ``SimplifySplice`` to the case where the concatenation
+    appears INLINE at the slice's argument position (rather than being
+    materialized as a named ``z = a || b`` assignment).  This is the
+    canonical-form output of inlining a method whose body is
+    ``return a || b;`` into a slice context: the inliner substitutes
+    the concat directly into the slice without introducing a name, so
+    ``SimplifySplice`` (which scans for ``z = a || b`` assignments)
+    does not fire.
+
+    Length resolution uses the proof-let / game-field type information
+    threaded through ``proof_let_types`` and the surrounding game fields
+    visited by ``transform_game``.  For each ``BitString`` operand, the
+    parameterization expression is recovered from the type and compared
+    structurally against the slice bounds.
+
+    Soundness: identical to ``SimplifySplice`` -- the substitution is the
+    standard concat/slice algebraic identity ``(a || b)[0 : |a|] = a``,
+    ``(a || b)[|a| : |a| + |b|] = b``.  See
+    ``extras/docs/transforms/sampling/SimplifySplice.md`` for the proof
+    of the underlying claim.
+    """
+
+    def __init__(
+        self,
+        proof_let_types: NameTypeMap | None = None,
+        ctx: PipelineContext | None = None,
+    ) -> None:
+        self._proof_let_types = proof_let_types
+        self._ctx = ctx
+        # name → BitString length expression (for fields, parameters,
+        # locals visible in the current method scope).
+        self._var_lengths: dict[str, frog_ast.Expression] = {}
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        # Seed with field declarations so field-scoped operands resolve.
+        for field in game.fields:
+            if isinstance(field.type, frog_ast.BitStringType) and (
+                field.type.parameterization is not None
+            ):
+                self._var_lengths[field.name] = field.type.parameterization
+        new_game = copy.deepcopy(game)
+        new_game.methods = [self._transform_method(m) for m in new_game.methods]
+        return new_game
+
+    def _transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        # Save / restore so siblings don't see each other's locals.
+        saved = dict(self._var_lengths)
+        try:
+            for param in method.signature.parameters:
+                if isinstance(param.type, frog_ast.BitStringType) and (
+                    param.type.parameterization is not None
+                ):
+                    self._var_lengths[param.name] = param.type.parameterization
+            for stmt in method.block.statements:
+                if (
+                    isinstance(
+                        stmt,
+                        (
+                            frog_ast.Assignment,
+                            frog_ast.Sample,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and isinstance(stmt.the_type, frog_ast.BitStringType)
+                    and stmt.the_type.parameterization is not None
+                ):
+                    self._var_lengths[stmt.var.name] = stmt.the_type.parameterization
+            return self.transform(method)
+        finally:
+            self._var_lengths = saved
+
+    @staticmethod
+    def _exprs_equal(a: frog_ast.Expression, b: frog_ast.Expression) -> bool:
+        """Structural equality of expressions; safe for compile-time
+        constants we care about (Variable, Integer, simple sums)."""
+        return a == b
+
+    @classmethod
+    def _add(
+        cls, a: frog_ast.Expression, b: frog_ast.Expression
+    ) -> frog_ast.Expression:
+        """Construct ``a + b`` as a BinaryOperation (no constant folding;
+        ``SymbolicComputation`` runs elsewhere in the pipeline)."""
+        return frog_ast.BinaryOperation(frog_ast.BinaryOperators.ADD, a, b)
+
+    def _operand_length(self, expr: frog_ast.Expression) -> frog_ast.Expression | None:
+        """Return the ``BitString`` length expression for *expr* if known,
+        else ``None``.  Currently handles ``Variable`` operands and
+        slices of known-length variables; recursion through nested
+        concats is intentional (a chain of concats has length equal to
+        the sum of its components, but we only need single-level
+        boundaries here)."""
+        if isinstance(expr, frog_ast.Variable):
+            return self._var_lengths.get(expr.name)
+        if isinstance(expr, frog_ast.Slice):
+            # length = end - start
+            return frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.SUBTRACT,
+                copy.deepcopy(expr.end),
+                copy.deepcopy(expr.start),
+            )
+        return None
+
+    def transform_slice(self, slc: frog_ast.Slice) -> frog_ast.Expression:
+        # Recurse into children first.
+        new_arr = self.transform(slc.the_array)
+        new_start = self.transform(slc.start)
+        new_end = self.transform(slc.end)
+
+        if not (
+            isinstance(new_arr, frog_ast.BinaryOperation)
+            and new_arr.operator is frog_ast.BinaryOperators.OR
+        ):
+            if (
+                new_arr is not slc.the_array
+                or new_start is not slc.start
+                or new_end is not slc.end
+            ):
+                return frog_ast.Slice(new_arr, new_start, new_end)
+            return slc
+
+        lhs = new_arr.left_expression
+        rhs = new_arr.right_expression
+        lhs_len = self._operand_length(lhs)
+        rhs_len = self._operand_length(rhs)
+
+        # Case 1: slice covers exactly the lhs (start == 0, end == |lhs|).
+        if (
+            lhs_len is not None
+            and isinstance(new_start, frog_ast.Integer)
+            and new_start.num == 0
+            and self._exprs_equal(new_end, lhs_len)
+        ):
+            return lhs
+
+        # Case 2: slice covers exactly the rhs (start == |lhs|, end == |lhs|+|rhs|).
+        if (
+            lhs_len is not None
+            and rhs_len is not None
+            and self._exprs_equal(new_start, lhs_len)
+            and self._exprs_equal(new_end, self._add(lhs_len, rhs_len))
+        ):
+            return rhs
+
+        # Near-miss: bounds are present and the slice argument is a concat,
+        # but at least one operand's length is not derivable from the
+        # surrounding type information, so we cannot match boundaries.
+        if self._ctx is not None and (lhs_len is None or rhs_len is None):
+            self._ctx.near_misses.append(
+                NearMiss(
+                    transform_name="Slice of Inline Concat",
+                    reason=(
+                        "Slice of inline concat not simplified: operand "
+                        "length not derivable from surrounding "
+                        "BitString<...> type information"
+                    ),
+                    location=None,
+                    suggestion=None,
+                    variable=None,
+                    method=None,
+                )
+            )
+
+        if (
+            new_arr is not slc.the_array
+            or new_start is not slc.start
+            or new_end is not slc.end
+        ):
+            return frog_ast.Slice(new_arr, new_start, new_end)
+        return slc
+
+
+class SliceOfInlineConcat(TransformPass):
+    name = "Slice of Inline Concat"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return SliceOfInlineConcatTransformer(
+            proof_let_types=ctx.proof_let_types,
+            ctx=ctx,
+        ).transform(game)
 
 
 class MergeUniformSamplesTransformer(BlockTransformer):

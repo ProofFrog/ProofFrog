@@ -122,6 +122,232 @@ class BranchEliminiationTransformer(BlockTransformer):
         return block
 
 
+class UniqExclusionBranchEliminationTransformer(BlockTransformer):
+    """Simplifies ``==`` / ``!=`` expressions whose result follows from
+    ``<-uniq[S]`` constraints.
+
+    For ``v <-uniq[S] T;`` in scope, every element of ``S`` is guaranteed
+    distinct from ``v`` by FrogLang's exclusion-sampling semantics.  When a
+    later expression contains ``v == s`` or ``s == v`` for some ``s`` that
+    is structurally equal to an element of ``S`` (or, by transitivity,
+    ``s <-uniq[S']`` with ``v`` lexically in ``S'``), the comparison is
+    statically ``false``; ``v != s`` is statically ``true``.  This transform
+    rewrites those subexpressions to the corresponding Boolean literal so
+    that downstream passes (``BooleanIdentity``, ``BranchElimination``)
+    fold the surrounding control flow.
+
+    Constraint scope is **block-local**: tracking does not cross method
+    boundaries or follow constraints into nested blocks (the transform
+    recurses into nested blocks via the standard ``BlockTransformer``
+    walk, but each block restarts its own constraint map).  A constraint
+    is invalidated as soon as either side (the sampled variable, or any
+    name appearing in its exclusion-set elements) is reassigned in the
+    same block.
+
+    Soundness: ``<-uniq[S]`` semantics guarantee ``v not in S`` at sample
+    time; if neither ``v`` nor any free variable of an ``S`` element has
+    been mutated since, the structural equality ``v == s`` is provably
+    ``false``.  This is the same reasoning that justifies
+    ``FreshInputRFToUniform`` (see TRANSFORMS.md).
+    """
+
+    @staticmethod
+    def _free_variable_names(expr: frog_ast.Expression) -> set[str]:
+        """Return the names of every ``Variable`` node free in *expr*.
+
+        Used to detect when a name appearing in an exclusion-set element
+        has been reassigned, which invalidates the constraint.
+        """
+        names: set[str] = set()
+
+        def _collect(node: frog_ast.ASTNode) -> bool:
+            if isinstance(node, frog_ast.Variable):
+                names.add(node.name)
+            return False
+
+        SearchVisitor(_collect).visit(expr)
+        return names
+
+    @classmethod
+    def _exclusion_elements(
+        cls, unique_set: frog_ast.Expression
+    ) -> tuple[list[frog_ast.Expression], set[str]] | None:
+        """Extract the list of exclusion elements from a ``<-uniq[S]`` set.
+
+        Currently handles literal sets ``{a, b, ...}``.  Returns the list
+        of elements together with the union of their free-variable names
+        (used for invalidation tracking).  Returns ``None`` if the set is
+        not a literal.
+        """
+        if not isinstance(unique_set, frog_ast.Set):
+            return None
+        all_free: set[str] = set()
+        for el in unique_set.elements:
+            all_free |= cls._free_variable_names(el)
+        return list(unique_set.elements), all_free
+
+    @staticmethod
+    def _written_var_names(stmt: frog_ast.Statement) -> set[str]:
+        """Return the set of variable names written by *stmt*.
+
+        Used to invalidate constraints when a tracked variable (or a
+        free variable of its exclusion-set elements) is reassigned.
+        """
+        if isinstance(
+            stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ):
+            if isinstance(stmt.var, frog_ast.Variable):
+                return {stmt.var.name}
+        return set()
+
+    def _try_simplify_eq(
+        self,
+        operator: frog_ast.BinaryOperators,
+        left: frog_ast.Expression,
+        right: frog_ast.Expression,
+        constraints: dict[str, list[frog_ast.Expression]],
+    ) -> frog_ast.Expression | None:
+        """Return a Boolean literal if (left op right) follows from a
+        ``<-uniq`` constraint; ``None`` otherwise.
+        """
+        if operator not in (
+            frog_ast.BinaryOperators.EQUALS,
+            frog_ast.BinaryOperators.NOTEQUALS,
+        ):
+            return None
+
+        # Try left as the sampled var, right as a candidate exclusion element
+        # (and symmetric).
+        for sampled, candidate in ((left, right), (right, left)):
+            if not isinstance(sampled, frog_ast.Variable):
+                continue
+            elems = constraints.get(sampled.name)
+            if elems is None:
+                continue
+            for el in elems:
+                if el == candidate:
+                    if operator == frog_ast.BinaryOperators.EQUALS:
+                        return frog_ast.Boolean(False)
+                    return frog_ast.Boolean(True)
+        return None
+
+    def _rewrite_expr(
+        self,
+        expr: frog_ast.Expression,
+        constraints: dict[str, list[frog_ast.Expression]],
+    ) -> frog_ast.Expression:
+        """Recursively rewrite ``==``/``!=`` subexpressions whose result is
+        determined by a ``<-uniq`` constraint, leaving everything else
+        unchanged.  Constraints do NOT propagate into nested blocks here
+        (those are handled by the BlockTransformer recursion).
+        """
+        if isinstance(expr, frog_ast.BinaryOperation):
+            new_left = self._rewrite_expr(expr.left_expression, constraints)
+            new_right = self._rewrite_expr(expr.right_expression, constraints)
+            simplified = self._try_simplify_eq(
+                expr.operator, new_left, new_right, constraints
+            )
+            if simplified is not None:
+                return simplified
+            if (
+                new_left is not expr.left_expression
+                or new_right is not expr.right_expression
+            ):
+                return frog_ast.BinaryOperation(expr.operator, new_left, new_right)
+            return expr
+        if isinstance(expr, frog_ast.UnaryOperation):
+            new_inner = self._rewrite_expr(expr.expression, constraints)
+            if new_inner is not expr.expression:
+                return frog_ast.UnaryOperation(expr.operator, new_inner)
+            return expr
+        if isinstance(expr, frog_ast.Tuple):
+            new_values = [self._rewrite_expr(v, constraints) for v in expr.values]
+            if any(nv is not ov for nv, ov in zip(new_values, expr.values)):
+                return frog_ast.Tuple(new_values)
+            return expr
+        if isinstance(expr, frog_ast.FuncCall):
+            new_args = [self._rewrite_expr(a, constraints) for a in expr.args]
+            if any(na is not oa for na, oa in zip(new_args, expr.args)):
+                return frog_ast.FuncCall(expr.func, new_args)
+            return expr
+        if isinstance(expr, frog_ast.ArrayAccess):
+            new_arr = self._rewrite_expr(expr.the_array, constraints)
+            new_idx = self._rewrite_expr(expr.index, constraints)
+            if new_arr is not expr.the_array or new_idx is not expr.index:
+                return frog_ast.ArrayAccess(new_arr, new_idx)
+            return expr
+        if isinstance(expr, frog_ast.Slice):
+            new_arr = self._rewrite_expr(expr.the_array, constraints)
+            new_start = self._rewrite_expr(expr.start, constraints)
+            new_end = self._rewrite_expr(expr.end, constraints)
+            if (
+                new_arr is not expr.the_array
+                or new_start is not expr.start
+                or new_end is not expr.end
+            ):
+                return frog_ast.Slice(new_arr, new_start, new_end)
+            return expr
+        return expr
+
+    def _transform_block_wrapper(
+        self,
+        block: frog_ast.Block,
+    ) -> frog_ast.Block:
+        # var_name -> exclusion elements (list of Expressions)
+        constraints: dict[str, list[frog_ast.Expression]] = {}
+        # var_name -> set of free-variable names whose mutation invalidates
+        # the constraint
+        invalidators: dict[str, set[str]] = {}
+        new_stmts: list[frog_ast.Statement] = []
+        changed = False
+        for stmt in block.statements:
+            written = self._written_var_names(stmt)
+            # Invalidate any constraint whose sampled var or free-variable
+            # of an exclusion element was reassigned BEFORE this statement
+            # rewrites its expressions (so a self-shadowing reassignment
+            # invalidates first, then we may add a new constraint).
+            if written:
+                to_drop = []
+                for var_name, free_set in invalidators.items():
+                    if var_name in written or (free_set & written):
+                        to_drop.append(var_name)
+                for v in to_drop:
+                    constraints.pop(v, None)
+                    invalidators.pop(v, None)
+
+            if isinstance(stmt, frog_ast.IfStatement):
+                new_conditions = [
+                    self._rewrite_expr(c, constraints) for c in stmt.conditions
+                ]
+                if new_conditions != stmt.conditions:
+                    changed = True
+                    new_stmts.append(frog_ast.IfStatement(new_conditions, stmt.blocks))
+                else:
+                    new_stmts.append(stmt)
+            elif isinstance(stmt, frog_ast.UniqueSample) and isinstance(
+                stmt.var, frog_ast.Variable
+            ):
+                extracted = self._exclusion_elements(stmt.unique_set)
+                if extracted is not None:
+                    elems, free_vars = extracted
+                    if elems:
+                        constraints[stmt.var.name] = elems
+                        invalidators[stmt.var.name] = free_vars
+                new_stmts.append(stmt)
+            else:
+                # Apply the rewrite to other statement-level expressions, e.g.,
+                # Assignment RHS, Return, Sample sampled_from, FuncCall args.
+                # Done conservatively to avoid touching non-condition contexts
+                # in this pass; ``BranchElimination`` only consumes conditions.
+                # For simplicity (and to keep the soundness story narrow) we
+                # leave non-condition expressions untouched here.
+                new_stmts.append(stmt)
+
+        if not changed:
+            return block
+        return frog_ast.Block(new_stmts)
+
+
 def _normalize_block_locals(block: frog_ast.Block) -> frog_ast.Block:
     """Rename locally-declared variables in *block* to v1, v2, ... by
     declaration order.  Used for alpha-equivalent comparison of branches."""
@@ -1449,6 +1675,13 @@ class BranchElimination(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return BranchEliminiationTransformer(ctx).transform(game)
+
+
+class UniqExclusionBranchElimination(TransformPass):
+    name = "Uniq Exclusion Branch Elimination"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return UniqExclusionBranchEliminationTransformer().transform(game)
 
 
 class ElseUnwrap(TransformPass):

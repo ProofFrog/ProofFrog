@@ -469,6 +469,10 @@ class InlineMultiUsePureExpressionTransformer(BlockTransformer):
         return F(a || b, a || b);
     """
 
+    def __init__(self, function_var_names: set[str] | None = None) -> None:
+        super().__init__()
+        self._function_var_names = function_var_names or set()
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
             if not (
@@ -483,14 +487,24 @@ class InlineMultiUsePureExpressionTransformer(BlockTransformer):
             var_name = statement.var.name
             expr = statement.value
 
-            # Skip ALL function calls (even deterministic ones): multi-use
-            # inlining duplicates the call at every use site, changing
-            # the canonical form.
+            # Skip function calls in general — multi-use inlining
+            # duplicates the call at every use site, changing the
+            # canonical form.  EXCEPTION: calls to a sampled
+            # ``Function<D, R>`` proof-let are deterministic in
+            # FrogLang (same input → same output) AND their canonical
+            # form should match the inline-form of games that don't
+            # extract the call to a local; allow inlining for those.
             if (
                 SearchVisitor(lambda n: isinstance(n, frog_ast.FuncCall)).visit(expr)
                 is not None
             ):
-                continue
+                if not (
+                    self._function_var_names
+                    and isinstance(expr, frog_ast.FuncCall)
+                    and isinstance(expr.func, frog_ast.Variable)
+                    and expr.func.name in self._function_var_names
+                ):
+                    continue
 
             # Skip expressions containing array access or slicing.
             # Inlining these spreads references to the indexed variable,
@@ -991,6 +1005,270 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
         return block
 
 
+class InlineLocalTupleLiteralTransformer(BlockTransformer):
+    """Inline a local typed tuple-literal binding when the variable is used
+    only at constant indices and not reassigned, substituting each ``v[k]``
+    with the corresponding tuple element.
+
+    Bridges a gap between ``ExpandTupleTransformer`` (which fires
+    block-locally and can leave outer-scope ``v[i]`` accesses unrewritten
+    when ``v`` was originally declared in an if-branch that
+    ``BranchElimination`` later collapsed) and
+    ``InlineSingleUseVariableTransformer`` (which skips Tuple RHS to avoid
+    breaking the tuple-expansion pipeline).
+
+    Preconditions for firing on ``[T0,...,Tn-1] v = [e0,...,en-1];``:
+
+    1. No bare reference to ``v`` in the remaining block (every reference
+       is the ``the_array`` child of an ``ArrayAccess`` node).
+    2. Every ``v[k]`` access has ``k`` a constant integer in ``[0, n)``.
+    3. ``v`` is not reassigned in the remaining block, and no free
+       variable of any ``e_i`` is reassigned anywhere later.
+    4. For each index ``i``: if ``v[i]`` is used 2+ times, ``e_i`` must
+       be deterministic (no non-deterministic calls); if ``v[i]`` is
+       never used, ``e_i`` must also be deterministic (so dropping it is
+       safe). When ``v[i]`` is used exactly once, ``e_i`` may have any
+       side effects (single substitution preserves the evaluation count).
+    """
+
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace | None = None,
+        proof_let_types: NameTypeMap | None = None,
+        ctx: PipelineContext | None = None,
+    ) -> None:
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
+        self._proof_let_types = proof_let_types
+        self.ctx = ctx
+
+    @staticmethod
+    def _classify_uses(
+        var_name: str, block: frog_ast.Block
+    ) -> tuple[bool, bool, dict[int, int]]:
+        """Walk ``block`` and classify references to ``var_name``.
+
+        Returns ``(has_bare_use, has_non_constant_index, index_counts)``
+        where ``index_counts[k]`` is the number of ``var_name[k]`` accesses
+        for constant integer ``k``.
+        """
+
+        class _Classifier(Visitor[None]):
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.total_var_refs = 0
+                self.array_access_refs = 0
+                self.has_non_constant = False
+                self.counts: dict[int, int] = {}
+
+            def result(self) -> None:
+                pass
+
+            def visit_variable(self, var: frog_ast.Variable) -> None:
+                if var.name == self.name:
+                    self.total_var_refs += 1
+
+            def visit_array_access(self, aa: frog_ast.ArrayAccess) -> None:
+                if (
+                    isinstance(aa.the_array, frog_ast.Variable)
+                    and aa.the_array.name == self.name
+                ):
+                    self.array_access_refs += 1
+                    if isinstance(aa.index, frog_ast.Integer):
+                        self.counts[aa.index.num] = self.counts.get(aa.index.num, 0) + 1
+                    else:
+                        self.has_non_constant = True
+
+        visitor = _Classifier(var_name)
+        visitor.visit(block)
+        has_bare = visitor.total_var_refs > visitor.array_access_refs
+        return has_bare, visitor.has_non_constant, visitor.counts
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if not (
+                isinstance(statement, frog_ast.Assignment)
+                and statement.the_type is not None
+                and isinstance(statement.the_type, frog_ast.ProductType)
+                and isinstance(statement.var, frog_ast.Variable)
+                and isinstance(statement.value, frog_ast.Tuple)
+            ):
+                continue
+
+            tuple_values = statement.value.values
+            unfolded_types = statement.the_type.types
+            if len(tuple_values) != len(unfolded_types):
+                continue
+
+            var_name = statement.var.name
+            remaining = frog_ast.Block(
+                copy.deepcopy(list(block.statements[index + 1 :]))
+            )
+
+            has_bare, has_non_const, counts = self._classify_uses(var_name, remaining)
+            # Refuse to fire when the variable has no uses in this block:
+            # it may be referenced from an enclosing scope (e.g. when this
+            # block is the body of an if-branch and the use is in the
+            # surrounding method body). Removing the declaration here
+            # would leave those outer-scope references dangling.
+            if not counts and not has_bare and not has_non_const:
+                continue
+            if has_bare:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Local Tuple Literal",
+                            reason=(
+                                f"Cannot inline '{var_name}': has a bare use "
+                                f"(not as v[k])"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"Restructure so '{var_name}' is only "
+                                f"referenced as '{var_name}[k]'"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
+                continue
+            if has_non_const:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Local Tuple Literal",
+                            reason=(
+                                f"Cannot inline '{var_name}': accessed at a "
+                                f"non-constant index"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"Constant-fold the index expression for "
+                                f"'{var_name}[...]' first"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
+                continue
+            if counts and (
+                max(counts.keys()) >= len(tuple_values) or min(counts.keys()) < 0
+            ):
+                continue
+
+            def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(
+                        node,
+                        (
+                            frog_ast.Sample,
+                            frog_ast.Assignment,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
+                    and isinstance(node.var, frog_ast.Variable)
+                    and node.var.name == name
+                )
+
+            # v itself must not be reassigned later.
+            if (
+                SearchVisitor(functools.partial(is_written_to, var_name)).visit(
+                    remaining
+                )
+                is not None
+            ):
+                continue
+
+            # No free variable of any e_i may be reassigned later.
+            free_var_reassigned = False
+            for e_i in tuple_values:
+                free_vars = VariableCollectionVisitor().visit(copy.deepcopy(e_i))
+                if any(
+                    SearchVisitor(functools.partial(is_written_to, fv.name)).visit(
+                        remaining
+                    )
+                    is not None
+                    for fv in free_vars
+                ):
+                    free_var_reassigned = True
+                    break
+            if free_var_reassigned:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Local Tuple Literal",
+                            reason=(
+                                f"Cannot inline '{var_name}': a free variable "
+                                f"of some tuple element is reassigned later"
+                            ),
+                            location=statement.origin,
+                            suggestion=None,
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
+                continue
+
+            # Per-element purity check: dropped or duplicated elements must
+            # be free of non-deterministic calls.
+            purity_blocked = False
+            for i, e_i in enumerate(tuple_values):
+                count_i = counts.get(i, 0)
+                if count_i != 1 and has_nondeterministic_call(
+                    e_i, self._proof_namespace, self._proof_let_types
+                ):
+                    purity_blocked = True
+                    if self.ctx is not None:
+                        self.ctx.near_misses.append(
+                            NearMiss(
+                                transform_name="Inline Local Tuple Literal",
+                                reason=(
+                                    f"Cannot inline '{var_name}': element "
+                                    f"{i} has a non-deterministic call but "
+                                    f"is used {count_i} time(s) "
+                                    f"(needs exactly 1)"
+                                ),
+                                location=statement.origin,
+                                suggestion=(
+                                    "Hoist the non-deterministic call to "
+                                    "its own deterministic local"
+                                ),
+                                variable=var_name,
+                                method=None,
+                            )
+                        )
+                    break
+            if purity_blocked:
+                continue
+
+            # Substitute every v[k] occurrence with a deep copy of e_k.
+            def matches_indexed_use(target_name: str, node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(node, frog_ast.ArrayAccess)
+                    and isinstance(node.the_array, frog_ast.Variable)
+                    and node.the_array.name == target_name
+                    and isinstance(node.index, frog_ast.Integer)
+                )
+
+            while True:
+                aa = SearchVisitor(
+                    functools.partial(matches_indexed_use, var_name)
+                ).visit(remaining)
+                if aa is None:
+                    break
+                k = aa.index.num
+                remaining = ReplaceTransformer(
+                    aa, copy.deepcopy(tuple_values[k])
+                ).transform(remaining)
+
+            return self.transform_block(
+                frog_ast.Block(
+                    list(block.statements[:index]) + list(remaining.statements)
+                )
+            )
+
+        return block
+
+
 # ---------------------------------------------------------------------------
 # TransformPass wrappers
 # ---------------------------------------------------------------------------
@@ -1034,6 +1312,17 @@ class ForwardExpressionAlias(TransformPass):
         return ForwardExpressionAliasTransformer(
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
+        ).transform(game)
+
+
+class InlineLocalTupleLiteral(TransformPass):
+    name = "Inline Local Tuple Literal"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return InlineLocalTupleLiteralTransformer(
+            proof_namespace=ctx.proof_namespace,
+            proof_let_types=ctx.proof_let_types,
+            ctx=ctx,
         ).transform(game)
 
 
@@ -1088,10 +1377,59 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
             return gf
         return frog_ast.GenericFor(gf.var_type, gf.var_name, new_over, new_block)
 
+    @staticmethod
+    def _has_full_reconstruction(
+        var_name: str, base_type: frog_ast.ProductType, block: frog_ast.Block
+    ) -> bool:
+        """Return True iff ``block`` contains a tuple literal whose values
+        are exactly ``[var_name[0], var_name[1], ..., var_name[n-1]]`` in
+        order, where ``n = len(base_type.types)``.
+
+        Such a literal would be folded back to ``var_name`` by
+        ``SimplifyTuple``; CSE'ing any of its index accesses would block
+        that fold.
+        """
+        n = len(base_type.types)
+
+        def is_full_recon(node: frog_ast.ASTNode) -> bool:
+            if not isinstance(node, frog_ast.Tuple):
+                return False
+            if len(node.values) != n:
+                return False
+            for i, val in enumerate(node.values):
+                if not (
+                    isinstance(val, frog_ast.ArrayAccess)
+                    and isinstance(val.the_array, frog_ast.Variable)
+                    and val.the_array.name == var_name
+                    and isinstance(val.index, frog_ast.Integer)
+                    and val.index.num == i
+                ):
+                    return False
+            return True
+
+        return SearchVisitor(is_full_recon).visit(block) is not None
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        """Expose ProductType method parameters for tuple-extraction.
+
+        Symmetrises games whose source-level code already extracts
+        ``v = ct0[1]`` against games whose source uses the param access
+        ``ct0[1]`` inline.  Block-local declarations still shadow params
+        on name collision.
+        """
+        saved = dict(self._scope_types)
+        try:
+            for param in method.signature.parameters:
+                if isinstance(param.type, frog_ast.ProductType):
+                    self._scope_types[param.name] = param.type
+            new_block = self.transform(method.block)
+        finally:
+            self._scope_types = saved
+        if new_block is method.block:
+            return method
+        return frog_ast.Method(method.signature, new_block)
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        # Build map: var_name -> declared type. Start with scope extras
-        # (enclosing loop binders), then overlay block-local assignments.
-        # Block-locals shadow scope on name collision.
         var_types: dict[str, frog_ast.Type] = dict(self._scope_types)
         # Sentinel -1 = scope-external (insert at top of this block).
         var_def_idx: dict[str, int] = {name: -1 for name in var_types}
@@ -1156,6 +1494,14 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
                 )
                 is not None
             ):
+                continue
+
+            # Don't CSE when the variable's full tuple-literal
+            # reconstruction ``[v[0], v[1], ..., v[n-1]]`` appears
+            # somewhere in the block: extracting one index would block
+            # ``SimplifyTuple``'s ``[v[0], v[1], ...] -> v`` fold-back,
+            # leaving the canonical form less reduced.
+            if self._has_full_reconstruction(var_name, base_type, block):
                 continue
 
             elem_type = base_type.types[idx_val]
@@ -1345,7 +1691,14 @@ class InlineMultiUsePureExpression(TransformPass):
     name = "Inline Multi-Use Pure Expressions"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return InlineMultiUsePureExpressionTransformer().transform(game)
+        function_var_names: set[str] = set()
+        if ctx.proof_let_types is not None:
+            for pair in ctx.proof_let_types.type_map:
+                if isinstance(pair.type, frog_ast.FunctionType):
+                    function_var_names.add(pair.name)
+        return InlineMultiUsePureExpressionTransformer(
+            function_var_names=function_var_names
+        ).transform(game)
 
 
 class RedundantFieldCopy(TransformPass):
@@ -2813,9 +3166,13 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         self,
         proof_namespace: frog_ast.Namespace,
         ctx: PipelineContext | None = None,
+        function_var_names: set[str] | None = None,
+        proof_let_types: NameTypeMap | None = None,
     ) -> None:
         self.proof_namespace = proof_namespace
         self._ctx = ctx
+        self._function_var_names = function_var_names or set()
+        self._proof_let_types = proof_let_types
         self.counter = 0
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
@@ -2827,7 +3184,9 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         # BlockTransformer recurses into them as their own blocks.
         all_calls: list[frog_ast.FuncCall] = []
         for statement in block.statements:
-            collector = _DeterministicCallCollector(self.proof_namespace)
+            collector = _DeterministicCallCollector(
+                self.proof_namespace, self._function_var_names
+            )
             if isinstance(statement, frog_ast.IfStatement):
                 for condition in statement.conditions:
                     collector.visit(condition)
@@ -2868,8 +3227,20 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         # Look up the return type for the new assignment
         representative = dup_group[0]
         m = _lookup_primitive_method(representative.func, self.proof_namespace)
-        assert m is not None
-        return_type = copy.deepcopy(m.return_type)
+        if m is not None:
+            return_type = copy.deepcopy(m.return_type)
+        elif (
+            isinstance(representative.func, frog_ast.Variable)
+            and representative.func.name in self._function_var_names
+            and self._proof_let_types is not None
+        ):
+            ftype = self._proof_let_types.get(representative.func.name)
+            assert isinstance(ftype, frog_ast.FunctionType)
+            return_type = copy.deepcopy(ftype.range_type)
+        else:
+            # Should not happen — collector only emits primitive-deterministic
+            # or function-var calls.
+            return block
 
         # Advance counter past any existing __determ_N__ names in the block
         # to avoid colliding with names created by earlier pipeline iterations.
@@ -2900,7 +3271,9 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         # statement or an if-condition) and insert before it.
         insert_index: int | None = None
         for index, statement in enumerate(block.statements):
-            collector = _DeterministicCallCollector(self.proof_namespace)
+            collector = _DeterministicCallCollector(
+                self.proof_namespace, self._function_var_names
+            )
             if isinstance(statement, frog_ast.IfStatement):
                 for condition in statement.conditions:
                     collector.visit(condition)
@@ -2953,7 +3326,9 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         first_idx: int | None = None
         last_idx: int | None = None
         for idx, stmt in enumerate(block.statements):
-            collector = _DeterministicCallCollector(self.proof_namespace)
+            collector = _DeterministicCallCollector(
+                self.proof_namespace, self._function_var_names
+            )
             if isinstance(stmt, frog_ast.IfStatement):
                 for cond in stmt.conditions:
                     collector.visit(cond)
@@ -3350,10 +3725,12 @@ class CrossMethodFieldAliasTransformer:
         proof_namespace: frog_ast.Namespace,
         ctx: PipelineContext | None = None,
         proof_let_types: NameTypeMap | None = None,
+        function_var_names: set[str] | None = None,
     ) -> None:
         self.proof_namespace = proof_namespace
         self._ctx = ctx
         self._proof_let_types = proof_let_types
+        self._function_var_names = function_var_names or set()
 
     def transform(self, game: frog_ast.Game) -> frog_ast.Game:
         field_names = {f.name for f in game.fields}
@@ -3498,7 +3875,9 @@ class CrossMethodFieldAliasTransformer:
             if midx == alias_midx:
                 continue
             target_aliases = method_aliases[midx]
-            collector = _DeterministicCallCollector(self.proof_namespace)
+            collector = _DeterministicCallCollector(
+                self.proof_namespace, self._function_var_names
+            )
             collector.visit(method.block)
             target_call = next(
                 (
@@ -3513,7 +3892,9 @@ class CrossMethodFieldAliasTransformer:
                 continue
             # Found a match — replace and return
             new_game = copy.deepcopy(game)
-            new_collector = _DeterministicCallCollector(self.proof_namespace)
+            new_collector = _DeterministicCallCollector(
+                self.proof_namespace, self._function_var_names
+            )
             new_collector.visit(new_game.methods[midx].block)
             for new_call in new_collector.result():
                 if (
@@ -3919,10 +4300,16 @@ class CrossMethodFieldAlias(TransformPass):
     name = "Cross-Method Field Alias"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        function_var_names: set[str] = set()
+        if ctx.proof_let_types is not None:
+            for pair in ctx.proof_let_types.type_map:
+                if isinstance(pair.type, frog_ast.FunctionType):
+                    function_var_names.add(pair.name)
         return CrossMethodFieldAliasTransformer(
             proof_namespace=ctx.proof_namespace,
             ctx=ctx,
             proof_let_types=ctx.proof_let_types,
+            function_var_names=function_var_names,
         ).transform(game)
 
 

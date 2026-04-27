@@ -8,7 +8,12 @@ from __future__ import annotations
 
 from ._base import TransformPass
 from .symbolic import SymbolicComputation
-from .sampling import SimplifySplice, MergeUniformSamples, MergeProductSamples
+from .sampling import (
+    SimplifySplice,
+    SliceOfInlineConcat,
+    MergeUniformSamples,
+    MergeProductSamples,
+)
 from .sampling import (
     SplitUniformSamples,
     SingleCallFieldToLocal,
@@ -41,6 +46,7 @@ from .inlining import (
     HoistGroupExpToInitialize,
     RefactorGroupElemFieldExp,
     ForwardExpressionAlias,
+    InlineLocalTupleLiteral,
     HoistFieldPureAlias,
     ExtractRepeatedTupleAccess,
     InlineMultiUsePureExpression,
@@ -80,6 +86,7 @@ from .control_flow import (
     IfFalseReturnToConjunction,
     FoldEquivalentReturnBranch,
     BranchElimination,
+    UniqExclusionBranchElimination,
     ElseUnwrap,
     SimplifyReturn,
     SimplifyIf,
@@ -95,6 +102,7 @@ from .tuples import (
 from .standardization import (
     VariableStandardize,
     StandardizeFieldNames,
+    FieldLexMinByRHS,
     BubbleSortFieldAssignments,
     StabilizeIndependentStatements,
 )
@@ -104,6 +112,7 @@ CORE_PIPELINE: list[TransformPass] = [
     CounterGuardedFieldToLocal(),
     SymbolicComputation(),
     SimplifySplice(),
+    SliceOfInlineConcat(),
     MergeUniformSamples(),
     MergeProductSamples(),
     SplitUniformSamples(),
@@ -137,7 +146,9 @@ CORE_PIPELINE: list[TransformPass] = [
     SplitOpaqueTupleField(),
     IfConditionAliasSubstitution(),
     RedundantConditionalReturn(),
+    UniqExclusionBranchElimination(),
     BranchElimination(),
+    InlineLocalTupleLiteral(),
     ElseUnwrap(),
     InlineSingleUseField(),
     LocalizeInitOnlyFieldSample(),
@@ -183,4 +194,10 @@ STANDARDIZATION_PIPELINE: list[TransformPass] = [
     BubbleSortFieldAssignments(),
     StabilizeIndependentStatements(),
     VariableStandardize(),
+    # Run Phase-3 lex-min with the FINAL local-variable names visible
+    # (RHS sort keys depend on names), then re-run statement reordering
+    # so field-assignment statements settle on the post-Phase-3 names.
+    FieldLexMinByRHS(),
+    BubbleSortFieldAssignments(),
+    StabilizeIndependentStatements(),
 ]

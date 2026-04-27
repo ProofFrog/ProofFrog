@@ -198,6 +198,16 @@ STANDARDIZATION_PIPELINE: list[TransformPass] = [
     # (RHS sort keys depend on names), then re-run statement reordering
     # so field-assignment statements settle on the post-Phase-3 names.
     FieldLexMinByRHS(),
+    # FieldLexMinByRHS may have swapped field numbers, which can leave
+    # commutative operators (==, !=) with operands no longer in lex-min
+    # order; re-normalize so operand ordering matches the post-swap names.
+    NormalizeCommutativeChains(),
     BubbleSortFieldAssignments(),
     StabilizeIndependentStatements(),
+    # Final VariableStandardize: StabilizeIndependentStatements may have
+    # reordered typed-local declarations after the previous
+    # VariableStandardize, leaving locals out of v1, v2, ... order.
+    # Re-number locals so canonical forms with the same final declaration
+    # order use the same names.
+    VariableStandardize(),
 ]

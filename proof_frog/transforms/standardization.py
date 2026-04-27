@@ -311,12 +311,25 @@ class FieldLexMinByRHS(TransformPass):
     """Run only Phase-3 of field standardization (lex-min within type
     groups by Initialize RHS).  Used as a post-VariableStandardize pass
     so the RHS sort keys see the final local-variable names rather than
-    the pre-rename ones."""
+    the pre-rename ones.
+
+    Iterates to a fixed point: a rename in one type group can change
+    the sort key (via referenced field names) used by another group, so
+    a single pass may not converge.
+    """
 
     name = "Field Lex-Min By RHS"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return _phase3_lex_min_within_type(game)
+        for _ in range(8):  # bounded fixed-point; 8 iterations is ample
+            new_game = _phase3_lex_min_within_type(game)
+            if new_game is game:
+                return game
+            # Compare via str() since AST objects may not implement __eq__.
+            if str(new_game) == str(game):
+                return new_game
+            game = new_game
+        return game
 
 
 class BubbleSortFieldAssignments(TransformPass):

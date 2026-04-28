@@ -54,6 +54,7 @@ Full documentation is available at [prooffrog.github.io](https://prooffrog.githu
 - [CLI reference](https://prooffrog.github.io/manual/cli-reference/) — command-line usage
 - [Web editor](https://prooffrog.github.io/manual/web-editor/) — browser-based editing and proof checking
 - Information about [editor plugins](https://prooffrog.github.io/manual/editor-plugins/) and [proving with AI assistants](https://prooffrog.github.io/researchers/gen-ai/)
+- [LaTeX export](docs/latex-export.md) — render FrogLang files to LaTeX (cryptocode pseudocode) via `python -m proof_frog export-latex`
 
 ## License
 

@@ -59,7 +59,7 @@ def export_file(path: str, backend_name: str = "cryptocode") -> str:
         game_file = frog_parser.parse_game_file(path)
         chunks = []
         for game in game_file.games:
-            chunks.append(renderer.render_game(game))
+            chunks.append(renderer.render_game(game, experiment_name=game_file.name))
         body = "\n\n".join(chunks)
         return _document(backend, macros, body)
     if suffix == ".proof":

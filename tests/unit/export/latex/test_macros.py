@@ -17,7 +17,7 @@ def test_preamble_uses_providecommand_and_mathsf() -> None:
     r = MacroRegistry()
     r.register_algorithm("KeyGen")
     pre = r.preamble()
-    assert r"\providecommand{\KeyGen}{\mathsf{KeyGen}}" in pre
+    assert r"\providecommand{\KeyGen}{\ensuremath{\mathsf{KeyGen}}}" in pre
 
 
 def test_collision_with_latex_builtin_is_suffixed() -> None:

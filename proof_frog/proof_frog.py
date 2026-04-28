@@ -266,6 +266,36 @@ def describe(file: str, json_output: bool) -> None:
         sys.exit(1)
 
 
+@cli.command(name="export-latex")
+@click.argument("file")
+@click.option(
+    "--output",
+    "-o",
+    default=None,
+    help="Output path for the .tex file (default: alongside the input, .tex extension).",
+)
+@click.option(
+    "--backend",
+    default="cryptocode",
+    type=click.Choice(["cryptocode"]),
+    help="Pseudocode package backend (only 'cryptocode' in v1).",
+)
+def export_latex(file: str, output: str | None, backend: str) -> None:
+    """Export a FrogLang file (.primitive, .scheme, .game, .proof) to LaTeX."""
+    # pylint: disable=import-outside-toplevel
+    from .export.latex.exporter import export_file
+
+    try:
+        source = export_file(file, backend_name=backend)
+    except (frog_parser.ParseError, FileNotFoundError, ValueError) as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
+
+    out_path = output if output is not None else str(Path(file).with_suffix(".tex"))
+    Path(out_path).write_text(source, encoding="utf-8")
+    click.echo(f"Wrote {out_path}")
+
+
 @cli.command("step-detail")
 @click.argument("file")
 @click.argument("step_index", type=click.INT)

@@ -68,7 +68,7 @@ class ExprRenderer:
         if isinstance(expr, frog_ast.Integer):
             return str(expr.num)
         if isinstance(expr, frog_ast.Boolean):
-            return r"\top" if expr.bool else r"\bot"
+            return r"\mathsf{true}" if expr.bool else r"\mathsf{false}"
         if isinstance(expr, frog_ast.NoneExpression):
             return r"\bot"
         if isinstance(expr, frog_ast.BinaryNum):
@@ -160,4 +160,9 @@ class ExprRenderer:
             head = self.macros.register_algorithm(obj.name)
         else:
             head = self._render(obj)
-        return f"{head}.{expr.name}"
+        tail = (
+            self.macros.register_algorithm(expr.name)
+            if _looks_like_algorithm_name(expr.name)
+            else expr.name
+        )
+        return f"{head}.{tail}"

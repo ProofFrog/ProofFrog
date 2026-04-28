@@ -11,3 +11,5 @@ def test_render_prg_security_game() -> None:
     assert r"\Real" in out
     assert r"\Random" in out
     assert r"\Query" in out
+    assert r"\Experiment{\PRGSecurity}{\Real}{\G}" in out
+    assert r"\Experiment{\PRGSecurity}{\Random}{\G}" in out

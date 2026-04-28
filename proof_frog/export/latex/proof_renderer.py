@@ -98,12 +98,14 @@ def _step_figure(
     if game_obj is None:
         body: ir.VStack | ir.ProcedureBlock = ir.ProcedureBlock(
             title=f"G_{{{index}}}",
-            lines=[ir.Comment(text=str(step).rstrip(";"))],
+            lines=[ir.Comment(text=_latex_escape(str(step).rstrip(";")))],
         )
     else:
         method_blocks = [
             renderer._method_block(  # pylint: disable=protected-access
-                m, renderer.macros.register_algorithm(game_obj.name)
+                m,
+                renderer.macros.register_algorithm(game_obj.name),
+                qualify=False,
             )
             for m in game_obj.methods
         ]
@@ -111,6 +113,24 @@ def _step_figure(
     return backend.render_figure(
         ir.Figure(body=body, caption=f"Game $G_{{{index}}}$", label=f"fig:G{index}")
     )
+
+
+_LATEX_ESC = {
+    "\\": r"\textbackslash{}",
+    "&": r"\&",
+    "%": r"\%",
+    "$": r"\$",
+    "#": r"\#",
+    "_": r"\_",
+    "{": r"\{",
+    "}": r"\}",
+    "~": r"\textasciitilde{}",
+    "^": r"\textasciicircum{}",
+}
+
+
+def _latex_escape(s: str) -> str:
+    return "".join(_LATEX_ESC.get(c, c) for c in s)
 
 
 def _game_name(g: frog_ast.Expression) -> str:

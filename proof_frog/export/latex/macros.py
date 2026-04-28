@@ -41,15 +41,39 @@ class MacroRegistry:
         Returns the LaTeX token (e.g. ``\\Enc``) to use in output.
         """
         token = self._safe_token(name)
-        body = rf"\mathsf{{{name}}}"
+        body = rf"\ensuremath{{{self._mathsf_body(name)}}}"
+        self._entries[name] = (token, body)
+        return "\\" + token
+
+    def register_security_notion(self, name: str) -> str:
+        """Register a security-notion name. Underscores render as hyphens.
+
+        E.g. ``LEAK_BIND_K_CT_ROM`` renders ``\\mathsf{LEAK\\text{-}BIND\\text{-}K\\text{-}CT\\text{-}ROM}``
+        rather than the algorithm-style first-underscore-as-subscript.
+        """
+        token = self._safe_token(name)
+        body = rf"\ensuremath{{\mathsf{{{name.replace('_', r'\text{-}')}}}}}"
         self._entries[name] = (token, body)
         return "\\" + token
 
     @staticmethod
+    def _mathsf_body(name: str) -> str:
+        if "_" not in name:
+            return rf"\mathsf{{{name}}}"
+        head, _, tail = name.partition("_")
+        return rf"\mathsf{{{head}}}_{{\mathsf{{{tail.replace('_', '\\_')}}}}}"
+
+    @staticmethod
     def _safe_token(name: str) -> str:
-        if name in _LATEX_BUILTINS:
-            return "Frog" + name
-        return name
+        # LaTeX macro names may contain only letters. Strip non-letters
+        # (e.g. ``G_RO`` -> ``GRO``); the displayed body still shows the
+        # original name verbatim.
+        token = "".join(ch for ch in name if ch.isalpha())
+        if not token:
+            token = "Frog"
+        if token in _LATEX_BUILTINS:
+            token = "Frog" + token
+        return token
 
     def preamble(self) -> str:
         lines = []

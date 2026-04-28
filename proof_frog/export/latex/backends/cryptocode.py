@@ -36,10 +36,15 @@ class CryptocodeBackend:
             PackageSpec("cryptocode", _CRYPTOCODE_OPTIONS),
             PackageSpec("amsmath"),
             PackageSpec("amssymb"),
+            PackageSpec("amsthm"),
         ]
 
     def preamble_extras(self) -> str:
-        return ""
+        return (
+            r"\newtheorem{theorem}{Theorem}" + "\n"
+            r"\providecommand{\todo}[1]{\textbf{TODO:} #1}" + "\n"
+            r"\providecommand{\Experiment}[3]{\ensuremath{{#1}.{#2}(#3)}}"
+        )
 
     def _line(self, line: ir.Line) -> str:
         match line:

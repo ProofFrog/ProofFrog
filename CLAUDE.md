@@ -12,7 +12,7 @@ python3 -m venv .venv
 - **Run tests**: `pytest` (runs in parallel via `pytest-xdist` `-n auto` by default; use `-n0` to disable). Don't use `--timeout`.
 - **All CI checks**: `make lint` — runs `black --check`, `mypy`, and `pylint` in sequence (must all pass before committing)
 - **Auto-format**: `make format` — runs `black` to reformat in place, then re-run `make lint`
-- **CLI**: `python -m proof_frog [version|parse|check|prove|describe|step-detail|inlined-game|canonicalization-trace|step-after-transform|download-examples|web|lsp|mcp] <file>`
+- **CLI**: `python -m proof_frog [version|parse|check|prove|describe|step-detail|inlined-game|canonicalization-trace|step-after-transform|export-latex|download-examples|web|lsp|mcp] <file>`
 - **Build package**: `make build` — regenerates parser, stamps examples pin, then runs `flit build`. Always use this instead of bare `flit build`.
 - **Build VSCode extension**: `make vscode-extension`
 - **Package VSCode extension**: `make vscode-vsix`

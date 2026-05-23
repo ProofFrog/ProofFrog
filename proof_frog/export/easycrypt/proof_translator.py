@@ -213,20 +213,43 @@ def translate_inlining_hop_pr_lemma(  # pylint: disable=too-many-arguments,too-m
     right_wrapper_name: str,
     scheme_footprint: str | None = None,
     wrapper_extra_args: list[str] | None = None,
+    glob_invariant_modules: list[str] | None = None,
 ) -> ec_ast.ProbLemma:
     """Emit a ``hop_<i>_pr`` lemma for an inlining hop.
 
     The proof discharges ``Pr[L] = Pr[R]`` via ``byequiv`` over the
     existing ``hop_<i>`` equiv lemma.
+
+    When ``glob_invariant_modules`` is non-empty (multi-module proofs
+    where ``hop_<i>``'s spec is strengthened with ``={glob X1, ...}``),
+    the adversary ``call`` is given ``(_: ={glob X1, ...})`` as its
+    preserved invariant so the resulting oracle subgoal has the
+    strengthened pre/post that ``conseq hop_<i>`` can directly unify
+    with.
     """
     left_app = _wrap_apply(left_wrapper_name, wrapper_extra_args)
     right_app = _wrap_apply(right_wrapper_name, wrapper_extra_args)
     statement = (
         f"Pr[{left_app}.main() @ &m : res]" f" = Pr[{right_app}.main() @ &m : res]"
     )
+    if glob_invariant_modules:
+        invariant = "={" + ", ".join(f"glob {m}" for m in glob_invariant_modules) + "}"
+        # Force the byequiv-introduced precondition to include each
+        # declared-module ``glob`` even when EC's heuristic would omit
+        # it (e.g. the right-hand module discards the parameter). Without
+        # this, ``call (_: ={glob X1, ..., glob Xn})`` is unprovable in
+        # the byequiv side condition.
+        byequiv_pre = (
+            "={glob A, " + ", ".join(f"glob {m}" for m in glob_invariant_modules) + "}"
+        )
+        byequiv_step = f"byequiv (_: {byequiv_pre} ==> ={{res}}) => //; proc."
+        call_step = f"call (_: {invariant}); first by conseq hop_{hop_index}."
+    else:
+        byequiv_step = "byequiv => //; proc."
+        call_step = f"call (_: true); first by conseq hop_{hop_index}."
     body = [
-        "byequiv => //; proc.",
-        f"call (_: true); first by conseq hop_{hop_index}.",
+        byequiv_step,
+        call_step,
         "auto.",
         "qed.",
     ]
@@ -416,6 +439,7 @@ def translate_hops(
     resolver: StepResolver,
     steps: list[frog_ast.ProofStep],
     body_for_hop: Callable[[int, frog_ast.Step, frog_ast.Step], list[str] | None],
+    spec_overrides: dict[int, tuple[str, str]] | None = None,
 ) -> list[ec_ast.Lemma]:
     """Produce one equiv lemma per adjacent-step pair.
 
@@ -423,7 +447,18 @@ def translate_hops(
     (ending with ``"qed."``) for hop ``i``, or ``None`` to skip the
     equiv lemma entirely for that hop (e.g. for assumption hops whose
     two sides are genuinely non-equivalent).
+
+    ``spec_overrides[i] = (precondition, postcondition)`` (if present)
+    replaces the default ``={oracle_params}``/``={res}`` for hop ``i``.
+    The per-transform exporter sets this in multi-module proofs to
+    strengthen the spec with ``={glob E1, glob E2, ...}``.
     """
+    # NOTE: keep the original dict identity — the caller may mutate it
+    # during ``body_for_hop`` calls (per-transform mode populates the
+    # override during the per-hop chain emission). ``spec_overrides or {}``
+    # would substitute a fresh empty dict if the caller passed in an
+    # empty one, losing later mutations.
+    overrides = spec_overrides if spec_overrides is not None else {}
     lemmas: list[ec_ast.Lemma] = []
     for i in range(len(steps) - 1):
         a, b = steps[i], steps[i + 1]
@@ -436,14 +471,15 @@ def translate_hops(
             continue
         ra = resolver.resolve(a)
         rb = resolver.resolve(b)
+        pre, post = overrides.get(i, (resolver.precondition_for(a), "={res}"))
         lemmas.append(
             ec_ast.Lemma(
                 name=f"hop_{i}",
                 module_args=[],
                 left=f"{ra.module_expr}.{ra.oracle_name}",
                 right=f"{rb.module_expr}.{rb.oracle_name}",
-                precondition=resolver.precondition_for(a),
-                postcondition="={res}",
+                precondition=pre,
+                postcondition=post,
                 body=body,
             )
         )

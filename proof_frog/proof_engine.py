@@ -22,9 +22,11 @@ from . import advantage
 from .transforms._base import (
     NearMiss,
     PipelineContext,
+    TransformApplication,
     deduplicate_near_misses,
     run_pipeline,
     run_pipeline_until,
+    run_pipeline_with_states,
     run_pipeline_with_trace,
     run_standardization,
     _MAX_FIXED_POINT_ITERATIONS,
@@ -1533,6 +1535,29 @@ class ProofEngine:
             "total_iterations": len(trace.iterations),
             "converged": trace.converged,
         }
+
+    def canonicalize_game_with_states(
+        self, game: frog_ast.Game
+    ) -> tuple[frog_ast.Game, list[TransformApplication]]:
+        """Same pipeline as canonicalize_game, but returns a list of
+        TransformApplication entries — one per pass that actually changed
+        the AST.  Used by the per-transform EasyCrypt exporter."""
+        ctx = self._build_context()
+        game, core_apps = run_pipeline_with_states(game, CORE_PIPELINE, ctx)
+        std_apps: list[TransformApplication] = []
+        for pass_ in STANDARDIZATION_PIPELINE:
+            before = game
+            game = pass_.apply(game, ctx)
+            if game != before:
+                std_apps.append(
+                    TransformApplication(
+                        iteration=0,
+                        transform_name=pass_.name,
+                        game_before=before,
+                        game_after=game,
+                    )
+                )
+        return game, core_apps + std_apps
 
     def canonicalize_until_transform(
         self, game: frog_ast.Game, transform_name: str

@@ -95,6 +95,46 @@ class ModuleTranslator:
             implements=implements,
         )
 
+    def translate_flat_game(
+        self,
+        game: frog_ast.Game,
+        module_name: str,
+        external_module_types: dict[str, str],
+        module_params: list[ec_ast.ModuleParam] | None = None,
+    ) -> ec_ast.Module:
+        """Translate a parameterless intermediate game-state AST.
+
+        Unlike :meth:`translate_game`, which expects a game declared with
+        one primitive parameter, ``translate_flat_game`` consumes the
+        inlined intermediate states produced by the engine's
+        canonicalization pipeline (where the scheme parameter has been
+        substituted with concrete let-bindings like ``E1``, ``E2``). The
+        ``external_module_types`` map binds those let-names to primitive
+        type names so calls like ``E1.Enc(...)`` resolve through the
+        method-return-type registry.
+
+        ``module_params`` declares EC module parameters on the emitted
+        functor. When emitted inside an EC ``section`` with declared
+        modules, the flat game must take each declared module as a
+        parameter (e.g. ``(E1 : E1_c.Scheme) (E2 : E2_c.Scheme)``) so
+        that EC's generalization-over-section finds those references.
+        """
+        if game.parameters:
+            raise NotImplementedError(
+                "translate_flat_game expects a parameterless game; "
+                f"got parameters {game.parameters}"
+            )
+        procs = [
+            self._translate_method(method, external_module_types)
+            for method in game.methods
+        ]
+        return ec_ast.Module(
+            name=module_name,
+            procs=procs,
+            params=list(module_params) if module_params else [],
+            implements=None,
+        )
+
     def translate_reduction(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
         self,
         reduction: frog_ast.Reduction,

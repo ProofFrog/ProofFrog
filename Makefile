@@ -1,6 +1,6 @@
 PYTHON := .venv/bin/python
 
-.PHONY: lint format test parser vscode-extension vscode-vsix examples-pin git-sha build
+.PHONY: lint format test parser vscode-extension vscode-vsix examples-pin git-sha build check-tactic-cache
 
 lint:
 	$(PYTHON) -m black --check proof_frog
@@ -13,6 +13,9 @@ format:
 
 test:
 	$(PYTHON) -m pytest
+
+check-tactic-cache:
+	$(PYTHON) -m proof_frog.export.easycrypt_per_transform.cache_report
 
 vscode-extension:
 	cd vscode-extension && npm install && npm run bundle

@@ -46,6 +46,15 @@ class ExpandTupleTransformer(Transformer):
             name
         ).visit(search_space)
 
+    @staticmethod
+    def _has_reference(name: str, block: frog_ast.Block) -> bool:
+        """Return True iff *name* is referenced (as a Variable) in *block*."""
+
+        def is_named_variable(node: frog_ast.ASTNode) -> bool:
+            return isinstance(node, frog_ast.Variable) and node.name == name
+
+        return SearchVisitor(is_named_variable).visit(block) is not None
+
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         new_fields = []
         for field in game.fields:
@@ -55,8 +64,9 @@ class ExpandTupleTransformer(Transformer):
                 for index, the_type in enumerate(unfolded_types):
                     expression = None
                     if field.value:
-                        assert isinstance(field.value, frog_ast.Tuple)
-                        expression = field.value.values[index]
+                        field_values = frog_ast.tuple_literal_values(field.value)
+                        assert field_values is not None
+                        expression = field_values[index]
                     new_fields.append(
                         frog_ast.Field(the_type, f"{field.name}@{index}", expression)
                     )
@@ -76,15 +86,16 @@ class ExpandTupleTransformer(Transformer):
     def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
         new_statements: list[frog_ast.Statement] = []
         expanded_tuple_count = 0
-        for index, statement in enumerate(block.statements):
+        for stmt_idx, statement in enumerate(block.statements):
             # Assigning to the tuple means assigning each individual value
             if (
                 isinstance(statement, frog_ast.Assignment)
                 and isinstance(statement.var, frog_ast.Variable)
                 and statement.var.name in self.to_transform
             ):
-                assert isinstance(statement.value, frog_ast.Tuple)
-                for index, tuple_value in enumerate(statement.value.values):
+                stmt_values = frog_ast.tuple_literal_values(statement.value)
+                assert stmt_values is not None
+                for index, tuple_value in enumerate(stmt_values):
                     new_statements.append(
                         frog_ast.Assignment(
                             None,
@@ -112,16 +123,28 @@ class ExpandTupleTransformer(Transformer):
                 and self._is_transformable_tuple(
                     statement.the_type, statement.var.name, block
                 )
+                # Refuse to fire on a local-decl whose variable is not
+                # referenced in subsequent statements of THIS block: the
+                # use site is in an enclosing scope (e.g. this block is
+                # the body of an if-branch), and expanding here would
+                # split the decl into v@k components without rewriting
+                # the outer-scope ``v[k]`` access, leaving it dangling.
+                # The decl's own LHS does not count as a reference.
+                and self._has_reference(
+                    statement.var.name,
+                    frog_ast.Block(list(block.statements[stmt_idx + 1 :])),
+                )
             ):
                 assert isinstance(statement.the_type, frog_ast.ProductType)
                 unfolded_types = statement.the_type.types
-                assert isinstance(statement.value, frog_ast.Tuple)
+                stmt_values = frog_ast.tuple_literal_values(statement.value)
+                assert stmt_values is not None
                 for index, the_type in enumerate(unfolded_types):
                     new_statements.append(
                         frog_ast.Assignment(
                             the_type,
                             frog_ast.Variable(f"{statement.var.name}@{index}"),
-                            statement.value.values[index],
+                            stmt_values[index],
                         )
                     )
                 self.to_transform.append(statement.var.name)
@@ -345,7 +368,7 @@ class CollapseSingleIndexTupleTransformer(BlockTransformer):
                 and statement.the_type is not None
                 and isinstance(statement.the_type, frog_ast.ProductType)
                 and isinstance(statement.var, frog_ast.Variable)
-                and not isinstance(statement.value, frog_ast.Tuple)
+                and frog_ast.tuple_literal_values(statement.value) is None
             ):
                 continue
 

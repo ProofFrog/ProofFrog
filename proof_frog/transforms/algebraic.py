@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import copy
 import functools
-from typing import Optional
+from typing import Callable, Optional
 
 from .. import frog_ast
 from ..visitors import (
@@ -20,10 +20,37 @@ from ..visitors import (
     SearchVisitor,
     ReplaceTransformer,
     NameTypeMap,
+    VariableCollectionVisitor,
     build_game_type_map,
 )
-from ._base import TransformPass, PipelineContext, NearMiss, has_nondeterministic_call
+from ._base import (
+    TransformPass,
+    PipelineContext,
+    NearMiss,
+    has_nondeterministic_call,
+    _lookup_primitive_method,
+)
 from ._ordering import node_sort_key
+from ._wrappers import GroupExponentWrapper, WrapperShape, _GroupExpShape
+
+
+def _count_field_assigns(node: frog_ast.ASTNode, name: str) -> int:
+    """Count assignments/samples to *name* recursively in *node*."""
+    count = 0
+
+    def _visit(n: frog_ast.ASTNode) -> bool:
+        nonlocal count
+        if (
+            isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
+            and isinstance(n.var, frog_ast.Variable)
+            and n.var.name == name
+        ):
+            count += 1
+        return False
+
+    SearchVisitor(_visit).visit(node)
+    return count
+
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
@@ -276,21 +303,60 @@ class UniformModIntSimplificationTransformer(BlockTransformer):
 
 
 class SimplifyNot(Transformer):
-    """Rewrites ``!(a == b)`` as ``a != b``."""
+    """Rewrites ``!(a == b)`` as ``a != b``, ``!(a != b)`` as ``a == b``,
+    and applies DeMorgan to push ``!`` inward through Boolean ``&&``/``||``.
+
+    Soundness: classical Boolean identities. The recursive rewrites
+    converge because each step strictly reduces the depth of ``!`` chains
+    over Boolean connectives.
+    """
 
     def transform_unary_operation(
         self, unary_op: frog_ast.UnaryOperation
     ) -> frog_ast.Expression:
+        if unary_op.operator != frog_ast.UnaryOperators.NOT:
+            return unary_op
+        inner = unary_op.expression
+        if isinstance(inner, frog_ast.BinaryOperation):
+            if inner.operator == frog_ast.BinaryOperators.EQUALS:
+                return frog_ast.BinaryOperation(
+                    frog_ast.BinaryOperators.NOTEQUALS,
+                    inner.left_expression,
+                    inner.right_expression,
+                )
+            if inner.operator == frog_ast.BinaryOperators.NOTEQUALS:
+                return frog_ast.BinaryOperation(
+                    frog_ast.BinaryOperators.EQUALS,
+                    inner.left_expression,
+                    inner.right_expression,
+                )
+            if inner.operator in (
+                frog_ast.BinaryOperators.AND,
+                frog_ast.BinaryOperators.OR,
+            ):
+                dual = (
+                    frog_ast.BinaryOperators.OR
+                    if inner.operator == frog_ast.BinaryOperators.AND
+                    else frog_ast.BinaryOperators.AND
+                )
+                neg_l = self.transform(
+                    frog_ast.UnaryOperation(
+                        frog_ast.UnaryOperators.NOT,
+                        copy.deepcopy(inner.left_expression),
+                    )
+                )
+                neg_r = self.transform(
+                    frog_ast.UnaryOperation(
+                        frog_ast.UnaryOperators.NOT,
+                        copy.deepcopy(inner.right_expression),
+                    )
+                )
+                return frog_ast.BinaryOperation(dual, neg_l, neg_r)
         if (
-            unary_op.operator == frog_ast.UnaryOperators.NOT
-            and isinstance(unary_op.expression, frog_ast.BinaryOperation)
-            and unary_op.expression.operator == frog_ast.BinaryOperators.EQUALS
+            isinstance(inner, frog_ast.UnaryOperation)
+            and inner.operator == frog_ast.UnaryOperators.NOT
         ):
-            return frog_ast.BinaryOperation(
-                frog_ast.BinaryOperators.NOTEQUALS,
-                unary_op.expression.left_expression,
-                unary_op.expression.right_expression,
-            )
+            return self.transform(copy.deepcopy(inner.expression))
         return unary_op
 
 
@@ -818,6 +884,135 @@ class BooleanIdentityTransformer(Transformer):
         return transformed
 
 
+def _flatten_or_chain(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
+    """Flatten a Boolean ``||`` chain into a list of disjuncts. Treats a
+    non-OR expression as a singleton list."""
+    if (
+        isinstance(expr, frog_ast.BinaryOperation)
+        and expr.operator == frog_ast.BinaryOperators.OR
+    ):
+        return _flatten_or_chain(expr.left_expression) + _flatten_or_chain(
+            expr.right_expression
+        )
+    return [expr]
+
+
+def _flatten_and_chain(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
+    """Flatten a Boolean ``&&`` chain into a list of conjuncts."""
+    if (
+        isinstance(expr, frog_ast.BinaryOperation)
+        and expr.operator == frog_ast.BinaryOperators.AND
+    ):
+        return _flatten_and_chain(expr.left_expression) + _flatten_and_chain(
+            expr.right_expression
+        )
+    return [expr]
+
+
+class BooleanAbsorptionTransformer(Transformer):
+    """Simplifies an ``&&`` chain by dropping any conjunct ``B`` that is
+    semantically implied by another conjunct ``A`` in the same chain,
+    where ``A``'s flattened OR-disjuncts are a subset of ``B``'s.
+
+    Soundness: when ``A`` implies ``B``, ``A && B`` is logically equal
+    to ``A``. Detecting implication via ``disjuncts(A) ⊆ disjuncts(B)``
+    is sound: any model satisfying some disjunct of ``A`` also satisfies
+    the same disjunct of ``B``.
+
+    Restriction: ``||`` is overloaded with BitString concatenation; we
+    only flatten OR-chains that appear directly as a conjunct of an
+    ``&&`` chain (since ``&&`` is unambiguously Boolean and forces its
+    operand types to Boolean).
+
+    Gap F guard: a conjunct ``B`` may only be dropped when the dropped
+    disjuncts ``D_B \\ D_A`` are evaluation-pure. Otherwise dropping the
+    conjunct removes observable side-effects / counter advances of
+    non-deterministic calls inside those disjuncts.
+    """
+
+    def __init__(self, ctx: PipelineContext) -> None:
+        self.ctx = ctx
+
+    def transform_binary_operation(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        transformed = frog_ast.BinaryOperation(
+            binary_operation.operator,
+            self.transform(binary_operation.left_expression),
+            self.transform(binary_operation.right_expression),
+        )
+        if transformed.operator != frog_ast.BinaryOperators.AND:
+            return transformed
+        conjuncts = _flatten_and_chain(transformed)
+        if len(conjuncts) < 2:
+            return transformed
+        # For each conjunct, compute its disjunct multiset (as a list of
+        # AST expressions). A conjunct B is absorbed by another conjunct
+        # A iff disjuncts(A) ⊆ disjuncts(B) and disjuncts(A) is a strict
+        # subset (i.e., len(A_disj) < len(B_disj)). If equal-length and
+        # equal as multisets they are duplicates: keep one.
+        disj_sets = [_flatten_or_chain(c) for c in conjuncts]
+        keep = [True] * len(conjuncts)
+        for i, _ci in enumerate(conjuncts):
+            if not keep[i]:
+                continue
+            for j, _cj in enumerate(conjuncts):
+                if i == j or not keep[j]:
+                    continue
+                # i absorbs j: disjuncts(i) ⊆ disjuncts(j) and
+                # disjuncts(j) ⊋ disjuncts(i) (strictly larger).
+                if len(disj_sets[i]) < len(disj_sets[j]) and self._is_subset(
+                    disj_sets[i], disj_sets[j]
+                ):
+                    # Gap F: dropping conjunct j removes its evaluation
+                    # entirely. If j contains a non-deterministic call
+                    # anywhere, doing so changes observable behavior even
+                    # though disj_sets[i] semantically implies disj_sets[j].
+                    if not has_nondeterministic_call(
+                        conjuncts[j],
+                        self.ctx.proof_namespace,
+                        self.ctx.proof_let_types,
+                    ):
+                        keep[j] = False
+                # Duplicate conjuncts: drop the higher-indexed one.
+                elif (
+                    i < j
+                    and len(disj_sets[i]) == len(disj_sets[j])
+                    and self._is_subset(disj_sets[i], disj_sets[j])
+                    and self._is_subset(disj_sets[j], disj_sets[i])
+                ):
+                    keep[j] = False
+        if all(keep):
+            return transformed
+        kept_conjuncts = [c for c, k in zip(conjuncts, keep) if k]
+        # Sort by node_sort_key so the rebuilt chain is canonical and
+        # matches the form produced when no absorption was needed (where
+        # NormalizeCommutativeChains sorts the chain in a separate pass).
+        kept_conjuncts.sort(key=node_sort_key)
+        if len(kept_conjuncts) == 1:
+            return kept_conjuncts[0]
+        result: frog_ast.Expression = kept_conjuncts[0]
+        for c in kept_conjuncts[1:]:
+            result = frog_ast.BinaryOperation(frog_ast.BinaryOperators.AND, result, c)
+        return result
+
+    @staticmethod
+    def _is_subset(
+        small: list[frog_ast.Expression], big: list[frog_ast.Expression]
+    ) -> bool:
+        for d in small:
+            if not any(d == b for b in big):
+                return False
+        return True
+
+
+class BooleanAbsorption(TransformPass):
+    name = "Boolean Absorption"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return BooleanAbsorptionTransformer(ctx).transform(game)
+
+
 # ---------------------------------------------------------------------------
 # TransformPass wrappers
 # ---------------------------------------------------------------------------
@@ -1097,6 +1292,44 @@ class NormalizeCommutativeChains(TransformPass):
         return NormalizeCommutativeChainsTransformer().transform(game)
 
 
+class FlattenConcatChainTransformer(Transformer):
+    """Left-associate ``||`` chains.
+
+    ``||`` is the OR operator in FrogLang, overloaded between Boolean OR
+    (associative + commutative) and BitString concatenation (associative,
+    NOT commutative). Both readings are associative, so left-associating
+    is semantics-preserving in either case. We rewrite
+    ``a || (b || c)`` to ``(a || b) || c`` recursively to a fixed point so
+    inliner-introduced right-grouped concat chains canonicalize to the
+    parser's natural left-associative shape.
+    """
+
+    def transform_binary_operation(
+        self, expr: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        transformed = frog_ast.BinaryOperation(
+            expr.operator,
+            self.transform(expr.left_expression),
+            self.transform(expr.right_expression),
+        )
+        if transformed.operator != frog_ast.BinaryOperators.OR:
+            return transformed
+        terms = _flatten_chain(transformed, frog_ast.BinaryOperators.OR)
+        if len(terms) < 2:
+            return transformed
+        rebuilt = _rebuild_chain(terms, frog_ast.BinaryOperators.OR)
+        if rebuilt == transformed:
+            return transformed
+        return rebuilt
+
+
+class FlattenConcatChain(TransformPass):
+    name = "Flatten Concat Chain"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return FlattenConcatChainTransformer().transform(game)
+
+
 class ReflexiveComparison(TransformPass):
     name = "Reflexive Comparison"
 
@@ -1105,6 +1338,850 @@ class ReflexiveComparison(TransformPass):
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
         ).transform(game)
+
+
+class InjectiveEqualitySimplifyTransformer(Transformer):
+    """Rewrites ``f(a1,...,an) == f(b1,...,bn)`` to ``(a1==b1) && ... && (an==bn)``
+    when ``f`` is a primitive method annotated ``deterministic injective``.
+
+    The ``!=`` variant becomes the corresponding disjunction of per-argument
+    ``!=`` comparisons.  Zero-argument calls are left to ``ReflexiveComparison``.
+    """
+
+    def __init__(self, ctx: PipelineContext, game: frog_ast.Game) -> None:
+        self.ctx = ctx
+        self.game = game
+        # Per-method map: local variable name -> its FuncCall RHS, for
+        # variables locally declared as ``Type v = f(args);``. Used to
+        # resolve Variable references when CSE / ForwardExpressionAlias
+        # has hoisted the call into a named local.
+        self.local_funccall_bindings: dict[str, frog_ast.FuncCall] = {}
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        bindings, reassigned = _scan_top_level_single_writes(
+            method.block,
+            value_predicate=lambda v: isinstance(v, frog_ast.FuncCall),
+        )
+        for name in reassigned:
+            bindings.pop(name, None)
+        # Cast: predicate guarantees FuncCall values.
+        funccall_bindings: dict[str, frog_ast.FuncCall] = {
+            n: v for n, v in bindings.items() if isinstance(v, frog_ast.FuncCall)
+        }
+        # Gap D: drop bindings whose call args reference free variables
+        # that may differ between the binding site and the comparison
+        # site. A free variable is "stable" iff it has at most one write
+        # in the method (parameters and write-once typed-locals qualify;
+        # fields written anywhere in the method do not).
+        param_names = {p.name for p in method.signature.parameters}
+        field_names = {f.name for f in self.game.fields}
+        stable_field_names = {
+            f for f in field_names if _count_field_assigns(method.block, f) == 0
+        }
+        # Top-level single-write typed-init locals are stable (write once,
+        # read many). A locally-rebound name is excluded.
+        all_locals, all_reassigned = _scan_top_level_single_writes(
+            method.block, value_predicate=lambda v: True
+        )
+        single_write_locals = set(all_locals.keys()) - all_reassigned
+        stable_names = param_names | stable_field_names | single_write_locals
+        for name in list(funccall_bindings.keys()):
+            call = funccall_bindings[name]
+            free = {
+                v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(call))
+            }
+            if not free.issubset(stable_names):
+                funccall_bindings.pop(name, None)
+        old = self.local_funccall_bindings
+        self.local_funccall_bindings = funccall_bindings
+        try:
+            new_block = self.transform(method.block)
+        finally:
+            self.local_funccall_bindings = old
+        if new_block is method.block:
+            return method
+        return frog_ast.Method(method.signature, new_block)
+
+    def _resolve_to_funccall(self, expr: frog_ast.Expression) -> frog_ast.Expression:
+        if (
+            isinstance(expr, frog_ast.Variable)
+            and expr.name in self.local_funccall_bindings
+        ):
+            bound = self.local_funccall_bindings[expr.name]
+            # Gap A/C analogue: refuse to duplicate a non-deterministic call
+            # (or a call whose args contain non-deterministic calls) into
+            # the comparison.
+            if has_nondeterministic_call(
+                bound, self.ctx.proof_namespace, self.ctx.proof_let_types
+            ):
+                return expr
+            return bound
+        # Field-RHS resolution: a Variable(F) for a single-write Init-only
+        # field whose RHS is a deterministic FuncCall resolves to that call.
+        # The injectivity contract on the RHS callee then authorizes the
+        # downstream rewrite via the FuncCall == FuncCall branch.
+        field_rhs = self._resolve_field_rhs(expr)
+        if field_rhs is not expr and isinstance(field_rhs, frog_ast.FuncCall):
+            return field_rhs
+        return expr
+
+    def transform_binary_operation(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        transformed = frog_ast.BinaryOperation(
+            binary_operation.operator,
+            self.transform(binary_operation.left_expression),
+            self.transform(binary_operation.right_expression),
+        )
+        op = transformed.operator
+        if op not in (
+            frog_ast.BinaryOperators.EQUALS,
+            frog_ast.BinaryOperators.NOTEQUALS,
+        ):
+            return transformed
+        left = self._resolve_to_funccall(transformed.left_expression)
+        right = self._resolve_to_funccall(transformed.right_expression)
+        if not (
+            isinstance(left, frog_ast.FuncCall) and isinstance(right, frog_ast.FuncCall)
+        ):
+            return self._try_wrapper_simplification(transformed, op, left, right)
+        # I-1: callees must be structurally equal.
+        if left.func != right.func:
+            return transformed
+        # I-3: arg list lengths must match.
+        if len(left.args) != len(right.args):
+            return transformed
+        # Zero-arg: f() == f() -> reflexive; let ReflexiveComparison handle it.
+        if not left.args:
+            return transformed
+        # I-2: resolve primitive method; must be deterministic + injective.
+        method = _lookup_primitive_method(left.func, self.ctx.proof_namespace)
+        if method is None:
+            return transformed
+        if not (method.deterministic and method.injective):
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="Injective Equality Simplify",
+                    reason=(
+                        f"comparison of calls to '{method.name}' did not simplify: "
+                        "method is not annotated 'deterministic injective'"
+                    ),
+                    location=binary_operation.origin,
+                    suggestion=(
+                        "If distinct inputs must map to distinct outputs, "
+                        "annotate the primitive method 'deterministic injective'."
+                    ),
+                    variable=None,
+                    method=method.name,
+                )
+            )
+            return transformed
+        pair_op = op  # EQUALS or NOTEQUALS
+        combiner = (
+            frog_ast.BinaryOperators.AND
+            if op == frog_ast.BinaryOperators.EQUALS
+            else frog_ast.BinaryOperators.OR
+        )
+        pairs = [
+            frog_ast.BinaryOperation(pair_op, a, b)
+            for a, b in zip(left.args, right.args)
+        ]
+        result: frog_ast.Expression = pairs[0]
+        for pair in pairs[1:]:
+            result = frog_ast.BinaryOperation(combiner, result, pair)
+        return result
+
+    def _try_wrapper_simplification(
+        self,
+        transformed: frog_ast.BinaryOperation,
+        op: frog_ast.BinaryOperators,
+        left: frog_ast.Expression,
+        right: frog_ast.Expression,
+    ) -> frog_ast.Expression:
+        """Wrapper-protocol fallback: ``wrap(a) op wrap(b) → a op b`` when
+        both sides are recognized as the same injective wrapper shape.
+
+        Currently consults :class:`GroupExponentWrapper` only (the
+        primitive-call case is already covered by the FuncCall branch
+        above).  Two preprocessing steps before the wrapper match:
+
+        1. **Field RHS substitution**: ``Variable(F) → F.rhs`` when ``F`` is
+           a single-write Init-only pure-deterministic ``GroupElem<G>``
+           field.  Closes the gap where one side of the equality is held in
+           a hoisted field.
+        2. **Exponent factoring**: ``base ^ (k * x)`` viewed as
+           ``(base ^ x) ^ k`` when ``k`` matches the wrapper exponent on
+           the other side.  Closes the gap where ``GroupElem
+           Simplification`` has already power-of-power-folded one side.
+        """
+        recognizer = GroupExponentWrapper()
+        left_resolved = self._resolve_field_rhs(left)
+        right_resolved = self._resolve_field_rhs(right)
+        match = self._match_with_factoring(recognizer, left_resolved, right_resolved)
+        if match is None:
+            return transformed
+        left_resolved, right_resolved, left_shape, right_shape = match
+        # Preconditions (prime-order + nonzero exponent) — emit near-miss if
+        # the shape was recognized but a precondition blocks the rewrite.
+        misses = left_shape.precondition_misses(self.game, self.ctx)
+        if misses:
+            for miss in misses:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Injective Equality Simplify",
+                        reason=(f"{left_shape.recognizer_label}: {miss}"),
+                        location=transformed.origin,
+                        suggestion=(
+                            "Declare `requires <group>.order is prime;` and "
+                            "sample the exponent via `<-uniq[{0}] T` (or "
+                            "`<- T \\ {0}`) so the engine treats x^k as "
+                            "injective."
+                        ),
+                        variable=None,
+                        method=None,
+                    )
+                )
+            return transformed
+        left_varying = left_shape.varying_at(left_resolved)
+        right_varying = right_shape.varying_at(right_resolved)
+        if left_varying is None or right_varying is None:
+            return transformed
+        return frog_ast.BinaryOperation(op, left_varying, right_varying)
+
+    def _match_with_factoring(
+        self,
+        recognizer: GroupExponentWrapper,
+        left: frog_ast.Expression,
+        right: frog_ast.Expression,
+    ) -> Optional[
+        tuple[
+            frog_ast.Expression,
+            frog_ast.Expression,
+            WrapperShape,
+            WrapperShape,
+        ]
+    ]:
+        """Try to match both sides as the same group-exp wrapper, possibly
+        factoring one side's exponent.
+
+        Returns ``(left_resolved, right_resolved, left_shape, right_shape)``
+        on success; ``None`` if no consistent shape pair is found.
+        """
+        l0 = recognizer.match_whole(left, self.ctx, self.game)
+        r0 = recognizer.match_whole(right, self.ctx, self.game)
+        # Direct agreement.
+        if l0 is not None and r0 is not None and l0.identity_key == r0.identity_key:
+            return left, right, l0, r0
+        # Try each candidate k_expr (from whichever side matched first) and
+        # attempt to refactor the other side to match.
+        candidates: list[frog_ast.Expression] = []
+        if isinstance(l0, _GroupExpShape):
+            candidates.append(l0.k_expr)
+        if isinstance(r0, _GroupExpShape):
+            candidates.append(r0.k_expr)
+        for k in candidates:
+            l_try = (
+                left
+                if (isinstance(l0, _GroupExpShape) and l0.k_expr == k)
+                else (self._try_factor_exponent(left, k) or left)
+            )
+            r_try = (
+                right
+                if (isinstance(r0, _GroupExpShape) and r0.k_expr == k)
+                else (self._try_factor_exponent(right, k) or right)
+            )
+            ls = recognizer.match_whole(l_try, self.ctx, self.game)
+            rs = recognizer.match_whole(r_try, self.ctx, self.game)
+            if ls is not None and rs is not None and ls.identity_key == rs.identity_key:
+                return l_try, r_try, ls, rs
+        return None
+
+    def _resolve_field_rhs(self, expr: frog_ast.Expression) -> frog_ast.Expression:
+        """If *expr* is ``Variable(F)`` where ``F`` is a single-write
+        Init-only field with a pure deterministic RHS whose free variables
+        are all cross-method-visible (fields/parameters), return that RHS.
+        Otherwise return *expr* unchanged.
+
+        The cross-method-visibility check is mandatory: the resolved
+        expression replaces *expr* in a comparison whose surrounding
+        context might be in a non-Init method, where Init-local variables
+        are out of scope.
+
+        Used by both the FuncCall == FuncCall path (via
+        ``_resolve_to_funccall``, to unwrap ``inj(x) == inj(y)`` written
+        through hoisted-field aliases into ``x == y``) and the wrapper
+        path (``_try_wrapper_simplification``, to recognize a
+        ``GroupExponentWrapper`` shape held in a hoisted field).  The
+        helper is intentionally type-agnostic: type-specific recognition
+        happens at each call site (the FuncCall path checks the resolved
+        callee for ``deterministic injective``; the wrapper path checks
+        the resolved expression against ``GroupExponentWrapper``).
+        """
+        if not isinstance(expr, frog_ast.Variable):
+            return expr
+        name = expr.name
+        fld = next((f for f in self.game.fields if f.name == name), None)
+        if fld is None:
+            return expr
+        init = next(
+            (m for m in self.game.methods if m.signature.name == "Initialize"),
+            None,
+        )
+        if init is None:
+            return expr
+        rhs: Optional[frog_ast.Expression] = None
+        for stmt in init.block.statements:
+            if (
+                isinstance(stmt, frog_ast.Assignment)
+                and stmt.the_type is None
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name == name
+            ):
+                if rhs is not None:
+                    return expr  # multiple top-level assignments
+                rhs = stmt.value
+        if rhs is None:
+            return expr
+        # No assignment may exist anywhere else in the game.
+        for method in self.game.methods:
+            if method is init:
+                continue
+            if _count_field_assigns(method.block, name) > 0:
+                return expr
+        if has_nondeterministic_call(
+            rhs, self.ctx.proof_namespace, self.ctx.proof_let_types
+        ):
+            return expr
+        # Free vars in rhs must be cross-method visible.  Anything else
+        # (Init-local declarations) cannot legally be referenced from the
+        # site where this resolved expression will be substituted in.
+        visible = {f.name for f in self.game.fields} | {
+            p.name for p in self.game.parameters
+        }
+        free = {v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(rhs))}
+        if not free.issubset(visible):
+            return expr
+        return rhs
+
+    @staticmethod
+    def _try_factor_exponent(
+        expr: frog_ast.Expression,
+        k_expr: Optional[frog_ast.Expression],
+    ) -> Optional[frog_ast.Expression]:
+        """If *expr* is ``base ^ (k * x)`` or ``base ^ (x * k)`` with ``k``
+        equal to *k_expr*, return ``(base ^ x) ^ k_expr``.  Else None."""
+        if k_expr is None:
+            return None
+        if not isinstance(expr, frog_ast.BinaryOperation):
+            return None
+        if expr.operator != frog_ast.BinaryOperators.EXPONENTIATE:
+            return None
+        right = expr.right_expression
+        if not isinstance(right, frog_ast.BinaryOperation):
+            return None
+        if right.operator != frog_ast.BinaryOperators.MULTIPLY:
+            return None
+        a, b = right.left_expression, right.right_expression
+        if a == k_expr:
+            other = b
+        elif b == k_expr:
+            other = a
+        else:
+            return None
+        return frog_ast.BinaryOperation(
+            frog_ast.BinaryOperators.EXPONENTIATE,
+            frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.EXPONENTIATE,
+                copy.deepcopy(expr.left_expression),
+                copy.deepcopy(other),
+            ),
+            copy.deepcopy(k_expr),
+        )
+
+
+class InjectiveEqualitySimplify(TransformPass):
+    name = "Injective Equality Simplify"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return InjectiveEqualitySimplifyTransformer(ctx, game).transform(game)
+
+
+# ---------------------------------------------------------------------------
+# Concat-equality decomposition
+# ---------------------------------------------------------------------------
+
+
+def _scan_top_level_single_writes(
+    block: frog_ast.Block,
+    value_predicate: "Callable[[frog_ast.Expression], bool]",
+) -> tuple[dict[str, frog_ast.Expression], set[str]]:
+    """Scan *block.statements* (top level only) and return
+    ``(bindings, reassigned)``.
+
+    ``bindings`` maps each name first declared by ``Type v = expr;`` (with
+    ``value_predicate(expr)`` true) to its RHS expression. ``reassigned``
+    is the set of names that have an additional write at the top level
+    of the same block.
+
+    All forms of write are tracked: plain ``Assignment``, ``Sample``,
+    ``UniqueSample``, and the loop-variable of ``NumericFor`` /
+    ``GenericFor`` statements. (Loop iteration overwrites the variable,
+    so any earlier binding cannot be relied on at later use sites.)
+
+    Bindings declared inside nested blocks (if/for bodies) are NOT
+    collected: a declaration inside a nested scope is not visible
+    outside it. This is the AST-level analogue of FrogLang's surface
+    scoping rules.
+    """
+    bindings: dict[str, frog_ast.Expression] = {}
+    reassigned: set[str] = set()
+    for stmt in block.statements:
+        if isinstance(stmt, frog_ast.Assignment) and isinstance(
+            stmt.var, frog_ast.Variable
+        ):
+            name = stmt.var.name
+            is_init = stmt.the_type is not None and value_predicate(stmt.value)
+            if is_init:
+                if name in bindings:
+                    reassigned.add(name)
+                else:
+                    bindings[name] = stmt.value
+            else:
+                if name in bindings:
+                    reassigned.add(name)
+        elif isinstance(stmt, (frog_ast.Sample, frog_ast.UniqueSample)) and isinstance(
+            stmt.var, frog_ast.Variable
+        ):
+            if stmt.var.name in bindings:
+                reassigned.add(stmt.var.name)
+        elif isinstance(stmt, frog_ast.NumericFor):
+            if stmt.name in bindings:
+                reassigned.add(stmt.name)
+        elif isinstance(stmt, frog_ast.GenericFor):
+            if stmt.var_name in bindings:
+                reassigned.add(stmt.var_name)
+    return bindings, reassigned
+
+
+def _flatten_concat(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
+    """Flatten a left- or right-nested ``||`` (BitString concat) chain.
+
+    ``a || b || c`` returns ``[a, b, c]`` regardless of associativity.
+    Non-concat expressions return a singleton list.
+    """
+    if (
+        isinstance(expr, frog_ast.BinaryOperation)
+        and expr.operator == frog_ast.BinaryOperators.OR
+    ):
+        return _flatten_concat(expr.left_expression) + _flatten_concat(
+            expr.right_expression
+        )
+    return [expr]
+
+
+def _bitstring_length(
+    expr: frog_ast.Expression,
+    ctx: PipelineContext,
+    type_map: NameTypeMap,
+) -> Optional[frog_ast.Expression]:
+    """Return the BitString length of *expr* as a length Expression, or None.
+
+    Handles slices (``end - start``), variables/parameters with declared
+    ``BitString<L>`` type, calls to primitive methods returning
+    ``BitString<L>``, and concatenations (sum of part lengths). Returns
+    ``None`` for any expression whose length cannot be statically derived
+    from these sources.
+    """
+    if isinstance(expr, frog_ast.Slice):
+        return frog_ast.BinaryOperation(
+            frog_ast.BinaryOperators.SUBTRACT,
+            copy.deepcopy(expr.end),
+            copy.deepcopy(expr.start),
+        )
+    if isinstance(expr, frog_ast.Variable):
+        t = type_map.get(expr.name)
+        if isinstance(t, frog_ast.BitStringType) and t.parameterization is not None:
+            return copy.deepcopy(t.parameterization)
+        return None
+    if isinstance(expr, frog_ast.FuncCall):
+        method = _lookup_primitive_method(expr.func, ctx.proof_namespace)
+        if method is None:
+            return None
+        rt = method.return_type
+        if isinstance(rt, frog_ast.BitStringType) and rt.parameterization is not None:
+            return copy.deepcopy(rt.parameterization)
+        return None
+    if (
+        isinstance(expr, frog_ast.BinaryOperation)
+        and expr.operator == frog_ast.BinaryOperators.OR
+    ):
+        left = _bitstring_length(expr.left_expression, ctx, type_map)
+        right = _bitstring_length(expr.right_expression, ctx, type_map)
+        if left is None or right is None:
+            return None
+        return frog_ast.BinaryOperation(frog_ast.BinaryOperators.ADD, left, right)
+    return None
+
+
+class ConcatEqualityDecomposeTransformer(Transformer):
+    """Rewrites ``x == (a1 || a2 || ... || ak)`` (or the mirror form)
+    to ``x[0:n1] == a1 && x[n1:n1+n2] == a2 && ... && x[s:s+nk] == ak``,
+    where ``ni`` is the statically-derivable BitString length of ``ai``.
+
+    The ``!=`` variant becomes the disjunction of per-slice disequalities.
+
+    The rewrite fires only when every concatenation term has a derivable
+    length (via :func:`_bitstring_length`) AND the concat contains at
+    least two terms. The other side of the equality must NOT itself be a
+    concat (which would already be handled by ``SimplifySplice`` or by
+    term-wise matching); if both sides are concats, no rewrite happens.
+    """
+
+    def __init__(
+        self,
+        ctx: PipelineContext,
+        type_map: NameTypeMap,
+        local_concat_bindings: Optional[dict[str, frog_ast.Expression]] = None,
+    ) -> None:
+        self.ctx = ctx
+        self.type_map = type_map
+        # Maps local variable name -> its concat-RHS, for variables
+        # locally declared as `Type v = a || b || ...;`. Used to resolve
+        # Variable references that appear in equality/inequality
+        # comparisons when CSE / ForwardExpressionAlias has hoisted the
+        # concat into a named local.
+        self.local_concat_bindings: dict[str, frog_ast.Expression] = (
+            local_concat_bindings or {}
+        )
+
+    def _resolve_to_concat(self, expr: frog_ast.Expression) -> frog_ast.Expression:
+        if (
+            isinstance(expr, frog_ast.Variable)
+            and expr.name in self.local_concat_bindings
+        ):
+            bound = self.local_concat_bindings[expr.name]
+            # Gap A: refuse to substitute a concat RHS containing a
+            # non-deterministic call (substitution duplicates the call at
+            # the comparison site, breaking the ``a||b == c||d ⟺ a==c &&
+            # b==d`` rewrite).
+            if has_nondeterministic_call(
+                bound, self.ctx.proof_namespace, self.ctx.proof_let_types
+            ):
+                return expr
+            return bound
+        return expr
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        # Collect single-write Assignment-with-initializer statements at the
+        # top level of the method whose RHS is a concat (||) chain. Any
+        # name that is also reassigned later (including by Sample,
+        # UniqueSample, or for-loop rebinding) is dropped, so the binding
+        # is unambiguous at every expression site. Inner-scope statements
+        # are NOT collected: a binding declared inside an if/for body is
+        # not visible to a comparison outside that scope.
+        bindings, reassigned = _scan_top_level_single_writes(
+            method.block,
+            value_predicate=(
+                lambda v: isinstance(v, frog_ast.BinaryOperation)
+                and v.operator == frog_ast.BinaryOperators.OR
+            ),
+        )
+        for name in reassigned:
+            bindings.pop(name, None)
+        old = self.local_concat_bindings
+        self.local_concat_bindings = bindings
+        try:
+            new_block = self.transform(method.block)
+        finally:
+            self.local_concat_bindings = old
+        if new_block is method.block:
+            return method
+        return frog_ast.Method(method.signature, new_block)
+
+    def transform_binary_operation(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        transformed = frog_ast.BinaryOperation(
+            binary_operation.operator,
+            self.transform(binary_operation.left_expression),
+            self.transform(binary_operation.right_expression),
+        )
+        op = transformed.operator
+        if op not in (
+            frog_ast.BinaryOperators.EQUALS,
+            frog_ast.BinaryOperators.NOTEQUALS,
+        ):
+            return transformed
+        left = self._resolve_to_concat(transformed.left_expression)
+        right = self._resolve_to_concat(transformed.right_expression)
+
+        def is_concat(e: frog_ast.Expression) -> bool:
+            return (
+                isinstance(e, frog_ast.BinaryOperation)
+                and e.operator == frog_ast.BinaryOperators.OR
+            )
+
+        if is_concat(left) and is_concat(right):
+            return self._decompose_termwise(transformed, op, left, right)
+        if is_concat(right):
+            concat_expr, other = right, left
+        elif is_concat(left):
+            concat_expr, other = left, right
+        else:
+            return transformed
+
+        terms = _flatten_concat(concat_expr)
+        if len(terms) < 2:
+            return transformed
+        lengths: list[frog_ast.Expression] = []
+        for term in terms:
+            length = _bitstring_length(term, self.ctx, self.type_map)
+            if length is None:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Concat Equality Decompose",
+                        reason=(
+                            f"concatenation term '{term}' has no "
+                            "statically-derivable BitString length; "
+                            "decomposition requires every term to be a "
+                            "slice, a typed BitString variable, a primitive "
+                            "method returning BitString<L>, or a concat of "
+                            "such terms"
+                        ),
+                        location=binary_operation.origin,
+                        suggestion=(
+                            "Annotate or wrap the term so its BitString "
+                            "length is derivable (e.g., declare a typed "
+                            "local, or ensure the primitive method's "
+                            "return type is BitString<L>)."
+                        ),
+                        variable=None,
+                        method=None,
+                    )
+                )
+                return transformed
+            lengths.append(length)
+
+        combiner = (
+            frog_ast.BinaryOperators.AND
+            if op == frog_ast.BinaryOperators.EQUALS
+            else frog_ast.BinaryOperators.OR
+        )
+        # Build slice pairs.  Partial sum is accumulated as a syntactic
+        # ADD chain; SymbolicComputation / NormalizeCommutativeChains
+        # will collapse it on subsequent iterations.
+        acc: Optional[frog_ast.Expression] = None
+        pairs: list[frog_ast.Expression] = []
+        for term, length in zip(terms, lengths):
+            start = frog_ast.Integer(0) if acc is None else copy.deepcopy(acc)
+            end = (
+                copy.deepcopy(length)
+                if acc is None
+                else frog_ast.BinaryOperation(
+                    frog_ast.BinaryOperators.ADD,
+                    copy.deepcopy(acc),
+                    copy.deepcopy(length),
+                )
+            )
+            slice_expr = frog_ast.Slice(copy.deepcopy(other), start, end)
+            pairs.append(frog_ast.BinaryOperation(op, slice_expr, copy.deepcopy(term)))
+            acc = (
+                copy.deepcopy(length)
+                if acc is None
+                else frog_ast.BinaryOperation(
+                    frog_ast.BinaryOperators.ADD,
+                    acc,
+                    copy.deepcopy(length),
+                )
+            )
+        result: frog_ast.Expression = pairs[0]
+        for p in pairs[1:]:
+            result = frog_ast.BinaryOperation(combiner, result, p)
+        return result
+
+    def _decompose_termwise(
+        self,
+        transformed: frog_ast.BinaryOperation,
+        op: frog_ast.BinaryOperators,
+        left: frog_ast.Expression,
+        right: frog_ast.Expression,
+    ) -> frog_ast.Expression:
+        # Two concat chains compared with == or !=. Decompose term-wise iff
+        # both chains flatten to the same number of terms and each
+        # corresponding pair has the same statically-derivable BitString
+        # length. Soundness: when per-position lengths match, fixed-length
+        # bit-string concatenation yields equality iff every slot matches.
+        left_terms = _flatten_concat(left)
+        right_terms = _flatten_concat(right)
+        if len(left_terms) != len(right_terms):
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="Concat Equality Decompose",
+                    reason=(
+                        "two-concat comparison: term counts differ "
+                        f"({len(left_terms)} vs {len(right_terms)}); "
+                        "term-wise decomposition requires equal term counts"
+                    ),
+                    location=transformed.origin,
+                    suggestion=(
+                        "Restructure the concatenations to use the same "
+                        "term count and matching per-position lengths."
+                    ),
+                    variable=None,
+                    method=None,
+                )
+            )
+            return transformed
+        for lt, rt in zip(left_terms, right_terms):
+            ll = _bitstring_length(lt, self.ctx, self.type_map)
+            rl = _bitstring_length(rt, self.ctx, self.type_map)
+            if ll is None or rl is None:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Concat Equality Decompose",
+                        reason=(
+                            "two-concat comparison: a term has no "
+                            "statically-derivable BitString length; "
+                            "term-wise decomposition requires every term "
+                            "to be a slice, a typed BitString variable, "
+                            "or a primitive method returning BitString<L>"
+                        ),
+                        location=transformed.origin,
+                        suggestion=(
+                            "Annotate or wrap the term so its BitString "
+                            "length is derivable."
+                        ),
+                        variable=None,
+                        method=None,
+                    )
+                )
+                return transformed
+            if ll != rl:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Concat Equality Decompose",
+                        reason=(
+                            "two-concat comparison: per-position lengths "
+                            "differ at one or more slots; term-wise "
+                            "decomposition requires syntactic length match"
+                        ),
+                        location=transformed.origin,
+                        suggestion=(
+                            "Re-bracket so corresponding positions have "
+                            "the same length, or use SymbolicComputation "
+                            "to normalize length expressions first."
+                        ),
+                        variable=None,
+                        method=None,
+                    )
+                )
+                return transformed
+        combiner = (
+            frog_ast.BinaryOperators.AND
+            if op == frog_ast.BinaryOperators.EQUALS
+            else frog_ast.BinaryOperators.OR
+        )
+        pairs = [
+            frog_ast.BinaryOperation(op, copy.deepcopy(lt), copy.deepcopy(rt))
+            for lt, rt in zip(left_terms, right_terms)
+        ]
+        result: frog_ast.Expression = pairs[0]
+        for p in pairs[1:]:
+            result = frog_ast.BinaryOperation(combiner, result, p)
+        return result
+
+
+class ConcatEqualityDecompose(TransformPass):
+    name = "Concat Equality Decompose"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        type_map = build_game_type_map(game, ctx.proof_let_types)
+        return ConcatEqualityDecomposeTransformer(ctx, type_map).transform(game)
+
+
+# ---------------------------------------------------------------------------
+# Tuple-equality decomposition
+# ---------------------------------------------------------------------------
+
+
+class TupleEqualityDecomposeTransformer(Transformer):
+    """Rewrites ``a != b`` between tuple-typed expressions to the
+    component-wise disjunction ``a[0]!=b[0] || ... || a[k-1]!=b[k-1]``.
+
+    Soundness: products are unequal iff some component is unequal.
+
+    Currently only the ``!=`` direction fires. The ``==`` direction is
+    intentionally NOT decomposed: many proofs use ``c == ctStar`` style
+    if-guards in Decaps oracles where the engine relies on the tuple
+    equality remaining atomic for ``IfConditionAliasSubstitution`` and
+    related passes. The binding-proof workflow that motivated this pass
+    only ever needs the ``!=`` direction at the point of comparison
+    (the ``==`` form in ``if (ct0 == ct1) { return false; }`` is
+    converted to ``!=`` by ``_negate_condition`` + DeMorgan before this
+    pass sees it).
+
+    The rewrite fires only when at least one of ``a``, ``b`` has a
+    statically-derivable :class:`ProductType` and the arity is known.
+    Tuple literals (``Tuple`` nodes) carry their arity directly; bare
+    variables/parameters are looked up in the per-method type map.
+    """
+
+    def __init__(self, ctx: PipelineContext, type_map: NameTypeMap) -> None:
+        self.ctx = ctx
+        self.type_map = type_map
+
+    def _product_arity(self, expr: frog_ast.Expression) -> Optional[int]:
+        if isinstance(expr, frog_ast.Tuple):
+            return len(expr.values)
+        if isinstance(expr, frog_ast.Variable):
+            t = self.type_map.get(expr.name)
+            if isinstance(t, frog_ast.ProductType):
+                return len(t.types)
+        return None
+
+    def transform_binary_operation(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        transformed = frog_ast.BinaryOperation(
+            binary_operation.operator,
+            self.transform(binary_operation.left_expression),
+            self.transform(binary_operation.right_expression),
+        )
+        op = transformed.operator
+        if op != frog_ast.BinaryOperators.NOTEQUALS:
+            return transformed
+        left = transformed.left_expression
+        right = transformed.right_expression
+        arity = self._product_arity(left)
+        if arity is None:
+            arity = self._product_arity(right)
+        if arity is None or arity < 1:
+            return transformed
+        # op is restricted to NOTEQUALS at the gate above; product
+        # disequality decomposes via OR of per-component disequalities.
+        combiner = frog_ast.BinaryOperators.OR
+
+        def project(e: frog_ast.Expression, i: int) -> frog_ast.Expression:
+            if isinstance(e, frog_ast.Tuple):
+                return copy.deepcopy(e.values[i])
+            return frog_ast.ArrayAccess(copy.deepcopy(e), frog_ast.Integer(i))
+
+        pairs = [
+            frog_ast.BinaryOperation(op, project(left, i), project(right, i))
+            for i in range(arity)
+        ]
+        result: frog_ast.Expression = pairs[0]
+        for p in pairs[1:]:
+            result = frog_ast.BinaryOperation(combiner, result, p)
+        return result
+
+
+class TupleEqualityDecompose(TransformPass):
+    name = "Tuple Equality Decompose"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        type_map = build_game_type_map(game, ctx.proof_let_types)
+        return TupleEqualityDecomposeTransformer(ctx, type_map).transform(game)
 
 
 # ---------------------------------------------------------------------------

@@ -687,6 +687,21 @@ class NameResolutionVisitor(VariableTypeVisitor):
                 )
             return
 
+        if isinstance(the_type, frog_ast.MapType):
+            if field_access.name not in ("keys", "values", "entries"):
+                suggestion = _suggestions.suggest_identifier(
+                    field_access.name, ["keys", "values", "entries"]
+                )
+                hint = f"did you mean '{suggestion}'?" if suggestion else ""
+                print_error(
+                    field_access,
+                    f"Map has no field '{field_access.name}'"
+                    " (only 'keys', 'values', and 'entries' are available)",
+                    self.file_name,
+                    hint=hint,
+                )
+            return
+
         if not isinstance(the_type, visitors.InstantiableType):
             print_error(
                 field_access,
@@ -743,6 +758,24 @@ def check_proof_well_formed(
             raise FailedTypeCheck()
 
     type_check_visitor.visit(proof.theorem)
+
+    for req in proof.requirements:
+        type_check_visitor.visit(req.target)
+        target_type = type_check_visitor.get_type_from_ast(req.target)
+        if req.kind == "prime":
+            if not isinstance(target_type, frog_ast.IntType):
+                print_error(
+                    req,
+                    f"`is prime` requires an integer-typed target, "
+                    f"got {_format_type(target_type)}",
+                    file_name,
+                )
+        else:
+            print_error(
+                req,
+                f"unknown structural predicate: `{req.kind}`",
+                file_name,
+            )
 
     for helper in proof.helpers:
         import_namespace[helper.name] = helper
@@ -1132,8 +1165,24 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 ),
             ):
                 continue
-            # Skip instantiated schemes/primitives/games stored as AST nodes
-            if isinstance(ns_val, (frog_ast.Primitive, frog_ast.Scheme, frog_ast.Game)):
+            # For instantiated schemes/primitives, expand each Int field into
+            # a qualified symbol mapping: e.g. K's Int field Nss with value
+            # kem_nss gives Symbol("K.Nss") -> Symbol("kem_nss"). This lets
+            # BitString size expressions written as K.Nss + ... (using a
+            # scheme/primitive parameter's field access) canonicalize to the
+            # same form as expressions using the concrete let-level Int
+            # variables.
+            if isinstance(ns_val, (frog_ast.Primitive, frog_ast.Scheme)):
+                for nested_field in ns_val.fields:
+                    if (
+                        isinstance(nested_field.type, frog_ast.IntType)
+                        and nested_field.value is not None
+                    ):
+                        nested_sym = _ast_to_sympy(nested_field.value)
+                        if nested_sym is not None:
+                            subs[Symbol(f"{ns_name}.{nested_field.name}")] = nested_sym
+                continue
+            if isinstance(ns_val, frog_ast.Game):
                 continue
             sym_val = _ast_to_sympy(ns_val)
             if sym_val is not None:
@@ -1345,10 +1394,26 @@ class CheckTypeVisitor(VariableTypeVisitor):
 
     def leave_generic_for(self, generic_for: frog_ast.GenericFor) -> None:
         super().leave_generic_for(generic_for)
-        over_set = self.get_type_from_ast(generic_for.over)
-        if not isinstance(over_set, frog_ast.SetType):
+        over_type = self.get_type_from_ast(generic_for.over)
+        element_type: PossibleType
+        if isinstance(over_type, frog_ast.SetType):
+            element_type = over_type.parameterization
+        elif isinstance(over_type, frog_ast.ArrayType):
+            element_type = over_type.element_type
+        else:
             self.print_error(
-                generic_for, f"Must iterate over finite set, got type {over_set}"
+                generic_for,
+                f"Must iterate over Set, Array, Map.keys, Map.values, or Map.entries;"
+                f" got type {over_type}",
+            )
+            return
+        if element_type is not None and not self.check_types(
+            generic_for.var_type, element_type
+        ):
+            self.print_error(
+                generic_for,
+                f"Loop variable has type {generic_for.var_type},"
+                f" but iteration yields elements of type {element_type}",
             )
 
     def visit_reduction(self, reduction: frog_ast.Reduction) -> None:
@@ -2032,6 +2097,31 @@ class CheckTypeVisitor(VariableTypeVisitor):
                     " (only 'generator', 'order', and 'identity' are available)",
                 )
             return
+        if isinstance(object_type, frog_ast.MapType):
+            if field_acess.name == "keys":
+                self.ast_type_map.set(
+                    field_acess, frog_ast.SetType(object_type.key_type)
+                )
+            elif field_acess.name == "values":
+                self.ast_type_map.set(
+                    field_acess, frog_ast.SetType(object_type.value_type)
+                )
+            elif field_acess.name == "entries":
+                self.ast_type_map.set(
+                    field_acess,
+                    frog_ast.SetType(
+                        frog_ast.ProductType(
+                            [object_type.key_type, object_type.value_type]
+                        )
+                    ),
+                )
+            else:
+                self.print_error(
+                    field_acess,
+                    f"Map has no field '{field_acess.name}'"
+                    " (only 'keys', 'values', and 'entries' are available)",
+                )
+            return
         if not isinstance(object_type, visitors.InstantiableType):
             self.print_error(
                 field_acess,
@@ -2124,7 +2214,10 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 "Unique sample set must be a parameterized Set<D>",
             )
             return
-        if not self.check_types(set_type.parameterization, unique_sample.sampled_from):
+        # Exclusion-set elements must be values in the sampled-from type,
+        # so the sampled type plays the 'declared' role (mirrors
+        # `ModInt<q> x = 0;` where ModInt accepts an Int literal).
+        if not self.check_types(unique_sample.sampled_from, set_type.parameterization):
             self.print_error(
                 unique_sample,
                 f"Set element type {set_type.parameterization} does not match"
@@ -2736,10 +2829,46 @@ def compare_types(
     ):
         return True
 
+    # Covariance of Set<_> under element-type coercion: Set<A> accepts Set<B>
+    # whenever A accepts B. This mirrors the ModInt/Int coercion above at the
+    # set-type level so e.g. passing `{0}` (Set<Int>) where Set<ModInt<q>> is
+    # expected type-checks.
+    if (
+        isinstance(declared_type, frog_ast.SetType)
+        and isinstance(value_type, frog_ast.SetType)
+        and declared_type.parameterization is not None
+        and value_type.parameterization is not None
+    ):
+        if compare_types(
+            declared_type.parameterization,
+            value_type.parameterization,
+            subsets_pairs,
+            sympy_subs,
+            strict_optional,
+        ):
+            return True
+
     if isinstance(declared_type, frog_ast.GroupElemType) and isinstance(
         value_type, frog_ast.GroupElemType
     ):
         return str(declared_type.group) == str(value_type.group)
+
+    if isinstance(declared_type, frog_ast.FunctionType) and isinstance(
+        value_type, frog_ast.FunctionType
+    ):
+        return compare_types(
+            declared_type.domain_type,
+            value_type.domain_type,
+            subsets_pairs,
+            sympy_subs,
+            strict_optional,
+        ) and compare_types(
+            declared_type.range_type,
+            value_type.range_type,
+            subsets_pairs,
+            sympy_subs,
+            strict_optional,
+        )
 
     if isinstance(declared_type, frog_ast.ArrayType) and isinstance(
         value_type, frog_ast.ArrayType

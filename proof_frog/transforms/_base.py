@@ -57,6 +57,38 @@ class PipelineContext:
     max_calls: Optional[int] = None
     sampled_let_names: set[str] = dataclasses.field(default_factory=set)
     near_misses: list[NearMiss] = dataclasses.field(default_factory=list)
+    requirements: list[frog_ast.StructuralRequirement] = dataclasses.field(
+        default_factory=list
+    )
+    # Fields created by a canonicalization pass specifically to serve as
+    # the canonical container for some expression (e.g. ``<base> ^ X`` by
+    # ``HoistGroupExpToInitialize``). ``InlineSingleUseField`` skips
+    # these: inlining them would re-expose the pattern and the producing
+    # pass would re-create the field on the next fixed-point iteration,
+    # never converging. Producers add names here when they create the
+    # field; consumers (currently only ``InlineSingleUseField``) consult
+    # the set.
+    pinned_fields: set[str] = dataclasses.field(default_factory=set)
+
+    def has_prime_order_requirement(self, group_expr: frog_ast.Expression) -> bool:
+        """True if the proof declares ``<group_expr>.order is prime``.
+
+        Accepts either the ``FieldAccess(the_object=<group_expr>, name='order')``
+        form or the canonical ``GroupOrder(<group_expr>)`` form.
+        """
+        for req in self.requirements:
+            if req.kind != "prime":
+                continue
+            target = req.target
+            if (
+                isinstance(target, frog_ast.FieldAccess)
+                and target.name == "order"
+                and target.the_object == group_expr
+            ):
+                return True
+            if isinstance(target, frog_ast.GroupOrder) and target.group == group_expr:
+                return True
+        return False
 
 
 def _lookup_primitive_method(

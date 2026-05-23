@@ -4,7 +4,20 @@ from proof_frog import frog_ast, frog_parser
 from proof_frog.transforms.inlining import (
     HoistDeterministicCallToInitializeTransformer,
 )
-from proof_frog.visitors import NameTypeMap
+from proof_frog.visitors import NameTypeMap, SearchVisitor
+
+
+def _walk_funccalls(node: frog_ast.ASTNode) -> list[frog_ast.FuncCall]:
+    """Collect all FuncCall nodes inside *node* (for assertions)."""
+    result: list[frog_ast.FuncCall] = []
+
+    def _collect(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, frog_ast.FuncCall):
+            result.append(n)
+        return False
+
+    SearchVisitor(_collect).visit(node)
+    return result
 
 
 def _make_det_namespace() -> frog_ast.Namespace:
@@ -207,6 +220,41 @@ class TestHoistDeterministicCallToInitialize:
         ).transform(game)
         assert result == game
 
+    def test_field_array_element_reassigned_in_oracle_not_hoisted(self) -> None:
+        """If an arg-field's element is mutated via ``arr[i] = v`` in an
+        oracle, the field is no longer stable across calls and hoisting
+        would be unsound. Exercises ``_fields_assigned_in_block``'s
+        ArrayAccess detection (inlining.py:3759-3764)."""
+        prim = frog_parser.parse_primitive_file("""
+            Primitive G(Int n) {
+                Set SeedArr = Array<BitString<n>, 2>;
+                deterministic BitString<n> evaluate(SeedArr s);
+            }
+            """)
+        ns: frog_ast.Namespace = {"G": prim, "GG": prim}
+        game = frog_parser.parse_game("""
+            Game Foo(G GG) {
+                Array<BitString<n>, 2> seeds;
+                Void Initialize() {
+                    BitString<n> s0 <- BitString<n>;
+                    BitString<n> s1 <- BitString<n>;
+                    seeds[0] = s0;
+                    seeds[1] = s1;
+                }
+                BitString<n> Get1() {
+                    return GG.evaluate(seeds);
+                }
+                Void Reset() {
+                    BitString<n> x <- BitString<n>;
+                    seeds[0] = x;
+                }
+            }
+            """)
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        assert result == game
+
     def test_nondeterministic_call_not_hoisted(self) -> None:
         """Non-deterministic calls must not be hoisted (would change semantics)."""
         game = frog_parser.parse_game("""
@@ -393,6 +441,428 @@ class TestHoistFunctionDRCalls:
                 }
                 Void Reset() {
                     RF <- Function<BitString<8>, BitString<16>>;
+                }
+            }
+            """)
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace={}
+        ).transform(game)
+        assert result == game
+
+
+def _make_group_namespace() -> frog_ast.Namespace:
+    """Namespace with primitive NG whose ``Exp`` and ``Generator`` are deterministic."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive NG(Int n) {
+            deterministic BitString<n> Generator();
+            deterministic BitString<n> Exp(BitString<n> base, BitString<n> exponent);
+        }
+        """)
+    return {"NG": prim}
+
+
+class TestNestedDeterministicStableArgs:
+    """Nested deterministic calls as stable arguments (design 2026-04-23)."""
+
+    def test_nested_zero_arg_det_call_hoisted(self) -> None:
+        """``NG.Exp(NG.Generator(), field_x)`` is hoisted into Initialize."""
+        game = frog_parser.parse_game("""
+            Game Foo(NG GG) {
+                BitString<n> field_x;
+                Void Initialize() {
+                    field_x <- BitString<n>;
+                }
+                BitString<n> Get1() {
+                    return GG.Exp(GG.Generator(), field_x);
+                }
+                BitString<n> Get2() {
+                    return GG.Exp(GG.Generator(), field_x);
+                }
+            }
+            """)
+        ns = _make_group_namespace()
+        ns["GG"] = ns["NG"]
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        assert len(result.fields) == len(game.fields) + 1
+        new_field_name = next(
+            f.name for f in result.fields if f.name not in {"field_x"}
+        )
+        init = result.methods[0]
+        last_stmt = init.block.statements[-1]
+        assert isinstance(last_stmt, frog_ast.Assignment)
+        assert isinstance(last_stmt.var, frog_ast.Variable)
+        assert last_stmt.var.name == new_field_name
+        assert isinstance(last_stmt.value, frog_ast.FuncCall)
+        for oracle in result.methods[1:]:
+            ret = oracle.block.statements[0]
+            assert isinstance(ret, frog_ast.ReturnStatement)
+            assert isinstance(ret.expression, frog_ast.Variable)
+            assert ret.expression.name == new_field_name
+
+    def test_doubly_nested_det_calls_hoisted(self) -> None:
+        """``F.inner(G.evaluate(field_x))`` hoists when both are deterministic."""
+        ns = _make_det_namespace()
+        prim_f = frog_parser.parse_primitive_file("""
+            Primitive F(Int n) {
+                deterministic BitString<n> inner(BitString<n> x);
+            }
+            """)
+        ns["F"] = prim_f
+        ns["FF"] = prim_f
+        ns["GG"] = ns["G"]
+        game = frog_parser.parse_game("""
+            Game Foo(G GG, F FF) {
+                BitString<n> field_x;
+                Void Initialize() {
+                    field_x <- BitString<n>;
+                }
+                BitString<n> Get1() {
+                    return FF.inner(GG.evaluate(field_x));
+                }
+                BitString<n> Get2() {
+                    return FF.inner(GG.evaluate(field_x));
+                }
+            }
+            """)
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        assert len(result.fields) == len(game.fields) + 1
+
+    def test_nested_nondet_call_not_hoisted(self) -> None:
+        """A nested non-deterministic call disqualifies the outer candidate."""
+        prim = frog_parser.parse_primitive_file("""
+            Primitive NG(Int n) {
+                BitString<n> Generator();
+                deterministic BitString<n> Exp(BitString<n> base, BitString<n> exponent);
+            }
+            """)
+        ns = {"NG": prim, "GG": prim}
+        game = frog_parser.parse_game("""
+            Game Foo(NG GG) {
+                BitString<n> field_x;
+                Void Initialize() {
+                    field_x <- BitString<n>;
+                }
+                BitString<n> Get1() {
+                    return GG.Exp(GG.Generator(), field_x);
+                }
+                BitString<n> Get2() {
+                    return GG.Exp(GG.Generator(), field_x);
+                }
+            }
+            """)
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        assert result == game
+
+    def test_nested_field_reassigned_not_hoisted(self) -> None:
+        """If a field appearing in a nested arg is reassigned, hoisting is unsound."""
+        prim_f = frog_parser.parse_primitive_file("""
+            Primitive F(Int n) {
+                deterministic BitString<n> wrap(BitString<n> x);
+            }
+            """)
+        ns = {"F": prim_f, "FF": prim_f}
+        game = frog_parser.parse_game("""
+            Game Foo(F FF) {
+                BitString<n> field_x;
+                Void Initialize() {
+                    field_x <- BitString<n>;
+                }
+                BitString<n> Get1() {
+                    return FF.wrap(FF.wrap(field_x));
+                }
+                Void Reset() {
+                    field_x <- BitString<n>;
+                }
+            }
+            """)
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        assert result == game
+
+    def test_terminal_return_hoisted_with_return_rewrite(self) -> None:
+        """Initialize with a terminal non-Void return: hoist + rewrite the return.
+
+        The hoisted assignment must land *before* the terminal return, and
+        any structural occurrence of the candidate in the return expression
+        must be rewritten to the new field. Matches the shape of composed
+        reductions where Initialize ends with ``return [..., candidate, ...];``.
+        """
+        game = frog_parser.parse_game("""
+            Game Foo(G GG) {
+                BitString<n> seed;
+                BitString<n> ct;
+                Void Initialize() {
+                    seed <- BitString<n>;
+                    ct <- BitString<n>;
+                    return [ct, GG.evaluate(seed)];
+                }
+                BitString<n> Get() {
+                    return GG.evaluate(seed);
+                }
+            }
+            """)
+        ns = _make_det_namespace()
+        ns["GG"] = ns["G"]
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        assert len(result.fields) == len(game.fields) + 1
+        new_field_name = next(
+            f.name for f in result.fields if f.name not in {"seed", "ct"}
+        )
+        init = result.methods[0]
+        stmts = list(init.block.statements)
+        # Terminal return still present at the end
+        assert isinstance(stmts[-1], frog_ast.ReturnStatement)
+        # Hoisted assignment inserted immediately before the return
+        assert isinstance(stmts[-2], frog_ast.Assignment)
+        assert isinstance(stmts[-2].var, frog_ast.Variable)
+        assert stmts[-2].var.name == new_field_name
+        # Return expression's candidate call is rewritten to the new field
+        ret = stmts[-1]
+        # Search the return expression for the original FuncCall — must be gone
+        found_call = next(
+            (
+                c
+                for c in _walk_funccalls(ret.expression)
+                if isinstance(c.func, frog_ast.FieldAccess)
+                and c.func.name == "evaluate"
+            ),
+            None,
+        )
+        assert found_call is None
+        # Get oracle also rewrites the call
+        oracle = result.methods[1]
+        oracle_ret = oracle.block.statements[0]
+        assert isinstance(oracle_ret, frog_ast.ReturnStatement)
+        assert isinstance(oracle_ret.expression, frog_ast.Variable)
+        assert oracle_ret.expression.name == new_field_name
+
+    def test_early_return_in_if_still_bails(self) -> None:
+        """An ``if`` block containing a ReturnStatement in Initialize: no hoist.
+
+        The appended hoisted assignment would be skipped when the guard
+        takes the early-return branch, so the pass must continue to bail.
+        """
+        game = frog_parser.parse_game("""
+            Game Foo(G GG, Bool cond) {
+                BitString<n> seed = 0^n;
+                Void Initialize() {
+                    seed <- BitString<n>;
+                }
+                BitString<n> Get() {
+                    return GG.evaluate(seed);
+                }
+            }
+            """)
+        # Inject an early return inside an if block in Initialize.
+        init = game.methods[0]
+        assert init.signature.name == "Initialize"
+        early_return_block = frog_ast.Block(
+            [frog_ast.ReturnStatement(frog_ast.Integer(0))]
+        )
+        if_stmt = frog_ast.IfStatement(
+            [frog_ast.Boolean(True)], [early_return_block]
+        )
+        init.block = frog_ast.Block([if_stmt, *list(init.block.statements)])
+        ns = _make_det_namespace()
+        ns["GG"] = ns["G"]
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        assert result == game
+
+    def test_alias_in_return_rewritten(self) -> None:
+        """``x = cand; return f(x);`` in Initialize: the alias use is rewritten.
+
+        Without alias-aware rewriting, the hoisted field has only one use
+        (in the oracle), so Inline Single-Use Field can fold it back.
+        """
+        ns = _make_det_namespace()
+        prim_f = frog_parser.parse_primitive_file("""
+            Primitive F(Int n) {
+                deterministic BitString<n> wrap(BitString<n> x);
+            }
+            """)
+        ns["F"] = prim_f
+        ns["FF"] = prim_f
+        ns["GG"] = ns["G"]
+        game = frog_parser.parse_game("""
+            Game Foo(G GG, F FF) {
+                BitString<n> seed;
+                Void Initialize() {
+                    seed <- BitString<n>;
+                    BitString<n> y = GG.evaluate(seed);
+                    return FF.wrap(y);
+                }
+                BitString<n> Get() {
+                    return GG.evaluate(seed);
+                }
+            }
+            """)
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        assert len(result.fields) == len(game.fields) + 1
+        new_field_name = next(
+            f.name for f in result.fields if f.name not in {"seed"}
+        )
+        init = result.methods[0]
+        stmts = list(init.block.statements)
+        ret = stmts[-1]
+        assert isinstance(ret, frog_ast.ReturnStatement)
+        # The return expression should now reference the new field via
+        # FF.wrap(new_field), not FF.wrap(y).
+        assert isinstance(ret.expression, frog_ast.FuncCall)
+        assert len(ret.expression.args) == 1
+        arg = ret.expression.args[0]
+        assert isinstance(arg, frog_ast.Variable)
+        assert arg.name == new_field_name
+
+    def test_hoist_with_slice_of_field_arg(self) -> None:
+        """Call whose argument is a Slice of a field gets hoisted.
+
+        This is the pattern that blocks hybrid-KEM seed-form Decaps from
+        canonicalizing: ``DeriveKeyPair(seed_full[0 : n])`` in Decaps, with
+        ``seed_full`` a field set in Initialize.
+        """
+        game = frog_parser.parse_game("""
+            Game Foo(G GG) {
+                BitString<16> seed_full;
+                Void Initialize() {
+                    seed_full <- BitString<16>;
+                }
+                BitString<8> Get() {
+                    return GG.evaluate(seed_full[0 : 8]);
+                }
+            }
+            """)
+        ns = _make_det_namespace()
+        ns["GG"] = ns["G"]
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        assert len(result.fields) == len(game.fields) + 1
+        new_field_name = next(
+            f.name for f in result.fields if f.name not in {"seed_full"}
+        )
+        # Initialize gains ``<new> = GG.evaluate(seed_full[0:n]);``
+        init = result.methods[0]
+        last_stmt = init.block.statements[-1]
+        assert isinstance(last_stmt, frog_ast.Assignment)
+        assert isinstance(last_stmt.var, frog_ast.Variable)
+        assert last_stmt.var.name == new_field_name
+        # Get's body should no longer contain any FuncCall.
+        get_body = result.methods[1].block
+        assert _walk_funccalls(get_body) == []
+
+    def test_hoist_with_array_access_of_field_arg(self) -> None:
+        """Call whose argument is an ArrayAccess (tuple projection) of a
+        field gets hoisted.
+        """
+        game = frog_parser.parse_game("""
+            Game Foo(G GG) {
+                [BitString<8>, BitString<8>] pair;
+                Void Initialize() {
+                    BitString<8> a <- BitString<8>;
+                    BitString<8> b <- BitString<8>;
+                    pair = [a, b];
+                }
+                BitString<8> Get() {
+                    return GG.evaluate(pair[0]);
+                }
+            }
+            """)
+        ns = _make_det_namespace()
+        ns["GG"] = ns["G"]
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        assert len(result.fields) == len(game.fields) + 1
+        new_field_name = next(
+            f.name for f in result.fields if f.name not in {"pair"}
+        )
+        init = result.methods[0]
+        stmts = list(init.block.statements)
+        # The hoisted assignment should be the last statement (no terminal
+        # return in this Void Initialize).
+        last_stmt = stmts[-1]
+        assert isinstance(last_stmt, frog_ast.Assignment)
+        assert isinstance(last_stmt.var, frog_ast.Variable)
+        assert last_stmt.var.name == new_field_name
+        get_body = result.methods[1].block
+        assert _walk_funccalls(get_body) == []
+
+    def test_slice_of_reassigned_local_not_hoisted(self) -> None:
+        """A Slice whose underlying array is a local (not a field/param)
+        is not stable -- the hoist must not fire.
+        """
+        game = frog_parser.parse_game("""
+            Game Foo(G GG) {
+                Void Initialize() {
+                }
+                BitString<8> Get() {
+                    BitString<16> x <- BitString<16>;
+                    return GG.evaluate(x[0 : 8]);
+                }
+            }
+            """)
+        ns = _make_det_namespace()
+        ns["GG"] = ns["G"]
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        # x is a local in Get, not a field. Slice should not be treated as
+        # stable; hoist must not fire.
+        assert result == game
+
+    def test_slice_of_field_reassigned_outside_init_not_hoisted(self) -> None:
+        """A Slice of a field that *is* reassigned outside Initialize must
+        not be hoisted -- each oracle call would see a different slice.
+        """
+        game = frog_parser.parse_game("""
+            Game Foo(G GG) {
+                BitString<16> seed_full;
+                Void Initialize() {
+                    seed_full <- BitString<16>;
+                }
+                BitString<8> Get() {
+                    return GG.evaluate(seed_full[0 : 8]);
+                }
+                Void Reset() {
+                    seed_full <- BitString<16>;
+                }
+            }
+            """)
+        ns = _make_det_namespace()
+        ns["GG"] = ns["G"]
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        assert result == game
+
+    def test_nested_function_var_callee_reassigned_not_hoisted(self) -> None:
+        """Nested ``RF(field_x)`` with RF reassigned outside Initialize: not hoisted."""
+        game = frog_parser.parse_game("""
+            Game Foo() {
+                BitString<8> seed;
+                Function<BitString<8>, BitString<8>> RF;
+                Void Initialize() {
+                    seed <- BitString<8>;
+                    RF <- Function<BitString<8>, BitString<8>>;
+                }
+                BitString<8> Get() {
+                    return RF(RF(seed));
+                }
+                Void Reset() {
+                    RF <- Function<BitString<8>, BitString<8>>;
                 }
             }
             """)

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import functools
+from typing import Sequence
 
 import z3
 
@@ -119,6 +120,232 @@ class BranchEliminiationTransformer(BlockTransformer):
                         )
                     )
         return block
+
+
+class UniqExclusionBranchEliminationTransformer(BlockTransformer):
+    """Simplifies ``==`` / ``!=`` expressions whose result follows from
+    ``<-uniq[S]`` constraints.
+
+    For ``v <-uniq[S] T;`` in scope, every element of ``S`` is guaranteed
+    distinct from ``v`` by FrogLang's exclusion-sampling semantics.  When a
+    later expression contains ``v == s`` or ``s == v`` for some ``s`` that
+    is structurally equal to an element of ``S`` (or, by transitivity,
+    ``s <-uniq[S']`` with ``v`` lexically in ``S'``), the comparison is
+    statically ``false``; ``v != s`` is statically ``true``.  This transform
+    rewrites those subexpressions to the corresponding Boolean literal so
+    that downstream passes (``BooleanIdentity``, ``BranchElimination``)
+    fold the surrounding control flow.
+
+    Constraint scope is **block-local**: tracking does not cross method
+    boundaries or follow constraints into nested blocks (the transform
+    recurses into nested blocks via the standard ``BlockTransformer``
+    walk, but each block restarts its own constraint map).  A constraint
+    is invalidated as soon as either side (the sampled variable, or any
+    name appearing in its exclusion-set elements) is reassigned in the
+    same block.
+
+    Soundness: ``<-uniq[S]`` semantics guarantee ``v not in S`` at sample
+    time; if neither ``v`` nor any free variable of an ``S`` element has
+    been mutated since, the structural equality ``v == s`` is provably
+    ``false``.  This is the same reasoning that justifies
+    ``FreshInputRFToUniform`` (see TRANSFORMS.md).
+    """
+
+    @staticmethod
+    def _free_variable_names(expr: frog_ast.Expression) -> set[str]:
+        """Return the names of every ``Variable`` node free in *expr*.
+
+        Used to detect when a name appearing in an exclusion-set element
+        has been reassigned, which invalidates the constraint.
+        """
+        names: set[str] = set()
+
+        def _collect(node: frog_ast.ASTNode) -> bool:
+            if isinstance(node, frog_ast.Variable):
+                names.add(node.name)
+            return False
+
+        SearchVisitor(_collect).visit(expr)
+        return names
+
+    @classmethod
+    def _exclusion_elements(
+        cls, unique_set: frog_ast.Expression
+    ) -> tuple[list[frog_ast.Expression], set[str]] | None:
+        """Extract the list of exclusion elements from a ``<-uniq[S]`` set.
+
+        Currently handles literal sets ``{a, b, ...}``.  Returns the list
+        of elements together with the union of their free-variable names
+        (used for invalidation tracking).  Returns ``None`` if the set is
+        not a literal.
+        """
+        if not isinstance(unique_set, frog_ast.Set):
+            return None
+        all_free: set[str] = set()
+        for el in unique_set.elements:
+            all_free |= cls._free_variable_names(el)
+        return list(unique_set.elements), all_free
+
+    @staticmethod
+    def _written_var_names(stmt: frog_ast.Statement) -> set[str]:
+        """Return the set of variable names written by *stmt*.
+
+        Used to invalidate constraints when a tracked variable (or a
+        free variable of its exclusion-set elements) is reassigned.
+        """
+        if isinstance(
+            stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ):
+            if isinstance(stmt.var, frog_ast.Variable):
+                return {stmt.var.name}
+        return set()
+
+    def _try_simplify_eq(
+        self,
+        operator: frog_ast.BinaryOperators,
+        left: frog_ast.Expression,
+        right: frog_ast.Expression,
+        constraints: dict[str, list[frog_ast.Expression]],
+    ) -> frog_ast.Expression | None:
+        """Return a Boolean literal if (left op right) follows from a
+        ``<-uniq`` constraint; ``None`` otherwise.
+        """
+        if operator not in (
+            frog_ast.BinaryOperators.EQUALS,
+            frog_ast.BinaryOperators.NOTEQUALS,
+        ):
+            return None
+
+        # Try left as the sampled var, right as a candidate exclusion element
+        # (and symmetric).
+        for sampled, candidate in ((left, right), (right, left)):
+            if not isinstance(sampled, frog_ast.Variable):
+                continue
+            elems = constraints.get(sampled.name)
+            if elems is None:
+                continue
+            for el in elems:
+                if el == candidate:
+                    if operator == frog_ast.BinaryOperators.EQUALS:
+                        return frog_ast.Boolean(False)
+                    return frog_ast.Boolean(True)
+        return None
+
+    def _rewrite_expr(
+        self,
+        expr: frog_ast.Expression,
+        constraints: dict[str, list[frog_ast.Expression]],
+    ) -> frog_ast.Expression:
+        """Recursively rewrite ``==``/``!=`` subexpressions whose result is
+        determined by a ``<-uniq`` constraint, leaving everything else
+        unchanged.  Constraints do NOT propagate into nested blocks here
+        (those are handled by the BlockTransformer recursion).
+        """
+        if isinstance(expr, frog_ast.BinaryOperation):
+            new_left = self._rewrite_expr(expr.left_expression, constraints)
+            new_right = self._rewrite_expr(expr.right_expression, constraints)
+            simplified = self._try_simplify_eq(
+                expr.operator, new_left, new_right, constraints
+            )
+            if simplified is not None:
+                return simplified
+            if (
+                new_left is not expr.left_expression
+                or new_right is not expr.right_expression
+            ):
+                return frog_ast.BinaryOperation(expr.operator, new_left, new_right)
+            return expr
+        if isinstance(expr, frog_ast.UnaryOperation):
+            new_inner = self._rewrite_expr(expr.expression, constraints)
+            if new_inner is not expr.expression:
+                return frog_ast.UnaryOperation(expr.operator, new_inner)
+            return expr
+        if isinstance(expr, frog_ast.Tuple):
+            new_values = [self._rewrite_expr(v, constraints) for v in expr.values]
+            if any(nv is not ov for nv, ov in zip(new_values, expr.values)):
+                return frog_ast.Tuple(new_values)
+            return expr
+        if isinstance(expr, frog_ast.FuncCall):
+            new_args = [self._rewrite_expr(a, constraints) for a in expr.args]
+            if any(na is not oa for na, oa in zip(new_args, expr.args)):
+                return frog_ast.FuncCall(expr.func, new_args)
+            return expr
+        if isinstance(expr, frog_ast.ArrayAccess):
+            new_arr = self._rewrite_expr(expr.the_array, constraints)
+            new_idx = self._rewrite_expr(expr.index, constraints)
+            if new_arr is not expr.the_array or new_idx is not expr.index:
+                return frog_ast.ArrayAccess(new_arr, new_idx)
+            return expr
+        if isinstance(expr, frog_ast.Slice):
+            new_arr = self._rewrite_expr(expr.the_array, constraints)
+            new_start = self._rewrite_expr(expr.start, constraints)
+            new_end = self._rewrite_expr(expr.end, constraints)
+            if (
+                new_arr is not expr.the_array
+                or new_start is not expr.start
+                or new_end is not expr.end
+            ):
+                return frog_ast.Slice(new_arr, new_start, new_end)
+            return expr
+        return expr
+
+    def _transform_block_wrapper(
+        self,
+        block: frog_ast.Block,
+    ) -> frog_ast.Block:
+        # var_name -> exclusion elements (list of Expressions)
+        constraints: dict[str, list[frog_ast.Expression]] = {}
+        # var_name -> set of free-variable names whose mutation invalidates
+        # the constraint
+        invalidators: dict[str, set[str]] = {}
+        new_stmts: list[frog_ast.Statement] = []
+        changed = False
+        for stmt in block.statements:
+            written = self._written_var_names(stmt)
+            # Invalidate any constraint whose sampled var or free-variable
+            # of an exclusion element was reassigned BEFORE this statement
+            # rewrites its expressions (so a self-shadowing reassignment
+            # invalidates first, then we may add a new constraint).
+            if written:
+                to_drop = []
+                for var_name, free_set in invalidators.items():
+                    if var_name in written or (free_set & written):
+                        to_drop.append(var_name)
+                for v in to_drop:
+                    constraints.pop(v, None)
+                    invalidators.pop(v, None)
+
+            if isinstance(stmt, frog_ast.IfStatement):
+                new_conditions = [
+                    self._rewrite_expr(c, constraints) for c in stmt.conditions
+                ]
+                if new_conditions != stmt.conditions:
+                    changed = True
+                    new_stmts.append(frog_ast.IfStatement(new_conditions, stmt.blocks))
+                else:
+                    new_stmts.append(stmt)
+            elif isinstance(stmt, frog_ast.UniqueSample) and isinstance(
+                stmt.var, frog_ast.Variable
+            ):
+                extracted = self._exclusion_elements(stmt.unique_set)
+                if extracted is not None:
+                    elems, free_vars = extracted
+                    if elems:
+                        constraints[stmt.var.name] = elems
+                        invalidators[stmt.var.name] = free_vars
+                new_stmts.append(stmt)
+            else:
+                # Apply the rewrite to other statement-level expressions, e.g.,
+                # Assignment RHS, Return, Sample sampled_from, FuncCall args.
+                # Done conservatively to avoid touching non-condition contexts
+                # in this pass; ``BranchElimination`` only consumes conditions.
+                # For simplicity (and to keep the soundness story narrow) we
+                # leave non-condition expressions untouched here.
+                new_stmts.append(stmt)
+
+        if not changed:
+            return block
+        return frog_ast.Block(new_stmts)
 
 
 def _normalize_block_locals(block: frog_ast.Block) -> frog_ast.Block:
@@ -789,6 +1016,572 @@ class RedundantConditionalReturnTransformer(BlockTransformer):
         return block
 
 
+class AbsorbRedundantEarlyReturnTransformer(BlockTransformer):
+    """Absorbs an early ``if (P) { return X; }`` into following if-statements
+    when the trailing top-level return value is structurally identical to ``X``.
+
+    Pattern (left → right within a single block)::
+
+        if (P) { return X; }
+        if (Q1) { ... }    // intervening if-statements (no else block)
+        ...
+        if (Qk) { ... }
+        return X;          // structurally identical X
+
+    is rewritten to::
+
+        if (!P && Q1) { ... }
+        ...
+        if (!P && Qk) { ... }
+        return X;
+
+    Soundness: when ``P`` holds, the original returns ``X`` immediately at the
+    early return. In the rewrite, every intervening condition becomes
+    ``!P && Qi``, which is false because ``!P`` is false; control falls
+    through to the trailing ``return X``. ``X`` evaluates to the same value
+    in both cases because no top-level statement between the early return
+    and the trailing return modifies its free variables -- only
+    if-statements appear there, and their bodies do not run when ``P``
+    holds (their guards include ``!P``). When ``!P`` holds, the rewritten
+    guards reduce to ``Qi``, matching the original.
+
+    Scope: this transform fires only on the outermost block of each method
+    body, never on nested if-bodies. When the same pattern arises inside
+    a nested if-body, the enclosing condition typically already constrains
+    ``P`` to be unreachable, and ``RemoveUnreachable`` will eliminate the
+    early-return branch entirely (preserving canonical equivalence with
+    proofs whose intermediate games omit the redundant ``!P`` conjunct).
+    Absorbing the conjunct in nested contexts would introduce a stale
+    ``!P`` that no other transform can drop.
+    """
+
+    def __init__(self) -> None:
+        self._nesting_depth = 0
+
+    def transform_if_statement(
+        self, if_statement: frog_ast.IfStatement
+    ) -> frog_ast.IfStatement:
+        # Recurse into branches with depth incremented so the nested blocks
+        # don't trigger absorption.
+        self._nesting_depth += 1
+        try:
+            new_blocks = [self.transform_block(b) for b in if_statement.blocks]
+            new_conditions = [self.transform(c) for c in if_statement.conditions]
+        finally:
+            self._nesting_depth -= 1
+        return frog_ast.IfStatement(new_conditions, new_blocks)
+
+    def transform_numeric_for(
+        self, for_stmt: frog_ast.NumericFor
+    ) -> frog_ast.NumericFor:
+        self._nesting_depth += 1
+        try:
+            new_block = self.transform_block(for_stmt.block)
+            new_start = self.transform(for_stmt.start)
+            new_end = self.transform(for_stmt.end)
+        finally:
+            self._nesting_depth -= 1
+        return frog_ast.NumericFor(for_stmt.name, new_start, new_end, new_block)
+
+    def transform_generic_for(
+        self, for_stmt: frog_ast.GenericFor
+    ) -> frog_ast.GenericFor:
+        self._nesting_depth += 1
+        try:
+            new_block = self.transform_block(for_stmt.block)
+            new_over = self.transform(for_stmt.over)
+        finally:
+            self._nesting_depth -= 1
+        return frog_ast.GenericFor(
+            for_stmt.var_type, for_stmt.var_name, new_over, new_block
+        )
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        if self._nesting_depth > 0:
+            return block
+        for index, statement in enumerate(block.statements):
+            if not _is_simple_early_return_if(statement):
+                continue
+            assert isinstance(statement, frog_ast.IfStatement)
+            early_p = statement.conditions[0]
+            return_stmt = statement.blocks[0].statements[0]
+            assert isinstance(return_stmt, frog_ast.ReturnStatement)
+            early_x = return_stmt.expression
+
+            # Find the first top-level trailing return whose expression
+            # structurally equals X. Allow only IfStatements (no else
+            # block) between the early return and that trailing return.
+            trailing_idx = _find_matching_trailing_return(
+                block.statements, index + 1, early_x
+            )
+            if trailing_idx is None:
+                continue
+
+            # Build !P with light surface simplification (== ↔ !=); deeper
+            # simplification happens via SimplifyNot / NormalizeCommutativeChains.
+            neg_p = _negate_condition(early_p)
+
+            new_intermediate: list[frog_ast.Statement] = []
+            for k in range(index + 1, trailing_idx):
+                inner_if = block.statements[k]
+                assert isinstance(inner_if, frog_ast.IfStatement)
+                new_conditions: list[frog_ast.Expression] = [
+                    frog_ast.BinaryOperation(
+                        frog_ast.BinaryOperators.AND,
+                        copy.deepcopy(neg_p),
+                        cond,
+                    )
+                    for cond in inner_if.conditions
+                ]
+                new_intermediate.append(
+                    frog_ast.IfStatement(new_conditions, list(inner_if.blocks))
+                )
+
+            new_stmts: list[frog_ast.Statement] = (
+                list(block.statements[:index])
+                + new_intermediate
+                + list(block.statements[trailing_idx:])
+            )
+            return self.transform_block(frog_ast.Block(new_stmts))
+        return block
+
+
+def _is_simple_early_return_if(stmt: frog_ast.Statement) -> bool:
+    """True iff ``stmt`` is ``if (P) { return X; }`` with no else, no else-if,
+    body of length 1, and the body's sole statement is a value-bearing
+    ReturnStatement.
+    """
+    if not isinstance(stmt, frog_ast.IfStatement):
+        return False
+    if len(stmt.conditions) != 1:
+        return False
+    if stmt.has_else_block():
+        return False
+    body = stmt.blocks[0]
+    if len(body.statements) != 1:
+        return False
+    only = body.statements[0]
+    return isinstance(only, frog_ast.ReturnStatement) and only.expression is not None
+
+
+def _find_matching_trailing_return(
+    statements: Sequence[frog_ast.Statement],
+    start: int,
+    expected: frog_ast.Expression,
+) -> int | None:
+    """Find the index of the first top-level ``return X'`` statement at or
+    after ``start`` whose expression structurally equals ``expected``,
+    provided every statement strictly before it (from ``start``) is an
+    ``IfStatement`` without a final else block. Returns ``None`` if any
+    other statement type, an else-bearing if, or a non-matching return is
+    encountered first.
+    """
+    for k in range(start, len(statements)):
+        s = statements[k]
+        if isinstance(s, frog_ast.ReturnStatement):
+            if s.expression is not None and s.expression == expected:
+                return k
+            return None
+        if not isinstance(s, frog_ast.IfStatement):
+            return None
+        if s.has_else_block():
+            return None
+    return None
+
+
+def _negate_condition(cond: frog_ast.Expression) -> frog_ast.Expression:
+    """Build a logical negation of ``cond``, preferring the surface form the
+    canonicalization pipeline already favors: ``a == b`` ↔ ``a != b``, and
+    eliminating a leading ``!`` if present. Otherwise wrap in ``!(cond)`` and
+    let ``SimplifyNot`` rewrite further.
+    """
+    if isinstance(cond, frog_ast.BinaryOperation):
+        if cond.operator == frog_ast.BinaryOperators.EQUALS:
+            return frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.NOTEQUALS,
+                copy.deepcopy(cond.left_expression),
+                copy.deepcopy(cond.right_expression),
+            )
+        if cond.operator == frog_ast.BinaryOperators.NOTEQUALS:
+            return frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.EQUALS,
+                copy.deepcopy(cond.left_expression),
+                copy.deepcopy(cond.right_expression),
+            )
+    if (
+        isinstance(cond, frog_ast.UnaryOperation)
+        and cond.operator == frog_ast.UnaryOperators.NOT
+    ):
+        return copy.deepcopy(cond.expression)
+    return frog_ast.UnaryOperation(frog_ast.UnaryOperators.NOT, copy.deepcopy(cond))
+
+
+class IfFalseReturnToConjunctionTransformer(BlockTransformer):
+    """Absorbs an early ``if (P) { return false; }`` into a trailing
+    ``return BoolExpr;`` at the top level of the same block.
+
+    Pattern (left → right within a single block)::
+
+        if (P) { return false; }
+        return BoolExpr;
+
+    is rewritten to::
+
+        return !P && BoolExpr;
+
+    Soundness: when ``P`` holds, the original returns ``false``
+    immediately; in the rewrite the locals execute unconditionally and
+    the return becomes ``false && BoolExpr = false``. When ``!P`` holds,
+    both forms run the same locals and return ``BoolExpr``. Equivalence
+    therefore holds iff the intervening statements are side-effect-free,
+    which we approximate by accepting only typed-local declarations
+    (``Type v = expr;``) — these introduce a fresh local from a pure
+    expression and have no observable effect outside the method.
+    Sample statements, field writes, and reassignments are rejected.
+
+    Companion to ``AbsorbRedundantEarlyReturn``: that pass handles the
+    case where the trailing return value is structurally identical to
+    the early return value; this pass handles the specific case where
+    the early return value is the literal ``false``.
+
+    Gap G guard: each accepted typed-local declaration's RHS expression
+    must be evaluation-pure (no non-deterministic / state-mutating
+    FuncCall). Without this guard, a helper that mutates a game-visible
+    field-typed Map (e.g. a manually-written guarded-lazy-RO) could be
+    hoisted past the early return, populating state that the original
+    skipped on the ``P`` branch.
+    """
+
+    def __init__(self, ctx: PipelineContext) -> None:
+        self.ctx = ctx
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        n = len(block.statements)
+        for index in range(n - 1):
+            stmt = block.statements[index]
+            if not isinstance(stmt, frog_ast.IfStatement):
+                continue
+            if len(stmt.conditions) != 1 or stmt.has_else_block():
+                continue
+            body = stmt.blocks[0]
+            if len(body.statements) != 1:
+                continue
+            inner = body.statements[0]
+            if not isinstance(inner, frog_ast.ReturnStatement):
+                continue
+            if not (
+                isinstance(inner.expression, frog_ast.Boolean)
+                and inner.expression.bool is False
+            ):
+                continue
+            # Trailing return must be the last statement in the block,
+            # with only side-effect-free typed-local declarations between
+            # the if and it.
+            trailing_idx = self._find_pure_trailing_return(block.statements, index + 1)
+            if trailing_idx is None:
+                continue
+            trailing = block.statements[trailing_idx]
+            assert isinstance(trailing, frog_ast.ReturnStatement)
+            if trailing.expression is None:
+                continue
+            neg_p = _negate_condition(stmt.conditions[0])
+            # Place the original return expression FIRST and the
+            # negated guard last; this matches the natural order in
+            # which the source-level "Q && ct != ctStar"-style
+            # binding-game checks are written, so canonicalization of
+            # the two sides of a hop converges without needing a
+            # global AND-chain sort (which proved too disruptive to
+            # other proofs).
+            new_return_expr = frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.AND,
+                copy.deepcopy(trailing.expression),
+                neg_p,
+            )
+            new_stmts: list[frog_ast.Statement] = (
+                list(block.statements[:index])
+                + list(block.statements[index + 1 : trailing_idx])
+                + [frog_ast.ReturnStatement(new_return_expr)]
+                + list(block.statements[trailing_idx + 1 :])
+            )
+            return self.transform_block(frog_ast.Block(new_stmts))
+        return block
+
+    def _find_pure_trailing_return(
+        self,
+        statements: Sequence[frog_ast.Statement],
+        start: int,
+    ) -> int | None:
+        for idx in range(start, len(statements)):
+            s = statements[idx]
+            if isinstance(s, frog_ast.ReturnStatement):
+                return idx
+            if (
+                isinstance(s, frog_ast.Assignment)
+                and s.the_type is not None
+                and isinstance(s.var, frog_ast.Variable)
+            ):
+                # Typed-local declaration; the RHS must additionally be
+                # evaluation-pure. ``has_nondeterministic_call`` flags any
+                # FuncCall whose callee is not an annotated-deterministic
+                # primitive method or a ``Function<D, R>`` variable, which
+                # is exactly the set of calls that may mutate game-visible
+                # state (Sample, field assignment, map/array writes
+                # through helper bodies).
+                if has_nondeterministic_call(
+                    s.value,
+                    self.ctx.proof_namespace,
+                    self.ctx.proof_let_types,
+                ):
+                    return None
+                continue
+            return None
+        return None
+
+
+class FoldEquivalentReturnBranchTransformer(BlockTransformer):
+    """Folds ``if (P) { return X; } return Y;`` to ``return Y;`` when Z3
+    proves ``P ⇒ (X ↔ Y)`` with FuncCalls modelled as opaque atoms.
+
+    Pattern (left → right within a single block, only when the if has no
+    else and the body is exactly a single ``return X;``)::
+
+        if (P) { return X; }
+        return Y;
+
+    is rewritten to::
+
+        return Y;
+
+    Soundness: when P holds, the original returns X; the rewrite returns Y.
+    The Z3 check establishes ``P ⇒ X == Y``, so X and Y agree under P.
+    When !P holds, the original falls through to ``return Y;`` (the if-body
+    is skipped); the rewrite also returns Y. Equivalence holds because no
+    statement between the if and the trailing return modifies free
+    variables — the pattern requires the if to be IMMEDIATELY followed by
+    the trailing return.
+
+    Gap-F guard: refuses to fold if any of P, X, Y contains a non-
+    deterministic call (mirroring ``BooleanAbsorption`` and the
+    equivalence-engine escape hatch). Without this guard, dropping an
+    early return could elide a counter advance or other observable
+    side-effect in the if-body's evaluation of X.
+
+    Z3 modelling: this pass uses ``opaque_func_call_fallback=True`` so
+    deterministic ``FuncCall`` and BitString-concat shapes that Z3 cannot
+    mix become memoized opaque atoms keyed on ``str(node)``. To bridge
+    the common pattern where P contains direct equalities ``a == b`` and
+    Y references ``b`` while X references ``a`` (or vice versa), the pass
+    first applies syntactic substitution from the top-level conjuncts of P
+    to both X and Y. After substitution, ``H(b)`` and ``H(a)`` become
+    structurally identical and intern to the same opaque atom — a sound
+    consequence of treating each conjunct ``a == b`` from P as a Z3
+    assertion ``a == b`` in the model under which X and Y are evaluated.
+
+    Closes the canonical-form gap where the bare-game side of a binding
+    proof is branchless but the reduction-composed side carries an
+    explicit case-split if-statement whose body is semantically equal to
+    the trailing return under the case-B condition.
+    """
+
+    def __init__(self, ctx: PipelineContext, ast: frog_ast.ASTNode) -> None:
+        self.ctx = ctx
+        self.ast = ast
+        self._init_field_rhs: list[tuple[frog_ast.Variable, frog_ast.Expression]] = []
+        if isinstance(ast, frog_ast.Game):
+            self._init_field_rhs = self._collect_init_field_rhs(ast)
+
+    @staticmethod
+    def _collect_init_field_rhs(
+        game: frog_ast.Game,
+    ) -> list[tuple[frog_ast.Variable, frog_ast.Expression]]:
+        """Collect ``F → rhs`` substitutions for fields F that are
+        single-write in Initialize with a deterministic FuncCall RHS and
+        no other writes in the game.
+        """
+        field_names = {f.name for f in game.fields}
+        # Count assignments per field across all methods.
+        counts: dict[str, int] = {}
+        for method in game.methods:
+            for name in field_names:
+                counts[name] = counts.get(name, 0) + _count_field_assigns_recursive(
+                    method.block, name
+                )
+        init = next((m for m in game.methods if m.signature.name == "Initialize"), None)
+        if init is None:
+            return []
+        result: list[tuple[frog_ast.Variable, frog_ast.Expression]] = []
+        for stmt in init.block.statements:
+            if not (
+                isinstance(stmt, frog_ast.Assignment)
+                and stmt.the_type is None
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name in field_names
+            ):
+                continue
+            if counts.get(stmt.var.name, 0) != 1:
+                continue
+            if not isinstance(stmt.value, frog_ast.FuncCall):
+                continue
+            result.append((stmt.var, stmt.value))
+        return result
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index in range(len(block.statements) - 1):
+            stmt = block.statements[index]
+            if not isinstance(stmt, frog_ast.IfStatement):
+                continue
+            if stmt.has_else_block() or len(stmt.conditions) != 1:
+                continue
+            body = stmt.blocks[0]
+            if len(body.statements) != 1:
+                continue
+            inner = body.statements[0]
+            if not isinstance(inner, frog_ast.ReturnStatement):
+                continue
+            x_expr = inner.expression
+            if x_expr is None:
+                continue
+            trailing = block.statements[index + 1]
+            if not isinstance(trailing, frog_ast.ReturnStatement):
+                continue
+            y_expr = trailing.expression
+            if y_expr is None:
+                continue
+            p_expr = stmt.conditions[0]
+            # Gap-F: refuse on any non-deterministic call.
+            if (
+                has_nondeterministic_call(
+                    p_expr,
+                    self.ctx.proof_namespace,
+                    self.ctx.proof_let_types,
+                )
+                or has_nondeterministic_call(
+                    x_expr,
+                    self.ctx.proof_namespace,
+                    self.ctx.proof_let_types,
+                )
+                or has_nondeterministic_call(
+                    y_expr,
+                    self.ctx.proof_namespace,
+                    self.ctx.proof_let_types,
+                )
+            ):
+                continue
+            # Apply syntactic equality substitution from top-level
+            # conjuncts of P. For each conjunct of the form `a == b`
+            # (where one side is a Variable), replace that Variable with
+            # the other side in X and Y. This bridges the common case
+            # where Y references one side of an equality stated in P and
+            # X references the other.
+            sub_pairs: list[tuple[frog_ast.Expression, frog_ast.Expression]] = []
+            for conjunct in _flatten_top_level_and(p_expr):
+                if (
+                    isinstance(conjunct, frog_ast.BinaryOperation)
+                    and conjunct.operator == frog_ast.BinaryOperators.EQUALS
+                ):
+                    a = conjunct.left_expression
+                    b = conjunct.right_expression
+                    if isinstance(b, frog_ast.Variable) and not isinstance(
+                        a, frog_ast.Variable
+                    ):
+                        sub_pairs.append((b, a))
+                    elif isinstance(a, frog_ast.Variable) and not isinstance(
+                        b, frog_ast.Variable
+                    ):
+                        sub_pairs.append((a, b))
+                    elif isinstance(a, frog_ast.Variable) and isinstance(
+                        b, frog_ast.Variable
+                    ):
+                        if a.name < b.name:
+                            sub_pairs.append((b, a))
+                        else:
+                            sub_pairs.append((a, b))
+            # Augment with single-write Init-only field RHS expansions
+            # so the comparison can see through hoisted-call fields.
+            # ``ASTMap.set`` is last-write-wins, so we put init_field_rhs
+            # first and sub_pairs last: where both cover the same field
+            # (e.g. P asserts ``field_a == field_b`` while init also
+            # rewrites ``field_b`` to a hoisted-call RHS), the equality
+            # from P takes priority. This keeps P's connection between
+            # field atoms intact in Z3 — overriding with the hoisted-call
+            # RHS would replace one side of the equality with a structure
+            # Z3 cannot relate to the other side's atom.
+            all_sub_pairs: list[tuple[frog_ast.Expression, frog_ast.Expression]] = list(
+                self._init_field_rhs
+            ) + list(sub_pairs)
+            if all_sub_pairs:
+                # Iterate substitution to a fixed point so chains like
+                # `_hoisted_0 → EncodeEK(ek_T_0)` followed by P's
+                # `ek_T_1 → ek_T_0` propagate fully.
+                x_sub = copy.deepcopy(x_expr)
+                y_sub = copy.deepcopy(y_expr)
+                for _ in range(8):
+                    sub_map: frog_ast.ASTMap[frog_ast.ASTNode] = frog_ast.ASTMap(
+                        identity=False
+                    )
+                    for k, v in all_sub_pairs:
+                        sub_map.set(k, copy.deepcopy(v))
+                    new_x = SubstitutionTransformer(sub_map).transform(
+                        copy.deepcopy(x_sub)
+                    )
+                    new_y = SubstitutionTransformer(sub_map).transform(
+                        copy.deepcopy(y_sub)
+                    )
+                    if new_x == x_sub and new_y == y_sub:
+                        break
+                    x_sub = new_x
+                    y_sub = new_y
+            else:
+                x_sub = x_expr
+                y_sub = y_expr
+            # Build Z3 formulas with opaque-FuncCall fallback.
+            type_map = GetTypeMapVisitor(stmt).visit(self.ast)
+            visitor = Z3FormulaVisitor(
+                type_map + (self.ctx.proof_let_types or NameTypeMap()),
+                variable_version_map={},
+                opaque_func_call_fallback=True,
+            )
+            p_formula = visitor.visit(p_expr)
+            x_formula = visitor.visit(x_sub)
+            y_formula = visitor.visit(y_sub)
+            if (
+                p_formula is None
+                or x_formula is None
+                or y_formula is None
+                or isinstance(p_formula, str)
+                or isinstance(x_formula, str)
+                or isinstance(y_formula, str)
+            ):
+                continue
+            try:
+                solver = z3.Solver()
+                solver.set("timeout", 30000)
+                # Check Not(P => (X == Y)) is UNSAT, i.e., P AND X != Y is UNSAT.
+                solver.add(z3.And(p_formula, x_formula != y_formula))
+                if solver.check() != z3.unsat:
+                    continue
+            except (z3.Z3Exception, TypeError):
+                continue
+            # Fold: drop the if-statement entirely, keep the trailing return.
+            new_stmts = list(block.statements[:index]) + list(
+                block.statements[index + 1 :]
+            )
+            return self.transform_block(frog_ast.Block(new_stmts))
+        return block
+
+
+def _flatten_top_level_and(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
+    """Flatten a left-associated ``A && B && C`` chain into [A, B, C]."""
+    if (
+        isinstance(expr, frog_ast.BinaryOperation)
+        and expr.operator == frog_ast.BinaryOperators.AND
+    ):
+        return _flatten_top_level_and(expr.left_expression) + _flatten_top_level_and(
+            expr.right_expression
+        )
+    return [expr]
+
+
 class ElseUnwrapTransformer(BlockTransformer):
     """Unwraps else blocks when the if-branch unconditionally returns.
 
@@ -856,11 +1649,39 @@ class RedundantConditionalReturn(TransformPass):
         return RedundantConditionalReturnTransformer().transform(game)
 
 
+class AbsorbRedundantEarlyReturn(TransformPass):
+    name = "Absorb Redundant Early Return"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return AbsorbRedundantEarlyReturnTransformer().transform(game)
+
+
+class IfFalseReturnToConjunction(TransformPass):
+    name = "If False Return To Conjunction"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return IfFalseReturnToConjunctionTransformer(ctx).transform(game)
+
+
+class FoldEquivalentReturnBranch(TransformPass):
+    name = "Fold Equivalent Return Branch"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return FoldEquivalentReturnBranchTransformer(ctx, game).transform(game)
+
+
 class BranchElimination(TransformPass):
     name = "Branch Elimination"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return BranchEliminiationTransformer(ctx).transform(game)
+
+
+class UniqExclusionBranchElimination(TransformPass):
+    name = "Uniq Exclusion Branch Elimination"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return UniqExclusionBranchEliminationTransformer().transform(game)
 
 
 class ElseUnwrap(TransformPass):

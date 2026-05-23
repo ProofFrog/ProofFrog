@@ -337,3 +337,201 @@ class TestCrossMethodFieldAlias:
         result = CrossMethodFieldAliasTransformer(proof_namespace=ns).transform(game)
         # stored is mutated via stored[0] = x in Modify -- must not replace
         assert result == game
+
+
+def _make_pair_namespace() -> frog_ast.Namespace:
+    """Namespace with primitive G whose ``compute`` is deterministic and takes
+    two args: a BitString and a key derived from another deterministic call.
+    Used to test alias-aware matching of CSE'd locals."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive G(Int n) {
+            deterministic BitString<n> base();
+            deterministic BitString<n> compute(BitString<n> a, BitString<n> b);
+        }
+        """)
+    return {"G": prim, "GG": prim}
+
+
+class TestCrossMethodFieldAliasAliasAware:
+    """Tests for alias-aware matching: CSE'd local that aliases a deterministic
+    call should be expanded so a structurally-different call (with the literal
+    deterministic call inlined) still matches."""
+
+    def test_cse_local_in_init_matches_inline_call_in_oracle(self) -> None:
+        """field_x = G.compute(local, k) where local = G.base(), and
+        Oracle has G.compute(G.base(), k) directly -> Oracle's call replaced."""
+        ns = _make_pair_namespace()
+        game = frog_parser.parse_game("""
+            Game Foo(G GG) {
+                BitString<n> k;
+                BitString<n> stored;
+                Void Initialize() {
+                    BitString<n> g = GG.base();
+                    stored = GG.compute(g, k);
+                }
+                BitString<n> Oracle() {
+                    return GG.compute(GG.base(), k);
+                }
+            }
+            """)
+        result = CrossMethodFieldAliasTransformer(proof_namespace=ns).transform(game)
+        oracle = result.methods[1]
+        ret = oracle.block.statements[0]
+        assert isinstance(ret, frog_ast.ReturnStatement)
+        assert isinstance(ret.expression, frog_ast.Variable)
+        assert ret.expression.name == "stored"
+
+    def test_cse_local_on_both_sides(self) -> None:
+        """field_x = G.compute(g_init, k) with g_init = G.base() in Init,
+        and Oracle has g_oracle = G.base(); G.compute(g_oracle, k);
+        Oracle's call replaced (after expansion both sides match)."""
+        ns = _make_pair_namespace()
+        game = frog_parser.parse_game("""
+            Game Foo(G GG) {
+                BitString<n> k;
+                BitString<n> stored;
+                Void Initialize() {
+                    BitString<n> g_init = GG.base();
+                    stored = GG.compute(g_init, k);
+                }
+                BitString<n> Oracle() {
+                    BitString<n> g_oracle = GG.base();
+                    BitString<n> v = GG.compute(g_oracle, k);
+                    return v;
+                }
+            }
+            """)
+        result = CrossMethodFieldAliasTransformer(proof_namespace=ns).transform(game)
+        oracle = result.methods[1]
+        # The GG.compute(g_oracle, k) call in Oracle's `v = ...` should be
+        # replaced with `stored`.
+        assign = oracle.block.statements[1]
+        assert isinstance(assign, frog_ast.Assignment)
+        assert isinstance(assign.value, frog_ast.Variable)
+        assert assign.value.name == "stored"
+
+    def test_alias_to_sample_not_treated_as_stable(self) -> None:
+        """If the local alias references a sampled var, don't treat it as
+        stable: sampled values change across method invocations.
+
+        Soundness Gap B: a local that depends on a sample is not invariant.
+        """
+        prim = frog_parser.parse_primitive_file("""
+            Primitive G(Int n) {
+                deterministic BitString<n> compute(BitString<n> a);
+            }
+            """)
+        ns: frog_ast.Namespace = {"G": prim, "GG": prim}
+        game = frog_parser.parse_game("""
+            Game Foo(G GG) {
+                BitString<n> stored;
+                Void Initialize() {
+                    BitString<n> r <- BitString<n>;
+                    BitString<n> alias = r;
+                    stored = GG.compute(alias);
+                }
+                BitString<n> Oracle() {
+                    BitString<n> r2 <- BitString<n>;
+                    return GG.compute(r2);
+                }
+            }
+            """)
+        result = CrossMethodFieldAliasTransformer(proof_namespace=ns).transform(game)
+        # `alias` is bound to a sampled `r`, not stable. The field RHS uses
+        # `alias`, which is non-stable, so the field should NOT be treated as
+        # an alias source.
+        assert result == game
+
+    def test_alias_reassigned_local_no_expansion(self) -> None:
+        """A local re-bound twice is not stable.
+
+        Soundness Gap B variant: only single-assignment locals qualify.
+        """
+        ns = _make_pair_namespace()
+        game = frog_parser.parse_game("""
+            Game Foo(G GG) {
+                BitString<n> k;
+                BitString<n> stored;
+                Void Initialize() {
+                    BitString<n> g = GG.base();
+                    g = 0^n;
+                    stored = GG.compute(g, k);
+                }
+                BitString<n> Oracle() {
+                    return GG.compute(GG.base(), k);
+                }
+            }
+            """)
+        result = CrossMethodFieldAliasTransformer(proof_namespace=ns).transform(game)
+        # `g` is assigned twice in Initialize; alias map must reject it. So
+        # the field RHS `GG.compute(g, k)` has a non-stable local `g`, and
+        # the transform should leave the game unchanged.
+        assert result == game
+
+    def test_oracle_local_conditionally_rebound_in_if_no_replacement(self) -> None:
+        """Soundness gap (2026-05-19): an oracle local that is single-assigned
+        at top level but conditionally re-assigned inside an if-body must NOT
+        enter the alias map.  Otherwise the matcher expands the call through
+        the now-stale top-level RHS and the replacement is unsound on the
+        rebinding path.
+
+        Distinguishing observation: with cond=true, the original returns
+        GG.compute(h, k); the (unsoundly) rewritten code returns
+        stored = GG.compute(GG.base(), k).  Those values differ in general.
+        """
+        ns = _make_pair_namespace()
+        game = frog_parser.parse_game("""
+            Game Foo(G GG) {
+                BitString<n> k;
+                BitString<n> stored;
+                Void Initialize() {
+                    BitString<n> g = GG.base();
+                    stored = GG.compute(g, k);
+                }
+                BitString<n> Oracle(Bool cond, BitString<n> h) {
+                    BitString<n> g = GG.base();
+                    if (cond) {
+                        g = h;
+                    }
+                    return GG.compute(g, k);
+                }
+            }
+            """)
+        result = CrossMethodFieldAliasTransformer(proof_namespace=ns).transform(game)
+        # The oracle's `g` is conditionally rebound to `h`, so substituting
+        # `GG.base()` for it is unsound on the cond=true path.  The transform
+        # must leave the game unchanged.
+        assert result == game
+
+    def test_oracle_local_rebound_in_for_loop_body_no_replacement(self) -> None:
+        """Same soundness gap, but the rebinding happens inside a for-loop
+        body.  A top-level single-assignment whose name is overwritten on
+        every loop iteration is not actually stable."""
+        prim = frog_parser.parse_primitive_file("""
+            Primitive G(Int n) {
+                deterministic BitString<n> base();
+                deterministic BitString<n> compute(BitString<n> a, BitString<n> b);
+                BitString<n> next();
+            }
+            """)
+        ns: frog_ast.Namespace = {"G": prim, "GG": prim}
+        game = frog_parser.parse_game("""
+            Game Foo(G GG) {
+                BitString<n> k;
+                BitString<n> stored;
+                Void Initialize() {
+                    BitString<n> g = GG.base();
+                    stored = GG.compute(g, k);
+                }
+                BitString<n> Oracle() {
+                    BitString<n> g = GG.base();
+                    for (Int i = 0 to 3) {
+                        g = GG.next();
+                    }
+                    return GG.compute(g, k);
+                }
+            }
+            """)
+        result = CrossMethodFieldAliasTransformer(proof_namespace=ns).transform(game)
+        assert result == game
+

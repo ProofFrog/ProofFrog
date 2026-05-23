@@ -147,8 +147,11 @@ def _check_equivalent_worker(task: _EquivalenceTask) -> EquivalenceResult:
 
     captured = "\n".join(verbose_lines) + "\n" if verbose_lines else ""
 
-    z3_result = _z3_conditional_equivalence(
-        current_game_ast, next_game_ast, task.proof_let_types
+    z3_result = _z3_residual_equivalence(
+        current_game_ast,
+        next_game_ast,
+        task.proof_let_types,
+        task.ctx.proof_namespace,
     )
     if z3_result.valid:
         return dataclasses.replace(z3_result, verbose_output=captured)
@@ -173,24 +176,101 @@ def _check_equivalent_worker(task: _EquivalenceTask) -> EquivalenceResult:
     )
 
 
-def _z3_conditional_equivalence(
+def _z3_check_expression_pair(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    current_game_ast: frog_ast.Game,
+    next_game_ast: frog_ast.Game,
+    current_expr: frog_ast.Expression,
+    next_expr: frog_ast.Expression,
+    proof_let_types: visitors.NameTypeMap,
+    proof_namespace: frog_ast.Namespace,
+    kind: str,
+) -> Optional[EquivalenceResult]:
+    """Check that two FrogLang expressions are Z3-equivalent. Returns
+    None on success, an EquivalenceResult(valid=False) on failure.
+    Refuses (returns failure) if either expression contains a
+    non-deterministic call -- callers MUST treat the resulting opaque-
+    atom Z3 encoding as sound only for deterministic expressions
+    (see Z3FormulaVisitor's SOUNDNESS comment).
+
+    `kind` is a short label ("if-condition", "return") used in error
+    messages.
+    """
+    # pylint: disable=import-outside-toplevel
+    from .transforms._base import has_nondeterministic_call
+
+    if has_nondeterministic_call(
+        current_expr, proof_namespace, proof_let_types
+    ) or has_nondeterministic_call(next_expr, proof_namespace, proof_let_types):
+        return EquivalenceResult(
+            valid=False,
+            failure_detail=(
+                f"Z3 escape hatch refused: non-deterministic call in {kind}: "
+                f"{current_expr} vs {next_expr}"
+            ),
+        )
+
+    first_formula = visitors.Z3FormulaVisitor(
+        visitors.GetTypeMapVisitor(current_expr).visit(current_game_ast)
+        + proof_let_types,
+        opaque_func_call_fallback=True,
+        proof_namespace=proof_namespace,
+    ).visit(current_expr)
+    next_formula = visitors.Z3FormulaVisitor(
+        visitors.GetTypeMapVisitor(next_expr).visit(next_game_ast) + proof_let_types,
+        opaque_func_call_fallback=True,
+        proof_namespace=proof_namespace,
+    ).visit(next_expr)
+    if first_formula is None or next_formula is None:
+        return EquivalenceResult(
+            valid=False,
+            failure_detail=(
+                f"Could not convert {kind} to Z3 formula: "
+                f"{current_expr} vs {next_expr}"
+            ),
+        )
+    solver = z3.Solver()
+    solver.set("timeout", 30000)
+    solver.add(z3.Not(first_formula == next_formula))
+    if solver.check() != z3.unsat:
+        return EquivalenceResult(
+            valid=False,
+            failure_detail=(
+                f"Could not prove equivalence of {kind}: "
+                f"{current_expr} vs {next_expr}"
+            ),
+        )
+    return None
+
+
+def _z3_residual_equivalence(
     current_game_ast: frog_ast.Game,
     next_game_ast: frog_ast.Game,
     proof_let_types: visitors.NameTypeMap,
+    proof_namespace: frog_ast.Namespace,
 ) -> EquivalenceResult:
-    """Check if two games differ only in if-conditions that are Z3-equivalent.
+    """Check if two games differ only in if-conditions and/or return
+    expressions, where each pair of differing expressions is
+    propositionally equivalent under Z3 with FuncCall sub-expressions
+    modelled as opaque atoms.
 
-    Standalone version of ProofEngine._z3_conditional_equivalence for use in
-    worker processes.
+    Standalone version for use in worker processes (mirrored by
+    ProofEngine._z3_residual_equivalence).
     """
-    all_true_current = _AllTrueTransformer().transform(current_game_ast)
-    all_true_next = _AllTrueTransformer().transform(next_game_ast)
-    if all_true_current != all_true_next:
+    neutralized_current = _AllReturnsToTrueTransformer().transform(
+        _AllTrueTransformer().transform(current_game_ast)
+    )
+    neutralized_next = _AllReturnsToTrueTransformer().transform(
+        _AllTrueTransformer().transform(next_game_ast)
+    )
+    if neutralized_current != neutralized_next:
         return EquivalenceResult(
             valid=False,
-            failure_detail="Games differ structurally (not just in if-conditions)",
+            failure_detail=(
+                "Games differ structurally (not just in if-conditions and returns)"
+            ),
         )
 
+    # Walk if-conditions in lockstep.
     found_ifs: list[frog_ast.IfStatement] = []
 
     def search_for_if(
@@ -213,34 +293,52 @@ def _z3_conditional_equivalence(
         for i, condition in enumerate(if_current.conditions):
             if condition == if_next.conditions[i]:
                 continue
+            failure = _z3_check_expression_pair(
+                current_game_ast,
+                next_game_ast,
+                condition,
+                if_next.conditions[i],
+                proof_let_types,
+                proof_namespace,
+                "if-condition",
+            )
+            if failure is not None:
+                return failure
 
-            first_if_formula = visitors.Z3FormulaVisitor(
-                visitors.GetTypeMapVisitor(condition).visit(current_game_ast)
-                + proof_let_types
-            ).visit(condition)
-            next_if_formula = visitors.Z3FormulaVisitor(
-                visitors.GetTypeMapVisitor(if_next.conditions[i]).visit(next_game_ast)
-                + proof_let_types
-            ).visit(if_next.conditions[i])
-            if first_if_formula is None or next_if_formula is None:
-                return EquivalenceResult(
-                    valid=False,
-                    failure_detail=(
-                        "Could not convert if-condition to Z3 formula: "
-                        f"{condition} vs {if_next.conditions[i]}"
-                    ),
-                )
-            solver = z3.Solver()
-            solver.set("timeout", 30000)
-            solver.add(z3.Not(first_if_formula == next_if_formula))
-            if solver.check() != z3.unsat:
-                return EquivalenceResult(
-                    valid=False,
-                    failure_detail=(
-                        "Could not prove equivalence of if-conditions: "
-                        f"{condition} vs {if_next.conditions[i]}"
-                    ),
-                )
+    # Walk return statements in lockstep.
+    found_returns: list[frog_ast.ReturnStatement] = []
+
+    def search_for_return(
+        found_returns: list[frog_ast.ReturnStatement], node: frog_ast.ASTNode
+    ) -> bool:
+        return isinstance(node, frog_ast.ReturnStatement) and node not in found_returns
+
+    while True:
+        partial_r = functools.partial(search_for_return, found_returns)
+        ret_current = visitors.SearchVisitor[frog_ast.ReturnStatement](partial_r).visit(
+            current_game_ast
+        )
+        ret_next = visitors.SearchVisitor[frog_ast.ReturnStatement](partial_r).visit(
+            next_game_ast
+        )
+        if ret_current is None or ret_next is None:
+            break
+        found_returns.append(ret_current)
+        found_returns.append(ret_next)
+        if ret_current.expression == ret_next.expression:
+            continue
+        failure = _z3_check_expression_pair(
+            current_game_ast,
+            next_game_ast,
+            ret_current.expression,
+            ret_next.expression,
+            proof_let_types,
+            proof_namespace,
+            "return",
+        )
+        if failure is not None:
+            return failure
+
     return EquivalenceResult(valid=True)
 
 
@@ -353,6 +451,18 @@ class _AllTrueTransformer(visitors.Transformer):
         )
 
 
+class _AllReturnsToTrueTransformer(visitors.Transformer):
+    """Replaces every `return <expr>;` with `return True;`. Used by the Z3
+    residual-equivalence escape hatch to compare two games for structural
+    equality modulo their final return expressions, then check the
+    expressions themselves under a Z3 formula encoding."""
+
+    def transform_return_statement(
+        self, _stmt: frog_ast.ReturnStatement
+    ) -> frog_ast.ReturnStatement:
+        return frog_ast.ReturnStatement(frog_ast.Boolean(True))
+
+
 class Verbosity(IntEnum):
     """Verbosity levels for proof engine output."""
 
@@ -392,6 +502,7 @@ class ProofEngine:
         self.method_lookup: MethodLookup = {}
         self.max_calls: Optional[int] = None
         self.sampled_let_names: set[str] = set()
+        self.requirements: list[frog_ast.StructuralRequirement] = []
         self._total_steps = 0
         self._current_step = 0
 
@@ -426,12 +537,22 @@ class ProofEngine:
                     count += 1  # induction rollover
         return count
 
-    def prove(self, proof_file: frog_ast.ProofFile, proof_path: str = "") -> None:
+    def set_up_proof_context(self, proof_file: frog_ast.ProofFile) -> None:
+        """Populate engine state from a parsed proof file.
+
+        Loads helper games, sampled-let names, `requires:` block,
+        instantiates let-bindings into `proof_namespace`, records types,
+        seeds `variables`/`max_calls`, builds the method lookup, and
+        extracts subset relations. Shared by the prover and the
+        diagnostic CLI/web commands so both see the same simplification
+        context.
+        """
         for game in proof_file.helpers:
             self.definition_namespace[game.name] = game
 
         # Here, we are substituting the lets with the parameters they are given
         self.sampled_let_names = proof_file.sampled_let_names
+        self.requirements = list(proof_file.requirements)
         for let in proof_file.lets:
             self.proof_let_types.set(let.name, let.type)
             # Sampled lets (e.g. Function<D,R> H <- Function<D,R>) have no value
@@ -457,6 +578,15 @@ class ProofEngine:
                     raise TypeError("Must instantiate either a Primitive or Scheme ")
             else:
                 self.proof_namespace[let.name] = copy.deepcopy(let.value)
+                # For abstract primitive-typed lets (e.g. `TrapdoorTest T;`
+                # with no initializer), bind the primitive itself into
+                # proof_namespace[let.name] so that method-annotation
+                # lookups on calls like `T.Eval(...)` resolve to the
+                # primitive's method signatures.
+                if let.value is None and isinstance(let.type, frog_ast.Variable):
+                    defn = self.definition_namespace.get(let.type.name)
+                    if isinstance(defn, (frog_ast.Primitive, frog_ast.Scheme)):
+                        self.proof_namespace[let.name] = copy.deepcopy(defn)
                 if isinstance(let.type, frog_ast.IntType):
                     if let.value is not None:
                         self.variables[let.name] = let.value
@@ -474,6 +604,9 @@ class ProofEngine:
 
         self.get_method_lookup()
         self._extract_subsets_pairs()
+
+    def prove(self, proof_file: frog_ast.ProofFile, proof_path: str = "") -> None:
+        self.set_up_proof_context(proof_file)
 
         first_step = proof_file.steps[0]
         final_step = proof_file.steps[-1]
@@ -1207,6 +1340,7 @@ class ProofEngine:
             sort_game_fn=self.sort_game,
             max_calls=self.max_calls,
             sampled_let_names=self.sampled_let_names,
+            requirements=list(self.requirements),
         )
 
     def check_equivalent(
@@ -1254,7 +1388,12 @@ class ProofEngine:
                 print("Inline Success!")
             return EquivalenceResult(valid=True)
 
-        z3_result = self._z3_conditional_equivalence(current_game_ast, next_game_ast)
+        z3_result = _z3_residual_equivalence(
+            current_game_ast,
+            next_game_ast,
+            self.proof_let_types,
+            self.proof_namespace,
+        )
         if z3_result.valid:
             return z3_result
 
@@ -1276,77 +1415,6 @@ class ProofEngine:
             failure_detail="\n".join(parts),
             diagnosis=diagnosis,
         )
-
-    def _z3_conditional_equivalence(
-        self,
-        current_game_ast: frog_ast.Game,
-        next_game_ast: frog_ast.Game,
-    ) -> EquivalenceResult:
-        all_true_current = _AllTrueTransformer().transform(current_game_ast)
-        all_true_next = _AllTrueTransformer().transform(next_game_ast)
-        if all_true_current != all_true_next:
-            return EquivalenceResult(
-                valid=False,
-                failure_detail=(
-                    "Games differ structurally (not just in if-conditions)"
-                ),
-            )
-
-        found_ifs: list[frog_ast.IfStatement] = []
-
-        def search_for_if(
-            found_ifs: list[frog_ast.IfStatement], node: frog_ast.ASTNode
-        ) -> bool:
-            return isinstance(node, frog_ast.IfStatement) and node not in found_ifs
-
-        while True:
-            partial = functools.partial(search_for_if, found_ifs)
-            if_current = visitors.SearchVisitor[frog_ast.IfStatement](partial).visit(
-                current_game_ast
-            )
-            if_next = visitors.SearchVisitor[frog_ast.IfStatement](partial).visit(
-                next_game_ast
-            )
-            if if_current is None or if_next is None:
-                break
-            found_ifs.append(if_current)
-            found_ifs.append(if_next)
-            for i, condition in enumerate(if_current.conditions):
-                if condition == if_next.conditions[i]:
-                    continue
-
-                first_if_formula = visitors.Z3FormulaVisitor(
-                    visitors.GetTypeMapVisitor(condition).visit(current_game_ast)
-                    + self.proof_let_types
-                ).visit(condition)
-                next_if_formula = visitors.Z3FormulaVisitor(
-                    visitors.GetTypeMapVisitor(if_next.conditions[i]).visit(
-                        next_game_ast
-                    )
-                    + self.proof_let_types
-                ).visit(if_next.conditions[i])
-                if first_if_formula is None or next_if_formula is None:
-                    return EquivalenceResult(
-                        valid=False,
-                        failure_detail=(
-                            "Could not convert if-condition to Z3 formula: "
-                            f"{condition} vs {if_next.conditions[i]}"
-                        ),
-                    )
-                solver = z3.Solver()
-                solver.set("timeout", 30000)
-                solver.add(z3.Not(first_if_formula == next_if_formula))
-                if solver.check() != z3.unsat:
-                    return EquivalenceResult(
-                        valid=False,
-                        failure_detail=(
-                            "Could not prove equivalence of if-conditions: "
-                            f"{condition} vs {if_next.conditions[i]}"
-                        ),
-                    )
-        if self.verbosity >= Verbosity.NORMAL:
-            print("Inline Success!")
-        return EquivalenceResult(valid=True)
 
     def canonicalize_game(self, game: frog_ast.Game) -> frog_ast.Game:
         """Apply the same simplification pipeline as check_equivalent() (without

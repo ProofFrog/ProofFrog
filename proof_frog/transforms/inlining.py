@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import functools
 from collections.abc import Callable, Sequence
+from typing import Optional
 
 from .. import frog_ast
 from ..visitors import (
@@ -468,6 +469,10 @@ class InlineMultiUsePureExpressionTransformer(BlockTransformer):
         return F(a || b, a || b);
     """
 
+    def __init__(self, function_var_names: set[str] | None = None) -> None:
+        super().__init__()
+        self._function_var_names = function_var_names or set()
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
             if not (
@@ -482,14 +487,24 @@ class InlineMultiUsePureExpressionTransformer(BlockTransformer):
             var_name = statement.var.name
             expr = statement.value
 
-            # Skip ALL function calls (even deterministic ones): multi-use
-            # inlining duplicates the call at every use site, changing
-            # the canonical form.
+            # Skip function calls in general — multi-use inlining
+            # duplicates the call at every use site, changing the
+            # canonical form.  EXCEPTION: calls to a sampled
+            # ``Function<D, R>`` proof-let are deterministic in
+            # FrogLang (same input → same output) AND their canonical
+            # form should match the inline-form of games that don't
+            # extract the call to a local; allow inlining for those.
             if (
                 SearchVisitor(lambda n: isinstance(n, frog_ast.FuncCall)).visit(expr)
                 is not None
             ):
-                continue
+                if not (
+                    self._function_var_names
+                    and isinstance(expr, frog_ast.FuncCall)
+                    and isinstance(expr.func, frog_ast.Variable)
+                    and expr.func.name in self._function_var_names
+                ):
+                    continue
 
             # Skip expressions containing array access or slicing.
             # Inlining these spreads references to the indexed variable,
@@ -990,6 +1005,270 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
         return block
 
 
+class InlineLocalTupleLiteralTransformer(BlockTransformer):
+    """Inline a local typed tuple-literal binding when the variable is used
+    only at constant indices and not reassigned, substituting each ``v[k]``
+    with the corresponding tuple element.
+
+    Bridges a gap between ``ExpandTupleTransformer`` (which fires
+    block-locally and can leave outer-scope ``v[i]`` accesses unrewritten
+    when ``v`` was originally declared in an if-branch that
+    ``BranchElimination`` later collapsed) and
+    ``InlineSingleUseVariableTransformer`` (which skips Tuple RHS to avoid
+    breaking the tuple-expansion pipeline).
+
+    Preconditions for firing on ``[T0,...,Tn-1] v = [e0,...,en-1];``:
+
+    1. No bare reference to ``v`` in the remaining block (every reference
+       is the ``the_array`` child of an ``ArrayAccess`` node).
+    2. Every ``v[k]`` access has ``k`` a constant integer in ``[0, n)``.
+    3. ``v`` is not reassigned in the remaining block, and no free
+       variable of any ``e_i`` is reassigned anywhere later.
+    4. For each index ``i``: if ``v[i]`` is used 2+ times, ``e_i`` must
+       be deterministic (no non-deterministic calls); if ``v[i]`` is
+       never used, ``e_i`` must also be deterministic (so dropping it is
+       safe). When ``v[i]`` is used exactly once, ``e_i`` may have any
+       side effects (single substitution preserves the evaluation count).
+    """
+
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace | None = None,
+        proof_let_types: NameTypeMap | None = None,
+        ctx: PipelineContext | None = None,
+    ) -> None:
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
+        self._proof_let_types = proof_let_types
+        self.ctx = ctx
+
+    @staticmethod
+    def _classify_uses(
+        var_name: str, block: frog_ast.Block
+    ) -> tuple[bool, bool, dict[int, int]]:
+        """Walk ``block`` and classify references to ``var_name``.
+
+        Returns ``(has_bare_use, has_non_constant_index, index_counts)``
+        where ``index_counts[k]`` is the number of ``var_name[k]`` accesses
+        for constant integer ``k``.
+        """
+
+        class _Classifier(Visitor[None]):
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.total_var_refs = 0
+                self.array_access_refs = 0
+                self.has_non_constant = False
+                self.counts: dict[int, int] = {}
+
+            def result(self) -> None:
+                pass
+
+            def visit_variable(self, var: frog_ast.Variable) -> None:
+                if var.name == self.name:
+                    self.total_var_refs += 1
+
+            def visit_array_access(self, aa: frog_ast.ArrayAccess) -> None:
+                if (
+                    isinstance(aa.the_array, frog_ast.Variable)
+                    and aa.the_array.name == self.name
+                ):
+                    self.array_access_refs += 1
+                    if isinstance(aa.index, frog_ast.Integer):
+                        self.counts[aa.index.num] = self.counts.get(aa.index.num, 0) + 1
+                    else:
+                        self.has_non_constant = True
+
+        visitor = _Classifier(var_name)
+        visitor.visit(block)
+        has_bare = visitor.total_var_refs > visitor.array_access_refs
+        return has_bare, visitor.has_non_constant, visitor.counts
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if not (
+                isinstance(statement, frog_ast.Assignment)
+                and statement.the_type is not None
+                and isinstance(statement.the_type, frog_ast.ProductType)
+                and isinstance(statement.var, frog_ast.Variable)
+                and isinstance(statement.value, frog_ast.Tuple)
+            ):
+                continue
+
+            tuple_values = statement.value.values
+            unfolded_types = statement.the_type.types
+            if len(tuple_values) != len(unfolded_types):
+                continue
+
+            var_name = statement.var.name
+            remaining = frog_ast.Block(
+                copy.deepcopy(list(block.statements[index + 1 :]))
+            )
+
+            has_bare, has_non_const, counts = self._classify_uses(var_name, remaining)
+            # Refuse to fire when the variable has no uses in this block:
+            # it may be referenced from an enclosing scope (e.g. when this
+            # block is the body of an if-branch and the use is in the
+            # surrounding method body). Removing the declaration here
+            # would leave those outer-scope references dangling.
+            if not counts and not has_bare and not has_non_const:
+                continue
+            if has_bare:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Local Tuple Literal",
+                            reason=(
+                                f"Cannot inline '{var_name}': has a bare use "
+                                f"(not as v[k])"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"Restructure so '{var_name}' is only "
+                                f"referenced as '{var_name}[k]'"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
+                continue
+            if has_non_const:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Local Tuple Literal",
+                            reason=(
+                                f"Cannot inline '{var_name}': accessed at a "
+                                f"non-constant index"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"Constant-fold the index expression for "
+                                f"'{var_name}[...]' first"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
+                continue
+            if counts and (
+                max(counts.keys()) >= len(tuple_values) or min(counts.keys()) < 0
+            ):
+                continue
+
+            def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(
+                        node,
+                        (
+                            frog_ast.Sample,
+                            frog_ast.Assignment,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
+                    and isinstance(node.var, frog_ast.Variable)
+                    and node.var.name == name
+                )
+
+            # v itself must not be reassigned later.
+            if (
+                SearchVisitor(functools.partial(is_written_to, var_name)).visit(
+                    remaining
+                )
+                is not None
+            ):
+                continue
+
+            # No free variable of any e_i may be reassigned later.
+            free_var_reassigned = False
+            for e_i in tuple_values:
+                free_vars = VariableCollectionVisitor().visit(copy.deepcopy(e_i))
+                if any(
+                    SearchVisitor(functools.partial(is_written_to, fv.name)).visit(
+                        remaining
+                    )
+                    is not None
+                    for fv in free_vars
+                ):
+                    free_var_reassigned = True
+                    break
+            if free_var_reassigned:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Local Tuple Literal",
+                            reason=(
+                                f"Cannot inline '{var_name}': a free variable "
+                                f"of some tuple element is reassigned later"
+                            ),
+                            location=statement.origin,
+                            suggestion=None,
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
+                continue
+
+            # Per-element purity check: dropped or duplicated elements must
+            # be free of non-deterministic calls.
+            purity_blocked = False
+            for i, e_i in enumerate(tuple_values):
+                count_i = counts.get(i, 0)
+                if count_i != 1 and has_nondeterministic_call(
+                    e_i, self._proof_namespace, self._proof_let_types
+                ):
+                    purity_blocked = True
+                    if self.ctx is not None:
+                        self.ctx.near_misses.append(
+                            NearMiss(
+                                transform_name="Inline Local Tuple Literal",
+                                reason=(
+                                    f"Cannot inline '{var_name}': element "
+                                    f"{i} has a non-deterministic call but "
+                                    f"is used {count_i} time(s) "
+                                    f"(needs exactly 1)"
+                                ),
+                                location=statement.origin,
+                                suggestion=(
+                                    "Hoist the non-deterministic call to "
+                                    "its own deterministic local"
+                                ),
+                                variable=var_name,
+                                method=None,
+                            )
+                        )
+                    break
+            if purity_blocked:
+                continue
+
+            # Substitute every v[k] occurrence with a deep copy of e_k.
+            def matches_indexed_use(target_name: str, node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(node, frog_ast.ArrayAccess)
+                    and isinstance(node.the_array, frog_ast.Variable)
+                    and node.the_array.name == target_name
+                    and isinstance(node.index, frog_ast.Integer)
+                )
+
+            while True:
+                aa = SearchVisitor(
+                    functools.partial(matches_indexed_use, var_name)
+                ).visit(remaining)
+                if aa is None:
+                    break
+                k = aa.index.num
+                remaining = ReplaceTransformer(
+                    aa, copy.deepcopy(tuple_values[k])
+                ).transform(remaining)
+
+            return self.transform_block(
+                frog_ast.Block(
+                    list(block.statements[:index]) + list(remaining.statements)
+                )
+            )
+
+        return block
+
+
 # ---------------------------------------------------------------------------
 # TransformPass wrappers
 # ---------------------------------------------------------------------------
@@ -1036,23 +1315,124 @@ class ForwardExpressionAlias(TransformPass):
         ).transform(game)
 
 
+class InlineLocalTupleLiteral(TransformPass):
+    name = "Inline Local Tuple Literal"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return InlineLocalTupleLiteralTransformer(
+            proof_namespace=ctx.proof_namespace,
+            proof_let_types=ctx.proof_let_types,
+            ctx=ctx,
+        ).transform(game)
+
+
 class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
-    """Extract repeated ``var[constant]`` accesses into named variables.
+    """Extract repeated ``var[constant]`` accesses and slice expressions.
 
-    When ``v[i]`` (variable + integer index) appears 2+ times in a block
-    and ``v`` is declared with a product (tuple) type, inserts a local
-    declaration ``Ti __cse_v_i__ = v[i];`` right after ``v``'s assignment
-    and replaces every occurrence with the new variable.
+    **Tuple phase.** When ``v[i]`` (variable + integer index) appears
+    2+ times in a block and ``v`` is declared with a product (tuple)
+    type, inserts ``Ti __cse_v_i__ = v[i];`` right after ``v``'s
+    assignment and replaces every occurrence with the new variable.
+    Also fires when ``v`` is a ``GenericFor`` loop binder, inserting the
+    extraction at the top of the loop body. This symmetrises games whose
+    loop body source writes ``m = e[0]`` explicitly against games whose
+    loop body obtains the same accesses via inlining a helper method.
 
-    This normalises games that destructure tuples explicitly
-    (``pk = k[0]``) against games that use inline access
-    (``Encaps(k[0])``).
+    (Method parameters are intentionally NOT eligible for tuple
+    extraction: doing so breaks the ``[v[0], v[1], ...] -> v`` fold in
+    ``SimplifyTuple`` when a reconstructed tuple literal elsewhere
+    references the same indices.)
+
+    **Slice phase.** When a ``v[A:B]`` slice expression (variable base,
+    syntactically-equal bounds) appears 2+ times in a block, inserts
+    ``BitString<B - A> __cse_slice_v_N__ = v[A:B];`` at the definition
+    point (after ``v``'s block-local assignment, or at position 0 for
+    method parameters / fields / enclosing-scope bases) and replaces
+    every matching slice with the new variable. Unlike the tuple phase,
+    method parameters ARE eligible, because no canonicalization pass
+    folds a concatenation of slices back into the base variable.
+
+    The slice phase symmetrises canonical forms between games that
+    hoist a named slice at source level (``k2enc = m[A:B];`` then using
+    ``k2enc`` in multiple branches) against games whose scan-loop body
+    obtains the same slice via inlining a helper + concat-equality
+    decomposition.
     """
 
+    def __init__(self) -> None:
+        super().__init__()
+        # Loop-binder types visible from the enclosing ``GenericFor``.
+        # Extraction for these is inserted at position 0 of the loop body.
+        self._scope_types: dict[str, frog_ast.Type] = {}
+
+    def transform_generic_for(self, gf: frog_ast.GenericFor) -> frog_ast.GenericFor:
+        new_over = self.transform(gf.over)
+        saved = dict(self._scope_types)
+        try:
+            self._scope_types[gf.var_name] = gf.var_type
+            new_block = self.transform(gf.block)
+        finally:
+            self._scope_types = saved
+        if new_block is gf.block and new_over is gf.over:
+            return gf
+        return frog_ast.GenericFor(gf.var_type, gf.var_name, new_over, new_block)
+
+    @staticmethod
+    def _has_full_reconstruction(
+        var_name: str, base_type: frog_ast.ProductType, block: frog_ast.Block
+    ) -> bool:
+        """Return True iff ``block`` contains a tuple literal whose values
+        are exactly ``[var_name[0], var_name[1], ..., var_name[n-1]]`` in
+        order, where ``n = len(base_type.types)``.
+
+        Such a literal would be folded back to ``var_name`` by
+        ``SimplifyTuple``; CSE'ing any of its index accesses would block
+        that fold.
+        """
+        n = len(base_type.types)
+
+        def is_full_recon(node: frog_ast.ASTNode) -> bool:
+            if not isinstance(node, frog_ast.Tuple):
+                return False
+            if len(node.values) != n:
+                return False
+            for i, val in enumerate(node.values):
+                if not (
+                    isinstance(val, frog_ast.ArrayAccess)
+                    and isinstance(val.the_array, frog_ast.Variable)
+                    and val.the_array.name == var_name
+                    and isinstance(val.index, frog_ast.Integer)
+                    and val.index.num == i
+                ):
+                    return False
+            return True
+
+        return SearchVisitor(is_full_recon).visit(block) is not None
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        """Expose ProductType method parameters for tuple-extraction.
+
+        Symmetrises games whose source-level code already extracts
+        ``v = ct0[1]`` against games whose source uses the param access
+        ``ct0[1]`` inline.  Block-local declarations still shadow params
+        on name collision.
+        """
+        saved = dict(self._scope_types)
+        try:
+            for param in method.signature.parameters:
+                if isinstance(param.type, frog_ast.ProductType):
+                    self._scope_types[param.name] = param.type
+            new_block = self.transform(method.block)
+        finally:
+            self._scope_types = saved
+        if new_block is method.block:
+            return method
+        return frog_ast.Method(method.signature, new_block)
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        # Build map: var_name -> declared type (from assignments in this block)
-        var_types: dict[str, frog_ast.Type] = {}
-        var_def_idx: dict[str, int] = {}
+        var_types: dict[str, frog_ast.Type] = dict(self._scope_types)
+        # Sentinel -1 = scope-external (insert at top of this block).
+        var_def_idx: dict[str, int] = {name: -1 for name in var_types}
         for idx, stmt in enumerate(block.statements):
             if (
                 isinstance(stmt, frog_ast.Assignment)
@@ -1116,6 +1496,14 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
             ):
                 continue
 
+            # Don't CSE when the variable's full tuple-literal
+            # reconstruction ``[v[0], v[1], ..., v[n-1]]`` appears
+            # somewhere in the block: extracting one index would block
+            # ``SimplifyTuple``'s ``[v[0], v[1], ...] -> v`` fold-back,
+            # leaving the canonical form less reduced.
+            if self._has_full_reconstruction(var_name, base_type, block):
+                continue
+
             elem_type = base_type.types[idx_val]
             cse_name = f"__cse_{var_name}_{idx_val}__"
             target_access = frog_ast.ArrayAccess(
@@ -1156,11 +1544,142 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
             new_stmts.extend(remaining.statements)
             return self.transform_block(frog_ast.Block(new_stmts))
 
+        # Slice-extraction phase: extract repeated ``v[A:B]`` slices
+        # (variable base, syntactically-equal bounds) into a local
+        # ``BitString<B - A> cse = v[A:B];``. Mirrors the tuple path
+        # but uses structural equality on the full Slice expression.
+        # Unlike the tuple path, method parameters are eligible as
+        # bases (SimplifyTuple only folds ArrayAccess, not Slice, so
+        # hoisting a slice of a param doesn't interact).
+        slice_occurrences: list[frog_ast.Slice] = []
+        for stmt in block.statements:
+
+            def slice_collector(node: frog_ast.ASTNode) -> bool:
+                if isinstance(node, frog_ast.Slice) and isinstance(
+                    node.the_array, frog_ast.Variable
+                ):
+                    slice_occurrences.append(node)
+                return False
+
+            SearchVisitor(slice_collector).visit(stmt)
+
+        # Group by structural equality.
+        slice_groups: list[tuple[frog_ast.Slice, int]] = []
+        for sl in slice_occurrences:
+            for idx, (rep, cnt) in enumerate(slice_groups):
+                if sl == rep:
+                    slice_groups[idx] = (rep, cnt + 1)
+                    break
+            else:
+                slice_groups.append((sl, 1))
+
+        for rep_slice, count in slice_groups:
+            if count < 2:
+                continue
+            assert isinstance(rep_slice.the_array, frog_ast.Variable)
+            var_name = rep_slice.the_array.name
+
+            # Determine insertion point: after block-local def if any,
+            # else at top (scope-external: param / field / enclosing).
+            def_idx = -1
+            for idx, stmt in enumerate(block.statements):
+                if (
+                    isinstance(
+                        stmt,
+                        (
+                            frog_ast.Assignment,
+                            frog_ast.Sample,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name == var_name
+                    and stmt.the_type is not None
+                ):
+                    def_idx = idx
+                    break
+
+            # Skip if base is reassigned anywhere after def (or anywhere
+            # in block for scope-external case). Reassignment would
+            # invalidate the hoist.
+            def _is_reassigned_slice(name: str, node: frog_ast.ASTNode) -> bool:
+                return (
+                    isinstance(
+                        node,
+                        (
+                            frog_ast.Assignment,
+                            frog_ast.Sample,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
+                    and isinstance(node.var, frog_ast.Variable)
+                    and node.var.name == name
+                )
+
+            check_from = def_idx + 1 if def_idx >= 0 else 0
+            remaining_block = frog_ast.Block(list(block.statements[check_from:]))
+            if (
+                SearchVisitor(functools.partial(_is_reassigned_slice, var_name)).visit(
+                    remaining_block
+                )
+                is not None
+            ):
+                continue
+
+            insert_at = def_idx + 1 if def_idx >= 0 else 0
+
+            # Build a CSE name that does not collide with prior hoists
+            # on the same base variable (different (start, end) pairs in
+            # the same block would otherwise alias). Use a counter over
+            # existing assignments whose name matches the prefix.
+            prefix = f"__cse_slice_{var_name}_"
+            existing = 0
+            for stmt in block.statements:
+                if (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name.startswith(prefix)
+                ):
+                    existing += 1
+            cse_name = f"{prefix}{existing}__"
+            length_expr = frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.SUBTRACT,
+                copy.deepcopy(rep_slice.end),
+                copy.deepcopy(rep_slice.start),
+            )
+            elem_type = frog_ast.BitStringType(length_expr)
+
+            new_assignment = frog_ast.Assignment(
+                elem_type,
+                frog_ast.Variable(cse_name),
+                copy.deepcopy(rep_slice),
+            )
+
+            new_stmts = list(block.statements[:insert_at])
+            new_stmts.append(new_assignment)
+            remaining = frog_ast.Block(list(block.statements[insert_at:]))
+
+            def _match_slice(target: frog_ast.Slice, node: frog_ast.ASTNode) -> bool:
+                return node == target
+
+            while True:
+                match = SearchVisitor(functools.partial(_match_slice, rep_slice)).visit(
+                    remaining
+                )
+                if match is None:
+                    break
+                remaining = ReplaceTransformer(
+                    match, frog_ast.Variable(cse_name)
+                ).transform(remaining)
+
+            new_stmts.extend(remaining.statements)
+            return self.transform_block(frog_ast.Block(new_stmts))
+
         return block
 
 
 class ExtractRepeatedTupleAccess(TransformPass):
-    """Extract repeated tuple element accesses into named variables."""
+    """Extract repeated tuple element accesses and slice expressions."""
 
     name = "Extract Repeated Tuple Access"
 
@@ -1172,7 +1691,14 @@ class InlineMultiUsePureExpression(TransformPass):
     name = "Inline Multi-Use Pure Expressions"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return InlineMultiUsePureExpressionTransformer().transform(game)
+        function_var_names: set[str] = set()
+        if ctx.proof_let_types is not None:
+            for pair in ctx.proof_let_types.type_map:
+                if isinstance(pair.type, frog_ast.FunctionType):
+                    function_var_names.add(pair.name)
+        return InlineMultiUsePureExpressionTransformer(
+            function_var_names=function_var_names
+        ).transform(game)
 
 
 class RedundantFieldCopy(TransformPass):
@@ -1496,11 +2022,20 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
         self.field_names = [field.name for field in game.fields]
         changed = True
         result = game
+        pinned = self.ctx.pinned_fields if self.ctx is not None else set()
         while changed:
             changed = False
-            # Try inlining declared fields
+            # Try inlining declared fields. Pinned fields (registered by a
+            # producing pass via ``PipelineContext.pinned_fields``) are
+            # considered only for same-method inlining; cross-method inlining
+            # of a pinned field would re-expose the pattern the producer was
+            # canonicalizing, preventing the fixed-point loop from converging.
+            # ``_try_inline_field`` enforces the same-method-only restriction
+            # when the field is pinned.
             for field_name in list(self.field_names):
-                new_game = self._try_inline_field(result, field_name)
+                new_game = self._try_inline_field(
+                    result, field_name, is_pinned=field_name in pinned
+                )
                 if new_game is not None:
                     result = new_game
                     self.field_names = [f.name for f in result.fields]
@@ -1513,7 +2048,7 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
             # RemoveUnnecessaryFields removes a field declaration but leaves
             # the assignment statement).
             for orphan in self._find_orphaned_vars(result):
-                new_game = self._try_inline_field(result, orphan)
+                new_game = self._try_inline_field(result, orphan, is_pinned=False)
                 if new_game is not None:
                     result = new_game
                     self.field_names = [f.name for f in result.fields]
@@ -1537,9 +2072,18 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
         return orphans
 
     def _try_inline_field(
-        self, game: frog_ast.Game, field_name: str
+        self, game: frog_ast.Game, field_name: str, is_pinned: bool = False
     ) -> frog_ast.Game | None:
-        """Try to inline a single field. Returns new game or None."""
+        """Try to inline a single field. Returns new game or None.
+
+        When *is_pinned* is True, cross-method inlining is rejected: a
+        producing pass (e.g. ``HoistDeterministicCallToInitialize``) has
+        asked that this field survive because re-inlining it across
+        methods would re-expose the pattern the producer was canonicalizing,
+        causing the fixed-point loop to oscillate. Same-method inlining is
+        still allowed because the producer targets non-Initialize calls,
+        and same-method substitution doesn't introduce such calls.
+        """
 
         # 1. Find the single assignment to this field across all methods.
         #    Count recursively to catch assignments inside nested blocks
@@ -1637,6 +2181,10 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
         # calls with the same value), so substitution is semantics-preserving.
         cross_method = False
         if not all_same_method:
+            if is_pinned:
+                # Producer pinned this field; reject cross-method inline to
+                # avoid oscillation with the producer's re-fire.
+                return None
             if not is_pure:
                 if self.ctx is not None:
                     self.ctx.near_misses.append(
@@ -1661,7 +2209,43 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
             #   - be assigned in the same method and BEFORE the current
             #     field's assignment (so its value was already determined)
             free_vars = VariableCollectionVisitor().visit(copy.deepcopy(assign_expr))
-            field_name_set = set(self.field_names)
+            # Use the game's actual fields (not ``self.field_names``,
+            # which is only refreshed at the ``transform_game`` level).
+            field_name_set = {f.name for f in game.fields}
+            # Promotion branch: when some free vars are Initialize-locals
+            # rather than fields, try to promote them to fields so the
+            # cross-method inline can then fire.  See
+            # ``InlineSingleUseFieldViaLocalPromotion.md``.
+            #
+            # Gate: only attempt promotion when the field's RHS is a
+            # top-level bitstring concatenation (``||`` chain).  This is
+            # the shape used for Hash-input layouts that
+            # ``ConcatEqualityDecompose`` matches against a slice-wise
+            # equality on the use side.  Other shapes (e.g. tuple
+            # projections ``v[0]``) do not benefit from promotion and
+            # can perturb the canonical form that already works via
+            # other routes.
+            is_concat_chain = (
+                isinstance(assign_expr, frog_ast.BinaryOperation)
+                and assign_expr.operator == frog_ast.BinaryOperators.OR
+            )
+            local_fv_names: list[str] = []
+            seen: set[str] = set()
+            for fv in free_vars:
+                if fv.name not in field_name_set and fv.name not in seen:
+                    local_fv_names.append(fv.name)
+                    seen.add(fv.name)
+            if local_fv_names and is_concat_chain:
+                promoted = self._try_promote_locals(
+                    game,
+                    field_name,
+                    local_fv_names,
+                    assign_method_idx,
+                    assign_stmt_idx,
+                )
+                if promoted is None:
+                    return None
+                return self._try_inline_field(promoted, field_name)
             can_cross_method = True
             for fv in free_vars:
                 if fv.name not in field_name_set:
@@ -1826,6 +2410,205 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
 
         return new_game
 
+    # pylint: disable=too-many-arguments,too-many-positional-arguments
+    def _try_promote_locals(
+        self,
+        game: frog_ast.Game,
+        field_name: str,
+        local_names: list[str],
+        assign_method_idx: int,
+        assign_stmt_idx: int,
+    ) -> frog_ast.Game | None:
+        """Promote each local in ``local_names`` to a game field so the
+        cross-method inlining path can treat its RHS as referencing only
+        fields.  Returns the promoted game, or ``None`` if any local is
+        not a promotion candidate (emitting a ``NearMiss`` describing
+        which precondition failed).
+
+        A local ``L`` is a promotion candidate iff:
+
+        1. Its sole defining statement is a top-level ``Sample``,
+           ``UniqueSample``, or typed ``Assignment`` in the same method
+           as the field being inlined, at an index strictly less than
+           ``assign_stmt_idx``.
+        2. ``_count_assigns_recursive`` over the whole game returns 1 for
+           ``L`` (no reassignments anywhere).
+
+        The soundness argument (see design doc
+        ``2026-04-22-promote-locals-for-cross-method-inline-design.md``)
+        relies on Initialize executing exactly once per game lifecycle,
+        so a single top-level definition in Initialize has the same
+        lifetime as a field assigned in Initialize.
+        """
+        method = game.methods[assign_method_idx]
+        method_stmts = method.block.statements
+        existing_field_names = {f.name for f in game.fields}
+        reserved = set(existing_field_names)
+        promotions: list[tuple[str, str, frog_ast.Type, int, frog_ast.Statement]] = []
+        for local_name in local_names:
+            # Total assignments across whole game must equal 1.
+            total = sum(
+                _count_assigns_recursive(m.block, local_name) for m in game.methods
+            )
+            if total != 1:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Single-Use Field",
+                            reason=(
+                                f"Cannot promote local '{local_name}' for "
+                                f"cross-method inlining of field "
+                                f"'{field_name}': reassigned {total} times "
+                                f"(need exactly 1)"
+                            ),
+                            location=None,
+                            suggestion=None,
+                            variable=local_name,
+                            method=None,
+                        )
+                    )
+                return None
+            # Locate the defining statement: top-level typed
+            # Sample/UniqueSample/Assignment in the same method, before
+            # the field's assignment.
+            def_idx = -1
+            def_stmt: frog_ast.Statement | None = None
+            for si in range(assign_stmt_idx):
+                stmt = method_stmts[si]
+                if (
+                    isinstance(
+                        stmt,
+                        (
+                            frog_ast.Sample,
+                            frog_ast.UniqueSample,
+                            frog_ast.Assignment,
+                        ),
+                    )
+                    and stmt.the_type is not None
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name == local_name
+                ):
+                    def_idx = si
+                    def_stmt = stmt
+                    break
+            if def_stmt is None:
+                # Distinguish: defined later (in this method, after the
+                # field) vs not at top level in this method at all.
+                defined_later = False
+                defined_nested = False
+                for si in range(assign_stmt_idx, len(method_stmts)):
+                    stmt = method_stmts[si]
+                    if (
+                        isinstance(
+                            stmt,
+                            (
+                                frog_ast.Sample,
+                                frog_ast.UniqueSample,
+                                frog_ast.Assignment,
+                            ),
+                        )
+                        and stmt.the_type is not None
+                        and isinstance(stmt.var, frog_ast.Variable)
+                        and stmt.var.name == local_name
+                    ):
+                        defined_later = True
+                        break
+                if not defined_later:
+                    # Count == 1, but no top-level typed def in this
+                    # method at all — it must be inside a nested block
+                    # or be an untyped assignment.
+                    defined_nested = True
+                if self.ctx is not None:
+                    if defined_later:
+                        reason = (
+                            f"Cannot promote local '{local_name}' for "
+                            f"cross-method inlining of field "
+                            f"'{field_name}': defined after field's "
+                            f"assignment"
+                        )
+                    elif defined_nested:
+                        reason = (
+                            f"Cannot promote local '{local_name}' for "
+                            f"cross-method inlining of field "
+                            f"'{field_name}': defined in a nested block "
+                            f"or via an untyped assignment, not at top "
+                            f"level"
+                        )
+                    else:
+                        reason = (
+                            f"Cannot promote local '{local_name}' for "
+                            f"cross-method inlining of field "
+                            f"'{field_name}': defining statement is not "
+                            f"a sample or typed assignment"
+                        )
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Single-Use Field",
+                            reason=reason,
+                            location=None,
+                            suggestion=None,
+                            variable=local_name,
+                            method=None,
+                        )
+                    )
+                return None
+            assert isinstance(
+                def_stmt,
+                (frog_ast.Sample, frog_ast.UniqueSample, frog_ast.Assignment),
+            )
+            assert def_stmt.the_type is not None
+            i = 0
+            while f"_promoted_{local_name}_{i}" in reserved:
+                i += 1
+            new_name = f"_promoted_{local_name}_{i}"
+            reserved.add(new_name)
+            promotions.append(
+                (local_name, new_name, def_stmt.the_type, def_idx, def_stmt)
+            )
+
+        # Build the promoted game.
+        new_game = copy.deepcopy(game)
+        for local_name, new_name, ftype, _, _ in promotions:
+            new_game.fields.append(frog_ast.Field(copy.deepcopy(ftype), new_name, None))
+        new_stmts = list(new_game.methods[assign_method_idx].block.statements)
+        for local_name, new_name, _, def_idx, _ in promotions:
+            old = new_stmts[def_idx]
+            if isinstance(old, frog_ast.Sample):
+                new_stmts[def_idx] = frog_ast.Sample(
+                    None,
+                    frog_ast.Variable(new_name),
+                    copy.deepcopy(old.sampled_from),
+                )
+            elif isinstance(old, frog_ast.UniqueSample):
+                new_stmts[def_idx] = frog_ast.UniqueSample(
+                    None,
+                    frog_ast.Variable(new_name),
+                    copy.deepcopy(old.unique_set),
+                    copy.deepcopy(old.sampled_from),
+                )
+            elif isinstance(old, frog_ast.Assignment):
+                new_stmts[def_idx] = frog_ast.Assignment(
+                    None,
+                    frog_ast.Variable(new_name),
+                    copy.deepcopy(old.value),
+                )
+        new_game.methods[assign_method_idx].block = frog_ast.Block(new_stmts)
+        for local_name, new_name, _, _, _ in promotions:
+            matcher = functools.partial(
+                lambda name, node: (
+                    isinstance(node, frog_ast.Variable) and node.name == name
+                ),
+                local_name,
+            )
+            while True:
+                found = SearchVisitor(matcher).visit(new_game)
+                if found is None:
+                    break
+                new_game = ReplaceTransformer(
+                    found, frog_ast.Variable(new_name)
+                ).transform(new_game)
+        return new_game
+
 
 class InlineSingleUseField(TransformPass):
     name = "Inline Single-Use Field"
@@ -1834,6 +2617,652 @@ class InlineSingleUseField(TransformPass):
         return InlineSingleUseFieldTransformer(
             proof_namespace=ctx.proof_namespace, ctx=ctx
         ).transform(game)
+
+
+# ---------------------------------------------------------------------------
+# HoistGroupExpToInitialize — cache field^X computations as new fields
+# ---------------------------------------------------------------------------
+
+
+def _locate_initialize_index(game: frog_ast.Game) -> int | None:
+    """Return the index of the ``Initialize`` method in ``game.methods``, or
+    ``None`` if no method named ``Initialize`` exists.  Shared by every
+    Initialize-targeting pass in this module (HoistGroupExpToInitialize,
+    RefactorGroupElemFieldExp, HoistDeterministicCallToInitialize,
+    SplitOpaqueTupleField)."""
+    for mi, method in enumerate(game.methods):
+        if method.signature.name == "Initialize":
+            return mi
+    return None
+
+
+def _is_groupelem_field(fld: frog_ast.Field) -> bool:
+    return isinstance(fld.type, frog_ast.GroupElemType)
+
+
+def _free_var_names(expr: frog_ast.Expression) -> set[str]:
+    return {v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(expr))}
+
+
+def _stmt_writes_var(stmt: frog_ast.Statement, name: str) -> bool:
+    """True if *stmt* (top-level only) assigns/samples to ``name``."""
+    return (
+        isinstance(stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
+        and isinstance(stmt.var, frog_ast.Variable)
+        and stmt.var.name == name
+    )
+
+
+class _GroupExpFinder(Visitor[Optional[frog_ast.BinaryOperation]]):
+    """Find the first ``Variable(name) ^ <expr>`` BinaryOperation in a tree."""
+
+    def __init__(self, base_field_name: str) -> None:
+        self._base_field_name = base_field_name
+        self._found: Optional[frog_ast.BinaryOperation] = None
+
+    def result(self) -> Optional[frog_ast.BinaryOperation]:
+        return self._found
+
+    def leave_binary_operation(self, node: frog_ast.BinaryOperation) -> None:
+        if self._found is not None:
+            return
+        if node.operator != frog_ast.BinaryOperators.EXPONENTIATE:
+            return
+        if (
+            isinstance(node.left_expression, frog_ast.Variable)
+            and node.left_expression.name == self._base_field_name
+        ):
+            self._found = node
+
+
+class HoistGroupExpToInitializeTransformer:
+    """Hoist ``<F> ^ <X>`` expressions into a fresh field assigned in Init,
+    where ``F`` is a single-write ``GroupElem<G>`` field with a pure
+    deterministic RHS and ``X`` is a stable expression.
+
+    Soundness: the new field captures the value of ``F.rhs ^ X`` at
+    Initialize-end.  This is semantics-preserving when:
+
+    1. ``F`` is assigned exactly once, at top level of ``Initialize``.
+    2. ``F``'s RHS contains no non-deterministic call.
+    3. Every free variable of ``X`` is a game field or game parameter
+       (cross-method-visible, stable across oracle calls).
+    4. None of the free variables of ``F.rhs`` or ``X`` are reassigned
+       after ``F``'s definition (in or outside ``Initialize``).
+
+    The new field's RHS is the inlined form ``F.rhs ^ X`` so that the
+    immediately-following ``GroupElem Simplification`` pass can fold any
+    nested power-of-power.
+
+    Motivation: closes the gap where ``field1 = G.generator ^ v1`` and a
+    use site ``field1 ^ field2`` would otherwise hide the nested
+    ``(g^v1)^field2`` pattern from the algebraic simplifier.
+    """
+
+    def __init__(self, ctx: PipelineContext) -> None:
+        self.ctx = ctx
+
+    def transform(self, game: frog_ast.Game) -> frog_ast.Game:
+        result = game
+        changed = True
+        while changed:
+            changed = False
+            new_game = self._try_one_hoist(result)
+            if new_game is not None:
+                result = new_game
+                changed = True
+        return result
+
+    # pylint: disable-next=too-many-return-statements,too-many-locals,too-many-branches
+    def _try_one_hoist(self, game: frog_ast.Game) -> frog_ast.Game | None:
+        init_idx = _locate_initialize_index(game)
+        if init_idx is None:
+            return None
+
+        # Defensive guard: if Initialize has an early return (nested in if/for,
+        # or any non-terminal ReturnStatement), splicing a new assignment could
+        # be skipped on the early-return path.  Well-typed FrogLang Void
+        # Initialize methods cannot produce this shape through the parser, but
+        # AST-level consumers could.  Mirrors HoistDeterministicCallToInitialize.
+        init_stmts_for_guard = game.methods[init_idx].block.statements
+        if _has_early_return_in_init(init_stmts_for_guard):
+            return None
+
+        field_names = {f.name for f in game.fields}
+        param_names = {p.name for p in game.parameters}
+
+        # Walk every GroupElem field eligible to be a base.
+        for fld in game.fields:
+            if not _is_groupelem_field(fld):
+                continue
+            base_info = self._eligible_base(game, fld.name, init_idx)
+            if base_info is None:
+                # Only diagnose when there's actually a ``<fld> ^ X`` use
+                # site that would have been hoisted but for the failure;
+                # silent otherwise to keep diagnostics signal-rich.
+                if self._field_has_exp_use(game, fld.name, init_idx):
+                    nd_stmt = self._initialize_assignment_is_nondeterministic(
+                        game, fld.name, init_idx
+                    )
+                    if nd_stmt is not None:
+                        self.ctx.near_misses.append(
+                            NearMiss(
+                                transform_name=(
+                                    "Hoist GroupElem Exponent To Initialize"
+                                ),
+                                reason=(
+                                    f"Field {fld.name!r}'s Initialize "
+                                    "assignment has a non-deterministic "
+                                    "RHS; cannot hoist (the cached value "
+                                    "could differ from the per-oracle live "
+                                    "computation)."
+                                ),
+                                location=nd_stmt.origin,
+                                suggestion=(
+                                    "Replace the non-deterministic call "
+                                    "in the field's RHS with a "
+                                    "deterministic one, or hoist that "
+                                    "call first via "
+                                    "Hoist Deterministic Call to "
+                                    "Initialize."
+                                ),
+                                variable=fld.name,
+                                method="Initialize",
+                            )
+                        )
+                continue
+            base_assign_idx, base_rhs = base_info
+
+            # Look for `<base> ^ X` in any non-Init method.
+            for mi, method in enumerate(game.methods):
+                if mi == init_idx:
+                    continue
+                hit = _GroupExpFinder(fld.name).visit(method.block)
+                if hit is None:
+                    continue
+                exp_x = hit.right_expression
+                # X must be stable: free vars all in fields or params.
+                unstable = sorted(
+                    n
+                    for n in _free_var_names(exp_x)
+                    if n not in field_names and n not in param_names
+                )
+                if unstable:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name=("Hoist GroupElem Exponent To Initialize"),
+                            reason=(
+                                f"Exponent of {fld.name!r} ^ X in method "
+                                f"{method.signature.name!r} has free "
+                                f"variable {unstable[0]!r} that is not a "
+                                "game field or parameter; the exponent "
+                                "must be stable across oracle calls."
+                            ),
+                            location=hit.origin,
+                            suggestion=(
+                                f"Promote {unstable[0]!r} to a game field "
+                                "assigned only in Initialize, or rephrase "
+                                "the exponent to use only fields and "
+                                "parameters."
+                            ),
+                            variable=unstable[0],
+                            method=method.signature.name,
+                        )
+                    )
+                    continue
+                # Free vars of base_rhs and X must not be mutated after the
+                # base's definition.
+                free_all = _free_var_names(base_rhs) | _free_var_names(exp_x)
+                mutated = self._free_vars_stable_after_base(
+                    game, init_idx, base_assign_idx, free_all
+                )
+                if mutated:
+                    bad = sorted(mutated)[0]
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name=("Hoist GroupElem Exponent To Initialize"),
+                            reason=(
+                                f"Free variable {bad!r} of the base or "
+                                "exponent is mutated after the base's "
+                                f"assignment in Initialize (or in another "
+                                "method); hoisting would cache a stale "
+                                "value."
+                            ),
+                            location=hit.origin,
+                            suggestion=(
+                                f"Stop reassigning {bad!r} after the "
+                                "base's definition, or move the offending "
+                                "write into Initialize before the base."
+                            ),
+                            variable=bad,
+                            method=method.signature.name,
+                        )
+                    )
+                    continue
+                if any(n == fld.name for n in _free_var_names(exp_x)):
+                    continue  # avoid degenerate self-reference
+                fresh = self._fresh_name(field_names)
+                # Mark as pinned so ``InlineSingleUseField`` leaves it
+                # alone — see ``PipelineContext.pinned_fields``.
+                self.ctx.pinned_fields.add(fresh)
+                return self._build_hoisted_game(
+                    game,
+                    init_idx,
+                    base_assign_idx,
+                    base_rhs,
+                    exp_x,
+                    fresh,
+                    target_method_idx=mi,
+                    target_node=hit,
+                )
+        return None
+
+    @staticmethod
+    def _fresh_name(existing: set[str]) -> str:
+        i = 0
+        while True:
+            name = f"_hge_{i}"
+            if name not in existing:
+                return name
+            i += 1
+
+    def _eligible_base(
+        self, game: frog_ast.Game, field_name: str, init_idx: int
+    ) -> tuple[int, frog_ast.Expression] | None:
+        total = sum(_count_assigns_recursive(m.block, field_name) for m in game.methods)
+        if total != 1:
+            return None
+        init_stmts = list(game.methods[init_idx].block.statements)
+        for si, stmt in enumerate(init_stmts):
+            if (
+                isinstance(stmt, frog_ast.Assignment)
+                and stmt.the_type is None
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name == field_name
+            ):
+                if has_nondeterministic_call(
+                    stmt.value, self.ctx.proof_namespace, self.ctx.proof_let_types
+                ):
+                    return None
+                return si, stmt.value
+        return None
+
+    @staticmethod
+    def _free_vars_stable_after_base(
+        game: frog_ast.Game,
+        init_idx: int,
+        base_assign_idx: int,
+        names: set[str],
+    ) -> set[str]:
+        """Return the subset of *names* that is mutated after the base
+        assignment (in Initialize after ``base_assign_idx``, or in any
+        other method).  An empty set means the names are stable, i.e. the
+        precondition holds."""
+        if not names:
+            return set()
+
+        def writes_to(node: frog_ast.ASTNode) -> set[str]:
+            hits: set[str] = set()
+
+            def _visit(n: frog_ast.ASTNode) -> bool:
+                if isinstance(
+                    n,
+                    (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+                ):
+                    if isinstance(n.var, frog_ast.Variable) and n.var.name in names:
+                        hits.add(n.var.name)
+                    else:
+                        # ``arr[i] = v`` / ``M[k] = v`` mutates the base
+                        # container named by the root Variable — treat as a
+                        # write to that name.
+                        root = n.var
+                        while isinstance(root, frog_ast.ArrayAccess):
+                            root = root.the_array
+                        if isinstance(root, frog_ast.Variable) and root.name in names:
+                            hits.add(root.name)
+                return False
+
+            SearchVisitor(_visit).visit(node)
+            return hits
+
+        mutated: set[str] = set()
+        init_stmts = game.methods[init_idx].block.statements
+        for si in range(base_assign_idx + 1, len(init_stmts)):
+            mutated |= writes_to(init_stmts[si])
+        for mi, method in enumerate(game.methods):
+            if mi == init_idx:
+                continue
+            for stmt in method.block.statements:
+                mutated |= writes_to(stmt)
+        return mutated
+
+    @staticmethod
+    def _field_has_exp_use(game: frog_ast.Game, field_name: str, init_idx: int) -> bool:
+        """True iff some non-Initialize method contains ``field_name ^ X``."""
+        for mi, method in enumerate(game.methods):
+            if mi == init_idx:
+                continue
+            if _GroupExpFinder(field_name).visit(method.block) is not None:
+                return True
+        return False
+
+    def _initialize_assignment_is_nondeterministic(
+        self, game: frog_ast.Game, field_name: str, init_idx: int
+    ) -> frog_ast.Assignment | None:
+        """If *field_name* is assigned at top level of Initialize with a
+        non-deterministic RHS, return that Assignment; else None."""
+        init_stmts = game.methods[init_idx].block.statements
+        for stmt in init_stmts:
+            if (
+                isinstance(stmt, frog_ast.Assignment)
+                and stmt.the_type is None
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name == field_name
+            ):
+                # Caller established ``_eligible_base`` returned None; among
+                # the silent reasons (no assignment / not top-level / not
+                # GroupElem), non-determinism is the only one we surface.
+                if has_nondeterministic_call(
+                    stmt.value,
+                    self.ctx.proof_namespace,
+                    self.ctx.proof_let_types,
+                ):
+                    return stmt
+                return None
+        return None
+
+    # pylint: disable-next=too-many-arguments,too-many-positional-arguments
+    def _build_hoisted_game(
+        self,
+        game: frog_ast.Game,
+        init_idx: int,
+        base_assign_idx: int,
+        base_rhs: frog_ast.Expression,
+        exp_x: frog_ast.Expression,
+        fresh_name: str,
+        target_method_idx: int,
+        target_node: frog_ast.BinaryOperation,
+    ) -> frog_ast.Game:
+        new_game = copy.deepcopy(game)
+        # Append field declaration.
+        new_field = frog_ast.Field(
+            the_type=frog_ast.GroupElemType(
+                copy.deepcopy(_first_group_arg(base_rhs, exp_x))
+            ),
+            name=fresh_name,
+            value=None,
+        )
+        new_game.fields = list(new_game.fields) + [new_field]
+        # Insert assignment in Initialize right after base's def.
+        init = new_game.methods[init_idx]
+        init_stmts = list(init.block.statements)
+        new_assign = frog_ast.Assignment(
+            the_type=None,
+            var=frog_ast.Variable(fresh_name),
+            value=frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.EXPONENTIATE,
+                copy.deepcopy(base_rhs),
+                copy.deepcopy(exp_x),
+            ),
+        )
+        init_stmts.insert(base_assign_idx + 1, new_assign)
+        init.block = frog_ast.Block(init_stmts)
+        # Replace the matched expression in the target method with the new
+        # field reference.  Re-find by structural equality (target_node was
+        # found on the original `game`, not on `new_game`).
+        target_method = new_game.methods[target_method_idx]
+
+        def _matches_target(n: frog_ast.ASTNode) -> bool:
+            return isinstance(n, frog_ast.BinaryOperation) and n == target_node
+
+        match = SearchVisitor(_matches_target).visit(target_method.block)
+        if match is not None:
+            target_method.block = ReplaceTransformer(
+                match, frog_ast.Variable(fresh_name)
+            ).transform(target_method.block)
+        return new_game
+
+
+def _first_group_arg(
+    *exprs: frog_ast.Expression,
+) -> frog_ast.Expression:
+    """Best-effort: extract the ``G`` from a ``GroupGenerator(G)`` if any of
+    *exprs* contains one; else default to ``Variable('G')``.
+
+    The new field's type only needs to be a syntactic ``GroupElem<G>`` for
+    the typechecker; later passes infer types from context.
+    """
+    for e in exprs:
+
+        def _find(n: frog_ast.ASTNode) -> bool:
+            return isinstance(n, frog_ast.GroupGenerator)
+
+        gen = SearchVisitor(_find).visit(e)
+        if isinstance(gen, frog_ast.GroupGenerator):
+            return copy.deepcopy(gen.group)
+    return frog_ast.Variable("G")
+
+
+class HoistGroupExpToInitialize(TransformPass):
+    name = "Hoist GroupElem Exponent To Initialize"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return HoistGroupExpToInitializeTransformer(ctx).transform(game)
+
+
+# ---------------------------------------------------------------------------
+# RefactorGroupElemFieldExp — rewrite ``g^(a*b)`` field RHS as ``F^b`` when
+# another field already holds ``g^a``.
+# ---------------------------------------------------------------------------
+
+
+def _exp_with_generator_base(
+    expr: frog_ast.Expression,
+) -> Optional[frog_ast.Expression]:
+    """If *expr* is ``<group>.generator ^ <e>``, return ``<e>``."""
+    if not isinstance(expr, frog_ast.BinaryOperation):
+        return None
+    if expr.operator != frog_ast.BinaryOperators.EXPONENTIATE:
+        return None
+    base = expr.left_expression
+    if (
+        isinstance(base, frog_ast.FieldAccess)
+        and base.name == "generator"
+        and isinstance(base.the_object, frog_ast.Variable)
+    ):
+        return expr.right_expression
+    if isinstance(base, frog_ast.GroupGenerator):
+        return expr.right_expression
+    return None
+
+
+class RefactorGroupElemFieldExpTransformer:
+    """Express ``Field1 = g^(a*b)`` as ``Field1 = Field2 ^ b`` when there
+    is a separate ``Field2 = g^a`` already, both assigned at top level of
+    ``Initialize`` and ``Field2`` defined first.
+
+    Bridges otherwise-canonical games where one side directly uses
+    ``Field1`` in a comparison against ``c^b`` and the other side has the
+    comparison structurally eliminated.  After refactoring, the
+    :class:`InjectiveEqualitySimplify` field-RHS substitution path can
+    re-express the comparison using cross-method-visible fields only.
+
+    Soundness: ``g^(a*b) = (g^a)^b = Field2^b`` and both fields'
+    Initialize-time values are otherwise identical to before.
+    """
+
+    def __init__(self, ctx: PipelineContext) -> None:
+        self.ctx = ctx
+
+    def transform(self, game: frog_ast.Game) -> frog_ast.Game:
+        result = game
+        changed = True
+        while changed:
+            changed = False
+            new_game = self._try_one(result)
+            if new_game is not None:
+                result = new_game
+                changed = True
+        return result
+
+    def _try_one(self, game: frog_ast.Game) -> frog_ast.Game | None:
+        init_idx = _locate_initialize_index(game)
+        if init_idx is None:
+            return None
+        init_stmts = list(game.methods[init_idx].block.statements)
+        gen_field_assigns: dict[str, tuple[int, frog_ast.Expression]] = {}
+        for si, stmt in enumerate(init_stmts):
+            if not (
+                isinstance(stmt, frog_ast.Assignment)
+                and stmt.the_type is None
+                and isinstance(stmt.var, frog_ast.Variable)
+            ):
+                continue
+            name = stmt.var.name
+            fld = next((f for f in game.fields if f.name == name), None)
+            if fld is None or not isinstance(fld.type, frog_ast.GroupElemType):
+                continue
+            total = sum(_count_assigns_recursive(m.block, name) for m in game.methods)
+            if total != 1:
+                continue
+            exponent = _exp_with_generator_base(stmt.value)
+            if exponent is None:
+                continue
+            gen_field_assigns[name] = (si, exponent)
+
+        for f1_name, (f1_idx, f1_exp) in gen_field_assigns.items():
+            if not isinstance(f1_exp, frog_ast.BinaryOperation):
+                # Bare exponent like ``g ^ a`` — not a Field1 candidate;
+                # such fields plausibly serve as Field2.  Stay silent.
+                continue
+            if f1_exp.operator != frog_ast.BinaryOperators.MULTIPLY:
+                # Almost-fires shape: the exponent is a BinaryOperation
+                # (e.g., ``a + b`` or ``a - b``) but not multiplication,
+                # so the power-of-power identity doesn't apply.
+                if any(other_name != f1_name for other_name in gen_field_assigns):
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name=("Refactor GroupElem Field Exponent"),
+                            reason=(
+                                f"Field {f1_name!r}'s generator exponent "
+                                "is a binary operation but not "
+                                "multiplication; the power-of-power "
+                                "identity ``(g^a)^b = g^(a*b)`` only "
+                                "applies when the exponent is a product."
+                            ),
+                            location=init_stmts[f1_idx].origin,
+                            suggestion=(
+                                f"Rewrite {f1_name!r}'s exponent as a "
+                                "product ``a * b`` so that a peer field "
+                                "holding ``g ^ a`` (or ``g ^ b``) can be "
+                                "substituted for the base."
+                            ),
+                            variable=f1_name,
+                            method="Initialize",
+                        )
+                    )
+                continue
+            matched_any = False
+            for f2_name, (f2_idx, f2_exp) in gen_field_assigns.items():
+                if f2_name == f1_name:
+                    continue
+                a, b = f1_exp.left_expression, f1_exp.right_expression
+                other: Optional[frog_ast.Expression] = None
+                if f2_exp == a:
+                    other = b
+                elif f2_exp == b:
+                    other = a
+                if other is None:
+                    continue
+                matched_any = True
+                # Soundness: at f1's def, f2 must already hold its value.
+                # If f2 is currently after f1, try to move f2 just before f1
+                # — provided f2's free vars are all defined strictly before
+                # f1's current position.
+                stmts = list(init_stmts)
+                f1_target_idx = f1_idx
+                if f2_idx > f1_idx:
+                    f2_free = {
+                        v.name
+                        for v in VariableCollectionVisitor().visit(
+                            copy.deepcopy(stmts[f2_idx])
+                        )
+                    }
+                    f2_free.discard(f2_name)
+                    if not self._defined_before(stmts, f1_idx, f2_free):
+                        continue
+                    f2_stmt = stmts.pop(f2_idx)
+                    # f2 was after f1; insert before f1 at f1_idx (new index).
+                    stmts.insert(f1_idx, f2_stmt)
+                    f1_target_idx = f1_idx + 1
+                new_assign = copy.deepcopy(stmts[f1_target_idx])
+                assert isinstance(new_assign, frog_ast.Assignment)
+                new_assign.value = frog_ast.BinaryOperation(
+                    frog_ast.BinaryOperators.EXPONENTIATE,
+                    frog_ast.Variable(f2_name),
+                    copy.deepcopy(other),
+                )
+                stmts[f1_target_idx] = new_assign
+                new_game = copy.deepcopy(game)
+                new_game.methods[init_idx].block = frog_ast.Block(stmts)
+                return new_game
+            # No peer ``Field2 = g ^ a`` exists with ``a`` structurally
+            # equal to either operand of ``f1_exp = a * b``.  Only
+            # diagnose when there is another candidate field at all —
+            # otherwise the transform is structurally inapplicable.
+            if not matched_any and any(
+                other_name != f1_name for other_name in gen_field_assigns
+            ):
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name=("Refactor GroupElem Field Exponent"),
+                        reason=(
+                            f"Field {f1_name!r} has generator exponent "
+                            f"product but no peer GroupElem field's "
+                            "exponent matches either factor."
+                        ),
+                        location=init_stmts[f1_idx].origin,
+                        suggestion=(
+                            "Add or expose a single-write GroupElem field "
+                            "whose exponent equals one factor of "
+                            f"{f1_name!r}'s product so the decomposition "
+                            "``Field1 = Field2 ^ other`` can apply."
+                        ),
+                        variable=f1_name,
+                        method="Initialize",
+                    )
+                )
+        return None
+
+    @staticmethod
+    def _defined_before(
+        stmts: list[frog_ast.Statement], idx: int, names: set[str]
+    ) -> bool:
+        """True if every name in *names* is assigned by some statement in
+        ``stmts[:idx]``."""
+        if not names:
+            return True
+        remaining = set(names)
+        for i in range(idx):
+            stmt = stmts[i]
+            if (
+                isinstance(
+                    stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+                )
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name in remaining
+            ):
+                remaining.remove(stmt.var.name)
+                if not remaining:
+                    return True
+        return not remaining
+
+
+class RefactorGroupElemFieldExp(TransformPass):
+    name = "Refactor GroupElem Field Exponent"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return RefactorGroupElemFieldExpTransformer(ctx).transform(game)
 
 
 class _DeterministicCallCollector(Visitor[list[frog_ast.FuncCall]]):
@@ -1892,6 +3321,14 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
     methods with structurally equal arguments, extracts the first occurrence
     into a fresh ``__determ_N__`` variable, and replaces all occurrences.
 
+    Scans top-level statements *and* if-statement conditions. If-conditions
+    are always evaluated when the if-statement is reached, so extracting a
+    deterministic call from a condition to a let-binding immediately before
+    the if-statement is semantics-preserving (under argument stability) — the
+    call evaluates the same number of times and on the same argument values.
+    If-statement *bodies* are not scanned at this level; they are nested
+    blocks handled by ``BlockTransformer`` recursion.
+
     Example::
 
         return [G.evaluate(k), G.evaluate(k)];
@@ -1904,24 +3341,33 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         self,
         proof_namespace: frog_ast.Namespace,
         ctx: PipelineContext | None = None,
+        function_var_names: set[str] | None = None,
+        proof_let_types: NameTypeMap | None = None,
     ) -> None:
         self.proof_namespace = proof_namespace
         self._ctx = ctx
+        self._function_var_names = function_var_names or set()
+        self._proof_let_types = proof_let_types
         self.counter = 0
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        # Collect all deterministic calls from top-level statements only.
-        # Skip parameterless calls (constants) — extracting them changes
-        # variable numbering without benefit, since existing transforms
-        # already handle pure constant expressions.
+        # Collect all deterministic calls from top-level statements, plus
+        # if-statement *conditions* (always evaluated when the if is reached,
+        # so extracting a deterministic call from a condition to a top-level
+        # let preserves the number of evaluations and the value, given
+        # argument stability). If-statement *bodies* are not scanned here:
+        # BlockTransformer recurses into them as their own blocks.
         all_calls: list[frog_ast.FuncCall] = []
         for statement in block.statements:
-            # Skip inner blocks (if-statements); BlockTransformer handles them
+            collector = _DeterministicCallCollector(
+                self.proof_namespace, self._function_var_names
+            )
             if isinstance(statement, frog_ast.IfStatement):
-                continue
-            collector = _DeterministicCallCollector(self.proof_namespace)
-            collector.visit(statement)
-            all_calls.extend(c for c in collector.result() if c.args)
+                for condition in statement.conditions:
+                    collector.visit(condition)
+            else:
+                collector.visit(statement)
+            all_calls.extend(collector.result())
 
         if not all_calls:
             # Check for near-miss: duplicate non-deterministic calls
@@ -1956,8 +3402,35 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         # Look up the return type for the new assignment
         representative = dup_group[0]
         m = _lookup_primitive_method(representative.func, self.proof_namespace)
-        assert m is not None
-        return_type = copy.deepcopy(m.return_type)
+        if m is not None:
+            return_type = copy.deepcopy(m.return_type)
+        elif (
+            isinstance(representative.func, frog_ast.Variable)
+            and representative.func.name in self._function_var_names
+            and self._proof_let_types is not None
+        ):
+            ftype = self._proof_let_types.get(representative.func.name)
+            assert isinstance(ftype, frog_ast.FunctionType)
+            return_type = copy.deepcopy(ftype.range_type)
+        else:
+            # Should not happen — collector only emits primitive-deterministic
+            # or function-var calls.
+            return block
+
+        # Advance counter past any existing __determ_N__ names in the block
+        # to avoid colliding with names created by earlier pipeline iterations.
+        for stmt in block.statements:
+            if isinstance(
+                stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+            ) and isinstance(stmt.var, frog_ast.Variable):
+                existing = stmt.var.name
+                if existing.startswith("__determ_") and existing.endswith("__"):
+                    try:
+                        n = int(existing[len("__determ_") : -len("__")])
+                    except ValueError:
+                        continue
+                    if n >= self.counter:
+                        self.counter = n + 1
 
         var_name = f"__determ_{self.counter}__"
         self.counter += 1
@@ -1969,13 +3442,18 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
             copy.deepcopy(representative),
         )
 
-        # Find the first statement containing a duplicate call and insert before it
+        # Find the first statement containing a duplicate call (in a top-level
+        # statement or an if-condition) and insert before it.
         insert_index: int | None = None
         for index, statement in enumerate(block.statements):
+            collector = _DeterministicCallCollector(
+                self.proof_namespace, self._function_var_names
+            )
             if isinstance(statement, frog_ast.IfStatement):
-                continue
-            collector = _DeterministicCallCollector(self.proof_namespace)
-            collector.visit(statement)
+                for condition in statement.conditions:
+                    collector.visit(condition)
+            else:
+                collector.visit(statement)
             for found_call in collector.result():
                 if found_call == representative:
                     insert_index = index
@@ -2018,14 +3496,19 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         if not arg_vars:
             return True
 
-        # Find first and last statement indices containing a call from the group
+        # Find first and last statement indices containing a call from the
+        # group. Scan top-level statements and if-conditions.
         first_idx: int | None = None
         last_idx: int | None = None
         for idx, stmt in enumerate(block.statements):
+            collector = _DeterministicCallCollector(
+                self.proof_namespace, self._function_var_names
+            )
             if isinstance(stmt, frog_ast.IfStatement):
-                continue
-            collector = _DeterministicCallCollector(self.proof_namespace)
-            collector.visit(stmt)
+                for cond in stmt.conditions:
+                    collector.visit(cond)
+            else:
+                collector.visit(stmt)
             if any(c == representative for c in collector.result()):
                 if first_idx is None:
                     first_idx = idx
@@ -2051,7 +3534,19 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
                     return True
             return False
 
-        intermediate = frog_ast.Block(list(block.statements[first_idx + 1 : last_idx]))
+        # The intermediate region (between the first and last call's evaluation
+        # points) excludes the call statements themselves. When the first
+        # statement is an IfStatement with the call in its condition, the
+        # if-body executes *after* the condition's call but *before* any
+        # subsequent call, so include those branch blocks in the scan.
+        intermediate_stmts: list[frog_ast.Statement] = list(
+            block.statements[first_idx + 1 : last_idx]
+        )
+        first_stmt = block.statements[first_idx]
+        if isinstance(first_stmt, frog_ast.IfStatement):
+            for branch in first_stmt.blocks:
+                intermediate_stmts.extend(branch.statements)
+        intermediate = frog_ast.Block(intermediate_stmts)
         for var_name in arg_vars:
             if (
                 SearchVisitor(functools.partial(is_written_to, var_name)).visit(
@@ -2068,10 +3563,12 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
 
         all_calls: list[frog_ast.FuncCall] = []
         for statement in block.statements:
-            if isinstance(statement, frog_ast.IfStatement):
-                continue
             collector = _AllPrimitiveFuncCallCollector(self.proof_namespace)
-            collector.visit(statement)
+            if isinstance(statement, frog_ast.IfStatement):
+                for condition in statement.conditions:
+                    collector.visit(condition)
+            else:
+                collector.visit(statement)
             all_calls.extend(collector.result())
 
         # Group by structural equality
@@ -2124,37 +3621,100 @@ class DeduplicateDeterministicCalls(TransformPass):
 # ---------------------------------------------------------------------------
 
 
-def _is_stable_arg(
+def _is_stable_arg(  # pylint: disable=too-many-arguments, too-many-positional-arguments
     expr: frog_ast.Expression,
     field_names: set[str],
     param_names: set[str],
+    proof_namespace: frog_ast.Namespace | None = None,
+    function_var_names: set[str] | None = None,
+    proof_let_names: set[str] | None = None,
+    local_alias_names: set[str] | None = None,
 ) -> bool:
     """Return True if *expr* is stable across method invocations.
 
     An expression is stable if it depends only on game fields, game parameters,
-    and constants — never on method-local variables.
+    constants, and deterministic calls whose arguments are themselves stable.
+
+    When *proof_namespace* / *function_var_names* are provided, nested
+    ``FuncCall`` nodes are accepted as stable iff the callee is a primitive
+    method annotated ``deterministic`` or a ``Function<D, R>`` variable named
+    in *function_var_names*, and every argument is recursively stable.
+
+    When *proof_let_names* is provided, ``Variable`` nodes whose name appears
+    in that set are treated as stable: proof-level ``let:`` bindings are
+    compile-time constants from the game's perspective.
+
+    When *local_alias_names* is provided, ``Variable`` nodes whose name appears
+    in that set are treated as stable. The caller is responsible for ensuring
+    each name in this set is bound exactly once (in the relevant method's top
+    level) to an expression that is itself stable, so that the variable's value
+    is invariant across the lifetime of the game state it depends on.
     """
     if isinstance(
-        expr, (frog_ast.Integer, frog_ast.Boolean, frog_ast.BitStringLiteral)
+        expr,
+        (
+            frog_ast.Integer,
+            frog_ast.Boolean,
+            frog_ast.BitStringLiteral,
+            frog_ast.NoneExpression,
+        ),
     ):
         return True
-    if isinstance(expr, frog_ast.Variable):
-        return expr.name in field_names or expr.name in param_names
-    if isinstance(expr, frog_ast.FieldAccess):
-        return _is_stable_arg(expr.the_object, field_names, param_names)
-    if isinstance(expr, frog_ast.BinaryOperation):
+
+    def _recurse(sub: frog_ast.Expression) -> bool:
         return _is_stable_arg(
-            expr.left_expression, field_names, param_names
-        ) and _is_stable_arg(expr.right_expression, field_names, param_names)
+            sub,
+            field_names,
+            param_names,
+            proof_namespace,
+            function_var_names,
+            proof_let_names,
+            local_alias_names,
+        )
+
+    if isinstance(expr, frog_ast.Variable):
+        return (
+            expr.name in field_names
+            or expr.name in param_names
+            or (proof_let_names is not None and expr.name in proof_let_names)
+            or (local_alias_names is not None and expr.name in local_alias_names)
+        )
+    if isinstance(expr, frog_ast.FieldAccess):
+        return _recurse(expr.the_object)
+    if isinstance(expr, frog_ast.BinaryOperation):
+        return _recurse(expr.left_expression) and _recurse(expr.right_expression)
     if isinstance(expr, frog_ast.UnaryOperation):
-        return _is_stable_arg(expr.expression, field_names, param_names)
+        return _recurse(expr.expression)
+    if isinstance(expr, frog_ast.ArrayAccess):
+        return _recurse(expr.the_array) and _recurse(expr.index)
+    if isinstance(expr, frog_ast.Slice):
+        return _recurse(expr.the_array) and _recurse(expr.start) and _recurse(expr.end)
+    if isinstance(expr, frog_ast.FuncCall):
+        is_det_primitive = False
+        if proof_namespace is not None:
+            m = _lookup_primitive_method(expr.func, proof_namespace)
+            if m is not None and m.deterministic:
+                is_det_primitive = True
+        is_function_var = (
+            function_var_names is not None
+            and isinstance(expr.func, frog_ast.Variable)
+            and expr.func.name in function_var_names
+        )
+        if not (is_det_primitive or is_function_var):
+            return False
+        return all(_recurse(a) for a in expr.args)
     return False
 
 
 def _collect_field_names_in_args(
     expr: frog_ast.Expression, field_names: set[str]
 ) -> set[str]:
-    """Return the set of field names referenced in *expr*."""
+    """Return the set of field names referenced in *expr*.
+
+    Descends through field accesses, unary/binary operators, and nested
+    ``FuncCall`` nodes (including the callee variable itself, so that a
+    ``Function<D, R>`` game field used as a nested callee is reported).
+    """
     if isinstance(expr, frog_ast.Variable):
         if expr.name in field_names:
             return {expr.name}
@@ -2167,6 +3727,23 @@ def _collect_field_names_in_args(
         ) | _collect_field_names_in_args(expr.right_expression, field_names)
     if isinstance(expr, frog_ast.UnaryOperation):
         return _collect_field_names_in_args(expr.expression, field_names)
+    if isinstance(expr, frog_ast.ArrayAccess):
+        return _collect_field_names_in_args(
+            expr.the_array, field_names
+        ) | _collect_field_names_in_args(expr.index, field_names)
+    if isinstance(expr, frog_ast.Slice):
+        return (
+            _collect_field_names_in_args(expr.the_array, field_names)
+            | _collect_field_names_in_args(expr.start, field_names)
+            | _collect_field_names_in_args(expr.end, field_names)
+        )
+    if isinstance(expr, frog_ast.FuncCall):
+        result: set[str] = set()
+        if isinstance(expr.func, frog_ast.Variable) and expr.func.name in field_names:
+            result.add(expr.func.name)
+        for a in expr.args:
+            result |= _collect_field_names_in_args(a, field_names)
+        return result
     return set()
 
 
@@ -2210,6 +3787,133 @@ def _fields_assigned_after(
     return _fields_assigned_in_block(tail_block, field_names)
 
 
+def _build_local_stable_alias_map(  # pylint: disable=too-many-arguments, too-many-positional-arguments
+    method: frog_ast.Method,
+    field_names: set[str],
+    param_names: set[str],
+    proof_namespace: frog_ast.Namespace | None,
+    function_var_names: set[str] | None,
+    proof_let_names: set[str] | None,
+) -> dict[str, frog_ast.Expression]:
+    """Return a map from local variable name -> RHS expression for top-level
+    single-assignment locals in *method* whose RHS is stable.
+
+    "Stable" means the RHS depends only on game fields, parameters, proof-level
+    let-bindings, constants, deterministic primitive calls (over stable args),
+    Function<D,R> calls (over stable args), and other locals already proven
+    stable. Iterates to a fixed point so chains like ``a = NG.Generator();
+    b = NG.Exp(a, field2);`` produce both ``a`` and ``b`` as aliases.
+
+    Excluded:
+    - Locals re-assigned more than once.
+    - Sampled / UniqueSample-bound locals (their value is non-deterministic).
+    - Locals shadowed by fields or parameters.
+    - Self-assignments (``x = x``), which are no-ops left by other transforms.
+    """
+    counts: dict[str, int] = {}
+    bindings: dict[str, frog_ast.Expression] = {}
+    sampled: set[str] = set()
+    for stmt in method.block.statements:
+        if isinstance(stmt, (frog_ast.Sample, frog_ast.UniqueSample)) and isinstance(
+            stmt.var, frog_ast.Variable
+        ):
+            sampled.add(stmt.var.name)
+            counts[stmt.var.name] = counts.get(stmt.var.name, 0) + 1
+            continue
+        if not isinstance(stmt, frog_ast.Assignment):
+            continue
+        if not isinstance(stmt.var, frog_ast.Variable):
+            continue
+        name = stmt.var.name
+        if name in field_names or name in param_names:
+            continue
+        if isinstance(stmt.value, frog_ast.Variable) and stmt.value.name == name:
+            # Skip self-assignments.
+            continue
+        counts[name] = counts.get(name, 0) + 1
+        bindings[name] = stmt.value
+
+    # Also count writes hidden inside nested blocks (if-branches, for-loop
+    # bodies, including the loop variable's per-iteration binding).  A name
+    # with even one such hidden write is not actually single-assignment and
+    # must be disqualified from the alias map.  Without this, a top-level
+    # `x = E_stable;` followed by an `if cond { x = h; }` would falsely admit
+    # `x -> E_stable`, and the cross-method matcher would expand uses of `x`
+    # in either branch through the stale RHS.
+    def _bump_nested(stmts: Sequence[frog_ast.Statement]) -> None:
+        for s in stmts:
+            if isinstance(
+                s, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+            ) and isinstance(s.var, frog_ast.Variable):
+                counts[s.var.name] = counts.get(s.var.name, 0) + 1
+            if isinstance(s, frog_ast.IfStatement):
+                for blk in s.blocks:
+                    _bump_nested(blk.statements)
+            elif isinstance(s, frog_ast.NumericFor):
+                counts[s.name] = counts.get(s.name, 0) + 1
+                _bump_nested(s.block.statements)
+            elif isinstance(s, frog_ast.GenericFor):
+                counts[s.var_name] = counts.get(s.var_name, 0) + 1
+                _bump_nested(s.block.statements)
+
+    for stmt in method.block.statements:
+        if isinstance(stmt, frog_ast.IfStatement):
+            for blk in stmt.blocks:
+                _bump_nested(blk.statements)
+        elif isinstance(stmt, frog_ast.NumericFor):
+            _bump_nested(stmt.block.statements)
+        elif isinstance(stmt, frog_ast.GenericFor):
+            _bump_nested(stmt.block.statements)
+
+    aliases: dict[str, frog_ast.Expression] = {}
+    while True:
+        changed = False
+        for name, expr in bindings.items():
+            if name in aliases:
+                continue
+            if counts.get(name, 0) != 1:
+                continue
+            if name in sampled:
+                continue
+            if _is_stable_arg(
+                expr,
+                field_names,
+                param_names,
+                proof_namespace,
+                function_var_names,
+                proof_let_names,
+                local_alias_names=set(aliases),
+            ):
+                aliases[name] = expr
+                changed = True
+        if not changed:
+            break
+    return aliases
+
+
+def _expand_aliases(
+    expr: frog_ast.ASTNode,
+    aliases: dict[str, frog_ast.Expression],
+) -> frog_ast.ASTNode:
+    """Recursively expand local stable aliases in *expr* to a fixed point.
+
+    Pure substitution. No side-effects on the input.
+    """
+    if not aliases:
+        return expr
+    prev: frog_ast.ASTNode | None = None
+    current: frog_ast.ASTNode = expr
+    for _ in range(32):  # bound in case of pathological aliases
+        if prev is not None and prev == current:
+            break
+        prev = current
+        sm: frog_ast.ASTMap[frog_ast.ASTNode] = frog_ast.ASTMap(identity=False)
+        for n, v in aliases.items():
+            sm.set(frog_ast.Variable(n), copy.deepcopy(v))
+        current = SubstitutionTransformer(sm).transform(current)
+    return current
+
+
 class CrossMethodFieldAliasTransformer:
     """Replace deterministic calls in oracles with field references.
 
@@ -2227,18 +3931,47 @@ class CrossMethodFieldAliasTransformer:
         self,
         proof_namespace: frog_ast.Namespace,
         ctx: PipelineContext | None = None,
+        proof_let_types: NameTypeMap | None = None,
+        function_var_names: set[str] | None = None,
     ) -> None:
         self.proof_namespace = proof_namespace
         self._ctx = ctx
+        self._proof_let_types = proof_let_types
+        self._function_var_names = function_var_names or set()
 
     def transform(self, game: frog_ast.Game) -> frog_ast.Game:
         field_names = {f.name for f in game.fields}
         param_names = {p.name for p in game.parameters}
+        proof_let_names: set[str] = (
+            {pair.name for pair in self._proof_let_types.type_map}
+            if self._proof_let_types is not None
+            else set()
+        )
+
+        # Build per-method stable-alias maps once. A "stable alias" is a
+        # top-level single-assignment local whose RHS depends only on stable
+        # things (fields, params, let-bindings, constants, deterministic
+        # calls over stable args, and other already-stable aliases).
+        # Common case: CSE introduces ``v1 = NG.Generator();`` and reuses v1
+        # in multiple field RHSs and oracle expressions; expanding through v1
+        # makes the cross-method match succeed.
+        method_aliases: list[dict[str, frog_ast.Expression]] = [
+            _build_local_stable_alias_map(
+                m,
+                field_names,
+                param_names,
+                self.proof_namespace,
+                None,
+                proof_let_names,
+            )
+            for m in game.methods
+        ]
 
         # Phase 1: Collect field assignments with deterministic RHS
-        # (field_name, det_call, method_idx)
-        field_aliases: list[tuple[str, frog_ast.FuncCall, int]] = []
+        # (field_name, det_call, method_idx, expanded_call)
+        field_aliases: list[tuple[str, frog_ast.FuncCall, int, frog_ast.FuncCall]] = []
         for midx, method in enumerate(game.methods):
+            init_aliases = method_aliases[midx]
             for sidx, stmt in enumerate(method.block.statements):
                 if not (
                     isinstance(stmt, frog_ast.Assignment)
@@ -2255,7 +3988,15 @@ class CrossMethodFieldAliasTransformer:
                 if not call.args:
                     continue
                 if not all(
-                    _is_stable_arg(a, field_names, param_names) for a in call.args
+                    _is_stable_arg(
+                        a,
+                        field_names,
+                        param_names,
+                        proof_namespace=self.proof_namespace,
+                        proof_let_names=proof_let_names,
+                        local_alias_names=set(init_aliases),
+                    )
+                    for a in call.args
                 ):
                     continue
 
@@ -2266,11 +4007,19 @@ class CrossMethodFieldAliasTransformer:
                 if method.signature.name != "Initialize":
                     continue
 
+                # Compute the expanded form of the call (with stable locals
+                # resolved). Use this for downstream cross-method matching
+                # and for collecting the underlying field dependencies, so
+                # that the no-reassignment guards apply to the real fields.
+                expanded_call_node = _expand_aliases(copy.deepcopy(call), init_aliases)
+                assert isinstance(expanded_call_node, frog_ast.FuncCall)
+                expanded_call = expanded_call_node
+
                 # Soundness check: the alias field and all argument fields
                 # must not be reassigned after the alias statement in this
                 # method, and must not be assigned in any other method.
-                arg_fields = set()
-                for a in call.args:
+                arg_fields: set[str] = set()
+                for a in expanded_call.args:
                     arg_fields |= _collect_field_names_in_args(a, field_names)
                 guarded_fields = {stmt.var.name} | arg_fields
 
@@ -2292,47 +4041,141 @@ class CrossMethodFieldAliasTransformer:
                 if modified_elsewhere:
                     continue
 
-                field_aliases.append((stmt.var.name, call, midx))
+                field_aliases.append((stmt.var.name, call, midx, expanded_call))
 
         if not field_aliases:
             return game
 
-        # Phase 2: For each field alias, check if the same call appears in
-        # other methods and replace it
-        for alias_field_name, alias_call, alias_midx in field_aliases:
-            result = self._try_replace(game, alias_field_name, alias_call, alias_midx)
+        # Phase 2: For each field alias, check if the same call (modulo local
+        # alias expansion) appears in other methods and replace it.
+        for alias_field_name, alias_call, alias_midx, expanded_call in field_aliases:
+            result = self._try_replace(
+                game,
+                alias_field_name,
+                alias_call,
+                alias_midx,
+                expanded_call,
+                method_aliases,
+            )
             if result is not None:
                 return result
 
         return game
 
-    def _try_replace(
+    def _try_replace(  # pylint: disable=too-many-arguments, too-many-positional-arguments
         self,
         game: frog_ast.Game,
         alias_field_name: str,
         alias_call: frog_ast.FuncCall,
         alias_midx: int,
+        expanded_call: frog_ast.FuncCall,
+        method_aliases: list[dict[str, frog_ast.Expression]],
     ) -> frog_ast.Game | None:
-        """Try to replace *alias_call* with *alias_field_name* in another method."""
+        """Try to replace *alias_call* with *alias_field_name* in another method.
+
+        Matches calls modulo stable-local-alias expansion: a target call ``c``
+        matches if either ``c == alias_call`` literally, or
+        ``expand(c, target_aliases) == expand(alias_call, init_aliases)``.
+        """
+        del alias_call  # alias_call is referenced only via expanded_call now
         for midx, method in enumerate(game.methods):
             if midx == alias_midx:
                 continue
-            collector = _DeterministicCallCollector(self.proof_namespace)
+            target_aliases = method_aliases[midx]
+            collector = _DeterministicCallCollector(
+                self.proof_namespace, self._function_var_names
+            )
             collector.visit(method.block)
-            if not any(c == alias_call for c in collector.result()):
+            target_call = next(
+                (
+                    c
+                    for c in collector.result()
+                    if _expand_aliases(copy.deepcopy(c), target_aliases)
+                    == expanded_call
+                ),
+                None,
+            )
+            if target_call is None:
                 continue
             # Found a match — replace and return
             new_game = copy.deepcopy(game)
-            new_collector = _DeterministicCallCollector(self.proof_namespace)
+            new_collector = _DeterministicCallCollector(
+                self.proof_namespace, self._function_var_names
+            )
             new_collector.visit(new_game.methods[midx].block)
             for new_call in new_collector.result():
-                if new_call == alias_call:
+                if (
+                    _expand_aliases(copy.deepcopy(new_call), target_aliases)
+                    == expanded_call
+                ):
                     new_game.methods[midx] = ReplaceTransformer(
                         new_call,
                         frog_ast.Variable(alias_field_name),
                     ).transform(new_game.methods[midx])
                     return new_game
         return None
+
+
+class _AliasAwareReplacer(ReplaceTransformer):
+    """Replace any node whose alias-expanded form equals *match_node*.
+
+    Used by HoistDeterministicCallToInitialize to rewrite occurrences of a
+    hoisted call in Initialize's return expression even when the candidate
+    is reached only through one or more local-variable aliases defined
+    earlier in Initialize.
+    """
+
+    def __init__(
+        self,
+        match_node: frog_ast.ASTNode,
+        replacement: frog_ast.ASTNode,
+        expand: Callable[[frog_ast.ASTNode], frog_ast.ASTNode],
+    ) -> None:
+        super().__init__(match_node, replacement)
+        self._match_expanded = match_node
+        self._expand = expand
+
+    def transform_ast_node(self, exp: frog_ast.ASTNode) -> Optional[frog_ast.ASTNode]:
+        # Cheap pre-check: avoid expanding leaves that clearly can't match.
+        if isinstance(exp, (frog_ast.FuncCall, frog_ast.Variable)):
+            if self._expand(exp) == self._match_expanded:
+                return copy.deepcopy(self.replace_with)
+        return None
+
+
+def _has_early_return_in_init(stmts: Sequence[frog_ast.Statement]) -> bool:
+    """Return True if *stmts* contains a ReturnStatement that is not the
+    terminal top-level statement. Any return nested inside an if/for block
+    counts as "early"; a ReturnStatement at the end of the top-level list
+    does not.
+    """
+    for i, stmt in enumerate(stmts):
+        if isinstance(stmt, frog_ast.ReturnStatement):
+            if i != len(stmts) - 1:
+                return True
+            continue
+        if isinstance(stmt, frog_ast.IfStatement):
+            for blk in stmt.blocks:
+                if _contains_return(blk.statements):
+                    return True
+        elif isinstance(stmt, (frog_ast.NumericFor, frog_ast.GenericFor)):
+            if _contains_return(stmt.block.statements):
+                return True
+    return False
+
+
+def _contains_return(stmts: Sequence[frog_ast.Statement]) -> bool:
+    for stmt in stmts:
+        if isinstance(stmt, frog_ast.ReturnStatement):
+            return True
+        if isinstance(stmt, frog_ast.IfStatement):
+            for blk in stmt.blocks:
+                if _contains_return(blk.statements):
+                    return True
+        elif isinstance(stmt, (frog_ast.NumericFor, frog_ast.GenericFor)):
+            if _contains_return(stmt.block.statements):
+                return True
+    return False
 
 
 class HoistDeterministicCallToInitializeTransformer:
@@ -2380,28 +4223,49 @@ class HoistDeterministicCallToInitializeTransformer:
         param_names = {p.name for p in game.parameters}
         function_var_return_types = self._function_var_types(game)
         function_var_names = set(function_var_return_types)
+        proof_let_names: set[str] = (
+            {pair.name for pair in self._proof_let_types.type_map}
+            if self._proof_let_types is not None
+            else set()
+        )
 
-        init_idx: int | None = None
-        for midx, method in enumerate(game.methods):
-            if method.signature.name == "Initialize":
-                init_idx = midx
-                break
+        init_idx = _locate_initialize_index(game)
         if init_idx is None:
             return game
 
-        # Soundness guard: if Initialize contains any ReturnStatement, an
-        # appended hoisted assignment could be skipped on the early-return
-        # path, leaving the new field uninitialized while oracles still read
-        # it. Well-typed FrogLang rejects `return expr;` in Void methods, so
-        # this should never occur in practice, but guarding is strictly
-        # conservative.
-        if (
-            SearchVisitor(lambda n: isinstance(n, frog_ast.ReturnStatement)).visit(
-                game.methods[init_idx].block
-            )
-            is not None
-        ):
+        # Soundness guard: an "early" return (nested inside if/for) would
+        # skip an appended hoisted assignment and leave the new field
+        # uninitialized while oracles still read it. A terminal top-level
+        # return (the common case for non-Void Initialize in composed
+        # reductions) is safe: we insert the hoisted assignment *before* it.
+        init_block_stmts = list(game.methods[init_idx].block.statements)
+        if _has_early_return_in_init(init_block_stmts):
+            if self._ctx is not None:
+                self._ctx.near_misses.append(
+                    NearMiss(
+                        transform_name=("Hoist Deterministic Call to Initialize"),
+                        reason=(
+                            "Initialize has an early return (nested in "
+                            "if/for); appending a hoisted assignment would "
+                            "be skipped on the early-return path"
+                        ),
+                        location=None,
+                        suggestion=(
+                            "Restructure Initialize so any return is the "
+                            "terminal top-level statement"
+                        ),
+                        variable=None,
+                        method="Initialize",
+                    )
+                )
             return game
+        # Locate the terminal return (if present). Any hoisted assignment
+        # will be spliced just before it.
+        init_terminal_return_idx: int | None = None
+        if init_block_stmts and isinstance(
+            init_block_stmts[-1], frog_ast.ReturnStatement
+        ):
+            init_terminal_return_idx = len(init_block_stmts) - 1
 
         existing_aliased_calls: list[frog_ast.FuncCall] = []
         for stmt in game.methods[init_idx].block.statements:
@@ -2439,7 +4303,15 @@ class HoistDeterministicCallToInitializeTransformer:
                 if not call.args:
                     continue
                 if not all(
-                    _is_stable_arg(a, field_names, param_names) for a in call.args
+                    _is_stable_arg(
+                        a,
+                        field_names,
+                        param_names,
+                        proof_namespace=self.proof_namespace,
+                        function_var_names=function_var_names,
+                        proof_let_names=proof_let_names,
+                    )
+                    for a in call.args
                 ):
                     continue
                 if any(call == ea for ea in existing_aliased_calls):
@@ -2490,13 +4362,94 @@ class HoistDeterministicCallToInitializeTransformer:
         new_name = self._fresh_field_name(field_names)
         new_game = copy.deepcopy(game)
         new_game.fields.append(frog_ast.Field(candidate_return_type, new_name, None))
+        # Pin the newly introduced field so ``Inline Single-Use Field`` leaves
+        # it alone on subsequent iterations — inlining it back would just
+        # re-expose the pattern and cause this pass to re-fire, preventing
+        # the fixed-point loop from converging.
+        if self._ctx is not None:
+            self._ctx.pinned_fields.add(new_name)
         init_method = new_game.methods[init_idx]
         hoisted_stmt = frog_ast.Assignment(
             None, frog_ast.Variable(new_name), copy.deepcopy(candidate)
         )
-        init_method.block = frog_ast.Block(
-            list(init_method.block.statements) + [hoisted_stmt]
-        )
+        init_stmts = list(init_method.block.statements)
+        if init_terminal_return_idx is not None:
+            # Insert just before the terminal return so the new field is set
+            # on every path that reaches the return.
+            init_stmts.insert(init_terminal_return_idx, hoisted_stmt)
+        else:
+            init_stmts.append(hoisted_stmt)
+        init_method.block = frog_ast.Block(init_stmts)
+
+        # When Initialize has a terminal return, rewrite matches of the
+        # candidate inside that return expression — including through local
+        # aliases defined earlier in Initialize (e.g. ``x = e; return f(x);``
+        # where f(expand(x)) == candidate). Without this, the hoisted field
+        # has only a single use on one side of an interchangeability hop,
+        # allowing Inline Single-Use Field to fold it back and introducing
+        # asymmetry.
+        if init_terminal_return_idx is not None:
+            new_init = new_game.methods[init_idx]
+            new_stmts = list(new_init.block.statements)
+            ret_stmt = new_stmts[-1]
+            assert isinstance(ret_stmt, frog_ast.ReturnStatement)
+            # Build alias map: local single-assignment bindings in Initialize
+            # (before the hoisted/terminal statements).
+            aliases: dict[str, frog_ast.Expression] = {}
+            alias_assign_counts: dict[str, int] = {}
+            for stmt in new_stmts[:-1]:
+                if stmt is hoisted_stmt:
+                    continue
+                if (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name not in field_names
+                    and stmt.var.name not in param_names
+                ):
+                    # Ignore self-assignments (``x = x;``) which are no-ops
+                    # that other transforms sometimes leave behind; counting
+                    # them would disqualify x from being treated as a stable
+                    # alias.
+                    if (
+                        isinstance(stmt.value, frog_ast.Variable)
+                        and stmt.value.name == stmt.var.name
+                    ):
+                        continue
+                    name = stmt.var.name
+                    alias_assign_counts[name] = alias_assign_counts.get(name, 0) + 1
+                    aliases[name] = stmt.value
+            # Only use aliases for variables assigned exactly once.
+            stable_aliases = {
+                n: v for n, v in aliases.items() if alias_assign_counts[n] == 1
+            }
+
+            def _expand(expr: frog_ast.ASTNode) -> frog_ast.ASTNode:
+                """Recursively expand local aliases in *expr* to a fixed point."""
+                prev: frog_ast.ASTNode | None = None
+                current: frog_ast.ASTNode = expr
+                for _ in range(32):  # bound in case of pathological aliases
+                    if prev is not None and prev == current:
+                        break
+                    prev = current
+                    sm: frog_ast.ASTMap[frog_ast.ASTNode] = frog_ast.ASTMap(
+                        identity=False
+                    )
+                    for n, v in stable_aliases.items():
+                        sm.set(frog_ast.Variable(n), copy.deepcopy(v))
+                    current = SubstitutionTransformer(sm).transform(current)
+                return current
+
+            expanded_candidate = _expand(copy.deepcopy(candidate))
+
+            replacer = _AliasAwareReplacer(
+                match_node=expanded_candidate,
+                replacement=frog_ast.Variable(new_name),
+                expand=_expand,
+            )
+            new_ret_expr = replacer.transform(ret_stmt.expression)
+            new_stmts[-1] = frog_ast.ReturnStatement(new_ret_expr)
+            new_init.block = frog_ast.Block(new_stmts)
+
         for midx, _ in enumerate(new_game.methods):
             if midx == init_idx:
                 continue
@@ -2550,6 +4503,348 @@ class CrossMethodFieldAlias(TransformPass):
     name = "Cross-Method Field Alias"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        function_var_names: set[str] = set()
+        if ctx.proof_let_types is not None:
+            for pair in ctx.proof_let_types.type_map:
+                if isinstance(pair.type, frog_ast.FunctionType):
+                    function_var_names.add(pair.name)
         return CrossMethodFieldAliasTransformer(
-            proof_namespace=ctx.proof_namespace, ctx=ctx
+            proof_namespace=ctx.proof_namespace,
+            ctx=ctx,
+            proof_let_types=ctx.proof_let_types,
+            function_var_names=function_var_names,
         ).transform(game)
+
+
+class SplitOpaqueTupleFieldTransformer:
+    """Split a tuple-typed field whose RHS is an opaque (non-literal) call.
+
+    Symmetrises canonical forms across reductions where a tuple-returning
+    deterministic call is stored in a field and only individual components
+    are projected. ``ExtractRepeatedTupleAccess`` and ``TupleIndexFolding``
+    handle tuple *literals* (``[a, b]``); they do not see through opaque
+    function-call RHSs that happen to return a tuple, e.g.
+    ``pq_keys = challenger.Generate();`` where ``pq_keys`` is later used
+    only as ``pq_keys[0]`` and ``pq_keys[1]``.
+    """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self._ctx = ctx
+
+    def transform(self, game: frog_ast.Game) -> frog_ast.Game:
+        # Iterate over a copy of the field list since we mutate fields.
+        for field in list(game.fields):
+            if not isinstance(field.type, frog_ast.ProductType):
+                continue
+            new_game = self._try_split_field(game, field)
+            if new_game is not None:
+                # Splitting one field per pass keeps the diff small and
+                # lets the fixed-point loop reach this transform again
+                # on the next iteration to handle further fields.
+                return new_game
+        return game
+
+    def _try_split_field(
+        self, game: frog_ast.Game, field: frog_ast.Field
+    ) -> frog_ast.Game | None:
+        # 1. Find every assignment to *field* across all methods. Reject if
+        # any sits at non-top level (inside if/for) or if there is more than
+        # one top-level assignment in total.
+        top_level_assigns: list[tuple[int, int, frog_ast.Assignment]] = []
+        total_assigns = 0
+        for midx, method in enumerate(game.methods):
+            for sidx, stmt in enumerate(method.block.statements):
+                if (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name == field.name
+                ):
+                    top_level_assigns.append((midx, sidx, stmt))
+            nested_match = SearchVisitor(
+                functools.partial(_is_field_assignment, field.name)
+            ).visit(method.block)
+            # Count of assignments to field anywhere in the method. We use a
+            # second scan to compute the total because SearchVisitor.visit
+            # returns only the first hit.
+            total_assigns += _count_field_assignments(method.block, field.name)
+            if nested_match is None:
+                continue
+        if total_assigns != len(top_level_assigns):
+            # Some assignment is inside a nested block.
+            return None
+        if len(top_level_assigns) != 1:
+            return None
+        assign_midx, assign_sidx, assignment = top_level_assigns[0]
+
+        # 2. Reject literal-tuple RHS: existing TupleIndexFolding handles it.
+        if isinstance(assignment.value, frog_ast.Tuple):
+            return None
+
+        # 3. Reject if RHS references the field itself (would create a dangling
+        # reference once the field is removed).
+        if _VarCountVisitor(field.name).visit(assignment.value) > 0:
+            return None
+
+        # 4. Collect all read-uses of *field*. Every read must be of the
+        # form ``field[k]`` with constant integer ``k``. Whole-tuple reads
+        # (``return field;``, ``field == other_field``) disqualify.
+        used_indices: set[int] = set()
+        if not _all_reads_are_const_indexed(
+            game, field.name, assign_midx, assign_sidx, used_indices
+        ):
+            return None
+        if not used_indices:
+            # No reads at all -- leave it for RemoveUnnecessaryFields.
+            return None
+
+        # 4. Soundness guard: if the assignment lives in Initialize and
+        # Initialize has an early return, splitting could leave per-index
+        # fields uninitialized while other methods still read them.
+        if game.methods[assign_midx].signature.name == "Initialize":
+            init_stmts = list(game.methods[assign_midx].block.statements)
+            if _has_early_return_in_init(init_stmts):
+                if self._ctx is not None:
+                    self._ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Split Opaque Tuple Field",
+                            reason=(
+                                "Initialize has an early return (nested in "
+                                "if/for); splitting would leave per-index "
+                                "fields uninitialized on the early-return path"
+                            ),
+                            location=assignment.origin,
+                            suggestion=(
+                                "Restructure Initialize so any return is the "
+                                "terminal top-level statement"
+                            ),
+                            variable=field.name,
+                            method="Initialize",
+                        )
+                    )
+                return None
+
+        # 5. Build the rewritten game.
+        assert isinstance(field.type, frog_ast.ProductType)
+        component_types = field.type.types
+        new_field_names: dict[int, str] = {}
+        existing_names = {f.name for f in game.fields}
+        for k in sorted(used_indices):
+            new_field_names[k] = self._fresh_name(f"{field.name}_{k}", existing_names)
+            existing_names.add(new_field_names[k])
+
+        new_game = copy.deepcopy(game)
+        # Replace the original field with per-index fields (preserve order).
+        new_fields: list[frog_ast.Field] = []
+        for f in new_game.fields:
+            if f.name == field.name:
+                for k in sorted(used_indices):
+                    new_fields.append(
+                        frog_ast.Field(component_types[k], new_field_names[k], None)
+                    )
+            else:
+                new_fields.append(f)
+        new_game.fields = new_fields
+
+        # Pin the new fields to prevent oscillation with InlineSingleUseField.
+        if self._ctx is not None:
+            for k in sorted(used_indices):
+                self._ctx.pinned_fields.add(new_field_names[k])
+
+        # Rewrite the assignment site: introduce ``_tup`` local, then set
+        # each per-index field. ``_tup`` name avoids collision with fields
+        # and existing method-locals.
+        method = new_game.methods[assign_midx]
+        local_names = _collect_local_names(method.block)
+        tup_name = self._fresh_name("_tup", existing_names | local_names)
+        new_stmts = list(method.block.statements)
+        # Keep the same RHS expression (deepcopy via the new_game copy).
+        original_assign = new_stmts[assign_sidx]
+        assert isinstance(original_assign, frog_ast.Assignment)
+        rhs = original_assign.value
+        replacement_stmts: list[frog_ast.Statement] = [
+            frog_ast.Assignment(
+                copy.deepcopy(field.type),
+                frog_ast.Variable(tup_name),
+                rhs,
+            )
+        ]
+        for k in sorted(used_indices):
+            replacement_stmts.append(
+                frog_ast.Assignment(
+                    None,
+                    frog_ast.Variable(new_field_names[k]),
+                    frog_ast.ArrayAccess(
+                        frog_ast.Variable(tup_name), frog_ast.Integer(k)
+                    ),
+                )
+            )
+        new_stmts = (
+            new_stmts[:assign_sidx] + replacement_stmts + new_stmts[assign_sidx + 1 :]
+        )
+        method.block = frog_ast.Block(new_stmts)
+
+        # Rewrite every ``field[k]`` read across all methods to ``field_k``.
+        # The replacement statements we just inserted contain no references
+        # to the original field (RHS guard above), so no skip is needed.
+        for m in new_game.methods:
+            new_block = _rewrite_indexed_reads(m.block, field.name, new_field_names)
+            if new_block is not m.block:
+                m.block = new_block
+
+        return new_game
+
+    @staticmethod
+    def _fresh_name(prefix: str, existing: set[str]) -> str:
+        if prefix not in existing:
+            return prefix
+        i = 0
+        while f"{prefix}_{i}" in existing:
+            i += 1
+        return f"{prefix}_{i}"
+
+
+def _is_field_assignment(field_name: str, node: frog_ast.ASTNode) -> bool:
+    return (
+        isinstance(node, frog_ast.Assignment)
+        and isinstance(node.var, frog_ast.Variable)
+        and node.var.name == field_name
+    )
+
+
+def _count_field_assignments(node: frog_ast.ASTNode, field_name: str) -> int:
+    count = 0
+
+    def visit(n: frog_ast.ASTNode) -> bool:
+        nonlocal count
+        if _is_field_assignment(field_name, n):
+            count += 1
+        return False
+
+    SearchVisitor(visit).visit(node)
+    return count
+
+
+def _all_reads_are_const_indexed(
+    game: frog_ast.Game,
+    field_name: str,
+    assign_midx: int,
+    assign_sidx: int,
+    used_indices: set[int],
+) -> bool:
+    """Return True if every read of ``field_name`` is ``field_name[k]`` for
+    integer-constant ``k`` (and record those ``k`` in *used_indices*).
+
+    The unique top-level assignment at (assign_midx, assign_sidx) is excluded
+    from the scan: it writes the field, and a write inside its own RHS is not
+    a read of the field for our purposes (and the RHS being a non-literal
+    is enforced separately).
+    """
+    for midx, method in enumerate(game.methods):
+        for sidx, stmt in enumerate(method.block.statements):
+            if midx == assign_midx and sidx == assign_sidx:
+                # The assignment statement itself: scan only its RHS.
+                assert isinstance(stmt, frog_ast.Assignment)
+                if not _check_reads_in(stmt.value, field_name, used_indices):
+                    return False
+                continue
+            if not _check_reads_in(stmt, field_name, used_indices):
+                return False
+    return True
+
+
+def _check_reads_in(
+    node: frog_ast.ASTNode, field_name: str, used_indices: set[int]
+) -> bool:
+    """Walk *node*; for every Variable(field_name) ensure its parent is
+    ArrayAccess(_, Integer(k)) and record k. Return False on any other
+    occurrence.
+    """
+    # We do this by looking for every Variable occurrence and walking the
+    # parent chain via a custom recursive descent: instead, simpler is to
+    # find every Variable and require that occurrence to be inside an
+    # ArrayAccess whose base is that variable. Implementation: scan all
+    # ArrayAccess(field, Integer(k)) and record; then count remaining
+    # Variable(field) occurrences and compare.
+    indexed_count = 0
+
+    def collect_indexed(n: frog_ast.ASTNode) -> bool:
+        nonlocal indexed_count
+        if (
+            isinstance(n, frog_ast.ArrayAccess)
+            and isinstance(n.the_array, frog_ast.Variable)
+            and n.the_array.name == field_name
+            and isinstance(n.index, frog_ast.Integer)
+        ):
+            used_indices.add(n.index.num)
+            indexed_count += 1
+        return False
+
+    SearchVisitor(collect_indexed).visit(node)
+
+    # Now count all Variable occurrences with this name.
+    total = _VarCountVisitor(field_name).visit(node)
+    # Each indexed access contains one Variable(field) occurrence. If the
+    # count of bare Variable occurrences exceeds the indexed-access count,
+    # there's a non-projection use.
+    return total == indexed_count
+
+
+def _collect_local_names(block: frog_ast.Block) -> set[str]:
+    names: set[str] = set()
+
+    def visit(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, frog_ast.Variable):
+            names.add(n.name)
+        return False
+
+    SearchVisitor(visit).visit(block)
+    return names
+
+
+def _rewrite_indexed_reads(
+    block: frog_ast.Block,
+    field_name: str,
+    new_field_names: dict[int, str],
+) -> frog_ast.Block:
+    """Replace every ``field_name[k]`` (constant ``k``) with
+    ``Variable(new_field_names[k])`` everywhere in *block*.
+    """
+    changed = False
+    new_stmts: list[frog_ast.Statement] = []
+    for stmt in block.statements:
+        new_stmt: frog_ast.Statement = stmt
+        while True:
+            target = SearchVisitor(
+                functools.partial(_match_indexed_read, field_name, set(new_field_names))
+            ).visit(new_stmt)
+            if target is None:
+                break
+            assert isinstance(target, frog_ast.ArrayAccess)
+            assert isinstance(target.index, frog_ast.Integer)
+            new_stmt = ReplaceTransformer(
+                target, frog_ast.Variable(new_field_names[target.index.num])
+            ).transform(new_stmt)
+            changed = True
+        new_stmts.append(new_stmt)
+    if not changed:
+        return block
+    return frog_ast.Block(new_stmts)
+
+
+def _match_indexed_read(
+    field_name: str, valid_indices: set[int], node: frog_ast.ASTNode
+) -> bool:
+    return (
+        isinstance(node, frog_ast.ArrayAccess)
+        and isinstance(node.the_array, frog_ast.Variable)
+        and node.the_array.name == field_name
+        and isinstance(node.index, frog_ast.Integer)
+        and node.index.num in valid_indices
+    )
+
+
+class SplitOpaqueTupleField(TransformPass):
+    name = "Split Opaque Tuple Field"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return SplitOpaqueTupleFieldTransformer(ctx=ctx).transform(game)

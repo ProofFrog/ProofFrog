@@ -1,5 +1,5 @@
 import pytest
-from proof_frog import frog_parser
+from proof_frog import frog_ast, frog_parser
 from proof_frog.transforms.standardization import (
     _StabilizeIndependentStatementsTransformer,
 )
@@ -183,3 +183,72 @@ def test_stabilize_independent(source: str, expected: str) -> None:
     expected_ast = frog_parser.parse_game(expected)
     result = _StabilizeIndependentStatementsTransformer().transform_game(game)
     assert result == expected_ast, f"\nGot:\n{result}\nExpected:\n{expected_ast}"
+
+
+def test_non_sortable_stmt_between_sortables_is_barrier() -> None:
+    """Regression: a non-sortable stmt (e.g. `if`) between two sortable
+    stmts is a dependency barrier. Reordering must not move a sortable
+    stmt past a non-sortable stmt that uses its defined variable.
+
+    Before the fix, this transform would swap the `BitString<16> v1 = m[...]`
+    assignment (whose value-key sorts later) with the `BitString<8> v2 <- ...`
+    sample (whose value-key sorts earlier), ignoring the fact that the `if`
+    between them uses `v1`. Result: after the swap, the `if` references
+    `v1` before `v1` is defined.
+    """
+    source = """
+        Game Test() {
+            BitString<8> f(BitString<16> m) {
+                BitString<16> v1 = m[0 : 16];
+                if (v1 == 0^16) {
+                    BitString<8> r <- BitString<8>;
+                    return r;
+                }
+                BitString<8> v2 <- BitString<8>;
+                return v2;
+            }
+        }
+    """
+    game = frog_parser.parse_game(source)
+    result = _StabilizeIndependentStatementsTransformer().transform_game(game)
+    stmts = result.methods[0].block.statements
+    # Minimal check: stmts[0] is the `v1 = m[0:16]` assignment, not the
+    # `v2 <- BitString<8>` sample. Swapping them would put `v1` after the
+    # `if` that uses it.
+    assert isinstance(stmts[0], frog_ast.Assignment), (
+        f"expected stmts[0] to still be `v1 = m[0:16]`, got {stmts[0]!r}"
+    )
+
+
+def test_if_with_return_in_body_is_a_barrier() -> None:
+    """A non-sortable ``if`` whose body contains a ``return`` still acts
+    as a dependency barrier for the sortable stmts on either side. The
+    early-return path means the second sortable (``v2``) is only observed
+    on the ``!cond`` branch, but the barrier behavior of the ``if``
+    itself does not depend on whether its body returns -- the ``if``
+    references ``v1``, so any swap that puts ``v1`` after ``v2`` would
+    print ``v1`` before its definition. Mirrors the a78a070 / 2ab448f
+    return-in-if pattern for the other reordering passes.
+    """
+    source = """
+        Game Test() {
+            BitString<8> f(BitString<16> m, Bool cond) {
+                BitString<16> v1 = m[0 : 16];
+                if (v1 == 0^16) {
+                    BitString<8> r <- BitString<8>;
+                    return r;
+                }
+                BitString<8> v2 <- BitString<8>;
+                return v2;
+            }
+        }
+    """
+    game = frog_parser.parse_game(source)
+    result = _StabilizeIndependentStatementsTransformer().transform_game(game)
+    stmts = result.methods[0].block.statements
+    assert isinstance(stmts[0], frog_ast.Assignment), (
+        f"expected stmts[0] to still be `v1 = m[0:16]`, got {stmts[0]!r}"
+    )
+    # The if-with-return still sits between v1 and v2 (positions 0/1/2).
+    assert isinstance(stmts[1], frog_ast.IfStatement)
+    assert isinstance(stmts[2], frog_ast.Sample)

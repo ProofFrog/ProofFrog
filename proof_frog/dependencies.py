@@ -185,6 +185,25 @@ class BubbleSortFieldAssignment(visitors.BlockTransformer):
         return new_game
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        # Short-circuit: a swap requires two adjacent field-assignments, so
+        # if the block contains fewer than two field-assignments at the top
+        # level, no swap is possible and we can skip the (expensive) graph.
+        field_names = {field.name for field in self.fields}
+        field_assign_count = 0
+        for stmt in block.statements:
+            if (
+                isinstance(
+                    stmt,
+                    (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+                )
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name in field_names
+            ):
+                field_assign_count += 1
+                if field_assign_count >= 2:
+                    break
+        if field_assign_count < 2:
+            return block
         graph = generate_dependency_graph(block, self.fields, {})
         new_statements = list(copy.deepcopy(block.statements))
         while True:
@@ -302,18 +321,19 @@ def _collect_field_access_refs(game: frog_ast.Game) -> list[frog_ast.Variable]:
         )
 
     for method in game.methods:
-        found = visitors.SearchVisitor(is_field_ref).visit(method.block)
+        current_block = method.block
+        found = visitors.SearchVisitor(is_field_ref).visit(current_block)
         while found is not None:
             assert isinstance(found, frog_ast.FieldAccess)
             assert isinstance(found.the_object, frog_ast.Variable)
             var = frog_ast.Variable(found.the_object.name)
             if var not in refs:
                 refs.append(var)
-            # Replace the found node to continue searching for more
-            method_block = visitors.ReplaceTransformer(
+            # Replace the found node and continue searching the updated tree.
+            current_block = visitors.ReplaceTransformer(
                 found, frog_ast.Variable("__field_access_counted__")
-            ).transform(method.block)
-            found = visitors.SearchVisitor(is_field_ref).visit(method_block)
+            ).transform(current_block)
+            found = visitors.SearchVisitor(is_field_ref).visit(current_block)
 
     return refs
 

@@ -189,6 +189,29 @@ from proof_frog.transforms.sampling import SinkUniformSampleTransformer
             }
             """,
         ),
+        # Sample used only after a following if-stmt that does not reference
+        # the sample variable (neither condition nor any branch): sink the
+        # sample past the if-stmt.
+        (
+            """
+            BitString<n> f(Int x) {
+                BitString<n> k <- BitString<n>;
+                if (x == 1) {
+                    return 0^n;
+                }
+                return k;
+            }
+            """,
+            """
+            BitString<n> f(Int x) {
+                if (x == 1) {
+                    return 0^n;
+                }
+                BitString<n> k <- BitString<n>;
+                return k;
+            }
+            """,
+        ),
     ],
 )
 def test_sink_uniform_sample(

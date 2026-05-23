@@ -538,8 +538,32 @@ class InlineTransformer(Transformer):
             and isinstance(exp.func.the_object, frog_ast.Variable)
             and (exp.func.the_object.name, exp.func.name) in self.method_lookup
         )
-        if not is_inlinable_call or self.finished:
+        if self.finished:
             return exp
+
+        if not is_inlinable_call:
+            # The call itself isn't inlinable, but its arguments (or function
+            # expression) may contain nested inlinable scheme-method calls.
+            # Fall through to copy-on-write recursion so those get inlined.
+            new_func = self.transform(exp.func)
+            new_args: list[frog_ast.Expression] = []
+            changed = new_func is not exp.func
+            for arg in exp.args:
+                if self.finished:
+                    # A nested inline has fired; preserve remaining args as-is
+                    # so the single-inline-per-pass invariant is maintained.
+                    new_args.append(arg)
+                    continue
+                new_arg = self.transform(arg)
+                if new_arg is not arg:
+                    changed = True
+                new_args.append(new_arg)
+            if not changed:
+                return exp
+            new_exp = copy.copy(exp)
+            new_exp.func = new_func
+            new_exp.args = new_args
+            return new_exp
 
         assert isinstance(exp.func, frog_ast.FieldAccess)
         assert isinstance(exp.func.the_object, frog_ast.Variable)
@@ -650,12 +674,25 @@ def _z3_var_for_type(name: str, var_type: frog_ast.Type) -> z3.ExprRef:
     return z3.Const(name, _OPAQUE_Z3_SORT)
 
 
+# SOUNDNESS: Z3FormulaVisitor models AST sub-expressions it cannot translate
+# natively (FuncCall, BinaryOperation type mismatches like `||` over BitString)
+# as memoized opaque Z3 constants keyed on the AST. Two textually identical
+# occurrences in the same expression -- and across two visitor invocations on
+# two games -- map to the same Z3 const, so propositional reasoning over the
+# atoms is sound when (and only when) every such occurrence denotes the same
+# value. That holds for deterministic FuncCalls trivially. It does NOT hold
+# for non-deterministic FuncCalls (e.g. `KEM.KeyGen()`): two textual copies
+# would denote independent samples, but memoization would unsoundly equate
+# them. Callers MUST refuse to use this visitor when either expression
+# contains a non-deterministic call (see `transforms._base.has_nondeterministic_call`).
 class Z3FormulaVisitor(Visitor[z3.AstRef]):
     # Don't just append Int(var.name), need mapping from name to new name in this formula
     def __init__(
         self,
         type_map: NameTypeMap,
         variable_version_map: Optional[dict[str, int]] = None,
+        opaque_func_call_fallback: bool = False,
+        proof_namespace: Optional[frog_ast.Namespace] = None,
     ) -> None:
         self.stack: list[Any] = []
         self.type_map = type_map
@@ -664,6 +701,73 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         self.expression_formula_map: list[
             tuple[tuple[frog_ast.Expression, dict[str, int]], z3.AstRef]
         ] = []
+        # Opt-in: when True, FuncCall expressions and BinaryOperations whose
+        # operand types Z3 cannot mix (e.g. `||` over BitString operands)
+        # are modelled as memoized opaque Z3 constants instead of None.
+        # Used by the equivalence-check escape hatch for return-expression
+        # diffs. See the SOUNDNESS comment above the class. Existing
+        # callers (e.g. canonicalization transforms RemoveUnreachable,
+        # ApplyAssumptions) leave this False to preserve their pre-existing
+        # "untranslatable -> None" behavior.
+        self.opaque_func_call_fallback = opaque_func_call_fallback
+        # Defense-in-depth for `opaque_func_call_fallback=True`: when a
+        # namespace is provided, `visit()` refuses (returns None) on any
+        # expression containing a non-deterministic call. The primary guard
+        # lives in `_z3_check_expression_pair`; this is the in-visitor
+        # backstop so future callers that opt into the fallback cannot
+        # silently reintroduce unsoundness by skipping the precondition.
+        self.proof_namespace = proof_namespace
+        self._opaque_atoms: dict[str, z3.AstRef] = {}
+        self._opaque_num = 0
+
+    def visit(self, visiting_node: frog_ast.ASTNode) -> Optional[z3.AstRef]:
+        if (
+            self.opaque_func_call_fallback
+            and self.proof_namespace is not None
+            and isinstance(visiting_node, frog_ast.Expression)
+        ):
+            # Lazy import to avoid a cycle with transforms/_base.py.
+            # pylint: disable=import-outside-toplevel,cyclic-import
+            from .transforms._base import has_nondeterministic_call
+
+            if has_nondeterministic_call(
+                visiting_node, self.proof_namespace, self.type_map
+            ):
+                self.stack = []
+                return None
+        return super().visit(visiting_node)
+
+    def _intern_opaque(
+        self,
+        node: frog_ast.ASTNode,
+        sort: z3.SortRef = _OPAQUE_Z3_SORT,
+    ) -> z3.AstRef:
+        """Return a memoized opaque Z3 constant for *node*. Two
+        structurally identical nodes (same `str(node)`, which traverses
+        the AST) under the same SSA `variable_version_map` share the
+        constant. The chosen `sort` defaults to the project-wide opaque
+        uninterpreted sort. Pass `z3.BoolSort()` for nodes whose AST type
+        is Bool (so the result composes cleanly inside `&&`/`||` chains).
+
+        Z3 interns constants by `(name, sort)`, so two visitor instances
+        that produce the same memo key produce constants Z3 treats as
+        the same atom -- which is what `_z3_residual_equivalence` relies
+        on when comparing formulas built independently for two games.
+        """
+        version_key = str(sorted((self.variable_version_map or {}).items()))
+        sort_key = sort.name() if hasattr(sort, "name") else str(sort)
+        key = f"{sort_key}@{version_key}@{str(node)}"
+        if key in self._opaque_atoms:
+            return self._opaque_atoms[key]
+        # Use the FULL structural key as the Z3 const name. Z3 interns
+        # constants by `(name, sort)`, so two visitor instances producing
+        # the same key yield the same Z3 constant; using the full key
+        # (rather than a truncated hash) guarantees no accidental atom
+        # collisions between structurally distinct sub-expressions.
+        atom = z3.Const(f"@@@opaque@{key}", sort)
+        self._opaque_num += 1
+        self._opaque_atoms[key] = atom
+        return atom
 
     def result(self) -> Optional[z3.AstRef]:
         value = self.stack[-1] if self.stack else None
@@ -811,9 +915,45 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
             try:
                 self.stack.append(operators[operation.operator](left_item, right_item))
             except (z3.Z3Exception, TypeError):
-                self.stack.append(None)
+                # Z3 rejects this operator/operand combination (e.g.
+                # `||` over BitString operands modelled as opaque consts:
+                # `z3.Or` expects Bool args). Fall back to an opaque atom
+                # only when explicitly opted in; otherwise preserve the
+                # historical "untranslatable -> None" behavior so existing
+                # canonicalization transforms (RemoveUnreachable,
+                # ApplyAssumptions) that use this visitor unchanged.
+                if self.opaque_func_call_fallback:
+                    self.stack.append(self._intern_opaque(operation))
+                else:
+                    self.stack.append(None)
         else:
             self.stack.append(None)
+
+    def leave_func_call(self, node: frog_ast.FuncCall) -> None:
+        # Only emit an opaque atom when explicitly opted in. Existing
+        # callers leave the flag False; their pre-change behavior was
+        # to leave the recursively-pushed children on the stack and let
+        # whatever sat on top "leak" upward (which result() / consumers
+        # historically saw as None for FuncCall-rooted expressions).
+        # Preserve that here by not popping any items in the
+        # opt-out path -- exactly the historical no-op.
+        if not self.opaque_func_call_fallback:
+            return
+        # FuncCall pushes one stack item per child: one for `func` (which
+        # itself recurses through e.g. a `FieldAccess` whose receiver
+        # `visit_variable` pushes one item), plus one per arg. Pop them
+        # all and discard -- the memo key carries the full AST. If any
+        # popped item is None, propagate failure rather than silently
+        # papering over an upstream translation gap.
+        n = 1 + len(node.args)
+        popped = [self.stack.pop() if self.stack else None for _ in range(n)]
+        if any(item is None for item in popped):
+            self.stack.append(None)
+            return
+        # Memoize the call as an opaque atom. Determinism is enforced
+        # outside the visitor by the equivalence helper, which refuses
+        # to invoke us on expressions containing non-deterministic calls.
+        self.stack.append(self._intern_opaque(node))
 
 
 class AllConstantFieldAccesses(Visitor[bool]):
@@ -837,7 +977,7 @@ class AllConstantFieldAccesses(Visitor[bool]):
             return
         if assignment.var.name != self.tuple_name:
             return
-        if not isinstance(assignment.value, frog_ast.Tuple):
+        if frog_ast.tuple_literal_values(assignment.value) is None:
             self.all_constant = False
 
 

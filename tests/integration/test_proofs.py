@@ -10,9 +10,18 @@ REPO_ROOT = Path(__file__).parent.parent.parent
 # implemented, e.g. identical-until-bad).
 _WIP_PROOFS = {"UG-KEM-CCA-SDH.proof"}
 
-PROOF_FILES = sorted(
-    p for p in REPO_ROOT.glob("**/examples/**/*.proof") if p.name not in _WIP_PROOFS
-)
+# Deduplicate by resolved path so symlinks (e.g. extras/examples/examples ->
+# ../../examples) don't cause the same proof to run twice.
+_seen: set[Path] = set()
+PROOF_FILES: list[Path] = []
+for _p in sorted(REPO_ROOT.glob("**/examples/**/*.proof")):
+    if _p.name in _WIP_PROOFS:
+        continue
+    _resolved = _p.resolve()
+    if _resolved in _seen:
+        continue
+    _seen.add(_resolved)
+    PROOF_FILES.append(_p)
 
 
 @pytest.mark.parametrize(

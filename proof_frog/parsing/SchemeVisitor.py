@@ -64,6 +64,11 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SchemeParser#varDeclWithSampleMinusStatement.
+    def visitVarDeclWithSampleMinusStatement(self, ctx:SchemeParser.VarDeclWithSampleMinusStatementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SchemeParser#varDeclWithSampleStatement.
     def visitVarDeclWithSampleStatement(self, ctx:SchemeParser.VarDeclWithSampleStatementContext):
         return self.visitChildren(ctx)
@@ -71,6 +76,11 @@ class SchemeVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SchemeParser#assignmentStatement.
     def visitAssignmentStatement(self, ctx:SchemeParser.AssignmentStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#sampleMinusStatement.
+    def visitSampleMinusStatement(self, ctx:SchemeParser.SampleMinusStatementContext):
         return self.visitChildren(ctx)
 
 

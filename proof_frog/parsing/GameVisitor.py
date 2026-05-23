@@ -59,6 +59,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#varDeclWithSampleMinusStatement.
+    def visitVarDeclWithSampleMinusStatement(self, ctx:GameParser.VarDeclWithSampleMinusStatementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#varDeclWithSampleStatement.
     def visitVarDeclWithSampleStatement(self, ctx:GameParser.VarDeclWithSampleStatementContext):
         return self.visitChildren(ctx)
@@ -66,6 +71,11 @@ class GameVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by GameParser#assignmentStatement.
     def visitAssignmentStatement(self, ctx:GameParser.AssignmentStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#sampleMinusStatement.
+    def visitSampleMinusStatement(self, ctx:GameParser.SampleMinusStatementContext):
         return self.visitChildren(ctx)
 
 

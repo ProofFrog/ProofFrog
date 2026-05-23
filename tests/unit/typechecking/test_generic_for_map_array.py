@@ -195,3 +195,145 @@ class TestIntegration:
             }
             """
         )
+
+
+_SYM_ENC_PRIMITIVE = """\
+Primitive SymEnc() {
+    Set Key = KeySpace;
+    Set Message = MessageSpace;
+    Set Ciphertext = CiphertextSpace;
+
+    Key KeyGen();
+    Ciphertext Enc(Key k, Message m);
+    Message Dec(Key k, Ciphertext c);
+}
+"""
+
+
+def _check_game_with_imports(
+    game_source: str, imports: dict[str, str]
+) -> None:
+    import_namespace: dict[str, object] = {}
+    for name, source in imports.items():
+        if "Primitive" in source:
+            import_namespace[name] = frog_parser.parse_primitive_file(source)
+        else:
+            import_namespace[name] = frog_parser.parse_scheme_file(source)
+    game = frog_parser.parse_game(game_source)
+    visitor = semantic_analysis.CheckTypeVisitor(
+        import_namespace, "test", {}  # type: ignore[arg-type]
+    )
+    visitor.visit(game)
+
+
+def _check_game_with_imports_fails(
+    game_source: str, imports: dict[str, str]
+) -> None:
+    with pytest.raises(semantic_analysis.FailedTypeCheck):
+        _check_game_with_imports(game_source, imports)
+
+
+class TestSchemeParameterIteration:
+    """Iteration over Array/Map whose element type comes through a scheme parameter."""
+
+    def test_iterate_array_of_scheme_field_type(self) -> None:
+        _check_game_with_imports(
+            """
+            Game G(SymEnc E) {
+                Array<E.Ciphertext, 4> arr;
+                Int Count() {
+                    Int n = 0;
+                    for (E.Ciphertext c in arr) {
+                        n = n + 1;
+                    }
+                    return n;
+                }
+            }
+            """,
+            {"SymEnc": _SYM_ENC_PRIMITIVE},
+        )
+
+    def test_iterate_array_of_scheme_field_wrong_element_type_fails(self) -> None:
+        _check_game_with_imports_fails(
+            """
+            Game G(SymEnc E) {
+                Array<E.Ciphertext, 4> arr;
+                Int Count() {
+                    Int n = 0;
+                    for (E.Key c in arr) {
+                        n = n + 1;
+                    }
+                    return n;
+                }
+            }
+            """,
+            {"SymEnc": _SYM_ENC_PRIMITIVE},
+        )
+
+    def test_iterate_map_keys_of_scheme_field_type(self) -> None:
+        _check_game_with_imports(
+            """
+            Game G(SymEnc E) {
+                Map<E.Key, E.Ciphertext> M;
+                Int Count() {
+                    Int n = 0;
+                    for (E.Key k in M.keys) {
+                        n = n + 1;
+                    }
+                    return n;
+                }
+            }
+            """,
+            {"SymEnc": _SYM_ENC_PRIMITIVE},
+        )
+
+    def test_iterate_map_values_of_scheme_field_type(self) -> None:
+        _check_game_with_imports(
+            """
+            Game G(SymEnc E) {
+                Map<E.Key, E.Ciphertext> M;
+                Int Count() {
+                    Int n = 0;
+                    for (E.Ciphertext c in M.values) {
+                        n = n + 1;
+                    }
+                    return n;
+                }
+            }
+            """,
+            {"SymEnc": _SYM_ENC_PRIMITIVE},
+        )
+
+    def test_iterate_map_entries_of_scheme_field_type(self) -> None:
+        _check_game_with_imports(
+            """
+            Game G(SymEnc E) {
+                Map<E.Key, E.Ciphertext> M;
+                Int Count() {
+                    Int n = 0;
+                    for ([E.Key, E.Ciphertext] entry in M.entries) {
+                        n = n + 1;
+                    }
+                    return n;
+                }
+            }
+            """,
+            {"SymEnc": _SYM_ENC_PRIMITIVE},
+        )
+
+    def test_iterate_map_keys_of_scheme_field_wrong_type_fails(self) -> None:
+        _check_game_with_imports_fails(
+            """
+            Game G(SymEnc E) {
+                Map<E.Key, E.Ciphertext> M;
+                Int Count() {
+                    Int n = 0;
+                    for (E.Ciphertext k in M.keys) {
+                        n = n + 1;
+                    }
+                    return n;
+                }
+            }
+            """,
+            {"SymEnc": _SYM_ENC_PRIMITIVE},
+        )

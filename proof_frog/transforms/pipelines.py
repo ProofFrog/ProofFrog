@@ -8,7 +8,12 @@ from __future__ import annotations
 
 from ._base import TransformPass
 from .symbolic import SymbolicComputation
-from .sampling import SimplifySplice, MergeUniformSamples, MergeProductSamples
+from .sampling import (
+    SimplifySplice,
+    SliceOfInlineConcat,
+    MergeUniformSamples,
+    MergeProductSamples,
+)
 from .sampling import (
     SplitUniformSamples,
     SingleCallFieldToLocal,
@@ -36,10 +41,12 @@ from .inlining import (
     DeduplicateDeterministicCalls,
     CrossMethodFieldAlias,
     HoistDeterministicCallToInitialize,
+    SplitOpaqueTupleField,
     InlineSingleUseField,
     HoistGroupExpToInitialize,
     RefactorGroupElemFieldExp,
     ForwardExpressionAlias,
+    InlineLocalTupleLiteral,
     HoistFieldPureAlias,
     ExtractRepeatedTupleAccess,
     InlineMultiUsePureExpression,
@@ -52,13 +59,16 @@ from .algebraic import (
     UniformGroupElemSimplification,
     SimplifyNotPass,
     BooleanIdentity,
+    BooleanAbsorption,
     XorCancellation,
     XorIdentity,
     ModIntSimplification,
     NormalizeCommutativeChains,
+    FlattenConcatChain,
     ReflexiveComparison,
     InjectiveEqualitySimplify,
     ConcatEqualityDecompose,
+    TupleEqualityDecompose,
     GroupElemSimplification,
     GroupElemCancellation,
     GroupElemExponentCombination,
@@ -72,7 +82,11 @@ from .structural import (
 from .control_flow import (
     IfConditionAliasSubstitution,
     RedundantConditionalReturn,
+    AbsorbRedundantEarlyReturn,
+    IfFalseReturnToConjunction,
+    FoldEquivalentReturnBranch,
     BranchElimination,
+    UniqExclusionBranchElimination,
     ElseUnwrap,
     SimplifyReturn,
     SimplifyIf,
@@ -88,6 +102,7 @@ from .tuples import (
 from .standardization import (
     VariableStandardize,
     StandardizeFieldNames,
+    FieldLexMinByRHS,
     BubbleSortFieldAssignments,
     StabilizeIndependentStatements,
 )
@@ -97,6 +112,7 @@ CORE_PIPELINE: list[TransformPass] = [
     CounterGuardedFieldToLocal(),
     SymbolicComputation(),
     SimplifySplice(),
+    SliceOfInlineConcat(),
     MergeUniformSamples(),
     MergeProductSamples(),
     SplitUniformSamples(),
@@ -127,9 +143,12 @@ CORE_PIPELINE: list[TransformPass] = [
     RemoveDuplicateFields(),
     CrossMethodFieldAlias(),
     HoistDeterministicCallToInitialize(),
+    SplitOpaqueTupleField(),
     IfConditionAliasSubstitution(),
     RedundantConditionalReturn(),
+    UniqExclusionBranchElimination(),
     BranchElimination(),
+    InlineLocalTupleLiteral(),
     ElseUnwrap(),
     InlineSingleUseField(),
     LocalizeInitOnlyFieldSample(),
@@ -144,6 +163,7 @@ CORE_PIPELINE: list[TransformPass] = [
     ExpandTuple(),
     SimplifyNotPass(),
     BooleanIdentity(),
+    BooleanAbsorption(),
     XorCancellation(),
     XorIdentity(),
     ModIntSimplification(),
@@ -153,13 +173,18 @@ CORE_PIPELINE: list[TransformPass] = [
     GroupElemCancellation(),
     GroupElemExponentCombination(),
     NormalizeCommutativeChains(),
+    FlattenConcatChain(),
     ReflexiveComparison(),
     InjectiveEqualitySimplify(),
     ConcatEqualityDecompose(),
+    TupleEqualityDecompose(),
     InlineMultiUsePureExpression(),
     RedundantFieldCopy(),
     SimplifyTuple(),
     RemoveUnreachable(),
+    AbsorbRedundantEarlyReturn(),
+    IfFalseReturnToConjunction(),
+    FoldEquivalentReturnBranch(),
 ]
 
 STANDARDIZATION_PIPELINE: list[TransformPass] = [
@@ -168,5 +193,21 @@ STANDARDIZATION_PIPELINE: list[TransformPass] = [
     NormalizeCommutativeChains(),
     BubbleSortFieldAssignments(),
     StabilizeIndependentStatements(),
+    VariableStandardize(),
+    # Run Phase-3 lex-min with the FINAL local-variable names visible
+    # (RHS sort keys depend on names), then re-run statement reordering
+    # so field-assignment statements settle on the post-Phase-3 names.
+    FieldLexMinByRHS(),
+    # FieldLexMinByRHS may have swapped field numbers, which can leave
+    # commutative operators (==, !=) with operands no longer in lex-min
+    # order; re-normalize so operand ordering matches the post-swap names.
+    NormalizeCommutativeChains(),
+    BubbleSortFieldAssignments(),
+    StabilizeIndependentStatements(),
+    # Final VariableStandardize: StabilizeIndependentStatements may have
+    # reordered typed-local declarations after the previous
+    # VariableStandardize, leaving locals out of v1, v2, ... order.
+    # Re-number locals so canonical forms with the same final declaration
+    # order use the same names.
     VariableStandardize(),
 ]

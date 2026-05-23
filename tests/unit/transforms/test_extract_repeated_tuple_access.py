@@ -106,7 +106,11 @@ def _transform_and_compare(source: str, expected: str) -> None:
             }
             """,
         ),
-        # 5. Method parameters are NOT hoisted (would break tuple fold).
+        # 5. Method parameters ARE hoisted when no full tuple-literal
+        # reconstruction ``[c[0], c[1]]`` exists in the block (which
+        # would block ``SimplifyTuple``'s fold-back).  Symmetrises games
+        # whose source extracts ``v = c[0]`` against games whose source
+        # uses ``c[0]`` inline.
         (
             """
             Game Test() {
@@ -118,7 +122,29 @@ def _transform_and_compare(source: str, expected: str) -> None:
             """
             Game Test() {
                 Int Decaps([Int, Int] c) {
-                    return c[0] + c[0];
+                    Int __cse_c_0__ = c[0];
+                    return __cse_c_0__ + __cse_c_0__;
+                }
+            }
+            """,
+        ),
+        # 6. Method parameters are NOT hoisted when a full tuple-literal
+        # reconstruction ``[c[0], c[1]]`` is present, since extracting
+        # would block ``SimplifyTuple``'s ``[c[0], c[1]] -> c`` fold-back.
+        (
+            """
+            Game Test() {
+                Bool Decaps([Int, Int] c, Set<[Int, Int]> S) {
+                    Int x = c[0] + c[0];
+                    return [c[0], c[1]] in S;
+                }
+            }
+            """,
+            """
+            Game Test() {
+                Bool Decaps([Int, Int] c, Set<[Int, Int]> S) {
+                    Int x = c[0] + c[0];
+                    return [c[0], c[1]] in S;
                 }
             }
             """,

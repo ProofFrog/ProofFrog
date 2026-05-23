@@ -1326,8 +1326,13 @@ class _GameASTGenerator(_SharedAST, GameVisitor):  # type: ignore[misc]
 class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
     def visitProgram(self, ctx: ProofParser.ProgramContext) -> frog_ast.ProofFile:
         game_list = []
-        for i in range(ctx.proofHelpers().getChildCount()):
-            game_list.append(self.visit(ctx.proofHelpers().getChild(i)))
+        before_ctx = ctx.helpersBefore
+        after_ctx = ctx.helpersAfter
+        for i in range(before_ctx.getChildCount()):
+            game_list.append(self.visit(before_ctx.getChild(i)))
+        helpers_after_count = after_ctx.getChildCount()
+        for i in range(helpers_after_count):
+            game_list.append(self.visit(after_ctx.getChild(i)))
 
         proof = ctx.proof()
         lets: list[frog_ast.Field] = []
@@ -1375,6 +1380,7 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
             self.visit(proof.theorem().parameterizedGame()),
             self.visit(proof.gameList()),
             requirements,
+            helpers_after_theorem_count=helpers_after_count,
         )
         proof_file.sampled_let_names = sampled_let_names
         return proof_file

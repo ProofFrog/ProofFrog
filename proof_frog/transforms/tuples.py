@@ -46,6 +46,15 @@ class ExpandTupleTransformer(Transformer):
             name
         ).visit(search_space)
 
+    @staticmethod
+    def _has_reference(name: str, block: frog_ast.Block) -> bool:
+        """Return True iff *name* is referenced (as a Variable) in *block*."""
+
+        def is_named_variable(node: frog_ast.ASTNode) -> bool:
+            return isinstance(node, frog_ast.Variable) and node.name == name
+
+        return SearchVisitor(is_named_variable).visit(block) is not None
+
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         new_fields = []
         for field in game.fields:
@@ -77,7 +86,7 @@ class ExpandTupleTransformer(Transformer):
     def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
         new_statements: list[frog_ast.Statement] = []
         expanded_tuple_count = 0
-        for index, statement in enumerate(block.statements):
+        for stmt_idx, statement in enumerate(block.statements):
             # Assigning to the tuple means assigning each individual value
             if (
                 isinstance(statement, frog_ast.Assignment)
@@ -113,6 +122,17 @@ class ExpandTupleTransformer(Transformer):
                 and isinstance(statement.var, frog_ast.Variable)
                 and self._is_transformable_tuple(
                     statement.the_type, statement.var.name, block
+                )
+                # Refuse to fire on a local-decl whose variable is not
+                # referenced in subsequent statements of THIS block: the
+                # use site is in an enclosing scope (e.g. this block is
+                # the body of an if-branch), and expanding here would
+                # split the decl into v@k components without rewriting
+                # the outer-scope ``v[k]`` access, leaving it dangling.
+                # The decl's own LHS does not count as a reference.
+                and self._has_reference(
+                    statement.var.name,
+                    frog_ast.Block(list(block.statements[stmt_idx + 1 :])),
                 )
             ):
                 assert isinstance(statement.the_type, frog_ast.ProductType)

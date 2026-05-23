@@ -2,7 +2,7 @@ grammar Proof;
 
 import Shared;
 
-program: moduleImport* proofHelpers proof EOF;
+program: moduleImport* helpersBefore=proofHelpers proof helpersAfter=proofHelpers EOF;
 
 proofHelpers: (reduction | game)*;
 

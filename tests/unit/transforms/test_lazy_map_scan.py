@@ -623,3 +623,39 @@ def test_injective_call_with_e1_in_predicate_is_silent() -> None:
     nms = [nm for nm in ctx.near_misses if nm.transform_name == "Lazy Map Scan"]
     assert len(nms) == 1
     assert "injective" not in nms[0].reason
+
+
+def test_body_contains_unrelated_array_access_preserved() -> None:
+    """Regression for the _TupleAccessSubstitution variant of the 497f9fc
+    bug: when the scan body references an unrelated ArrayAccess (e.g.
+    ``aux[0]`` where ``aux`` is not the loop variable), the substitution
+    must leave it intact rather than corrupt the AST by returning None
+    via specific-method dispatch.
+    """
+    game_src = """
+        Game G() {
+            Map<Int, Bool> M;
+            Array<Bool, 2> aux;
+            Bool Lookup(Int query) {
+                for ([Int, Bool] e in M.entries) {
+                    if (e[0] == query) {
+                        return e[1] || aux[0];
+                    }
+                }
+                return false;
+            }
+        }
+    """
+    expected_src = """
+        Game G() {
+            Map<Int, Bool> M;
+            Array<Bool, 2> aux;
+            Bool Lookup(Int query) {
+                if (query in M) {
+                    return M[query] || aux[0];
+                }
+                return false;
+            }
+        }
+    """
+    _apply_and_expect(game_src, expected_src)

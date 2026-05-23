@@ -221,6 +221,30 @@ from proof_frog.transforms.sampling import SplitUniformSampleTransformer
             }
             """,
         ),
+        # Coexisting slice of an UNRELATED variable: the _SliceReplacer must
+        # leave non-target slices unchanged. Previously transform_slice
+        # returned None for non-matching slices, which the Transformer's
+        # specific-method dispatch propagated as the new value, corrupting
+        # the AST (None ended up where the unrelated Slice should be).
+        (
+            """
+            BitString<lambda> f(BitString<2 * lambda> w) {
+                BitString<2 * lambda> z <- BitString<2 * lambda>;
+                BitString<lambda> a = z[0 : lambda];
+                BitString<lambda> b = z[lambda : 2 * lambda];
+                return w[0 : lambda] || a || b;
+            }
+            """,
+            """
+            BitString<lambda> f(BitString<2 * lambda> w) {
+                BitString<lambda> z_0 <- BitString<lambda>;
+                BitString<lambda> z_1 <- BitString<lambda>;
+                BitString<lambda> a = z_0;
+                BitString<lambda> b = z_1;
+                return w[0 : lambda] || a || b;
+            }
+            """,
+        ),
     ],
 )
 def test_split_uniform_samples(

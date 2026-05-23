@@ -79,14 +79,20 @@ class _TupleAccessSubstitution(Transformer):
         self.zero_repl = zero_repl
         self.one_repl = one_repl
 
-    def transform_array_access(
-        self, node: frog_ast.ArrayAccess
-    ) -> Optional[frog_ast.Expression]:
+    def transform_array_access(self, node: frog_ast.ArrayAccess) -> frog_ast.ASTNode:
         if _is_tuple_index(node, self.var_name, 0):
             return copy.deepcopy(self.zero_repl)
         if _is_tuple_index(node, self.var_name, 1):
             return copy.deepcopy(self.one_repl)
-        return None
+        # Non-target ArrayAccess: recurse into children so any nested
+        # entry[0]/entry[1] are still substituted. Returning ``None`` here
+        # would propagate as the new value via specific-method dispatch
+        # and corrupt the AST (same bug class as 497f9fc / _SliceReplacer).
+        new_array = self.transform(node.the_array)
+        new_index = self.transform(node.index)
+        if new_array is node.the_array and new_index is node.index:
+            return node
+        return frog_ast.ArrayAccess(new_array, new_index)
 
 
 def _bare_references(expr: frog_ast.Expression, var_name: str) -> bool:

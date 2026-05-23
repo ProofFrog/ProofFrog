@@ -1252,3 +1252,339 @@ def test_local_fn_near_miss_declared_not_sampled() -> None:
     assert any(
         "declared (known deterministic)" in nm.reason for nm in misses
     )
+
+
+# ---------------------------------------------------------------------------
+# ConcatEqualityDecompose near-miss
+# ---------------------------------------------------------------------------
+
+
+from proof_frog.transforms.algebraic import (  # noqa: E402
+    ConcatEqualityDecompose,
+)
+
+
+def _concat_ctx() -> PipelineContext:
+    return PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+
+
+def test_concat_equality_decompose_near_miss_unknown_length() -> None:
+    """A term without a statically-derivable BitString length should emit
+    a near-miss explaining that length derivation failed."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Bool Q(BitString<16> x, BitString<8> a) {
+                return x == (a || unknown);
+            }
+        }
+        """
+    )
+    ctx = _concat_ctx()
+    ConcatEqualityDecompose().apply(game, ctx)
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Concat Equality Decompose"
+    ]
+    assert misses
+    assert any("statically-derivable" in nm.reason for nm in misses)
+
+
+def test_concat_equality_decompose_no_near_miss_when_fires() -> None:
+    """When every term has a derivable length, the transform fires and
+    emits no near-miss."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Bool Q(BitString<16> x, BitString<8> a, BitString<8> b) {
+                return x == (a || b);
+            }
+        }
+        """
+    )
+    ctx = _concat_ctx()
+    ConcatEqualityDecompose().apply(game, ctx)
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Concat Equality Decompose"
+    ]
+    assert not misses
+
+
+# ---------------------------------------------------------------------------
+# HoistGroupExpToInitialize near-misses
+# ---------------------------------------------------------------------------
+
+
+from proof_frog.transforms.inlining import (  # noqa: E402
+    HoistGroupExpToInitialize,
+    RefactorGroupElemFieldExp,
+)
+
+
+_HGE_NAME = "Hoist GroupElem Exponent To Initialize"
+
+
+def _hge_ctx() -> PipelineContext:
+    prim = frog_parser.parse_primitive_file("""
+        Primitive G(Int n) {
+            BitString<n> rand();
+            deterministic ModInt<n> det_exp();
+        }
+        """)
+    return PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"G": prim, "GG": prim, "H": prim},
+        subsets_pairs=[],
+    )
+
+
+def test_hge_near_miss_nondeterministic_base_rhs() -> None:
+    """When the GroupElem base field's Initialize RHS contains a non-
+    deterministic call AND there's a real ``field ^ X`` use site, emit a
+    near-miss explaining the determinism gap."""
+    game = frog_parser.parse_game("""
+        Game G(Group GG, H HH) {
+            ModInt<GG.order> sk;
+            GroupElem<GG> pk;
+
+            Void Initialize() {
+                sk <-uniq[{0}] ModInt<GG.order>;
+                pk = GG.generator ^ HH.det_exp();
+            }
+            Bool Q(GroupElem<GG> z) {
+                return z == pk ^ sk;
+            }
+        }
+        """)
+    # The primitive ``H`` is intentionally NOT registered in the
+    # namespace so that ``HH.det_exp()`` is treated as non-deterministic
+    # (no ``deterministic`` annotation visible at lookup time).
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    HoistGroupExpToInitialize().apply(game, ctx)
+    misses = [nm for nm in ctx.near_misses if nm.transform_name == _HGE_NAME]
+    assert misses, "expected a non-deterministic-RHS near-miss"
+    nm = misses[0]
+    assert nm.variable == "pk"
+    assert "non-deterministic" in nm.reason
+
+
+def test_hge_near_miss_exponent_uses_local() -> None:
+    """When the exponent of ``field ^ X`` references a method-local
+    variable (not a field or parameter), emit a near-miss naming it."""
+    game = frog_parser.parse_game("""
+        Game G(Group GG) {
+            GroupElem<GG> pk;
+
+            Void Initialize() {
+                ModInt<GG.order> b <- ModInt<GG.order>;
+                pk = GG.generator ^ b;
+            }
+            GroupElem<GG> Apply(ModInt<GG.order> k) {
+                ModInt<GG.order> tmp = k;
+                return pk ^ tmp;
+            }
+        }
+        """)
+    ctx = _hge_ctx()
+    HoistGroupExpToInitialize().apply(game, ctx)
+    misses = [nm for nm in ctx.near_misses if nm.transform_name == _HGE_NAME]
+    assert misses, "expected an unstable-exponent near-miss"
+    nm = next(m for m in misses if m.variable == "tmp")
+    assert "stable" in nm.reason
+    assert nm.method == "Apply"
+
+
+def test_hge_near_miss_free_var_mutated_after_base() -> None:
+    """When a free variable of the base or exponent is reassigned after
+    the base's assignment (here: in another oracle), emit a near-miss."""
+    game = frog_parser.parse_game("""
+        Game G(Group GG) {
+            ModInt<GG.order> sk;
+            GroupElem<GG> pk;
+
+            Void Initialize() {
+                sk <-uniq[{0}] ModInt<GG.order>;
+                ModInt<GG.order> b <- ModInt<GG.order>;
+                pk = GG.generator ^ b;
+            }
+            Void Refresh() {
+                sk <-uniq[{0}] ModInt<GG.order>;
+            }
+            Bool Q(GroupElem<GG> z) {
+                return z == pk ^ sk;
+            }
+        }
+        """)
+    ctx = _hge_ctx()
+    HoistGroupExpToInitialize().apply(game, ctx)
+    misses = [nm for nm in ctx.near_misses if nm.transform_name == _HGE_NAME]
+    assert any(nm.variable == "sk" and "mutated" in nm.reason for nm in misses)
+
+
+def test_hge_no_near_miss_when_hoist_succeeds() -> None:
+    """A clean hoist must not produce any HGE near-miss."""
+    game = frog_parser.parse_game("""
+        Game G(Group GG) {
+            ModInt<GG.order> sk;
+            GroupElem<GG> pk;
+
+            Void Initialize() {
+                sk <-uniq[{0}] ModInt<GG.order>;
+                ModInt<GG.order> b <- ModInt<GG.order>;
+                pk = GG.generator ^ b;
+            }
+            Bool Q(GroupElem<GG> z) {
+                return z == pk ^ sk;
+            }
+        }
+        """)
+    ctx = _hge_ctx()
+    HoistGroupExpToInitialize().apply(game, ctx)
+    assert not [nm for nm in ctx.near_misses if nm.transform_name == _HGE_NAME]
+
+
+def test_hge_no_near_miss_when_no_field_caret_use_site() -> None:
+    """Silent for ineligible fields when nothing tries to hoist them."""
+    game = frog_parser.parse_game("""
+        Game G(Group GG, H HH) {
+            GroupElem<GG> pk;
+
+            Void Initialize() {
+                pk = GG.generator ^ HH.det_exp();
+            }
+            GroupElem<GG> Get() {
+                return pk;
+            }
+        }
+        """)
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    HoistGroupExpToInitialize().apply(game, ctx)
+    # No ``pk ^ X`` anywhere: no diagnostic, even though the RHS is
+    # non-deterministic.
+    assert not [nm for nm in ctx.near_misses if nm.transform_name == _HGE_NAME]
+
+
+# ---------------------------------------------------------------------------
+# RefactorGroupElemFieldExp near-misses
+# ---------------------------------------------------------------------------
+
+
+_RGFE_NAME = "Refactor GroupElem Field Exponent"
+
+
+def _rgfe_ctx() -> PipelineContext:
+    return PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+
+
+def test_rgfe_near_miss_exponent_not_multiplication() -> None:
+    """``field1``'s exponent is a binary operation but not multiplication
+    (here, addition); diagnose that the power-of-power identity does
+    not apply."""
+    game = frog_parser.parse_game("""
+        Game G(Group GG) {
+            GroupElem<GG> field1;
+            GroupElem<GG> field2;
+
+            Void Initialize() {
+                ModInt<GG.order> a <- ModInt<GG.order>;
+                ModInt<GG.order> b <- ModInt<GG.order>;
+                field2 = GG.generator ^ a;
+                field1 = GG.generator ^ (a + b);
+            }
+        }
+        """)
+    ctx = _rgfe_ctx()
+    RefactorGroupElemFieldExp().apply(game, ctx)
+    misses = [nm for nm in ctx.near_misses if nm.transform_name == _RGFE_NAME]
+    assert any(
+        nm.variable == "field1" and "multiplication" in nm.reason
+        for nm in misses
+    )
+    assert all(nm.method == "Initialize" for nm in misses)
+
+
+def test_rgfe_near_miss_no_matching_second_field() -> None:
+    """``field1 = g ^ (a * b)`` but no peer field's exponent equals ``a``
+    or ``b``: diagnose that no peer matches either factor."""
+    game = frog_parser.parse_game("""
+        Game G(Group GG) {
+            GroupElem<GG> field1;
+            GroupElem<GG> field2;
+
+            Void Initialize() {
+                ModInt<GG.order> a <- ModInt<GG.order>;
+                ModInt<GG.order> b <- ModInt<GG.order>;
+                ModInt<GG.order> c <- ModInt<GG.order>;
+                field2 = GG.generator ^ c;
+                field1 = GG.generator ^ (a * b);
+            }
+        }
+        """)
+    ctx = _rgfe_ctx()
+    RefactorGroupElemFieldExp().apply(game, ctx)
+    misses = [nm for nm in ctx.near_misses if nm.transform_name == _RGFE_NAME]
+    assert any(
+        nm.variable == "field1" and "no peer" in nm.reason for nm in misses
+    )
+
+
+def test_rgfe_no_near_miss_when_fires() -> None:
+    """Successful refactor must not emit any near-miss for either field."""
+    game = frog_parser.parse_game("""
+        Game G(Group GG) {
+            GroupElem<GG> field1;
+            GroupElem<GG> field2;
+
+            Void Initialize() {
+                ModInt<GG.order> a <- ModInt<GG.order>;
+                ModInt<GG.order> b <- ModInt<GG.order>;
+                field2 = GG.generator ^ a;
+                field1 = GG.generator ^ (a * b);
+            }
+        }
+        """)
+    ctx = _rgfe_ctx()
+    RefactorGroupElemFieldExp().apply(game, ctx)
+    assert not [nm for nm in ctx.near_misses if nm.transform_name == _RGFE_NAME]
+
+
+def test_rgfe_no_near_miss_when_only_one_candidate_field() -> None:
+    """Single GroupElem field with non-multiplication exponent: nothing
+    to refactor against, so stay silent."""
+    game = frog_parser.parse_game("""
+        Game G(Group GG) {
+            GroupElem<GG> field1;
+
+            Void Initialize() {
+                ModInt<GG.order> a <- ModInt<GG.order>;
+                field1 = GG.generator ^ a;
+            }
+        }
+        """)
+    ctx = _rgfe_ctx()
+    RefactorGroupElemFieldExp().apply(game, ctx)
+    assert not [nm for nm in ctx.near_misses if nm.transform_name == _RGFE_NAME]

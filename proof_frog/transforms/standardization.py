@@ -372,14 +372,53 @@ class _StabilizeIndependentStatementsTransformer(BlockTransformer):
         # adj[i] = list of sortable indices j that depend on i
         in_deg: dict[int, int] = {i: 0 for i in sortable_indices}
         adj: dict[int, list[int]] = {i: [] for i in sortable_indices}
+
+        def _add_edge(src: int, dst: int) -> None:
+            if dst not in adj[src]:
+                adj[src].append(dst)
+                in_deg[dst] += 1
+
         for i in sortable_indices:
             node_i = graph.get_node(stmts[i])
             for j in sortable_indices:
                 if i != j:
                     node_j = graph.get_node(stmts[j])
                     if node_i in node_j.in_neighbours:
-                        adj[i].append(j)
-                        in_deg[j] += 1
+                        _add_edge(i, j)
+
+        # Non-sortable statements (if, for, return, ...) stay in place,
+        # but they can *depend* on a sortable stmt that precedes them or
+        # *be depended on* by a sortable stmt that follows them.  If we
+        # reorder the two sortable stmts across such a barrier, the
+        # non-sortable stmt ends up referencing an undefined variable.
+        # Encode the constraint by adding i -> j edges whenever a
+        # non-sortable stmt k with i < k < j witnesses this.
+        sortable_set = set(sortable_indices)
+        for k, stmt_k in enumerate(stmts):
+            if k in sortable_set:
+                continue
+            node_k = graph.get_node(stmt_k)
+            # k depends on some earlier sortable i (node_i in node_k.in_neighbours):
+            # any sortable j > k must sort after i, so add i -> j.
+            for i in sortable_indices:
+                if i >= k:
+                    continue
+                if graph.get_node(stmts[i]) not in node_k.in_neighbours:
+                    continue
+                for j in sortable_indices:
+                    if j > k:
+                        _add_edge(i, j)
+            # k is depended on by some later sortable j (node_k in
+            # node_j.in_neighbours): any sortable i < k must sort before j.
+            for j in sortable_indices:
+                if j <= k:
+                    continue
+                node_j = graph.get_node(stmts[j])
+                if node_k not in node_j.in_neighbours:
+                    continue
+                for i in sortable_indices:
+                    if i < k:
+                        _add_edge(i, j)
 
         # Compute return-statement-based ranks.  Statements contributing
         # to earlier return values sort first, giving a canonical order

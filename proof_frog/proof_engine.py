@@ -427,7 +427,16 @@ class ProofEngine:
                     count += 1  # induction rollover
         return count
 
-    def prove(self, proof_file: frog_ast.ProofFile, proof_path: str = "") -> None:
+    def set_up_proof_context(self, proof_file: frog_ast.ProofFile) -> None:
+        """Populate engine state from a parsed proof file.
+
+        Loads helper games, sampled-let names, `requires:` block,
+        instantiates let-bindings into `proof_namespace`, records types,
+        seeds `variables`/`max_calls`, builds the method lookup, and
+        extracts subset relations. Shared by the prover and the
+        diagnostic CLI/web commands so both see the same simplification
+        context.
+        """
         for game in proof_file.helpers:
             self.definition_namespace[game.name] = game
 
@@ -485,6 +494,9 @@ class ProofEngine:
 
         self.get_method_lookup()
         self._extract_subsets_pairs()
+
+    def prove(self, proof_file: frog_ast.ProofFile, proof_path: str = "") -> None:
+        self.set_up_proof_context(proof_file)
 
         first_step = proof_file.steps[0]
         final_step = proof_file.steps[-1]

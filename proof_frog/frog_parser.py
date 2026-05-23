@@ -1,7 +1,7 @@
 from __future__ import annotations
 import os
 import re
-from typing import Type, Callable
+from typing import Any, Type, Callable, cast
 from antlr4 import (
     FileStream,
     InputStream,
@@ -949,11 +949,47 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             None, self.visit(ctx.lvalue()), self.visit(ctx.expression())
         )
 
+    def _expression_to_type(self, expr_ctx: Any) -> frog_ast.Type:
+        """Extract a Type AST from an `expression` parse-tree context.
+
+        Used by the `<- T \\ S` sugar where the LHS of the BACKSLASH is an
+        expression node but must denote a type. Accepts the typeExp
+        alternative or an lvalueExp that resolves to a user-defined type.
+        """
+        # typeExp has a child `type` rule; visit the type directly.
+        type_child = expr_ctx.type_() if hasattr(expr_ctx, "type_") else None
+        if callable(type_child):
+            t = type_child()
+            if t is not None:
+                return cast(frog_ast.Type, self.visit(t))
+        # Fall back: visit the expression; if it is already a Type node,
+        # return it directly. Non-type expressions on the LHS of `<- T \ S`
+        # are caught later by semantic analysis.
+        result = self.visit(expr_ctx)
+        if isinstance(result, frog_ast.Type):
+            return result
+        raise ValueError(
+            f"Left side of `<- T \\ S` sugar must be a type, got {result!r}"
+        )
+
     def visitSampleStatement(
         self, ctx: PrimitiveParser.SampleStatementContext
     ) -> frog_ast.Sample:
         return frog_ast.Sample(
             None, self.visit(ctx.lvalue()), self.visit(ctx.expression())
+        )
+
+    def visitSampleMinusStatement(
+        self, ctx: PrimitiveParser.SampleMinusStatementContext
+    ) -> frog_ast.UniqueSample:
+        sampled_from_type = self._expression_to_type(ctx.expression(0))
+        exclusion = self.visit(ctx.expression(1))
+        return frog_ast.UniqueSample(
+            None,
+            self.visit(ctx.lvalue()),
+            exclusion,
+            sampled_from_type,
+            surface_form="minus",
         )
 
     def visitBlock(self, ctx: PrimitiveParser.BlockContext) -> frog_ast.Block:
@@ -1022,13 +1058,28 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             self.visit(ctx.expression()),
         )
 
+    def visitVarDeclWithSampleMinusStatement(
+        self,
+        ctx: PrimitiveParser.VarDeclWithSampleMinusStatementContext,
+    ) -> frog_ast.UniqueSample:
+        # `type lv <- T \ S;`  desugars to `type lv <-uniq[S] T;`
+        sampled_from_type = self._expression_to_type(ctx.expression(0))
+        exclusion = self.visit(ctx.expression(1))
+        return frog_ast.UniqueSample(
+            self.visit(ctx.type_()),
+            self.visit(ctx.lvalue()),
+            exclusion,
+            sampled_from_type,
+            surface_form="minus",
+        )
+
     def visitUniqueSampleStatement(
         self, ctx: PrimitiveParser.UniqueSampleStatementContext
     ) -> frog_ast.UniqueSample:
         return frog_ast.UniqueSample(
             self.visit(ctx.type_()[0]),
-            self.visit(ctx.lvalue()[0]),
-            self.visit(ctx.lvalue()[1]),
+            self.visit(ctx.lvalue()),
+            self.visit(ctx.expression()),
             self.visit(ctx.type_()[1]),
         )
 
@@ -1037,8 +1088,8 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
     ) -> frog_ast.UniqueSample:
         return frog_ast.UniqueSample(
             None,
-            self.visit(ctx.lvalue()[0]),
-            self.visit(ctx.lvalue()[1]),
+            self.visit(ctx.lvalue()),
+            self.visit(ctx.expression()),
             self.visit(ctx.type_()),
         )
 
@@ -1309,6 +1360,11 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
                 path = lemma_entry.FILESTRING().getText().strip("'")
                 lemmas.append(frog_ast.Lemma(game, path))
 
+        requirements: list[frog_ast.StructuralRequirement] = []
+        if proof.requirements():
+            for req_entry in proof.requirements().requirement():
+                requirements.append(self.visit(req_entry))
+
         proof_file = frog_ast.ProofFile(
             [self.visit(im) for im in ctx.moduleImport()],
             game_list,
@@ -1318,6 +1374,7 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
             max_calls,
             self.visit(proof.theorem().parameterizedGame()),
             self.visit(proof.gameList()),
+            requirements,
         )
         proof_file.sampled_let_names = sampled_let_names
         return proof_file
@@ -1366,6 +1423,16 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
         self, ctx: ProofParser.StepAssumptionContext
     ) -> frog_ast.StepAssumption:
         return frog_ast.StepAssumption(self.visit(ctx.expression()))
+
+    def visitPrimeRequirement(
+        self, ctx: ProofParser.PrimeRequirementContext
+    ) -> frog_ast.StructuralRequirement:
+        req = frog_ast.StructuralRequirement(
+            kind="prime", target=self.visit(ctx.expression())
+        )
+        req.line_num = ctx.start.line
+        req.column_num = ctx.start.column
+        return req
 
     def visitRegularStep(
         self, ctx: ProofParser.RegularStepContext

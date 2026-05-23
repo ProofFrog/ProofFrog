@@ -29,6 +29,16 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#requirements.
+    def visitRequirements(self, ctx:ProofParser.RequirementsContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#primeRequirement.
+    def visitPrimeRequirement(self, ctx:ProofParser.PrimeRequirementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#lets.
     def visitLets(self, ctx:ProofParser.LetsContext):
         return self.visitChildren(ctx)
@@ -144,6 +154,11 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#varDeclWithSampleMinusStatement.
+    def visitVarDeclWithSampleMinusStatement(self, ctx:ProofParser.VarDeclWithSampleMinusStatementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#varDeclWithSampleStatement.
     def visitVarDeclWithSampleStatement(self, ctx:ProofParser.VarDeclWithSampleStatementContext):
         return self.visitChildren(ctx)
@@ -151,6 +166,11 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#assignmentStatement.
     def visitAssignmentStatement(self, ctx:ProofParser.AssignmentStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#sampleMinusStatement.
+    def visitSampleMinusStatement(self, ctx:ProofParser.SampleMinusStatementContext):
         return self.visitChildren(ctx)
 
 

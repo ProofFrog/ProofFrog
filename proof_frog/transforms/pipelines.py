@@ -23,7 +23,12 @@ from .random_functions import (
     LocalRFToUniform,
     DistinctConstRFToUniform,
     FreshInputRFToUniform,
+    LazyMapToSampledFunction,
+    LazyMapPairToSampledFunction,
+    LocalFunctionFieldToLet,
 )
+from .map_iteration import LazyMapScan
+from .map_reindex import MapKeyReindex
 from .inlining import (
     RedundantCopy,
     IfSplitBranchAssignment,
@@ -94,6 +99,11 @@ CORE_PIPELINE: list[TransformPass] = [
     UniformBijectionElimination(),
     FoldTupleIndex(),
     ExtractRepeatedTupleAccess(),
+    LazyMapScan(),
+    MapKeyReindex(),
+    LazyMapToSampledFunction(),
+    LazyMapPairToSampledFunction(),
+    LocalFunctionFieldToLet(),
     ExtractRFCalls(),
     UniqueRFSimplification(),
     ChallengeExclusionRFToUniform(),

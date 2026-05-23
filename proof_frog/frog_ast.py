@@ -2,7 +2,15 @@ from __future__ import annotations
 import dataclasses
 from enum import Enum
 from abc import ABC, abstractmethod
-from typing import Optional, TypeAlias, Sequence, TypeVar, Generic, Tuple as PyTuple
+from typing import (
+    Literal,
+    Optional,
+    TypeAlias,
+    Sequence,
+    TypeVar,
+    Generic,
+    Tuple as PyTuple,
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -40,7 +48,7 @@ class ASTNode(ABC):
         return all(
             (
                 True
-                if attr in {"line_num", "column_num", "origin"}
+                if attr in {"line_num", "column_num", "origin", "surface_form"}
                 else getattr(self, attr) == getattr(other, attr)
             )
             for attr in self.__dict__
@@ -428,6 +436,22 @@ class Tuple(Expression):
         return f'[{", ".join(str(value) for value in self.values)}]'
 
 
+def tuple_literal_values(node: object) -> list[Expression] | None:
+    """Return the element list if *node* is a tuple literal, else ``None``.
+
+    Set-alias fields whose type is a ``ProductType`` may carry tuple literals
+    in expression positions (field initialisers, assignment RHS) as
+    ``ProductType`` nodes rather than ``Tuple`` nodes, with the elements
+    stored on ``.types``.  This helper hides that quirk so callers can treat
+    both representations uniformly.
+    """
+    if isinstance(node, Tuple):
+        return list(node.values)
+    if isinstance(node, ProductType):
+        return list(node.types)  # type: ignore[arg-type,return-value]
+    return None
+
+
 class ReturnStatement(Statement):
     def __init__(self, expression: Expression):
         super().__init__()
@@ -573,23 +597,30 @@ class Sample(Statement):
 
 
 class UniqueSample(Statement):
+    # pylint: disable=too-many-positional-arguments,too-many-arguments
     def __init__(
         self,
         the_type: Optional[Type],
         var: Expression,
         unique_set: Expression,
         sampled_from: Type,
+        surface_form: Literal["uniq", "minus"] = "uniq",
     ) -> None:
         super().__init__()
         self.the_type = the_type
         self.var = var
         self.unique_set = unique_set
         self.sampled_from = sampled_from
+        # Purely presentational; preserves author's chosen surface syntax
+        # through parse/unparse. Not compared in __eq__ (inherited from AST
+        # base, which ignores non-semantic metadata like `origin`).
+        self.surface_form = surface_form
 
     def __str__(self) -> str:
-        return (
-            f"{self.the_type} " if self.the_type else ""
-        ) + f"{self.var} <-uniq[{self.unique_set}] {self.sampled_from};"
+        prefix = f"{self.the_type} " if self.the_type else ""
+        if self.surface_form == "minus":
+            return prefix + f"{self.var} <- {self.sampled_from} \\ {self.unique_set};"
+        return prefix + f"{self.var} <-uniq[{self.unique_set}] {self.sampled_from};"
 
 
 class Assignment(Statement):
@@ -925,6 +956,22 @@ class Lemma(ASTNode):
         return f"{self.game} by '{self.proof_path}';"
 
 
+class StructuralRequirement(ASTNode):
+    """A structural fact declared in a proof's ``requires:`` block.
+
+    ``kind`` is a tag naming the predicate (initially only ``"prime"``);
+    ``target`` is the expression the predicate applies to (e.g. ``G.order``).
+    """
+
+    def __init__(self, kind: str, target: Expression) -> None:
+        super().__init__()
+        self.kind = kind
+        self.target = target
+
+    def __str__(self) -> str:
+        return f"{self.target} is {self.kind}"
+
+
 class ProofFile(Root):
     # pylint: disable=too-many-positional-arguments,too-many-arguments
     def __init__(
@@ -937,6 +984,7 @@ class ProofFile(Root):
         max_calls: Optional[Variable],
         theorem: ParameterizedGame,
         steps: list[ProofStep],
+        requirements: Optional[list[StructuralRequirement]] = None,
     ) -> None:
         super().__init__()
         self.imports = imports
@@ -948,6 +996,7 @@ class ProofFile(Root):
         self.lemmas = lemmas
         self.theorem = theorem
         self.steps = steps
+        self.requirements = requirements if requirements is not None else []
 
     def __str__(self) -> str:
         output_string = ("\n".join(str(im) for im in self.imports)) + "\n\n"
@@ -967,6 +1016,11 @@ class ProofFile(Root):
 
         if self.max_calls:
             output_string += f"  calls <= {self.max_calls};\n"
+
+        if self.requirements:
+            output_string += "\nrequires:\n"
+            for req in self.requirements:
+                output_string += f"  {req};\n"
 
         if self.lemmas:
             output_string += "\nlemma:\n"

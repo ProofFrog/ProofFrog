@@ -392,6 +392,7 @@ class ProofEngine:
         self.method_lookup: MethodLookup = {}
         self.max_calls: Optional[int] = None
         self.sampled_let_names: set[str] = set()
+        self.requirements: list[frog_ast.StructuralRequirement] = []
         self._total_steps = 0
         self._current_step = 0
 
@@ -432,6 +433,7 @@ class ProofEngine:
 
         # Here, we are substituting the lets with the parameters they are given
         self.sampled_let_names = proof_file.sampled_let_names
+        self.requirements = list(proof_file.requirements)
         for let in proof_file.lets:
             self.proof_let_types.set(let.name, let.type)
             # Sampled lets (e.g. Function<D,R> H <- Function<D,R>) have no value
@@ -457,6 +459,15 @@ class ProofEngine:
                     raise TypeError("Must instantiate either a Primitive or Scheme ")
             else:
                 self.proof_namespace[let.name] = copy.deepcopy(let.value)
+                # For abstract primitive-typed lets (e.g. `TrapdoorTest T;`
+                # with no initializer), bind the primitive itself into
+                # proof_namespace[let.name] so that method-annotation
+                # lookups on calls like `T.Eval(...)` resolve to the
+                # primitive's method signatures.
+                if let.value is None and isinstance(let.type, frog_ast.Variable):
+                    defn = self.definition_namespace.get(let.type.name)
+                    if isinstance(defn, (frog_ast.Primitive, frog_ast.Scheme)):
+                        self.proof_namespace[let.name] = copy.deepcopy(defn)
                 if isinstance(let.type, frog_ast.IntType):
                     if let.value is not None:
                         self.variables[let.name] = let.value
@@ -1207,6 +1218,7 @@ class ProofEngine:
             sort_game_fn=self.sort_game,
             max_calls=self.max_calls,
             sampled_let_names=self.sampled_let_names,
+            requirements=list(self.requirements),
         )
 
     def check_equivalent(

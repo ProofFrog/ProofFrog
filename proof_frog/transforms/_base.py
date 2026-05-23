@@ -57,6 +57,29 @@ class PipelineContext:
     max_calls: Optional[int] = None
     sampled_let_names: set[str] = dataclasses.field(default_factory=set)
     near_misses: list[NearMiss] = dataclasses.field(default_factory=list)
+    requirements: list[frog_ast.StructuralRequirement] = dataclasses.field(
+        default_factory=list
+    )
+
+    def has_prime_order_requirement(self, group_expr: frog_ast.Expression) -> bool:
+        """True if the proof declares ``<group_expr>.order is prime``.
+
+        Accepts either the ``FieldAccess(the_object=<group_expr>, name='order')``
+        form or the canonical ``GroupOrder(<group_expr>)`` form.
+        """
+        for req in self.requirements:
+            if req.kind != "prime":
+                continue
+            target = req.target
+            if (
+                isinstance(target, frog_ast.FieldAccess)
+                and target.name == "order"
+                and target.the_object == group_expr
+            ):
+                return True
+            if isinstance(target, frog_ast.GroupOrder) and target.group == group_expr:
+                return True
+        return False
 
 
 def _lookup_primitive_method(

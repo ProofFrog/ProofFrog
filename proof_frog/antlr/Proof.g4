@@ -8,7 +8,11 @@ proofHelpers: (reduction | game)*;
 
 reduction: REDUCTION id L_PAREN paramList? R_PAREN COMPOSE parameterizedGame AGAINST gameAdversary L_CURLY gameBody R_CURLY;
 
-proof: PROOF COLON (LET COLON lets)? (ASSUME COLON assumptions)? (LEMMA COLON lemmas)? THEOREM COLON theorem  GAMES COLON gameList;
+proof: PROOF COLON (LET COLON lets)? (ASSUME COLON assumptions)? (REQUIRES COLON requirements)? (LEMMA COLON lemmas)? THEOREM COLON theorem  GAMES COLON gameList;
+
+requirements: (requirement SEMI)*;
+requirement: expression IS PRIME  # primeRequirement
+           ;
 
 lets: (letEntry SEMI)*;
 
@@ -53,3 +57,6 @@ INDUCTION: 'induction';
 LEMMA: 'lemma';
 BY: 'by';
 FROM: 'from';
+REQUIRES: 'requires';
+IS: 'is';
+PRIME: 'prime';

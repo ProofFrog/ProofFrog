@@ -134,8 +134,13 @@ class TypeCollector:
 
         In abstract mode this yields ``d<name>`` (e.g. ``dciphertext``) and
         records that distribution for later emission. In concrete mode it
-        yields ``dbs...`` for bitstring types.
+        yields ``dbs...`` for bitstring types. Product EC types
+        (``A * B * ...``) yield ``dA `*` dB `*` ...``.
         """
+        # Product type: recurse on each component.
+        if " * " in ec_type.text and "(" not in ec_type.text:
+            parts = [p.strip() for p in ec_type.text.split(" * ")]
+            return " `*` ".join(self.distr_for(ec_ast.EcType(p)) for p in parts)
         if ec_type.text in self._abstract_seen:
             distr = f"d{ec_type.text}"
             if distr not in self._abstract_distrs:

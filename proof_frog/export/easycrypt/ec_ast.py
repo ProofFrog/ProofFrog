@@ -360,7 +360,14 @@ def _render_section(section: Section) -> list[str]:
     for i, inner in enumerate(section.decls):
         if i > 0:
             out.append("")
-        for line in _render_decl(inner):
+        rendered = _render_decl(inner)
+        # Bare str decls may carry embedded newlines (raw EC source
+        # fragments produced by the per-transform exporter). Split them
+        # so per-line indentation applies to every line.
+        flat: list[str] = []
+        for line in rendered:
+            flat.extend(line.split("\n"))
+        for line in flat:
             out.append(f"  {line}" if line else line)
     footer = "end section" if section.name is None else f"end section {section.name}"
     out.append(f"{footer}.")

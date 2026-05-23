@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pathlib
 from typing import Callable
 
 from . import ec_ast
@@ -48,6 +49,49 @@ def _distr_binding_for(
     return None
 
 
+def _section_header(label: str) -> str:
+    """Render a top-level section divider comment.
+
+    Inserted as a bare-string ``EcTopDecl`` (the pretty-printer renders
+    such elements verbatim) to break the generated EC file into
+    visually-distinct sections.
+    """
+    return f"(* ===== {label} ===== *)"
+
+
+def _describe_step_wrapper(index: int, step: frog_ast.Step) -> str:
+    """Render the per-step description comment for a ``Game_step_<i>``."""
+    if not isinstance(step.challenger, frog_ast.ConcreteGame):
+        return f"(* Game_step_{index} *)"
+    side = step.challenger.which
+    game_file = step.challenger.game.name
+    if step.reduction is None:
+        return f"(* Game_step_{index}: {game_file}.{side} *)"
+    return (
+        f"(* Game_step_{index}: {game_file}.{side} composed with "
+        f"reduction {step.reduction.name} *)"
+    )
+
+
+def _describe_inlining_hop(index: int) -> str:
+    """Render the comment introducing an interchangeability hop's Pr lemma."""
+    return (
+        f"(* Hop {index}: interchangeability. The two adjacent games are "
+        f"equivalent (no advantage). *)"
+    )
+
+
+def _describe_assumption_hop(
+    index: int, assumption_name: str, reduction_name: str
+) -> str:
+    """Render the comment introducing an assumption hop's Pr lemma."""
+    return (
+        f"(* Hop {index}: assumption hop. Bounded by the "
+        f"{assumption_name}_advantage axiom applied to "
+        f"{reduction_name}_Adv. *)"
+    )
+
+
 def _is_assumption_hop(a: frog_ast.Step, b: frog_ast.Step) -> bool:
     """Detect a hop that flips a security side under the same reduction."""
     if a.reduction is None or b.reduction is None:
@@ -63,7 +107,7 @@ def _is_assumption_hop(a: frog_ast.Step, b: frog_ast.Step) -> bool:
 
 
 # pylint: disable=too-many-locals,too-many-statements,too-many-branches
-def export_proof_file(proof_path: str) -> str:
+def export_proof_file(proof_path: str, mode: str = "per-hop") -> str:
     """Parse ``proof_path`` and return the EC source as a string.
 
     The exporter wraps the primitive + game-file interfaces inside an
@@ -71,7 +115,21 @@ def export_proof_file(proof_path: str) -> str:
     scheme's concrete types. Every reference to the cloned theory's
     contents (oracle types, adversary types, eps ops, advantage axiom,
     assumption-game wrappers) is qualified through the clone alias.
+
+    ``mode`` selects the interchangeability-hop discharge strategy:
+
+    * ``"per-hop"`` (default): each interchangeability hop's equiv
+      lemma is discharged by a single ``proc; inline *; <tactic>`` body
+      synthesized by ``tactic_generator``.
+    * ``"per-transform"``: each interchangeability hop additionally
+      emits a chain of intermediate-state modules and micro-lemmas
+      (one per ProofFrog canonicalization-transform application), with
+      the equiv lemma's body discharged via ``transitivity`` through
+      the chain. Reductions and assumption-hop axiom appeals remain
+      unchanged (this is the same EC infrastructure as ``per-hop``).
     """
+    if mode not in ("per-hop", "per-transform"):
+        raise ValueError(f"Unknown export mode {mode!r}")
     proof = frog_parser.parse_proof_file(proof_path)
 
     primitive: frog_ast.Primitive | None = None
@@ -473,6 +531,51 @@ def export_proof_file(proof_path: str) -> str:
                 engine.add_definition(sub_root.get_export_name(), sub_root)
     engine.prove(proof, proof_path)
 
+    # Side-effect accumulator: when ``mode == "per-transform"``, each
+    # interchangeability hop's chain emission appends to this list, and
+    # the assembled file inserts the contents before ``lemmas``.
+    # Tactic-cache sidecar for per-transform mode. Loaded once per
+    # export; consulted on every micro-lemma that falls through
+    # Layer 1. ``requested_cache_keys`` accumulates the lookup keys
+    # (used by ``cache_report.py`` for orphan detection).
+    # pylint: disable=import-outside-toplevel
+    from ..easycrypt_per_transform.tactic_cache import (
+        TacticCache,
+        relative_sidecar_path,
+    )
+
+    proof_path_obj = pathlib.Path(proof_path)
+    tactic_cache = TacticCache.load(relative_sidecar_path(proof_path_obj))
+    sidecar_relpath = str(relative_sidecar_path(proof_path_obj))
+    requested_cache_keys: list[tuple[str, str, str]] = []
+    # Published as a module-level side-channel so ``cache_report.py``
+    # can diff the cache against the latest export without reshaping
+    # this function's signature. Cleared at each export entry; read
+    # immediately after the export call.
+    globals()["_last_requested_cache_keys"] = requested_cache_keys
+
+    chain_extra_decls: list[ec_ast.EcTopDecl] = []
+    # Per-hop precondition/postcondition overrides emitted by the
+    # per-transform chain when the chain artifacts use strengthened
+    # specs (``={glob E1, ...}``) in multi-module proofs. The outer
+    # ``hop_<i>`` lemma must use the same strengthened spec or the
+    # ``apply hop_<i>_chain`` step in its tactic body fails.
+    chain_spec_overrides: dict[int, tuple[str, str]] = {}
+
+    # Module params for non-primary instances used as ``declare module``
+    # inside the section. Reduction-adversary wrappers need these as
+    # explicit parameters so EC doesn't complain about depending on
+    # declared modules. Defined here (before ``_body_for_hop``) so the
+    # per-transform chain emitter can also see them.
+    declared_instance_params: list[ec_ast.ModuleParam] = [
+        ec_ast.ModuleParam(
+            name=inst.let_name,
+            module_type=f"{inst.clone_alias}.{scheme_type_name}",
+        )
+        for inst in instances
+        if inst is not primary
+    ]
+
     def _body_for_hop(
         _i: int, step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> list[str] | None:
@@ -484,6 +587,53 @@ def export_proof_file(proof_path: str) -> str:
         left_ast = engine._get_game_ast(step_a.challenger, step_a.reduction)
         right_ast = engine._get_game_ast(step_b.challenger, step_b.reduction)
         # pylint: enable=protected-access
+        if mode == "per-transform":
+            # pylint: disable=import-outside-toplevel
+            import copy
+
+            from ..easycrypt_per_transform.exporter import emit_chain_for_hop
+
+            _left_canon, left_apps = engine.canonicalize_game_with_states(
+                copy.deepcopy(left_ast)
+            )
+            _right_canon, right_apps = engine.canonicalize_game_with_states(
+                copy.deepcopy(right_ast)
+            )
+            external_module_types: dict[str, str] = {
+                inst.let_name: primitive.name for inst in instances
+            }
+            # In multi-scheme proofs the flat-state modules live inside
+            # a section with ``declare module E1, E2``; EC forbids
+            # section-local modules from depending on declared modules
+            # implicitly, so we pass them as functor parameters.
+            flat_module_params = (
+                list(declared_instance_params) if declared_instance_params else None
+            )
+            info = emit_chain_for_hop(
+                hop_index=_i,
+                left_game=left_ast,
+                right_game=right_ast,
+                left_apps=left_apps,
+                right_apps=right_apps,
+                oracle_name=method_name,
+                eq_args=resolver.precondition_for(step_a),
+                types=top_types,
+                type_of_factory=type_of_factory,
+                external_module_types=external_module_types,
+                method_return_types=method_return_types,
+                flat_module_params=flat_module_params,
+                tactic_cache=tactic_cache,
+                sidecar_relpath=sidecar_relpath,
+            )
+            chain_extra_decls.extend(info.extra_decls)
+            requested_cache_keys.extend(info.requested_keys)
+            if info.pre_override is not None or info.post_override is not None:
+                chain_spec_overrides[_i] = (
+                    info.pre_override or resolver.precondition_for(step_a),
+                    info.post_override or "={res}",
+                )
+            return info.tactic_body
+
         _, left_trace = engine.canonicalize_game_with_trace(left_ast)
         _, right_trace = engine.canonicalize_game_with_trace(right_ast)
         multi = step_a.reduction is not None or step_b.reduction is not None
@@ -496,26 +646,15 @@ def export_proof_file(proof_path: str) -> str:
             has_multi_module=multi and len(instances) > 1,
         )
 
-    lemmas = pt.translate_hops(resolver, proof.steps, _body_for_hop)
+    lemmas = pt.translate_hops(
+        resolver, proof.steps, _body_for_hop, spec_overrides=chain_spec_overrides
+    )
 
     qualified_adv_type_by_game_file: dict[str, str] = {
         name: f"{clone_alias}.{adv}" for name, adv in adv_type_by_game_file.items()
     }
     outer_game_file_name = proof.theorem.name
     qualified_outer_adv = qualified_adv_type_by_game_file[outer_game_file_name]
-
-    # Module params for non-primary instances used as ``declare module``
-    # inside the section. Reduction-adversary wrappers need these as
-    # explicit parameters so EC doesn't complain about depending on
-    # declared modules.
-    declared_instance_params: list[ec_ast.ModuleParam] = [
-        ec_ast.ModuleParam(
-            name=inst.let_name,
-            module_type=f"{inst.clone_alias}.{scheme_type_name}",
-        )
-        for inst in instances
-        if inst is not primary
-    ]
 
     ec_reduction_advs: list[ec_ast.EcTopDecl] = []
     for helper in proof.helpers:
@@ -552,6 +691,7 @@ def export_proof_file(proof_path: str) -> str:
             adv_type = qualified_adv_type_by_game_file[step_game_file]
         else:
             adv_type = qualified_outer_adv
+        ec_game_wrappers.append(_describe_step_wrapper(i, step))
         ec_game_wrappers.append(
             top_modules.translate_game_wrapper(
                 wrapper_name=f"Game_step_{i}",
@@ -579,6 +719,9 @@ def export_proof_file(proof_path: str) -> str:
             assumption_game_file_name = step_a.challenger.game.name
             hop_kinds.append(pt.HopKind.ASSUMPTION)
             assumption_names_by_hop[i] = assumption_game_file_name
+            ec_pr_lemmas.append(
+                _describe_assumption_hop(i, assumption_game_file_name, reduction_name)
+            )
             # Per-hop clone target: which instance's advantage axiom
             # bounds this hop. For a reduction ``R1 compose
             # OneTimeSecrecy(E1)`` hop this is ``E1_c``.
@@ -630,6 +773,18 @@ def export_proof_file(proof_path: str) -> str:
             )
         else:
             hop_kinds.append(pt.HopKind.INLINING)
+            ec_pr_lemmas.append(_describe_inlining_hop(i))
+            # When ``chain_spec_overrides`` registers a per-hop spec
+            # override for this hop (only ever happens in multi-module
+            # mode where the chain emits ``={glob E1, ...}``-strengthened
+            # micros and the outer ``hop_<i>`` is similarly strengthened),
+            # pass the declared-module list as the ``call`` invariant
+            # so the inner ``conseq hop_<i>`` can unify.
+            glob_invariant_modules = (
+                [p.name for p in declared_instance_params]
+                if i in chain_spec_overrides and declared_instance_params
+                else None
+            )
             ec_pr_lemmas.append(
                 pt.translate_inlining_hop_pr_lemma(
                     hop_index=i,
@@ -640,6 +795,7 @@ def export_proof_file(proof_path: str) -> str:
                     scheme_footprint=primary_footprint,
                     wrapper_extra_args=[p.name for p in declared_instance_params]
                     or None,
+                    glob_invariant_modules=glob_invariant_modules,
                 )
             )
 
@@ -679,6 +835,51 @@ def export_proof_file(proof_path: str) -> str:
     )
 
     clones: list[ec_ast.EcTopDecl] = [_instance_clone(inst) for inst in instances]
+
+    # Per-clone distribution axioms. For each cloned distribution
+    # ``<concrete_distr>`` bound in an instance's clone (e.g.
+    # ``dciphertext -> dCiphertextSpace1`` in ``E1_c``), emit
+    #
+    #     axiom <let_name>_<concrete_distr>_funi : is_funiform <concrete_distr>.
+    #     axiom <let_name>_<concrete_distr>_ll   : is_lossless <concrete_distr>.
+    #
+    # These are the hooks per-transform tactic scripts use to discharge
+    # ``rnd{1}`` (drop independent sample) and related goals. They are
+    # redundant in single-clone proofs (the TypeCollector already emits
+    # ``<concrete_distr>_fu``/``<concrete_distr>_ll``), but the explicit
+    # per-clone prefix is uniform across all proofs and immune to
+    # multi-instance naming collisions in proofs with two clones over
+    # the same primitive.
+    clone_axioms: list[ec_ast.EcTopDecl] = []
+    seen_axiom_names: set[str] = set()
+    for inst in instances:
+        for _, concrete_distr in next(
+            (
+                c.op_bindings
+                for c in clones
+                if isinstance(c, ec_ast.Clone) and c.alias == inst.clone_alias
+            ),
+            [],
+        ):
+            # Only emit axioms for atomic distribution ops. Product
+            # distributions (``dA `*` dB``) are constructed from atomic
+            # ones whose axioms are already emitted for the source
+            # instances; emitting an axiom about the product would be
+            # both redundant and a syntactic mess (the ``*`` in the
+            # axiom name is invalid EC).
+            if not concrete_distr.isidentifier():
+                continue
+            for suffix, predicate in (
+                ("funi", "is_funiform"),
+                ("ll", "is_lossless"),
+            ):
+                axiom_name = f"{inst.let_name}_{concrete_distr}_{suffix}"
+                if axiom_name in seen_axiom_names:
+                    continue
+                seen_axiom_names.add(axiom_name)
+                clone_axioms.append(
+                    ec_ast.Axiom(axiom_name, f"{predicate} {concrete_distr}")
+                )
 
     # Process ``requires`` clauses to discover type equalities.
     # ``requires E2.Key subsets E1.Message`` implies that the
@@ -787,12 +988,28 @@ def export_proof_file(proof_path: str) -> str:
         )
 
     proof_decls: list[ec_ast.EcTopDecl] = []
-    proof_decls.extend(ec_reductions)
-    proof_decls.extend(ec_reduction_advs)
+    if ec_reductions:
+        proof_decls.append(_section_header("Reductions"))
+        proof_decls.extend(ec_reductions)
+    if ec_reduction_advs:
+        proof_decls.append(
+            _section_header("Reductions lifted to assumption-adversaries")
+        )
+        proof_decls.extend(ec_reduction_advs)
+    proof_decls.append(_section_header("Game-step wrappers"))
     proof_decls.extend(ec_game_wrappers)
+    # In per-transform mode the chain artifacts (flat-state modules,
+    # micro-lemmas, hop_<i>_chain lemmas) must precede the hop_<i>
+    # equiv lemmas that reference them via ``apply hop_<i>_chain``.
+    if chain_extra_decls:
+        proof_decls.append(_section_header("Per-transform canonicalization chain"))
+        proof_decls.extend(chain_extra_decls)
+    proof_decls.append(_section_header("Per-hop equivalence lemmas"))
     proof_decls.extend(lemmas)
+    proof_decls.append(_section_header("Per-hop probability lemmas"))
     proof_decls.extend(ec_pr_lemmas)
     if main_theorem is not None:
+        proof_decls.append(_section_header("Main theorem"))
         proof_decls.append(main_theorem)
 
     decls: list[ec_ast.EcTopDecl] = []
@@ -800,10 +1017,20 @@ def export_proof_file(proof_path: str) -> str:
     # must precede any op declarations that reference them (e.g. the
     # ``dCiphertextSpace1 : CiphertextSpace1 distr`` that ``top_types.
     # emit()`` produces).
-    decls.extend(set_let_decls)
+    if set_let_decls:
+        decls.append(_section_header("Abstract set declarations"))
+        decls.extend(set_let_decls)
+    decls.append(_section_header("Concrete primitive types"))
     decls.extend(top_types.emit())
+    decls.append(
+        _section_header("Abstract theory: primitive + security games + assumption")
+    )
     decls.append(theory)
+    decls.append(_section_header("Theory instantiation"))
     decls.extend(clones)
+    if clone_axioms:
+        decls.append(_section_header("Per-clone distribution axioms"))
+        decls.extend(clone_axioms)
     if scheme.requirements:
         decls.append(
             "(* NOTE: the FrogLang scheme has `requires` clauses that are "
@@ -812,6 +1039,7 @@ def export_proof_file(proof_path: str) -> str:
             "implied by the `requires` are not expressed in the clones. "
             "Deferred to Phase 5D. *)"
         )
+    decls.append(_section_header("Concrete scheme implementation"))
     decls.append(ec_scheme)
     if declare_modules:
         decls.append(

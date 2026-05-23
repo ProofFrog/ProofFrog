@@ -252,13 +252,28 @@ def prove(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     default=None,
     help="Output path for the .ec file (default: alongside the input, .ec extension).",
 )
-def export(file: str, output: str | None) -> None:
+@click.option(
+    "--mode",
+    type=click.Choice(["per-hop", "per-transform"]),
+    default="per-hop",
+    help="Export granularity: per-hop (default) or per-transform (prototype).",
+)
+def export(file: str, output: str | None, mode: str) -> None:
     """Export a .proof file to EasyCrypt (.ec) source (Phase 1: stubs)."""
     # pylint: disable=import-outside-toplevel
-    from .export.easycrypt.exporter import export_proof_file
+    if mode == "per-transform":
+        from .export.easycrypt_per_transform.exporter import (
+            export_proof_file_per_transform,
+        )
+
+        export_fn = export_proof_file_per_transform
+    else:
+        from .export.easycrypt.exporter import export_proof_file
+
+        export_fn = export_proof_file
 
     try:
-        source = export_proof_file(file)
+        source = export_fn(file)
     except (frog_parser.ParseError, FileNotFoundError, ValueError) as e:
         click.echo(str(e), err=True)
         sys.exit(1)

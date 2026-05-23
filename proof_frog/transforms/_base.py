@@ -255,6 +255,63 @@ def run_pipeline_with_trace(
     return game, PipelineTrace(iterations=iterations, converged=converged)
 
 
+@dataclass
+class TransformApplication:
+    """A single transform application that changed the AST.
+
+    ``game_before`` and ``game_after`` are the game ASTs immediately before
+    and after the named pass fired.  ``iteration`` is 1-indexed for core
+    pipeline applications, and 0 for standardization-pipeline applications
+    (which run once outside the fixed-point loop).
+    """
+
+    iteration: int
+    transform_name: str
+    game_before: frog_ast.Game
+    game_after: frog_ast.Game
+
+
+def run_pipeline_with_states(
+    game: frog_ast.Game,
+    pipeline: list[TransformPass],
+    ctx: PipelineContext,
+    max_iterations: int = _MAX_FIXED_POINT_ITERATIONS,
+) -> tuple[frog_ast.Game, list[TransformApplication]]:
+    """Run transform passes in a fixed-point loop, recording every change.
+
+    For each pass that produces ``new_game != before``, records a
+    ``TransformApplication`` with both ASTs.  Useful for downstream tools
+    (e.g. the per-transform EasyCrypt exporter) that need to emit a proof
+    obligation per individual rewrite.
+    """
+    applications: list[TransformApplication] = []
+    converged = False
+    for iteration in range(max_iterations):
+        new_game = game
+        for pass_ in pipeline:
+            before = new_game
+            new_game = pass_.apply(new_game, ctx)
+            if new_game != before:
+                applications.append(
+                    TransformApplication(
+                        iteration=iteration + 1,
+                        transform_name=pass_.name,
+                        game_before=before,
+                        game_after=new_game,
+                    )
+                )
+        if new_game == game:
+            converged = True
+            break
+        game = new_game
+    if not converged:
+        warnings.warn(
+            "Canonicalization did not converge within " f"{max_iterations} iterations",
+            stacklevel=3,
+        )
+    return game, applications
+
+
 def run_pipeline_until(
     game: frog_ast.Game,
     core_pipeline: list[TransformPass],

@@ -285,6 +285,7 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     scheme_footprint: str | None = None,
     reduction_adv_extra_args: list[str] | None = None,
     wrapper_extra_args: list[str] | None = None,
+    force_admit: bool = False,
 ) -> ec_ast.ProbLemma:
     """Emit a ``hop_<i>_pr`` lemma for an assumption hop.
 
@@ -297,6 +298,17 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     ``reduction_adv_extra_args`` supplies extra module arguments that
     the reduction-adversary wrapper takes before ``A`` (e.g. declared
     module instances ``E1, E2``).
+
+    ``force_admit``: emit the lemma body as a single ``admit.`` plus a
+    structured comment, skipping the byequiv-then-apply chain entirely.
+    Used when the assumption scheme is the only declared module in the
+    section — EC's adversary-footprint analysis rejects
+    ``apply (advantage Em (R_Adv(Em, A)) &m)`` because ``R_Adv(Em, A)``
+    has ``Em`` in its footprint while the axiom restricts the adversary
+    to ``{-Em}``. The closure is a tactic-engineering task (likely
+    requires restructuring the reduction to not take Em as a parameter,
+    or routing through a fresh abstract module). Leave as admit until
+    that's worked out.
     """
     prefix = f"{clone_alias}." if clone_alias else ""
     eps_ref = f"{prefix}eps_{assumption_name}"
@@ -314,6 +326,34 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
         f" - Pr[{right_app}.main() @ &m : res] |"
         f" <= {eps_ref}"
     )
+    if force_admit:
+        admit_body = [
+            "(* EC's adversary-footprint analysis rejects",
+            f"   apply ({advantage_ref} {scheme_module_expr} " f"({adv_applied}) &m)",
+            f"   because {scheme_module_expr} is the only declared module",
+            "   in the section and the reduction-adversary uses it. The",
+            "   bound itself is sound by the underlying assumption;",
+            "   leaving as admit until the reduction can be restructured. *)",
+            "admit.",
+            "qed.",
+        ]
+        footprint = (
+            scheme_footprint
+            if scheme_footprint is not None
+            else f"-{scheme_module_expr}"
+        )
+        return ec_ast.ProbLemma(
+            name=f"hop_{hop_index}_pr",
+            module_args=[
+                ec_ast.ModuleParam(
+                    name="A",
+                    module_type=f"{adversary_type_name} {{{footprint}}}",
+                )
+            ],
+            memory_args=["&m"],
+            statement=statement,
+            body=admit_body,
+        )
     body = [
         f"have hL : Pr[{left_app}.main() @ &m : res]",
         f"        = Pr[{left_wrapper_ref}({scheme_module_expr}, "

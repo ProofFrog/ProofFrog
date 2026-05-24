@@ -569,7 +569,56 @@ def download_examples(directory: str, force: bool, ref: str | None) -> None:
         click.echo(f"Extraction failed: {e}", err=True)
         sys.exit(1)
 
+    _write_claude_docs(target)
+
     click.echo(f"Examples downloaded to '{directory}'.")
+
+
+def _write_claude_docs(target: Path) -> None:
+    """Materialize the bundled agent docs into <target>/claude_docs/ and write
+    a top-level CLAUDE.md router. Silently no-op if the bundle is missing
+    (e.g. running from a source tree without `make claude-docs` having been run).
+    """
+    # pylint: disable=import-outside-toplevel
+    from importlib.resources import files
+
+    try:
+        docs_root = files("proof_frog").joinpath("claude_docs")
+        if not docs_root.is_dir():
+            return
+    except (FileNotFoundError, ModuleNotFoundError):
+        return
+
+    out_dir = target / "claude_docs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    wrote_any = False
+    for entry in docs_root.iterdir():
+        if entry.name.endswith(".md"):
+            (out_dir / entry.name).write_text(entry.read_text(encoding="utf-8"))
+            wrote_any = True
+
+    if not wrote_any:
+        return
+
+    router = (
+        "# ProofFrog examples\n\n"
+        "This directory holds the ProofFrog examples repository. The "
+        "`claude_docs/` subdirectory contains agent-facing instructions "
+        "shipped with the installed `proof_frog` package.\n\n"
+        "Routing for AI agents:\n\n"
+        "- Writing or debugging a ProofFrog proof: read "
+        "[claude_docs/WRITING_PROOFS.md](claude_docs/WRITING_PROOFS.md) and "
+        "[claude_docs/MCP_GUIDE.md](claude_docs/MCP_GUIDE.md); skim "
+        "[claude_docs/TRANSFORMS.md](claude_docs/TRANSFORMS.md); pull "
+        "[claude_docs/FROGLANG_REFERENCE.md](claude_docs/FROGLANG_REFERENCE.md) "
+        "for semantics questions.\n"
+        "- Closing EasyCrypt admits: read "
+        "[claude_docs/EASYCRYPT_TACTICS.md](claude_docs/EASYCRYPT_TACTICS.md) "
+        "and the EasyCrypt MCP section of "
+        "[claude_docs/MCP_GUIDE.md](claude_docs/MCP_GUIDE.md).\n\n"
+        "Humans should read the manual at https://prooffrog.github.io.\n"
+    )
+    (target / "CLAUDE.md").write_text(router)
 
 
 @cli.command()

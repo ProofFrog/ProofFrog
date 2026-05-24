@@ -7,10 +7,7 @@ proofOutput.txt
 .vscode
 .worktrees
 extras
-*~
-
-# Emacs
-emacs/*.elc
+proof_frog/claude_docs
 
 # VSCode extension
 vscode-extension/node_modules/

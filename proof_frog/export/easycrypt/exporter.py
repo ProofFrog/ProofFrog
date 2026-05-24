@@ -828,15 +828,6 @@ def export_proof_file(proof_path: str, mode: str = "per-hop") -> str:
                 (assumption_game_file_name, right_side)
             ]
             reverse_direction = left_side == gf_a.games[1].name
-            # EC's adversary-footprint rule rejects ``apply (advantage Em
-            # (R_Adv(Em, A)) &m)`` when the only declared module in the
-            # section is the same module Em the axiom restricts the
-            # adversary against (``{-Em}``). Detect that and admit the
-            # hop_pr lemma rather than emit a body that won't close.
-            declared_names = {p.name for p in declared_instance_params}
-            force_admit = (
-                assumption_scheme_expr in declared_names and len(declared_names) == 1
-            )
             ec_pr_lemmas.append(
                 pt.translate_assumption_hop_pr_lemma(
                     hop_index=i,
@@ -855,7 +846,6 @@ def export_proof_file(proof_path: str, mode: str = "per-hop") -> str:
                     or None,
                     wrapper_extra_args=[p.name for p in declared_instance_params]
                     or None,
-                    force_admit=force_admit,
                 )
             )
         else:

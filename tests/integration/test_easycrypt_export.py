@@ -471,7 +471,7 @@ def test_export_tripling_prg_does_not_crash() -> None:
 def test_export_tripling_prg_per_transform_typechecks_in_easycrypt(
     tmp_path: Path,
 ) -> None:
-    """EC accepts the TriplingPRG per-transform export.
+    """EC accepts the TriplingPRG per-transform export with 0 admits.
 
     All three interchangeability hops (``hop_0``, ``hop_2``, ``hop_4``)
     close end-to-end: ``hop_0``'s chain runs through canned + parametric
@@ -480,21 +480,21 @@ def test_export_tripling_prg_per_transform_typechecks_in_easycrypt(
     synthesizers (using the slice/concat round-trip + distribution-split
     axioms emitted by ``TypeCollector.emit()``).
 
-    The remaining two admits — ``hop_1_pr`` and ``hop_3_pr`` — are the
-    single-declared-module assumption-hop blocker that cannot be closed
-    without restructuring the reduction (the ``R1_Adv`` / ``R3_Adv``
-    lifts reference the declared module ``G``, which the PRGSecurity
-    advantage axiom's ``{-G}`` restriction forbids). The test asserts
-    exactly two ``admit.``s remain so any regression in the parametric
-    synthesizers (which would add chain-level admits back) is caught.
+    The two assumption hops (``hop_1_pr``, ``hop_3_pr``) also close: the
+    advantage axiom emitted by
+    ``translate_assumption_axioms_theory`` no longer carries the
+    ``{-Em}`` adversary-footprint restriction, which would otherwise
+    block ``R1_Adv(G, A)`` (whose body references the declared module
+    ``G``). The restriction was redundant for ProofFrog's stateless
+    primitive convention and prevented PRG-hybrid-style reductions
+    from applying the axiom.
     """
     output = per_transform_exporter.export_proof_file_per_transform(str(TPRG_PROOF))
-    admit_count = output.count("admit.")
-    assert admit_count == 2, (
-        f"TriplingPRG per-transform export should have exactly 2 admits "
-        f"(the two single-declared-module assumption hops); got "
-        f"{admit_count}. The Split/Merge Uniform Samples parametric "
-        f"synthesizers or their type-collector axioms may have regressed."
+    assert "admit." not in output, (
+        "TriplingPRG per-transform export should have no admits; "
+        "regression in the parametric synthesizers, type-collector "
+        "axioms, or the relaxed advantage-axiom emission may have "
+        "reintroduced one."
     )
     ec_file = tmp_path / "triplingprg_per_transform.ec"
     ec_file.write_text(output)

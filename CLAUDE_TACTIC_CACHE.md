@@ -1,9 +1,7 @@
 # Per-transform EasyCrypt tactic cache — Claude workflow
 
 This document is for Claude sessions whose job is to close residual
-`admit.` lines in a per-transform EasyCrypt export. It pairs with the
-infrastructure described in
-[`extras/docs/plans/todo/2026-05-23-per-transform-tactic-cache.md`](extras/docs/plans/todo/2026-05-23-per-transform-tactic-cache.md).
+`admit.` lines in a per-transform EasyCrypt export.
 
 ## When to read this doc
 

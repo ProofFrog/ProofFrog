@@ -290,19 +290,19 @@ def test_export_chained_encryption_per_transform_produces_chain_lemmas() -> None
 def test_export_chained_encryption_per_transform_typechecks_in_easycrypt(
     tmp_path: Path,
 ) -> None:
-    """EC verification of per-transform CES.
+    """EC verification of per-transform CES, end-to-end with zero admits.
 
-    The inline-style canned tactics handle abstract module calls in
-    multi-module proofs (strengthened ``={glob ...}`` specs, ``proc; sp;
-    wp; sim.``, and ``swap{n}`` permutations for reordering transforms).
-    EC accepts the file with the 6 documented admits remaining (3 ×
-    ``Topological Sorting`` permutation extraction, 1 × ``Merge Product
-    Samples`` parametric synthesis, 2 × multi-module assumption hops);
-    EC stops at the first ``admit`` so we expect a non-zero exit but no
-    ``cannot save an incomplete proof`` / ``[by]: cannot close goals``
-    style errors *before* the first admit.
+    The per-transform chain + Layer-2 tactic cache cover all interchange-
+    ability micro-lemmas (Topological Sorting, Merge Product Samples,
+    etc.), and the multi-module assumption hops (``hop_1_pr``,
+    ``hop_3_pr``) close via the byequiv/inline*/sim + advantage-axiom
+    template. The file must exit 0 in EC with no ``admit.`` remaining.
     """
     output = per_transform_exporter.export_proof_file_per_transform(str(CES_PROOF))
+    assert "admit." not in output, (
+        f"CES per-transform export still contains admit; the 0-admit "
+        f"baseline has regressed:\n{output}"
+    )
     ec_file = tmp_path / "ces_per_transform.ec"
     ec_file.write_text(output)
     result = subprocess.run(
@@ -317,8 +317,6 @@ def test_export_chained_encryption_per_transform_typechecks_in_easycrypt(
         f"EC parse error in per-transform CES output:\nstderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout}"
     )
-    # All non-admit lemmas now close — exit 0 — guarding against any
-    # regression in the inline-style canned-tactic robustness work.
     assert result.returncode == 0, (
         f"EC verification failed (exit {result.returncode}); inline-style "
         f"micro-lemmas or _pr lemmas may have regressed.\n"
@@ -391,32 +389,14 @@ def test_export_otpsecurelr_uses_theory_and_clone() -> None:
 
 def test_export_chained_encryption_per_transform_uses_tactic_cache() -> None:
     """With the CES sidecar checked in, the per-transform export must
-    consume the cached Topological Sorting tactics — no ``tactic-cache
-    miss`` blocks for that transform should remain.
-
-    Today the only residual cache miss is the ``Merge Product Samples``
-    micro-lemma (intentionally deferred); the 2 multi-module assumption
-    hops admit via a different path (no diagnostic comment).
+    consume all cached tactics — no ``tactic-cache miss`` blocks should
+    remain. Covers both Topological Sorting and Merge Product Samples.
     """
     output = per_transform_exporter.export_proof_file_per_transform(str(CES_PROOF))
     miss_blocks = output.count("tactic-cache miss")
-    # The Topological Sorting cache entries should resolve; only Merge
-    # Product Samples (1 lemma) is allowed to remain a miss.
-    assert miss_blocks <= 1, (
-        f"Expected ≤1 cache misses (Merge Product Samples only); got "
-        f"{miss_blocks}.\n{output}"
+    assert miss_blocks == 0, (
+        f"Expected 0 cache misses; got {miss_blocks}.\n{output}"
     )
-    # And no Topological Sorting block should appear in a miss
-    # diagnostic — they must all be Layer-2 hits now.
-    for block_start in range(len(output)):
-        idx = output.find("tactic-cache miss", block_start)
-        if idx == -1:
-            break
-        block = output[idx : idx + 500]
-        assert "Topological Sorting" not in block, (
-            f"Topological Sorting cache lookup unexpectedly missed:\n{block}"
-        )
-        block_start = idx + 1
 
 
 def test_export_otpsecure_per_transform_no_layer2_consultation() -> None:

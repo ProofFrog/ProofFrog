@@ -822,6 +822,14 @@ def _expr_signature(
         )
     if isinstance(expr, frog_ast.Tuple):
         return ("tup", tuple(_expr_signature(v) for v in expr.values))
+    if isinstance(expr, frog_ast.Type):
+        # ``frog_ast`` types (e.g. ``BitStringType``) lack ``__repr__``
+        # overrides, so a bare ``repr`` includes the object's memory
+        # address — which makes two structurally-equal types compare
+        # unequal across deepcopies. Use ``str`` (which all types
+        # implement structurally) so sample/declaration signatures with
+        # bitstring types match by shape rather than identity.
+        return ("type", str(expr))
     return ("other", repr(expr))
 
 

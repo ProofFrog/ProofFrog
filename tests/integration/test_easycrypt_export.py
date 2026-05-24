@@ -20,6 +20,7 @@ OTP_PROOF = REPO_ROOT / "examples" / "joy" / "Proofs" / "Ch2" / "OTPSecure.proof
 OTP_LR_PROOF = REPO_ROOT / "examples" / "joy" / "Proofs" / "Ch2" / "OTPSecureLR.proof"
 CES_PROOF = EXAMPLES / "joy" / "Proofs" / "Ch2" / "ChainedEncryptionSecure.proof"
 TPRG_PROOF = REPO_ROOT / "examples" / "Proofs" / "PRG" / "TriplingPRG_PRGSecurity.proof"
+PRG_5_8_A_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_a.proof"
 PRG_5_8_B_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_b.proof"
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
@@ -565,6 +566,104 @@ def test_export_5_8_b_partial_split_closes_via_augmented_intermediate() -> None:
         f"Expected zero admits after the partial-split synthesizer "
         f"closes hop_2 via the augmented intermediate. Got "
         f"{output.count('admit.')} admits."
+    )
+
+
+def test_export_5_8_a_partial_split_mid_gap_with_modcall_tail_closes() -> None:
+    """``5_8_a`` exercises the *mid-gap* partial-split shape combined
+    with a *module-call tail* — the partial-split synthesizer's hardest
+    case so far.
+
+    The proof's R1 reduction samples a ``BS<3*lambda>`` challenger
+    output and slices it at ``[0, lambda)`` and ``[2*lambda, 3*lambda)``
+    — leaving the *middle* window ``[lambda, 2*lambda)`` unused. Each
+    used slice is then passed to ``G.evaluate`` and the two outputs are
+    concatenated. The engine emits a ``Split Uniform Samples`` with
+    ``|L| + |R| = 2*lambda < 3*lambda = |RES|`` *and* the slices wrapped
+    in module calls.
+
+    Locks in:
+
+    * The mid-gap source layout produces a 3-way concat3 op with piece
+      order ``(L, GAP, R)`` (not ``(L, R, GAP)``).
+    * The module-call-tail branch fires (Mid/Aug bodies splice the
+      ``G.evaluate`` calls; the return concat uses
+      ``concat_<eval_ret>_<eval_ret>_to_<ret_type>``, not the unsound
+      ``concat_<L>_<R>_to_<ret_type>``).
+    * The augmented intermediate's ``aug_to_right`` emits a
+      ``swap{1} 2 1.`` to move the dead gap sample to the tail before
+      dropping it via ``rnd{1}``.
+    * Zero admits in the final export.
+    """
+    output = per_transform_exporter.export_proof_file_per_transform(
+        str(PRG_5_8_A_PROOF)
+    )
+    assert "dbs_6_lambda_split_bs_lambda_bs_lambda" not in output, (
+        "Unsound 2-way split axiom regressed: the partial-split path "
+        "must not emit a ``concat_<L>_<R>_to_<ret_type>`` axiom when "
+        "the return is ``concat (eval_ret) (eval_ret)`` with "
+        "|L|+|R| != |ret_type|."
+    )
+    assert "concat_bs_lambda_bs_lambda_to_bs_6_lambda" not in output, (
+        "Unsound 2-way concat op for the module-call-tail partial "
+        "split regressed."
+    )
+    assert (
+        "concat3_bs_lambda_bs_lambda_bs_lambda_to_bs_3_lambda" in output
+    ), (
+        "Expected the 3-way concat op for the mid-gap partial-split "
+        "path; the augmented-intermediate synthesizer did not fire."
+    )
+    assert "swap{1} 2 1." in output, (
+        "Expected ``aug_to_right`` to emit ``swap{1} 2 1.`` for the "
+        "mid-gap layout (so the dead gap sample lands at the tail "
+        "before being dropped via ``rnd{1}``)."
+    )
+    assert "admit." not in output, (
+        f"Expected zero admits after the partial-split synthesizer "
+        f"closes hop_2 via the augmented intermediate. Got "
+        f"{output.count('admit.')} admits."
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_export_5_8_a_partial_split_typechecks_in_easycrypt(
+    tmp_path: Path,
+) -> None:
+    """EC accepts the ``5_8_a`` per-transform export end-to-end with
+    zero admits.
+
+    The mid-gap layout + module-call tail variants of
+    :func:`_partial_split_helpers_modcall` (and the structural fix to
+    ``_expr_signature`` that lets the swap-detection find the
+    Inline-Single-Use-Variables permutation modulo the hoist's
+    fresh-name rename) together close every hop.
+    """
+    output = per_transform_exporter.export_proof_file_per_transform(
+        str(PRG_5_8_A_PROOF)
+    )
+    ec_file = tmp_path / "5_8_a_per_transform.ec"
+    ec_file.write_text(output)
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    combined = result.stderr + result.stdout
+    assert "parse error" not in combined, (
+        f"EC parse error in per-transform 5_8_a output:\n"
+        f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
+    )
+    assert result.returncode == 0, (
+        f"EC verification failed (exit {result.returncode}); the "
+        f"non-admit portions of the per-transform 5_8_a export may "
+        f"have regressed.\nstderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
     )
 
 

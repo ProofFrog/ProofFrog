@@ -473,15 +473,29 @@ def test_export_tripling_prg_per_transform_typechecks_in_easycrypt(
 ) -> None:
     """EC accepts the TriplingPRG per-transform export.
 
-    Residual admits remain on the three interchangeability hops
-    (``hop_0``, ``hop_2``, ``hop_4``): the per-transform chain currently
-    falls back to a single ``admit.`` per hop whenever any intermediate
-    flat-state body contains a FrogLang construct the EC expression
-    translator does not yet handle (here: ``Slice`` on bitstrings). The
-    structural translation (theory, clones, reductions, wrappers,
-    Pr-lemmas, main theorem) verifies end-to-end.
+    All three interchangeability hops (``hop_0``, ``hop_2``, ``hop_4``)
+    close end-to-end: ``hop_0``'s chain runs through canned + parametric
+    tactics, and ``hop_2`` / ``hop_4`` are closed by the
+    ``Split Uniform Samples`` / ``Merge Uniform Samples`` parametric
+    synthesizers (using the slice/concat round-trip + distribution-split
+    axioms emitted by ``TypeCollector.emit()``).
+
+    The remaining two admits — ``hop_1_pr`` and ``hop_3_pr`` — are the
+    single-declared-module assumption-hop blocker that cannot be closed
+    without restructuring the reduction (the ``R1_Adv`` / ``R3_Adv``
+    lifts reference the declared module ``G``, which the PRGSecurity
+    advantage axiom's ``{-G}`` restriction forbids). The test asserts
+    exactly two ``admit.``s remain so any regression in the parametric
+    synthesizers (which would add chain-level admits back) is caught.
     """
     output = per_transform_exporter.export_proof_file_per_transform(str(TPRG_PROOF))
+    admit_count = output.count("admit.")
+    assert admit_count == 2, (
+        f"TriplingPRG per-transform export should have exactly 2 admits "
+        f"(the two single-declared-module assumption hops); got "
+        f"{admit_count}. The Split/Merge Uniform Samples parametric "
+        f"synthesizers or their type-collector axioms may have regressed."
+    )
     ec_file = tmp_path / "triplingprg_per_transform.ec"
     ec_file.write_text(output)
     result = subprocess.run(

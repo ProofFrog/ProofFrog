@@ -23,6 +23,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Callable
 
+from ..easycrypt.type_collector import TypeCollector
 from ...transforms._base import TransformApplication
 from . import parametric_tactics
 
@@ -52,15 +53,26 @@ TRANSFORM_BUCKET: dict[str, Bucket] = {
     "Variable Standardization": Bucket.CANNED,
     "Standardize Field Names": Bucket.CANNED,
     "Subset Type Normalization": Bucket.CANNED,
+    # ``Symbolic Computation`` and ``Normalize Commutative Chains`` only
+    # rewrite at the FrogLang type level (sympy-canonical bitstring
+    # parameterizations) or commute already-equal sub-expressions; on the
+    # EC body they are no-ops once the expression translator canonicalizes
+    # int arguments to slice/concat. ``proc; sim.`` closes them.
+    "Symbolic Computation": Bucket.CANNED,
+    "Normalize Commutative Chains": Bucket.CANNED,
     # Parametric (Bucket 1b): canned template with slots from the diff.
     "Uniform XOR Simplification": Bucket.CANNED,
+    # Parametric synthesizer in ``parametric_tactics`` emits a
+    # ``transitivity`` + ``rndsem`` + ``rnd`` tactic that uses the per-
+    # clone distribution-split axiom plus slice/concat round-trip axioms
+    # (emitted by ``TypeCollector.emit()``) to close the equiv.
+    "Merge Uniform Samples": Bucket.CANNED,
+    "Split Uniform Samples": Bucket.CANNED,
     # --- Bucket 2: interactive/cached ---
     "Uniform ModInt Simplification": Bucket.INTERACTIVE,
     "Uniform GroupElem Simplification": Bucket.INTERACTIVE,
     "Simplifying Splices": Bucket.INTERACTIVE,
-    "Merge Uniform Samples": Bucket.INTERACTIVE,
     "Merge Product Samples": Bucket.INTERACTIVE,
-    "Split Uniform Samples": Bucket.INTERACTIVE,
     "Sink Uniform Sample": Bucket.INTERACTIVE,
     "XOR Cancellation": Bucket.INTERACTIVE,
     "XOR Identity": Bucket.INTERACTIVE,
@@ -95,6 +107,11 @@ CANNED_TACTIC: dict[str, list[str]] = {
     # ``requires`` subsets clause). EC's clone-driven type aliases make
     # this a structural no-op on both sides.
     "Subset Type Normalization": ["proc; sim."],
+    # No-op on the EC body once int args to slice/concat are sympy-
+    # canonicalized (see ``expr_translator._canonical_int_str``); both
+    # bodies are syntactically identical so ``sim`` matches them.
+    "Symbolic Computation": ["proc; sim."],
+    "Normalize Commutative Chains": ["proc; sim."],
     # Pure-reorder transforms are handled in ``exporter._tactic_for`` by
     # synthesizing ``swap{1} pos delta.`` tactics from the AST diff
     # (``_permutation_swaps``); the empty list here keeps them
@@ -109,10 +126,20 @@ CANNED_TACTIC: dict[str, list[str]] = {
 
 
 # Bucket 1b — parametric tactic synthesizers. Each callable takes the
-# TransformApplication and returns the rendered tactic body (or None to
-# fall back to admit if synthesis fails).
-PARAMETRIC_TACTIC: dict[str, Callable[[TransformApplication], list[str] | None]] = {
+# TransformApplication plus an optional TypeCollector (for synthesizers
+# that need to look up bit-length expressions or register slice/concat
+# ops on demand) and returns the rendered tactic body (or None to fall
+# back to admit if synthesis fails).
+PARAMETRIC_TACTIC: dict[
+    str,
+    Callable[[TransformApplication, TypeCollector | None], list[str] | None],
+] = {
     "Uniform XOR Simplification": parametric_tactics.uniform_xor_tactic,
+    "Inline Single-Use Variables": (
+        parametric_tactics.inline_single_use_variables_tactic
+    ),
+    "Merge Uniform Samples": parametric_tactics.merge_uniform_samples_tactic,
+    "Split Uniform Samples": parametric_tactics.split_uniform_samples_tactic,
 }
 
 
@@ -122,18 +149,25 @@ def classify(transform_name: str) -> Bucket:
 
 
 def tactic_body(
-    transform_name: str, app: TransformApplication | None = None
+    transform_name: str,
+    app: TransformApplication | None = None,
+    types: TypeCollector | None = None,
 ) -> list[str] | None:
     """Return the canned tactic body for ``transform_name``.
 
-    Tries static (1a) first; if the transform has a parametric synthesizer
-    (1b) and ``app`` is provided, calls it with the application's diff.
-    Returns ``None`` if no canned body is available (caller falls back to
-    ``admit.``).
+    Tries the parametric synthesizer (1b) first when ``app`` is provided
+    — synthesizers inspect the application's AST and tune the tactic to
+    the specific structure, so they should win when both kinds are
+    registered for a transform. ``types`` is passed through for
+    synthesizers that need it (Split/Merge Uniform Samples). Falls back
+    to the static body (1a) otherwise. Returns ``None`` if neither is
+    available (caller falls back to ``admit.``).
     """
+    if app is not None and transform_name in PARAMETRIC_TACTIC:
+        synthesized = PARAMETRIC_TACTIC[transform_name](app, types)
+        if synthesized is not None:
+            return synthesized
     static = CANNED_TACTIC.get(transform_name)
     if static:
         return static
-    if app is not None and transform_name in PARAMETRIC_TACTIC:
-        return PARAMETRIC_TACTIC[transform_name](app)
     return None

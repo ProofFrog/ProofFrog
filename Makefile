@@ -15,7 +15,7 @@ test:
 	$(PYTHON) -m pytest
 
 check-tactic-cache:
-	$(PYTHON) -m proof_frog.export.easycrypt_per_transform.cache_report
+	$(PYTHON) -m proof_frog.export.easycrypt.cache_report
 
 vscode-extension:
 	cd vscode-extension && npm install && npm run bundle

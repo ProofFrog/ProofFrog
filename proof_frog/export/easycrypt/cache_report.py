@@ -49,16 +49,16 @@ class _Report:
 
 
 def _harvest_keys(proof_path: pathlib.Path) -> set[tuple[str, str, str]]:
-    """Run the per-transform export and return every cache key consulted.
+    """Run the export and return every cache key consulted.
 
-    The unified exporter publishes the list as
+    The exporter publishes the list as
     ``easycrypt.exporter._last_requested_cache_keys`` after each call;
     we read it immediately after invoking the export.
     """
     # pylint: disable=import-outside-toplevel
-    from ..easycrypt import exporter as ec_exporter
+    from . import exporter as ec_exporter
 
-    ec_exporter.export_proof_file(str(proof_path), "per-transform")
+    ec_exporter.export_proof_file(str(proof_path))
     return set(getattr(ec_exporter, "_last_requested_cache_keys", []))
 
 

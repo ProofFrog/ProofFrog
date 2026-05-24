@@ -1,19 +1,16 @@
 # pylint: disable=duplicate-code
-"""Per-transform EasyCrypt exporter.
+"""Per-transform EasyCrypt chain emitter.
 
 Emits one EC module per intermediate state of the engine's
 canonicalization pipeline and chains them together via per-transform
 ``micro_*`` lemmas plus a top-level ``hop_<i>_chain`` lemma.
 
-The per-transform exporter is a thin wrapper that delegates to the
-unified pipeline in
-:func:`proof_frog.export.easycrypt.exporter.export_proof_file` with
-``mode="per-transform"``. The chain artifacts for each interchangeability
-hop are emitted by :func:`emit_chain_for_hop`, which uses the shared
-per-hop translators (``TypeCollector`` / ``ModuleTranslator``) to render
-each flat intermediate-state module. A small pre-pass mangles synthetic
-identifiers (``E.KeyGen@k0``) and hoists nested module calls so the
-shared statement translator can consume the canonical AST.
+The chain artifacts for each interchangeability hop are emitted by
+:func:`emit_chain_for_hop`, which uses the shared translators
+(``TypeCollector`` / ``ModuleTranslator``) to render each flat
+intermediate-state module. A small pre-pass mangles synthetic identifiers
+(``E.KeyGen@k0``) and hoists nested module calls so the shared statement
+translator can consume the canonical AST.
 """
 
 from __future__ import annotations
@@ -25,9 +22,9 @@ from typing import Callable
 
 from ... import frog_ast
 from ...transforms._base import TransformApplication
-from ..easycrypt import ec_ast
-from ..easycrypt import module_translator as mt
-from ..easycrypt import type_collector as tc
+from . import ec_ast
+from . import module_translator as mt
+from . import type_collector as tc
 from .canonical_form import _normalize_for_ec, canonical_text
 from .tactic_cache import TacticCache
 from .transform_buckets import PARAMETRIC_TACTIC, Bucket, classify, tactic_body
@@ -55,26 +52,6 @@ class _MicroLemma:
     transform_name: str
     body: list[str]
     bucket: Bucket
-
-
-def export_proof_file_per_transform(proof_path: str) -> str:
-    """Export the proof in per-transform mode.
-
-    Thin wrapper that delegates to the unified pipeline in
-    ``proof_frog.export.easycrypt.exporter.export_proof_file`` with
-    ``mode="per-transform"``. The unified pipeline produces the same
-    structured EC output as ``per-hop`` mode (theory clone, reduction
-    modules, reduction-as-adversary lifts, game-step wrappers,
-    assumption-hop axiom appeals, main theorem), and additionally
-    emits per-transform chain artifacts (flat-state modules,
-    micro-lemmas, ``hop_<i>_chain`` lemmas) for each interchangeability
-    hop. Each ``hop_<i>`` equiv lemma's proof body is then a short
-    ``transitivity`` bridge that funnels through the chain.
-    """
-    # pylint: disable=import-outside-toplevel,cyclic-import
-    from ..easycrypt.exporter import export_proof_file
-
-    return export_proof_file(proof_path, mode="per-transform")
 
 
 # ---------------------------------------------------------------------------
@@ -869,7 +846,7 @@ def _render_module_decl(module: ec_ast.Module) -> list[str]:
     raw EC fragments.
     """
     # pylint: disable=import-outside-toplevel
-    from ..easycrypt.ec_ast import pretty_print, EcFile
+    from .ec_ast import pretty_print, EcFile
 
     rendered = pretty_print(EcFile(requires=[], decls=[module]))
     # Strip the auto-generated header and trailing blank.

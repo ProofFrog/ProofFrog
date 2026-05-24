@@ -10,7 +10,7 @@ admits" surfaced during stress-testing on
 
 from __future__ import annotations
 
-from proof_frog.export.easycrypt_per_transform.transform_buckets import (
+from proof_frog.export.easycrypt.transform_buckets import (
     CANNED_TACTIC,
     PARAMETRIC_TACTIC,
     TRANSFORM_BUCKET,

@@ -20,6 +20,7 @@ OTP_PROOF = REPO_ROOT / "examples" / "joy" / "Proofs" / "Ch2" / "OTPSecure.proof
 OTP_LR_PROOF = REPO_ROOT / "examples" / "joy" / "Proofs" / "Ch2" / "OTPSecureLR.proof"
 CES_PROOF = EXAMPLES / "joy" / "Proofs" / "Ch2" / "ChainedEncryptionSecure.proof"
 TPRG_PROOF = REPO_ROOT / "examples" / "Proofs" / "PRG" / "TriplingPRG_PRGSecurity.proof"
+PRG_5_8_B_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_b.proof"
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
 
@@ -514,5 +515,95 @@ def test_export_tripling_prg_per_transform_typechecks_in_easycrypt(
         f"EC verification failed (exit {result.returncode}); the "
         f"non-admit portions of the per-transform TriplingPRG export "
         f"may have regressed.\nstderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+def test_export_5_8_b_partial_split_closes_via_augmented_intermediate() -> None:
+    """``5_8_b`` exercises the partial-split path of
+    ``split_uniform_samples_tactic``.
+
+    The proof's reduction projects a ``bs_3*lambda`` challenger sample
+    onto two ``bs_lambda`` slices ``[0, lambda)`` and ``[lambda, 2*lambda)``
+    and discards the last ``lambda``-bit window. The engine emits a
+    ``Split Uniform Samples`` whose ``|L| + |R| = 2*lambda < 3*lambda =
+    |RES|`` — a partial split.
+
+    The straight 2-way bijection axiom would be unsound (image
+    cardinality ``2^(2*lambda)`` vs ``2^(3*lambda)``). The synthesizer
+    instead routes through an augmented intermediate: register a 3-way
+    concat op ``concat3_bs_lambda_bs_lambda_bs_lambda_to_bs_3_lambda``
+    with the sound dlet-form ``dbs_3_lambda_split3_...`` axiom, then
+    emit per-micro ``Mid``/``Aug`` helper modules plus four sub-lemmas
+    that chain L→Mid→Aug→R.
+
+    This test pins both directions: (a) the unsound 2-way axioms must
+    not appear, (b) the 3-way concat op + augmented helpers + zero
+    admits must appear.
+    """
+    output = per_transform_exporter.export_proof_file_per_transform(
+        str(PRG_5_8_B_PROOF)
+    )
+    assert "dbs_3_lambda_split_bs_lambda_bs_lambda" not in output, (
+        "Unsound 2-way split axiom (image of concat has 2^(2*lambda) "
+        "elements but dbs_3_lambda has 2^(3*lambda)) regressed."
+    )
+    assert "concat_bs_lambda_bs_lambda_to_bs_3_lambda" not in output, (
+        "Unsound 2-way concat op for the partial-split case regressed."
+    )
+    assert (
+        "concat3_bs_lambda_bs_lambda_bs_lambda_to_bs_3_lambda" in output
+    ), (
+        "Expected the sound 3-way concat op for the partial-split path; "
+        "the augmented-intermediate synthesizer did not fire."
+    )
+    assert "dbs_3_lambda_split3_bs_lambda_bs_lambda_bs_lambda" in output, (
+        "Expected the sound dlet-form distribution-split axiom for the "
+        "3-way decomposition; ``TypeCollector.emit()`` may have skipped it."
+    )
+    assert "admit." not in output, (
+        f"Expected zero admits after the partial-split synthesizer "
+        f"closes hop_2 via the augmented intermediate. Got "
+        f"{output.count('admit.')} admits."
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_export_5_8_b_partial_split_typechecks_in_easycrypt(
+    tmp_path: Path,
+) -> None:
+    """EC accepts the ``5_8_b`` per-transform export end-to-end with zero admits.
+
+    The partial-split synthesizer routes ``hop_2`` through an augmented
+    intermediate (3-way concat bijection), closing it without admits.
+    Everything else — the assumption hop, the Real/Random-side chains,
+    the reduction-body wrappers — closes via the standard parametric +
+    canned tactics. Locks in that the augmented-intermediate path is
+    accepted by EC end-to-end.
+    """
+    output = per_transform_exporter.export_proof_file_per_transform(
+        str(PRG_5_8_B_PROOF)
+    )
+    ec_file = tmp_path / "5_8_b_per_transform.ec"
+    ec_file.write_text(output)
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    combined = result.stderr + result.stdout
+    assert "parse error" not in combined, (
+        f"EC parse error in per-transform 5_8_b output:\n"
+        f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
+    )
+    assert result.returncode == 0, (
+        f"EC verification failed (exit {result.returncode}); the "
+        f"non-admit portions of the per-transform 5_8_b export may "
+        f"have regressed.\nstderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )

@@ -317,6 +317,14 @@ def _rename_expr(expr: frog_ast.Expression, rename: dict[str, str]) -> None:
         _rename_expr(expr.the_array, rename)
         _rename_expr(expr.index, rename)
         return
+    if isinstance(expr, frog_ast.Slice):
+        _rename_expr(expr.the_array, rename)
+        _rename_expr(expr.start, rename)
+        _rename_expr(expr.end, rename)
+        return
+    if isinstance(expr, frog_ast.UnaryOperation):
+        _rename_expr(expr.expression, rename)
+        return
 
 
 # --- Nested module-call hoisting ------------------------------------------
@@ -358,7 +366,42 @@ def _module_call_return_type(
         return None
     if isinstance(raw_type, frog_ast.Variable):
         return frog_ast.FieldAccess(frog_ast.Variable(obj.name), raw_type.name)
+    if isinstance(raw_type, frog_ast.BitStringType):
+        # The primitive's signature uses bare field names
+        # (``BitString<lambda + stretch>``). Wrap each Variable reference
+        # in a ``FieldAccess(<instance>, name)`` so the TypeCollector's
+        # alias map resolves it through THIS instance's concretized
+        # fields rather than the primary's.
+        if raw_type.parameterization is None:
+            return raw_type
+        return frog_ast.BitStringType(
+            _qualify_field_refs(raw_type.parameterization, obj.name)
+        )
     return raw_type
+
+
+def _qualify_field_refs(
+    expr: frog_ast.Expression, qualifier: str
+) -> frog_ast.Expression:
+    """Rewrite each ``Variable(x)`` to ``FieldAccess(Variable(qualifier), x)``.
+
+    Used to specialize a primitive's generic return type to a specific
+    instance. The TypeCollector then resolves the qualified name through
+    its alias map (e.g. ``G.lambda`` -> ``Variable("lambda")``).
+    """
+    if isinstance(expr, frog_ast.Variable):
+        return frog_ast.FieldAccess(frog_ast.Variable(qualifier), expr.name)
+    if isinstance(expr, frog_ast.BinaryOperation):
+        return frog_ast.BinaryOperation(
+            expr.operator,
+            _qualify_field_refs(expr.left_expression, qualifier),
+            _qualify_field_refs(expr.right_expression, qualifier),
+        )
+    if isinstance(expr, frog_ast.UnaryOperation):
+        return frog_ast.UnaryOperation(
+            expr.operator, _qualify_field_refs(expr.expression, qualifier)
+        )
+    return expr
 
 
 class _Hoister:
@@ -405,6 +448,16 @@ class _Hoister:
             )
         if isinstance(expr, frog_ast.FieldAccess):
             return frog_ast.FieldAccess(self._hoist_sub(expr.the_object), expr.name)
+        if isinstance(expr, frog_ast.Slice):
+            return frog_ast.Slice(
+                self._hoist_sub(expr.the_array),
+                self._hoist_sub(expr.start),
+                self._hoist_sub(expr.end),
+            )
+        if isinstance(expr, frog_ast.UnaryOperation):
+            return frog_ast.UnaryOperation(
+                expr.operator, self._hoist_sub(expr.expression)
+            )
         return expr
 
     def _hoist_sub(self, expr: frog_ast.Expression) -> frog_ast.Expression:

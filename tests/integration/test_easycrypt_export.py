@@ -19,6 +19,7 @@ EXAMPLES = REPO_ROOT / "examples"
 OTP_PROOF = REPO_ROOT / "examples" / "joy" / "Proofs" / "Ch2" / "OTPSecure.proof"
 OTP_LR_PROOF = REPO_ROOT / "examples" / "joy" / "Proofs" / "Ch2" / "OTPSecureLR.proof"
 CES_PROOF = EXAMPLES / "joy" / "Proofs" / "Ch2" / "ChainedEncryptionSecure.proof"
+TPRG_PROOF = REPO_ROOT / "examples" / "Proofs" / "PRG" / "TriplingPRG_PRGSecurity.proof"
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
 
@@ -438,3 +439,66 @@ def test_export_chained_encryption_does_not_crash() -> None:
     assert "module" in output  # sanity: got some EC output
     # Two distinct assumption hops; each produces an eps term.
     assert "eps_OneTimeSecrecy" in output
+
+
+def test_export_tripling_prg_does_not_crash() -> None:
+    """TriplingPRG_PRGSecurity exports without raising.
+
+    First single-primitive proof beyond SymEnc that the exporter handles:
+    PRG primitive with ``Int``-valued field parameters (``lambda``,
+    ``stretch``), a scheme (TriplingPRG) that re-instantiates the same
+    primitive with different stretch, and two reductions over
+    PRGSecurity. Exercises the abstract-bitstring-type clone bindings
+    and the sympy canonicalization of bitstring length expressions.
+    """
+    output = per_transform_exporter.export_proof_file_per_transform(str(TPRG_PROOF))
+    # Sanity: structural artifacts that the architecture must produce.
+    assert "abstract theory PRG_Theory" in output
+    assert "clone PRG_Theory as G_c" in output
+    assert "clone PRG_Theory as T_c" in output
+    # Per-clone bitstring type bindings: G has stretch=lambda (output
+    # bs_lambda + lambda = bs_2_lambda); T has stretch=2*lambda (output
+    # bs_lambda + 2*lambda = bs_3_lambda). sympy canonicalization
+    # collapses ``lambda + 2 * lambda`` -> ``3*lambda``.
+    assert "bs_lambda_stretch_t <- bs_2_lambda" in output
+    assert "bs_lambda_stretch_t <- bs_3_lambda" in output
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_export_tripling_prg_per_transform_typechecks_in_easycrypt(
+    tmp_path: Path,
+) -> None:
+    """EC accepts the TriplingPRG per-transform export.
+
+    Residual admits remain on the three interchangeability hops
+    (``hop_0``, ``hop_2``, ``hop_4``): the per-transform chain currently
+    falls back to a single ``admit.`` per hop whenever any intermediate
+    flat-state body contains a FrogLang construct the EC expression
+    translator does not yet handle (here: ``Slice`` on bitstrings). The
+    structural translation (theory, clones, reductions, wrappers,
+    Pr-lemmas, main theorem) verifies end-to-end.
+    """
+    output = per_transform_exporter.export_proof_file_per_transform(str(TPRG_PROOF))
+    ec_file = tmp_path / "triplingprg_per_transform.ec"
+    ec_file.write_text(output)
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    combined = result.stderr + result.stdout
+    assert "parse error" not in combined, (
+        f"EC parse error in per-transform TriplingPRG output:\n"
+        f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
+    )
+    assert result.returncode == 0, (
+        f"EC verification failed (exit {result.returncode}); the "
+        f"non-admit portions of the per-transform TriplingPRG export "
+        f"may have regressed.\nstderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )

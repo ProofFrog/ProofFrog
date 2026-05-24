@@ -1,10 +1,21 @@
-# Per-transform EasyCrypt tactic cache — Claude workflow
+# EasyCrypt tactics for ProofFrog exports
 
-This document is for Claude sessions whose job is to close residual
-`admit.` lines in an EasyCrypt export. The exporter always emits a
-per-transform canonicalization chain for each interchangeability hop;
-this doc covers how the tactic cache fills in the micro-lemmas that
-chain produces.
+This document covers two related concerns for an agent session working
+on the EasyCrypt side:
+
+1. **The per-transform tactic cache** — how to fill in cache entries
+   for `admit.` lines emitted by the exporter (the main body).
+2. **Running EasyCrypt** and known EC tactic gotchas (appendix sections
+   at the end).
+
+For interactive REPL workflow (which EC MCP tools to load and how to
+drive `cli_step`), see [MCP_GUIDE.md](MCP_GUIDE.md#easycrypt-mcp).
+
+## Per-transform tactic cache
+
+The exporter always emits a per-transform canonicalization chain for each
+interchangeability hop; this section covers how the tactic cache fills
+in the micro-lemmas that chain produces.
 
 ## When to read this doc
 
@@ -174,3 +185,87 @@ Run `make check-tactic-cache` to see per-proof `used / orphan / missing`
 counts for the whole `examples/` corpus. Use `--strict` (or pass it via
 `PYTHONPATH=. .venv/bin/python -m proof_frog.export.easycrypt.cache_report --strict`)
 to exit nonzero if any proof has missing entries.
+
+---
+
+## Appendix: running EasyCrypt
+
+EasyCrypt is invoked via `scripts/easycrypt.sh <file.ec>`. The script
+runs EasyCrypt inside the `ghcr.io/easycrypt/ec-test-box:release`
+Docker image. Exit 0 = type-check success; parse/type errors print to
+stderr with a `[critical] [/work/<name>: line N (col-col)] ...` prefix.
+
+**Sandbox gotcha (Claude Code).** The default sandbox blocks the Docker
+socket, so any `bash scripts/easycrypt.sh ...` call must be run with
+`dangerouslyDisableSandbox: true`. When the sandbox is disabled,
+`$TMPDIR` resolves to the real macOS `/var/folders/...` path (not
+`/tmp/claude-501/...`), and Docker Desktop's default shared-paths config
+does not mount `/var/folders/...`. Put `.ec` files under a subdirectory
+of the repo (e.g. `.ec-tmp/` at the repo root) so Docker can mount them
+successfully, and clean that directory up afterward — it is not tracked.
+
+Test fixtures: `tests/integration/test_easycrypt_export.py` has EC
+type-check tests that are gated on a `_docker_available()` probe
+(`docker info`), so they SKIP when Docker is not reachable, including
+in the sandbox.
+
+For interactive iteration, prefer the EC MCP tools (see
+[MCP_GUIDE.md](MCP_GUIDE.md#easycrypt-mcp)). The MCP-relevant quirks of
+`cli_step` are documented there too.
+
+## Appendix: EC tactic gotchas (observed in this codebase)
+
+### `eager proc` on abstract calls leaves an args-binding obligation
+
+When using `eager call (: I ==> ...)` followed by `eager proc inv => //`
+on an abstract adversary call like `A(O).distinguish(arg1, arg2)`,
+EasyCrypt produces a side condition of the form
+
+```
+forall &1 &2, callsite-pre =>
+  (s0{1} = s0{2} /\ s1{1} = s1{2}) /\ ...
+```
+
+where `s0`, `s1` are the formal parameters of `A.distinguish`. The
+`forall` ranges over memories with **no constraint linking the formals
+to the call-site args**, so even when `={glob G}` at the call site
+implies `={arg1, arg2}` (e.g. both sides call with `(G.s0g, G.s1g)`),
+smt cannot discharge the args equality.
+
+**Why:** The EC `process_fun_abs` rule expects pre = `I /\ ={glob A,
+A.f.params}`, but the formal-parameter equality is not auto-derived
+from the call-site arg equality in this version of EC.
+
+**Workarounds tried (in this codebase):**
+
+- Wrapping `A.distinguish(args)` in a 0-arg helper proc `AdvW.d`
+  clears the *outer* result-passing issue (so the outer eager call can
+  thread `={res}` cleanly), but the abstract call's args-binding
+  obligation reappears as soon as you `eager proc` into `AdvW.d`.
+- `conseq` is not available on eager judgments.
+
+The leftover admit can be discharged either with an EC patch that links
+formals to call-site args, or by routing the proof through transitivity
+to a 0-arg presentation where the args are read from globals at the
+inside-the-adversary level — which requires defining a wrapper
+*adversary*, not just a wrapper proc.
+
+Canonical example:
+`examples/applications/cfrg-hybrid-kems/easycrypt/LazyROTwoSeeded.ec`
+(`lazyW_huniqW`).
+
+### `byphoare` seq with a `1%r` bound auto-discharges that sub-goal
+
+`byphoare`'s `seq N : (P) p1 q1 p2 q2 (R)`: when a bound is `1%r`, that
+sub-goal is auto-discharged — don't write a `+ ...` block for it. So
+`seq N : P p _ _ 0%r (R)` produces 3 visible sub-goals (R, p1, q_n),
+not 4.
+
+### Cloning `Dexcepted.TwoStepSampling`
+
+Use `op dt _ <- dseed`, not `op dt <- (fun _ => dseed)` — beta-reduction
+issues otherwise.
+
+### `dexcepted_ll` requires `mu d P < 1%r`
+
+For the `pseed = 1` case, the proof needs a separate trivial branch.

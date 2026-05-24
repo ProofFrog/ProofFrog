@@ -1172,7 +1172,11 @@ def export_proof_file(proof_path: str, mode: str = "per-hop") -> str:
         decls.extend(proof_decls)
 
     ec_file = ec_ast.EcFile(
-        requires=["AllCore", "Distr"],
+        # ``DProd`` / ``DMap`` provide the dprod/dmap lemmas
+        # (``dmap_dprodE``, ``dmap1E``, ``dmap_id``, ``supp_dprod``,
+        # etc.) consumed by the slice/concat round-trip + distribution-
+        # split tactics emitted for Split/Merge Uniform Samples.
+        requires=["AllCore", "Distr", "DProd", "DMap"],
         decls=decls,
     )
     return ec_ast.pretty_print(ec_file)

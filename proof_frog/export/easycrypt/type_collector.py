@@ -95,6 +95,12 @@ class TypeCollector:
         # Order-preserving, deduped by (left, right, result).
         self._concat_ops: list[tuple[str, str, str]] = []
         self._concat_op_set: set[tuple[str, str, str]] = set()
+        # Per-bitstring canonical length expression string. Populated
+        # whenever a bitstring is named via ``_bitstring_name``; used by
+        # ``emit()`` / ``emit_abstract()`` to parameterize the
+        # slice/concat round-trip axioms and distribution-split axioms
+        # with the actual bit-length integer expressions.
+        self._bs_lengths: dict[str, str] = {}
 
     def resolve(
         self, t: frog_ast.Type, _visited: frozenset[str] = frozenset()
@@ -168,7 +174,9 @@ class TypeCollector:
 
     def _bitstring_name(self, t: frog_ast.BitStringType) -> str:
         if t.parameterization is None:
-            return "bs_t" if self._theory_mode else "bs"
+            name = "bs_t" if self._theory_mode else "bs"
+            # No length expression to record.
+            return name
         expr = self._stripped_parameterization(t)
         # Canonicalize via sympy so arithmetically-equivalent forms
         # (``lambda + 2 * lambda`` and ``3 * lambda``) collapse to the
@@ -187,8 +195,16 @@ class TypeCollector:
         # ``bs_lambda`` (e.g. ``BitString<lambda>`` derived from a
         # ``Int lambda;`` let). Suffix theory-local names with ``_t``.
         if self._theory_mode:
-            return f"bs_{sanitized}_t" if sanitized else "bs_t"
-        return f"bs_{sanitized}" if sanitized else "bs"
+            name = f"bs_{sanitized}_t" if sanitized else "bs_t"
+        else:
+            name = f"bs_{sanitized}" if sanitized else "bs"
+        # Record the canonical length expression for the
+        # slice/concat axiom emitter. The string form matches what
+        # ``expr_translator._canonical_int_str`` emits in slice op
+        # arguments (sympy-canonical), so axioms and expressions
+        # reference the same int literals.
+        self._bs_lengths[name] = length_str
+        return name
 
     def _stripped_parameterization(
         self, t: frog_ast.BitStringType
@@ -235,7 +251,12 @@ class TypeCollector:
         * one ``type <name>.`` per abstract type (including any bitstring
           types registered while in theory mode),
         * for each distribution used: ``op d<name> : <name> distr.`` plus
-          ``axiom d<name>_ll`` / ``axiom d<name>_fu``.
+          ``axiom d<name>_ll`` / ``axiom d<name>_fu`` / ``axiom d<name>_full``.
+
+        Theory-mode slice/concat ops and their round-trip + distribution-
+        split axioms are emitted by the caller via :meth:`emit` (not here)
+        because slice/concat ops are registered at the top level even when
+        the bitstring types live inside the theory.
         """
         decls: list[ec_ast.EcTopDecl] = []
         for name in self._abstract_seen:
@@ -247,6 +268,7 @@ class TypeCollector:
             decls.append(ec_ast.OpDecl(distr, f"{type_name} distr"))
             decls.append(ec_ast.Axiom(f"{distr}_ll", f"is_lossless {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
+            decls.append(ec_ast.Axiom(f"{distr}_full", f"is_full {distr}"))
         return decls
 
     @property
@@ -296,12 +318,27 @@ class TypeCollector:
         """Register a concat op ``left -> right -> result`` and return its name.
 
         The op is uninterpreted; see :meth:`register_slice` for caveats.
+        Also auto-registers the two slice ops ``(result, left)`` and
+        ``(result, right)`` so the slice/concat round-trip axioms emitted
+        in :meth:`emit` and :meth:`emit_abstract` have both ops in scope.
         """
         key = (left_name, right_name, result_name)
         if key not in self._concat_op_set:
             self._concat_op_set.add(key)
             self._concat_ops.append(key)
+        # Auto-register the inverse slice ops if not already present.
+        self.register_slice(result_name, left_name)
+        self.register_slice(result_name, right_name)
         return _concat_op_name(left_name, right_name, result_name)
+
+    def bs_length_for(self, bs_name: str) -> str | None:
+        """Return the canonical length expression string for a registered
+        abstract bitstring, or ``None`` if the name isn't registered.
+        Used by parametric tactic synthesizers (Split/Merge Uniform
+        Samples) to render the bit-length integer expressions in
+        slice/concat tactic arguments.
+        """
+        return self._bs_lengths.get(bs_name)
 
     @property
     def abstract_bitstrings(self) -> list[tuple[str, frog_ast.Expression]]:
@@ -319,13 +356,14 @@ class TypeCollector:
         decls: list[ec_ast.EcTopDecl] = []
         # Distributions over known top-level abstract types (declared
         # elsewhere via ``type X.``): emit the distribution op and
-        # lossless/funiform axioms. The type declaration itself is
+        # lossless/funiform/full axioms. The type declaration itself is
         # emitted by the caller from the ``Set X;`` let bindings.
         for distr in self._known_abstract_distrs:
             type_name = distr[1:]
             decls.append(ec_ast.OpDecl(distr, f"{type_name} distr"))
             decls.append(ec_ast.Axiom(f"{distr}_ll", f"is_lossless {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
+            decls.append(ec_ast.Axiom(f"{distr}_full", f"is_full {distr}"))
         for name in self._names:
             suffix = name.removeprefix("bs")
             distr = f"dbs{suffix}"
@@ -333,6 +371,7 @@ class TypeCollector:
             decls.append(ec_ast.OpDecl(distr, f"{name} distr"))
             decls.append(ec_ast.Axiom(f"{distr}_ll", f"is_lossless {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
+            decls.append(ec_ast.Axiom(f"{distr}_full", f"is_full {distr}"))
         for name in self._names:
             xor_op = _xor_name(name)
             decls.append(ec_ast.OpDecl(xor_op, f"{name} -> {name} -> {name}"))
@@ -349,6 +388,55 @@ class TypeCollector:
             op = _concat_op_name(left_name, right_name, result_name)
             decls.append(
                 ec_ast.OpDecl(op, f"{left_name} -> {right_name} -> {result_name}")
+            )
+        # Round-trip and distribution-split axioms for each registered
+        # concat triple. These let the Split/Merge Uniform Samples
+        # parametric synthesizers close their per-transform micros via
+        # ``rnd`` with a slice/concat bijection. Skipped when the bit
+        # lengths aren't known (e.g. unparameterized ``BitString`` types).
+        for left_name, right_name, result_name in self._concat_ops:
+            len_l = self._bs_lengths.get(left_name)
+            len_r = self._bs_lengths.get(right_name)
+            if len_l is None or len_r is None:
+                continue
+            concat_op = _concat_op_name(left_name, right_name, result_name)
+            slice_l = _slice_op_name(result_name, left_name)
+            slice_r = _slice_op_name(result_name, right_name)
+            len_l_p = _paren_int(len_l)
+            len_sum = f"({len_l} + {len_r})"
+            decls.append(
+                ec_ast.Axiom(
+                    f"slice_concat_left_{left_name}_{right_name}_{result_name}",
+                    f"forall (a : {left_name}) (b : {right_name}),\n"
+                    f"  {slice_l} ({concat_op} a b) 0 {len_l_p} = a",
+                )
+            )
+            decls.append(
+                ec_ast.Axiom(
+                    f"slice_concat_right_{left_name}_{right_name}_{result_name}",
+                    f"forall (a : {left_name}) (b : {right_name}),\n"
+                    f"  {slice_r} ({concat_op} a b) {len_l_p} {len_sum} = b",
+                )
+            )
+            decls.append(
+                ec_ast.Axiom(
+                    f"concat_slices_id_{left_name}_{right_name}_{result_name}",
+                    f"forall (s : {result_name}),\n"
+                    f"  {concat_op} ({slice_l} s 0 {len_l_p})"
+                    f" ({slice_r} s {len_l_p} {len_sum}) = s",
+                )
+            )
+            distr_l = f"d{left_name}"
+            distr_r = f"d{right_name}"
+            distr_res = f"d{result_name}"
+            decls.append(
+                ec_ast.Axiom(
+                    f"{distr_res}_split_{left_name}_{right_name}",
+                    f"{distr_res} =\n"
+                    f"  dmap ({distr_l} `*` {distr_r})\n"
+                    f"       (fun (p : {left_name} * {right_name}) =>"
+                    f" {concat_op} p.`1 p.`2)",
+                )
             )
         return decls
 
@@ -490,6 +578,19 @@ def _slice_op_name(src_name: str, dst_name: str) -> str:
 def _concat_op_name(left_name: str, right_name: str, result_name: str) -> str:
     """Name for an abstract concat op."""
     return f"concat_{left_name}_{right_name}_to_{result_name}"
+
+
+def _paren_int(s: str) -> str:
+    """Wrap an integer expression string in parens unless it's an atomic
+    identifier or literal. Mirrors ``expr_translator._paren`` but tuned
+    for the int-argument positions in slice/concat axioms (no whitespace
+    expected in atomic forms).
+    """
+    if s.startswith("(") and s.endswith(")"):
+        return s
+    if any(op in s for op in "+-*/ "):
+        return f"({s})"
+    return s
 
 
 def xor_name_for(ec_type: ec_ast.EcType) -> str:

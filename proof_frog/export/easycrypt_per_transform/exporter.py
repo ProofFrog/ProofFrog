@@ -29,7 +29,7 @@ from ..easycrypt import module_translator as mt
 from ..easycrypt import type_collector as tc
 from .canonical_form import _normalize_for_ec, canonical_text
 from .tactic_cache import TacticCache
-from .transform_buckets import Bucket, classify, tactic_body
+from .transform_buckets import PARAMETRIC_TACTIC, Bucket, classify, tactic_body
 
 # Engine passes that are pure structural reorderings (modulo dead-code
 # drops): we synthesize ``swap{1} pos delta.`` tactics from the AST diff
@@ -354,7 +354,19 @@ def emit_chain_for_hop(
             if cached is not None:
                 return cached
             return _layer3_admit(app, bucket, reversed_dir)
-        body = tactic_body(app.transform_name, app)
+        # Try the parametric synthesizer first when registered — its
+        # output is tuned to the specific AST and takes precedence over
+        # the multi-module ``proc; sp; wp; sim.`` fallback below.
+        # ``tactic_body`` would silently fall back to the static canned
+        # body when the synthesizer declines (returns None), so call
+        # the synthesizer directly here to distinguish "synthesized" vs
+        # "fell back to static".
+        synth = PARAMETRIC_TACTIC.get(app.transform_name)
+        if synth is not None:
+            synthesized = synth(app, types)
+            if synthesized is not None:
+                return synthesized
+        body = tactic_body(app.transform_name, app, types)
         if multi_module and bucket == Bucket.CANNED and body:
             # Compare hoisted forms, not raw FrogLang ASTs: the engine's
             # ``Inline Single-Use Variables`` produces a nested call
@@ -480,38 +492,37 @@ def emit_chain_for_hop(
     # The outer hop_<i> tactic body uses the same strengthened spec in
     # all transitivity middle-specs and as its own lemma's spec (set via
     # ``pre_override``/``post_override`` on the returned HopChainInfo).
-    # Both ``proc; inline *; sim`` subgoals (wrapper ↔ flat-state) are
-    # within the section's abstract-module scope; ``sim`` can prove
-    # them because the wrappers inline to syntactically-identical
-    # call sequences plus the strengthened ``={glob ...}`` pre/post.
+    # Both bridge subgoals (wrapper ↔ flat-state) are within the
+    # section's abstract-module scope. ``proc; inline*; sp; wp; sim``
+    # closes them: ``sp`` absorbs the leading parameter aliases that
+    # inlining introduces (e.g. ``s0 <- s``); ``wp`` absorbs the
+    # trailing ``_r0 <- <expr>; return _r0;`` shape that wrapping a
+    # value-returning oracle adds; ``sim`` then matches the residual
+    # symmetric call sequence.
+    bridge_tactic = "proc; inline *; sp; wp; sim"
     tactic = [
         "(* Per-transform: bridge wrappers to flat states, chain through. *)",
         f"transitivity {mod_ref(left_mods[0])}.{oracle_name} "
         f"({eq_args_strong} ==> {eq_post_strong}) "
         f"({eq_args_strong} ==> {eq_post_strong}); "
-        f"[ smt() | smt() | proc; inline *; sim |].",
+        f"[ smt() | smt() | {bridge_tactic} |].",
         f"transitivity {mod_ref(right_mods[0])}.{oracle_name} "
         f"({eq_args_strong} ==> {eq_post_strong}) "
         f"({eq_args_strong} ==> {eq_post_strong}); "
-        f"[ smt() | smt() | apply {chain_lemma_name} | proc; inline *; sim ].",
+        f"[ smt() | smt() | apply {chain_lemma_name} | {bridge_tactic} ].",
         "qed.",
     ]
     # If any flat-state body translation:
     #   * fell back to ``return witness;`` (a FrogLang construct the EC
     #     expression translator doesn't yet handle), OR
-    #   * uses abstract ``slice_*`` / ``concat_*`` ops on bitstrings
-    #     (which are emitted as uninterpreted; the canned Layer-1
-    #     micro tactics ``proc; sp; auto`` / ``proc; sp; wp; sim``
-    #     cannot reason about them, and we don't yet have a verified
-    #     tactic library for them),
+    #   * has a micro whose tactic body is ``admit.`` (no canned tactic
+    #     or sidecar entry covers the transform),
     # the chain can't be closed end-to-end. Discard the chain artifacts
     # and replace the outer hop's proof body with ``admit.`` plus a
     # structured comment, mirroring the per-micro Layer-3 admit shape.
     has_stub_body = any("return witness;" in chunk for chunk in chunks)
-    has_uninterpreted_bs_ops = any(
-        "slice_" in chunk or "concat_" in chunk for chunk in chunks
-    )
-    if has_stub_body or has_uninterpreted_bs_ops:
+    has_micro_admit = any(_chunk_has_micro_admit(chunk) for chunk in chunks)
+    if has_stub_body or has_micro_admit:
         if has_stub_body:
             reason = (
                 "at least one intermediate-state body could not be "
@@ -521,9 +532,9 @@ def emit_chain_for_hop(
             )
         else:
             reason = (
-                "intermediate-state bodies use uninterpreted "
-                "slice_*/concat_* bitstring ops; the canned micro "
-                "tactics cannot reason about them yet"
+                "at least one micro lemma falls back to admit (no "
+                "canned tactic or sidecar entry covers the underlying "
+                "transform)"
             )
         admit_tactic = [
             f"(* per-transform chain unrenderable: {reason}.",
@@ -614,6 +625,29 @@ def _permutation_swaps(
         swaps.append(f"swap{{1}} {src + 1} {delta}.")
         current.insert(target, current.pop(src))
     return swaps
+
+
+def _chunk_has_micro_admit(chunk: str) -> bool:
+    """Return True if a rendered chunk has a tactic body that is ``admit.``.
+
+    Used by the chain-renderer's fallback: if any micro lemma still
+    admits, the chain can't close end-to-end, so we discard the chain
+    artifacts and admit the outer hop directly. Bare ``admit`` substring
+    checks would also fire on diagnostic-comment text containing the
+    word, so we look only for the tactic-line form after a ``proof.``.
+    """
+    in_proof = False
+    for line in chunk.splitlines():
+        stripped = line.strip()
+        if stripped == "proof.":
+            in_proof = True
+            continue
+        if stripped == "qed.":
+            in_proof = False
+            continue
+        if in_proof and stripped == "admit.":
+            return True
+    return False
 
 
 def _stmt_signature(stmt: frog_ast.Statement) -> tuple[object, ...]:

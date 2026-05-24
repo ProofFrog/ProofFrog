@@ -78,11 +78,14 @@ def test_translate_assumption_axioms_theory() -> None:
     pos_axiom = next(a for a in axiom_decls if a.name == "eps_OneTimeSecrecy_pos")
     assert pos_axiom.formula == "0%r <= eps_OneTimeSecrecy"
     adv_axiom = next(a for a in axiom_decls if a.name == "OneTimeSecrecy_advantage")
-    # Scheme param declared first so adversary can reference {-Em}.
+    # Scheme param declared first. The adversary carries no
+    # ``{-Em}`` restriction: ProofFrog primitives are stateless, and the
+    # restriction would block legitimate reductions (e.g. PRG hybrids)
+    # that evaluate the primitive themselves on un-hybridized positions.
     assert adv_axiom.module_args[0].name == "Em"
     assert adv_axiom.module_args[0].module_type == "Scheme"
     assert adv_axiom.module_args[1].name == "A"
-    assert adv_axiom.module_args[1].module_type == "OneTimeSecrecy_Adv {-Em}"
+    assert adv_axiom.module_args[1].module_type == "OneTimeSecrecy_Adv"
     assert "&m" in adv_axiom.memory_args
     assert "Game_OneTimeSecrecy_Real(Em, A)" in adv_axiom.formula
     assert "Game_OneTimeSecrecy_Random(Em, A)" in adv_axiom.formula

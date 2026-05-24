@@ -1,9 +1,9 @@
 """Smoke test for ``make check-tactic-cache`` / the cache-report module.
 
 Runs the reporter on the OTPSecure/OTPSecureLR/CES corpus and asserts
-sensible counts: OTPs hit Layer 1 only (used=0, orphan=0, missing=0)
-while CES still has open misses today (the Bucket-2 Topological Sorting
-admits) and reports them.
+sensible counts: OTPs hit Layer 1 only (used=0, orphan=0, missing=0);
+CES exercises the cache-hit path with sidecar entries for both
+Topological Sorting and Merge Product Samples (used>0, missing=0).
 """
 
 from __future__ import annotations
@@ -33,15 +33,16 @@ def test_otpsecurelr_has_no_cache_misses() -> None:
     assert report.missing == 0
 
 
-def test_ces_reports_open_misses_without_sidecar() -> None:
-    """CES has Bucket-2 admits today; the reporter must surface them."""
+def test_ces_sidecar_is_complete() -> None:
+    """CES's sidecar covers every interactive micro-lemma."""
     report = cache_report._build_report(PROOF_DIR / "ChainedEncryptionSecure.proof")
     assert report.error is None, report.error
-    # Today's baseline: 4 cache-miss diagnostic blocks (3x Topological
-    # Sorting + 1x Merge Product Samples). Bucket-2 closures will
-    # reduce this; require >0 so the reporter exercises the
-    # missing-counter path.
-    assert report.missing > 0
+    # Exercises the cache-hit path: 3x Topological Sorting +
+    # 1x Merge Product Samples entries, all picked up by the
+    # exporter and zero outstanding misses.
+    assert report.used > 0
+    assert report.missing == 0
+    assert report.orphan == 0
 
 
 def test_cli_main_returns_zero_by_default() -> None:

@@ -470,6 +470,76 @@ def split_uniform_samples_tactic(
     # cardinality ``2^(|L|+|R|)`` vs ``2^|RES|``); the 3-way decomposition
     # is sound because ``|L|+|R|+|GAP| = |RES|``.
     if not _lengths_sum_equal(len_l, len_r, len_res):
+        # The partial-split helpers support two source-layout shapes for
+        # the augmented intermediate: ``tail-gap`` (slices at ``[0..|L|]``
+        # and ``[|L|..|L|+|R|]``; unused window is the tail) and
+        # ``mid-gap`` (slices at ``[0..|L|]`` and
+        # ``[|RES|-|R|..|RES|]``; unused window is between L and R).
+        # Walk only the statements *after* ``s_orig`` so the sample's
+        # own declaration doesn't count as a bare use. Any other layout
+        # (head-gap, interleaved, or non-slice use) falls back to
+        # ``_partial_split_admit``.
+        layout = _classify_partial_split_layout(
+            before_stmts[common + 1 :],
+            s_orig.var.name,
+            len_l,
+            len_r,
+            len_res,
+        )
+        if layout is None:
+            return _partial_split_admit(
+                "Split Uniform Samples", name_l, name_r, name_res
+            )
+        # The simple Mid/Aug bodies emit a 2-way return concat
+        # ``concat_<L>_<R>_to_<ret_type>`` and assume the procedure's
+        # return is ``concat (slice_L) (slice_R)``. If the before-game
+        # wraps each slice in a module call (e.g.
+        # ``return G.evaluate(slice_L) || G.evaluate(slice_R)``), the
+        # procedure return is ``concat (call_out_L) (call_out_R)``
+        # instead. Detect that specific shape and route to the
+        # module-call-tail variant. Otherwise, if the tail contains any
+        # module calls we don't recognize, bail to a structured admit.
+        modcall_info = _detect_module_call_tail_pattern(
+            before_stmts[common + 1 :],
+            s_orig.var.name,
+        )
+        if modcall_info is not None:
+            modcall = _partial_split_helpers_modcall(
+                types=types,
+                len_l=len_l,
+                len_r=len_r,
+                len_res=len_res,
+                name_l=name_l,
+                name_r=name_r,
+                name_res=name_res,
+                ret_type=_return_bs_name(app, types),
+                orig_var=_ec_ident(s_orig.var.name),
+                a_var=_ec_ident(s_a.var.name),
+                b_var=_ec_ident(s_b.var.name),
+                helpers=helpers,
+                name_prefix=name_prefix,
+                module_param_sig=module_param_sig,
+                module_param_args=module_param_args,
+                left_module_ref=left_module_ref,
+                right_module_ref=right_module_ref,
+                eq_args_strong=eq_args_strong,
+                eq_post_strong=eq_post_strong,
+                layout=layout,
+                module_name=modcall_info["module"],
+                method_name=modcall_info["method"],
+            )
+            if modcall is not None:
+                return modcall
+            return _partial_split_admit(
+                "Split Uniform Samples", name_l, name_r, name_res
+            )
+        if _has_module_call_tail(
+            before_stmts[common + 1 :],
+            s_orig.var.name,
+        ):
+            return _partial_split_admit(
+                "Split Uniform Samples", name_l, name_r, name_res
+            )
         partial = _partial_split_helpers(
             types=types,
             len_l=len_l,
@@ -490,6 +560,7 @@ def split_uniform_samples_tactic(
             right_module_ref=right_module_ref,
             eq_args_strong=eq_args_strong,
             eq_post_strong=eq_post_strong,
+            layout=layout,
         )
         if partial is not None:
             return partial
@@ -602,6 +673,240 @@ def _lengths_sum_equal(len_l: str, len_r: str, len_res: str) -> bool:
         return False
 
 
+def _collect_slice_ranges_for_var(
+    node: object, var_name: str
+) -> list[tuple[frog_ast.Expression, frog_ast.Expression]] | None:
+    """Return (start, end) pairs of every ``Slice`` over ``var_name``.
+
+    Returns ``None`` if ``var_name`` appears as a bare ``Variable``
+    outside of a ``Slice`` — that signals the source variable is used
+    for something other than slicing (e.g. passed whole to a method),
+    so the partial-split synthesizer's assumptions are violated.
+    """
+    found: list[tuple[frog_ast.Expression, frog_ast.Expression]] = []
+    bad = False
+
+    def walk(n: object) -> None:
+        nonlocal bad
+        if isinstance(n, frog_ast.Slice):
+            arr = n.the_array
+            if isinstance(arr, frog_ast.Variable) and arr.name == var_name:
+                found.append((n.start, n.end))
+                walk(n.start)
+                walk(n.end)
+                return
+        if isinstance(n, frog_ast.Variable) and n.name == var_name:
+            bad = True
+            return
+        if isinstance(n, frog_ast.ASTNode):
+            for attr in vars(n):
+                walk(getattr(n, attr))
+        elif isinstance(n, (list, tuple)):
+            for item in n:
+                walk(item)
+
+    walk(node)
+    if bad:
+        return None
+    return found
+
+
+def _classify_partial_split_layout(
+    tail_stmts: list[frog_ast.Statement],
+    orig_var_name: str,
+    len_l: str,
+    len_r: str,
+    len_res: str,
+) -> str | None:
+    """Classify the partial-split slice layout for a ``Split Uniform Samples``
+    application.
+
+    Returns one of:
+
+    * ``"tail-gap"`` — slices are ``[0..|L|]`` and ``[|L|..|L|+|R|]``; the
+      unused window is at the tail (``[|L|+|R|..|RES|]``). Both 5_8_b's
+      hop_2 (TriplingPRG) and any future ``[L][R][gap]`` source layout.
+    * ``"mid-gap"`` — slices are ``[0..|L|]`` and ``[|RES|-|R|..|RES|]``;
+      the unused window is between L and R
+      (``[|L|..|L|+|gap|]``). 5_8_a's hop_2 has this shape.
+    * ``None`` — neither layout matches (head-gap, interleaved, or the
+      source variable is referenced outside a slice). The caller falls
+      back to ``_partial_split_admit``.
+
+    ``tail_stmts`` are the statements following the orig sample
+    declaration; walking only the tail avoids counting the declaration
+    itself as a bare use of the source variable.
+    """
+    ranges = _collect_slice_ranges_for_var(tail_stmts, orig_var_name)
+    if ranges is None or len(ranges) != 2:
+        return None
+    add_l_r = _add_canonical(len_l, len_r)
+    res_minus_r = _subtract_canonical(len_res, len_r)
+    actual: list[tuple[str, str]] = [(str(s), str(e)) for s, e in ranges]
+    if add_l_r is not None:
+        tail_gap = [("0", len_l), (len_l, add_l_r)]
+        if _ranges_set_equal(actual, tail_gap):
+            return "tail-gap"
+    if res_minus_r is not None:
+        mid_gap = [("0", len_l), (res_minus_r, len_res)]
+        if _ranges_set_equal(actual, mid_gap):
+            return "mid-gap"
+    return None
+
+
+def _has_module_call_tail(
+    tail_stmts: list[frog_ast.Statement], orig_var_name: str
+) -> bool:
+    """Return True if the tail wraps slices of ``orig_var_name`` in
+    module-method calls (e.g. ``G.evaluate(slice ...)``) before reaching
+    the return.
+
+    The simple-concat Mid/Aug template emits a return concat that
+    assumes the procedure return is ``concat (slice_L) (slice_R)`` (a
+    direct concat of the two slices). When each slice is instead an
+    argument to a module call, the procedure return type doesn't equal
+    ``|L| + |R|`` and the emitted ``concat_<L>_<R>_to_<ret>`` axiom would
+    be unsound. The module-call-tail variant
+    (``_detect_module_call_tail_pattern``) handles this shape; this
+    coarser check is used as a fallback gate when the richer pattern
+    isn't recognized.
+    """
+
+    def has_module_call(node: object) -> bool:
+        if isinstance(node, frog_ast.FuncCall) and isinstance(
+            node.func, frog_ast.FieldAccess
+        ):
+            return True
+        if isinstance(node, frog_ast.ASTNode):
+            for attr in vars(node):
+                if has_module_call(getattr(node, attr)):
+                    return True
+            return False
+        if isinstance(node, (list, tuple)):
+            return any(has_module_call(item) for item in node)
+        return False
+
+    _ = orig_var_name  # captured for future tail-aware variants
+    return has_module_call(tail_stmts)
+
+
+def _detect_module_call_tail_pattern(
+    tail_stmts: list[frog_ast.Statement], orig_var_name: str
+) -> dict[str, str] | None:
+    """Detect the specific tail shape ``return M.f(slice_L(orig)) ||
+    M.f(slice_R(orig))`` and return the module/method names.
+
+    Used by the partial-split synthesizer to emit Mid/Aug bodies that
+    splice the post-slice ``M.f(...)`` calls verbatim, so the return
+    concat in the helper modules matches the actual flat-state module's
+    return (``concat (M.f result) (M.f result)``, with the call's output
+    bitstring type, not the slice's input bitstring type).
+
+    Returns ``None`` if the tail isn't a single ``ReturnStatement`` whose
+    expression is ``BinaryOp(OR, FuncCall1, FuncCall2)`` with both calls
+    targeting the same ``module.method`` and arguments that are slices of
+    ``orig_var_name``.
+    """
+    if len(tail_stmts) != 1:
+        return None
+    stmt = tail_stmts[0]
+    if not isinstance(stmt, frog_ast.ReturnStatement):
+        return None
+    expr = stmt.expression
+    if not isinstance(expr, frog_ast.BinaryOperation):
+        return None
+    if expr.operator != frog_ast.BinaryOperators.OR:
+        return None
+    left, right = expr.left_expression, expr.right_expression
+    if not (
+        isinstance(left, frog_ast.FuncCall) and isinstance(right, frog_ast.FuncCall)
+    ):
+        return None
+    if not (
+        isinstance(left.func, frog_ast.FieldAccess)
+        and isinstance(right.func, frog_ast.FieldAccess)
+    ):
+        return None
+    if not (
+        isinstance(left.func.the_object, frog_ast.Variable)
+        and isinstance(right.func.the_object, frog_ast.Variable)
+    ):
+        return None
+    if (
+        left.func.name != right.func.name
+        or left.func.the_object.name != right.func.the_object.name
+    ):
+        return None
+    if len(left.args) != 1 or len(right.args) != 1:
+        return None
+    arg_l, arg_r = left.args[0], right.args[0]
+    if not (isinstance(arg_l, frog_ast.Slice) and isinstance(arg_r, frog_ast.Slice)):
+        return None
+    if not (
+        isinstance(arg_l.the_array, frog_ast.Variable)
+        and isinstance(arg_r.the_array, frog_ast.Variable)
+    ):
+        return None
+    if arg_l.the_array.name != orig_var_name or arg_r.the_array.name != orig_var_name:
+        return None
+    return {
+        "module": left.func.the_object.name,
+        "method": left.func.name,
+    }
+
+
+def _ranges_set_equal(
+    actual: list[tuple[str, str]], expected: list[tuple[str, str]]
+) -> bool:
+    """Set-equality of two range lists where each (a, b) entry is
+    compared as integer expressions via sympy. Order-insensitive.
+    """
+    # pylint: disable=import-outside-toplevel
+    try:
+        import keyword as _kw
+
+        from sympy import Symbol, simplify, sympify
+    except ImportError:
+        return False
+    if len(actual) != len(expected):
+        return False
+    all_strs = " ".join(s for pair in actual + expected for s in pair)
+    names = set(re.findall(r"[A-Za-z_]\w*", all_strs))
+    renames = {n: f"_{n}_sym_" for n in names if _kw.iskeyword(n)}
+
+    def _safe(s: str) -> str:
+        out = s
+        for old, new in renames.items():
+            out = re.sub(rf"\b{re.escape(old)}\b", new, out)
+        return out
+
+    safe_names = {renames.get(n, n) for n in names}
+    locals_ = {n: Symbol(n) for n in safe_names}
+
+    def _norm(pair: tuple[str, str]) -> tuple[object, object] | None:
+        try:
+            a = simplify(sympify(_safe(pair[0]), locals=locals_))
+            b = simplify(sympify(_safe(pair[1]), locals=locals_))
+            return (a, b)
+        except Exception:  # pylint: disable=broad-exception-caught
+            return None
+
+    actual_norm = [_norm(p) for p in actual]
+    expected_norm = [_norm(p) for p in expected]
+    if any(p is None for p in actual_norm + expected_norm):
+        return False
+    remaining = list(expected_norm)
+    for ap in actual_norm:
+        match_idx = next(
+            (i for i, ep in enumerate(remaining) if ep == ap),
+            None,
+        )
+        if match_idx is None:
+            return False
+        remaining.pop(match_idx)
+    return not remaining
+
+
 def _return_bs_name(app: TransformApplication, types: TypeCollector) -> str | None:
     """Extract the bitstring type name of the after-game's return value.
 
@@ -641,6 +946,7 @@ def _partial_split_helpers(
     right_module_ref: str,
     eq_args_strong: str,
     eq_post_strong: str,
+    layout: str,
 ) -> list[str] | None:
     """Emit helper modules + sub-lemmas for a partial-split micro and
     return the chain-through-them tactic body.
@@ -648,19 +954,26 @@ def _partial_split_helpers(
     Strategy (see prototype in ``scripts/_taclab/partial_split.ec``):
 
     * ``Mid`` module: samples 3 indep ``bs_<L>``/``bs_<R>``/``bs_<GAP>``
-      pieces, builds ``r := concat3 a b gap``, returns ``concat (slice r
-      0 |L|) (slice r |L| (|L|+|R|))``.
-    * ``Aug`` module: samples the same 3 pieces, returns ``concat a b``
-      directly (the gap is dead).
+      pieces in the source-layout order, builds ``r := concat3 ...``,
+      returns the 2-way concat of two slices of ``r``.
+    * ``Aug`` module: samples the same 3 pieces in the same order,
+      returns ``concat a b`` directly (the gap is dead).
     * ``left_to_mid``: relate ``r <$ dbs_<RES>`` to the 3-sample form via
       ``rndsem*{2} 0`` + ``rnd identity`` + ``dbs_<RES>_split3`` axiom.
-    * ``mid_to_aug``: trivial after slice-of-concat3 rewrites
-      (``slice_concat3_p1``, ``slice_concat3_p2``).
+    * ``mid_to_aug``: trivial after slice-of-concat3 rewrites (the two
+      slice axioms naming the L and R pieces of the concat3).
     * ``aug_to_right``: drop the dead ``gap`` sample via ``rnd{1}``
-      + ``dbs_<GAP>_ll``.
+      + ``dbs_<GAP>_ll``. For ``mid-gap`` layouts, a leading
+      ``swap{1} 2 1`` first reorders the side-1 samples so the dead
+      gap sample lands at the tail.
     * Main tactic: ``transitivity Aug; [smt | smt | (transitivity Mid;
       [smt | smt | apply left_to_mid | apply mid_to_aug]) | apply
       aug_to_right]``.
+
+    The ``layout`` parameter selects between ``"tail-gap"`` (slices
+    ``[0..|L|]`` + ``[|L|..|L|+|R|]``; concat3 piece order
+    ``(L, R, GAP)``) and ``"mid-gap"`` (slices ``[0..|L|]`` +
+    ``[|RES|-|R|..|RES|]``; concat3 piece order ``(L, GAP, R)``).
 
     Returns ``None`` if any prerequisite is missing (gap length not
     sympifiable, no helpers list, etc.).
@@ -674,32 +987,76 @@ def _partial_split_helpers(
         or not right_module_ref
         or not eq_args_strong
         or not eq_post_strong
+        or layout not in ("tail-gap", "mid-gap")
     ):
         return None
     gap_len = _subtract_canonical(len_res, _add_canonical(len_l, len_r))
     if gap_len is None:
         return None
     name_gap = types.register_bs_by_length_str(gap_len)
-    types.register_concat3(name_l, name_r, name_gap, name_res)
+    # Register the concat3 op in the source-layout order so the emitted
+    # ``slice_concat3_p1/p2/p3`` axioms index the pieces in the order the
+    # Mid module assembles them via ``concat3 ...``.
+    if layout == "tail-gap":
+        types.register_concat3(name_l, name_r, name_gap, name_res)
+        piece1, piece2, piece3 = name_l, name_r, name_gap
+    else:  # mid-gap
+        types.register_concat3(name_l, name_gap, name_r, name_res)
+        piece1, piece2, piece3 = name_l, name_gap, name_r
     # The 2-way return concat (e.g. ``concat_bs_lambda_bs_lambda_to_bs_2_lambda``).
     types.register_concat(name_l, name_r, ret_type)
     ret_concat_op = f"concat_{name_l}_{name_r}_to_{ret_type}"
-    concat3_op = f"concat3_{name_l}_{name_r}_{name_gap}_to_{name_res}"
+    concat3_op = f"concat3_{piece1}_{piece2}_{piece3}_to_{name_res}"
     slice_l = f"slice_{name_res}_to_{name_l}"
     slice_r = f"slice_{name_res}_to_{name_r}"
     distr_l = f"d{name_l}"
     distr_r = f"d{name_r}"
     distr_gap = f"d{name_gap}"
-    split3_axiom = f"d{name_res}_split3_{name_l}_{name_r}_{name_gap}"
-    axiom_prefix = f"{name_l}_{name_r}_{name_gap}_{name_res}"
+    split3_axiom = f"d{name_res}_split3_{piece1}_{piece2}_{piece3}"
+    axiom_prefix = f"{piece1}_{piece2}_{piece3}_{name_res}"
     p1_axiom = f"slice_concat3_p1_{axiom_prefix}"
     p2_axiom = f"slice_concat3_p2_{axiom_prefix}"
+    p3_axiom = f"slice_concat3_p3_{axiom_prefix}"
     len_l_p = _bs_length_arg(len_l)
+    len_res_p = _bs_length_arg(len_res)
     # Use the sympy-canonical sum so the slice end argument matches what
     # the rest of the EC file emits (e.g. ``2 * lambda`` not ``lambda +
     # lambda``); without this, ``sim`` fails to match the two slices.
     canonical_sum = _add_canonical(len_l, len_r)
     len_lr = _bs_length_arg(canonical_sum) if canonical_sum else f"({len_l} + {len_r})"
+    canonical_l_gap = _add_canonical(len_l, gap_len)
+    len_l_gap = (
+        _bs_length_arg(canonical_l_gap) if canonical_l_gap else f"({len_l} + {gap_len})"
+    )
+    # Per-layout sample sequence, concat3 call, R-slice start, and the
+    # axioms naming the L and R pieces in the concat3. Mid and Aug share
+    # the sample order so ``mid_to_aug`` is trivial via the rnd-rnd-rnd
+    # lockstep; the dead-gap sample sits in source-layout position.
+    if layout == "tail-gap":
+        sample_seq = [
+            f"      {a_var} <$ {distr_l};",
+            f"      {b_var} <$ {distr_r};",
+            f"      _gap <$ {distr_gap};",
+        ]
+        concat3_call = f"{concat3_op} {a_var} {b_var} _gap"
+        r_slice_start = len_l_p
+        r_slice_end = len_lr
+        mid_to_aug_axioms = f"{p1_axiom} {p2_axiom}"
+        aug_to_right_reorder: list[str] = []
+    else:  # mid-gap
+        sample_seq = [
+            f"      {a_var} <$ {distr_l};",
+            f"      _gap <$ {distr_gap};",
+            f"      {b_var} <$ {distr_r};",
+        ]
+        concat3_call = f"{concat3_op} {a_var} _gap {b_var}"
+        r_slice_start = len_l_gap
+        r_slice_end = len_res_p
+        mid_to_aug_axioms = f"{p1_axiom} {p3_axiom}"
+        # The right module samples ``a, b`` in that order. Swap the
+        # side-1 gap and b samples so the first two statements pair off
+        # with the right side under the seq-2-2 invariant below.
+        aug_to_right_reorder = ["  swap{1} 2 1."]
     mid_mod = f"Mid_{name_prefix}"
     aug_mod = f"Aug_{name_prefix}"
     l2m = f"left_to_mid_{name_prefix}"
@@ -717,13 +1074,12 @@ def _partial_split_helpers(
                 f"      var {orig_var} : {name_res};",
                 f"      var {a_var}, {b_var} : {name_l};",
                 f"      var _gap : {name_gap};",
-                f"      {a_var} <$ {distr_l};",
-                f"      {b_var} <$ {distr_r};",
-                f"      _gap <$ {distr_gap};",
-                f"      {orig_var} <- {concat3_op} {a_var} {b_var} _gap;",
+                *sample_seq,
+                f"      {orig_var} <- {concat3_call};",
                 f"      return {ret_concat_op}",
                 f"               ({slice_l} {orig_var} 0 {len_l_p})",
-                f"               ({slice_r} {orig_var} {len_l_p} {len_lr});",
+                f"               ({slice_r} {orig_var} {r_slice_start}"
+                f" {r_slice_end});",
                 "    }",
                 "  }.",
             ]
@@ -737,9 +1093,7 @@ def _partial_split_helpers(
                 f"    proc query() : {ret_type} = {{",
                 f"      var {a_var}, {b_var} : {name_l};",
                 f"      var _gap : {name_gap};",
-                f"      {a_var} <$ {distr_l};",
-                f"      {b_var} <$ {distr_r};",
-                f"      _gap <$ {distr_gap};",
+                *sample_seq,
                 f"      return {ret_concat_op} {a_var} {b_var};",
                 "    }",
                 "  }.",
@@ -776,7 +1130,7 @@ def _partial_split_helpers(
                 f"    equiv [ {mid_inst}.query ~ {aug_inst}.query :",
                 f"            {eq_args_strong} ==> {eq_post_strong} ].",
                 "  proof.",
-                f"  proc; wp; rnd; rnd; rnd; skip => /> *; smt({p1_axiom} {p2_axiom}).",
+                f"  proc; wp; rnd; rnd; rnd; skip => /> *; smt({mid_to_aug_axioms}).",
                 "  qed.",
             ]
         )
@@ -790,6 +1144,7 @@ def _partial_split_helpers(
                 f"            {eq_args_strong} ==> {eq_post_strong} ].",
                 "  proof.",
                 "  proc.",
+                *aug_to_right_reorder,
                 f"  seq 2 2 : ({eq_args_strong} /\\ {a_var}{{1}} = {a_var}{{2}}"
                 f" /\\ {b_var}{{1}} = {b_var}{{2}}).",
                 "  by auto.",
@@ -820,6 +1175,288 @@ def _partial_split_helpers(
     ]
 
 
+# pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-statements,too-many-branches
+def _partial_split_helpers_modcall(
+    *,
+    types: TypeCollector,
+    len_l: str,
+    len_r: str,
+    len_res: str,
+    name_l: str,
+    name_r: str,
+    name_res: str,
+    ret_type: str | None,
+    orig_var: str,
+    a_var: str,
+    b_var: str,
+    helpers: list[str] | None,
+    name_prefix: str,
+    module_param_sig: str,
+    module_param_args: str,
+    left_module_ref: str,
+    right_module_ref: str,
+    eq_args_strong: str,
+    eq_post_strong: str,
+    layout: str,
+    module_name: str,
+    method_name: str,
+) -> list[str] | None:
+    """Module-call-tail variant of :func:`_partial_split_helpers`.
+
+    Handles the partial-split case where each used slice of the source
+    bitstring is wrapped in a module-method call before contributing to
+    the procedure's return, i.e. the before-game's tail is
+
+        return M.f(slice_L(orig)) || M.f(slice_R(orig))
+
+    The state module's hoisted EC body becomes
+
+        orig <$ dRES;
+        _r0 <@ M.f(slice_L orig 0 |L|);
+        _r1 <@ M.f(slice_R orig <r_start> <r_end>);
+        return concat_<eval_ret>_<eval_ret>_to_<ret_type> _r0 _r1;
+
+    The simple ``_partial_split_helpers`` would emit Mid/Aug bodies whose
+    return is ``concat (slice_L) (slice_R)`` — the wrong shape (and
+    triggers an unsound ``concat_<L>_<R>_to_<ret_type>`` axiom, since
+    ``|L| + |R| ≠ |ret_type|`` in this case). The module-call-tail
+    variant splices the ``M.f`` calls into the helper modules so the
+    helpers' returns match the state modules' returns.
+
+    Mirror of the simple helpers' chain structure: ``Mid`` mediates the
+    distribution rewrite via concat3; ``Aug`` matches the after-state
+    plus a dead gap sample; sub-lemmas ``left_to_mid`` / ``mid_to_aug``
+    / ``aug_to_right`` / ``left_to_aug`` close the chain; the main
+    tactic is ``transitivity Aug; [smt | smt | apply left_to_aug | apply
+    aug_to_right]``.
+
+    Returns ``None`` if any prerequisite is missing.
+    """
+    if (
+        helpers is None
+        or not name_prefix
+        or not module_param_sig
+        or ret_type is None
+        or not left_module_ref
+        or not right_module_ref
+        or not eq_args_strong
+        or not eq_post_strong
+        or layout not in ("tail-gap", "mid-gap")
+    ):
+        return None
+    ret_len = types.bs_length_for(ret_type)
+    if ret_len is None:
+        return None
+    # ``M.f`` returns the bitstring whose length is half the procedure
+    # return: the return is ``concat (M.f a) (M.f b)`` of two equal-length
+    # pieces. If the length isn't evenly halvable in sympy, bail.
+    eval_ret_len = _divide_canonical(ret_len, "2")
+    if eval_ret_len is None:
+        return None
+    eval_ret = types.register_bs_by_length_str(eval_ret_len)
+    # Register the proper return concat ``eval_ret + eval_ret -> ret_type``.
+    types.register_concat(eval_ret, eval_ret, ret_type)
+    gap_len = _subtract_canonical(len_res, _add_canonical(len_l, len_r))
+    if gap_len is None:
+        return None
+    name_gap = types.register_bs_by_length_str(gap_len)
+    if layout == "tail-gap":
+        types.register_concat3(name_l, name_r, name_gap, name_res)
+        piece1, piece2, piece3 = name_l, name_r, name_gap
+    else:
+        types.register_concat3(name_l, name_gap, name_r, name_res)
+        piece1, piece2, piece3 = name_l, name_gap, name_r
+    concat3_op = f"concat3_{piece1}_{piece2}_{piece3}_to_{name_res}"
+    ret_concat_op = f"concat_{eval_ret}_{eval_ret}_to_{ret_type}"
+    slice_l = f"slice_{name_res}_to_{name_l}"
+    slice_r = f"slice_{name_res}_to_{name_r}"
+    distr_l = f"d{name_l}"
+    distr_r = f"d{name_r}"
+    distr_gap = f"d{name_gap}"
+    split3_axiom = f"d{name_res}_split3_{piece1}_{piece2}_{piece3}"
+    axiom_prefix = f"{piece1}_{piece2}_{piece3}_{name_res}"
+    p1_axiom = f"slice_concat3_p1_{axiom_prefix}"
+    p2_axiom = f"slice_concat3_p2_{axiom_prefix}"
+    p3_axiom = f"slice_concat3_p3_{axiom_prefix}"
+    len_l_p = _bs_length_arg(len_l)
+    len_res_p = _bs_length_arg(len_res)
+    canonical_sum = _add_canonical(len_l, len_r)
+    len_lr = _bs_length_arg(canonical_sum) if canonical_sum else f"({len_l} + {len_r})"
+    canonical_l_gap = _add_canonical(len_l, gap_len)
+    len_l_gap = (
+        _bs_length_arg(canonical_l_gap) if canonical_l_gap else f"({len_l} + {gap_len})"
+    )
+    if layout == "tail-gap":
+        sample_seq = [
+            f"      {a_var} <$ {distr_l};",
+            f"      {b_var} <$ {distr_r};",
+            f"      _gap <$ {distr_gap};",
+        ]
+        concat3_call = f"{concat3_op} {a_var} {b_var} _gap"
+        r_slice_start = len_l_p
+        r_slice_end = len_lr
+        r_piece_axiom = p2_axiom
+        aug_to_right_reorder: list[str] = []
+    else:  # mid-gap
+        sample_seq = [
+            f"      {a_var} <$ {distr_l};",
+            f"      _gap <$ {distr_gap};",
+            f"      {b_var} <$ {distr_r};",
+        ]
+        concat3_call = f"{concat3_op} {a_var} _gap {b_var}"
+        r_slice_start = len_l_gap
+        r_slice_end = len_res_p
+        r_piece_axiom = p3_axiom
+        aug_to_right_reorder = ["  swap{1} 2 1."]
+    mid_mod = f"Mid_{name_prefix}"
+    aug_mod = f"Aug_{name_prefix}"
+    l2m = f"left_to_mid_{name_prefix}"
+    m2a = f"mid_to_aug_{name_prefix}"
+    a2r = f"aug_to_right_{name_prefix}"
+    l2a = f"left_to_aug_{name_prefix}"
+    mid_inst = f"{mid_mod}{module_param_args}"
+    aug_inst = f"{aug_mod}{module_param_args}"
+    # Mid module — same head as the simple variant, but the tail splices
+    # the ``M.f(slice ...)`` calls and a return that concats the two
+    # call results via the proper ``eval_ret + eval_ret -> ret_type`` op.
+    helpers.append(
+        "\n".join(
+            [
+                f"  module {mid_mod} {module_param_sig} = {{",
+                f"    proc query() : {ret_type} = {{",
+                f"      var {orig_var} : {name_res};",
+                f"      var {a_var}, {b_var} : {name_l};",
+                f"      var _gap : {name_gap};",
+                f"      var _r0, _r1 : {eval_ret};",
+                *sample_seq,
+                f"      {orig_var} <- {concat3_call};",
+                f"      _r0 <@ {module_name}.{method_name}"
+                f"({slice_l} {orig_var} 0 {len_l_p});",
+                f"      _r1 <@ {module_name}.{method_name}"
+                f"({slice_r} {orig_var} {r_slice_start} {r_slice_end});",
+                f"      return {ret_concat_op} _r0 _r1;",
+                "    }",
+                "  }.",
+            ]
+        )
+    )
+    # Aug module — same as the after-state plus a dead ``_gap`` sample.
+    helpers.append(
+        "\n".join(
+            [
+                f"  module {aug_mod} {module_param_sig} = {{",
+                f"    proc query() : {ret_type} = {{",
+                f"      var {a_var}, {b_var} : {name_l};",
+                f"      var _gap : {name_gap};",
+                f"      var _r0, _r1 : {eval_ret};",
+                *sample_seq,
+                f"      _r0 <@ {module_name}.{method_name}({a_var});",
+                f"      _r1 <@ {module_name}.{method_name}({b_var});",
+                f"      return {ret_concat_op} _r0 _r1;",
+                "    }",
+                "  }.",
+            ]
+        )
+    )
+    spec = f"({eq_args_strong} ==> {eq_post_strong})"
+    # left_to_mid: seq 1 4 pairs the single sample on side 1 with the
+    # 3-sample + concat3 head on side 2; the remaining tail (2 calls +
+    # return) is identical under ``orig{1}=orig{2}``, so ``sim`` closes.
+    helpers.append(
+        "\n".join(
+            [
+                f"  lemma {l2m} :",
+                f"    equiv [ {left_module_ref}.query ~ {mid_inst}.query :",
+                f"            {eq_args_strong} ==> {eq_post_strong} ].",
+                "  proof.",
+                "  proc.",
+                f"  seq 1 4 : ({eq_args_strong} /\\ {orig_var}{{1}}"
+                f" = {orig_var}{{2}}); last by sim.",
+                "  rndsem*{2} 0.",
+                f"  conseq (: {eq_args_strong} ==>"
+                f" {eq_args_strong} /\\ {orig_var}{{1}} = {orig_var}{{2}}) => //.",
+                f"  rnd (fun (z : {name_res}) => z) (fun (z : {name_res}) => z);"
+                f" skip => />.",
+                f"  rewrite -{split3_axiom} /=; smt({split3_axiom}).",
+                "  qed.",
+            ]
+        )
+    )
+    # mid_to_aug: the 3 samples pair off lockstep; the side-1 ``orig``
+    # assignment + the slice-axiom rewrites supply the
+    # ``slice_L orig 0 |L| = a`` and ``slice_R orig <r_start> <r_end> = b``
+    # equations that make the call-arg side conditions discharge.
+    inv_strong = (
+        f"{eq_args_strong} /\\ {a_var}{{1}}={a_var}{{2}}"
+        f" /\\ {b_var}{{1}}={b_var}{{2}} /\\ _gap{{1}}=_gap{{2}}"
+        f" /\\ {slice_l} {orig_var}{{1}} 0 {len_l_p} = {a_var}{{2}}"
+        f" /\\ {slice_r} {orig_var}{{1}} {r_slice_start} {r_slice_end}"
+        f" = {b_var}{{2}}"
+    )
+    helpers.append(
+        "\n".join(
+            [
+                f"  lemma {m2a} :",
+                f"    equiv [ {mid_inst}.query ~ {aug_inst}.query :",
+                f"            {eq_args_strong} ==> {eq_post_strong} ].",
+                "  proof.",
+                "  proc.",
+                f"  seq 4 3 : ({inv_strong}).",
+                f"  - by auto; smt({p1_axiom} {r_piece_axiom}).",
+                "  wp.",
+                "  call (_: true).",
+                "  wp.",
+                "  call (_: true).",
+                "  skip => />.",
+                "  qed.",
+            ]
+        )
+    )
+    # aug_to_right: the right (state-after) module has the same body as
+    # Aug minus the dead ``_gap`` sample. For ``mid-gap`` the gap sits in
+    # source-layout position 2, so ``swap{1} 2 1`` first moves it to the
+    # tail; both layouts then close via ``seq 2 2 + rnd{1} + ll``.
+    helpers.append(
+        "\n".join(
+            [
+                f"  lemma {a2r} :",
+                f"    equiv [ {aug_inst}.query ~ {right_module_ref}.query :",
+                f"            {eq_args_strong} ==> {eq_post_strong} ].",
+                "  proof.",
+                "  proc.",
+                *aug_to_right_reorder,
+                f"  seq 2 2 : ({eq_args_strong} /\\ {a_var}{{1}}={a_var}{{2}}"
+                f" /\\ {b_var}{{1}}={b_var}{{2}}).",
+                "  by auto.",
+                "  seq 1 0 : "
+                f"({eq_args_strong} /\\ {a_var}{{1}}={a_var}{{2}}"
+                f" /\\ {b_var}{{1}}={b_var}{{2}}).",
+                f"  - by rnd{{1}}; auto; smt({distr_gap}_ll).",
+                "  sim.",
+                "  qed.",
+            ]
+        )
+    )
+    # left_to_aug wrapper.
+    helpers.append(
+        "\n".join(
+            [
+                f"  lemma {l2a} :",
+                f"    equiv [ {left_module_ref}.query ~ {aug_inst}.query :",
+                f"            {eq_args_strong} ==> {eq_post_strong} ].",
+                "  proof.",
+                f"  transitivity {mid_inst}.query {spec} {spec};"
+                f" [ smt() | smt() | apply {l2m} | apply {m2a} ].",
+                "  qed.",
+            ]
+        )
+    )
+    return [
+        f"transitivity {aug_inst}.query {spec} {spec};"
+        f" [ smt() | smt() | apply {l2a} | apply {a2r} ].",
+    ]
+
+
 def _add_canonical(a: str, b: str) -> str | None:
     """Return canonical-sum of two integer expression strings via sympy,
     or ``None`` on sympify failure (Python keyword fallback included).
@@ -832,6 +1469,11 @@ def _subtract_canonical(a: str, b: str | None) -> str | None:
     if b is None:
         return None
     return _binop_canonical(a, b, "-")
+
+
+def _divide_canonical(a: str, b: str) -> str | None:
+    """Return canonical ``a / b``, or ``None`` on failure or non-integer."""
+    return _binop_canonical(a, b, "/")
 
 
 def _binop_canonical(a: str, b: str, op: str) -> str | None:
@@ -857,7 +1499,12 @@ def _binop_canonical(a: str, b: str, op: str) -> str | None:
     try:
         ea = sympify(_safe(a), locals=locals_)
         eb = sympify(_safe(b), locals=locals_)
-        result = simplify(ea + eb) if op == "+" else simplify(ea - eb)
+        if op == "+":
+            result = simplify(ea + eb)
+        elif op == "-":
+            result = simplify(ea - eb)
+        else:  # "/"
+            result = simplify(ea / eb)
     except Exception:  # pylint: disable=broad-exception-caught
         return None
     out = str(result)

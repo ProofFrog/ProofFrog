@@ -9,7 +9,6 @@ from . import ec_ast
 from . import module_translator as mt
 from . import proof_translator as pt
 from . import scheme_instances as si
-from . import tactic_generator as tgen
 from . import type_collector as tc
 from ... import frog_ast
 from ... import frog_parser
@@ -159,7 +158,7 @@ def _is_assumption_hop(a: frog_ast.Step, b: frog_ast.Step) -> bool:
 
 
 # pylint: disable=too-many-locals,too-many-statements,too-many-branches
-def export_proof_file(proof_path: str, mode: str = "per-hop") -> str:
+def export_proof_file(proof_path: str) -> str:
     """Parse ``proof_path`` and return the EC source as a string.
 
     The exporter wraps the primitive + game-file interfaces inside an
@@ -168,20 +167,12 @@ def export_proof_file(proof_path: str, mode: str = "per-hop") -> str:
     contents (oracle types, adversary types, eps ops, advantage axiom,
     assumption-game wrappers) is qualified through the clone alias.
 
-    ``mode`` selects the interchangeability-hop discharge strategy:
-
-    * ``"per-hop"`` (default): each interchangeability hop's equiv
-      lemma is discharged by a single ``proc; inline *; <tactic>`` body
-      synthesized by ``tactic_generator``.
-    * ``"per-transform"``: each interchangeability hop additionally
-      emits a chain of intermediate-state modules and micro-lemmas
-      (one per ProofFrog canonicalization-transform application), with
-      the equiv lemma's body discharged via ``transitivity`` through
-      the chain. Reductions and assumption-hop axiom appeals remain
-      unchanged (this is the same EC infrastructure as ``per-hop``).
+    Each interchangeability hop emits a chain of intermediate-state
+    modules and micro-lemmas (one per ProofFrog canonicalization-
+    transform application), with the equiv lemma's body discharged via
+    ``transitivity`` through the chain. Reductions and assumption-hop
+    axiom appeals are emitted alongside.
     """
-    if mode not in ("per-hop", "per-transform"):
-        raise ValueError(f"Unknown export mode {mode!r}")
     proof = frog_parser.parse_proof_file(proof_path)
 
     primitive: frog_ast.Primitive | None = None
@@ -608,15 +599,12 @@ def export_proof_file(proof_path: str, mode: str = "per-hop") -> str:
                 engine.add_definition(sub_root.get_export_name(), sub_root)
     engine.prove(proof, proof_path)
 
-    # Side-effect accumulator: when ``mode == "per-transform"``, each
-    # interchangeability hop's chain emission appends to this list, and
-    # the assembled file inserts the contents before ``lemmas``.
-    # Tactic-cache sidecar for per-transform mode. Loaded once per
-    # export; consulted on every micro-lemma that falls through
-    # Layer 1. ``requested_cache_keys`` accumulates the lookup keys
-    # (used by ``cache_report.py`` for orphan detection).
+    # Tactic-cache sidecar. Loaded once per export; consulted on every
+    # micro-lemma that falls through Layer 1. ``requested_cache_keys``
+    # accumulates the lookup keys (used by ``cache_report.py`` for
+    # orphan detection).
     # pylint: disable=import-outside-toplevel
-    from ..easycrypt_per_transform.tactic_cache import (
+    from .tactic_cache import (
         TacticCache,
         relative_sidecar_path,
     )
@@ -631,19 +619,21 @@ def export_proof_file(proof_path: str, mode: str = "per-hop") -> str:
     # immediately after the export call.
     globals()["_last_requested_cache_keys"] = requested_cache_keys
 
+    # Each interchangeability hop's chain emission appends to this list;
+    # the assembled file inserts the contents before ``lemmas``.
     chain_extra_decls: list[ec_ast.EcTopDecl] = []
-    # Per-hop precondition/postcondition overrides emitted by the
-    # per-transform chain when the chain artifacts use strengthened
-    # specs (``={glob E1, ...}``) in multi-module proofs. The outer
-    # ``hop_<i>`` lemma must use the same strengthened spec or the
-    # ``apply hop_<i>_chain`` step in its tactic body fails.
+    # Per-hop precondition/postcondition overrides emitted by the chain
+    # when its artifacts use strengthened specs (``={glob E1, ...}``) in
+    # multi-module proofs. The outer ``hop_<i>`` lemma must use the same
+    # strengthened spec or the ``apply hop_<i>_chain`` step in its
+    # tactic body fails.
     chain_spec_overrides: dict[int, tuple[str, str]] = {}
 
     # Module params for non-primary instances used as ``declare module``
     # inside the section. Reduction-adversary wrappers need these as
     # explicit parameters so EC doesn't complain about depending on
     # declared modules. Defined here (before ``_body_for_hop``) so the
-    # per-transform chain emitter can also see them.
+    # chain emitter can also see them.
     declared_instance_params: list[ec_ast.ModuleParam] = [
         ec_ast.ModuleParam(
             name=inst.let_name,
@@ -664,64 +654,51 @@ def export_proof_file(proof_path: str, mode: str = "per-hop") -> str:
         left_ast = engine._get_game_ast(step_a.challenger, step_a.reduction)
         right_ast = engine._get_game_ast(step_b.challenger, step_b.reduction)
         # pylint: enable=protected-access
-        if mode == "per-transform":
-            # pylint: disable=import-outside-toplevel
-            import copy
+        # pylint: disable=import-outside-toplevel
+        import copy
 
-            from ..easycrypt_per_transform.exporter import emit_chain_for_hop
+        from .chain_emitter import emit_chain_for_hop
 
-            _left_canon, left_apps = engine.canonicalize_game_with_states(
-                copy.deepcopy(left_ast)
-            )
-            _right_canon, right_apps = engine.canonicalize_game_with_states(
-                copy.deepcopy(right_ast)
-            )
-            external_module_types: dict[str, str] = {
-                inst.let_name: primitive.name for inst in instances
-            }
-            # In multi-scheme proofs the flat-state modules live inside
-            # a section with ``declare module E1, E2``; EC forbids
-            # section-local modules from depending on declared modules
-            # implicitly, so we pass them as functor parameters.
-            flat_module_params = (
-                list(declared_instance_params) if declared_instance_params else None
-            )
-            info = emit_chain_for_hop(
-                hop_index=_i,
-                left_game=left_ast,
-                right_game=right_ast,
-                left_apps=left_apps,
-                right_apps=right_apps,
-                oracle_name=method_name,
-                eq_args=resolver.precondition_for(step_a),
-                types=top_types,
-                type_of_factory=type_of_factory,
-                external_module_types=external_module_types,
-                method_return_types=method_return_types,
-                flat_module_params=flat_module_params,
-                tactic_cache=tactic_cache,
-                sidecar_relpath=sidecar_relpath,
-            )
-            chain_extra_decls.extend(info.extra_decls)
-            requested_cache_keys.extend(info.requested_keys)
-            if info.pre_override is not None or info.post_override is not None:
-                chain_spec_overrides[_i] = (
-                    info.pre_override or resolver.precondition_for(step_a),
-                    info.post_override or "={res}",
-                )
-            return info.tactic_body
-
-        _, left_trace = engine.canonicalize_game_with_trace(left_ast)
-        _, right_trace = engine.canonicalize_game_with_trace(right_ast)
-        multi = step_a.reduction is not None or step_b.reduction is not None
-        return tgen.generate(
-            left_trace=left_trace,
-            right_trace=right_trace,
-            left_ast=left_ast,
-            right_ast=right_ast,
-            method_name=method_name,
-            has_multi_module=multi and len(instances) > 1,
+        _left_canon, left_apps = engine.canonicalize_game_with_states(
+            copy.deepcopy(left_ast)
         )
+        _right_canon, right_apps = engine.canonicalize_game_with_states(
+            copy.deepcopy(right_ast)
+        )
+        external_module_types: dict[str, str] = {
+            inst.let_name: primitive.name for inst in instances
+        }
+        # In multi-scheme proofs the flat-state modules live inside a
+        # section with ``declare module E1, E2``; EC forbids
+        # section-local modules from depending on declared modules
+        # implicitly, so we pass them as functor parameters.
+        flat_module_params = (
+            list(declared_instance_params) if declared_instance_params else None
+        )
+        info = emit_chain_for_hop(
+            hop_index=_i,
+            left_game=left_ast,
+            right_game=right_ast,
+            left_apps=left_apps,
+            right_apps=right_apps,
+            oracle_name=method_name,
+            eq_args=resolver.precondition_for(step_a),
+            types=top_types,
+            type_of_factory=type_of_factory,
+            external_module_types=external_module_types,
+            method_return_types=method_return_types,
+            flat_module_params=flat_module_params,
+            tactic_cache=tactic_cache,
+            sidecar_relpath=sidecar_relpath,
+        )
+        chain_extra_decls.extend(info.extra_decls)
+        requested_cache_keys.extend(info.requested_keys)
+        if info.pre_override is not None or info.post_override is not None:
+            chain_spec_overrides[_i] = (
+                info.pre_override or resolver.precondition_for(step_a),
+                info.post_override or "={res}",
+            )
+        return info.tactic_body
 
     lemmas = pt.translate_hops(
         resolver, proof.steps, _body_for_hop, spec_overrides=chain_spec_overrides
@@ -1108,9 +1085,9 @@ def export_proof_file(proof_path: str, mode: str = "per-hop") -> str:
         proof_decls.extend(ec_reduction_advs)
     proof_decls.append(_section_header("Game-step wrappers"))
     proof_decls.extend(ec_game_wrappers)
-    # In per-transform mode the chain artifacts (flat-state modules,
-    # micro-lemmas, hop_<i>_chain lemmas) must precede the hop_<i>
-    # equiv lemmas that reference them via ``apply hop_<i>_chain``.
+    # The chain artifacts (flat-state modules, micro-lemmas,
+    # hop_<i>_chain lemmas) must precede the hop_<i> equiv lemmas that
+    # reference them via ``apply hop_<i>_chain``.
     if chain_extra_decls:
         proof_decls.append(_section_header("Per-transform canonicalization chain"))
         proof_decls.extend(chain_extra_decls)

@@ -11,7 +11,7 @@ from __future__ import annotations
 import copy
 
 from proof_frog import frog_ast
-from proof_frog.export.easycrypt_per_transform.canonical_form import (
+from proof_frog.export.easycrypt.canonical_form import (
     canonical_text,
     _normalize_for_ec,
 )

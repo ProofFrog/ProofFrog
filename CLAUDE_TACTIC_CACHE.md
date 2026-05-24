@@ -1,16 +1,19 @@
 # Per-transform EasyCrypt tactic cache — Claude workflow
 
 This document is for Claude sessions whose job is to close residual
-`admit.` lines in a per-transform EasyCrypt export.
+`admit.` lines in an EasyCrypt export. The exporter always emits a
+per-transform canonicalization chain for each interchangeability hop;
+this doc covers how the tactic cache fills in the micro-lemmas that
+chain produces.
 
 ## When to read this doc
 
 Read this whenever the user asks something like:
 
-- "close the remaining admits in `<proof>`'s per-transform export"
+- "close the remaining admits in `<proof>`'s EasyCrypt export"
 - "derive cached tactics for the Topological Sorting hops"
 - "fill in the tactic cache for X"
-- "investigate the per-transform export of X"
+- "investigate the EasyCrypt export of X"
 
 Also read it before editing any `*.tactics.toml` sidecar.
 
@@ -26,7 +29,7 @@ order:
    recording everything you need to derive a tactic.
 
 Layer 2 is what you populate. The canonical text is what
-`proof_frog.export.easycrypt_per_transform.canonical_form.canonical_text`
+`proof_frog.export.easycrypt.canonical_form.canonical_text`
 emits — exactly what shows up in the Layer-3 diagnostic. **Copy that
 text verbatim into the sidecar.** Any whitespace or naming drift
 silently turns a hit into a miss.
@@ -34,11 +37,11 @@ silently turns a hit into a miss.
 ## Step-by-step workflow
 
 ```
-1. Re-export the proof in per-transform mode:
-   .venv/bin/python -c "from proof_frog.export.easycrypt_per_transform.exporter \
-     import export_proof_file_per_transform; \
+1. Re-export the proof:
+   .venv/bin/python -c "from proof_frog.export.easycrypt.exporter \
+     import export_proof_file; \
      open('/tmp/export.ec', 'w').write(
-       export_proof_file_per_transform('<path-to-proof>'))"
+       export_proof_file('<path-to-proof>'))"
 
 2. List outstanding misses:
    grep -n "tactic-cache miss" /tmp/export.ec
@@ -169,5 +172,5 @@ Stop and confirm with the user before:
 
 Run `make check-tactic-cache` to see per-proof `used / orphan / missing`
 counts for the whole `examples/` corpus. Use `--strict` (or pass it via
-`PYTHONPATH=. .venv/bin/python -m proof_frog.export.easycrypt_per_transform.cache_report --strict`)
+`PYTHONPATH=. .venv/bin/python -m proof_frog.export.easycrypt.cache_report --strict`)
 to exit nonzero if any proof has missing entries.

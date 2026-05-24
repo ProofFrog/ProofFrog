@@ -121,9 +121,49 @@ class ExpressionTranslator:
         dst_ec = self._types.translate_type(frog_ast.BitStringType(dst_len))
         op = self._types.register_slice(src_ec.text, dst_ec.text)
         src_str = self.translate(expr.the_array)
-        start = self.translate(expr.start)
-        end = self.translate(expr.end)
+        # Canonicalize the int arguments via sympy so that
+        # arithmetically-equivalent variants (``2 * lambda`` vs
+        # ``lambda * 2``) emit identical EC text. The slice op is
+        # uninterpreted on its int args, so EC's ``sim`` requires
+        # syntactic identity; canonicalization here lets ``sim`` close
+        # micro lemmas whose only difference is commutative rearrangement
+        # of the int arguments. Aliases (e.g. ``T.lambda`` -> ``lambda``)
+        # are resolved first so the canonical form is the same across
+        # reduction-body translations (which see ``T.lambda``) and
+        # scheme/flat-state translations (which see bare ``lambda``).
+        start_resolved = self._resolve_aliases(expr.start)
+        end_resolved = self._resolve_aliases(expr.end)
+        start = _canonical_int_str(start_resolved) or self.translate(start_resolved)
+        end = _canonical_int_str(end_resolved) or self.translate(end_resolved)
         return f"{op} {_paren(src_str)} {_paren(start)} {_paren(end)}"
+
+    def _resolve_aliases(self, expr: frog_ast.Expression) -> frog_ast.Expression:
+        """Recursively replace ``FieldAccess(Variable(o), name)`` with the
+        alias-resolved expression (e.g. ``T.lambda`` -> ``lambda``).
+
+        Used to normalize int arguments before sympy canonicalization.
+        Non-``FieldAccess`` nodes are recursed into; nodes the resolver
+        doesn't know about (or whose alias is non-Expression) are kept
+        as-is.
+        """
+        if isinstance(expr, frog_ast.FieldAccess) and isinstance(
+            expr.the_object, frog_ast.Variable
+        ):
+            resolved = self._types.resolve_value_alias(expr.the_object.name, expr.name)
+            if resolved is not None:
+                return self._resolve_aliases(resolved)
+            return expr
+        if isinstance(expr, frog_ast.BinaryOperation):
+            return frog_ast.BinaryOperation(
+                expr.operator,
+                self._resolve_aliases(expr.left_expression),
+                self._resolve_aliases(expr.right_expression),
+            )
+        if isinstance(expr, frog_ast.UnaryOperation):
+            return frog_ast.UnaryOperation(
+                expr.operator, self._resolve_aliases(expr.expression)
+            )
+        return expr
 
     def _translate_concat(
         self,
@@ -151,7 +191,77 @@ class ExpressionTranslator:
 
 
 def _paren(s: str) -> str:
-    """Wrap a rendered expression in parens if it contains whitespace."""
+    """Wrap a rendered expression in parens if it isn't already atomic.
+
+    Atomic forms (single identifier or integer literal, possibly already
+    wrapped in matching outer parens) are left alone. Anything containing
+    whitespace or an infix operator is wrapped so it doesn't bind
+    incorrectly when inlined as a function argument.
+    """
+    if s.startswith("(") and s.endswith(")"):
+        return s
     if " " in s:
         return f"({s})"
+    if any(op in s for op in "+-*/"):
+        return f"({s})"
     return s
+
+
+def _canonical_int_str(expr: frog_ast.Expression) -> str | None:
+    """Return a canonical EC int-expression string for ``expr``, or None.
+
+    Routes ``expr`` through sympy when it's purely arithmetic over bare
+    integer-typed variables (no ``FieldAccess`` or other constructs the
+    visitor doesn't handle). Returns ``None`` if sympy can't represent
+    the expression or if the canonical form would contain identifiers
+    the EC scope doesn't have.
+    """
+    # pylint: disable=import-outside-toplevel
+    if _contains_field_access(expr):
+        return None
+    try:
+        from sympy import Symbol  # noqa: F401
+        from ... import visitors as _vis
+    except ImportError:
+        return None
+    names: set[str] = set()
+    if not _collect_bare_variable_names(expr, names):
+        return None
+    variables = {n: Symbol(n) for n in names}
+    visitor = _vis.FrogToSympyVisitor(variables)
+    try:
+        visitor.visit(expr)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return None
+    result = visitor.result()
+    if result is None:
+        return None
+    return str(result)
+
+
+def _contains_field_access(expr: frog_ast.Expression) -> bool:
+    if isinstance(expr, frog_ast.FieldAccess):
+        return True
+    if isinstance(expr, frog_ast.BinaryOperation):
+        return _contains_field_access(expr.left_expression) or _contains_field_access(
+            expr.right_expression
+        )
+    if isinstance(expr, frog_ast.UnaryOperation):
+        return _contains_field_access(expr.expression)
+    return False
+
+
+def _collect_bare_variable_names(expr: frog_ast.Expression, out: set[str]) -> bool:
+    """Collect bare ``Variable`` names; return False on unsupported node."""
+    if isinstance(expr, frog_ast.Variable):
+        out.add(expr.name)
+        return True
+    if isinstance(expr, frog_ast.Integer):
+        return True
+    if isinstance(expr, frog_ast.BinaryOperation):
+        return _collect_bare_variable_names(
+            expr.left_expression, out
+        ) and _collect_bare_variable_names(expr.right_expression, out)
+    if isinstance(expr, frog_ast.UnaryOperation):
+        return _collect_bare_variable_names(expr.expression, out)
+    return False

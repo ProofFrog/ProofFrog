@@ -22,7 +22,7 @@ import re
 # pylint: disable=duplicate-code
 
 from ... import frog_ast
-from ..easycrypt.type_collector import TypeCollector
+from .type_collector import TypeCollector
 from ...transforms._base import TransformApplication
 
 

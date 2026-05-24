@@ -23,7 +23,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Callable
 
-from ..easycrypt.type_collector import TypeCollector
+from .type_collector import TypeCollector
 from ...transforms._base import TransformApplication
 from . import parametric_tactics
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pathlib
 
-from proof_frog.export.easycrypt_per_transform import cache_report
+from proof_frog.export.easycrypt import cache_report
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]

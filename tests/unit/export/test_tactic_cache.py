@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pathlib
 
-from proof_frog.export.easycrypt_per_transform.tactic_cache import (
+from proof_frog.export.easycrypt.tactic_cache import (
     CacheEntry,
     SCHEMA_VERSION,
     TacticCache,

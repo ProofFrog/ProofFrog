@@ -49,6 +49,58 @@ def _distr_binding_for(
     return None
 
 
+def _instantiate_bitstring_expr(
+    expr: frog_ast.Expression,
+    concretized_fields: dict[str, frog_ast.Type],
+    _visited: frozenset[str] = frozenset(),
+) -> frog_ast.Expression:
+    """Substitute a scheme instance's concretized field values into an
+    abstract bitstring parameterization expression.
+
+    The abstract expression is post-strip (uses bare primitive field
+    names like ``lambda``, ``stretch``). For each ``Variable(name)``
+    encountered, if ``concretized_fields[name]`` is itself an
+    ``Expression`` (the typical case for ``Int`` value fields), splice
+    that value in. Otherwise leave the variable unchanged.
+
+    Cycle-safe: a ``Variable(name)`` whose concretization is itself a
+    ``Variable(name)`` (the common case for opaque let-bindings like
+    ``Int lambda;`` where ``G.lambda = lambda``) is left alone rather
+    than substituted into infinite regress.
+
+    Recurses through ``BinaryOperation`` and ``UnaryOperation`` so
+    expressions like ``lambda + stretch`` become ``lambda + (2 * lambda)``
+    (for a TriplingPRG instance built on a length-doubling G).
+    """
+    if isinstance(expr, frog_ast.Variable):
+        if expr.name in _visited:
+            return expr
+        value = concretized_fields.get(expr.name)
+        if isinstance(value, frog_ast.Variable) and value.name == expr.name:
+            return expr
+        if isinstance(value, frog_ast.Expression):
+            return _instantiate_bitstring_expr(
+                value, concretized_fields, _visited | {expr.name}
+            )
+        return expr
+    if isinstance(expr, frog_ast.BinaryOperation):
+        return frog_ast.BinaryOperation(
+            expr.operator,
+            _instantiate_bitstring_expr(
+                expr.left_expression, concretized_fields, _visited
+            ),
+            _instantiate_bitstring_expr(
+                expr.right_expression, concretized_fields, _visited
+            ),
+        )
+    if isinstance(expr, frog_ast.UnaryOperation):
+        return frog_ast.UnaryOperation(
+            expr.operator,
+            _instantiate_bitstring_expr(expr.expression, concretized_fields, _visited),
+        )
+    return expr
+
+
 def _section_header(label: str) -> str:
     """Render a top-level section divider comment.
 
@@ -220,14 +272,31 @@ def export_proof_file(proof_path: str, mode: str = "per-hop") -> str:
     )
 
     # Primitive field names that act as abstract types inside the theory.
-    # For each primitive field whose value is a Type expression (e.g.
-    # ``Set Key = KeySpace;``), expose an abstract EC type named by the
-    # lowercase form of the FrogLang field name.
+    # Only ``Set``-typed fields (the carrier-set pattern, e.g.
+    # ``Set Key = KeySpace;``) become abstract EC types. ``Int``-typed
+    # scalar parameters (e.g. ``Int lambda = lambda;`` on PRG) are values,
+    # not types, and stay out of the map. We can't use ``isinstance(pf.value,
+    # frog_ast.Type)`` here because ``Variable`` is itself a ``Type``
+    # subclass, so every field with a non-None value would match.
     abstract_types_map: dict[str, str] = {}
     for pf in primitive.fields:
-        if isinstance(pf.value, frog_ast.Type) or pf.value is None:
+        if isinstance(pf.type, frog_ast.SetType):
             abstract_types_map[pf.name] = pf.name.lower()
-    theory_types = tc.TypeCollector(abstract_types=abstract_types_map)
+    # Each game inside the abstract theory takes a single primitive-typed
+    # parameter (e.g. ``Game Real(PRG G)``). Inside the theory, that
+    # parameter is just a module variable; ``G.lambda`` has no first-class
+    # meaning. Strip ``G.`` prefixes from any bitstring parameterization
+    # expression so ``BitString<G.lambda + G.stretch>`` collapses to
+    # ``BitString<lambda + stretch>``, matching the primitive's own
+    # ``BitString<lambda + stretch>`` signature.
+    theory_param_prefixes = {
+        gf.games[0].parameters[0].name for gf in game_files if gf.games[0].parameters
+    }
+    theory_types = tc.TypeCollector(
+        abstract_types=abstract_types_map,
+        strip_field_prefixes=theory_param_prefixes,
+        theory_mode=True,
+    )
 
     method_return_types: dict[tuple[str, str], frog_ast.Type] = {}
     for prim_sig in primitive.methods:
@@ -259,6 +328,14 @@ def export_proof_file(proof_path: str, mode: str = "per-hop") -> str:
                     key = (module_param_types[obj.name], e.func.name)
                     if key in method_return_types:
                         return method_return_types[key]
+            if isinstance(e, frog_ast.Slice):
+                # A slice's static type is ``BitString<end - start>``
+                # regardless of the source bitstring's length.
+                return frog_ast.BitStringType(
+                    frog_ast.BinaryOperation(
+                        frog_ast.BinaryOperators.SUBTRACT, e.end, e.start
+                    )
+                )
             raise NotImplementedError(f"type_of not implemented for {type(e).__name__}")
 
         return type_of
@@ -751,6 +828,15 @@ def export_proof_file(proof_path: str, mode: str = "per-hop") -> str:
                 (assumption_game_file_name, right_side)
             ]
             reverse_direction = left_side == gf_a.games[1].name
+            # EC's adversary-footprint rule rejects ``apply (advantage Em
+            # (R_Adv(Em, A)) &m)`` when the only declared module in the
+            # section is the same module Em the axiom restricts the
+            # adversary against (``{-Em}``). Detect that and admit the
+            # hop_pr lemma rather than emit a body that won't close.
+            declared_names = {p.name for p in declared_instance_params}
+            force_admit = (
+                assumption_scheme_expr in declared_names and len(declared_names) == 1
+            )
             ec_pr_lemmas.append(
                 pt.translate_assumption_hop_pr_lemma(
                     hop_index=i,
@@ -769,6 +855,7 @@ def export_proof_file(proof_path: str, mode: str = "per-hop") -> str:
                     or None,
                     wrapper_extra_args=[p.name for p in declared_instance_params]
                     or None,
+                    force_admit=force_admit,
                 )
             )
         else:
@@ -801,15 +888,33 @@ def export_proof_file(proof_path: str, mode: str = "per-hop") -> str:
 
     # === Assemble the file ===
 
-    # Build one clone per scheme instance. For each instance, every
-    # primitive abstract type (``message``/``key``/``ciphertext``)
-    # binds to the instance's concretized field type at the top level.
+    # Build one clone per scheme instance. For each instance:
+    #   * every primitive abstract type (``message``/``key``) binds to
+    #     the instance's concretized field type at the top level;
+    #   * every abstract bitstring type registered inside the theory
+    #     (e.g. ``bs_lambda``, ``bs_lambda_stretch`` from PRG) binds to
+    #     the concrete top-level bitstring obtained by substituting the
+    #     instance's field values into the original parameterization
+    #     (e.g. ``bs_lambda_stretch`` -> ``bs_2_lambda`` when the
+    #     instance has lambda=lambda and stretch=lambda).
     def _instance_clone(inst: si.SchemeInstance) -> ec_ast.Clone:
         type_bindings_: list[tuple[str, str]] = []
         for pf_name, abs_name in abstract_types_map.items():
             if pf_name in inst.concretized_fields:
                 ec_concrete = top_types.translate_type(inst.concretized_fields[pf_name])
                 type_bindings_.append((abs_name, ec_concrete.text))
+        # Build bitstring type bindings by reconstructing each abstract
+        # bitstring as a BitString<...> with the instance's field values
+        # substituted in, then re-translating through ``top_types`` so the
+        # resulting concrete type gets registered for top-level emission.
+        for abs_name, abs_expr in theory_types.abstract_bitstrings:
+            concrete_expr = _instantiate_bitstring_expr(
+                abs_expr, inst.concretized_fields
+            )
+            concrete_type = top_types.translate_type(
+                frog_ast.BitStringType(concrete_expr)
+            )
+            type_bindings_.append((abs_name, concrete_type.text))
         op_bindings_: list[tuple[str, str]] = []
         for distr in theory_types.abstract_distrs_seen:
             binding = _distr_binding_for(
@@ -817,6 +922,16 @@ def export_proof_file(proof_path: str, mode: str = "per-hop") -> str:
             )
             if binding is not None:
                 op_bindings_.append(binding)
+            elif distr.startswith("dbs_"):
+                # Bitstring distribution bound through the abstract
+                # bitstring binding: dbs_X (theory) <- dbs_<concrete>
+                # (top-level) for whatever the theory's bs_X clones to.
+                abs_name = distr[1:]  # strip leading 'd' -> bs_X
+                for a_name, t_name in type_bindings_:
+                    if a_name == abs_name and t_name.startswith("bs"):
+                        concrete_distr = "d" + t_name
+                        op_bindings_.append((distr, concrete_distr))
+                        break
         return ec_ast.Clone(
             source_theory=theory_name,
             alias=inst.clone_alias,
@@ -953,6 +1068,11 @@ def export_proof_file(proof_path: str, mode: str = "per-hop") -> str:
                 )
             else:
                 set_let_decls.append(ec_ast.TypeDecl(let.name))
+        elif isinstance(let.type, frog_ast.IntType) and let.value is None:
+            # Opaque ``Int X;`` let-binding -- declare as an abstract int op
+            # at top level. Referenced from BitString lengths, reduction
+            # bodies, etc.
+            set_let_decls.append(ec_ast.OpDecl(let.name, "int"))
 
     # Non-primary primitive instances become ``declare module`` names
     # inside a ``section Main``. For CES this yields

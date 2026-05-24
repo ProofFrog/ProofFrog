@@ -496,6 +496,49 @@ def emit_chain_for_hop(
         f"[ smt() | smt() | apply {chain_lemma_name} | proc; inline *; sim ].",
         "qed.",
     ]
+    # If any flat-state body translation:
+    #   * fell back to ``return witness;`` (a FrogLang construct the EC
+    #     expression translator doesn't yet handle), OR
+    #   * uses abstract ``slice_*`` / ``concat_*`` ops on bitstrings
+    #     (which are emitted as uninterpreted; the canned Layer-1
+    #     micro tactics ``proc; sp; auto`` / ``proc; sp; wp; sim``
+    #     cannot reason about them, and we don't yet have a verified
+    #     tactic library for them),
+    # the chain can't be closed end-to-end. Discard the chain artifacts
+    # and replace the outer hop's proof body with ``admit.`` plus a
+    # structured comment, mirroring the per-micro Layer-3 admit shape.
+    has_stub_body = any("return witness;" in chunk for chunk in chunks)
+    has_uninterpreted_bs_ops = any(
+        "slice_" in chunk or "concat_" in chunk for chunk in chunks
+    )
+    if has_stub_body or has_uninterpreted_bs_ops:
+        if has_stub_body:
+            reason = (
+                "at least one intermediate-state body could not be "
+                "translated to EC (the engine produced a FrogLang "
+                "construct the expression translator does not yet "
+                "handle)"
+            )
+        else:
+            reason = (
+                "intermediate-state bodies use uninterpreted "
+                "slice_*/concat_* bitstring ops; the canned micro "
+                "tactics cannot reason about them yet"
+            )
+        admit_tactic = [
+            f"(* per-transform chain unrenderable: {reason}.",
+            "   Falling back to admit; the chain artifacts are omitted",
+            "   from the file. *)",
+            "admit.",
+            "qed.",
+        ]
+        return HopChainInfo(
+            extra_decls=[],
+            tactic_body=admit_tactic,
+            pre_override=eq_args_strong if multi_module else None,
+            post_override=eq_post_strong if multi_module else None,
+            requested_keys=requested_keys,
+        )
     return HopChainInfo(
         extra_decls=chunks,
         tactic_body=tactic,

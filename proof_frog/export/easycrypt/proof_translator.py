@@ -314,36 +314,29 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
         f" - Pr[{right_app}.main() @ &m : res] |"
         f" <= {eps_ref}"
     )
-    if wrapper_extra_args:
-        body = [
-            "admit.",
-            f"(* multi-module assumption hop: {left_wrapper_name} -> "
-            f"{right_wrapper_name} via {advantage_ref} *)",
-        ]
+    body = [
+        f"have hL : Pr[{left_app}.main() @ &m : res]",
+        f"        = Pr[{left_wrapper_ref}({scheme_module_expr}, "
+        f"{adv_applied}).main() @ &m : res]",
+        "  by byequiv => //; proc; inline *; sim.",
+        f"have hR : Pr[{right_app}.main() @ &m : res]",
+        f"        = Pr[{right_wrapper_ref}({scheme_module_expr}, "
+        f"{adv_applied}).main() @ &m : res]",
+        "  by byequiv => //; proc; inline *; sim.",
+        "rewrite hL hR.",
+    ]
+    if reverse_direction:
+        body.extend(
+            [
+                f"have H := {advantage_ref} {scheme_module_expr} "
+                f"({adv_applied}) &m.",
+                "smt().",
+            ]
+        )
     else:
-        body = [
-            f"have hL : Pr[{left_app}.main() @ &m : res]",
-            f"        = Pr[{left_wrapper_ref}({scheme_module_expr}, "
-            f"{adv_applied}).main() @ &m : res]",
-            "  by byequiv => //; proc; inline *; sim.",
-            f"have hR : Pr[{right_app}.main() @ &m : res]",
-            f"        = Pr[{right_wrapper_ref}({scheme_module_expr}, "
-            f"{adv_applied}).main() @ &m : res]",
-            "  by byequiv => //; proc; inline *; sim.",
-            "rewrite hL hR.",
-        ]
-        if reverse_direction:
-            body.extend(
-                [
-                    f"have H := {advantage_ref} {scheme_module_expr} "
-                    f"({adv_applied}) &m.",
-                    "smt().",
-                ]
-            )
-        else:
-            body.append(
-                f"apply ({advantage_ref} {scheme_module_expr} " f"({adv_applied}) &m)."
-            )
+        body.append(
+            f"apply ({advantage_ref} {scheme_module_expr} " f"({adv_applied}) &m)."
+        )
     body.append("qed.")
     footprint = (
         scheme_footprint if scheme_footprint is not None else f"-{scheme_module_expr}"

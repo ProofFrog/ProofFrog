@@ -1,6 +1,6 @@
 PYTHON := .venv/bin/python
 
-.PHONY: lint format test parser vscode-extension vscode-vsix examples-pin git-sha build check-tactic-cache
+.PHONY: lint format test parser vscode-extension vscode-vsix examples-pin git-sha claude-docs build check-tactic-cache
 
 lint:
 	$(PYTHON) -m black --check proof_frog
@@ -36,7 +36,12 @@ git-sha:
 	 fi; \
 	 echo "GIT_SHA: str | None = \"$$sha\"" >> proof_frog/_git_sha.py
 
-build: examples-pin git-sha parser
+claude-docs:
+	@rm -rf proof_frog/claude_docs
+	@mkdir -p proof_frog/claude_docs
+	@cp docs/for_agents/*.md proof_frog/claude_docs/
+
+build: examples-pin git-sha claude-docs parser
 	$(PYTHON) -m flit build
 
 GRAMMARS := Game.g4 Primitive.g4 Proof.g4 Scheme.g4

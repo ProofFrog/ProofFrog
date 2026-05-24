@@ -95,6 +95,18 @@ class TypeCollector:
         # Order-preserving, deduped by (left, right, result).
         self._concat_ops: list[tuple[str, str, str]] = []
         self._concat_op_set: set[tuple[str, str, str]] = set()
+        # Abstract 3-way concatenation operators:
+        # ``concat3_<a>_<b>_<c>_to_<r> : <a> -> <b> -> <c> -> <r>``.
+        # Registered on demand by the partial-split synthesizer to model
+        # ``Split Uniform Samples`` applications whose two used slices
+        # don't cover the full source bitstring (a third "gap" piece
+        # collapses the bijection). The slice ops ``(<r>, <a>)``,
+        # ``(<r>, <b>)``, ``(<r>, <c>)`` are auto-registered, and
+        # :meth:`emit` produces three round-trip axioms plus a
+        # dlet-form distribution-split axiom.
+        # Order-preserving, deduped by (left, right, gap, result).
+        self._concat3_ops: list[tuple[str, str, str, str]] = []
+        self._concat3_op_set: set[tuple[str, str, str, str]] = set()
         # Per-bitstring canonical length expression string. Populated
         # whenever a bitstring is named via ``_bitstring_name``; used by
         # ``emit()`` / ``emit_abstract()`` to parameterize the
@@ -331,6 +343,57 @@ class TypeCollector:
         self.register_slice(result_name, right_name)
         return _concat_op_name(left_name, right_name, result_name)
 
+    def register_concat3(
+        self, left_name: str, right_name: str, gap_name: str, result_name: str
+    ) -> str:
+        """Register a 3-way concat ``left -> right -> gap -> result`` and
+        return its name.
+
+        Used by the partial-split synthesizer for ``Split Uniform Samples``
+        applications where the two used slices don't cover the source
+        bitstring: a third "gap" piece reconstructs a sound 3-way
+        bijection. Auto-registers the three inverse slice ops so the
+        round-trip axioms emitted in :meth:`emit` have all components in
+        scope.
+        """
+        key = (left_name, right_name, gap_name, result_name)
+        if key not in self._concat3_op_set:
+            self._concat3_op_set.add(key)
+            self._concat3_ops.append(key)
+        # Auto-register the inverse slice ops if not already present.
+        self.register_slice(result_name, left_name)
+        self.register_slice(result_name, right_name)
+        self.register_slice(result_name, gap_name)
+        return _concat3_op_name(left_name, right_name, gap_name, result_name)
+
+    def register_bs_by_length_str(self, length_str: str) -> str:
+        """Register a fresh bitstring type by its canonical length string,
+        returning the EC type name. Idempotent: if a bs with the same
+        canonical length is already registered, returns its name.
+
+        Used by the partial-split synthesizer to obtain a bitstring type
+        for the gap piece in a 3-way concat decomposition. The length
+        string should already be in sympy-canonical form (matching the
+        ``_canonical_arith_str`` output used elsewhere) so the resulting
+        name aligns with bs types registered via ``_bitstring_name``.
+        """
+        sanitized = _sanitize(length_str)
+        if self._theory_mode:
+            name = f"bs_{sanitized}_t" if sanitized else "bs_t"
+            if name not in self._abstract_bitstring_names:
+                # Cannot construct a frog_ast Expression here; leave
+                # parameterization absent. Theory-mode partial splits
+                # aren't currently exercised, but record the name for
+                # completeness.
+                self._abstract_bitstring_names.add(name)
+        else:
+            name = f"bs_{sanitized}" if sanitized else "bs"
+            if name not in self._seen:
+                self._seen.add(name)
+                self._names.append(name)
+        self._bs_lengths[name] = length_str
+        return name
+
     def bs_length_for(self, bs_name: str) -> str | None:
         """Return the canonical length expression string for a registered
         abstract bitstring, or ``None`` if the name isn't registered.
@@ -436,6 +499,73 @@ class TypeCollector:
                     f"  dmap ({distr_l} `*` {distr_r})\n"
                     f"       (fun (p : {left_name} * {right_name}) =>"
                     f" {concat_op} p.`1 p.`2)",
+                )
+            )
+        # 3-way concat round-trip and distribution-split axioms for
+        # partial-split applications. The dlet-form distribution-split
+        # axiom matches the shape produced by EC's ``rndsem*{i} 0`` when
+        # folding three independent samples plus a concat3 assignment.
+        for left_name, right_name, gap_name, result_name in self._concat3_ops:
+            len_l = self._bs_lengths.get(left_name)
+            len_r = self._bs_lengths.get(right_name)
+            len_g = self._bs_lengths.get(gap_name)
+            if len_l is None or len_r is None or len_g is None:
+                continue
+            concat3_op = _concat3_op_name(left_name, right_name, gap_name, result_name)
+            slice_l = _slice_op_name(result_name, left_name)
+            slice_r = _slice_op_name(result_name, right_name)
+            slice_g = _slice_op_name(result_name, gap_name)
+            len_l_p = _paren_int(len_l)
+            len_lr = f"({len_l} + {len_r})"
+            len_res = _paren_int(self._bs_lengths.get(result_name, ""))
+            axiom_prefix = f"{left_name}_{right_name}_{gap_name}_{result_name}"
+            decls.append(
+                ec_ast.OpDecl(
+                    concat3_op,
+                    f"{left_name} -> {right_name} -> {gap_name} -> {result_name}",
+                )
+            )
+            decls.append(
+                ec_ast.Axiom(
+                    f"slice_concat3_p1_{axiom_prefix}",
+                    f"forall (a : {left_name}) (b : {right_name}) (c : {gap_name}),\n"
+                    f"  {slice_l} ({concat3_op} a b c) 0 {len_l_p} = a",
+                )
+            )
+            decls.append(
+                ec_ast.Axiom(
+                    f"slice_concat3_p2_{axiom_prefix}",
+                    f"forall (a : {left_name}) (b : {right_name}) (c : {gap_name}),\n"
+                    f"  {slice_r} ({concat3_op} a b c) {len_l_p} {len_lr} = b",
+                )
+            )
+            decls.append(
+                ec_ast.Axiom(
+                    f"slice_concat3_p3_{axiom_prefix}",
+                    f"forall (a : {left_name}) (b : {right_name}) (c : {gap_name}),\n"
+                    f"  {slice_g} ({concat3_op} a b c) {len_lr} {len_res} = c",
+                )
+            )
+            decls.append(
+                ec_ast.Axiom(
+                    f"concat3_slices_id_{axiom_prefix}",
+                    f"forall (s : {result_name}),\n"
+                    f"  {concat3_op} ({slice_l} s 0 {len_l_p})"
+                    f" ({slice_r} s {len_l_p} {len_lr})"
+                    f" ({slice_g} s {len_lr} {len_res}) = s",
+                )
+            )
+            distr_l = f"d{left_name}"
+            distr_r = f"d{right_name}"
+            distr_g = f"d{gap_name}"
+            distr_res = f"d{result_name}"
+            decls.append(
+                ec_ast.Axiom(
+                    f"{distr_res}_split3_{left_name}_{right_name}_{gap_name}",
+                    f"{distr_res} =\n"
+                    f"  dlet {distr_l} (fun (v1 : {left_name}) =>\n"
+                    f"     dlet {distr_r} (fun (v2 : {right_name}) =>\n"
+                    f"        dmap {distr_g} ({concat3_op} v1 v2)))",
                 )
             )
         return decls
@@ -578,6 +708,13 @@ def _slice_op_name(src_name: str, dst_name: str) -> str:
 def _concat_op_name(left_name: str, right_name: str, result_name: str) -> str:
     """Name for an abstract concat op."""
     return f"concat_{left_name}_{right_name}_to_{result_name}"
+
+
+def _concat3_op_name(
+    left_name: str, right_name: str, gap_name: str, result_name: str
+) -> str:
+    """Name for an abstract 3-way concat op (partial-split)."""
+    return f"concat3_{left_name}_{right_name}_{gap_name}_to_{result_name}"
 
 
 def _paren_int(s: str) -> str:

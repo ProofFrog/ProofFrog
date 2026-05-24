@@ -19,6 +19,7 @@ shared statement translator can consume the canonical AST.
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -293,8 +294,26 @@ def emit_chain_for_hop(
         lines.append("admit.")
         return lines
 
-    def _tactic_for(
-        app: TransformApplication, bucket: Bucket, reversed_dir: bool = False
+    # Module-parameter signature derived from ``flat_params``: used by
+    # parametric synthesizers (e.g. partial-split ``Split Uniform Samples``)
+    # to emit auxiliary helper modules whose functor signatures match the
+    # surrounding flat-state modules.
+    if flat_params:
+        module_param_sig = (
+            "(" + ", ".join(f"{p.name} : {p.module_type}" for p in flat_params) + ")"
+        )
+    else:
+        module_param_sig = ""
+    module_param_args = inst_suffix
+
+    def _tactic_for(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        app: TransformApplication,
+        bucket: Bucket,
+        reversed_dir: bool = False,
+        helpers: list[str] | None = None,
+        name_prefix: str = "",
+        left_module_ref: str = "",
+        right_module_ref: str = "",
     ) -> list[str]:
         """Resolve the tactic body for one transform application.
 
@@ -363,7 +382,18 @@ def emit_chain_for_hop(
         # "fell back to static".
         synth = PARAMETRIC_TACTIC.get(app.transform_name)
         if synth is not None:
-            synthesized = synth(app, types)
+            synthesized = synth(
+                app,
+                types,
+                helpers=helpers,
+                name_prefix=name_prefix,
+                module_param_sig=module_param_sig,
+                module_param_args=module_param_args,
+                left_module_ref=left_module_ref,
+                right_module_ref=right_module_ref,
+                eq_args_strong=eq_args_strong,
+                eq_post_strong=eq_post_strong,
+            )
             if synthesized is not None:
                 return synthesized
         body = tactic_body(app.transform_name, app, types)
@@ -400,11 +430,24 @@ def emit_chain_for_hop(
     micros_left: list[_MicroLemma] = []
     for k, app in enumerate(left_apps):
         bucket = classify(app.transform_name)
-        body = _tactic_for(app, bucket)
+        micro_name = f"micro_{hop_index}_left_{k}"
+        helpers: list[str] = []
+        left_ref = mod_ref(left_mods[k])
+        right_ref = mod_ref(left_mods[k + 1])
+        body = _tactic_for(
+            app,
+            bucket,
+            helpers=helpers,
+            name_prefix=micro_name,
+            left_module_ref=left_ref,
+            right_module_ref=right_ref,
+        )
+        for h in helpers:
+            chunks.append(h)
         micro = _MicroLemma(
-            name=f"micro_{hop_index}_left_{k}",
-            left_module=mod_ref(left_mods[k]),
-            right_module=mod_ref(left_mods[k + 1]),
+            name=micro_name,
+            left_module=left_ref,
+            right_module=right_ref,
             transform_name=app.transform_name,
             body=body,
             bucket=bucket,
@@ -419,20 +462,46 @@ def emit_chain_for_hop(
     micros_right_rev: list[_MicroLemma] = []
     for k, app in enumerate(right_apps):
         bucket = classify(app.transform_name)
-        fwd_body = _tactic_for(app, bucket, reversed_dir=False)
-        rev_body = _tactic_for(app, bucket, reversed_dir=True)
+        fwd_name = f"micro_{hop_index}_right_{k}_fwd"
+        rev_name = f"micro_{hop_index}_right_{k}_rev"
+        right_left_ref = mod_ref(right_mods[k])
+        right_right_ref = mod_ref(right_mods[k + 1])
+        helpers_fwd: list[str] = []
+        helpers_rev: list[str] = []
+        fwd_body = _tactic_for(
+            app,
+            bucket,
+            reversed_dir=False,
+            helpers=helpers_fwd,
+            name_prefix=fwd_name,
+            left_module_ref=right_left_ref,
+            right_module_ref=right_right_ref,
+        )
+        rev_body = _tactic_for(
+            app,
+            bucket,
+            reversed_dir=True,
+            helpers=helpers_rev,
+            name_prefix=rev_name,
+            left_module_ref=right_right_ref,
+            right_module_ref=right_left_ref,
+        )
+        for h in helpers_fwd:
+            chunks.append(h)
         fwd = _MicroLemma(
-            name=f"micro_{hop_index}_right_{k}_fwd",
-            left_module=mod_ref(right_mods[k]),
-            right_module=mod_ref(right_mods[k + 1]),
+            name=fwd_name,
+            left_module=right_left_ref,
+            right_module=right_right_ref,
             transform_name=app.transform_name,
             body=fwd_body,
             bucket=bucket,
         )
+        for h in helpers_rev:
+            chunks.append(h)
         rev = _MicroLemma(
-            name=f"micro_{hop_index}_right_{k}_rev",
-            left_module=mod_ref(right_mods[k + 1]),
-            right_module=mod_ref(right_mods[k]),
+            name=rev_name,
+            left_module=right_right_ref,
+            right_module=right_left_ref,
             transform_name=app.transform_name + " (reversed)",
             body=rev_body,
             bucket=bucket,
@@ -531,10 +600,12 @@ def emit_chain_for_hop(
                 "handle)"
             )
         else:
+            culprits = _micro_admit_culprits(chunks)
+            culprit_str = ", ".join(sorted(set(culprits))) if culprits else "<unknown>"
             reason = (
-                "at least one micro lemma falls back to admit (no "
-                "canned tactic or sidecar entry covers the underlying "
-                "transform)"
+                "at least one micro lemma falls back to admit (no canned "
+                "tactic or sidecar entry covers the underlying transform; "
+                f"culprits: {culprit_str})"
             )
         admit_tactic = [
             f"(* per-transform chain unrenderable: {reason}.",
@@ -648,6 +719,41 @@ def _chunk_has_micro_admit(chunk: str) -> bool:
         if in_proof and stripped == "admit.":
             return True
     return False
+
+
+_TRANSFORM_COMMENT_RE = re.compile(r"\(\* transform: (.+?) \(bucket=\w+\) \*\)")
+
+
+def _micro_admit_culprits(chunks: list[str]) -> list[str]:
+    """Return the transform names of micros whose tactic body is ``admit.``.
+
+    Walks each rendered chunk; when ``admit.`` appears inside a
+    ``proof. ... qed.`` block, records the most recent
+    ``(* transform: NAME (bucket=...) *)`` comment in that chunk as the
+    culprit. Used by the chain-renderer's fallback to name the
+    responsible transform(s) in the structured admit comment so dashboards
+    and human readers can attribute the admit to a specific transform.
+    """
+    culprits: list[str] = []
+    for chunk in chunks:
+        last_transform: str | None = None
+        in_proof = False
+        for line in chunk.splitlines():
+            m = _TRANSFORM_COMMENT_RE.search(line)
+            if m:
+                last_transform = m.group(1)
+                continue
+            stripped = line.strip()
+            if stripped == "proof.":
+                in_proof = True
+                continue
+            if stripped == "qed.":
+                in_proof = False
+                continue
+            if in_proof and stripped == "admit." and last_transform is not None:
+                culprits.append(last_transform)
+                last_transform = None
+    return culprits
 
 
 def _stmt_signature(stmt: frog_ast.Statement) -> tuple[object, ...]:

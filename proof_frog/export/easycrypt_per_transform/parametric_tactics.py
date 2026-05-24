@@ -63,7 +63,9 @@ def _bitstring_suffix(t: frog_ast.Type) -> str | None:
 
 # pylint: disable=too-many-locals
 def uniform_xor_tactic(
-    app: TransformApplication, _types: TypeCollector | None = None
+    app: TransformApplication,
+    _types: TypeCollector | None = None,
+    **_kwargs: object,  # accept and ignore optional context kwargs
 ) -> list[str] | None:
     """Synthesize the EC tactic for ``Uniform XOR Simplification``.
 
@@ -151,6 +153,7 @@ def uniform_xor_tactic(
 def inline_single_use_variables_tactic(
     app: TransformApplication,
     _types: TypeCollector | None = None,
+    **_kwargs: object,  # accept and ignore optional context kwargs
 ) -> list[str] | None:
     """Synthesize the EC tactic for ``Inline Single-Use Variables``.
 
@@ -228,7 +231,9 @@ def inline_single_use_variables_tactic(
 
 # pylint: disable=too-many-locals
 def merge_uniform_samples_tactic(
-    app: TransformApplication, types: TypeCollector | None = None
+    app: TransformApplication,
+    types: TypeCollector | None = None,
+    **_kwargs: object,  # accept and ignore optional context kwargs
 ) -> list[str] | None:
     """Synthesize the EC tactic for ``Merge Uniform Samples``.
 
@@ -341,6 +346,14 @@ def merge_uniform_samples_tactic(
     len_res = types.bs_length_for(name_res)
     if len_l is None or len_r is None or len_res is None:
         return None
+    # Partial-merge soundness gate: ``|L| + |R| != |RES|`` would emit an
+    # unsound ``concat_<L>_<R>_<RES>`` distribution-split axiom (the
+    # image of concat has 2^(|L|+|R|) elements, |RES| has 2^|RES|).
+    # In practice merges from the engine are always full (the engine
+    # only merges when the lengths sum to the merged type), but guard
+    # defensively so a future shape can't introduce false axioms.
+    if not _lengths_sum_equal(len_l, len_r, len_res):
+        return _partial_split_admit("Merge Uniform Samples", name_l, name_r, name_res)
     # Ensure the concat triple is registered so the round-trip and
     # distribution-split axioms get emitted in TypeCollector.emit() (the
     # collector's emit runs after the chain renderer, so on-demand
@@ -359,9 +372,19 @@ def merge_uniform_samples_tactic(
     )
 
 
-# pylint: disable=too-many-locals
+# pylint: disable=too-many-locals,too-many-branches,too-many-statements,too-many-arguments,too-many-positional-arguments
 def split_uniform_samples_tactic(
-    app: TransformApplication, types: TypeCollector | None = None
+    app: TransformApplication,
+    types: TypeCollector | None = None,
+    *,
+    helpers: list[str] | None = None,
+    name_prefix: str = "",
+    module_param_sig: str = "",
+    module_param_args: str = "",
+    left_module_ref: str = "",
+    right_module_ref: str = "",
+    eq_args_strong: str = "",
+    eq_post_strong: str = "",
 ) -> list[str] | None:
     """Synthesize the EC tactic for ``Split Uniform Samples``.
 
@@ -440,6 +463,37 @@ def split_uniform_samples_tactic(
     len_res = types.bs_length_for(name_res)
     if len_l is None or len_r is None or len_res is None:
         return None
+    # Partial-split case: ``|L| + |R| < |RES|``. Introduce an augmented
+    # intermediate that adds a dummy ``gap`` sample on the RIGHT and a
+    # ``Mid`` that mediates the bijection via concat3. The straight 2-way
+    # bijection would emit an unsound ``concat`` axiom (image
+    # cardinality ``2^(|L|+|R|)`` vs ``2^|RES|``); the 3-way decomposition
+    # is sound because ``|L|+|R|+|GAP| = |RES|``.
+    if not _lengths_sum_equal(len_l, len_r, len_res):
+        partial = _partial_split_helpers(
+            types=types,
+            len_l=len_l,
+            len_r=len_r,
+            len_res=len_res,
+            name_l=name_l,
+            name_r=name_r,
+            name_res=name_res,
+            ret_type=_return_bs_name(app, types),
+            orig_var=_ec_ident(s_orig.var.name),
+            a_var=_ec_ident(s_a.var.name),
+            b_var=_ec_ident(s_b.var.name),
+            helpers=helpers,
+            name_prefix=name_prefix,
+            module_param_sig=module_param_sig,
+            module_param_args=module_param_args,
+            left_module_ref=left_module_ref,
+            right_module_ref=right_module_ref,
+            eq_args_strong=eq_args_strong,
+            eq_post_strong=eq_post_strong,
+        )
+        if partial is not None:
+            return partial
+        return _partial_split_admit("Split Uniform Samples", name_l, name_r, name_res)
     # Register the concat triple so the round-trip + distribution-split
     # axioms get emitted in TypeCollector.emit(). For Split the (l, r,
     # res) concat doesn't appear in the actual game bodies (only slices
@@ -500,6 +554,343 @@ def _bs_length_arg(s: str) -> str:
     if any(op in s for op in "+-*/ "):
         return f"({s})"
     return s
+
+
+def _lengths_sum_equal(len_l: str, len_r: str, len_res: str) -> bool:
+    """Return True iff ``len_l + len_r == len_res`` as integer expressions.
+
+    Used to distinguish full splits (where ``concat (l, r) → res`` is a
+    bijection on supports) from partial splits (where the source has
+    extra bits that get discarded). Sympy canonicalization tolerates
+    syntactic variants like ``lambda + lambda`` vs ``2 * lambda``.
+
+    Python keywords (notably ``lambda`` — common in crypto length
+    expressions) are renamed to safe aliases before sympify because
+    sympy's parser delegates to Python's ``compile`` and chokes on
+    keywords even when they appear in ``locals``.
+
+    Returns False whenever sympy can't decide — the safe direction for
+    the synthesizers (they fall back to admit rather than emit a
+    bijection-based proof that might rely on an unsound axiom).
+    """
+    # pylint: disable=import-outside-toplevel
+    try:
+        import keyword as _kw
+
+        from sympy import Symbol, simplify, sympify
+    except ImportError:
+        return False
+    names = set(re.findall(r"[A-Za-z_]\w*", f"{len_l} {len_r} {len_res}"))
+    # Rename any Python keyword identifier (e.g. ``lambda``) to a safe
+    # alias so sympy's compile-based parser accepts the expression.
+    renames = {n: f"_{n}_sym_" for n in names if _kw.iskeyword(n)}
+
+    def _safe(s: str) -> str:
+        out = s
+        for old, new in renames.items():
+            out = re.sub(rf"\b{re.escape(old)}\b", new, out)
+        return out
+
+    safe_names = {renames.get(n, n) for n in names}
+    locals_ = {n: Symbol(n) for n in safe_names}
+    try:
+        e_l = sympify(_safe(len_l), locals=locals_)
+        e_r = sympify(_safe(len_r), locals=locals_)
+        e_res = sympify(_safe(len_res), locals=locals_)
+        return bool(simplify((e_l + e_r) - e_res) == 0)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return False
+
+
+def _return_bs_name(app: TransformApplication, types: TypeCollector) -> str | None:
+    """Extract the bitstring type name of the after-game's return value.
+
+    The return type is e.g. ``BitString<lambda + lambda>`` which collapses
+    to ``bs_2_lambda`` via :meth:`TypeCollector.translate_type`. Used to
+    name the 2-way concat op in the return statements of synthesized
+    helper modules.
+    """
+    if not app.game_after.methods:
+        return None
+    ret_type = app.game_after.methods[0].signature.return_type
+    bs = _resolve_bs_type(ret_type)
+    if bs is None:
+        return None
+    return _bs_name_via_collector(types, bs)
+
+
+# pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+def _partial_split_helpers(
+    *,
+    types: TypeCollector,
+    len_l: str,
+    len_r: str,
+    len_res: str,
+    name_l: str,
+    name_r: str,
+    name_res: str,
+    ret_type: str | None,
+    orig_var: str,
+    a_var: str,
+    b_var: str,
+    helpers: list[str] | None,
+    name_prefix: str,
+    module_param_sig: str,
+    module_param_args: str,
+    left_module_ref: str,
+    right_module_ref: str,
+    eq_args_strong: str,
+    eq_post_strong: str,
+) -> list[str] | None:
+    """Emit helper modules + sub-lemmas for a partial-split micro and
+    return the chain-through-them tactic body.
+
+    Strategy (see prototype in ``scripts/_taclab/partial_split.ec``):
+
+    * ``Mid`` module: samples 3 indep ``bs_<L>``/``bs_<R>``/``bs_<GAP>``
+      pieces, builds ``r := concat3 a b gap``, returns ``concat (slice r
+      0 |L|) (slice r |L| (|L|+|R|))``.
+    * ``Aug`` module: samples the same 3 pieces, returns ``concat a b``
+      directly (the gap is dead).
+    * ``left_to_mid``: relate ``r <$ dbs_<RES>`` to the 3-sample form via
+      ``rndsem*{2} 0`` + ``rnd identity`` + ``dbs_<RES>_split3`` axiom.
+    * ``mid_to_aug``: trivial after slice-of-concat3 rewrites
+      (``slice_concat3_p1``, ``slice_concat3_p2``).
+    * ``aug_to_right``: drop the dead ``gap`` sample via ``rnd{1}``
+      + ``dbs_<GAP>_ll``.
+    * Main tactic: ``transitivity Aug; [smt | smt | (transitivity Mid;
+      [smt | smt | apply left_to_mid | apply mid_to_aug]) | apply
+      aug_to_right]``.
+
+    Returns ``None`` if any prerequisite is missing (gap length not
+    sympifiable, no helpers list, etc.).
+    """
+    if (
+        helpers is None
+        or not name_prefix
+        or not module_param_sig
+        or ret_type is None
+        or not left_module_ref
+        or not right_module_ref
+        or not eq_args_strong
+        or not eq_post_strong
+    ):
+        return None
+    gap_len = _subtract_canonical(len_res, _add_canonical(len_l, len_r))
+    if gap_len is None:
+        return None
+    name_gap = types.register_bs_by_length_str(gap_len)
+    types.register_concat3(name_l, name_r, name_gap, name_res)
+    # The 2-way return concat (e.g. ``concat_bs_lambda_bs_lambda_to_bs_2_lambda``).
+    types.register_concat(name_l, name_r, ret_type)
+    ret_concat_op = f"concat_{name_l}_{name_r}_to_{ret_type}"
+    concat3_op = f"concat3_{name_l}_{name_r}_{name_gap}_to_{name_res}"
+    slice_l = f"slice_{name_res}_to_{name_l}"
+    slice_r = f"slice_{name_res}_to_{name_r}"
+    distr_l = f"d{name_l}"
+    distr_r = f"d{name_r}"
+    distr_gap = f"d{name_gap}"
+    split3_axiom = f"d{name_res}_split3_{name_l}_{name_r}_{name_gap}"
+    axiom_prefix = f"{name_l}_{name_r}_{name_gap}_{name_res}"
+    p1_axiom = f"slice_concat3_p1_{axiom_prefix}"
+    p2_axiom = f"slice_concat3_p2_{axiom_prefix}"
+    len_l_p = _bs_length_arg(len_l)
+    # Use the sympy-canonical sum so the slice end argument matches what
+    # the rest of the EC file emits (e.g. ``2 * lambda`` not ``lambda +
+    # lambda``); without this, ``sim`` fails to match the two slices.
+    canonical_sum = _add_canonical(len_l, len_r)
+    len_lr = _bs_length_arg(canonical_sum) if canonical_sum else f"({len_l} + {len_r})"
+    mid_mod = f"Mid_{name_prefix}"
+    aug_mod = f"Aug_{name_prefix}"
+    l2m = f"left_to_mid_{name_prefix}"
+    m2a = f"mid_to_aug_{name_prefix}"
+    a2r = f"aug_to_right_{name_prefix}"
+    l2a = f"left_to_aug_{name_prefix}"
+    mid_inst = f"{mid_mod}{module_param_args}"
+    aug_inst = f"{aug_mod}{module_param_args}"
+    # Mid module.
+    helpers.append(
+        "\n".join(
+            [
+                f"  module {mid_mod} {module_param_sig} = {{",
+                f"    proc query() : {ret_type} = {{",
+                f"      var {orig_var} : {name_res};",
+                f"      var {a_var}, {b_var} : {name_l};",
+                f"      var _gap : {name_gap};",
+                f"      {a_var} <$ {distr_l};",
+                f"      {b_var} <$ {distr_r};",
+                f"      _gap <$ {distr_gap};",
+                f"      {orig_var} <- {concat3_op} {a_var} {b_var} _gap;",
+                f"      return {ret_concat_op}",
+                f"               ({slice_l} {orig_var} 0 {len_l_p})",
+                f"               ({slice_r} {orig_var} {len_l_p} {len_lr});",
+                "    }",
+                "  }.",
+            ]
+        )
+    )
+    # Aug module.
+    helpers.append(
+        "\n".join(
+            [
+                f"  module {aug_mod} {module_param_sig} = {{",
+                f"    proc query() : {ret_type} = {{",
+                f"      var {a_var}, {b_var} : {name_l};",
+                f"      var _gap : {name_gap};",
+                f"      {a_var} <$ {distr_l};",
+                f"      {b_var} <$ {distr_r};",
+                f"      _gap <$ {distr_gap};",
+                f"      return {ret_concat_op} {a_var} {b_var};",
+                "    }",
+                "  }.",
+            ]
+        )
+    )
+    spec = f"({eq_args_strong} ==> {eq_post_strong})"
+    # left_to_mid sub-lemma.
+    helpers.append(
+        "\n".join(
+            [
+                f"  lemma {l2m} :",
+                f"    equiv [ {left_module_ref}.query ~ {mid_inst}.query :",
+                f"            {eq_args_strong} ==> {eq_post_strong} ].",
+                "  proof.",
+                "  proc.",
+                f"  seq 1 4 : ({eq_args_strong} /\\ {orig_var}{{1}} = {orig_var}{{2}});"
+                f" last by auto.",
+                "  rndsem*{2} 0.",
+                f"  conseq (: {eq_args_strong} ==>"
+                f" {eq_args_strong} /\\ {orig_var}{{1}} = {orig_var}{{2}}) => //.",
+                f"  rnd (fun (z : {name_res}) => z) (fun (z : {name_res}) => z);"
+                f" skip => />.",
+                f"  rewrite -{split3_axiom} /=; smt({split3_axiom}).",
+                "  qed.",
+            ]
+        )
+    )
+    # mid_to_aug sub-lemma.
+    helpers.append(
+        "\n".join(
+            [
+                f"  lemma {m2a} :",
+                f"    equiv [ {mid_inst}.query ~ {aug_inst}.query :",
+                f"            {eq_args_strong} ==> {eq_post_strong} ].",
+                "  proof.",
+                f"  proc; wp; rnd; rnd; rnd; skip => /> *; smt({p1_axiom} {p2_axiom}).",
+                "  qed.",
+            ]
+        )
+    )
+    # aug_to_right sub-lemma.
+    helpers.append(
+        "\n".join(
+            [
+                f"  lemma {a2r} :",
+                f"    equiv [ {aug_inst}.query ~ {right_module_ref}.query :",
+                f"            {eq_args_strong} ==> {eq_post_strong} ].",
+                "  proof.",
+                "  proc.",
+                f"  seq 2 2 : ({eq_args_strong} /\\ {a_var}{{1}} = {a_var}{{2}}"
+                f" /\\ {b_var}{{1}} = {b_var}{{2}}).",
+                "  by auto.",
+                "  rnd{1}.",
+                f"  by auto; smt({distr_gap}_ll).",
+                "  qed.",
+            ]
+        )
+    )
+    # left_to_aug wrapper that chains via Mid.
+    helpers.append(
+        "\n".join(
+            [
+                f"  lemma {l2a} :",
+                f"    equiv [ {left_module_ref}.query ~ {aug_inst}.query :",
+                f"            {eq_args_strong} ==> {eq_post_strong} ].",
+                "  proof.",
+                f"  transitivity {mid_inst}.query {spec} {spec};"
+                f" [ smt() | smt() | apply {l2m} | apply {m2a} ].",
+                "  qed.",
+            ]
+        )
+    )
+    # Main tactic body for the micro lemma: transitivity through Aug.
+    return [
+        f"transitivity {aug_inst}.query {spec} {spec};"
+        f" [ smt() | smt() | apply {l2a} | apply {a2r} ].",
+    ]
+
+
+def _add_canonical(a: str, b: str) -> str | None:
+    """Return canonical-sum of two integer expression strings via sympy,
+    or ``None`` on sympify failure (Python keyword fallback included).
+    """
+    return _binop_canonical(a, b, "+")
+
+
+def _subtract_canonical(a: str, b: str | None) -> str | None:
+    """Return canonical-difference ``a - b``, or ``None`` on failure."""
+    if b is None:
+        return None
+    return _binop_canonical(a, b, "-")
+
+
+def _binop_canonical(a: str, b: str, op: str) -> str | None:
+    # pylint: disable=import-outside-toplevel
+    try:
+        import keyword as _kw
+
+        from sympy import Symbol, simplify, sympify
+    except ImportError:
+        return None
+    names = set(re.findall(r"[A-Za-z_]\w*", f"{a} {b}"))
+    renames = {n: f"_{n}_sym_" for n in names if _kw.iskeyword(n)}
+    inv_renames = {v: k for k, v in renames.items()}
+
+    def _safe(s: str) -> str:
+        out = s
+        for old, new in renames.items():
+            out = re.sub(rf"\b{re.escape(old)}\b", new, out)
+        return out
+
+    safe_names = {renames.get(n, n) for n in names}
+    locals_ = {n: Symbol(n) for n in safe_names}
+    try:
+        ea = sympify(_safe(a), locals=locals_)
+        eb = sympify(_safe(b), locals=locals_)
+        result = simplify(ea + eb) if op == "+" else simplify(ea - eb)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return None
+    out = str(result)
+    # Reverse the keyword-renaming.
+    for old, new in inv_renames.items():
+        out = re.sub(rf"\b{re.escape(old)}\b", new, out)
+    return out
+
+
+def _partial_split_admit(
+    transform_name: str, name_l: str, name_r: str, name_res: str
+) -> list[str]:
+    """Return a structured-admit micro body for partial-split shapes.
+
+    Emitted when a ``Split Uniform Samples`` / ``Merge Uniform Samples``
+    application has ``|L| + |R| != |RES|`` — i.e. the source bitstring
+    has unused bits that the engine discards via dead-code elimination.
+    The existing bijection-based tactic would otherwise register an
+    *unsound* ``concat_<L>_<R>_<RES>`` axiom claiming a two-piece concat
+    produces ``RES`` (image cardinality ``2^(|L|+|R|)`` vs ``RES`` space
+    ``2^|RES|`` — different for partial splits). The chain-fallback in
+    ``exporter.emit_chain_for_hop`` sees the ``admit.`` and replaces the
+    outer ``hop_<i>`` with admit so the file remains compilable.
+    """
+    return [
+        "(* parametric tactic miss",
+        f"   transform: {transform_name!r}",
+        f"   reason:    partial split ({name_l} + {name_r} != {name_res});",
+        "              the sound marginal-distribution tactic is not yet",
+        "              implemented (followup #4 of the TriplingPRG plan).",
+        "   *)",
+        "admit.",
+    ]
 
 
 # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals

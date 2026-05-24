@@ -132,7 +132,7 @@ CANNED_TACTIC: dict[str, list[str]] = {
 # back to admit if synthesis fails).
 PARAMETRIC_TACTIC: dict[
     str,
-    Callable[[TransformApplication, TypeCollector | None], list[str] | None],
+    Callable[..., list[str] | None],
 ] = {
     "Uniform XOR Simplification": parametric_tactics.uniform_xor_tactic,
     "Inline Single-Use Variables": (

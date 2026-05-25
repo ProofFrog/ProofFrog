@@ -25,6 +25,7 @@ CES_PROOF = EXAMPLES / "joy" / "Proofs" / "Ch2" / "ChainedEncryptionSecure.proof
 TPRG_PROOF = REPO_ROOT / "examples" / "Proofs" / "PRG" / "TriplingPRG_PRGSecurity.proof"
 PRG_5_8_A_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_a.proof"
 PRG_5_8_B_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_b.proof"
+PRG_5_8_E_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_e.proof"
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
 
@@ -553,6 +554,90 @@ def test_export_5_8_a_partial_split_typechecks_in_easycrypt(
     assert result.returncode == 0, (
         f"EC verification failed (exit {result.returncode}); the "
         f"non-admit portions of the 5_8_a export may have regressed.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+def test_export_5_8_e_hoists_scheme_and_reduction_calls() -> None:
+    """``5_8_e``'s scheme and reduction bodies contain primitive calls
+    nested in expressions (e.g. ``G.evaluate(s) + G.evaluate(0^lambda)``
+    in the scheme, ``challenger.Query() + G.evaluate(0^lambda)`` in
+    R1). EC does not permit module-procedure calls inside expressions,
+    so the exporter pre-hoists them into separate ``<@`` call
+    statements. Without this, the bodies fall back to ``return witness;``
+    and the per-hop wrapper-to-flat-state bridge fails because inlining
+    ``witness`` cannot align with the engine's already-inlined flat
+    states.
+
+    Locks in:
+
+    * The scheme body renders both ``G.evaluate`` calls as ``<@``
+      statements, not ``return witness;``.
+    * The reductions R1 and R2 render their nested primitive/challenger
+      calls as ``<@`` statements before the return.
+    * Only the two cross-primitive bridge admits remain (out of scope
+      per the fourth-pass architectural limitation).
+    """
+    output = exporter.export_proof_file(str(PRG_5_8_E_PROOF))
+    # The scheme body must NOT fall back to ``return witness;``.
+    assert "module PRG_5_8_e" in output
+    scheme_section = output.split("module PRG_5_8_e", 1)[1].split("}", 1)[0]
+    assert "return witness" not in scheme_section, (
+        "PRG_5_8_e scheme body fell back to ``return witness;``; the "
+        "scheme-call hoister did not fire on its source body."
+    )
+    # Both G.evaluate calls hoisted as <@ statements.
+    assert scheme_section.count("<@ G.evaluate") == 2
+    # Reduction R1 hoists the challenger.Query call.
+    r1_section = output.split("module R1 ", 1)[1].split("}.", 1)[0]
+    assert "<@ Challenger.query()" in r1_section
+    assert "<@ G.evaluate(zero_lambda)" in r1_section
+    # Reduction R2 hoists the nested G.evaluate inside Challenger.ctxt.
+    r2_section = output.split("module R2 ", 1)[1].split("}.", 1)[0]
+    assert "<@ G.evaluate(zero_lambda)" in r2_section
+    # The two remaining admits are the cross-primitive bridges
+    # (hop_1 and hop_3 in this proof) — out of scope per the
+    # architectural-limitation analysis in the plan's fourth pass.
+    assert output.count("admit.") == 2, (
+        f"Expected exactly 2 admits (both cross-primitive bridges). "
+        f"Got {output.count('admit.')}."
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_export_5_8_e_typechecks_in_easycrypt(
+    tmp_path: Path,
+) -> None:
+    """EC accepts the ``5_8_e`` export end-to-end (with the two
+    cross-primitive bridge admits gated by structured comments).
+
+    Locks in that the scheme/reduction body hoisting produces an EC
+    file that compiles cleanly: the non-admit hops close via the
+    standard chain + canned-bridge tactics, and the two admitted hops
+    are the only ones that don't (and are architectural, not tactic).
+    """
+    output = exporter.export_proof_file(str(PRG_5_8_E_PROOF))
+    ec_file = tmp_path / "5_8_e.ec"
+    ec_file.write_text(output)
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    combined = result.stderr + result.stdout
+    assert "parse error" not in combined, (
+        f"EC parse error in 5_8_e output:\n"
+        f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
+    )
+    assert result.returncode == 0, (
+        f"EC verification failed (exit {result.returncode}); the "
+        f"non-admit portions of the 5_8_e export may have regressed.\n"
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )

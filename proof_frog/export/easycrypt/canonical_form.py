@@ -169,6 +169,10 @@ def _pretty_print_expr(expr: frog_ast.Expression) -> str:
         # across runs (``repr`` embeds the object's memory address for
         # types without a custom repr).
         return _type_text(expr)
+    if isinstance(expr, frog_ast.BitStringLiteral):
+        return f"{expr.bit}^{_pretty_print_expr(expr.length)}"
+    if isinstance(expr, frog_ast.Integer):
+        return str(expr.num)
     return repr(expr)
 
 
@@ -181,6 +185,66 @@ def _type_text(t: frog_ast.Type | None) -> str:
 # ---------------------------------------------------------------------------
 # Shared normalization (moved from exporter.py)
 # ---------------------------------------------------------------------------
+
+
+def hoist_reduction_calls(
+    reduction: frog_ast.Reduction,
+    challenger_oracle_type: str,
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+) -> frog_ast.Reduction:
+    """Return a deepcopy of ``reduction`` with module calls hoisted in each method.
+
+    Mirrors :func:`hoist_scheme_calls` for reductions. The reduction's
+    body refers to its primitive-typed parameters by name plus the
+    pseudo-parameter ``challenger`` (an oracle of the assumed game's
+    oracle type). Both must appear in the ``external_module_types`` map
+    so nested calls like ``challenger.Query() + G.evaluate(0^lambda)``
+    are recognized and lifted.
+    """
+    external: dict[str, str] = {
+        p.name: p.type.name
+        for p in reduction.parameters
+        if isinstance(p.type, frog_ast.Variable)
+    }
+    external["challenger"] = challenger_oracle_type
+    out = copy.deepcopy(reduction)
+    for method in out.methods:
+        method.block = frog_ast.Block(
+            _hoist_block(list(method.block.statements), external, method_return_types)
+        )
+    return out
+
+
+def hoist_scheme_calls(
+    scheme: frog_ast.Scheme,
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+) -> frog_ast.Scheme:
+    """Return a deepcopy of ``scheme`` with module calls hoisted in each method.
+
+    A scheme's source body may use a primitive call as a sub-expression
+    (e.g. ``return G.evaluate(s) + G.evaluate(0^lambda);``). EC does not
+    permit module-procedure calls inside expressions, so the shared
+    statement translator falls back to ``return witness;`` for any such
+    body — which then breaks the wrapper-to-flat-state bridge, since
+    inlining ``witness`` cannot align with the engine's already-inlined
+    flat states. Pre-hoisting the calls makes the scheme body translate
+    to the same shape the chain emitter produces for the surrounding
+    state modules, so ``proc; inline*; sp; wp; sim`` can close.
+
+    ``external_module_types`` is derived from the scheme's module-typed
+    parameters (e.g. ``Scheme PRG_5_8_e(PRG G)`` -> ``{"G": "PRG"}``).
+    """
+    external = {
+        p.name: p.type.name
+        for p in scheme.parameters
+        if isinstance(p.type, frog_ast.Variable)
+    }
+    out = copy.deepcopy(scheme)
+    for method in out.methods:
+        method.block = frog_ast.Block(
+            _hoist_block(list(method.block.statements), external, method_return_types)
+        )
+    return out
 
 
 def _normalize_for_ec(

@@ -38,6 +38,15 @@ class ExpressionTranslator:
             return expr.name
         if isinstance(expr, frog_ast.Integer):
             return str(expr.num)
+        if isinstance(expr, frog_ast.BitStringLiteral):
+            if expr.bit != 0:
+                raise NotImplementedError(
+                    "BitStringLiteral with bit=1 not yet supported by the EC "
+                    "exporter; only 0^n is currently translated."
+                )
+            bs_type = frog_ast.BitStringType(expr.length)
+            ec_type = self._types.translate_type(bs_type)
+            return tc.zero_name_for(ec_type)
         if isinstance(expr, frog_ast.FieldAccess) and isinstance(
             expr.the_object, frog_ast.Variable
         ):

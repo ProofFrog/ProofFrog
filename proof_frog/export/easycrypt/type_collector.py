@@ -277,6 +277,7 @@ class TypeCollector:
             decls.append(ec_ast.TypeDecl(name))
         for name, _expr in self._abstract_bitstrings:
             decls.append(ec_ast.TypeDecl(name))
+            decls.append(ec_ast.OpDecl(_zero_name(name), name))
         for distr in self._abstract_distrs:
             type_name = distr[1:]  # strip 'd'
             decls.append(ec_ast.OpDecl(distr, f"{type_name} distr"))
@@ -437,6 +438,8 @@ class TypeCollector:
             decls.append(ec_ast.Axiom(f"{distr}_ll", f"is_lossless {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_full", f"is_full {distr}"))
+        for name in self._names:
+            decls.append(ec_ast.OpDecl(_zero_name(name), name))
         for name in self._names:
             xor_op = _xor_name(name)
             decls.append(ec_ast.OpDecl(xor_op, f"{name} -> {name} -> {name}"))
@@ -712,6 +715,11 @@ def _xor_name(bs_name: str) -> str:
     return f"xor{suffix}"
 
 
+def _zero_name(bs_name: str) -> str:
+    suffix = bs_name.removeprefix("bs")
+    return f"zero{suffix}"
+
+
 def _slice_op_name(src_name: str, dst_name: str) -> str:
     """Name for an abstract slice op from ``src_name`` to ``dst_name``."""
     return f"slice_{src_name}_to_{dst_name}"
@@ -745,3 +753,8 @@ def _paren_int(s: str) -> str:
 def xor_name_for(ec_type: ec_ast.EcType) -> str:
     """Exposed for the expression translator to find the xor op name."""
     return _xor_name(ec_type.text)
+
+
+def zero_name_for(ec_type: ec_ast.EcType) -> str:
+    """Exposed for the expression translator to find the all-zero op name."""
+    return _zero_name(ec_type.text)

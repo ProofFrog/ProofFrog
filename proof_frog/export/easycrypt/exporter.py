@@ -6,6 +6,7 @@ import pathlib
 from dataclasses import dataclass
 from typing import Callable
 
+from . import canonical_form
 from . import ec_ast
 from . import module_translator as mt
 from . import proof_translator as pt
@@ -445,6 +446,8 @@ def export_proof_file(proof_path: str) -> str:
                 return lhs_t
             if isinstance(e, frog_ast.Integer):
                 return frog_ast.IntType()
+            if isinstance(e, frog_ast.BitStringLiteral):
+                return frog_ast.BitStringType(e.length)
             raise NotImplementedError(f"type_of not implemented for {type(e).__name__}")
 
         return type_of
@@ -721,8 +724,14 @@ def export_proof_file(proof_path: str) -> str:
             )
             scheme_module_param_types[sp.name] = primitive.name
 
+    # Hoist any nested module calls in scheme method bodies before
+    # translating. EC requires module-procedure calls at statement level,
+    # so a FrogLang body like ``return G.evaluate(s) + G.evaluate(0^lambda)``
+    # would otherwise fall back to ``return witness;`` and break the
+    # wrapper-to-flat-state bridge in the per-hop chain.
+    scheme_hoisted = canonical_form.hoist_scheme_calls(scheme, method_return_types)
     ec_scheme = top_modules.translate_scheme(
-        scheme,
+        scheme_hoisted,
         qualified_scheme_type,
         module_params=scheme_module_params or None,
         module_param_types=scheme_module_param_types or None,
@@ -812,9 +821,24 @@ def export_proof_file(proof_path: str) -> str:
             p_inst = instances_by_let_name.get(p.name)
             if p_inst is not None:
                 per_param_mod_types[p.name] = f"{p_inst.clone_alias}.{scheme_type_name}"
+        # Hoist nested module calls in the reduction body before
+        # translation (same motivation as the scheme-body hoisting
+        # above): the source body may use a primitive/challenger call
+        # as a sub-expression (e.g. ``return challenger.Query() +
+        # G.evaluate(0^lambda)``), which the EC translator cannot render
+        # as a single statement. Without hoisting, the body falls back
+        # to ``return witness;`` and the per-hop wrapper-to-flat-state
+        # bridge fails to align with the engine's already-inlined flat
+        # states.
+        challenger_oracle_type = f"{helper.to_use.name}_Oracle"
+        hoisted_reduction = canonical_form.hoist_reduction_calls(
+            helper,
+            challenger_oracle_type=challenger_oracle_type,
+            method_return_types=method_return_types,
+        )
         ec_reductions.append(
             top_modules.translate_reduction(
-                helper,
+                hoisted_reduction,
                 primitive_name=primitive.name,
                 oracle_type_name=qualified_inner_oracle,
                 emitted_primitive_type=qualified_scheme_type,

@@ -49,6 +49,7 @@ class StepResolver:
         instance_module_expr_by_let_name: dict[str, str] | None = None,
         module_name_by_instance_game: dict[tuple[str, str, str], str] | None = None,
         declared_module_names: list[str] | None = None,
+        outer_oracle_name: str | None = None,
     ) -> None:
         self._module_names = module_name_by_concrete_game
         self._oracle_names = oracle_name_by_game_file
@@ -56,6 +57,14 @@ class StepResolver:
         self._scheme_name = scheme_name
         self._oracle_params = oracle_params_by_game_file or {}
         self._reduction_params = oracle_params_by_reduction or {}
+        # In multi-primitive proofs a composed reduction
+        # ``R compose <Inner>`` exposes the OUTER (theorem game's) oracle
+        # method, not the inner challenger's. ``outer_oracle_name`` lets
+        # the resolver emit the right method name for composed steps. For
+        # plain (non-composed) steps the per-game-file oracle is correct
+        # and ``outer_oracle_name`` is ignored. ``None`` preserves the
+        # legacy single-primitive behavior where inner == outer.
+        self._outer_oracle_name = outer_oracle_name
         # Multi-instance mode: when these are provided, ``resolve`` uses
         # per-instance clone-qualified module names and instance module
         # expressions.
@@ -101,7 +110,12 @@ class StepResolver:
             )
         game_file_name = concrete.game.name
         side = concrete.which
-        oracle = self._oracle_names[game_file_name]
+        # Composed steps expose the outer (theorem game's) oracle. Plain
+        # steps expose their own game's oracle.
+        if step.reduction is not None and self._outer_oracle_name is not None:
+            oracle = self._outer_oracle_name
+        else:
+            oracle = self._oracle_names[game_file_name]
 
         if self._instance_module_expr:
             # Multi-instance mode.

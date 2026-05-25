@@ -162,6 +162,13 @@ def _pretty_print_expr(expr: frog_ast.Expression) -> str:
             f"{_pretty_print_expr(expr.the_array)}"
             f"[{_pretty_print_expr(expr.index)}]"
         )
+    if isinstance(expr, frog_ast.Type):
+        # ``Sample.sampled_from`` may be a Type literal (e.g. ``<-
+        # BitString<lambda>``). Use the type's structural ``__str__``
+        # instead of ``repr`` so the canonical text stays deterministic
+        # across runs (``repr`` embeds the object's memory address for
+        # types without a custom repr).
+        return _type_text(expr)
     return repr(expr)
 
 

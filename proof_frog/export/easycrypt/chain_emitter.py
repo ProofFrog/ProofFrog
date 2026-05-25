@@ -370,6 +370,8 @@ def emit_chain_for_hop(
                 right_module_ref=right_module_ref,
                 eq_args_strong=eq_args_strong,
                 eq_post_strong=eq_post_strong,
+                external_module_types=external_module_types,
+                method_return_types=method_return_types,
             )
             if synthesized is not None:
                 return synthesized
@@ -754,6 +756,17 @@ def _stmt_signature(stmt: frog_ast.Statement) -> tuple[object, ...]:
         value = (
             stmt.value if isinstance(stmt, frog_ast.Assignment) else stmt.sampled_from
         )
+        # For samples we keep the bound variable name in the signature
+        # so a reorder that swaps two samples of the SAME distribution
+        # (e.g. ``r0_0 <$ d; r0_1 <$ d;`` ↔ ``r0_1 <$ d; r0_0 <$ d;``)
+        # is detected as a permutation. Without the name, the two
+        # statements have identical signatures and ``_permutation_swaps``
+        # returns no swaps — but EC's ``sim`` then fails because the
+        # downstream uses are tied to specific variable names. Hoist-
+        # renames are deterministic given the AST shape, so the same
+        # statement at the same position in the before/after gets the
+        # same name.
+        bound_name = stmt.var.name if isinstance(stmt.var, frog_ast.Variable) else None
         if (
             isinstance(value, frog_ast.FuncCall)
             and isinstance(value.func, frog_ast.FieldAccess)
@@ -766,6 +779,8 @@ def _stmt_signature(stmt: frog_ast.Statement) -> tuple[object, ...]:
                 _expr_signature(value.args),
             )
         kind = "assign" if isinstance(stmt, frog_ast.Assignment) else "sample"
+        if kind == "sample":
+            return (kind, bound_name, _expr_signature(value))
         return (kind, _expr_signature(value))
     if isinstance(stmt, frog_ast.ReturnStatement):
         return ("return", _expr_signature(stmt.expression))

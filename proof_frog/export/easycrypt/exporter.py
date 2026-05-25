@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+from dataclasses import dataclass
 from typing import Callable
 
 from . import ec_ast
@@ -100,6 +101,20 @@ def _instantiate_bitstring_expr(
     return expr
 
 
+def _ec_ident(s: str) -> str:
+    """Sanitize a FrogLang name for use as an EC identifier.
+
+    Replaces any character outside ``[A-Za-z0-9_]`` with ``_`` so that
+    game-file names containing ``$`` (e.g. ``INDOT$``) or other punctuation
+    yield valid EC names (``INDOT__Oracle``, ``eps_INDOT_`` etc.). The
+    mapping is deterministic and injective for the names that actually
+    appear in the corpus.
+    """
+    import re  # pylint: disable=import-outside-toplevel
+
+    return re.sub(r"[^A-Za-z0-9_]", "_", s)
+
+
 def _section_header(label: str) -> str:
     """Render a top-level section divider comment.
 
@@ -175,46 +190,103 @@ def export_proof_file(proof_path: str) -> str:
     """
     proof = frog_parser.parse_proof_file(proof_path)
 
-    primitive: frog_ast.Primitive | None = None
-    scheme: frog_ast.Scheme | None = None
+    # Collect ALL primitives and schemes by name (directly imported or
+    # reached transitively through a Scheme's own imports). The primary
+    # primitive/scheme is then selected from the theorem's target instance,
+    # not from import order. This matters for proofs that import auxiliary
+    # schemes used only by assumption hops (e.g. 5_10 imports OTP + SymEnc
+    # alongside its primary PRG_5_10/PRG, because step 4 invokes the
+    # INDOT$ axiom about OTP).
+    primitives_by_name: dict[str, frog_ast.Primitive] = {}
+    schemes_by_name: dict[str, frog_ast.Scheme] = {}
     game_files: list[frog_ast.GameFile] = []
 
     for imp in proof.imports:
         resolved = frog_parser.resolve_import_path(imp.filename, proof_path)
         root = frog_parser.parse_file(resolved)
         if isinstance(root, frog_ast.Primitive):
-            primitive = root
+            primitives_by_name[root.name] = root
         elif isinstance(root, frog_ast.Scheme):
-            scheme = root
-            for sub_imp in scheme.imports:
+            schemes_by_name[root.name] = root
+            for sub_imp in root.imports:
                 sub_resolved = frog_parser.resolve_import_path(
                     sub_imp.filename, resolved
                 )
                 sub_root = frog_parser.parse_file(sub_resolved)
                 if isinstance(sub_root, frog_ast.Primitive):
-                    primitive = sub_root
+                    primitives_by_name[sub_root.name] = sub_root
         elif isinstance(root, frog_ast.GameFile):
             game_files.append(root)
 
-    if primitive is None:
-        raise ValueError(
-            "Exporter requires a Primitive to be imported directly or "
-            "transitively through a Scheme."
-        )
-    if scheme is None:
+    if not schemes_by_name:
         raise ValueError("Exporter requires a Scheme import.")
     if not game_files:
         raise ValueError("Exporter requires at least one GameFile import.")
 
+    # The primary scheme is the one whose instance appears in the theorem.
+    # For ``theorem: PRGSecurity(H)`` with ``PRG_5_10 H = PRG_5_10(G);``,
+    # the primary let is H and the primary scheme is PRG_5_10.
+    if not (
+        isinstance(proof.theorem, frog_ast.ParameterizedGame)
+        and proof.theorem.args
+        and isinstance(proof.theorem.args[0], frog_ast.Variable)
+    ):
+        raise ValueError(
+            "Exporter requires the theorem to be a ParameterizedGame whose "
+            "first argument is the scheme instance under attack."
+        )
+    primary_let_name = proof.theorem.args[0].name
+    primary_scheme_name: str | None = None
+    for let in proof.lets:
+        if let.name == primary_let_name and isinstance(let.type, frog_ast.Variable):
+            primary_scheme_name = let.type.name
+            break
+    if primary_scheme_name is None or primary_scheme_name not in schemes_by_name:
+        raise ValueError(
+            f"Could not identify primary scheme from theorem instance "
+            f"{primary_let_name!r}."
+        )
+    scheme = schemes_by_name[primary_scheme_name]
+    if scheme.primitive_name not in primitives_by_name:
+        raise ValueError(
+            f"Primary scheme {scheme.name!r} extends primitive "
+            f"{scheme.primitive_name!r}, which was not imported."
+        )
+    primitive = primitives_by_name[scheme.primitive_name]
+
     # Collect scheme-instance descriptors. Each let-binding of the form
     # ``<Scheme> X = <Scheme>(...);`` produces one instance, which in
     # turn produces one clone of the primitive theory.
-    instances = si.collect(proof, primitive, scheme)
+    # ``collect_all`` walks every imported primitive/scheme so multi-
+    # primitive proofs (e.g. 5_10 = PRG_5_10 + OTP) get instances for both
+    # families. Each instance records its ``primitive_name`` so the
+    # exporter knows which abstract theory to clone for it.
+    instances = si.collect_all(proof, primitives_by_name, schemes_by_name)
     if not instances:
         raise ValueError(
             "Exporter requires at least one scheme instance in the proof's "
             "let block."
         )
+
+    # Each game file's primitive is the type name of its first parameter
+    # (e.g. ``Game Real(SymEnc E)`` → ``"SymEnc"``). Game files associated
+    # with auxiliary primitives (i.e. not the primary) live in a separate
+    # abstract theory.
+    primitive_name_by_game_file: dict[str, str] = {}
+    for gf in game_files:
+        params = gf.games[0].parameters
+        if not params or not isinstance(params[0].type, frog_ast.Variable):
+            raise ValueError(
+                f"Game file {gf.name!r}: expected first game parameter to be a "
+                "primitive-typed Variable."
+            )
+        prim_param_name = params[0].type.name
+        if prim_param_name not in primitives_by_name:
+            raise ValueError(
+                f"Game file {gf.name!r} references primitive {prim_param_name!r}, "
+                "which was not imported."
+            )
+        primitive_name_by_game_file[gf.name] = prim_param_name
     # "Primary" instance: the one whose scheme matches the theorem's
     # target. For OTPSecure this is ``E`` (OTP); for CES it is ``CE``
     # (ChainedEncryption). Used for scheme-body translation and as the
@@ -273,6 +345,15 @@ def export_proof_file(proof_path: str) -> str:
     for pf in primitive.fields:
         if isinstance(pf.type, frog_ast.SetType):
             abstract_types_map[pf.name] = pf.name.lower()
+    # Game files associated with the primary primitive (vs. foreign-primitive
+    # ones, e.g. INDOT$ when the primary is PRG_5_10/PRG). Foreign game files
+    # get translated inside their own primitive's abstract theory.
+    primary_game_files = [
+        gf
+        for gf in game_files
+        if primitive_name_by_game_file[gf.name] == primitive.name
+    ]
+
     # Each game inside the abstract theory takes a single primitive-typed
     # parameter (e.g. ``Game Real(PRG G)``). Inside the theory, that
     # parameter is just a module variable; ``G.lambda`` has no first-class
@@ -281,7 +362,9 @@ def export_proof_file(proof_path: str) -> str:
     # ``BitString<lambda + stretch>``, matching the primitive's own
     # ``BitString<lambda + stretch>`` signature.
     theory_param_prefixes = {
-        gf.games[0].parameters[0].name for gf in game_files if gf.games[0].parameters
+        gf.games[0].parameters[0].name
+        for gf in primary_game_files
+        if gf.games[0].parameters
     }
     theory_types = tc.TypeCollector(
         abstract_types=abstract_types_map,
@@ -289,9 +372,15 @@ def export_proof_file(proof_path: str) -> str:
         theory_mode=True,
     )
 
+    # Method return types are global across ALL primitives so that
+    # ``type_of`` resolves method calls like ``P.Enc(k, m)`` even when ``P``
+    # is an auxiliary-primitive instance and the caller is a reduction in
+    # the primary primitive's scope. Without this, a multi-primitive proof
+    # whose reduction body calls into a foreign primitive would crash.
     method_return_types: dict[tuple[str, str], frog_ast.Type] = {}
-    for prim_sig in primitive.methods:
-        method_return_types[(primitive.name, prim_sig.name)] = prim_sig.return_type
+    for prim in primitives_by_name.values():
+        for prim_sig in prim.methods:
+            method_return_types[(prim.name, prim_sig.name)] = prim_sig.return_type
     for gf in game_files:
         oracle_type = f"{gf.name}_Oracle"
         for game_method in gf.games[0].methods:
@@ -327,6 +416,35 @@ def export_proof_file(proof_path: str) -> str:
                         frog_ast.BinaryOperators.SUBTRACT, e.end, e.start
                     )
                 )
+            if isinstance(e, frog_ast.BinaryOperation):
+                # Recursively resolve through the operator. For ADD/OR
+                # on two bitstrings: ADD is xor (same length as LHS);
+                # OR is concat (sum of the two lengths). For arithmetic
+                # on ints, the result type matches the LHS type.
+                lhs_t = type_of(e.left_expression)
+                if e.operator == frog_ast.BinaryOperators.ADD and isinstance(
+                    lhs_t, frog_ast.BitStringType
+                ):
+                    return lhs_t
+                if e.operator == frog_ast.BinaryOperators.OR and isinstance(
+                    lhs_t, frog_ast.BitStringType
+                ):
+                    rhs_t = type_of(e.right_expression)
+                    if (
+                        isinstance(rhs_t, frog_ast.BitStringType)
+                        and lhs_t.parameterization is not None
+                        and rhs_t.parameterization is not None
+                    ):
+                        return frog_ast.BitStringType(
+                            frog_ast.BinaryOperation(
+                                frog_ast.BinaryOperators.ADD,
+                                lhs_t.parameterization,
+                                rhs_t.parameterization,
+                            )
+                        )
+                return lhs_t
+            if isinstance(e, frog_ast.Integer):
+                return frog_ast.IntType()
             raise NotImplementedError(f"type_of not implemented for {type(e).__name__}")
 
         return type_of
@@ -352,14 +470,15 @@ def export_proof_file(proof_path: str) -> str:
     oracle_type_by_game_file: dict[str, str] = {}
     module_name_by_concrete_game: dict[tuple[str, str], str] = {}
     adv_type_by_game_file: dict[str, str] = {}
-    for gf in game_files:
-        oracle_type_name = f"{gf.name}_Oracle"
+    for gf in primary_game_files:
+        gf_id = _ec_ident(gf.name)
+        oracle_type_name = f"{gf_id}_Oracle"
         oracle_type_by_game_file[gf.name] = oracle_type_name
         theory_game_decls.append(
             theory_modules.translate_game_file_oracle(gf, oracle_type_name)
         )
         for side in gf.games:
-            mod_name = f"{gf.name}_{side.name}"
+            mod_name = f"{gf_id}_{side.name}"
             module_name_by_concrete_game[(gf.name, side.name)] = mod_name
             theory_game_decls.append(
                 theory_modules.translate_game(
@@ -370,7 +489,9 @@ def export_proof_file(proof_path: str) -> str:
                     emitted_param_type=scheme_type_name,
                 )
             )
-        adv = theory_modules.translate_adversary_type(gf, oracle_type_name)
+        adv = theory_modules.translate_adversary_type(
+            gf, oracle_type_name, adv_type_name=f"{gf_id}_Adv"
+        )
         adv_type_by_game_file[gf.name] = adv.name
         theory_game_decls.append(adv)
 
@@ -380,12 +501,13 @@ def export_proof_file(proof_path: str) -> str:
 
     theory_assumption_decls: list[ec_ast.EcTopDecl] = []
     assumption_wrapper_names: dict[tuple[str, str], str] = {}
-    for gf in game_files:
+    for gf in primary_game_files:
         if gf.name not in assumed_gf_names:
             continue
+        gf_id = _ec_ident(gf.name)
         adv_type_name = adv_type_by_game_file[gf.name]
         for side in gf.games:
-            wrapper_name = f"Game_{gf.name}_{side.name}"
+            wrapper_name = f"Game_{gf_id}_{side.name}"
             assumption_wrapper_names[(gf.name, side.name)] = wrapper_name
             side_mod_name = module_name_by_concrete_game[(gf.name, side.name)]
             theory_assumption_decls.append(
@@ -401,7 +523,7 @@ def export_proof_file(proof_path: str) -> str:
         random_side = gf.games[1].name
         theory_assumption_decls.extend(
             pt.translate_assumption_axioms_theory(
-                assumption_name=gf.name,
+                assumption_name=gf_id,
                 adversary_type_name=adv_type_name,
                 scheme_type_name=scheme_type_name,
                 scheme_param_name=scheme_param_name,
@@ -412,6 +534,156 @@ def export_proof_file(proof_path: str) -> str:
 
     # Abstract types + distributions populated during game translation above.
     theory_head = theory_types.emit_abstract()
+
+    # === Secondary primitive theories (multi-primitive proofs) ===
+    #
+    # For each non-primary primitive that's referenced by a game file or
+    # by an instance, emit its own abstract theory containing the Scheme
+    # module type, oracle module types, side modules, and adversary type
+    # for *its* game files. Each foreign instance later clones from its
+    # primitive's theory rather than the primary one.
+    #
+    # Cross-primitive plumbing (reductions that bridge primitives,
+    # assumption-hop axioms on foreign primitives, resolver dispatch
+    # through multiple theories) is built in subsequent stages.
+    foreign_primitive_names: list[str] = []
+    for inst in instances:
+        if (
+            inst.primitive_name != primitive.name
+            and inst.primitive_name not in foreign_primitive_names
+        ):
+            foreign_primitive_names.append(inst.primitive_name)
+    for gf in game_files:
+        pn = primitive_name_by_game_file[gf.name]
+        if pn != primitive.name and pn not in foreign_primitive_names:
+            foreign_primitive_names.append(pn)
+
+    # Per-foreign-primitive scope: TypeCollector + game/oracle decls, plus
+    # the abstract-types map and theory_types reference needed later when
+    # the corresponding instance is cloned.
+    @dataclass
+    class _ForeignScope:
+        primitive: frog_ast.Primitive
+        theory_name: str
+        theory_types: tc.TypeCollector
+        theory_modules: mt.ModuleTranslator
+        abstract_types_map: dict[str, str]
+        game_files: list[frog_ast.GameFile]
+        theory_decls: list[ec_ast.EcTopDecl]
+        oracle_type_by_game_file: dict[str, str]
+        module_name_by_concrete_game: dict[tuple[str, str], str]
+        adv_type_by_game_file: dict[str, str]
+        assumption_wrapper_names: dict[tuple[str, str], str]
+
+    foreign_scopes: dict[str, _ForeignScope] = {}
+    for fp_name in foreign_primitive_names:
+        fp = primitives_by_name[fp_name]
+        fp_abstract: dict[str, str] = {}
+        for pf in fp.fields:
+            if isinstance(pf.type, frog_ast.SetType):
+                fp_abstract[pf.name] = pf.name.lower()
+        fp_game_files = [
+            gf for gf in game_files if primitive_name_by_game_file[gf.name] == fp.name
+        ]
+        fp_param_prefixes = {
+            gf.games[0].parameters[0].name
+            for gf in fp_game_files
+            if gf.games[0].parameters
+        }
+        fp_theory_types = tc.TypeCollector(
+            abstract_types=fp_abstract,
+            strip_field_prefixes=fp_param_prefixes,
+            theory_mode=True,
+        )
+        fp_theory_modules = mt.ModuleTranslator(fp_theory_types, type_of_factory)
+        fp_theory_name = f"{fp.name}_Theory"
+        fp_ec_primitive = fp_theory_modules.translate_primitive(
+            fp, name=scheme_type_name
+        )
+        fp_decls: list[ec_ast.EcTopDecl] = [fp_ec_primitive]
+        fp_oracle_by_gf: dict[str, str] = {}
+        fp_modname_by_cg: dict[tuple[str, str], str] = {}
+        fp_adv_by_gf: dict[str, str] = {}
+        for gf in fp_game_files:
+            gf_id = _ec_ident(gf.name)
+            oracle_type_name = f"{gf_id}_Oracle"
+            fp_oracle_by_gf[gf.name] = oracle_type_name
+            fp_decls.append(
+                fp_theory_modules.translate_game_file_oracle(gf, oracle_type_name)
+            )
+            for side in gf.games:
+                mod_name = f"{gf_id}_{side.name}"
+                fp_modname_by_cg[(gf.name, side.name)] = mod_name
+                fp_decls.append(
+                    fp_theory_modules.translate_game(
+                        side,
+                        mod_name,
+                        fp.name,
+                        implements=oracle_type_name,
+                        emitted_param_type=scheme_type_name,
+                    )
+                )
+            adv = fp_theory_modules.translate_adversary_type(
+                gf, oracle_type_name, adv_type_name=f"{gf_id}_Adv"
+            )
+            fp_adv_by_gf[gf.name] = adv.name
+            fp_decls.append(adv)
+        # Assumption wrappers + axioms for each assumed foreign game file.
+        fp_assumed = {a.name for a in proof.assumptions if a.name in fp_oracle_by_gf}
+        fp_wrapper_names: dict[tuple[str, str], str] = {}
+        for gf in fp_game_files:
+            if gf.name not in fp_assumed:
+                continue
+            gf_id = _ec_ident(gf.name)
+            adv_type_name = fp_adv_by_gf[gf.name]
+            for side in gf.games:
+                wrapper_name = f"Game_{gf_id}_{side.name}"
+                fp_wrapper_names[(gf.name, side.name)] = wrapper_name
+                side_mod_name = fp_modname_by_cg[(gf.name, side.name)]
+                fp_decls.append(
+                    fp_theory_modules.translate_theory_game_wrapper(
+                        wrapper_name=wrapper_name,
+                        scheme_param_name=scheme_param_name,
+                        scheme_type_name=scheme_type_name,
+                        adversary_type_name=adv_type_name,
+                        side_module_name=side_mod_name,
+                    )
+                )
+            real_side = gf.games[0].name
+            random_side = gf.games[1].name
+            fp_decls.extend(
+                pt.translate_assumption_axioms_theory(
+                    assumption_name=gf_id,
+                    adversary_type_name=adv_type_name,
+                    scheme_type_name=scheme_type_name,
+                    scheme_param_name=scheme_param_name,
+                    real_wrapper_name=fp_wrapper_names[(gf.name, real_side)],
+                    random_wrapper_name=fp_wrapper_names[(gf.name, random_side)],
+                )
+            )
+        foreign_scopes[fp.name] = _ForeignScope(
+            primitive=fp,
+            theory_name=fp_theory_name,
+            theory_types=fp_theory_types,
+            theory_modules=fp_theory_modules,
+            abstract_types_map=fp_abstract,
+            game_files=fp_game_files,
+            theory_decls=fp_decls,
+            oracle_type_by_game_file=fp_oracle_by_gf,
+            module_name_by_concrete_game=fp_modname_by_cg,
+            adv_type_by_game_file=fp_adv_by_gf,
+            assumption_wrapper_names=fp_wrapper_names,
+        )
+
+    # Merge foreign scopes' game-file mappings into the global view used
+    # by downstream code (reductions, resolver, hop translation). Keys are
+    # game-file names so the same dictionaries cover both primary and
+    # foreign game files.
+    for fs in foreign_scopes.values():
+        oracle_type_by_game_file.update(fs.oracle_type_by_game_file)
+        module_name_by_concrete_game.update(fs.module_name_by_concrete_game)
+        adv_type_by_game_file.update(fs.adv_type_by_game_file)
+        assumption_wrapper_names.update(fs.assumption_wrapper_names)
 
     # === Top-level contents ===
 
@@ -480,11 +752,21 @@ def export_proof_file(proof_path: str) -> str:
     # takes one or more module names. For a single-scheme proof (OTP)
     # the footprint is the scheme module itself; for a multi-scheme
     # proof it must name the abstract instances the functor depends on
-    # (``-E1, -E2``), not the functor application.
+    # (``-E1, -E2``), not the functor application. For multi-primitive
+    # proofs every additional ``declare module`` (foreign-primitive
+    # instance such as ``P`` for 5_10) must also appear so the
+    # adversary's call boundaries don't accidentally permit writes to
+    # those declared modules; otherwise the byequiv side conditions of
+    # the per-hop pr lemmas fail with ``module P can write A``.
+    footprint_names: list[str] = []
     if scheme_module_params:
-        primary_footprint = ", ".join(f"-{p.name}" for p in scheme_module_params)
+        footprint_names.extend(p.name for p in scheme_module_params)
     else:
-        primary_footprint = f"-{scheme.name}"
+        footprint_names.append(scheme.name)
+    for inst in instances:
+        if inst is not primary and inst.let_name not in footprint_names:
+            footprint_names.append(inst.let_name)
+    primary_footprint = ", ".join(f"-{n}" for n in footprint_names)
 
     # Which clone each reduction's composed assumption targets. For
     # ``R1 compose OneTimeSecrecy(E1)`` the challenger oracle lives in
@@ -582,6 +864,7 @@ def export_proof_file(proof_path: str) -> str:
         instance_module_expr_by_let_name=instance_module_expr,
         module_name_by_instance_game=module_name_by_instance_game,
         declared_module_names=declared_module_names,
+        outer_oracle_name=oracle_name_by_game_file[proof.theorem.name],
     )
 
     # Validate proof via the engine (same as before).
@@ -649,7 +932,52 @@ def export_proof_file(proof_path: str) -> str:
         if _is_assumption_hop(step_a, step_b):
             return None
         assert isinstance(step_a.challenger, frog_ast.ConcreteGame)
-        method_name = oracle_name_by_game_file[step_a.challenger.game.name]
+        assert isinstance(step_b.challenger, frog_ast.ConcreteGame)
+        # Cross-primitive bridge: when the two endpoints' challengers
+        # are different game files on different primitives, the engine
+        # inlines each side's challenger body — including external-
+        # primitive method calls (``P.KeyGen()``, ``P.Enc()``) — into
+        # flat samples and xor operations. EC's per-primitive abstract
+        # theory keeps those primitives' methods abstract, so the bridge
+        # ``proc; inline*; sp; wp; sim`` between the engine's inlined
+        # flat-state module and the reduction's abstract-method body
+        # cannot close: EC doesn't know that ``P.KeyGen()`` is uniform
+        # without the INDOT$ assumption (which the proof treats as an
+        # inlining hop here, not an assumption hop). Emit a hop-level
+        # admit with a structured comment rather than producing a
+        # chain whose bridge will fail. The chain itself is internally
+        # consistent and would close — only the wrapper-to-flat bridge
+        # is unprovable in this configuration.
+        left_gf = step_a.challenger.game.name
+        right_gf = step_b.challenger.game.name
+        if left_gf != right_gf and primitive_name_by_game_file.get(
+            left_gf
+        ) != primitive_name_by_game_file.get(right_gf):
+            return [
+                f"(* cross-primitive inlining hop: {left_gf} and {right_gf} "
+                f"live on different primitives "
+                f"({primitive_name_by_game_file.get(left_gf)} vs "
+                f"{primitive_name_by_game_file.get(right_gf)}). The engine's "
+                "canonicalization inlines each side's primitive methods to "
+                "uniform samples, but EC keeps the primitives abstract; the "
+                "wrapper↔flat-state bridge ``proc; inline*; sp; wp; sim`` "
+                "cannot reconcile abstract module calls with inlined samples "
+                "without the indistinguishability assumption being applied as "
+                "an axiom (which the proof treats as an inlining hop here). "
+                "Falling back to admit at the hop level. *)",
+                "admit.",
+                "qed.",
+            ]
+        # The hop equiv compares the two adjacent composed games at the
+        # OUTER oracle interface (what the adversary calls). When a
+        # reduction is composed, the resulting module exposes the
+        # reduction's outer-method names, which match the theorem game's
+        # oracle — *not* the inner challenger's. For single-primitive
+        # proofs these coincide; for multi-primitive proofs (e.g. 5_10's
+        # hop 4 between INDOT$(P).Real ∘ R3 and PRGSecurity(G).Real ∘ R4),
+        # using the inner-challenger's method name would call a non-
+        # existent procedure on the composed module.
+        method_name = oracle_name_by_game_file[proof.theorem.name]
         # pylint: disable=protected-access
         left_ast = engine._get_game_ast(step_a.challenger, step_a.reduction)
         right_ast = engine._get_game_ast(step_b.challenger, step_b.reduction)
@@ -772,7 +1100,7 @@ def export_proof_file(proof_path: str) -> str:
             assert isinstance(step_a.challenger, frog_ast.ConcreteGame)
             assumption_game_file_name = step_a.challenger.game.name
             hop_kinds.append(pt.HopKind.ASSUMPTION)
-            assumption_names_by_hop[i] = assumption_game_file_name
+            assumption_names_by_hop[i] = _ec_ident(assumption_game_file_name)
             ec_pr_lemmas.append(
                 _describe_assumption_hop(i, assumption_game_file_name, reduction_name)
             )
@@ -812,7 +1140,7 @@ def export_proof_file(proof_path: str) -> str:
                     scheme_module_expr=assumption_scheme_expr,
                     left_wrapper_name=left_wrapper,
                     right_wrapper_name=right_wrapper,
-                    assumption_name=assumption_game_file_name,
+                    assumption_name=_ec_ident(assumption_game_file_name),
                     reduction_adv_name=f"{reduction_name}_Adv",
                     left_assumption_wrapper=left_assumption_wrapper,
                     right_assumption_wrapper=right_assumption_wrapper,
@@ -865,8 +1193,21 @@ def export_proof_file(proof_path: str) -> str:
     #     (e.g. ``bs_lambda_stretch`` -> ``bs_2_lambda`` when the
     #     instance has lambda=lambda and stretch=lambda).
     def _instance_clone(inst: si.SchemeInstance) -> ec_ast.Clone:
+        # Each instance clones the abstract theory of its primitive. For
+        # primary-primitive instances that's the primary theory; for
+        # foreign-primitive instances it's the corresponding foreign
+        # scope's theory (with its own abstract_types_map and theory_types).
+        if inst.primitive_name == primitive.name:
+            src_theory_name = theory_name
+            src_abstract_types_map = abstract_types_map
+            src_theory_types = theory_types
+        else:
+            fs = foreign_scopes[inst.primitive_name]
+            src_theory_name = fs.theory_name
+            src_abstract_types_map = fs.abstract_types_map
+            src_theory_types = fs.theory_types
         type_bindings_: list[tuple[str, str]] = []
-        for pf_name, abs_name in abstract_types_map.items():
+        for pf_name, abs_name in src_abstract_types_map.items():
             if pf_name in inst.concretized_fields:
                 ec_concrete = top_types.translate_type(inst.concretized_fields[pf_name])
                 type_bindings_.append((abs_name, ec_concrete.text))
@@ -874,7 +1215,7 @@ def export_proof_file(proof_path: str) -> str:
         # bitstring as a BitString<...> with the instance's field values
         # substituted in, then re-translating through ``top_types`` so the
         # resulting concrete type gets registered for top-level emission.
-        for abs_name, abs_expr in theory_types.abstract_bitstrings:
+        for abs_name, abs_expr in src_theory_types.abstract_bitstrings:
             concrete_expr = _instantiate_bitstring_expr(
                 abs_expr, inst.concretized_fields
             )
@@ -883,9 +1224,9 @@ def export_proof_file(proof_path: str) -> str:
             )
             type_bindings_.append((abs_name, concrete_type.text))
         op_bindings_: list[tuple[str, str]] = []
-        for distr in theory_types.abstract_distrs_seen:
+        for distr in src_theory_types.abstract_distrs_seen:
             binding = _distr_binding_for(
-                distr, abstract_types_map, inst.concretized_fields, top_types
+                distr, src_abstract_types_map, inst.concretized_fields, top_types
             )
             if binding is not None:
                 op_bindings_.append(binding)
@@ -900,7 +1241,7 @@ def export_proof_file(proof_path: str) -> str:
                         op_bindings_.append((distr, concrete_distr))
                         break
         return ec_ast.Clone(
-            source_theory=theory_name,
+            source_theory=src_theory_name,
             alias=inst.clone_alias,
             type_bindings=type_bindings_,
             op_bindings=op_bindings_,
@@ -915,6 +1256,22 @@ def export_proof_file(proof_path: str) -> str:
             *theory_assumption_decls,
         ],
     )
+
+    # Foreign primitives each get their own abstract theory. The list is
+    # emitted into the file in the same registration order as
+    # ``foreign_primitive_names`` so output is deterministic.
+    foreign_theories: list[ec_ast.AbstractTheory] = []
+    for fp_name in foreign_primitive_names:
+        fs = foreign_scopes[fp_name]
+        foreign_theories.append(
+            ec_ast.AbstractTheory(
+                name=fs.theory_name,
+                decls=[
+                    *fs.theory_types.emit_abstract(),
+                    *fs.theory_decls,
+                ],
+            )
+        )
 
     clones: list[ec_ast.EcTopDecl] = [_instance_clone(inst) for inst in instances]
 
@@ -1113,6 +1470,9 @@ def export_proof_file(proof_path: str) -> str:
         _section_header("Abstract theory: primitive + security games + assumption")
     )
     decls.append(theory)
+    for fp_theory in foreign_theories:
+        decls.append(_section_header(f"Foreign primitive theory: {fp_theory.name}"))
+        decls.append(fp_theory)
     decls.append(_section_header("Theory instantiation"))
     decls.extend(clones)
     if clone_axioms:

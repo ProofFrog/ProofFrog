@@ -150,6 +150,8 @@ class TypeCollector:
                 self._abstract_seen.append(abstract)
             return ec_ast.EcType(abstract)
         resolved = self.resolve(t)
+        if isinstance(resolved, frog_ast.Void):
+            return ec_ast.EcType("unit")
         if isinstance(resolved, frog_ast.BitStringType):
             name = self._bitstring_name(resolved)
             if self._theory_mode:
@@ -442,6 +444,16 @@ class TypeCollector:
                 ec_ast.Axiom(
                     f"{xor_op}_invol",
                     f"forall (a b : {name}), {xor_op} ({xor_op} a b) b = a",
+                )
+            )
+            # Commutativity: needed by the canned tactic for
+            # ``Normalize Commutative Chains`` when the engine rewrites
+            # ``xor a b`` to ``xor b a``. ``sim`` alone won't close those
+            # micros; ``smt(<xor>_commut)`` does.
+            decls.append(
+                ec_ast.Axiom(
+                    f"{xor_op}_commut",
+                    f"forall (a b : {name}), {xor_op} a b = {xor_op} b a",
                 )
             )
         for src_name, dst_name in self._slice_ops:

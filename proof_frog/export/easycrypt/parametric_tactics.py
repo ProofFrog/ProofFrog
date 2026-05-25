@@ -61,11 +61,11 @@ def _bitstring_suffix(t: frog_ast.Type) -> str | None:
     return sanitized or None
 
 
-# pylint: disable=too-many-locals
+# pylint: disable=too-many-locals,too-many-branches,too-many-statements
 def uniform_xor_tactic(
     app: TransformApplication,
     _types: TypeCollector | None = None,
-    **_kwargs: object,  # accept and ignore optional context kwargs
+    **_kwargs: object,  # accept the unified caller's extra kwargs
 ) -> list[str] | None:
     """Synthesize the EC tactic for ``Uniform XOR Simplification``.
 
@@ -93,8 +93,27 @@ def uniform_xor_tactic(
     if len(app.game_before.methods) != 1 or len(app.game_after.methods) != 1:
         return None
 
-    before_block = app.game_before.methods[0].block
-    after_block = app.game_after.methods[0].block
+    # The back-walk count (wp/call/rnd after the bijection site) must
+    # match what EC actually sees, which is the *hoisted* form: nested
+    # module-call expressions become standalone ``<@`` assignments. If
+    # the caller supplied the normalization context, hoist first.
+    # pylint: disable=import-outside-toplevel
+    import copy as _copy
+
+    from .canonical_form import _normalize_for_ec as _norm_ec
+
+    _ext = _kwargs.get("external_module_types")
+    _mrt = _kwargs.get("method_return_types")
+    if isinstance(_ext, dict) and isinstance(_mrt, dict):
+        before_block = (
+            _norm_ec(_copy.deepcopy(app.game_before), _ext, _mrt).methods[0].block
+        )
+        after_block = (
+            _norm_ec(_copy.deepcopy(app.game_after), _ext, _mrt).methods[0].block
+        )
+    else:
+        before_block = app.game_before.methods[0].block
+        after_block = app.game_after.methods[0].block
 
     if len(before_block.statements) != len(after_block.statements):
         return None
@@ -142,12 +161,47 @@ def uniform_xor_tactic(
 
     xor_op = f"xor_{suffix}"
     distr = f"dbs_{suffix}"
-    return [
-        "proc.",
+    # Back-walk the after-block from the end: each statement past the
+    # uniform sample needs a tactic to discharge before ``rnd`` can fire
+    # at the bijection site. ``wp`` covers the return; ``call (_: true)``
+    # covers each module-call assignment; ``rnd.`` (no bijection)
+    # covers any non-targeted sample. Statements *before* the uniform
+    # sample close via ``auto``.
+    stmts_after = list(after_block.statements)
+    uniform_idx: int | None = None
+    for i, s in enumerate(stmts_after):
+        if (
+            isinstance(s, frog_ast.Sample)
+            and isinstance(s.var, frog_ast.Variable)
+            and s.var.name == uniform_var
+        ):
+            uniform_idx = i
+            break
+    if uniform_idx is None:
+        return None
+    tail_tactics: list[str] = []
+    for s in stmts_after[uniform_idx + 1 :]:
+        if isinstance(s, frog_ast.ReturnStatement):
+            tail_tactics.append("wp.")
+        elif isinstance(s, frog_ast.Assignment) and isinstance(
+            s.value, frog_ast.FuncCall
+        ):
+            tail_tactics.append("call (_: true).")
+        elif isinstance(s, frog_ast.Sample):
+            tail_tactics.append("rnd.")
+        elif isinstance(s, frog_ast.Assignment):
+            tail_tactics.append("wp.")
+        else:
+            return None
+    # The bijection at the uniform-var sample; back-walking runs these
+    # in reverse order so the tail tactics come first.
+    tactic = ["proc.", *reversed(tail_tactics)]
+    tactic.append(
         f"rnd (fun z => {xor_op} z {offset_ec}{{2}}) "
-        f"(fun z => {xor_op} z {offset_ec}{{2}}).",
-        f"auto => />; progress; smt({xor_op}_invol {distr}_fu).",
-    ]
+        f"(fun z => {xor_op} z {offset_ec}{{2}})."
+    )
+    tactic.append(f"auto => />; progress; smt({xor_op}_invol {distr}_fu).")
+    return tactic
 
 
 def inline_single_use_variables_tactic(
@@ -202,7 +256,14 @@ def inline_single_use_variables_tactic(
             continue
         # Unknown statement shape (e.g. IfStatement) — bail out.
         return None
-    if sample_count > 1:
+    # The back-walker only works when the body's shape is
+    # ``(samples)*; (calls)*; (deterministic-assignment-or-something)*;
+    # return`` and EXACTLY mirrors that shape on both sides. The walker
+    # produces ``wp; (call; wp)*; (rnd)*; skip`` which assumes all
+    # samples precede all calls; bail when the order is interleaved.
+    if not _shape_is_samples_then_calls(app.game_before.methods[0]):
+        return None
+    if not _shape_is_samples_then_calls(app.game_after.methods[0]):
         return None
     # The back-walker emits ``call (_: true).`` at each call position;
     # EC matches the calls left↔right in lockstep. If the IsUV transform
@@ -219,14 +280,427 @@ def inline_single_use_variables_tactic(
 
     tactics: list[str] = ["proc.", "wp."]
     # Back-walk through call_count hoisted call assignments, then
-    # any leading sample.
+    # the leading samples.
     for _ in range(call_count):
         tactics.append("call (_: true).")
         tactics.append("wp.")
-    if sample_count == 1:
+    for _ in range(sample_count):
         tactics.append("rnd.")
     tactics.append("skip => />.")
     return tactics
+
+
+def _shape_is_samples_then_calls(method: frog_ast.Method) -> bool:
+    """True if the post-hoist body is ``(sample)*; (call|assign)*; return``.
+
+    Walks the hoisted method body. Once a non-sample statement is seen,
+    no further sample may appear. This is the canonical shape the
+    ``inline_single_use_variables_tactic`` back-walker is built for; mixed
+    interleavings (``sample; call; sample; call``) defeat its ``rnd; rnd``
+    bulk emission since each pair would need to be back-walked through
+    its own call.
+    """
+    saw_non_sample = False
+    for stmt in method.block.statements:
+        if isinstance(stmt, frog_ast.Sample):
+            if saw_non_sample:
+                return False
+        elif isinstance(stmt, (frog_ast.Assignment, frog_ast.ReturnStatement)):
+            saw_non_sample = True
+        else:
+            return False
+    return True
+
+
+def _sympy_normalize_int_arith(game: frog_ast.Game) -> None:
+    """Replace int arithmetic sub-expressions with sympy-canonical forms.
+
+    Walks every ``BitStringType`` parameterization and ``Slice``
+    start/end on the game in place, replacing pure integer arithmetic
+    (``BinaryOperation`` over ``Variable`` / ``Integer`` / ``BinaryOperation``)
+    with the result of parsing the sympy-canonical string back into an
+    AST. This matches the canonicalization that ``TypeCollector.
+    _bitstring_name`` and ``expr_translator._canonical_int_str`` apply
+    when generating EC source, so AST-level equality after this pass
+    matches EC-level equality for these positions.
+    """
+    # pylint: disable=import-outside-toplevel
+    from .type_collector import _canonical_arith_str
+
+    def canon(expr: frog_ast.Expression) -> frog_ast.Expression:
+        # Parse the sympy-canonical string back into a tiny AST. We
+        # only need to handle ``a + b``, ``a * b``, ``a - b`` over
+        # ``Variable`` / ``Integer`` — which is the shape sympy emits
+        # for the parameterizations we see in practice.
+        canonical = _canonical_arith_str(expr)
+        return _parse_simple_arith(canonical) or expr
+
+    def walk_expr(expr: frog_ast.Expression) -> None:
+        if isinstance(expr, frog_ast.Slice):
+            expr.start = canon(expr.start)
+            expr.end = canon(expr.end)
+            walk_expr(expr.the_array)
+            return
+        if isinstance(expr, frog_ast.BinaryOperation):
+            walk_expr(expr.left_expression)
+            walk_expr(expr.right_expression)
+            return
+        if isinstance(expr, frog_ast.FuncCall):
+            for a in expr.args:
+                walk_expr(a)
+
+    def walk_type(t: frog_ast.Type | None) -> None:
+        if t is None:
+            return
+        if isinstance(t, frog_ast.BitStringType) and t.parameterization is not None:
+            t.parameterization = canon(t.parameterization)
+
+    def walk_stmt(s: frog_ast.Statement) -> None:
+        if isinstance(s, frog_ast.VariableDeclaration):
+            walk_type(s.type)
+            return
+        if isinstance(s, (frog_ast.Sample, frog_ast.Assignment)):
+            walk_type(s.the_type)
+            if isinstance(s, frog_ast.Assignment):
+                walk_expr(s.value)
+            elif isinstance(s, frog_ast.Sample) and isinstance(
+                s.sampled_from, frog_ast.Type
+            ):
+                walk_type(s.sampled_from)
+            return
+        if isinstance(s, frog_ast.ReturnStatement):
+            walk_expr(s.expression)
+
+    for method in game.methods:
+        for stmt in method.block.statements:
+            walk_stmt(stmt)
+
+
+def _parse_simple_arith(s: str) -> frog_ast.Expression | None:
+    """Parse a sympy-canonical arithmetic string into a tiny AST.
+
+    Handles ``Variable`` (identifier, possibly a Python keyword like
+    ``lambda``), ``Integer``, and ``+``/``*``/``-`` over them. Returns
+    ``None`` for shapes outside that grammar.
+
+    We can't use Python's ``ast`` module directly because the
+    identifiers we see (``lambda``) clash with Python keywords; instead
+    we run a tiny precedence-climbing parser over a hand-rolled
+    tokenizer.
+    """
+    tokens = _tokenize_arith(s)
+    if tokens is None:
+        return None
+    pos = [0]
+
+    def parse_atom() -> frog_ast.Expression | None:
+        if pos[0] >= len(tokens):
+            return None
+        tok = tokens[pos[0]]
+        if tok == "(":
+            pos[0] += 1
+            expr = parse_addsub()
+            if pos[0] >= len(tokens) or tokens[pos[0]] != ")":
+                return None
+            pos[0] += 1
+            return expr
+        if tok == "-":
+            pos[0] += 1
+            inner = parse_atom()
+            if inner is None:
+                return None
+            return frog_ast.UnaryOperation(frog_ast.UnaryOperators.MINUS, inner)
+        if tok.isdigit():
+            pos[0] += 1
+            return frog_ast.Integer(int(tok))
+        if tok.replace("_", "").isalnum() and not tok[0].isdigit():
+            pos[0] += 1
+            return frog_ast.Variable(tok)
+        return None
+
+    def parse_mul() -> frog_ast.Expression | None:
+        left = parse_atom()
+        if left is None:
+            return None
+        while pos[0] < len(tokens) and tokens[pos[0]] in ("*", "/"):
+            op_tok = tokens[pos[0]]
+            pos[0] += 1
+            right = parse_atom()
+            if right is None:
+                return None
+            op = (
+                frog_ast.BinaryOperators.MULTIPLY
+                if op_tok == "*"
+                else frog_ast.BinaryOperators.DIVIDE
+            )
+            left = frog_ast.BinaryOperation(op, left, right)
+        return left
+
+    def parse_addsub() -> frog_ast.Expression | None:
+        left = parse_mul()
+        if left is None:
+            return None
+        while pos[0] < len(tokens) and tokens[pos[0]] in ("+", "-"):
+            op_tok = tokens[pos[0]]
+            pos[0] += 1
+            right = parse_mul()
+            if right is None:
+                return None
+            op = (
+                frog_ast.BinaryOperators.ADD
+                if op_tok == "+"
+                else frog_ast.BinaryOperators.SUBTRACT
+            )
+            left = frog_ast.BinaryOperation(op, left, right)
+        return left
+
+    result = parse_addsub()
+    if pos[0] != len(tokens):
+        return None
+    return result
+
+
+def _tokenize_arith(s: str) -> list[str] | None:
+    tokens: list[str] = []
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c.isspace():
+            i += 1
+            continue
+        if c in "+-*/()":
+            tokens.append(c)
+            i += 1
+            continue
+        if c.isdigit():
+            j = i
+            while j < len(s) and s[j].isdigit():
+                j += 1
+            tokens.append(s[i:j])
+            i = j
+            continue
+        if c.isalpha() or c == "_":
+            j = i
+            while j < len(s) and (s[j].isalnum() or s[j] == "_"):
+                j += 1
+            tokens.append(s[i:j])
+            i = j
+            continue
+        return None
+    return tokens
+
+
+def _xor_arg_swaps_only(
+    before: frog_ast.Expression,
+    after: frog_ast.Expression,
+    swaps: list[frog_ast.Type],
+) -> bool:
+    """Return True if ``after`` equals ``before`` modulo swapped XOR args.
+
+    Records each swap site's operand type into ``swaps`` so the caller
+    can emit ``xor_<suffix>_commut`` axioms for the relevant types. The
+    operand type is reconstructed from ``before.left_expression`` via
+    :func:`_expr_bs_type` (a best-effort inference that handles bare
+    Variable + Slice cases — sufficient for the canonical-chain shapes
+    we currently see).
+    """
+    if isinstance(before, frog_ast.BinaryOperation) and isinstance(
+        after, frog_ast.BinaryOperation
+    ):
+        if before.operator != after.operator:
+            return False
+        # ADD on BitString is XOR (commutative).
+        is_xor_add = before.operator == frog_ast.BinaryOperators.ADD
+        if (
+            is_xor_add
+            and before.left_expression == after.right_expression
+            and before.right_expression == after.left_expression
+        ):
+            inferred = _expr_bs_type(before.left_expression)
+            if inferred is None:
+                return False
+            swaps.append(inferred)
+            return True
+        return _xor_arg_swaps_only(
+            before.left_expression, after.left_expression, swaps
+        ) and _xor_arg_swaps_only(
+            before.right_expression, after.right_expression, swaps
+        )
+    if isinstance(before, frog_ast.FuncCall) and isinstance(after, frog_ast.FuncCall):
+        if before.func != after.func or len(before.args) != len(after.args):
+            return False
+        return all(
+            _xor_arg_swaps_only(b, a, swaps) for b, a in zip(before.args, after.args)
+        )
+    return before == after
+
+
+def _expr_bs_type(e: frog_ast.Expression) -> frog_ast.Type | None:
+    """Best-effort inference of an expression's BitString type.
+
+    Handles the cases that appear in the chain-emitter's micros:
+    ``Slice`` (length = ``end - start``) and ``Variable`` (looked up
+    later via the surrounding sample). Returns ``None`` otherwise. The
+    caller treats ``None`` as "can't synthesize this swap" and bails.
+    """
+    if isinstance(e, frog_ast.Slice):
+        return frog_ast.BitStringType(
+            frog_ast.BinaryOperation(frog_ast.BinaryOperators.SUBTRACT, e.end, e.start)
+        )
+    # Bare Variable: its type is fixed by the sample/assignment that
+    # binds it; we'd need the surrounding type map to resolve. For the
+    # shapes that surface today, at least one operand of every XOR swap
+    # we see is a Slice — so returning None here is acceptable.
+    return None
+
+
+def normalize_commutative_chains_tactic(  # pylint: disable=too-many-branches,too-many-locals
+    app: TransformApplication,
+    types: TypeCollector | None = None,
+    **kwargs: object,
+) -> list[str] | None:
+    """Synthesize an EC tactic for ``Normalize Commutative Chains`` when
+    the diff is a pure XOR-argument swap.
+
+    The canned ``proc; sim.`` fallback can't close micros where the
+    engine reorders XOR arguments (``xor a b`` → ``xor b a``) because
+    ``sim`` doesn't see the commutativity. This synthesizer detects
+    return-statement diffs that consist *only* of XOR arg swaps, walks
+    the method's local-variable bindings to enumerate the locals,
+    extracts module-typed externals from the method's body (anything
+    appearing as the receiver of a ``<@`` call), and emits::
+
+        proc.
+        conseq (_: _ ==> ={glob <M1>, glob <M2>, <L1>, <L2>, ...});
+            first by progress; smt(xor_<suffix1>_commut ...).
+        sim.
+
+    Returns ``None`` when the diff isn't a clean XOR-swap, no
+    bitstring suffix can be inferred, or the method shape doesn't
+    fit the conseq-then-sim pattern.
+    """
+    if len(app.game_before.methods) != 1 or len(app.game_after.methods) != 1:
+        return None
+    # Normalize through the EC pipeline first: sympy-canonicalize int
+    # arithmetic (so ``2 * lambda`` vs ``lambda * 2`` no longer counts
+    # as a diff) and hoist nested module calls (matching what EC sees).
+    # Falls back to raw-AST comparison when normalization context isn't
+    # available (older test fixtures that call the synthesizer directly).
+    # pylint: disable=import-outside-toplevel
+    import copy
+
+    from .canonical_form import _normalize_for_ec
+
+    ext_types = kwargs.get("external_module_types")
+    method_rets = kwargs.get("method_return_types")
+    if isinstance(ext_types, dict) and isinstance(method_rets, dict):
+        before_game = _normalize_for_ec(
+            copy.deepcopy(app.game_before), ext_types, method_rets
+        )
+        after_game = _normalize_for_ec(
+            copy.deepcopy(app.game_after), ext_types, method_rets
+        )
+    else:
+        before_game = app.game_before
+        after_game = app.game_after
+    # sympy-canonicalize int sub-expressions on both sides so e.g.
+    # ``2 * lambda`` and ``lambda * 2`` (which EC's TypeCollector
+    # collapses to the same ``bs_2_lambda``) compare equal at the AST
+    # level. Without this, statement-level diff detection sees an
+    # apparent change in every type annotation and slice index that
+    # the engine's commutative-chain rewriter touched, even though
+    # those positions disappear in the EC output.
+    _sympy_normalize_int_arith(before_game)
+    _sympy_normalize_int_arith(after_game)
+    before_method = before_game.methods[0]
+    after_method = after_game.methods[0]
+    before_stmts = list(before_method.block.statements)
+    after_stmts = list(after_method.block.statements)
+    if len(before_stmts) != len(after_stmts):
+        return None
+    swap_types: list[frog_ast.Type] = []
+    found_diff = False
+    for b, a in zip(before_stmts, after_stmts):
+        if b == a:
+            continue
+        if found_diff:
+            return None
+        if not (
+            isinstance(b, frog_ast.ReturnStatement)
+            and isinstance(a, frog_ast.ReturnStatement)
+        ):
+            return None
+        if not _xor_arg_swaps_only(b.expression, a.expression, swap_types):
+            return None
+        found_diff = True
+    if not found_diff or not swap_types:
+        return None
+
+    # Enumerate locals: every variable bound by a Sample / Assignment /
+    # VariableDeclaration in the method body.
+    locals_: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: str) -> None:
+        if name not in seen:
+            seen.add(name)
+            locals_.append(name)
+
+    for stmt in before_stmts:
+        if isinstance(stmt, frog_ast.VariableDeclaration):
+            _add(stmt.name)
+        elif isinstance(stmt, (frog_ast.Sample, frog_ast.Assignment)):
+            if isinstance(stmt.var, frog_ast.Variable):
+                _add(stmt.var.name)
+
+    # Externals: receivers of ``<@`` calls. We walk Assignment.value
+    # for ``FuncCall(FieldAccess(Variable(M), ...), ...)`` and collect
+    # ``M``. These become ``glob M`` in the conseq.
+    externals: list[str] = []
+    seen_ext: set[str] = set()
+    for stmt in before_stmts:
+        if isinstance(stmt, frog_ast.Assignment) and isinstance(
+            stmt.value, frog_ast.FuncCall
+        ):
+            func = stmt.value.func
+            if isinstance(func, frog_ast.FieldAccess) and isinstance(
+                func.the_object, frog_ast.Variable
+            ):
+                name = func.the_object.name
+                if name not in seen_ext:
+                    seen_ext.add(name)
+                    externals.append(name)
+
+    # Emit ``={glob M1, ..., L1, L2, ...}`` for the conseq postcondition.
+    eq_terms = [f"glob {m}" for m in externals] + locals_
+    if not eq_terms:
+        return None
+    eq_str = "={" + ", ".join(eq_terms) + "}"
+
+    # Collect xor_<suffix>_commut axioms for each swap site. The EC
+    # type name comes from the TypeCollector (matches how
+    # ``type_collector.emit()`` derives axiom names), not from a
+    # syntactic suffix of the parameterization expression — sympy
+    # canonicalization may reduce ``lambda - 0`` to ``lambda``.
+    if types is None:
+        return None
+    axiom_names: list[str] = []
+    for t in swap_types:
+        ec_type = types.translate_type(t)
+        bs_name = ec_type.text
+        if not bs_name.startswith("bs_") and bs_name != "bs":
+            return None
+        suffix = bs_name.removeprefix("bs_") if bs_name != "bs" else ""
+        ax = f"xor_{suffix}_commut" if suffix else "xor_commut"
+        if ax not in axiom_names:
+            axiom_names.append(ax)
+
+    return [
+        "proc.",
+        f"conseq (_: _ ==> {eq_str}); first by progress; "
+        f"smt({' '.join(axiom_names)}).",
+        "sim.",
+    ]
 
 
 # pylint: disable=too-many-locals
@@ -359,6 +833,7 @@ def merge_uniform_samples_tactic(
     # collector's emit runs after the chain renderer, so on-demand
     # registration here is honored).
     types.register_concat(name_l, name_r, name_res)
+    eq_args_strong = _kwargs.get("eq_args_strong")
     return _merge_tactic_body(
         l_var=_ec_ident(s_l.var.name),
         r_var=_ec_ident(s_r.var.name),
@@ -369,6 +844,7 @@ def merge_uniform_samples_tactic(
         len_l=len_l,
         len_r=len_r,
         len_res=len_res,
+        eq_args_strong=(eq_args_strong if isinstance(eq_args_strong, str) else ""),
     )
 
 
@@ -385,6 +861,7 @@ def split_uniform_samples_tactic(
     right_module_ref: str = "",
     eq_args_strong: str = "",
     eq_post_strong: str = "",
+    **_extra_kwargs: object,  # accept the unified caller's extra kwargs
 ) -> list[str] | None:
     """Synthesize the EC tactic for ``Split Uniform Samples``.
 
@@ -570,6 +1047,34 @@ def split_uniform_samples_tactic(
     # res) concat doesn't appear in the actual game bodies (only slices
     # do); without this call the axioms would be missing.
     types.register_concat(name_l, name_r, name_res)
+    # The engine's split can emit either orientation: ``a_var`` may
+    # replace either ``slice(orig, 0, |L|)`` or
+    # ``slice(orig, |L|, |L|+|R|)``. Detect which by walking the after-
+    # tail (post the two new samples) in parallel with the before-tail
+    # (post the original sample) and matching the first variable use
+    # against the first slice. Swap ``(a_var, b_var)`` in the tactic
+    # invariant if the engine's orientation is reversed.
+    before_tail = before_stmts[common + 1 :]
+    after_tail = after_stmts[common + 2 :]
+    first_slice = _find_first_slice_of(before_tail, s_orig.var.name)
+    first_var = _find_first_var_use(after_tail, {s_a.var.name, s_b.var.name})
+    swap_split = False
+    if first_slice is not None and first_var is not None:
+        first_is_left = (
+            isinstance(first_slice.start, frog_ast.Integer)
+            and first_slice.start.num == 0
+        )
+        # When the first use is the LEFT half, the first-used variable
+        # should be ``a_var``; when it's the RIGHT half, ``b_var``. If
+        # the engine's mapping is reversed (5_10 hop 2 surfaces this:
+        # ``y = r0[lambda..2*lambda]`` on the left side becomes
+        # ``y = r0_0`` on the right), the invariant binding ``a`` ↔ left
+        # half must be flipped — and so must the rndsem* bijection's
+        # component order in the HEAD subgoal.
+        if first_is_left and first_var == s_b.var.name:
+            swap_split = True
+        elif not first_is_left and first_var == s_a.var.name:
+            swap_split = True
     return _split_tactic_body(
         orig_var=_ec_ident(s_orig.var.name),
         a_var=_ec_ident(s_a.var.name),
@@ -580,7 +1085,89 @@ def split_uniform_samples_tactic(
         len_l=len_l,
         len_r=len_r,
         len_res=len_res,
+        swap_split=swap_split,
+        eq_args_strong=eq_args_strong,
     )
+
+
+def _find_first_slice_of(
+    stmts: list[frog_ast.Statement], orig_name: str
+) -> frog_ast.Slice | None:
+    """Return the first ``Slice`` over ``orig_name`` encountered in
+    left-to-right depth-first traversal of ``stmts``."""
+
+    def walk(node: object) -> frog_ast.Slice | None:
+        if isinstance(node, frog_ast.Slice) and isinstance(
+            node.the_array, frog_ast.Variable
+        ):
+            if node.the_array.name == orig_name:
+                return node
+        if isinstance(node, frog_ast.BinaryOperation):
+            return walk(node.left_expression) or walk(node.right_expression)
+        if isinstance(node, frog_ast.UnaryOperation):
+            return walk(node.expression)
+        if isinstance(node, frog_ast.FuncCall):
+            for a in node.args:
+                r = walk(a)
+                if r is not None:
+                    return r
+        if isinstance(node, frog_ast.Slice):
+            return walk(node.the_array)
+        if isinstance(node, frog_ast.Assignment):
+            return walk(node.value)
+        if isinstance(node, frog_ast.Sample):
+            return walk(node.sampled_from)
+        if isinstance(node, frog_ast.ReturnStatement):
+            return walk(node.expression)
+        return None
+
+    for stmt in stmts:
+        r = walk(stmt)
+        if r is not None:
+            return r
+    return None
+
+
+def _find_first_var_use(stmts: list[frog_ast.Statement], names: set[str]) -> str | None:
+    """Return the name of the first ``Variable`` in ``names`` used in
+    left-to-right depth-first traversal."""
+
+    def walk(node: object) -> str | None:
+        if isinstance(node, frog_ast.Variable) and node.name in names:
+            return node.name
+        if isinstance(node, frog_ast.BinaryOperation):
+            return walk(node.left_expression) or walk(node.right_expression)
+        if isinstance(node, frog_ast.UnaryOperation):
+            return walk(node.expression)
+        if isinstance(node, frog_ast.FuncCall):
+            for a in node.args:
+                r = walk(a)
+                if r is not None:
+                    return r
+            return walk(node.func)
+        if isinstance(node, frog_ast.Slice):
+            return walk(node.the_array)
+        if isinstance(node, frog_ast.FieldAccess):
+            return walk(node.the_object)
+        if isinstance(node, frog_ast.Assignment):
+            r = walk(node.value)
+            if r is not None:
+                return r
+            return walk(node.var)
+        if isinstance(node, frog_ast.Sample):
+            r = walk(node.sampled_from)
+            if r is not None:
+                return r
+            return walk(node.var)
+        if isinstance(node, frog_ast.ReturnStatement):
+            return walk(node.expression)
+        return None
+
+    for stmt in stmts:
+        r = walk(stmt)
+        if r is not None:
+            return r
+    return None
 
 
 def _resolve_bs_type(
@@ -1541,7 +2128,7 @@ def _partial_split_admit(
 
 
 # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
-def _merge_tactic_body(
+def _merge_tactic_body(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     *,
     l_var: str,
     r_var: str,
@@ -1552,6 +2139,7 @@ def _merge_tactic_body(
     len_l: str,
     len_r: str,
     len_res: str,
+    eq_args_strong: str = "",
 ) -> list[str]:
     """Render the EC tactic body for a ``Merge Uniform Samples`` micro
     parameterized by the (l, r, res) bitstring names + lengths + the
@@ -1580,19 +2168,26 @@ def _merge_tactic_body(
     slice_concat_l = f"slice_concat_left_{name_l}_{name_r}_{name_res}"
     slice_concat_r = f"slice_concat_right_{name_l}_{name_r}_{name_res}"
     _ = len_r  # captured for symmetry / future use
+    # Multi-module proofs require ``={glob X1, glob X2, ...}`` carried
+    # through the transitivity intermediate; otherwise the residual
+    # ``={glob P}`` (etc.) goal at qed time can't be discharged.
+    if eq_args_strong:
+        eq_inv = eq_args_strong
+    else:
+        eq_inv = "={glob G}"
     return [
         "proc.",
         "transitivity {2}",
         f"  {{ {merged_var} <$ dmap ({distr_l} `*` {distr_r})",
         f"                          (fun (p : {name_l} * {name_r}) =>",
         f"                             {concat_op} p.`1 p.`2); }}",
-        "  (={glob G} ==>",
-        f"   ={{glob G}} /\\ {concat_op} {l_var}{{1}} {r_var}{{1}} ="
+        f"  ({eq_inv} ==>",
+        f"   {eq_inv} /\\ {concat_op} {l_var}{{1}} {r_var}{{1}} ="
         f" {merged_var}{{2}})",
-        f"  (={{glob G}} ==> ={{glob G, {merged_var}}}).",
+        f"  ({eq_inv} ==> {eq_inv} /\\ ={{{merged_var}}}).",
         "- by smt().",
         "- by smt().",
-        "- seq 2 1 : (={glob G} /\\",
+        f"- seq 2 1 : ({eq_inv} /\\",
         f"             {merged_var}{{2}} = {concat_op} {l_var}{{1}}"
         f" {r_var}{{1}}); last by auto.",
         "  rndsem*{1} 0.",
@@ -1620,7 +2215,7 @@ def _merge_tactic_body(
 
 
 # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
-def _split_tactic_body(
+def _split_tactic_body(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     *,
     orig_var: str,
     a_var: str,
@@ -1631,6 +2226,8 @@ def _split_tactic_body(
     len_l: str,
     len_r: str,
     len_res: str,
+    swap_split: bool = False,
+    eq_args_strong: str = "",
 ) -> list[str]:
     """Render the EC tactic body for a ``Split Uniform Samples`` micro.
 
@@ -1666,9 +2263,36 @@ def _split_tactic_body(
     slice_concat_l = f"slice_concat_left_{name_l}_{name_r}_{name_res}"
     slice_concat_r = f"slice_concat_right_{name_l}_{name_r}_{name_res}"
     _ = len_r  # captured for symmetry / future use
+    # When the engine's split orientation maps the FIRST new sample to
+    # the RIGHT half (e.g. ``y = slice(r0, lambda, 2*lambda)`` on the
+    # left becomes ``y = r0_0`` on the right), prepend ``swap{2} 1 1``
+    # so the two new samples appear in (left-half, right-half) order on
+    # side 2, and pass the *swapped* names as ``a``/``b`` so the standard
+    # invariant ``slice 0 |L| = a`` / ``slice |L| 2|L| = b`` lines up
+    # with the post-swap sample order. The TAIL goal's deterministic
+    # assignments then carry through automatically.
+    if swap_split:
+        a_var, b_var = b_var, a_var
+    # In multi-module proofs, the equiv carries an enriched pre/post
+    # that includes ``={glob G, glob P, ...}``. Each globs needs to be
+    # preserved through the invariant; otherwise the TAIL leaves
+    # un-discharged ``={glob P}`` (etc.) at qed time. Default to the
+    # single-module shape ``={glob G}`` when the caller doesn't supply
+    # ``eq_args_strong``.
+    if eq_args_strong:
+        eq_glob_inv = eq_args_strong
+        eq_glob_pre = eq_args_strong
+        eq_glob_post = eq_args_strong + f" /\\ ={{{orig_var}}}"
+    else:
+        eq_glob_inv = "={glob G}"
+        eq_glob_pre = "={glob G}"
+        eq_glob_post = "={glob G, " + orig_var + "}"
+    prelude = ["proc."]
+    if swap_split:
+        prelude.append("swap{2} 1 1.")
     return [
-        "proc.",
-        "seq 1 2 : (={glob G} /\\",
+        *prelude,
+        f"seq 1 2 : ({eq_glob_inv} /\\",
         f"           {slice_l} {orig_var}{{1}} 0 {len_l_p} = {a_var}{{2}} /\\",
         f"           {slice_r} {orig_var}{{1}} {len_l_p} {len_sum} ="
         f" {b_var}{{2}}).",
@@ -1677,9 +2301,9 @@ def _split_tactic_body(
         f"    {{ {orig_var} <$ dmap ({distr_l} `*` {distr_r})",
         f"                          (fun (p : {name_l} * {name_r}) =>",
         f"                             {concat_op} p.`1 p.`2); }}",
-        f"    (={{glob G}} ==> ={{glob G, {orig_var}}})",
-        "    (={glob G} ==>",
-        "     ={glob G} /\\",
+        f"    ({eq_glob_pre} ==> {eq_glob_post})",
+        f"    ({eq_glob_pre} ==>",
+        f"     {eq_glob_inv} /\\",
         f"     {slice_l} {orig_var}{{1}} 0 {len_l_p} = {a_var}{{2}} /\\"
         f"     {slice_r} {orig_var}{{1}} {len_l_p} {len_sum} ="
         f" {b_var}{{2}}).",
@@ -1714,7 +2338,13 @@ def _split_tactic_body(
         "call args match  *)",
         "  (* and the return concats agree. *)",
         "  call (_: true).",
-        "  skip => /> *.",
+        # ``auto`` (not ``skip``) is needed when the deterministic tail
+        # contains an assignment like ``y = slice(orig, ...)`` ahead of
+        # the call: ``skip`` only closes the leaf, while ``auto`` peels
+        # off head/tail wp/sp to feed the invariant through. The locked-
+        # in proofs that use plain ``skip => /> *`` have no such pre-
+        # call assignment.
+        "  auto => /> *.",
     ]
 
 
@@ -1819,23 +2449,48 @@ def _expr_of(stmt: frog_ast.Statement) -> frog_ast.Expression | None:
 def _xor_dropped_operand(
     before: frog_ast.Expression, after: frog_ast.Expression
 ) -> tuple[str, frog_ast.Expression] | None:
-    """Return ``(uniform_var_name, dropped_operand_expr)`` if ``before`` is
-    ``BinaryOperation(ADD, u, m)`` (in either order) and ``after`` is just
-    ``u``. Else ``None``."""
-    if not isinstance(after, frog_ast.Variable):
-        return None
-    if not isinstance(before, frog_ast.BinaryOperation):
-        return None
-    if before.operator != frog_ast.BinaryOperators.ADD:
+    """Return ``(uniform_var_name, dropped_operand_expr)`` if the XOR
+    simplification fires at this position. ``before`` is
+    ``BinaryOperation(ADD, u, m)`` (in either order) and ``after`` is
+    just ``u``; or the same shape nested inside a matching containing
+    expression. Else ``None``.
+
+    The recursion handles cases where the XOR simplification happens
+    inside a larger expression — most commonly a concatenation in the
+    return position (``(u + m) || rest`` → ``u || rest``), but also
+    nested concatenations on either side. We descend through any
+    ``BinaryOperation`` whose operator and untouched side match between
+    before and after, locating the single sub-position where the XOR is
+    dropped.
+    """
+    if isinstance(after, frog_ast.Variable):
+        if not isinstance(before, frog_ast.BinaryOperation):
+            return None
+        if before.operator != frog_ast.BinaryOperators.ADD:
+            return None
+        if (
+            isinstance(before.left_expression, frog_ast.Variable)
+            and before.left_expression.name == after.name
+        ):
+            return (after.name, before.right_expression)
+        if (
+            isinstance(before.right_expression, frog_ast.Variable)
+            and before.right_expression.name == after.name
+        ):
+            return (after.name, before.left_expression)
         return None
     if (
-        isinstance(before.left_expression, frog_ast.Variable)
-        and before.left_expression.name == after.name
+        isinstance(before, frog_ast.BinaryOperation)
+        and isinstance(after, frog_ast.BinaryOperation)
+        and before.operator == after.operator
     ):
-        return (after.name, before.right_expression)
-    if (
-        isinstance(before.right_expression, frog_ast.Variable)
-        and before.right_expression.name == after.name
-    ):
-        return (after.name, before.left_expression)
+        # Descend into whichever side differs (the other must match
+        # structurally). If both sides differ, the diff isn't a single
+        # XOR-drop and we bail.
+        left_eq = before.left_expression == after.left_expression
+        right_eq = before.right_expression == after.right_expression
+        if left_eq and not right_eq:
+            return _xor_dropped_operand(before.right_expression, after.right_expression)
+        if right_eq and not left_eq:
+            return _xor_dropped_operand(before.left_expression, after.left_expression)
     return None

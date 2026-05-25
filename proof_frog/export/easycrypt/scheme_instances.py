@@ -34,6 +34,15 @@ class SchemeInstance:
     let_name: str
     clone_alias: str
     concretized_fields: dict[str, frog_ast.Type]
+    # Name of the primitive this instance ultimately implements. For a
+    # primitive let (``PRG G = PRG(...);``) this is the primitive's own
+    # name. For a scheme let (``PRG_5_10 H = PRG_5_10(G);``) this is
+    # ``scheme.primitive_name`` of the scheme being instantiated.
+    primitive_name: str = ""
+    # Name of the scheme/primitive ctor used in the let. For
+    # ``H = PRG_5_10(G);`` this is ``"PRG_5_10"``. For
+    # ``G = PRG(lambda, lambda);`` this is ``"PRG"`` (same as primitive_name).
+    ctor_name: str = ""
 
 
 def collect(
@@ -48,7 +57,6 @@ def collect(
     E2)``) resolves correctly.
     """
     instances: list[SchemeInstance] = []
-    # Map let_name -> concretized_fields for already-processed instances
     prior: dict[str, dict[str, frog_ast.Type]] = {}
 
     for let in proof.lets:
@@ -62,14 +70,65 @@ def collect(
         args = let.value.args
         if ctor == primitive.name:
             concret = _concretize_primitive(primitive, args)
+            prim_name = primitive.name
         elif ctor == scheme.name:
             concret = _concretize_scheme(scheme, args, prior)
+            prim_name = scheme.primitive_name
         else:
             continue
         inst = SchemeInstance(
             let_name=let.name,
             clone_alias=f"{let.name}_c",
             concretized_fields=concret,
+            primitive_name=prim_name,
+            ctor_name=ctor,
+        )
+        instances.append(inst)
+        prior[let.name] = concret
+
+    return instances
+
+
+def collect_all(
+    proof: frog_ast.ProofFile,
+    primitives_by_name: dict[str, frog_ast.Primitive],
+    schemes_by_name: dict[str, frog_ast.Scheme],
+) -> list[SchemeInstance]:
+    """Collect every scheme/primitive instance in the proof's let block.
+
+    Unlike :func:`collect`, which only collects instances of one (primary)
+    primitive and scheme, this version collects all imported primitives'
+    and schemes' instances, recording each one's ``primitive_name`` so
+    the exporter can clone the right abstract theory per instance.
+    """
+    instances: list[SchemeInstance] = []
+    prior: dict[str, dict[str, frog_ast.Type]] = {}
+
+    for let in proof.lets:
+        if not (
+            isinstance(let.type, frog_ast.Variable)
+            and isinstance(let.value, frog_ast.FuncCall)
+            and isinstance(let.value.func, frog_ast.Variable)
+        ):
+            continue
+        ctor = let.value.func.name
+        args = let.value.args
+        if ctor in primitives_by_name:
+            primitive = primitives_by_name[ctor]
+            concret = _concretize_primitive(primitive, args)
+            prim_name = primitive.name
+        elif ctor in schemes_by_name:
+            scheme = schemes_by_name[ctor]
+            concret = _concretize_scheme(scheme, args, prior)
+            prim_name = scheme.primitive_name
+        else:
+            continue
+        inst = SchemeInstance(
+            let_name=let.name,
+            clone_alias=f"{let.name}_c",
+            concretized_fields=concret,
+            primitive_name=prim_name,
+            ctor_name=ctor,
         )
         instances.append(inst)
         prior[let.name] = concret

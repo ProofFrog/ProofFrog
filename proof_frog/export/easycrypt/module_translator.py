@@ -209,16 +209,22 @@ class ModuleTranslator:
         )
 
     def translate_adversary_type(
-        self, game_file: frog_ast.GameFile, oracle_type_name: str
+        self,
+        game_file: frog_ast.GameFile,
+        oracle_type_name: str,
+        adv_type_name: str | None = None,
     ) -> ec_ast.ModuleType:
         """Emit ``module type <Gf>_Adv (O : <oracle>) = { proc distinguish() : bool }``.
 
         The adversary's interface is a single ``distinguish`` procedure
         returning a bool. This matches the standard EC pattern for
-        games whose adversaries make adaptive oracle queries.
+        games whose adversaries make adaptive oracle queries. When
+        ``adv_type_name`` is supplied the caller controls the emitted
+        identifier (used for sanitizing names containing non-identifier
+        characters like ``$``).
         """
         return ec_ast.ModuleType(
-            name=f"{game_file.name}_Adv",
+            name=adv_type_name or f"{game_file.name}_Adv",
             procs=[
                 ec_ast.ProcSig(
                     name="distinguish",

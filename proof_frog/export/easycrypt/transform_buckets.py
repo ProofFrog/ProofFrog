@@ -140,6 +140,9 @@ PARAMETRIC_TACTIC: dict[
     ),
     "Merge Uniform Samples": parametric_tactics.merge_uniform_samples_tactic,
     "Split Uniform Samples": parametric_tactics.split_uniform_samples_tactic,
+    "Normalize Commutative Chains": (
+        parametric_tactics.normalize_commutative_chains_tactic
+    ),
 }
 
 

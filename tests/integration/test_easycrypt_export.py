@@ -26,6 +26,7 @@ TPRG_PROOF = REPO_ROOT / "examples" / "Proofs" / "PRG" / "TriplingPRG_PRGSecurit
 PRG_5_8_A_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_a.proof"
 PRG_5_8_B_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_b.proof"
 PRG_5_8_E_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_e.proof"
+PRG_5_8_F_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_f.proof"
 PRG_5_10_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_10.proof"
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
@@ -674,13 +675,53 @@ def test_export_5_8_e_hoists_scheme_and_reduction_calls() -> None:
     # Reduction R2 hoists the nested G.evaluate inside Challenger.ctxt.
     r2_section = output.split("module R2 ", 1)[1].split("}.", 1)[0]
     assert "<@ G.evaluate(zero_lambda)" in r2_section
-    # The two remaining admits are the cross-primitive bridges
-    # (hop_1 and hop_3 in this proof) — out of scope per the
-    # architectural-limitation analysis in the plan's fourth pass.
-    assert output.count("admit.") == 2, (
-        f"Expected exactly 2 admits (both cross-primitive bridges). "
+    # Both cross-primitive deterministic-reorder hops (hop_1, hop_3) close
+    # via the hop-level cascades cached in the proof's ``.tactics.toml``
+    # sidecar -- 0 admits (see test_export_5_8_e_concretizes_pseudootp).
+    assert output.count("admit.") == 0, (
+        f"Expected 0 admits (both hops closed from the sidecar cache). "
         f"Got {output.count('admit.')}."
     )
+
+
+def test_export_5_8_e_concretizes_pseudootp() -> None:
+    """5_8_e's foreign ``P = PseudoOTP(lambda, 2*lambda, G)`` is a non-ground
+    scheme. The exporter concretizes it as an EC functor
+    ``module PseudoOTP (G : G_c.Scheme) : P_c.Scheme`` applied as
+    ``PseudoOTP(G)`` (so ``inline *`` can unfold it), and its two
+    cross-primitive deterministic-reorder hops close via the hop-level
+    cascades cached in the proof's ``.tactics.toml`` sidecar (keyed on the
+    hops' canonical games). Result: 0 admits, and the export type-checks in
+    EC (covered by test_export_5_8_e_typechecks_in_easycrypt).
+    """
+    output = exporter.export_proof_file(str(PRG_5_8_E_PROOF))
+    # PseudoOTP emitted as a functor, applied to the declared module G,
+    # with no abstract ``declare module P``.
+    assert "module PseudoOTP (G : G_c.Scheme) : P_c.Scheme" in output
+    assert "PseudoOTP(G)" in output
+    assert "declare module P " not in output
+    # The advantage axiom application parenthesizes the functor application.
+    assert "advantage (PseudoOTP(G))" in output
+    # Hops closed from the sidecar cache: cascade tactics present, 0 admits.
+    assert "call{1} (G_evaluate_det" in output
+    assert output.count("admit.") == 0
+
+
+def test_export_emits_guided_template_for_uncached_det_reorder_hop() -> None:
+    """A cross-primitive deterministic-reorder hop with no sidecar entry
+    falls back to a Layer-3 *guided-template* admit: a structured admit
+    annotated with the reorder cascade strategy, the determinism axioms in
+    scope, and the canonical keys needed to author a sidecar entry. 5_8_f has
+    such a hop and (intentionally) no sidecar cascade, so its export still
+    exhibits the guidance. (5_8_f does not fully type-check in EC for an
+    unrelated, pre-existing reason -- its primary scheme hits the
+    ``requires``-clause type-equality gap -- so this is a structural check.)
+    """
+    output = exporter.export_proof_file(str(PRG_5_8_F_PROOF))
+    assert "guided" in output and "STRATEGY" in output
+    assert "G_evaluate_det" in output
+    # The guidance includes how to cache the filled tactic.
+    assert 'transform = ' in output and "TO CACHE" in output
 
 
 def test_export_emits_determinism_specs_for_abstract_methods() -> None:
@@ -695,18 +736,22 @@ def test_export_emits_determinism_specs_for_abstract_methods() -> None:
     still type-check (covered by the Docker-gated tests).
 
     ``5_8_e`` declares ``G <: G_c.Scheme`` (PRG, ``deterministic
-    evaluate``) and ``P <: P_c.Scheme`` (SymEnc, ``deterministic Dec``),
-    so both a PRG and a SymEnc determinism spec must appear.
+    evaluate``); its ``P = PseudoOTP(...)`` is concretized as a functor so
+    has no ``declare module``. CES declares ``E1``/``E2 <: *_c.Scheme``
+    (SymEnc, ``deterministic Dec`` -- the 2-arg path).
     """
-    output = exporter.export_proof_file(str(PRG_5_8_E_PROOF))
+    prg_out = exporter.export_proof_file(str(PRG_5_8_E_PROOF))
     # Theory-level op modelling each deterministic method as a pure
     # function of its arguments (cloned per instance, e.g. G_c.ev_evaluate).
-    assert "op ev_evaluate : bs_lambda_t -> bs_lambda_stretch_t." in output
-    assert "op ev_dec :" in output
-    # Section-scope determinism axioms over the declared modules.
-    assert "declare axiom G_evaluate_det (g : (glob G))" in output
-    assert "res = G_c.ev_evaluate a0 ] = 1%r." in output
-    assert "declare axiom P_dec_det (g : (glob P))" in output
+    assert "op ev_evaluate : bs_lambda_t -> bs_lambda_stretch_t." in prg_out
+    # Section-scope determinism axiom over the declared PRG module ``G``.
+    assert "declare axiom G_evaluate_det (g : (glob G))" in prg_out
+    assert "res = G_c.ev_evaluate a0 ] = 1%r." in prg_out
+
+    # CES exercises the SymEnc 2-arg deterministic ``Dec`` path.
+    ces_out = exporter.export_proof_file(str(CES_PROOF))
+    assert "op ev_dec :" in ces_out
+    assert "declare axiom E1_dec_det (g : (glob E1)) (a0 :" in ces_out
 
 
 @pytest.mark.skipif(

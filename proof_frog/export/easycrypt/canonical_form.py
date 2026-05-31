@@ -61,7 +61,7 @@ def canonical_text(
     text = _pretty_print_game(prepared)
     # Trailing newline matches the TOML literal-block round-trip
     # (``'''\n<body>\n'''`` reads as ``<body>\n``), so a sidecar entry
-    # written verbatim from the Layer-3 diagnostic compares equal to
+    # written verbatim from the admit diagnostic compares equal to
     # the export's freshly-computed canonical text.
     if not text.endswith("\n"):
         text += "\n"

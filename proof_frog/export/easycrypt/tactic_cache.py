@@ -4,6 +4,15 @@ Each ``.proof`` file may have a sibling ``.proof.tactics.toml`` sidecar
 containing cached tactic bodies, keyed by
 ``(transform_name, canonical_text(game_before), canonical_text(game_after))``.
 
+Most entries are *per-transform* micro-lemma tactics. A second kind of
+entry is *per-hop*: a whole-hop proof body for a hop the chain machinery
+cannot decompose (a cross-primitive deterministic-reorder hop). These use
+the reserved ``transform`` sentinel :data:`HOP_TRANSFORM` with
+``game_before``/``game_after`` set to the canonical text of the hop's two
+adjacent (inlined) games. All caching for a proof — per-transform and
+per-hop — lives in the single sidecar; the schema is unchanged (a hop
+entry is just an ``[[entry]]`` with ``transform = "<hop>"``).
+
 This module owns reading and writing those sidecars. Reading uses the
 stdlib ``tomllib``. Writing uses a small deterministic serializer
 (triple-quoted multi-line strings preserved verbatim, fixed key order)
@@ -12,7 +21,7 @@ so that round-tripping is byte-stable and ``git diff`` stays readable.
 Schema versioning is conservative: a load with an unrecognized
 ``schema_version`` returns an empty live cache, retaining the stored
 entries as hints (addressable via :attr:`TacticCache.stale_entries`) for
-the Layer-3 diagnostic to surface but never returned by :meth:`lookup`.
+the admit diagnostic to surface but never returned by :meth:`lookup`.
 """
 
 from __future__ import annotations
@@ -27,6 +36,12 @@ SCHEMA_VERSION = 1
 """Bumped whenever ``canonical_text`` or this file's serialization shape
 changes. Entries written under an older schema are loaded as stale
 hints (orphaned) rather than treated as cache hits."""
+
+HOP_TRANSFORM = "<hop>"
+"""Reserved ``transform`` value for a *per-hop* cache entry (a whole-hop
+proof body, e.g. for a cross-primitive deterministic-reorder hop). Its
+``game_before``/``game_after`` are the canonical text of the hop's two
+adjacent games rather than a single transform's before/after."""
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,7 +66,7 @@ class TacticCache:
     ``entries`` are the live (schema-matching) entries used for
     :meth:`lookup`. ``stale_entries`` are entries from a sidecar whose
     ``schema_version`` does not match :data:`SCHEMA_VERSION` — they are
-    retained for the Layer-3 diagnostic to consult as fuzzy hints but
+    retained for the admit diagnostic to consult as fuzzy hints but
     never returned by :meth:`lookup`.
     """
 

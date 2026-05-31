@@ -17,7 +17,7 @@ Output is a per-proof report:
               Retained for fuzzy-hint purposes; flagged so a human can
               curate them.
 * **missing** — keys the export requested but the sidecar lacked. Each
-              one corresponds to a Layer-3 ``admit.`` in the EC file.
+              one corresponds to an ``admit-*`` resolution in the EC file.
 
 Exit code is always 0 (the report is a status surface, not a CI gate),
 unless ``--strict`` is passed — then a nonzero exit indicates at least

@@ -173,6 +173,48 @@ def _is_assumption_hop(a: frog_ast.Step, b: frog_ast.Step) -> bool:
     return ca.game.name == cb.game.name and ca.which != cb.which
 
 
+def _scheme_functor_params(
+    scheme: frog_ast.Scheme,
+    let_value: frog_ast.Expression | None,
+    instances_by_let_name: "dict[str, si.SchemeInstance]",
+    scheme_type_name: str,
+) -> "tuple[list[ec_ast.ModuleParam], dict[str, str], list[str]]":
+    """Compute the EC functor parameters for a scheme instance.
+
+    For a scheme taking module-typed parameters (e.g.
+    ``ChainedEncryption(SymEnc E1, SymEnc E2)`` or
+    ``PseudoOTP(Int, Int, PRG G)``) this returns the EC ``ModuleParam``
+    list, the param-name -> primitive-type map (for the body translator),
+    and the ordered list of applied argument names. Non-module parameters
+    (e.g. ``Int lambda``) are dropped: they act as compile-time indices
+    baked into the cloned types. Each module parameter is bound to the
+    clone alias of the instance passed as the corresponding constructor
+    argument.
+    """
+    params: list[ec_ast.ModuleParam] = []
+    param_types: dict[str, str] = {}
+    applied: list[str] = []
+    if not isinstance(let_value, frog_ast.FuncCall):
+        return params, param_types, applied
+    for sp, arg in zip(scheme.parameters, let_value.args):
+        if not isinstance(sp.type, frog_ast.Variable):
+            continue
+        if not isinstance(arg, frog_ast.Variable):
+            continue
+        inst_opt = instances_by_let_name.get(arg.name)
+        if inst_opt is None:
+            continue
+        params.append(
+            ec_ast.ModuleParam(
+                name=sp.name,
+                module_type=f"{inst_opt.clone_alias}.{scheme_type_name}",
+            )
+        )
+        param_types[sp.name] = sp.type.name
+        applied.append(sp.name)
+    return params, param_types, applied
+
+
 # pylint: disable=too-many-locals,too-many-statements,too-many-branches
 def export_proof_file(proof_path: str) -> str:
     """Parse ``proof_path`` and return the EC source as a string.
@@ -309,6 +351,38 @@ def export_proof_file(proof_path: str) -> str:
             f"{scheme.name!r} in proof lets."
         )
     primary: si.SchemeInstance = primary_opt
+
+    # Foreign instances we can emit as CONCRETE EC modules (instead of an
+    # abstract ``declare module``). A foreign instance qualifies when:
+    #   * its constructor resolves to a concrete ``Scheme`` (so we can
+    #     translate a real body), not an abstract primitive; AND
+    #   * that scheme is "ground" — it has no module-typed (sub-primitive)
+    #     parameters. A ground scheme's body inlines fully to samples + XOR
+    #     under EC's ``inline *``, so the cross-primitive wrapper-to-flat
+    #     bridge closes.
+    # The motivating case is 5_10's ``P = OTP(lambda)`` (only ``Int``
+    # params, body is pure XOR). CES's ``E1``/``E2`` (ctor ``SymEnc``, a
+    # primitive) do NOT qualify and stay abstract; nor does 5_8_e's
+    # ``PseudoOTP(Int, Int, PRG G)``, whose body retains an abstract
+    # ``G.evaluate`` call. Concretizing it as an EC functor reaches 0
+    # admits but the wrapper-to-flat bridge must reorder two deterministic
+    # ``G.evaluate`` calls (different order on the two sides). The sound
+    # tactic for that reorder is the deterministic-method ``declare axiom``
+    # cascade (emitted by Workstream A: ``op ev_<m>`` + ``<m>_det``); see
+    # the EC spike in the plan doc. Synthesizing that cascade blind is
+    # impractical because it requires predicting EC's ``inline *``-generated
+    # variable names on the wrapper side, so PseudoOTP stays abstract for
+    # now and the hop keeps its cross-primitive admit.
+    concretizable_foreign: set[str] = {
+        inst.let_name
+        for inst in instances
+        if inst is not primary
+        and inst.ctor_name in schemes_by_name
+        and not any(
+            isinstance(sp.type, frog_ast.Variable)
+            for sp in schemes_by_name[inst.ctor_name].parameters
+        )
+    }
 
     # ``Set X;`` let-bindings declare top-level abstract EC types
     # (``type X.``). Record their names so the TypeCollector accepts
@@ -469,6 +543,13 @@ def export_proof_file(proof_path: str) -> str:
 
     ec_primitive = theory_modules.translate_primitive(primitive, name=scheme_type_name)
 
+    # Theory-local EC proc signatures per primitive, keyed by primitive name.
+    # Used to build the section-scope deterministic-method ``declare axiom``s
+    # (binder types are these proc-param types qualified by the clone prefix).
+    theory_proc_sigs_by_primitive: dict[str, list[ec_ast.ProcSig]] = {
+        primitive.name: ec_primitive.procs
+    }
+
     theory_game_decls: list[ec_ast.EcTopDecl] = []
     oracle_type_by_game_file: dict[str, str] = {}
     module_name_by_concrete_game: dict[tuple[str, str], str] = {}
@@ -603,7 +684,11 @@ def export_proof_file(proof_path: str) -> str:
         fp_ec_primitive = fp_theory_modules.translate_primitive(
             fp, name=scheme_type_name
         )
-        fp_decls: list[ec_ast.EcTopDecl] = [fp_ec_primitive]
+        fp_decls: list[ec_ast.EcTopDecl] = [
+            fp_ec_primitive,
+            *fp_theory_modules.deterministic_op_decls(fp),
+        ]
+        theory_proc_sigs_by_primitive[fp.name] = fp_ec_primitive.procs
         fp_oracle_by_gf: dict[str, str] = {}
         fp_modname_by_cg: dict[tuple[str, str], str] = {}
         fp_adv_by_gf: dict[str, str] = {}
@@ -700,29 +785,11 @@ def export_proof_file(proof_path: str) -> str:
     # (e.g. ``Int lambda``) are dropped — they act as abstract compile-
     # time indices and are baked into the concrete types at the clone
     # bindings.
-    scheme_module_params: list[ec_ast.ModuleParam] = []
-    scheme_module_param_types: dict[str, str] = {}
     instances_by_let_name = {inst.let_name: inst for inst in instances}
     primary_let = next(let for let in proof.lets if let.name == primary.let_name)
-    if isinstance(primary_let.value, frog_ast.FuncCall):
-        for sp, arg in zip(scheme.parameters, primary_let.value.args):
-            if not isinstance(sp.type, frog_ast.Variable):
-                continue
-            if sp.type.name != primitive.name:
-                continue
-            if not isinstance(arg, frog_ast.Variable):
-                continue
-            inst_opt = instances_by_let_name.get(arg.name)
-            if inst_opt is None:
-                continue
-            inst = inst_opt
-            scheme_module_params.append(
-                ec_ast.ModuleParam(
-                    name=sp.name,
-                    module_type=f"{inst.clone_alias}.{scheme_type_name}",
-                )
-            )
-            scheme_module_param_types[sp.name] = primitive.name
+    scheme_module_params, scheme_module_param_types, _ = _scheme_functor_params(
+        scheme, primary_let.value, instances_by_let_name, scheme_type_name
+    )
 
     # Hoist any nested module calls in scheme method bodies before
     # translating. EC requires module-procedure calls at statement level,
@@ -737,6 +804,48 @@ def export_proof_file(proof_path: str) -> str:
         module_param_types=scheme_module_param_types or None,
     )
 
+    # Concrete foreign-scheme modules. For each foreign instance we can
+    # concretize (e.g. 5_10's ``P = OTP(lambda)``), translate its scheme
+    # body to a top-level EC module ascribing to its clone's ``Scheme``
+    # type. Unlike the abstract ``declare module`` path, this lets EC's
+    # ``inline *`` unfold the foreign primitive's methods, so the
+    # cross-primitive inlining-hop bridge closes. The abstract foreign
+    # theory + ``eps_<assumption>`` axiom are still emitted, so the
+    # proof's advantage bound is unchanged. We seed a dedicated
+    # TypeCollector that resolves the foreign scheme's bare field types
+    # (e.g. ``Key``/``Message``/``Ciphertext``) to their concretized
+    # carriers; those carriers (e.g. ``bs_lambda``) are emitted by
+    # ``top_types`` and merely referenced here.
+    foreign_concrete_modules: dict[str, ec_ast.Module] = {}
+    concrete_module_expr: dict[str, str] = {}
+    for inst in instances:
+        if inst.let_name not in concretizable_foreign:
+            continue
+        foreign_scheme = schemes_by_name[inst.ctor_name]
+        foreign_let = next(let for let in proof.lets if let.name == inst.let_name)
+        foreign_aliases = dict(top_aliases)
+        for fname, ftype in inst.concretized_fields.items():
+            foreign_aliases.setdefault(fname, ftype)
+        foreign_types = tc.TypeCollector(
+            aliases=foreign_aliases, known_abstract_types=known_abstract_types
+        )
+        foreign_modules = mt.ModuleTranslator(foreign_types, type_of_factory)
+        fmp, fmpt, applied = _scheme_functor_params(
+            foreign_scheme, foreign_let.value, instances_by_let_name, scheme_type_name
+        )
+        foreign_hoisted = canonical_form.hoist_scheme_calls(
+            foreign_scheme, method_return_types
+        )
+        foreign_concrete_modules[inst.let_name] = foreign_modules.translate_scheme(
+            foreign_hoisted,
+            f"{inst.clone_alias}.{scheme_type_name}",
+            module_params=fmp or None,
+            module_param_types=fmpt or None,
+        )
+        concrete_module_expr[inst.let_name] = (
+            f"{inst.ctor_name}({', '.join(applied)})" if applied else inst.ctor_name
+        )
+
     # Per-instance module expression. For a primitive instance
     # (``E1 = SymEnc(...)``) this is just the let-name itself (which,
     # inside the section wrap, will correspond to a ``declare module``).
@@ -749,6 +858,10 @@ def export_proof_file(proof_path: str) -> str:
             instance_module_expr[inst.let_name] = f"{scheme.name}({applied_args})"
         elif inst is primary:
             instance_module_expr[inst.let_name] = scheme.name
+        elif inst.let_name in concretizable_foreign:
+            # Concrete foreign module: reference it directly (e.g. ``OTP``)
+            # rather than via a section ``declare module``.
+            instance_module_expr[inst.let_name] = concrete_module_expr[inst.let_name]
         else:
             instance_module_expr[inst.let_name] = inst.let_name
 
@@ -773,7 +886,14 @@ def export_proof_file(proof_path: str) -> str:
     else:
         footprint_names.append(scheme.name)
     for inst in instances:
-        if inst is not primary and inst.let_name not in footprint_names:
+        # Concretized foreign instances are top-level concrete modules, not
+        # ``declare module``s, so they don't belong in the adversary's
+        # separation footprint.
+        if (
+            inst is not primary
+            and inst.let_name not in concretizable_foreign
+            and inst.let_name not in footprint_names
+        ):
             footprint_names.append(inst.let_name)
     primary_footprint = ", ".join(f"-{n}" for n in footprint_names)
 
@@ -877,7 +997,11 @@ def export_proof_file(proof_path: str) -> str:
             module_name_by_instance_game[(inst.let_name, gf_name, side_name)] = (
                 f"{inst.clone_alias}.{name}"
             )
-    declared_module_names = [inst.let_name for inst in instances if inst is not primary]
+    declared_module_names = [
+        inst.let_name
+        for inst in instances
+        if inst is not primary and inst.let_name not in concretizable_foreign
+    ]
     resolver = pt.StepResolver(
         module_name_by_concrete_game=qualified_module_names,
         oracle_name_by_game_file=oracle_name_by_game_file,
@@ -947,7 +1071,7 @@ def export_proof_file(proof_path: str) -> str:
             module_type=f"{inst.clone_alias}.{scheme_type_name}",
         )
         for inst in instances
-        if inst is not primary
+        if inst is not primary and inst.let_name not in concretizable_foreign
     ]
 
     def _body_for_hop(
@@ -967,16 +1091,40 @@ def export_proof_file(proof_path: str) -> str:
         # flat-state module and the reduction's abstract-method body
         # cannot close: EC doesn't know that ``P.KeyGen()`` is uniform
         # without the INDOT$ assumption (which the proof treats as an
-        # inlining hop here, not an assumption hop). Emit a hop-level
-        # admit with a structured comment rather than producing a
-        # chain whose bridge will fail. The chain itself is internally
-        # consistent and would close — only the wrapper-to-flat bridge
-        # is unprovable in this configuration.
+        # inlining hop here, not an assumption hop).
+        #
+        # When every instance of the foreign primitive(s) involved in the
+        # hop is emitted CONCRETELY (see ``concretizable_foreign``), EC's
+        # ``inline *`` can unfold those methods on the wrapper side, so
+        # the chain bridge closes and we fall through to normal emission.
+        # Otherwise (the foreign primitive stays abstract) we emit a
+        # hop-level admit with a structured comment rather than producing
+        # a chain whose bridge will fail. The chain itself is internally
+        # consistent and would close — only the wrapper-to-flat bridge is
+        # unprovable in the abstract configuration.
         left_gf = step_a.challenger.game.name
         right_gf = step_b.challenger.game.name
         if left_gf != right_gf and primitive_name_by_game_file.get(
             left_gf
         ) != primitive_name_by_game_file.get(right_gf):
+            foreign_prims = {
+                primitive_name_by_game_file.get(left_gf),
+                primitive_name_by_game_file.get(right_gf),
+            } - {primitive.name}
+            foreign_insts = [
+                inst for inst in instances if inst.primitive_name in foreign_prims
+            ]
+            foreign_all_concrete = bool(foreign_insts) and all(
+                inst.let_name in concretizable_foreign for inst in foreign_insts
+            )
+        else:
+            foreign_all_concrete = True
+        if (
+            left_gf != right_gf
+            and primitive_name_by_game_file.get(left_gf)
+            != primitive_name_by_game_file.get(right_gf)
+            and not foreign_all_concrete
+        ):
             return [
                 f"(* cross-primitive inlining hop: {left_gf} and {right_gf} "
                 f"live on different primitives "
@@ -1276,6 +1424,7 @@ def export_proof_file(proof_path: str) -> str:
         decls=[
             *theory_head,
             ec_primitive,
+            *theory_modules.deterministic_op_decls(primitive),
             *theory_game_decls,
             *theory_assumption_decls,
         ],
@@ -1427,7 +1576,7 @@ def export_proof_file(proof_path: str) -> str:
     # ``declare module E1 <: E1_c.Scheme.`` and ``E2 <: E2_c.Scheme.``.
     declare_modules: list[ec_ast.DeclareModule] = []
     for inst in instances:
-        if inst is primary:
+        if inst is primary or inst.let_name in concretizable_foreign:
             continue
         disjoint = [d.name for d in declare_modules]
         declare_modules.append(
@@ -1437,6 +1586,35 @@ def export_proof_file(proof_path: str) -> str:
                 disjoint_from=disjoint,
             )
         )
+
+    # Deterministic-method support: for each declared module ascribing to a
+    # primitive theory, emit a section-scope ``declare axiom`` asserting the
+    # method is a pure, glob-preserving, total function (== the theory-level
+    # ``ev_<m>`` op cloned into ``<clone>.ev_<m>``). This is what lets the
+    # cross-primitive bridge reorder two deterministic abstract calls soundly
+    # (FrogLang ``deterministic`` methods are pure functions of their args).
+    det_axioms: list[ec_ast.Axiom] = []
+    for dm in declare_modules:
+        dm_inst = next(i for i in instances if i.let_name == dm.name)
+        dm_prim = primitives_by_name.get(dm_inst.primitive_name)
+        dm_proc_sigs = theory_proc_sigs_by_primitive.get(dm_inst.primitive_name, [])
+        if dm_prim is None:
+            continue
+        proc_sig_by_name = {ps.name: ps for ps in dm_proc_sigs}
+        # Resolve theory-local type names into the clone's scope: bound types
+        # become their concrete target (``bs_lambda_t`` -> ``bs_lambda``);
+        # still-abstract types fall back to ``<clone>.<name>``.
+        dm_type_binding = dict(_instance_clone(dm_inst).type_bindings)
+        for sig in dm_prim.methods:
+            if sig.deterministic and sig.name.lower() in proc_sig_by_name:
+                det_axioms.append(
+                    mt.ModuleTranslator.deterministic_axiom(
+                        dm.name,
+                        dm_inst.clone_alias,
+                        proc_sig_by_name[sig.name.lower()],
+                        dm_type_binding,
+                    )
+                )
 
     n_hops = len(proof.steps) - 1
     main_theorem: ec_ast.ProbLemma | None = None
@@ -1512,11 +1690,21 @@ def export_proof_file(proof_path: str) -> str:
         )
     decls.append(_section_header("Concrete scheme implementation"))
     decls.append(ec_scheme)
+    if foreign_concrete_modules:
+        decls.append(_section_header("Concrete foreign scheme implementations"))
+        for inst in instances:
+            if inst.let_name in foreign_concrete_modules:
+                decls.append(foreign_concrete_modules[inst.let_name])
+    det_axiom_decls: list[ec_ast.EcTopDecl] = (
+        [_section_header("Deterministic-method specs"), *det_axioms]
+        if det_axioms
+        else []
+    )
     if declare_modules:
         decls.append(
             ec_ast.Section(
                 name="Main",
-                decls=[*declare_modules, *proof_decls],
+                decls=[*declare_modules, *det_axiom_decls, *proof_decls],
             )
         )
     else:

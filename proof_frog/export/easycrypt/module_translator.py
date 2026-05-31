@@ -37,6 +37,66 @@ class ModuleTranslator:
         procs: list[ec_ast.ProcSig] = [self._translate_sig(sig) for sig in prim.methods]
         return ec_ast.ModuleType(name or prim.name, procs)
 
+    def deterministic_op_decls(self, prim: frog_ast.Primitive) -> list[ec_ast.OpDecl]:
+        """Emit ``op ev_<m> : T0 -> ... -> R.`` per ``deterministic`` method.
+
+        Models a deterministic primitive method as a pure, glob-independent
+        function of its arguments (faithful to FrogLang, where
+        ``deterministic`` methods are pure functions with no state). Emitted
+        *inside* the primitive's abstract theory so each clone gets a distinct
+        op (``G_c.ev_evaluate`` vs ``H_c.ev_evaluate``); the matching
+        ``declare axiom`` is emitted at section scope by the exporter via
+        :meth:`deterministic_axiom`. Built with a theory-mode translator so the
+        arg/return types are the theory-local names (``bs_lambda_t`` etc.).
+        """
+        decls: list[ec_ast.OpDecl] = []
+        for sig in prim.methods:
+            if not sig.deterministic:
+                continue
+            arrow = " -> ".join(
+                [self._translate_param_type(p.type).text for p in sig.parameters]
+                + [self._translate_param_type(sig.return_type).text]
+            )
+            decls.append(ec_ast.OpDecl(f"ev_{sig.name.lower()}", arrow))
+        return decls
+
+    @staticmethod
+    def deterministic_axiom(
+        module_name: str,
+        clone_prefix: str,
+        proc_sig: ec_ast.ProcSig,
+        type_bindings: dict[str, str],
+    ) -> ec_ast.Axiom:
+        """Emit ``declare axiom <module>_<m>_det`` (phoare-1 determinism spec).
+
+        Asserts that ``<module>.<m>`` is deterministic, glob-preserving and
+        total: it returns ``<clone_prefix>.ev_<m>`` applied to its arguments
+        and leaves ``glob <module>`` unchanged with probability 1.
+        ``type_bindings`` maps each theory-local EC type name to the concrete
+        type the clone binds it to (``bs_lambda_t`` -> ``bs_lambda``); an
+        unbound type falls back to ``<clone>.<name>`` (still abstract). This
+        makes the binder types match the declared module's proc signature.
+        """
+        proc = proc_sig.name
+        op = f"{clone_prefix}.ev_{proc}"
+        binders = [f"(g : (glob {module_name}))"]
+        pre_eqs = [f"(glob {module_name}) = g"]
+        arg_names: list[str] = []
+        for i, pp in enumerate(proc_sig.params):
+            arg = f"a{i}"
+            arg_names.append(arg)
+            arg_type = type_bindings.get(pp.type.text, f"{clone_prefix}.{pp.type.text}")
+            binders.append(f"({arg} : {arg_type})")
+            pre_eqs.append(f"{pp.name} = {arg}")
+        applied = "".join(f" {arg}" for arg in arg_names)
+        formula = (
+            f"{' '.join(binders)} : "
+            f"phoare[ {module_name}.{proc} : "
+            f"{' /\\ '.join(pre_eqs)} "
+            f"==> (glob {module_name}) = g /\\ res = {op}{applied} ] = 1%r"
+        )
+        return ec_ast.Axiom(f"{module_name}_{proc}_det", formula, declare=True)
+
     def translate_scheme(
         self,
         scheme: frog_ast.Scheme,

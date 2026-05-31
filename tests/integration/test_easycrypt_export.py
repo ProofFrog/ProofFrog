@@ -26,6 +26,7 @@ TPRG_PROOF = REPO_ROOT / "examples" / "Proofs" / "PRG" / "TriplingPRG_PRGSecurit
 PRG_5_8_A_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_a.proof"
 PRG_5_8_B_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_b.proof"
 PRG_5_8_E_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_e.proof"
+PRG_5_10_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_10.proof"
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
 
@@ -559,6 +560,83 @@ def test_export_5_8_a_partial_split_typechecks_in_easycrypt(
     )
 
 
+def test_export_5_10_concrete_foreign_otp_closes_cross_primitive_hops() -> None:
+    """``5_10`` proves ``PRGSecurity(H)`` (``H = PRG_5_10(G)``) via a
+    three-stage hybrid that routes through ``INDOT$(P)`` for ``P = OTP``.
+
+    Two of its hops are *cross-primitive inlining* hops
+    (``PRGSecurity(G).Random ∘ R1 ≡ INDOT$(P).Real ∘ R3`` and the
+    reverse): the engine proves them by inlining OTP's concrete body
+    (``Enc(k,m) = k + m``). For an *abstract* INDOT$-secure ``P`` these
+    are not valid, so they can only close when EC sees OTP concretely.
+
+    The exporter emits ``OTP`` as a concrete top-level module
+    (``module OTP : P_c.Scheme``) and binds ``P := OTP``, while keeping
+    the abstract ``P_c`` theory + ``eps_INDOT_`` axiom so the advantage
+    bound is preserved. EC's ``inline *`` then unfolds OTP on the wrapper
+    side and the chain bridge closes.
+
+    Locks in:
+
+    * The concrete foreign module is emitted as ``module OTP : P_c.Scheme``
+      (not an abstract ``declare module P``).
+    * The abstract foreign theory + advantage axiom survive (the bound
+      still references ``P_c.eps_INDOT_``).
+    * Zero admits in the final export (both cross-primitive bridges close).
+    """
+    output = exporter.export_proof_file(str(PRG_5_10_PROOF))
+    assert "module OTP : P_c.Scheme" in output, (
+        "Expected the foreign OTP instance to be emitted as a concrete "
+        "module ascribing to its clone's Scheme type."
+    )
+    assert "declare module P " not in output, (
+        "OTP must be a concrete module, not an abstract ``declare module``."
+    )
+    assert "P_c.eps_INDOT_" in output, (
+        "The abstract foreign theory + INDOT$ advantage axiom must be "
+        "kept so the proof's advantage bound is preserved."
+    )
+    assert "admit." not in output, (
+        f"Expected zero admits after concrete OTP closes the two "
+        f"cross-primitive inlining bridges. Got {output.count('admit.')}."
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_export_5_10_typechecks_in_easycrypt(tmp_path: Path) -> None:
+    """EC accepts the ``5_10`` export end-to-end with zero admits.
+
+    Exercises the multi-primitive theory architecture (two abstract
+    theories, three clones, a cross-primitive reduction) together with
+    the concrete-foreign-OTP emission that closes the cross-primitive
+    inlining-hop bridges via ``inline *``.
+    """
+    output = exporter.export_proof_file(str(PRG_5_10_PROOF))
+    ec_file = tmp_path / "5_10.ec"
+    ec_file.write_text(output)
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    combined = result.stderr + result.stdout
+    assert "parse error" not in combined, (
+        f"EC parse error in 5_10 output:\n"
+        f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
+    )
+    assert result.returncode == 0, (
+        f"EC verification failed (exit {result.returncode}); the "
+        f"concrete-foreign-OTP cross-primitive export may have regressed.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
 def test_export_5_8_e_hoists_scheme_and_reduction_calls() -> None:
     """``5_8_e``'s scheme and reduction bodies contain primitive calls
     nested in expressions (e.g. ``G.evaluate(s) + G.evaluate(0^lambda)``
@@ -603,6 +681,32 @@ def test_export_5_8_e_hoists_scheme_and_reduction_calls() -> None:
         f"Expected exactly 2 admits (both cross-primitive bridges). "
         f"Got {output.count('admit.')}."
     )
+
+
+def test_export_emits_determinism_specs_for_abstract_methods() -> None:
+    """Each ``deterministic`` method of a declared (abstract) primitive
+    module gets a glob-independent ``op ev_<m>`` in its theory and a
+    section-scope ``declare axiom <m>_det`` (a phoare-1 spec asserting it
+    is a pure, glob-preserving, total function == ``ev_<m>``).
+
+    This is the sound foundation for reordering two deterministic
+    abstract calls in EC (see the EC spike in the plan doc). The axioms
+    are additive: existing tactics ignore them and all locked proofs
+    still type-check (covered by the Docker-gated tests).
+
+    ``5_8_e`` declares ``G <: G_c.Scheme`` (PRG, ``deterministic
+    evaluate``) and ``P <: P_c.Scheme`` (SymEnc, ``deterministic Dec``),
+    so both a PRG and a SymEnc determinism spec must appear.
+    """
+    output = exporter.export_proof_file(str(PRG_5_8_E_PROOF))
+    # Theory-level op modelling each deterministic method as a pure
+    # function of its arguments (cloned per instance, e.g. G_c.ev_evaluate).
+    assert "op ev_evaluate : bs_lambda_t -> bs_lambda_stretch_t." in output
+    assert "op ev_dec :" in output
+    # Section-scope determinism axioms over the declared modules.
+    assert "declare axiom G_evaluate_det (g : (glob G))" in output
+    assert "res = G_c.ev_evaluate a0 ] = 1%r." in output
+    assert "declare axiom P_dec_det (g : (glob P))" in output
 
 
 @pytest.mark.skipif(

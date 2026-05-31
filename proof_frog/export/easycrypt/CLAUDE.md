@@ -17,30 +17,63 @@ Key modules:
 - `canonical_form.py` — `canonical_text()` is the *normative* string
   used as the cache key. Whitespace/naming drift between this and the
   sidecar cache silently turns a hit into a miss.
-- `tactic_cache.py` — sidecar TOML cache (Layer 2 of the three-layer
-  resolution; see below).
-- `parametric_tactics.py` — Layer 1 synthesizers.
-- `transform_buckets.py` — groups transforms by EC tactic shape.
+- `tactic_cache.py` — sidecar TOML cache (the *Cached* band of the
+  automation ladder; see below).
+- `transform_buckets.py` — groups transforms by EC tactic shape; holds
+  the static `CANNED_TACTIC` bodies and the `PARAMETRIC_TACTIC`
+  synthesizers (the *Synthesized* band of the ladder).
+- `resolution.py` — the automation ladder: rung tokens, display names,
+  and the `(* resolution: <rung> *)` tag the exporter emits at each
+  resolved transform/hop so the dashboard can tally exactly how each
+  closed.
 - `cache_report.py` — `make check-tactic-cache` driver.
 - `proof_translator.py`, `module_translator.py`, `expr_translator.py`,
   `stmt_translator.py`, `type_collector.py`, `scheme_instances.py`,
   `ec_ast.py` — FrogLang→EC translation primitives.
 
-## Three-layer tactic resolution
+## Automation ladder (how each resolution closes)
 
-For each per-transform micro-lemma the exporter tries:
+Every closed transform micro-lemma or whole-hop body is labelled with
+one rung of a single ranked scale — *how much of the proof is
+attributable to the exporter's own machinery*. The exporter emits a
+machine-readable `(* resolution: <rung> *)` tag (see `resolution.py`)
+at each site so the dashboard tallies the ladder exactly. Best-automated
+first:
 
-1. **Layer 1** — static / parametric canned tactic (Python).
-   Promote a recipe to Layer 1 only after at least 5 distinct proofs
-   hit the same shape.
-2. **Layer 2** — sidecar cache lookup keyed on `(transform_name,
-   canonical_text(game_before), canonical_text(game_after))`. The cache
-   lives in `*.tactics.toml` sidecars next to the source proof.
-3. **Layer 3** — `admit.` plus a `(* tactic-cache miss ... *)` comment
-   recording everything needed to derive a tactic.
+1. **Synthesized — static** (`synth-static`): a fixed canned tactic from
+   `CANNED_TACTIC`; no per-instance logic. Promote a recipe here only
+   after ≥5 distinct proofs hit the same shape.
+2. **Synthesized — parametric** (`synth-param`): the tactic is *computed*
+   from the hop's AST (a `PARAMETRIC_TACTIC` synthesizer, a swap
+   sequence, a cascade). Still fully automatic — no human, no cache.
+3. **Cached — with guidance** (`cached-guided`): closed from a sidecar
+   entry that the exporter *scaffolded* (it emitted a `STRATEGY`/`TO
+   CACHE` guided template that a human filled and we stored). Currently
+   the whole-hop `transform = "<hop>"` entries.
+4. **Cached — without guidance** (`cached-unguided`): closed from a
+   sidecar entry the exporter did *not* scaffold — a human derived the
+   tactic from scratch and we captured it. The per-transform cache hits.
+5. **Admit — with guidance** (`admit-guided`): an open `admit.`, but the
+   exporter emitted a targeted fill template for this exact hop (the
+   unfilled form of rung 3 — cheap to promote).
+6. **Admit — without guidance** (`admit-unguided`): an open `admit.`
+   with only the generic `(* tactic-cache miss ... *)` comment.
 
-Workflow for adding cache entries (the agent-facing task that drives
-most cache changes) is in
+Below the per-resolution ladder sits a seventh, **proof-level** state —
+**Blocked** (`blocked`): the proof exports to `.ec` but the result does
+not EasyCrypt-compile (a structural gap upstream of hop resolution).
+The exporter can't detect non-compilation, so the dashboard carries
+Blocked as a maintained `KNOWN_BLOCKED` set, not a tag.
+
+Resolution order in the emitter is rung 1 → 2 → (3/4 via the cache) →
+(5/6 admit). **Automated = rungs 1–4** (no open hole); **Open = rungs
+5–6**; **Blocked = rung 7**. The sub-splits (static-vs-parametric,
+guided-vs-unguided) sit in different closure bands, so this is one
+ladder rather than two axes.
+
+Workflow for adding cache entries — i.e. promoting a rung-5 *guided
+admit* to a rung-3 *cached-guided*, or filling a rung-6 admit into a
+rung-4 *cached-unguided* — is in
 [../../../docs/for_agents/EASYCRYPT_TACTICS.md](../../../docs/for_agents/EASYCRYPT_TACTICS.md).
 
 ## Things to stop and ask before doing
@@ -51,8 +84,9 @@ most cache changes) is in
   `_normalize_for_ec`, or anything in `proof_frog/transforms/` that
   changes canonical output) silently invalidates cached entries.
   Coordinate with the user before changing.
-- **Promoting a recurring cache shape to a Layer 1 synthesizer** — wait
-  until at least 5 distinct proofs hit the same recipe.
+- **Promoting a recurring cache shape (rung 3/4) to a `synth-static` /
+  `synth-param` tactic (rung 1/2)** — wait until at least 5 distinct
+  proofs hit the same recipe.
 
 ## Sanity check
 

@@ -28,22 +28,41 @@ Read this whenever the user asks something like:
 
 Also read it before editing any `*.tactics.toml` sidecar.
 
-## How the cache fits in
+## How the cache fits in — the automation ladder
 
-For each per-transform micro-lemma the exporter tries three layers in
-order:
+Every closed transform/hop is labelled with one rung of a single ranked
+scale (best-automated first), and the exporter prints it as a
+`(* resolution: <rung> *)` tag right before the tactic body:
 
-1. **Layer 1** — static / parametric canned tactic (built into Python).
-2. **Layer 2** — sidecar cache lookup keyed on
-   `(transform_name, canonical_text(game_before), canonical_text(game_after))`.
-3. **Layer 3** — `admit.` plus a `(* tactic-cache miss ... *)` comment
-   recording everything you need to derive a tactic.
+1. **`synth-static`** — a fixed canned tactic built into Python.
+2. **`synth-param`** — a tactic computed from the hop's AST (synthesizer,
+   swap sequence, cascade). Rungs 1–2 are "Synthesized": no human, no cache.
+3. **`cached-guided`** — closed from a sidecar entry the exporter
+   *scaffolded* (it emitted a `STRATEGY`/`TO CACHE` guided template you
+   filled). Currently the whole-hop `transform = "<hop>"` entries.
+4. **`cached-unguided`** — closed from a sidecar entry the exporter did
+   *not* scaffold (you wrote the per-transform tactic from scratch).
+5. **`admit-guided`** — open `admit.`, but with a targeted fill template
+   for this exact hop (the unfilled form of rung 3).
+6. **`admit-unguided`** — open `admit.` with only the generic
+   `(* tactic-cache miss ... *)` comment.
 
-Layer 2 is what you populate. The canonical text is what
+A seventh, proof-level state — **`blocked`** — is a proof that exports
+but does not EasyCrypt-compile (a structural gap upstream of hop
+resolution); it is tracked in the dashboard's `KNOWN_BLOCKED` set, not
+as a tag.
+
+**Your job in this doc is to climb the ladder:** turn a rung-5
+*admit-guided* into a rung-3 *cached-guided* (fill the emitted template,
+then cache it), or a rung-6 *admit-unguided* into a rung-4
+*cached-unguided* (derive a tactic, then cache it). The sidecar cache is
+keyed on
+`(transform_name, canonical_text(game_before), canonical_text(game_after))`.
+The canonical text is what
 `proof_frog.export.easycrypt.canonical_form.canonical_text`
-emits — exactly what shows up in the Layer-3 diagnostic. **Copy that
-text verbatim into the sidecar.** Any whitespace or naming drift
-silently turns a hit into a miss.
+emits — exactly what shows up in the admit diagnostic. **Copy that text
+verbatim into the sidecar.** Any whitespace or naming drift silently
+turns a hit into a miss.
 
 ## Step-by-step workflow
 
@@ -82,8 +101,8 @@ silently turns a hit into a miss.
       below the one you just patched = success.
    e. Append a new [[entry]] to the sidecar TOML. **Format below.**
 
-4. Re-export the proof. Each lemma you covered should now skip Layer 3
-   and use your cached tactic.
+4. Re-export the proof. Each lemma you covered should now resolve as
+   `cached-guided` / `cached-unguided` instead of an `admit-*` rung.
 
 5. Final validation: re-run scripts/easycrypt.sh /tmp/export.ec to
    confirm the chain still verifies end-to-end.

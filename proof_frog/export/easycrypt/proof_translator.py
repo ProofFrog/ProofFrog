@@ -328,6 +328,14 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     adv_applied = (
         f"{reduction_adv_name}({extra}, A)" if extra else f"{reduction_adv_name}(A)"
     )
+    # When the scheme instance is a concretized functor application (e.g.
+    # ``PseudoOTP(G)``), it must be parenthesized where it is passed as a
+    # bare proof-term module argument to the advantage axiom — otherwise EC
+    # parses ``PseudoOTP`` (the functor) as the argument and ``(G)`` as the
+    # next one ("incompatible module type"). A plain module name is left as-is.
+    scheme_module_arg = (
+        f"({scheme_module_expr})" if "(" in scheme_module_expr else scheme_module_expr
+    )
     left_app = _wrap_apply(left_wrapper_name, wrapper_extra_args)
     right_app = _wrap_apply(right_wrapper_name, wrapper_extra_args)
     statement = (
@@ -349,14 +357,14 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     if reverse_direction:
         body.extend(
             [
-                f"have H := {advantage_ref} {scheme_module_expr} "
+                f"have H := {advantage_ref} {scheme_module_arg} "
                 f"({adv_applied}) &m.",
                 "smt().",
             ]
         )
     else:
         body.append(
-            f"apply ({advantage_ref} {scheme_module_expr} " f"({adv_applied}) &m)."
+            f"apply ({advantage_ref} {scheme_module_arg} " f"({adv_applied}) &m)."
         )
     body.append("qed.")
     footprint = (

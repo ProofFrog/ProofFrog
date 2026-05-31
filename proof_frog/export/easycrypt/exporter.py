@@ -12,6 +12,8 @@ from . import module_translator as mt
 from . import proof_translator as pt
 from . import scheme_instances as si
 from . import type_collector as tc
+from .resolution import ADMIT_GUIDED, ADMIT_UNGUIDED, CACHED_GUIDED
+from .resolution import tag as _res_tag
 from ... import frog_ast
 from ... import frog_parser
 from ... import proof_engine as pe
@@ -211,7 +213,11 @@ def _scheme_functor_params(
             )
         )
         param_types[sp.name] = sp.type.name
-        applied.append(sp.name)
+        # The functor is *defined* with parameter name ``sp.name`` (its body
+        # refers to the sub-primitive by that name); it is *applied* to the
+        # argument instance ``arg.name`` (e.g. ``PseudoOTP(G)`` binds the
+        # declared module ``G`` to the functor's ``G`` parameter).
+        applied.append(arg.name)
     return params, param_types, applied
 
 
@@ -356,31 +362,58 @@ def export_proof_file(proof_path: str) -> str:
     # abstract ``declare module``). A foreign instance qualifies when:
     #   * its constructor resolves to a concrete ``Scheme`` (so we can
     #     translate a real body), not an abstract primitive; AND
-    #   * that scheme is "ground" — it has no module-typed (sub-primitive)
-    #     parameters. A ground scheme's body inlines fully to samples + XOR
-    #     under EC's ``inline *``, so the cross-primitive wrapper-to-flat
-    #     bridge closes.
-    # The motivating case is 5_10's ``P = OTP(lambda)`` (only ``Int``
-    # params, body is pure XOR). CES's ``E1``/``E2`` (ctor ``SymEnc``, a
-    # primitive) do NOT qualify and stay abstract; nor does 5_8_e's
-    # ``PseudoOTP(Int, Int, PRG G)``, whose body retains an abstract
-    # ``G.evaluate`` call. Concretizing it as an EC functor reaches 0
-    # admits but the wrapper-to-flat bridge must reorder two deterministic
-    # ``G.evaluate`` calls (different order on the two sides). The sound
-    # tactic for that reorder is the deterministic-method ``declare axiom``
-    # cascade (emitted by Workstream A: ``op ev_<m>`` + ``<m>_det``); see
-    # the EC spike in the plan doc. Synthesizing that cascade blind is
-    # impractical because it requires predicting EC's ``inline *``-generated
-    # variable names on the wrapper side, so PseudoOTP stays abstract for
-    # now and the hop keeps its cross-primitive admit.
+    #   * every module-typed (sub-primitive) parameter is bound to a known
+    #     instance, so the scheme can be emitted as an EC functor applied to
+    #     those instances.
+    # A *ground* scheme (no module params, e.g. 5_10's ``P = OTP(lambda)``)
+    # inlines fully to samples + XOR, so its cross-primitive wrapper-to-flat
+    # bridge closes via the canned ``sim`` tactic. A *non-ground* scheme
+    # (e.g. 5_8_e's ``PseudoOTP(Int, Int, PRG G)``) is emitted as a functor
+    # ``module PseudoOTP (G : G_c.Scheme) : P_c.Scheme`` applied as
+    # ``PseudoOTP(G)``; its body retains an abstract ``G.evaluate`` call, so
+    # its cross-primitive hop needs the deterministic-method reorder cascade.
+    # Those hops are routed to a *guided-template* admit (see ``_body_for_hop``)
+    # — an ``admit-guided`` resolution annotated with the cascade strategy + det
+    # axioms in scope, so a human/agent can fill it interactively and cache
+    # the result. CES's ``E1``/``E2`` (ctor ``SymEnc``, a primitive) do NOT
+    # qualify and stay abstract.
+    def _module_args_resolve(inst: si.SchemeInstance) -> bool:
+        scheme_def = schemes_by_name[inst.ctor_name]
+        module_params = [
+            sp for sp in scheme_def.parameters if isinstance(sp.type, frog_ast.Variable)
+        ]
+        if not module_params:
+            return True
+        let = next((b for b in proof.lets if b.name == inst.let_name), None)
+        if let is None or not isinstance(let.value, frog_ast.FuncCall):
+            return False
+        known = {i.let_name for i in instances}
+        resolved = sum(
+            1
+            for sp, arg in zip(scheme_def.parameters, let.value.args)
+            if isinstance(sp.type, frog_ast.Variable)
+            and isinstance(arg, frog_ast.Variable)
+            and arg.name in known
+        )
+        return resolved == len(module_params)
+
     concretizable_foreign: set[str] = {
         inst.let_name
         for inst in instances
         if inst is not primary
         and inst.ctor_name in schemes_by_name
-        and not any(
+        and _module_args_resolve(inst)
+    }
+    # Concretized foreign instances whose scheme is *non-ground* (functor):
+    # their cross-primitive hops need the deterministic reorder cascade.
+    nonground_concrete: set[str] = {
+        let_name
+        for let_name in concretizable_foreign
+        if any(
             isinstance(sp.type, frog_ast.Variable)
-            for sp in schemes_by_name[inst.ctor_name].parameters
+            for sp in schemes_by_name[
+                next(i for i in instances if i.let_name == let_name).ctor_name
+            ].parameters
         )
     }
 
@@ -1031,11 +1064,13 @@ def export_proof_file(proof_path: str) -> str:
     engine.prove(proof, proof_path)
 
     # Tactic-cache sidecar. Loaded once per export; consulted on every
-    # micro-lemma that falls through Layer 1. ``requested_cache_keys``
+    # micro-lemma that falls through the Synthesized rungs (1/2).
+    # ``requested_cache_keys``
     # accumulates the lookup keys (used by ``cache_report.py`` for
     # orphan detection).
     # pylint: disable=import-outside-toplevel
     from .tactic_cache import (
+        HOP_TRANSFORM,
         TacticCache,
         relative_sidecar_path,
     )
@@ -1074,6 +1109,112 @@ def export_proof_file(proof_path: str) -> str:
         if inst is not primary and inst.let_name not in concretizable_foreign
     ]
 
+    def _det_reorder_guided_admit(
+        _i: int,
+        step_a: frog_ast.Step,
+        step_b: frog_ast.Step,
+        left_key: str,
+        right_key: str,
+    ) -> list[str]:
+        """``admit-guided`` resolution (rung 5) for a deterministic-reorder hop.
+
+        The hop equiv ``<left>.query ~ <right>.query`` reduces (after
+        ``proc; inline*; sp; wp``) to: a fresh sample on each side, the same
+        deterministic abstract calls in a different order, and an XOR of the
+        results. EC's ``sim`` cannot reorder abstract calls, so we admit — but
+        annotate the admit with the verified cascade strategy plus the
+        determinism axioms in scope (emitted by the determinism-support pass).
+        A human/agent reads the ``inline*``-generated variable names off the
+        goal (``ec_print_goals <file> <line>``), instantiates the ``<...>``
+        placeholders, replaces the ``admit.``, and the result can be cached.
+        """
+        # Determinism axioms/ops in scope: one per deterministic method of
+        # each declared (abstract) module. The reorder is justified by these.
+        hints: list[str] = []
+        for inst in instances:
+            if inst is primary or inst.let_name in concretizable_foreign:
+                continue
+            prim = primitives_by_name.get(inst.primitive_name)
+            if prim is None:
+                continue
+            for sig in prim.methods:
+                if sig.deterministic:
+                    m = sig.name.lower()
+                    hints.append(
+                        f"     {inst.let_name}_{m}_det "
+                        f"(g : (glob {inst.let_name})) (a0 : <T> ...) : "
+                        f"phoare[ {inst.let_name}.{m} : (glob {inst.let_name})=g "
+                        f"/\\ <arg>=a0 ==> (glob {inst.let_name})=g "
+                        f"/\\ res = {inst.clone_alias}.ev_{m} a0 ] = 1%r"
+                    )
+        assert isinstance(step_a.challenger, frog_ast.ConcreteGame)
+        assert isinstance(step_b.challenger, frog_ast.ConcreteGame)
+        lp = primitive_name_by_game_file.get(step_a.challenger.game.name)
+        rp = primitive_name_by_game_file.get(step_b.challenger.game.name)
+        return [
+            _res_tag(ADMIT_GUIDED),
+            f"(* cross-primitive deterministic-reorder hop ({lp} <-> {rp}): a "
+            "non-ground foreign scheme is concretized as a functor, so both "
+            "sides make the same deterministic abstract calls in a DIFFERENT "
+            "order (plus a fresh sample + XOR). EC's ``sim`` cannot reorder "
+            "abstract calls; the sound fix replaces each call with its "
+            "deterministic op-value via the determinism axioms below, then "
+            "couples the samples. This is an ``admit-guided`` resolution "
+            "(automation-ladder rung 5): fill the ``<...>`` placeholders from "
+            "the goal and replace the admit below to promote it to "
+            "``cached-guided`` (rung 3).",
+            "",
+            "   Determinism axioms in scope (justify the reorder):",
+            *hints,
+            "",
+            "   STRATEGY (verified on 5_8_e; read names via "
+            "``ec_print_goals <file> <this-line+1>``):",
+            "     proc. inline *. sp. wp.",
+            "     (* if a side's fresh sample isn't first, bring it there: *)",
+            "     swap{2} <pos> <delta>.",
+            "     (* couple the two fresh samples: *)",
+            "     seq 1 1 : (<sample1>{1} = <sample2>{2}).",
+            "     + rnd (fun (x : <keytype>) => x); skip => />.",
+            "     (* peel + eliminate each side's HEAD abstract call (arg is a "
+            "constant like zero_lambda); ``sp`` then absorbs the assigns it "
+            "feeds so later call args become root vars: *)",
+            "     seq 0 1 : (<carry coupling> /\\ <m2>{2} = "
+            "<clone>.ev_<meth> <const>).",
+            "     + exists* (glob <Mod2>){2}; elim* => g2; "
+            "call{2} (<Mod2>_<meth>_det g2 <const>); auto.",
+            "     sp.",
+            "     (* eliminate the remaining (key-argument) calls, one side at "
+            "a time, back to front; ``exists*`` the arg first, ``wp`` between "
+            "calls to clear trailing assigns: *)",
+            "     exists* (glob <Mod1>){1}; elim* => g1. "
+            "exists* (glob <Mod2>){2}; elim* => g2.",
+            "     exists* <keyarg2>{2}; elim* => k2v. "
+            "call{2} (<Mod2>_<meth>_det g2 k2v).",
+            "     call{1} (<Mod1>_<meth>_det g1 <const>). wp.",
+            "     exists* <keyarg1>{1}; elim* => k1v. "
+            "call{1} (<Mod1>_<meth>_det g1 k1v).",
+            "     skip => /#.",
+            "   NOTE: a reverse-direction hop may have a DEAD evaluate call "
+            "(its result is discarded) — eliminate it the same way (the "
+            "axiom's glob-preservation discharges it). For >1 key call or "
+            "data-dependent args, repeat the eliminate step per call.",
+            "",
+            "   TO CACHE (once filled & ``ec_compile`` passes): add an "
+            "``[[entry]]`` to the proof's ``.tactics.toml`` sidecar with "
+            f"``transform = {HOP_TRANSFORM!r}``, ``tactic`` = the filled body "
+            "(without the final ``qed.``), and the two canonical keys below as "
+            "``game_before`` / ``game_after``. Re-export then closes this hop "
+            "automatically.",
+            "",
+            "   game_before (canonical text of the left game):",
+            *(f"     {ln}" for ln in left_key.splitlines() or [""]),
+            "   game_after (canonical text of the right game):",
+            *(f"     {ln}" for ln in right_key.splitlines() or [""]),
+            "   *)",
+            "admit.",
+            "qed.",
+        ]
+
     def _body_for_hop(
         _i: int, step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> list[str] | None:
@@ -1104,9 +1245,10 @@ def export_proof_file(proof_path: str) -> str:
         # unprovable in the abstract configuration.
         left_gf = step_a.challenger.game.name
         right_gf = step_b.challenger.game.name
-        if left_gf != right_gf and primitive_name_by_game_file.get(
+        is_cross_primitive = left_gf != right_gf and primitive_name_by_game_file.get(
             left_gf
-        ) != primitive_name_by_game_file.get(right_gf):
+        ) != primitive_name_by_game_file.get(right_gf)
+        if is_cross_primitive:
             foreign_prims = {
                 primitive_name_by_game_file.get(left_gf),
                 primitive_name_by_game_file.get(right_gf),
@@ -1117,15 +1259,15 @@ def export_proof_file(proof_path: str) -> str:
             foreign_all_concrete = bool(foreign_insts) and all(
                 inst.let_name in concretizable_foreign for inst in foreign_insts
             )
+            foreign_has_nonground = any(
+                inst.let_name in nonground_concrete for inst in foreign_insts
+            )
         else:
             foreign_all_concrete = True
-        if (
-            left_gf != right_gf
-            and primitive_name_by_game_file.get(left_gf)
-            != primitive_name_by_game_file.get(right_gf)
-            and not foreign_all_concrete
-        ):
+            foreign_has_nonground = False
+        if is_cross_primitive and not foreign_all_concrete:
             return [
+                _res_tag(ADMIT_UNGUIDED),
                 f"(* cross-primitive inlining hop: {left_gf} and {right_gf} "
                 f"live on different primitives "
                 f"({primitive_name_by_game_file.get(left_gf)} vs "
@@ -1140,6 +1282,37 @@ def export_proof_file(proof_path: str) -> str:
                 "admit.",
                 "qed.",
             ]
+        if is_cross_primitive and foreign_has_nonground:
+            # Non-ground foreign scheme concretized as a functor (e.g.
+            # ``PseudoOTP(G)``): the two sides make the same deterministic
+            # ``G.evaluate`` calls in a different order (plus an interleaved
+            # sample + XOR), which the canned ``sim`` bridge cannot reorder.
+            # This whole hop is the cache unit (it bypasses the per-transform
+            # chain). Consult the sidecar for a cached hop tactic keyed on the
+            # canonical text of the two adjacent inlined games; on a hit emit
+            # it and the hop closes on export (``cached-guided``, rung 3). On
+            # a miss emit an ``admit-guided`` resolution (rung 5: the cascade
+            # strategy + determinism axioms in scope) so a human/agent can
+            # fill it in and add the
+            # sidecar entry.
+            assert isinstance(step_a.challenger, frog_ast.ConcreteGame)
+            assert isinstance(step_b.challenger, frog_ast.ConcreteGame)
+            # pylint: disable=protected-access
+            hop_left_ast = engine._get_game_ast(step_a.challenger, step_a.reduction)
+            hop_right_ast = engine._get_game_ast(step_b.challenger, step_b.reduction)
+            # pylint: enable=protected-access
+            emt = {inst.let_name: primitive.name for inst in instances}
+            left_key = canonical_form.canonical_text(
+                hop_left_ast, emt, method_return_types
+            )
+            right_key = canonical_form.canonical_text(
+                hop_right_ast, emt, method_return_types
+            )
+            requested_cache_keys.append((HOP_TRANSFORM, left_key, right_key))
+            cached = tactic_cache.lookup(HOP_TRANSFORM, left_key, right_key)
+            if cached is not None:
+                return [_res_tag(CACHED_GUIDED), *cached.tactic.splitlines(), "qed."]
+            return _det_reorder_guided_admit(_i, step_a, step_b, left_key, right_key)
         # The hop equiv compares the two adjacent composed games at the
         # OUTER oracle interface (what the adversary calls). When a
         # reduction is composed, the resulting module exposes the

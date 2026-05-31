@@ -26,6 +26,13 @@ from . import ec_ast
 from . import module_translator as mt
 from . import type_collector as tc
 from .canonical_form import _normalize_for_ec, canonical_text
+from .resolution import (
+    ADMIT_UNGUIDED,
+    CACHED_UNGUIDED,
+    SYNTH_PARAM,
+    SYNTH_STATIC,
+)
+from .resolution import tag as _res_tag
 from .tactic_cache import TacticCache
 from .transform_buckets import PARAMETRIC_TACTIC, Bucket, classify, tactic_body
 
@@ -208,7 +215,7 @@ def emit_chain_for_hop(
     def _layer2_lookup(
         app: TransformApplication, reversed_dir: bool
     ) -> list[str] | None:
-        """Layer 2: consult the sidecar tactic cache.
+        """Cache lookup (ladder rungs 3/4): consult the sidecar tactic cache.
 
         Computes canonical text on (game_before, game_after) — or
         swapped for the reversed-direction right micro — and looks up
@@ -233,7 +240,7 @@ def emit_chain_for_hop(
     def _layer3_admit(
         app: TransformApplication, bucket: Bucket, reversed_dir: bool
     ) -> list[str]:
-        """Layer 3: ``admit.`` with a Claude-targeted diagnostic comment.
+        """Unguided admit (ladder rung 6): ``admit.`` with a diagnostic comment.
 
         The comment embeds the transform name, the sidecar path, a
         ``grep`` recipe to locate the surrounding lemma by name (no
@@ -345,11 +352,11 @@ def emit_chain_for_hop(
                 before_hoisted, after_hoisted, reversed_dir=reversed_dir
             )
             if swaps is not None:
-                return ["proc.", *swaps, "sim."]
+                return [_res_tag(SYNTH_PARAM), "proc.", *swaps, "sim."]
             cached = _layer2_lookup(app, reversed_dir)
             if cached is not None:
-                return cached
-            return _layer3_admit(app, bucket, reversed_dir)
+                return [_res_tag(CACHED_UNGUIDED), *cached]
+            return [_res_tag(ADMIT_UNGUIDED), *_layer3_admit(app, bucket, reversed_dir)]
         # Try the parametric synthesizer first when registered — its
         # output is tuned to the specific AST and takes precedence over
         # the multi-module ``proc; sp; wp; sim.`` fallback below.
@@ -374,7 +381,7 @@ def emit_chain_for_hop(
                 method_return_types=method_return_types,
             )
             if synthesized is not None:
-                return synthesized
+                return [_res_tag(SYNTH_PARAM), *synthesized]
         body = tactic_body(app.transform_name, app, types)
         if multi_module and bucket == Bucket.CANNED and body:
             # Compare hoisted forms, not raw FrogLang ASTs: the engine's
@@ -397,14 +404,14 @@ def emit_chain_for_hop(
                 before_hoisted, after_hoisted, reversed_dir=reversed_dir
             )
             if swaps is not None and swaps:
-                return ["proc.", *swaps, "sp; wp; sim."]
-            return ["proc; sp; wp; sim."]
+                return [_res_tag(SYNTH_PARAM), "proc.", *swaps, "sp; wp; sim."]
+            return [_res_tag(SYNTH_STATIC), "proc; sp; wp; sim."]
         if body:
-            return body
+            return [_res_tag(SYNTH_STATIC), *body]
         cached = _layer2_lookup(app, reversed_dir)
         if cached is not None:
-            return cached
-        return _layer3_admit(app, bucket, reversed_dir)
+            return [_res_tag(CACHED_UNGUIDED), *cached]
+        return [_res_tag(ADMIT_UNGUIDED), *_layer3_admit(app, bucket, reversed_dir)]
 
     micros_left: list[_MicroLemma] = []
     for k, app in enumerate(left_apps):
@@ -567,7 +574,8 @@ def emit_chain_for_hop(
     #     or sidecar entry covers the transform),
     # the chain can't be closed end-to-end. Discard the chain artifacts
     # and replace the outer hop's proof body with ``admit.`` plus a
-    # structured comment, mirroring the per-micro Layer-3 admit shape.
+    # structured comment, mirroring the per-micro unguided-admit shape
+    # (ladder rung 6, ``admit-unguided``).
     has_stub_body = any("return witness;" in chunk for chunk in chunks)
     has_micro_admit = any(_chunk_has_micro_admit(chunk) for chunk in chunks)
     if has_stub_body or has_micro_admit:
@@ -587,6 +595,7 @@ def emit_chain_for_hop(
                 f"culprits: {culprit_str})"
             )
         admit_tactic = [
+            _res_tag(ADMIT_UNGUIDED),
             f"(* per-transform chain unrenderable: {reason}.",
             "   Falling back to admit; the chain artifacts are omitted",
             "   from the file. *)",

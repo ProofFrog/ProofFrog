@@ -41,12 +41,22 @@ class OpDecl:
 
 @dataclass
 class Axiom:
-    """``axiom <name> [(<module_args>)] [<memory_args>] : <formula>.``"""
+    """``axiom <name> [(<module_args>)] [<memory_args>] : <formula>.``
+
+    When ``declare`` is set the axiom is emitted as ``declare axiom <name>
+    <formula>.`` with ``formula`` carrying the entire tail verbatim
+    (binders, the ``:``, and the body, e.g.
+    ``(g : (glob G)) (a0 : t) : phoare[ ... ] = 1%r``). This is used for
+    section-local deterministic-method specs, which quantify over a
+    ``declare module`` and so cannot use the structured ``module_args`` /
+    ``memory_args`` form.
+    """
 
     name: str
     formula: str
     module_args: list[ModuleParam] = field(default_factory=list)
     memory_args: list[str] = field(default_factory=list)
+    declare: bool = False
 
 
 # --- Module type members -------------------------------------------------
@@ -315,6 +325,8 @@ def _render_decl(decl: EcTopDecl) -> list[str]:
     if isinstance(decl, OpDecl):
         return [f"op {decl.name} : {decl.signature}."]
     if isinstance(decl, Axiom):
+        if decl.declare:
+            return [f"declare axiom {decl.name} {decl.formula}."]
         header = f"axiom {decl.name}"
         if decl.module_args:
             args = " ".join(f"({p.name} <: {p.module_type})" for p in decl.module_args)

@@ -325,6 +325,137 @@ def _scheme_functor_params(
     return params, param_types, applied
 
 
+def _reduction_arg_expr(
+    param: frog_ast.Parameter,
+    instance_module_expr: dict[str, str],
+    primary_ctor_name: str,
+    primary_module_expr: str,
+) -> str:
+    """Module expression passed to a reduction parameter, in declaration order.
+
+    A parameter whose name is itself a scheme instance (``R1(CE, E1, E2)``)
+    maps to that instance's module expression. A parameter whose name is not
+    an instance but whose type is the primary scheme/primitive (the
+    primitive-only case ``Reduction R1(SymEnc se)`` applied as ``R1(proofE)``)
+    maps to the primary module expression. Otherwise the name is emitted
+    verbatim.
+    """
+    if param.name in instance_module_expr:
+        return instance_module_expr[param.name]
+    if (
+        isinstance(param.type, frog_ast.Variable)
+        and param.type.name == primary_ctor_name
+    ):
+        return primary_module_expr
+    return param.name
+
+
+def _ec_module_ident(name: str) -> str:
+    """Uppercase-initial form of ``name`` for use as an EC module identifier.
+
+    EC theory/module/functor-parameter names must begin with an uppercase
+    letter. Identity when ``name`` already starts uppercase (so the common
+    uppercase-instance corpus is untouched).
+    """
+    return name[:1].upper() + name[1:] if name else name
+
+
+class _NameRenamer(visitors.Transformer):
+    """Rename free ``Variable`` references according to a name map.
+
+    Used to propagate scheme/primitive-instance and reduction-parameter
+    renames (lowercase -> uppercase-initial) through expression positions.
+    Field/Parameter/let ``name`` *strings* are renamed separately by the
+    caller (they are plain attributes, not ``Variable`` nodes).
+    """
+
+    def __init__(self, rename: dict[str, str]) -> None:
+        self.rename = rename
+
+    def transform_variable(self, variable: frog_ast.Variable) -> frog_ast.ASTNode:
+        renamed = self.rename.get(variable.name)
+        return frog_ast.Variable(renamed) if renamed is not None else variable
+
+
+def _normalize_ec_module_names(
+    proof: frog_ast.ProofFile,
+    primitives_by_name: dict[str, frog_ast.Primitive],
+    schemes_by_name: dict[str, frog_ast.Scheme],
+) -> None:
+    """Rename lowercase EC-module identifiers in ``proof`` to uppercase-initial.
+
+    Two families of names are emitted verbatim as EC module identifiers and so
+    must start with an uppercase letter:
+
+    * **Scheme/primitive instances** (``let`` bindings whose type names a
+      scheme or primitive, e.g. ``SymEnc proofE = SymEnc(...)``). Their name
+      becomes the clone alias (``proofE_c``), the section ``declare module``
+      name, and the module expression threaded through games/reductions/
+      wrappers. Renamed across the theorem, assumptions, steps, and other
+      let values (which may reference the instance).
+    * **Module-typed reduction parameters** (``Reduction R1(SymEnc se)``).
+      The parameter becomes an EC functor parameter (``module R1 (se : ...)``)
+      and is referenced in the reduction body / its ``compose`` + ``against``
+      clauses. Renamed locally within each reduction.
+
+    Mutates ``proof`` in place. A no-op for the all-uppercase corpus.
+    """
+    module_type_names = set(primitives_by_name) | set(schemes_by_name)
+
+    # --- Instances (top-level lets whose type names a scheme/primitive) ---
+    instance_rename: dict[str, str] = {}
+    existing_let_names = {let.name for let in proof.lets}
+    for let in proof.lets:
+        if not (isinstance(let.type, frog_ast.Variable) and let.name[:1].islower()):
+            continue
+        if let.type.name not in module_type_names:
+            continue
+        new_name = _ec_module_ident(let.name)
+        if new_name == let.name or new_name in existing_let_names:
+            continue  # already uppercase, or would collide -- leave as-is
+        instance_rename[let.name] = new_name
+        existing_let_names.add(new_name)
+
+    if instance_rename:
+        renamer = _NameRenamer(instance_rename)
+        for let in proof.lets:
+            if let.name in instance_rename:
+                let.name = instance_rename[let.name]
+            if let.value is not None:
+                let.value = renamer.transform(let.value)
+        proof.theorem = renamer.transform(proof.theorem)
+        proof.assumptions = [renamer.transform(a) for a in proof.assumptions]
+        proof.steps = [renamer.transform(s) for s in proof.steps]
+
+    # --- Module-typed reduction parameters (local to each reduction) ---
+    for helper in proof.helpers:
+        if not isinstance(helper, frog_ast.Reduction):
+            continue
+        param_rename: dict[str, str] = {}
+        local_names = {p.name for p in helper.parameters}
+        for param in helper.parameters:
+            if not (
+                isinstance(param.type, frog_ast.Variable) and param.name[:1].islower()
+            ):
+                continue
+            if param.type.name not in module_type_names:
+                continue
+            new_name = _ec_module_ident(param.name)
+            if new_name == param.name or new_name in local_names:
+                continue
+            param_rename[param.name] = new_name
+            local_names.add(new_name)
+        if not param_rename:
+            continue
+        prenamer = _NameRenamer(param_rename)
+        for param in helper.parameters:
+            if param.name in param_rename:
+                param.name = param_rename[param.name]
+        helper.to_use = prenamer.transform(helper.to_use)
+        helper.play_against = prenamer.transform(helper.play_against)
+        helper.methods = [prenamer.transform(m) for m in helper.methods]
+
+
 # pylint: disable=too-many-locals,too-many-statements,too-many-branches
 def export_proof_file(proof_path: str) -> str:
     """Parse ``proof_path`` and return the EC source as a string.
@@ -371,14 +502,28 @@ def export_proof_file(proof_path: str) -> str:
         elif isinstance(root, frog_ast.GameFile):
             game_files.append(root)
 
-    if not schemes_by_name:
-        raise ValueError("Exporter requires a Scheme import.")
+    if not schemes_by_name and not primitives_by_name:
+        raise ValueError("Exporter requires a Scheme or Primitive import.")
     if not game_files:
         raise ValueError("Exporter requires at least one GameFile import.")
 
-    # The primary scheme is the one whose instance appears in the theorem.
+    # EC requires theory/module names to begin with an uppercase letter, but
+    # the exporter emits scheme/primitive instance let-names and module-typed
+    # reduction parameters verbatim as EC module identifiers (clone alias,
+    # ``declare module``, functor parameters). Rename any lowercase such name
+    # to an uppercase-initial form throughout the proof AST *before* the
+    # engine inlines and the exporter emits, so every EC reference agrees.
+    _normalize_ec_module_names(proof, primitives_by_name, schemes_by_name)
+
+    # The primary instance is the one whose instance appears in the theorem.
     # For ``theorem: PRGSecurity(H)`` with ``PRG_5_10 H = PRG_5_10(G);``,
-    # the primary let is H and the primary scheme is PRG_5_10.
+    # the primary let is H and the primary scheme is PRG_5_10. The primary's
+    # declared *type* is usually a Scheme; for a primitive-security proof
+    # (``theorem: INDOT(proofE)`` with ``SymEnc proofE = SymEnc(...)``) it is
+    # a Primitive instantiated directly with its carrier sets. In that
+    # primitive-only case there is no concrete scheme body to translate: the
+    # primary becomes an abstract section ``declare module`` (the proof holds
+    # for every primitive satisfying the assumption).
     if not (
         isinstance(proof.theorem, frog_ast.ParameterizedGame)
         and proof.theorem.args
@@ -389,23 +534,36 @@ def export_proof_file(proof_path: str) -> str:
             "first argument is the scheme instance under attack."
         )
     primary_let_name = proof.theorem.args[0].name
-    primary_scheme_name: str | None = None
+    primary_type_name: str | None = None
     for let in proof.lets:
         if let.name == primary_let_name and isinstance(let.type, frog_ast.Variable):
-            primary_scheme_name = let.type.name
+            primary_type_name = let.type.name
             break
-    if primary_scheme_name is None or primary_scheme_name not in schemes_by_name:
+    scheme: frog_ast.Scheme | None
+    if primary_type_name is not None and primary_type_name in schemes_by_name:
+        scheme = schemes_by_name[primary_type_name]
+        if scheme.primitive_name not in primitives_by_name:
+            raise ValueError(
+                f"Primary scheme {scheme.name!r} extends primitive "
+                f"{scheme.primitive_name!r}, which was not imported."
+            )
+        primitive = primitives_by_name[scheme.primitive_name]
+    elif primary_type_name is not None and primary_type_name in primitives_by_name:
+        # Primitive-only proof: the module under attack is an abstract
+        # primitive instance, not a concrete scheme.
+        scheme = None
+        primitive = primitives_by_name[primary_type_name]
+    else:
         raise ValueError(
-            f"Could not identify primary scheme from theorem instance "
-            f"{primary_let_name!r}."
+            f"Could not identify primary scheme or primitive from theorem "
+            f"instance {primary_let_name!r}."
         )
-    scheme = schemes_by_name[primary_scheme_name]
-    if scheme.primitive_name not in primitives_by_name:
-        raise ValueError(
-            f"Primary scheme {scheme.name!r} extends primitive "
-            f"{scheme.primitive_name!r}, which was not imported."
-        )
-    primitive = primitives_by_name[scheme.primitive_name]
+    # In primitive-only mode the primary scheme module is emitted abstractly
+    # (a section ``declare module``) rather than as a concrete EC module.
+    primitive_only = scheme is None
+    # The type name the primary instance's let must match to be selected as
+    # the primary scheme instance (a Scheme name, or the Primitive name).
+    primary_ctor_name = scheme.name if scheme is not None else primitive.name
 
     # Collect scheme-instance descriptors. Each let-binding of the form
     # ``<Scheme> X = <Scheme>(...);`` produces one instance, which in
@@ -446,19 +604,20 @@ def export_proof_file(proof_path: str) -> str:
     # clone alias threaded through the existing single-scheme code paths.
     primary_opt: si.SchemeInstance | None = None
     for inst in instances:
-        # An instance is "primary" when its let type matches scheme.name
-        # and it is the last declared (so CE comes after E1/E2).
+        # An instance is "primary" when its let type matches the primary
+        # scheme/primitive name and it is the last declared (so CE comes
+        # after E1/E2).
         for let in proof.lets:
             if (
                 let.name == inst.let_name
                 and isinstance(let.type, frog_ast.Variable)
-                and let.type.name == scheme.name
+                and let.type.name == primary_ctor_name
             ):
                 primary_opt = inst
     if primary_opt is None:
         raise ValueError(
-            "No scheme instance found matching the main scheme "
-            f"{scheme.name!r} in proof lets."
+            "No scheme instance found matching the main scheme/primitive "
+            f"{primary_ctor_name!r} in proof lets."
         )
     primary: si.SchemeInstance = primary_opt
 
@@ -957,31 +1116,36 @@ def export_proof_file(proof_path: str) -> str:
     # bindings.
     instances_by_let_name = {inst.let_name: inst for inst in instances}
     primary_let = next(let for let in proof.lets if let.name == primary.let_name)
-    scheme_module_params, scheme_module_param_types, _ = _scheme_functor_params(
-        scheme, primary_let.value, instances_by_let_name, scheme_type_name
-    )
+    scheme_module_params: list[ec_ast.ModuleParam] = []
+    scheme_module_param_types: dict[str, str] = {}
+    ec_scheme: ec_ast.Module | None = None
+    if not primitive_only:
+        assert scheme is not None
+        scheme_module_params, scheme_module_param_types, _ = _scheme_functor_params(
+            scheme, primary_let.value, instances_by_let_name, scheme_type_name
+        )
 
-    # Hoist any nested module calls in scheme method bodies before
-    # translating. EC requires module-procedure calls at statement level,
-    # so a FrogLang body like ``return G.evaluate(s) + G.evaluate(0^lambda)``
-    # would otherwise fall back to ``return witness;`` and break the
-    # wrapper-to-flat-state bridge in the per-hop chain.
-    scheme_hoisted = canonical_form.hoist_scheme_calls(scheme, method_return_types)
-    # Pre-inline the scheme body's integer length references to base symbols.
-    # Bare field names (e.g. ``lambda`` = the scheme's own ``Int lambda``) and
-    # foreign field references (``G.lambda``) are resolved one-shot so the
-    # body's bitstring types match the (base-named) clone bindings. This is
-    # what ``top_types`` cannot do alone, since a bare ``lambda`` there would
-    # shadow the base let.
-    scheme_hoisted = _LengthInliner(
-        local_int_by_let.get(primary.let_name, {}), int_qual_map
-    ).transform(scheme_hoisted)
-    ec_scheme = top_modules.translate_scheme(
-        scheme_hoisted,
-        qualified_scheme_type,
-        module_params=scheme_module_params or None,
-        module_param_types=scheme_module_param_types or None,
-    )
+        # Hoist any nested module calls in scheme method bodies before
+        # translating. EC requires module-procedure calls at statement level,
+        # so a FrogLang body like ``return G.evaluate(s) + G.evaluate(0^lambda)``
+        # would otherwise fall back to ``return witness;`` and break the
+        # wrapper-to-flat-state bridge in the per-hop chain.
+        scheme_hoisted = canonical_form.hoist_scheme_calls(scheme, method_return_types)
+        # Pre-inline the scheme body's integer length references to base
+        # symbols. Bare field names (e.g. ``lambda`` = the scheme's own ``Int
+        # lambda``) and foreign field references (``G.lambda``) are resolved
+        # one-shot so the body's bitstring types match the (base-named) clone
+        # bindings. This is what ``top_types`` cannot do alone, since a bare
+        # ``lambda`` there would shadow the base let.
+        scheme_hoisted = _LengthInliner(
+            local_int_by_let.get(primary.let_name, {}), int_qual_map
+        ).transform(scheme_hoisted)
+        ec_scheme = top_modules.translate_scheme(
+            scheme_hoisted,
+            qualified_scheme_type,
+            module_params=scheme_module_params or None,
+            module_param_types=scheme_module_param_types or None,
+        )
 
     # Concrete foreign-scheme modules. For each foreign instance we can
     # concretize (e.g. 5_10's ``P = OTP(lambda)``), translate its scheme
@@ -1044,10 +1208,16 @@ def export_proof_file(proof_path: str) -> str:
     # is the functor application ``ChainedEncryption(E1, E2)``.
     instance_module_expr: dict[str, str] = {}
     for inst in instances:
-        if inst is primary and scheme_module_params:
+        if inst is primary and primitive_only:
+            # Abstract primitive primary: a section ``declare module``,
+            # referenced by its let-name (like any non-primary instance).
+            instance_module_expr[inst.let_name] = inst.let_name
+        elif inst is primary and scheme_module_params:
+            assert scheme is not None
             applied_args = ", ".join(p.name for p in scheme_module_params)
             instance_module_expr[inst.let_name] = f"{scheme.name}({applied_args})"
         elif inst is primary:
+            assert scheme is not None
             instance_module_expr[inst.let_name] = scheme.name
         elif inst.let_name in concretizable_foreign:
             # Concrete foreign module: reference it directly (e.g. ``OTP``)
@@ -1074,14 +1244,17 @@ def export_proof_file(proof_path: str) -> str:
     footprint_names: list[str] = []
     if scheme_module_params:
         footprint_names.extend(p.name for p in scheme_module_params)
-    else:
+    elif not primitive_only:
+        assert scheme is not None
         footprint_names.append(scheme.name)
+    # In primitive-only mode the primary is itself a ``declare module`` and is
+    # added by the loop below (so it is separated from the adversary too).
     for inst in instances:
         # Concretized foreign instances are top-level concrete modules, not
         # ``declare module``s, so they don't belong in the adversary's
         # separation footprint.
         if (
-            inst is not primary
+            (inst is not primary or primitive_only)
             and inst.let_name not in concretizable_foreign
             and inst.let_name not in footprint_names
         ):
@@ -1269,7 +1442,8 @@ def export_proof_file(proof_path: str) -> str:
             module_type=f"{inst.clone_alias}.{scheme_type_name}",
         )
         for inst in instances
-        if inst is not primary and inst.let_name not in concretizable_foreign
+        if (inst is not primary or primitive_only)
+        and inst.let_name not in concretizable_foreign
     ]
 
     def _det_reorder_guided_admit(
@@ -1569,9 +1743,15 @@ def export_proof_file(proof_path: str) -> str:
         # Each reduction-arg position gets the module expression for
         # the instance of that name — e.g. R1's parameter list
         # ``(CE, E1, E2)`` maps to
-        # ``[ChainedEncryption(E1, E2), E1, E2]``.
+        # ``[ChainedEncryption(E1, E2), E1, E2]``. A reduction parameter
+        # whose name doesn't match an instance but whose type is the
+        # primary scheme/primitive (e.g. ``Reduction R1(SymEnc se)`` applied
+        # as ``R1(proofE)``) maps to the primary module expression.
         red_arg_exprs = [
-            instance_module_expr.get(p.name, p.name) for p in helper.parameters
+            _reduction_arg_expr(
+                p, instance_module_expr, primary_ctor_name, primary_module_expr
+            )
+            for p in helper.parameters
         ]
         ec_reduction_advs.append(
             top_modules.translate_reduction_adversary(
@@ -1867,7 +2047,7 @@ def export_proof_file(proof_path: str) -> str:
     # abstract types bound to those fields are equal; emit one as
     # a type alias of the other so EC sees them as the same type.
     type_aliases: dict[str, str] = {}  # alias_name -> canonical_name
-    if scheme.requirements:
+    if scheme is not None and scheme.requirements:
         param_to_let: dict[str, str] = {}
         if isinstance(primary_let.value, frog_ast.FuncCall):
             for sp, arg in zip(scheme.parameters, primary_let.value.args):
@@ -1943,9 +2123,12 @@ def export_proof_file(proof_path: str) -> str:
     # Non-primary primitive instances become ``declare module`` names
     # inside a ``section Main``. For CES this yields
     # ``declare module E1 <: E1_c.Scheme.`` and ``E2 <: E2_c.Scheme.``.
+    # In primitive-only mode the primary itself is declared abstractly.
     declare_modules: list[ec_ast.DeclareModule] = []
     for inst in instances:
-        if inst is primary or inst.let_name in concretizable_foreign:
+        if inst.let_name in concretizable_foreign:
+            continue
+        if inst is primary and not primitive_only:
             continue
         disjoint = [d.name for d in declare_modules]
         declare_modules.append(
@@ -2073,7 +2256,7 @@ def export_proof_file(proof_path: str) -> str:
     if clone_axioms:
         decls.append(_section_header("Per-clone distribution axioms"))
         decls.extend(clone_axioms)
-    if scheme.requirements:
+    if scheme is not None and scheme.requirements:
         decls.append(
             "(* NOTE: the FrogLang scheme has `requires` clauses that are "
             "not enforced by the EC export. The scheme module below may "
@@ -2081,8 +2264,9 @@ def export_proof_file(proof_path: str) -> str:
             "implied by the `requires` are not expressed in the clones. "
             "Deferred to Phase 5D. *)"
         )
-    decls.append(_section_header("Concrete scheme implementation"))
-    decls.append(ec_scheme)
+    if ec_scheme is not None:
+        decls.append(_section_header("Concrete scheme implementation"))
+        decls.append(ec_scheme)
     if foreign_concrete_modules:
         decls.append(_section_header("Concrete foreign scheme implementations"))
         for inst in instances:

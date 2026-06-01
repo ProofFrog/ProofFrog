@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import pathlib
 from dataclasses import dataclass
 from typing import Callable
@@ -17,6 +18,106 @@ from .resolution import tag as _res_tag
 from ... import frog_ast
 from ... import frog_parser
 from ... import proof_engine as pe
+from ... import visitors
+
+
+class _LengthInliner(visitors.Transformer):
+    """Substitute integer field/param references in bitstring lengths with
+    base-resolved expressions.
+
+    The substitution is one-shot: ``transform_variable`` /
+    ``transform_field_access`` return the replacement directly, and the base
+    :class:`Transformer` does not re-visit a returned node. This is what keeps
+    ``G.lambda -> lambda`` terminal -- the produced base ``lambda`` is never
+    re-expanded by a same-named primary-scheme field equation (the bug that
+    made one length acquire several distinct ``bs_*`` names).
+    """
+
+    def __init__(
+        self,
+        bare: dict[str, frog_ast.ASTNode],
+        qualified: dict[str, frog_ast.ASTNode],
+    ) -> None:
+        self._bare = bare
+        self._qualified = qualified
+
+    def transform_variable(self, variable: frog_ast.Variable) -> frog_ast.ASTNode:
+        if variable.name in self._bare:
+            return copy.deepcopy(self._bare[variable.name])
+        return variable
+
+    def transform_field_access(
+        self, field_access: frog_ast.FieldAccess
+    ) -> frog_ast.ASTNode:
+        if isinstance(field_access.the_object, frog_ast.Variable):
+            key = f"{field_access.the_object.name}.{field_access.name}"
+            if key in self._qualified:
+                return copy.deepcopy(self._qualified[key])
+        return field_access
+
+
+def _base_int_length_map(
+    proof: frog_ast.ProofFile,
+    primitives_by_name: dict[str, frog_ast.Primitive],
+    schemes_by_name: dict[str, frog_ast.Scheme],
+) -> tuple[
+    dict[str, frog_ast.ASTNode],
+    dict[str, dict[str, frog_ast.ASTNode]],
+    dict[str, dict[str, frog_ast.ASTNode]],
+    dict[str, set[str]],
+]:
+    # pylint: disable=too-many-locals
+    """Resolve every instance's integer params/fields to base ``Int`` lets.
+
+    Returns ``(qualified, local_by_let, param_by_let, names_by_let)``:
+
+    * ``qualified`` maps ``"<let>.<intname>"`` to a base-resolved expression.
+    * ``local_by_let`` maps a let-name to its in-scope ``{intname -> base
+      expr}`` (int params + int fields). Used to pre-inline a scheme *body*,
+      whose bare references can be either a param or the scheme's own field.
+    * ``param_by_let`` maps a let-name to its int *params* only. Used to
+      base-resolve an instance's ``concretized_fields``: those length values
+      reference params and foreign fields, never the instance's own bare
+      field names, so re-applying the field aliases would wrongly re-expand
+      an already-base symbol.
+    * ``names_by_let`` maps a let-name to its set of int param/field names.
+
+    Lets are processed in declaration order, so each instance resolves its
+    field/param values through the already-resolved prior instances.
+    """
+    qualified: dict[str, frog_ast.ASTNode] = {}
+    local_by_let: dict[str, dict[str, frog_ast.ASTNode]] = {}
+    param_by_let: dict[str, dict[str, frog_ast.ASTNode]] = {}
+    names_by_let: dict[str, set[str]] = {}
+    for let in proof.lets:
+        if not (
+            isinstance(let.value, frog_ast.FuncCall)
+            and isinstance(let.value.func, frog_ast.Variable)
+        ):
+            continue
+        ctor = let.value.func.name
+        defn: frog_ast.Primitive | frog_ast.Scheme | None = primitives_by_name.get(
+            ctor
+        ) or schemes_by_name.get(ctor)
+        if defn is None:
+            continue
+        local: dict[str, frog_ast.ASTNode] = {}
+        params_local: dict[str, frog_ast.ASTNode] = {}
+        inliner = _LengthInliner(local, qualified)
+        for param, arg in zip(defn.parameters, let.value.args):
+            if isinstance(getattr(param, "type", None), frog_ast.IntType):
+                value = inliner.transform(arg)
+                local[param.name] = value
+                params_local[param.name] = value
+        for fld in defn.fields:
+            if isinstance(fld.type, frog_ast.IntType) and fld.value is not None:
+                local[fld.name] = inliner.transform(fld.value)
+        local_by_let[let.name] = local
+        param_by_let[let.name] = params_local
+        names_by_let[let.name] = set(local.keys())
+        for local_name, local_value in local.items():
+            qualified[f"{let.name}.{local_name}"] = local_value
+    return qualified, local_by_let, param_by_let, names_by_let
 
 
 def _distr_binding_for(
@@ -82,9 +183,12 @@ def _instantiate_bitstring_expr(
         if isinstance(value, frog_ast.Variable) and value.name == expr.name:
             return expr
         if isinstance(value, frog_ast.Expression):
-            return _instantiate_bitstring_expr(
-                value, concretized_fields, _visited | {expr.name}
-            )
+            # Single-pass: the concretized fields are already base-resolved
+            # (see ``_base_int_length_map``), so splice the value in directly.
+            # Re-substituting it would let a base symbol that coincides with
+            # another field name -- e.g. the ``lambda`` value of ``stretch``
+            # colliding with the ``lambda`` field -- be wrongly re-expanded.
+            return copy.deepcopy(value)
         return expr
     if isinstance(expr, frog_ast.BinaryOperation):
         return frog_ast.BinaryOperation(
@@ -426,17 +530,50 @@ def export_proof_file(proof_path: str) -> str:
         if isinstance(let.type, frog_ast.SetType) and let.value is None
     }
 
+    # Base-resolve every instance's bitstring lengths to the proof's base
+    # ``Int`` lets BEFORE building aliases / clone bindings. A scheme like
+    # ``PRG_5_8_f`` defines ``Int lambda = 2 * G.lambda`` and slices on
+    # ``G.lambda``; leaving those lengths in terms of a foreign field -- or
+    # exposing the primary's ``lambda`` field as a *bare* alias that shadows
+    # the base ``Int lambda`` let -- makes the same length acquire several
+    # distinct ``bs_*`` names (``bs_2_lambda`` vs ``bs_2_G_lambda``) and EC
+    # rejects the scheme. We resolve each int param/field to a base
+    # expression and rewrite the instances' concretized lengths once.
+    (
+        int_qual_map,
+        local_int_by_let,
+        param_int_by_let,
+        int_names_by_let,
+    ) = _base_int_length_map(proof, primitives_by_name, schemes_by_name)
+    for inst in instances:
+        # Resolve foreign field refs + this instance's int params, but NOT its
+        # own field names: the concretized lengths are already in base/foreign
+        # terms, so applying the field aliases would re-double a base symbol.
+        inst_inliner = _LengthInliner(
+            param_int_by_let.get(inst.let_name, {}), int_qual_map
+        )
+        inst.concretized_fields = {
+            fname: inst_inliner.transform(ftype)
+            for fname, ftype in inst.concretized_fields.items()
+        }
+    primary_int_names = int_names_by_let.get(primary.let_name, set())
+
     # Build the top-level alias map. Entries:
-    #   * qualified ``"<inst>.<Field>"`` -> concretized Type (for
-    #     resolving ``E1.Key`` FieldAccess types in reductions, etc.)
-    #   * bare ``"<Field>"`` -> concretized Type for the primary
-    #     instance (for resolving bare ``Key``/``Message`` types in
-    #     the main scheme's method signatures).
+    #   * qualified ``"<inst>.<Field>"`` -> base-resolved Type (for resolving
+    #     ``E1.Key`` FieldAccess types in reductions, etc.)
+    #   * bare ``"<Field>"`` -> base-resolved Type for the primary instance's
+    #     *non-int* (Set carrier) fields. The primary's int fields are
+    #     deliberately NOT exposed bare: a bare ``lambda`` alias would shadow
+    #     the base ``Int lambda`` let and re-double every base length when
+    #     naming concrete clone bindings. The scheme *body* -- where bare
+    #     ``lambda`` legitimately means the field -- is pre-inlined instead.
     top_aliases: dict[str, frog_ast.Type] = {}
     for inst in instances:
         for fname, ftype in inst.concretized_fields.items():
             top_aliases[f"{inst.let_name}.{fname}"] = ftype
     for fname, ftype in primary.concretized_fields.items():
+        if fname in primary_int_names:
+            continue
         top_aliases[fname] = ftype
     top_types = tc.TypeCollector(
         aliases=top_aliases, known_abstract_types=known_abstract_types
@@ -830,6 +967,15 @@ def export_proof_file(proof_path: str) -> str:
     # would otherwise fall back to ``return witness;`` and break the
     # wrapper-to-flat-state bridge in the per-hop chain.
     scheme_hoisted = canonical_form.hoist_scheme_calls(scheme, method_return_types)
+    # Pre-inline the scheme body's integer length references to base symbols.
+    # Bare field names (e.g. ``lambda`` = the scheme's own ``Int lambda``) and
+    # foreign field references (``G.lambda``) are resolved one-shot so the
+    # body's bitstring types match the (base-named) clone bindings. This is
+    # what ``top_types`` cannot do alone, since a bare ``lambda`` there would
+    # shadow the base let.
+    scheme_hoisted = _LengthInliner(
+        local_int_by_let.get(primary.let_name, {}), int_qual_map
+    ).transform(scheme_hoisted)
     ec_scheme = top_modules.translate_scheme(
         scheme_hoisted,
         qualified_scheme_type,
@@ -857,7 +1003,10 @@ def export_proof_file(proof_path: str) -> str:
         foreign_scheme = schemes_by_name[inst.ctor_name]
         foreign_let = next(let for let in proof.lets if let.name == inst.let_name)
         foreign_aliases = dict(top_aliases)
+        foreign_int_names = int_names_by_let.get(inst.let_name, set())
         for fname, ftype in inst.concretized_fields.items():
+            if fname in foreign_int_names:
+                continue  # base-shadowing int field; body is pre-inlined below
             foreign_aliases.setdefault(fname, ftype)
         foreign_types = tc.TypeCollector(
             aliases=foreign_aliases, known_abstract_types=known_abstract_types
@@ -869,6 +1018,9 @@ def export_proof_file(proof_path: str) -> str:
         foreign_hoisted = canonical_form.hoist_scheme_calls(
             foreign_scheme, method_return_types
         )
+        foreign_hoisted = _LengthInliner(
+            local_int_by_let.get(inst.let_name, {}), int_qual_map
+        ).transform(foreign_hoisted)
         foreign_concrete_modules[inst.let_name] = foreign_modules.translate_scheme(
             foreign_hoisted,
             f"{inst.clone_alias}.{scheme_type_name}",
@@ -1328,8 +1480,6 @@ def export_proof_file(proof_path: str) -> str:
         right_ast = engine._get_game_ast(step_b.challenger, step_b.reduction)
         # pylint: enable=protected-access
         # pylint: disable=import-outside-toplevel
-        import copy
-
         from .chain_emitter import emit_chain_for_hop
 
         _left_canon, left_apps = engine.canonicalize_game_with_states(

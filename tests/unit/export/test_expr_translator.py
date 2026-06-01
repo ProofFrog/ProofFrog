@@ -39,3 +39,9 @@ def test_translate_indexed_tuple_access() -> None:
 def test_translate_variable() -> None:
     tr = _make()
     assert tr.translate(frog_ast.Variable("x")) == "x"
+
+
+def test_translate_boolean_literal() -> None:
+    tr = _make()
+    assert tr.translate(frog_ast.Boolean(True)) == "true"
+    assert tr.translate(frog_ast.Boolean(False)) == "false"

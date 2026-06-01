@@ -50,6 +50,13 @@ def test_field_access_abstract_lookup() -> None:
     assert ec_type.text == "message"
 
 
+def test_translate_bool_type() -> None:
+    """BoolType maps to EC's built-in ``bool``."""
+    tc = TypeCollector()
+    ec = tc.translate_type(frog_ast.BoolType())
+    assert ec.text == "bool"
+
+
 def test_translate_tuple_type() -> None:
     tc = TypeCollector()
     pair = frog_ast.ProductType(

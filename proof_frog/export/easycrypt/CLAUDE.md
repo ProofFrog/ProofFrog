@@ -27,6 +27,17 @@ Key modules:
   resolved transform/hop so the dashboard can tally exactly how each
   closed.
 - `cache_report.py` — `make check-tactic-cache` driver.
+- **Scheme-statelessness foundation** (in `chain_emitter._synth_stateless_reorder`
+  + `module_translator` helpers + gated emission in `exporter.py`): when a
+  micro reorders two *abstract scheme calls* (e.g. `Inline Local Tuple
+  Literal` over `Enc(KeyGen())`), EC can't `swap` them. The exporter emits
+  per-method distribution ops + an `Ideal` sampling module + `declare axiom
+  <E>_<m>_sem` statelessness specs (the probabilistic analogue of the
+  `E_dec_det` determinism foundation), and routes the micro through a 4-hop
+  transitivity over the all-`Ideal` instantiation. Gated: only emitted for
+  schemes whose calls are actually reordered. Single declared module only so
+  far. Design + extensions:
+  `extras/docs/plans/in-progress/2026-06-01-scheme-statelessness-foundation.md`.
 - `proof_translator.py`, `module_translator.py`, `expr_translator.py`,
   `stmt_translator.py`, `type_collector.py`, `scheme_instances.py`,
   `ec_ast.py` — FrogLang→EC translation primitives.

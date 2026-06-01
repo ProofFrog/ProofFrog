@@ -1246,6 +1246,11 @@ def export_proof_file(proof_path: str) -> str:
     # Each interchangeability hop's chain emission appends to this list;
     # the assembled file inserts the contents before ``lemmas``.
     chain_extra_decls: list[ec_ast.EcTopDecl] = []
+    # (declared module name, clone alias) pairs that needed the
+    # statelessness foundation (a stateless-scheme reorder micro was
+    # synthesized). The theory + section foundation is emitted only for
+    # these, so unaffected proofs are untouched.
+    stateless_module_requests: set[tuple[str, str]] = set()
     # Per-hop precondition/postcondition overrides emitted by the chain
     # when its artifacts use strengthened specs (``={glob E1, ...}``) in
     # multi-module proofs. The outer ``hop_<i>`` lemma must use the same
@@ -1537,6 +1542,7 @@ def export_proof_file(proof_path: str) -> str:
         )
         chain_extra_decls.extend(info.extra_decls)
         requested_cache_keys.extend(info.requested_keys)
+        stateless_module_requests.update(info.stateless_modules)
         if info.pre_override is not None or info.post_override is not None:
             chain_spec_overrides[_i] = (
                 info.pre_override or resolver.precondition_for(step_a),
@@ -1763,12 +1769,31 @@ def export_proof_file(proof_path: str) -> str:
             op_bindings=op_bindings_,
         )
 
+    # Statelessness foundation (gated): emit the per-method distribution ops,
+    # the ``Ideal`` sampling module and the lossless axioms into the primary
+    # theory only when a stateless-scheme reorder for one of its instances was
+    # synthesized. See ``chain_emitter._synth_stateless_reorder``.
+    _requested_primitive_names = {
+        inst.primitive_name
+        for inst in instances
+        if inst.let_name in {m for (m, _) in stateless_module_requests}
+    }
+    stateless_theory_decls: list[ec_ast.EcTopDecl] = []
+    if primitive.name in _requested_primitive_names:
+        stateless_theory_decls = [
+            "(* Statelessness foundation *)",
+            *theory_modules.distribution_op_decls(primitive),
+            *theory_modules.lossless_axiom_lines(primitive),
+            theory_modules.ideal_module_text(primitive, scheme_type_name),
+        ]
+
     theory = ec_ast.AbstractTheory(
         name=theory_name,
         decls=[
             *theory_head,
             ec_primitive,
             *theory_modules.deterministic_op_decls(primitive),
+            *stateless_theory_decls,
             *theory_game_decls,
             *theory_assumption_decls,
         ],
@@ -1960,6 +1985,30 @@ def export_proof_file(proof_path: str) -> str:
                     )
                 )
 
+    # Statelessness specs: ``declare axiom <E>_<m>_sem`` per probabilistic
+    # method, for each declared module that a synthesized stateless-scheme
+    # reorder routed through ``Ideal``.
+    stateless_axioms: list[ec_ast.Axiom] = []
+    _stateless_request_names = {m for (m, _) in stateless_module_requests}
+    for dm in declare_modules:
+        if dm.name not in _stateless_request_names:
+            continue
+        dm_inst = next(i for i in instances if i.let_name == dm.name)
+        dm_prim = primitives_by_name.get(dm_inst.primitive_name)
+        dm_proc_sigs = theory_proc_sigs_by_primitive.get(dm_inst.primitive_name, [])
+        if dm_prim is None:
+            continue
+        proc_sig_by_name = {ps.name: ps for ps in dm_proc_sigs}
+        for sig in dm_prim.methods:
+            if not sig.deterministic and sig.name.lower() in proc_sig_by_name:
+                stateless_axioms.append(
+                    mt.ModuleTranslator.stateless_axiom(
+                        dm.name,
+                        dm_inst.clone_alias,
+                        proc_sig_by_name[sig.name.lower()],
+                    )
+                )
+
     n_hops = len(proof.steps) - 1
     main_theorem: ec_ast.ProbLemma | None = None
     if n_hops > 0:
@@ -2044,6 +2093,11 @@ def export_proof_file(proof_path: str) -> str:
         if det_axioms
         else []
     )
+    if stateless_axioms:
+        det_axiom_decls += [
+            _section_header("Statelessness specs"),
+            *stateless_axioms,
+        ]
     if declare_modules:
         decls.append(
             ec_ast.Section(

@@ -97,6 +97,109 @@ class ModuleTranslator:
         )
         return ec_ast.Axiom(f"{module_name}_{proc}_det", formula, declare=True)
 
+    # ----- Statelessness foundation (probabilistic-method analogue of the
+    # deterministic ``ev_<m>``/``_det`` foundation). Lets EC reorder two
+    # calls to a *stateless* randomized scheme method: each is modelled as
+    # sampling a fixed per-method distribution (``d<m>``), realised by an
+    # ``Ideal`` module, and the section asserts ``E.<m> ~ Ideal.<m>`` via a
+    # ``declare axiom <module>_<m>_sem``. See the chain emitter's
+    # stateless-reorder transitivity. -------------------------------------
+
+    def distribution_op_decls(self, prim: frog_ast.Primitive) -> list[ec_ast.OpDecl]:
+        """Emit ``op d<m> : T0 -> ... -> R distr.`` per probabilistic method.
+
+        Models a stateless randomized primitive method as sampling a fixed
+        distribution parameterized by its value-arguments. Emitted inside
+        the primitive's abstract theory (so each clone gets ``<clone>.d<m>``),
+        next to the deterministic ``ev_<m>`` ops.
+        """
+        decls: list[ec_ast.OpDecl] = []
+        for sig in prim.methods:
+            if sig.deterministic:
+                continue
+            param_types = [
+                self._translate_param_type(p.type).text for p in sig.parameters
+            ]
+            ret = self._translate_param_type(sig.return_type).text
+            arrow = " -> ".join(param_types + [f"{ret} distr"])
+            decls.append(ec_ast.OpDecl(f"d{sig.name.lower()}", arrow))
+        return decls
+
+    def lossless_axiom_lines(self, prim: frog_ast.Primitive) -> list[str]:
+        """Emit ``axiom d<m>_ll : is_lossless ...`` per probabilistic method.
+
+        Only consumed by reorder micros that *drop* an independent sample;
+        harmless (unused) for pure-permutation reorders. Emitted inside the
+        theory so the lossless fact is available per clone.
+        """
+        lines: list[str] = []
+        for sig in prim.methods:
+            if sig.deterministic:
+                continue
+            name = f"d{sig.name.lower()}"
+            n = len(sig.parameters)
+            if n == 0:
+                lines.append(f"axiom {name}_ll : is_lossless {name}.")
+            else:
+                binders = " ".join(f"a{i}" for i in range(n))
+                applied = " ".join(f"a{i}" for i in range(n))
+                lines.append(
+                    f"axiom {name}_ll : forall {binders}, "
+                    f"is_lossless ({name} {applied})."
+                )
+        return lines
+
+    def ideal_module_text(
+        self, prim: frog_ast.Primitive, scheme_type_name: str = "Scheme"
+    ) -> str:
+        """Raw EC text for the ``Ideal`` module realizing the primitive.
+
+        Each probabilistic method samples its ``d<m>`` distribution; each
+        deterministic method returns ``ev_<m>`` applied to its arguments
+        (matching the determinism foundation). Emitted inside the theory so
+        ``<clone>.Ideal`` exists for every instance.
+        """
+        procs: list[str] = []
+        for sig in prim.methods:
+            name = sig.name.lower()
+            params = ", ".join(
+                f"{p.name} : {self._translate_param_type(p.type).text}"
+                for p in sig.parameters
+            )
+            ret = self._translate_param_type(sig.return_type).text
+            applied = "".join(f" {p.name}" for p in sig.parameters)
+            if sig.deterministic:
+                body = f"return ev_{name}{applied};"
+            else:
+                body = f"var r : {ret}; r <$ d{name}{applied}; return r;"
+            procs.append(f"  proc {name}({params}) : {ret} = {{ {body} }}")
+        inner = "\n".join(procs)
+        return f"module Ideal : {scheme_type_name} = {{\n{inner}\n}}."
+
+    @staticmethod
+    def stateless_axiom(
+        module_name: str, clone_prefix: str, proc_sig: ec_ast.ProcSig
+    ) -> ec_ast.Axiom:
+        """Emit ``declare axiom <module>_<m>_sem`` (equiv-to-Ideal spec).
+
+        Asserts that ``<module>.<m>`` is observationally ``<clone>.Ideal.<m>``
+        (samples the fixed ``d<m>`` distribution) and preserves
+        ``glob <module>`` — i.e. the method is stateless. This restricts the
+        EC theorem to stateless ``E``, which is exactly what ProofFrog proves
+        when its canonicalization reorders the method's calls.
+        """
+        m = proc_sig.name
+        pre = (
+            f"={{glob {module_name}, arg}}"
+            if proc_sig.params
+            else f"={{glob {module_name}}}"
+        )
+        formula = (
+            f": equiv[ {module_name}.{m} ~ {clone_prefix}.Ideal.{m} : "
+            f"{pre} ==> ={{res, glob {module_name}}} ]"
+        )
+        return ec_ast.Axiom(f"{module_name}_{m}_sem", formula, declare=True)
+
     def translate_scheme(
         self,
         scheme: frog_ast.Scheme,

@@ -98,6 +98,11 @@ class HopChainInfo:
     pre_override: str | None = None
     post_override: str | None = None
     requested_keys: list[tuple[str, str, str]] = field(default_factory=list)
+    # (declared module name, clone alias) pairs for which a stateless-scheme
+    # reorder micro was synthesized this hop; the exporter emits the
+    # statelessness foundation (``d<m>`` ops, ``Ideal`` module, ``<E>_<m>_sem``
+    # axioms) for each. Empty when no such reorder fired.
+    stateless_modules: set[tuple[str, str]] = field(default_factory=set)
 
 
 # pylint: disable=too-many-locals,too-many-statements,too-many-arguments,too-many-positional-arguments
@@ -413,6 +418,78 @@ def emit_chain_for_hop(
             return [_res_tag(CACHED_UNGUIDED), *cached]
         return [_res_tag(ADMIT_UNGUIDED), *_layer3_admit(app, bucket, reversed_dir)]
 
+    # Stateless-scheme reorder synthesis. When a micro that would otherwise
+    # admit is a reorder of abstract calls of a single declared stateless
+    # scheme, route it through the all-``Ideal`` instantiation (see
+    # ``_synth_stateless_reorder``). Only supported for a single declared
+    # module (the common ``declare module E`` shape).
+    stateless_modules: set[tuple[str, str]] = set()
+    emitted_m_modules: set[str] = set()
+    _stateless_ok = len(flat_params) == 1
+    _sm_name = ""
+    _clone_alias = ""
+    _ideal_suffix = ""
+    if _stateless_ok:
+        _sm_name = flat_params[0].name
+        _clone_alias = flat_params[0].module_type.split(".")[0]
+        _ideal_suffix = f"({_clone_alias}.Ideal)"
+
+    def _is_admit(tac: list[str]) -> bool:
+        return bool(tac) and "admit-unguided" in tac[0]
+
+    def _try_stateless(
+        app: TransformApplication,
+        state_before: frog_ast.Game,
+        state_after: frog_ast.Game,
+        name_before: str,
+        name_after: str,
+        reversed_dir: bool,
+    ) -> _StatelessSynth | None:
+        if not _stateless_ok or app.transform_name != "Inline Local Tuple Literal":
+            return None
+        before_module = _flat_state_module(
+            modules,
+            name_before,
+            state_before,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        after_module = _flat_state_module(
+            modules,
+            name_after,
+            state_after,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        return _synth_stateless_reorder(
+            before_module,
+            after_module,
+            name_before,
+            name_after,
+            _ideal_suffix,
+            _sm_name,
+            _clone_alias,
+            oracle_name,
+            eq_args_strong,
+            eq_post_strong,
+            reversed_dir,
+        )
+
+    def _apply_stateless(syn: _StatelessSynth | None) -> list[str] | None:
+        if syn is None:
+            return None
+        stateless_modules.add(syn.request)
+        if (
+            syn.module_text
+            and syn.module_name is not None
+            and syn.module_name not in emitted_m_modules
+        ):
+            chunks.append(syn.module_text)
+            emitted_m_modules.add(syn.module_name)
+        return syn.tactic
+
     micros_left: list[_MicroLemma] = []
     for k, app in enumerate(left_apps):
         bucket = classify(app.transform_name)
@@ -420,6 +497,7 @@ def emit_chain_for_hop(
         helpers: list[str] = []
         left_ref = mod_ref(left_mods[k])
         right_ref = mod_ref(left_mods[k + 1])
+        _key_mark = len(requested_keys)
         body = _tactic_for(
             app,
             bucket,
@@ -428,6 +506,21 @@ def emit_chain_for_hop(
             left_module_ref=left_ref,
             right_module_ref=right_ref,
         )
+        if _is_admit(body):
+            synth = _apply_stateless(
+                _try_stateless(
+                    app,
+                    left_states[k],
+                    left_states[k + 1],
+                    left_mods[k],
+                    left_mods[k + 1],
+                    reversed_dir=False,
+                )
+            )
+            if synth is not None:
+                body = synth
+                # Drop the cache miss this micro recorded before synthesis won.
+                del requested_keys[_key_mark:]
         for h in helpers:
             chunks.append(h)
         micro = _MicroLemma(
@@ -454,6 +547,7 @@ def emit_chain_for_hop(
         right_right_ref = mod_ref(right_mods[k + 1])
         helpers_fwd: list[str] = []
         helpers_rev: list[str] = []
+        _key_mark = len(requested_keys)
         fwd_body = _tactic_for(
             app,
             bucket,
@@ -463,6 +557,21 @@ def emit_chain_for_hop(
             left_module_ref=right_left_ref,
             right_module_ref=right_right_ref,
         )
+        if _is_admit(fwd_body):
+            synth = _apply_stateless(
+                _try_stateless(
+                    app,
+                    right_states[k],
+                    right_states[k + 1],
+                    right_mods[k],
+                    right_mods[k + 1],
+                    reversed_dir=False,
+                )
+            )
+            if synth is not None:
+                fwd_body = synth
+                del requested_keys[_key_mark:]
+        _key_mark = len(requested_keys)
         rev_body = _tactic_for(
             app,
             bucket,
@@ -472,6 +581,20 @@ def emit_chain_for_hop(
             left_module_ref=right_right_ref,
             right_module_ref=right_left_ref,
         )
+        if _is_admit(rev_body):
+            synth = _apply_stateless(
+                _try_stateless(
+                    app,
+                    right_states[k],
+                    right_states[k + 1],
+                    right_mods[k],
+                    right_mods[k + 1],
+                    reversed_dir=True,
+                )
+            )
+            if synth is not None:
+                rev_body = synth
+                del requested_keys[_key_mark:]
         for h in helpers_fwd:
             chunks.append(h)
         fwd = _MicroLemma(
@@ -608,6 +731,9 @@ def emit_chain_for_hop(
             pre_override=eq_args_strong if multi_module else None,
             post_override=eq_post_strong if multi_module else None,
             requested_keys=requested_keys,
+            # Chain discarded: the synthesized stateless tactics are unused, so
+            # don't request the (now-orphan) foundation.
+            stateless_modules=set(),
         )
     return HopChainInfo(
         extra_decls=chunks,
@@ -615,6 +741,7 @@ def emit_chain_for_hop(
         pre_override=eq_args_strong if multi_module else None,
         post_override=eq_post_strong if multi_module else None,
         requested_keys=requested_keys,
+        stateless_modules=stateless_modules,
     )
 
 
@@ -839,6 +966,23 @@ def _expr_signature(
 # ---------------------------------------------------------------------------
 
 
+def _flat_state_module(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    modules: mt.ModuleTranslator,
+    mod_name: str,
+    game: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    module_params: list[ec_ast.ModuleParam],
+) -> ec_ast.Module:
+    """Translate one intermediate flat-state game to an EC ``Module`` AST."""
+    prepared = _normalize_for_ec(
+        copy.deepcopy(game), external_module_types, method_return_types
+    )
+    return modules.translate_flat_game(
+        prepared, mod_name, external_module_types, module_params=module_params
+    )
+
+
 def _render_flat_state(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     modules: mt.ModuleTranslator,
     mod_name: str,
@@ -848,11 +992,13 @@ def _render_flat_state(  # pylint: disable=too-many-arguments,too-many-positiona
     module_params: list[ec_ast.ModuleParam],
 ) -> str:
     """Render one intermediate flat-state game as an EC module source string."""
-    prepared = _normalize_for_ec(
-        copy.deepcopy(game), external_module_types, method_return_types
-    )
-    ec_module = modules.translate_flat_game(
-        prepared, mod_name, external_module_types, module_params=module_params
+    ec_module = _flat_state_module(
+        modules,
+        mod_name,
+        game,
+        external_module_types,
+        method_return_types,
+        module_params,
     )
     return "\n".join(_render_module_decl(ec_module))
 
@@ -860,6 +1006,279 @@ def _render_flat_state(  # pylint: disable=too-many-arguments,too-many-positiona
 # ---------------------------------------------------------------------------
 # EC source rendering helpers
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Stateless-scheme reorder synthesis
+#
+# Some canonicalization steps (notably ``Inline Local Tuple Literal``) inline a
+# tuple literal whose components are abstract scheme calls. At the FrogLang
+# level this is a pure inline, but the EC flat-state renderer hoists the two
+# nestings differently, so the before/after EC modules differ by a *reorder of
+# abstract scheme calls* (``KeyGen;KeyGen;Enc;Enc`` vs ``KeyGen;Enc;KeyGen;Enc``).
+# EC's ``swap`` rejects reordering two abstract calls (they conflict on
+# ``glob E``), and the reorder is genuinely unsound for a *stateful* scheme.
+#
+# It is sound here because the scheme is stateless (ProofFrog only validated the
+# reorder for that reason). We route the equiv through the all-``Ideal``
+# (stateless, hence swap-able) instantiation via a 4-hop transitivity, using the
+# section-scope ``<E>_<m>_sem`` statelessness axioms emitted by the exporter:
+#
+#   state_1(E)      ~ state_1(Ideal)   (* leg1: call-by-call sem axioms       *)
+#   state_1(Ideal)  ~ M(Ideal)         (* leg_a: EC tuple inline, same order   *)
+#   M(Ideal)        ~ state_2(Ideal)   (* leg_b: pure call-level reorder       *)
+#   state_2(Ideal)  ~ state_2(E)       (* leg3: symmetry + sem axioms         *)
+#
+# where M is ``state_1`` with the tuple literal inlined at the EC level (so it
+# matches state_2 modulo the call order). See the design doc
+# ``extras/docs/plans/in-progress/2026-06-01-scheme-statelessness-foundation.md``.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _StatelessSynth:
+    """Synthesized stateless-reorder proof for one micro."""
+
+    module_text: str | None  # the M intermediate module (None if no tuple)
+    module_name: str | None
+    tactic: list[str]
+    request: tuple[str, str]  # (declared module name, clone alias)
+
+
+def _split_top_tuple(rhs: str) -> list[str] | None:
+    """Split a top-level EC tuple literal ``(e0, e1, ...)`` into components."""
+    s = rhs.strip()
+    if not (s.startswith("(") and s.endswith(")")):
+        return None
+    depth = 0
+    parts: list[str] = []
+    cur = ""
+    for ch in s[1:-1]:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur.strip())
+    return parts if len(parts) >= 2 else None
+
+
+def _proj_re(var: str) -> "re.Pattern[str]":
+    return re.compile(r"\b" + re.escape(var) + r"\.`(\d+)")
+
+
+def _has_bare_use(var: str, text: str) -> bool:
+    """True if ``var`` appears in ``text`` other than as a projection ``var.`i``."""
+    total = len(re.findall(r"\b" + re.escape(var) + r"\b", text))
+    projs = len(_proj_re(var).findall(text))
+    return total > projs
+
+
+def _stmt_text(stmt: ec_ast.EcStmt) -> str:
+    if isinstance(stmt, ec_ast.Assign):
+        return stmt.rhs
+    if isinstance(stmt, ec_ast.Call):
+        return stmt.args
+    if isinstance(stmt, ec_ast.Return):
+        return stmt.expr
+    return ""
+
+
+def _subst_proj(stmt: ec_ast.EcStmt, var: str, comps: list[str]) -> ec_ast.EcStmt:
+    def repl(m: "re.Match[str]") -> str:
+        idx = int(m.group(1)) - 1
+        return comps[idx] if 0 <= idx < len(comps) else m.group(0)
+
+    pat = _proj_re(var)
+    if isinstance(stmt, ec_ast.Assign):
+        return ec_ast.Assign(stmt.var, pat.sub(repl, stmt.rhs))
+    if isinstance(stmt, ec_ast.Call):
+        return ec_ast.Call(stmt.var, stmt.callee, pat.sub(repl, stmt.args))
+    if isinstance(stmt, ec_ast.Return):
+        return ec_ast.Return(pat.sub(repl, stmt.expr))
+    return stmt
+
+
+def _ec_tuple_inline(
+    body: list[ec_ast.EcStmt],
+) -> tuple[list[ec_ast.EcStmt], bool]:
+    """Inline tuple-literal local assignments at the EC level.
+
+    For ``k <- (e0, e1, ...)`` whose later uses are all projections ``k.`i``,
+    drop the assignment (and ``k``'s var decl) and replace ``k.`i`` with the
+    corresponding component everywhere after. Mirrors
+    ``InlineLocalTupleLiteralTransformer`` but on the rendered EC module so the
+    inlined intermediate keeps the *un-hoisted* call order.
+    """
+    rest_text = "\n".join(_stmt_text(s) for s in body)
+    inline_map: dict[str, list[str]] = {}
+    inlined: set[str] = set()
+    out: list[ec_ast.EcStmt] = []
+    changed = False
+    for idx, stmt in enumerate(body):
+        if isinstance(stmt, ec_ast.Assign):
+            comps = _split_top_tuple(stmt.rhs)
+            if comps is not None:
+                later = "\n".join(_stmt_text(s) for s in body[idx + 1 :])
+                if not _has_bare_use(stmt.var, later):
+                    inline_map[stmt.var] = comps
+                    inlined.add(stmt.var)
+                    changed = True
+                    continue
+        for var, comps in inline_map.items():
+            stmt = _subst_proj(stmt, var, comps)
+        out.append(stmt)
+    out = [s for s in out if not (isinstance(s, ec_ast.VarDecl) and s.name in inlined)]
+    _ = rest_text
+    return out, changed
+
+
+def _exec_stmts(body: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt]:
+    return [s for s in body if not isinstance(s, ec_ast.VarDecl)]
+
+
+def _ec_sig(stmt: ec_ast.EcStmt) -> tuple[str, ...]:
+    if isinstance(stmt, ec_ast.Call):
+        return ("call", stmt.callee)
+    if isinstance(stmt, ec_ast.Sample):
+        return ("sample",)
+    if isinstance(stmt, ec_ast.Assign):
+        return ("assign",)
+    if isinstance(stmt, ec_ast.Return):
+        return ("return",)
+    return ("?",)
+
+
+def _ec_perm_swaps(
+    before: list[ec_ast.EcStmt], after: list[ec_ast.EcStmt]
+) -> list[str] | None:
+    """``swap{1}`` tactics reordering ``before``'s exec statements to ``after``.
+
+    Matches statements by a rename-invariant signature (call callee / sample /
+    assign / return) with a stable bubble sort, so same-callee statements keep
+    their relative order. Returns ``None`` when the two are not a permutation.
+    """
+    b = _exec_stmts(before)
+    a = _exec_stmts(after)
+    if len(b) != len(a):
+        return None
+    bsig = [_ec_sig(s) for s in b]
+    asig = [_ec_sig(s) for s in a]
+    if sorted(map(str, bsig)) != sorted(map(str, asig)):
+        return None
+    cur = list(bsig)
+    swaps: list[str] = []
+    for target, sig in enumerate(asig):
+        if cur[target] == sig:
+            continue
+        src = next((i for i in range(target + 1, len(cur)) if cur[i] == sig), None)
+        if src is None:
+            return None
+        delta = target - src
+        swaps.append(f"swap{{1}} {src + 1} {delta}")
+        cur.insert(target, cur.pop(src))
+    return swaps
+
+
+def _leg_sem_calls(body: list[ec_ast.EcStmt], module_name: str) -> str:
+    """Bottom-up ``proc; wp; call <E>_<m>_sem; ...; auto`` tactic for a leg.
+
+    Walks the executable statements in reverse: each abstract call becomes
+    ``call <module>_<method>_sem``; a maximal run of deterministic statements
+    before a call becomes one ``wp``. Closes the residual with ``auto``. This
+    discharges ``state(E) ~ state(Ideal)`` (identical bodies, ``E`` vs ``Ideal``).
+    """
+    seq = ["proc"]
+    need_wp = True
+    for stmt in reversed(_exec_stmts(body)):
+        if isinstance(stmt, ec_ast.Call):
+            if need_wp:
+                seq.append("wp")
+                need_wp = False
+            method = stmt.callee.split(".")[-1]
+            seq.append(f"call {module_name}_{method}_sem")
+        else:
+            need_wp = True
+    seq.append("auto")
+    return "; ".join(seq)
+
+
+def _synth_stateless_reorder(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    before_module: ec_ast.Module,
+    after_module: ec_ast.Module,
+    before_name: str,
+    after_name: str,
+    ideal_suffix: str,
+    module_name: str,
+    clone_alias: str,
+    oracle: str,
+    pre: str,
+    post: str,
+    reversed_dir: bool,
+) -> _StatelessSynth | None:
+    """Synthesize the transitivity-through-``Ideal`` proof for a reorder micro.
+
+    Returns ``None`` when the diff is not a stateless-scheme reorder (e.g. not
+    a permutation, or no abstract calls involved), so the caller falls back to
+    the normal cache/admit path.
+    """
+    if not before_module.procs or not after_module.procs:
+        return None
+    before_body = before_module.procs[0].body
+    after_body = after_module.procs[0].body
+    if not any(isinstance(s, ec_ast.Call) for s in _exec_stmts(before_body)):
+        return None
+    m_body, did_inline = _ec_tuple_inline(before_body)
+    swaps = _ec_perm_swaps(m_body, after_body)
+    if swaps is None:
+        return None
+
+    spec = f"({pre} ==> {post}) ({pre} ==> {post})"
+    leg1 = _leg_sem_calls(before_body, module_name)
+    leg3 = "symmetry; " + _leg_sem_calls(after_body, module_name)
+    leg_b = "proc; " + "; ".join(swaps + ["sim"]) if swaps else "proc; sim"
+
+    module_text: str | None = None
+    m_name: str | None = None
+    if did_inline:
+        m_name = before_name + "b"
+        leg_a = "proc; inline*; auto"
+        body_lines = [
+            f"transitivity {before_name}{ideal_suffix}.{oracle} {spec};",
+            f"  [ smt() | smt() | {leg1} | ].",
+            f"transitivity {m_name}{ideal_suffix}.{oracle} {spec};",
+            f"  [ smt() | smt() | {leg_a} | ].",
+            f"transitivity {after_name}{ideal_suffix}.{oracle} {spec};",
+            f"  [ smt() | smt() | {leg_b} | {leg3} ].",
+        ]
+        proc0 = before_module.procs[0]
+        m_proc = ec_ast.Proc(proc0.name, proc0.params, proc0.return_type, m_body)
+        m_module = ec_ast.Module(
+            name=m_name, procs=[m_proc], params=before_module.params
+        )
+        module_text = "\n".join(_render_module_decl(m_module))
+    else:
+        body_lines = [
+            f"transitivity {before_name}{ideal_suffix}.{oracle} {spec};",
+            f"  [ smt() | smt() | {leg1} | ].",
+            f"transitivity {after_name}{ideal_suffix}.{oracle} {spec};",
+            f"  [ smt() | smt() | {leg_b} | {leg3} ].",
+        ]
+
+    tactic = [_res_tag(SYNTH_PARAM)]
+    if reversed_dir:
+        tactic.append("symmetry.")
+    tactic.extend(body_lines)
+    return _StatelessSynth(
+        module_text=module_text,
+        module_name=m_name,
+        tactic=tactic,
+        request=(module_name, clone_alias),
+    )
 
 
 def _render_module_decl(module: ec_ast.Module) -> list[str]:

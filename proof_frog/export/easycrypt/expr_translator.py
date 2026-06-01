@@ -38,6 +38,8 @@ class ExpressionTranslator:
             return expr.name
         if isinstance(expr, frog_ast.Integer):
             return str(expr.num)
+        if isinstance(expr, frog_ast.Boolean):
+            return "true" if expr.bool else "false"
         if isinstance(expr, frog_ast.BitStringLiteral):
             if expr.bit != 0:
                 raise NotImplementedError(

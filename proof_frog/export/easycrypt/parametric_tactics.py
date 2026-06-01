@@ -494,15 +494,17 @@ def _xor_arg_swaps_only(
     before: frog_ast.Expression,
     after: frog_ast.Expression,
     swaps: list[frog_ast.Type],
+    var_types: dict[str, frog_ast.Type] | None = None,
 ) -> bool:
     """Return True if ``after`` equals ``before`` modulo swapped XOR args.
 
     Records each swap site's operand type into ``swaps`` so the caller
     can emit ``xor_<suffix>_commut`` axioms for the relevant types. The
     operand type is reconstructed from ``before.left_expression`` via
-    :func:`_expr_bs_type` (a best-effort inference that handles bare
-    Variable + Slice cases — sufficient for the canonical-chain shapes
-    we currently see).
+    :func:`_expr_bs_type`. The optional ``var_types`` argument supplies
+    a name→Type map (built by the caller from method params + local
+    declarations) so bare ``Variable`` operands resolve to their
+    declared bitstring type.
     """
     if isinstance(before, frog_ast.BinaryOperation) and isinstance(
         after, frog_ast.BinaryOperation
@@ -516,41 +518,46 @@ def _xor_arg_swaps_only(
             and before.left_expression == after.right_expression
             and before.right_expression == after.left_expression
         ):
-            inferred = _expr_bs_type(before.left_expression)
+            inferred = _expr_bs_type(before.left_expression, var_types)
+            if inferred is None:
+                inferred = _expr_bs_type(before.right_expression, var_types)
             if inferred is None:
                 return False
             swaps.append(inferred)
             return True
         return _xor_arg_swaps_only(
-            before.left_expression, after.left_expression, swaps
+            before.left_expression, after.left_expression, swaps, var_types
         ) and _xor_arg_swaps_only(
-            before.right_expression, after.right_expression, swaps
+            before.right_expression, after.right_expression, swaps, var_types
         )
     if isinstance(before, frog_ast.FuncCall) and isinstance(after, frog_ast.FuncCall):
         if before.func != after.func or len(before.args) != len(after.args):
             return False
         return all(
-            _xor_arg_swaps_only(b, a, swaps) for b, a in zip(before.args, after.args)
+            _xor_arg_swaps_only(b, a, swaps, var_types)
+            for b, a in zip(before.args, after.args)
         )
     return before == after
 
 
-def _expr_bs_type(e: frog_ast.Expression) -> frog_ast.Type | None:
+def _expr_bs_type(
+    e: frog_ast.Expression,
+    var_types: dict[str, frog_ast.Type] | None = None,
+) -> frog_ast.Type | None:
     """Best-effort inference of an expression's BitString type.
 
-    Handles the cases that appear in the chain-emitter's micros:
-    ``Slice`` (length = ``end - start``) and ``Variable`` (looked up
-    later via the surrounding sample). Returns ``None`` otherwise. The
-    caller treats ``None`` as "can't synthesize this swap" and bails.
+    Handles ``Slice`` (length = ``end - start``) and bare ``Variable``
+    (looked up in ``var_types`` if provided — the caller builds this
+    map from method params + ``VariableDeclaration``s).
     """
     if isinstance(e, frog_ast.Slice):
         return frog_ast.BitStringType(
             frog_ast.BinaryOperation(frog_ast.BinaryOperators.SUBTRACT, e.end, e.start)
         )
-    # Bare Variable: its type is fixed by the sample/assignment that
-    # binds it; we'd need the surrounding type map to resolve. For the
-    # shapes that surface today, at least one operand of every XOR swap
-    # we see is a Slice — so returning None here is acceptable.
+    if isinstance(e, frog_ast.Variable) and var_types is not None:
+        t = var_types.get(e.name)
+        if isinstance(t, frog_ast.BitStringType):
+            return t
     return None
 
 
@@ -618,6 +625,19 @@ def normalize_commutative_chains_tactic(  # pylint: disable=too-many-branches,to
     after_stmts = list(after_method.block.statements)
     if len(before_stmts) != len(after_stmts):
         return None
+    # Build a name->Type map for bare-Variable lookups inside
+    # ``_xor_arg_swaps_only``. Method params + ``VariableDeclaration``s
+    # cover every name that can appear as an XOR operand in the EC body.
+    var_types: dict[str, frog_ast.Type] = {}
+    for p in before_method.signature.parameters:
+        var_types[p.name] = p.type
+    for stmt in before_stmts:
+        if isinstance(stmt, frog_ast.VariableDeclaration):
+            var_types.setdefault(stmt.name, stmt.type)
+        elif isinstance(stmt, (frog_ast.Sample, frog_ast.Assignment)):
+            if isinstance(stmt.var, frog_ast.Variable) and stmt.the_type is not None:
+                var_types.setdefault(stmt.var.name, stmt.the_type)
+
     swap_types: list[frog_ast.Type] = []
     found_diff = False
     for b, a in zip(before_stmts, after_stmts):
@@ -630,7 +650,7 @@ def normalize_commutative_chains_tactic(  # pylint: disable=too-many-branches,to
             and isinstance(a, frog_ast.ReturnStatement)
         ):
             return None
-        if not _xor_arg_swaps_only(b.expression, a.expression, swap_types):
+        if not _xor_arg_swaps_only(b.expression, a.expression, swap_types, var_types):
             return None
         found_diff = True
     if not found_diff or not swap_types:

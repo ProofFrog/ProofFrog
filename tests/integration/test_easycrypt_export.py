@@ -27,6 +27,9 @@ PRG_5_8_A_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_a.pr
 PRG_5_8_B_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_b.proof"
 PRG_5_8_E_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_e.proof"
 PRG_5_8_F_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_f.proof"
+PRG_5_8_OTUC_PROOF = (
+    REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_PseudoOTP_OTUC.proof"
+)
 PRG_5_10_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_10.proof"
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
@@ -755,6 +758,61 @@ def test_export_5_8_f_base_resolves_foreign_field_lengths() -> None:
     assert "bs_2_G_lambda" not in output  # the pre-fix splinter is gone
 
 
+def test_export_otuc_foreign_otp_uses_its_own_carrier_types() -> None:
+    """OTUC has primary ``P = PseudoOTP(lambda, 2*lambda, G)`` and foreign
+    ground ``E = OTP(3*lambda)``. Both schemes extend ``SymEnc`` and share
+    field names (``Key``, ``Message``, ``Ciphertext``), but with different
+    lengths: PseudoOTP's ``Key = BitString<lambda>`` and ``Message =
+    BitString<3*lambda>``; OTP's are all ``BitString<3*lambda>``.
+
+    The exporter must translate OTP's body using *OTP's* carrier types, not
+    inherit PseudoOTP's bare aliases from the top-level alias map. The
+    ground-scheme bug emitted ``proc enc(k : bs_lambda, m : bs_3_lambda)``
+    with ``xor_lambda k m`` (k pinned to primary's ``Key`` width).
+    """
+    output = exporter.export_proof_file(str(PRG_5_8_OTUC_PROOF))
+    # OTP is concretized as a ground foreign module of E_c.Scheme.
+    assert "module OTP : E_c.Scheme = {" in output
+    otp_body = output.split("module OTP : E_c.Scheme = {", 1)[1].split("}.", 1)[0]
+    # All three procs use OTP's own carrier width (bs_3_lambda everywhere);
+    # nothing should leak the primary's bs_lambda width through.
+    assert "proc keygen() : bs_3_lambda" in otp_body
+    assert "k <$ dbs_3_lambda" in otp_body
+    assert "proc enc(k : bs_3_lambda, m : bs_3_lambda) : bs_3_lambda" in otp_body
+    assert "proc dec(k : bs_3_lambda, c : bs_3_lambda) : bs_3_lambda" in otp_body
+    # Body XORs are at the 3*lambda width.
+    assert "xor_3_lambda k m" in otp_body
+    assert "xor_3_lambda k c" in otp_body
+    assert "bs_lambda" not in otp_body
+    assert "xor_lambda" not in otp_body
+    # E_c clone bindings (sanity) are at bs_3_lambda.
+    assert "clone SymEnc_Theory as E_c with" in output
+    e_c_block = output.split("clone SymEnc_Theory as E_c with", 1)[1].split(".", 1)[0]
+    assert "type key <- bs_3_lambda" in e_c_block
+    assert "type message <- bs_3_lambda" in e_c_block
+    assert "type ciphertext <- bs_3_lambda" in e_c_block
+
+
+def test_export_otuc_closes_at_zero_admits() -> None:
+    """5_8_PseudoOTP_OTUC was previously ``blocked`` (exported with 2
+    cross-primitive admits). With the carrier-name + ``external_module_types``
+    fixes, the only foreign primitive on the cross-primitive hops is ``G``
+    (a PRG *primitive* instance, no scheme body to inline). The chain emits
+    and the per-transform micros close with synth-static throughout —
+    bringing OTUC to 0 admits. Pins both: 0 admits, and that the two
+    cross-primitive hops emit a chain (not the abstract-bridge admit).
+    """
+    output = exporter.export_proof_file(str(PRG_5_8_OTUC_PROOF))
+    assert output.count("admit.") == 0
+    # Both cross-primitive hops emit a chain through Step_<i>{L,R}_state_*
+    # rather than the foreign-abstract admit comment.
+    assert "module Step_0L_state_0" in output
+    assert "module Step_0R_state_0" in output
+    assert "module Step_2L_state_0" in output
+    assert "module Step_2R_state_0" in output
+    assert "cross-primitive inlining hop" not in output
+
+
 def test_export_emits_determinism_specs_for_abstract_methods() -> None:
     """Each ``deterministic`` method of a declared (abstract) primitive
     module gets a glob-independent ``op ev_<m>`` in its theory and a
@@ -783,6 +841,44 @@ def test_export_emits_determinism_specs_for_abstract_methods() -> None:
     ces_out = exporter.export_proof_file(str(CES_PROOF))
     assert "op ev_dec :" in ces_out
     assert "declare axiom E1_dec_det (g : (glob E1)) (a0 :" in ces_out
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_export_5_8_PseudoOTP_OTUC_typechecks_in_easycrypt(
+    tmp_path: Path,
+) -> None:
+    """EC accepts the ``5_8_PseudoOTP_OTUC`` export end-to-end with zero
+    admits. OTUC has primary ``P : PseudoOTP`` (functor) and foreign ground
+    ``E : OTP``; both extend ``SymEnc``. The carrier-alias precedence fix
+    (foreign's bare ``Key``/``Message``/``Ciphertext`` beat the primary's
+    same-named aliases) gives OTP correct widths. The cross-primitive hops
+    (INDOT$ ↔ PRGSecurity) bridge via the standard ``proc; inline*; sp; wp;
+    sim`` recipe — possible here because the only foreign-primitive instance
+    on the hop is ``G`` (a PRG primitive, no scheme body to inline).
+    """
+    output = exporter.export_proof_file(str(PRG_5_8_OTUC_PROOF))
+    ec_file = tmp_path / "5_8_PseudoOTP_OTUC.ec"
+    ec_file.write_text(output)
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    combined = result.stderr + result.stdout
+    assert "parse error" not in combined, (
+        f"EC parse error in OTUC output:\n"
+        f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
+    )
+    assert result.returncode == 0, (
+        f"EC verification failed (exit {result.returncode}).\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
 
 
 @pytest.mark.skipif(

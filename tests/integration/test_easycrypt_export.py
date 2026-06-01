@@ -707,21 +707,52 @@ def test_export_5_8_e_concretizes_pseudootp() -> None:
     assert output.count("admit.") == 0
 
 
-def test_export_emits_guided_template_for_uncached_det_reorder_hop() -> None:
+def test_export_emits_guided_template_for_uncached_det_reorder_hop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A cross-primitive deterministic-reorder hop with no sidecar entry
     falls back to a Layer-3 *guided-template* admit: a structured admit
     annotated with the reorder cascade strategy, the determinism axioms in
-    scope, and the canonical keys needed to author a sidecar entry. 5_8_f has
-    such a hop and (intentionally) no sidecar cascade, so its export still
-    exhibits the guidance. (5_8_f does not fully type-check in EC for an
-    unrelated, pre-existing reason -- its primary scheme hits the
-    ``requires``-clause type-equality gap -- so this is a structural check.)
+    scope, and the canonical keys needed to author a sidecar entry. 5_8_f's
+    two cross-primitive hops are normally closed from its sidecar; here we
+    force the sidecar lookup empty so the export exhibits the guidance --
+    exactly the path that authored that sidecar.
     """
+    from proof_frog.export.easycrypt import tactic_cache as _tc
+
+    monkeypatch.setattr(
+        _tc,
+        "relative_sidecar_path",
+        lambda _p: Path("/nonexistent.proof.tactics.toml"),
+    )
     output = exporter.export_proof_file(str(PRG_5_8_F_PROOF))
     assert "guided" in output and "STRATEGY" in output
     assert "G_evaluate_det" in output
     # The guidance includes how to cache the filled tactic.
-    assert 'transform = ' in output and "TO CACHE" in output
+    assert "transform = " in output and "TO CACHE" in output
+
+
+def test_export_5_8_f_base_resolves_foreign_field_lengths() -> None:
+    """5_8_f's primary scheme ``PRG_5_8_f`` defines ``Int lambda = 2*G.lambda``
+    and slices on ``G.lambda``. The exporter must resolve every bitstring
+    length to the proof's base ``lambda``, so the same length never acquires
+    two EC type names (the ``requires``-equality "Phase 5D" gap). Since
+    ``G = PRG(lambda, 2*lambda)``, ``G.lambda = lambda`` and ``G.stretch =
+    2*lambda``; ``H.lambda = 2*lambda``, ``H.stretch = lambda``; and every
+    ``G.evaluate`` output is ``3*lambda``.
+    """
+    output = exporter.export_proof_file(str(PRG_5_8_F_PROOF))
+    # G's clone: seed = bs_lambda (G.lambda), output = bs_3_lambda.
+    assert "type bs_lambda_t <- bs_lambda," in output
+    assert "type bs_lambda_stretch_t <- bs_3_lambda," in output
+    # H's clone: seed = bs_2_lambda (2*G.lambda), output also = bs_3_lambda.
+    assert "type bs_lambda_t <- bs_2_lambda," in output
+    # The scheme module matches the clone: evaluate takes bs_2_lambda -> bs_3_lambda.
+    assert "proc evaluate(s : bs_2_lambda) : bs_3_lambda" in output
+    # The slices feed G.evaluate at its real domain (bs_lambda), not a
+    # splintered foreign-field name.
+    assert "slice_bs_2_lambda_to_bs_lambda" in output
+    assert "bs_2_G_lambda" not in output  # the pre-fix splinter is gone
 
 
 def test_export_emits_determinism_specs_for_abstract_methods() -> None:

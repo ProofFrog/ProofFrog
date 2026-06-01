@@ -590,10 +590,16 @@ def _hoist_stmt(
             the_type=stmt.the_type, var=stmt.var, sampled_from=new_sampled
         )
     if isinstance(stmt, frog_ast.ReturnStatement):
-        # Top-level module call in a return: leave intact. Hoist only
-        # nested calls.
-        if _is_module_call(stmt.expression, external_module_types):
-            return hoister.pre, stmt
+        # ``hoister.visit`` rewrites nested module-call sub-expressions to
+        # fresh ``_rN`` variables but leaves an *outer* top-level call in
+        # place (it only hoists call arguments, not the call itself). So
+        # a plain ``return E.method(...)`` keeps its outer call in return
+        # position for the statement translator to lift, while a nested
+        # arg like ``return challenger.CTXT(G.evaluate(sR))`` gets its
+        # inner ``G.evaluate(sR)`` hoisted (EC cannot render a call whose
+        # argument is itself a call). The old "leave intact when the
+        # whole return is a module call" shortcut skipped that inner
+        # hoist and forced a ``return witness;`` stub (5_8_f's R3).
         new_expr = hoister.visit(stmt.expression)
         return hoister.pre, frog_ast.ReturnStatement(new_expr)
     return [], stmt

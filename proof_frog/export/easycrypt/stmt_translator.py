@@ -38,12 +38,25 @@ class StatementTranslator:
         self._exprs = exprs
         self._module_var_aliases: dict[str, str] = dict(module_var_aliases or {})
 
-    def translate_block(self, block: frog_ast.Block) -> TranslatedBlock:
-        """Translate every statement; hoist all var decls to the front."""
+    def translate_block(
+        self,
+        block: frog_ast.Block,
+        return_type: ec_ast.EcType | None = None,
+    ) -> TranslatedBlock:
+        """Translate every statement; hoist all var decls to the front.
+
+        ``return_type`` is the proc's EC return type, used to type the
+        fresh variable when lifting a module call in return position
+        (``return E.method(...)``). The call's result type equals the
+        proc's declared return type, which is always concretely
+        translatable — unlike the oracle method's abstract signature type
+        (e.g. INDOT$'s ``E.Ciphertext``), which the TypeCollector can't
+        resolve on its own.
+        """
         decls: list[ec_ast.VarDecl] = []
         stmts: list[ec_ast.EcStmt] = []
         for stmt in block.statements:
-            self._translate_stmt(stmt, decls, stmts)
+            self._translate_stmt(stmt, decls, stmts, return_type)
         return TranslatedBlock(decls, stmts)
 
     def _translate_stmt(
@@ -51,6 +64,7 @@ class StatementTranslator:
         stmt: frog_ast.Statement,
         decls: list[ec_ast.VarDecl],
         stmts: list[ec_ast.EcStmt],
+        return_type: ec_ast.EcType | None = None,
     ) -> None:
         if isinstance(stmt, frog_ast.Sample):
             self._handle_sample(stmt, decls, stmts)
@@ -66,8 +80,15 @@ class StatementTranslator:
                 call = stmt.expression
                 assert isinstance(call, frog_ast.FuncCall)
                 fresh = _fresh_name(decls, stmts)
-                ret_type = self._exprs.type_of(call)
-                ec_type = self._types.translate_type(ret_type)
+                # The lifted call's result is returned directly, so its
+                # type is the proc's declared return type. Prefer that
+                # (always concretely translatable) over the oracle
+                # method's abstract signature type, which may be an
+                # unresolvable cross-scheme alias like ``E.Ciphertext``.
+                if return_type is not None:
+                    ec_type = return_type
+                else:
+                    ec_type = self._types.translate_type(self._exprs.type_of(call))
                 decls.append(ec_ast.VarDecl(fresh, ec_type))
                 callee = self._render_module_call_target(call.func)
                 args = ", ".join(self._exprs.translate(a) for a in call.args)

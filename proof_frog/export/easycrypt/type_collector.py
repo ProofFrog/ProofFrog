@@ -152,6 +152,8 @@ class TypeCollector:
         resolved = self.resolve(t)
         if isinstance(resolved, frog_ast.Void):
             return ec_ast.EcType("unit")
+        if isinstance(resolved, frog_ast.BoolType):
+            return ec_ast.EcType("bool")
         if isinstance(resolved, frog_ast.BitStringType):
             name = self._bitstring_name(resolved)
             if self._theory_mode:

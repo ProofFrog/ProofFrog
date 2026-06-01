@@ -16,7 +16,6 @@ import pytest
 
 from proof_frog.export.easycrypt import exporter
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = REPO_ROOT / "examples"
 OTP_PROOF = REPO_ROOT / "examples" / "joy" / "Proofs" / "Ch2" / "OTPSecure.proof"
@@ -34,8 +33,15 @@ PRG_5_10_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_10.proo
 # 2_13: the inner SymEnc primitive's KeyGen/Enc calls are reordered by the
 # Inline-Local-Tuple-Literal step, which needs the scheme-statelessness
 # foundation to close in EC.
-STATELESS_2_13_PROOF = (
-    REPO_ROOT / "examples" / "joy_old" / "2_Exercises" / "2_13.proof"
+STATELESS_2_13_PROOF = REPO_ROOT / "examples" / "joy_old" / "2_Exercises" / "2_13.proof"
+# Primitive-only proofs: the module under attack is an abstract primitive
+# instance (``SymEnc E = SymEnc(MS, CS, KS)``), not a concrete scheme, so the
+# primary is emitted as a section ``declare module`` with no concrete scheme.
+PRIMITIVE_ONLY_2_14_FWD_PROOF = (
+    REPO_ROOT / "examples" / "joy_old" / "2_Exercises" / "2_14_Forward.proof"
+)
+INDOT_DOLLAR_IMPLIES_INDOT_PROOF = (
+    REPO_ROOT / "examples" / "Proofs" / "SymEnc" / "INDOT$_implies_INDOT.proof"
 )
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
@@ -252,9 +258,9 @@ def test_export_chained_encryption_produces_chain_lemmas() -> None:
         "CiphertextSpace1",
         "CiphertextSpace2",
     ):
-        assert f"type {ty}." in output or f"type {ty} =" in output, (
-            f"missing `type {ty}` in:\n{output}"
-        )
+        assert (
+            f"type {ty}." in output or f"type {ty} =" in output
+        ), f"missing `type {ty}` in:\n{output}"
     # Flat-state modules are parameterized over the declared instances.
     assert "module Step_0L_state_0 (E1 : E1_c.Scheme, E2 : E2_c.Scheme)" in output
     assert "module Step_0R_state_0 (E1 : E1_c.Scheme, E2 : E2_c.Scheme)" in output
@@ -298,9 +304,7 @@ def test_export_chained_encryption_uses_tactic_cache() -> None:
     """
     output = exporter.export_proof_file(str(CES_PROOF))
     miss_blocks = output.count("tactic-cache miss")
-    assert miss_blocks == 0, (
-        f"Expected 0 cache misses; got {miss_blocks}.\n{output}"
-    )
+    assert miss_blocks == 0, f"Expected 0 cache misses; got {miss_blocks}.\n{output}"
 
 
 @pytest.mark.skipif(
@@ -457,12 +461,10 @@ def test_export_5_8_b_partial_split_closes_via_augmented_intermediate() -> None:
         "Unsound 2-way split axiom (image of concat has 2^(2*lambda) "
         "elements but dbs_3_lambda has 2^(3*lambda)) regressed."
     )
-    assert "concat_bs_lambda_bs_lambda_to_bs_3_lambda" not in output, (
-        "Unsound 2-way concat op for the partial-split case regressed."
-    )
     assert (
-        "concat3_bs_lambda_bs_lambda_bs_lambda_to_bs_3_lambda" in output
-    ), (
+        "concat_bs_lambda_bs_lambda_to_bs_3_lambda" not in output
+    ), "Unsound 2-way concat op for the partial-split case regressed."
+    assert "concat3_bs_lambda_bs_lambda_bs_lambda_to_bs_3_lambda" in output, (
         "Expected the sound 3-way concat op for the partial-split path; "
         "the augmented-intermediate synthesizer did not fire."
     )
@@ -511,12 +513,9 @@ def test_export_5_8_a_partial_split_mid_gap_with_modcall_tail_closes() -> None:
         "|L|+|R| != |ret_type|."
     )
     assert "concat_bs_lambda_bs_lambda_to_bs_6_lambda" not in output, (
-        "Unsound 2-way concat op for the module-call-tail partial "
-        "split regressed."
+        "Unsound 2-way concat op for the module-call-tail partial " "split regressed."
     )
-    assert (
-        "concat3_bs_lambda_bs_lambda_bs_lambda_to_bs_3_lambda" in output
-    ), (
+    assert "concat3_bs_lambda_bs_lambda_bs_lambda_to_bs_3_lambda" in output, (
         "Expected the 3-way concat op for the mid-gap partial-split "
         "path; the augmented-intermediate synthesizer did not fire."
     )
@@ -599,9 +598,9 @@ def test_export_5_10_concrete_foreign_otp_closes_cross_primitive_hops() -> None:
         "Expected the foreign OTP instance to be emitted as a concrete "
         "module ascribing to its clone's Scheme type."
     )
-    assert "declare module P " not in output, (
-        "OTP must be a concrete module, not an abstract ``declare module``."
-    )
+    assert (
+        "declare module P " not in output
+    ), "OTP must be a concrete module, not an abstract ``declare module``."
     assert "P_c.eps_INDOT_" in output, (
         "The abstract foreign theory + INDOT$ advantage axiom must be "
         "kept so the proof's advantage bound is preserved."
@@ -1035,6 +1034,79 @@ def test_export_2_13_typechecks_in_easycrypt(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, (
         f"EasyCrypt rejected the 2_13 export.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Primitive-only proofs (A2): no concrete Scheme; the module under attack is
+# an abstract primitive instance emitted as a section ``declare module``.
+# ---------------------------------------------------------------------------
+
+
+def test_export_primitive_only_emits_declare_module_no_concrete_scheme() -> None:
+    """A primitive-security proof (``SymEnc E = SymEnc(MS, CS, KS)``; no
+    concrete scheme imported) exports with the primary primitive as an
+    abstract section ``declare module E <: E_c.Scheme`` and NO concrete scheme
+    module ("Concrete scheme implementation" section). Games/reductions are
+    emitted as functors over the declared ``E``. Regression guard for the
+    primitive-only entry path in ``export_proof_file``.
+    """
+    output = exporter.export_proof_file(str(PRIMITIVE_ONLY_2_14_FWD_PROOF))
+    assert "clone SymEnc_Theory as E_c" in output
+    assert "section Main" in output
+    assert "declare module E <: E_c.Scheme" in output
+    # No concrete scheme body is translated in primitive-only mode.
+    assert "Concrete scheme implementation" not in output
+    # The security games are still emitted as functors over the abstract E.
+    assert "module Game_step_0 (E : E_c.Scheme" in output
+
+
+def test_export_primitive_only_reduction_applied_to_primary_module() -> None:
+    """When a reduction's scheme parameter is named differently from the
+    instance (``Reduction R1(SymEnc se)`` applied as ``R1(proofE)``), the
+    lifted reduction-adversary wrapper applies the reduction to the primary
+    declared module, not to the reduction's own formal-parameter name.
+
+    Also exercises EC-module-name normalization: the lowercase instance
+    ``proofE`` and reduction params ``se``/``se2`` are uppercased to valid EC
+    module identifiers (``ProofE``, ``Se``/``Se2``) — EC theory/module names
+    must begin with an uppercase letter.
+    """
+    output = exporter.export_proof_file(str(INDOT_DOLLAR_IMPLIES_INDOT_PROOF))
+    # Lowercase instance/param names are normalized to uppercase-initial.
+    assert "clone SymEnc_Theory as ProofE_c" in output
+    assert "declare module ProofE <: ProofE_c.Scheme" in output
+    assert "A(R1(ProofE, C))" in output
+    assert "A(R2(ProofE, C))" in output
+    # The original lowercase identifiers must not leak into the EC output.
+    assert "proofE" not in output
+    assert "A(R1(se, C))" not in output
+    assert "A(R2(se2, C))" not in output
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_export_primitive_only_indot_typechecks_in_easycrypt(tmp_path: Path) -> None:
+    """End-to-end: the primitive-only ``INDOT$_implies_INDOT`` export (abstract
+    ``declare module``, EC-name normalization) type-checks in EasyCrypt with
+    zero admits."""
+    output = exporter.export_proof_file(str(INDOT_DOLLAR_IMPLIES_INDOT_PROOF))
+    assert "admit." not in output
+    ec_file = tmp_path / "indot_implies_indot.ec"
+    ec_file.write_text(output)
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the INDOT$_implies_INDOT export.\n"
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )

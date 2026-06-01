@@ -1007,7 +1007,13 @@ def export_proof_file(proof_path: str) -> str:
         for fname, ftype in inst.concretized_fields.items():
             if fname in foreign_int_names:
                 continue  # base-shadowing int field; body is pre-inlined below
-            foreign_aliases.setdefault(fname, ftype)
+            # Direct assignment: the foreign body references bare carrier
+            # names (e.g. ``Key``) that mean *its own* fields, so the foreign
+            # instance's binding must take precedence over any same-named
+            # bare alias inherited from the primary. Without this, OTUC's
+            # foreign ``OTP(3*lambda)`` would resolve bare ``Key`` to the
+            # primary PseudoOTP's ``BitString<lambda>`` (different width).
+            foreign_aliases[fname] = ftype
         foreign_types = tc.TypeCollector(
             aliases=foreign_aliases, known_abstract_types=known_abstract_types
         )
@@ -1408,8 +1414,19 @@ def export_proof_file(proof_path: str) -> str:
             foreign_insts = [
                 inst for inst in instances if inst.primitive_name in foreign_prims
             ]
-            foreign_all_concrete = bool(foreign_insts) and all(
-                inst.let_name in concretizable_foreign for inst in foreign_insts
+            # Only scheme instances (concrete bodies the engine can inline)
+            # need to be concretized in EC. A foreign *primitive* instance
+            # (e.g. OTUC's ``G : PRG``) has no scheme body — its methods stay
+            # opaque on both sides of the hop, so ``sim`` over an abstract
+            # declared module closes the bridge with ``={glob G}``. We
+            # therefore restrict the concretization-required check to scheme
+            # instances; a hop whose only foreign instance is a primitive is
+            # not blocked.
+            foreign_scheme_insts = [
+                inst for inst in foreign_insts if inst.ctor_name in schemes_by_name
+            ]
+            foreign_all_concrete = all(
+                inst.let_name in concretizable_foreign for inst in foreign_scheme_insts
             )
             foreign_has_nonground = any(
                 inst.let_name in nonground_concrete for inst in foreign_insts
@@ -1488,8 +1505,12 @@ def export_proof_file(proof_path: str) -> str:
         _right_canon, right_apps = engine.canonicalize_game_with_states(
             copy.deepcopy(right_ast)
         )
+        # Each instance maps to its OWN primitive's name (not the primary's).
+        # A multi-primitive proof has, e.g., ``G : PRG`` alongside ``P, E``
+        # on SymEnc; method-return-type lookups for ``G.evaluate`` must
+        # resolve through ``PRG``, not the primary's primitive.
         external_module_types: dict[str, str] = {
-            inst.let_name: primitive.name for inst in instances
+            inst.let_name: inst.primitive_name for inst in instances
         }
         # In multi-scheme proofs the flat-state modules live inside a
         # section with ``declare module E1, E2``; EC forbids

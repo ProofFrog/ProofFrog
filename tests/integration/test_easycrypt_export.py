@@ -31,6 +31,12 @@ PRG_5_8_OTUC_PROOF = (
     REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_PseudoOTP_OTUC.proof"
 )
 PRG_5_10_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_10.proof"
+# 2_13: the inner SymEnc primitive's KeyGen/Enc calls are reordered by the
+# Inline-Local-Tuple-Literal step, which needs the scheme-statelessness
+# foundation to close in EC.
+STATELESS_2_13_PROOF = (
+    REPO_ROOT / "examples" / "joy_old" / "2_Exercises" / "2_13.proof"
+)
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
 
@@ -953,6 +959,82 @@ def test_export_5_8_b_partial_split_typechecks_in_easycrypt(
     assert result.returncode == 0, (
         f"EC verification failed (exit {result.returncode}); the "
         f"non-admit portions of the 5_8_b export may have regressed.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scheme-statelessness foundation (stateless-scheme abstract-call reorder)
+# ---------------------------------------------------------------------------
+
+
+def test_export_2_13_emits_statelessness_foundation_and_closes() -> None:
+    """2_13's Inline-Local-Tuple-Literal step reorders two abstract scheme
+    calls. The exporter emits the statelessness foundation (distribution ops,
+    ``Ideal`` module, ``E_<m>_sem`` axioms) and synthesizes a
+    transitivity-through-``Ideal`` proof, closing the proof with no admits.
+    """
+    output = exporter.export_proof_file(str(STATELESS_2_13_PROOF))
+    # Foundation in the theory.
+    assert "op dkeygen :" in output
+    assert "op denc :" in output
+    assert "module Ideal : Scheme" in output
+    # Section-scope statelessness specs.
+    assert "declare axiom E_keygen_sem" in output
+    assert "declare axiom E_enc_sem" in output
+    # Synthesized transitivity through the all-Ideal instantiation + the
+    # tuple-inlined intermediate module.
+    assert "E_c.Ideal).eavesdrop" in output
+    assert "module Step_0L_state_1b" in output
+    # No admits.
+    assert "admit." not in output
+
+
+def test_export_2_13_no_orphan_or_missing_cache_keys() -> None:
+    """The synthesized stateless micros must not leave phantom cache lookups:
+    once synthesis wins, the cache miss recorded by the admit path is dropped,
+    so 2_13 consults the tactic cache zero times.
+    """
+    exporter.export_proof_file(str(STATELESS_2_13_PROOF))
+    keys = getattr(exporter, "_last_requested_cache_keys", [])
+    assert keys == [], (
+        f"2_13 unexpectedly consulted the tactic cache ({len(keys)} key(s)); "
+        "stateless-reorder synthesis should drop the recorded miss."
+    )
+
+
+def test_statelessness_foundation_is_gated() -> None:
+    """Proofs whose abstract scheme calls are not reordered must not get the
+    foundation (no Ideal module, no _sem axioms) and must still close.
+    """
+    for proof in (OTP_PROOF, PRG_5_8_A_PROOF, CES_PROOF):
+        output = exporter.export_proof_file(str(proof))
+        assert "module Ideal" not in output, f"{proof.name} got an Ideal module"
+        assert "_sem :" not in output, f"{proof.name} got a stateless axiom"
+        assert "admit." not in output, f"{proof.name} regressed to an admit"
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_export_2_13_typechecks_in_easycrypt(tmp_path: Path) -> None:
+    """End-to-end: 2_13 export (with the statelessness foundation) type-checks
+    in EasyCrypt with zero admits."""
+    output = exporter.export_proof_file(str(STATELESS_2_13_PROOF))
+    assert "admit." not in output
+    ec_file = tmp_path / "2_13.ec"
+    ec_file.write_text(output)
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the 2_13 export.\n"
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )

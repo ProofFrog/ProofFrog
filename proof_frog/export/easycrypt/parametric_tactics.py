@@ -1075,6 +1075,12 @@ def split_uniform_samples_tactic(
             swap_split = True
         elif not first_is_left and first_var == s_a.var.name:
             swap_split = True
+    # Count module calls in the deterministic tail so the TAIL sub-goal
+    # emits one ``call (_: true).`` per call. Concatenate shapes
+    # (5_8_a/b, 5_10) have one; the XOR-of-two-PRG shape (5_8_f) has two.
+    tail_calls = sum(
+        _count_module_calls(e) for s in before_tail if (e := _expr_of(s)) is not None
+    )
     return _split_tactic_body(
         orig_var=_ec_ident(s_orig.var.name),
         a_var=_ec_ident(s_a.var.name),
@@ -1087,6 +1093,7 @@ def split_uniform_samples_tactic(
         len_res=len_res,
         swap_split=swap_split,
         eq_args_strong=eq_args_strong,
+        tail_calls=tail_calls,
     )
 
 
@@ -2228,6 +2235,7 @@ def _split_tactic_body(  # pylint: disable=too-many-arguments,too-many-positiona
     len_res: str,
     swap_split: bool = False,
     eq_args_strong: str = "",
+    tail_calls: int = 1,
 ) -> list[str]:
     """Render the EC tactic body for a ``Split Uniform Samples`` micro.
 
@@ -2337,7 +2345,13 @@ def _split_tactic_body(  # pylint: disable=too-many-arguments,too-many-positiona
         "- (* TAIL: invariant supplies the slice/var equalities so the "
         "call args match  *)",
         "  (* and the return concats agree. *)",
-        "  call (_: true).",
+        # One ``call (_: true).`` per module call in the deterministic
+        # tail, processed back-to-front. The single-call concatenate
+        # shape (5_8_a/b, 5_10) emits exactly one; the XOR-of-two-PRG
+        # shape (5_8_f: ``G(sL) XOR G(sR)``) emits two, otherwise the
+        # second ``G.evaluate`` is left un-discharged and ``auto`` stalls
+        # on ``forall r, xor _r0{1} r = xor _r0{2} r``.
+        *["  call (_: true)." for _ in range(max(tail_calls, 1))],
         # ``auto`` (not ``skip``) is needed when the deterministic tail
         # contains an assignment like ``y = slice(orig, ...)`` ahead of
         # the call: ``skip`` only closes the leaf, while ``auto`` peels

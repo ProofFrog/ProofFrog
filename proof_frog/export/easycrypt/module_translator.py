@@ -502,7 +502,7 @@ class ModuleTranslator:
             self._types, exprs, module_var_aliases=module_var_aliases
         )
         try:
-            translated = stmts.translate_block(method.block)
+            translated = stmts.translate_block(method.block, return_type=return_type)
             body: list[ec_ast.EcStmt] = []
             body.extend(translated.var_decls)
             body.extend(translated.stmts)

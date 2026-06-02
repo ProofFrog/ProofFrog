@@ -1110,3 +1110,44 @@ def test_export_primitive_only_indot_typechecks_in_easycrypt(tmp_path: Path) -> 
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Multi-oracle stateful indistinguishability — VALIDATED EC TEMPLATE
+# ---------------------------------------------------------------------------
+
+EC_TEMPLATES = Path(__file__).parent / "ec_templates"
+MULTI_ORACLE_TEMPLATE = EC_TEMPLATES / "multi_oracle_indist.ec"
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_multi_oracle_indist_template_compiles(tmp_path: Path) -> None:
+    """Regression tripwire for the multi-oracle stateful indistinguishability
+    EC tactic template (the hand-derived target shape the exporter must emit
+    for hops between adjacent multi-oracle, stateful games such as
+    KEM_INDCCA's Initialize + Decaps). The shape: Initialize is lifted into
+    the game wrapper's ``main`` (the adversary gets only the post-init oracles
+    plus the init result); a relational state-coupling invariant
+    ``(glob L){1} = (glob R){2}`` is established by ``hop_init`` and preserved
+    by one per-oracle equiv lemma each; the Pr lemma is ``byequiv; proc;
+    call (_: coupling)`` with one ``conseq hop_<oracle>`` per post-init oracle
+    then ``call hop_init``. If this stops compiling, the exporter's target
+    shape for multi-oracle hops needs to be re-derived before any automation
+    relying on it can be trusted."""
+    ec_file = tmp_path / "multi_oracle_indist.ec"
+    ec_file.write_text(MULTI_ORACLE_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the multi-oracle template.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )

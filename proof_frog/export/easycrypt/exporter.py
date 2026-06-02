@@ -265,6 +265,20 @@ def _describe_assumption_hop(
     )
 
 
+def _challenger_game_file_name(
+    challenger: frog_ast.ConcreteGame | frog_ast.ParameterizedGame,
+) -> str:
+    """Game-file (or intermediate-game) name of a step's challenger.
+
+    A ``ConcreteGame`` names an imported game file plus a ``.Real``/``.Random``
+    side (``challenger.game.name``); a ``ParameterizedGame`` is a bare
+    intermediate game defined in the proof (``challenger.name``).
+    """
+    if isinstance(challenger, frog_ast.ConcreteGame):
+        return challenger.game.name
+    return challenger.name
+
+
 def _is_assumption_hop(a: frog_ast.Step, b: frog_ast.Step) -> bool:
     """Detect a hop that flips a security side under the same reduction."""
     if a.reduction is None or b.reduction is None:
@@ -1557,8 +1571,6 @@ def export_proof_file(proof_path: str) -> str:
     ) -> list[str] | None:
         if _is_assumption_hop(step_a, step_b):
             return None
-        assert isinstance(step_a.challenger, frog_ast.ConcreteGame)
-        assert isinstance(step_b.challenger, frog_ast.ConcreteGame)
         # Cross-primitive bridge: when the two endpoints' challengers
         # are different game files on different primitives, the engine
         # inlines each side's challenger body — including external-
@@ -1580,11 +1592,25 @@ def export_proof_file(proof_path: str) -> str:
         # a chain whose bridge will fail. The chain itself is internally
         # consistent and would close — only the wrapper-to-flat bridge is
         # unprovable in the abstract configuration.
-        left_gf = step_a.challenger.game.name
-        right_gf = step_b.challenger.game.name
-        is_cross_primitive = left_gf != right_gf and primitive_name_by_game_file.get(
-            left_gf
-        ) != primitive_name_by_game_file.get(right_gf)
+        left_gf = _challenger_game_file_name(step_a.challenger)
+        right_gf = _challenger_game_file_name(step_b.challenger)
+        # The cross-primitive special-casing below assumes both endpoints are
+        # imported game files (``ConcreteGame`` with a ``.Real``/``.Random``
+        # side) keyed in ``primitive_name_by_game_file``. A bare intermediate
+        # game (``ParameterizedGame`` defined in the proof, e.g. ``G_RandKey``)
+        # has no game-file primitive and is not a foreign-primitive bridge, so
+        # treat such a hop as in-primitive and route it through the normal
+        # per-transform chain emission ("translate it as a flat game and bridge
+        # as usual").
+        both_concrete = isinstance(
+            step_a.challenger, frog_ast.ConcreteGame
+        ) and isinstance(step_b.challenger, frog_ast.ConcreteGame)
+        is_cross_primitive = (
+            both_concrete
+            and left_gf != right_gf
+            and primitive_name_by_game_file.get(left_gf)
+            != primitive_name_by_game_file.get(right_gf)
+        )
         if is_cross_primitive:
             foreign_prims = {
                 primitive_name_by_game_file.get(left_gf),

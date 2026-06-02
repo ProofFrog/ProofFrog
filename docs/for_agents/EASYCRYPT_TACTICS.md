@@ -48,9 +48,12 @@ scale (best-automated first), and the exporter prints it as a
    `(* tactic-cache miss ... *)` comment.
 
 A seventh, proof-level state — **`blocked`** — is a proof that exports
-but does not EasyCrypt-compile (a structural gap upstream of hop
-resolution); it is tracked in the dashboard's `KNOWN_BLOCKED` set, not
-as a tag.
+but EasyCrypt rejects (a structural gap upstream of hop resolution, or a
+canned/synth tactic that doesn't actually close its goal). The dashboard
+**measures** this: it compiles every exported `.ec` in EasyCrypt, and a
+proof counts as `clean` only if EasyCrypt accepts it *and* it is
+admit-free — a 0-admit file that EasyCrypt rejects is `blocked`, not
+clean.
 
 **Your job in this doc is to climb the ladder:** turn a rung-5
 *admit-guided* into a rung-3 *cached-guided* (fill the emitted template,

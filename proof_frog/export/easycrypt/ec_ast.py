@@ -157,12 +157,19 @@ class ModuleParam:
 
 @dataclass
 class Module:
-    """`module <name> [(<params>)] [: <iface>] = { <procs> }.`"""
+    """`module <name> [(<params>)] [: <iface>] = { [<vars>] <procs> }.`
+
+    ``module_vars`` are module-level state declarations (EC ``var`` decls
+    emitted before the procedures). These model the field declarations of
+    a stateful FrogLang Reduction or Game, whose procedures read and write
+    shared state across oracle calls.
+    """
 
     name: str
     procs: list[Proc]
     params: list[ModuleParam] = field(default_factory=list)
     implements: str | None = None
+    module_vars: list[VarDecl] = field(default_factory=list)
 
 
 @dataclass
@@ -444,6 +451,8 @@ def _render_module(module: Module) -> list[str]:
         header += f" : {module.implements}"
     header += " = {"
     out = [header]
+    for var in module.module_vars:
+        out.append(f"  {_render_stmt(var)}")
     for proc in module.procs:
         out.extend(_render_proc_impl(proc))
     out.append("}.")

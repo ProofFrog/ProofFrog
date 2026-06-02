@@ -320,16 +320,18 @@ class ModuleTranslator:
         module-parameter convention) is appended; reduction-body
         references to ``challenger.METHOD(args)`` are rewritten to
         ``Challenger.method(args)``.
+
+        Stateful reductions (those with field declarations) are
+        supported: each field becomes a module-level ``var`` declaration,
+        and the procedure bodies read/write that shared state. Field
+        assignments in the body carry no type annotation, so the
+        statement translator renders them as ``<-`` updates to the
+        module var rather than fresh locals.
         """
         if not reduction.parameters:
             raise ValueError(
                 f"Reduction {reduction.name!r} has no parameters; "
                 "need at least the primitive instance parameter."
-            )
-        if reduction.fields:
-            raise NotImplementedError(
-                f"Stateful reductions (with field declarations) are not "
-                f"supported yet: {reduction.name!r} has fields {reduction.fields}"
             )
 
         # EC requires module parameter names to start with an uppercase
@@ -361,6 +363,11 @@ class ModuleTranslator:
         for src, dst in renames.items():
             module_var_aliases[src] = dst
 
+        module_vars = [
+            ec_ast.VarDecl(fld.name, self._types.translate_type(fld.type))
+            for fld in reduction.fields
+        ]
+
         procs = [
             self._translate_method(method, module_param_types, module_var_aliases)
             for method in reduction.methods
@@ -369,6 +376,7 @@ class ModuleTranslator:
             name=reduction.name,
             procs=procs,
             params=module_params,
+            module_vars=module_vars,
         )
 
     def translate_adversary_type(

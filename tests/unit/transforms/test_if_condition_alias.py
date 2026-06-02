@@ -251,6 +251,62 @@ def _transform_and_compare(source: str, expected: str) -> None:
             }
             """,
         ),
+        # Tuple-of-fields guard: `pk == [field1, field2]` means pk[0]==field1
+        # and pk[1]==field2 within the branch, so each field is rewritten to
+        # the matching param element. This arises when a tuple-valued field
+        # (e.g. a public key) has been expanded to its literal.
+        (
+            """
+            Game Test() {
+                Int field1;
+                Int field2;
+                Int f([Int, Int] pk) {
+                    if (pk == [field1, field2]) {
+                        return field2;
+                    }
+                    return pk[1];
+                }
+            }
+            """,
+            """
+            Game Test() {
+                Int field1;
+                Int field2;
+                Int f([Int, Int] pk) {
+                    if (pk == [field1, field2]) {
+                        return pk[1];
+                    }
+                    return pk[1];
+                }
+            }
+            """,
+        ),
+        # Negative: tuple containing a non-field element does NOT qualify
+        # (we can only assert field == param[i], not local == param[i]).
+        (
+            """
+            Game Test() {
+                Int field1;
+                Int f([Int, Int] pk, Int a) {
+                    if (pk == [field1, a]) {
+                        return field1;
+                    }
+                    return pk[0];
+                }
+            }
+            """,
+            """
+            Game Test() {
+                Int field1;
+                Int f([Int, Int] pk, Int a) {
+                    if (pk == [field1, a]) {
+                        return field1;
+                    }
+                    return pk[0];
+                }
+            }
+            """,
+        ),
     ],
 )
 def test_if_condition_alias_substitution(source: str, expected: str) -> None:

@@ -80,7 +80,8 @@ from proof_frog.transforms.control_flow import RedundantConditionalReturnTransfo
             }
             """,
         ),
-        # Multi-statement if body — no change
+        # Multi-statement if body that does NOT match the fall-through —
+        # no change (body length 2, only one statement follows).
         (
             """
             Int f(Int x) {
@@ -98,6 +99,56 @@ from proof_frog.transforms.control_flow import RedundantConditionalReturnTransfo
                     return y;
                 }
                 return 42;
+            }
+            """,
+        ),
+        # Multi-statement body that unconditionally returns and matches the
+        # fall-through exactly — the guard is redundant, so it collapses.
+        (
+            """
+            Int f(Int x, Int y) {
+                if (x == 1) {
+                    if (y == 2) {
+                        return 7;
+                    }
+                    return 8;
+                }
+                if (y == 2) {
+                    return 7;
+                }
+                return 8;
+            }
+            """,
+            """
+            Int f(Int x, Int y) {
+                if (y == 2) {
+                    return 7;
+                }
+                return 8;
+            }
+            """,
+        ),
+        # Body matches the fall-through but does NOT unconditionally return —
+        # no change (dropping the guard would change behavior: when the guard
+        # holds, the body runs and then control continues to the same
+        # statements, executing them twice).
+        (
+            """
+            Int f(Int x, Set<Int> s) {
+                if (x == 1) {
+                    s = s union 9;
+                }
+                s = s union 9;
+                return 0;
+            }
+            """,
+            """
+            Int f(Int x, Set<Int> s) {
+                if (x == 1) {
+                    s = s union 9;
+                }
+                s = s union 9;
+                return 0;
             }
             """,
         ),

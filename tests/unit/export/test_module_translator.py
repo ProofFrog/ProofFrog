@@ -17,6 +17,11 @@ def _render_stmt_for_test(stmt: ec_ast.EcStmt) -> str:
     return ec_ast._render_stmt(stmt)
 
 
+def _render_module_for_test(module: ec_ast.Module) -> list[str]:
+    # pylint: disable=protected-access
+    return ec_ast._render_module(module)
+
+
 @pytest.fixture
 def reduction_r1() -> frog_ast.Reduction:
     proof = frog_parser.parse_proof_file(
@@ -124,6 +129,78 @@ def test_reduction_return_call_is_lifted(
     kinds = [type(s).__name__ for s in proc.body]
     assert "Call" in kinds
     assert kinds[-1] == "Return"
+
+
+@pytest.fixture
+def stateful_reduction() -> frog_ast.Reduction:
+    """A reduction carrying module-level field state (``dk0``, ``dk1``)."""
+    proof = frog_parser.parse_proof_file(
+        "examples/applications/cfrg-hybrid-kems/proofs/Generic/"
+        "LEAK_implies_HON_BIND_K_CT.proof"
+    )
+    return next(h for h in proof.helpers if isinstance(h, frog_ast.Reduction))
+
+
+def test_stateful_reduction_emits_module_vars(
+    stateful_reduction: frog_ast.Reduction,
+) -> None:
+    """A reduction's field declarations become module-level ``var`` decls."""
+    bs = frog_ast.BitStringType(parameterization=frog_ast.Variable("lambda"))
+    tx = _make_translator(
+        {
+            "DecapsKey": bs,
+            "EncapsKey": bs,
+            "SharedSecret": bs,
+            "Ciphertext": bs,
+        }
+    )
+    mod = tx.translate_reduction(
+        stateful_reduction,
+        primitive_name="KEM",
+        oracle_type_name="LEAK_BIND_K_CT_Oracle",
+    )
+    assert [v.name for v in mod.module_vars] == ["dk0", "dk1"]
+    # The rendered module declares the state vars before the procs.
+    rendered = "\n".join(_render_module_for_test(mod))
+    assert "var dk0 :" in rendered
+    assert rendered.index("var dk0 :") < rendered.index("proc ")
+
+
+def test_stateful_reduction_field_writes_are_assignments(
+    stateful_reduction: frog_ast.Reduction,
+) -> None:
+    """Field writes (no type annotation) update state via ``<-``, not a fresh local.
+
+    The state vars must not be re-declared as locals inside the procs, and
+    field reads must resolve to the module var.
+    """
+    bs = frog_ast.BitStringType(parameterization=frog_ast.Variable("lambda"))
+    tx = _make_translator(
+        {
+            "DecapsKey": bs,
+            "EncapsKey": bs,
+            "SharedSecret": bs,
+            "Ciphertext": bs,
+        }
+    )
+    mod = tx.translate_reduction(
+        stateful_reduction,
+        primitive_name="KEM",
+        oracle_type_name="LEAK_BIND_K_CT_Oracle",
+    )
+    init = next(p for p in mod.procs if p.name == "initialize")
+    # dk0/dk1 are assigned (Assign / `<-`), never re-declared as locals.
+    assert any(
+        isinstance(s, ec_ast.Assign) and s.var == "dk0" for s in init.body
+    )
+    assert not any(
+        isinstance(s, ec_ast.VarDecl) and s.name in {"dk0", "dk1"} for s in init.body
+    )
+    # A reading proc references the module var as a plain identifier.
+    decaps0 = next(p for p in mod.procs if p.name == "decaps0")
+    assert any(
+        isinstance(s, ec_ast.Call) and "dk0" in s.args for s in decaps0.body
+    )
 
 
 def test_translate_adversary_module_type(

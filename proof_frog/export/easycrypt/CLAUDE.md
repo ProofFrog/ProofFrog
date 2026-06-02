@@ -84,10 +84,17 @@ first:
    with only the generic `(* tactic-cache miss ... *)` comment.
 
 Below the per-resolution ladder sits a seventh, **proof-level** state —
-**Blocked** (`blocked`): the proof exports to `.ec` but the result does
-not EasyCrypt-compile (a structural gap upstream of hop resolution).
-The exporter can't detect non-compilation, so the dashboard carries
-Blocked as a maintained `KNOWN_BLOCKED` set, not a tag.
+**Blocked** (`blocked`): the proof exports to `.ec` but EasyCrypt rejects
+the result (a structural gap upstream of hop resolution, or a canned/synth
+tactic that doesn't actually close its goal). The *exporter* can't detect
+non-compilation, but the **dashboard measures it**: `easycrypt_dashboard.py`
+compiles every exported `.ec` in EasyCrypt, and a proof is `clean` only if
+EasyCrypt accepts it AND it is admit-free. "0 admits" alone is not clean —
+a canned tactic that silently fails to close its goal (without emitting
+`admit.`) yields a 0-admit file EasyCrypt still rejects (this is how
+`2_14_Forward`/`2_14_Backward` were once miscounted clean). The dashboard
+fails loudly if EasyCrypt/Docker is unavailable rather than emit unverified
+counts.
 
 Resolution order in the emitter is rung 1 → 2 → (3/4 via the cache) →
 (5/6 admit). **Automated = rungs 1–4** (no open hole); **Open = rungs

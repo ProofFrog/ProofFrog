@@ -40,6 +40,9 @@ STATELESS_2_13_PROOF = REPO_ROOT / "examples" / "joy_old" / "2_Exercises" / "2_1
 PRIMITIVE_ONLY_2_14_FWD_PROOF = (
     REPO_ROOT / "examples" / "joy_old" / "2_Exercises" / "2_14_Forward.proof"
 )
+PRIMITIVE_ONLY_2_14_BWD_PROOF = (
+    REPO_ROOT / "examples" / "joy_old" / "2_Exercises" / "2_14_Backward.proof"
+)
 INDOT_DOLLAR_IMPLIES_INDOT_PROOF = (
     REPO_ROOT / "examples" / "Proofs" / "SymEnc" / "INDOT$_implies_INDOT.proof"
 )
@@ -1063,6 +1066,59 @@ def test_export_primitive_only_emits_declare_module_no_concrete_scheme() -> None
     assert "module Game_step_0 (E : E_c.Scheme" in output
 
 
+def test_export_dead_sample_drop_synthesizes_one_sided_rnd() -> None:
+    """``2_14_Forward``'s codewise hop drops a dead ``mPrime`` sample (the
+    reduction samples it but ``Foo.Left`` encrypts only ``m``), which
+    ``Topological Sorting`` removes on one side. The dead-sample-drop
+    synthesizer must emit a one-sided lossless-sample drop for both the
+    forward (``rnd{1}``) and reversed (``rnd{2}``) micro instead of falling
+    back to admit. Guards the synth-param path in ``chain_emitter``.
+
+    NB: this asserts the dead-drop micro is *resolved*. The abstract
+    call-past-sample reorder (blocker B) is covered by
+    ``test_export_2_14_forward_synthesizes_call_past_sample_swap`` and the
+    Docker-gated end-to-end test.
+    """
+    output = exporter.export_proof_file(str(PRIMITIVE_ONLY_2_14_FWD_PROOF))
+    assert "+ rnd{1}; auto; smt(dMessageSpace_ll)." in output
+    assert "+ rnd{2}; auto; smt(dMessageSpace_ll)." in output
+    # The dead-drop micros resolve via synth-param, so the chain no longer
+    # collapses to an admit (the Topological-Sorting culprit is gone).
+    assert "per-transform chain unrenderable" not in output
+    assert "culprits: Topological Sorting" not in output
+
+
+def test_export_2_14_forward_synthesizes_call_past_sample_swap() -> None:
+    """``2_14_Forward``'s hop_2 reorders an abstract ``E.keygen()`` past an
+    independent ``mPrime <$ dMessageSpace`` sample under ``Inline Single-Use
+    Variables``. The raw transform-application ASTs are normalized differently
+    from the rendered flat-state modules the micro lemma relates, so the
+    swap must be recomputed from the rendered modules
+    (``_rendered_state_swaps``). The forward and reversed micros must each
+    emit ``swap{1} 2 -1.`` (synth-param) and the whole proof must export with
+    no admits. Guards blocker B."""
+    output = exporter.export_proof_file(str(PRIMITIVE_ONLY_2_14_FWD_PROOF))
+    # The call-past-sample reorder is now synthesized as an explicit swap on
+    # both the forward and reversed micro (rather than collapsing to the canned
+    # ``proc; sp; wp; sim.`` that cannot reconcile the reorder).
+    assert output.count("swap{1} 2 -1.") >= 2
+    # Whole proof closes: no admits anywhere, chain renders end to end.
+    assert "admit." not in output
+    assert "per-transform chain unrenderable" not in output
+
+
+def test_export_2_14_backward_synthesizes_call_past_sample_swap() -> None:
+    """``2_14_Backward`` is the mirror of ``2_14_Forward`` and carries the same
+    abstract call-past-sample reorder. It was 0-admit but previously did NOT
+    EC-compile (the canned ``proc; sp; wp; sim.`` cannot reconcile the reorder),
+    so it was effectively Blocked despite the dashboard counting it clean. The
+    rendered-state swap synthesizer closes it too."""
+    output = exporter.export_proof_file(str(PRIMITIVE_ONLY_2_14_BWD_PROOF))
+    assert output.count("swap{1} 2 -1.") >= 2
+    assert "admit." not in output
+    assert "per-transform chain unrenderable" not in output
+
+
 def test_export_primitive_only_reduction_applied_to_primary_module() -> None:
     """When a reduction's scheme parameter is named differently from the
     instance (``Reduction R1(SymEnc se)`` applied as ``R1(proofE)``), the
@@ -1112,12 +1168,117 @@ def test_export_primitive_only_indot_typechecks_in_easycrypt(tmp_path: Path) -> 
     )
 
 
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+@pytest.mark.parametrize(
+    "proof_path, stem",
+    [
+        (PRIMITIVE_ONLY_2_14_FWD_PROOF, "2_14_forward"),
+        (PRIMITIVE_ONLY_2_14_BWD_PROOF, "2_14_backward"),
+    ],
+)
+def test_export_2_14_typechecks_in_easycrypt(
+    proof_path: Path, stem: str, tmp_path: Path
+) -> None:
+    """End-to-end: the primitive-only ``2_14_Forward``/``2_14_Backward`` exports
+    type-check in EasyCrypt with zero admits. Exercises both B3 synthesizers
+    together — the dead-sample-drop (hop_0) and the abstract call-past-sample
+    swap (blocker B) — which previously left these proofs 0-admit but
+    non-compiling (the canned ``proc; sp; wp; sim.`` cannot reconcile the
+    reorder of an abstract ``E.keygen()`` past an independent ``mPrime <$ d``
+    sample)."""
+    output = exporter.export_proof_file(str(proof_path))
+    assert "admit." not in output
+    ec_file = tmp_path / f"{stem}.ec"
+    ec_file.write_text(output)
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the {stem} export.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Multi-oracle stateful indistinguishability — VALIDATED EC TEMPLATE
 # ---------------------------------------------------------------------------
 
 EC_TEMPLATES = Path(__file__).parent / "ec_templates"
 MULTI_ORACLE_TEMPLATE = EC_TEMPLATES / "multi_oracle_indist.ec"
+DEAD_SAMPLE_DROP_TEMPLATE = EC_TEMPLATES / "dead_sample_drop.ec"
+CALL_PAST_SAMPLE_SWAP_TEMPLATE = EC_TEMPLATES / "call_past_sample_swap.ec"
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_dead_sample_drop_template_compiles(tmp_path: Path) -> None:
+    """Regression tripwire for the dead-sample-drop EC tactic template (B3
+    part 1). The shape: a per-transform micro hop where one side carries an
+    extra, independent, dead `<$` sample (bound variable unused downstream)
+    that ``Topological Sorting`` drops on the other side. The two bodies are
+    not whole-body permutations, so ``_permutation_swaps`` cannot handle them;
+    the recipe instead moves the dead lossless sample to the front
+    (``swap{S}``), splits it off (``seq``), discharges it one-sided
+    (``rnd{S}; auto; smt(d<Type>_ll)``), then closes with ``sim``. ``S`` is the
+    side carrying the extra sample (1 forward, 2 reversed). If this stops
+    compiling, the ``_dead_sample_drop`` synthesizer's target tactic must be
+    re-derived before any automation relying on it can be trusted."""
+    ec_file = tmp_path / "dead_sample_drop.ec"
+    ec_file.write_text(DEAD_SAMPLE_DROP_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the dead-sample-drop template.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_call_past_sample_swap_template_compiles(tmp_path: Path) -> None:
+    """Regression tripwire for the call-past-sample reorder EC tactic template
+    (B3 blocker B). The shape: a per-transform micro hop where a
+    canonicalization step (e.g. ``Inline Single-Use Variables``) reorders an
+    abstract scheme call (``k <@ E.keygen()``) past an INDEPENDENT sample
+    (``mPrime <$ d``). The sample is glob-independent, so EC's ``swap`` can move
+    it past the abstract call; the recipe is ``proc; swap{1} <pos> <delta>;
+    sp; wp; sim`` (the same canned suffix the multi-module emitter uses). The
+    swap is computed from the rendered flat-state modules (see
+    ``chain_emitter._rendered_state_swaps``), not the raw transform-application
+    ASTs. If this stops compiling, that synthesizer's target tactic must be
+    re-derived before any automation relying on it can be trusted."""
+    ec_file = tmp_path / "call_past_sample_swap.ec"
+    ec_file.write_text(CALL_PAST_SAMPLE_SWAP_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the call-past-sample-swap template.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
 
 
 @pytest.mark.skipif(

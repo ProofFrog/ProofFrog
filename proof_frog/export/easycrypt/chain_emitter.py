@@ -22,6 +22,7 @@ from typing import Callable
 
 from ... import frog_ast
 from ...transforms._base import TransformApplication
+from ...visitors import VariableCollectionVisitor
 from . import ec_ast
 from . import module_translator as mt
 from . import type_collector as tc
@@ -303,6 +304,8 @@ def emit_chain_for_hop(
         name_prefix: str = "",
         left_module_ref: str = "",
         right_module_ref: str = "",
+        left_state: frog_ast.Game | None = None,
+        right_state: frog_ast.Game | None = None,
     ) -> list[str]:
         """Resolve the tactic body for one transform application.
 
@@ -358,6 +361,15 @@ def emit_chain_for_hop(
             )
             if swaps is not None:
                 return [_res_tag(SYNTH_PARAM), "proc.", *swaps, "sim."]
+            # Not a whole-body permutation: the reorder pass may instead have
+            # dropped one or more dead, independent samples (e.g.
+            # ``Topological Sorting``'s DFS prunes statements the return
+            # doesn't depend on). Synthesize a one-sided lossless-sample drop.
+            drop = _dead_sample_drop(
+                before_hoisted, after_hoisted, types, eq_args_strong, reversed_dir
+            )
+            if drop is not None:
+                return [_res_tag(SYNTH_PARAM), *drop]
             cached = _layer2_lookup(app, reversed_dir)
             if cached is not None:
                 return [_res_tag(CACHED_UNGUIDED), *cached]
@@ -410,6 +422,29 @@ def emit_chain_for_hop(
             )
             if swaps is not None and swaps:
                 return [_res_tag(SYNTH_PARAM), "proc.", *swaps, "sp; wp; sim."]
+            # The raw transform-application ASTs are normalized differently
+            # from the rendered flat-state modules the micro lemma actually
+            # relates (separately-canonicalized ``game_before``; nested
+            # ``return`` only hoisted at render time). Recompute the reorder
+            # from the rendered modules -- what EC sees -- so an abstract-call-
+            # past-independent-sample swap (e.g. ``Inline Single-Use
+            # Variables`` reordering ``E.keygen()`` past ``mPrime <$ d``) is
+            # detected even when the raw-AST check above missed it.
+            ec_swaps = _rendered_state_swaps(
+                modules,
+                left_state,
+                right_state,
+                external_module_types,
+                method_return_types,
+                flat_params,
+            )
+            if ec_swaps:
+                return [
+                    _res_tag(SYNTH_PARAM),
+                    "proc.",
+                    *[f"{s}." for s in ec_swaps],
+                    "sp; wp; sim.",
+                ]
             return [_res_tag(SYNTH_STATIC), "proc; sp; wp; sim."]
         if body:
             return [_res_tag(SYNTH_STATIC), *body]
@@ -505,6 +540,8 @@ def emit_chain_for_hop(
             name_prefix=micro_name,
             left_module_ref=left_ref,
             right_module_ref=right_ref,
+            left_state=left_states[k],
+            right_state=left_states[k + 1],
         )
         if _is_admit(body):
             synth = _apply_stateless(
@@ -556,6 +593,8 @@ def emit_chain_for_hop(
             name_prefix=fwd_name,
             left_module_ref=right_left_ref,
             right_module_ref=right_right_ref,
+            left_state=right_states[k],
+            right_state=right_states[k + 1],
         )
         if _is_admit(fwd_body):
             synth = _apply_stateless(
@@ -580,6 +619,8 @@ def emit_chain_for_hop(
             name_prefix=rev_name,
             left_module_ref=right_right_ref,
             right_module_ref=right_left_ref,
+            left_state=right_states[k + 1],
+            right_state=right_states[k],
         )
         if _is_admit(rev_body):
             synth = _apply_stateless(
@@ -811,6 +852,141 @@ def _permutation_swaps(
         swaps.append(f"swap{{1}} {src + 1} {delta}.")
         current.insert(target, current.pop(src))
     return swaps
+
+
+@dataclass
+class _DeadDropPlan:
+    """A detected dead-sample-drop diff between two single-oracle games.
+
+    ``side`` is the EC side (1 or 2) carrying the extra dead samples;
+    ``long_stmts`` is that side's full top-level statement list; ``drops``
+    are the dead ``Sample`` statements to remove, in their ``long_stmts``
+    order.
+    """
+
+    side: int
+    long_stmts: list[frog_ast.Statement]
+    drops: list[frog_ast.Sample]
+
+
+def _subsequence_complement(
+    long: list[frog_ast.Statement], short: list[frog_ast.Statement]
+) -> list[frog_ast.Statement] | None:
+    """Return the ``long`` statements not consumed when matching ``short``
+    as an order-preserving subsequence (by statement signature), or ``None``
+    if ``short`` is not a subsequence of ``long``.
+
+    Matching is greedy (earliest match for each ``short`` element). When
+    signatures repeat this may attribute a different statement to the
+    complement than a human would, but the caller then requires every
+    complement statement to be a dead sample, so a mis-attribution simply
+    declines (falls back to cache/admit) rather than emitting a wrong swap.
+    """
+    short_sigs = [_stmt_signature(s) for s in short]
+    j = 0
+    complement: list[frog_ast.Statement] = []
+    for stmt in long:
+        if j < len(short_sigs) and _stmt_signature(stmt) == short_sigs[j]:
+            j += 1
+        else:
+            complement.append(stmt)
+    if j != len(short_sigs):
+        return None
+    return complement
+
+
+def _stmt_uses_name(stmt: frog_ast.Statement, name: str) -> bool:
+    """True if ``name`` is referenced anywhere in ``stmt`` (any position)."""
+    return any(v.name == name for v in VariableCollectionVisitor().visit(stmt))
+
+
+def _dead_sample_drop_plan(
+    before: frog_ast.Game, after: frog_ast.Game, reversed_dir: bool = False
+) -> _DeadDropPlan | None:
+    """Detect a pure dead-sample-drop diff between two single-oracle games.
+
+    Returns a plan when one side is exactly the other with one or more
+    independent, never-used ``<$`` samples removed (a subsequence drop, not
+    a reorder). ``reversed_dir`` follows the :func:`_permutation_swaps`
+    convention: it swaps which game is the lemma's left side. Returns
+    ``None`` for equal-length diffs (those are reorders — owned by
+    :func:`_permutation_swaps`), non-subsequence diffs, or when any dropped
+    statement is not a dead sample. Purely structural; the distribution's
+    losslessness is verified by :func:`_dead_sample_drop`.
+    """
+    if len(before.methods) != 1 or len(after.methods) != 1:
+        return None
+    if reversed_dir:
+        before, after = after, before
+    b_stmts = list(before.methods[0].block.statements)
+    a_stmts = list(after.methods[0].block.statements)
+    if len(b_stmts) == len(a_stmts):
+        return None
+    if len(b_stmts) > len(a_stmts):
+        long, short, side = b_stmts, a_stmts, 1
+    else:
+        long, short, side = a_stmts, b_stmts, 2
+    complement = _subsequence_complement(long, short)
+    if not complement:
+        return None
+    drops: list[frog_ast.Sample] = []
+    for stmt in complement:
+        if not isinstance(stmt, frog_ast.Sample) or stmt.the_type is None:
+            return None
+        if not isinstance(stmt.var, frog_ast.Variable):
+            return None
+        idx = next(i for i, s in enumerate(long) if s is stmt)
+        if any(_stmt_uses_name(later, stmt.var.name) for later in long[idx + 1 :]):
+            return None
+        drops.append(stmt)
+    return _DeadDropPlan(side, long, drops)
+
+
+def _dead_sample_drop(
+    before: frog_ast.Game,
+    after: frog_ast.Game,
+    types: tc.TypeCollector,
+    eq_args: str,
+    reversed_dir: bool = False,
+) -> list[str] | None:
+    """Synthesize an EC tactic dropping dead, lossless ``<$`` samples from
+    one side of a per-transform micro hop.
+
+    Returns the full tactic body (``proc.`` ... ``sim.``) or ``None`` when
+    the diff is not a pure dead-sample-drop, or a dropped sample's
+    distribution is not a simple (non-product) lossless ``d<Type>`` (every
+    such distribution the exporter emits carries a ``d<Type>_ll`` axiom).
+    The recipe moves each dead sample to the front (``swap{side}``), splits
+    it off (``seq``), discharges it one-sided (``rnd{side}; auto;
+    smt(<distr>_ll)``), then closes the identical remainder with ``sim``.
+    Validated against ``tests/integration/ec_templates/dead_sample_drop.ec``.
+    """
+    plan = _dead_sample_drop_plan(before, after, reversed_dir)
+    if plan is None:
+        return None
+    distrs: list[str] = []
+    for sample in plan.drops:
+        assert sample.the_type is not None  # guaranteed by the planner
+        try:
+            distr = types.distr_for(types.translate_type(sample.the_type))
+        except NotImplementedError:
+            return None
+        if "`*`" in distr:  # product distribution — out of scope
+            return None
+        distrs.append(distr)
+    side = plan.side
+    seq_tac = "seq 1 0" if side == 1 else "seq 0 1"
+    body = ["proc."]
+    remaining: list[frog_ast.Statement] = list(plan.long_stmts)
+    for sample, distr in zip(plan.drops, distrs):
+        pos = next(i for i, s in enumerate(remaining) if s is sample) + 1
+        if pos > 1:
+            body.append(f"swap{{{side}}} {pos} -{pos - 1}.")
+        body.append(f"{seq_tac} : ({eq_args}).")
+        body.append(f"+ rnd{{{side}}}; auto; smt({distr}_ll).")
+        remaining = [s for s in remaining if s is not sample]
+    body.append("sim.")
+    return body
 
 
 def _chunk_has_micro_admit(chunk: str) -> bool:
@@ -1182,6 +1358,57 @@ def _ec_perm_swaps(
         swaps.append(f"swap{{1}} {src + 1} {delta}")
         cur.insert(target, cur.pop(src))
     return swaps
+
+
+def _rendered_state_swaps(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    modules: mt.ModuleTranslator,
+    left_state: frog_ast.Game | None,
+    right_state: frog_ast.Game | None,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+) -> list[str] | None:
+    """``swap{1}`` tactics computed from the *rendered* flat-state EC modules.
+
+    A per-transform micro lemma relates the two rendered flat-state modules
+    (``Step_*_state_k`` / ``Step_*_state_{k+1}``), not ``app.game_before`` /
+    ``app.game_after``. Those are not the same ASTs: the engine records a
+    separately-canonicalized ``game_before`` for each application, and
+    transforms like ``Inline Single-Use Variables`` leave a *nested* ``return``
+    expression that only the EC hoister flattens (at render time). So an
+    abstract-call-past-independent-sample reorder that EC sees between the two
+    rendered modules is invisible to :func:`_permutation_swaps` run on the raw
+    transform-application ASTs (length/normalization mismatch -> ``None``).
+
+    This recomputes the permutation from the exact EC bodies the lemma
+    relates. ``left_state`` is the lemma's left side (module argument 1), so
+    the synthesized swaps always target side ``1`` -- no ``reversed_dir``
+    handling is needed (the caller passes the states in lemma order). Returns
+    the ``swap{1} <pos> <delta>`` strings (no trailing period, matching
+    :func:`_ec_perm_swaps`) or ``None`` when the two bodies are not a
+    permutation of each other (the caller then keeps the canned tactic).
+    """
+    if left_state is None or right_state is None:
+        return None
+    left_mod = _flat_state_module(
+        modules,
+        "_swap_probe_left",
+        left_state,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    right_mod = _flat_state_module(
+        modules,
+        "_swap_probe_right",
+        right_state,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    if not left_mod.procs or not right_mod.procs:
+        return None
+    return _ec_perm_swaps(left_mod.procs[0].body, right_mod.procs[0].body)
 
 
 def _leg_sem_calls(body: list[ec_ast.EcStmt], module_name: str) -> str:

@@ -38,6 +38,19 @@ Key modules:
   schemes whose calls are actually reordered. Single declared module only so
   far. Design + extensions:
   `extras/docs/plans/in-progress/2026-06-01-scheme-statelessness-foundation.md`.
+- **Reorder swap synthesizers** (in `chain_emitter`): a micro lemma relates
+  two *rendered* flat-state modules, which are normalized differently from
+  the raw `app.game_before`/`app.game_after` (the engine stores a
+  separately-canonicalized `game_before`; `Inline Single-Use Variables`
+  leaves a nested `return` only the EC hoister flattens). `_permutation_swaps`
+  runs on the raw ASTs; `_rendered_state_swaps` (the fallback for the
+  multi-module `Bucket.CANNED` branch) recomputes the permutation from the
+  rendered EC bodies via `_ec_perm_swaps`, which is what catches an
+  abstract-call-past-independent-sample reorder (e.g. `E.keygen()` past
+  `mPrime <$ d`) that the raw-AST check misses. A sample is glob-independent,
+  so EC's `swap` accepts it (unlike two abstract calls, which need the
+  stateless `Ideal` machinery). Template:
+  `tests/integration/ec_templates/call_past_sample_swap.ec`.
 - `proof_translator.py`, `module_translator.py`, `expr_translator.py`,
   `stmt_translator.py`, `type_collector.py`, `scheme_instances.py`,
   `ec_ast.py` — FrogLang→EC translation primitives.

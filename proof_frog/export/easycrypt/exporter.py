@@ -10,6 +10,7 @@ from typing import Callable
 from . import canonical_form
 from . import ec_ast
 from . import module_translator as mt
+from . import oracle_model
 from . import proof_translator as pt
 from . import scheme_instances as si
 from . import type_collector as tc
@@ -612,6 +613,29 @@ def export_proof_file(proof_path: str) -> str:
                 "which was not imported."
             )
         primitive_name_by_game_file[gf.name] = prim_param_name
+
+    # Oracle data model per game file (multi-oracle foundation). Built here,
+    # before module emission, so the adversary-type / game-wrapper emitters can
+    # request a per-game-file ``MultiOracleSpec``. Single-oracle games yield no
+    # spec, so their adversary types and wrappers stay byte-identical.
+    oracle_model_by_game_file: dict[str, oracle_model.GameOracleModel] = {
+        gf.name: oracle_model.classify_game_file(gf) for gf in game_files
+    }
+    game_file_by_name: dict[str, frog_ast.GameFile] = {gf.name: gf for gf in game_files}
+
+    def multi_oracle_spec_for(
+        modules: mt.ModuleTranslator, game_file_name: str
+    ) -> mt.MultiOracleSpec | None:
+        """``MultiOracleSpec`` for a game file in ``modules``' type scope.
+
+        ``None`` for single-oracle game files (the emitters then take their
+        byte-identical legacy path).
+        """
+        return modules.multi_oracle_spec(
+            game_file_by_name[game_file_name],
+            oracle_model_by_game_file[game_file_name],
+        )
+
     # "Primary" instance: the one whose scheme matches the theorem's
     # target. For OTPSecure this is ``E`` (OTP); for CES it is ``CE``
     # (ChainedEncryption). Used for scheme-body translation and as the
@@ -917,7 +941,12 @@ def export_proof_file(proof_path: str) -> str:
                 )
             )
         adv = theory_modules.translate_adversary_type(
-            gf, oracle_type_name, adv_type_name=f"{gf_id}_Adv"
+            gf,
+            oracle_type_name,
+            adv_type_name=f"{gf_id}_Adv",
+            multi_oracle=theory_modules.multi_oracle_spec(
+                gf, oracle_model_by_game_file[gf.name]
+            ),
         )
         adv_type_by_game_file[gf.name] = adv.name
         theory_game_decls.append(adv)
@@ -933,6 +962,9 @@ def export_proof_file(proof_path: str) -> str:
             continue
         gf_id = _ec_ident(gf.name)
         adv_type_name = adv_type_by_game_file[gf.name]
+        gf_multi_oracle = theory_modules.multi_oracle_spec(
+            gf, oracle_model_by_game_file[gf.name]
+        )
         for side in gf.games:
             wrapper_name = f"Game_{gf_id}_{side.name}"
             assumption_wrapper_names[(gf.name, side.name)] = wrapper_name
@@ -944,6 +976,7 @@ def export_proof_file(proof_path: str) -> str:
                     scheme_type_name=scheme_type_name,
                     adversary_type_name=adv_type_name,
                     side_module_name=side_mod_name,
+                    multi_oracle=gf_multi_oracle,
                 )
             )
         real_side = gf.games[0].name
@@ -1055,7 +1088,12 @@ def export_proof_file(proof_path: str) -> str:
                     )
                 )
             adv = fp_theory_modules.translate_adversary_type(
-                gf, oracle_type_name, adv_type_name=f"{gf_id}_Adv"
+                gf,
+                oracle_type_name,
+                adv_type_name=f"{gf_id}_Adv",
+                multi_oracle=fp_theory_modules.multi_oracle_spec(
+                    gf, oracle_model_by_game_file[gf.name]
+                ),
             )
             fp_adv_by_gf[gf.name] = adv.name
             fp_decls.append(adv)
@@ -1067,6 +1105,9 @@ def export_proof_file(proof_path: str) -> str:
                 continue
             gf_id = _ec_ident(gf.name)
             adv_type_name = fp_adv_by_gf[gf.name]
+            gf_multi_oracle = fp_theory_modules.multi_oracle_spec(
+                gf, oracle_model_by_game_file[gf.name]
+            )
             for side in gf.games:
                 wrapper_name = f"Game_{gf_id}_{side.name}"
                 fp_wrapper_names[(gf.name, side.name)] = wrapper_name
@@ -1078,6 +1119,7 @@ def export_proof_file(proof_path: str) -> str:
                         scheme_type_name=scheme_type_name,
                         adversary_type_name=adv_type_name,
                         side_module_name=side_mod_name,
+                        multi_oracle=gf_multi_oracle,
                     )
                 )
             real_side = gf.games[0].name
@@ -1349,11 +1391,18 @@ def export_proof_file(proof_path: str) -> str:
                 p.name for p in helper.methods[0].signature.parameters
             ]
 
+    # Scalar oracle name + params derived from the oracle model built above.
+    # ``oracle_name_by_game_file`` is the first method (the legacy single-oracle
+    # key) so single-oracle emission stays byte-identical; the full
+    # ``oracle_model_by_game_file`` is threaded onto the resolver for the P2-P4
+    # multi-oracle emitters.
     oracle_name_by_game_file: dict[str, str] = {}
     oracle_params_by_game_file: dict[str, list[str]] = {}
     for gf in game_files:
         first_method = gf.games[0].methods[0]
-        oracle_name_by_game_file[gf.name] = first_method.signature.name.lower()
+        oracle_name_by_game_file[gf.name] = oracle_model_by_game_file[
+            gf.name
+        ].scalar_oracle_name
         oracle_params_by_game_file[gf.name] = [
             p.name for p in first_method.signature.parameters
         ]
@@ -1391,6 +1440,7 @@ def export_proof_file(proof_path: str) -> str:
         module_name_by_instance_game=module_name_by_instance_game,
         declared_module_names=declared_module_names,
         outer_oracle_name=oracle_name_by_game_file[proof.theorem.name],
+        oracle_model_by_game_file=oracle_model_by_game_file,
     )
 
     # Validate proof via the engine (same as before).
@@ -1787,6 +1837,12 @@ def export_proof_file(proof_path: str) -> str:
                 scheme_module_expr=primary_module_expr,
                 reduction_arg_exprs=red_arg_exprs,
                 extra_module_params=declared_instance_params or None,
+                inner_multi_oracle=multi_oracle_spec_for(
+                    top_modules, helper.to_use.name
+                ),
+                outer_multi_oracle=multi_oracle_spec_for(
+                    top_modules, outer_game_file_name
+                ),
             )
         )
 
@@ -1797,9 +1853,14 @@ def export_proof_file(proof_path: str) -> str:
         resolved_step = resolver.resolve(step)
         assert isinstance(step.challenger, frog_ast.ConcreteGame)
         if step.reduction is None:
-            step_game_file = step.challenger.game.name
-            adv_type = qualified_adv_type_by_game_file[step_game_file]
+            # A plain step exposes its own game file's oracle, so the wrapper
+            # lifts that game file's Initialize.
+            wrapper_game_file = step.challenger.game.name
+            adv_type = qualified_adv_type_by_game_file[wrapper_game_file]
         else:
+            # A composed step exposes the OUTER (theorem) game's oracle, so the
+            # wrapper lifts the theorem game file's Initialize.
+            wrapper_game_file = outer_game_file_name
             adv_type = qualified_outer_adv
         ec_game_wrappers.append(_describe_step_wrapper(i, step))
         ec_game_wrappers.append(
@@ -1808,6 +1869,7 @@ def export_proof_file(proof_path: str) -> str:
                 adversary_type_name=adv_type,
                 oracle_module_expr=resolved_step.module_expr,
                 extra_module_params=declared_instance_params or None,
+                multi_oracle=multi_oracle_spec_for(top_modules, wrapper_game_file),
             )
         )
 

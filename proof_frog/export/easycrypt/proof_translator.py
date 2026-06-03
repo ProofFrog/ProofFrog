@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from . import ec_ast
+from . import oracle_model
 from ... import frog_ast
 
 
@@ -50,6 +51,9 @@ class StepResolver:
         module_name_by_instance_game: dict[tuple[str, str, str], str] | None = None,
         declared_module_names: list[str] | None = None,
         outer_oracle_name: str | None = None,
+        oracle_model_by_game_file: (
+            dict[str, oracle_model.GameOracleModel] | None
+        ) = None,
     ) -> None:
         self._module_names = module_name_by_concrete_game
         self._oracle_names = oracle_name_by_game_file
@@ -75,6 +79,11 @@ class StepResolver:
         # and wrapper-level call invariants); not used by the current
         # precondition/postcondition emission.
         self._declared_modules = declared_module_names or []  # noqa: F841
+        # Full oracle data model per game file (ordered names + init/post-init
+        # split; see ``oracle_model``). Reserved for the multi-oracle emitters
+        # (P2-P4): the current single-oracle resolution keys off the scalar
+        # ``oracle_name_by_game_file`` and ignores this.
+        self._oracle_models = oracle_model_by_game_file or {}  # noqa: F841
 
     def precondition_for(self, step: frog_ast.Step) -> str:
         """Return the EC precondition: ``={arg1, arg2, ...}`` or ``true``.

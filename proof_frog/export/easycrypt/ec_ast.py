@@ -72,11 +72,20 @@ class ProcParam:
 
 @dataclass
 class ProcSig:
-    """A procedure signature (used inside module types)."""
+    """A procedure signature (used inside module types).
+
+    ``oracle_restriction`` is the optional EC oracle-restriction clause that
+    follows the return type in a parameterized module type, e.g. the
+    ``{O.eval, O.chk}`` in ``proc distinguish(pk : pubkey) : bool {O.eval,
+    O.chk}``. It restricts which of the module-parameter's oracles the
+    procedure may call. ``None`` (the single-oracle default) emits no clause,
+    so existing output is byte-identical.
+    """
 
     name: str
     params: list[ProcParam]
     return_type: EcType
+    oracle_restriction: list[str] | None = None
 
 
 # --- Procedure bodies ---------------------------------------------------
@@ -439,7 +448,10 @@ def _render_prob_lemma(lemma: ProbLemma) -> list[str]:
 
 def _render_proc_sig(proc: ProcSig) -> str:
     param_str = ", ".join(f"{p.name} : {p.type.text}" for p in proc.params)
-    return f"proc {proc.name}({param_str}) : {proc.return_type.text}"
+    base = f"proc {proc.name}({param_str}) : {proc.return_type.text}"
+    if proc.oracle_restriction is not None:
+        base += " {" + ", ".join(proc.oracle_restriction) + "}"
+    return base
 
 
 def _render_module(module: Module) -> list[str]:

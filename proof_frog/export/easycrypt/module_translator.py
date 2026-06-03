@@ -2,13 +2,49 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable
 
 from . import ec_ast
 from . import expr_translator
+from . import oracle_model
 from . import stmt_translator
 from . import type_collector as tc
 from ... import frog_ast
+
+#: Binder name for the lifted-``Initialize`` result threaded from the game
+#: wrapper's ``main()`` into the adversary's ``distinguish``. Matches the
+#: validated multi-oracle template (``tests/integration/ec_templates/
+#: multi_oracle_indist.ec``).
+INIT_RESULT_NAME = "pk"
+
+
+@dataclass
+class MultiOracleSpec:
+    """Emission spec for a multi-oracle (Initialize-lifted) game file.
+
+    Built by :meth:`ModuleTranslator.multi_oracle_spec` from a game file's
+    :class:`~proof_frog.export.easycrypt.oracle_model.GameOracleModel`. Carries
+    everything the wrapper/adversary-type emitters need to produce the
+    Initialize-lifted shape:
+
+    - ``init_name`` -- EC oracle name of the lifted ``Initialize`` (lowercased).
+    - ``init_return_type`` -- EC type of ``Initialize``'s result, used both as
+      the ``main()`` local's type and the ``distinguish`` init parameter type.
+    - ``post_init_names`` -- EC names of the adaptive (adversary-facing)
+      oracles, used for the ``{O.<m>, ...}`` restriction clause.
+
+    A single-oracle game produces no spec (the emitters take the legacy path),
+    so single-oracle output stays byte-identical.
+    """
+
+    init_name: str
+    init_return_type: ec_ast.EcType
+    post_init_names: list[str]
+
+    def oracle_restriction(self, oracle_param: str) -> list[str]:
+        """Restriction clause entries ``["<O>.<m>", ...]`` for ``distinguish``."""
+        return [f"{oracle_param}.{m}" for m in self.post_init_names]
 
 
 class ModuleTranslator:
@@ -379,34 +415,81 @@ class ModuleTranslator:
             module_vars=module_vars,
         )
 
+    def multi_oracle_spec(
+        self,
+        game_file: frog_ast.GameFile,
+        model: oracle_model.GameOracleModel | None = None,
+    ) -> MultiOracleSpec | None:
+        """Build the Initialize-lifted emission spec, or ``None`` if single-oracle.
+
+        ``model`` defaults to classifying ``game_file`` directly; callers that
+        already hold a model (the exporter threads one per game file) pass it to
+        avoid re-classifying. Returns ``None`` for single-oracle games so the
+        wrapper/adversary emitters take their legacy byte-identical path.
+        """
+        if model is None:
+            model = oracle_model.classify_game_file(game_file)
+        if not model.is_multi_oracle:
+            return None
+        init_method = next(
+            m
+            for m in game_file.games[0].methods
+            if m.signature.name.lower() == model.init_name
+        )
+        return MultiOracleSpec(
+            init_name=model.init_name or "",
+            init_return_type=self._translate_param_type(
+                init_method.signature.return_type
+            ),
+            post_init_names=list(model.post_init_names),
+        )
+
     def translate_adversary_type(
         self,
         game_file: frog_ast.GameFile,
         oracle_type_name: str,
         adv_type_name: str | None = None,
+        multi_oracle: MultiOracleSpec | None = None,
     ) -> ec_ast.ModuleType:
-        """Emit ``module type <Gf>_Adv (O : <oracle>) = { proc distinguish() : bool }``.
+        """Emit ``module type <Gf>_Adv (O : <oracle>) = { proc distinguish ... }``.
 
-        The adversary's interface is a single ``distinguish`` procedure
-        returning a bool. This matches the standard EC pattern for
-        games whose adversaries make adaptive oracle queries. When
-        ``adv_type_name`` is supplied the caller controls the emitted
+        Single-oracle (``multi_oracle is None``): the adversary's interface is a
+        bare ``proc distinguish() : bool``, matching the standard EC pattern for
+        games whose adversaries make adaptive oracle queries.
+
+        Multi-oracle (Initialize-lifted): ``distinguish`` gains the lifted-
+        ``Initialize`` result as a parameter and is restricted to the post-init
+        oracle set, e.g. ``proc distinguish(pk : pubkey) : bool {O.eval,
+        O.chk}``. ``Initialize`` is excluded from the adversary's reachable
+        oracles because the game wrapper runs it in ``main()`` before the
+        adversary starts.
+
+        When ``adv_type_name`` is supplied the caller controls the emitted
         identifier (used for sanitizing names containing non-identifier
         characters like ``$``).
         """
+        if multi_oracle is None:
+            distinguish = ec_ast.ProcSig(
+                name="distinguish",
+                params=[],
+                return_type=ec_ast.EcType("bool"),
+            )
+        else:
+            distinguish = ec_ast.ProcSig(
+                name="distinguish",
+                params=[
+                    ec_ast.ProcParam(INIT_RESULT_NAME, multi_oracle.init_return_type)
+                ],
+                return_type=ec_ast.EcType("bool"),
+                oracle_restriction=multi_oracle.oracle_restriction("O"),
+            )
         return ec_ast.ModuleType(
             name=adv_type_name or f"{game_file.name}_Adv",
-            procs=[
-                ec_ast.ProcSig(
-                    name="distinguish",
-                    params=[],
-                    return_type=ec_ast.EcType("bool"),
-                )
-            ],
+            procs=[distinguish],
             params=[ec_ast.ModuleParam(name="O", module_type=oracle_type_name)],
         )
 
-    def translate_reduction_adversary(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    def translate_reduction_adversary(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
         self,
         reduction: frog_ast.Reduction,
         outer_adversary_type_name: str,
@@ -414,6 +497,8 @@ class ModuleTranslator:
         scheme_module_expr: str,
         reduction_arg_exprs: list[str] | None = None,
         extra_module_params: list[ec_ast.ModuleParam] | None = None,
+        inner_multi_oracle: MultiOracleSpec | None = None,
+        outer_multi_oracle: MultiOracleSpec | None = None,
     ) -> ec_ast.Module:
         """Lift a Reduction into an adversary against the inner game.
 
@@ -431,19 +516,67 @@ class ModuleTranslator:
         and ``C``. This is needed when the adversary wrapper lives inside
         a section with ``declare module`` and the reduction body references
         those declared modules (EC requires them as explicit parameters).
+
+        Multi-oracle (Initialize-lifted): when ``outer_multi_oracle`` is given,
+        ``R_Adv`` must ascribe to the inner Initialize-lifted adversary type, so
+        ``distinguish`` gains the inner ``Initialize`` result as a parameter.
+        Because the *outer* adversary ``A`` expects the outer ``Initialize``
+        result, the body runs ``Initialize`` on the reduction-composed game
+        ``R(...)`` and threads *that* into ``A``::
+
+            proc distinguish(pk : <inner_init_ret>) : bool = {
+              var b : bool;
+              var pk0 : <outer_init_ret>;
+              pk0 <@ R(<args>, C).initialize();
+              b   <@ A(R(<args>, C)).distinguish(pk0);
+              return b;
+            }
+
+        The received inner-init parameter is currently unused: re-running
+        ``Initialize`` through ``R`` is the type-correct shape, but reconciling
+        it with the inner game's own lifted ``Initialize`` (so the reduction
+        does not double-initialise shared state) is the coupling-synthesis
+        problem completed in later phases (see the multi-oracle foundation
+        plan, sections 3 and 6). This path has no validated template and no
+        end-to-end corpus exercise yet.
         """
         if reduction_arg_exprs is None:
             reduction_arg_exprs = [scheme_module_expr]
         call_args = ", ".join(list(reduction_arg_exprs) + ["C"])
+        composed = f"{reduction.name}({call_args})"
         body: list[ec_ast.EcStmt] = [
-            ec_ast.VarDecl(name="b", type=ec_ast.EcType("bool")),
+            ec_ast.VarDecl(name="b", type=ec_ast.EcType("bool"))
+        ]
+        distinguish_params: list[ec_ast.ProcParam] = []
+        if outer_multi_oracle is None:
+            distinguish_args = ""
+        else:
+            inner_spec = inner_multi_oracle or outer_multi_oracle
+            distinguish_params.append(
+                ec_ast.ProcParam(INIT_RESULT_NAME, inner_spec.init_return_type)
+            )
+            outer_init_local = f"{INIT_RESULT_NAME}0"
+            body.append(
+                ec_ast.VarDecl(
+                    name=outer_init_local, type=outer_multi_oracle.init_return_type
+                )
+            )
+            body.append(
+                ec_ast.Call(
+                    var=outer_init_local,
+                    callee=f"{composed}.{outer_multi_oracle.init_name}",
+                    args="",
+                )
+            )
+            distinguish_args = outer_init_local
+        body.append(
             ec_ast.Call(
                 var="b",
-                callee=f"A({reduction.name}({call_args})).distinguish",
-                args="",
-            ),
-            ec_ast.Return(expr="b"),
-        ]
+                callee=f"A({composed}).distinguish",
+                args=distinguish_args,
+            )
+        )
+        body.append(ec_ast.Return(expr="b"))
         params = list(extra_module_params) if extra_module_params else []
         params.extend(
             [
@@ -456,7 +589,7 @@ class ModuleTranslator:
             procs=[
                 ec_ast.Proc(
                     name="distinguish",
-                    params=[],
+                    params=distinguish_params,
                     return_type=ec_ast.EcType("bool"),
                     body=body,
                 )
@@ -464,17 +597,37 @@ class ModuleTranslator:
             params=params,
         )
 
-    def translate_game_wrapper(
+    def translate_game_wrapper(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         wrapper_name: str,
         adversary_type_name: str,
         oracle_module_expr: str,
         extra_module_params: list[ec_ast.ModuleParam] | None = None,
+        multi_oracle: MultiOracleSpec | None = None,
     ) -> ec_ast.Module:
         """Emit a ``main()``-wrapper module for one step in the proof.
 
         The wrapper takes an adversary parameter ``A`` and a single ``main``
         procedure that runs ``A`` against the given oracle module expression.
+
+        Single-oracle (``multi_oracle is None``): ``main`` just runs
+        ``b <@ A(<oracle>).distinguish()``.
+
+        Multi-oracle (Initialize-lifted): ``main`` first runs the lifted
+        ``Initialize`` on the same oracle module and passes its result to the
+        adversary::
+
+            proc main() : bool = {
+              var b : bool;
+              var pk : <init_ret>;
+              pk <@ <oracle>.initialize();
+              b  <@ A(<oracle>).distinguish(pk);
+              return b;
+            }
+
+        Lifting ``Initialize`` into ``main()`` (rather than coupling the two
+        games' state in the byequiv precondition) is what makes the
+        state-coupling invariant establishable before the adversary runs.
 
         Args:
             wrapper_name: e.g. ``"Game_step_0"``.
@@ -485,16 +638,35 @@ class ModuleTranslator:
                 ``"R1(OTP, OneTimeSecrecy_Real(OTP))"``.
             extra_module_params: additional module parameters before ``A``
                 (e.g. declared module instances inside a section).
+            multi_oracle: Initialize-lifted spec, or ``None`` for single-oracle.
         """
         body: list[ec_ast.EcStmt] = [
-            ec_ast.VarDecl(name="b", type=ec_ast.EcType("bool")),
+            ec_ast.VarDecl(name="b", type=ec_ast.EcType("bool"))
+        ]
+        if multi_oracle is None:
+            distinguish_args = ""
+        else:
+            body.append(
+                ec_ast.VarDecl(
+                    name=INIT_RESULT_NAME, type=multi_oracle.init_return_type
+                )
+            )
+            body.append(
+                ec_ast.Call(
+                    var=INIT_RESULT_NAME,
+                    callee=f"{oracle_module_expr}.{multi_oracle.init_name}",
+                    args="",
+                )
+            )
+            distinguish_args = INIT_RESULT_NAME
+        body.append(
             ec_ast.Call(
                 var="b",
                 callee=f"A({oracle_module_expr}).distinguish",
-                args="",
-            ),
-            ec_ast.Return(expr="b"),
-        ]
+                args=distinguish_args,
+            )
+        )
+        body.append(ec_ast.Return(expr="b"))
         params = list(extra_module_params) if extra_module_params else []
         params.append(ec_ast.ModuleParam(name="A", module_type=adversary_type_name))
         return ec_ast.Module(
@@ -517,10 +689,11 @@ class ModuleTranslator:
         scheme_type_name: str,
         adversary_type_name: str,
         side_module_name: str,
+        multi_oracle: MultiOracleSpec | None = None,
     ) -> ec_ast.Module:
         """Assumption-game ``main()`` wrapper parameterized on ``(E, A)``.
 
-        Emits::
+        Single-oracle emits::
 
             module <wrapper_name> (<E> : <Scheme>, A : <Adv>) = {
               proc main() : bool = {
@@ -530,19 +703,42 @@ class ModuleTranslator:
               }
             }
 
+        Multi-oracle (Initialize-lifted) runs ``Initialize`` on ``<side>(<E>)``
+        first and threads its result into ``distinguish`` (mirroring
+        :meth:`translate_game_wrapper`).
+
         Lives inside the primitive's abstract theory so the advantage
         axiom can forall-quantify over both the adversary and the
         scheme instance.
         """
+        oracle_expr = f"{side_module_name}({scheme_param_name})"
         body: list[ec_ast.EcStmt] = [
-            ec_ast.VarDecl(name="b", type=ec_ast.EcType("bool")),
+            ec_ast.VarDecl(name="b", type=ec_ast.EcType("bool"))
+        ]
+        if multi_oracle is None:
+            distinguish_args = ""
+        else:
+            body.append(
+                ec_ast.VarDecl(
+                    name=INIT_RESULT_NAME, type=multi_oracle.init_return_type
+                )
+            )
+            body.append(
+                ec_ast.Call(
+                    var=INIT_RESULT_NAME,
+                    callee=f"{oracle_expr}.{multi_oracle.init_name}",
+                    args="",
+                )
+            )
+            distinguish_args = INIT_RESULT_NAME
+        body.append(
             ec_ast.Call(
                 var="b",
-                callee=f"A({side_module_name}({scheme_param_name})).distinguish",
-                args="",
-            ),
-            ec_ast.Return(expr="b"),
-        ]
+                callee=f"A({oracle_expr}).distinguish",
+                args=distinguish_args,
+            )
+        )
+        body.append(ec_ast.Return(expr="b"))
         return ec_ast.Module(
             name=wrapper_name,
             procs=[

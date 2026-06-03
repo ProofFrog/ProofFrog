@@ -1398,6 +1398,12 @@ def export_proof_file(proof_path: str) -> str:
     # multi-oracle emitters.
     oracle_name_by_game_file: dict[str, str] = {}
     oracle_params_by_game_file: dict[str, list[str]] = {}
+    # Per-oracle params (game file -> oracle name -> ordered EC param names).
+    # Used by the multi-oracle per-oracle equiv lemmas (P3) so each post-init
+    # ``hop_<i>_<m>`` lemma's precondition carries ``m``'s own argument
+    # equality. Single-oracle resolution ignores this (it keys off the scalar
+    # first-method params), so output stays byte-identical.
+    oracle_params_by_oracle: dict[str, dict[str, list[str]]] = {}
     for gf in game_files:
         first_method = gf.games[0].methods[0]
         oracle_name_by_game_file[gf.name] = oracle_model_by_game_file[
@@ -1406,6 +1412,10 @@ def export_proof_file(proof_path: str) -> str:
         oracle_params_by_game_file[gf.name] = [
             p.name for p in first_method.signature.parameters
         ]
+        oracle_params_by_oracle[gf.name] = {
+            m.signature.name.lower(): [p.name for p in m.signature.parameters]
+            for m in gf.games[0].methods
+        }
 
     # Resolver produces qualified E.<Gf>_<Side> module names so step
     # module expressions reference the cloned theory contents.
@@ -1441,6 +1451,7 @@ def export_proof_file(proof_path: str) -> str:
         declared_module_names=declared_module_names,
         outer_oracle_name=oracle_name_by_game_file[proof.theorem.name],
         oracle_model_by_game_file=oracle_model_by_game_file,
+        oracle_params_by_oracle=oracle_params_by_oracle,
     )
 
     # Validate proof via the engine (same as before).
@@ -1800,8 +1811,77 @@ def export_proof_file(proof_path: str) -> str:
             )
         return info.tactic_body
 
+    # Per-hop memo of the multi-oracle chain emission. ``translate_hops``
+    # calls ``_oracle_body_for_hop`` once per oracle of a multi-oracle hop;
+    # the first call for a hop runs the whole per-oracle chain emission, caches
+    # it, and appends its shared flat-state modules + per-oracle artifacts to
+    # ``chain_extra_decls`` exactly once. Single-oracle proofs never reach this
+    # (``translate_hops`` only routes multi-oracle models here), so their
+    # output is unchanged.
+    multi_oracle_hop_cache: dict[int, dict[str, list[str]]] = {}
+
+    def _oracle_body_for_hop(
+        _i: int,
+        step_a: frog_ast.Step,
+        step_b: frog_ast.Step,
+        oracle_name: str,
+        _is_init: bool,
+    ) -> list[str] | None:
+        if _is_assumption_hop(step_a, step_b):
+            return None
+        if _i not in multi_oracle_hop_cache:
+            model = resolver.oracle_model_for(step_a)
+            assert model is not None and model.init_name is not None
+            oracles: list[tuple[str, bool]] = [(model.init_name, True)]
+            oracles += [(m, False) for m in model.post_init_names]
+            oracle_eq_args = {
+                name: resolver.precondition_for(step_a, name) for name, _ in oracles
+            }
+            # pylint: disable=protected-access
+            left_ast = engine._get_game_ast(step_a.challenger, step_a.reduction)
+            right_ast = engine._get_game_ast(step_b.challenger, step_b.reduction)
+            # pylint: enable=protected-access
+            _lc, left_apps = engine.canonicalize_game_with_states(
+                copy.deepcopy(left_ast)
+            )
+            _rc, right_apps = engine.canonicalize_game_with_states(
+                copy.deepcopy(right_ast)
+            )
+            external_module_types = {
+                inst.let_name: inst.primitive_name for inst in instances
+            }
+            flat_module_params = (
+                list(declared_instance_params) if declared_instance_params else None
+            )
+            # pylint: disable=import-outside-toplevel
+            from .chain_emitter import emit_multi_oracle_chain_for_hop
+
+            info = emit_multi_oracle_chain_for_hop(
+                hop_index=_i,
+                left_game=left_ast,
+                right_game=right_ast,
+                left_apps=left_apps,
+                right_apps=right_apps,
+                oracles=oracles,
+                oracle_eq_args=oracle_eq_args,
+                left_wrapper_expr=resolver.resolve(step_a).module_expr,
+                right_wrapper_expr=resolver.resolve(step_b).module_expr,
+                types=top_types,
+                type_of_factory=type_of_factory,
+                external_module_types=external_module_types,
+                method_return_types=method_return_types,
+                flat_module_params=flat_module_params,
+            )
+            chain_extra_decls.extend(info.extra_decls)
+            multi_oracle_hop_cache[_i] = info.tactic_body_by_oracle
+        return multi_oracle_hop_cache[_i].get(oracle_name)
+
     lemmas = pt.translate_hops(
-        resolver, proof.steps, _body_for_hop, spec_overrides=chain_spec_overrides
+        resolver,
+        proof.steps,
+        _body_for_hop,
+        spec_overrides=chain_spec_overrides,
+        oracle_body_for_hop=_oracle_body_for_hop,
     )
 
     qualified_adv_type_by_game_file: dict[str, str] = {

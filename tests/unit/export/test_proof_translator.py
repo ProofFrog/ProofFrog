@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from proof_frog import frog_ast, frog_parser
 from proof_frog.export.easycrypt import ec_ast
+from proof_frog.export.easycrypt import oracle_model as om
 from proof_frog.export.easycrypt import proof_translator as pt
 
 
@@ -57,6 +58,127 @@ def test_translate_hops_emits_admit_per_hop() -> None:
     assert all(lemma.postcondition == "={res}" for lemma in lemmas)
     assert all(lemma.precondition == "true" for lemma in lemmas)
     assert all(lemma.body == ["admit.", "qed."] for lemma in lemmas)
+
+
+# --- Multi-oracle per-oracle equiv lemmas (P3) -----------------------------
+
+
+def _multi_oracle_model() -> om.GameOracleModel:
+    """A two-oracle (Initialize + Challenge) model for both OTPSecureLR sides."""
+    return om.GameOracleModel(
+        all_names=["initialize", "challenge"],
+        init_name="initialize",
+        post_init_names=["challenge"],
+    )
+
+
+def _multi_oracle_resolver() -> pt.StepResolver:
+    model = _multi_oracle_model()
+    return pt.StepResolver(
+        module_name_by_concrete_game={
+            ("OneTimeSecrecyLR", "Left"): "OneTimeSecrecyLR_Left",
+            ("OneTimeSecrecyLR", "Right"): "OneTimeSecrecyLR_Right",
+            ("OneTimeSecrecy", "Real"): "OneTimeSecrecy_Real",
+            ("OneTimeSecrecy", "Random"): "OneTimeSecrecy_Random",
+        },
+        oracle_name_by_game_file={
+            "OneTimeSecrecyLR": "initialize",
+            "OneTimeSecrecy": "initialize",
+        },
+        primitive_name="SymEnc",
+        scheme_name="OTP",
+        oracle_model_by_game_file={
+            "OneTimeSecrecyLR": model,
+            "OneTimeSecrecy": model,
+        },
+        oracle_params_by_oracle={
+            "OneTimeSecrecyLR": {"initialize": [], "challenge": ["m0", "m1"]},
+            "OneTimeSecrecy": {"initialize": [], "challenge": ["m0", "m1"]},
+        },
+    )
+
+
+def test_coupling_invariant_shape() -> None:
+    inv = pt.coupling_invariant("GL(OTP)", "GR(OTP)")
+    assert inv == "(glob GL(OTP)){1} = (glob GR(OTP)){2}"
+
+
+def test_oracle_model_for_returns_model() -> None:
+    steps = _steps_of_otpsecurelr()
+    resolver = _multi_oracle_resolver()
+    model = resolver.oracle_model_for(steps[0])
+    assert model is not None and model.is_multi_oracle
+    assert model.init_name == "initialize"
+    assert model.post_init_names == ["challenge"]
+
+
+def test_precondition_for_oracle_name_uses_per_oracle_params() -> None:
+    steps = _steps_of_otpsecurelr()
+    resolver = _multi_oracle_resolver()
+    # The init oracle has no args; challenge takes m0, m1.
+    assert resolver.precondition_for(steps[0], "initialize") == "true"
+    assert resolver.precondition_for(steps[0], "challenge") == "={m0, m1}"
+    # Without an oracle name the legacy (first-method) params apply.
+    assert resolver.precondition_for(steps[0]) == "true"
+
+
+def test_translate_hops_single_oracle_when_no_callback() -> None:
+    """A multi-oracle model is ignored unless an oracle body callback is given."""
+    steps = _steps_of_otpsecurelr()
+    resolver = _multi_oracle_resolver()
+    lemmas = pt.translate_hops(resolver, steps, lambda _i, _a, _b: ["admit.", "qed."])
+    assert [lemma.name for lemma in lemmas] == [f"hop_{i}" for i in range(5)]
+
+
+def test_translate_hops_multi_oracle_emits_per_oracle_lemmas() -> None:
+    steps = _steps_of_otpsecurelr()
+    resolver = _multi_oracle_resolver()
+    lemmas = pt.translate_hops(
+        resolver,
+        steps,
+        lambda _i, _a, _b: ["admit.", "qed."],  # legacy path; unused here
+        oracle_body_for_hop=lambda _i, _a, _b, _name, _is_init: ["proc; auto.", "qed."],
+    )
+    # 5 hops x 2 oracles (init + 1 post-init) = 10 lemmas.
+    assert len(lemmas) == 10
+    names = [lemma.name for lemma in lemmas]
+    assert names[:2] == ["hop_0_initialize", "hop_0_challenge"]
+
+    init_lemma = lemmas[0]
+    chal_lemma = lemmas[1]
+    coupling = pt.coupling_invariant(
+        "OneTimeSecrecyLR_Left(OTP)", "R1(OTP, OneTimeSecrecy_Real(OTP))"
+    )
+    # init: established from `true`, posts the coupling.
+    assert init_lemma.left == "OneTimeSecrecyLR_Left(OTP).initialize"
+    assert init_lemma.right == "R1(OTP, OneTimeSecrecy_Real(OTP)).initialize"
+    assert init_lemma.precondition == "true"
+    assert init_lemma.postcondition == f"={{res}} /\\ {coupling}"
+    # post-init: preserves the coupling, pre also carries the arg equality.
+    assert chal_lemma.left == "OneTimeSecrecyLR_Left(OTP).challenge"
+    assert chal_lemma.precondition == f"={{m0, m1}} /\\ {coupling}"
+    assert chal_lemma.postcondition == f"={{res}} /\\ {coupling}"
+    assert chal_lemma.body == ["proc; auto.", "qed."]
+
+
+def test_translate_hops_multi_oracle_skips_oracle_when_body_none() -> None:
+    steps = _steps_of_otpsecurelr()
+    resolver = _multi_oracle_resolver()
+
+    def only_init(
+        _i: int, _a: object, _b: object, _name: str, is_init: bool
+    ) -> list[str] | None:
+        return ["proc; auto.", "qed."] if is_init else None
+
+    lemmas = pt.translate_hops(
+        resolver,
+        steps,
+        lambda _i, _a, _b: ["admit.", "qed."],
+        oracle_body_for_hop=only_init,
+    )
+    # Only the init oracle per hop survives.
+    assert all(lemma.name.endswith("_initialize") for lemma in lemmas)
+    assert len(lemmas) == 5
 
 
 def test_translate_assumption_axioms_theory() -> None:

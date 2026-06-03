@@ -266,3 +266,158 @@ def test_translate_game_wrapper(otp_lr_proof_setup: dict[str, object]) -> None:
     assert "var b : bool" in body_str
     assert "b <@ A(OneTimeSecrecyLR_Left(OTP)).distinguish()" in body_str
     assert "return b" in body_str
+
+
+# --- Multi-oracle (Initialize-lifted) emission, P2 -----------------------
+
+
+def _multi_oracle_game_file() -> frog_ast.GameFile:
+    """A synthetic two-side multi-oracle game file (Initialize + Eval + Chk).
+
+    Mirrors the validated EC template shape: an ``Initialize`` oracle plus two
+    post-init oracles. Initialize returns a bitstring (so the lifted-init param
+    type is concrete); Eval/Chk are the adversary-facing oracles.
+    """
+    bs = frog_ast.BitStringType(parameterization=frog_ast.Variable("lambda"))
+
+    def side(name: str) -> frog_ast.Game:
+        param = frog_ast.Parameter(frog_ast.Variable("PRF"), "E")
+        init = frog_ast.Method(
+            frog_ast.MethodSignature("Initialize", bs, []), frog_ast.Block([])
+        )
+        eval_m = frog_ast.Method(
+            frog_ast.MethodSignature("Eval", bs, [frog_ast.Parameter(bs, "x")]),
+            frog_ast.Block([]),
+        )
+        chk = frog_ast.Method(
+            frog_ast.MethodSignature("Chk", bs, [frog_ast.Parameter(bs, "x")]),
+            frog_ast.Block([]),
+        )
+        return frog_ast.Game((name, [param], [], [init, eval_m, chk]))
+
+    return frog_ast.GameFile([], (side("Left"), side("Right")), "PRFGame")
+
+
+def _multi_oracle_translator() -> mt.ModuleTranslator:
+    return _make_translator({})
+
+
+def test_multi_oracle_spec_built_for_multi_oracle_game() -> None:
+    tx = _multi_oracle_translator()
+    spec = tx.multi_oracle_spec(_multi_oracle_game_file())
+    assert spec is not None
+    assert spec.init_name == "initialize"
+    assert spec.init_return_type.text == "bs_lambda"
+    assert spec.post_init_names == ["eval", "chk"]
+    assert spec.oracle_restriction("O") == ["O.eval", "O.chk"]
+
+
+def test_multi_oracle_spec_none_for_single_oracle() -> None:
+    tx = _multi_oracle_translator()
+    # OTPSecureLR's OneTimeSecrecyLR game has no Initialize -> single-oracle.
+    proof_path = "examples/joy/Proofs/Ch2/OTPSecureLR.proof"
+    gf = next(
+        g
+        for g in (
+            frog_parser.parse_file(
+                frog_parser.resolve_import_path(imp.filename, proof_path)
+            )
+            for imp in frog_parser.parse_proof_file(proof_path).imports
+        )
+        if isinstance(g, frog_ast.GameFile) and g.name == "OneTimeSecrecyLR"
+    )
+    assert tx.multi_oracle_spec(gf) is None
+
+
+def test_multi_oracle_adversary_type_restricts_to_post_init() -> None:
+    tx = _multi_oracle_translator()
+    gf = _multi_oracle_game_file()
+    spec = tx.multi_oracle_spec(gf)
+    adv = tx.translate_adversary_type(
+        gf, oracle_type_name="PRFGame_Oracle", multi_oracle=spec
+    )
+    assert len(adv.procs) == 1
+    distinguish = adv.procs[0]
+    assert distinguish.name == "distinguish"
+    # distinguish gains the lifted-init result parameter ...
+    assert [p.name for p in distinguish.params] == ["pk"]
+    assert distinguish.params[0].type.text == "bs_lambda"
+    # ... and is restricted to the post-init oracles only.
+    assert distinguish.oracle_restriction == ["O.eval", "O.chk"]
+    # The rendered module type carries the restriction clause.
+    rendered = "\n".join(ec_ast._render_decl(adv))  # pylint: disable=protected-access
+    assert "proc distinguish(pk : bs_lambda) : bool {O.eval, O.chk}" in rendered
+
+
+def test_multi_oracle_game_wrapper_lifts_initialize() -> None:
+    tx = _multi_oracle_translator()
+    spec = tx.multi_oracle_spec(_multi_oracle_game_file())
+    wrapper = tx.translate_game_wrapper(
+        wrapper_name="Game_step_0",
+        adversary_type_name="PRFGame_Adv",
+        oracle_module_expr="PRFGame_Left(E)",
+        multi_oracle=spec,
+    )
+    body_str = "\n".join(_render_stmt_for_test(s) for s in wrapper.procs[0].body)
+    assert "var pk : bs_lambda;" in body_str
+    assert "pk <@ PRFGame_Left(E).initialize();" in body_str
+    assert "b <@ A(PRFGame_Left(E)).distinguish(pk);" in body_str
+    assert "return b;" in body_str
+
+
+def test_multi_oracle_theory_game_wrapper_lifts_initialize() -> None:
+    tx = _multi_oracle_translator()
+    spec = tx.multi_oracle_spec(_multi_oracle_game_file())
+    wrapper = tx.translate_theory_game_wrapper(
+        wrapper_name="Game_PRFGame_Left",
+        scheme_param_name="Em",
+        scheme_type_name="Scheme",
+        adversary_type_name="PRFGame_Adv",
+        side_module_name="PRFGame_Left",
+        multi_oracle=spec,
+    )
+    body_str = "\n".join(_render_stmt_for_test(s) for s in wrapper.procs[0].body)
+    assert "pk <@ PRFGame_Left(Em).initialize();" in body_str
+    assert "b <@ A(PRFGame_Left(Em)).distinguish(pk);" in body_str
+
+
+def test_multi_oracle_reduction_adversary_threads_init(
+    otp_lr_proof_setup: dict[str, object],
+) -> None:
+    tx = _multi_oracle_translator()
+    r1 = otp_lr_proof_setup["reduction_R1"]
+    assert isinstance(r1, frog_ast.Reduction)
+    spec = tx.multi_oracle_spec(_multi_oracle_game_file())
+    adv = tx.translate_reduction_adversary(
+        reduction=r1,
+        outer_adversary_type_name="PRFGame_Adv",
+        inner_oracle_type_name="PRFGame_Oracle",
+        scheme_module_expr="OTP",
+        inner_multi_oracle=spec,
+        outer_multi_oracle=spec,
+    )
+    distinguish = adv.procs[0]
+    # distinguish takes the inner-init result; the body re-runs Initialize
+    # through the reduction to produce the outer-init result it forwards to A.
+    assert [p.name for p in distinguish.params] == ["pk"]
+    body_str = "\n".join(_render_stmt_for_test(s) for s in distinguish.body)
+    assert "var pk0 : bs_lambda;" in body_str
+    assert "pk0 <@ R1(OTP, C).initialize();" in body_str
+    assert "b <@ A(R1(OTP, C)).distinguish(pk0);" in body_str
+
+
+def test_single_oracle_emitters_unchanged_when_spec_none() -> None:
+    """multi_oracle=None reproduces the legacy single-oracle shapes exactly."""
+    tx = _multi_oracle_translator()
+    gf = _multi_oracle_game_file()
+    adv = tx.translate_adversary_type(gf, oracle_type_name="PRFGame_Oracle")
+    assert adv.procs[0].params == []
+    assert adv.procs[0].oracle_restriction is None
+    wrapper = tx.translate_game_wrapper(
+        wrapper_name="Game_step_0",
+        adversary_type_name="PRFGame_Adv",
+        oracle_module_expr="PRFGame_Left(E)",
+    )
+    body_str = "\n".join(_render_stmt_for_test(s) for s in wrapper.procs[0].body)
+    assert "b <@ A(PRFGame_Left(E)).distinguish();" in body_str
+    assert "initialize" not in body_str

@@ -787,6 +787,455 @@ def emit_chain_for_hop(
 
 
 # ---------------------------------------------------------------------------
+# Multi-oracle per-oracle chain emission (P3 Part B)
+#
+# A multi-oracle, stateful hop (``Initialize`` lifted into the wrapper's
+# ``main()``, plus one or more post-init oracles that read the state it set)
+# cannot be discharged by the single-oracle ``hop_<i>`` + chain: that proves
+# exactly one oracle. Instead each oracle gets its OWN per-transform chain,
+# and every chain spec carries the relational state-coupling invariant
+# ``(glob L){1} = (glob R){2}`` (idea 2 of the validated template
+# ``tests/integration/ec_templates/multi_oracle_indist.ec``) so that the init
+# oracle ESTABLISHES the coupling (pre ``true``) and each post-init oracle
+# PRESERVES it.
+#
+# The flat-state modules (``Step_<i>{L,R}_state_k``) are full multi-oracle
+# games -- emitted ONCE and shared across every oracle's chain; only the
+# micro/canon_bridge/chain lemmas are oracle-suffixed (``micro_<i>_<m>_*``,
+# ``canon_bridge_<i>_<m>``, ``hop_<i>_<m>_chain``).
+#
+# Scope (identical-state first cut, per the multi-oracle foundation plan, §3):
+# each chain step's micro tactic is ``proc; sim`` when that oracle's body is
+# unchanged across the step (``sim`` carries the untouched-state coupling), a
+# synthesized ``proc; swap...; sim`` for a pure top-level reorder of that
+# oracle's body, and otherwise the whole oracle routes to a coupling-pending
+# admit. The wrapper<->flat bridge and differently-named-field correspondence
+# remain the coupling-synthesis research piece (P5). Every multi-oracle proof
+# in the corpus has an independent companion blocker, so this path has no
+# EC-compiling target yet -- it is validated by unit tests on the emitted
+# shape and lands such proofs as Blocked (automation-ladder rung 7) rather
+# than crashing.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MultiOracleHopChainInfo:
+    """Per-oracle chain output for one multi-oracle interchangeability hop.
+
+    ``extra_decls`` are the shared flat-state modules (emitted ONCE) followed
+    by every per-oracle chain artifact. ``tactic_body_by_oracle`` maps each
+    oracle name to the tactic body for that oracle's outer ``hop_<i>_<m>``
+    equiv lemma; Part A's :func:`proof_translator._multi_oracle_hop_lemmas`
+    declares those lemmas (names, coupling pre/post) and this supplies their
+    bodies via the ``oracle_body_for_hop`` callback. An oracle absent from the
+    dict (callback returned its body as ``None``) is skipped by Part A.
+    """
+
+    extra_decls: list[str]
+    tactic_body_by_oracle: dict[str, list[str]]
+
+
+def _glob_coupling(left_ref: str, right_ref: str) -> str:
+    """``(glob L){1} = (glob R){2}`` -- the identical-state coupling invariant.
+
+    Matches :func:`proof_translator.coupling_invariant`; duplicated here to
+    keep ``chain_emitter`` free of a proof-translator import.
+    """
+    return f"(glob {left_ref})" "{1}" f" = (glob {right_ref})" "{2}"
+
+
+def _coupling_spec(left_ref: str, right_ref: str, is_init: bool, eq_args: str) -> str:
+    """``(<pre> ==> ={res} /\\ <coupling>)`` for a transitivity middle-spec.
+
+    The init oracle establishes the coupling from ``true``; a post-init oracle
+    additionally requires its argument equality (``eq_args``) in the
+    precondition.
+    """
+    cpl = _glob_coupling(left_ref, right_ref)
+    if is_init:
+        pre = "true"
+    else:
+        pre = cpl if eq_args == "true" else f"{eq_args} /\\ {cpl}"
+    return f"({pre} ==> ={{res}} /\\ {cpl})"
+
+
+def _project_to_method(game: frog_ast.Game, oracle_name: str) -> frog_ast.Game | None:
+    """Deepcopy ``game`` keeping only the method named ``oracle_name`` (lower)."""
+    chosen = [m for m in game.methods if m.signature.name.lower() == oracle_name]
+    if not chosen:
+        return None
+    proj = copy.deepcopy(game)
+    proj.methods = [copy.deepcopy(chosen[0])]
+    return proj
+
+
+def _oracle_step_tactic(
+    state_before: frog_ast.Game,
+    state_after: frog_ast.Game,
+    oracle_name: str,
+    reversed_dir: bool,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+) -> list[str] | None:
+    """Tactic for one chain step's micro lemma, restricted to ``oracle_name``.
+
+    ``["proc; sim."]`` when that oracle's body is unchanged across the step
+    (``sim`` preserves the coupling on untouched state); a ``proc; swap...;
+    sim`` sequence when the step is a pure top-level reorder of that oracle's
+    body; ``None`` when neither applies (the caller routes the whole oracle to
+    a coupling-pending admit).
+    """
+    pb = _project_to_method(state_before, oracle_name)
+    pa = _project_to_method(state_after, oracle_name)
+    if pb is None or pa is None:
+        return None
+    if pb.methods[0] == pa.methods[0]:
+        return ["proc; sim."]
+    before_h = _normalize_for_ec(
+        copy.deepcopy(pb), external_module_types, method_return_types
+    )
+    after_h = _normalize_for_ec(
+        copy.deepcopy(pa), external_module_types, method_return_types
+    )
+    swaps = _permutation_swaps(before_h, after_h, reversed_dir=reversed_dir)
+    if swaps is not None:
+        return ["proc.", *swaps, "sim."]
+    return None
+
+
+def _oracle_pending_admit(hop_index: int, oracle_name: str) -> list[str]:
+    """Coupling-pending admit body for one oracle of a multi-oracle hop."""
+    return [
+        _res_tag(ADMIT_UNGUIDED),
+        f"(* multi-oracle hop {hop_index}, oracle {oracle_name!r}: a chain step",
+        "   transforms this oracle's body in a way the identical-state first",
+        "   cut does not yet discharge under the state-coupling invariant",
+        "   (proc; sim / reorder only). Synthesizing the coupling for a",
+        "   transformed post-init oracle body is the coupling-synthesis piece",
+        "   (P5 of the multi-oracle foundation plan). Falling back to admit. *)",
+        "admit.",
+        "qed.",
+    ]
+
+
+# pylint: disable=too-many-locals,too-many-statements,too-many-arguments,too-many-positional-arguments
+def emit_multi_oracle_chain_for_hop(
+    hop_index: int,
+    left_game: frog_ast.Game,
+    right_game: frog_ast.Game,
+    left_apps: list[TransformApplication],
+    right_apps: list[TransformApplication],
+    oracles: list[tuple[str, bool]],
+    oracle_eq_args: dict[str, str],
+    left_wrapper_expr: str,
+    right_wrapper_expr: str,
+    types: tc.TypeCollector,
+    type_of_factory: Callable[
+        [dict[str, frog_ast.Type], dict[str, str]],
+        Callable[[frog_ast.Expression], frog_ast.Type],
+    ],
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_module_params: list[ec_ast.ModuleParam] | None = None,
+) -> MultiOracleHopChainInfo:
+    """Emit the per-oracle per-transform chains for one multi-oracle hop.
+
+    ``oracles`` is the ordered ``(oracle_name, is_init)`` list (init first,
+    then post-init in module-type declaration order); ``oracle_eq_args`` maps
+    each oracle to its EC argument-equality string (``"true"`` or
+    ``"={a, b}"``). ``left_wrapper_expr`` / ``right_wrapper_expr`` are the two
+    adjacent games' wrapper module expressions (e.g.
+    ``OneTimeSecrecyLR_Left(OTP)``), used to bridge the wrapper to the flat
+    chain in each oracle's outer body.
+
+    Returns the shared flat-state modules plus every oracle's chain artifacts,
+    and a per-oracle outer tactic body. See the module-level note for scope.
+    """
+    left_states: list[frog_ast.Game] = [left_game] + [a.game_after for a in left_apps]
+    right_states: list[frog_ast.Game] = [right_game] + [
+        a.game_after for a in right_apps
+    ]
+    left_mods = [f"Step_{hop_index}L_state_{k}" for k in range(len(left_states))]
+    right_mods = [f"Step_{hop_index}R_state_{k}" for k in range(len(right_states))]
+
+    modules = mt.ModuleTranslator(types, type_of_factory)
+    flat_params = list(flat_module_params) if flat_module_params else []
+    inst_suffix = (
+        "(" + ", ".join(p.name for p in flat_params) + ")" if flat_params else ""
+    )
+
+    def mod_ref(name: str) -> str:
+        return f"{name}{inst_suffix}"
+
+    # Shared flat-state modules (full multi-oracle games) emitted ONCE.
+    chunks: list[str] = []
+    for mod_name, state in zip(left_mods, left_states):
+        chunks.append(
+            _render_flat_state(
+                modules,
+                mod_name,
+                state,
+                external_module_types,
+                method_return_types,
+                flat_params,
+                emit_state_vars=True,
+            )
+        )
+    for mod_name, state in zip(right_mods, right_states):
+        chunks.append(
+            _render_flat_state(
+                modules,
+                mod_name,
+                state,
+                external_module_types,
+                method_return_types,
+                flat_params,
+                emit_state_vars=True,
+            )
+        )
+
+    bridge_tactic = "proc; inline *; sp; wp; sim"
+    tactic_body_by_oracle: dict[str, list[str]] = {}
+    for oracle_name, is_init in oracles:
+        eq_args = oracle_eq_args.get(oracle_name, "true")
+        oracle_chunks, outer_body = _emit_one_oracle_chain(
+            hop_index=hop_index,
+            oracle_name=oracle_name,
+            is_init=is_init,
+            eq_args=eq_args,
+            left_mods=left_mods,
+            right_mods=right_mods,
+            left_states=left_states,
+            right_states=right_states,
+            left_apps=left_apps,
+            right_apps=right_apps,
+            mod_ref=mod_ref,
+            left_wrapper_expr=left_wrapper_expr,
+            right_wrapper_expr=right_wrapper_expr,
+            bridge_tactic=bridge_tactic,
+            external_module_types=external_module_types,
+            method_return_types=method_return_types,
+        )
+        chunks.extend(oracle_chunks)
+        tactic_body_by_oracle[oracle_name] = outer_body
+
+    return MultiOracleHopChainInfo(
+        extra_decls=chunks, tactic_body_by_oracle=tactic_body_by_oracle
+    )
+
+
+# pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
+def _emit_one_oracle_chain(
+    hop_index: int,
+    oracle_name: str,
+    is_init: bool,
+    eq_args: str,
+    left_mods: list[str],
+    right_mods: list[str],
+    left_states: list[frog_ast.Game],
+    right_states: list[frog_ast.Game],
+    left_apps: list[TransformApplication],
+    right_apps: list[TransformApplication],
+    mod_ref: Callable[[str], str],
+    left_wrapper_expr: str,
+    right_wrapper_expr: str,
+    bridge_tactic: str,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+) -> tuple[list[str], list[str]]:
+    """Emit one oracle's chain artifacts + outer tactic body.
+
+    Returns ``(extra_decls, outer_body)``. If any chain step's micro cannot be
+    resolved (not identity, not a pure reorder), the chain is discarded and the
+    outer body is a coupling-pending admit (no oracle-suffixed artifacts).
+    """
+
+    def micro_pre(left_ref: str, right_ref: str) -> str:
+        cpl = _glob_coupling(left_ref, right_ref)
+        if is_init:
+            return "true"
+        return cpl if eq_args == "true" else f"{eq_args} /\\ {cpl}"
+
+    def micro_post(left_ref: str, right_ref: str) -> str:
+        return f"={{res}} /\\ {_glob_coupling(left_ref, right_ref)}"
+
+    chunks: list[str] = []
+    micros_left: list[str] = []
+    for k, _app in enumerate(left_apps):
+        tac = _oracle_step_tactic(
+            left_states[k],
+            left_states[k + 1],
+            oracle_name,
+            reversed_dir=False,
+            external_module_types=external_module_types,
+            method_return_types=method_return_types,
+        )
+        if tac is None:
+            return [], _oracle_pending_admit(hop_index, oracle_name)
+        name = f"micro_{hop_index}_{oracle_name}_left_{k}"
+        lref, rref = mod_ref(left_mods[k]), mod_ref(left_mods[k + 1])
+        micros_left.append(name)
+        chunks.append(
+            "\n".join(
+                _render_lemma_block(
+                    name,
+                    lref,
+                    rref,
+                    oracle_name,
+                    micro_pre(lref, rref),
+                    tac,
+                    postcondition=micro_post(lref, rref),
+                )
+            )
+        )
+
+    micros_right_rev: list[str] = []
+    for k, _app in enumerate(right_apps):
+        tac = _oracle_step_tactic(
+            right_states[k],
+            right_states[k + 1],
+            oracle_name,
+            reversed_dir=True,
+            external_module_types=external_module_types,
+            method_return_types=method_return_types,
+        )
+        if tac is None:
+            return [], _oracle_pending_admit(hop_index, oracle_name)
+        name = f"micro_{hop_index}_{oracle_name}_right_{k}_rev"
+        # Reversed: proves Step_R_state_{k+1} ~ Step_R_state_k.
+        lref, rref = mod_ref(right_mods[k + 1]), mod_ref(right_mods[k])
+        micros_right_rev.append(name)
+        chunks.append(
+            "\n".join(
+                _render_lemma_block(
+                    name,
+                    lref,
+                    rref,
+                    oracle_name,
+                    micro_pre(lref, rref),
+                    tac,
+                    postcondition=micro_post(lref, rref),
+                )
+            )
+        )
+
+    bridge_name = f"canon_bridge_{hop_index}_{oracle_name}"
+    bl, br = mod_ref(left_mods[-1]), mod_ref(right_mods[-1])
+    chunks.append(
+        "\n".join(
+            _render_lemma_block(
+                bridge_name,
+                bl,
+                br,
+                oracle_name,
+                micro_pre(bl, br),
+                ["proc; sim."],
+                postcondition=micro_post(bl, br),
+            )
+        )
+    )
+
+    chain_name = f"hop_{hop_index}_{oracle_name}_chain"
+    l0, r0 = mod_ref(left_mods[0]), mod_ref(right_mods[0])
+    chain_body = _render_coupling_chain_body(
+        oracle_name,
+        is_init,
+        eq_args,
+        [mod_ref(n) for n in left_mods],
+        [mod_ref(n) for n in right_mods],
+        micros_left,
+        micros_right_rev,
+        bridge_name,
+    )
+    chunks.append(
+        "\n".join(
+            _render_lemma_block(
+                chain_name,
+                l0,
+                r0,
+                oracle_name,
+                micro_pre(l0, r0),
+                chain_body,
+                postcondition=micro_post(l0, r0),
+            )
+        )
+    )
+
+    # Outer hop_<i>_<m> body: bridge the two wrappers to the flat chain ends,
+    # then discharge via the chain lemma. The wrapper<->flat coupling is the
+    # P5 piece; the structure mirrors the single-oracle outer tactic.
+    outer_body = [
+        "(* Per-transform: bridge wrappers to flat states, chain through. *)",
+        f"transitivity {l0}.{oracle_name} "
+        f"{_coupling_spec(left_wrapper_expr, l0, is_init, eq_args)} "
+        f"{_coupling_spec(l0, right_wrapper_expr, is_init, eq_args)}; "
+        f"[ smt() | smt() | {bridge_tactic} |].",
+        f"transitivity {r0}.{oracle_name} "
+        f"{_coupling_spec(l0, r0, is_init, eq_args)} "
+        f"{_coupling_spec(r0, right_wrapper_expr, is_init, eq_args)}; "
+        f"[ smt() | smt() | apply {chain_name} | {bridge_tactic} ].",
+        "qed.",
+    ]
+    return chunks, outer_body
+
+
+def _render_coupling_chain_body(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    oracle_name: str,
+    is_init: bool,
+    eq_args: str,
+    left_refs: list[str],
+    right_refs: list[str],
+    micros_left: list[str],
+    micros_right_rev: list[str],
+    bridge_name: str,
+) -> list[str]:
+    """Transitivity chain body with per-step coupling specs.
+
+    Walks ``L0 -> ... -> Ln --bridge--> Rn -> ... -> R0`` applying each
+    oracle-suffixed micro. Unlike the single-oracle :func:`_render_chain_body`
+    (uniform ``={res}`` spec), every transitivity middle-spec couples the
+    current intermediate module to the relevant endpoint, because the coupling
+    invariant references the actual module names.
+    """
+    final_right = right_refs[0]
+
+    def spec(a_ref: str, b_ref: str) -> str:
+        return _coupling_spec(a_ref, b_ref, is_init, eq_args)
+
+    body = ["(* Chain through per-transform micro-lemmas (coupling-preserving). *)"]
+    cur = left_refs[0]
+    for i, micro in enumerate(micros_left):
+        nxt = left_refs[i + 1]
+        body.append(
+            f"transitivity {nxt}.{oracle_name} "
+            f"{spec(cur, nxt)} {spec(nxt, final_right)}; "
+            f"[ smt() | smt() | apply {micro} |]."
+        )
+        cur = nxt
+    if micros_right_rev:
+        rn = right_refs[-1]
+        body.append(
+            f"transitivity {rn}.{oracle_name} "
+            f"{spec(cur, rn)} {spec(rn, final_right)}; "
+            f"[ smt() | smt() | apply {bridge_name} |]."
+        )
+        for i in reversed(range(len(micros_right_rev))):
+            rev = micros_right_rev[i]
+            if i == 0:
+                body.append(f"apply {rev}.")
+            else:
+                target = right_refs[i]
+                body.append(
+                    f"transitivity {target}.{oracle_name} "
+                    f"{spec(right_refs[i + 1], target)} {spec(target, final_right)}; "
+                    f"[ smt() | smt() | apply {rev} |]."
+                )
+    else:
+        body.append(f"apply {bridge_name}.")
+    return body
+
+
+# ---------------------------------------------------------------------------
 # Statement-reorder detection (for ``swap`` tactic synthesis)
 # ---------------------------------------------------------------------------
 
@@ -1149,13 +1598,18 @@ def _flat_state_module(  # pylint: disable=too-many-arguments,too-many-positiona
     external_module_types: dict[str, str],
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     module_params: list[ec_ast.ModuleParam],
+    emit_state_vars: bool = False,
 ) -> ec_ast.Module:
     """Translate one intermediate flat-state game to an EC ``Module`` AST."""
     prepared = _normalize_for_ec(
         copy.deepcopy(game), external_module_types, method_return_types
     )
     return modules.translate_flat_game(
-        prepared, mod_name, external_module_types, module_params=module_params
+        prepared,
+        mod_name,
+        external_module_types,
+        module_params=module_params,
+        emit_state_vars=emit_state_vars,
     )
 
 
@@ -1166,6 +1620,7 @@ def _render_flat_state(  # pylint: disable=too-many-arguments,too-many-positiona
     external_module_types: dict[str, str],
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     module_params: list[ec_ast.ModuleParam],
+    emit_state_vars: bool = False,
 ) -> str:
     """Render one intermediate flat-state game as an EC module source string."""
     ec_module = _flat_state_module(
@@ -1175,6 +1630,7 @@ def _render_flat_state(  # pylint: disable=too-many-arguments,too-many-positiona
         external_module_types,
         method_return_types,
         module_params,
+        emit_state_vars=emit_state_vars,
     )
     return "\n".join(_render_module_decl(ec_module))
 

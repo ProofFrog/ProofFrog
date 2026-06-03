@@ -29,6 +29,27 @@ class ResolvedStep:
     oracle_name: str
 
 
+def coupling_invariant(left_module_expr: str, right_module_expr: str) -> str:
+    """Return the relational state-coupling invariant for a multi-oracle hop.
+
+    The two adjacent multi-oracle games carry mutable module state (set by
+    the lifted ``Initialize``, read by the post-init oracles). The per-oracle
+    equiv lemmas couple that state across the two equiv sides with
+    ``(glob L){1} = (glob R){2}`` (idea 2 of the validated template,
+    ``tests/integration/ec_templates/multi_oracle_indist.ec``): ``hop_<i>_init``
+    establishes it from ``true`` and every post-init oracle preserves it.
+
+    This is the **identical-state** (easy) form of the coupling -- correct
+    precisely when the two games' globals line up field-by-field (e.g. both
+    sides are the same game with one oracle body transformed). The
+    differently-named-field correspondence for inlining hops between
+    non-identical-state games is the coupling-synthesis research piece (P5,
+    section 3 of the multi-oracle foundation plan); until it lands those hops
+    stay on guided admit.
+    """
+    return f"(glob {left_module_expr})" "{1}" f" = (glob {right_module_expr})" "{2}"
+
+
 class StepResolver:
     """Resolve a FrogLang proof step to its EC module expression.
 
@@ -54,6 +75,7 @@ class StepResolver:
         oracle_model_by_game_file: (
             dict[str, oracle_model.GameOracleModel] | None
         ) = None,
+        oracle_params_by_oracle: dict[str, dict[str, list[str]]] | None = None,
     ) -> None:
         self._module_names = module_name_by_concrete_game
         self._oracle_names = oracle_name_by_game_file
@@ -80,17 +102,36 @@ class StepResolver:
         # precondition/postcondition emission.
         self._declared_modules = declared_module_names or []  # noqa: F841
         # Full oracle data model per game file (ordered names + init/post-init
-        # split; see ``oracle_model``). Reserved for the multi-oracle emitters
-        # (P2-P4): the current single-oracle resolution keys off the scalar
-        # ``oracle_name_by_game_file`` and ignores this.
-        self._oracle_models = oracle_model_by_game_file or {}  # noqa: F841
+        # split; see ``oracle_model``). Consumed by ``oracle_model_for`` to
+        # drive the multi-oracle per-oracle equiv-lemma emission (P3); the
+        # single-oracle resolution still keys off the scalar
+        # ``oracle_name_by_game_file``.
+        self._oracle_models = oracle_model_by_game_file or {}
+        # Per-oracle precondition parameters: game file -> oracle name ->
+        # ordered EC parameter names. Used by ``precondition_for`` when an
+        # ``oracle_name`` is supplied (multi-oracle post-init oracles each
+        # have their own argument signature, unlike the single-oracle path
+        # which uses the first method's params). Empty -> ``precondition_for``
+        # falls back to the scalar (first-method) params, so single-oracle
+        # output is unchanged.
+        self._oracle_params_by_oracle = oracle_params_by_oracle or {}
 
-    def precondition_for(self, step: frog_ast.Step) -> str:
+    def precondition_for(
+        self, step: frog_ast.Step, oracle_name: str | None = None
+    ) -> str:
         """Return the EC precondition: ``={arg1, arg2, ...}`` or ``true``.
 
         A composed step ``Game.Side compose R`` exposes the reduction's
         outer signature; use the reduction's params. A plain step
         ``Game.Side`` exposes the game's own signature.
+
+        ``oracle_name`` selects a specific oracle's argument signature for
+        the multi-oracle per-oracle equiv lemmas (P3): each post-init oracle
+        has its own parameters, so ``hop_<i>_<m>``'s precondition uses
+        ``m``'s params, not the first method's. When ``oracle_name`` is
+        ``None`` (the single-oracle path) or no per-oracle params are
+        registered for it, the legacy first-method params apply, so
+        single-oracle output is unchanged.
         """
         if step.reduction is not None:
             params = self._reduction_params.get(step.reduction.name, [])
@@ -98,10 +139,30 @@ class StepResolver:
             concrete = step.challenger
             if not isinstance(concrete, frog_ast.ConcreteGame):
                 return "true"
-            params = self._oracle_params.get(concrete.game.name, [])
+            per_oracle = self._oracle_params_by_oracle.get(concrete.game.name, {})
+            if oracle_name is not None and oracle_name in per_oracle:
+                params = per_oracle[oracle_name]
+            else:
+                params = self._oracle_params.get(concrete.game.name, [])
         if not params:
             return "true"
         return "={" + ", ".join(params) + "}"
+
+    def oracle_model_for(
+        self, step: frog_ast.Step
+    ) -> oracle_model.GameOracleModel | None:
+        """Return the oracle data model for a step's game file, if known.
+
+        Used by :func:`translate_hops` to decide whether a hop is
+        multi-oracle (``Initialize`` lifted into ``main`` plus post-init
+        oracles) and, if so, which per-oracle equiv lemmas to emit. Returns
+        ``None`` for non-``ConcreteGame`` steps or game files with no
+        registered model -- both of which take the single-oracle path.
+        """
+        concrete = step.challenger
+        if not isinstance(concrete, frog_ast.ConcreteGame):
+            return None
+        return self._oracle_models.get(concrete.game.name)
 
     @property
     def primitive_name(self) -> str:
@@ -466,13 +527,17 @@ def translate_main_theorem(  # pylint: disable=too-many-arguments,too-many-posit
     )
 
 
-def translate_hops(
+def translate_hops(  # pylint: disable=too-many-locals
     resolver: StepResolver,
     steps: list[frog_ast.ProofStep],
     body_for_hop: Callable[[int, frog_ast.Step, frog_ast.Step], list[str] | None],
     spec_overrides: dict[int, tuple[str, str]] | None = None,
+    oracle_body_for_hop: (
+        Callable[[int, frog_ast.Step, frog_ast.Step, str, bool], list[str] | None]
+        | None
+    ) = None,
 ) -> list[ec_ast.Lemma]:
-    """Produce one equiv lemma per adjacent-step pair.
+    """Produce the equiv lemma(s) per adjacent-step pair.
 
     ``body_for_hop(i, step_a, step_b)`` returns the list of tactic lines
     (ending with ``"qed."``) for hop ``i``, or ``None`` to skip the
@@ -483,6 +548,24 @@ def translate_hops(
     replaces the default ``={oracle_params}``/``={res}`` for hop ``i``.
     The per-transform exporter sets this in multi-module proofs to
     strengthen the spec with ``={glob E1, glob E2, ...}``.
+
+    **Multi-oracle hops (P3).** When ``oracle_body_for_hop`` is supplied
+    *and* the hop's game file is multi-oracle (an ``Initialize`` lifted into
+    ``main`` plus one or more post-init oracles -- see
+    :meth:`StepResolver.oracle_model_for`), the hop emits **one equiv lemma
+    per oracle** instead of the single ``hop_<i>``:
+
+    - ``hop_<i>_<init>`` establishes the state-coupling invariant
+      ``(glob L){1} = (glob R){2}`` from ``true`` (postcondition
+      ``={res} /\\ <coupling>``);
+    - each ``hop_<i>_<m>`` (post-init oracle ``m``, in module-type
+      declaration order) *preserves* it (pre and post both carry the
+      coupling, pre also carries ``m``'s argument equality).
+
+    ``oracle_body_for_hop(i, a, b, oracle_name, is_init)`` returns that
+    oracle's tactic body (or ``None`` to skip the lemma). Single-oracle
+    hops -- and every hop when ``oracle_body_for_hop`` is ``None`` -- take
+    the legacy single-lemma path, so single-oracle output is unchanged.
     """
     # NOTE: keep the original dict identity — the caller may mutate it
     # during ``body_for_hop`` calls (per-transform mode populates the
@@ -497,6 +580,18 @@ def translate_hops(
             raise NotImplementedError(
                 "Only simple Step entries are supported (no Induction)."
             )
+        model = (
+            resolver.oracle_model_for(a) if oracle_body_for_hop is not None else None
+        )
+        if (
+            oracle_body_for_hop is not None
+            and model is not None
+            and model.is_multi_oracle
+        ):
+            lemmas.extend(
+                _multi_oracle_hop_lemmas(resolver, i, a, b, model, oracle_body_for_hop)
+            )
+            continue
         body = body_for_hop(i, a, b)
         if body is None:
             continue
@@ -511,6 +606,53 @@ def translate_hops(
                 right=f"{rb.module_expr}.{rb.oracle_name}",
                 precondition=pre,
                 postcondition=post,
+                body=body,
+            )
+        )
+    return lemmas
+
+
+def _multi_oracle_hop_lemmas(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    resolver: StepResolver,
+    hop_index: int,
+    step_a: frog_ast.Step,
+    step_b: frog_ast.Step,
+    model: oracle_model.GameOracleModel,
+    oracle_body_for_hop: Callable[
+        [int, frog_ast.Step, frog_ast.Step, str, bool], list[str] | None
+    ],
+) -> list[ec_ast.Lemma]:
+    """Emit the per-oracle equiv lemmas for one multi-oracle hop (P3).
+
+    See :func:`translate_hops` for the lemma shapes. The init oracle is
+    emitted first (establishes the coupling from ``true``), then each
+    post-init oracle in declaration order (preserves the coupling).
+    """
+    ra = resolver.resolve(step_a)
+    rb = resolver.resolve(step_b)
+    coupling = coupling_invariant(ra.module_expr, rb.module_expr)
+    # init first, then post-init oracles in module-type declaration order.
+    assert model.init_name is not None  # is_multi_oracle guarantees this
+    ordered: list[tuple[str, bool]] = [(model.init_name, True)]
+    ordered += [(m, False) for m in model.post_init_names]
+    lemmas: list[ec_ast.Lemma] = []
+    for oracle_name, is_init in ordered:
+        body = oracle_body_for_hop(hop_index, step_a, step_b, oracle_name, is_init)
+        if body is None:
+            continue
+        if is_init:
+            pre = "true"
+        else:
+            eq_args = resolver.precondition_for(step_a, oracle_name)
+            pre = coupling if eq_args == "true" else f"{eq_args} /\\ {coupling}"
+        lemmas.append(
+            ec_ast.Lemma(
+                name=f"hop_{hop_index}_{oracle_name}",
+                module_args=[],
+                left=f"{ra.module_expr}.{oracle_name}",
+                right=f"{rb.module_expr}.{oracle_name}",
+                precondition=pre,
+                postcondition=f"={{res}} /\\ {coupling}",
                 body=body,
             )
         )

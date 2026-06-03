@@ -294,12 +294,13 @@ class ModuleTranslator:
             implements=implements,
         )
 
-    def translate_flat_game(
+    def translate_flat_game(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         game: frog_ast.Game,
         module_name: str,
         external_module_types: dict[str, str],
         module_params: list[ec_ast.ModuleParam] | None = None,
+        emit_state_vars: bool = False,
     ) -> ec_ast.Module:
         """Translate a parameterless intermediate game-state AST.
 
@@ -317,6 +318,15 @@ class ModuleTranslator:
         modules, the flat game must take each declared module as a
         parameter (e.g. ``(E1 : E1_c.Scheme) (E2 : E2_c.Scheme)``) so
         that EC's generalization-over-section finds those references.
+
+        ``emit_state_vars`` declares each game-level field as a module-level
+        ``var`` (mirroring :meth:`translate_reduction`). Multi-oracle stateful
+        games (e.g. a KEM ``Initialize`` that sets ``sk``/``ctStar`` read by a
+        later ``Decaps``) need their shared state to live on the module so the
+        relational coupling invariant ``(glob M){1} = (glob M'){2}`` is
+        non-vacuous. Single-oracle games (the legacy path) leave this ``False``
+        and emit no ``var`` block, so their output is byte-identical -- those
+        games' fields are inlined to method locals by canonicalization.
         """
         if game.parameters:
             raise NotImplementedError(
@@ -327,11 +337,20 @@ class ModuleTranslator:
             self._translate_method(method, external_module_types)
             for method in game.methods
         ]
+        module_vars = (
+            [
+                ec_ast.VarDecl(fld.name, self._types.translate_type(fld.type))
+                for fld in game.fields
+            ]
+            if emit_state_vars
+            else []
+        )
         return ec_ast.Module(
             name=module_name,
             procs=procs,
             params=list(module_params) if module_params else [],
             implements=None,
+            module_vars=module_vars,
         )
 
     def translate_reduction(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals

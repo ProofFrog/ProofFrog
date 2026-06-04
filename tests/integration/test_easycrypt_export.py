@@ -1280,6 +1280,9 @@ MULTI_ORACLE_TEMPLATE = EC_TEMPLATES / "multi_oracle_indist.ec"
 MULTI_ORACLE_DEADFIELD_TEMPLATE = (
     EC_TEMPLATES / "multi_oracle_deadfield_coupling.ec"
 )
+MULTI_ORACLE_ABSTRACT_CALL_TEMPLATE = (
+    EC_TEMPLATES / "multi_oracle_abstract_call_coupling.ec"
+)
 DEAD_SAMPLE_DROP_TEMPLATE = EC_TEMPLATES / "dead_sample_drop.ec"
 CALL_PAST_SAMPLE_SWAP_TEMPLATE = EC_TEMPLATES / "call_past_sample_swap.ec"
 
@@ -1380,6 +1383,42 @@ def test_multi_oracle_deadfield_coupling_template_compiles(
     )
     assert result.returncode == 0, (
         f"EasyCrypt rejected the multi-oracle dead-field coupling template.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_multi_oracle_abstract_call_coupling_template_compiles(
+    tmp_path: Path,
+) -> None:
+    """Regression tripwire for the live-state coupling when the post-init
+    oracle CALLS an abstract stateless scheme (the realistic KEMPRF shape:
+    ``challenge`` invokes ``K.encaps`` / ``F.evaluate``). Extends the
+    deadfield template, whose post-init oracle used only operators and so
+    never exercised an abstract call under the live-state coupling. Pins the
+    extra load-bearing fact: the abstract scheme module must be RESTRICTED
+    from the state-holding modules named in the coupling (``declare module E
+    <: Scheme {-Chal, -GR}``) -- otherwise EC rejects the Pr lemma's ``call
+    (_: Chal.pk{1} = GR.pk{2})`` with "The module E can write GR.pk" (an
+    unrestricted abstract module is assumed to write every in-scope global).
+    The adversary is likewise restricted ``{-Chal, -GR, -E}``. If this stops
+    compiling, the footprint-restriction approach for abstract-call multi-
+    oracle hops must be re-derived."""
+    ec_file = tmp_path / "multi_oracle_abstract_call_coupling.ec"
+    ec_file.write_text(MULTI_ORACLE_ABSTRACT_CALL_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the multi-oracle abstract-call coupling template.\n"
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )

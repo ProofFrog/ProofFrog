@@ -259,6 +259,122 @@ def test_translate_assumption_hop_pr() -> None:
     assert "qed." in body
 
 
+# --- Multi-oracle Pr lemmas (P4) -------------------------------------------
+
+
+def _pr_spec() -> pt.MultiOraclePrSpec:
+    return pt.MultiOraclePrSpec(
+        coupling="(glob GL){1} = (glob GR){2}",
+        init_oracle="initialize",
+        post_init_oracles=["eval", "chk"],
+    )
+
+
+def test_translate_inlining_hop_pr_multi_oracle_body() -> None:
+    """The multi-oracle inlining Pr lemma emits the validated section-2.4 body."""
+    lemma = pt.translate_inlining_hop_pr_lemma(
+        hop_index=3,
+        adversary_type_name="KEM_INDCPA_Adv",
+        scheme_module_expr="KEMPRF",
+        left_wrapper_name="Game_step_3",
+        right_wrapper_name="Game_step_4",
+        multi_oracle=_pr_spec(),
+    )
+    assert lemma.name == "hop_3_pr"
+    # The post-init oracles each get a `conseq hop_<i>_<m>` bullet, in order;
+    # the init oracle is discharged by the trailing `call hop_<i>_init`.
+    assert lemma.body == [
+        "byequiv (_: ={glob A} ==> ={res}) => //.",
+        "proc.",
+        "call (_: (glob GL){1} = (glob GR){2}).",
+        "+ conseq hop_3_eval.",
+        "+ conseq hop_3_chk.",
+        "call hop_3_initialize.",
+        "auto.",
+        "qed.",
+    ]
+
+
+def test_translate_inlining_hop_pr_single_oracle_unchanged() -> None:
+    """Without a multi-oracle spec the legacy single-oracle body is emitted."""
+    multi = pt.translate_inlining_hop_pr_lemma(
+        hop_index=0,
+        adversary_type_name="A_t",
+        scheme_module_expr="OTP",
+        left_wrapper_name="Game_step_0",
+        right_wrapper_name="Game_step_1",
+        multi_oracle=None,
+    )
+    legacy = pt.translate_inlining_hop_pr_lemma(
+        hop_index=0,
+        adversary_type_name="A_t",
+        scheme_module_expr="OTP",
+        left_wrapper_name="Game_step_0",
+        right_wrapper_name="Game_step_1",
+    )
+    assert multi.body == legacy.body
+    assert "call (_: true); first by conseq hop_0." in "\n".join(multi.body)
+
+
+def test_translate_assumption_hop_pr_multi_oracle_admits_bridge() -> None:
+    """The multi-oracle assumption Pr lemma routes its wrapper bridges to a
+    guided admit (the differently-named-state coupling is the P5 synthesis
+    piece) but keeps the rewrite + advantage-axiom structure intact."""
+    lemma = pt.translate_assumption_hop_pr_lemma(
+        hop_index=1,
+        adversary_type_name="KEM_INDCPA_Adv",
+        scheme_module_expr="KEMPRF",
+        left_wrapper_name="Game_step_1",
+        right_wrapper_name="Game_step_2",
+        assumption_name="PRF",
+        reduction_adv_name="R1_Adv",
+        left_assumption_wrapper="Game_PRF_Real",
+        right_assumption_wrapper="Game_PRF_Random",
+        reverse_direction=False,
+        multi_oracle=_pr_spec(),
+    )
+    body = "\n".join(lemma.body)
+    # The two rewrite bridges are admitted (not silently closed by sim).
+    assert sum(1 for line in lemma.body if line.strip() == "admit.") == 2
+    assert "sim." not in body
+    # The rewrite + axiom application still close the lemma.
+    assert "rewrite hL hR." in body
+    assert "PRF_advantage KEMPRF (R1_Adv(A))" in body
+    assert lemma.body[-1] == "qed."
+
+
+def test_translate_assumption_hop_pr_single_oracle_unchanged() -> None:
+    """Without a multi-oracle spec the legacy assumption body (sim bridges) holds."""
+    legacy = pt.translate_assumption_hop_pr_lemma(
+        hop_index=1,
+        adversary_type_name="A_t",
+        scheme_module_expr="OTP",
+        left_wrapper_name="Game_step_1",
+        right_wrapper_name="Game_step_2",
+        assumption_name="OneTimeSecrecy",
+        reduction_adv_name="R1_Adv",
+        left_assumption_wrapper="Game_OneTimeSecrecy_Real",
+        right_assumption_wrapper="Game_OneTimeSecrecy_Random",
+        reverse_direction=False,
+    )
+    explicit_none = pt.translate_assumption_hop_pr_lemma(
+        hop_index=1,
+        adversary_type_name="A_t",
+        scheme_module_expr="OTP",
+        left_wrapper_name="Game_step_1",
+        right_wrapper_name="Game_step_2",
+        assumption_name="OneTimeSecrecy",
+        reduction_adv_name="R1_Adv",
+        left_assumption_wrapper="Game_OneTimeSecrecy_Real",
+        right_assumption_wrapper="Game_OneTimeSecrecy_Random",
+        reverse_direction=False,
+        multi_oracle=None,
+    )
+    assert legacy.body == explicit_none.body
+    assert "admit." not in legacy.body
+    assert "sim." in "\n".join(legacy.body)
+
+
 def test_translate_main_theorem_otpsecurelr_shape() -> None:
     """Main theorem statement: bound is sum of eps for assumption hops only."""
     from proof_frog.export.easycrypt import proof_translator as pt

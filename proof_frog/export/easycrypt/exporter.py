@@ -1884,6 +1884,70 @@ def export_proof_file(proof_path: str) -> str:
             )
         return info.tactic_body
 
+    # --- Live-state coupling (M5) ------------------------------------------
+    # A multi-oracle hop couples its two endpoint games on their shared *live*
+    # state -- a field equality on the module that holds it -- not on the whole
+    # ``glob`` (which is ill-typed when one endpoint is a reduction-composed
+    # game carrying a dead field the other lacks). See the validated template
+    # ``tests/integration/ec_templates/multi_oracle_deadfield_coupling.ec``.
+
+    def _live_state_field_name() -> str:
+        """The shared live-state field name: the field the outer (theorem)
+        game's ``Initialize`` returns (its public value). For KEMPRF this is
+        ``pk``. Cross-name correspondence between differently-named live fields
+        on the two sides is a deferred generalization (this uses one name)."""
+        outer_gf = game_file_by_name.get(proof.theorem.name)
+        if outer_gf is None or not outer_gf.games:
+            return ""
+        game = outer_gf.games[0]
+        field_names = {f.name for f in game.fields}
+        init = next(
+            (m for m in game.methods if m.signature.name.lower() == "initialize"),
+            None,
+        )
+        if init is not None:
+            for stmt in reversed(list(init.block.statements)):
+                if (
+                    isinstance(stmt, frog_ast.ReturnStatement)
+                    and isinstance(stmt.expression, frog_ast.Variable)
+                    and stmt.expression.name in field_names
+                ):
+                    return stmt.expression.name
+        return game.fields[0].name if game.fields else ""
+
+    def _reduction_holds_field(reduction_name: str, field: str) -> bool:
+        """True when the named reduction declares the live field itself (so its
+        ``Initialize`` stores into it, e.g. ``R_MultiPRF``); False for a
+        stateless delegating reduction (``R_KEM``) whose live state lives in
+        the challenger sub-module."""
+        helper = next(
+            (
+                h
+                for h in proof.helpers
+                if isinstance(h, frog_ast.Reduction) and h.name == reduction_name
+            ),
+            None,
+        )
+        return bool(helper and any(f.name == field for f in helper.fields))
+
+    def _live_state_ref(step: frog_ast.Step) -> str:
+        """Field-qualified EC reference to a step endpoint's live state, e.g.
+        ``G_RandKey.pk`` or ``K_c.KEM_INDCPA_MultiChal_Random.pk``."""
+        module_expr = resolver.resolve(step).module_expr
+        field = _live_state_field_name()
+        if step.reduction is not None and not _reduction_holds_field(
+            step.reduction.name, field
+        ):
+            # Stateless reduction delegates: the live state is in the challenger
+            # sub-module (the last functor argument of the resolved expression).
+            holder = pt.module_base_name(pt.last_module_arg(module_expr))
+        else:
+            holder = pt.module_base_name(module_expr)
+        return f"{holder}.{field}"
+
+    def _live_state_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
+        return pt.live_state_coupling(_live_state_ref(step_a), _live_state_ref(step_b))
+
     # Per-hop memo of the multi-oracle chain emission. ``translate_hops``
     # calls ``_oracle_body_for_hop`` once per oracle of a multi-oracle hop;
     # the first call for a hop runs the whole per-oracle chain emission, caches
@@ -1955,6 +2019,7 @@ def export_proof_file(proof_path: str) -> str:
         _body_for_hop,
         spec_overrides=chain_spec_overrides,
         oracle_body_for_hop=_oracle_body_for_hop,
+        coupling_for_hop=_live_state_coupling,
     )
 
     qualified_adv_type_by_game_file: dict[str, str] = {
@@ -2091,10 +2156,7 @@ def export_proof_file(proof_path: str) -> str:
             return None
         assert model.init_name is not None
         return pt.MultiOraclePrSpec(
-            coupling=pt.coupling_invariant(
-                resolver.resolve(step_a).module_expr,
-                resolver.resolve(step_b).module_expr,
-            ),
+            coupling=_live_state_coupling(step_a, step_b),
             init_oracle=model.init_name,
             post_init_oracles=list(model.post_init_names),
         )

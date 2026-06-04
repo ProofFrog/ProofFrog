@@ -77,6 +77,77 @@ def coupling_invariant(left_module_expr: str, right_module_expr: str) -> str:
     return f"(glob {left_module_expr})" "{1}" f" = (glob {right_module_expr})" "{2}"
 
 
+def module_base_name(module_expr: str) -> str:
+    """Return a module expression's base name (everything before its args).
+
+    ``G_RandKey(K, F)`` -> ``G_RandKey``;
+    ``R_KEM(K, F, KEMPRF(K, F), K_c.X(K))`` -> ``R_KEM``;
+    ``R_MultiPRF`` (no args) -> ``R_MultiPRF``. The base name keeps any clone
+    qualifier (``KF_c.KEM_INDCPA_MultiChal_Real``); only the outermost
+    argument list is stripped.
+    """
+    head, _, _ = module_expr.partition("(")
+    return head.strip()
+
+
+def last_module_arg(module_expr: str) -> str:
+    """Return the last top-level argument of ``module_expr``'s outermost args.
+
+    Used to reach the challenger sub-module of a stateless reduction endpoint
+    (``R_KEM(..., K_c.KEM_INDCPA_MultiChal_Random(K))`` ->
+    ``K_c.KEM_INDCPA_MultiChal_Random(K)``). Splits on the top-level comma
+    inside the outermost parentheses, respecting nested parens.
+    """
+    open_idx = module_expr.find("(")
+    if open_idx == -1:
+        return module_expr.strip()
+    # Find the matching close for the outermost open paren.
+    depth = 0
+    inner = ""
+    for ch in module_expr[open_idx:]:
+        if ch == "(":
+            depth += 1
+            if depth == 1:
+                continue
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        inner += ch
+    # Split ``inner`` on top-level commas.
+    args: list[str] = []
+    depth = 0
+    cur = ""
+    for ch in inner:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            args.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    args.append(cur)
+    return args[-1].strip()
+
+
+def live_state_coupling(left_field_ref: str, right_field_ref: str) -> str:
+    """Return the live-state field coupling ``<L>{1} = <R>{2}``.
+
+    Unlike :func:`coupling_invariant` (a whole-``glob`` equality, ill-typed
+    when the two endpoints carry structurally different module state), this
+    couples only the shared *live* state by naming the field directly on the
+    module that holds it -- well-typed even when one side carries a dead field
+    the other lacks (validated EC template
+    ``tests/integration/ec_templates/multi_oracle_deadfield_coupling.ec``).
+    ``left_field_ref``/``right_field_ref`` are field-qualified module
+    references such as ``K_c.KEM_INDCPA_MultiChal_Random.pk`` or
+    ``G_RandKey.pk``.
+    """
+    return f"{left_field_ref}" "{1}" f" = {right_field_ref}" "{2}"
+
+
 class StepResolver:
     """Resolve a FrogLang proof step to its EC module expression.
 
@@ -659,7 +730,7 @@ def translate_main_theorem(  # pylint: disable=too-many-arguments,too-many-posit
     )
 
 
-def translate_hops(  # pylint: disable=too-many-locals
+def translate_hops(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
     resolver: StepResolver,
     steps: list[frog_ast.ProofStep],
     body_for_hop: Callable[[int, frog_ast.Step, frog_ast.Step], list[str] | None],
@@ -668,6 +739,7 @@ def translate_hops(  # pylint: disable=too-many-locals
         Callable[[int, frog_ast.Step, frog_ast.Step, str, bool], list[str] | None]
         | None
     ) = None,
+    coupling_for_hop: Callable[[frog_ast.Step, frog_ast.Step], str] | None = None,
 ) -> list[ec_ast.Lemma]:
     """Produce the equiv lemma(s) per adjacent-step pair.
 
@@ -698,6 +770,14 @@ def translate_hops(  # pylint: disable=too-many-locals
     oracle's tactic body (or ``None`` to skip the lemma). Single-oracle
     hops -- and every hop when ``oracle_body_for_hop`` is ``None`` -- take
     the legacy single-lemma path, so single-oracle output is unchanged.
+
+    ``coupling_for_hop(a, b)`` (if supplied) returns the per-hop state-coupling
+    invariant string used in the per-oracle equiv lemmas, overriding the
+    default whole-``glob`` :func:`coupling_invariant`. The exporter passes a
+    *live-state* coupling here (a field equality on the shared live state) so
+    the lemmas typecheck even when the two endpoints carry structurally
+    different module state (M5; validated EC template
+    ``tests/integration/ec_templates/multi_oracle_deadfield_coupling.ec``).
     """
     # NOTE: keep the original dict identity — the caller may mutate it
     # during ``body_for_hop`` calls (per-transform mode populates the
@@ -721,7 +801,9 @@ def translate_hops(  # pylint: disable=too-many-locals
             and model.is_multi_oracle
         ):
             lemmas.extend(
-                _multi_oracle_hop_lemmas(resolver, i, a, b, model, oracle_body_for_hop)
+                _multi_oracle_hop_lemmas(
+                    resolver, i, a, b, model, oracle_body_for_hop, coupling_for_hop
+                )
             )
             continue
         body = body_for_hop(i, a, b)
@@ -753,16 +835,22 @@ def _multi_oracle_hop_lemmas(  # pylint: disable=too-many-arguments,too-many-pos
     oracle_body_for_hop: Callable[
         [int, frog_ast.Step, frog_ast.Step, str, bool], list[str] | None
     ],
+    coupling_for_hop: Callable[[frog_ast.Step, frog_ast.Step], str] | None = None,
 ) -> list[ec_ast.Lemma]:
     """Emit the per-oracle equiv lemmas for one multi-oracle hop (P3).
 
     See :func:`translate_hops` for the lemma shapes. The init oracle is
     emitted first (establishes the coupling from ``true``), then each
     post-init oracle in declaration order (preserves the coupling).
+    ``coupling_for_hop`` (if supplied) computes the live-state coupling
+    string, overriding the default whole-``glob`` coupling.
     """
     ra = resolver.resolve(step_a)
     rb = resolver.resolve(step_b)
-    coupling = coupling_invariant(ra.module_expr, rb.module_expr)
+    if coupling_for_hop is not None:
+        coupling = coupling_for_hop(step_a, step_b)
+    else:
+        coupling = coupling_invariant(ra.module_expr, rb.module_expr)
     # init first, then post-init oracles in module-type declaration order.
     assert model.init_name is not None  # is_multi_oracle guarantees this
     ordered: list[tuple[str, bool]] = [(model.init_name, True)]

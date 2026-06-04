@@ -138,6 +138,64 @@ def test_coupling_invariant_shape() -> None:
     assert inv == "(glob GL(OTP)){1} = (glob GR(OTP)){2}"
 
 
+# --- Live-state coupling primitives (M5) -----------------------------------
+
+
+def test_module_base_name_strips_outermost_args() -> None:
+    assert pt.module_base_name("G_RandKey(K, F)") == "G_RandKey"
+    assert (
+        pt.module_base_name("R_KEM(K, F, KEMPRF(K, F), K_c.X(K))") == "R_KEM"
+    )
+    assert (
+        pt.module_base_name("KF_c.KEM_INDCPA_MultiChal_Real(KEMPRF(K, F))")
+        == "KF_c.KEM_INDCPA_MultiChal_Real"
+    )
+    # A bare module with no args is its own base name.
+    assert pt.module_base_name("R_MultiPRF") == "R_MultiPRF"
+
+
+def test_last_module_arg_returns_balanced_final_argument() -> None:
+    # The challenger sub-module is the last top-level argument, with its own
+    # nested parens kept intact.
+    assert (
+        pt.last_module_arg(
+            "R_KEM(K, F, KEMPRF(K, F), K_c.KEM_INDCPA_MultiChal_Random(K))"
+        )
+        == "K_c.KEM_INDCPA_MultiChal_Random(K)"
+    )
+    assert pt.last_module_arg("R1(OTP, OneTimeSecrecy_Real(OTP))") == (
+        "OneTimeSecrecy_Real(OTP)"
+    )
+
+
+def test_live_state_coupling_joins_field_refs_relationally() -> None:
+    assert (
+        pt.live_state_coupling(
+            "K_c.KEM_INDCPA_MultiChal_Random.pk", "G_RandKey.pk"
+        )
+        == "K_c.KEM_INDCPA_MultiChal_Random.pk{1} = G_RandKey.pk{2}"
+    )
+
+
+def test_translate_hops_multi_oracle_uses_coupling_for_hop_callback() -> None:
+    """When ``coupling_for_hop`` is supplied it overrides the default glob
+    coupling in every per-oracle equiv lemma's pre/post."""
+    steps = _steps_of_otpsecurelr()
+    resolver = _multi_oracle_resolver()
+    lemmas = pt.translate_hops(
+        resolver,
+        steps,
+        lambda _i, _a, _b: ["admit.", "qed."],
+        oracle_body_for_hop=lambda _i, _a, _b, _name, _is_init: ["admit.", "qed."],
+        coupling_for_hop=lambda _a, _b: "L.pk{1} = R.pk{2}",
+    )
+    init_lemma = lemmas[0]
+    chal_lemma = lemmas[1]
+    assert init_lemma.postcondition == "={res} /\\ L.pk{1} = R.pk{2}"
+    assert chal_lemma.precondition == "={m0, m1} /\\ L.pk{1} = R.pk{2}"
+    assert chal_lemma.postcondition == "={res} /\\ L.pk{1} = R.pk{2}"
+
+
 def test_oracle_model_for_returns_model() -> None:
     steps = _steps_of_otpsecurelr()
     resolver = _multi_oracle_resolver()

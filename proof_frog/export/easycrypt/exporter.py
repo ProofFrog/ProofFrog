@@ -1957,6 +1957,41 @@ def export_proof_file(proof_path: str) -> str:
     hop_kinds: list[pt.HopKind] = []
     assumption_names_by_hop: dict[int, str] = {}
     assumption_clone_by_hop: dict[int, str] = {}
+
+    def _pr_multi_oracle_for(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> pt.MultiOraclePrSpec | None:
+        """Build the multi-oracle Pr-lemma spec for a hop (P4), or ``None``.
+
+        The Pr lemma is stated over the step wrappers ``Game_step_i``, which
+        lift the *wrapper game file's* ``Initialize`` (the step's own game for
+        a plain step, the theorem game for a composed step -- mirroring the
+        wrapper emission). A hop is multi-oracle precisely when that wrapper
+        game file is multi-oracle. For an inlining hop the per-oracle equiv
+        lemma names (``hop_<i>_<m>``) the section-2.4 body references are
+        emitted by :func:`translate_hops` off the *same* model
+        (``oracle_model_for(step_a)`` == this model for a plain step), so the
+        ``conseq hop_<i>_<m>`` bullets resolve.
+        """
+        assert isinstance(step_a.challenger, frog_ast.ConcreteGame)
+        wrapper_gf = (
+            step_a.challenger.game.name
+            if step_a.reduction is None
+            else outer_game_file_name
+        )
+        model = oracle_model_by_game_file.get(wrapper_gf)
+        if model is None or not model.is_multi_oracle:
+            return None
+        assert model.init_name is not None
+        return pt.MultiOraclePrSpec(
+            coupling=pt.coupling_invariant(
+                resolver.resolve(step_a).module_expr,
+                resolver.resolve(step_b).module_expr,
+            ),
+            init_oracle=model.init_name,
+            post_init_oracles=list(model.post_init_names),
+        )
+
     for i in range(len(proof.steps) - 1):
         step_a = proof.steps[i]
         step_b = proof.steps[i + 1]
@@ -2021,6 +2056,7 @@ def export_proof_file(proof_path: str) -> str:
                     or None,
                     wrapper_extra_args=[p.name for p in declared_instance_params]
                     or None,
+                    multi_oracle=_pr_multi_oracle_for(step_a, step_b),
                 )
             )
         else:
@@ -2048,6 +2084,7 @@ def export_proof_file(proof_path: str) -> str:
                     wrapper_extra_args=[p.name for p in declared_instance_params]
                     or None,
                     glob_invariant_modules=glob_invariant_modules,
+                    multi_oracle=_pr_multi_oracle_for(step_a, step_b),
                 )
             )
 

@@ -29,6 +29,33 @@ class ResolvedStep:
     oracle_name: str
 
 
+@dataclass
+class MultiOraclePrSpec:
+    """Per-oracle data a multi-oracle hop's Pr lemma needs (P4).
+
+    A multi-oracle hop (``Initialize`` lifted into ``main`` plus one or more
+    post-init oracles) discharges ``Pr[L] = Pr[R]`` via the validated section
+    2.4 body of the multi-oracle foundation template
+    (``tests/integration/ec_templates/multi_oracle_indist.ec``): one
+    ``conseq hop_<i>_<m>`` per post-init oracle (in module-type declaration
+    order) under a single ``call (_: <coupling>)``, then ``call
+    hop_<i>_<init>; auto``.
+
+    - ``coupling`` -- the relational state-coupling invariant string
+      ``(glob L){1} = (glob R){2}`` (built by :func:`coupling_invariant` from
+      the two wrappers' oracle module expressions; the *same* string the
+      per-oracle equiv lemmas carry).
+    - ``init_oracle`` -- EC name of the lifted ``Initialize`` oracle (the
+      ``call hop_<i>_<init>`` target).
+    - ``post_init_oracles`` -- EC names of the adversary-facing oracles, in
+      module-type declaration order (one ``conseq`` bullet each).
+    """
+
+    coupling: str
+    init_oracle: str
+    post_init_oracles: list[str]
+
+
 def coupling_invariant(left_module_expr: str, right_module_expr: str) -> str:
     """Return the relational state-coupling invariant for a multi-oracle hop.
 
@@ -305,6 +332,7 @@ def translate_inlining_hop_pr_lemma(  # pylint: disable=too-many-arguments,too-m
     scheme_footprint: str | None = None,
     wrapper_extra_args: list[str] | None = None,
     glob_invariant_modules: list[str] | None = None,
+    multi_oracle: MultiOraclePrSpec | None = None,
 ) -> ec_ast.ProbLemma:
     """Emit a ``hop_<i>_pr`` lemma for an inlining hop.
 
@@ -317,12 +345,50 @@ def translate_inlining_hop_pr_lemma(  # pylint: disable=too-many-arguments,too-m
     preserved invariant so the resulting oracle subgoal has the
     strengthened pre/post that ``conseq hop_<i>`` can directly unify
     with.
+
+    **Multi-oracle hops (P4).** When ``multi_oracle`` is supplied the hop is
+    a lifted-``Initialize`` multi-oracle hop and the body is the validated
+    section-2.4 template: one ``call (_: <coupling>)`` over the adversary,
+    one ``conseq hop_<i>_<m>`` per post-init oracle (module-type declaration
+    order), then ``call hop_<i>_<init>; auto`` for the lifted init. This
+    references the per-oracle equiv lemmas that :func:`translate_hops` emits
+    (``hop_<i>_<oracle>``) rather than the single-oracle ``hop_<i>``.
+    ``multi_oracle`` takes precedence over ``glob_invariant_modules`` (a
+    multi-oracle hop never also takes the single-oracle ``={glob X}``-
+    strengthened path).
     """
     left_app = _wrap_apply(left_wrapper_name, wrapper_extra_args)
     right_app = _wrap_apply(right_wrapper_name, wrapper_extra_args)
     statement = (
         f"Pr[{left_app}.main() @ &m : res]" f" = Pr[{right_app}.main() @ &m : res]"
     )
+    if multi_oracle is not None:
+        body = [
+            "byequiv (_: ={glob A} ==> ={res}) => //.",
+            "proc.",
+            f"call (_: {multi_oracle.coupling}).",
+            *[f"+ conseq hop_{hop_index}_{m}." for m in multi_oracle.post_init_oracles],
+            f"call hop_{hop_index}_{multi_oracle.init_oracle}.",
+            "auto.",
+            "qed.",
+        ]
+        footprint = (
+            scheme_footprint
+            if scheme_footprint is not None
+            else f"-{scheme_module_expr}"
+        )
+        return ec_ast.ProbLemma(
+            name=f"hop_{hop_index}_pr",
+            module_args=[
+                ec_ast.ModuleParam(
+                    name="A",
+                    module_type=f"{adversary_type_name} {{{footprint}}}",
+                )
+            ],
+            memory_args=["&m"],
+            statement=statement,
+            body=body,
+        )
     if glob_invariant_modules:
         invariant = "={" + ", ".join(f"glob {m}" for m in glob_invariant_modules) + "}"
         # Force the byequiv-introduced precondition to include each
@@ -376,6 +442,7 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     scheme_footprint: str | None = None,
     reduction_adv_extra_args: list[str] | None = None,
     wrapper_extra_args: list[str] | None = None,
+    multi_oracle: MultiOraclePrSpec | None = None,
 ) -> ec_ast.ProbLemma:
     """Emit a ``hop_<i>_pr`` lemma for an assumption hop.
 
@@ -388,6 +455,19 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     ``reduction_adv_extra_args`` supplies extra module arguments that
     the reduction-adversary wrapper takes before ``A`` (e.g. declared
     module instances ``E1, E2``).
+
+    **Multi-oracle hops (P4).** When ``multi_oracle`` is supplied the two
+    wrapper-rewrite bridges (``hL``/``hR``) relate a lifted-``Initialize``
+    multi-oracle game wrapper to its assumption-game wrapper across
+    *differently-named* module state (the reduction adversary re-runs
+    ``Initialize`` through ``R``, so the single-oracle ``proc; inline *; sim``
+    closer cannot be trusted to close). Synthesizing that field
+    correspondence is the P5 coupling-synthesis piece, so each bridge is
+    emitted as an explicit guided ``admit`` rather than a canned tactic that
+    would silently fail to close (yielding a 0-admit file EasyCrypt still
+    rejects). The rewrite + advantage-axiom application is unchanged, so the
+    lemma is structurally complete and lands ``admit-guided`` (rung 5) rather
+    than ``Blocked``.
     """
     prefix = f"{clone_alias}." if clone_alias else ""
     eps_ref = f"{prefix}eps_{assumption_name}"
@@ -413,17 +493,36 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
         f" - Pr[{right_app}.main() @ &m : res] |"
         f" <= {eps_ref}"
     )
-    body = [
-        f"have hL : Pr[{left_app}.main() @ &m : res]",
-        f"        = Pr[{left_wrapper_ref}({scheme_module_expr}, "
-        f"{adv_applied}).main() @ &m : res]",
-        "  by byequiv => //; proc; inline *; sim.",
-        f"have hR : Pr[{right_app}.main() @ &m : res]",
-        f"        = Pr[{right_wrapper_ref}({scheme_module_expr}, "
-        f"{adv_applied}).main() @ &m : res]",
-        "  by byequiv => //; proc; inline *; sim.",
-        "rewrite hL hR.",
-    ]
+    if multi_oracle is not None:
+        bridge_note = (
+            "  (* coupling-pending: multi-oracle wrapper <-> assumption-wrapper "
+            "bridge across differently-named state (P5). *)"
+        )
+        body = [
+            f"have hL : Pr[{left_app}.main() @ &m : res]",
+            f"        = Pr[{left_wrapper_ref}({scheme_module_expr}, "
+            f"{adv_applied}).main() @ &m : res].",
+            bridge_note,
+            "  admit.",
+            f"have hR : Pr[{right_app}.main() @ &m : res]",
+            f"        = Pr[{right_wrapper_ref}({scheme_module_expr}, "
+            f"{adv_applied}).main() @ &m : res].",
+            bridge_note,
+            "  admit.",
+            "rewrite hL hR.",
+        ]
+    else:
+        body = [
+            f"have hL : Pr[{left_app}.main() @ &m : res]",
+            f"        = Pr[{left_wrapper_ref}({scheme_module_expr}, "
+            f"{adv_applied}).main() @ &m : res]",
+            "  by byequiv => //; proc; inline *; sim.",
+            f"have hR : Pr[{right_app}.main() @ &m : res]",
+            f"        = Pr[{right_wrapper_ref}({scheme_module_expr}, "
+            f"{adv_applied}).main() @ &m : res]",
+            "  by byequiv => //; proc; inline *; sim.",
+            "rewrite hL hR.",
+        ]
     if reverse_direction:
         body.extend(
             [

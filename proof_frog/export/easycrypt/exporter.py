@@ -1999,6 +1999,49 @@ def export_proof_file(proof_path: str) -> str:
             )
         )
 
+    # Emit a concrete EC module for each multi-oracle intermediate game
+    # defined in the proof (e.g. ``Game G_RandKey(KEM K, PRF F)``). A bare
+    # ``ParameterizedGame`` step (``G_RandKey(K, F)``) resolves to a reference
+    # to this module, so it must be defined. Single-oracle intermediate games
+    # route through the chain emitter instead (their flat states are emitted
+    # there), so they are skipped here. The intermediate game is played against
+    # the OUTER theorem adversary and ascribes to its oracle type.
+    outer_oracle_qualified = (
+        f"{clone_alias}.{oracle_type_by_game_file[outer_game_file_name]}"
+    )
+    ec_intermediate_games: list[ec_ast.EcTopDecl] = []
+    for helper in proof.helpers:
+        # ``Reduction`` subclasses ``Game``; only true intermediate games
+        # (no challenger composition) are emitted here -- reductions are
+        # handled by the ``ec_reductions`` loop above.
+        if not isinstance(helper, frog_ast.Game) or isinstance(
+            helper, frog_ast.Reduction
+        ):
+            continue
+        if not oracle_model.classify_game(helper).is_multi_oracle:
+            continue
+        if any(p.name not in instances_by_let_name for p in helper.parameters):
+            continue
+        param_module_types = {
+            p.name: f"{instances_by_let_name[p.name].clone_alias}.{scheme_type_name}"
+            for p in helper.parameters
+        }
+        param_primitive_types = {
+            p.name: instances_by_let_name[p.name].primitive_name
+            for p in helper.parameters
+        }
+        hoisted_game = canonical_form.hoist_game_calls(helper, method_return_types)
+        ec_intermediate_games.append(
+            top_modules.translate_intermediate_game(
+                hoisted_game,
+                module_name=helper.name,
+                param_module_types=param_module_types,
+                param_primitive_types=param_primitive_types,
+                implements=outer_oracle_qualified,
+                emit_state_vars=bool(helper.fields),
+            )
+        )
+
     ec_game_wrappers: list[ec_ast.EcTopDecl] = []
     for i, step in enumerate(proof.steps):
         if not isinstance(step, frog_ast.Step):
@@ -2311,64 +2354,93 @@ def export_proof_file(proof_path: str) -> str:
                     ec_ast.Axiom(axiom_name, f"{predicate} {concrete_distr}")
                 )
 
-    # Process ``requires`` clauses to discover type equalities.
-    # ``requires E2.Key subsets E1.Message`` implies that the
-    # abstract types bound to those fields are equal; emit one as
-    # a type alias of the other so EC sees them as the same type.
-    type_aliases: dict[str, str] = {}  # alias_name -> canonical_name
+    # Process ``requires`` clauses to discover type equalities. A clause
+    # that equates (``==``) or relates by ``subsets`` two carrier types
+    # means the abstract EC types behind them must be the same. Each side is
+    # either a primitive field access (``K.SharedSecret``, resolving to a
+    # ``Set X;`` carrier) or a ``BitString<...>`` type (resolving to a
+    # concrete ``bs_*`` type). We unify them by emitting one as an alias of
+    # the other. The *canonical* side is whichever EC type is declared first:
+    # ``Set X;`` carriers (emitted in the "Abstract set declarations"
+    # section) precede the ``bs_*`` types (emitted by ``top_types`` in the
+    # "Concrete primitive types" section), so a carrier always wins over a
+    # bitstring. This expresses e.g.
+    # ``requires K.SharedSecret == BitString<F.lambda>`` as
+    # ``type bs_lambda = SharedSecretSpace.`` and lets the concrete scheme
+    # module (whose ``encaps`` assigns a ``SharedSecretSpace`` to a
+    # ``bs_lambda``) type-check.
+    type_aliases: dict[str, str] = {}  # set-let alias_name -> canonical_name
+    set_let_order = [
+        let.name
+        for let in proof.lets
+        if isinstance(let.type, frog_ast.SetType) and let.value is None
+    ]
+    param_to_let: dict[str, str] = {}
+    if scheme is not None and isinstance(primary_let.value, frog_ast.FuncCall):
+        for sp, arg in zip(scheme.parameters, primary_let.value.args):
+            if isinstance(arg, frog_ast.Variable):
+                param_to_let[sp.name] = arg.name
+
+    def _requires_type_name(side: frog_ast.Expression) -> str | None:
+        """EC type name for one side of a ``requires`` type relation."""
+        if isinstance(side, frog_ast.FieldAccess) and isinstance(
+            side.the_object, frog_ast.Variable
+        ):
+            let_name = param_to_let.get(side.the_object.name, side.the_object.name)
+            found_inst = instances_by_let_name.get(let_name)
+            if found_inst is None:
+                return None
+            resolved_field = found_inst.concretized_fields.get(side.name)
+            # Only Set carriers unify as types. An ``Int`` field (e.g.
+            # TriplingPRG's ``G.lambda == G.stretch``) also resolves to a
+            # ``Variable``, but it names an ``Int X;`` let, not a type --
+            # excluded by the ``known_abstract_types`` (Set-let) membership.
+            if (
+                isinstance(resolved_field, frog_ast.Variable)
+                and resolved_field.name in known_abstract_types
+            ):
+                return resolved_field.name
+            return None
+        if isinstance(side, frog_ast.BitStringType):
+            try:
+                return top_types.translate_type(side).text
+            except NotImplementedError:
+                return None
+        return None
+
+    def _canonical_rank(name: str) -> tuple[int, int]:
+        """Lower rank = declared earlier = canonical side."""
+        if name in set_let_order:
+            return (0, set_let_order.index(name))
+        bs_names = top_types.registered_bitstring_names
+        idx = bs_names.index(name) if name in bs_names else len(bs_names)
+        return (1, idx)
+
+    unhandled_requires = False
     if scheme is not None and scheme.requirements:
-        param_to_let: dict[str, str] = {}
-        if isinstance(primary_let.value, frog_ast.FuncCall):
-            for sp, arg in zip(scheme.parameters, primary_let.value.args):
-                if isinstance(arg, frog_ast.Variable):
-                    param_to_let[sp.name] = arg.name
         for req in scheme.requirements:
             if not (
                 isinstance(req, frog_ast.BinaryOperation)
-                and req.operator == frog_ast.BinaryOperators.SUBSETS
+                and req.operator
+                in (
+                    frog_ast.BinaryOperators.SUBSETS,
+                    frog_ast.BinaryOperators.EQUALS,
+                )
             ):
+                unhandled_requires = True
                 continue
-            lhs, rhs = req.left_expression, req.right_expression
-            names: list[str] = []
-            req_side: frog_ast.Expression
-            for req_side in (lhs, rhs):
-                if not (
-                    isinstance(req_side, frog_ast.FieldAccess)
-                    and isinstance(req_side.the_object, frog_ast.Variable)
-                ):
-                    break
-                param_name = req_side.the_object.name
-                field_name = req_side.name
-                let_name = param_to_let.get(param_name, param_name)
-                found_inst = instances_by_let_name.get(let_name)
-                if found_inst is None:
-                    break
-                resolved_field = found_inst.concretized_fields.get(field_name)
-                if resolved_field is None or not isinstance(
-                    resolved_field, frog_ast.Variable
-                ):
-                    break
-                names.append(resolved_field.name)
-            if len(names) == 2 and names[0] != names[1]:
-                set_let_order = [
-                    let.name
-                    for let in proof.lets
-                    if isinstance(let.type, frog_ast.SetType) and let.value is None
-                ]
-                idx0 = (
-                    set_let_order.index(names[0])
-                    if names[0] in set_let_order
-                    else len(set_let_order)
-                )
-                idx1 = (
-                    set_let_order.index(names[1])
-                    if names[1] in set_let_order
-                    else len(set_let_order)
-                )
-                if idx0 < idx1:
-                    type_aliases[names[1]] = names[0]
-                else:
-                    type_aliases[names[0]] = names[1]
+            n0 = _requires_type_name(req.left_expression)
+            n1 = _requires_type_name(req.right_expression)
+            if n0 is None or n1 is None or n0 == n1:
+                unhandled_requires = True
+                continue
+            canonical, alias = (
+                (n0, n1) if _canonical_rank(n0) < _canonical_rank(n1) else (n1, n0)
+            )
+            if alias in set_let_order:
+                type_aliases[alias] = canonical
+            else:
+                top_types.register_type_alias(alias, canonical)
 
     # Abstract-set let-bindings (e.g. ``Set KeySpace1;``) emit as
     # top-level EC type declarations before any clone that may bind
@@ -2488,6 +2560,9 @@ def export_proof_file(proof_path: str) -> str:
             _section_header("Reductions lifted to assumption-adversaries")
         )
         proof_decls.extend(ec_reduction_advs)
+    if ec_intermediate_games:
+        proof_decls.append(_section_header("Intermediate games"))
+        proof_decls.extend(ec_intermediate_games)
     proof_decls.append(_section_header("Game-step wrappers"))
     proof_decls.extend(ec_game_wrappers)
     # The chain artifacts (flat-state modules, micro-lemmas,
@@ -2526,7 +2601,7 @@ def export_proof_file(proof_path: str) -> str:
     if clone_axioms:
         decls.append(_section_header("Per-clone distribution axioms"))
         decls.extend(clone_axioms)
-    if scheme is not None and scheme.requirements:
+    if scheme is not None and scheme.requirements and unhandled_requires:
         decls.append(
             "(* NOTE: the FrogLang scheme has `requires` clauses that are "
             "not enforced by the EC export. The scheme module below may "

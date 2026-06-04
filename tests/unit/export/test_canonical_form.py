@@ -14,6 +14,7 @@ from proof_frog import frog_ast
 from proof_frog.export.easycrypt.canonical_form import (
     canonical_text,
     _normalize_for_ec,
+    _module_call_return_type,
 )
 
 
@@ -149,3 +150,30 @@ def test_normalize_for_ec_returns_same_object() -> None:
     g = _make_game_with_invalid_name()
     result = _normalize_for_ec(g, {}, {})
     assert result is g
+
+
+def test_module_call_return_type_qualifies_product_fields() -> None:
+    """A ``ProductType`` return must qualify each field with the instance.
+
+    ``K.encaps`` returns ``[SharedSecret, Ciphertext]`` (a ProductType of
+    bare field names). For a *specific* instance ``K`` whose
+    ``SharedSecret`` differs from the primary scheme's, the hoisted var's
+    declared type must be ``[K.SharedSecret, K.Ciphertext]`` so the
+    TypeCollector resolves each component through ``K``'s clone (not the
+    primary's). Without qualification the bare ``SharedSecret`` resolves
+    against the primary, producing a wrong type (the M4 ``bs_out`` bug).
+    """
+    call = frog_ast.FuncCall(
+        frog_ast.FieldAccess(frog_ast.Variable("K"), "encaps"),
+        [frog_ast.Variable("pk")],
+    )
+    external = {"K": "KEM"}
+    method_rt: dict[tuple[str, str], frog_ast.Type] = {
+        ("KEM", "encaps"): frog_ast.ProductType(
+            [frog_ast.Variable("SharedSecret"), frog_ast.Variable("Ciphertext")]
+        )
+    }
+    result = _module_call_return_type(call, external, method_rt)
+    assert isinstance(result, frog_ast.ProductType)
+    assert all(isinstance(t, frog_ast.FieldAccess) for t in result.types)
+    assert str(result) == "[K.SharedSecret, K.Ciphertext]"

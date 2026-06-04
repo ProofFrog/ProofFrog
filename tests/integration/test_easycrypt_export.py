@@ -46,6 +46,7 @@ PRIMITIVE_ONLY_2_14_BWD_PROOF = (
 INDOT_DOLLAR_IMPLIES_INDOT_PROOF = (
     REPO_ROOT / "examples" / "Proofs" / "SymEnc" / "INDOT$_implies_INDOT.proof"
 )
+KEMPRF_INDCPA_PROOF = REPO_ROOT / "examples" / "Proofs" / "KEM" / "KEMPRF_INDCPA.proof"
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
 
@@ -766,6 +767,69 @@ def test_export_5_8_f_base_resolves_foreign_field_lengths() -> None:
     assert "bs_2_G_lambda" not in output  # the pre-fix splinter is gone
 
 
+def test_export_kemprf_requires_equality_emits_bitstring_type_aliases() -> None:
+    """KEMPRF's scheme has two ``requires`` clauses relating a KEM carrier
+    set to a PRF BitString type:
+
+        requires K.SharedSecret == BitString<F.lambda>;
+        requires K.Ciphertext subsets BitString<F.in>;
+
+    With ``K = KEM(SharedSecretSpace, CiphertextSpace, ...)`` and
+    ``F = PRF(lambda, in, out)`` these say ``SharedSecretSpace == bs_lambda``
+    and ``CiphertextSpace == bs_in``. The exporter must express these type
+    equalities so the scheme module type-checks (``k <- x.`1`` assigns a
+    ``SharedSecretSpace`` to a ``bs_lambda``). The set-let carrier is declared
+    first, so the BitString type is emitted as an alias of it.
+    """
+    output = exporter.export_proof_file(str(KEMPRF_INDCPA_PROOF))
+    # The BitString types become aliases of the (earlier-declared) set carriers.
+    assert "type bs_lambda = SharedSecretSpace." in output
+    assert "type bs_in = CiphertextSpace." in output
+    # The set carriers stay abstract; the bare abstract BitString decls are gone.
+    assert "type SharedSecretSpace." in output
+    assert "type CiphertextSpace." in output
+    assert "type bs_lambda.\n" not in output
+    assert "type bs_in.\n" not in output
+
+
+def test_export_kemprf_emits_intermediate_game_module() -> None:
+    """KEMPRF_INDCPA's step 3 is the bare intermediate game ``G_RandKey(K, F)``.
+
+    The exporter must emit a concrete ``module G_RandKey`` -- a multi-primitive
+    functor (params ``K``, ``F``) ascribing to the outer KEM oracle type, with
+    the ``pk`` field as module state -- so ``Game_step_3``'s reference to
+    ``G_RandKey(K, F).initialize`` resolves in EasyCrypt.
+    """
+    output = exporter.export_proof_file(str(KEMPRF_INDCPA_PROOF))
+    assert (
+        "module G_RandKey (K : K_c.Scheme, F : F_c.Scheme) : "
+        "KF_c.KEM_INDCPA_MultiChal_Oracle = {" in output
+    )
+    body = output.split("module G_RandKey", 1)[1].split("}.", 1)[0]
+    # The shared KEM public key lives as module state.
+    assert "var pk : PKeySpace" in body
+    # initialize sets pk from K.keygen; challenge samples a fresh PRF key,
+    # runs K.encaps, and applies F.evaluate (the nested call is hoisted).
+    assert "proc initialize() : PKeySpace = {" in body
+    assert "key <$ dbs_lambda" in body
+    assert "<@ K.encaps(pk)" in body
+    assert "<@ F.evaluate(key, ct)" in body
+
+
+def test_export_kemprf_flat_state_field_names_are_ec_identifiers() -> None:
+    """The multi-oracle hop's flat-state modules carry inlined reduction state
+    whose field names contain ``@`` (``challenger@pk``). EC rejects ``@`` in a
+    ``var`` declaration. The normalizer must sanitize the field *declaration*
+    names (not just their in-body references) so the module parses.
+    """
+    output = exporter.export_proof_file(str(KEMPRF_INDCPA_PROOF))
+    # The mangled field name must not survive into any declaration/reference.
+    assert "challenger@pk" not in output
+    assert "challenger@sk" not in output
+    # The sanitized form is used consistently (declared as a module var).
+    assert "var challenger_pk :" in output
+
+
 def test_export_otuc_foreign_otp_uses_its_own_carrier_types() -> None:
     """OTUC has primary ``P = PseudoOTP(lambda, 2*lambda, G)`` and foreign
     ground ``E = OTP(3*lambda)``. Both schemes extend ``SymEnc`` and share
@@ -1213,6 +1277,9 @@ def test_export_2_14_typechecks_in_easycrypt(
 
 EC_TEMPLATES = Path(__file__).parent / "ec_templates"
 MULTI_ORACLE_TEMPLATE = EC_TEMPLATES / "multi_oracle_indist.ec"
+MULTI_ORACLE_DEADFIELD_TEMPLATE = (
+    EC_TEMPLATES / "multi_oracle_deadfield_coupling.ec"
+)
 DEAD_SAMPLE_DROP_TEMPLATE = EC_TEMPLATES / "dead_sample_drop.ec"
 CALL_PAST_SAMPLE_SWAP_TEMPLATE = EC_TEMPLATES / "call_past_sample_swap.ec"
 
@@ -1276,6 +1343,43 @@ def test_call_past_sample_swap_template_compiles(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, (
         f"EasyCrypt rejected the call-past-sample-swap template.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_multi_oracle_deadfield_coupling_template_compiles(
+    tmp_path: Path,
+) -> None:
+    """Regression tripwire for the LIVE-STATE coupling target shape used when
+    two adjacent multi-oracle games have STRUCTURALLY DIFFERENT module state
+    (the realistic KEMPRF case, M5 line-1334 blocker). The left endpoint is a
+    reduction R(Chal) delegating to an assumption challenger that holds pk + a
+    DEAD sk; the right endpoint is a bare game GR holding only pk. Their globs
+    differ in shape, so ``(glob R(Chal)){1} = (glob GR){2}`` is ill-typed. The
+    fix couples on the shared LIVE state only, naming it directly --
+    ``Chal.pk{1} = GR.pk{2}`` (the sub-module's var is nameable even though the
+    lemma is about R(Chal); ``proc; inline *; auto`` unfolds the delegation).
+    The Pr-lemma structure is unchanged from the identical-state template; only
+    the coupling string changes from a glob-equality to a live-state field
+    equality -- the single seam the exporter must compute. If this stops
+    compiling, the live-state coupling shape must be re-derived before any
+    automation relying on it can be trusted."""
+    ec_file = tmp_path / "multi_oracle_deadfield_coupling.ec"
+    ec_file.write_text(MULTI_ORACLE_DEADFIELD_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the multi-oracle dead-field coupling template.\n"
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )

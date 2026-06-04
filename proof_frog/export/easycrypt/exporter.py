@@ -223,6 +223,60 @@ def _ec_ident(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", s)
 
 
+# EasyCrypt reserved keywords that can collide with FrogLang let-binding
+# names (e.g. ``Int in;`` from a PRF index). When a let-name lands in this
+# set it must be escaped before emission as an EC ``op`` / identifier, else
+# EC raises a parse error (``op in : int.`` -> "parse error"). The list is
+# the subset of EC keywords a numeric/set let-name realistically hits; extend
+# as new collisions surface under EC validation.
+_EC_RESERVED_WORDS: frozenset[str] = frozenset(
+    {
+        "in",
+        "as",
+        "op",
+        "var",
+        "fun",
+        "let",
+        "end",
+        "res",
+        "if",
+        "then",
+        "else",
+        "while",
+        "return",
+        "with",
+        "type",
+        "module",
+        "proc",
+        "theory",
+        "clone",
+        "import",
+        "export",
+        "axiom",
+        "lemma",
+        "proof",
+        "qed",
+        "glob",
+        "hoare",
+        "equiv",
+        "forall",
+        "exists",
+    }
+)
+
+
+def _safe_ec_op_ident(name: str) -> str:
+    """Escape a FrogLang let-name that collides with an EC reserved keyword.
+
+    Appends a single underscore (``in`` -> ``in_``) so the emitted ``op`` /
+    identifier parses; non-colliding names pass through unchanged. The mapping
+    is deterministic and injective over the corpus's let-names. Apply this at
+    every site that renders a let-name as an EC identifier so the declaration
+    and its references stay consistent.
+    """
+    return f"{name}_" if name in _EC_RESERVED_WORDS else name
+
+
 def _section_header(label: str) -> str:
     """Render a top-level section divider comment.
 
@@ -278,6 +332,21 @@ def _challenger_game_file_name(
     if isinstance(challenger, frog_ast.ConcreteGame):
         return challenger.game.name
     return challenger.name
+
+
+def _wrapper_game_file_for(step: frog_ast.Step, outer_game_file_name: str) -> str:
+    """Game file whose ``Initialize`` / oracle interface the step's wrapper lifts.
+
+    A **plain** step (``Game(E).Side``, no reduction) exposes its own game
+    file's oracle, so its ``Game_step_<i>`` wrapper lifts that game file's
+    ``Initialize``. A **composed** step (``Game(E).Side compose R``) and a
+    bare **intermediate game** (``G_RandKey(K, F)``) are both played against
+    the OUTER (theorem) adversary, so their wrappers lift the theorem game
+    file's ``Initialize`` and use the outer adversary type.
+    """
+    if isinstance(step.challenger, frog_ast.ConcreteGame) and step.reduction is None:
+        return step.challenger.game.name
+    return outer_game_file_name
 
 
 def _is_assumption_hop(a: frog_ast.Step, b: frog_ast.Step) -> bool:
@@ -938,6 +1007,7 @@ def export_proof_file(proof_path: str) -> str:
                     primitive.name,
                     implements=oracle_type_name,
                     emitted_param_type=scheme_type_name,
+                    emit_state_vars=oracle_model_by_game_file[gf.name].is_multi_oracle,
                 )
             )
         adv = theory_modules.translate_adversary_type(
@@ -1085,6 +1155,9 @@ def export_proof_file(proof_path: str) -> str:
                         fp.name,
                         implements=oracle_type_name,
                         emitted_param_type=scheme_type_name,
+                        emit_state_vars=oracle_model_by_game_file[
+                            gf.name
+                        ].is_multi_oracle,
                     )
                 )
             adv = fp_theory_modules.translate_adversary_type(
@@ -1931,17 +2004,13 @@ def export_proof_file(proof_path: str) -> str:
         if not isinstance(step, frog_ast.Step):
             raise NotImplementedError("Induction steps not supported yet.")
         resolved_step = resolver.resolve(step)
-        assert isinstance(step.challenger, frog_ast.ConcreteGame)
-        if step.reduction is None:
-            # A plain step exposes its own game file's oracle, so the wrapper
-            # lifts that game file's Initialize.
-            wrapper_game_file = step.challenger.game.name
-            adv_type = qualified_adv_type_by_game_file[wrapper_game_file]
-        else:
-            # A composed step exposes the OUTER (theorem) game's oracle, so the
-            # wrapper lifts the theorem game file's Initialize.
-            wrapper_game_file = outer_game_file_name
+        # A plain step lifts its own game file's Initialize; a composed step
+        # or a bare intermediate game lifts the OUTER (theorem) game's.
+        wrapper_game_file = _wrapper_game_file_for(step, outer_game_file_name)
+        if wrapper_game_file == outer_game_file_name:
             adv_type = qualified_outer_adv
+        else:
+            adv_type = qualified_adv_type_by_game_file[wrapper_game_file]
         ec_game_wrappers.append(_describe_step_wrapper(i, step))
         ec_game_wrappers.append(
             top_modules.translate_game_wrapper(
@@ -1973,12 +2042,7 @@ def export_proof_file(proof_path: str) -> str:
         (``oracle_model_for(step_a)`` == this model for a plain step), so the
         ``conseq hop_<i>_<m>`` bullets resolve.
         """
-        assert isinstance(step_a.challenger, frog_ast.ConcreteGame)
-        wrapper_gf = (
-            step_a.challenger.game.name
-            if step_a.reduction is None
-            else outer_game_file_name
-        )
+        wrapper_gf = _wrapper_game_file_for(step_a, outer_game_file_name)
         model = oracle_model_by_game_file.get(wrapper_gf)
         if model is None or not model.is_multi_oracle:
             return None
@@ -2322,8 +2386,9 @@ def export_proof_file(proof_path: str) -> str:
         elif isinstance(let.type, frog_ast.IntType) and let.value is None:
             # Opaque ``Int X;`` let-binding -- declare as an abstract int op
             # at top level. Referenced from BitString lengths, reduction
-            # bodies, etc.
-            set_let_decls.append(ec_ast.OpDecl(let.name, "int"))
+            # bodies, etc. Escape EC reserved keywords (e.g. ``Int in;`` ->
+            # ``op in_ : int.``) so the declaration parses.
+            set_let_decls.append(ec_ast.OpDecl(_safe_ec_op_ident(let.name), "int"))
 
     # Non-primary primitive instances become ``declare module`` names
     # inside a ``section Main``. For CES this yields

@@ -270,11 +270,22 @@ class ModuleTranslator:
         param_type_name: str,
         implements: str | None = None,
         emitted_param_type: str | None = None,
+        emit_state_vars: bool = False,
     ) -> ec_ast.Module:
         """Translate a Game.
 
         The game must take exactly one parameter, which is the primitive
         instance (e.g. ``Game Real(SymEnc E)``).
+
+        ``emit_state_vars`` declares each game-level field as a module-level
+        ``var`` (mirroring :meth:`translate_flat_game` /
+        :meth:`translate_reduction`). A **multi-oracle stateful** game (a KEM
+        ``Initialize`` that sets ``pk``/``sk`` read by a later ``Challenge``)
+        keeps that state on the module so the two procs share it; without the
+        ``var`` block EC rejects the cross-proc reference with ``unknown
+        module-level variable``. Single-oracle games leave this ``False`` and
+        emit no ``var`` block, so their output is byte-identical -- their
+        fields are inlined to method locals by canonicalization.
         """
         assert len(game.parameters) == 1, (
             "Phase 1 skeleton only handles games with a single "
@@ -287,11 +298,20 @@ class ModuleTranslator:
             self._translate_method(method, module_param_types)
             for method in game.methods
         ]
+        module_vars = (
+            [
+                ec_ast.VarDecl(fld.name, self._types.translate_type(fld.type))
+                for fld in game.fields
+            ]
+            if emit_state_vars
+            else []
+        )
         return ec_ast.Module(
             name=module_name,
             procs=procs,
             params=[ec_ast.ModuleParam(name=param.name, module_type=emitted_type)],
             implements=implements,
+            module_vars=module_vars,
         )
 
     def translate_flat_game(  # pylint: disable=too-many-arguments,too-many-positional-arguments

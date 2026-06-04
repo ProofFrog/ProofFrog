@@ -182,11 +182,16 @@ class StepResolver:
 
         Used by :func:`translate_hops` to decide whether a hop is
         multi-oracle (``Initialize`` lifted into ``main`` plus post-init
-        oracles) and, if so, which per-oracle equiv lemmas to emit. Returns
-        ``None`` for non-``ConcreteGame`` steps or game files with no
-        registered model -- both of which take the single-oracle path.
+        oracles) and, if so, which per-oracle equiv lemmas to emit. A bare
+        ``ParameterizedGame`` (intermediate game) is keyed by its synthetic
+        game name; a ``ConcreteGame`` by its game file. Returns ``None`` for
+        any other step or a game with no registered model -- both of which
+        take the single-oracle path.
         """
         concrete = step.challenger
+        if isinstance(concrete, frog_ast.ParameterizedGame):
+            # Bare intermediate game: model keyed by the synthetic game name.
+            return self._oracle_models.get(concrete.name)
         if not isinstance(concrete, frog_ast.ConcreteGame):
             return None
         return self._oracle_models.get(concrete.game.name)
@@ -201,6 +206,8 @@ class StepResolver:
 
     def resolve(self, step: frog_ast.Step) -> ResolvedStep:
         concrete = step.challenger
+        if isinstance(concrete, frog_ast.ParameterizedGame):
+            return self._resolve_intermediate_game(concrete)
         if not isinstance(concrete, frog_ast.ConcreteGame):
             raise NotImplementedError(
                 f"Only ConcreteGame steps are supported; got {type(concrete).__name__}"
@@ -256,6 +263,32 @@ class StepResolver:
 
         red = step.reduction
         module_expr = f"{red.name}({self._scheme_name}, {game_module_expr})"
+        return ResolvedStep(module_expr=module_expr, oracle_name=oracle)
+
+    def _resolve_intermediate_game(
+        self, game: frog_ast.ParameterizedGame
+    ) -> ResolvedStep:
+        """Resolve a bare intermediate-game step (``G_RandKey(K, F)``).
+
+        An intermediate game has no ``.Real``/``.Random`` side and carries no
+        reduction: it is a synthetic game (defined in the proof's ``helpers``)
+        played directly against the **outer (theorem) adversary**, so it
+        exposes the theorem game's oracle interface. Its EC module is a functor
+        applied to its primitive-instance arguments; each ``Variable`` arg is
+        routed through the instance table (falling back to its own name), and
+        any non-``Variable`` index argument is rendered verbatim.
+        """
+        arg_exprs: list[str] = []
+        for a in game.args:
+            if isinstance(a, frog_ast.Variable):
+                arg_exprs.append(self._instance_module_expr.get(a.name, a.name))
+            else:
+                arg_exprs.append(str(a))
+        module_expr = f"{game.name}({', '.join(arg_exprs)})" if arg_exprs else game.name
+        # Played against the outer adversary -> the theorem game's oracle. Fall
+        # back to a per-game-file scalar name (single-primitive intermediate
+        # games with no outer-oracle override).
+        oracle = self._outer_oracle_name or self._oracle_names.get(game.name, "main")
         return ResolvedStep(module_expr=module_expr, oracle_name=oracle)
 
 

@@ -60,9 +60,10 @@ def otp_lr_proof_setup() -> dict[str, object]:
 def _make_translator(
     aliases: dict[str, frog_ast.Type],
     return_types: dict[tuple[str, str], frog_ast.Type] | None = None,
+    abstract_types: dict[str, str] | None = None,
 ) -> mt.ModuleTranslator:
     rt = return_types or {}
-    types = tc.TypeCollector(aliases=aliases)
+    types = tc.TypeCollector(aliases=aliases, abstract_types=abstract_types)
 
     def type_of_factory(
         local: dict[str, frog_ast.Type],
@@ -201,6 +202,55 @@ def test_stateful_reduction_field_writes_are_assignments(
     assert any(
         isinstance(s, ec_ast.Call) and "dk0" in s.args for s in decaps0.body
     )
+
+
+def _kem_multichal_real_game() -> frog_ast.Game:
+    """The Real side of the multi-oracle KEM INDCPA_MultiChal game (fields pk/sk)."""
+    gf = frog_parser.parse_file("examples/Games/KEM/INDCPA_MultiChal.game")
+    return gf.games[0]
+
+
+def test_translate_game_emits_state_vars_for_multi_oracle_game() -> None:
+    """A stateful multi-oracle game (``Initialize`` sets ``pk``/``sk`` read by
+    ``Challenge``) must declare those fields as module-level ``var``s, else EC
+    rejects the cross-proc reference with ``unknown module-level variable``."""
+    abstract = {
+        "PublicKey": "publickey",
+        "SecretKey": "secretkey",
+        "SharedSecret": "sharedsecret",
+        "Ciphertext": "ciphertext",
+    }
+    tx = _make_translator({}, abstract_types=abstract)
+    mod = tx.translate_game(
+        _kem_multichal_real_game(),
+        "KEM_INDCPA_MultiChal_Real",
+        "KEM",
+        implements="KEM_INDCPA_MultiChal_Oracle",
+        emit_state_vars=True,
+    )
+    assert [v.name for v in mod.module_vars] == ["pk", "sk"]
+    rendered = "\n".join(_render_module_for_test(mod))
+    assert "var pk :" in rendered
+    assert rendered.index("var pk :") < rendered.index("proc ")
+
+
+def test_translate_game_no_state_vars_by_default() -> None:
+    """Single-oracle games (the legacy path) emit no state-var block, so their
+    output stays byte-identical."""
+    abstract = {
+        "PublicKey": "publickey",
+        "SecretKey": "secretkey",
+        "SharedSecret": "sharedsecret",
+        "Ciphertext": "ciphertext",
+    }
+    tx = _make_translator({}, abstract_types=abstract)
+    mod = tx.translate_game(
+        _kem_multichal_real_game(),
+        "KEM_INDCPA_MultiChal_Real",
+        "KEM",
+        implements="KEM_INDCPA_MultiChal_Oracle",
+    )
+    assert mod.module_vars == []
 
 
 def test_translate_adversary_module_type(

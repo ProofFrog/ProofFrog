@@ -464,7 +464,9 @@ def _render_module(module: Module) -> list[str]:
     header += " = {"
     out = [header]
     for var in module.module_vars:
-        out.append(f"  {_render_stmt(var)}")
+        # Module-level ``var`` decls take NO trailing semicolon (EC parse
+        # error otherwise), unlike a local ``var`` inside a proc body.
+        out.append(f"  var {var.name} : {var.type.text}")
     for proc in module.procs:
         out.extend(_render_proc_impl(proc))
     out.append("}.")

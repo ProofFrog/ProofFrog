@@ -113,6 +113,13 @@ class TypeCollector:
         # slice/concat round-trip axioms and distribution-split axioms
         # with the actual bit-length integer expressions.
         self._bs_lengths: dict[str, str] = {}
+        # Bitstring type names that a ``requires``-equality clause unified
+        # with an earlier-declared abstract type. ``emit()`` renders these
+        # as ``type <name> = <definition>.`` aliases instead of fresh
+        # abstract ``type <name>.`` declarations, so EC treats e.g.
+        # ``bs_lambda`` and the KEM carrier ``SharedSecretSpace`` as one
+        # type (the ``requires K.SharedSecret == BitString<F.lambda>`` gap).
+        self._type_alias_defs: dict[str, str] = {}
 
     def resolve(
         self, t: frog_ast.Type, _visited: frozenset[str] = frozenset()
@@ -399,6 +406,20 @@ class TypeCollector:
         self._bs_lengths[name] = length_str
         return name
 
+    def register_type_alias(self, bs_name: str, definition: str) -> None:
+        """Mark a registered bitstring type as an alias of ``definition``.
+
+        Used when a scheme ``requires`` clause equates a bitstring type
+        (e.g. ``BitString<F.lambda>`` -> ``bs_lambda``) with an
+        earlier-declared abstract carrier type (e.g. ``SharedSecretSpace``).
+        :meth:`emit` then renders ``type bs_lambda = SharedSecretSpace.``
+        instead of a fresh abstract ``type bs_lambda.``, so EC unifies them.
+        The definition type must be declared *before* this collector's
+        output (e.g. a ``Set X;`` let), which the exporter guarantees by
+        making the set-let carrier the canonical side.
+        """
+        self._type_alias_defs[bs_name] = definition
+
     def bs_length_for(self, bs_name: str) -> str | None:
         """Return the canonical length expression string for a registered
         abstract bitstring, or ``None`` if the name isn't registered.
@@ -407,6 +428,16 @@ class TypeCollector:
         slice/concat tactic arguments.
         """
         return self._bs_lengths.get(bs_name)
+
+    @property
+    def registered_bitstring_names(self) -> list[str]:
+        """Concrete bitstring type names registered so far, in emission order.
+
+        Used by the exporter to order ``requires``-equality unifications
+        between two bitstring types (the earlier-registered one is the
+        canonical side, since it is declared first in :meth:`emit`).
+        """
+        return list(self._names)
 
     @property
     def abstract_bitstrings(self) -> list[tuple[str, frog_ast.Expression]]:
@@ -435,7 +466,11 @@ class TypeCollector:
         for name in self._names:
             suffix = name.removeprefix("bs")
             distr = f"dbs{suffix}"
-            decls.append(ec_ast.TypeDecl(name))
+            alias_def = self._type_alias_defs.get(name)
+            if alias_def is not None:
+                decls.append(ec_ast.TypeDecl(name, definition=alias_def))
+            else:
+                decls.append(ec_ast.TypeDecl(name))
             decls.append(ec_ast.OpDecl(distr, f"{name} distr"))
             decls.append(ec_ast.Axiom(f"{distr}_ll", f"is_lossless {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))

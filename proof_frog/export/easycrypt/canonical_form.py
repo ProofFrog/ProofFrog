@@ -247,6 +247,33 @@ def hoist_scheme_calls(
     return out
 
 
+def hoist_game_calls(
+    game: frog_ast.Game,
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+) -> frog_ast.Game:
+    """Return a deepcopy of ``game`` with module calls hoisted in each method.
+
+    Mirrors :func:`hoist_scheme_calls` for a source intermediate game (e.g.
+    ``Game G_RandKey(KEM K, PRF F)``). Its body may use a primitive call as a
+    sub-expression (``return [F.evaluate(key, ct), ct];``); EC forbids module
+    calls inside expressions, so the calls are pre-hoisted to
+    ``<type> _r0 = F.evaluate(key, ct);`` statements. ``external_module_types``
+    is derived from the game's module-typed parameters (e.g.
+    ``{"K": "KEM", "F": "PRF"}``).
+    """
+    external = {
+        p.name: p.type.name
+        for p in game.parameters
+        if isinstance(p.type, frog_ast.Variable)
+    }
+    out = copy.deepcopy(game)
+    for method in out.methods:
+        method.block = frog_ast.Block(
+            _hoist_block(list(method.block.statements), external, method_return_types)
+        )
+    return out
+
+
 def _normalize_for_ec(
     game: frog_ast.Game,
     external_module_types: dict[str, str],
@@ -268,6 +295,14 @@ def _normalize_for_ec(
     rename_map = _build_local_rename_map(game)
     if rename_map:
         _apply_rename(game, rename_map)
+        # Game-level fields become module ``var`` declarations in the flat-
+        # state module; their declaration names must be sanitized too (the
+        # body references were handled by ``_apply_rename`` above). Inlined
+        # reduction state can carry ``@``-mangled field names (``challenger@pk``)
+        # that EC rejects in a ``var`` decl.
+        for fld in game.fields:
+            if fld.name in rename_map:
+                fld.name = rename_map[fld.name]
     for method in game.methods:
         method.block = frog_ast.Block(
             _hoist_block(
@@ -300,6 +335,10 @@ def _ec_ident(name: str) -> str:
 def _build_local_rename_map(game: frog_ast.Game) -> dict[str, str]:
     """Collect names that bind local variables; rename invalid ones."""
     locals_seen: set[str] = set()
+    # Game-level fields (module state in the flat-state module) need
+    # sanitizing too, even when only read (never assigned) in a body.
+    for fld in game.fields:
+        locals_seen.add(fld.name)
     for method in game.methods:
         for p in method.signature.parameters:
             locals_seen.add(p.name)
@@ -435,18 +474,33 @@ def _module_call_return_type(
     raw_type = method_return_types.get((prim, expr.func.name))
     if raw_type is None:
         return None
+    return _qualify_return_type(raw_type, obj.name)
+
+
+def _qualify_return_type(raw_type: frog_ast.Type, instance_name: str) -> frog_ast.Type:
+    """Specialize a primitive's generic return type to a specific instance.
+
+    The method-return-type registry holds the generic primitive return
+    type, whose set/bitstring fields are *bare* names (``SharedSecret``,
+    ``BitString<lambda>``). For a call on a specific instance we wrap each
+    such reference in a ``FieldAccess(<instance>, name)`` so the
+    TypeCollector resolves it through THIS instance's clone rather than
+    the primary scheme's. A ``ProductType`` (e.g. ``Encaps`` returning
+    ``[SharedSecret, Ciphertext]``) qualifies element-wise — without this
+    a hoisted ``K.encaps(...)`` var is typed against the primary (the M4
+    ``bs_out`` mis-typing).
+    """
     if isinstance(raw_type, frog_ast.Variable):
-        return frog_ast.FieldAccess(frog_ast.Variable(obj.name), raw_type.name)
+        return frog_ast.FieldAccess(frog_ast.Variable(instance_name), raw_type.name)
     if isinstance(raw_type, frog_ast.BitStringType):
-        # The primitive's signature uses bare field names
-        # (``BitString<lambda + stretch>``). Wrap each Variable reference
-        # in a ``FieldAccess(<instance>, name)`` so the TypeCollector's
-        # alias map resolves it through THIS instance's concretized
-        # fields rather than the primary's.
         if raw_type.parameterization is None:
             return raw_type
         return frog_ast.BitStringType(
-            _qualify_field_refs(raw_type.parameterization, obj.name)
+            _qualify_field_refs(raw_type.parameterization, instance_name)
+        )
+    if isinstance(raw_type, frog_ast.ProductType):
+        return frog_ast.ProductType(
+            [_qualify_return_type(t, instance_name) for t in raw_type.types]
         )
     return raw_type
 

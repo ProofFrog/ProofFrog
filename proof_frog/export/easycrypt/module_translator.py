@@ -314,6 +314,60 @@ class ModuleTranslator:
             module_vars=module_vars,
         )
 
+    def translate_intermediate_game(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        game: frog_ast.Game,
+        module_name: str,
+        param_module_types: dict[str, str],
+        param_primitive_types: dict[str, str],
+        implements: str | None = None,
+        emit_state_vars: bool = False,
+    ) -> ec_ast.Module:
+        """Translate a multi-primitive intermediate game to an EC module.
+
+        Unlike :meth:`translate_game` (which requires exactly one primitive
+        parameter), an in-proof intermediate game such as
+        ``Game G_RandKey(KEM K, PRF F)`` carries several primitive-typed
+        parameters and is played against the *outer* theorem game's oracle, so
+        it ascribes to that oracle type (``implements``).
+
+        ``param_module_types`` gives each parameter its EC functor type
+        (``{"K": "K_c.Scheme", "F": "F_c.Scheme"}``) for the emitted signature;
+        ``param_primitive_types`` gives each its primitive name
+        (``{"K": "KEM", "F": "PRF"}``) so body calls like ``K.encaps(...)`` /
+        ``F.evaluate(...)`` resolve through the method-return-type registry.
+
+        ``emit_state_vars`` declares each game-level field as a module-level
+        ``var`` (mirroring :meth:`translate_reduction`): a multi-oracle game
+        whose ``Initialize`` sets ``pk`` read by a later ``Challenge`` keeps
+        that state on the module. The body must be pre-hoisted (see
+        :func:`canonical_form.hoist_game_calls`) so nested module calls are
+        already lifted to statements.
+        """
+        module_params = [
+            ec_ast.ModuleParam(name=p.name, module_type=param_module_types[p.name])
+            for p in game.parameters
+        ]
+        procs = [
+            self._translate_method(method, param_primitive_types)
+            for method in game.methods
+        ]
+        module_vars = (
+            [
+                ec_ast.VarDecl(fld.name, self._types.translate_type(fld.type))
+                for fld in game.fields
+            ]
+            if emit_state_vars
+            else []
+        )
+        return ec_ast.Module(
+            name=module_name,
+            procs=procs,
+            params=module_params,
+            implements=implements,
+            module_vars=module_vars,
+        )
+
     def translate_flat_game(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         game: frog_ast.Game,

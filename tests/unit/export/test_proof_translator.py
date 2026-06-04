@@ -48,6 +48,41 @@ def test_step_resolver_composed_step() -> None:
     assert resolved.oracle_name == "enc"
 
 
+def _kemprf_instance_resolver() -> pt.StepResolver:
+    """A multi-instance resolver mirroring KEMPRF (instances K, F, KF)."""
+    return pt.StepResolver(
+        module_name_by_concrete_game={},
+        oracle_name_by_game_file={"KEM_INDCPA_MultiChal": "initialize"},
+        primitive_name="KEM",
+        scheme_name="KEMPRF(K, F)",
+        instance_module_expr_by_let_name={
+            "K": "K",
+            "F": "F",
+            "KF": "KEMPRF(K, F)",
+        },
+        module_name_by_instance_game={},
+        outer_oracle_name="initialize",
+    )
+
+
+def test_step_resolver_parameterized_intermediate_game() -> None:
+    """A bare intermediate game ``G_RandKey(K, F)`` step resolves through the
+    instance table to its EC module expression, played against the outer
+    (theorem) adversary's oracle."""
+    step = frog_ast.Step(
+        challenger=frog_ast.ParameterizedGame(
+            "G_RandKey", [frog_ast.Variable("K"), frog_ast.Variable("F")]
+        ),
+        reduction=None,
+        adversary=frog_ast.ParameterizedGame(
+            "KEM_INDCPA_MultiChal", [frog_ast.Variable("KF")]
+        ),
+    )
+    resolved = _kemprf_instance_resolver().resolve(step)
+    assert resolved.module_expr == "G_RandKey(K, F)"
+    assert resolved.oracle_name == "initialize"
+
+
 def test_translate_hops_emits_admit_per_hop() -> None:
     steps = _steps_of_otpsecurelr()
     resolver = _resolver()
@@ -110,6 +145,30 @@ def test_oracle_model_for_returns_model() -> None:
     assert model is not None and model.is_multi_oracle
     assert model.init_name == "initialize"
     assert model.post_init_names == ["challenge"]
+
+
+def test_oracle_model_for_parameterized_intermediate_game() -> None:
+    """A bare intermediate-game step's model is looked up by game name so the
+    hop takes the multi-oracle per-oracle path (not the single-oracle one)."""
+    model = _multi_oracle_model()
+    resolver = pt.StepResolver(
+        module_name_by_concrete_game={},
+        oracle_name_by_game_file={"KEM_INDCPA_MultiChal": "initialize"},
+        primitive_name="KEM",
+        scheme_name="KEMPRF(K, F)",
+        oracle_model_by_game_file={"G_RandKey": model},
+    )
+    step = frog_ast.Step(
+        challenger=frog_ast.ParameterizedGame(
+            "G_RandKey", [frog_ast.Variable("K"), frog_ast.Variable("F")]
+        ),
+        reduction=None,
+        adversary=frog_ast.ParameterizedGame(
+            "KEM_INDCPA_MultiChal", [frog_ast.Variable("KF")]
+        ),
+    )
+    got = resolver.oracle_model_for(step)
+    assert got is model and got.is_multi_oracle
 
 
 def test_precondition_for_oracle_name_uses_per_oracle_params() -> None:

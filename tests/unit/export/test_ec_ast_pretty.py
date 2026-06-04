@@ -5,6 +5,34 @@ from __future__ import annotations
 from proof_frog.export.easycrypt import ec_ast
 
 
+def test_module_var_renders_without_trailing_semicolon() -> None:
+    """A module-level ``var`` decl must NOT carry a trailing ``;`` (EC parse
+    error), unlike a local ``var`` inside a proc body which does."""
+    mod = ec_ast.Module(
+        name="M",
+        procs=[
+            ec_ast.Proc(
+                name="f",
+                params=[],
+                return_type=ec_ast.EcType("publickey"),
+                body=[
+                    ec_ast.VarDecl("k", ec_ast.EcType("int")),
+                    ec_ast.Return("pk"),
+                ],
+            )
+        ],
+        params=[],
+        implements="O",
+        module_vars=[ec_ast.VarDecl("pk", ec_ast.EcType("publickey"))],
+    )
+    rendered = "\n".join(ec_ast._render_module(mod))  # pylint: disable=protected-access
+    # Module-level var: no trailing semicolon.
+    assert "var pk : publickey\n" in rendered + "\n"
+    assert "var pk : publickey;" not in rendered
+    # Local var inside the proc: keeps its trailing semicolon.
+    assert "var k : int;" in rendered
+
+
 def test_axiom_with_module_and_memory_params() -> None:
     axiom = ec_ast.Axiom(
         name="OneTimeSecrecy_advantage",

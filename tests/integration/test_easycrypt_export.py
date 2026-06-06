@@ -1439,13 +1439,21 @@ def test_export_kemprf_indcpa_compiles_in_easycrypt(tmp_path: Path) -> None:
     type qualification, the live-state couplings, and the abstract-scheme
     footprint restrictions all composing in EC.
 
-    NOTE: the file is NOT yet admit-free -- the per-oracle equiv bodies and the
-    assumption-hop Pr-lemma wrapper bridges are still guided admits (M5). So this
-    test asserts EC ACCEPTANCE (no parse/type/tactic error), not zero admits. If
-    it regresses to a nonzero exit, a structural multi-oracle/multi-primitive gap
-    has reopened.
+    NOTE: the file is NOT yet admit-free, but the four lifted-``Initialize``
+    per-oracle equiv lemmas (``hop_{0,2,3,5}_initialize``) now close via the
+    canned inline-equivalence tactic under the ``={glob K} /\\ ={glob F}``
+    coupling, leaving exactly 8 guided admits (M5): the 4 ``challenge`` per-oracle
+    bodies + the 4 assumption-hop Pr-lemma wrapper bridges. So this test asserts
+    EC ACCEPTANCE (no parse/type/tactic error) AND the admit count, not zero
+    admits. If it regresses to a nonzero exit, a structural multi-oracle/multi-
+    primitive gap has reopened; if the admit count rises, an init lemma reopened.
     """
     output = exporter.export_proof_file(str(KEMPRF_INDCPA_PROOF))
+    n_admits = len([ln for ln in output.splitlines() if ln.strip() == "admit."])
+    assert n_admits == 8, (
+        f"expected 8 guided admits (4 challenge bodies + 4 Pr bridges), "
+        f"got {n_admits}; an init equiv lemma may have reopened or a new gap appeared."
+    )
     ec_file = tmp_path / "kemprf_indcpa.ec"
     ec_file.write_text(output)
     result = subprocess.run(

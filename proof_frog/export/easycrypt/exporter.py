@@ -1901,6 +1901,23 @@ def export_proof_file(proof_path: str) -> str:
     # proofs, so it gates the abstract-footprint restriction + section reorder.
     live_state_holders: set[str] = set()
 
+    # Abstract scheme modules (``declare module K, F``) the multi-oracle oracle
+    # bodies call (``K.encaps`` / ``F.evaluate``). ``sim`` can only relate two
+    # calls to such a module when ``={glob <module>}`` holds, so the per-oracle
+    # coupling carries ``={glob K} /\\ ={glob F}`` and the lifted-``Initialize``
+    # precondition + the Pr lemma's ``byequiv`` precondition carry it too.
+    # Same list as ``declare_modules`` (built below); empty in single-oracle /
+    # concrete-only proofs, so their output is byte-identical.
+    abstract_scheme_modules = [p.name for p in declared_instance_params]
+    glob_invariant_conj = " /\\ ".join(
+        f"={{glob {m}}}" for m in abstract_scheme_modules
+    )
+    multi_oracle_byequiv_pre = (
+        "={"
+        + ", ".join(["glob A"] + [f"glob {m}" for m in abstract_scheme_modules])
+        + "}"
+    )
+
     def _live_state_field_name() -> str:
         """The shared live-state field name: the field the outer (theorem)
         game's ``Initialize`` returns (its public value). For KEMPRF this is
@@ -1962,7 +1979,12 @@ def export_proof_file(proof_path: str) -> str:
         return f"{holder}.{field}"
 
     def _live_state_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
-        return pt.live_state_coupling(_live_state_ref(step_a), _live_state_ref(step_b))
+        field = pt.live_state_coupling(_live_state_ref(step_a), _live_state_ref(step_b))
+        # Prefix the abstract-scheme glob equality so ``sim`` can relate the
+        # post-init oracles' abstract calls (``K.encaps`` / ``F.evaluate``)
+        # under this coupling. ``glob_invariant_conj`` is empty for proofs with
+        # no declared abstract scheme module (output unchanged there).
+        return f"{glob_invariant_conj} /\\ {field}" if glob_invariant_conj else field
 
     # Per-hop memo of the multi-oracle chain emission. ``translate_hops``
     # calls ``_oracle_body_for_hop`` once per oracle of a multi-oracle hop;
@@ -2036,6 +2058,7 @@ def export_proof_file(proof_path: str) -> str:
         spec_overrides=chain_spec_overrides,
         oracle_body_for_hop=_oracle_body_for_hop,
         coupling_for_hop=_live_state_coupling,
+        glob_invariant=glob_invariant_conj,
     )
 
     qualified_adv_type_by_game_file: dict[str, str] = {
@@ -2175,6 +2198,7 @@ def export_proof_file(proof_path: str) -> str:
             coupling=_live_state_coupling(step_a, step_b),
             init_oracle=model.init_name,
             post_init_oracles=list(model.post_init_names),
+            byequiv_pre=multi_oracle_byequiv_pre,
         )
 
     # Warm-up: fully populate ``live_state_holders`` before the Pr loop, so the

@@ -183,9 +183,34 @@ def test_translate_hops_multi_oracle_uses_coupling_for_hop_callback() -> None:
     )
     init_lemma = lemmas[0]
     chal_lemma = lemmas[1]
+    # No glob_invariant: the init oracle establishes the coupling from `true`.
+    assert init_lemma.precondition == "true"
     assert init_lemma.postcondition == "={res} /\\ L.pk{1} = R.pk{2}"
     assert chal_lemma.precondition == "={m0, m1} /\\ L.pk{1} = R.pk{2}"
     assert chal_lemma.postcondition == "={res} /\\ L.pk{1} = R.pk{2}"
+
+
+def test_translate_hops_multi_oracle_glob_invariant_is_init_precondition() -> None:
+    """``glob_invariant`` (the abstract-scheme glob equality) replaces ``true``
+    as the lifted-``Initialize`` oracle's precondition, so ``sim`` can relate
+    the keygen call's abstract module under ``={glob K} /\\ ={glob F}``. The
+    post-init oracles get the glob equality via the coupling string instead."""
+    steps = _steps_of_otpsecurelr()
+    resolver = _multi_oracle_resolver()
+    lemmas = pt.translate_hops(
+        resolver,
+        steps,
+        lambda _i, _a, _b: ["admit.", "qed."],
+        oracle_body_for_hop=lambda _i, _a, _b, _name, _is_init: ["admit.", "qed."],
+        coupling_for_hop=lambda _a, _b: "={glob K} /\\ ={glob F} /\\ L.pk{1} = R.pk{2}",
+        glob_invariant="={glob K} /\\ ={glob F}",
+    )
+    init_lemma = lemmas[0]
+    assert init_lemma.precondition == "={glob K} /\\ ={glob F}"
+    assert (
+        init_lemma.postcondition
+        == "={res} /\\ ={glob K} /\\ ={glob F} /\\ L.pk{1} = R.pk{2}"
+    )
 
 
 def test_oracle_model_for_returns_model() -> None:
@@ -496,6 +521,30 @@ def test_translate_inlining_hop_pr_multi_oracle_body() -> None:
         "auto.",
         "qed.",
     ]
+
+
+def test_translate_inlining_hop_pr_multi_oracle_byequiv_pre() -> None:
+    """A multi-oracle Pr lemma whose oracles call abstract scheme modules uses
+    the strengthened ``byequiv`` precondition (``={glob A, glob K, glob F}``) so
+    the coupling's ``={glob K} /\\ ={glob F}`` is established at ``main`` entry."""
+    spec = pt.MultiOraclePrSpec(
+        coupling="={glob K} /\\ ={glob F} /\\ (glob GL){1} = (glob GR){2}",
+        init_oracle="initialize",
+        post_init_oracles=["challenge"],
+        byequiv_pre="={glob A, glob K, glob F}",
+    )
+    lemma = pt.translate_inlining_hop_pr_lemma(
+        hop_index=0,
+        adversary_type_name="KEM_INDCPA_Adv",
+        scheme_module_expr="KEMPRF",
+        left_wrapper_name="Game_step_0",
+        right_wrapper_name="Game_step_1",
+        multi_oracle=spec,
+    )
+    assert lemma.body[0] == "byequiv (_: ={glob A, glob K, glob F} ==> ={res}) => //."
+    assert "call (_: ={glob K} /\\ ={glob F} /\\ (glob GL){1} = (glob GR){2})." in (
+        lemma.body
+    )
 
 
 def test_translate_inlining_hop_pr_multi_oracle_adv_state_restrictions() -> None:

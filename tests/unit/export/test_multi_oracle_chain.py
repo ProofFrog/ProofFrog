@@ -122,18 +122,50 @@ def test_emit_one_oracle_chain_no_transforms_init() -> None:
         external_module_types={},
         method_return_types={},
     )
-    text = "\n".join(chunks)
-    # No transforms => just the canon bridge + chain lemma, both init-suffixed.
-    assert "canon_bridge_0_initialize" in text
-    assert "hop_0_initialize_chain" in text
-    # init establishes the coupling from `true`.
-    assert "true ==>" in text
-    assert "(glob Step_0L_state_0){1} = (glob Step_0R_state_0){2}" in text
-    # outer body bridges the two wrappers and applies the chain lemma.
+    # Canonically-identical init endpoints (same game body) => the raw wrappers
+    # are inline-equivalent, so the lemma closes directly via the canned
+    # inline-equivalence tactic and emits NO per-transform chain artifacts.
+    assert chunks == []
     outer_text = "\n".join(outer)
-    assert "apply hop_0_initialize_chain" in outer_text
-    assert "GL(E)" in outer_text and "GR(E)" in outer_text
+    assert "proc; inline *; sim." in outer_text
+    assert "synth-static" in outer_text  # ladder rung 1 (fixed canned tactic)
     assert outer[-1] == "qed."
+
+
+def test_emit_one_oracle_chain_init_inline_equiv_gated_on_canonical_equality() -> None:
+    # When the two init endpoints' canonical bodies DIFFER, the inline-
+    # equivalence shortcut must NOT fire -- the chain (bridge + chain lemma) is
+    # emitted instead, so the emitter never silently claims inline-equivalence
+    # for genuinely different init bodies.
+    g_left = _two_oracle_game("G")
+    g_right = _two_oracle_game("G")
+    # Make the right init body differ (append an extra return so it is not equal
+    # to the left init body, and not a pure reorder of a single statement).
+    g_right.methods[0].block.statements.append(
+        frog_ast.ReturnStatement(frog_ast.Variable("sk"))
+    )
+    chunks, outer = _emit_one_oracle_chain(
+        hop_index=0,
+        oracle_name="initialize",
+        is_init=True,
+        eq_args="true",
+        left_mods=["Step_0L_state_0"],
+        right_mods=["Step_0R_state_0"],
+        left_states=[g_left],
+        right_states=[g_right],
+        left_apps=[],
+        right_apps=[],
+        mod_ref=lambda n: n,
+        left_wrapper_expr="GL(E)",
+        right_wrapper_expr="GR(E)",
+        bridge_tactic="proc; inline *; sp; wp; sim",
+        external_module_types={},
+        method_return_types={},
+    )
+    text = "\n".join(chunks)
+    assert chunks != []
+    assert "hop_0_initialize_chain" in text
+    assert "proc; inline *; sim." not in "\n".join(outer)
 
 
 def test_emit_one_oracle_chain_post_init_carries_args() -> None:
@@ -212,14 +244,15 @@ def test_emit_multi_oracle_chain_full_shape() -> None:
     assert decls.count("module Step_0R_state_0") == 1
     # Stateful game => the shared module declares its state var.
     assert "var sk" in decls
-    # Per-oracle chain artifacts for both oracles.
-    assert "hop_0_initialize_chain" in decls
+    # init endpoints are canonically identical => inline-equivalence tactic, no
+    # init chain artifacts; the post-init oracle still chains per-transform.
+    assert "hop_0_initialize_chain" not in decls
     assert "hop_0_challenge_chain" in decls
     # Both oracles produced an outer tactic body.
     assert set(info.tactic_body_by_oracle) == {"initialize", "challenge"}
     init_body = "\n".join(info.tactic_body_by_oracle["initialize"])
     chal_body = "\n".join(info.tactic_body_by_oracle["challenge"])
-    assert "apply hop_0_initialize_chain" in init_body
+    assert "proc; inline *; sim." in init_body
     assert "apply hop_0_challenge_chain" in chal_body
     # The post-init oracle threads its argument equality into the bridge spec.
     assert "={m0}" in chal_body
@@ -263,6 +296,6 @@ def test_emit_multi_oracle_chain_admits_changed_post_init_body() -> None:
     )
     chal_body = "\n".join(info.tactic_body_by_oracle["challenge"])
     assert "admit." in chal_body
-    # init is unchanged across the step, so it still gets a real chain.
+    # init endpoints are canonically identical => inline-equivalence tactic.
     init_body = "\n".join(info.tactic_body_by_oracle["initialize"])
-    assert "apply hop_0_initialize_chain" in init_body
+    assert "proc; inline *; sim." in init_body

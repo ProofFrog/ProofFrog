@@ -19,6 +19,42 @@ from ... import frog_ast
 INIT_RESULT_NAME = "pk"
 
 
+def _reduction_init_method(
+    reduction: frog_ast.Reduction,
+) -> frog_ast.Method | None:
+    """Return the reduction's ``Initialize`` method, or ``None`` if absent."""
+    for method in reduction.methods:
+        if method.signature.name.lower() == "initialize":
+            return method
+    return None
+
+
+def _is_pure_forward_init(method: frog_ast.Method) -> bool:
+    """True when ``method``'s body is exactly ``return challenger.Initialize();``.
+
+    Such a reduction merely forwards the inner challenger's ``Initialize``
+    result unchanged and holds no own state. In the Initialize-lifted design
+    (multi-oracle inner game), the game wrapper's ``main()`` has *already* run
+    the inner ``Initialize`` and threaded its result into ``distinguish`` as the
+    ``pk`` parameter, so the outer init result equals that received ``pk``.
+    Re-running the reduction's ``Initialize`` here would call ``challenger.
+    Initialize`` (``C.initialize``) a second time, which the restricted
+    post-init-only adversary interface forbids (multi-oracle foundation §7,
+    blocker B). See ``translate_reduction_adversary``.
+    """
+    stmts = list(method.block.statements)
+    if len(stmts) != 1 or not isinstance(stmts[0], frog_ast.ReturnStatement):
+        return False
+    expr = stmts[0].expression
+    return (
+        isinstance(expr, frog_ast.FuncCall)
+        and isinstance(expr.func, frog_ast.FieldAccess)
+        and isinstance(expr.func.the_object, frog_ast.Variable)
+        and expr.func.the_object.name == "challenger"
+        and expr.func.name.lower() == "initialize"
+    )
+
+
 @dataclass
 class MultiOracleSpec:
     """Emission spec for a multi-oracle (Initialize-lifted) game file.
@@ -625,13 +661,18 @@ class ModuleTranslator:
               return b;
             }
 
-        The received inner-init parameter is currently unused: re-running
-        ``Initialize`` through ``R`` is the type-correct shape, but reconciling
-        it with the inner game's own lifted ``Initialize`` (so the reduction
-        does not double-initialise shared state) is the coupling-synthesis
-        problem completed in later phases (see the multi-oracle foundation
-        plan, sections 3 and 6). This path has no validated template and no
-        end-to-end corpus exercise yet.
+        **Forward-pk vs re-init (blocker B).** When the inner game is itself
+        multi-oracle *and* the reduction's ``Initialize`` is a pure forward
+        (``return challenger.Initialize();``), the lifted ``main`` has already
+        run the inner ``Initialize``; ``distinguish`` then forwards the received
+        ``pk`` directly to ``A`` rather than re-running ``Initialize`` through
+        ``R`` (which would call ``C.initialize`` a second time and violate the
+        restricted post-init-only adversary interface). Otherwise -- a
+        single-oracle inner game, or a reduction whose ``Initialize`` is
+        independent of the challenger (generates its own keypair / state) --
+        ``distinguish`` re-runs ``R``'s own ``Initialize`` to establish that
+        state. EC-compilation validation of the forward-pk shape is pending a
+        hand-derived template (Docker required).
         """
         if reduction_arg_exprs is None:
             reduction_arg_exprs = [scheme_module_expr]
@@ -641,27 +682,53 @@ class ModuleTranslator:
             ec_ast.VarDecl(name="b", type=ec_ast.EcType("bool"))
         ]
         distinguish_params: list[ec_ast.ProcParam] = []
-        if outer_multi_oracle is None:
-            distinguish_args = ""
-        else:
-            inner_spec = inner_multi_oracle or outer_multi_oracle
-            distinguish_params.append(
-                ec_ast.ProcParam(INIT_RESULT_NAME, inner_spec.init_return_type)
-            )
+
+        def reinit(outer_spec: MultiOracleSpec) -> str:
+            # Run the reduction's OWN Initialize to produce the outer-init
+            # result (and set the reduction's own state). Type-safe whenever
+            # the reduction's Initialize does not call ``challenger.Initialize``.
             outer_init_local = f"{INIT_RESULT_NAME}0"
             body.append(
                 ec_ast.VarDecl(
-                    name=outer_init_local, type=outer_multi_oracle.init_return_type
+                    name=outer_init_local,
+                    type=outer_spec.init_return_type,
                 )
             )
             body.append(
                 ec_ast.Call(
                     var=outer_init_local,
-                    callee=f"{composed}.{outer_multi_oracle.init_name}",
+                    callee=f"{composed}.{outer_spec.init_name}",
                     args="",
                 )
             )
-            distinguish_args = outer_init_local
+            return outer_init_local
+
+        if outer_multi_oracle is None:
+            distinguish_args = ""
+        elif inner_multi_oracle is not None:
+            # Inner game is multi-oracle: its Initialize was lifted into the
+            # wrapper's ``main()``, which threads the inner-init result into
+            # ``distinguish`` as ``pk``.
+            distinguish_params.append(
+                ec_ast.ProcParam(INIT_RESULT_NAME, inner_multi_oracle.init_return_type)
+            )
+            init_method = _reduction_init_method(reduction)
+            if init_method is not None and _is_pure_forward_init(init_method):
+                # Forward-pk path (blocker B). The reduction's Initialize merely
+                # forwards ``challenger.Initialize()``, so the outer init result
+                # equals the received ``pk``; re-running it would call
+                # ``C.initialize`` again and violate the restricted post-init-only
+                # adversary interface.
+                distinguish_args = INIT_RESULT_NAME
+            else:
+                distinguish_args = reinit(outer_multi_oracle)
+        else:
+            # Inner game is single-oracle: nothing is lifted, so ``distinguish``
+            # takes no parameter (matching the inner single-oracle adversary
+            # type). The reduction supplies the outer-init result by running its
+            # own Initialize, which is independent of the inner challenger (it
+            # generates its own keypair / state) and so never touches ``C``.
+            distinguish_args = reinit(outer_multi_oracle)
         body.append(
             ec_ast.Call(
                 var="b",

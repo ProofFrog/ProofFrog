@@ -1525,6 +1525,7 @@ def export_proof_file(proof_path: str) -> str:
         outer_oracle_name=oracle_name_by_game_file[proof.theorem.name],
         oracle_model_by_game_file=oracle_model_by_game_file,
         oracle_params_by_oracle=oracle_params_by_oracle,
+        outer_game_file_name=proof.theorem.name,
     )
 
     # Validate proof via the engine (same as before).
@@ -1890,6 +1891,15 @@ def export_proof_file(proof_path: str) -> str:
     # ``glob`` (which is ill-typed when one endpoint is a reduction-composed
     # game carrying a dead field the other lacks). See the validated template
     # ``tests/integration/ec_templates/multi_oracle_deadfield_coupling.ec``.
+    #
+    # Every state-holding module named in a live-state coupling is accumulated
+    # here as ``_live_state_ref`` runs (during equiv-lemma + Pr-lemma emission).
+    # The abstract scheme modules and inlining-hop Pr adversaries must be
+    # restricted from these (M5 blocker A: an unrestricted abstract module is
+    # assumed to write every in-scope global, so EC rejects the coupling's
+    # ``call (_: Chal.pk{1} = G.pk{2})``). Non-empty only for multi-oracle
+    # proofs, so it gates the abstract-footprint restriction + section reorder.
+    live_state_holders: set[str] = set()
 
     def _live_state_field_name() -> str:
         """The shared live-state field name: the field the outer (theorem)
@@ -1932,7 +1942,12 @@ def export_proof_file(proof_path: str) -> str:
 
     def _live_state_ref(step: frog_ast.Step) -> str:
         """Field-qualified EC reference to a step endpoint's live state, e.g.
-        ``G_RandKey.pk`` or ``K_c.KEM_INDCPA_MultiChal_Random.pk``."""
+        ``G_RandKey.pk`` or ``K_c.KEM_INDCPA_MultiChal_Random.pk``.
+
+        Side effect: the holder module's base name is recorded in
+        ``live_state_holders`` -- the set of state-holding modules the abstract
+        scheme modules (``K``/``F``) and inlining-hop Pr-lemma adversaries must
+        be restricted from (M5 blocker A; see the file-assembly reorder below)."""
         module_expr = resolver.resolve(step).module_expr
         field = _live_state_field_name()
         if step.reduction is not None and not _reduction_holds_field(
@@ -1943,6 +1958,7 @@ def export_proof_file(proof_path: str) -> str:
             holder = pt.module_base_name(pt.last_module_arg(module_expr))
         else:
             holder = pt.module_base_name(module_expr)
+        live_state_holders.add(holder)
         return f"{holder}.{field}"
 
     def _live_state_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
@@ -2161,6 +2177,18 @@ def export_proof_file(proof_path: str) -> str:
             post_init_oracles=list(model.post_init_names),
         )
 
+    # Warm-up: fully populate ``live_state_holders`` before the Pr loop, so the
+    # inlining-hop adversary restriction below uses the COMPLETE state-module set
+    # (the loop processes hops in order, so a per-hop computation would miss
+    # holders introduced by later hops). ``_pr_multi_oracle_for`` populates the
+    # set as a side effect of ``_live_state_coupling``; it returns ``None`` (no
+    # population) for single-oracle hops, leaving the set empty there.
+    for _wi in range(len(proof.steps) - 1):
+        _wa, _wb = proof.steps[_wi], proof.steps[_wi + 1]
+        if isinstance(_wa, frog_ast.Step) and isinstance(_wb, frog_ast.Step):
+            _pr_multi_oracle_for(_wa, _wb)
+    live_state_modules = sorted(live_state_holders)
+
     for i in range(len(proof.steps) - 1):
         step_a = proof.steps[i]
         step_b = proof.steps[i + 1]
@@ -2254,6 +2282,7 @@ def export_proof_file(proof_path: str) -> str:
                     or None,
                     glob_invariant_modules=glob_invariant_modules,
                     multi_oracle=_pr_multi_oracle_for(step_a, step_b),
+                    adv_state_restrictions=live_state_modules or None,
                 )
             )
 
@@ -2534,7 +2563,13 @@ def export_proof_file(proof_path: str) -> str:
             continue
         if inst is primary and not primitive_only:
             continue
-        disjoint = [d.name for d in declare_modules]
+        # Restrict each abstract scheme module from the other declared modules
+        # (state-disjointness for ``swap``) AND from the state-holding modules
+        # named in the multi-oracle live-state couplings (M5 blocker A: without
+        # this EC assumes the abstract module writes the coupling's live field
+        # and rejects the Pr lemma). ``live_state_modules`` is empty for
+        # single-oracle proofs, so their declarations stay byte-identical.
+        disjoint = [d.name for d in declare_modules] + live_state_modules
         declare_modules.append(
             ec_ast.DeclareModule(
                 name=inst.let_name,
@@ -2611,6 +2646,7 @@ def export_proof_file(proof_path: str) -> str:
             assumption_clone_by_hop=assumption_clone_by_hop,
             scheme_footprint=primary_footprint,
             wrapper_extra_args=[p.name for p in declared_instance_params] or None,
+            adv_state_restrictions=live_state_modules or None,
         )
 
     proof_decls: list[ec_ast.EcTopDecl] = []
@@ -2689,7 +2725,33 @@ def export_proof_file(proof_path: str) -> str:
             _section_header("Statelessness specs"),
             *stateless_axioms,
         ]
-    if declare_modules:
+    if declare_modules and live_state_modules:
+        # Multi-oracle live-state coupling (M5 blocker A): the ``declare module
+        # K/F`` restriction clauses name state-holding modules (reductions,
+        # intermediate games, wrappers), so those module DEFINITIONS must be in
+        # scope before the declarations. Split ``proof_decls`` at the first
+        # lemma section -- everything before it is module definitions (functors
+        # over K/F; none reference the section-declared K/F), everything from it
+        # on is lemmas that DO reference the declared modules. The abstract
+        # modules + det/stateless axioms then sit between the two groups.
+        # (Gated on a multi-oracle coupling, where the per-oracle chain is
+        # always discarded to admit, so the chain section here is module-only.)
+        equiv_hdr = _section_header("Per-hop equivalence lemmas")
+        split_at = proof_decls.index(equiv_hdr)
+        module_defs = proof_decls[:split_at]
+        lemma_decls = proof_decls[split_at:]
+        decls.append(
+            ec_ast.Section(
+                name="Main",
+                decls=[
+                    *module_defs,
+                    *declare_modules,
+                    *det_axiom_decls,
+                    *lemma_decls,
+                ],
+            )
+        )
+    elif declare_modules:
         decls.append(
             ec_ast.Section(
                 name="Main",

@@ -9,9 +9,7 @@ from proof_frog.export.easycrypt import proof_translator as pt
 
 
 def _steps_of_otpsecurelr() -> list[frog_ast.ProofStep]:
-    proof = frog_parser.parse_proof_file(
-        "examples/joy/Proofs/Ch2/OTPSecureLR.proof"
-    )
+    proof = frog_parser.parse_proof_file("examples/joy/Proofs/Ch2/OTPSecureLR.proof")
     return proof.steps
 
 
@@ -86,9 +84,7 @@ def test_step_resolver_parameterized_intermediate_game() -> None:
 def test_translate_hops_emits_admit_per_hop() -> None:
     steps = _steps_of_otpsecurelr()
     resolver = _resolver()
-    lemmas = pt.translate_hops(
-        resolver, steps, lambda _i, _a, _b: ["admit.", "qed."]
-    )
+    lemmas = pt.translate_hops(resolver, steps, lambda _i, _a, _b: ["admit.", "qed."])
     assert len(lemmas) == 5
     assert all(lemma.postcondition == "={res}" for lemma in lemmas)
     assert all(lemma.precondition == "true" for lemma in lemmas)
@@ -143,9 +139,7 @@ def test_coupling_invariant_shape() -> None:
 
 def test_module_base_name_strips_outermost_args() -> None:
     assert pt.module_base_name("G_RandKey(K, F)") == "G_RandKey"
-    assert (
-        pt.module_base_name("R_KEM(K, F, KEMPRF(K, F), K_c.X(K))") == "R_KEM"
-    )
+    assert pt.module_base_name("R_KEM(K, F, KEMPRF(K, F), K_c.X(K))") == "R_KEM"
     assert (
         pt.module_base_name("KF_c.KEM_INDCPA_MultiChal_Real(KEMPRF(K, F))")
         == "KF_c.KEM_INDCPA_MultiChal_Real"
@@ -170,9 +164,7 @@ def test_last_module_arg_returns_balanced_final_argument() -> None:
 
 def test_live_state_coupling_joins_field_refs_relationally() -> None:
     assert (
-        pt.live_state_coupling(
-            "K_c.KEM_INDCPA_MultiChal_Random.pk", "G_RandKey.pk"
-        )
+        pt.live_state_coupling("K_c.KEM_INDCPA_MultiChal_Random.pk", "G_RandKey.pk")
         == "K_c.KEM_INDCPA_MultiChal_Random.pk{1} = G_RandKey.pk{2}"
     )
 
@@ -227,6 +219,100 @@ def test_oracle_model_for_parameterized_intermediate_game() -> None:
     )
     got = resolver.oracle_model_for(step)
     assert got is model and got.is_multi_oracle
+
+
+def test_oracle_model_for_intermediate_game_uses_outer_when_set() -> None:
+    """With ``outer_game_file_name`` set, a bare intermediate game keys off the
+    OUTER theorem model (the synthetic game is unregistered), matching what its
+    ``Game_step_<i>`` wrapper lifts and what the multi-oracle Pr lemma uses."""
+    outer = _multi_oracle_model()
+    resolver = pt.StepResolver(
+        module_name_by_concrete_game={},
+        oracle_name_by_game_file={"KEM_INDCPA_MultiChal": "initialize"},
+        primitive_name="KEM",
+        scheme_name="KEMPRF(K, F)",
+        # G_RandKey is NOT registered; only the outer theorem game is.
+        oracle_model_by_game_file={"KEM_INDCPA_MultiChal": outer},
+        outer_game_file_name="KEM_INDCPA_MultiChal",
+    )
+    step = frog_ast.Step(
+        challenger=frog_ast.ParameterizedGame(
+            "G_RandKey", [frog_ast.Variable("K"), frog_ast.Variable("F")]
+        ),
+        reduction=None,
+        adversary=frog_ast.ParameterizedGame(
+            "KEM_INDCPA_MultiChal", [frog_ast.Variable("KF")]
+        ),
+    )
+    assert resolver.oracle_model_for(step) is outer
+
+
+def test_oracle_model_for_composed_step_uses_outer_when_set() -> None:
+    """A composed step (reduction present) whose INNER game is single-oracle
+    still routes multi-oracle off the OUTER theorem model, so its per-oracle
+    equiv lemmas match the Pr lemma that references them."""
+    outer = _multi_oracle_model()
+    single = om.GameOracleModel(
+        all_names=["lookup"], init_name=None, post_init_names=["lookup"]
+    )
+    resolver = pt.StepResolver(
+        module_name_by_concrete_game={
+            ("PRFSecurity_MultiKey", "Random"): "R_MultiPRF(...)"
+        },
+        oracle_name_by_game_file={
+            "KEM_INDCPA_MultiChal": "initialize",
+            "PRFSecurity_MultiKey": "lookup",
+        },
+        primitive_name="PRF",
+        scheme_name="KEMPRF(K, F)",
+        oracle_model_by_game_file={
+            "KEM_INDCPA_MultiChal": outer,
+            "PRFSecurity_MultiKey": single,
+        },
+        outer_game_file_name="KEM_INDCPA_MultiChal",
+    )
+    step = frog_ast.Step(
+        challenger=frog_ast.ConcreteGame(
+            frog_ast.ParameterizedGame(
+                "PRFSecurity_MultiKey", [frog_ast.Variable("F")]
+            ),
+            "Random",
+        ),
+        reduction=frog_ast.ParameterizedGame("R_MultiPRF", [frog_ast.Variable("F")]),
+        adversary=frog_ast.ParameterizedGame(
+            "KEM_INDCPA_MultiChal", [frog_ast.Variable("KF")]
+        ),
+    )
+    got = resolver.oracle_model_for(step)
+    # Routes off the outer multi-oracle model, not the single-oracle inner game.
+    assert got is outer and got.is_multi_oracle
+
+
+def test_oracle_model_for_plain_step_unaffected_by_outer() -> None:
+    """A plain step (ConcreteGame, no reduction) still keys off its OWN game
+    file even when ``outer_game_file_name`` is set."""
+    own = _multi_oracle_model()
+    resolver = pt.StepResolver(
+        module_name_by_concrete_game={("KEM_INDCPA_MultiChal", "Real"): "G_Real"},
+        oracle_name_by_game_file={"KEM_INDCPA_MultiChal": "initialize"},
+        primitive_name="KEM",
+        scheme_name="KEMPRF(K, F)",
+        oracle_model_by_game_file={"KEM_INDCPA_MultiChal": own},
+        outer_game_file_name="KEM_INDCPA_MultiChal",
+    )
+    step = frog_ast.Step(
+        challenger=frog_ast.ConcreteGame(
+            frog_ast.ParameterizedGame(
+                "KEM_INDCPA_MultiChal", [frog_ast.Variable("KF")]
+            ),
+            "Real",
+        ),
+        reduction=None,
+        adversary=frog_ast.ParameterizedGame(
+            "KEM_INDCPA_MultiChal", [frog_ast.Variable("KF")]
+        ),
+    )
+    assert resolver.oracle_model_for(step) is own
 
 
 def test_precondition_for_oracle_name_uses_per_oracle_params() -> None:
@@ -412,6 +498,43 @@ def test_translate_inlining_hop_pr_multi_oracle_body() -> None:
     ]
 
 
+def test_translate_inlining_hop_pr_multi_oracle_adv_state_restrictions() -> None:
+    """``adv_state_restrictions`` extends the multi-oracle Pr adversary footprint
+    with each named state-holding module (M5 blocker A: an unrestricted abstract
+    adversary is assumed to write the coupling's live-state field, so EC rejects
+    the ``call (_: <coupling>)``)."""
+    lemma = pt.translate_inlining_hop_pr_lemma(
+        hop_index=2,
+        adversary_type_name="KEM_INDCPA_Adv",
+        scheme_module_expr="KEMPRF",
+        left_wrapper_name="Game_step_2",
+        right_wrapper_name="Game_step_3",
+        scheme_footprint="-K, -F",
+        multi_oracle=_pr_spec(),
+        adv_state_restrictions=["G_RandKey", "R_MultiPRF"],
+    )
+    assert lemma.module_args[0].module_type == (
+        "KEM_INDCPA_Adv {-K, -F, -G_RandKey, -R_MultiPRF}"
+    )
+
+
+def test_translate_inlining_hop_pr_adv_state_restrictions_ignored_single_oracle() -> (
+    None
+):
+    """``adv_state_restrictions`` only applies on the multi-oracle path; without
+    a ``multi_oracle`` spec the footprint is the legacy single-oracle one."""
+    lemma = pt.translate_inlining_hop_pr_lemma(
+        hop_index=0,
+        adversary_type_name="A_t",
+        scheme_module_expr="OTP",
+        left_wrapper_name="Game_step_0",
+        right_wrapper_name="Game_step_1",
+        scheme_footprint="-OTP",
+        adv_state_restrictions=["G_RandKey"],
+    )
+    assert lemma.module_args[0].module_type == "A_t {-OTP}"
+
+
 def test_translate_inlining_hop_pr_single_oracle_unchanged() -> None:
     """Without a multi-oracle spec the legacy single-oracle body is emitted."""
     multi = pt.translate_inlining_hop_pr_lemma(
@@ -521,6 +644,44 @@ def test_translate_main_theorem_otpsecurelr_shape() -> None:
     assert "<= eps_OneTimeSecrecy + eps_OneTimeSecrecy" in lemma.statement
     body = "\n".join(lemma.body)
     assert "qed." in body
+
+
+def test_translate_main_theorem_adv_state_restrictions() -> None:
+    """``adv_state_restrictions`` appends the state-holding modules to ``A``'s
+    footprint, so ``A`` satisfies the (stronger) restriction each ``hop_<i>_pr``
+    requires of its adversary."""
+    from proof_frog.export.easycrypt import proof_translator as pt
+
+    lemma = pt.translate_main_theorem(
+        adversary_type_name="KEM_INDCPA_MultiChal_Adv",
+        scheme_module_expr="KEMPRF(K, F)",
+        first_wrapper_name="Game_step_0",
+        last_wrapper_name="Game_step_6",
+        hop_kinds=[pt.HopKind.ASSUMPTION],
+        assumption_names_by_hop={0: "KEM_INDCPA_MultiChal"},
+        n_hops=1,
+        scheme_footprint="-K, -F",
+        adv_state_restrictions=["G_RandKey", "R_MultiPRF"],
+    )
+    footprint = lemma.module_args[0].module_type
+    assert "{-K, -F, -G_RandKey, -R_MultiPRF}" in footprint
+
+
+def test_translate_main_theorem_no_state_restrictions_when_none() -> None:
+    """Without ``adv_state_restrictions`` the footprint is unchanged (single-
+    oracle/clean proofs stay byte-identical)."""
+    from proof_frog.export.easycrypt import proof_translator as pt
+
+    lemma = pt.translate_main_theorem(
+        adversary_type_name="OneTimeSecrecyLR_Adv",
+        scheme_module_expr="OTP",
+        first_wrapper_name="Game_step_0",
+        last_wrapper_name="Game_step_5",
+        hop_kinds=[pt.HopKind.INLINING],
+        assumption_names_by_hop={},
+        n_hops=1,
+    )
+    assert lemma.module_args[0].module_type == "OneTimeSecrecyLR_Adv {-OTP}"
 
 
 def test_translate_main_theorem_no_assumption_hops_uses_equality() -> None:

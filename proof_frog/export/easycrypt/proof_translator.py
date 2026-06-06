@@ -174,6 +174,7 @@ class StepResolver:
             dict[str, oracle_model.GameOracleModel] | None
         ) = None,
         oracle_params_by_oracle: dict[str, dict[str, list[str]]] | None = None,
+        outer_game_file_name: str | None = None,
     ) -> None:
         self._module_names = module_name_by_concrete_game
         self._oracle_names = oracle_name_by_game_file
@@ -213,6 +214,15 @@ class StepResolver:
         # falls back to the scalar (first-method) params, so single-oracle
         # output is unchanged.
         self._oracle_params_by_oracle = oracle_params_by_oracle or {}
+        # Theorem (outer) game file name. A composed step (``Game.Side compose
+        # R``) and a bare intermediate game (``ParameterizedGame``) are both
+        # played against the OUTER adversary, so their multi-oracle-ness is
+        # the theorem game's, not the inner challenger's (which may be
+        # single-oracle, e.g. PRFSecurity_MultiKey, or unregistered, e.g. a
+        # synthetic intermediate game). Mirrors ``_wrapper_game_file_for`` in
+        # the exporter, keeping ``oracle_model_for`` consistent with the
+        # multi-oracle Pr-lemma builder.
+        self._outer_game_file_name = outer_game_file_name
 
     def precondition_for(
         self, step: frog_ast.Step, oracle_name: str | None = None
@@ -253,18 +263,36 @@ class StepResolver:
 
         Used by :func:`translate_hops` to decide whether a hop is
         multi-oracle (``Initialize`` lifted into ``main`` plus post-init
-        oracles) and, if so, which per-oracle equiv lemmas to emit. A bare
-        ``ParameterizedGame`` (intermediate game) is keyed by its synthetic
-        game name; a ``ConcreteGame`` by its game file. Returns ``None`` for
-        any other step or a game with no registered model -- both of which
-        take the single-oracle path.
+        oracles) and, if so, which per-oracle equiv lemmas to emit.
+
+        The model must match what the step's ``Game_step_<i>`` wrapper lifts
+        (see ``_wrapper_game_file_for`` in the exporter):
+
+        - A **plain** step (``ConcreteGame`` with no reduction) exposes its
+          own game file's oracle, so it is keyed by that game file.
+        - A **composed** step (``ConcreteGame`` with a reduction) and a bare
+          **intermediate game** (``ParameterizedGame``) are both played
+          against the OUTER (theorem) adversary, so they are keyed by the
+          theorem game file. The inner challenger may be single-oracle (e.g.
+          ``PRFSecurity_MultiKey``) or unregistered (a synthetic intermediate
+          game), so keying off it would wrongly route these hops to the
+          single-oracle path -- inconsistent with the multi-oracle Pr lemma
+          that references their per-oracle ``hop_<i>_<m>`` lemmas.
+
+        Returns ``None`` for any other step or a game with no registered
+        model -- both of which take the single-oracle path.
         """
         concrete = step.challenger
         if isinstance(concrete, frog_ast.ParameterizedGame):
-            # Bare intermediate game: model keyed by the synthetic game name.
+            # Bare intermediate game: played against the outer adversary.
+            if self._outer_game_file_name is not None:
+                return self._oracle_models.get(self._outer_game_file_name)
             return self._oracle_models.get(concrete.name)
         if not isinstance(concrete, frog_ast.ConcreteGame):
             return None
+        if step.reduction is not None and self._outer_game_file_name is not None:
+            # Composed step: the wrapper lifts the theorem game's oracle.
+            return self._oracle_models.get(self._outer_game_file_name)
         return self._oracle_models.get(concrete.game.name)
 
     @property
@@ -437,6 +465,7 @@ def translate_inlining_hop_pr_lemma(  # pylint: disable=too-many-arguments,too-m
     wrapper_extra_args: list[str] | None = None,
     glob_invariant_modules: list[str] | None = None,
     multi_oracle: MultiOraclePrSpec | None = None,
+    adv_state_restrictions: list[str] | None = None,
 ) -> ec_ast.ProbLemma:
     """Emit a ``hop_<i>_pr`` lemma for an inlining hop.
 
@@ -460,6 +489,15 @@ def translate_inlining_hop_pr_lemma(  # pylint: disable=too-many-arguments,too-m
     ``multi_oracle`` takes precedence over ``glob_invariant_modules`` (a
     multi-oracle hop never also takes the single-oracle ``={glob X}``-
     strengthened path).
+
+    **Abstract-scheme footprint (M5 blocker A).** When ``adv_state_restrictions``
+    is supplied (only on the multi-oracle path), each named state-holding module
+    is added to the adversary's footprint (``{-K, -F, -G_RandKey, ...}``). The
+    multi-oracle Pr body's ``call (_: <live-state coupling>)`` is rejected by EC
+    unless the adversary is restricted from the modules whose fields the coupling
+    names -- an unrestricted abstract adversary is assumed to write every in-scope
+    global. Validated by
+    ``tests/integration/ec_templates/multi_oracle_abstract_call_coupling.ec``.
     """
     left_app = _wrap_apply(left_wrapper_name, wrapper_extra_args)
     right_app = _wrap_apply(right_wrapper_name, wrapper_extra_args)
@@ -481,6 +519,10 @@ def translate_inlining_hop_pr_lemma(  # pylint: disable=too-many-arguments,too-m
             if scheme_footprint is not None
             else f"-{scheme_module_expr}"
         )
+        if adv_state_restrictions:
+            footprint = (
+                footprint + ", " + ", ".join(f"-{m}" for m in adv_state_restrictions)
+            )
         return ec_ast.ProbLemma(
             name=f"hop_{hop_index}_pr",
             module_args=[
@@ -669,12 +711,19 @@ def translate_main_theorem(  # pylint: disable=too-many-arguments,too-many-posit
     assumption_clone_by_hop: dict[int, str] | None = None,
     scheme_footprint: str | None = None,
     wrapper_extra_args: list[str] | None = None,
+    adv_state_restrictions: list[str] | None = None,
 ) -> ec_ast.ProbLemma:
     """Emit the chained main theorem for a sequence of hops.
 
     The bound is the sum of ``eps_<name>`` for each assumption hop;
     inlining hops contribute zero. If there are no assumption hops, the
     statement is an equality (``Pr[L] = Pr[R]``) rather than a bound.
+
+    ``adv_state_restrictions`` (multi-oracle path only) adds the state-holding
+    modules named in the per-hop live-state couplings to ``A``'s footprint, so
+    that ``A`` satisfies the (stronger) restriction each ``hop_<i>_pr`` requires
+    of its adversary -- otherwise ``have h<i> := hop_<i>_pr A`` is rejected
+    because ``main_theorem``'s ``A`` could use a coupled state module.
     """
     default_prefix = f"{clone_alias}." if clone_alias else ""
     per_hop_clones = assumption_clone_by_hop or {}
@@ -716,6 +765,10 @@ def translate_main_theorem(  # pylint: disable=too-many-arguments,too-many-posit
     footprint = (
         scheme_footprint if scheme_footprint is not None else f"-{scheme_module_expr}"
     )
+    if adv_state_restrictions:
+        footprint = (
+            footprint + ", " + ", ".join(f"-{m}" for m in adv_state_restrictions)
+        )
     return ec_ast.ProbLemma(
         name="main_theorem",
         module_args=[

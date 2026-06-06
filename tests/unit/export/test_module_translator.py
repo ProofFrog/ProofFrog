@@ -24,9 +24,7 @@ def _render_module_for_test(module: ec_ast.Module) -> list[str]:
 
 @pytest.fixture
 def reduction_r1() -> frog_ast.Reduction:
-    proof = frog_parser.parse_proof_file(
-        "examples/joy/Proofs/Ch2/OTPSecureLR.proof"
-    )
+    proof = frog_parser.parse_proof_file("examples/joy/Proofs/Ch2/OTPSecureLR.proof")
     helpers = [h for h in proof.helpers if isinstance(h, frog_ast.Reduction)]
     return helpers[0]
 
@@ -191,17 +189,13 @@ def test_stateful_reduction_field_writes_are_assignments(
     )
     init = next(p for p in mod.procs if p.name == "initialize")
     # dk0/dk1 are assigned (Assign / `<-`), never re-declared as locals.
-    assert any(
-        isinstance(s, ec_ast.Assign) and s.var == "dk0" for s in init.body
-    )
+    assert any(isinstance(s, ec_ast.Assign) and s.var == "dk0" for s in init.body)
     assert not any(
         isinstance(s, ec_ast.VarDecl) and s.name in {"dk0", "dk1"} for s in init.body
     )
     # A reading proc references the module var as a plain identifier.
     decaps0 = next(p for p in mod.procs if p.name == "decaps0")
-    assert any(
-        isinstance(s, ec_ast.Call) and "dk0" in s.args for s in decaps0.body
-    )
+    assert any(isinstance(s, ec_ast.Call) and "dk0" in s.args for s in decaps0.body)
 
 
 def _kem_multichal_real_game() -> frog_ast.Game:
@@ -454,6 +448,94 @@ def test_multi_oracle_reduction_adversary_threads_init(
     assert "var pk0 : bs_lambda;" in body_str
     assert "pk0 <@ R1(OTP, C).initialize();" in body_str
     assert "b <@ A(R1(OTP, C)).distinguish(pk0);" in body_str
+
+
+def _pure_forward_reduction() -> frog_ast.Reduction:
+    """A reduction whose ``Initialize`` forwards ``challenger.Initialize()``.
+
+    Mirrors KEMPRF's ``R_KEM``: ``Initialize() { return challenger.Initialize(); }``
+    plus a post-init ``Challenge`` that delegates to the challenger.
+    """
+    bs = frog_ast.BitStringType(parameterization=frog_ast.Variable("lambda"))
+    init = frog_ast.Method(
+        frog_ast.MethodSignature("Initialize", bs, []),
+        frog_ast.Block(
+            [
+                frog_ast.ReturnStatement(
+                    frog_ast.FuncCall(
+                        frog_ast.FieldAccess(
+                            frog_ast.Variable("challenger"), "Initialize"
+                        ),
+                        [],
+                    )
+                )
+            ]
+        ),
+    )
+    challenge = frog_ast.Method(
+        frog_ast.MethodSignature("Challenge", bs, []), frog_ast.Block([])
+    )
+    game = frog_ast.ParameterizedGame("KEM_INDCPA_MultiChal", [frog_ast.Variable("K")])
+    return frog_ast.Reduction(
+        (
+            "R_KEM",
+            [frog_ast.Parameter(frog_ast.Variable("KEM"), "K")],
+            [],
+            [init, challenge],
+        ),
+        game,
+        game,
+    )
+
+
+def test_multi_oracle_reduction_adversary_forwards_pk_for_pure_forward_init() -> None:
+    """Blocker B: a pure-forward-Initialize reduction against a multi-oracle inner
+    game forwards the received ``pk`` instead of re-running ``Initialize`` (which
+    would re-call ``C.initialize`` and break the restricted adversary interface).
+    """
+    tx = _multi_oracle_translator()
+    reduction = _pure_forward_reduction()
+    spec = tx.multi_oracle_spec(_multi_oracle_game_file())
+    adv = tx.translate_reduction_adversary(
+        reduction=reduction,
+        outer_adversary_type_name="KEM_Adv",
+        inner_oracle_type_name="KEM_Oracle",
+        scheme_module_expr="K",
+        inner_multi_oracle=spec,
+        outer_multi_oracle=spec,
+    )
+    distinguish = adv.procs[0]
+    assert [p.name for p in distinguish.params] == ["pk"]
+    body_str = "\n".join(_render_stmt_for_test(s) for s in distinguish.body)
+    # The received pk is forwarded directly; no re-init local, no R.initialize call.
+    assert "b <@ A(R_KEM(K, C)).distinguish(pk);" in body_str
+    assert "initialize()" not in body_str
+    assert "pk0" not in body_str
+
+
+def test_multi_oracle_reduction_adversary_reinit_for_single_oracle_inner() -> None:
+    """When the inner game is single-oracle (no Initialize lifted), ``distinguish``
+    takes NO parameter (matching the inner single-oracle adversary type) and the
+    reduction re-runs its own Initialize to produce the outer-init result.
+    ``inner_multi_oracle=None`` is the trigger.
+    """
+    tx = _multi_oracle_translator()
+    reduction = _pure_forward_reduction()
+    spec = tx.multi_oracle_spec(_multi_oracle_game_file())
+    adv = tx.translate_reduction_adversary(
+        reduction=reduction,
+        outer_adversary_type_name="KEM_Adv",
+        inner_oracle_type_name="PRF_Oracle",
+        scheme_module_expr="K",
+        inner_multi_oracle=None,
+        outer_multi_oracle=spec,
+    )
+    distinguish = adv.procs[0]
+    # Single-oracle inner type -> distinguish() takes no parameter.
+    assert distinguish.params == []
+    body_str = "\n".join(_render_stmt_for_test(s) for s in distinguish.body)
+    assert "pk0 <@ R_KEM(K, C).initialize();" in body_str
+    assert "b <@ A(R_KEM(K, C)).distinguish(pk0);" in body_str
 
 
 def test_single_oracle_emitters_unchanged_when_spec_none() -> None:

@@ -30,6 +30,10 @@ PRG_5_8_OTUC_PROOF = (
     REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_8_PseudoOTP_OTUC.proof"
 )
 PRG_5_10_PROOF = REPO_ROOT / "examples" / "joy_old" / "5_Exercises" / "5_10.proof"
+# KEMPRF_INDCPA: the multi-oracle + multi-primitive epic target. EC-compiles
+# (exit 0, EasyCrypt-ACCEPTED) but is not yet admit-free -- the per-oracle equiv
+# bodies and assumption-Pr wrapper bridges remain guided admits (M5).
+KEMPRF_INDCPA_PROOF = REPO_ROOT / "examples" / "Proofs" / "KEM" / "KEMPRF_INDCPA.proof"
 # 2_13: the inner SymEnc primitive's KeyGen/Enc calls are reordered by the
 # Inline-Local-Tuple-Literal step, which needs the scheme-statelessness
 # foundation to close in EC.
@@ -830,6 +834,44 @@ def test_export_kemprf_flat_state_field_names_are_ec_identifiers() -> None:
     assert "var challenger_pk :" in output
 
 
+def test_export_kemprf_abstract_footprint_restriction_and_section_order() -> None:
+    """M5 blocker A: the abstract scheme modules (and inlining-hop Pr-lemma
+    adversaries) must be RESTRICTED from the state-holding modules named in the
+    multi-oracle live-state couplings, and those module DEFINITIONS must precede
+    ``declare module K/F`` so the restriction names are in scope.
+
+    Without the restriction EC rejects the Pr lemma's
+    ``call (_: Chal.pk{1} = G.pk{2})`` ("the module K can write ...pk"); without
+    the reorder the restriction names (``G_RandKey``, ``R_MultiPRF``) are not yet
+    declared at the ``declare module`` line.
+    """
+    output = exporter.export_proof_file(str(KEMPRF_INDCPA_PROOF))
+    lines = output.splitlines()
+
+    def _line_of(predicate: object) -> int:
+        return next(i for i, ln in enumerate(lines) if predicate(ln))  # type: ignore[operator]
+
+    # ``declare module K`` carries the state-module restriction set.
+    decl_k = next(ln for ln in lines if ln.strip().startswith("declare module K <:"))
+    for mod in ("-G_RandKey", "-R_MultiPRF", "-K_c.KEM_INDCPA_MultiChal_Random"):
+        assert mod in decl_k, f"{mod!r} missing from declare module K"
+
+    # The state-holding module definitions precede ``declare module K``.
+    declare_k_idx = _line_of(lambda ln: ln.strip().startswith("declare module K <:"))
+    grandkey_idx = _line_of(lambda ln: ln.strip().startswith("module G_RandKey "))
+    rmultiprf_idx = _line_of(lambda ln: ln.strip().startswith("module R_MultiPRF "))
+    assert grandkey_idx < declare_k_idx
+    assert rmultiprf_idx < declare_k_idx
+
+    # An inlining-hop Pr lemma's adversary carries the same state-module
+    # restriction; the assumption-hop Pr lemma keeps the bare ``{-K, -F}``
+    # footprint (its advantage-axiom application needs the unmodified footprint).
+    hop2_pr = next(ln for ln in lines if ln.strip().startswith("lemma hop_2_pr "))
+    assert "-G_RandKey" in hop2_pr and "-R_MultiPRF" in hop2_pr
+    hop1_pr = next(ln for ln in lines if ln.strip().startswith("lemma hop_1_pr "))
+    assert hop1_pr.strip().endswith("{-K, -F}) &m :")
+
+
 def test_export_otuc_foreign_otp_uses_its_own_carrier_types() -> None:
     """OTUC has primary ``P = PseudoOTP(lambda, 2*lambda, G)`` and foreign
     ground ``E = OTP(3*lambda)``. Both schemes extend ``SymEnc`` and share
@@ -1277,14 +1319,15 @@ def test_export_2_14_typechecks_in_easycrypt(
 
 EC_TEMPLATES = Path(__file__).parent / "ec_templates"
 MULTI_ORACLE_TEMPLATE = EC_TEMPLATES / "multi_oracle_indist.ec"
-MULTI_ORACLE_DEADFIELD_TEMPLATE = (
-    EC_TEMPLATES / "multi_oracle_deadfield_coupling.ec"
-)
+MULTI_ORACLE_DEADFIELD_TEMPLATE = EC_TEMPLATES / "multi_oracle_deadfield_coupling.ec"
 MULTI_ORACLE_ABSTRACT_CALL_TEMPLATE = (
     EC_TEMPLATES / "multi_oracle_abstract_call_coupling.ec"
 )
 DEAD_SAMPLE_DROP_TEMPLATE = EC_TEMPLATES / "dead_sample_drop.ec"
 CALL_PAST_SAMPLE_SWAP_TEMPLATE = EC_TEMPLATES / "call_past_sample_swap.ec"
+MULTI_ORACLE_REDUCTION_ADV_TEMPLATE = (
+    EC_TEMPLATES / "multi_oracle_reduction_adversary.ec"
+)
 
 
 @pytest.mark.skipif(
@@ -1348,6 +1391,79 @@ def test_call_past_sample_swap_template_compiles(tmp_path: Path) -> None:
         f"EasyCrypt rejected the call-past-sample-swap template.\n"
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_multi_oracle_reduction_adversary_template_compiles(tmp_path: Path) -> None:
+    """Regression tripwire for the ASSUMPTION-HOP reduction-adversary lift
+    (multi-oracle foundation §7, blocker B). The shape: an Initialize-lifted
+    multi-oracle game whose adversary is a reduction-lift ``R_Adv(E, A)`` of an
+    outer adversary ``A`` through a reduction ``R`` whose ``Initialize`` is a
+    pure forward of ``challenger.Initialize()``. ``R_Adv.distinguish`` must
+    FORWARD the lifted ``pk`` to ``A`` rather than re-run ``R.initialize`` (which
+    would call ``C.init`` a second time and violate the restricted ``{O.challenge}``
+    adversary interface). If this stops compiling, the exporter's
+    ``translate_reduction_adversary`` forward-pk path must be re-derived. Verified
+    end-to-end: compiling KEMPRF_INDCPA.ec confirmed this advances EC past the
+    line-1403 interface rejection."""
+    ec_file = tmp_path / "multi_oracle_reduction_adversary.ec"
+    ec_file.write_text(MULTI_ORACLE_REDUCTION_ADV_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the multi-oracle reduction-adversary template.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_export_kemprf_indcpa_compiles_in_easycrypt(tmp_path: Path) -> None:
+    """KEMPRF_INDCPA (the multi-oracle + multi-primitive epic target) EC-compiles
+    end-to-end -- EasyCrypt ACCEPTS the file (exit 0). This is the
+    Blocked->accepted milestone: it exercises the lifted-Initialize multi-oracle
+    wrappers, the reduction-adversary forward-pk lift (blocker B), the
+    intermediate-game module, requires-equality type aliases, multi-primitive
+    type qualification, the live-state couplings, and the abstract-scheme
+    footprint restrictions all composing in EC.
+
+    NOTE: the file is NOT yet admit-free -- the per-oracle equiv bodies and the
+    assumption-hop Pr-lemma wrapper bridges are still guided admits (M5). So this
+    test asserts EC ACCEPTANCE (no parse/type/tactic error), not zero admits. If
+    it regresses to a nonzero exit, a structural multi-oracle/multi-primitive gap
+    has reopened.
+    """
+    output = exporter.export_proof_file(str(KEMPRF_INDCPA_PROOF))
+    ec_file = tmp_path / "kemprf_indcpa.ec"
+    ec_file.write_text(output)
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    combined = result.stderr + result.stdout
+    assert "parse error" not in combined, (
+        f"EC parse error in KEMPRF_INDCPA output:\nstderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+    assert result.returncode == 0, (
+        f"EC rejected KEMPRF_INDCPA (exit {result.returncode}); a multi-oracle / "
+        f"multi-primitive structural gap has reopened.\n"
+        f"stderr:\n{result.stderr}\nstdout:\n{result.stdout[-2000:]}"
     )
 
 

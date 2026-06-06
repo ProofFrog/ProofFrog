@@ -43,6 +43,25 @@ proof body, e.g. for a cross-primitive deterministic-reorder hop). Its
 ``game_before``/``game_after`` are the canonical text of the hop's two
 adjacent games rather than a single transform's before/after."""
 
+ORACLE_TRANSFORM = "<oracle>"
+"""Reserved ``transform`` prefix for a *per-oracle* cache entry of a
+multi-oracle hop (a whole-oracle proof body the per-oracle chain cannot
+decompose, e.g. KEMPRF's transformed ``challenge`` body). The full
+``transform`` value is ``f"{ORACLE_TRANSFORM}:{oracle_name}"`` (see
+:func:`oracle_transform`) so the init and each post-init oracle of one hop
+get distinct keys. As with :data:`HOP_TRANSFORM`, ``game_before``/
+``game_after`` are the canonical text of the hop's two adjacent games
+rather than a single transform's before/after. Mirrors the ``<hop>``
+mechanism exactly: an ordinary ``[[entry]]`` with a reserved ``transform``,
+no schema change."""
+
+
+def oracle_transform(oracle_name: str) -> str:
+    """Per-oracle cache ``transform`` sentinel for ``oracle_name``.
+
+    See :data:`ORACLE_TRANSFORM`."""
+    return f"{ORACLE_TRANSFORM}:{oracle_name}"
+
 
 _LOGGER = logging.getLogger(__name__)
 

@@ -6,8 +6,10 @@ import pathlib
 
 from proof_frog.export.easycrypt.tactic_cache import (
     CacheEntry,
+    ORACLE_TRANSFORM,
     SCHEMA_VERSION,
     TacticCache,
+    oracle_transform,
     relative_sidecar_path,
 )
 
@@ -92,6 +94,31 @@ def test_relative_sidecar_path() -> None:
     assert relative_sidecar_path(p) == pathlib.Path(
         "examples/foo/Bar.proof.tactics.toml"
     )
+
+
+def test_oracle_transform_sentinel() -> None:
+    """The per-oracle sentinel is the reserved prefix plus the oracle name,
+    so init and each post-init oracle of one hop get distinct keys."""
+    assert oracle_transform("challenge") == f"{ORACLE_TRANSFORM}:challenge"
+    assert oracle_transform("initialize") != oracle_transform("challenge")
+
+
+def test_oracle_entry_round_trips_byte_stably(tmp_path: pathlib.Path) -> None:
+    """An ``<oracle>:challenge`` entry is an ordinary [[entry]] with a
+    reserved transform -- it round-trips and looks up like any other (no
+    schema change)."""
+    entry = _sample_entry(transform=oracle_transform("challenge"), description="hop 0")
+    cache = TacticCache(entries=[entry])
+    path = tmp_path / "oracle.tactics.toml"
+    cache.save(path)
+    reloaded = TacticCache.load(path)
+    assert reloaded.entries == [entry]
+    hit = reloaded.lookup(entry.transform, entry.game_before, entry.game_after)
+    assert hit == entry
+    # Byte-stable second write.
+    path2 = tmp_path / "oracle2.tactics.toml"
+    reloaded.save(path2)
+    assert path.read_bytes() == path2.read_bytes()
 
 
 def test_serialize_omits_optional_fields_when_none(tmp_path: pathlib.Path) -> None:

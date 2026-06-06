@@ -597,6 +597,7 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     reduction_adv_extra_args: list[str] | None = None,
     wrapper_extra_args: list[str] | None = None,
     multi_oracle: MultiOraclePrSpec | None = None,
+    adv_state_restrictions: list[str] | None = None,
 ) -> ec_ast.ProbLemma:
     """Emit a ``hop_<i>_pr`` lemma for an assumption hop.
 
@@ -610,18 +611,30 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     the reduction-adversary wrapper takes before ``A`` (e.g. declared
     module instances ``E1, E2``).
 
-    **Multi-oracle hops (P4).** When ``multi_oracle`` is supplied the two
+    **Multi-oracle hops (P4/M5).** When ``multi_oracle`` is supplied the two
     wrapper-rewrite bridges (``hL``/``hR``) relate a lifted-``Initialize``
-    multi-oracle game wrapper to its assumption-game wrapper across
-    *differently-named* module state (the reduction adversary re-runs
-    ``Initialize`` through ``R``, so the single-oracle ``proc; inline *; sim``
-    closer cannot be trusted to close). Synthesizing that field
-    correspondence is the P5 coupling-synthesis piece, so each bridge is
-    emitted as an explicit guided ``admit`` rather than a canned tactic that
-    would silently fail to close (yielding a 0-admit file EasyCrypt still
-    rejects). The rewrite + advantage-axiom application is unchanged, so the
-    lemma is structurally complete and lands ``admit-guided`` (rung 5) rather
-    than ``Blocked``.
+    multi-oracle game wrapper (``Game_step_i``) to its assumption-game wrapper
+    instantiated on the reduction-adversary lift. Despite the conservative
+    "differently-named state" framing of earlier phases, the bridge is in fact
+    *name-independent*: after ``inline *`` both sides reduce to the literally
+    same state module (the reduction ``R`` forwards into / is the only stateful
+    holder, shared by both wrappers), so ``byequiv (_: <pre> ==> ={res}) => //;
+    proc; inline *; sim`` closes it with no inline-generated names in the
+    tactic. The one requirement is that ``A`` be separated from those state
+    modules (see ``adv_state_restrictions`` below); EC otherwise assumes the
+    abstract adversary may write the challenger's globals and rejects the
+    ``sim`` frame. Validated end-to-end on ``KEMPRF_INDCPA`` (both the
+    ``KEM_INDCPA_MultiChal`` and ``PRFSecurity_MultiKey`` hops close to ``qed``,
+    EC exit 0). This is the M5 "clean" close -- the lemma is admit-free.
+
+    **Abstract-scheme footprint (M5).** When ``adv_state_restrictions`` is
+    supplied (only on the multi-oracle path), each named state-holding module is
+    added to the adversary's footprint, mirroring
+    :func:`translate_inlining_hop_pr_lemma`. The bridge's ``sim`` is rejected by
+    EC unless the adversary is restricted from the challenger/reduction state
+    modules. ``main_theorem`` already restricts ``A`` from the full set, so the
+    widened footprint here is a subset and the ``have h<i> := hop_<i>_pr A``
+    application still typechecks.
     """
     prefix = f"{clone_alias}." if clone_alias else ""
     eps_ref = f"{prefix}eps_{assumption_name}"
@@ -648,21 +661,19 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
         f" <= {eps_ref}"
     )
     if multi_oracle is not None:
-        bridge_note = (
-            "  (* coupling-pending: multi-oracle wrapper <-> assumption-wrapper "
-            "bridge across differently-named state (P5). *)"
+        bridge_close = (
+            f"  by byequiv (_: {multi_oracle.byequiv_pre} ==> ={{res}}) => //; "
+            "proc; inline *; sim."
         )
         body = [
             f"have hL : Pr[{left_app}.main() @ &m : res]",
             f"        = Pr[{left_wrapper_ref}({scheme_module_expr}, "
-            f"{adv_applied}).main() @ &m : res].",
-            bridge_note,
-            "  admit.",
+            f"{adv_applied}).main() @ &m : res]",
+            bridge_close,
             f"have hR : Pr[{right_app}.main() @ &m : res]",
             f"        = Pr[{right_wrapper_ref}({scheme_module_expr}, "
-            f"{adv_applied}).main() @ &m : res].",
-            bridge_note,
-            "  admit.",
+            f"{adv_applied}).main() @ &m : res]",
+            bridge_close,
             "rewrite hL hR.",
         ]
     else:
@@ -693,6 +704,10 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     footprint = (
         scheme_footprint if scheme_footprint is not None else f"-{scheme_module_expr}"
     )
+    if multi_oracle is not None and adv_state_restrictions:
+        footprint = (
+            footprint + ", " + ", ".join(f"-{m}" for m in adv_state_restrictions)
+        )
     return ec_ast.ProbLemma(
         name=f"hop_{hop_index}_pr",
         module_args=[

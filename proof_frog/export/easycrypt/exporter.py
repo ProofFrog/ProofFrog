@@ -1552,6 +1552,7 @@ def export_proof_file(proof_path: str) -> str:
     from .tactic_cache import (
         HOP_TRANSFORM,
         TacticCache,
+        oracle_transform,
         relative_sidecar_path,
     )
 
@@ -1994,6 +1995,10 @@ def export_proof_file(proof_path: str) -> str:
     # (``translate_hops`` only routes multi-oracle models here), so their
     # output is unchanged.
     multi_oracle_hop_cache: dict[int, dict[str, list[str]]] = {}
+    # Per-hop memo of the canonical-text key pair (the two adjacent inlined
+    # games), used for the per-oracle (``<oracle>``) cache lookup below.
+    # Mirrors the ``<hop>`` site's ``(left_key, right_key)``.
+    multi_oracle_game_keys: dict[int, tuple[str, str]] = {}
 
     def _oracle_body_for_hop(
         _i: int,
@@ -2049,7 +2054,32 @@ def export_proof_file(proof_path: str) -> str:
             )
             chain_extra_decls.extend(info.extra_decls)
             multi_oracle_hop_cache[_i] = info.tactic_body_by_oracle
-        return multi_oracle_hop_cache[_i].get(oracle_name)
+            multi_oracle_game_keys[_i] = (
+                canonical_form.canonical_text(
+                    left_ast, external_module_types, method_return_types
+                ),
+                canonical_form.canonical_text(
+                    right_ast, external_module_types, method_return_types
+                ),
+            )
+        body = multi_oracle_hop_cache[_i].get(oracle_name)
+        if _is_init:
+            # The init oracle already closes synth-static (``proc; inline*;
+            # sim``); never cache it.
+            return body
+        # Post-init oracle: its body is non-trivially transformed across the
+        # chain, so the rung-5 guided template (``body``) is the miss path.
+        # Consult the sidecar for a per-oracle (``<oracle>``) cached tactic
+        # keyed on the canonical text of the hop's two adjacent games -- on a
+        # hit emit it as ``cached-guided`` (rung 3); on a miss fall back to the
+        # guided template. Mirrors the ``<hop>`` site exactly.
+        left_key, right_key = multi_oracle_game_keys[_i]
+        key = (oracle_transform(oracle_name), left_key, right_key)
+        requested_cache_keys.append(key)
+        cached = tactic_cache.lookup(*key)
+        if cached is not None:
+            return [_res_tag(CACHED_GUIDED), *cached.tactic.splitlines(), "qed."]
+        return body
 
     lemmas = pt.translate_hops(
         resolver,
@@ -2278,6 +2308,7 @@ def export_proof_file(proof_path: str) -> str:
                     wrapper_extra_args=[p.name for p in declared_instance_params]
                     or None,
                     multi_oracle=_pr_multi_oracle_for(step_a, step_b),
+                    adv_state_restrictions=live_state_modules or None,
                 )
             )
         else:

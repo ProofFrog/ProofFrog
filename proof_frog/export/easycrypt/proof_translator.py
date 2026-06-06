@@ -49,11 +49,19 @@ class MultiOraclePrSpec:
       ``call hop_<i>_<init>`` target).
     - ``post_init_oracles`` -- EC names of the adversary-facing oracles, in
       module-type declaration order (one ``conseq`` bullet each).
+    - ``byequiv_pre`` -- the ``byequiv`` precondition. Defaults to ``={glob A}``;
+      when the post-init oracles call abstract scheme modules (e.g. KEMPRF's
+      ``challenge`` calls ``K.encaps`` / ``F.evaluate``) it is strengthened to
+      ``={glob A, glob K, glob F}`` so the per-oracle equiv lemmas' coupling
+      (which carries ``={glob K} /\\ ={glob F}``) is established at ``main``
+      entry. ``sim`` cannot relate two abstract calls without ``={glob}`` on the
+      called module.
     """
 
     coupling: str
     init_oracle: str
     post_init_oracles: list[str]
+    byequiv_pre: str = "={glob A}"
 
 
 def coupling_invariant(left_module_expr: str, right_module_expr: str) -> str:
@@ -506,7 +514,7 @@ def translate_inlining_hop_pr_lemma(  # pylint: disable=too-many-arguments,too-m
     )
     if multi_oracle is not None:
         body = [
-            "byequiv (_: ={glob A} ==> ={res}) => //.",
+            f"byequiv (_: {multi_oracle.byequiv_pre} ==> ={{res}}) => //.",
             "proc.",
             f"call (_: {multi_oracle.coupling}).",
             *[f"+ conseq hop_{hop_index}_{m}." for m in multi_oracle.post_init_oracles],
@@ -793,6 +801,7 @@ def translate_hops(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
         | None
     ) = None,
     coupling_for_hop: Callable[[frog_ast.Step, frog_ast.Step], str] | None = None,
+    glob_invariant: str = "",
 ) -> list[ec_ast.Lemma]:
     """Produce the equiv lemma(s) per adjacent-step pair.
 
@@ -831,6 +840,13 @@ def translate_hops(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     the lemmas typecheck even when the two endpoints carry structurally
     different module state (M5; validated EC template
     ``tests/integration/ec_templates/multi_oracle_deadfield_coupling.ec``).
+
+    ``glob_invariant`` (if supplied) is the abstract-scheme glob equality
+    (e.g. ``={glob K} /\\ ={glob F}``) used as the init oracle's precondition
+    in place of ``true``. ``sim`` needs ``={glob}`` on each called abstract
+    module to relate its calls; ``Initialize`` calls ``K.keygen`` so its
+    precondition must carry it. The post-init oracles' preconditions get it via
+    ``coupling_for_hop`` (which folds the same glob equality into the coupling).
     """
     # NOTE: keep the original dict identity — the caller may mutate it
     # during ``body_for_hop`` calls (per-transform mode populates the
@@ -855,7 +871,14 @@ def translate_hops(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
         ):
             lemmas.extend(
                 _multi_oracle_hop_lemmas(
-                    resolver, i, a, b, model, oracle_body_for_hop, coupling_for_hop
+                    resolver,
+                    i,
+                    a,
+                    b,
+                    model,
+                    oracle_body_for_hop,
+                    coupling_for_hop,
+                    glob_invariant,
                 )
             )
             continue
@@ -889,6 +912,7 @@ def _multi_oracle_hop_lemmas(  # pylint: disable=too-many-arguments,too-many-pos
         [int, frog_ast.Step, frog_ast.Step, str, bool], list[str] | None
     ],
     coupling_for_hop: Callable[[frog_ast.Step, frog_ast.Step], str] | None = None,
+    glob_invariant: str = "",
 ) -> list[ec_ast.Lemma]:
     """Emit the per-oracle equiv lemmas for one multi-oracle hop (P3).
 
@@ -914,7 +938,7 @@ def _multi_oracle_hop_lemmas(  # pylint: disable=too-many-arguments,too-many-pos
         if body is None:
             continue
         if is_init:
-            pre = "true"
+            pre = glob_invariant if glob_invariant else "true"
         else:
             eq_args = resolver.precondition_for(step_a, oracle_name)
             pre = coupling if eq_args == "true" else f"{eq_args} /\\ {coupling}"

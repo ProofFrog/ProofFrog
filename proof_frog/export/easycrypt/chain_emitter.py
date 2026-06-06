@@ -1049,6 +1049,26 @@ def _emit_one_oracle_chain(
     resolved (not identity, not a pure reorder), the chain is discarded and the
     outer body is a coupling-pending admit (no oracle-suffixed artifacts).
     """
+    # Inline-equivalent endpoints (the P5 identical-state finding at oracle
+    # granularity): when the two endpoints' CANONICAL bodies for this oracle
+    # are identical, the raw wrapper modules are inline-equivalent, so
+    # ``proc; inline *; sim`` closes the lemma directly on the wrappers --
+    # sidestepping the per-transform chain (which the keygen-inlining steps of
+    # ``Initialize`` defeat: an inlining step is neither identity nor a pure
+    # reorder, so ``_oracle_step_tactic`` returns ``None`` and the chain admits).
+    # Scoped to the init oracle, where the body is a simple keygen delegation
+    # that ``sim`` aligns reliably under the ``={glob K} /\\ ={glob F}`` coupling;
+    # post-init oracles (tuple-plumbing / genuine body transforms) keep the
+    # per-transform chain / coupling-pending admit.
+    if is_init:
+        proj_l = _project_to_method(left_states[-1], oracle_name)
+        proj_r = _project_to_method(right_states[-1], oracle_name)
+        if (
+            proj_l is not None
+            and proj_r is not None
+            and proj_l.methods[0] == proj_r.methods[0]
+        ):
+            return [], [_res_tag(SYNTH_STATIC), "proc; inline *; sim.", "qed."]
 
     def micro_pre(left_ref: str, right_ref: str) -> str:
         cpl = _glob_coupling(left_ref, right_ref)

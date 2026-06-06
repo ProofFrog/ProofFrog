@@ -9,6 +9,9 @@ proofOutput.txt
 extras
 proof_frog/claude_docs
 
+# EasyCrypt compilation artifacts (created next to .ec files on compile)
+*.eco
+
 # VSCode extension
 vscode-extension/node_modules/
 vscode-extension/out/

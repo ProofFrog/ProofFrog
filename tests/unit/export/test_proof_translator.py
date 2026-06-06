@@ -605,10 +605,17 @@ def test_translate_inlining_hop_pr_single_oracle_unchanged() -> None:
     assert "call (_: true); first by conseq hop_0." in "\n".join(multi.body)
 
 
-def test_translate_assumption_hop_pr_multi_oracle_admits_bridge() -> None:
-    """The multi-oracle assumption Pr lemma routes its wrapper bridges to a
-    guided admit (the differently-named-state coupling is the P5 synthesis
-    piece) but keeps the rewrite + advantage-axiom structure intact."""
+def test_translate_assumption_hop_pr_multi_oracle_bridge_synthesized() -> None:
+    """The multi-oracle assumption Pr lemma closes its two wrapper bridges
+    (hL/hR) with the synthesized name-independent ``byequiv ...; proc; inline *;
+    sim`` tactic (option B) -- no admits -- and widens the adversary footprint
+    with the state-module restrictions so EC accepts the ``sim`` frame."""
+    spec = pt.MultiOraclePrSpec(
+        coupling="(glob GL){1} = (glob GR){2}",
+        init_oracle="initialize",
+        post_init_oracles=["eval", "chk"],
+        byequiv_pre="={glob A, glob K, glob F}",
+    )
     lemma = pt.translate_assumption_hop_pr_lemma(
         hop_index=1,
         adversary_type_name="KEM_INDCPA_Adv",
@@ -620,16 +627,47 @@ def test_translate_assumption_hop_pr_multi_oracle_admits_bridge() -> None:
         left_assumption_wrapper="Game_PRF_Real",
         right_assumption_wrapper="Game_PRF_Random",
         reverse_direction=False,
-        multi_oracle=_pr_spec(),
+        scheme_footprint="-K, -F",
+        multi_oracle=spec,
+        adv_state_restrictions=["G_RandKey", "R_MultiPRF"],
     )
     body = "\n".join(lemma.body)
-    # The two rewrite bridges are admitted (not silently closed by sim).
-    assert sum(1 for line in lemma.body if line.strip() == "admit.") == 2
-    assert "sim." not in body
+    # No admits: both bridges close via the synthesized tactic.
+    assert "admit." not in lemma.body
+    bridge = (
+        "  by byequiv (_: ={glob A, glob K, glob F} ==> ={res}) => //; "
+        "proc; inline *; sim."
+    )
+    assert lemma.body.count(bridge) == 2
     # The rewrite + axiom application still close the lemma.
     assert "rewrite hL hR." in body
     assert "PRF_advantage KEMPRF (R1_Adv(A))" in body
     assert lemma.body[-1] == "qed."
+    # The adversary footprint is widened with the state-module restrictions.
+    assert lemma.module_args[0].module_type == (
+        "KEM_INDCPA_Adv {-K, -F, -G_RandKey, -R_MultiPRF}"
+    )
+
+
+def test_translate_assumption_hop_pr_multi_oracle_no_restrictions() -> None:
+    """Without ``adv_state_restrictions`` the multi-oracle assumption footprint
+    is just the scheme footprint (the widening is gated on the restriction
+    list)."""
+    lemma = pt.translate_assumption_hop_pr_lemma(
+        hop_index=1,
+        adversary_type_name="KEM_INDCPA_Adv",
+        scheme_module_expr="KEMPRF",
+        left_wrapper_name="Game_step_1",
+        right_wrapper_name="Game_step_2",
+        assumption_name="PRF",
+        reduction_adv_name="R1_Adv",
+        left_assumption_wrapper="Game_PRF_Real",
+        right_assumption_wrapper="Game_PRF_Random",
+        reverse_direction=False,
+        scheme_footprint="-K, -F",
+        multi_oracle=_pr_spec(),
+    )
+    assert lemma.module_args[0].module_type == "KEM_INDCPA_Adv {-K, -F}"
 
 
 def test_translate_assumption_hop_pr_single_oracle_unchanged() -> None:

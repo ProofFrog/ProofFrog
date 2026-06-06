@@ -28,6 +28,7 @@ from . import module_translator as mt
 from . import type_collector as tc
 from .canonical_form import _normalize_for_ec, canonical_text
 from .resolution import (
+    ADMIT_GUIDED,
     ADMIT_UNGUIDED,
     CACHED_UNGUIDED,
     SYNTH_PARAM,
@@ -904,15 +905,56 @@ def _oracle_step_tactic(
 
 
 def _oracle_pending_admit(hop_index: int, oracle_name: str) -> list[str]:
-    """Coupling-pending admit body for one oracle of a multi-oracle hop."""
+    """Guided coupling-pending admit body for one oracle of a multi-oracle hop.
+
+    The post-init oracle's body is non-trivially transformed across the hop's
+    canonicalization chain (``_oracle_step_tactic`` returns ``None``), so the
+    identical-state first cut (``proc; sim`` / pure reorder) cannot discharge
+    it under the live-state coupling. Synthesizing a closing tactic is blocked
+    on EC's ``inline *``-generated variable names (the determinism finisher's
+    ``exists*`` captures and the ``seq`` invariant relating the two abstract
+    ``encaps`` results both need those names, which the exporter cannot predict
+    -- confirmed 2026-06-06: unification holes fail with "cannot infer all
+    placeholders", and ``sim`` cannot align the ``F.evaluate`` inputs because
+    they are tuple-projections of the differently-named ``encaps`` results).
+
+    Rather than a bare admit, emit the VALIDATED fill template (rung
+    ``admit-guided``): the determinism-axiom finisher derived end-to-end on
+    KEMPRF hop_0_challenge (EC EXIT 0). The ``<...>`` placeholders are this
+    hop's EC inline names -- read them off ``ec_print_goals`` and fill, or
+    cache the filled tactic in the proof's ``.tactics.toml`` sidecar (the
+    established mechanism for these name-dependent det finishers; cf. 5_8).
+    """
     return [
-        _res_tag(ADMIT_UNGUIDED),
-        f"(* multi-oracle hop {hop_index}, oracle {oracle_name!r}: a chain step",
-        "   transforms this oracle's body in a way the identical-state first",
-        "   cut does not yet discharge under the state-coupling invariant",
-        "   (proc; sim / reorder only). Synthesizing the coupling for a",
-        "   transformed post-init oracle body is the coupling-synthesis piece",
-        "   (P5 of the multi-oracle foundation plan). Falling back to admit. *)",
+        _res_tag(ADMIT_GUIDED),
+        f"(* multi-oracle hop {hop_index}, oracle {oracle_name!r}: post-init",
+        "   body transformed along the chain; not closed by proc; sim / reorder.",
+        "   VALIDATED fill template (det-axiom finisher; KEMPRF hop_0_challenge",
+        "   compiles EC EXIT 0). Fill <...> with this hop's EC inline names:",
+        "     proc. inline *. sp. wp.",
+        "     seq 1 1 : (={glob K, glob F} /\\ <encapsResL>{1} = <encapsResR>{2}",
+        "                /\\ <live-state coupling>).",
+        "     + sim.                          (* relate the abstract encaps calls *)",
+        "     sp. wp.",
+        "     exists* (glob F){1}, <FseedL>{1}, <FinputL>{1}; elim* => gf1 a0 a1.",
+        "     call{1} (F_evaluate_det gf1 a0 a1).",
+        "     exists* (glob F){2}, <FseedR>{2}, <FinputR>{2}; elim* => gf2 b0 b1.",
+        "     call{2} (F_evaluate_det gf2 b0 b1).",
+        "     skip => /#.",
+        "   A reusable name-independent helper for the F.evaluate step (derive",
+        "   once per primitive from F_evaluate_det; lets 'wp. call F_evaluate_equiv'",
+        "   replace the two exists*/call blocks):",
+        "     lemma F_evaluate_equiv : equiv[ F.evaluate ~ F.evaluate :",
+        "       ={glob F, seed, input} ==> ={res, glob F} ].",
+        "     proof. proc*; exists* (glob F){1}, seed{1}, input{1}; elim* => g s i;",
+        "       call{1} (F_evaluate_det g s i); call{2} (F_evaluate_det g s i);",
+        "       skip => /#. qed.",
+        "   Per-shape variants (the body transform differs by hop):",
+        "   - distribution swap (e.g. dsharedsecret <-> dbs_lambda under the",
+        "     requires-equality alias): couple the two uniform samples with rnd,",
+        "     discharging the distribution equality from is_funiform + is_full;",
+        "   - sample/encaps order swap: swap{i} to align, then the det finisher;",
+        "   - dead F.evaluate: call{i} (F_evaluate_det ...) to drop it, then sim. *)",
         "admit.",
         "qed.",
     ]

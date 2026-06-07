@@ -193,6 +193,81 @@ class TestSimpleEarlyReturn:
             )
 
 
+class TestReturnIntoAssignmentHoist:
+    """Inlining a returning call into a *typed declaration* must hoist the
+    declaration out of the produced branches and emit plain (untyped)
+    assignments at the leaves.
+
+    Otherwise each branch gets its own ``Type v = X`` declaration; when ``v``
+    is used after the if (FrogLang hoists declarations to method scope), the
+    block-scoped copy/dead-code transforms delete the branch assignments and
+    dangle the later ``return v``. See the AKEM SUF-CMA Ideal-game Decaps.
+    """
+
+    def _inline_check_into_assignment(self) -> frog_ast.Block:
+        # Bool result = obj.Check(flag);
+        # if (result) { return false; }   <- guard AFTER the assignment, so
+        # return result;                     the call lands in an assignment
+        caller = frog_ast.Method(
+            frog_ast.MethodSignature("Outer", frog_ast.BoolType(), []),
+            frog_ast.Block(
+                [
+                    frog_ast.Assignment(
+                        frog_ast.BoolType(),
+                        frog_ast.Variable("result"),
+                        frog_ast.FuncCall(
+                            frog_ast.FieldAccess(frog_ast.Variable("obj"), "Check"),
+                            [frog_ast.Variable("flag")],
+                        ),
+                    ),
+                    frog_ast.IfStatement(
+                        [frog_ast.Variable("result")],
+                        [
+                            frog_ast.Block(
+                                [frog_ast.ReturnStatement(frog_ast.Boolean(False))]
+                            )
+                        ],
+                    ),
+                    frog_ast.ReturnStatement(frog_ast.Variable("result")),
+                ]
+            ),
+        )
+        lookup = {("obj", "Check"): _make_simple_early_return_method()}
+        return visitors.InlineTransformer(lookup).transform(
+            copy.deepcopy(caller)
+        ).block
+
+    def test_declaration_is_hoisted(self) -> None:
+        block = self._inline_check_into_assignment()
+        # A bare VariableDeclaration for 'result' must precede the if-statement.
+        decls = [
+            s
+            for s in block.statements
+            if isinstance(s, frog_ast.VariableDeclaration) and s.name == "result"
+        ]
+        assert len(decls) == 1, (
+            f"Expected one hoisted declaration of 'result', got: "
+            f"{[str(s) for s in block.statements]}"
+        )
+
+    def test_branch_assignments_are_untyped(self) -> None:
+        block = self._inline_check_into_assignment()
+        if_stmt = next(
+            s for s in block.statements if isinstance(s, frog_ast.IfStatement)
+        )
+        for branch in if_stmt.blocks:
+            for stmt in branch.statements:
+                if (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name == "result"
+                ):
+                    assert stmt.the_type is None, (
+                        "Branch assignment to the hoisted variable must be "
+                        f"untyped, got: {stmt}"
+                    )
+
+
 class TestNestedEarlyReturn:
     """Nested if with early return: if (a) { if (b) { return X; } } return Y;"""
 

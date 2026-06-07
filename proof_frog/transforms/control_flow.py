@@ -18,6 +18,7 @@ import z3
 from .. import frog_ast
 from ..visitors import (
     Transformer,
+    Visitor,
     BlockTransformer,
     SearchVisitor,
     SubstitutionTransformer,
@@ -425,6 +426,132 @@ class SimplifyIfTransformer(Transformer):
         return frog_ast.IfStatement(new_conditions, new_blocks)
 
 
+class GuardConditionSimplificationTransformer(Transformer):
+    """Replaces an if-condition by its known truth value inside its branches.
+
+    Within ``if (C) { then } else { els }``, ``C`` holds throughout ``then``
+    and is false throughout ``els`` (when ``C`` is deterministic and none of
+    its variables are reassigned in the branch). So occurrences of ``C`` are
+    replaced by ``true`` in ``then`` and by ``false`` in ``els``, after which
+    boolean-identity / branch-elimination passes finish the simplification.
+
+    Example::
+
+        if (c in S) { v = c in S; } else { v = c in S && w; }
+      becomes:
+        if (c in S) { v = true; } else { v = false && w; }   (-> v = false)
+
+    This collapses redundant re-tests of a membership/boolean guard -- e.g.
+    when a reduction gates an oracle call on a set membership that the
+    oracle itself also checks.
+    """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+
+    def _is_deterministic(self, expr: frog_ast.Expression) -> bool:
+        namespace = self.ctx.proof_namespace if self.ctx else {}
+        let_types = self.ctx.proof_let_types if self.ctx else None
+        return not has_nondeterministic_call(expr, namespace, let_types)
+
+    @staticmethod
+    def _reassigns_any(names: set[str], block: frog_ast.Block) -> bool:
+        def writes(node: frog_ast.ASTNode) -> bool:
+            return (
+                isinstance(
+                    node,
+                    (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+                )
+                and isinstance(node.var, frog_ast.Variable)
+                and node.var.name in names
+            )
+
+        return SearchVisitor(writes).visit(block) is not None
+
+    def _substitute(
+        self, block: frog_ast.Block, cond: frog_ast.Expression, value: bool
+    ) -> frog_ast.Block:
+        replace_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+        replace_map.set(copy.deepcopy(cond), frog_ast.Boolean(value))
+        return SubstitutionTransformer(replace_map).transform(block)
+
+    def transform_if_statement(
+        self, if_statement: frog_ast.IfStatement
+    ) -> frog_ast.IfStatement:
+        new_blocks = list(if_statement.blocks)
+        if len(if_statement.conditions) == 1:
+            cond = if_statement.conditions[0]
+            if self._is_deterministic(cond) and not isinstance(cond, frog_ast.Boolean):
+                cond_vars = {v.name for v in VariableCollectionVisitor().visit(cond)}
+                if not self._reassigns_any(cond_vars, new_blocks[0]):
+                    new_blocks[0] = self._substitute(new_blocks[0], cond, True)
+                if if_statement.has_else_block() and not self._reassigns_any(
+                    cond_vars, new_blocks[1]
+                ):
+                    new_blocks[1] = self._substitute(new_blocks[1], cond, False)
+        # Recurse into the (possibly substituted) children.
+        return frog_ast.IfStatement(
+            [self.transform(c) for c in if_statement.conditions],
+            [self.transform(b) for b in new_blocks],
+        )
+
+
+class IfToBooleanAssignmentTransformer(BlockTransformer):
+    """Collapses an if/else that assigns a boolean literal to one variable.
+
+    ::
+
+        if (C) { x = true; } else { x = false; }   ->   x = C;
+        if (C) { x = false; } else { x = true; }   ->   x = !C;
+
+    This turns a control-flow encoding of a boolean back into a plain
+    assignment, so downstream passes (e.g. IfSplitBranchAssignment) can treat
+    the branch as ending in a direct assignment.
+    """
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            if not isinstance(statement, frog_ast.IfStatement):
+                continue
+            if len(statement.conditions) != 1 or len(statement.blocks) != 2:
+                continue
+            if not statement.has_else_block():
+                continue
+            then_block, else_block = statement.blocks
+            if len(then_block.statements) != 1 or len(else_block.statements) != 1:
+                continue
+            then_stmt = then_block.statements[0]
+            else_stmt = else_block.statements[0]
+            if not (
+                isinstance(then_stmt, frog_ast.Assignment)
+                and isinstance(else_stmt, frog_ast.Assignment)
+                and isinstance(then_stmt.var, frog_ast.Variable)
+                and isinstance(else_stmt.var, frog_ast.Variable)
+                and then_stmt.var.name == else_stmt.var.name
+                and isinstance(then_stmt.value, frog_ast.Boolean)
+                and isinstance(else_stmt.value, frog_ast.Boolean)
+                and then_stmt.value.bool != else_stmt.value.bool
+            ):
+                continue
+            cond = statement.conditions[0]
+            value: frog_ast.Expression = (
+                copy.deepcopy(cond) if then_stmt.value.bool else _negate_condition(cond)
+            )
+            new_assign = frog_ast.Assignment(
+                then_stmt.the_type or else_stmt.the_type,
+                frog_ast.Variable(then_stmt.var.name),
+                value,
+            )
+            return self.transform_block(
+                frog_ast.Block(
+                    list(block.statements[:index])
+                    + [new_assign]
+                    + list(block.statements[index + 1 :])
+                )
+            )
+        return block
+
+
 class SimplifyReturnTransformer(BlockTransformer):
     """Inlines the value of an assignment into a trailing return statement.
 
@@ -659,14 +786,25 @@ class RemoveUnreachableTransformer(BlockTransformer):
                     if cond_formula is None:
                         all_conditions_dead = False
                         break
-                    dead_solver = z3.Solver()
-                    dead_solver.set("timeout", 30000)
-                    dead_constraints = list(path_constraints)
-                    if formula_so_far is not None:
-                        dead_constraints.append(z3.Not(formula_so_far))
-                    dead_constraints.append(cond_formula)
-                    dead_solver.add(z3.And(*dead_constraints))
-                    if dead_solver.check() != z3.unsat:
+                    try:
+                        dead_solver = z3.Solver()
+                        dead_solver.set("timeout", 30000)
+                        dead_constraints = list(path_constraints)
+                        if formula_so_far is not None:
+                            dead_constraints.append(z3.Not(formula_so_far))
+                        dead_constraints.append(cond_formula)
+                        dead_solver.add(z3.And(*dead_constraints))
+                        check_result = dead_solver.check()
+                    except (z3.Z3Exception, TypeError):
+                        # Defense-in-depth: if the formula visitor yields an
+                        # ill-sorted term for some condition (so z3.And raises
+                        # a sort mismatch / boolean-conversion error), treat it
+                        # as "cannot prove dead" and keep the branch -- the
+                        # conservative, sound choice. Mirrors the guards at the
+                        # two sibling z3 call sites in this file.
+                        all_conditions_dead = False
+                        break
+                    if check_result != z3.unsat:
                         all_conditions_dead = False
                         break
                 if all_conditions_dead and all(
@@ -881,45 +1019,48 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
             if condition.operator != frog_ast.BinaryOperators.EQUALS:
                 continue
 
-            local_expr, field_expr = self._classify_alias_pair(
-                condition.left_expression, condition.right_expression
-            )
-            if local_expr is None or field_expr is None:
+            # alias_pairs: each (field_variable, replacement_expression) means
+            # the field equals the replacement within this branch, so the
+            # field may be rewritten to the replacement there. Covers both
+            # `local == field` (single field) and `param == [f0, ..., fn]`
+            # (a tuple of fields equal to a param, yielding f_i -> param[i]).
+            alias_pairs = self._alias_substitutions(condition)
+            if not alias_pairs:
                 continue
 
             new_branch = copy.deepcopy(statement.blocks[0])
+            field_var_names = {f.name for f, _ in alias_pairs}
 
             # Phase 1: Inline single-assignment fields whose definitions
-            # mention the comparison field.
-            assert isinstance(field_expr, frog_ast.Variable)
-            field_var_name = field_expr.name
+            # mention any comparison field.
             for dep_field, dep_expr in self.field_definitions.items():
                 dep_vars = VariableCollectionVisitor().visit(dep_expr)
-                if not any(v.name == field_var_name for v in dep_vars):
+                if not any(v.name in field_var_names for v in dep_vars):
                     continue
                 inline_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
                 inline_map.set(frog_ast.Variable(dep_field), copy.deepcopy(dep_expr))
                 new_branch = SubstitutionTransformer(inline_map).transform(new_branch)
 
-            # Phase 2: Substitute the comparison field with the local/param.
-            # Stop at the first reassignment of the field within the branch,
-            # since after reassignment the field value may differ from the local.
+            # Phase 2: Substitute each comparison field with its replacement.
+            # Stop at the first reassignment of any comparison field within the
+            # branch, since after reassignment the field value may differ from
+            # the replacement.
             alias_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-            alias_map.set(field_expr, local_expr)
+            for field_expr, replacement in alias_pairs:
+                alias_map.set(field_expr, replacement)
             new_stmts: list[frog_ast.Statement] = []
-            for branch_stmt in new_branch.statements:
-                # Check if this statement reassigns the field
+            for stmt_idx, branch_stmt in enumerate(new_branch.statements):
+                # Check if this statement reassigns one of the comparison fields
                 if (
                     isinstance(
                         branch_stmt,
                         (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
                     )
                     and isinstance(branch_stmt.var, frog_ast.Variable)
-                    and branch_stmt.var.name == field_var_name
+                    and branch_stmt.var.name in field_var_names
                 ):
                     # Stop substituting: keep this and all remaining as-is
-                    remaining_idx = new_branch.statements.index(branch_stmt)
-                    new_stmts.extend(new_branch.statements[remaining_idx:])
+                    new_stmts.extend(new_branch.statements[stmt_idx:])
                     break
                 new_stmts.append(
                     SubstitutionTransformer(alias_map).transform(branch_stmt)
@@ -937,6 +1078,66 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
                 + frog_ast.Block(block.statements[index + 1 :])
             )
         return block
+
+    def _alias_substitutions(
+        self, condition: frog_ast.BinaryOperation
+    ) -> list[tuple[frog_ast.Variable, frog_ast.Expression]]:
+        """Return field -> replacement substitutions implied by an equality
+        guard, valid within the (then) branch the guard asserts.
+
+        Two shapes qualify:
+
+        * ``local == field`` -> ``[(field, local)]`` (the original behaviour).
+        * ``param == [f0, ..., fn]`` where ``param`` is a local/parameter
+          variable and every ``f_i`` is a field -> ``[(f_i, param[i]), ...]``.
+          This arises after a field whose value is a tuple (e.g. a public key
+          ``pkS = [.., ..]``) is expanded to its literal, turning a
+          ``pk == pkS`` guard into ``pk == [f0, f1]``; rewriting ``f_i`` to
+          ``param[i]`` inside the branch brings it into the same form as the
+          fall-through, letting the redundant branch collapse.
+        """
+        left = condition.left_expression
+        right = condition.right_expression
+
+        local_expr, field_expr = self._classify_alias_pair(left, right)
+        if local_expr is not None and field_expr is not None:
+            assert isinstance(field_expr, frog_ast.Variable)
+            return [(field_expr, local_expr)]
+
+        tuple_pairs = self._classify_tuple_alias(
+            left, right
+        ) or self._classify_tuple_alias(right, left)
+        return tuple_pairs or []
+
+    def _classify_tuple_alias(
+        self,
+        maybe_param: frog_ast.Expression,
+        maybe_tuple: frog_ast.Expression,
+    ) -> list[tuple[frog_ast.Variable, frog_ast.Expression]] | None:
+        """Return ``[(f_i, param[i]), ...]`` when *maybe_param* is a plain
+        local/parameter variable and *maybe_tuple* is a tuple literal whose
+        every element is a field variable; otherwise None."""
+        if not (
+            isinstance(maybe_param, frog_ast.Variable)
+            and maybe_param.name not in self.field_names
+        ):
+            return None
+        if not isinstance(maybe_tuple, frog_ast.Tuple) or not maybe_tuple.values:
+            return None
+        if not all(self._is_field(v) for v in maybe_tuple.values):
+            return None
+        pairs: list[tuple[frog_ast.Variable, frog_ast.Expression]] = []
+        for i, element in enumerate(maybe_tuple.values):
+            assert isinstance(element, frog_ast.Variable)
+            pairs.append(
+                (
+                    element,
+                    frog_ast.ArrayAccess(
+                        copy.deepcopy(maybe_param), frog_ast.Integer(i)
+                    ),
+                )
+            )
+        return pairs
 
     def _classify_alias_pair(
         self,
@@ -974,15 +1175,26 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
 
 
 class RedundantConditionalReturnTransformer(BlockTransformer):
-    """Removes if-without-else blocks whose return duplicates the fall-through.
+    """Removes an if-without-else whose body duplicates the fall-through.
 
     Detects the pattern::
 
-        if (cond) { return X; }
-        return X;
+        if (cond) { B }     // B returns on every path
+        B                   // the same statements B follow immediately
 
-    and simplifies it to just ``return X;``, since the if-branch is
-    redundant.
+    and simplifies it to just ``B``, since the guard is redundant: when
+    ``cond`` holds the body ``B`` runs and returns; when it does not, the
+    identical fall-through ``B`` runs and returns. The simplest instance is
+    ``if (cond) { return X; } return X;`` (a single-statement body), but the
+    body may be any block that unconditionally returns -- e.g.::
+
+        if (pk == pkS) { if (Verify(..)) return ss; return None; }
+        if (Verify(..)) return ss;
+        return None;
+
+    collapses to ``if (Verify(..)) return ss; return None;``. (This arises
+    after IfConditionAliasSubstitution rewrites a redundant case-split branch
+    into the same form as its fall-through.)
     """
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
@@ -996,19 +1208,19 @@ class RedundantConditionalReturnTransformer(BlockTransformer):
             if_body = statement.blocks[0]
             if not if_body.statements:
                 continue
-            last_if_stmt = if_body.statements[-1]
-            if not isinstance(last_if_stmt, frog_ast.ReturnStatement):
+            # The body must return on every path; otherwise control would
+            # fall through to the statements after the if and run them in
+            # addition to the body, so the guard would not be redundant.
+            if not block_unconditionally_returns(if_body):
                 continue
-            # Check if the statement after the if is a matching return
-            if index + 1 >= len(block.statements):
+            # The statements immediately following the if must match the body
+            # exactly. (Anything after that copy is dead, since the body
+            # unconditionally returns, and is cleaned up by dead-code passes.)
+            body_len = len(if_body.statements)
+            following = block.statements[index + 1 : index + 1 + body_len]
+            if list(if_body.statements) != list(following):
                 continue
-            next_stmt = block.statements[index + 1]
-            if not isinstance(next_stmt, frog_ast.ReturnStatement):
-                continue
-            if if_body != frog_ast.Block([next_stmt]):
-                continue
-            # The if-branch body is just `return X;` and the fall-through
-            # is the same `return X;` — remove the if entirely.
+            # Drop the if; the identical fall-through copy remains.
             return self.transform_block(
                 frog_ast.Block(block.statements[:index])
                 + frog_ast.Block(block.statements[index + 1 :])
@@ -1627,6 +1839,359 @@ class ElseUnwrapTransformer(BlockTransformer):
         return block
 
 
+class FactorCommonGuardTransformer(BlockTransformer):
+    """Transpose a P-first nested-if into V-first by factoring a shared inner
+    guard out of an outer guard's arm and the fall-through.
+
+    Recognizes (the outer ``if (P)`` has no else and returns on every path)::
+
+        if (P) {
+            if (V) { A }     // A returns on every path
+            RET              // RET returns; the V-false case under P
+        }
+        if (V) { B }         // SAME condition V; B returns on every path
+        RET                  // identical trailing RET; the V-false case under !P
+
+    and rewrites it::
+
+        if (V) {
+            if (P) { A } else { B }
+        }
+        RET
+
+    Every ``(P, V)`` combination yields the same result in both forms, so this
+    is semantics-preserving. Its purpose is canonical normalization: a
+    reduction Decaps that delegates verification to a challenger only for the
+    challenge key produces a P-first nesting, whereas the corresponding game
+    Decaps is V-first; collapsing both to the V-outer shape lets equivalent
+    games match.
+
+    Guard: ``P`` must contain no non-deterministic call. The transpose
+    evaluates ``P`` only when ``V`` holds (instead of always), so a
+    side-effecting / non-deterministic ``P`` could change behavior. ``V`` is
+    evaluated exactly once in both forms, so it is unrestricted.
+    """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+
+    def _is_deterministic(self, expr: frog_ast.Expression) -> bool:
+        namespace = self.ctx.proof_namespace if self.ctx else {}
+        let_types = self.ctx.proof_let_types if self.ctx else None
+        return not has_nondeterministic_call(expr, namespace, let_types)
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        stmts = block.statements
+        for index in range(len(stmts) - 1):
+            outer = stmts[index]
+            if not isinstance(outer, frog_ast.IfStatement):
+                continue
+            if outer.has_else_block() or len(outer.conditions) != 1:
+                continue
+            outer_body = outer.blocks[0]
+            if len(outer_body.statements) < 2:
+                continue
+            if not block_unconditionally_returns(outer_body):
+                continue
+            inner = outer_body.statements[0]
+            if not isinstance(inner, frog_ast.IfStatement):
+                continue
+            if inner.has_else_block() or len(inner.conditions) != 1:
+                continue
+            if not block_unconditionally_returns(inner.blocks[0]):
+                continue
+            tail_p = list(outer_body.statements[1:])
+
+            fall = stmts[index + 1]
+            if not isinstance(fall, frog_ast.IfStatement):
+                continue
+            if fall.has_else_block() or len(fall.conditions) != 1:
+                continue
+            if fall.conditions[0] != inner.conditions[0]:
+                continue
+            if not block_unconditionally_returns(fall.blocks[0]):
+                continue
+            tail_fall = list(stmts[index + 2 :])
+            # The V-false behavior must be identical whether or not P holds.
+            if tail_p != tail_fall:
+                continue
+
+            p_cond = outer.conditions[0]
+            v_cond = inner.conditions[0]
+            if not self._is_deterministic(p_cond):
+                continue
+
+            new_inner = frog_ast.IfStatement(
+                [copy.deepcopy(p_cond)],
+                [
+                    copy.deepcopy(inner.blocks[0]),
+                    copy.deepcopy(fall.blocks[0]),
+                ],
+            )
+            new_if = frog_ast.IfStatement(
+                [copy.deepcopy(v_cond)], [frog_ast.Block([new_inner])]
+            )
+            return self.transform_block(
+                frog_ast.Block(list(stmts[:index]) + [new_if] + tail_p)
+            )
+        return block
+
+
+class MergeNestedGuardTransformer(BlockTransformer):
+    """Merge a nested guard whose only effect is an inner early return.
+
+    Recognizes (the outer ``if (P)`` has no else and returns on every path)::
+
+        if (P) {
+            if (Q) { BODY }   // BODY returns on every path
+            TAIL              // the !Q case under P; returns on every path
+        }
+        TAIL                  // identical trailing TAIL; the !P case
+
+    and rewrites it::
+
+        if (P && Q) { BODY }
+        TAIL
+
+    Sound because every ``(P, Q)`` case yields the same result: ``P and Q``
+    -> BODY; ``P and not Q`` -> TAIL; ``not P`` -> TAIL. This collapses the
+    P-first nesting left behind once ``FactorCommonGuard`` has hoisted the
+    shared verification guard, matching the conjunction guard written
+    directly in the corresponding game (e.g. ``if (pk == pkS && c notin C)``).
+
+    Guard: ``P`` and ``Q`` must contain no non-deterministic call, since the
+    rewrite evaluates them as ``P && Q`` rather than as separate nested
+    conditions.
+    """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+
+    def _is_deterministic(self, expr: frog_ast.Expression) -> bool:
+        namespace = self.ctx.proof_namespace if self.ctx else {}
+        let_types = self.ctx.proof_let_types if self.ctx else None
+        return not has_nondeterministic_call(expr, namespace, let_types)
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        stmts = block.statements
+        for index in range(len(stmts) - 1):
+            outer = stmts[index]
+            if not isinstance(outer, frog_ast.IfStatement):
+                continue
+            if outer.has_else_block() or len(outer.conditions) != 1:
+                continue
+            outer_body = outer.blocks[0]
+            if len(outer_body.statements) < 2:
+                continue
+            if not block_unconditionally_returns(outer_body):
+                continue
+            inner = outer_body.statements[0]
+            if not isinstance(inner, frog_ast.IfStatement):
+                continue
+            if inner.has_else_block() or len(inner.conditions) != 1:
+                continue
+            if not block_unconditionally_returns(inner.blocks[0]):
+                continue
+            tail_p = list(outer_body.statements[1:])
+            tail_fall = list(stmts[index + 1 :])
+            if not tail_p or tail_p != tail_fall:
+                continue
+
+            p_cond = outer.conditions[0]
+            q_cond = inner.conditions[0]
+            if not (self._is_deterministic(p_cond) and self._is_deterministic(q_cond)):
+                continue
+
+            merged_cond = frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.AND,
+                copy.deepcopy(p_cond),
+                copy.deepcopy(q_cond),
+            )
+            new_if = frog_ast.IfStatement(
+                [merged_cond], [copy.deepcopy(inner.blocks[0])]
+            )
+            return self.transform_block(
+                frog_ast.Block(list(stmts[:index]) + [new_if] + tail_p)
+            )
+        return block
+
+
+def _iter_block_nodes(block: frog_ast.Block) -> list[frog_ast.ASTNode]:
+    """Return every AST node in *block* (the block and all descendants)."""
+    nodes: list[frog_ast.ASTNode] = []
+
+    class _Collector(Visitor[None]):
+        def result(self) -> None:
+            return None
+
+        def leave_ast_node(self, node: frog_ast.ASTNode) -> None:
+            nodes.append(node)
+
+    _Collector().visit(block)
+    return nodes
+
+
+def _condition_literal(cond: frog_ast.Expression, holds: bool) -> tuple[str, bool]:
+    """Normalize a known-true/known-false condition to a ``(base, polarity)``
+    literal. ``!(X)`` flips the polarity, so ``X`` known-false and ``!(X)``
+    known-true both yield ``(str(X), False)``. Used to compare path facts
+    against the conjuncts of a guard."""
+    base: frog_ast.Expression = cond
+    polarity = holds
+    while (
+        isinstance(base, frog_ast.UnaryOperation)
+        and base.operator == frog_ast.UnaryOperators.NOT
+    ):
+        base = base.expression
+        polarity = not polarity
+    return (str(base), polarity)
+
+
+class DeadGuardedAssignmentEliminationTransformer(BlockTransformer):
+    """Kills a boolean assignment whose value cannot be observed.
+
+    When a block has the shape::
+
+        ... assignments to v ...
+        if (v) { if (G) { return R }; ... }
+        return R                       // same R as the inner guarded return
+
+    then on any path where ``G`` holds the result is ``R`` regardless of
+    ``v``: if ``v`` is true the inner guard returns ``R``; if ``v`` is false
+    the fall-through returns ``R``. So an assignment ``v = E`` reached only
+    under path conditions that entail ``G`` is a dead store -- its value is
+    replaced by ``false`` (enabling boolean simplification / IfToBoolean).
+
+    This is the backward-dead-store counterpart to the forward guard
+    reasoning the other passes do; it arises when a reduction's membership
+    rejection (``if (pk == pkS && c notin C) ...``) dominates a real-
+    verification call that the simulated game performs only on recorded
+    ciphertexts.
+    """
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        for index, statement in enumerate(block.statements):
+            use = self._match_guarded_use(statement, block.statements[index + 1 :])
+            if use is None:
+                continue
+            v_name, guard = use
+            # Soundness: the assignment's value may only be killed if `v` is
+            # read solely by the matched `if (v)` guard. Any other read of `v`
+            # would observe the rewritten `false` value. Count reads (variable
+            # occurrences that are not an assignment target); exactly one --
+            # the guard condition -- is required.
+            if self._read_count(block, v_name) != 1:
+                continue
+            guard_lits = [
+                _condition_literal(g, True) for g in _flatten_top_level_and(guard)
+            ]
+            prefix = list(block.statements[:index])
+            new_prefix = [self._kill(s, v_name, guard_lits, []) for s in prefix]
+            if new_prefix != prefix:
+                return self.transform_block(
+                    frog_ast.Block(new_prefix + list(block.statements[index:]))
+                )
+        return block
+
+    @staticmethod
+    def _read_count(block: frog_ast.Block, name: str) -> int:
+        """Number of read occurrences of *name* (Variable nodes that are not
+        the assignment/sample target)."""
+        total = 0
+        writes = 0
+        for node in _iter_block_nodes(block):
+            if isinstance(node, frog_ast.Variable) and node.name == name:
+                total += 1
+            if (
+                isinstance(
+                    node,
+                    (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+                )
+                and isinstance(node.var, frog_ast.Variable)
+                and node.var.name == name
+            ):
+                writes += 1
+        return total - writes
+
+    @staticmethod
+    def _match_guarded_use(
+        statement: frog_ast.Statement,
+        rest: Sequence[frog_ast.Statement],
+    ) -> tuple[str, frog_ast.Expression] | None:
+        if (
+            not isinstance(statement, frog_ast.IfStatement)
+            or statement.has_else_block()
+            or len(statement.conditions) != 1
+        ):
+            return None
+        guard_var = statement.conditions[0]
+        if not isinstance(guard_var, frog_ast.Variable):
+            return None
+        body = statement.blocks[0]
+        if not body.statements:
+            return None
+        inner = body.statements[0]
+        if (
+            not isinstance(inner, frog_ast.IfStatement)
+            or inner.has_else_block()
+            or len(inner.conditions) != 1
+            or len(inner.blocks[0].statements) != 1
+        ):
+            return None
+        inner_return = inner.blocks[0].statements[0]
+        if not isinstance(inner_return, frog_ast.ReturnStatement):
+            return None
+        # The fall-through must be exactly `return R` with the same R.
+        if len(rest) != 1 or not isinstance(rest[0], frog_ast.ReturnStatement):
+            return None
+        if rest[0].expression != inner_return.expression:
+            return None
+        return (guard_var.name, inner.conditions[0])
+
+    def _kill(
+        self,
+        statement: frog_ast.Statement,
+        var_name: str,
+        guard_lits: list[tuple[str, bool]],
+        path: list[tuple[str, bool]],
+    ) -> frog_ast.Statement:
+        if (
+            isinstance(statement, frog_ast.Assignment)
+            and isinstance(statement.var, frog_ast.Variable)
+            and statement.var.name == var_name
+            and not isinstance(statement.value, frog_ast.Boolean)
+            and all(lit in path for lit in guard_lits)
+        ):
+            return frog_ast.Assignment(
+                statement.the_type, statement.var, frog_ast.Boolean(False)
+            )
+        if isinstance(statement, frog_ast.IfStatement):
+            new_blocks: list[frog_ast.Block] = []
+            for block_index, branch in enumerate(statement.blocks):
+                branch_path = list(path)
+                if block_index < len(statement.conditions):
+                    for prior in range(block_index):
+                        branch_path.append(
+                            _condition_literal(statement.conditions[prior], False)
+                        )
+                    branch_path.append(
+                        _condition_literal(statement.conditions[block_index], True)
+                    )
+                else:
+                    for cond in statement.conditions:
+                        branch_path.append(_condition_literal(cond, False))
+                new_blocks.append(
+                    frog_ast.Block(
+                        [
+                            self._kill(s, var_name, guard_lits, branch_path)
+                            for s in branch.statements
+                        ]
+                    )
+                )
+            return frog_ast.IfStatement(list(statement.conditions), new_blocks)
+        return statement
+
+
 # ---------------------------------------------------------------------------
 # TransformPass wrappers
 # ---------------------------------------------------------------------------
@@ -1642,6 +2207,20 @@ class IfConditionAliasSubstitution(TransformPass):
         ).transform(game)
 
 
+class GuardConditionSimplification(TransformPass):
+    name = "Guard Condition Simplification"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return GuardConditionSimplificationTransformer(ctx).transform(game)
+
+
+class IfToBooleanAssignment(TransformPass):
+    name = "If To Boolean Assignment"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return IfToBooleanAssignmentTransformer().transform(game)
+
+
 class RedundantConditionalReturn(TransformPass):
     name = "Redundant Conditional Return"
 
@@ -1654,6 +2233,27 @@ class AbsorbRedundantEarlyReturn(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return AbsorbRedundantEarlyReturnTransformer().transform(game)
+
+
+class FactorCommonGuard(TransformPass):
+    name = "Factor Common Guard"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return FactorCommonGuardTransformer(ctx).transform(game)
+
+
+class MergeNestedGuard(TransformPass):
+    name = "Merge Nested Guard"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return MergeNestedGuardTransformer(ctx).transform(game)
+
+
+class DeadGuardedAssignmentElimination(TransformPass):
+    name = "Dead Guarded Assignment Elimination"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return DeadGuardedAssignmentEliminationTransformer().transform(game)
 
 
 class IfFalseReturnToConjunction(TransformPass):

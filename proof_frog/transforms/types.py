@@ -264,6 +264,22 @@ class SubsetTypeNormalizer(Transformer):
             return copy.deepcopy(self.type_replacements[the_type.name])
         if isinstance(the_type, frog_ast.ProductType):
             return frog_ast.ProductType([self._normalize(t) for t in the_type.types])
+        # Recurse into collection element types so that, e.g.,
+        # `Set<[KCiphertext, Sig]>` and `Set<[Message, Sig]>` normalize to the
+        # same supertype annotation when `KCiphertext subsets Message`.
+        if isinstance(the_type, frog_ast.SetType):
+            if the_type.parameterization is None:
+                return the_type
+            return frog_ast.SetType(self._normalize(the_type.parameterization))
+        if isinstance(the_type, frog_ast.MapType):
+            return frog_ast.MapType(
+                self._normalize(the_type.key_type),
+                self._normalize(the_type.value_type),
+            )
+        if isinstance(the_type, frog_ast.ArrayType):
+            return frog_ast.ArrayType(
+                self._normalize(the_type.element_type), the_type.count
+            )
         return the_type
 
 

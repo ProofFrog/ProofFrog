@@ -243,6 +243,11 @@ from proof_frog.transforms.control_flow import RemoveUnreachableTransformer
             """,
         ),
         (
+            # `challenger.g()` is a method call, which is non-deterministic
+            # by default: two evaluations may differ, so `g() in S` and
+            # `!(g() in S)` are NOT complementary and `return 3` is
+            # reachable. The condition is untranslatable to a Z3 formula, so
+            # the transform conservatively keeps every branch.
             """
             Int f(Int x, Set<Int> s) {
                 if (challenger.g() in S) {
@@ -262,6 +267,7 @@ from proof_frog.transforms.control_flow import RemoveUnreachableTransformer
                 if (!(challenger.g() in S)) {
                     return 2;
                 }
+                return 3;
             }
             """,
         ),

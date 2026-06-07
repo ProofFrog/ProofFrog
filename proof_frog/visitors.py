@@ -643,14 +643,42 @@ class InlineTransformer(Transformer):
                 )
             )
         elif isinstance(final_statement, frog_ast.IfStatement):
-            # All returns are at leaves of this if-else tree.
+            # All returns are at leaves of this if-else tree. Each leaf
+            # `return X` is rewritten to the call-site statement with the
+            # call replaced by X. When the call site is a *typed declaration*
+            # `Type v = call(...)`, that would place a fresh `Type v = X`
+            # declaration inside every branch. If `v` is then used after the
+            # if (e.g. `... = AK.Decaps(...); if (g) return None; return v;`),
+            # those branch-local declarations break block-scoped copy /
+            # dead-code transforms (FrogLang hoists declarations to method
+            # scope, but RedundantCopy/InlineSingleUseVariable only scan the
+            # current block). Hoist the declaration out of the branches and
+            # emit plain (untyped) assignments at the leaves instead, which
+            # those transforms handle correctly.
+            decl_stmts: list[frog_ast.Statement] = []
+            site_stmt: frog_ast.Statement = call_site_stmt
+            if (
+                isinstance(call_site_stmt, frog_ast.Assignment)
+                and call_site_stmt.the_type is not None
+                and isinstance(call_site_stmt.var, frog_ast.Variable)
+            ):
+                decl_stmts = [
+                    frog_ast.VariableDeclaration(
+                        call_site_stmt.the_type, call_site_stmt.var.name
+                    )
+                ]
+                site_stmt = frog_ast.Assignment(
+                    None, call_site_stmt.var, call_site_stmt.value
+                )
             new_if = _replace_returns_in_if(
                 final_statement,
                 exp,
-                call_site_stmt,
+                site_stmt,
             )
             self.blocks.append(
-                frog_ast.Block(statements_so_far + [new_if] + statements_after)
+                frog_ast.Block(
+                    statements_so_far + decl_stmts + [new_if] + statements_after
+                )
             )
         else:
             self.blocks.append(
@@ -930,29 +958,39 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
             self.stack.append(None)
 
     def leave_func_call(self, node: frog_ast.FuncCall) -> None:
-        # Only emit an opaque atom when explicitly opted in. Existing
-        # callers leave the flag False; their pre-change behavior was
-        # to leave the recursively-pushed children on the stack and let
-        # whatever sat on top "leak" upward (which result() / consumers
-        # historically saw as None for FuncCall-rooted expressions).
-        # Preserve that here by not popping any items in the
-        # opt-out path -- exactly the historical no-op.
-        if not self.opaque_func_call_fallback:
-            return
-        # FuncCall pushes one stack item per child: one for `func` (which
+        # A FuncCall pushes one stack item per child: one for `func` (which
         # itself recurses through e.g. a `FieldAccess` whose receiver
-        # `visit_variable` pushes one item), plus one per arg. Pop them
-        # all and discard -- the memo key carries the full AST. If any
-        # popped item is None, propagate failure rather than silently
-        # papering over an upstream translation gap.
+        # `visit_variable` pushes one item), plus one per arg. We must pop
+        # all of them so the FuncCall contributes exactly one net stack item
+        # (the visitor contract that every expression leaves the stack one
+        # taller). The opt-out path historically *failed* to do this: it
+        # returned without popping, leaking the children and leaving the
+        # last-visited argument on top of the stack. Consumers then read
+        # that leaked argument as the FuncCall's "formula" (the comment here
+        # used to claim they saw None, but they did not), which is both
+        # semantically wrong and frequently ill-sorted -- a non-Bool atom
+        # used as a Bool condition crashes downstream Z3 combinators
+        # (z3.And / z3.Not / Solver.add) with "sort mismatch" or "cannot be
+        # converted into a Z3 Boolean value".
         n = 1 + len(node.args)
         popped = [self.stack.pop() if self.stack else None for _ in range(n)]
+        # Opt-out (the default for canonicalization callers such as
+        # RemoveUnreachable and ApplyAssumptions): model a FuncCall as
+        # untranslatable. Returning None is the sound, conservative choice --
+        # those callers already treat None as "cannot reason about this
+        # expression" and simply decline to fire. Crucially, this avoids
+        # treating a (by-default non-deterministic) call as a fixed value.
+        if not self.opaque_func_call_fallback:
+            self.stack.append(None)
+            return
+        # Opt-in (equivalence-check escape hatch): memoize the call as an
+        # opaque atom. If any popped child is None, propagate failure rather
+        # than papering over an upstream translation gap. Determinism is
+        # enforced outside the visitor by the equivalence helper, which
+        # refuses to invoke us on expressions with non-deterministic calls.
         if any(item is None for item in popped):
             self.stack.append(None)
             return
-        # Memoize the call as an opaque atom. Determinism is enforced
-        # outside the visitor by the equivalence helper, which refuses
-        # to invoke us on expressions containing non-deterministic calls.
         self.stack.append(self._intern_opaque(node))
 
 

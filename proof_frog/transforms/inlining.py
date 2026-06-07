@@ -3616,6 +3616,194 @@ class DeduplicateDeterministicCalls(TransformPass):
         ).transform(game)
 
 
+class HoistDuplicateBranchCallTransformer(BlockTransformer):
+    """Hoist a deterministic call duplicated across exclusive branches.
+
+    When the same deterministic primitive call appears (with structurally
+    equal arguments) in several mutually-exclusive branch returns, e.g.::
+
+        if (pk == pkS) { if (c in C) { return K.Decaps(sk, c); } return None; }
+        if (Verify(..)) { return K.Decaps(sk, c); }
+        return None;
+
+    the two calls are extracted to a single local computed before the
+    branches::
+
+        SharedSecret t = K.Decaps(sk, c);
+        if (pk == pkS) { if (c in C) { return t; } return None; }
+        if (Verify(..)) { return t; }
+        return None;
+
+    A deterministic call returns the same value regardless of when it runs and
+    has no observable side effect, so computing it eagerly is sound (the engine
+    already hoists deterministic calls in HoistDeterministicCallToInitialize).
+    This normalizes the canonical form to the hoisted shape that
+    ``InlineMultiUsePureExpression`` preserves (it deliberately leaves
+    function-call results named rather than inlining them), so two games that
+    reach the same branch structure by different routes agree.
+
+    Only fires when every argument variable is available at the hoist point:
+    a game field/parameter, or a top-level local assigned exactly once before
+    the first branch containing the call, and never reassigned.
+    """
+
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace,
+        function_var_names: set[str] | None = None,
+    ) -> None:
+        self.proof_namespace = proof_namespace
+        self._function_var_names = function_var_names or set()
+        self.counter = 0
+
+    @staticmethod
+    def _writes(name: str, node: frog_ast.ASTNode) -> bool:
+        return (
+            isinstance(
+                node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+            )
+            and isinstance(node.var, frog_ast.Variable)
+            and node.var.name == name
+        )
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        # Only consider deterministic calls that are the ENTIRE expression of
+        # a `return` statement. Hoisting a call out of an arbitrary in-branch
+        # position can change whether that branch later simplifies; restricting
+        # to return positions keeps this transform to the narrow case where a
+        # value is computed solely to be returned from several exclusive
+        # branches (so eager evaluation has no downstream effect).
+        return_calls: list[frog_ast.FuncCall] = []
+        for ret in _iter_matches(
+            block, lambda n: isinstance(n, frog_ast.ReturnStatement)
+        ):
+            assert isinstance(ret, frog_ast.ReturnStatement)
+            if not isinstance(ret.expression, frog_ast.FuncCall):
+                continue
+            collector = _DeterministicCallCollector(
+                self.proof_namespace, self._function_var_names
+            )
+            collector.visit(ret.expression)
+            found = collector.result()
+            if found and found[0] == ret.expression:
+                return_calls.append(ret.expression)
+        calls = return_calls
+        if not calls:
+            return block
+
+        groups: list[list[frog_ast.FuncCall]] = []
+        for call in calls:
+            for group in groups:
+                if call == group[0]:
+                    group.append(call)
+                    break
+            else:
+                groups.append([call])
+
+        for group in groups:
+            if len(group) < 2:
+                continue
+            rep = group[0]
+
+            def _is_rep(
+                node: frog_ast.ASTNode, target: frog_ast.FuncCall = rep
+            ) -> bool:
+                return node == target
+
+            containing = [
+                index
+                for index, stmt in enumerate(block.statements)
+                if SearchVisitor(_is_rep).visit(stmt) is not None
+            ]
+            if not containing:
+                continue
+            insert_index = containing[0]
+            if not self._args_available(block, rep, insert_index):
+                continue
+            return_type = self._return_type(rep)
+            if return_type is None:
+                continue
+
+            var_name = f"__hoist_{self.counter}__"
+            self.counter += 1
+            new_block = block
+            for call in group:
+                new_block = ReplaceTransformer(
+                    call, frog_ast.Variable(var_name)
+                ).transform(new_block)
+            new_assignment = frog_ast.Assignment(
+                return_type, frog_ast.Variable(var_name), copy.deepcopy(rep)
+            )
+            new_stmts = (
+                list(new_block.statements[:insert_index])
+                + [new_assignment]
+                + list(new_block.statements[insert_index:])
+            )
+            return self.transform_block(frog_ast.Block(new_stmts))
+        return block
+
+    def _args_available(
+        self, block: frog_ast.Block, rep: frog_ast.FuncCall, insert_index: int
+    ) -> bool:
+        arg_vars: set[str] = set()
+        for arg in rep.args:
+            for fv in VariableCollectionVisitor().visit(copy.deepcopy(arg)):
+                arg_vars.add(fv.name)
+        for name in arg_vars:
+            total_writes = 0
+            for stmt in block.statements:
+                total_writes += sum(
+                    1
+                    for _ in _iter_matches(stmt, functools.partial(self._writes, name))
+                )
+            if total_writes == 0:
+                continue  # field / parameter / outer constant
+            # Must be assigned only at the top level, before the hoist point.
+            top_writes = [
+                index
+                for index, stmt in enumerate(block.statements)
+                if self._writes(name, stmt)
+            ]
+            if len(top_writes) != total_writes:
+                return False  # some write is nested inside a branch
+            if any(index >= insert_index for index in top_writes):
+                return False  # assigned at/after the hoist point
+        return True
+
+    def _return_type(self, call: frog_ast.FuncCall) -> frog_ast.Type | None:
+        method = _lookup_primitive_method(call.func, self.proof_namespace)
+        if method is not None:
+            return copy.deepcopy(method.return_type)
+        return None
+
+
+def _iter_matches(
+    node: frog_ast.ASTNode, predicate: Callable[[frog_ast.ASTNode], bool]
+) -> list[frog_ast.ASTNode]:
+    """Return every descendant (and *node* itself) satisfying *predicate*."""
+    found: list[frog_ast.ASTNode] = []
+
+    class _Collector(Visitor[None]):
+        def result(self) -> None:
+            return None
+
+        def leave_ast_node(self, n: frog_ast.ASTNode) -> None:
+            if predicate(n):
+                found.append(n)
+
+    _Collector().visit(node)
+    return found
+
+
+class HoistDuplicateBranchCall(TransformPass):
+    name = "Hoist Duplicate Branch Call"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return HoistDuplicateBranchCallTransformer(
+            proof_namespace=ctx.proof_namespace
+        ).transform(game)
+
+
 # ---------------------------------------------------------------------------
 # Cross-method deterministic field alias
 # ---------------------------------------------------------------------------

@@ -106,6 +106,57 @@ class TestBasicNormalization:
         assert result == expected
 
 
+class TestCollectionTypeNormalization:
+    """Subset normalization recurses into collection element types so that,
+    e.g., a Set declared over a subtype matches one declared over its
+    supertype."""
+
+    def test_normalizes_set_element_type(self) -> None:
+        method = frog_parser.parse_method("""
+            Void f() {
+                Set<[KeySpace2, MessageSpace]> store = other;
+            }
+            """)
+        expected = frog_parser.parse_method("""
+            Void f() {
+                Set<[IntermediateSpace, MessageSpace]> store = other;
+            }
+            """)
+        pairs = _make_pairs(("KeySpace2", "IntermediateSpace"))
+        result = SubsetTypeNormalizer(pairs).transform(method)
+        assert result == expected
+
+    def test_normalizes_map_key_and_value_types(self) -> None:
+        method = frog_parser.parse_method("""
+            Void f() {
+                Map<KeySpace2, KeySpace2> m = n;
+            }
+            """)
+        expected = frog_parser.parse_method("""
+            Void f() {
+                Map<IntermediateSpace, IntermediateSpace> m = n;
+            }
+            """)
+        pairs = _make_pairs(("KeySpace2", "IntermediateSpace"))
+        result = SubsetTypeNormalizer(pairs).transform(method)
+        assert result == expected
+
+    def test_normalizes_array_element_type(self) -> None:
+        method = frog_parser.parse_method("""
+            Void f() {
+                Array<KeySpace2, 4> a = b;
+            }
+            """)
+        expected = frog_parser.parse_method("""
+            Void f() {
+                Array<IntermediateSpace, 4> a = b;
+            }
+            """)
+        pairs = _make_pairs(("KeySpace2", "IntermediateSpace"))
+        result = SubsetTypeNormalizer(pairs).transform(method)
+        assert result == expected
+
+
 class TestSampleNormalization:
     """Tests that sample statements are correctly normalized.
 

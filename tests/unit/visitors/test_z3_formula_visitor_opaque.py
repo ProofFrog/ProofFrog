@@ -55,21 +55,38 @@ def test_func_call_distinct_ast_distinct_atoms() -> None:
     assert solver.check() == z3.sat
 
 
-def test_func_call_off_by_default_returns_none_or_garbage() -> None:
-    # Without opt-in, the visitor preserves its historical behavior:
-    # FuncCall sub-expressions don't produce a clean Z3 formula. The
-    # exact result is implementation-defined but it must NOT be a
-    # tautologically-true Z3 BoolRef (which would unsoundly succeed).
+def test_func_call_off_by_default_returns_none() -> None:
+    # Without opt-in, a FuncCall-rooted expression is untranslatable: the
+    # visitor returns None. (Previously this path leaked the call's
+    # children onto the stack and returned a garbage sub-term -- see
+    # test_bare_call_condition_returns_none_not_leaked_arg below.)
     expr = _parse_expr("H.evaluate(x) == H.evaluate(y)")
     formula = visitors.Z3FormulaVisitor(_empty_type_map()).visit(expr)
-    if formula is None:
-        return
-    # If a non-None formula came back, it must not be a tautology.
-    solver = z3.Solver()
-    solver.add(z3.Not(formula))
-    # Either SAT (formula isn't a tautology) or unknown is acceptable;
-    # unsat would be a regression to unsound behavior.
-    assert solver.check() != z3.unsat
+    assert formula is None
+
+
+def test_bare_call_condition_returns_none_not_leaked_arg() -> None:
+    # Regression: a bare method-call condition such as `S.Verify(pk, m, s)`
+    # used directly as a Bool must translate to None, NOT leak its last
+    # argument (`s`) as the formula. The leaked argument was an opaque
+    # (non-Bool) atom that, fed into z3.And/z3.Not by RemoveUnreachable's
+    # dead-code check, crashed canonicalization with a Z3 "sort mismatch".
+    visitor = visitors.Z3FormulaVisitor(_empty_type_map(), variable_version_map={})
+    formula = visitor.visit(_parse_expr("S.Verify(pk, m, s)"))
+    assert formula is None
+    # The visitor must also leave a balanced stack (the FuncCall contributes
+    # exactly one net item -- None -- not one-per-child).
+    assert visitor.stack == []
+
+
+def test_bare_call_condition_composes_in_boolean_context() -> None:
+    # The fix must keep a call condition usable inside boolean combinators
+    # without raising: `!S.Verify(...)` is also untranslatable (None), and
+    # combining None operands stays None rather than producing an
+    # ill-sorted atom that would later crash z3.And.
+    visitor = visitors.Z3FormulaVisitor(_empty_type_map(), variable_version_map={})
+    assert visitor.visit(_parse_expr("!S.Verify(pk, m, s)")) is None
+    assert visitor.stack == []
 
 
 # ---------------------------------------------------------------------------

@@ -158,10 +158,31 @@ tactics fire or the canonical-text basis.
 
 ## When changing the exporter, also
 
-- Run the EC type-check integration tests (`tests/integration/test_easycrypt_export.py`)
-  — they skip if Docker isn't available, but exercise real EC compilation
-  when it is.
-- Re-export at least one proof end-to-end and run `scripts/easycrypt.sh`
-  on the result. See
+**Fast regression loop (do this — don't run the full suite).** A change here can
+only affect proofs that *export*; the ~60 that fail before chain emission
+(type/skeleton/import, FailedProof engine runs — several are the slowest proofs
+in the corpus) are untouched. So:
+
+- `scripts/ec_export_regression.sh` — re-exports just the ~44 exporting proofs
+  **in parallel** and diffs the working tree against the committed (HEAD)
+  baseline, printing exactly which `.ec` outputs changed. ~35s (cached baseline)
+  vs **minutes** for a sequential full-corpus sweep. It stashes/restores your
+  `proof_frog` changes to build the baseline; the baseline is cached per HEAD
+  SHA so iteration runs don't re-stash.
+- Compile **only the changed** proofs in EasyCrypt (`mcp ec_compile`, or
+  `scripts/easycrypt.sh`). Byte-identical exports are guaranteed to compile
+  identically, so unchanged ones need no EC run.
+- Targeted tests only — NOT `pytest` (the full suite runs `test_proofs.py`,
+  ~9 min of engine runs irrelevant to an export change):
+  `pytest tests/unit/export tests/integration/test_easycrypt_export.py
+  tests/integration/test_tactic_cache_orphan_check.py`. The
+  `test_easycrypt_export.py` cases skip if Docker isn't available but exercise
+  real EC compilation when it is.
+- See
   [../../../docs/for_agents/EASYCRYPT_TACTICS.md](../../../docs/for_agents/EASYCRYPT_TACTICS.md)
   for the `.ec-tmp/` sandbox-mount workaround on macOS.
+
+The full-corpus `make check-tactic-cache` (sequential, all 106) and the
+EasyCrypt **dashboard** (compiles every `.ec`) are the heavyweight,
+publish-the-numbers checks — run them before declaring a milestone, not on every
+edit.

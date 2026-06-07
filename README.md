@@ -11,7 +11,7 @@
 
 **A tool for checking transitions in cryptographic game-hopping proofs.**
 
-ProofFrog checks the validity of game hops for cryptographic game-hopping proofs in the reduction-based security paradigm: it checks that the starting and ending games match the security definition, and that each adjacent pair of games is either interchangeable (by code equivalence) or justified by a stated assumption. Proofs are written in FrogLang, a small C/Java-style domain-specific language designed to look like a pen-and-paper proof. ProofFrog can be used from the command line, a browser-based editor, or an MCP server for integration with AI coding assistants. ProofFrog is suitable for introductory level proofs, but is not as expressive for advanced concepts as other verification tools like EasyCrypt.
+ProofFrog checks the validity of game hops for cryptographic game-hopping proofs in the reduction-based security paradigm: it checks that the starting and ending games match the security definition, and that each adjacent pair of games is either interchangeable (by code equivalence) or justified by a stated assumption. Proofs are written in FrogLang, a small C/Java-style domain-specific language designed to look like a pen-and-paper proof. ProofFrog can be used from the command line, a browser-based editor, or an MCP server for integration with AI coding assistants. ProofFrog is suitable for introductory-level proofs, but is not as expressive for advanced concepts as other verification tools like EasyCrypt and lacks comparable levels of assurance.
 
 ![ProofFrog web interface](https://raw.githubusercontent.com/ProofFrog/ProofFrog/refs/heads/main/media/screenshot-web.png)
 

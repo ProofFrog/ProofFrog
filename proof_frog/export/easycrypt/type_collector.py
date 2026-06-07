@@ -49,6 +49,13 @@ class TypeCollector:
         self._abstract_bitstring_names: set[str] = set()
         self._names: list[str] = []  # ordered, unique
         self._seen: set[str] = set()
+        # Concrete ModInt<q> types seen, by EC type name (e.g.
+        # ``modint_q``). Modelled as an abstract finite additive group:
+        # each gets a uniform full distribution plus ``add``/``sub`` ops
+        # and group axioms (the additive analogue of the bitstring
+        # ``xor``/``zero`` foundation). Order-preserving, deduped.
+        self._modints: list[str] = []
+        self._modint_set: set[str] = set()
         # Alias keys may be plain (``"Key"``) or qualified
         # (``"E1.key"``). Qualified keys resolve ``FieldAccess`` types
         # through per-instance scheme clones in multi-scheme exports.
@@ -177,6 +184,14 @@ class TypeCollector:
         if isinstance(resolved, frog_ast.ProductType):
             parts = [self.translate_type(sub).text for sub in resolved.types]
             return ec_ast.EcType(" * ".join(parts))
+        if isinstance(resolved, frog_ast.IntType):
+            return ec_ast.EcType("int")
+        if isinstance(resolved, frog_ast.ModIntType):
+            name = self._modint_name(resolved)
+            if name not in self._modint_set:
+                self._modint_set.add(name)
+                self._modints.append(name)
+            return ec_ast.EcType(name)
         if (
             isinstance(resolved, frog_ast.Variable)
             and resolved.name in self._known_abstract_types
@@ -237,6 +252,19 @@ class TypeCollector:
             t.parameterization, self._aliases, self._strip_field_prefixes
         )
 
+    def _modint_name(self, t: frog_ast.ModIntType) -> str:
+        """EC type name for a ``ModInt<q>`` type.
+
+        Canonicalizes the modulus expression via sympy (mirroring
+        ``_bitstring_name``) so arithmetically-equivalent moduli collapse
+        to one EC type. ``ModInt<q>`` becomes ``modint_q``.
+        """
+        modulus = _substitute_aliases(
+            t.modulus, self._aliases, self._strip_field_prefixes
+        )
+        sanitized = _sanitize(_canonical_arith_str(modulus))
+        return f"modint_{sanitized}" if sanitized else "modint"
+
     def distr_for(self, ec_type: ec_ast.EcType) -> str:
         """Return the distribution op name for a sampled type.
 
@@ -259,6 +287,8 @@ class TypeCollector:
             if distr not in self._known_abstract_distrs:
                 self._known_abstract_distrs.append(distr)
             return distr
+        if ec_type.text in self._modint_set:
+            return f"d{ec_type.text}"
         assert ec_type.text.startswith("bs_") or ec_type.text == "bs"
         suffix = ec_type.text.removeprefix("bs")
         distr = f"dbs{suffix}"
@@ -453,6 +483,41 @@ class TypeCollector:
     def emit(self) -> list[ec_ast.EcTopDecl]:
         """Produce top-level EC declarations for every registered type."""
         decls: list[ec_ast.EcTopDecl] = []
+        # ModInt<q> types: an abstract finite additive group with a
+        # uniform full distribution. ``add``/``sub`` model ``+``/``-``;
+        # the round-trip axioms make ``fun z => add z m`` a measure-
+        # preserving bijection (with ``sub`` as its inverse), which is
+        # what the ``Uniform ModInt Simplification`` synthesizer's ``rnd``
+        # bijection needs. ``add_comm`` covers the ``m + u`` orientation.
+        for name in self._modints:
+            distr = f"d{name}"
+            add_op = _add_name(name)
+            sub_op = _sub_name(name)
+            decls.append(ec_ast.TypeDecl(name))
+            decls.append(ec_ast.OpDecl(distr, f"{name} distr"))
+            decls.append(ec_ast.Axiom(f"{distr}_ll", f"is_lossless {distr}"))
+            decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
+            decls.append(ec_ast.Axiom(f"{distr}_full", f"is_full {distr}"))
+            decls.append(ec_ast.OpDecl(add_op, f"{name} -> {name} -> {name}"))
+            decls.append(ec_ast.OpDecl(sub_op, f"{name} -> {name} -> {name}"))
+            decls.append(
+                ec_ast.Axiom(
+                    f"{add_op}_sub",
+                    f"forall (a b : {name}), {sub_op} ({add_op} a b) b = a",
+                )
+            )
+            decls.append(
+                ec_ast.Axiom(
+                    f"{sub_op}_add",
+                    f"forall (a b : {name}), {add_op} ({sub_op} a b) b = a",
+                )
+            )
+            decls.append(
+                ec_ast.Axiom(
+                    f"{add_op}_comm",
+                    f"forall (a b : {name}), {add_op} a b = {add_op} b a",
+                )
+            )
         # Distributions over known top-level abstract types (declared
         # elsewhere via ``type X.``): emit the distribution op and
         # lossless/funiform/full axioms. The type declaration itself is
@@ -757,6 +822,18 @@ def _zero_name(bs_name: str) -> str:
     return f"zero{suffix}"
 
 
+def _add_name(modint_name: str) -> str:
+    """Additive-group ``+`` op for a ModInt type (``modint_q`` -> ``add_q``)."""
+    suffix = modint_name.removeprefix("modint")
+    return f"add{suffix}"
+
+
+def _sub_name(modint_name: str) -> str:
+    """Additive-group ``-`` op for a ModInt type (``modint_q`` -> ``sub_q``)."""
+    suffix = modint_name.removeprefix("modint")
+    return f"sub{suffix}"
+
+
 def _slice_op_name(src_name: str, dst_name: str) -> str:
     """Name for an abstract slice op from ``src_name`` to ``dst_name``."""
     return f"slice_{src_name}_to_{dst_name}"
@@ -795,3 +872,13 @@ def xor_name_for(ec_type: ec_ast.EcType) -> str:
 def zero_name_for(ec_type: ec_ast.EcType) -> str:
     """Exposed for the expression translator to find the all-zero op name."""
     return _zero_name(ec_type.text)
+
+
+def add_name_for(ec_type: ec_ast.EcType) -> str:
+    """Exposed for the expression translator: ModInt additive ``+`` op."""
+    return _add_name(ec_type.text)
+
+
+def sub_name_for(ec_type: ec_ast.EcType) -> str:
+    """Exposed for the expression translator: ModInt additive ``-`` op."""
+    return _sub_name(ec_type.text)

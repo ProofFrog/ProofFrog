@@ -62,6 +62,9 @@ TRANSFORM_BUCKET: dict[str, Bucket] = {
     "Normalize Commutative Chains": Bucket.CANNED,
     # Parametric (Bucket 1b): canned template with slots from the diff.
     "Uniform XOR Simplification": Bucket.CANNED,
+    # Additive-group analogue of Uniform XOR: ``u +/- m -> u`` over
+    # ModInt<q>. Synthesizer emits an ``rnd`` bijection over add/sub.
+    "Uniform ModInt Simplification": Bucket.CANNED,
     # Parametric synthesizer in ``parametric_tactics`` emits a
     # ``transitivity`` + ``rndsem`` + ``rnd`` tactic that uses the per-
     # clone distribution-split axiom plus slice/concat round-trip axioms
@@ -69,7 +72,6 @@ TRANSFORM_BUCKET: dict[str, Bucket] = {
     "Merge Uniform Samples": Bucket.CANNED,
     "Split Uniform Samples": Bucket.CANNED,
     # --- Bucket 2: interactive/cached ---
-    "Uniform ModInt Simplification": Bucket.INTERACTIVE,
     "Uniform GroupElem Simplification": Bucket.INTERACTIVE,
     "Simplifying Splices": Bucket.INTERACTIVE,
     "Merge Product Samples": Bucket.INTERACTIVE,
@@ -135,6 +137,7 @@ PARAMETRIC_TACTIC: dict[
     Callable[..., list[str] | None],
 ] = {
     "Uniform XOR Simplification": parametric_tactics.uniform_xor_tactic,
+    "Uniform ModInt Simplification": parametric_tactics.uniform_modint_tactic,
     "Inline Single-Use Variables": (
         parametric_tactics.inline_single_use_variables_tactic
     ),

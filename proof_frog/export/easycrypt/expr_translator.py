@@ -86,6 +86,12 @@ class ExpressionTranslator:
                 left = self.translate(expr.left_expression)
                 right = self.translate(expr.right_expression)
                 return f"{xor} {_paren(left)} {_paren(right)}"
+            if isinstance(lhs_type, frog_ast.ModIntType):
+                ec_type = self._types.translate_type(lhs_type)
+                add = tc.add_name_for(ec_type)
+                left = self.translate(expr.left_expression)
+                right = self.translate(expr.right_expression)
+                return f"{add} {_paren(left)} {_paren(right)}"
             # Integer (or other arithmetic) addition: defer to plain EC.
             return self._translate_arith(expr)
         if expr.operator == frog_ast.BinaryOperators.OR:
@@ -98,8 +104,16 @@ class ExpressionTranslator:
             ):
                 return self._translate_concat(expr, lhs_type, rhs_type)
             return self._translate_arith(expr)
+        if expr.operator == frog_ast.BinaryOperators.SUBTRACT:
+            lhs_type = self._types.resolve(self._type_of(expr.left_expression))
+            if isinstance(lhs_type, frog_ast.ModIntType):
+                ec_type = self._types.translate_type(lhs_type)
+                sub = tc.sub_name_for(ec_type)
+                left = self.translate(expr.left_expression)
+                right = self.translate(expr.right_expression)
+                return f"{sub} {_paren(left)} {_paren(right)}"
+            return self._translate_arith(expr)
         if expr.operator in (
-            frog_ast.BinaryOperators.SUBTRACT,
             frog_ast.BinaryOperators.MULTIPLY,
             frog_ast.BinaryOperators.DIVIDE,
         ):

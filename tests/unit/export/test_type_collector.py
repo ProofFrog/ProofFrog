@@ -101,3 +101,69 @@ def test_resolve_qualified_tuple_ciphertext() -> None:
     fa = frog_ast.FieldAccess(frog_ast.Variable("CE"), "ciphertext")
     ec = tc.translate_type(fa)
     assert ec.text == "CiphertextSpace1 * CiphertextSpace2"
+
+
+def test_translate_int_type() -> None:
+    """IntType maps to EC's built-in ``int``."""
+    tc = TypeCollector()
+    ec = tc.translate_type(frog_ast.IntType())
+    assert ec.text == "int"
+
+
+def test_translate_modint_type_name() -> None:
+    """ModInt<q> registers as an abstract ``modint_q`` type."""
+    tc = TypeCollector()
+    ec = tc.translate_type(frog_ast.ModIntType(frog_ast.Variable("q")))
+    assert ec.text == "modint_q"
+
+
+def test_modint_distr_for() -> None:
+    """A registered ModInt type yields a ``dmodint_q`` distribution."""
+    tc = TypeCollector()
+    ec = tc.translate_type(frog_ast.ModIntType(frog_ast.Variable("q")))
+    assert tc.distr_for(ec) == "dmodint_q"
+
+
+def test_modint_emits_group_foundation() -> None:
+    """ModInt emission carries a uniform distribution and an additive group
+    (add/sub ops + round-trip + commutativity axioms)."""
+    tc = TypeCollector()
+    tc.translate_type(frog_ast.ModIntType(frog_ast.Variable("q")))
+    names = {getattr(d, "name", None) for d in tc.emit()}
+    for expected in (
+        "modint_q",
+        "dmodint_q",
+        "dmodint_q_ll",
+        "dmodint_q_fu",
+        "dmodint_q_full",
+        "add_q",
+        "sub_q",
+        "add_q_sub",
+        "sub_q_add",
+        "add_q_comm",
+    ):
+        assert expected in names, f"missing {expected}"
+
+
+def test_modint_name_canonicalizes_modulus() -> None:
+    """Arithmetically-equivalent moduli collapse to one EC type name."""
+    tc = TypeCollector()
+    a = tc.translate_type(
+        frog_ast.ModIntType(
+            frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.MULTIPLY,
+                frog_ast.Integer(2),
+                frog_ast.Variable("q"),
+            )
+        )
+    )
+    b = tc.translate_type(
+        frog_ast.ModIntType(
+            frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.MULTIPLY,
+                frog_ast.Variable("q"),
+                frog_ast.Integer(2),
+            )
+        )
+    )
+    assert a.text == b.text

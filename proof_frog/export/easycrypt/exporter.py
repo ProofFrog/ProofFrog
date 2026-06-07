@@ -1600,6 +1600,17 @@ def export_proof_file(proof_path: str) -> str:
     # synthesized). The theory + section foundation is emitted only for
     # these, so unaffected proofs are untouched.
     stateless_module_requests: set[tuple[str, str]] = set()
+    # (declared module var, method) pairs for which a pure-local
+    # tuple-congruence micro was synthesized in some hop's chain. The exporter
+    # emits one ``<M>_<m>_eq`` congruence lemma per distinct pair, in section
+    # scope before the chain decls that ``call`` them. Empty when no
+    # tuple-congruence micro fired, so unaffected proofs are untouched.
+    congruence_method_requests: set[tuple[str, str]] = set()
+    # (declared module var, EC method) pairs for which a dead-abstract-call-drop
+    # micro was synthesized. The exporter emits one ``<M>_<m>_pres`` glob-
+    # preservation axiom per pair in section scope. Empty for proofs with no
+    # such drop, so they are untouched.
+    pres_method_requests: set[tuple[str, str]] = set()
     # Per-hop precondition/postcondition overrides emitted by the chain
     # when its artifacts use strengthened specs (``={glob E1, ...}``) in
     # multi-module proofs. The outer ``hop_<i>`` lemma must use the same
@@ -1905,6 +1916,8 @@ def export_proof_file(proof_path: str) -> str:
         chain_extra_decls.extend(info.extra_decls)
         requested_cache_keys.extend(info.requested_keys)
         stateless_module_requests.update(info.stateless_modules)
+        congruence_method_requests.update(info.congruence_methods)
+        pres_method_requests.update(info.pres_methods)
         if info.pre_override is not None or info.post_override is not None:
             chain_spec_overrides[_i] = (
                 info.pre_override or resolver.precondition_for(step_a),
@@ -2751,6 +2764,17 @@ def export_proof_file(proof_path: str) -> str:
     # reference them via ``apply hop_<i>_chain``.
     if chain_extra_decls:
         proof_decls.append(_section_header("Per-transform canonicalization chain"))
+        # Per-method congruence lemmas for pure-local tuple-congruence micros,
+        # emitted once (deduped) before the chain decls that ``call`` them.
+        if congruence_method_requests:
+            # pylint: disable=import-outside-toplevel
+            from .chain_emitter import congruence_lemma_block
+
+            proof_decls.append(
+                "(* Per-method congruence lemmas (pure-local tuple inlining) *)"
+            )
+            for mod, meth in sorted(congruence_method_requests):
+                proof_decls.append(congruence_lemma_block(mod, meth))
         proof_decls.extend(chain_extra_decls)
     proof_decls.append(_section_header("Per-hop equivalence lemmas"))
     proof_decls.extend(lemmas)
@@ -2807,6 +2831,16 @@ def export_proof_file(proof_path: str) -> str:
         det_axiom_decls += [
             _section_header("Statelessness specs"),
             *stateless_axioms,
+        ]
+    # Glob-preservation specs for dead-abstract-call-drop micros (one
+    # ``<M>_<m>_pres`` per pruned scheme method).
+    if pres_method_requests:
+        det_axiom_decls += [
+            _section_header("Glob-preservation specs (dead-call drop)"),
+            *(
+                mt.ModuleTranslator.pres_axiom(mod, meth)
+                for mod, meth in sorted(pres_method_requests)
+            ),
         ]
     if declare_modules and live_state_modules:
         # Multi-oracle live-state coupling (M5 blocker A): the ``declare module

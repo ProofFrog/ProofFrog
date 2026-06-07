@@ -58,6 +58,17 @@ KEMPRF_INDCPA_PROOF = REPO_ROOT / "examples" / "Proofs" / "KEM" / "KEMPRF_INDCPA
 # an unconditional primitive-typed primary, (b) single-oracle intermediate-game
 # body emission, (c) the reversed-direction ModInt rnd bijection.
 MODOTP_INDOT_PROOF = REPO_ROOT / "examples" / "Proofs" / "SymEnc" / "ModOTP_INDOT.proof"
+# GeneralDoubleSymEnc_INDOT$: Key = [S.Key, T.Key], so canonicalization
+# eliminates a local ``k <- (key1, key2)`` (built from two prior abstract
+# keygen results) and projects ``k.`1``/``k.`2`` into abstract ``S.enc``/
+# ``T.enc``. Two blockers close via two synthesizers over TWO declared modules:
+# hop_0's pure-local tuple via the per-method tuple-congruence synthesizer, and
+# hop_2's ``Topological Sorting`` (which prunes dead abstract ``S.keygen``/
+# ``S.enc`` calls) via the dead-abstract-call-drop synthesizer + ``<M>_<m>_pres``
+# glob-preservation axioms. Admit-free + EasyCrypt-accepted.
+GENERAL_DOUBLE_SYMENC_PROOF = (
+    REPO_ROOT / "examples" / "Proofs" / "SymEnc" / "GeneralDoubleSymEnc_INDOT$.proof"
+)
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
 
@@ -1154,6 +1165,98 @@ def test_export_2_13_typechecks_in_easycrypt(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, (
         f"EasyCrypt rejected the 2_13 export.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pure-local tuple-congruence synthesizer (multi-module ``Inline Local Tuple
+# Literal``: ``k <- (key1, key2)`` projected into abstract ``S.enc``/``T.enc``).
+# ---------------------------------------------------------------------------
+
+
+def test_export_general_double_symenc_synthesizes_tuple_congruence() -> None:
+    """``GeneralDoubleSymEnc_INDOT$`` hop_0 eliminates a pure-local
+    ``k <- (key1, key2)`` over two declared modules and projects ``k.`1``/
+    ``k.`2`` into abstract ``S.enc``/``T.enc``. The tuple-congruence
+    synthesizer must emit one ``<M>_<m>_eq`` congruence lemma per abstract
+    method and close the micro name-independently (``call <M>_<m>_eq`` peeling
+    + ``wp`` + ``skip => /#``) as ``synth-param`` -- not the whole-hop admit it
+    fell to before (the single-module ``Ideal`` route does not cover two
+    declared modules).
+    """
+    output = exporter.export_proof_file(str(GENERAL_DOUBLE_SYMENC_PROOF))
+    # One congruence lemma per abstract method used in the hop.
+    assert "(* Per-method congruence lemmas (pure-local tuple inlining) *)" in output
+    for name in ("S_keygen_eq", "T_keygen_eq", "S_enc_eq", "T_enc_eq"):
+        assert f"lemma {name} :" in output, f"missing congruence lemma {name}"
+        assert f"call {name}." in output, f"congruence lemma {name} never applied"
+    # The tuple micro now resolves via synth-param (reverse-order congruence
+    # peeling + residual smt), not the whole-hop unguided admit.
+    assert "skip => /#." in output
+    assert "culprits: Inline Local Tuple Literal" not in output
+    # The whole hop_0 chain renders (its tuple micro no longer sinks it).
+    assert "per-transform chain unrenderable" not in output
+    # Both blockers close: the proof is admit-free end to end.
+    assert "admit." not in output
+
+
+def test_export_general_double_symenc_drops_dead_abstract_calls() -> None:
+    """``GeneralDoubleSymEnc_INDOT$`` hop_2 is a ``Topological Sorting`` that
+    prunes a reduction's dead ``S.keygen(); S.enc(...)`` calls (the challenger
+    is ``Random`` so their results feed nothing). Dropping an abstract call
+    one-sided is unsound for a stateful module, so the dead-abstract-call-drop
+    synthesizer emits ``<M>_<m>_pres`` glob-preservation axioms (the
+    stateless-scheme assumption ProofFrog's pruning relies on) and drops each
+    call via ``call{1} (<m>_pres g)`` -- resolving the micro as synth-param.
+    """
+    output = exporter.export_proof_file(str(GENERAL_DOUBLE_SYMENC_PROOF))
+    for axiom in ("S_keygen_pres", "S_enc_pres"):
+        assert f"declare axiom {axiom} " in output, f"missing pres axiom {axiom}"
+        assert f"call{{1}} ({axiom} g_S)." in output, f"{axiom} never applied"
+    # The Topological-Sorting prune no longer collapses the hop to admit.
+    assert "culprits: Topological Sorting" not in output
+
+
+def test_congruence_lemmas_are_gated() -> None:
+    """Proofs with no pure-local tuple-congruence micro must not get the
+    per-method congruence lemmas (byte-identical to before for unaffected
+    proofs) and must still close.
+    """
+    for proof in (OTP_PROOF, PRG_5_8_A_PROOF, CES_PROOF):
+        output = exporter.export_proof_file(str(proof))
+        assert (
+            "(* Per-method congruence lemmas (pure-local tuple inlining) *)"
+            not in output
+        ), f"{proof.name} got congruence lemmas"
+        assert "_pres " not in output, f"{proof.name} got a glob-preservation axiom"
+        assert "admit." not in output, f"{proof.name} regressed to an admit"
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_export_general_double_symenc_typechecks_in_easycrypt(tmp_path: Path) -> None:
+    """End-to-end: the ``GeneralDoubleSymEnc_INDOT$`` export is admit-free and
+    type-checks in EasyCrypt (EXIT 0). hop_0's tuple-congruence micro and hop_2's
+    dead-abstract-call drop both close, so the synthesized proofs are real, not
+    merely 0-error text -- this is the first clean proof produced by the
+    tuple-congruence + dead-call-drop synthesizers."""
+    output = exporter.export_proof_file(str(GENERAL_DOUBLE_SYMENC_PROOF))
+    assert "admit." not in output
+    ec_file = tmp_path / "GeneralDoubleSymEnc.ec"
+    ec_file.write_text(output)
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the GeneralDoubleSymEnc export.\n"
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )

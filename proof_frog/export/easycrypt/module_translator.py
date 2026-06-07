@@ -272,6 +272,26 @@ class ModuleTranslator:
         )
         return ec_ast.Axiom(f"{module_name}_{m}_sem", formula, declare=True)
 
+    @staticmethod
+    def pres_axiom(module_name: str, method: str) -> ec_ast.Axiom:
+        """Emit ``declare axiom <module>_<m>_pres`` (glob-preserving + total).
+
+        Asserts that ``<module>.<m>`` leaves ``glob <module>`` unchanged with
+        probability 1 (it is stateless and total) -- the weaker, result-agnostic
+        sibling of :meth:`deterministic_axiom`. This is what lets EC drop a
+        *dead* abstract scheme call one-sided (``call{i} (<m>_pres g)``): the
+        call has no observable effect, exactly the assumption ProofFrog's
+        ``Topological Sorting`` makes when it prunes a call the return does not
+        depend on. ``arg`` is left unconstrained, so one axiom covers any arity.
+        """
+        return ec_ast.Axiom(
+            f"{module_name}_{method}_pres",
+            f"(g : (glob {module_name})) : "
+            f"phoare[ {module_name}.{method} : "
+            f"(glob {module_name}) = g ==> (glob {module_name}) = g ] = 1%r",
+            declare=True,
+        )
+
     def translate_scheme(
         self,
         scheme: frog_ast.Scheme,

@@ -2,7 +2,7 @@
   "name": "prooffrog",
   "displayName": "ProofFrog",
   "description": "Language support for ProofFrog's FrogLang cryptographic proof DSL",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "ProofFrog",
   "license": "MIT",
   "icon": "prooffrog.png",

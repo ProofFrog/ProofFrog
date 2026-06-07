@@ -69,6 +69,24 @@ MODOTP_INDOT_PROOF = REPO_ROOT / "examples" / "Proofs" / "SymEnc" / "ModOTP_INDO
 GENERAL_DOUBLE_SYMENC_PROOF = (
     REPO_ROOT / "examples" / "Proofs" / "SymEnc" / "GeneralDoubleSymEnc_INDOT$.proof"
 )
+# INDOT$_implies_DoubleSymEnc_INDOT$: the SINGLE-module analogue of
+# GeneralDoubleSymEnc. ``Scheme DoubleSymEnc(SymEnc s)`` (lowercase module-typed
+# param) double-encrypts with ONE scheme ``s`` under two independent keys, so
+# ``Key = [s.Key, s.Key]`` and every abstract call is on the same module. Two
+# things had to land: (1) structural -- uppercase the scheme's own param
+# (``s`` -> ``S``) for EC, apply the functor to the instance (``DoubleSymEnc(E)``
+# not ``DoubleSymEnc(S)``), and resolve ``s.Key`` locals to the inner carrier;
+# (2) tactics -- hop_0's tuple ``Inline Local Tuple Literal`` and the reduction
+# side's ``Inline Single-Use Variables`` both reorder/relabel two SAME-module
+# abstract calls, which a plain ``swap`` cannot do (shared ``glob``). They route
+# through the single-module ``Ideal`` stateless route with a data-aware swap.
+DOUBLE_SYMENC_PROOF = (
+    REPO_ROOT
+    / "examples"
+    / "Proofs"
+    / "SymEnc"
+    / "INDOT$_implies_DoubleSymEnc_INDOT$.proof"
+)
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
 
@@ -1257,6 +1275,88 @@ def test_export_general_double_symenc_typechecks_in_easycrypt(tmp_path: Path) ->
     )
     assert result.returncode == 0, (
         f"EasyCrypt rejected the GeneralDoubleSymEnc export.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Single-module DoubleSymEnc: lowercase scheme module-param normalization +
+# same-module abstract-call reorder/relabel via the single-module Ideal route.
+# ---------------------------------------------------------------------------
+
+
+def test_export_double_symenc_normalizes_lowercase_scheme_param() -> None:
+    """``Scheme DoubleSymEnc(SymEnc s)`` has a lowercase module-typed param,
+    which is an invalid EC functor-param identifier. The exporter must
+    uppercase it (``s`` -> ``S``) in the functor signature AND its body, apply
+    the functor to the passed *instance* (``DoubleSymEnc(E)``), resolve the
+    body's ``s.Key`` locals to the inner carrier (``KeySpace``, not the
+    scheme's own pair ``KeySpace * KeySpace``), and keep ``S`` out of the
+    adversary footprint (only the declared ``E`` belongs there).
+    """
+    output = exporter.export_proof_file(str(DOUBLE_SYMENC_PROOF))
+    # Functor param + body uppercased.
+    assert "module DoubleSymEnc (S : E_c.Scheme)" in output
+    assert "key1 <@ S.keygen();" in output
+    # The functor is applied to the instance E, never to the bare param S.
+    assert "DoubleSymEnc(E)" in output
+    assert "DoubleSymEnc(S)" not in output
+    assert "DoubleSymEnc(s)" not in output
+    # ``s.Key`` local resolves to the inner key, not the scheme's pair Key.
+    assert "var key1 : KeySpace;" in output
+    assert "var key1 : KeySpace * KeySpace;" not in output
+    # Footprint names the declared instance, not the scheme's own param.
+    assert "{-S," not in output and "{-S}" not in output
+
+
+def test_export_double_symenc_routes_same_module_reorders_through_ideal() -> None:
+    """Every abstract call in the single-module DoubleSymEnc is on the same
+    module ``E``, so the tuple inline (hop_0 left) and the reduction-side
+    ``Inline Single-Use Variables`` (hop_0 right) each transpose/relabel two
+    ``E`` calls -- a plain ``swap`` is unsound (the calls share ``glob E``).
+    Both must route through the single-module ``Ideal`` stateless route with a
+    *data-aware* swap, never emit a bare same-module ``swap`` on ``E``, and
+    close admit-free.
+    """
+    output = exporter.export_proof_file(str(DOUBLE_SYMENC_PROOF))
+    # The reduction-side ISUV reorder routes through Ideal (transitivity) with
+    # the data-aware swap that accounts for the keygen-result relabel...
+    assert "transitivity Step_0R_state_1(E_c.Ideal).ctxt" in output
+    assert "proc; swap{1} 3 -2; sim" in output
+    # ...and never emits the unsound signature-only same-module swap on E.
+    assert "swap{1} 3 -1" not in output
+    # The tuple micro's Ideal leg recovers the relabel too (swap before sim).
+    assert "proc; swap{1} 2 -1; sim" in output
+    # Statelessness foundation is in scope (the route depends on it).
+    assert "declare axiom E_keygen_sem" in output
+    assert "admit." not in output
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_export_double_symenc_typechecks_in_easycrypt(tmp_path: Path) -> None:
+    """End-to-end: the single-module ``DoubleSymEnc`` export is admit-free and
+    EasyCrypt-accepted (EXIT 0). Guards the full stack -- lowercase-param
+    normalization, ``s.Key`` carrier resolution, instance-applied functor, and
+    the same-module reorder/relabel routed through the ``Ideal`` route -- since
+    a 0-admit file EC still rejects is Blocked, not clean.
+    """
+    output = exporter.export_proof_file(str(DOUBLE_SYMENC_PROOF))
+    assert "admit." not in output
+    ec_file = tmp_path / "DoubleSymEnc.ec"
+    ec_file.write_text(output)
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the DoubleSymEnc export.\n"
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )

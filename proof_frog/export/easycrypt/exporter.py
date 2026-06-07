@@ -539,6 +539,51 @@ def _normalize_ec_module_names(
         helper.play_against = prenamer.transform(helper.play_against)
         helper.methods = [prenamer.transform(m) for m in helper.methods]
 
+    # --- Module-typed concrete-scheme parameters (local to each scheme) ---
+    # A concrete scheme like ``Scheme DoubleSymEnc(SymEnc s)`` emits its own
+    # parameter verbatim as an EC functor param (``module DoubleSymEnc (s :
+    # ...)``) and references it in the body (``s.keygen()``). EC functor
+    # params must start uppercase, so rename ``s -> S`` (mirroring the
+    # reduction-parameter branch above). The argument names threaded into the
+    # functor *application* are instance let-names, renamed separately, so the
+    # scheme's own param rename stays local to its definition + body.
+    for scheme in schemes_by_name.values():
+        _normalize_scheme_module_params(scheme, module_type_names)
+
+
+def _normalize_scheme_module_params(
+    scheme: frog_ast.Scheme, module_type_names: set[str]
+) -> None:
+    """Uppercase a concrete scheme's lowercase module-typed parameters.
+
+    Renames each parameter whose type names a primitive/scheme and whose own
+    name starts lowercase (so it would emit an invalid EC functor-param
+    identifier) to its uppercase-initial form, propagating the rename through
+    the scheme's fields, requirements, and method bodies via ``_NameRenamer``.
+    Idempotent for the all-uppercase corpus (a no-op when no param matches).
+    """
+    param_rename: dict[str, str] = {}
+    local_names = {p.name for p in scheme.parameters}
+    for param in scheme.parameters:
+        if not (isinstance(param.type, frog_ast.Variable) and param.name[:1].islower()):
+            continue
+        if param.type.name not in module_type_names:
+            continue
+        new_name = _ec_module_ident(param.name)
+        if new_name == param.name or new_name in local_names:
+            continue
+        param_rename[param.name] = new_name
+        local_names.add(new_name)
+    if not param_rename:
+        return
+    renamer = _NameRenamer(param_rename)
+    for param in scheme.parameters:
+        if param.name in param_rename:
+            param.name = param_rename[param.name]
+    scheme.fields = [renamer.transform(f) for f in scheme.fields]
+    scheme.requirements = [renamer.transform(r) for r in scheme.requirements]
+    scheme.methods = [renamer.transform(m) for m in scheme.methods]
+
 
 # pylint: disable=too-many-locals,too-many-statements,too-many-branches
 def export_proof_file(proof_path: str) -> str:
@@ -867,6 +912,32 @@ def export_proof_file(proof_path: str) -> str:
         if fname in primary_int_names:
             continue
         top_aliases[fname] = ftype
+    # Qualified aliases for a concrete scheme's module-typed parameters.
+    # ``Scheme DoubleSymEnc(SymEnc S)`` refers to its sub-scheme's carrier
+    # types as ``S.Key``/``S.Message``/... in local var decls (``s.Key key1 =
+    # s.KeyGen();``). Those must resolve to the *passed instance's* carriers
+    # (``E.Key``, ...), not the scheme's own same-named field -- whose bare
+    # alias (``Key`` -> the pair ``[s.Key, s.Key]``) would otherwise capture
+    # ``S.Key`` via the unqualified fallback and mistype the local. Map each
+    # ``<param>.<field>`` to the same carrier as the applied instance's
+    # ``<arg>.<field>``.
+    module_type_names = set(primitives_by_name) | set(schemes_by_name)
+    primary_let_value = next(
+        let.value for let in proof.lets if let.name == primary.let_name
+    )
+    if scheme is not None and isinstance(primary_let_value, frog_ast.FuncCall):
+        for sp, arg in zip(scheme.parameters, primary_let_value.args):
+            if not (
+                isinstance(sp.type, frog_ast.Variable)
+                and sp.type.name in module_type_names
+                and isinstance(arg, frog_ast.Variable)
+            ):
+                continue
+            arg_prefix = f"{arg.name}."
+            for key in list(top_aliases):
+                if key.startswith(arg_prefix):
+                    field = key[len(arg_prefix) :]
+                    top_aliases[f"{sp.name}.{field}"] = top_aliases[key]
     top_types = tc.TypeCollector(
         aliases=top_aliases, known_abstract_types=known_abstract_types
     )
@@ -1273,10 +1344,15 @@ def export_proof_file(proof_path: str) -> str:
     primary_let = next(let for let in proof.lets if let.name == primary.let_name)
     scheme_module_params: list[ec_ast.ModuleParam] = []
     scheme_module_param_types: dict[str, str] = {}
+    scheme_applied_args: list[str] = []
     ec_scheme: ec_ast.Module | None = None
     if not primitive_only:
         assert scheme is not None
-        scheme_module_params, scheme_module_param_types, _ = _scheme_functor_params(
+        (
+            scheme_module_params,
+            scheme_module_param_types,
+            scheme_applied_args,
+        ) = _scheme_functor_params(
             scheme, primary_let.value, instances_by_let_name, scheme_type_name
         )
 
@@ -1369,7 +1445,12 @@ def export_proof_file(proof_path: str) -> str:
             instance_module_expr[inst.let_name] = inst.let_name
         elif inst is primary and scheme_module_params:
             assert scheme is not None
-            applied_args = ", ".join(p.name for p in scheme_module_params)
+            # Apply the functor to the *instance* args (``DoubleSymEnc(E)``),
+            # not the scheme's own param names (``DoubleSymEnc(S)``). These
+            # coincide for schemes whose params are named after their
+            # instances (CES's ``E1``/``E2``) but differ when a scheme uses a
+            # local param name (``DoubleSymEnc(SymEnc s)`` applied to ``E``).
+            applied_args = ", ".join(scheme_applied_args)
             instance_module_expr[inst.let_name] = f"{scheme.name}({applied_args})"
         elif inst is primary:
             assert scheme is not None
@@ -1398,7 +1479,11 @@ def export_proof_file(proof_path: str) -> str:
     # the per-hop pr lemmas fail with ``module P can write A``.
     footprint_names: list[str] = []
     if scheme_module_params:
-        footprint_names.extend(p.name for p in scheme_module_params)
+        # Name the abstract *instances* the functor depends on (``-E``), not
+        # the scheme's own param names (``-S``) -- the latter are not declared
+        # modules. These coincide when params are named after their instances
+        # (CES) but differ for a local param name (``DoubleSymEnc(SymEnc s)``).
+        footprint_names.extend(scheme_applied_args)
     elif not primitive_only:
         assert scheme is not None
         footprint_names.append(scheme.name)

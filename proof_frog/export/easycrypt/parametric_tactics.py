@@ -204,6 +204,156 @@ def uniform_xor_tactic(
     return tactic
 
 
+def _modint_suffix(t: frog_ast.Type) -> str | None:
+    """EC op suffix for a ModInt type (``ModInt<q>`` -> ``q``).
+
+    Mirrors ``type_collector._modint_name`` so emitted tactics reference
+    the same ``add_<suffix>`` / ``sub_<suffix>`` / ``dmodint_<suffix>``
+    symbols as the preamble.
+    """
+    if not isinstance(t, frog_ast.ModIntType):
+        return None
+    sanitized = re.sub(r"\W+", "_", str(t.modulus)).strip("_")
+    return sanitized or None
+
+
+def uniform_modint_tactic(  # pylint: disable=too-many-locals,too-many-branches,too-many-return-statements,too-many-statements
+    app: TransformApplication,
+    _types: TypeCollector | None = None,
+    **_kwargs: object,  # accept the unified caller's extra kwargs
+) -> list[str] | None:
+    """Synthesize the EC tactic for ``Uniform ModInt Simplification``.
+
+    The transform rewrites a single occurrence ``u + m`` / ``m + u`` /
+    ``u - m`` (where ``u`` is a single-use uniform ``ModInt<q>`` sample)
+    to ``u``: adding/subtracting a fixed group element is a measure-
+    preserving bijection on a uniform group sample. Strategy mirrors
+    :func:`uniform_xor_tactic` but uses the additive group ops
+    ``add_<q>`` / ``sub_<q>`` and the group axioms from the preamble.
+
+    Emits an ``rnd`` with the bijection oriented for the matched operator,
+    closed by ``smt`` over the round-trip + commutativity axioms. Returns
+    ``None`` (-> ``admit.``) when the diff isn't this exact single-operand
+    additive drop, the type isn't ModInt, or the offset isn't renderable.
+    The ``m - u`` orientation is not handled (its inverse needs an axiom
+    the preamble doesn't carry) and falls back to ``admit.``.
+    """
+    if len(app.game_before.methods) != 1 or len(app.game_after.methods) != 1:
+        return None
+
+    # pylint: disable=import-outside-toplevel
+    import copy as _copy
+
+    from .canonical_form import _normalize_for_ec as _norm_ec
+
+    _ext = _kwargs.get("external_module_types")
+    _mrt = _kwargs.get("method_return_types")
+    if isinstance(_ext, dict) and isinstance(_mrt, dict):
+        before_block = (
+            _norm_ec(_copy.deepcopy(app.game_before), _ext, _mrt).methods[0].block
+        )
+        after_block = (
+            _norm_ec(_copy.deepcopy(app.game_after), _ext, _mrt).methods[0].block
+        )
+    else:
+        before_block = app.game_before.methods[0].block
+        after_block = app.game_after.methods[0].block
+
+    if len(before_block.statements) != len(after_block.statements):
+        return None
+
+    changed_pair: tuple[frog_ast.Statement, frog_ast.Statement] | None = None
+    for b, a in zip(before_block.statements, after_block.statements):
+        if b != a:
+            if changed_pair is not None:
+                return None  # ambiguous — more than one statement changed
+            changed_pair = (b, a)
+    if changed_pair is None:
+        return None
+
+    b_stmt, a_stmt = changed_pair
+    before_expr = _expr_of(b_stmt)
+    after_expr = _expr_of(a_stmt)
+    if before_expr is None or after_expr is None:
+        return None
+
+    diff = _modint_dropped_operand(before_expr, after_expr)
+    if diff is None:
+        return None
+    uniform_var, dropped_expr, operator, uniform_is_left = diff
+
+    # The uniform variable was sampled earlier in the block — read its type.
+    sample_type: frog_ast.Type | None = None
+    for s in before_block.statements:
+        if isinstance(s, frog_ast.Sample) and isinstance(s.var, frog_ast.Variable):
+            if s.var.name == uniform_var:
+                sample_type = s.the_type
+                break
+    if sample_type is None:
+        return None
+
+    suffix = _modint_suffix(sample_type)
+    if suffix is None:
+        return None
+
+    offset_ec = _ec_expr(dropped_expr)
+    if offset_ec is None:
+        return None
+
+    add_op = f"add_{suffix}"
+    sub_op = f"sub_{suffix}"
+    distr = f"dmodint_{suffix}"
+    off = f"{offset_ec}{{2}}"
+    # Pick the rnd bijection. EC's ``rnd g f`` couples left-sample z1 and
+    # right-sample z2 with ``f`` mapping z1 -> z2 (the body value) and
+    # ``g`` its inverse. See the per-case derivation in the module docs.
+    if operator == frog_ast.BinaryOperators.ADD and uniform_is_left:
+        fwd, inv = f"fun z => {add_op} z {off}", f"fun z => {sub_op} z {off}"
+    elif operator == frog_ast.BinaryOperators.ADD:  # m + u
+        fwd, inv = f"fun z => {add_op} {off} z", f"fun z => {sub_op} z {off}"
+    elif operator == frog_ast.BinaryOperators.SUBTRACT and uniform_is_left:  # u - m
+        fwd, inv = f"fun z => {sub_op} z {off}", f"fun z => {add_op} z {off}"
+    else:  # m - u: inverse needs an axiom the preamble doesn't carry
+        return None
+
+    stmts_after = list(after_block.statements)
+    uniform_idx: int | None = None
+    for i, s in enumerate(stmts_after):
+        if (
+            isinstance(s, frog_ast.Sample)
+            and isinstance(s.var, frog_ast.Variable)
+            and s.var.name == uniform_var
+        ):
+            uniform_idx = i
+            break
+    if uniform_idx is None:
+        return None
+    tail_tactics: list[str] = []
+    for s in stmts_after[uniform_idx + 1 :]:
+        if isinstance(s, frog_ast.ReturnStatement):
+            tail_tactics.append("wp.")
+        elif isinstance(s, frog_ast.Assignment) and isinstance(
+            s.value, frog_ast.FuncCall
+        ):
+            tail_tactics.append("call (_: true).")
+        elif isinstance(s, frog_ast.Sample):
+            tail_tactics.append("rnd.")
+        elif isinstance(s, frog_ast.Assignment):
+            tail_tactics.append("wp.")
+        else:
+            return None
+    tactic = ["proc.", *reversed(tail_tactics)]
+    # EC's ``rnd f finv`` couples the left sample z1 so the left body
+    # value equals ``f z1`` (the forward/body-value map); ``finv`` is its
+    # inverse. ``_full`` discharges the support-membership side-goal.
+    tactic.append(f"rnd ({fwd}) ({inv}).")
+    tactic.append(
+        f"auto => />; progress; "
+        f"smt({add_op}_sub {sub_op}_add {add_op}_comm {distr}_fu {distr}_full)."
+    )
+    return tactic
+
+
 def inline_single_use_variables_tactic(
     app: TransformApplication,
     _types: TypeCollector | None = None,
@@ -2477,6 +2627,56 @@ def _expr_of(stmt: frog_ast.Statement) -> frog_ast.Expression | None:
         return stmt.expression
     if isinstance(stmt, frog_ast.Assignment):
         return stmt.value
+    return None
+
+
+def _modint_dropped_operand(
+    before: frog_ast.Expression, after: frog_ast.Expression
+) -> tuple[str, frog_ast.Expression, frog_ast.BinaryOperators, bool] | None:
+    """Return ``(uniform_var, offset_expr, operator, uniform_is_left)`` if a
+    ModInt additive simplification fires at this position.
+
+    ``before`` is ``BinaryOperation(ADD|SUBTRACT, ...)`` with the uniform
+    variable as one operand and ``after`` is just that variable; or the
+    same shape nested inside a matching containing expression. Else
+    ``None``. ``uniform_is_left`` records whether the uniform sample was
+    the left operand (so the synthesizer can pick the correct ``rnd``
+    bijection orientation).
+    """
+    if isinstance(after, frog_ast.Variable):
+        if not isinstance(before, frog_ast.BinaryOperation):
+            return None
+        if before.operator not in (
+            frog_ast.BinaryOperators.ADD,
+            frog_ast.BinaryOperators.SUBTRACT,
+        ):
+            return None
+        if (
+            isinstance(before.left_expression, frog_ast.Variable)
+            and before.left_expression.name == after.name
+        ):
+            return (after.name, before.right_expression, before.operator, True)
+        if (
+            isinstance(before.right_expression, frog_ast.Variable)
+            and before.right_expression.name == after.name
+        ):
+            return (after.name, before.left_expression, before.operator, False)
+        return None
+    if (
+        isinstance(before, frog_ast.BinaryOperation)
+        and isinstance(after, frog_ast.BinaryOperation)
+        and before.operator == after.operator
+    ):
+        left_eq = before.left_expression == after.left_expression
+        right_eq = before.right_expression == after.right_expression
+        if left_eq and not right_eq:
+            return _modint_dropped_operand(
+                before.right_expression, after.right_expression
+            )
+        if right_eq and not left_eq:
+            return _modint_dropped_operand(
+                before.left_expression, after.left_expression
+            )
     return None
 
 

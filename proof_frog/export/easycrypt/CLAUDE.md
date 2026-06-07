@@ -38,6 +38,16 @@ Key modules:
   schemes whose calls are actually reordered. Single declared module only so
   far. Design + extensions:
   `extras/docs/plans/in-progress/2026-06-01-scheme-statelessness-foundation.md`.
+- **ModInt additive-group foundation** (in `type_collector` +
+  `expr_translator` + `parametric_tactics.uniform_modint_tactic`):
+  `ModInt<q>` translates to an abstract finite additive group
+  (`modint_q` + uniform full `dmodint_q` + `add_q`/`sub_q` ops +
+  round-trip/commutativity axioms). `+`/`-` on ModInt operands render to
+  `add_q`/`sub_q`, and `Uniform ModInt Simplification` (`u +/- m -> u`)
+  closes via an `rnd` bijection over add/sub — the additive analogue of
+  the bitstring `xor` foundation. The GroupElem multiplicative analogue
+  (`Uniform GroupElem Simplification`) is still INTERACTIVE; this is its
+  template. Verified end-to-end by `examples/joy/.../ModOTPSecure.proof`.
 - **Reorder swap synthesizers** (in `chain_emitter`): a micro lemma relates
   two *rendered* flat-state modules, which are normalized differently from
   the raw `app.game_before`/`app.game_after` (the engine stores a

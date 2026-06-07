@@ -10,6 +10,7 @@ extras
 proof_frog/claude_docs
 
 # EasyCrypt compilation artifacts (created next to .ec files on compile)
+.ec-tmp
 *.eco
 
 # VSCode extension

@@ -414,6 +414,17 @@ def emit_chain_for_hop(
                 return [_res_tag(SYNTH_PARAM), *synthesized]
         body = tactic_body(app.transform_name, app, types)
         if multi_module and bucket == Bucket.CANNED and body:
+            # A reorder that transposes two abstract calls of the *same* single
+            # declared module is not plain-``swap``-safe: the two calls share
+            # ``glob`` so EC rejects the swap. Detect it (the rendered call-
+            # callee subsequence changes) and fall through to an admit so the
+            # stateless ``Ideal`` route (``_try_stateless``) closes it instead;
+            # ``swap`` past a glob-independent sample keeps the canned path.
+            if _stateless_ok and _crosses_single_module_calls(left_state, right_state):
+                return [
+                    _res_tag(ADMIT_UNGUIDED),
+                    *_layer3_admit(app, bucket, reversed_dir),
+                ]
             # Compare hoisted forms, not raw FrogLang ASTs: the engine's
             # ``Inline Single-Use Variables`` produces a nested call
             # expression (single statement) that the EC hoister later
@@ -485,6 +496,39 @@ def emit_chain_for_hop(
     def _is_admit(tac: list[str]) -> bool:
         return bool(tac) and "admit-unguided" in tac[0]
 
+    def _crosses_single_module_calls(
+        left_state: frog_ast.Game | None, right_state: frog_ast.Game | None
+    ) -> bool:
+        """True if the rendered micro transposes two same-module abstract calls.
+
+        For the single-declared-module case, every call is to that module, so a
+        changed call-callee subsequence between the two rendered flat states
+        means a call/call transposition -- not plain-``swap``-safe.
+        """
+        if left_state is None or right_state is None:
+            return False
+        left_mod = _flat_state_module(
+            modules,
+            "_call_probe_left",
+            left_state,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        right_mod = _flat_state_module(
+            modules,
+            "_call_probe_right",
+            right_state,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        if not left_mod.procs or not right_mod.procs:
+            return False
+        return _ec_call_callees(left_mod.procs[0].body) != _ec_call_callees(
+            right_mod.procs[0].body
+        )
+
     def _try_stateless(
         app: TransformApplication,
         state_before: frog_ast.Game,
@@ -493,7 +537,7 @@ def emit_chain_for_hop(
         name_after: str,
         reversed_dir: bool,
     ) -> _StatelessSynth | None:
-        if not _stateless_ok or app.transform_name != "Inline Local Tuple Literal":
+        if not _stateless_ok:
             return None
         before_module = _flat_state_module(
             modules,
@@ -511,6 +555,18 @@ def emit_chain_for_hop(
             method_return_types,
             flat_params,
         )
+        # The tuple route always qualifies. Otherwise (e.g. ``Inline Single-Use
+        # Variables`` regrouping ``keygen``/``enc``) route through ``Ideal``
+        # only when the micro transposes two abstract calls of the single
+        # declared module -- a plain ``swap`` is unsound there (the two calls
+        # share ``glob``), so the canned path's swap would be EC-rejected.
+        if app.transform_name != "Inline Local Tuple Literal":
+            if not before_module.procs or not after_module.procs:
+                return None
+            if _ec_call_callees(before_module.procs[0].body) == _ec_call_callees(
+                after_module.procs[0].body
+            ):
+                return None
         return _synth_stateless_reorder(
             before_module,
             after_module,
@@ -2054,6 +2110,85 @@ def _ec_perm_swaps(
     return swaps
 
 
+def _stmt_tokens(stmt: ec_ast.EcStmt) -> list[str]:
+    """Identifier/number tokens in a statement's data content (sans callee)."""
+    return re.findall(r"[A-Za-z_][A-Za-z0-9_]*|\d+", _stmt_text(stmt))
+
+
+def _ec_call_callees(body: list[ec_ast.EcStmt]) -> list[str]:
+    """The ordered callee list of the abstract calls in ``body``."""
+    return [s.callee for s in _exec_stmts(body) if isinstance(s, ec_ast.Call)]
+
+
+def _ec_reorder_swaps(
+    before: list[ec_ast.EcStmt], after: list[ec_ast.EcStmt]
+) -> list[str] | None:
+    """``swap{1}`` tactics reordering ``before`` to *data-flow*-match ``after``.
+
+    Unlike :func:`_ec_perm_swaps` (which matches statements by callee signature
+    only), this is data-aware: it finds a permutation of ``before``'s exec
+    statements whose data-flow graph is isomorphic to ``after``'s, so it also
+    recovers a *relabel* of interchangeable same-callee call results that
+    signature matching cannot see (e.g. two ``E.keygen()`` whose results feed
+    swapped ``E.enc`` arguments). Two stateless same-distribution calls are
+    exchangeable, so the reordered ``before`` couples to ``after`` under
+    ``sim``. Returns side-``1`` ``swap{1} <pos> <delta>`` strings (no trailing
+    period), ``[]`` when already aligned, or ``None`` when no data-flow
+    isomorphism exists. Small straight-line bodies only (backtracking match).
+    """
+    b = _exec_stmts(before)
+    a = _exec_stmts(after)
+    n = len(a)
+    if len(b) != n:
+        return None
+    _varying = (ec_ast.Assign, ec_ast.Sample, ec_ast.Call)
+    aprod = {s.var: i for i, s in enumerate(a) if isinstance(s, _varying)}
+    bprod = {s.var: i for i, s in enumerate(b) if isinstance(s, _varying)}
+    perm = [-1] * n  # perm[i] = before-index matched to after-position i
+    used = [False] * n
+
+    def consistent(ai: int, bi: int) -> bool:
+        if _ec_sig(a[ai]) != _ec_sig(b[bi]):
+            return False
+        ta, tb = _stmt_tokens(a[ai]), _stmt_tokens(b[bi])
+        if len(ta) != len(tb):
+            return False
+        for x, y in zip(ta, tb):
+            xa, yb = aprod.get(x), bprod.get(y)
+            if (xa is None) != (yb is None):
+                return False  # produced var vs literal/param mismatch
+            if xa is None:
+                if x != y:
+                    return False  # literals/params must match exactly
+            elif perm[xa] != yb:
+                return False  # producers must already be matched to each other
+        return True
+
+    def backtrack(i: int) -> bool:
+        if i == n:
+            return True
+        for bi in range(n):
+            if used[bi] or not consistent(i, bi):
+                continue
+            perm[i], used[bi] = bi, True
+            if backtrack(i + 1):
+                return True
+            perm[i], used[bi] = -1, False
+        return False
+
+    if not backtrack(0):
+        return None
+    swaps: list[str] = []
+    cur = list(range(n))
+    for target in range(n):
+        src = cur.index(perm[target])
+        if src == target:
+            continue
+        swaps.append(f"swap{{1}} {src + 1} {target - src}")
+        cur.insert(target, cur.pop(src))
+    return swaps
+
+
 def _rendered_state_swaps(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     modules: mt.ModuleTranslator,
     left_state: frog_ast.Game | None,
@@ -2154,7 +2289,11 @@ def _synth_stateless_reorder(  # pylint: disable=too-many-arguments,too-many-pos
     if not any(isinstance(s, ec_ast.Call) for s in _exec_stmts(before_body)):
         return None
     m_body, did_inline = _ec_tuple_inline(before_body)
-    swaps = _ec_perm_swaps(m_body, after_body)
+    # Data-aware reorder: recovers both a callee-order permutation *and* a
+    # relabel of interchangeable same-callee call results (two ``E.keygen()``
+    # feeding swapped ``E.enc`` args), which signature-only matching misses and
+    # would leave ``sim`` facing an unprovable crossed-result post.
+    swaps = _ec_reorder_swaps(m_body, after_body)
     if swaps is None:
         return None
 

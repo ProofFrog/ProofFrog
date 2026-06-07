@@ -380,9 +380,14 @@ class ModuleTranslator:
         :func:`canonical_form.hoist_game_calls`) so nested module calls are
         already lifted to statements.
         """
+        # Only module-typed parameters become EC functor params; non-module
+        # parameters (e.g. ``Int q`` compile-time indices) are absent from
+        # ``param_module_types`` and dropped, so a single-oracle intermediate
+        # game like ``Hyb(Int q)`` emits as a parameterless module.
         module_params = [
             ec_ast.ModuleParam(name=p.name, module_type=param_module_types[p.name])
             for p in game.parameters
+            if p.name in param_module_types
         ]
         procs = [
             self._translate_method(method, param_primitive_types)

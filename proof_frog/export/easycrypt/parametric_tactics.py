@@ -315,6 +315,13 @@ def uniform_modint_tactic(  # pylint: disable=too-many-locals,too-many-branches,
         fwd, inv = f"fun z => {sub_op} z {off}", f"fun z => {add_op} z {off}"
     else:  # m - u: inverse needs an axiom the preamble doesn't carry
         return None
+    # The reversed right-side micro (``state_{k+1} ~ state_k``) relates the
+    # two flat states with the bijection oriented the opposite way: the
+    # dropped/added operand sits on the lemma's *right* side, so ``f`` and its
+    # inverse swap. Unlike XOR (self-inverse, so fwd == inv), the additive
+    # group's ``add``/``sub`` are distinct, making this orientation matter.
+    if bool(_kwargs.get("reversed_dir")):
+        fwd, inv = inv, fwd
 
     stmts_after = list(after_block.statements)
     uniform_idx: int | None = None

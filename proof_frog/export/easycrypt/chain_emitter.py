@@ -52,6 +52,17 @@ _REORDER_TRANSFORMS = frozenset(
     }
 )
 
+# Transforms that drop a local tuple and rewrite its projections to the
+# components. Their micro relates a tuple-bearing flat state to its
+# tuple-free successor; the stateless ``Ideal`` route's ``_ec_tuple_inline``
+# handles them name-independently (see ``_synth_stateless_reorder``).
+_TUPLE_INLINE_TRANSFORMS = frozenset(
+    {
+        "Inline Local Tuple Literal",
+        "Expand Tuples",
+    }
+)
+
 
 @dataclass
 class _MicroLemma:
@@ -411,6 +422,23 @@ def emit_chain_for_hop(
                 reversed_dir=reversed_dir,
             )
             if synthesized is not None:
+                # The ``Inline Single-Use Variables`` synthesizer emits a
+                # lockstep ``call (_: true)`` per call; its raw-AST callee
+                # guard is blind to a data-flow relabel of interchangeable
+                # same-module calls (the standardization reorder it bundles).
+                # When the rendered states need such a reorder, the lockstep
+                # coupling leaves ``={res}`` open, so fall back to an admit and
+                # let the dispatch route it through the stateless ``Ideal``
+                # reorder (``_try_stateless`` -> ``_synth_stateless_reorder``).
+                if (
+                    app.transform_name == "Inline Single-Use Variables"
+                    and _stateless_ok
+                    and _needs_data_aware_reorder(left_state, right_state)
+                ):
+                    return [
+                        _res_tag(ADMIT_UNGUIDED),
+                        *_layer3_admit(app, bucket, reversed_dir),
+                    ]
                 return [_res_tag(SYNTH_PARAM), *synthesized]
         body = tactic_body(app.transform_name, app, types)
         if multi_module and bucket == Bucket.CANNED and body:
@@ -529,6 +557,43 @@ def emit_chain_for_hop(
             right_mod.procs[0].body
         )
 
+    def _needs_data_aware_reorder(
+        left_state: frog_ast.Game | None, right_state: frog_ast.Game | None
+    ) -> bool:
+        """True if the rendered micro needs a *data-aware* call reorder/relabel.
+
+        A lockstep parametric/canned tactic (``call (_: true)`` / ``sp; wp;
+        sim``) couples the two sides' abstract calls position-by-position. When
+        the rendered before/after bodies share a callee subsequence but are a
+        data-flow *permutation* (e.g. two ``E.enc`` whose message args are
+        transposed, so the surviving result moves position), that lockstep
+        coupling cannot prove ``={res}`` -- the micro must route through the
+        stateless ``Ideal`` reorder instead. ``_ec_perm_swaps`` (callee-only)
+        is blind to this relabel; ``_ec_reorder_swaps`` (data-aware) catches it.
+        """
+        if left_state is None or right_state is None:
+            return False
+        left_mod = _flat_state_module(
+            modules,
+            "_reorder_probe_left",
+            left_state,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        right_mod = _flat_state_module(
+            modules,
+            "_reorder_probe_right",
+            right_state,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        if not left_mod.procs or not right_mod.procs:
+            return False
+        m_body, _ = _ec_tuple_inline(left_mod.procs[0].body)
+        return bool(_ec_reorder_swaps(m_body, right_mod.procs[0].body))
+
     def _try_stateless(
         app: TransformApplication,
         state_before: frog_ast.Game,
@@ -555,18 +620,25 @@ def emit_chain_for_hop(
             method_return_types,
             flat_params,
         )
-        # The tuple route always qualifies. Otherwise (e.g. ``Inline Single-Use
-        # Variables`` regrouping ``keygen``/``enc``) route through ``Ideal``
-        # only when the micro transposes two abstract calls of the single
-        # declared module -- a plain ``swap`` is unsound there (the two calls
-        # share ``glob``), so the canned path's swap would be EC-rejected.
-        if app.transform_name != "Inline Local Tuple Literal":
+        # The tuple-inline route always qualifies (the local tuple is dropped
+        # and its projections rewritten -- ``Inline Local Tuple Literal`` and
+        # its expansion sibling ``Expand Tuples``). Otherwise (e.g. ``Inline
+        # Single-Use Variables`` regrouping ``keygen``/``enc``) route through
+        # ``Ideal`` only when the micro reorders abstract calls of the single
+        # declared module -- a plain ``swap`` is unsound there (the calls share
+        # ``glob``), so the canned path's swap would be EC-rejected.
+        if app.transform_name not in _TUPLE_INLINE_TRANSFORMS:
             if not before_module.procs or not after_module.procs:
                 return None
             if _ec_call_callees(before_module.procs[0].body) == _ec_call_callees(
                 after_module.procs[0].body
             ):
-                return None
+                # Same callee subsequence: route to ``Ideal`` only when a
+                # *data-aware* reorder (a relabel of interchangeable same-callee
+                # results) is still needed; otherwise keep the canned path.
+                m_body, _ = _ec_tuple_inline(before_module.procs[0].body)
+                if not _ec_reorder_swaps(m_body, after_module.procs[0].body):
+                    return None
         return _synth_stateless_reorder(
             before_module,
             after_module,

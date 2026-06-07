@@ -87,6 +87,20 @@ DOUBLE_SYMENC_PROOF = (
     / "SymEnc"
     / "INDOT$_implies_DoubleSymEnc_INDOT$.proof"
 )
+# 2_15_Backward: the Foo (swap-two-ciphertexts) game implies INDOT, reduced by
+# extracting one ciphertext from the Foo pair. Single declared module ``E``.
+# Each interchangeability hop canonicalizes a reduction body that builds a local
+# pair ``c <- (Enc(KeyGen(), mL), Enc(KeyGen(), mR))`` and returns ``c[0]``: the
+# pair is eliminated by ``Expand Tuples`` and a later standardization reorder
+# (attributed to ``Inline Single-Use Variables``) transposes the two same-module
+# ``E.enc`` calls so the surviving result moves position. ``Expand Tuples`` (the
+# tuple-inline sibling) and the same-module enc reorder both route through the
+# single-module ``Ideal`` stateless path with a *data-aware* swap -- the lockstep
+# ``call (_: true)`` ISUV tactic cannot bridge the relabel (it leaves ``={res}``
+# open). Admit-free + EasyCrypt-accepted.
+JOY_2_15_BACKWARD_PROOF = (
+    REPO_ROOT / "examples" / "joy_old" / "2_Exercises" / "2_15_Backward.proof"
+)
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
 
@@ -1357,6 +1371,69 @@ def test_export_double_symenc_typechecks_in_easycrypt(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, (
         f"EasyCrypt rejected the DoubleSymEnc export.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 2_15_Backward: Expand Tuples + same-module enc reorder via the Ideal route.
+# ---------------------------------------------------------------------------
+
+
+def test_export_2_15_backward_routes_expand_tuples_and_reorder_through_ideal() -> None:
+    """The single-module ``2_15_Backward`` hops each eliminate a local pair via
+    ``Expand Tuples`` and transpose two same-module ``E.enc`` calls (a relabel
+    attributed to ``Inline Single-Use Variables``). Neither is plain-``swap``
+    safe (the calls share ``glob E``), so both must route through the
+    single-module ``Ideal`` stateless path:
+
+    * ``Expand Tuples`` -- the tuple-inline sibling -- builds the ``state_1b``
+      intermediate module and bridges it with ``proc; inline*; auto``.
+    * the same-module enc reorder uses a *data-aware* swap sequence
+      (``swap{1} 3 -2; swap{1} 4 -2``) that accounts for the keygen-result
+      relabel a signature-only swap would miss.
+
+    The lockstep ``call (_: true)`` ISUV tactic must NOT be what closes the
+    reorder micro (it leaves ``={res}`` open), and no admit may remain.
+    """
+    output = exporter.export_proof_file(str(JOY_2_15_BACKWARD_PROOF))
+    # Statelessness foundation is in scope (the route depends on it).
+    assert "declare axiom E_keygen_sem" in output
+    assert "declare axiom E_enc_sem" in output
+    # Expand Tuples routes through Ideal with the tuple-inline intermediate.
+    assert "module Step_0R_state_1b (E : E_c.Scheme)" in output
+    assert "transitivity Step_0R_state_1b(E_c.Ideal).eavesdrop" in output
+    assert "proc; inline*; auto" in output
+    # The same-module enc reorder uses the data-aware swap, not a bare lockstep.
+    assert "proc; swap{1} 3 -2; swap{1} 4 -2; sim" in output
+    # Admit-free.
+    assert "admit." not in output
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_export_2_15_backward_typechecks_in_easycrypt(tmp_path: Path) -> None:
+    """End-to-end: ``2_15_Backward`` is admit-free and EasyCrypt-accepted (EXIT
+    0). Guards that routing ``Expand Tuples`` and the same-module enc reorder
+    through the ``Ideal`` stateless path actually closes -- a 0-admit file EC
+    still rejects would be Blocked, not clean.
+    """
+    output = exporter.export_proof_file(str(JOY_2_15_BACKWARD_PROOF))
+    assert "admit." not in output
+    ec_file = tmp_path / "2_15_Backward.ec"
+    ec_file.write_text(output)
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the 2_15_Backward export.\n"
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )

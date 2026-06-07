@@ -619,13 +619,41 @@ def export_proof_file(proof_path: str) -> str:
         )
     primary_let_name = proof.theorem.args[0].name
     primary_type_name: str | None = None
+    primary_value_ctor: str | None = None
     for let in proof.lets:
         if let.name == primary_let_name and isinstance(let.type, frog_ast.Variable):
             primary_type_name = let.type.name
+            if isinstance(let.value, frog_ast.FuncCall) and isinstance(
+                let.value.func, frog_ast.Variable
+            ):
+                primary_value_ctor = let.value.func.name
             break
     scheme: frog_ast.Scheme | None
     if primary_type_name is not None and primary_type_name in schemes_by_name:
         scheme = schemes_by_name[primary_type_name]
+        if scheme.primitive_name not in primitives_by_name:
+            raise ValueError(
+                f"Primary scheme {scheme.name!r} extends primitive "
+                f"{scheme.primitive_name!r}, which was not imported."
+            )
+        primitive = primitives_by_name[scheme.primitive_name]
+    elif (
+        primary_type_name is not None
+        and primary_type_name in primitives_by_name
+        and not proof.assumptions
+        and primary_value_ctor is not None
+        and primary_value_ctor in schemes_by_name
+    ):
+        # Primitive-typed let bound to a *concrete scheme* constructor in an
+        # unconditional proof (e.g. ``SymEnc E = ModOTP(q);`` with no
+        # ``assume:``). The engine inlines the scheme body into the flat
+        # states, so the wrapper-to-flat bridge needs a concrete EC module
+        # (``module ModOTP``) that ``inline *`` can unfold -- an abstract
+        # section ``declare module`` cannot. Treat it as a concrete-scheme
+        # primary, resolving the scheme from the RHS constructor rather than
+        # the declared interface type. (Assumption proofs keep E abstract: the
+        # result holds for every scheme meeting the assumption.)
+        scheme = schemes_by_name[primary_value_ctor]
         if scheme.primitive_name not in primitives_by_name:
             raise ValueError(
                 f"Primary scheme {scheme.name!r} extends primitive "
@@ -705,22 +733,20 @@ def export_proof_file(proof_path: str) -> str:
             oracle_model_by_game_file[game_file_name],
         )
 
-    # "Primary" instance: the one whose scheme matches the theorem's
-    # target. For OTPSecure this is ``E`` (OTP); for CES it is ``CE``
+    # "Primary" instance: the one bound to the theorem's target let-name.
+    # For OTPSecure this is ``E`` (OTP); for CES it is ``CE``
     # (ChainedEncryption). Used for scheme-body translation and as the
     # clone alias threaded through the existing single-scheme code paths.
+    # Keying off the theorem target's let-name (rather than matching the
+    # declared let type against ``primary_ctor_name``) handles the case where
+    # the declared interface type differs from the resolved scheme ctor --
+    # e.g. ``SymEnc E = ModOTP(q);`` resolves ``primary_ctor_name`` to the
+    # concrete scheme ``ModOTP`` while the let type stays ``SymEnc``.
     primary_opt: si.SchemeInstance | None = None
     for inst in instances:
-        # An instance is "primary" when its let type matches the primary
-        # scheme/primitive name and it is the last declared (so CE comes
-        # after E1/E2).
-        for let in proof.lets:
-            if (
-                let.name == inst.let_name
-                and isinstance(let.type, frog_ast.Variable)
-                and let.type.name == primary_ctor_name
-            ):
-                primary_opt = inst
+        if inst.let_name == primary_let_name:
+            primary_opt = inst
+            break
     if primary_opt is None:
         raise ValueError(
             "No scheme instance found matching the main scheme/primitive "
@@ -2133,13 +2159,16 @@ def export_proof_file(proof_path: str) -> str:
             )
         )
 
-    # Emit a concrete EC module for each multi-oracle intermediate game
-    # defined in the proof (e.g. ``Game G_RandKey(KEM K, PRF F)``). A bare
-    # ``ParameterizedGame`` step (``G_RandKey(K, F)``) resolves to a reference
-    # to this module, so it must be defined. Single-oracle intermediate games
-    # route through the chain emitter instead (their flat states are emitted
-    # there), so they are skipped here. The intermediate game is played against
-    # the OUTER theorem adversary and ascribes to its oracle type.
+    # Emit a concrete EC module for each intermediate game defined in the
+    # proof (e.g. ``Game G_RandKey(KEM K, PRF F)`` or the single-oracle
+    # ``Game Hyb(Int q)``). A bare ``ParameterizedGame`` step (``G_RandKey(K,
+    # F)`` / ``Hyb``) resolves to a reference to this module, so it must be
+    # defined -- the Game_step wrapper and the per-hop equiv lemmas name it.
+    # The intermediate game is played against the OUTER theorem adversary and
+    # ascribes to its oracle type. Module-typed (sub-primitive instance)
+    # parameters become EC functor params; non-module parameters (``Int q``
+    # compile-time indices) are dropped, mirroring the scheme functor-param
+    # convention and ``_resolve_intermediate_game``'s module expression.
     outer_oracle_qualified = (
         f"{clone_alias}.{oracle_type_by_game_file[outer_game_file_name]}"
     )
@@ -2152,17 +2181,16 @@ def export_proof_file(proof_path: str) -> str:
             helper, frog_ast.Reduction
         ):
             continue
-        if not oracle_model.classify_game(helper).is_multi_oracle:
-            continue
-        if any(p.name not in instances_by_let_name for p in helper.parameters):
-            continue
+        module_helper_params = [
+            p for p in helper.parameters if p.name in instances_by_let_name
+        ]
         param_module_types = {
             p.name: f"{instances_by_let_name[p.name].clone_alias}.{scheme_type_name}"
-            for p in helper.parameters
+            for p in module_helper_params
         }
         param_primitive_types = {
             p.name: instances_by_let_name[p.name].primitive_name
-            for p in helper.parameters
+            for p in module_helper_params
         }
         hoisted_game = canonical_form.hoist_game_calls(helper, method_return_types)
         ec_intermediate_games.append(

@@ -54,6 +54,23 @@ def test_modint_tactic_add_left() -> None:
     assert "smt(add_q_sub sub_q_add add_q_comm dmodint_q_fu dmodint_q_full)." in body
 
 
+def test_modint_tactic_add_left_reversed() -> None:
+    """The reversed micro (``state_{k+1} ~ state_k``) swaps the bijection.
+
+    Unlike XOR (self-inverse, so fwd == inv), the additive group's
+    ``add``/``sub`` are distinct: the reversed direction must emit ``sub``
+    first with ``add`` as its inverse, or EC's ``rnd`` side-goal is false.
+    """
+    add = frog_ast.BinaryOperation(
+        frog_ast.BinaryOperators.ADD,
+        frog_ast.Variable("k"),
+        frog_ast.Variable("m"),
+    )
+    tac = parametric_tactics.uniform_modint_tactic(_app(add), reversed_dir=True)
+    assert tac is not None
+    assert "rnd (fun z => sub_q z m{2}) (fun z => add_q z m{2})." in "\n".join(tac)
+
+
 def test_modint_tactic_sub_left() -> None:
     """``k - m -> k`` synthesizes an rnd with sub first, add as inverse."""
     sub = frog_ast.BinaryOperation(

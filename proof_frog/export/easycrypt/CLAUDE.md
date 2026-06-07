@@ -47,7 +47,27 @@ Key modules:
   closes via an `rnd` bijection over add/sub — the additive analogue of
   the bitstring `xor` foundation. The GroupElem multiplicative analogue
   (`Uniform GroupElem Simplification`) is still INTERACTIVE; this is its
-  template. Verified end-to-end by `examples/joy/.../ModOTPSecure.proof`.
+  template. Verified end-to-end by
+  `examples/Proofs/SymEnc/ModOTP_INDOT.proof` (ec_compile OK).
+- **Intermediate-game body emission** (in `exporter.py` intermediate-game loop
+  + `module_translator.translate_intermediate_game` + `proof_translator.
+  _resolve_intermediate_game`): a proof-local `Game` helper referenced as a
+  bare `ParameterizedGame` step (`Hyb(q)`, `G_RandKey(K, F)`) is emitted as a
+  concrete EC module implementing the *outer* theorem game's oracle type. Both
+  single- and multi-oracle helpers are emitted. Module-typed (scheme-instance)
+  params become EC functor params; non-module params (`Int q` compile-time
+  indices) are dropped from the signature *and* the module expression, so
+  `Hyb(q)` renders as a bare `Hyb`. The bare step's precondition is keyed off
+  the outer game file (`={mL, mR}`), not `true`.
+- **Concrete scheme for unconditional primitive-typed primaries** (in
+  `exporter.py` scheme determination): `SymEnc E = ModOTP(q)` (a primitive-
+  typed let bound to a concrete *scheme* ctor) with **no** `assume:` is emitted
+  as a concrete `module ModOTP`, not an abstract `declare module E` -- the
+  engine inlines the scheme into the flat states, so the wrapper-to-flat bridge
+  needs a module `inline *` can unfold. Gated on `not proof.assumptions`
+  (assumption proofs keep E abstract for the reduction). The scheme is resolved
+  from the RHS ctor, not the declared interface type; the primary instance is
+  keyed off the theorem-target let-name.
 - **Reorder swap synthesizers** (in `chain_emitter`): a micro lemma relates
   two *rendered* flat-state modules, which are normalized differently from
   the raw `app.game_before`/`app.game_after` (the engine stores a

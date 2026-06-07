@@ -105,6 +105,17 @@ class HopChainInfo:
     # statelessness foundation (``d<m>`` ops, ``Ideal`` module, ``<E>_<m>_sem``
     # axioms) for each. Empty when no such reorder fired.
     stateless_modules: set[tuple[str, str]] = field(default_factory=set)
+    # (declared module name, method name) pairs for which a pure-local
+    # tuple-congruence micro was synthesized this hop; the exporter emits one
+    # ``<M>_<m>_eq`` per-method congruence lemma (proved by ``proc true;
+    # auto``) for each, deduped across hops and placed before the chain decls.
+    # Empty when no tuple-congruence micro fired.
+    congruence_methods: set[tuple[str, str]] = field(default_factory=set)
+    # (declared module name, EC method name) pairs for which a dead-abstract-
+    # call-drop micro (``Topological Sorting`` pruning a dead scheme call) was
+    # synthesized this hop; the exporter emits one ``<M>_<m>_pres`` glob-
+    # preservation axiom per pair. Empty when no such drop fired.
+    pres_methods: set[tuple[str, str]] = field(default_factory=set)
 
 
 # pylint: disable=too-many-locals,too-many-statements,too-many-arguments,too-many-positional-arguments
@@ -527,6 +538,92 @@ def emit_chain_for_hop(
             emitted_m_modules.add(syn.module_name)
         return syn.tactic
 
+    # Pure-local tuple-congruence synthesis (the multi-module analogue of the
+    # single-module stateless route): when an ``Inline Local Tuple Literal``
+    # micro that would otherwise admit is the pure-local-tuple shape, close it
+    # name-independently with per-method congruence lemmas. Tried only after the
+    # stateless route declines, so single-declared-module behavior is unchanged.
+    congruence_methods: set[tuple[str, str]] = set()
+    _declared_names = {p.name for p in flat_params}
+
+    def _try_congruence(
+        app: TransformApplication,
+        state_before: frog_ast.Game,
+        state_after: frog_ast.Game,
+        name_before: str,
+        name_after: str,
+        reversed_dir: bool,
+    ) -> _CongruenceSynth | None:
+        if app.transform_name != "Inline Local Tuple Literal":
+            return None
+        tuple_module = _flat_state_module(
+            modules,
+            name_before,
+            state_before,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        other_module = _flat_state_module(
+            modules,
+            name_after,
+            state_after,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        return _synth_tuple_congruence(
+            tuple_module, other_module, _declared_names, reversed_dir
+        )
+
+    def _apply_congruence(syn: _CongruenceSynth | None) -> list[str] | None:
+        if syn is None:
+            return None
+        congruence_methods.update(syn.methods)
+        return syn.tactic
+
+    # Dead-abstract-call-drop synthesis: a ``Topological Sorting`` (or sibling
+    # reorder) micro that prunes dead abstract scheme calls closes one-sided via
+    # ``<M>_<m>_pres`` glob-preservation axioms. Tried only after the other
+    # synthesizers decline.
+    pres_methods: set[tuple[str, str]] = set()
+
+    def _try_dead_call_drop(
+        app: TransformApplication,
+        state_before: frog_ast.Game,
+        state_after: frog_ast.Game,
+        name_before: str,
+        name_after: str,
+        reversed_dir: bool,
+    ) -> _DeadCallDrop | None:
+        if app.transform_name not in _REORDER_TRANSFORMS:
+            return None
+        before_module = _flat_state_module(
+            modules,
+            name_before,
+            state_before,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        after_module = _flat_state_module(
+            modules,
+            name_after,
+            state_after,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        return _synth_dead_call_drop(
+            before_module, after_module, _declared_names, eq_args_strong, reversed_dir
+        )
+
+    def _apply_dead_call_drop(syn: _DeadCallDrop | None) -> list[str] | None:
+        if syn is None:
+            return None
+        pres_methods.update(syn.methods)
+        return syn.tactic
+
     micros_left: list[_MicroLemma] = []
     for k, app in enumerate(left_apps):
         bucket = classify(app.transform_name)
@@ -546,14 +643,36 @@ def emit_chain_for_hop(
             right_state=left_states[k + 1],
         )
         if _is_admit(body):
-            synth = _apply_stateless(
-                _try_stateless(
-                    app,
-                    left_states[k],
-                    left_states[k + 1],
-                    left_mods[k],
-                    left_mods[k + 1],
-                    reversed_dir=False,
+            synth = (
+                _apply_stateless(
+                    _try_stateless(
+                        app,
+                        left_states[k],
+                        left_states[k + 1],
+                        left_mods[k],
+                        left_mods[k + 1],
+                        reversed_dir=False,
+                    )
+                )
+                or _apply_congruence(
+                    _try_congruence(
+                        app,
+                        left_states[k],
+                        left_states[k + 1],
+                        left_mods[k],
+                        left_mods[k + 1],
+                        reversed_dir=False,
+                    )
+                )
+                or _apply_dead_call_drop(
+                    _try_dead_call_drop(
+                        app,
+                        left_states[k],
+                        left_states[k + 1],
+                        left_mods[k],
+                        left_mods[k + 1],
+                        reversed_dir=False,
+                    )
                 )
             )
             if synth is not None:
@@ -599,14 +718,36 @@ def emit_chain_for_hop(
             right_state=right_states[k + 1],
         )
         if _is_admit(fwd_body):
-            synth = _apply_stateless(
-                _try_stateless(
-                    app,
-                    right_states[k],
-                    right_states[k + 1],
-                    right_mods[k],
-                    right_mods[k + 1],
-                    reversed_dir=False,
+            synth = (
+                _apply_stateless(
+                    _try_stateless(
+                        app,
+                        right_states[k],
+                        right_states[k + 1],
+                        right_mods[k],
+                        right_mods[k + 1],
+                        reversed_dir=False,
+                    )
+                )
+                or _apply_congruence(
+                    _try_congruence(
+                        app,
+                        right_states[k],
+                        right_states[k + 1],
+                        right_mods[k],
+                        right_mods[k + 1],
+                        reversed_dir=False,
+                    )
+                )
+                or _apply_dead_call_drop(
+                    _try_dead_call_drop(
+                        app,
+                        right_states[k],
+                        right_states[k + 1],
+                        right_mods[k],
+                        right_mods[k + 1],
+                        reversed_dir=False,
+                    )
                 )
             )
             if synth is not None:
@@ -625,14 +766,36 @@ def emit_chain_for_hop(
             right_state=right_states[k],
         )
         if _is_admit(rev_body):
-            synth = _apply_stateless(
-                _try_stateless(
-                    app,
-                    right_states[k],
-                    right_states[k + 1],
-                    right_mods[k],
-                    right_mods[k + 1],
-                    reversed_dir=True,
+            synth = (
+                _apply_stateless(
+                    _try_stateless(
+                        app,
+                        right_states[k],
+                        right_states[k + 1],
+                        right_mods[k],
+                        right_mods[k + 1],
+                        reversed_dir=True,
+                    )
+                )
+                or _apply_congruence(
+                    _try_congruence(
+                        app,
+                        right_states[k],
+                        right_states[k + 1],
+                        right_mods[k],
+                        right_mods[k + 1],
+                        reversed_dir=True,
+                    )
+                )
+                or _apply_dead_call_drop(
+                    _try_dead_call_drop(
+                        app,
+                        right_states[k],
+                        right_states[k + 1],
+                        right_mods[k],
+                        right_mods[k + 1],
+                        reversed_dir=True,
+                    )
                 )
             )
             if synth is not None:
@@ -742,6 +905,16 @@ def emit_chain_for_hop(
     # and replace the outer hop's proof body with ``admit.`` plus a
     # structured comment, mirroring the per-micro unguided-admit shape
     # (ladder rung 6, ``admit-unguided``).
+    #
+    # NB: this whole-hop suppression is deliberately conservative -- emitting a
+    # chain that still contains an ``admit.`` micro alongside a *silently-
+    # failing* synth/canned sibling (e.g. ``inline_single_use_variables_tactic``
+    # whose ``call (_: true)`` does not couple abstract-call results) would
+    # produce a 0-error-looking file EasyCrypt still rejects. The per-transform
+    # synthesizers run BEFORE this check, so a hop whose every micro now resolves
+    # (e.g. ``GeneralDoubleSymEnc`` hop_0 tuple-congruence + hop_2 dead-call
+    # drop) is NOT suppressed and its chain is emitted; only hops that retain a
+    # genuinely-unresolved micro fall back to the whole-hop admit.
     has_stub_body = any("return witness;" in chunk for chunk in chunks)
     has_micro_admit = any(_chunk_has_micro_admit(chunk) for chunk in chunks)
     if has_stub_body or has_micro_admit:
@@ -774,8 +947,8 @@ def emit_chain_for_hop(
             pre_override=eq_args_strong if multi_module else None,
             post_override=eq_post_strong if multi_module else None,
             requested_keys=requested_keys,
-            # Chain discarded: the synthesized stateless tactics are unused, so
-            # don't request the (now-orphan) foundation.
+            # Chain discarded: the synthesized foundations are unused, so don't
+            # request the (now-orphan) statelessness / congruence / pres specs.
             stateless_modules=set(),
         )
     return HopChainInfo(
@@ -785,6 +958,8 @@ def emit_chain_for_hop(
         post_override=eq_post_strong if multi_module else None,
         requested_keys=requested_keys,
         stateless_modules=stateless_modules,
+        congruence_methods=congruence_methods,
+        pres_methods=pres_methods,
     )
 
 
@@ -2025,6 +2200,261 @@ def _synth_stateless_reorder(  # pylint: disable=too-many-arguments,too-many-pos
         tactic=tactic,
         request=(module_name, clone_alias),
     )
+
+
+# ---------------------------------------------------------------------------
+# Pure-local tuple-congruence synthesis
+#
+# ``Inline Local Tuple Literal`` (and its projection-vs-name siblings) over a
+# *multi-module* scheme (``Key = [S.Key, T.Key]``) eliminates a local
+# ``k <- (key1, key2)`` -- built from values already produced by abstract
+# scheme calls -- and rewrites ``k.`1``/``k.`2`` (fed into abstract ``S.enc`` /
+# ``T.enc``) to the components. The single-declared-module ``Ideal`` route
+# (``_synth_stateless_reorder``) does not cover this (two declared modules), and
+# ``proc; sim`` leaves it open (``sim``'s syntactic arg-match cannot bridge
+# ``k.`1`` vs ``key1``), while two-sided ``call (_: ={glob M})`` on an abstract
+# module is rejected (``module T can write T``).
+#
+# The working close turns each projection arg-equality into an
+# smt-dischargeable side goal via a generic per-method congruence lemma
+# (``<M>_<m>_eq : equiv[ M.m ~ M.m : ={glob M, arg} ==> ={glob M, res} ]``,
+# proved by ``proc true; auto``). The micro tactic reorders the inlined side's
+# calls to the tuple side's order (``swap``), peels every abstract call from the
+# back with its congruence lemma (``call <M>_<m>_eq``, reverse program order),
+# absorbs the deterministic tuple assignment (``wp``), and discharges the
+# residual projection equalities (``skip => /#``). Every quantity is computed
+# from the rendered EC bodies, so this is ``synth-param``. Validated end-to-end
+# on ``GeneralDoubleSymEnc_INDOT$`` hop_0 (EC EXIT 0, admit-free).
+#
+# Scope: the PURE-LOCAL shape only -- the tuple is built from already-coupled
+# values and is not separated from its use by an abstract call whose *result*
+# round-trips through it. The KEMPRF-style entangled residue
+# (``rsp<-(ss0,ctxt); ss<-rsp.1`` with ``K.encaps`` between construction and
+# use) is detected out of scope (a non-call executable statement survives, or
+# the call sequences are not a permutation) and falls through to cache/admit.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _CongruenceSynth:
+    """Synthesized pure-local tuple-congruence proof for one micro."""
+
+    tactic: list[str]
+    methods: set[tuple[str, str]]  # (declared module var, method name)
+
+
+def _callee_parts(callee: str) -> tuple[str, str] | None:
+    """Split an EC callee ``M.m`` into ``(M, m)``; ``None`` if not dotted."""
+    parts = callee.split(".")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return None
+    return parts[0], parts[1]
+
+
+def _congr_lemma_name(mod: str, meth: str) -> str:
+    return f"{mod}_{meth}_eq"
+
+
+def congruence_lemma_block(mod: str, meth: str) -> str:
+    """Render the ``<M>_<m>_eq`` per-method congruence lemma as EC source.
+
+    ``equiv[ M.m ~ M.m : ={glob M, arg} ==> ={glob M, res} ]`` proved by
+    ``proc true; auto`` -- valid for any arity (``arg`` is unit for a no-param
+    procedure). Emitted once per distinct ``(M, m)`` in section scope, before
+    the per-transform chain that ``call``s it.
+    """
+    name = _congr_lemma_name(mod, meth)
+    return "\n".join(
+        [
+            f"lemma {name} :",
+            f"  equiv [ {mod}.{meth} ~ {mod}.{meth} :",
+            f"          ={{glob {mod}, arg}} ==> ={{glob {mod}, res}} ].",
+            "proof. proc true; auto. qed.",
+        ]
+    )
+
+
+def _synth_tuple_congruence(  # pylint: disable=too-many-return-statements,too-many-locals
+    tuple_module: ec_ast.Module,
+    other_module: ec_ast.Module,
+    declared_names: set[str],
+    reversed_dir: bool,
+) -> _CongruenceSynth | None:
+    """Synthesize a per-method congruence proof for a pure-local tuple micro.
+
+    ``tuple_module`` is the rendered ``state_k`` side (it physically builds the
+    local tuple and projects it); ``other_module`` is the rendered
+    ``state_{k+1}`` side (the tuple inlined, abstract calls possibly reordered).
+    ``reversed_dir`` follows the chain-emitter convention: the lemma's left side
+    is the tuple side when forward and the inlined side when reversed.
+
+    Returns ``None`` (caller falls through to cache/admit) when the diff is not
+    the pure-local-tuple shape: no inlinable tuple, a non-call executable
+    statement survives after inlining (sample / residual assign / round-tripped
+    result), a callee is not a dotted call to a declared module, or the two call
+    sequences are not a permutation of each other.
+    """
+    if not tuple_module.procs or not other_module.procs:
+        return None
+    tuple_body = tuple_module.procs[0].body
+    other_body = other_module.procs[0].body
+    inlined, did_inline = _ec_tuple_inline(tuple_body)
+    if not did_inline:
+        return None
+
+    def _calls_only(body: list[ec_ast.EcStmt]) -> list[ec_ast.Call] | None:
+        out: list[ec_ast.Call] = []
+        for stmt in _exec_stmts(body):
+            if isinstance(stmt, ec_ast.Return):
+                continue
+            if not isinstance(stmt, ec_ast.Call):
+                return None
+            out.append(stmt)
+        return out
+
+    inlined_calls = _calls_only(inlined)
+    other_calls = _calls_only(other_body)
+    if not inlined_calls or other_calls is None:
+        return None
+    methods: set[tuple[str, str]] = set()
+    for call in inlined_calls:
+        parts = _callee_parts(call.callee)
+        if parts is None or parts[0] not in declared_names:
+            return None
+        methods.add(parts)
+    for call in other_calls:
+        if _callee_parts(call.callee) is None:
+            return None
+    # Reorder the OTHER (inlined) side's calls to match the tuple side's order.
+    swaps = _ec_perm_swaps(other_body, inlined)
+    if swaps is None:
+        return None
+    other_side = 1 if reversed_dir else 2
+    body: list[str] = ["proc."]
+    for sw in swaps:
+        body.append(sw.replace("{1}", "{" + str(other_side) + "}") + ".")
+    # Reverse-walk the tuple side's physical statements: peel each abstract call
+    # with its congruence lemma; flush one ``wp`` per run of deterministic
+    # assignments (the tuple literal + any copies).
+    walk = [s for s in tuple_body if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))]
+    pending_wp = False
+    for stmt in reversed(walk):
+        if isinstance(stmt, ec_ast.Call):
+            if pending_wp:
+                body.append("wp.")
+                pending_wp = False
+            parts = _callee_parts(stmt.callee)
+            if parts is None:
+                return None
+            body.append(f"call {_congr_lemma_name(*parts)}.")
+        elif isinstance(stmt, ec_ast.Assign):
+            pending_wp = True
+        else:
+            return None
+    if pending_wp:
+        body.append("wp.")
+    body.append("skip => /#.")
+    return _CongruenceSynth(tactic=[_res_tag(SYNTH_PARAM), *body], methods=methods)
+
+
+# ---------------------------------------------------------------------------
+# Dead-abstract-call-drop synthesis
+#
+# ``Topological Sorting`` prunes statements the return does not transitively
+# depend on. When the pruned statements are *abstract scheme calls* (e.g. a
+# reduction's ``S.keygen(); S.enc(...)`` whose results feed nothing once the
+# challenger oracle is the ``Random`` one), EC cannot simply drop them: an
+# abstract call may write ``glob S``, so dropping it on one side would violate
+# the ``={glob S}`` postcondition. It IS sound here because ProofFrog only
+# prunes a call under its stateless-scheme model -- the call has no observable
+# effect. We make that assumption explicit with a ``<M>_<m>_pres`` glob-
+# preservation phoare axiom (the result-agnostic sibling of ``<M>_<m>_det``) and
+# drop each dead call one-sided: ``seq <ndrop> 0 : (<pre>); call{1} (<m>_pres
+# g); ...; auto; sim``. Validated end-to-end on ``GeneralDoubleSymEnc_INDOT$``
+# hop_2 (EC EXIT 0).
+#
+# Scope: the dead calls must be a CONTIGUOUS PREFIX of the longer side, all
+# abstract calls to declared modules, and none of their results used by a
+# surviving statement. Anything else falls through to cache/admit.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _DeadCallDrop:
+    """Synthesized dead-abstract-call-drop proof for one micro."""
+
+    tactic: list[str]
+    methods: set[tuple[str, str]]  # (declared module var, EC method name)
+
+
+def _pres_lemma_name(mod: str, meth: str) -> str:
+    return f"{mod}_{meth}_pres"
+
+
+def _synth_dead_call_drop(  # pylint: disable=too-many-return-statements,too-many-locals,too-many-branches
+    before_module: ec_ast.Module,
+    after_module: ec_ast.Module,
+    declared_names: set[str],
+    eq_args: str,
+    reversed_dir: bool,
+) -> _DeadCallDrop | None:
+    """Synthesize a one-sided drop of dead abstract calls for a prune micro.
+
+    ``before_module`` is the rendered longer state (it makes the dead calls);
+    ``after_module`` is the rendered pruned state. The lemma's drop side is 1
+    when forward (``before`` is the left) and 2 when reversed.
+
+    Returns ``None`` (caller falls through) when the diff is not a contiguous
+    prefix of dead abstract calls to declared modules whose results no surviving
+    statement uses.
+    """
+    if not before_module.procs or not after_module.procs:
+        return None
+    b_exec = _exec_stmts(before_module.procs[0].body)
+    a_exec = _exec_stmts(after_module.procs[0].body)
+    if len(b_exec) <= len(a_exec):
+        return None
+    ndrop = len(b_exec) - len(a_exec)
+    dropped = b_exec[:ndrop]
+    surviving = b_exec[ndrop:]
+    # The surviving suffix must match the pruned side exactly (by signature).
+    if [_ec_sig(s) for s in surviving] != [_ec_sig(s) for s in a_exec]:
+        return None
+    methods: set[tuple[str, str]] = set()
+    mods_in_order: list[str] = []
+    dropped_vars: set[str] = set()
+    dropped_calls: list[tuple[str, str, ec_ast.Call]] = []
+    for stmt in dropped:
+        if not isinstance(stmt, ec_ast.Call):
+            return None
+        parts = _callee_parts(stmt.callee)
+        if parts is None or parts[0] not in declared_names:
+            return None
+        methods.add(parts)
+        dropped_calls.append((parts[0], parts[1], stmt))
+        if parts[0] not in mods_in_order:
+            mods_in_order.append(parts[0])
+        if stmt.var:
+            dropped_vars.add(stmt.var)
+    # Soundness: no surviving statement may use a dropped call's result.
+    surv_text = "\n".join(_stmt_text(s) for s in surviving)
+    for var in dropped_vars:
+        if re.search(r"\b" + re.escape(var) + r"\b", surv_text):
+            return None
+    drop_side = 2 if reversed_dir else 1
+    seq_tac = f"seq {ndrop} 0" if drop_side == 1 else f"seq 0 {ndrop}"
+    sub: list[str] = []
+    for mod in mods_in_order:
+        sub.append(f"exists* (glob {mod}){{{drop_side}}}; elim* => g_{mod}.")
+    # Peel dead calls from the back of the dropped block (reverse program order).
+    for mod, meth, _stmt in reversed(dropped_calls):
+        sub.append(f"call{{{drop_side}}} ({_pres_lemma_name(mod, meth)} g_{mod}).")
+    sub.append("auto.")
+    body = [_res_tag(SYNTH_PARAM), "proc.", f"{seq_tac} : ({eq_args})."]
+    body.append("+ " + sub[0])
+    body.extend("  " + line for line in sub[1:])
+    body.append("sim.")
+    return _DeadCallDrop(tactic=body, methods=methods)
 
 
 def _render_module_decl(module: ec_ast.Module) -> list[str]:

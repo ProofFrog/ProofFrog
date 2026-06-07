@@ -397,6 +397,7 @@ def emit_chain_for_hop(
                 eq_post_strong=eq_post_strong,
                 external_module_types=external_module_types,
                 method_return_types=method_return_types,
+                reversed_dir=reversed_dir,
             )
             if synthesized is not None:
                 return [_res_tag(SYNTH_PARAM), *synthesized]

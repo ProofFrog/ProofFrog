@@ -253,13 +253,26 @@ class StepResolver:
             params = self._reduction_params.get(step.reduction.name, [])
         else:
             concrete = step.challenger
-            if not isinstance(concrete, frog_ast.ConcreteGame):
+            if isinstance(concrete, frog_ast.ParameterizedGame):
+                # Bare intermediate game: played against the outer adversary,
+                # so it exposes the theorem game's oracle signature. Keying the
+                # precondition off the *outer* game file (rather than returning
+                # ``true``) keeps ``={mL, mR, ...}`` in scope through the hop's
+                # micro-lemma chain -- a uniform-simplification ``rnd`` bijection
+                # on a message-dependent ciphertext needs the message equal on
+                # both sides.
+                game_key = self._outer_game_file_name
+                if game_key is None:
+                    return "true"
+            elif not isinstance(concrete, frog_ast.ConcreteGame):
                 return "true"
-            per_oracle = self._oracle_params_by_oracle.get(concrete.game.name, {})
+            else:
+                game_key = concrete.game.name
+            per_oracle = self._oracle_params_by_oracle.get(game_key, {})
             if oracle_name is not None and oracle_name in per_oracle:
                 params = per_oracle[oracle_name]
             else:
-                params = self._oracle_params.get(concrete.game.name, [])
+                params = self._oracle_params.get(game_key, [])
         if not params:
             return "true"
         return "={" + ", ".join(params) + "}"
@@ -381,16 +394,18 @@ class StepResolver:
         reduction: it is a synthetic game (defined in the proof's ``helpers``)
         played directly against the **outer (theorem) adversary**, so it
         exposes the theorem game's oracle interface. Its EC module is a functor
-        applied to its primitive-instance arguments; each ``Variable`` arg is
-        routed through the instance table (falling back to its own name), and
-        any non-``Variable`` index argument is rendered verbatim.
+        applied to its primitive-instance arguments only: each ``Variable`` arg
+        bound to a known scheme instance is routed through the instance table;
+        non-instance arguments (``Int q`` compile-time indices, literals) are
+        dropped, mirroring the scheme functor-param convention. A game with no
+        module arguments (e.g. ``Hyb(q)``) therefore renders as a bare module
+        reference (``Hyb``).
         """
-        arg_exprs: list[str] = []
-        for a in game.args:
-            if isinstance(a, frog_ast.Variable):
-                arg_exprs.append(self._instance_module_expr.get(a.name, a.name))
-            else:
-                arg_exprs.append(str(a))
+        arg_exprs: list[str] = [
+            self._instance_module_expr[a.name]
+            for a in game.args
+            if isinstance(a, frog_ast.Variable) and a.name in self._instance_module_expr
+        ]
         module_expr = f"{game.name}({', '.join(arg_exprs)})" if arg_exprs else game.name
         # Played against the outer adversary -> the theorem game's oracle. Fall
         # back to a per-game-file scalar name (single-primitive intermediate

@@ -52,6 +52,12 @@ INDOT_DOLLAR_IMPLIES_INDOT_PROOF = (
     REPO_ROOT / "examples" / "Proofs" / "SymEnc" / "INDOT$_implies_INDOT.proof"
 )
 KEMPRF_INDCPA_PROOF = REPO_ROOT / "examples" / "Proofs" / "KEM" / "KEMPRF_INDCPA.proof"
+# ModOTP_INDOT: a primitive-typed-let bound to a concrete scheme
+# (``SymEnc E = ModOTP(q)``) with a proof-local single-oracle intermediate
+# game (``Game Hyb(Int q)``). Exercises (a) concrete-scheme instantiation for
+# an unconditional primitive-typed primary, (b) single-oracle intermediate-game
+# body emission, (c) the reversed-direction ModInt rnd bijection.
+MODOTP_INDOT_PROOF = REPO_ROOT / "examples" / "Proofs" / "SymEnc" / "ModOTP_INDOT.proof"
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
 
@@ -1504,6 +1510,63 @@ def test_export_kemprf_indcpa_compiles_in_easycrypt(tmp_path: Path) -> None:
     assert result.returncode == 0, (
         f"EC rejected KEMPRF_INDCPA (exit {result.returncode}); a multi-oracle / "
         f"multi-primitive structural gap has reopened.\n"
+        f"stderr:\n{result.stderr}\nstdout:\n{result.stdout[-2000:]}"
+    )
+
+
+def test_export_modotp_indot_emits_intermediate_game_module() -> None:
+    """ModOTP_INDOT exports a concrete scheme + intermediate-game body.
+
+    The proof binds a primitive-typed let to a concrete scheme
+    (``SymEnc E = ModOTP(q)``) with no assumption and interposes a proof-local
+    single-oracle intermediate game ``Game Hyb(Int q)``. The exporter must (a)
+    instantiate ``module ModOTP`` (not an abstract ``declare module E``), and
+    (b) emit ``module Hyb`` (with the ``Int q`` index dropped) referenced as a
+    bare ``Hyb`` by the game wrapper and per-hop equiv lemmas. Admit-free,
+    cache-free (all synthesized).
+    """
+    output = exporter.export_proof_file(str(MODOTP_INDOT_PROOF))
+    assert "declare module E" not in output
+    assert "module ModOTP : E_c.Scheme" in output
+    assert "module Hyb : E_c.INDOT_Oracle" in output
+    assert "A(Hyb)" in output and "A(Hyb(q))" not in output
+    n_admits = len([ln for ln in output.splitlines() if ln.strip() == "admit."])
+    assert n_admits == 0, f"expected 0 admits, got {n_admits}"
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_export_modotp_indot_compiles_in_easycrypt(tmp_path: Path) -> None:
+    """End-to-end: ModOTP_INDOT export is admit-free AND EC ACCEPTS it.
+
+    Regression tripwire for the single-oracle intermediate-game emission path:
+    if the ``Hyb`` module body, its bare reference, the concrete-scheme
+    instantiation, or the reversed ModInt bijection regresses, EC rejects the
+    file (the intermediate-game reference goes undefined, the abstract-E bridge
+    fails to ``inline *``, or the reversed ``rnd`` side-goal becomes false).
+    """
+    output = exporter.export_proof_file(str(MODOTP_INDOT_PROOF))
+    n_admits = len([ln for ln in output.splitlines() if ln.strip() == "admit."])
+    assert n_admits == 0, f"expected 0 admits, got {n_admits}"
+    ec_file = tmp_path / "modotp_indot.ec"
+    ec_file.write_text(output)
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    combined = result.stderr + result.stdout
+    assert "parse error" not in combined, (
+        f"EC parse error in ModOTP_INDOT output:\nstderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+    assert result.returncode == 0, (
+        f"EC rejected ModOTP_INDOT (exit {result.returncode}); the intermediate-"
+        f"game emission or concrete-scheme instantiation path has reopened.\n"
         f"stderr:\n{result.stderr}\nstdout:\n{result.stdout[-2000:]}"
     )
 

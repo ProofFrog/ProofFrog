@@ -182,7 +182,20 @@ class TypeCollector:
                     self._names.append(name)
             return ec_ast.EcType(name)
         if isinstance(resolved, frog_ast.ProductType):
-            parts = [self.translate_type(sub).text for sub in resolved.types]
+            parts = []
+            for sub in resolved.types:
+                sub_txt = self.translate_type(sub).text
+                # Parenthesize a component that is itself a product so EC
+                # sees a *nested* tuple rather than a flattened one: a
+                # FrogLang ``[[A, B], C]`` is a pair whose first element is a
+                # pair (``(A * B) * C``), not a flat 3-tuple (``A * B * C``).
+                # Without the parens the emitted return type disagrees with
+                # the nested value expression / ``.`i`` projections the rest
+                # of the export renders (e.g. KEMCombiner's
+                # ``[[pk1, pk2], [sk1, sk2, pk1, pk2]]`` KeyGen result).
+                if isinstance(self.resolve(sub), frog_ast.ProductType):
+                    sub_txt = f"({sub_txt})"
+                parts.append(sub_txt)
             return ec_ast.EcType(" * ".join(parts))
         if isinstance(resolved, frog_ast.IntType):
             return ec_ast.EcType("int")

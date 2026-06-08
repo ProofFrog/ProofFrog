@@ -115,6 +115,40 @@ def test_translate_reduction_has_two_curried_params(
     ]
 
 
+def test_translate_reduction_drops_value_params_from_functor() -> None:
+    # A reduction like ``R(KEM K, Int n, PRF F)`` mixes module-typed params
+    # (``KEM K``, ``PRF F`` -> bare ``Variable`` types) with value params
+    # (``Int n``). The ``Int`` is a compile-time index appearing only inside
+    # bitstring-length types in the body; it must NOT become an EC functor
+    # module-parameter (which would emit an invalid ``n : <Scheme>``
+    # signature). Only the module-typed params plus the appended
+    # ``Challenger`` survive.
+    sig = frog_ast.MethodSignature("compute", frog_ast.BoolType(), [])
+    block = frog_ast.Block([frog_ast.ReturnStatement(frog_ast.Variable("witness"))])
+    body: frog_ast.GameBody = (
+        "R",
+        [
+            frog_ast.Parameter(frog_ast.Variable("KEM"), "K"),
+            frog_ast.Parameter(frog_ast.IntType(), "n"),
+            frog_ast.Parameter(frog_ast.Variable("PRF"), "F"),
+        ],
+        [],
+        [frog_ast.Method(sig, block)],
+    )
+    reduction = frog_ast.Reduction(
+        body,
+        frog_ast.ParameterizedGame("Inner", []),
+        frog_ast.ParameterizedGame("Outer", []),
+    )
+    tx = _make_translator({}, {})
+    mod = tx.translate_reduction(
+        reduction,
+        primitive_name="KEM",
+        oracle_type_name="Inner_Oracle",
+    )
+    assert [p.name for p in mod.params] == ["K", "F", "Challenger"]
+
+
 def test_reduction_return_call_is_lifted(
     reduction_r1: frog_ast.Reduction,
 ) -> None:

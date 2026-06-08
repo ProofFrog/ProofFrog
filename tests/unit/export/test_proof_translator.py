@@ -46,6 +46,53 @@ def test_step_resolver_composed_step() -> None:
     assert resolved.oracle_name == "enc"
 
 
+def test_step_resolver_composed_step_drops_value_reduction_args() -> None:
+    """A composed step ``KEMCorrectness(K1).FromDecaps compose
+    R(K1, K2, F, n, KC)`` passes only the module-instance args to the
+    reduction functor; the value arg ``n`` (an ``Int`` length index, not a
+    known instance) is dropped -- matching ``translate_reduction``'s
+    module-typed-param functor signature."""
+    resolver = pt.StepResolver(
+        module_name_by_concrete_game={},
+        oracle_name_by_game_file={"KEMCorrectness": "compute"},
+        primitive_name="KEM",
+        scheme_name="KC",
+        instance_module_expr_by_let_name={
+            "K1": "K1",
+            "K2": "K2",
+            "F": "F",
+            "KC": "KEMCombiner(K1, K2, F)",
+        },
+        module_name_by_instance_game={
+            ("K1", "KEMCorrectness", "FromDecaps"): "KEMCorrectness_FromDecaps",
+        },
+        outer_oracle_name="compute",
+    )
+    step = frog_ast.Step(
+        challenger=frog_ast.ConcreteGame(
+            frog_ast.ParameterizedGame("KEMCorrectness", [frog_ast.Variable("K1")]),
+            "FromDecaps",
+        ),
+        reduction=frog_ast.ParameterizedGame(
+            "R_KEM1",
+            [
+                frog_ast.Variable("K1"),
+                frog_ast.Variable("K2"),
+                frog_ast.Variable("F"),
+                frog_ast.Variable("n"),  # value arg -> dropped
+                frog_ast.Variable("KC"),
+            ],
+        ),
+        adversary=frog_ast.ParameterizedGame(
+            "KEMCorrectnessKG", [frog_ast.Variable("KC")]
+        ),
+    )
+    resolved = resolver.resolve(step)
+    assert resolved.module_expr == (
+        "R_KEM1(K1, K2, F, KEMCombiner(K1, K2, F), KEMCorrectness_FromDecaps(K1))"
+    )
+
+
 def _kemprf_instance_resolver() -> pt.StepResolver:
     """A multi-instance resolver mirroring KEMPRF (instances K, F, KF)."""
     return pt.StepResolver(

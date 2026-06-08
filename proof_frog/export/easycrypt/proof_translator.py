@@ -362,12 +362,17 @@ class StepResolver:
             if step.reduction is None:
                 return ResolvedStep(module_expr=game_module_expr, oracle_name=oracle)
             red = step.reduction
-            red_arg_exprs: list[str] = []
-            for a in red.args:
-                if isinstance(a, frog_ast.Variable):
-                    red_arg_exprs.append(self._instance_module_expr.get(a.name, a.name))
-                else:
-                    red_arg_exprs.append(str(a))
+            # Only module-instance arguments are passed to the reduction
+            # functor; value arguments (``Int pk1len`` compile-time indices,
+            # literals) are dropped, mirroring ``_resolve_intermediate_game``
+            # and the reduction's own module-typed-param functor signature
+            # (see ``module_translator.translate_reduction``).
+            red_arg_exprs: list[str] = [
+                self._instance_module_expr[a.name]
+                for a in red.args
+                if isinstance(a, frog_ast.Variable)
+                and a.name in self._instance_module_expr
+            ]
             module_expr = f"{red.name}({', '.join(red_arg_exprs)}, {game_module_expr})"
             return ResolvedStep(module_expr=module_expr, oracle_name=oracle)
 

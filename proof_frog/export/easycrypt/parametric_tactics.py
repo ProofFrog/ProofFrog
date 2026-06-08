@@ -411,6 +411,11 @@ def inline_single_use_variables_tactic(
         if isinstance(stmt, frog_ast.ReturnStatement):
             call_count += _count_module_calls(stmt.expression)
             continue
+        if isinstance(stmt, frog_ast.VariableDeclaration):
+            # Bare ``var x : T;`` declarations (no initializer) — the EC
+            # body translator hoists all declarations to the top, so they
+            # carry no call/sample and don't affect the back-walk shape.
+            continue
         # Unknown statement shape (e.g. IfStatement) — bail out.
         return None
     # The back-walker only works when the body's shape is
@@ -429,9 +434,28 @@ def inline_single_use_variables_tactic(
     # tactics fire at mismatched positions and EC reports
     # "<E2>.method reduces to ... and <E1>.method reduces to ...".
     # Detect this by comparing the (module, method) call signatures in
-    # both games; bail to the static fallback if they disagree.
-    before_calls = _module_call_signature(app.game_before.methods[0])
-    after_calls = _module_call_signature(app.game_after.methods[0])
+    # both games; bail to the static fallback if they disagree. The
+    # comparison MUST run on the *post-hoist EC body* -- the form EC
+    # actually sees -- not the raw ``app.game_before/after`` ASTs: the
+    # engine stores a separately-canonicalized ``game_after`` whose nested
+    # calls sit in a different order than the EC hoister produces, so the
+    # raw signatures can spuriously disagree (a false "reorder detected")
+    # even when the rendered states' calls are in lockstep.
+    # pylint: disable=import-outside-toplevel
+    import copy as _copy
+
+    from .canonical_form import _normalize_for_ec as _norm_ec
+
+    _ext = _kwargs.get("external_module_types")
+    _mrt = _kwargs.get("method_return_types")
+    if isinstance(_ext, dict) and isinstance(_mrt, dict):
+        before_method = _norm_ec(_copy.deepcopy(app.game_before), _ext, _mrt).methods[0]
+        after_method = _norm_ec(_copy.deepcopy(app.game_after), _ext, _mrt).methods[0]
+    else:
+        before_method = app.game_before.methods[0]
+        after_method = app.game_after.methods[0]
+    before_calls = _module_call_signature(before_method)
+    after_calls = _module_call_signature(after_method)
     if before_calls is None or before_calls != after_calls:
         return None
 
@@ -462,6 +486,10 @@ def _shape_is_samples_then_calls(method: frog_ast.Method) -> bool:
         if isinstance(stmt, frog_ast.Sample):
             if saw_non_sample:
                 return False
+        elif isinstance(stmt, frog_ast.VariableDeclaration):
+            # Declarations hoist to the top of the EC body, so they don't
+            # interrupt the ``(sample)*; (call|assign)*`` ordering.
+            continue
         elif isinstance(stmt, (frog_ast.Assignment, frog_ast.ReturnStatement)):
             saw_non_sample = True
         else:

@@ -1006,12 +1006,20 @@ def emit_chain_for_hop(
     # ``pre_override``/``post_override`` on the returned HopChainInfo).
     # Both bridge subgoals (wrapper ↔ flat-state) are within the
     # section's abstract-module scope. ``proc; inline*; sp; wp; sim``
-    # closes them: ``sp`` absorbs the leading parameter aliases that
-    # inlining introduces (e.g. ``s0 <- s``); ``wp`` absorbs the
-    # trailing ``_r0 <- <expr>; return _r0;`` shape that wrapping a
+    # closes the common shape: ``sp`` absorbs the leading parameter
+    # aliases that inlining introduces (e.g. ``s0 <- s``); ``wp`` absorbs
+    # the trailing ``_r0 <- <expr>; return _r0;`` shape that wrapping a
     # value-returning oracle adds; ``sim`` then matches the residual
-    # symmetric call sequence.
-    bridge_tactic = "proc; inline *; sp; wp; sim"
+    # symmetric call sequence. But when the wrapper/scheme round-trips a
+    # value through a tuple (``rsp <- (ss, ct); ss <- rsp.`1`` straddling
+    # an abstract call), ``sp``/``wp`` over-substitute the projections and
+    # ``sim`` then "cannot infer the set of equalities" -- whereas plain
+    # ``sim`` (which back-matches the whole symmetric body in one pass)
+    # closes it. So try the ``sp; wp`` preprocessing first and fall back to
+    # bare ``sim`` via ``||`` (EC alternation: the fallback runs only when
+    # the first branch *errors*, so this is strictly more robust than
+    # ``sp; wp; sim`` alone -- it can add closures, never remove them).
+    bridge_tactic = "proc; inline *; ((sp; wp; sim) || sim)"
     tactic = [
         "(* Per-transform: bridge wrappers to flat states, chain through. *)",
         f"transitivity {mod_ref(left_mods[0])}.{oracle_name} "
@@ -1024,43 +1032,35 @@ def emit_chain_for_hop(
         f"[ smt() | smt() | apply {chain_lemma_name} | {bridge_tactic} ].",
         "qed.",
     ]
-    # If any flat-state body translation:
-    #   * fell back to ``return witness;`` (a FrogLang construct the EC
-    #     expression translator doesn't yet handle), OR
-    #   * has a micro whose tactic body is ``admit.`` (no canned tactic
-    #     or sidecar entry covers the transform),
-    # the chain can't be closed end-to-end. Discard the chain artifacts
-    # and replace the outer hop's proof body with ``admit.`` plus a
-    # structured comment, mirroring the per-micro unguided-admit shape
-    # (ladder rung 6, ``admit-unguided``).
+    # Whole-hop suppression -- ONLY for a genuinely untranslatable
+    # intermediate state. If any flat-state body translation fell back to
+    # ``return witness;`` (a FrogLang construct the EC expression
+    # translator doesn't yet handle), the chain cannot be composed through
+    # that malformed module, so discard the chain artifacts and replace
+    # the outer hop's proof body with ``admit.`` plus a structured comment
+    # (ladder rung 6, ``admit-unguided``). This trigger is also partly
+    # load-bearing for soundness (``_partial_split_admit`` bails here
+    # rather than emit an unsound concat axiom).
     #
-    # NB: this whole-hop suppression is deliberately conservative -- emitting a
-    # chain that still contains an ``admit.`` micro alongside a *silently-
-    # failing* synth/canned sibling (e.g. ``inline_single_use_variables_tactic``
-    # whose ``call (_: true)`` does not couple abstract-call results) would
-    # produce a 0-error-looking file EasyCrypt still rejects. The per-transform
-    # synthesizers run BEFORE this check, so a hop whose every micro now resolves
-    # (e.g. ``GeneralDoubleSymEnc`` hop_0 tuple-congruence + hop_2 dead-call
-    # drop) is NOT suppressed and its chain is emitted; only hops that retain a
-    # genuinely-unresolved micro fall back to the whole-hop admit.
+    # We deliberately do NOT suppress on a per-micro ``admit.``: an admit
+    # micro keeps its own (admitted) lemma, and the chain's ``apply
+    # micro_*`` still composes through it, so a synthesizable sibling in
+    # the same hop lands as synth-param even when an unrelated micro
+    # admits. The old ``has_micro_admit`` suppression masked partial
+    # progress (a correctness hop is a chain of ~7 transforms; closing one
+    # synthesizer left the whole hop suppressed until the LAST admit was
+    # gone). Its protective job -- guarding against a 0-visible-admit file
+    # EC still rejects because a *silently-failing* sibling tactic runs
+    # but doesn't close its goal -- is now covered by the dashboard's real
+    # EC compilation of every exported ``.ec``.
     has_stub_body = any("return witness;" in chunk for chunk in chunks)
-    has_micro_admit = any(_chunk_has_micro_admit(chunk) for chunk in chunks)
-    if has_stub_body or has_micro_admit:
-        if has_stub_body:
-            reason = (
-                "at least one intermediate-state body could not be "
-                "translated to EC (the engine produced a FrogLang "
-                "construct the expression translator does not yet "
-                "handle)"
-            )
-        else:
-            culprits = _micro_admit_culprits(chunks)
-            culprit_str = ", ".join(sorted(set(culprits))) if culprits else "<unknown>"
-            reason = (
-                "at least one micro lemma falls back to admit (no canned "
-                "tactic or sidecar entry covers the underlying transform; "
-                f"culprits: {culprit_str})"
-            )
+    if has_stub_body:
+        reason = (
+            "at least one intermediate-state body could not be "
+            "translated to EC (the engine produced a FrogLang "
+            "construct the expression translator does not yet "
+            "handle)"
+        )
         admit_tactic = [
             _res_tag(ADMIT_UNGUIDED),
             f"(* per-transform chain unrenderable: {reason}.",
@@ -1340,7 +1340,7 @@ def emit_multi_oracle_chain_for_hop(
             )
         )
 
-    bridge_tactic = "proc; inline *; sp; wp; sim"
+    bridge_tactic = "proc; inline *; ((sp; wp; sim) || sim)"
     tactic_body_by_oracle: dict[str, list[str]] = {}
     for oracle_name, is_init in oracles:
         eq_args = oracle_eq_args.get(oracle_name, "true")
@@ -1802,64 +1802,6 @@ def _dead_sample_drop(
         remaining = [s for s in remaining if s is not sample]
     body.append("sim.")
     return body
-
-
-def _chunk_has_micro_admit(chunk: str) -> bool:
-    """Return True if a rendered chunk has a tactic body that is ``admit.``.
-
-    Used by the chain-renderer's fallback: if any micro lemma still
-    admits, the chain can't close end-to-end, so we discard the chain
-    artifacts and admit the outer hop directly. Bare ``admit`` substring
-    checks would also fire on diagnostic-comment text containing the
-    word, so we look only for the tactic-line form after a ``proof.``.
-    """
-    in_proof = False
-    for line in chunk.splitlines():
-        stripped = line.strip()
-        if stripped == "proof.":
-            in_proof = True
-            continue
-        if stripped == "qed.":
-            in_proof = False
-            continue
-        if in_proof and stripped == "admit.":
-            return True
-    return False
-
-
-_TRANSFORM_COMMENT_RE = re.compile(r"\(\* transform: (.+?) \(bucket=\w+\) \*\)")
-
-
-def _micro_admit_culprits(chunks: list[str]) -> list[str]:
-    """Return the transform names of micros whose tactic body is ``admit.``.
-
-    Walks each rendered chunk; when ``admit.`` appears inside a
-    ``proof. ... qed.`` block, records the most recent
-    ``(* transform: NAME (bucket=...) *)`` comment in that chunk as the
-    culprit. Used by the chain-renderer's fallback to name the
-    responsible transform(s) in the structured admit comment so dashboards
-    and human readers can attribute the admit to a specific transform.
-    """
-    culprits: list[str] = []
-    for chunk in chunks:
-        last_transform: str | None = None
-        in_proof = False
-        for line in chunk.splitlines():
-            m = _TRANSFORM_COMMENT_RE.search(line)
-            if m:
-                last_transform = m.group(1)
-                continue
-            stripped = line.strip()
-            if stripped == "proof.":
-                in_proof = True
-                continue
-            if stripped == "qed.":
-                in_proof = False
-                continue
-            if in_proof and stripped == "admit." and last_transform is not None:
-                culprits.append(last_transform)
-                last_transform = None
-    return culprits
 
 
 def _stmt_signature(stmt: frog_ast.Statement) -> tuple[object, ...]:

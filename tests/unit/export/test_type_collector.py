@@ -69,6 +69,34 @@ def test_translate_tuple_type() -> None:
     assert ec.text == "bs_lambda * bs_lambda"
 
 
+def test_translate_nested_tuple_parenthesizes_inner_products() -> None:
+    # A FrogLang ``[[A, B], [C, D, E]]`` is a *pair* whose elements are
+    # themselves tuples (``(A * B) * (C * D * E)``), not a flat 5-tuple.
+    # Each product-typed component must be parenthesized so the emitted
+    # EC type matches the nested value expressions / ``.`i`` projections
+    # the rest of the export renders (the KEMCombiner KeyGen-result shape).
+    tc = TypeCollector()
+    nested = frog_ast.ProductType(
+        [
+            frog_ast.ProductType(
+                [
+                    frog_ast.BitStringType(frog_ast.Variable("a")),
+                    frog_ast.BitStringType(frog_ast.Variable("b")),
+                ]
+            ),
+            frog_ast.ProductType(
+                [
+                    frog_ast.BitStringType(frog_ast.Variable("c")),
+                    frog_ast.BitStringType(frog_ast.Variable("d")),
+                    frog_ast.BitStringType(frog_ast.Variable("e")),
+                ]
+            ),
+        ]
+    )
+    ec = tc.translate_type(nested)
+    assert ec.text == "(bs_a * bs_b) * (bs_c * bs_d * bs_e)"
+
+
 def test_resolve_handles_qualified_field_alias() -> None:
     """Qualified alias key ``E1.key`` resolves FieldAccess(E1, 'key')."""
     aliases: dict[str, frog_ast.Type] = {"E1.key": frog_ast.Variable("KeySpace1")}

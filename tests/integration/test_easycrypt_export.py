@@ -2018,3 +2018,59 @@ def test_multi_oracle_indist_template_compiles(tmp_path: Path) -> None:
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Hybrid-KEM *_Correctness structural fixes (nested-tuple type + value-param
+# drop): these flipped the four expanded *_Correctness proofs from EC-rejected
+# (blocked) to EC-accepted-with-whole-hop-admits (the chain battery is the
+# remaining work). Pin that the export still EC-compiles.
+# ---------------------------------------------------------------------------
+
+CG_EXPANDED_CORRECTNESS = (
+    EXAMPLES
+    / "applications"
+    / "cfrg-hybrid-kems"
+    / "proofs"
+    / "CG"
+    / "CG_expanded_Correctness.proof"
+)
+
+
+def test_export_cg_expanded_correctness_nested_tuple_typed() -> None:
+    """The KEMCombiner-style nested ``[[...], [...]]`` KeyGen result must emit
+    a *nested* EC tuple type ``(... ) * (... )``, not a flattened one. Before
+    the fix the scheme module was internally type-inconsistent (flat type vs
+    nested ``.`i`` projections) and EC rejected it."""
+    output = exporter.export_proof_file(str(CG_EXPANDED_CORRECTNESS))
+    # A flattened nested product would have no parenthesized inner product;
+    # the fix emits parens around each product-typed component.
+    assert ") * (" in output
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_export_cg_expanded_correctness_compiles_in_easycrypt(tmp_path: Path) -> None:
+    """End-to-end: the CG_expanded_Correctness export must be ACCEPTED by
+    EasyCrypt (exit 0). It still carries whole-hop ``admit.`` micros (the
+    7-transform chain battery is unsynthesized), so this asserts compilation,
+    NOT admit-freeness -- it is the ⛔ -> ⚠ flip guard for the nested-tuple +
+    value-param structural fixes. If it stops compiling, one of those fixes
+    regressed."""
+    output = exporter.export_proof_file(str(CG_EXPANDED_CORRECTNESS))
+    ec_file = tmp_path / "cg_expanded_correctness.ec"
+    ec_file.write_text(output)
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected CG_expanded_Correctness.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )

@@ -539,20 +539,31 @@ class ModuleTranslator:
         renames = dict(param_renames) if param_renames else {}
         emitted_type = emitted_primitive_type or primitive_name
 
+        # Only module-typed parameters (those whose FrogLang type is a
+        # bare ``Variable`` naming a primitive/scheme, e.g. ``KEM KEM1``)
+        # become EC functor params. Value parameters (``Int pk1len`` and
+        # other non-module types) are compile-time indices that appear only
+        # inside bitstring-length types in the body (``BitString<pk1len>``
+        # -> the abstract ``bs_pk1len`` type); emitting them as functor
+        # params produces an invalid ``pk1len : <Scheme>`` signature. This
+        # mirrors :meth:`translate_intermediate_game`'s param filtering.
+        module_typed_params = [
+            p for p in reduction.parameters if isinstance(p.type, frog_ast.Variable)
+        ]
         per_param_types = dict(param_module_types or {})
         module_params: list[ec_ast.ModuleParam] = [
             ec_ast.ModuleParam(
                 name=renames.get(p.name, p.name),
                 module_type=per_param_types.get(p.name, emitted_type),
             )
-            for p in reduction.parameters
+            for p in module_typed_params
         ]
         module_params.append(
             ec_ast.ModuleParam(name=challenger_ec_name, module_type=oracle_type_name)
         )
 
         module_param_types: dict[str, str] = {
-            p.name: primitive_name for p in reduction.parameters
+            p.name: primitive_name for p in module_typed_params
         }
         module_param_types["challenger"] = oracle_type_name
 

@@ -2234,11 +2234,16 @@ def export_proof_file(proof_path: str) -> str:
         # whose name doesn't match an instance but whose type is the
         # primary scheme/primitive (e.g. ``Reduction R1(SymEnc se)`` applied
         # as ``R1(proofE)``) maps to the primary module expression.
+        # Only module-typed parameters (FrogLang type is a bare ``Variable``
+        # naming a primitive/scheme) become EC functor args; value parameters
+        # (``Int pk1len`` etc.) are dropped from both the reduction's functor
+        # signature (see ``translate_reduction``) and this application.
         red_arg_exprs = [
             _reduction_arg_expr(
                 p, instance_module_expr, primary_ctor_name, primary_module_expr
             )
             for p in helper.parameters
+            if isinstance(p.type, frog_ast.Variable)
         ]
         ec_reduction_advs.append(
             top_modules.translate_reduction_adversary(

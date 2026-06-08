@@ -164,6 +164,7 @@ def emit_chain_for_hop(
     flat_module_params: list[ec_ast.ModuleParam] | None = None,
     tactic_cache: TacticCache | None = None,
     sidecar_relpath: str | None = None,
+    det_methods: dict[str, set[str]] | None = None,
 ) -> HopChainInfo:
     """Emit the per-transform chain artifacts for one interchangeability hop.
 
@@ -379,6 +380,31 @@ def emit_chain_for_hop(
         skips statements that aren't a transitive dependency of the
         return), we fall back to ``admit.`` with an explanatory comment.
         """
+        # Deterministic reorder with no EC-acceptable swap (preempts every
+        # swap-based route). Fires on a same-module reorder (EC rejects the
+        # ``swap`` -- shared ``glob``) or, for non-tuple transforms, a cross-module
+        # reorder whose right->left calls-only alignment is data-invalid (the
+        # ``_synth_isuv_walk`` swap would be EC-rejected). Functionalize the det
+        # calls to their ``ev_<m>`` form and route through ev-functional twin
+        # modules. ``Inline Local Tuple Literal`` micros are excluded from the
+        # cross-module case: their tuple-walk aligns the non-tuple side to the
+        # inlined tuple side (a valid direction), so they stay byte-identical.
+        if (
+            left_state is not None
+            and right_state is not None
+            and (left_module_ref and right_module_ref)
+        ):
+            det_re = _apply_det_reorder(
+                _try_det_reorder(
+                    left_state,
+                    right_state,
+                    left_module_ref.split("(")[0],
+                    right_module_ref.split("(")[0],
+                    app.transform_name not in _TUPLE_INLINE_TRANSFORMS,
+                )
+            )
+            if det_re is not None:
+                return det_re
         # Pure-reorder transforms: synthesize a ``swap`` sequence directly
         # from the AST diff. If the diff isn't a clean permutation (e.g.
         # ``Topological Sorting`` may also drop dead samples — its DFS
@@ -559,6 +585,22 @@ def emit_chain_for_hop(
     # module (the common ``declare module E`` shape).
     stateless_modules: set[tuple[str, str]] = set()
     emitted_m_modules: set[str] = set()
+
+    # Deterministic same-module-reorder route (functional-module transitivity):
+    # ``det_methods`` maps a declared module name to its set of deterministic EC
+    # method names; ``_clone_of`` resolves a declared module to its clone alias
+    # (the ``ev_<m>`` op prefix). ``emitted_fdet_modules`` dedups the emitted
+    # ``F_left``/``F_right`` twin modules across micros.
+    _det_methods = det_methods or {}
+    _clone_aliases = {p.name: p.module_type.split(".")[0] for p in flat_params}
+    emitted_fdet_modules: set[str] = set()
+
+    def _det_pred(module: str, method: str) -> bool:
+        return method.lower() in _det_methods.get(module, set())
+
+    def _clone_of(module: str) -> str | None:
+        return _clone_aliases.get(module)
+
     _stateless_ok = len(flat_params) == 1
     _sm_name = ""
     _clone_alias = ""
@@ -833,6 +875,63 @@ def emit_chain_for_hop(
         # and that is where the alignment swaps must land.
         other_side = 1 if reversed_dir else 2
         return _synth_tuple_walk(tuple_module, other_module, other_side)
+
+    # Deterministic same-module-reorder route. Any reorder transform (``Inline
+    # Single-Use Variables``, ``Inline Local Tuple Literal``, ``Topological
+    # Sorting``, ``Stabilize Independent Statements``, ...) can sink a
+    # deterministic abstract call past another call of the SAME declared module;
+    # EC rejects ``swap`` on two same-``glob`` calls, so the swap-based routes
+    # (``_permutation_swaps`` / ``_synth_isuv_walk`` / ``_synth_tuple_walk``)
+    # emit an EC-rejected ``swap``. Functionalize the det calls (``ev_<m>`` via
+    # ``<M>_<m>_det``) and route ``left ~ right`` through ev-functional F-twin
+    # modules. Tried at the head of ``_tactic_for`` so it preempts every swap
+    # route uniformly; its gate (:func:`_has_same_module_det_reorder`) declines
+    # on cross-module-only reorders and non-reorders, leaving those byte-identical.
+    def _try_det_reorder(
+        state_left: frog_ast.Game,
+        state_right: frog_ast.Game,
+        name_left: str,
+        name_right: str,
+        allow_cross_module: bool,
+    ) -> _DetReorderSynth | None:
+        left_mod = _flat_state_module(
+            modules,
+            name_left,
+            state_left,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        right_mod = _flat_state_module(
+            modules,
+            name_right,
+            state_right,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        return _synth_det_reorder(
+            left_mod,
+            right_mod,
+            name_left,
+            name_right,
+            inst_suffix,
+            oracle_name,
+            eq_args_strong,
+            eq_post_strong,
+            _det_pred,
+            _clone_of,
+            allow_cross_module,
+        )
+
+    def _apply_det_reorder(syn: _DetReorderSynth | None) -> list[str] | None:
+        if syn is None:
+            return None
+        for m_name, m_text in zip(syn.module_names, syn.module_texts):
+            if m_name not in emitted_fdet_modules:
+                chunks.append(m_text)
+                emitted_fdet_modules.add(m_name)
+        return syn.tactic
 
     # Deduplicate-deterministic-calls finisher (``<M>_<m>_det`` axiom). No
     # emitted helpers (the det axioms are always present for declared modules).
@@ -2748,20 +2847,14 @@ def _stmt_full_sig(stmt: ec_ast.EcStmt) -> tuple[str, str | None, str | None, st
     )
 
 
-def _calls_only_align_swaps(
-    other_body: list[ec_ast.EcStmt],
-    inlined_body: list[ec_ast.EcStmt],
-) -> list[str] | None:
-    """``swap{1}`` strings reordering ``other_body``'s *calls* to ``inlined_body``'s
-    call order.
+def _calls_only_target(
+    other_body: list[ec_ast.EcStmt], inlined_body: list[ec_ast.EcStmt]
+) -> list[ec_ast.EcStmt] | None:
+    """``other_body``'s executable statements with its *calls* reordered to
+    ``inlined_body``'s callee order (assignments kept in place).
 
-    Returns ``[]`` when the call orders already agree, the swap list when
-    ``other_body``'s calls are a callee-permutation of ``inlined_body``'s, or
-    ``None`` when the callees do not match up. Only calls are permuted (assigns
-    stay put, absorbed by the walker's ``wp``); same-callee calls keep their
-    relative order, so an independent different-module reorder the inline exposed
-    (e.g. ``K.decaps`` past ``F.evaluate``) is recovered while interchangeable
-    same-callee results are left for the walker.
+    Same-callee calls keep their relative order. Returns ``None`` when the
+    callees do not match up.
     """
     o_exec = _exec_stmts(other_body)
     i_calls = [s for s in _exec_stmts(inlined_body) if isinstance(s, ec_ast.Call)]
@@ -2791,7 +2884,64 @@ def _calls_only_align_swaps(
             ti += 1
         else:
             target_exec.append(stmt)
-    return _ec_perm_swaps(o_exec, target_exec)
+    return target_exec
+
+
+def _calls_only_alignment_invalid(
+    before_body: list[ec_ast.EcStmt], after_body: list[ec_ast.EcStmt]
+) -> bool:
+    """True if aligning ``before_body``'s calls to ``after_body``'s order (with
+    assignments kept fixed) is a use-before-def -- the data-invalid reorder EC
+    rejects ("statements not independent"). Happens when a reordered call is
+    pushed past an assignment that reads its result; the signature-only
+    ``_ec_perm_swaps`` does not catch it, so the swap routes mis-fire and the
+    deterministic functional-twin route must take over.
+
+    Tuple literals are inlined first (``_ec_tuple_inline``): a tuple round-tripping
+    an abstract-call result (the KEMPRF shape) makes the *raw* alignment look
+    invalid, but the tuple-walk dissolves the tuple and that reorder is a valid
+    swap -- so it must stay on the byte-identical swap path, not preempted here.
+    """
+    before_body, _ = _ec_tuple_inline(before_body)
+    after_body, _ = _ec_tuple_inline(after_body)
+    target = _calls_only_target(before_body, after_body)
+    if target is None:
+        return False
+    def_index: dict[str, int] = {}
+    for i, stmt in enumerate(target):
+        var = getattr(stmt, "var", None)
+        if var is not None and var not in def_index:
+            def_index[var] = i
+    for i, stmt in enumerate(target):
+        own = getattr(stmt, "var", None)
+        for tok in _stmt_tokens(stmt):
+            if tok == own:
+                continue
+            origin = def_index.get(tok)
+            if origin is not None and origin > i:
+                return True
+    return False
+
+
+def _calls_only_align_swaps(
+    other_body: list[ec_ast.EcStmt],
+    inlined_body: list[ec_ast.EcStmt],
+) -> list[str] | None:
+    """``swap{1}`` strings reordering ``other_body``'s *calls* to ``inlined_body``'s
+    call order.
+
+    Returns ``[]`` when the call orders already agree, the swap list when
+    ``other_body``'s calls are a callee-permutation of ``inlined_body``'s, or
+    ``None`` when the callees do not match up. Only calls are permuted (assigns
+    stay put, absorbed by the walker's ``wp``); same-callee calls keep their
+    relative order, so an independent different-module reorder the inline exposed
+    (e.g. ``K.decaps`` past ``F.evaluate``) is recovered while interchangeable
+    same-callee results are left for the walker.
+    """
+    target_exec = _calls_only_target(other_body, inlined_body)
+    if target_exec is None:
+        return None
+    return _ec_perm_swaps(_exec_stmts(other_body), target_exec)
 
 
 def _synth_tuple_walk(
@@ -2876,6 +3026,294 @@ def _synth_isuv_walk(
         body.append("call (_: true).")
     body.append("skip => /#.")
     return body
+
+
+# ---------------------------------------------------------------------------
+# Deterministic same-module-reorder synthesis (functional-module transitivity)
+#
+# ``Inline Single-Use Variables`` (and other reorder passes) can sink a
+# *deterministic* abstract call past other calls of the *same* declared module
+# (e.g. ``KEM_T.decaps`` past ``KEM_T.encodeciphertext``). EC rejects ``swap``
+# on two same-module calls (shared ``glob``), so the ``_synth_isuv_walk``
+# swap-aligned route emits an EC-rejected ``swap{2}``. The reorder is sound only
+# because the methods are *deterministic* -- so we functionalize every det call
+# to its ``ev_<m>`` form via the ``<M>_<m>_det`` axioms (always emitted for
+# declared modules' deterministic methods), after which the reorder is trivial.
+#
+# We route ``left ~ right`` through two ``ev``-functionalized twin modules
+# ``F_left`` / ``F_right`` (the state bodies with det calls replaced by ``x <-
+# <clone>.ev_<m> a`` assignments, probabilistic calls kept) via transitivity:
+#
+#   left      ~ F_left   (* leg1: top-down ``seq 1 1`` peel, program order      *)
+#   F_left    ~ F_right  (* leg_mid: pure-det reorder -- wp + call (_: true)     *)
+#   F_right   ~ right     (* leg3: top-down ``seq 1 1`` peel                      *)
+#
+# The legs MUST run top-down (``seq 1 1`` per statement, uniform ``={vars}``
+# couplings since F mirrors the state's structure) so a det call's args are
+# functionalized *before* a later statement inlines its result -- bottom-up
+# ``exists*`` peeling would freeze the inlined intermediate (an ISUV-inlined
+# ``H.evaluate(concat(_r1, ...))`` arg) before ``_r1`` is pinned to its ``ev``
+# value, breaking the close. Verified end-to-end on ``CK_expanded_Correctness``
+# ``micro_0_right_2_fwd`` (EC EXIT 0).
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _DetReorderSynth:
+    """Synthesized deterministic-reorder proof + the F-twin modules to emit."""
+
+    module_texts: list[str]
+    module_names: list[str]
+    tactic: list[str]
+
+
+def _det_app(clone_alias: str, method: str, args: str) -> str:
+    """Functional form ``<clone>.ev_<m> (a0) (a1) ...`` of a det call."""
+    app = f"{clone_alias}.ev_{method}"
+    for arg in _split_top_args(args):
+        app += f" ({arg})"
+    return app
+
+
+def _ec_functionalize(
+    body: list[ec_ast.EcStmt],
+    det_pred: Callable[[str, str], bool],
+    clone_of: Callable[[str], str | None],
+) -> list[ec_ast.EcStmt]:
+    """Replace each deterministic abstract call with its ``ev_<m>`` assignment.
+
+    ``x <@ M.m(a)`` with ``m`` deterministic becomes ``x <- <clone of M>.ev_m
+    (a)``; probabilistic calls and every other statement (incl. ``VarDecl``)
+    are kept verbatim.
+    """
+    out: list[ec_ast.EcStmt] = []
+    for stmt in body:
+        if isinstance(stmt, ec_ast.Call):
+            parts = _callee_parts(stmt.callee)
+            alias = clone_of(parts[0]) if parts is not None else None
+            if parts is not None and alias is not None and det_pred(parts[0], parts[1]):
+                out.append(
+                    ec_ast.Assign(stmt.var, _det_app(alias, parts[1], stmt.args))
+                )
+                continue
+        out.append(stmt)
+    return out
+
+
+def _det_topdown_leg(
+    call_body: list[ec_ast.EcStmt],
+    call_side: int,
+    glob_items: list[str],
+    det_pred: Callable[[str, str], bool],
+    ctr: list[int],
+) -> list[str]:
+    """Top-down ``seq 1 1`` peel functionalizing the call-side's det calls.
+
+    ``call_body`` is the *state* body (with abstract calls); the other side is
+    its ``ev_*``-functionalized twin (assignments threaded by ``wp``). Each
+    statement is split off with ``seq 1 1 : (={<globs>, <vars so far>})`` and
+    proved: a det call peeled one-sided (``exists*`` + ``call{side} (M_m_det
+    ...)``), a probabilistic call coupled (``call (_: true)``), an assignment by
+    ``auto``. Program order keeps a det call's args already-functionalized.
+    """
+    tac: list[str] = ["proc."]
+    coupled = list(glob_items)
+    for stmt in _exec_stmts(call_body):
+        if isinstance(stmt, ec_ast.Return):
+            break
+        var = getattr(stmt, "var", None)
+        if var:
+            coupled.append(var)
+        tac.append("seq 1 1 : (={" + ", ".join(coupled) + "}).")
+        if isinstance(stmt, ec_ast.Call):
+            parts = _callee_parts(stmt.callee)
+            if parts is not None and det_pred(parts[0], parts[1]):
+                mod, meth = parts
+                args = _split_top_args(stmt.args)
+                names = " ".join(
+                    [f"g{ctr[0]}"] + [f"a{ctr[0]}_{k}" for k in range(len(args))]
+                )
+                cap = ", ".join(
+                    [f"(glob {mod}){{{call_side}}}"]
+                    + [f"({a}){{{call_side}}}" for a in args]
+                )
+                tac.append("wp.")
+                tac.append(f"exists* {cap}; elim* => {names}.")
+                tac.append(f"call{{{call_side}}} ({mod}_{meth}_det {names}).")
+                tac.append("auto.")
+                ctr[0] += 1
+            else:
+                tac.append("call (_: true); auto.")
+        else:
+            tac.append("auto.")
+    tac.append("skip => /#.")
+    return tac
+
+
+def _leads_with_noncall(body: list[ec_ast.EcStmt]) -> bool:
+    """True if ``body``'s first executable statement is not an abstract call."""
+    execs = _exec_stmts(body)
+    return bool(execs) and not isinstance(execs[0], ec_ast.Call)
+
+
+def _det_reorder_leg(
+    left_body: list[ec_ast.EcStmt], right_body: list[ec_ast.EcStmt]
+) -> list[str]:
+    """``F_left ~ F_right`` leg: both fully functional, differ by a reorder.
+
+    Both sides hold the same probabilistic calls (same order, per the gate) plus
+    pure ``ev`` assignments distributed differently. EC's ``wp`` requires both
+    sides' tails to be deterministic, so a ``wp`` before *every* ``call (_:
+    true)`` clears whichever side currently trails in assignments (the reorder
+    can put an assign at one side's tail and a call at the other's). The number
+    of ``(wp; call)`` rounds is the abstract-call count (identical on both
+    sides). A final ``wp`` clears any *leading* assignment run (before the first
+    call) -- emitted only when a side actually leads with assignments, since
+    ``wp`` on an already-empty program is rejected. ``skip => /#`` discharges
+    the functional equality.
+    """
+    n_calls = len([s for s in _exec_stmts(left_body) if isinstance(s, ec_ast.Call)])
+    tac = ["proc."]
+    for _ in range(n_calls):
+        tac.append("wp.")
+        tac.append("call (_: true).")
+    if _leads_with_noncall(left_body) or _leads_with_noncall(right_body):
+        tac.append("wp.")
+    tac.append("skip => /#.")
+    return tac
+
+
+def _prob_callees(
+    body: list[ec_ast.EcStmt], det_pred: Callable[[str, str], bool]
+) -> list[str]:
+    """Ordered callees of the *probabilistic* abstract calls in ``body``."""
+    out: list[str] = []
+    for stmt in _exec_stmts(body):
+        if isinstance(stmt, ec_ast.Call):
+            parts = _callee_parts(stmt.callee)
+            if parts is None or not det_pred(parts[0], parts[1]):
+                out.append(stmt.callee)
+    return out
+
+
+def _needs_det_functional_reorder(
+    before_body: list[ec_ast.EcStmt],
+    after_body: list[ec_ast.EcStmt],
+    det_pred: Callable[[str, str], bool],
+    allow_cross_module: bool,
+) -> bool:
+    """True if a deterministic reorder needs the functional-twin route (no
+    EC-acceptable swap exists for it).
+
+    Requires the same multiset of abstract callees and an identical
+    probabilistic-call subsequence (kept aligned by the ``F_left ~ F_right``
+    leg). Then fires when either:
+
+    - **same-module** -- some declared module's own call order differs, so EC
+      rejects any ``swap`` (shared ``glob``); the swap routes always fail. Fires
+      for any transform.
+    - **cross-module data-invalid** (only when ``allow_cross_module``) -- the
+      ``_synth_isuv_walk`` swap route reorders the *right* (``after``) side's
+      calls to the *left* (``before``) order keeping assignments fixed, and that
+      alignment is a use-before-def (e.g. ``L.get`` pushed past the ``kdf_in_d``
+      concat that reads it) the signature-only ``_ec_perm_swaps`` does not catch,
+      so EC rejects it ("statements not independent"). ``allow_cross_module`` is
+      False for ``Inline Local Tuple Literal`` micros: the tuple-walk aligns the
+      non-tuple side to the (inlined) tuple side -- a different, valid direction
+      (KEMPRF ``K.decaps`` past ``F.evaluate``) -- so those stay byte-identical
+      on the swap path.
+    """
+    bc = _ec_call_callees(before_body)
+    ac = _ec_call_callees(after_body)
+    if not bc or sorted(bc) != sorted(ac):
+        return False
+    if _prob_callees(before_body, det_pred) != _prob_callees(after_body, det_pred):
+        return False
+    mods = {c.split(".")[0] for c in bc if "." in c}
+    for mod in mods:
+        if [c for c in bc if c.startswith(mod + ".")] != [
+            c for c in ac if c.startswith(mod + ".")
+        ]:
+            return True
+    if (
+        allow_cross_module
+        and bc != ac
+        and _calls_only_alignment_invalid(after_body, before_body)
+    ):
+        return True
+    return False
+
+
+def _synth_det_reorder(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    left_module: ec_ast.Module,
+    right_module: ec_ast.Module,
+    left_name: str,
+    right_name: str,
+    inst_suffix: str,
+    oracle: str,
+    pre: str,
+    post: str,
+    det_pred: Callable[[str, str], bool],
+    clone_of: Callable[[str], str | None],
+    allow_cross_module: bool,
+) -> _DetReorderSynth | None:
+    """Synthesize the functional-module transitivity for a deterministic reorder.
+
+    Returns ``None`` when the diff is not a deterministic reorder that needs the
+    functional-twin route (so the caller falls through to the swap walker / cache
+    / admit). See :func:`_needs_det_functional_reorder` for the firing criterion.
+    """
+    if not left_module.procs or not right_module.procs:
+        return None
+    left_body = left_module.procs[0].body
+    right_body = right_module.procs[0].body
+    if not _needs_det_functional_reorder(
+        left_body, right_body, det_pred, allow_cross_module
+    ):
+        return None
+    glob_items = [f"glob {p.name}" for p in left_module.params]
+
+    fl_name = left_name + "_fdet"
+    fr_name = right_name + "_fdet"
+    fl_body = _ec_functionalize(left_body, det_pred, clone_of)
+    fr_body = _ec_functionalize(right_body, det_pred, clone_of)
+    lp = left_module.procs[0]
+    rp = right_module.procs[0]
+    fl_mod = ec_ast.Module(
+        name=fl_name,
+        procs=[ec_ast.Proc(lp.name, lp.params, lp.return_type, fl_body)],
+        params=left_module.params,
+    )
+    fr_mod = ec_ast.Module(
+        name=fr_name,
+        procs=[ec_ast.Proc(rp.name, rp.params, rp.return_type, fr_body)],
+        params=right_module.params,
+    )
+
+    spec = f"({pre} ==> {post}) ({pre} ==> {post})"
+    ctr = [0]
+    leg1 = _det_topdown_leg(left_body, 1, glob_items, det_pred, ctr)
+    leg_mid = _det_reorder_leg(fl_body, fr_body)
+    leg3 = _det_topdown_leg(right_body, 2, glob_items, det_pred, ctr)
+
+    tactic: list[str] = [_res_tag(SYNTH_PARAM)]
+    tactic.append(f"transitivity {fl_name}{inst_suffix}.{oracle} {spec}.")
+    tactic.append("smt().")
+    tactic.append("smt().")
+    tactic.extend(leg1)
+    tactic.append(f"transitivity {fr_name}{inst_suffix}.{oracle} {spec}.")
+    tactic.append("smt().")
+    tactic.append("smt().")
+    tactic.extend(leg_mid)
+    tactic.extend(leg3)
+    return _DetReorderSynth(
+        module_texts=[
+            "\n".join(_render_module_decl(fl_mod)),
+            "\n".join(_render_module_decl(fr_mod)),
+        ],
+        module_names=[fl_name, fr_name],
+        tactic=tactic,
+    )
 
 
 # ---------------------------------------------------------------------------

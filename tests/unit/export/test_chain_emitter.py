@@ -14,6 +14,7 @@ from proof_frog.export.easycrypt import ec_ast
 from proof_frog.export.easycrypt.chain_emitter import (
     _dead_sample_drop_plan,
     _ec_perm_swaps,
+    _synth_isuv_walk,
 )
 
 
@@ -258,3 +259,63 @@ def test_ec_perm_swaps_declines_non_permutation() -> None:
         ec_ast.Return("c"),
     ]
     assert _ec_perm_swaps(_state0_body(), short) is None
+
+
+# ---------------------------------------------------------------------------
+# Inline-Single-Use-Variables swap-aligned call-walker (``_synth_isuv_walk``).
+#
+# ``Inline Single-Use Variables`` removes deterministic single-use assignments,
+# so before/after differ in statement *count* and the whole-statement
+# permutation checks decline; when the inlining also exposed an independent
+# different-module call reorder, the canned ``proc; sp; wp; sim`` silently
+# leaves ``={res}`` open. The walker aligns the calls (only) with ``swap{2}``
+# then peels them bottom-up. The end-to-end EC compilation is covered by the
+# cluster correctness proofs (CK_expanded micro_0_left_2 etc).
+# ---------------------------------------------------------------------------
+
+
+def _isuv_module(body: list[ec_ast.EcStmt]) -> ec_ast.Module:
+    proc = ec_ast.Proc("compute", [], ec_ast.EcType("T"), body)
+    return ec_ast.Module("S", [proc], [], None, [])
+
+
+def test_isuv_walk_fires_on_cross_module_reorder() -> None:
+    # Two independent different-module calls (M.f, N.g) in opposite order on the
+    # two sides; the walker aligns the right side's calls to the left's order.
+    left = _isuv_module(
+        [
+            ec_ast.Call("a", "M.f", ""),
+            ec_ast.Call("b", "N.g", ""),
+            ec_ast.Return("(a, b)"),
+        ]
+    )
+    right = _isuv_module(
+        [
+            ec_ast.Call("b", "N.g", ""),
+            ec_ast.Call("a", "M.f", ""),
+            ec_ast.Return("(a, b)"),
+        ]
+    )
+    tactic = _synth_isuv_walk(left, right)
+    assert tactic is not None
+    # proc + one alignment swap on side 2, then a (wp; call) per call + close.
+    assert "proc." in tactic
+    assert "swap{2} 2 -1." in tactic
+    assert tactic.count("call (_: true).") == 2
+    assert tactic[-1] == "skip => /#."
+
+
+def test_isuv_walk_declines_when_already_aligned() -> None:
+    # No reorder -> the canned ``sim`` route handles it; the walker must decline
+    # so it never preempts a working static tactic.
+    body = [
+        ec_ast.Call("a", "M.f", ""),
+        ec_ast.Call("b", "N.g", ""),
+        ec_ast.Return("(a, b)"),
+    ]
+    assert _synth_isuv_walk(_isuv_module(body), _isuv_module(body)) is None
+
+
+def test_isuv_walk_declines_without_calls() -> None:
+    body = [ec_ast.Assign("x", "y"), ec_ast.Return("x")]
+    assert _synth_isuv_walk(_isuv_module(body), _isuv_module(body)) is None

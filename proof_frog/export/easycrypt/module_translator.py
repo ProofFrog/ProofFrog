@@ -350,8 +350,9 @@ class ModuleTranslator:
         param = game.parameters[0]
         module_param_types = {param.name: param_type_name}
         emitted_type = emitted_param_type or param_type_name
+        field_types = {fld.name: fld.type for fld in game.fields}
         procs = [
-            self._translate_method(method, module_param_types)
+            self._translate_method(method, module_param_types, field_types=field_types)
             for method in game.methods
         ]
         module_vars = (
@@ -409,8 +410,11 @@ class ModuleTranslator:
             for p in game.parameters
             if p.name in param_module_types
         ]
+        field_types = {fld.name: fld.type for fld in game.fields}
         procs = [
-            self._translate_method(method, param_primitive_types)
+            self._translate_method(
+                method, param_primitive_types, field_types=field_types
+            )
             for method in game.methods
         ]
         module_vars = (
@@ -468,8 +472,11 @@ class ModuleTranslator:
                 "translate_flat_game expects a parameterless game; "
                 f"got parameters {game.parameters}"
             )
+        field_types = {fld.name: fld.type for fld in game.fields}
         procs = [
-            self._translate_method(method, external_module_types)
+            self._translate_method(
+                method, external_module_types, field_types=field_types
+            )
             for method in game.methods
         ]
         module_vars = (
@@ -557,9 +564,12 @@ class ModuleTranslator:
             ec_ast.VarDecl(fld.name, self._types.translate_type(fld.type))
             for fld in reduction.fields
         ]
+        field_types = {fld.name: fld.type for fld in reduction.fields}
 
         procs = [
-            self._translate_method(method, module_param_types, module_var_aliases)
+            self._translate_method(
+                method, module_param_types, module_var_aliases, field_types=field_types
+            )
             for method in reduction.methods
         ]
         return ec_ast.Module(
@@ -974,6 +984,7 @@ class ModuleTranslator:
         method: frog_ast.Method,
         module_param_types: dict[str, str],
         module_var_aliases: dict[str, str] | None = None,
+        field_types: dict[str, frog_ast.Type] | None = None,
     ) -> ec_ast.Proc:
         sig = method.signature
         ec_params = [
@@ -983,6 +994,13 @@ class ModuleTranslator:
         return_type = self._translate_param_type(sig.return_type)
 
         type_map: dict[str, frog_ast.Type] = {}
+        # Seed enclosing module-level fields first so an oracle body that
+        # reads shared state (e.g. a ``_hoisted_0`` field the engine's
+        # ``Hoist Deterministic Call to Initialize`` lifts into the game's
+        # Initialize and a later oracle consumes) types its references.
+        # Parameters and local declarations below override on name clash.
+        if field_types:
+            type_map.update(field_types)
         for p in sig.parameters:
             type_map[p.name] = p.type
         for stmt in method.block.statements:

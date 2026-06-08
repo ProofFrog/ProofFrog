@@ -101,6 +101,20 @@ DOUBLE_SYMENC_PROOF = (
 JOY_2_15_BACKWARD_PROOF = (
     REPO_ROOT / "examples" / "joy_old" / "2_Exercises" / "2_15_Backward.proof"
 )
+# CG_seedbased_HON_BIND_K_PK: a hybrid-KEM binding proof whose flat-game
+# endpoints carry a ``_hoisted_0`` field (the engine's ``Hoist Deterministic
+# Call to Initialize`` lifts a deterministic call into Initialize as a shared
+# field) read by a later oracle. The exporter must type that field reference
+# from the module's field declarations, not only from in-method locals.
+CG_HON_BIND_K_PK_PROOF = (
+    REPO_ROOT
+    / "examples"
+    / "applications"
+    / "cfrg-hybrid-kems"
+    / "proofs"
+    / "CG"
+    / "CG_seedbased_HON_BIND_K_PK.proof"
+)
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
 
@@ -432,6 +446,23 @@ def test_export_tripling_prg_does_not_crash() -> None:
     # collapses ``lambda + 2 * lambda`` -> ``3*lambda``.
     assert "bs_lambda_stretch_t <- bs_2_lambda" in output
     assert "bs_lambda_stretch_t <- bs_3_lambda" in output
+
+
+def test_export_hoisted_field_reference_is_typed() -> None:
+    """A flat-game ``_hoisted_0`` field read by an oracle exports without a
+    ``KeyError: Unknown variable type``.
+
+    The engine's ``Hoist Deterministic Call to Initialize`` lifts a
+    deterministic call into the game's Initialize as a shared field
+    (``_hoisted_0``); a later oracle consumes it inside an expression. The
+    module translator must seed each method's type map from the enclosing
+    module's field declarations -- not only from in-method locals -- so the
+    expression translator can resolve the field's type. Before the fix this
+    whole A-type class (11 cfrg-hybrid-kems + 2 GHP18 proofs) failed to export.
+    """
+    output = exporter.export_proof_file(str(CG_HON_BIND_K_PK_PROOF))
+    # The hoisted field surfaces as a module-level state var in the flat games.
+    assert "var _hoisted_0 :" in output
 
 
 @pytest.mark.skipif(

@@ -81,6 +81,23 @@ Key modules:
   so EC's `swap` accepts it (unlike two abstract calls, which need the
   stateless `Ideal` machinery). Template:
   `tests/integration/ec_templates/call_past_sample_swap.ec`.
+- **ISUV swap-aligned call-walker** (`chain_emitter._synth_isuv_walk`, wired in
+  `_tactic_for`'s `Inline Single-Use Variables` canned branch): the whole-
+  statement permutation checks (`_permutation_swaps`/`_rendered_state_swaps` ->
+  `_ec_perm_swaps`) decline on an ISUV micro because inlining removes single-use
+  assignments, so before/after differ in statement *count* (not a permutation).
+  When the inlining also exposed an independent *different-module* call reorder
+  (e.g. `KEM_PQ.encodesharedsecret` past `KEM_T.decaps`), the canned
+  `proc; sp; wp; sim` runs but silently leaves `={res}` open (a 0-admit file EC
+  rejects). This route aligns the right side's *calls only* to the left's call
+  order with `swap{2}` (`_calls_only_align_swaps`; the count-differing det
+  assigns stay for the walker's `wp`), then peels the calls bottom-up
+  (`(wp; call (_: true))*`) and closes `skip => /#`. It fires only when an
+  actual reorder exists (`swaps != []`), so it never preempts a working static
+  `sim`; clean proofs are unaffected (a clean ISUV micro with a real call
+  reorder would already be EC-rejected by the static `sim`, hence not clean).
+  Same-*module* reorders still need the stateless `Ideal` route. Validated on
+  `CK_expanded_Correctness` micro_0_left_2 (EC EXIT 0).
 - `proof_translator.py`, `module_translator.py`, `expr_translator.py`,
   `stmt_translator.py`, `type_collector.py`, `scheme_instances.py`,
   `ec_ast.py` — FrogLang→EC translation primitives.

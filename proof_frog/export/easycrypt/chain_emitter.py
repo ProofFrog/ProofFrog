@@ -513,6 +513,37 @@ def emit_chain_for_hop(
                     *[f"{s}." for s in ec_swaps],
                     "sp; wp; sim.",
                 ]
+            # The swap checks above demand a whole-statement permutation, which
+            # ``Inline Single-Use Variables`` defeats: it removes deterministic
+            # single-use assignments, so before/after differ in statement count.
+            # When the inlining also exposed an independent different-module call
+            # reorder, the static ``sp; wp; sim`` below silently leaves ``={res}``
+            # open. Try a calls-only alignment + bottom-up call-walker, which
+            # ignores the count-differing assignments (the walker's ``wp`` absorbs
+            # them) and aligns just the calls.
+            if app.transform_name == "Inline Single-Use Variables" and (
+                left_state is not None and right_state is not None
+            ):
+                isuv_walk = _synth_isuv_walk(
+                    _flat_state_module(
+                        modules,
+                        "_isuv_probe_left",
+                        left_state,
+                        external_module_types,
+                        method_return_types,
+                        flat_params,
+                    ),
+                    _flat_state_module(
+                        modules,
+                        "_isuv_probe_right",
+                        right_state,
+                        external_module_types,
+                        method_return_types,
+                        flat_params,
+                    ),
+                )
+                if isuv_walk is not None:
+                    return isuv_walk
             return [_res_tag(SYNTH_STATIC), "proc; sp; wp; sim."]
         if body:
             return [_res_tag(SYNTH_STATIC), *body]
@@ -2794,6 +2825,52 @@ def _synth_tuple_walk(
     body = [_res_tag(SYNTH_PARAM), "proc."]
     for sw in swaps:
         body.append(sw.replace("{1}", "{" + str(other_side) + "}") + ".")
+    for _ in range(n_calls):
+        body.append("wp.")
+        body.append("call (_: true).")
+    body.append("skip => /#.")
+    return body
+
+
+def _synth_isuv_walk(
+    left_module: ec_ast.Module,
+    right_module: ec_ast.Module,
+) -> list[str] | None:
+    """Swap-aligned call-walker for an ``Inline Single-Use Variables`` micro
+    whose inlining also exposed an independent (different-module) call reorder.
+
+    ``Inline Single-Use Variables`` removes deterministic single-use assignments,
+    so the before/after bodies differ in statement *count* -- the whole-statement
+    permutation check (:func:`_ec_perm_swaps`, via ``_permutation_swaps`` /
+    ``_rendered_state_swaps``) rejects them as non-permutations and the canned
+    ``proc; sp; wp; sim`` runs but silently leaves ``={res}`` open whenever the
+    inlining also let two independent calls of *different* declared modules swap
+    (e.g. ``K_PQ.encodesharedsecret`` past ``K_T.decaps``): ``sim`` can't align
+    the calls at mismatched positions. Align ``right_module``'s *calls* (only --
+    the count-differing deterministic assignments stay for the walker's ``wp``)
+    to ``left_module``'s call order with ``swap{2}``, then peel the ``n`` now-
+    aligned calls bottom-up (``wp`` then ``call (_: true)`` each) and finish
+    ``skip => /#`` (smt discharges the surviving projections the inlining left in
+    the call args; ``=> />`` is too weak). Returns ``None`` (caller keeps the
+    canned tactic) when the calls are not a callee-permutation or are already
+    aligned (no reorder -> the canned ``sim`` route handles it). Validated on
+    CK_expanded_Correctness micro_0_left_2 (EC EXIT 0).
+    """
+    if not left_module.procs or not right_module.procs:
+        return None
+    l_body = left_module.procs[0].body
+    r_body = right_module.procs[0].body
+    n_calls = len([s for s in _exec_stmts(l_body) if isinstance(s, ec_ast.Call)])
+    if n_calls == 0:
+        return None
+    swaps = _calls_only_align_swaps(r_body, l_body)
+    # No reorder (``swaps == []``) means the calls already line up, so the canned
+    # ``sim`` route closes it -- only fire when an actual alignment is needed.
+    if not swaps:
+        return None
+    body = [_res_tag(SYNTH_PARAM), "proc."]
+    for sw in swaps:
+        body.append(sw.replace("{1}", "{2}") + ".")
     for _ in range(n_calls):
         body.append("wp.")
         body.append("call (_: true).")

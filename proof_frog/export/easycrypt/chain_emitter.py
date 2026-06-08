@@ -64,6 +64,22 @@ _TUPLE_INLINE_TRANSFORMS = frozenset(
 )
 
 
+# Transforms whose micros are closed by a synthesizer that lives at the
+# chain-emitter level (the ``_try_*`` routes in ``emit_chain_for_hop``), not by
+# a ``transform_buckets`` ``CANNED_TACTIC``/``PARAMETRIC_TACTIC`` entry. These
+# reach ``synth-param`` when their shape matches and fall through to cache/admit
+# otherwise -- i.e. they "degrade" like the reorder transforms. The dashboard
+# reads this set so its capability column credits them (the bucket tables alone
+# cannot see chain-emitter synthesis). Keep in sync with the ``_try_*`` gates:
+# ``_TUPLE_INLINE_TRANSFORMS`` (tuple-walk / congruence / stateless) and
+# ``Deduplicate Deterministic Calls`` (``_synth_dedup_det``). The reorder
+# transforms (``_synth_dead_call_drop``) are already credited via their empty
+# ``CANNED_TACTIC`` entry, so they are not repeated here.
+CHAIN_EMITTER_SYNTH_TRANSFORMS = frozenset(
+    _TUPLE_INLINE_TRANSFORMS | {"Deduplicate Deterministic Calls"}
+)
+
+
 @dataclass
 class _MicroLemma:
     name: str

@@ -570,7 +570,18 @@ def emit_chain_for_hop(
                 )
                 if isuv_walk is not None:
                     return isuv_walk
-            return [_res_tag(SYNTH_STATIC), "proc; sp; wp; sim."]
+            # Generic multi-module static fallback. ``sp; wp; sim`` is right for
+            # most reorder-ish CANNED micros, but a ``Symbolic Computation``
+            # (or ``Normalize Commutative Chains``) micro whose two sides render
+            # byte-identically -- the int args were sympy-canonicalized on both
+            # sides, so the transform is an EC no-op -- makes ``sp`` strengthen
+            # past the leading abstract calls in a way that leaves ``sim`` unable
+            # to "infer the set of equalities". Plain ``sim`` closes the identical
+            # bodies directly. ``((sp; wp; sim) || sim)`` keeps the first branch
+            # for every shape that already worked and falls back to ``sim`` only
+            # when ``sp; wp; sim`` *errors* -- strictly more robust (it can add a
+            # closure, never remove one), mirroring the wrapper/flat bridge.
+            return [_res_tag(SYNTH_STATIC), "proc; ((sp; wp; sim) || sim)."]
         if body:
             return [_res_tag(SYNTH_STATIC), *body]
         cached = _layer2_lookup(app, reversed_dir)
@@ -3238,7 +3249,11 @@ def _needs_det_functional_reorder(
     if (
         allow_cross_module
         and bc != ac
-        and _calls_only_alignment_invalid(after_body, before_body)
+        # The ISUV swap walker aligns right->left, so check that direction:
+        # pass the *after* body as the alignment source and *before* as target.
+        and _calls_only_alignment_invalid(
+            before_body=after_body, after_body=before_body
+        )
     ):
         return True
     return False

@@ -310,7 +310,7 @@ def test_export_chained_encryption_produces_chain_lemmas() -> None:
     flat-state modules parametrized over E1/E2, micro-lemmas, canon
     bridges, and per-hop chain lemmas — for each of the three
     interchangeability hops. Verifies the multi-module strengthening
-    (``={m, glob E1, glob E2}``-style specs, ``proc; sp; wp; sim.``
+    (``={m, glob E1, glob E2}``-style specs, ``proc; ((sp; wp; sim) || sim).``
     canned tactic, ``swap{n}`` permutation tactics for inline-style
     transforms that reorder, and ``byequiv (_: ... ==> ...)``-strengthened
     ``hop_<i>_pr`` proofs).
@@ -353,9 +353,12 @@ def test_export_chained_encryption_produces_chain_lemmas() -> None:
     # declared-module ``glob`` equalities in their pre/post.
     assert "={m, glob E1, glob E2}" in output
     assert "={res, glob E1, glob E2}" in output
-    # Inline-style canned tactic for multi-module bodies is
-    # ``proc; sp; wp; sim.`` (not the single-instance ``proc; sp; auto.``).
-    assert "proc; sp; wp; sim." in output
+    # Inline-style canned tactic for multi-module bodies is the robust
+    # ``proc; ((sp; wp; sim) || sim).`` form (not the single-instance
+    # ``proc; sp; auto.``). The ``|| sim`` fallback closes the identical-render
+    # ``Symbolic Computation`` shape where ``sp; wp; sim`` errors on equality
+    # inference; the left branch keeps every shape that already worked.
+    assert "proc; ((sp; wp; sim) || sim)." in output
     # ``Inline Single-Use Variables`` reorders adjacent statements in
     # multi-module mode; the exporter detects the permutation and
     # emits the corresponding ``swap{1}`` tactic.

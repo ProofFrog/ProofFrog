@@ -96,8 +96,30 @@ Key modules:
   actual reorder exists (`swaps != []`), so it never preempts a working static
   `sim`; clean proofs are unaffected (a clean ISUV micro with a real call
   reorder would already be EC-rejected by the static `sim`, hence not clean).
-  Same-*module* reorders still need the stateless `Ideal` route. Validated on
-  `CK_expanded_Correctness` micro_0_left_2 (EC EXIT 0).
+  Same-*module* reorders take the deterministic functional-twin route below.
+  Validated on `CK_expanded_Correctness` micro_0_left_2 (EC EXIT 0).
+- **Deterministic-reorder synthesizer** (`chain_emitter._synth_det_reorder`,
+  hooked at the head of `_tactic_for` so it preempts every swap-based route):
+  when before/after differ by a deterministic reorder EC's `swap` can't do, it
+  **functionalizes** every det call to its `ev_<m>` form (via the always-emitted
+  `<M>_<m>_det` axioms) and routes `left ~ right` through two `ev`-functional
+  **twin modules** `<state>_fdet` via 3-leg transitivity: `left ~ F_left`
+  (top-down `seq 1 1` peel, program order — dodges the `exists*` freeze on
+  ISUV-inlined call args), `F_left ~ F_right` (pure-det reorder,
+  `(wp; call (_: true))*`), `F_right ~ right` (top-down peel). The gate
+  `_needs_det_functional_reorder` (same call multiset + identical probabilistic
+  subsequence) fires when **(a)** some declared module's own call order differs
+  (same-module → EC rejects any `swap`, shared `glob`; any transform), or **(b)**
+  for non-tuple transforms, the cross-module right→left calls-only alignment is
+  **data-invalid** (`_calls_only_alignment_invalid`: a reordered call pushed past
+  an assignment reading its result, e.g. `L.get` past the `kdf_in_d` concat — the
+  `_synth_isuv_walk` swap EC rejects as "statements not independent"). Tuple
+  transforms (`allow_cross_module=False`) keep their tuple-walk, which aligns to
+  the *inlined tuple* side — a valid direction (KEMPRF `K.decaps` past
+  `F.evaluate`). Cross-module *valid* reorders and non-reorders decline, so clean
+  proofs stay byte-identical. Determinism is threaded from the exporter as a
+  per-declared-module `det_methods` map. Validated end-to-end on
+  `CK_expanded_Correctness` (compile frontier advanced through hops 0-3).
 - `proof_translator.py`, `module_translator.py`, `expr_translator.py`,
   `stmt_translator.py`, `type_collector.py`, `scheme_instances.py`,
   `ec_ast.py` — FrogLang→EC translation primitives.

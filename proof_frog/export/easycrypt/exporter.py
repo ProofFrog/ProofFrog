@@ -736,6 +736,19 @@ def export_proof_file(proof_path: str) -> str:
             "let block."
         )
 
+    # Per-declared-module deterministic-method sets, for the chain emitter's
+    # deterministic same-module-reorder route (functionalize det calls to their
+    # ``ev_<m>`` form via the ``<M>_<m>_det`` axioms). Keyed by the instance
+    # let-name (the declared module name that appears as an EC call callee).
+    det_methods_by_module: dict[str, set[str]] = {}
+    for _inst in instances:
+        _prim = primitives_by_name.get(_inst.primitive_name)
+        if _prim is None:
+            continue
+        det_methods_by_module[_inst.let_name] = {
+            m.name.lower() for m in _prim.methods if m.deterministic
+        }
+
     # Each game file's primitive is the type name of its first parameter
     # (e.g. ``Game Real(SymEnc E)`` → ``"SymEnc"``). Game files associated
     # with auxiliary primitives (i.e. not the primary) live in a separate
@@ -1997,6 +2010,7 @@ def export_proof_file(proof_path: str) -> str:
             flat_module_params=flat_module_params,
             tactic_cache=tactic_cache,
             sidecar_relpath=sidecar_relpath,
+            det_methods=det_methods_by_module,
         )
         chain_extra_decls.extend(info.extra_decls)
         requested_cache_keys.extend(info.requested_keys)

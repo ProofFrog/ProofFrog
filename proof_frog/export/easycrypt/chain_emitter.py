@@ -752,6 +752,73 @@ def emit_chain_for_hop(
         pres_methods.update(syn.methods)
         return syn.tactic
 
+    # Entangled-tuple call-walker (the projection-only-in-glue shape the
+    # congruence route declines). No emitted helpers; tried after congruence so
+    # the multi-module pure-local case still routes through congruence.
+    def _try_tuple_walk(
+        app: TransformApplication,
+        state_before: frog_ast.Game,
+        state_after: frog_ast.Game,
+        name_before: str,
+        name_after: str,
+        reversed_dir: bool,
+    ) -> list[str] | None:
+        if app.transform_name not in _TUPLE_INLINE_TRANSFORMS:
+            return None
+        tuple_module = _flat_state_module(
+            modules,
+            name_before,
+            state_before,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        other_module = _flat_state_module(
+            modules,
+            name_after,
+            state_after,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        # The tuple side (``state_before``) is the lemma's left when forward and
+        # its right when reversed; the non-tuple ``other`` side is the opposite,
+        # and that is where the alignment swaps must land.
+        other_side = 1 if reversed_dir else 2
+        return _synth_tuple_walk(tuple_module, other_module, other_side)
+
+    # Deduplicate-deterministic-calls finisher (``<M>_<m>_det`` axiom). No
+    # emitted helpers (the det axioms are always present for declared modules).
+    def _try_dedup_det(
+        app: TransformApplication,
+        state_before: frog_ast.Game,
+        state_after: frog_ast.Game,
+        name_before: str,
+        name_after: str,
+        reversed_dir: bool,
+    ) -> list[str] | None:
+        if app.transform_name != "Deduplicate Deterministic Calls":
+            return None
+        before_module = _flat_state_module(
+            modules,
+            name_before,
+            state_before,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        after_module = _flat_state_module(
+            modules,
+            name_after,
+            state_after,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        return _synth_dedup_det(
+            before_module, after_module, _declared_names, reversed_dir
+        )
+
     micros_left: list[_MicroLemma] = []
     for k, app in enumerate(left_apps):
         bucket = classify(app.transform_name)
@@ -801,6 +868,22 @@ def emit_chain_for_hop(
                         left_mods[k + 1],
                         reversed_dir=False,
                     )
+                )
+                or _try_tuple_walk(
+                    app,
+                    left_states[k],
+                    left_states[k + 1],
+                    left_mods[k],
+                    left_mods[k + 1],
+                    reversed_dir=False,
+                )
+                or _try_dedup_det(
+                    app,
+                    left_states[k],
+                    left_states[k + 1],
+                    left_mods[k],
+                    left_mods[k + 1],
+                    reversed_dir=False,
                 )
             )
             if synth is not None:
@@ -877,6 +960,22 @@ def emit_chain_for_hop(
                         reversed_dir=False,
                     )
                 )
+                or _try_tuple_walk(
+                    app,
+                    right_states[k],
+                    right_states[k + 1],
+                    right_mods[k],
+                    right_mods[k + 1],
+                    reversed_dir=False,
+                )
+                or _try_dedup_det(
+                    app,
+                    right_states[k],
+                    right_states[k + 1],
+                    right_mods[k],
+                    right_mods[k + 1],
+                    reversed_dir=False,
+                )
             )
             if synth is not None:
                 fwd_body = synth
@@ -924,6 +1023,22 @@ def emit_chain_for_hop(
                         right_mods[k + 1],
                         reversed_dir=True,
                     )
+                )
+                or _try_tuple_walk(
+                    app,
+                    right_states[k],
+                    right_states[k + 1],
+                    right_mods[k],
+                    right_mods[k + 1],
+                    reversed_dir=True,
+                )
+                or _try_dedup_det(
+                    app,
+                    right_states[k],
+                    right_states[k + 1],
+                    right_mods[k],
+                    right_mods[k + 1],
+                    reversed_dir=True,
                 )
             )
             if synth is not None:
@@ -2007,6 +2122,41 @@ def _split_top_tuple(rhs: str) -> list[str] | None:
     return parts if len(parts) >= 2 else None
 
 
+def _split_top_args(args: str) -> list[str]:
+    """Split a rendered EC argument list on top-level commas.
+
+    ``"seed, ct"`` -> ``["seed", "ct"]``; respects ``(`` / ``[`` nesting so a
+    tuple or nested call argument is not split mid-expression. Empty arg list
+    returns ``[]``.
+    """
+    s = args.strip()
+    if not s:
+        return []
+    depth = 0
+    parts: list[str] = []
+    cur = ""
+    for ch in s:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur.strip())
+    return [p for p in parts if p]
+
+
+def _mem_expr(expr: str, side: int) -> str:
+    """``expr`` annotated at memory ``side``; bare identifiers need no parens."""
+    e = expr.strip()
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", e):
+        return f"{e}{{{side}}}"
+    return f"({e}){{{side}}}"
+
+
 def _proj_re(var: str) -> "re.Pattern[str]":
     return re.compile(r"\b" + re.escape(var) + r"\.`(\d+)")
 
@@ -2383,8 +2533,9 @@ def _synth_stateless_reorder(  # pylint: disable=too-many-arguments,too-many-pos
 # values and is not separated from its use by an abstract call whose *result*
 # round-trips through it. The KEMPRF-style entangled residue
 # (``rsp<-(ss0,ctxt); ss<-rsp.1`` with ``K.encaps`` between construction and
-# use) is detected out of scope (a non-call executable statement survives, or
-# the call sequences are not a permutation) and falls through to cache/admit.
+# use) is detected out of scope here (a non-call executable statement survives,
+# or the call sequences are not a permutation) -- it is closed instead by the
+# entangled-tuple call-walker (``_synth_tuple_walk``, the next route tried).
 # ---------------------------------------------------------------------------
 
 
@@ -2508,6 +2659,225 @@ def _synth_tuple_congruence(  # pylint: disable=too-many-return-statements,too-m
         body.append("wp.")
     body.append("skip => /#.")
     return _CongruenceSynth(tactic=[_res_tag(SYNTH_PARAM), *body], methods=methods)
+
+
+# ---------------------------------------------------------------------------
+# Entangled-tuple call-walker synthesis
+#
+# The pure-local tuple-congruence route above declines the KEMPRF-style
+# entangled residue: the tuple round-trips an abstract-call *result*
+# (``encaps_result <- (_r0, c0); ct <- encaps_result.`2`` with ``F.evaluate``
+# producing ``_r0``), so a non-call statement (the projection copy ``ct <- c0``)
+# survives inlining and ``_calls_only`` returns ``None``. But here the tuple's
+# projections feed only deterministic assignments and the return -- never an
+# abstract-call argument -- so after inlining the tuple side the abstract-call
+# subsequence (callee + rendered args) is IDENTICAL to the other side, and the
+# only diffs are deterministic glue (the dissolved tuple plus a copy that may be
+# hoisted across a call boundary). ``proc; sim`` does NOT close it (``sim``
+# cannot infer the equalities once a copy is hoisted across a call boundary).
+# The close is the ISUV-style call-walker: ``proc.`` then, bottom-up, ``wp``
+# (absorbs each side's -- possibly asymmetric -- trailing deterministic block,
+# including the dissolved tuple) and ``call (_: true)`` to peel each abstract
+# call, finishing with ``skip => /#`` (smt discharges the surviving tuple
+# projections, which ``=> />`` cannot). Distinct from the congruence case, where
+# a projection feeds a call arg (``k.`1`` vs ``key1``) and the calls do not align
+# 1:1. Validated on KEMPRF_Correctness (4 tuple micros across hop_0/hop_2,
+# EC EXIT 0).
+# ---------------------------------------------------------------------------
+
+
+def _stmt_full_sig(stmt: ec_ast.EcStmt) -> tuple[str, str | None, str | None, str]:
+    """Full structural signature (kind, lhs var, callee, data) of a statement.
+
+    Unlike :func:`_stmt_text` (data content only) this distinguishes a Call from
+    a same-rhs Assign and a renamed call result, so identical-prefix matching is
+    exact.
+    """
+    return (
+        type(stmt).__name__,
+        getattr(stmt, "var", None),
+        getattr(stmt, "callee", None),
+        _stmt_text(stmt),
+    )
+
+
+def _calls_only_align_swaps(
+    other_body: list[ec_ast.EcStmt],
+    inlined_body: list[ec_ast.EcStmt],
+) -> list[str] | None:
+    """``swap{1}`` strings reordering ``other_body``'s *calls* to ``inlined_body``'s
+    call order.
+
+    Returns ``[]`` when the call orders already agree, the swap list when
+    ``other_body``'s calls are a callee-permutation of ``inlined_body``'s, or
+    ``None`` when the callees do not match up. Only calls are permuted (assigns
+    stay put, absorbed by the walker's ``wp``); same-callee calls keep their
+    relative order, so an independent different-module reorder the inline exposed
+    (e.g. ``K.decaps`` past ``F.evaluate``) is recovered while interchangeable
+    same-callee results are left for the walker.
+    """
+    o_exec = _exec_stmts(other_body)
+    i_calls = [s for s in _exec_stmts(inlined_body) if isinstance(s, ec_ast.Call)]
+    o_calls = [s for s in o_exec if isinstance(s, ec_ast.Call)]
+    if len(o_calls) != len(i_calls):
+        return None
+    used = [False] * len(o_calls)
+    target_calls: list[ec_ast.Call] = []
+    for ic in i_calls:
+        match = next(
+            (
+                j
+                for j, oc in enumerate(o_calls)
+                if not used[j] and oc.callee == ic.callee
+            ),
+            None,
+        )
+        if match is None:
+            return None
+        used[match] = True
+        target_calls.append(o_calls[match])
+    target_exec: list[ec_ast.EcStmt] = []
+    ti = 0
+    for stmt in o_exec:
+        if isinstance(stmt, ec_ast.Call):
+            target_exec.append(target_calls[ti])
+            ti += 1
+        else:
+            target_exec.append(stmt)
+    return _ec_perm_swaps(o_exec, target_exec)
+
+
+def _synth_tuple_walk(
+    tuple_module: ec_ast.Module,
+    other_module: ec_ast.Module,
+    other_side: int,
+) -> list[str] | None:
+    """Call-walker close for an entangled ``Inline Local Tuple Literal`` micro.
+
+    Inlines ``tuple_module``'s local tuple, aligns ``other_module``'s calls to
+    that call order with ``swap{other_side}`` (an independent different-module
+    reorder the inline exposed, e.g. ``K.decaps`` past ``F.evaluate``; ``[]`` when
+    already aligned), then peels the ``n`` now-aligned calls bottom-up (``wp``
+    then ``call (_: true)`` each) and finishes ``skip => /#`` (smt discharges the
+    surviving tuple projections, which ``=> />`` cannot). Returns ``None`` (caller
+    falls through) when there is no inlinable tuple or the calls are not a
+    callee-permutation. Validated on KEMPRF_Correctness (6 tuple micros across
+    hop_0/hop_2, including the two ``K.decaps``/``F.evaluate`` reorders, EC EXIT 0).
+    """
+    if not tuple_module.procs or not other_module.procs:
+        return None
+    inlined, did_inline = _ec_tuple_inline(tuple_module.procs[0].body)
+    if not did_inline:
+        return None
+    n_calls = len([s for s in _exec_stmts(inlined) if isinstance(s, ec_ast.Call)])
+    if n_calls == 0:
+        return None
+    swaps = _calls_only_align_swaps(other_module.procs[0].body, inlined)
+    if swaps is None:
+        return None
+    body = [_res_tag(SYNTH_PARAM), "proc."]
+    for sw in swaps:
+        body.append(sw.replace("{1}", "{" + str(other_side) + "}") + ".")
+    for _ in range(n_calls):
+        body.append("wp.")
+        body.append("call (_: true).")
+    body.append("skip => /#.")
+    return body
+
+
+# ---------------------------------------------------------------------------
+# Deduplicate-deterministic-calls synthesis
+#
+# ``Deduplicate Deterministic Calls`` collapses N>=2 identical calls to a
+# deterministic scheme method (same callee, same args) into one, rewriting the
+# return to reuse the single result (``_r0 <@ F.evaluate(ss,ct); _r1 <@
+# F.evaluate(ss,ct); return (..,_r0,_r1)`` -> ``__d <@ F.evaluate(ss,ct);
+# return (..,__d,__d)``). ``sim`` cannot align the asymmetric call counts. The
+# close: ``seq P P`` past the identical prefix (``sim``), capture ``glob M`` and
+# the shared call args with ``exists*``, then peel every call (N on the dup
+# side, 1 on the other) with the ``<M>_<m>_det`` determinism axiom -- which
+# pins each result to ``ev_<m> args`` -- so all results coincide and
+# ``skip => /#`` discharges the return equality. Every quantity (prefix length,
+# coupling vars, args, axiom name) is read off the rendered EC bodies, so this
+# is ``synth-param``. The ``_det`` axioms are emitted unconditionally for every
+# declared module's deterministic methods. Validated on KEMPRF_Correctness
+# hop_2 (EC EXIT 0).
+# ---------------------------------------------------------------------------
+
+
+def _synth_dedup_det(  # pylint: disable=too-many-return-statements,too-many-locals,too-many-branches
+    before_module: ec_ast.Module,
+    after_module: ec_ast.Module,
+    declared_names: set[str],
+    reversed_dir: bool,
+) -> list[str] | None:
+    """Synthesize the determinism-axiom finisher for a dedup micro.
+
+    ``before_module`` is the rendered state with the duplicated calls;
+    ``after_module`` the deduplicated state. The dup side is 1 when forward
+    (``before`` is the lemma's left) and 2 when reversed. Returns ``None`` when
+    the diff is not ``N>=1`` identical trailing deterministic calls to one
+    declared module collapsing to a single call.
+    """
+    if not before_module.procs or not after_module.procs:
+        return None
+    b_exec = _exec_stmts(before_module.procs[0].body)
+    a_exec = _exec_stmts(after_module.procs[0].body)
+    # Longest identical executable prefix. ``_stmt_text`` alone is only the
+    # data content (a Call's args, an Assign's rhs), so a deduplicated call
+    # whose args match its predecessor would be swept into the prefix -- compare
+    # the full signature (kind + lhs var + callee + data) instead.
+    prefix = 0
+    while (
+        prefix < len(a_exec)
+        and prefix < len(b_exec)
+        and _stmt_full_sig(a_exec[prefix]) == _stmt_full_sig(b_exec[prefix])
+    ):
+        prefix += 1
+    b_tail = [s for s in b_exec[prefix:] if not isinstance(s, ec_ast.Return)]
+    a_tail = [s for s in a_exec[prefix:] if not isinstance(s, ec_ast.Return)]
+    if len(a_tail) != 1 or not isinstance(a_tail[0], ec_ast.Call):
+        return None
+    if not b_tail or not all(isinstance(s, ec_ast.Call) for s in b_tail):
+        return None
+    canon = a_tail[0]
+    b_calls = [s for s in b_tail if isinstance(s, ec_ast.Call)]
+    if any((s.callee, s.args) != (canon.callee, canon.args) for s in b_calls):
+        return None
+    parts = _callee_parts(canon.callee)
+    if parts is None or parts[0] not in declared_names:
+        return None
+    mod, meth = parts
+    det = f"{mod}_{meth}_det"
+    arg_exprs = _split_top_args(canon.args)
+    # Coupling carried across the ``seq`` split: globs of every declared module
+    # plus each variable produced in the (identical) prefix. ``sim`` proves them
+    # all (the prefix is syntactically equal); extra equalities are harmless.
+    prefix_vars: list[str] = []
+    for stmt in b_exec[:prefix]:
+        var = getattr(stmt, "var", None)
+        if var and var not in prefix_vars:
+            prefix_vars.append(var)
+    coupling_items = [f"glob {m}" for m in sorted(declared_names)] + prefix_vars
+    coupling = "={" + ", ".join(coupling_items) + "}"
+    dup_side = 2 if reversed_dir else 1
+    other_side = 1 if reversed_dir else 2
+    names = " ".join(["g"] + [f"a{i}" for i in range(len(arg_exprs))])
+    apply_args = names
+    capture = ", ".join(
+        [f"(glob {mod}){{{dup_side}}}"] + [_mem_expr(e, dup_side) for e in arg_exprs]
+    )
+    body = [
+        _res_tag(SYNTH_PARAM),
+        "proc.",
+        f"seq {prefix} {prefix} : ({coupling}).",
+        "sim.",
+        f"exists* {capture}; elim* => {names}.",
+    ]
+    body.extend(f"call{{{dup_side}}} ({det} {apply_args})." for _ in b_tail)
+    body.append(f"call{{{other_side}}} ({det} {apply_args}).")
+    body.append("skip => /#.")
+    return body
 
 
 # ---------------------------------------------------------------------------

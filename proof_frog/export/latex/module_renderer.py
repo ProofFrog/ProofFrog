@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ... import frog_ast
+from ...visitors import GetTypeMapVisitor, NameTypeMap
 from . import ir
 from .backends.base import Backend
 from .expr_renderer import ExprRenderer, _looks_like_algorithm_name
@@ -23,6 +24,32 @@ class ModuleRenderer:
         self.expr = ExprRenderer(self.macros)
         self.types = TypeRenderer(self.expr)
         self.stmts = StmtRenderer(self.expr)
+        # Optional proof-level let types, merged into every method's scope map
+        # so operands referencing let-bound variables (e.g. a BitString let)
+        # disambiguate `+`/`||`. Set by the proof renderer; None for standalone
+        # module export.
+        self.base_name_types: NameTypeMap | None = None
+
+    @staticmethod
+    def _scope_name_types(
+        method: frog_ast.Method,
+        fields: list[frog_ast.Field],
+        base: NameTypeMap | None,
+    ) -> NameTypeMap:
+        """Build the name->Type map visible inside a method body.
+
+        Layered so the innermost scope wins: proof lets (base), then module
+        fields, then the method's own parameters and local declarations.
+        """
+        # A dummy stopping point that won't match any real node.
+        method_map = GetTypeMapVisitor(frog_ast.Boolean(True)).visit(method)
+        field_map = NameTypeMap()
+        for field in fields:
+            field_map.set(field.name, field.type)
+        result = field_map + method_map
+        if base is not None:
+            result = base + result
+        return result
 
     # ---- Primitive ---------------------------------------------------------
 
@@ -68,7 +95,10 @@ class ModuleRenderer:
 
     def render_scheme(self, s: frog_ast.Scheme) -> str:
         head_macro = self.macros.register_algorithm(s.name)
-        blocks = [self._method_block(method, head_macro) for method in s.methods]
+        blocks = [
+            self._method_block(method, head_macro, fields=s.fields)
+            for method in s.methods
+        ]
         vstack = ir.VStack(blocks=blocks, boxed=True)
         header = rf"\noindent\textbf{{Scheme {head_macro}}}\par\medskip"
         return header + "\n" + self.backend.render_vstack(vstack)
@@ -78,6 +108,7 @@ class ModuleRenderer:
         method: frog_ast.Method,
         owner_macro: str,
         qualify: bool = True,
+        fields: list[frog_ast.Field] | None = None,
     ) -> ir.ProcedureBlock:
         sig = method.signature
         method_macro = self.macros.register_algorithm(sig.name)
@@ -89,7 +120,17 @@ class ModuleRenderer:
             if qualify
             else rf"{method_macro}({args})"
         )
-        body = self.stmts.render_block(method.block)
+        # Make this method's scope types visible to the expression renderer so
+        # `+`/`||` disambiguate. Restored afterwards so nested/sibling renders
+        # see their own scope.
+        saved = self.expr.name_types
+        self.expr.name_types = self._scope_name_types(
+            method, fields or [], self.base_name_types
+        )
+        try:
+            body = self.stmts.render_block(method.block)
+        finally:
+            self.expr.name_types = saved
         return ir.ProcedureBlock(title=title, lines=body)
 
     # ---- Game --------------------------------------------------------------
@@ -102,7 +143,10 @@ class ModuleRenderer:
         heading).
         """
         side_macro = self.macros.register_algorithm(g.name)
-        blocks = [self._method_block(m, side_macro, qualify=False) for m in g.methods]
+        blocks = [
+            self._method_block(m, side_macro, qualify=False, fields=g.fields)
+            for m in g.methods
+        ]
         return ir.VStack(blocks=blocks, boxed=True)
 
     def render_game(self, g: frog_ast.Game, experiment_name: str | None = None) -> str:

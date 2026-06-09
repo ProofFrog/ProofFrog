@@ -21,16 +21,23 @@ def test_assignment_emits_assign() -> None:
     assert line.rhs == "m"
 
 
-def test_variable_declaration_emits_assign_dropping_type() -> None:
+def test_variable_declaration_emits_no_line() -> None:
+    # An uninitialized declaration (`Foo x;`) has no value, and types are
+    # suppressed in bodies, so a bare name line is never correct -- drop it.
     s = frog_ast.VariableDeclaration(frog_ast.IntType(), "x")
-    [line] = _renderer().render_block(_block([s]))
-    assert isinstance(line, ir.Raw)
+    assert _renderer().render_block(_block([s])) == []
+
+
+def test_variable_declaration_dropped_between_statements() -> None:
+    decl = frog_ast.VariableDeclaration(frog_ast.IntType(), "x")
+    asgn = frog_ast.Assignment(None, frog_ast.Variable("x"), frog_ast.Integer(1))
+    lines = _renderer().render_block(_block([decl, asgn]))
+    assert len(lines) == 1
+    assert isinstance(lines[0], ir.Assign)
 
 
 def test_sample_emits_sample() -> None:
-    s = frog_ast.Sample(
-        None, frog_ast.Variable("r"), frog_ast.Variable("BitString")
-    )
+    s = frog_ast.Sample(None, frog_ast.Variable("r"), frog_ast.Variable("BitString"))
     [line] = _renderer().render_block(_block([s]))
     assert isinstance(line, ir.Sample)
     assert line.lhs == "r"

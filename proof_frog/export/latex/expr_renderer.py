@@ -4,10 +4,13 @@ The renderer is backend-independent. It produces strings suitable for
 embedding inside math mode (``$...$``) — the surrounding delimiters are
 the caller's responsibility.
 
-Optional ``type_of`` map keyed by ``id(node)`` lets the proof-level
-orchestrator inform XOR rendering: a ``+`` whose operand has
-``BitStringType`` becomes ``\\oplus``. Without type info we default to
-``+``.
+Two overloaded operators disambiguate on operand type: ``+`` is XOR
+(``\\oplus``) on ``BitString`` else addition; ``||`` is concatenation
+(``\\|``) on ``BitString`` else logical OR (``\\lor``). Operand types come
+from either the ``type_of`` map (keyed by ``id(node)``, set per-node by an
+orchestrator) or the ``name_types`` map (keyed by variable name, built by the
+module/proof renderers from the enclosing scope). Without type info we keep
+the syntactic default (``+`` / ``\\lor``).
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from __future__ import annotations
 import re
 
 from ... import frog_ast
+from ...visitors import NameTypeMap
 from .macros import MacroRegistry
 
 _BINOP_LATEX: dict[frog_ast.BinaryOperators, str] = {
@@ -54,9 +58,14 @@ class ExprRenderer:
         self,
         macros: MacroRegistry,
         type_of: dict[int, frog_ast.Type] | None = None,
+        name_types: NameTypeMap | None = None,
     ) -> None:
         self.macros = macros
         self.type_of = type_of or {}
+        # Scope-level name -> Type map, refreshed per method by the module/proof
+        # renderers. Used to resolve a bare ``Variable`` operand's type when
+        # ``type_of`` has no per-node entry.
+        self.name_types = name_types
 
     def render(self, expr: frog_ast.Expression) -> str:
         return self._render(expr)
@@ -131,18 +140,32 @@ class ExprRenderer:
             return f"{self._render_variable(m.group(1))}_{{{m.group(2)}}}"
         return name
 
+    def _operand_type(self, op: frog_ast.Expression) -> frog_ast.Type | None:
+        """Resolve an operand's type from ``type_of`` (per-node) or names."""
+        per_node = self.type_of.get(id(op))
+        if per_node is not None:
+            return per_node
+        if isinstance(op, frog_ast.Variable) and self.name_types is not None:
+            return self.name_types.get(op.name)
+        return None
+
+    def _is_bitstring_operand(self, expr: frog_ast.BinaryOperation) -> bool:
+        return isinstance(
+            self._operand_type(expr.left_expression), frog_ast.BitStringType
+        ) or isinstance(
+            self._operand_type(expr.right_expression), frog_ast.BitStringType
+        )
+
     def _render_binop(self, expr: frog_ast.BinaryOperation) -> str:
         left = self._render(expr.left_expression)
         right = self._render(expr.right_expression)
         op = expr.operator
+        # `+` and `||` are overloaded: XOR/concat on BitString, else add/OR.
         if op == frog_ast.BinaryOperators.ADD:
-            sym = "+"
-            left_t = self.type_of.get(id(expr.left_expression))
-            right_t = self.type_of.get(id(expr.right_expression))
-            if isinstance(left_t, frog_ast.BitStringType) or isinstance(
-                right_t, frog_ast.BitStringType
-            ):
-                sym = r"\oplus"
+            sym = r"\oplus" if self._is_bitstring_operand(expr) else "+"
+            return f"{left} {sym} {right}"
+        if op == frog_ast.BinaryOperators.OR:
+            sym = r"\|" if self._is_bitstring_operand(expr) else r"\lor"
             return f"{left} {sym} {right}"
         return f"{left} {_BINOP_LATEX[op]} {right}"
 

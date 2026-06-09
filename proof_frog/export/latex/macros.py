@@ -8,8 +8,13 @@ preamble win.
 
 from __future__ import annotations
 
-# A small set of LaTeX builtins we must not redefine. Extend as needed.
+# LaTeX builtins we must not redefine: ``\providecommand`` silently no-ops
+# against an already-defined command, so a generated ``\S`` would keep
+# rendering as the section sign rather than our ``\mathsf{S}``. Names listed
+# here are renamed (``Frog``-prefixed) so the readable body still shows the
+# original identifier. Extend as needed.
 _LATEX_BUILTINS = {
+    # Math operators (\mathop names defined by base LaTeX).
     "Pr",
     "Re",
     "Im",
@@ -25,6 +30,41 @@ _LATEX_BUILTINS = {
     "lim",
     "sup",
     "inf",
+    # Single-letter / short text-mode commands defined by base LaTeX:
+    # special letters \i \j \l \o \L \O \P \S \SS \AA, accent commands
+    # \H \t \c \d \b \u \v \r \k (these take an argument), and the \aa..\th
+    # ligatures. A crypto identifier named e.g. S (a set), H (a hash), P (a
+    # party), or lowercase c/d/i/j would otherwise mis-render.
+    "S",
+    "P",
+    "H",
+    "L",
+    "O",
+    "i",
+    "j",
+    "l",
+    "o",
+    "t",
+    "c",
+    "d",
+    "b",
+    "u",
+    "v",
+    "r",
+    "k",
+    "a",
+    "AA",
+    "aa",
+    "AE",
+    "ae",
+    "OE",
+    "oe",
+    "DH",
+    "dh",
+    "TH",
+    "th",
+    "SS",
+    "ss",
 }
 
 

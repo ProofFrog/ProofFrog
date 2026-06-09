@@ -6,6 +6,25 @@ DDH = "examples/Proofs/Group/DDH_implies_CDH.proof"
 # bindings that resolve to imported Primitive/Scheme objects.
 TRIPLING = "examples/Proofs/PRG/TriplingPRG_PRGSecurity.proof"
 CPRG = "examples/Proofs/PRG/CounterPRG_PRGSecurity.proof"
+# ElGamal's theorem game INDCPA_MultiChal.Initialize destructures
+# `[pk, sk] = E.KeyGen();` -- an *imported* security game (Definitions section).
+ELGAMAL = "examples/Proofs/PubKeyEnc/ElGamal_INDCPA_MultiChal.proof"
+# GHP18's let `KEMCombiner KC = KEMCombiner(...);` destructures inside its own
+# Encaps body -- an instantiated *construction* (Construction section).
+GHP18 = "examples/applications/KEMCombiner-GHP18/GHP18_INDCPA_First.proof"
+
+
+def _has_destructuring(block: frog_ast.Block) -> bool:
+    return any(isinstance(s, frog_ast.DestructuringBinding) for s in block.statements)
+
+
+def _has_tup_temp(block: frog_ast.Block) -> bool:
+    return any(
+        isinstance(s, frog_ast.Assignment)
+        and isinstance(s.var, frog_ast.Variable)
+        and s.var.name.startswith("_tup")
+        for s in block.statements
+    )
 
 
 def test_security_game_files_are_resolved_and_deduped():
@@ -78,3 +97,28 @@ def test_hop_kinds_detects_side_flip_assumption_hops():
         kinds[3].assumption is not None
         and kinds[3].assumption.name == "RandomTargetGuessing"
     )
+
+
+def test_security_game_files_render_destructuring_not_desugared():
+    # Part 2.5: imported security games used in Definitions must keep
+    # tuple-destructuring bindings, not the engine's desugared _tup temporaries.
+    ctx = ProofContext(ELGAMAL)
+    indcpa = next(
+        gf
+        for gf in ctx.security_game_files()
+        if gf.get_export_name() == "INDCPA_MultiChal"
+    )
+    for game in indcpa.games:
+        init = next(m for m in game.methods if m.signature.name == "Initialize")
+        assert _has_destructuring(init.block)
+        assert not _has_tup_temp(init.block)
+
+
+def test_let_constructions_render_destructuring_not_desugared():
+    # Part 2.5: instantiated constructions used in Construction must keep
+    # tuple-destructuring bindings inside their own method bodies.
+    ctx = ProofContext(GHP18)
+    kc = next(root for name, root in ctx.let_constructions() if name == "KC")
+    encaps = next(m for m in kc.methods if m.signature.name == "Encaps")
+    assert _has_destructuring(encaps.block)
+    assert not _has_tup_temp(encaps.block)

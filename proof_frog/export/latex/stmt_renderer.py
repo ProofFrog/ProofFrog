@@ -35,7 +35,9 @@ class StmtRenderer:
             )
             return
         if isinstance(stmt, frog_ast.VariableDeclaration):
-            out.append(ir.Raw(latex=stmt.name))
+            # An uninitialized declaration (`Foo x;`) has no value, and types
+            # are suppressed in bodies, so a bare name line would be
+            # meaningless. Drop it; a later assignment introduces the name.
             return
         if isinstance(stmt, frog_ast.DestructuringBinding):
             self._render_destructuring(stmt, out)

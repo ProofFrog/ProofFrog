@@ -30,6 +30,9 @@ def render_proof(
     The body is rendered first so macro registration populates the preamble,
     then the full document is assembled.
     """
+    # Make proof-level let types visible to operand disambiguation (`+`/`||`)
+    # inside reduction / intermediate-game bodies.
+    renderer.base_name_types = ctx.let_types()
     body_parts = [
         _definitions_section(ctx, renderer),
         _construction_section(ctx, renderer),

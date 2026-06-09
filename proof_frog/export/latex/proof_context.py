@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ... import frog_ast, frog_parser, proof_engine
+from ... import frog_ast, frog_parser, proof_engine, visitors
 
 
 @dataclass
@@ -47,13 +47,23 @@ class ProofContext:
         # it is set up from a separately-desugared parse of the same file.
         self.proof_file = frog_parser.parse_proof_file(path, desugar=False)
         self.engine = proof_engine.ProofEngine(False)
-        self._load_imports()
+        self._load_imports(self.engine, desugar=True)
         self.engine.set_up_proof_context(frog_parser.parse_proof_file(path))
+        # Render engine: a second, never-proven engine populated from
+        # non-desugared parses. Its namespaces feed the Definitions
+        # (security_game_files) and Construction (let_constructions) sections,
+        # so imported games and instantiated schemes that destructure render as
+        # tuple-LHS lines instead of the engine's desugared `_tup` temporaries.
+        # The proving engine above stays desugared (inlined-mode resolution
+        # needs core statements); only render-side reads use this copy.
+        self._render_engine = proof_engine.ProofEngine(False)
+        self._load_imports(self._render_engine, desugar=False)
+        self._render_engine.set_up_proof_context(self.proof_file)
 
     # pylint: disable=duplicate-code
     # (import-loading mirrors web_server._setup_engine_for_proof; kept local
     #  so the export package does not import the Flask web module.)
-    def _load_imports(self) -> None:
+    def _load_imports(self, engine: proof_engine.ProofEngine, *, desugar: bool) -> None:
         for imp in self.proof_file.imports:
             imp_path = frog_parser.resolve_import_path(imp.filename, self.path)
             # pylint: disable=protected-access
@@ -62,15 +72,16 @@ class ProofContext:
             root: frog_ast.Root
             match file_type:
                 case frog_ast.FileType.PRIMITIVE:
+                    # Primitives have no method bodies, so never desugar.
                     root = frog_parser.parse_primitive_file(imp_path)
                 case frog_ast.FileType.SCHEME:
-                    root = frog_parser.parse_scheme_file(imp_path)
+                    root = frog_parser.parse_scheme_file(imp_path, desugar=desugar)
                 case frog_ast.FileType.GAME:
-                    root = frog_parser.parse_game_file(imp_path)
+                    root = frog_parser.parse_game_file(imp_path, desugar=desugar)
                 case _:
                     raise TypeError(f"Cannot import {file_type}")
             name = imp.rename if imp.rename else root.get_export_name()
-            self.engine.add_definition(name, root)
+            engine.add_definition(name, root)
 
     # pylint: enable=duplicate-code
 
@@ -101,15 +112,28 @@ class ProofContext:
             if name in seen:
                 continue
             seen.add(name)
-            resolved = self.engine.definition_namespace.get(name)
+            # Read from the non-desugared render engine so destructuring
+            # bindings render faithfully (Part 2.5).
+            resolved = self._render_engine.definition_namespace.get(name)
             if isinstance(resolved, frog_ast.GameFile):
                 result.append(resolved)
         return result
 
+    def let_types(self) -> visitors.NameTypeMap:
+        """Name->Type map of the proof's let bindings.
+
+        Fed to the renderer as base scope types so operands referencing
+        let-bound variables (e.g. a ``BitString`` let) disambiguate
+        ``+``/``||``. Desugaring does not affect let types, so the proving
+        engine's map is reused.
+        """
+        return self.engine.proof_let_types
+
     def let_constructions(self) -> list[tuple[str, frog_ast.Root]]:
         result: list[tuple[str, frog_ast.Root]] = []
         for let in self.proof_file.lets:
-            resolved = self.engine.proof_namespace.get(let.name)
+            # Read from the non-desugared render engine (Part 2.5).
+            resolved = self._render_engine.proof_namespace.get(let.name)
             if isinstance(resolved, (frog_ast.Scheme, frog_ast.Primitive)):
                 result.append((let.name, resolved))
         return result

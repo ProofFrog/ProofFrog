@@ -7,10 +7,10 @@ import pytest
 from proof_frog import frog_ast
 from proof_frog.transforms._ordering import node_sort_key
 
-
 # ---------------------------------------------------------------------------
 # Completeness: every concrete ASTNode subclass is covered
 # ---------------------------------------------------------------------------
+
 
 def _concrete_subclasses(base: type) -> set[type]:
     """Recursively collect all non-abstract concrete subclasses of *base*."""
@@ -47,6 +47,9 @@ _EXCLUDED = {
     frog_ast.Induction,
     frog_ast.Lemma,
     frog_ast.StructuralRequirement,
+    # Parse-time-only sugar: the parser desugars these away immediately, so
+    # they never reach canonicalization/ordering.
+    frog_ast.DestructuringBinding,
 }
 
 # Factory functions that build a minimal instance of each covered type.
@@ -90,7 +93,9 @@ _FACTORIES: dict[type, frog_ast.ASTNode] = {
     frog_ast.ArrayType: frog_ast.ArrayType(frog_ast.IntType(), frog_ast.Integer(10)),
     frog_ast.MapType: frog_ast.MapType(frog_ast.IntType(), frog_ast.BoolType()),
     frog_ast.SetType: frog_ast.SetType(frog_ast.IntType()),
-    frog_ast.FunctionType: frog_ast.FunctionType(frog_ast.IntType(), frog_ast.BoolType()),
+    frog_ast.FunctionType: frog_ast.FunctionType(
+        frog_ast.IntType(), frog_ast.BoolType()
+    ),
     frog_ast.OptionalType: frog_ast.OptionalType(frog_ast.IntType()),
     frog_ast.ProductType: frog_ast.ProductType([frog_ast.IntType()]),
     # Statements
@@ -125,9 +130,7 @@ _FACTORIES: dict[type, frog_ast.ASTNode] = {
         frog_ast.Variable("S"),
         frog_ast.Block([]),
     ),
-    frog_ast.VariableDeclaration: frog_ast.VariableDeclaration(
-        frog_ast.IntType(), "x"
-    ),
+    frog_ast.VariableDeclaration: frog_ast.VariableDeclaration(frog_ast.IntType(), "x"),
     frog_ast.Block: frog_ast.Block([]),
 }
 
@@ -149,6 +152,7 @@ def test_completeness() -> None:
 # Structural ordering: tag determines primary order
 # ---------------------------------------------------------------------------
 
+
 def test_expression_tag_ordering() -> None:
     """Simpler expression types sort before complex ones."""
     var = frog_ast.Variable("z")
@@ -168,9 +172,9 @@ def test_type_tag_ordering() -> None:
     assert node_sort_key(frog_ast.IntType()) < node_sort_key(
         frog_ast.BitStringType(frog_ast.Variable("n"))
     )
-    assert node_sort_key(frog_ast.BitStringType(frog_ast.Variable("n"))) < node_sort_key(
-        frog_ast.GroupElemType(frog_ast.Variable("G"))
-    )
+    assert node_sort_key(
+        frog_ast.BitStringType(frog_ast.Variable("n"))
+    ) < node_sort_key(frog_ast.GroupElemType(frog_ast.Variable("G")))
 
 
 def test_statement_tag_ordering() -> None:
@@ -193,6 +197,7 @@ def test_statement_tag_ordering() -> None:
 # Same-type tiebreaking
 # ---------------------------------------------------------------------------
 
+
 def test_variable_name_tiebreaking() -> None:
     assert node_sort_key(frog_ast.Variable("a")) < node_sort_key(frog_ast.Variable("b"))
 
@@ -211,6 +216,7 @@ def test_boolean_value_tiebreaking() -> None:
 # ---------------------------------------------------------------------------
 # Recursive structure
 # ---------------------------------------------------------------------------
+
 
 def test_recursive_binop_ordering() -> None:
     """a + b < a + c because b < c."""
@@ -248,6 +254,7 @@ def test_funccall_arg_ordering() -> None:
 # Motivating case: structural complexity beats name
 # ---------------------------------------------------------------------------
 
+
 def test_variable_sorts_before_complex_expression() -> None:
     """Variable("field2") < BinaryOp(EXPONENTIATE, Variable("field1"), Variable("aprime")).
 
@@ -267,6 +274,7 @@ def test_variable_sorts_before_complex_expression() -> None:
 # Cross-category ordering: expressions < types < statements
 # ---------------------------------------------------------------------------
 
+
 def test_expression_sorts_before_type() -> None:
     assert node_sort_key(frog_ast.Variable("x")) < node_sort_key(frog_ast.IntType())
 
@@ -281,6 +289,7 @@ def test_type_sorts_before_statement() -> None:
 # ---------------------------------------------------------------------------
 # Optional / None fields
 # ---------------------------------------------------------------------------
+
 
 def test_bitstring_type_unparameterized() -> None:
     """Unparameterized BitStringType produces a shorter tuple."""
@@ -299,6 +308,7 @@ def test_set_type_unparameterized() -> None:
 # ---------------------------------------------------------------------------
 # Determinism: same node always produces the same key
 # ---------------------------------------------------------------------------
+
 
 def test_determinism() -> None:
     """Calling node_sort_key twice on the same node produces identical keys."""

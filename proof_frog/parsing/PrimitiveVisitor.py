@@ -69,6 +69,21 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#destructuringAssignStatement.
+    def visitDestructuringAssignStatement(self, ctx:PrimitiveParser.DestructuringAssignStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#destructuringSampleMinusStatement.
+    def visitDestructuringSampleMinusStatement(self, ctx:PrimitiveParser.DestructuringSampleMinusStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#destructuringSampleStatement.
+    def visitDestructuringSampleStatement(self, ctx:PrimitiveParser.DestructuringSampleStatementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#assignmentStatement.
     def visitAssignmentStatement(self, ctx:PrimitiveParser.AssignmentStatementContext):
         return self.visitChildren(ctx)

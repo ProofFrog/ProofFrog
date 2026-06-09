@@ -1,7 +1,8 @@
 from __future__ import annotations
+import copy
 import os
 import re
-from typing import Any, Type, Callable, cast
+from typing import Any, Optional, Type, Callable, TypeVar, cast
 from antlr4 import (
     FileStream,
     InputStream,
@@ -25,6 +26,9 @@ from .parsing.ProofParser import ProofParser
 from .parsing.ProofLexer import ProofLexer
 from . import frog_ast
 from . import suggestions as _suggestions
+
+# A Root/Game/Method node passed through the destructuring desugarer.
+T = TypeVar("T", bound=frog_ast.ASTNode)
 
 
 class _SilentErrorListener(ErrorListener):  # type: ignore[misc]
@@ -968,6 +972,15 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
         result = self.visit(expr_ctx)
         if isinstance(result, frog_ast.Type):
             return result
+        # A bracketed product type (e.g. `[T1, T2]`) parses as a Tuple in
+        # expression position; reinterpret it as a ProductType when every
+        # element is itself a type.
+        if isinstance(result, frog_ast.Tuple) and all(
+            isinstance(value, frog_ast.Type) for value in result.values
+        ):
+            return frog_ast.ProductType(
+                [cast(frog_ast.Type, value) for value in result.values]
+            )
         raise ValueError(
             f"Left side of `<- T \\ S` sugar must be a type, got {result!r}"
         )
@@ -1071,6 +1084,43 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             exclusion,
             sampled_from_type,
             surface_form="minus",
+        )
+
+    def visitDestructuringAssignStatement(
+        self, ctx: PrimitiveParser.DestructuringAssignStatementContext
+    ) -> frog_ast.DestructuringBinding:
+        return frog_ast.DestructuringBinding(
+            cast(frog_ast.Type, self.visit(ctx.type_())),
+            [id_ctx.getText() for id_ctx in ctx.id_()],
+            self.visit(ctx.expression()),
+            kind="assign",
+        )
+
+    def visitDestructuringSampleStatement(
+        self, ctx: PrimitiveParser.DestructuringSampleStatementContext
+    ) -> frog_ast.DestructuringBinding:
+        return frog_ast.DestructuringBinding(
+            cast(frog_ast.Type, self.visit(ctx.type_())),
+            [id_ctx.getText() for id_ctx in ctx.id_()],
+            self.visit(ctx.expression()),
+            kind="sample",
+        )
+
+    def visitDestructuringSampleMinusStatement(
+        self, ctx: PrimitiveParser.DestructuringSampleMinusStatementContext
+    ) -> frog_ast.DestructuringBinding:
+        # `[T..] [a, b] <- D \ S;` samples a tuple from D excluding S, then
+        # reads each element out. The LHS of BACKSLASH denotes a type.
+        sampled_from_type = self._expression_to_type(ctx.expression(0))
+        exclusion = self.visit(ctx.expression(1))
+        return frog_ast.DestructuringBinding(
+            cast(frog_ast.Type, self.visit(ctx.type_())),
+            [id_ctx.getText() for id_ctx in ctx.id_()],
+            # For sample-minus the "value" slot carries the (type) source the
+            # tuple is sampled from; the desugarer reads it back as a Type.
+            cast(frog_ast.Expression, sampled_from_type),
+            kind="sample_minus",
+            exclusion=exclusion,
         )
 
     def visitUniqueSampleStatement(
@@ -1500,6 +1550,200 @@ def _get_parser(
     return parser
 
 
+def _fresh_temp_name(used: set[str], base: str = "_tup") -> str:
+    """Return a name not in *used*, preferring *base* then ``base_0``, ..."""
+    if base not in used:
+        return base
+    i = 0
+    while f"{base}_{i}" in used:
+        i += 1
+    return f"{base}_{i}"
+
+
+def _collect_all_names(node: Any) -> set[str]:
+    """Collect every local/declared name appearing anywhere under *node*.
+
+    Used to pick a destructuring temp name that cannot collide with any name
+    in the method (including locals declared after the destructuring).
+    """
+    names: set[str] = set()
+
+    def walk(n: Any) -> None:
+        if isinstance(n, frog_ast.Variable):
+            names.add(n.name)
+        elif isinstance(n, frog_ast.VariableDeclaration):
+            names.add(n.name)
+        elif isinstance(n, frog_ast.DestructuringBinding):
+            names.update(n.names)
+        elif isinstance(n, frog_ast.NumericFor):
+            names.add(n.name)
+        elif isinstance(n, frog_ast.GenericFor):
+            names.add(n.var_name)
+        if isinstance(n, frog_ast.ASTNode):
+            for attr in vars(n):
+                walk(getattr(n, attr))
+        elif isinstance(n, (list, tuple)):
+            for item in n:
+                walk(item)
+
+    walk(node)
+    return names
+
+
+def _record_declared_name(stmt: frog_ast.Statement, scope: set[str]) -> None:
+    """Add the local name *stmt* introduces (if any) into *scope*."""
+    if isinstance(stmt, frog_ast.VariableDeclaration):
+        scope.add(stmt.name)
+    elif isinstance(
+        stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+    ):
+        if stmt.the_type is not None and isinstance(stmt.var, frog_ast.Variable):
+            scope.add(stmt.var.name)
+
+
+def _expand_destructuring(
+    stmt: frog_ast.DestructuringBinding, scope: set[str], used: set[str]
+) -> tuple[list[frog_ast.Statement], set[str]]:
+    """Rewrite one ``DestructuringBinding`` into temp + per-element reads.
+
+    Returns the replacement statements and the set of newly declared names.
+    A target already in *scope* (field/param/outer local) becomes a plain
+    assignment; otherwise it is a new typed declaration.
+    """
+    leading = stmt.the_type
+    if not isinstance(leading, frog_ast.ProductType):
+        raise ParseError(
+            f"destructuring binding requires a tuple type, got '{leading}'",
+            line=stmt.line_num,
+            column=stmt.column_num,
+        )
+    if len(leading.types) != len(stmt.names):
+        raise ParseError(
+            f"destructuring binding has {len(stmt.names)} names but the type "
+            f"'{leading}' has {len(leading.types)} components",
+            line=stmt.line_num,
+            column=stmt.column_num,
+        )
+
+    result: list[frog_ast.Statement] = []
+    # For a plain `= variable` RHS, index the variable directly (no temp).
+    if stmt.kind == "assign" and isinstance(stmt.value, frog_ast.Variable):
+        source_name = stmt.value.name
+    else:
+        source_name = _fresh_temp_name(used)
+        used.add(source_name)
+        temp_var = frog_ast.Variable(source_name)
+        if stmt.kind == "sample":
+            result.append(frog_ast.Sample(copy.deepcopy(leading), temp_var, stmt.value))
+        elif stmt.kind == "sample_minus":
+            result.append(
+                frog_ast.UniqueSample(
+                    copy.deepcopy(leading),
+                    temp_var,
+                    cast(frog_ast.Expression, stmt.exclusion),
+                    cast(frog_ast.Type, stmt.value),
+                    surface_form="minus",
+                )
+            )
+        else:
+            result.append(
+                frog_ast.Assignment(copy.deepcopy(leading), temp_var, stmt.value)
+            )
+
+    new_names: set[str] = set()
+    for index, name in enumerate(stmt.names):
+        if name in scope:
+            target_type: Optional[frog_ast.Type] = None
+        else:
+            target_type = copy.deepcopy(leading.types[index])
+            new_names.add(name)
+        result.append(
+            frog_ast.Assignment(
+                target_type,
+                frog_ast.Variable(name),
+                frog_ast.ArrayAccess(
+                    frog_ast.Variable(source_name), frog_ast.Integer(index)
+                ),
+            )
+        )
+    return result, new_names
+
+
+def _expand_statements(
+    statements: list[frog_ast.Statement], scope: set[str], used: set[str]
+) -> list[frog_ast.Statement]:
+    """Desugar destructuring bindings in a statement list, threading scope."""
+    result: list[frog_ast.Statement] = []
+    for stmt in statements:
+        if isinstance(stmt, frog_ast.DestructuringBinding):
+            expanded, new_names = _expand_destructuring(stmt, scope, used)
+            result.extend(expanded)
+            scope |= new_names
+            continue
+        if isinstance(stmt, frog_ast.IfStatement):
+            stmt.blocks = [
+                frog_ast.Block(
+                    _expand_statements(list(block.statements), set(scope), used)
+                )
+                for block in stmt.blocks
+            ]
+        elif isinstance(stmt, frog_ast.NumericFor):
+            inner = set(scope)
+            inner.add(stmt.name)
+            stmt.block = frog_ast.Block(
+                _expand_statements(list(stmt.block.statements), inner, used)
+            )
+        elif isinstance(stmt, frog_ast.GenericFor):
+            inner = set(scope)
+            inner.add(stmt.var_name)
+            stmt.block = frog_ast.Block(
+                _expand_statements(list(stmt.block.statements), inner, used)
+            )
+        _record_declared_name(stmt, scope)
+        result.append(stmt)
+    return result
+
+
+def _methods_with_scope(node: Any) -> list[tuple[frog_ast.Method, set[str]]]:
+    """Yield each method-with-a-body and the names ambient at its top level."""
+    pairs: list[tuple[frog_ast.Method, set[str]]] = []
+
+    def from_container(container: Any, extra: set[str]) -> None:
+        field_names = {field.name for field in container.fields}
+        for method in container.methods:
+            params = {param.name for param in method.signature.parameters}
+            pairs.append((method, field_names | params | extra))
+
+    if isinstance(node, frog_ast.GameFile):
+        for game in node.games:
+            from_container(game, set())
+    elif isinstance(node, frog_ast.Scheme):
+        from_container(node, set())
+    elif isinstance(node, frog_ast.ProofFile):
+        let_names = {let.name for let in node.lets}
+        for helper in node.helpers:
+            from_container(helper, let_names)
+    elif isinstance(node, frog_ast.Game):  # also Reduction
+        from_container(node, set())
+    elif isinstance(node, frog_ast.Method):
+        pairs.append((node, {p.name for p in node.signature.parameters}))
+    return pairs
+
+
+def _desugar_destructuring(node: T) -> T:
+    """Rewrite every ``DestructuringBinding`` under *node* into core statements.
+
+    Runs at parse time so all downstream stages (semantic analysis, the proof
+    engine, exporters) only ever see ordinary declarations and assignments.
+    """
+    for method, ambient in _methods_with_scope(node):
+        used = set(ambient) | _collect_all_names(method.block)
+        method.block = frog_ast.Block(
+            _expand_statements(list(method.block.statements), set(ambient), used)
+        )
+    return node
+
+
 def parse_primitive_file(primitive: str) -> frog_ast.Primitive:
     try:
         visitor = _PrimitiveASTGenerator()
@@ -1520,7 +1764,7 @@ def parse_scheme_file(scheme: str) -> frog_ast.Scheme:
         ast: frog_ast.Scheme = visitor.visit(
             _get_parser(scheme, SchemeLexer, SchemeParser).program()
         )
-        return ast
+        return _desugar_destructuring(ast)
     except antlr_error.Errors.ParseCancellationException as e:
         better = _reparse_for_error(scheme, SchemeLexer, SchemeParser)
         raise (better or _to_parse_error(e, scheme)) from e
@@ -1544,7 +1788,7 @@ def parse_game_file(game_file: str) -> frog_ast.GameFile:
         ast: frog_ast.GameFile = visitor.visit(
             _get_parser(game_file, GameLexer, GameParser).program()
         )
-        return ast
+        return _desugar_destructuring(ast)
     except antlr_error.Errors.ParseCancellationException as e:
         better = _reparse_for_error(game_file, GameLexer, GameParser)
         raise (better or _to_parse_error(e, game_file)) from e
@@ -1557,7 +1801,7 @@ def parse_proof_file(proof_file: str) -> frog_ast.ProofFile:
         ast: frog_ast.ProofFile = visitor.visit(
             _get_parser(proof_file, ProofLexer, ProofParser).program()
         )
-        return ast
+        return _desugar_destructuring(ast)
     except antlr_error.Errors.ParseCancellationException as e:
         better = _reparse_for_error(proof_file, ProofLexer, ProofParser)
         raise (better or _to_parse_error(e, proof_file)) from e
@@ -1637,7 +1881,7 @@ def parse_string(content: str, file_type: frog_ast.FileType) -> frog_ast.Root:
     try:
         parser = _get_parser_from_stream(content, lexer_cls, parser_cls)
         ast: frog_ast.Root = visitor.visit(parser.program())
-        return ast
+        return _desugar_destructuring(ast)
     except antlr_error.Errors.ParseCancellationException as e:
         better = _reparse_for_error(content, lexer_cls, parser_cls)
         raise (better or _to_parse_error(e, content)) from e
@@ -1674,7 +1918,7 @@ def parse_string_collecting_errors(  # pylint: disable=too-many-locals
     try:
         parser = _get_parser_from_stream(content, lexer_cls, parser_cls)
         ast: frog_ast.Root = visitor.visit(parser.program())
-        return ast, []
+        return _desugar_destructuring(ast), []
     except antlr_error.Errors.ParseCancellationException:
         pass
 
@@ -1749,7 +1993,7 @@ def parse_game(game: str) -> frog_ast.Game:
         ast: frog_ast.Game = _SharedAST().visit(
             _get_parser(game, GameLexer, GameParser).game()
         )
-        return ast
+        return _desugar_destructuring(ast)
     except antlr_error.Errors.ParseCancellationException as e:
         raise _to_parse_error(e, game) from e
 
@@ -1759,7 +2003,7 @@ def parse_reduction(reduction: str) -> frog_ast.Reduction:
         ast: frog_ast.Reduction = _ProofASTGenerator().visit(
             _get_parser(reduction, ProofLexer, ProofParser).reduction()
         )
-        return ast
+        return _desugar_destructuring(ast)
     except antlr_error.Errors.ParseCancellationException as e:
         raise _to_parse_error(e, reduction) from e
 
@@ -1769,6 +2013,6 @@ def parse_method(method: str) -> frog_ast.Method:
         ast: frog_ast.Method = _SharedAST().visit(
             _get_parser(method, GameLexer, GameParser).method()
         )
-        return ast
+        return _desugar_destructuring(ast)
     except antlr_error.Errors.ParseCancellationException as e:
         raise _to_parse_error(e, method) from e

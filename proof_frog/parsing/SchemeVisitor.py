@@ -74,6 +74,21 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SchemeParser#destructuringAssignStatement.
+    def visitDestructuringAssignStatement(self, ctx:SchemeParser.DestructuringAssignStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#destructuringSampleMinusStatement.
+    def visitDestructuringSampleMinusStatement(self, ctx:SchemeParser.DestructuringSampleMinusStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SchemeParser#destructuringSampleStatement.
+    def visitDestructuringSampleStatement(self, ctx:SchemeParser.DestructuringSampleStatementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SchemeParser#assignmentStatement.
     def visitAssignmentStatement(self, ctx:SchemeParser.AssignmentStatementContext):
         return self.visitChildren(ctx)

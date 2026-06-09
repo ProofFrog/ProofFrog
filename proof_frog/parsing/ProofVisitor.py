@@ -164,6 +164,21 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#destructuringAssignStatement.
+    def visitDestructuringAssignStatement(self, ctx:ProofParser.DestructuringAssignStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#destructuringSampleMinusStatement.
+    def visitDestructuringSampleMinusStatement(self, ctx:ProofParser.DestructuringSampleMinusStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#destructuringSampleStatement.
+    def visitDestructuringSampleStatement(self, ctx:ProofParser.DestructuringSampleStatementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#assignmentStatement.
     def visitAssignmentStatement(self, ctx:ProofParser.AssignmentStatementContext):
         return self.visitChildren(ctx)

@@ -100,6 +100,22 @@ class ExprRenderer:
         if isinstance(expr, frog_ast.Tuple):
             inner = ", ".join(self._render(v) for v in expr.values)
             return f"({inner})"
+        # ParameterizedGame in expression position (e.g. as the object of
+        # a field access like `G(params).count`).  Render as an algorithm
+        # macro call so field-access chains remain readable.
+        if isinstance(expr, frog_ast.ParameterizedGame):
+            head = self.macros.register_algorithm(expr.name)
+            if not expr.args:
+                return head
+            rendered_args = [self._render(a) for a in expr.args]
+            return f"{head}({', '.join(rendered_args)})"
+        # A Type used in expression position (e.g. `a <- ModInt<q>;`):
+        # delegate to TypeRenderer to avoid the fallback comment.
+        if isinstance(expr, frog_ast.Type):
+            # pylint: disable=import-outside-toplevel
+            from .type_renderer import TypeRenderer
+
+            return TypeRenderer(self).render(expr)
         # Unknown node: defer to repr-like fallback.
         return f"% unsupported: {type(expr).__name__}"
 

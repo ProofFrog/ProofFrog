@@ -2,20 +2,40 @@
 
 from __future__ import annotations
 
-from ... import frog_ast, frog_parser
+from typing import TYPE_CHECKING
+
+from ... import frog_ast
 from . import ir
 from .backends.base import Backend
+from .expr_renderer import _looks_like_algorithm_name
 from .macros import MacroRegistry
 from .module_renderer import ModuleRenderer
 
+if TYPE_CHECKING:
+    from .proof_context import Hop, ProofContext
+
 
 def render_proof(
-    path: str,
+    ctx: "ProofContext",
     backend: Backend,
     macros: MacroRegistry,
     renderer: ModuleRenderer,
+    composition: str = "symbolic",
 ) -> str:
-    proof = frog_parser.parse_proof_file(path)
+    """Render a proof file to a self-contained LaTeX document.
+
+    ``ctx`` is a ``ProofContext`` that exposes game steps and resolution.
+    ``composition`` is either ``"symbolic"`` (default) or ``"inlined"``.
+
+    The body is rendered first so macro registration populates the preamble,
+    then the full document is assembled.
+    """
+    body_parts = [
+        _definitions_section(ctx, renderer),
+        _construction_section(ctx, renderer),
+        _theorem_section(ctx, renderer),
+        _games_sequence(ctx, renderer, backend, composition),
+    ]
 
     pkg_lines = []
     for spec in backend.required_packages():
@@ -24,41 +44,115 @@ def render_proof(
         else:
             pkg_lines.append(rf"\usepackage{{{spec.name}}}")
 
-    body_parts: list[str] = []
-    body_parts.append(_construction_section(proof, renderer))
-    body_parts.append(_theorem_section(proof, renderer))
-    body_parts.append(_games_sequence(proof, renderer, backend))
-
     parts = [
         r"\documentclass{article}",
         *pkg_lines,
         backend.preamble_extras() or "",
         macros.preamble().rstrip(),
         r"\begin{document}",
-        "\n\n".join(s for s in body_parts if s),
+        "\n\n".join(p for p in body_parts if p),
         r"\end{document}",
         "",
     ]
     return "\n".join(p for p in parts if p != "")
 
 
-def _construction_section(proof: frog_ast.ProofFile, renderer: ModuleRenderer) -> str:
-    if not proof.lets:
-        return ""
-    lines = [r"\section*{Construction}", r"\begin{itemize}"]
-    for let in proof.lets:
-        ty = renderer.types.render(let.type)
-        lines.append(rf"  \item ${let.name} : {ty}$")
-    lines.append(r"\end{itemize}")
-    return "\n".join(lines)
+def _definitions_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:
+    parts = [r"\section*{Definitions}"]
+    for game_file in ctx.security_game_files():
+        for game in game_file.games:
+            parts.append(
+                renderer.render_game(game, experiment_name=game_file.get_export_name())
+            )
+    return "\n\n".join(parts)
 
 
-def _theorem_section(proof: frog_ast.ProofFile, renderer: ModuleRenderer) -> str:
-    theorem_str = renderer.expr.render(proof.theorem)
+def _construction_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:
+    parts = [r"\section*{Construction}"]
+    construction_names: set[str] = set()
+    for name, root in ctx.let_constructions():
+        construction_names.add(name)
+        if isinstance(root, frog_ast.Scheme):
+            parts.append(renderer.render_scheme(root))
+        elif isinstance(root, frog_ast.Primitive):
+            parts.append(renderer.render_primitive(root))
+    # Remaining lets (e.g. `Group G;`, which is a built-in type rather than a
+    # scheme/primitive body) are listed as a typed definition list, matching
+    # the v1 construction style so identifiers like `\G` still appear.
+    others = [let for let in ctx.proof_file.lets if let.name not in construction_names]
+    if others:
+        lines = [r"\begin{itemize}"]
+        for let in others:
+            if _looks_like_algorithm_name(let.name):
+                name_tex = renderer.macros.register_algorithm(let.name)
+            else:
+                name_tex = renderer.expr.render(frog_ast.Variable(let.name))
+            lines.append(rf"  \item ${name_tex} : {renderer.types.render(let.type)}$")
+        lines.append(r"\end{itemize}")
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts)
+
+
+def _render_game_ref(
+    game: frog_ast.Expression,
+    renderer: ModuleRenderer,
+    *,
+    as_notion: bool,
+) -> str:
+    """Render a ParameterizedGame / ConcreteGame as a LaTeX reference.
+
+    ``as_notion`` registers the head name via the security-notion macro
+    (underscores -> hyphens); otherwise via the algorithm macro. Arguments
+    may be Expressions or Types, so each is dispatched accordingly.
+    """
+    if isinstance(game, frog_ast.ConcreteGame):
+        head = _render_game_ref(game.game, renderer, as_notion=as_notion)
+        side = renderer.macros.register_algorithm(game.which)
+        return f"{head}.{side}"
+    if isinstance(game, frog_ast.ParameterizedGame):
+        if as_notion:
+            head = renderer.macros.register_security_notion(game.name)
+        else:
+            head = renderer.macros.register_algorithm(game.name)
+        if not game.args:
+            return head
+        rendered_args = [_render_game_arg(a, renderer) for a in game.args]
+        return f"{head}({', '.join(rendered_args)})"
+    return renderer.expr.render(game)
+
+
+def _render_game_arg(arg: object, renderer: ModuleRenderer) -> str:
+    # Algorithm-like variable args (scheme/group instances such as `G`, `E`)
+    # are macroified, matching ModuleRenderer._render_param_name, so a game
+    # reference reads `\DDH(\G)` rather than `\DDH(G)`.
+    # NOTE: Variable multiply-inherits both Expression and Type, so it
+    # satisfies both isinstance checks below and must be tested first. A pure
+    # Type (e.g. GroupElemType) is not an Expression, so the Type check must
+    # precede the Expression check. Order: Variable -> Type -> Expression.
+    if isinstance(arg, frog_ast.Variable) and _looks_like_algorithm_name(arg.name):
+        return renderer.macros.register_algorithm(arg.name)
+    if isinstance(arg, frog_ast.Type):
+        return renderer.types.render(arg)
+    if isinstance(arg, frog_ast.Expression):
+        return renderer.expr.render(arg)
+    return str(arg)
+
+
+def _theorem_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:
+    hyps = [_render_game_ref(a, renderer, as_notion=True) for a in ctx.assumptions()]
+    concl = _render_game_ref(ctx.theorem(), renderer, as_notion=True)
+    if hyps:
+        joined = " and ".join(f"${h}$" for h in hyps)
+        body = (
+            f"If indistinguishability holds for {joined}, then "
+            f"indistinguishability holds for ${concl}$."
+        )
+    else:
+        body = f"Indistinguishability holds for ${concl}$."
     return (
         r"\begin{theorem}"
         + "\n"
-        + theorem_str
+        + body
         + "\n"
         + r"\end{theorem}"
         + "\n\n"
@@ -67,52 +161,95 @@ def _theorem_section(proof: frog_ast.ProofFile, renderer: ModuleRenderer) -> str
 
 
 def _games_sequence(
-    proof: frog_ast.ProofFile,
+    ctx: "ProofContext",
     renderer: ModuleRenderer,
     backend: Backend,
+    composition: str,
 ) -> str:
+    """Render the full game sequence with hop annotations between figures."""
+    steps = ctx.game_steps()
+    hops = ctx.hop_kinds()
     chunks: list[str] = []
-    helpers_by_name = {g.name: g for g in proof.helpers}
-    for i, step in enumerate(proof.steps):
-        chunks.append(rf"\paragraph{{Game $G_{{{i}}}$.}} \todo{{commentary}}")
-        figure = _step_figure(step, helpers_by_name, renderer, backend, i)
-        if figure:
-            chunks.append(figure)
+    for i, step in enumerate(steps):
+        if i > 0:
+            chunks.append(_hop_annotation(i, hops[i - 1], renderer))
+        chunks.append(_step_figure(ctx, step, renderer, backend, i, composition))
     return "\n\n".join(chunks)
 
 
+def _hop_annotation(i: int, hop: "Hop", renderer: ModuleRenderer) -> str:
+    """Render the paragraph annotation for a hop between G_{i-1} and G_i."""
+    if hop.kind == "assumption" and hop.assumption is not None:
+        ref = _render_game_ref(hop.assumption, renderer, as_notion=True)
+        reason = f"by assumption ${ref}$"
+    else:
+        reason = "interchangeable"
+    return (
+        rf"\paragraph{{Game $G_{{{i-1}}} \to G_{{{i}}}$.}} "
+        rf"({reason}) \todo{{commentary}}"
+    )
+
+
 def _step_figure(
-    step: frog_ast.ProofStep,
-    helpers_by_name: dict[str, frog_ast.Game],
+    ctx: "ProofContext",
+    step: frog_ast.Step,
     renderer: ModuleRenderer,
     backend: Backend,
     index: int,
+    composition: str,
 ) -> str:
-    game_obj: frog_ast.Game | None = None
-    if isinstance(step, frog_ast.Step):
-        challenger = step.challenger
-        if isinstance(challenger, (frog_ast.ConcreteGame, frog_ast.ParameterizedGame)):
-            name = _game_name(challenger)
-            if name in helpers_by_name:
-                game_obj = helpers_by_name[name]
-    if game_obj is None:
-        body: ir.VStack | ir.ProcedureBlock = ir.ProcedureBlock(
-            title=f"G_{{{index}}}",
-            lines=[ir.Comment(text=_latex_escape(str(step).rstrip(";")))],
-        )
-    else:
-        method_blocks = [
-            renderer._method_block(  # pylint: disable=protected-access
-                m,
-                renderer.macros.register_algorithm(game_obj.name),
-                qualify=False,
+    """Render a single game-step figure in the requested composition mode.
+
+    On any resolution or render failure, prints a warning to stderr and emits
+    the raw step text in a ``\\pccomment`` fallback block so partial proofs
+    still export.
+    """
+    caption = f"Game $G_{{{index}}}$"
+    label = f"fig:G{index}"
+    try:
+        if composition == "inlined":
+            game = ctx.resolve_inlined(step)
+            block = renderer._method_blocks_vstack(
+                game
+            )  # pylint: disable=protected-access
+            body: ir.VStack | ir.ProcedureBlock = block
+            return backend.render_figure(
+                ir.Figure(body=body, caption=caption, label=label)
             )
-            for m in game_obj.methods
-        ]
-        body = ir.VStack(blocks=method_blocks, boxed=True)
-    return backend.render_figure(
-        ir.Figure(body=body, caption=f"Game $G_{{{index}}}$", label=f"fig:G{index}")
-    )
+        # symbolic mode
+        sr = ctx.resolve_symbolic(step)
+        challenger_ref = _render_game_ref(sr.challenger, renderer, as_notion=True)
+        if sr.reduction_ref is not None:
+            comp = _render_game_ref(sr.reduction_ref, renderer, as_notion=False)
+            heading = rf"$G_{{{index}}} = {challenger_ref} \circ {comp}$"
+        else:
+            heading = rf"$G_{{{index}}} = {challenger_ref}$"
+        if sr.novel is not None:
+            vstack = renderer._method_blocks_vstack(
+                sr.novel
+            )  # pylint: disable=protected-access
+            return backend.render_figure(
+                ir.Figure(body=vstack, heading=heading, caption=caption, label=label)
+            )
+        # start/end step: heading only, referencing the shared sections.
+        heading_only = heading + r"\\\textit{(see Definitions and Construction)}"
+        return backend.render_figure(
+            ir.Figure(body=None, heading=heading_only, caption=caption, label=label)
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        import sys  # pylint: disable=import-outside-toplevel
+
+        print(f"latex-export: could not render step {index}: {exc}", file=sys.stderr)
+        return backend.render_figure(
+            ir.Figure(
+                body=ir.ProcedureBlock(
+                    title=caption,
+                    lines=[ir.Comment(text=_latex_escape(str(step).rstrip(";")))],
+                ),
+                caption=caption,
+                label=label,
+            )
+        )
 
 
 _LATEX_ESC = {
@@ -131,14 +268,3 @@ _LATEX_ESC = {
 
 def _latex_escape(s: str) -> str:
     return "".join(_LATEX_ESC.get(c, c) for c in s)
-
-
-def _game_name(g: frog_ast.Expression) -> str:
-    if isinstance(g, frog_ast.ConcreteGame):
-        # ConcreteGame has .game (ParameterizedGame) and .which (left/right name)
-        inner = getattr(g, "game", None)
-        if inner is not None:
-            return _game_name(inner)
-    if isinstance(g, frog_ast.ParameterizedGame):
-        return getattr(g, "name", "")
-    return ""

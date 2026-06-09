@@ -43,7 +43,8 @@ class CryptocodeBackend:
         return (
             r"\newtheorem{theorem}{Theorem}" + "\n"
             r"\providecommand{\todo}[1]{\textbf{TODO:} #1}" + "\n"
-            r"\providecommand{\Experiment}[3]{\ensuremath{{#1}.{#2}(#3)}}"
+            r"\providecommand{\Experiment}[3]{\ensuremath{{#1}.{#2}(#3)}}" + "\n"
+            r"\providecommand{\getsr}{\sample}"
         )
 
     def _line(self, line: ir.Line) -> str:
@@ -71,6 +72,8 @@ class CryptocodeBackend:
         raise TypeError(f"unknown IR line: {line!r}")
 
     def render_procedure(self, p: ir.ProcedureBlock) -> str:
+        if not p.lines:
+            return "\\procedure[linenumbering]{$" + p.title + "$}{}"
         body = " \\\\\n    ".join(self._line(ln) for ln in p.lines)
         return "\\procedure[linenumbering]{$" + p.title + "$}{\n    " + body + "\n}"
 
@@ -80,12 +83,18 @@ class CryptocodeBackend:
         return f"\\begin{{pcvstack}}{opt}\n{body}\n\\end{{pcvstack}}"
 
     def render_figure(self, f: ir.Figure) -> str:
-        inner = (
-            self.render_vstack(f.body)
-            if isinstance(f.body, ir.VStack)
-            else self.render_procedure(f.body)
-        )
-        parts = ["\\begin{figure}[ht]", "\\centering", inner]
+        parts = ["\\begin{figure}[ht]", "\\centering"]
+        if f.heading:
+            parts.append(f.heading)
+            if f.body is not None:
+                parts.append("\\par\\smallskip")
+        if f.body is not None:
+            inner = (
+                self.render_vstack(f.body)
+                if isinstance(f.body, ir.VStack)
+                else self.render_procedure(f.body)
+            )
+            parts.append(inner)
         if f.caption:
             parts.append(rf"\caption{{{f.caption}}}")
         if f.label:

@@ -94,13 +94,20 @@ class ModuleRenderer:
 
     # ---- Game --------------------------------------------------------------
 
-    def render_game(self, g: frog_ast.Game, experiment_name: str | None = None) -> str:
+    def _method_blocks_vstack(self, g: frog_ast.Game) -> ir.VStack:
+        """Return a boxed VStack of all method blocks for a game.
+
+        Used both by ``render_game`` (which adds a heading) and by the proof
+        renderer's figure builder (which needs the block stack without the
+        heading).
+        """
         side_macro = self.macros.register_algorithm(g.name)
-        blocks: list[ir.ProcedureBlock] = []
-        if g.methods:
-            for m in g.methods:
-                blocks.append(self._method_block(m, side_macro, qualify=False))
-        vstack = ir.VStack(blocks=blocks, boxed=True)
+        blocks = [self._method_block(m, side_macro, qualify=False) for m in g.methods]
+        return ir.VStack(blocks=blocks, boxed=True)
+
+    def render_game(self, g: frog_ast.Game, experiment_name: str | None = None) -> str:
+        vstack = self._method_blocks_vstack(g)
+        side_macro = self.macros.register_algorithm(g.name)
         params = ", ".join(self._render_param_name(p.name) for p in g.parameters)
         if experiment_name:
             exp_macro = self.macros.register_security_notion(experiment_name)

@@ -81,6 +81,7 @@ class VStack:
 
 @dataclass
 class Figure:
-    body: Union[VStack, ProcedureBlock]
+    body: Union[VStack, ProcedureBlock, None] = None
     caption: str | None = None
     label: str | None = None
+    heading: str | None = None  # rendered (math-mode) line above the body

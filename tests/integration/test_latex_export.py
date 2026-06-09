@@ -35,3 +35,27 @@ def test_export_sweep(src: Path) -> None:
     out = export_file(str(src))
     assert r"\begin{document}" in out
     assert r"\end{document}" in out
+
+
+def test_export_latex_composition_flag(tmp_path: Path) -> None:
+    out = tmp_path / "ddh.tex"
+    r = subprocess.run(
+        [
+            "python",
+            "-m",
+            "proof_frog",
+            "export-latex",
+            "examples/Proofs/Group/DDH_implies_CDH.proof",
+            "--composition",
+            "inlined",
+            "-o",
+            str(out),
+        ],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert r.returncode == 0, r.stderr
+    text = out.read_text()
+    assert r"\begin{document}" in text and r"\end{document}" in text

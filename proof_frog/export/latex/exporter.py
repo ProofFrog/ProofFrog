@@ -40,7 +40,11 @@ def _document(backend: Backend, macros: MacroRegistry, body: str) -> str:
     return "\n".join(parts)
 
 
-def export_file(path: str, backend_name: str = "cryptocode") -> str:
+def export_file(
+    path: str,
+    backend_name: str = "cryptocode",
+    composition: str = "symbolic",
+) -> str:
     """Dispatch on file extension. Returns rendered LaTeX as a string."""
     suffix = Path(path).suffix
     backend = _make_backend(backend_name)
@@ -65,6 +69,8 @@ def export_file(path: str, backend_name: str = "cryptocode") -> str:
     if suffix == ".proof":
         # pylint: disable=import-outside-toplevel
         from .proof_renderer import render_proof
+        from .proof_context import ProofContext
 
-        return render_proof(path, backend, macros, renderer)
+        ctx = ProofContext(path)
+        return render_proof(ctx, backend, macros, renderer, composition=composition)
     raise ValueError(f"Unsupported file type for LaTeX export: {suffix}")

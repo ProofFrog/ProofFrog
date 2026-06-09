@@ -638,6 +638,45 @@ class Assignment(Statement):
         ) + f"{self.var} = {self.value};"
 
 
+class DestructuringBinding(Statement):
+    """A tuple-destructuring binding, e.g. ``[T1, T2] [a, b] = expr;``.
+
+    This is parse-time-only sugar: the parser produces this node and
+    ``frog_parser._desugar_destructuring`` immediately rewrites it into a
+    temporary binding plus one ``Assignment`` per element, so no later stage
+    ever sees it. ``the_type`` is the leading product type (which both types
+    the temporary and supplies each target's element type); ``kind`` records
+    the surface form so the temporary keeps the right sampling semantics.
+    For ``"sample_minus"``, ``value`` holds the (type) source sampled from
+    and ``exclusion`` the excluded set; otherwise ``value`` is the RHS
+    expression and ``exclusion`` is unused.
+    """
+
+    # pylint: disable=too-many-positional-arguments,too-many-arguments
+    def __init__(
+        self,
+        the_type: Type,
+        names: list[str],
+        value: Expression,
+        kind: Literal["assign", "sample", "sample_minus"] = "assign",
+        exclusion: Optional[Expression] = None,
+    ) -> None:
+        super().__init__()
+        self.the_type = the_type
+        self.names = names
+        self.value = value
+        self.kind = kind
+        self.exclusion = exclusion
+
+    def __str__(self) -> str:
+        targets = f'[{", ".join(self.names)}]'
+        if self.kind == "sample":
+            return f"{self.the_type} {targets} <- {self.value};"
+        if self.kind == "sample_minus":
+            return f"{self.the_type} {targets} <- {self.value} \\ {self.exclusion};"
+        return f"{self.the_type} {targets} = {self.value};"
+
+
 class Integer(Expression):
     def __init__(self, num: int) -> None:
         super().__init__()

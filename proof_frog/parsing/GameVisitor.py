@@ -69,6 +69,21 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#destructuringAssignStatement.
+    def visitDestructuringAssignStatement(self, ctx:GameParser.DestructuringAssignStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#destructuringSampleMinusStatement.
+    def visitDestructuringSampleMinusStatement(self, ctx:GameParser.DestructuringSampleMinusStatementContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#destructuringSampleStatement.
+    def visitDestructuringSampleStatement(self, ctx:GameParser.DestructuringSampleStatementContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#assignmentStatement.
     def visitAssignmentStatement(self, ctx:GameParser.AssignmentStatementContext):
         return self.visitChildren(ctx)

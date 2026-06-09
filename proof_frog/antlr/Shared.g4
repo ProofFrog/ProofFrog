@@ -16,6 +16,9 @@ statement: type id SEMI #varDeclStatement
 	| type lvalue EQUALS expression SEMI #varDeclWithValueStatement
 	| type lvalue SAMPLES expression BACKSLASH expression SEMI #varDeclWithSampleMinusStatement
 	| type lvalue SAMPLES expression SEMI #varDeclWithSampleStatement
+	| type L_SQUARE id (COMMA id)+ R_SQUARE EQUALS expression SEMI #destructuringAssignStatement
+	| type L_SQUARE id (COMMA id)+ R_SQUARE SAMPLES expression BACKSLASH expression SEMI #destructuringSampleMinusStatement
+	| type L_SQUARE id (COMMA id)+ R_SQUARE SAMPLES expression SEMI #destructuringSampleStatement
 	| lvalue EQUALS expression SEMI #assignmentStatement
 	| lvalue SAMPLES expression BACKSLASH expression SEMI #sampleMinusStatement
 	| lvalue SAMPLES expression SEMI #sampleStatement

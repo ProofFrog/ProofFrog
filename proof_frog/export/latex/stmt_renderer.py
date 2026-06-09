@@ -37,6 +37,9 @@ class StmtRenderer:
         if isinstance(stmt, frog_ast.VariableDeclaration):
             out.append(ir.Raw(latex=stmt.name))
             return
+        if isinstance(stmt, frog_ast.DestructuringBinding):
+            self._render_destructuring(stmt, out)
+            return
         if isinstance(stmt, frog_ast.Sample):
             out.append(
                 ir.Sample(
@@ -83,6 +86,24 @@ class StmtRenderer:
             out.append(ir.Raw(latex=self.expr.render(stmt)))
             return
         out.append(ir.Raw(latex=f"% unsupported: {type(stmt).__name__}"))
+
+    def _render_destructuring(
+        self, stmt: frog_ast.DestructuringBinding, out: list[ir.Line]
+    ) -> None:
+        """Render a tuple-destructuring binding as a single tuple-LHS line.
+
+        Only reached when the file was parsed with ``desugar=False`` (the LaTeX
+        export path); otherwise the parser has already rewritten the node into
+        temp+index reads.
+        """
+        lhs = f"({', '.join(stmt.names)})"
+        rhs = self.expr.render(stmt.value)
+        if stmt.kind == "assign":
+            out.append(ir.Assign(lhs=lhs, rhs=rhs))
+            return
+        if stmt.kind == "sample_minus":
+            rhs = f"{rhs} \\setminus {self.expr.render(stmt.exclusion)}"  # type: ignore[arg-type]
+        out.append(ir.Sample(lhs=lhs, rhs=rhs))
 
     def _render_if(self, stmt: frog_ast.IfStatement, out: list[ir.Line]) -> None:
         for i, cond in enumerate(stmt.conditions):

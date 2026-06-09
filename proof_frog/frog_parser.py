@@ -1757,14 +1757,18 @@ def parse_primitive_file(primitive: str) -> frog_ast.Primitive:
         raise (better or _to_parse_error(e, primitive)) from e
 
 
-def parse_scheme_file(scheme: str) -> frog_ast.Scheme:
+def parse_scheme_file(scheme: str, desugar: bool = True) -> frog_ast.Scheme:
+    # `desugar=False` keeps tuple `DestructuringBinding` nodes in method bodies
+    # rather than rewriting them into temp+index reads. The LaTeX exporter is
+    # the intended False caller: it renders bindings faithfully and is the one
+    # carve-out from the "exporters see only core statements" invariant.
     try:
         visitor = _SchemeASTGenerator()
         visitor.source_file = scheme
         ast: frog_ast.Scheme = visitor.visit(
             _get_parser(scheme, SchemeLexer, SchemeParser).program()
         )
-        return _desugar_destructuring(ast)
+        return _desugar_destructuring(ast) if desugar else ast
     except antlr_error.Errors.ParseCancellationException as e:
         better = _reparse_for_error(scheme, SchemeLexer, SchemeParser)
         raise (better or _to_parse_error(e, scheme)) from e
@@ -1781,27 +1785,29 @@ def parse_expression(expression: str) -> frog_ast.Expression:
         raise (better or _to_parse_error(e, expression)) from e
 
 
-def parse_game_file(game_file: str) -> frog_ast.GameFile:
+def parse_game_file(game_file: str, desugar: bool = True) -> frog_ast.GameFile:
+    # See parse_scheme_file for the meaning of `desugar=False` (LaTeX export).
     try:
         visitor = _GameASTGenerator()
         visitor.source_file = game_file
         ast: frog_ast.GameFile = visitor.visit(
             _get_parser(game_file, GameLexer, GameParser).program()
         )
-        return _desugar_destructuring(ast)
+        return _desugar_destructuring(ast) if desugar else ast
     except antlr_error.Errors.ParseCancellationException as e:
         better = _reparse_for_error(game_file, GameLexer, GameParser)
         raise (better or _to_parse_error(e, game_file)) from e
 
 
-def parse_proof_file(proof_file: str) -> frog_ast.ProofFile:
+def parse_proof_file(proof_file: str, desugar: bool = True) -> frog_ast.ProofFile:
+    # See parse_scheme_file for the meaning of `desugar=False` (LaTeX export).
     try:
         visitor = _ProofASTGenerator()
         visitor.source_file = proof_file
         ast: frog_ast.ProofFile = visitor.visit(
             _get_parser(proof_file, ProofLexer, ProofParser).program()
         )
-        return _desugar_destructuring(ast)
+        return _desugar_destructuring(ast) if desugar else ast
     except antlr_error.Errors.ParseCancellationException as e:
         better = _reparse_for_error(proof_file, ProofLexer, ProofParser)
         raise (better or _to_parse_error(e, proof_file)) from e

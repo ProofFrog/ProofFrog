@@ -56,11 +56,13 @@ def export_file(
         body = renderer.render_primitive(ast)
         return _document(backend, macros, body)
     if suffix == ".scheme":
-        ast_s = frog_parser.parse_scheme_file(path)
+        # desugar=False keeps tuple-destructuring bindings intact for faithful
+        # rendering; the module path never reaches the proof engine.
+        ast_s = frog_parser.parse_scheme_file(path, desugar=False)
         body = renderer.render_scheme(ast_s)
         return _document(backend, macros, body)
     if suffix == ".game":
-        game_file = frog_parser.parse_game_file(path)
+        game_file = frog_parser.parse_game_file(path, desugar=False)
         chunks = []
         for game in game_file.games:
             chunks.append(renderer.render_game(game, experiment_name=game_file.name))

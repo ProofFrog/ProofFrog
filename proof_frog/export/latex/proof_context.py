@@ -40,10 +40,15 @@ class ProofContext:
 
     def __init__(self, path: str) -> None:
         self.path = path
-        self.proof_file = frog_parser.parse_proof_file(path)
+        # Symbolic-mode rendering reads helper (reduction / intermediate game)
+        # bodies straight off this AST, so keep tuple-destructuring bindings
+        # intact (desugar=False) for faithful output. The engine only
+        # understands core statements (it inlines helpers in inlined mode), so
+        # it is set up from a separately-desugared parse of the same file.
+        self.proof_file = frog_parser.parse_proof_file(path, desugar=False)
         self.engine = proof_engine.ProofEngine(False)
         self._load_imports()
-        self.engine.set_up_proof_context(self.proof_file)
+        self.engine.set_up_proof_context(frog_parser.parse_proof_file(path))
 
     # pylint: disable=duplicate-code
     # (import-loading mirrors web_server._setup_engine_for_proof; kept local

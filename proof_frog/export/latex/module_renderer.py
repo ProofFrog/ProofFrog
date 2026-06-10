@@ -103,7 +103,9 @@ class ModuleRenderer:
         ]
         vstack = ir.VStack(blocks=blocks, boxed=True)
         header = rf"\noindent\textbf{{Scheme {head_macro}}}\par\medskip"
-        return header + "\n" + self.backend.render_vstack(vstack)
+        return (
+            header + "\n" + self.backend.fit_width(self.backend.render_vstack(vstack))
+        )
 
     def _method_block(
         self,
@@ -167,7 +169,9 @@ class ModuleRenderer:
         vstack = self._method_blocks_vstack(g)
         title = self._game_title(g, experiment_name)
         header = rf"\noindent\textbf{{Game}} ${title}$\par\medskip"
-        return header + "\n" + self.backend.render_vstack(vstack)
+        return (
+            header + "\n" + self.backend.fit_width(self.backend.render_vstack(vstack))
+        )
 
     def render_game_file_games(
         self, games: Sequence[frog_ast.Game], experiment_name: str | None = None
@@ -191,4 +195,5 @@ class ModuleRenderer:
             vstack.heading = f"${self._game_title(g, experiment_name)}$"
             stacks.append(vstack)
         header = r"\noindent\textbf{Game}\par\medskip"
-        return header + "\n" + self.backend.render_hstack(ir.HStack(stacks=stacks))
+        hstack = self.backend.render_hstack(ir.HStack(stacks=stacks))
+        return header + "\n" + self.backend.fit_width(hstack)

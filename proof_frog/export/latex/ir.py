@@ -9,52 +9,63 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Union
 
+# Each IR line carries a ``depth``: its control-flow nesting level. Markers
+# (If/Else/EndIf/For/EndFor) take the depth of the *enclosing* block; the
+# statements between a header and its end-marker take depth + 1. Backends
+# prefix that many indents so nesting is visible (A3).
+
 
 @dataclass
 class Sample:
     lhs: str
     rhs: str
+    depth: int = 0
 
 
 @dataclass
 class Assign:
     lhs: str
     rhs: str
+    depth: int = 0
 
 
 @dataclass
 class Return:
     expr: str
+    depth: int = 0
 
 
 @dataclass
 class If:
     cond: str
+    depth: int = 0
 
 
 @dataclass
 class Else:
-    pass
+    depth: int = 0
 
 
 @dataclass
 class EndIf:
-    pass
+    depth: int = 0
 
 
 @dataclass
 class For:
     header: str
+    depth: int = 0
 
 
 @dataclass
 class EndFor:
-    pass
+    depth: int = 0
 
 
 @dataclass
 class Comment:
     text: str
+    depth: int = 0
 
 
 @dataclass
@@ -62,6 +73,7 @@ class Raw:
     """Escape hatch: pre-rendered LaTeX line."""
 
     latex: str
+    depth: int = 0
 
 
 Line = Union[Sample, Assign, Return, If, Else, EndIf, For, EndFor, Comment, Raw]

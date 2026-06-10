@@ -73,3 +73,53 @@ def test_funccall_statement_emits_raw() -> None:
     [line] = _renderer().render_block(_block([s]))
     assert isinstance(line, ir.Raw)
     assert r"\Foo(x)" in line.latex
+
+
+def test_if_body_is_indented_one_level_deeper_than_markers() -> None:
+    # The guarded body of an `if` must sit one nesting level deeper than the
+    # If/Else/EndIf markers so the structure is visible (A3). The markers stay
+    # at the outer depth.
+    cond = frog_ast.Variable("b")
+    then_blk = _block([frog_ast.ReturnStatement(frog_ast.Integer(1))])
+    else_blk = _block([frog_ast.ReturnStatement(frog_ast.Integer(0))])
+    s = frog_ast.IfStatement([cond], [then_blk, else_blk])
+    lines = _renderer().render_block(_block([s]))
+    depths = [(type(ln).__name__, ln.depth) for ln in lines]
+    assert depths == [
+        ("If", 0),
+        ("Return", 1),
+        ("Else", 0),
+        ("Return", 1),
+        ("EndIf", 0),
+    ]
+
+
+def test_for_body_is_indented_one_level_deeper() -> None:
+    body = _block([frog_ast.ReturnStatement(frog_ast.Variable("i"))])
+    s = frog_ast.NumericFor("i", frog_ast.Integer(0), frog_ast.Integer(5), body)
+    lines = _renderer().render_block(_block([s]))
+    depths = [(type(ln).__name__, ln.depth) for ln in lines]
+    assert depths == [("For", 0), ("Return", 1), ("EndFor", 0)]
+
+
+def test_nested_if_inside_for_stacks_depth() -> None:
+    inner_if = frog_ast.IfStatement(
+        [frog_ast.Variable("b")], [_block([frog_ast.ReturnStatement(frog_ast.Integer(1))])]
+    )
+    body = _block([inner_if])
+    s = frog_ast.NumericFor("i", frog_ast.Integer(0), frog_ast.Integer(5), body)
+    lines = _renderer().render_block(_block([s]))
+    depths = [(type(ln).__name__, ln.depth) for ln in lines]
+    assert depths == [
+        ("For", 0),
+        ("If", 1),
+        ("Return", 2),
+        ("EndIf", 1),
+        ("EndFor", 0),
+    ]
+
+
+def test_top_level_statements_have_depth_zero() -> None:
+    s = frog_ast.ReturnStatement(frog_ast.Variable("x"))
+    [line] = _renderer().render_block(_block([s]))
+    assert line.depth == 0

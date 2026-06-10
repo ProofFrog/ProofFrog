@@ -21,15 +21,20 @@ def render_proof(
     macros: MacroRegistry,
     renderer: ModuleRenderer,
     composition: str = "symbolic",
+    standalone: bool = True,
 ) -> str:
-    """Render a proof file to a self-contained LaTeX document.
+    """Render a proof file to LaTeX.
 
     ``ctx`` is a ``ProofContext`` that exposes game steps and resolution.
     ``composition`` is either ``"symbolic"`` (default) or ``"inlined"``.
+    ``standalone`` selects a full document (default) or an ``\\input`` fragment.
 
     The body is rendered first so macro registration populates the preamble,
-    then the full document is assembled.
+    then the document (or fragment) is assembled.
     """
+    # pylint: disable=import-outside-toplevel
+    from .exporter import assemble
+
     # Make proof-level let types visible to operand disambiguation (`+`/`||`)
     # inside reduction / intermediate-game bodies.
     renderer.base_name_types = ctx.let_types()
@@ -39,25 +44,8 @@ def render_proof(
         _theorem_section(ctx, renderer),
         _games_sequence(ctx, renderer, backend, composition),
     ]
-
-    pkg_lines = []
-    for spec in backend.required_packages():
-        if spec.options:
-            pkg_lines.append(rf"\usepackage[{','.join(spec.options)}]{{{spec.name}}}")
-        else:
-            pkg_lines.append(rf"\usepackage{{{spec.name}}}")
-
-    parts = [
-        r"\documentclass{article}",
-        *pkg_lines,
-        backend.preamble_extras() or "",
-        macros.preamble().rstrip(),
-        r"\begin{document}",
-        "\n\n".join(p for p in body_parts if p),
-        r"\end{document}",
-        "",
-    ]
-    return "\n".join(p for p in parts if p != "")
+    body = "\n\n".join(p for p in body_parts if p)
+    return assemble(backend, macros, body, standalone)
 
 
 def _definitions_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:

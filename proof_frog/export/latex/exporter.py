@@ -19,17 +19,57 @@ def _make_backend(name: str) -> Backend:
     return _BACKENDS[name]()  # type: ignore[abstract]
 
 
-def _document(backend: Backend, macros: MacroRegistry, body: str) -> str:
-    pkg_lines = []
+def _package_lines(backend: Backend) -> list[str]:
+    lines = []
     for spec in backend.required_packages():
         if spec.options:
-            pkg_lines.append(rf"\usepackage[{','.join(spec.options)}]{{{spec.name}}}")
+            lines.append(rf"\usepackage[{','.join(spec.options)}]{{{spec.name}}}")
         else:
-            pkg_lines.append(rf"\usepackage{{{spec.name}}}")
+            lines.append(rf"\usepackage{{{spec.name}}}")
+    return lines
+
+
+def _fragment(backend: Backend, macros: MacroRegistry, body: str) -> str:
+    """Assemble an ``\\input``-able fragment (no document wrapper).
+
+    Packages and ``preamble_extras`` (e.g. ``\\newtheorem``) cannot appear in
+    the document body, so they are listed in a commented header for the user
+    to copy into their own preamble. The generated ``\\providecommand`` macros
+    *can* live in the body and are emitted inline so a bare ``\\input`` works
+    without hand-copying them; ``\\providecommand`` yields to any definition the
+    user already has, so inlining is safe.
+    """
+    preamble: list[str] = list(_package_lines(backend))
+    extras = backend.preamble_extras()
+    if extras:
+        preamble.extend(extras.splitlines())
+    header = [
+        "% --- ProofFrog LaTeX export (fragment; \\input this file) ---",
+        "% Add the following lines to your document preamble:",
+        *(f"% {line}" for line in preamble),
+        "% The \\providecommand macros below may stay inline (they yield to",
+        "% any definitions already in your preamble).",
+        "% -----------------------------------------------------------",
+    ]
+    parts = [
+        "\n".join(header),
+        macros.preamble().rstrip(),
+        body,
+        "",
+    ]
+    return "\n".join(p for p in parts if p != "")
+
+
+def assemble(
+    backend: Backend, macros: MacroRegistry, body: str, standalone: bool = True
+) -> str:
+    """Wrap a rendered ``body`` as a full document or an ``\\input`` fragment."""
+    if not standalone:
+        return _fragment(backend, macros, body)
     extras = backend.preamble_extras()
     parts = [
         r"\documentclass{article}",
-        *pkg_lines,
+        *_package_lines(backend),
         *([extras] if extras else []),
         macros.preamble().rstrip(),
         r"\begin{document}",
@@ -37,15 +77,20 @@ def _document(backend: Backend, macros: MacroRegistry, body: str) -> str:
         r"\end{document}",
         "",
     ]
-    return "\n".join(parts)
+    return "\n".join(p for p in parts if p != "")
 
 
 def export_file(
     path: str,
     backend_name: str = "cryptocode",
     composition: str = "symbolic",
+    standalone: bool = True,
 ) -> str:
-    """Dispatch on file extension. Returns rendered LaTeX as a string."""
+    """Dispatch on file extension. Returns rendered LaTeX as a string.
+
+    ``standalone`` controls whether the output is a complete document
+    (default) or an ``\\input``-able fragment for inclusion in a larger file.
+    """
     suffix = Path(path).suffix
     backend = _make_backend(backend_name)
     macros = MacroRegistry()
@@ -54,24 +99,31 @@ def export_file(
     if suffix == ".primitive":
         ast = frog_parser.parse_primitive_file(path)
         body = renderer.render_primitive(ast)
-        return _document(backend, macros, body)
+        return assemble(backend, macros, body, standalone)
     if suffix == ".scheme":
         # desugar=False keeps tuple-destructuring bindings intact for faithful
         # rendering; the module path never reaches the proof engine.
         ast_s = frog_parser.parse_scheme_file(path, desugar=False)
         body = renderer.render_scheme(ast_s)
-        return _document(backend, macros, body)
+        return assemble(backend, macros, body, standalone)
     if suffix == ".game":
         game_file = frog_parser.parse_game_file(path, desugar=False)
         body = renderer.render_game_file_games(
             game_file.games, experiment_name=game_file.name
         )
-        return _document(backend, macros, body)
+        return assemble(backend, macros, body, standalone)
     if suffix == ".proof":
         # pylint: disable=import-outside-toplevel
         from .proof_renderer import render_proof
         from .proof_context import ProofContext
 
         ctx = ProofContext(path)
-        return render_proof(ctx, backend, macros, renderer, composition=composition)
+        return render_proof(
+            ctx,
+            backend,
+            macros,
+            renderer,
+            composition=composition,
+            standalone=standalone,
+        )
     raise ValueError(f"Unsupported file type for LaTeX export: {suffix}")

@@ -92,6 +92,18 @@ _GROUP_SYMBOL_MEMBERS = {"generator": "generator", "order": "order"}
 
 _SUBSCRIPT_RE = re.compile(r"^(.+?)(\d+)$")
 
+# B4: a closed allow-list of name decorations rendered as math superscripts or
+# accents. Matched only at a camelCase boundary (a lowercase letter or digit
+# precedes the capitalized suffix), so literals like ``polestar`` and acronym
+# runs like ``ABStar`` are left untouched. Source identifiers stay legal
+# FrogLang; the operator-disambiguation maps key off the *raw* name, so this is
+# invisible to them.
+_DECORATION_SUPERSCRIPTS = {"Star": r"^{*}", "Prime": r"^{\prime}"}
+_DECORATION_ACCENTS = {"Hat": r"\hat", "Tilde": r"\tilde", "Bar": r"\overline"}
+_DECORATION_RE = re.compile(
+    r"^(?P<head>.*[a-z0-9])(?P<deco>Star|Prime|Hat|Tilde|Bar)(?P<digits>\d*)$"
+)
+
 
 def _looks_like_algorithm_name(name: str) -> bool:
     if not name:
@@ -197,16 +209,51 @@ class ExprRenderer:
         # paths can never compound into a double subscript.
         if name in _KEYWORD_VARIABLES:
             return _KEYWORD_VARIABLES[name]
-        if "_" in name:
-            head, _, tail = name.partition("_")
-            return (
-                f"{_KEYWORD_VARIABLES.get(head, head)}_{{{tail.replace('_', r'\_')}}}"
-            )
-        m = _SUBSCRIPT_RE.match(name)
+        decorated = self._render_decorated(name)
+        if decorated is not None:
+            return decorated
+        head, sub = self._split_subscript(name)
+        return f"{head}_{{{sub}}}" if sub is not None else head
+
+    @staticmethod
+    def _split_subscript(token: str) -> tuple[str, str | None]:
+        """Split a name into its rendered head and a single subscript group.
+
+        Honors the single-subscript invariant: a first underscore drops the
+        tail into one subscript (literal underscores escaped), else a trailing
+        digit run subscripts. The head is mapped through the Greek table. The
+        head is never itself subscripted, so callers can append at most one
+        more axis (a decoration superscript) without a double subscript.
+        """
+        if "_" in token:
+            head, _, tail = token.partition("_")
+            return _KEYWORD_VARIABLES.get(head, head), tail.replace("_", r"\_")
+        m = _SUBSCRIPT_RE.match(token)
         if m:
-            head = m.group(1)
-            return f"{_KEYWORD_VARIABLES.get(head, head)}_{{{m.group(2)}}}"
-        return name
+            return _KEYWORD_VARIABLES.get(m.group(1), m.group(1)), m.group(2)
+        return _KEYWORD_VARIABLES.get(token, token), None
+
+    @classmethod
+    def _render_decorated(cls, name: str) -> str | None:
+        """Render a decorated name (``ctStar`` -> ``ct^{*}``), else ``None`` (B4).
+
+        Superscript decorations (``Star``/``Prime``) sit on a different axis
+        from the subscript, so an index composes safely whether it precedes the
+        decoration (``ct1Star`` -> ``ct_{1}^{*}``) or follows it
+        (``ctStar0`` -> ``ct_{0}^{*}``). Accents (``Hat``/``Tilde``/``Bar``)
+        wrap the base with the subscript kept *outside* the accent
+        (``mHat0`` -> ``\\hat{m}_{0}``), again avoiding a double subscript.
+        """
+        m = _DECORATION_RE.match(name)
+        if m is None:
+            return None
+        head, head_sub = cls._split_subscript(m.group("head"))
+        sub = head_sub or (m.group("digits") or None)
+        subtex = f"_{{{sub}}}" if sub else ""
+        deco = m.group("deco")
+        if deco in _DECORATION_SUPERSCRIPTS:
+            return f"{head}{subtex}{_DECORATION_SUPERSCRIPTS[deco]}"
+        return f"{_DECORATION_ACCENTS[deco]}{{{head}}}{subtex}"
 
     def _operand_type(self, op: frog_ast.Expression) -> frog_ast.Type | None:
         """Resolve an operand's type from ``type_of`` (per-node) or names."""
@@ -263,12 +310,14 @@ class ExprRenderer:
             return f"{left} {sym} {right}"
         if op == frog_ast.BinaryOperators.EXPONENTIATE:
             # Brace the exponent (so chained `^` never stacks into a "Double
-            # superscript") and the base when it is a compound expression.
-            base = (
-                f"{{{left}}}"
-                if isinstance(expr.left_expression, frog_ast.BinaryOperation)
-                else left
+            # superscript") and the base when it is a compound expression or
+            # already carries a superscript -- e.g. a decorated base such as
+            # `xStar` (`x^{*}`) would otherwise produce `x^{*}^{sk}` (B4).
+            needs_brace = (
+                isinstance(expr.left_expression, frog_ast.BinaryOperation)
+                or "^" in left
             )
+            base = f"{{{left}}}" if needs_brace else left
             return f"{base}^{{{right}}}"
         return f"{left} {_BINOP_LATEX[op]} {right}"
 

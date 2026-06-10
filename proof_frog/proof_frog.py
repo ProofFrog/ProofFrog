@@ -286,13 +286,28 @@ def describe(file: str, json_output: bool) -> None:
     type=click.Choice(["symbolic", "inlined"]),
     help="How reduction-based steps render (default: symbolic).",
 )
-def export_latex(file: str, output: str | None, backend: str, composition: str) -> None:
+@click.option(
+    "--standalone/--no-standalone",
+    default=True,
+    help=(
+        "Emit a complete document (default) or an \\input-able fragment "
+        "for inclusion in a larger LaTeX file."
+    ),
+)
+def export_latex(
+    file: str, output: str | None, backend: str, composition: str, standalone: bool
+) -> None:
     """Export a FrogLang file (.primitive, .scheme, .game, .proof) to LaTeX."""
     # pylint: disable=import-outside-toplevel
     from .export.latex.exporter import export_file
 
     try:
-        source = export_file(file, backend_name=backend, composition=composition)
+        source = export_file(
+            file,
+            backend_name=backend,
+            composition=composition,
+            standalone=standalone,
+        )
     except (frog_parser.ParseError, FileNotFoundError, ValueError) as e:
         click.echo(str(e), err=True)
         sys.exit(1)

@@ -37,7 +37,28 @@ class CryptocodeBackend:
             PackageSpec("amsmath"),
             PackageSpec("amssymb"),
             PackageSpec("amsthm"),
+            PackageSpec("adjustbox"),
+            PackageSpec("varwidth"),
         ]
+
+    def fit_width(self, content: str) -> str:
+        """Shrink ``content`` to ``\\textwidth`` only if it is wider (A1).
+
+        ``adjustbox``'s ``max width`` leaves content narrower than the text
+        block untouched and scales down anything that would otherwise run past
+        the right margin (and the box frame) without erroring.
+
+        cryptocode's ``pcvstack`` / ``pchstack`` need vertical mode, so they
+        cannot be placed directly in ``adjustbox``'s LR box ("Not allowed in
+        LR mode"). Wrapping them in a ``varwidth`` first gives ``adjustbox`` a
+        box whose width is the content's *natural* width: ``varwidth`` shrinks
+        to fit its body up to the supplied bound. The bound is a generous
+        ``4\\textwidth`` so genuinely over-wide figures still measure their
+        true width (and thus scale down) rather than clamping at the bound and
+        overflowing.
+        """
+        boxed = rf"\begin{{varwidth}}{{4\textwidth}}{content}\end{{varwidth}}"
+        return rf"\adjustbox{{max width=\textwidth}}{{{boxed}}}"
 
     def preamble_extras(self) -> str:
         return (
@@ -71,10 +92,23 @@ class CryptocodeBackend:
                 return latex
         raise TypeError(f"unknown IR line: {line!r}")
 
+    def _indented_line(self, line: ir.Line) -> str:
+        """Render one IR line, prefixing one ``\\pcind`` per nesting depth.
+
+        ``\\pcind`` is cryptocode's one-level procedure indent. The indent goes
+        *after* the ``\\\\`` line break (added by the join) and *before* the
+        line content, so guarded bodies sit one level deeper than their
+        If/For markers (A3).
+        """
+        rendered = self._line(line)
+        if line.depth <= 0:
+            return rendered
+        return r"\pcind" * line.depth + " " + rendered
+
     def render_procedure(self, p: ir.ProcedureBlock) -> str:
         if not p.lines:
             return "\\procedure[linenumbering]{$" + p.title + "$}{}"
-        body = " \\\\\n    ".join(self._line(ln) for ln in p.lines)
+        body = " \\\\\n    ".join(self._indented_line(ln) for ln in p.lines)
         return "\\procedure[linenumbering]{$" + p.title + "$}{\n    " + body + "\n}"
 
     def render_vstack(self, v: ir.VStack) -> str:
@@ -90,6 +124,12 @@ class CryptocodeBackend:
         return inner
 
     def render_hstack(self, h: ir.HStack) -> str:
+        # A2: side-by-side columns are top-aligned. cryptocode has no [top] key
+        # on pchstack, but each pcvstack already raises its content to the strut
+        # top (`\raisebox{\dimexpr\ht\strutbox-\height}{\begin{varwidth}[t]...}`
+        # in cryptocode.sty), so unequal-height columns share a top edge by
+        # default -- the alignment game pairs read best with. Verified visually
+        # on an asymmetric pair; no key to add.
         body = "\n\\pchspace\n".join(self.render_vstack(v) for v in h.stacks)
         return f"\\begin{{pchstack}}\n{body}\n\\end{{pchstack}}"
 
@@ -105,7 +145,7 @@ class CryptocodeBackend:
                 if isinstance(f.body, ir.VStack)
                 else self.render_procedure(f.body)
             )
-            parts.append(inner)
+            parts.append(self.fit_width(inner))
         if f.caption:
             parts.append(rf"\caption{{{f.caption}}}")
         if f.label:

@@ -62,11 +62,71 @@ def test_render_hstack_lays_columns_side_by_side() -> None:
     assert out.count(r"\begin{pcvstack}") == 2
 
 
+def test_procedure_indents_lines_by_depth() -> None:
+    # A guarded body (depth 1) is prefixed with one \pcind so it reads as
+    # nested under its If/For marker; the marker and sibling lines (depth 0)
+    # are not (A3).
+    b = CryptocodeBackend()
+    p = ir.ProcedureBlock(
+        title=r"\Decaps(dk, c)",
+        lines=[
+            ir.If(cond="c = ctStar", depth=0),
+            ir.Return(expr=r"\bot", depth=1),
+            ir.EndIf(depth=0),
+            ir.Return(expr=r"K.Decaps(dk, c)", depth=0),
+        ],
+    )
+    out = b.render_procedure(p)
+    assert r"\pcind \pcreturn \bot" in out
+    # The unconditional return and the \pcif must NOT carry a \pcind.
+    assert r"\pcind \pcif" not in out
+    assert r"\pcind \pcreturn K.Decaps" not in out
+
+
+def test_procedure_indents_nested_depth_twice() -> None:
+    b = CryptocodeBackend()
+    p = ir.ProcedureBlock(
+        title=r"\Foo()",
+        lines=[ir.Return(expr="x", depth=2)],
+    )
+    out = b.render_procedure(p)
+    assert r"\pcind\pcind \pcreturn x" in out
+
+
 def test_required_packages() -> None:
     b = CryptocodeBackend()
     pkgs = b.required_packages()
     names = {p.name for p in pkgs}
     assert "cryptocode" in names
+
+
+def test_required_packages_includes_adjustbox() -> None:
+    # adjustbox supplies \adjustbox{max width=...} used by fit_width (A1).
+    b = CryptocodeBackend()
+    names = {p.name for p in b.required_packages()}
+    assert "adjustbox" in names
+
+
+def test_fit_width_wraps_in_max_width_adjustbox() -> None:
+    b = CryptocodeBackend()
+    out = b.fit_width("CONTENT")
+    # adjustbox shrinks over-wide content; the varwidth wrapper is required so
+    # cryptocode's vertical-mode stacks survive adjustbox's LR box and so the
+    # natural content width drives the scaling.
+    assert out.startswith(r"\adjustbox{max width=\textwidth}{")
+    assert r"\begin{varwidth}{4\textwidth}CONTENT\end{varwidth}" in out
+
+
+def test_figure_body_is_wrapped_to_fit_width() -> None:
+    # A wide procedure body must shrink to the text width rather than run off
+    # the page (A1). The figure body is wrapped in an adjustbox max-width box.
+    b = CryptocodeBackend()
+    p = ir.ProcedureBlock(title=r"\Enc(k, m)", lines=[ir.Return(expr="c")])
+    out = b.render_figure(ir.Figure(body=p, caption="Game"))
+    assert r"\adjustbox{max width=\textwidth}{" in out
+    # The procedure itself sits inside the adjustbox, before the caption.
+    assert out.index(r"\adjustbox") < out.index(r"\procedure")
+    assert out.index(r"\procedure") < out.index(r"\caption")
 
 
 def test_preamble_extras_defines_getsr() -> None:

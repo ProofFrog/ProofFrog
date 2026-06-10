@@ -59,3 +59,31 @@ def test_export_latex_composition_flag(tmp_path: Path) -> None:
     assert r.returncode == 0, r.stderr
     text = out.read_text()
     assert r"\begin{document}" in text and r"\end{document}" in text
+
+
+def test_export_latex_no_standalone_flag(tmp_path: Path) -> None:
+    out = tmp_path / "frag.tex"
+    r = subprocess.run(
+        [
+            "python",
+            "-m",
+            "proof_frog",
+            "export-latex",
+            "examples/Schemes/PRG/TriplingPRG.scheme",
+            "--no-standalone",
+            "-o",
+            str(out),
+        ],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert r.returncode == 0, r.stderr
+    text = out.read_text()
+    # A fragment has no document wrapper but keeps macros and body, and lists
+    # the required packages in a commented preamble header.
+    assert r"\documentclass" not in text
+    assert r"\begin{document}" not in text
+    assert r"\providecommand{\TriplingPRG}" in text
+    assert r"% \usepackage" in text

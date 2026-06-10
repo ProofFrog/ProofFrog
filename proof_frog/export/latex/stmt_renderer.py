@@ -22,8 +22,18 @@ class StmtRenderer:
         # ``return`` expression as concat/XOR when the method returns a
         # BitString.
         self.return_type: frog_ast.Type | None = None
+        # Current control-flow nesting depth. Stamped onto each emitted line so
+        # backends can indent guarded bodies one level deeper than their
+        # markers (A3).
+        self._depth = 0
+
+    def _emit(self, out: list[ir.Line], line: ir.Line) -> None:
+        """Append ``line`` stamped with the current nesting depth."""
+        line.depth = self._depth
+        out.append(line)
 
     def render_block(self, block: frog_ast.Block) -> list[ir.Line]:
+        self._depth = 0
         out: list[ir.Line] = []
         for stmt in block.statements:
             self._render_stmt(stmt, out)
@@ -34,11 +44,12 @@ class StmtRenderer:
         if isinstance(stmt, frog_ast.Assignment):
             if isinstance(stmt.the_type, frog_ast.BitStringType):
                 self.expr.note_bitstring_context(stmt.value)
-            out.append(
+            self._emit(
+                out,
                 ir.Assign(
                     lhs=self.expr.render(stmt.var),
                     rhs=self.expr.render(stmt.value),
-                )
+                ),
             )
             return
         if isinstance(stmt, frog_ast.VariableDeclaration):
@@ -50,28 +61,30 @@ class StmtRenderer:
             self._render_destructuring(stmt, out)
             return
         if isinstance(stmt, frog_ast.Sample):
-            out.append(
+            self._emit(
+                out,
                 ir.Sample(
                     lhs=self.expr.render(stmt.var),
                     rhs=self.expr.render(stmt.sampled_from),
-                )
+                ),
             )
             return
         if isinstance(stmt, frog_ast.UniqueSample):
-            out.append(
+            self._emit(
+                out,
                 ir.Sample(
                     lhs=self.expr.render(stmt.var),
                     rhs=(
                         f"{self.expr.render(stmt.sampled_from)}"  # type: ignore[arg-type]
                         f" \\setminus {self.expr.render(stmt.unique_set)}"
                     ),
-                )
+                ),
             )
             return
         if isinstance(stmt, frog_ast.ReturnStatement):
             if isinstance(self.return_type, frog_ast.BitStringType):
                 self.expr.note_bitstring_context(stmt.expression)
-            out.append(ir.Return(expr=self.expr.render(stmt.expression)))
+            self._emit(out, ir.Return(expr=self.expr.render(stmt.expression)))
             return
         if isinstance(stmt, frog_ast.IfStatement):
             self._render_if(stmt, out)
@@ -81,22 +94,26 @@ class StmtRenderer:
                 f"{stmt.name} = {self.expr.render(stmt.start)} "
                 f"\\dots {self.expr.render(stmt.end)}"
             )
-            out.append(ir.For(header=header))
+            self._emit(out, ir.For(header=header))
+            self._depth += 1
             for inner in stmt.block.statements:
                 self._render_stmt(inner, out)
-            out.append(ir.EndFor())
+            self._depth -= 1
+            self._emit(out, ir.EndFor())
             return
         if isinstance(stmt, frog_ast.GenericFor):
             header = f"{stmt.var_name} \\in {self.expr.render(stmt.over)}"
-            out.append(ir.For(header=header))
+            self._emit(out, ir.For(header=header))
+            self._depth += 1
             for inner in stmt.block.statements:
                 self._render_stmt(inner, out)
-            out.append(ir.EndFor())
+            self._depth -= 1
+            self._emit(out, ir.EndFor())
             return
         if isinstance(stmt, frog_ast.FuncCall):
-            out.append(ir.Raw(latex=self.expr.render(stmt)))
+            self._emit(out, ir.Raw(latex=self.expr.render(stmt)))
             return
-        out.append(ir.Raw(latex=f"% unsupported: {type(stmt).__name__}"))
+        self._emit(out, ir.Raw(latex=f"% unsupported: {type(stmt).__name__}"))
 
     def _render_destructuring(
         self, stmt: frog_ast.DestructuringBinding, out: list[ir.Line]
@@ -116,23 +133,29 @@ class StmtRenderer:
         lhs = f"({names})"
         rhs = self.expr.render(stmt.value)
         if stmt.kind == "assign":
-            out.append(ir.Assign(lhs=lhs, rhs=rhs))
+            self._emit(out, ir.Assign(lhs=lhs, rhs=rhs))
             return
         if stmt.kind == "sample_minus":
             rhs = f"{rhs} \\setminus {self.expr.render(stmt.exclusion)}"  # type: ignore[arg-type]
-        out.append(ir.Sample(lhs=lhs, rhs=rhs))
+        self._emit(out, ir.Sample(lhs=lhs, rhs=rhs))
 
     def _render_if(self, stmt: frog_ast.IfStatement, out: list[ir.Line]) -> None:
+        # Markers (If/Else/EndIf) sit at the enclosing depth; the guarded body
+        # statements between them are rendered one level deeper.
+        def render_body(block: frog_ast.Block) -> None:
+            self._depth += 1
+            for inner in block.statements:
+                self._render_stmt(inner, out)
+            self._depth -= 1
+
         for i, cond in enumerate(stmt.conditions):
             if i == 0:
-                out.append(ir.If(cond=self.expr.render(cond)))
+                self._emit(out, ir.If(cond=self.expr.render(cond)))
             else:
-                out.append(ir.Else())
-                out.append(ir.If(cond=self.expr.render(cond)))
-            for inner in stmt.blocks[i].statements:
-                self._render_stmt(inner, out)
+                self._emit(out, ir.Else())
+                self._emit(out, ir.If(cond=self.expr.render(cond)))
+            render_body(stmt.blocks[i])
         if len(stmt.blocks) > len(stmt.conditions):
-            out.append(ir.Else())
-            for inner in stmt.blocks[-1].statements:
-                self._render_stmt(inner, out)
-        out.append(ir.EndIf())
+            self._emit(out, ir.Else())
+            render_body(stmt.blocks[-1])
+        self._emit(out, ir.EndIf())

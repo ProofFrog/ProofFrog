@@ -126,13 +126,16 @@ class ModuleRenderer:
         # `+`/`||` disambiguate. Restored afterwards so nested/sibling renders
         # see their own scope.
         saved = self.expr.name_types
+        saved_ret = self.stmts.return_type
         self.expr.name_types = self._scope_name_types(
             method, fields or [], self.base_name_types
         )
+        self.stmts.return_type = sig.return_type
         try:
             body = self.stmts.render_block(method.block)
         finally:
             self.expr.name_types = saved
+            self.stmts.return_type = saved_ret
         return ir.ProcedureBlock(title=title, lines=body)
 
     # ---- Game --------------------------------------------------------------

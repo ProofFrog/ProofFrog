@@ -224,16 +224,42 @@ class ExprRenderer:
             self._operand_type(expr.right_expression), frog_ast.BitStringType
         )
 
+    def _binop_is_bitstring(self, expr: frog_ast.BinaryOperation) -> bool:
+        # A node-level mark (from ``note_bitstring_context``) wins, so a
+        # concatenation of method-call operands whose types are otherwise
+        # unresolvable still renders as concat/XOR rather than logical-or/plus.
+        return isinstance(
+            self.type_of.get(id(expr)), frog_ast.BitStringType
+        ) or self._is_bitstring_operand(expr)
+
+    def note_bitstring_context(self, expr: frog_ast.Expression) -> None:
+        """Mark ``expr`` as BitString-typed so overloaded ``||`` / ``+`` inside
+        it render as concatenation / XOR rather than logical-or / addition.
+
+        Recurses through the overloaded operators only. Called by the statement
+        renderer when the enclosing context is known to be a BitString (an
+        assignment whose declared type is a BitString, or a return in a
+        BitString-returning method) — type the per-operand resolver cannot
+        recover from bare method-call operands.
+        """
+        if isinstance(expr, frog_ast.BinaryOperation) and expr.operator in (
+            frog_ast.BinaryOperators.OR,
+            frog_ast.BinaryOperators.ADD,
+        ):
+            self.type_of[id(expr)] = frog_ast.BitStringType()
+            self.note_bitstring_context(expr.left_expression)
+            self.note_bitstring_context(expr.right_expression)
+
     def _render_binop(self, expr: frog_ast.BinaryOperation) -> str:
         left = self._render(expr.left_expression)
         right = self._render(expr.right_expression)
         op = expr.operator
         # `+` and `||` are overloaded: XOR/concat on BitString, else add/OR.
         if op == frog_ast.BinaryOperators.ADD:
-            sym = r"\oplus" if self._is_bitstring_operand(expr) else "+"
+            sym = r"\oplus" if self._binop_is_bitstring(expr) else "+"
             return f"{left} {sym} {right}"
         if op == frog_ast.BinaryOperators.OR:
-            sym = r"\|" if self._is_bitstring_operand(expr) else r"\lor"
+            sym = r"\|" if self._binop_is_bitstring(expr) else r"\lor"
             return f"{left} {sym} {right}"
         if op == frog_ast.BinaryOperators.EXPONENTIATE:
             # Brace the exponent (so chained `^` never stacks into a "Double

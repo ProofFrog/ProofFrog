@@ -89,3 +89,30 @@ def test_register_algorithm_escapes_specials_with_underscore() -> None:
     r = MacroRegistry()
     r.register_algorithm("IND_CPA$")
     assert _no_bare_dollar(r.preamble())
+
+
+# --- Digit-bearing names must get distinct macro tokens ---
+
+
+def test_digit_suffixed_names_get_distinct_tokens() -> None:
+    # \Decaps macro names may contain only letters, so stripping the digit made
+    # Decaps0 and Decaps1 collide on \Decaps; the first \providecommand won and
+    # both oracles rendered as "Decaps". Distinct names must get distinct tokens.
+    r = MacroRegistry()
+    assert r.register_algorithm("Decaps0") != r.register_algorithm("Decaps1")
+
+
+def test_digit_suffixed_name_distinct_from_undigited() -> None:
+    r = MacroRegistry()
+    assert r.register_algorithm("Decaps0") != r.register_algorithm("Decaps")
+
+
+def test_digit_suffixed_names_render_distinct_bodies() -> None:
+    # Both providecommands must survive into the preamble with their own bodies,
+    # so the two oracle titles render distinctly.
+    r = MacroRegistry()
+    r.register_algorithm("Decaps0")
+    r.register_algorithm("Decaps1")
+    pre = r.preamble()
+    assert r"\mathsf{Decaps0}" in pre
+    assert r"\mathsf{Decaps1}" in pre

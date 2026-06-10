@@ -17,6 +17,11 @@ class StmtRenderer:
 
     def __init__(self, expr_renderer: ExprRenderer) -> None:
         self.expr = expr_renderer
+        # Return type of the method currently being rendered, set by the module
+        # renderer. Used to disambiguate an overloaded ``||`` / ``+`` in a
+        # ``return`` expression as concat/XOR when the method returns a
+        # BitString.
+        self.return_type: frog_ast.Type | None = None
 
     def render_block(self, block: frog_ast.Block) -> list[ir.Line]:
         out: list[ir.Line] = []
@@ -27,6 +32,8 @@ class StmtRenderer:
     # pylint: disable=too-many-branches
     def _render_stmt(self, stmt: frog_ast.Statement, out: list[ir.Line]) -> None:
         if isinstance(stmt, frog_ast.Assignment):
+            if isinstance(stmt.the_type, frog_ast.BitStringType):
+                self.expr.note_bitstring_context(stmt.value)
             out.append(
                 ir.Assign(
                     lhs=self.expr.render(stmt.var),
@@ -62,6 +69,8 @@ class StmtRenderer:
             )
             return
         if isinstance(stmt, frog_ast.ReturnStatement):
+            if isinstance(self.return_type, frog_ast.BitStringType):
+                self.expr.note_bitstring_context(stmt.expression)
             out.append(ir.Return(expr=self.expr.render(stmt.expression)))
             return
         if isinstance(stmt, frog_ast.IfStatement):

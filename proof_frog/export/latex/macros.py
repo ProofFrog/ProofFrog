@@ -84,6 +84,24 @@ _MATHSF_SPECIALS = {
     "}": r"\}",
 }
 
+# LaTeX macro names may contain only letters, so a token built by dropping
+# non-letters collapses digit-suffixed siblings onto one command (``Decaps0``,
+# ``Decaps1`` -> ``\Decaps``) and ``\providecommand`` keeps only the first body.
+# Spell digits out so distinct names keep distinct tokens; the displayed body
+# still shows the original digit.
+_DIGIT_WORDS = {
+    "0": "Zero",
+    "1": "One",
+    "2": "Two",
+    "3": "Three",
+    "4": "Four",
+    "5": "Five",
+    "6": "Six",
+    "7": "Seven",
+    "8": "Eight",
+    "9": "Nine",
+}
+
 
 def _escape_mathsf(s: str) -> str:
     """Escape LaTeX specials (except ``_``) for display inside ``\\mathsf{}``."""
@@ -153,10 +171,15 @@ class MacroRegistry:
 
     @staticmethod
     def _safe_token(name: str) -> str:
-        # LaTeX macro names may contain only letters. Strip non-letters
+        # LaTeX macro names may contain only letters. Spell out digits (so
+        # ``Decaps0``/``Decaps1`` stay distinct) and strip other non-letters
         # (e.g. ``G_RO`` -> ``GRO``); the displayed body still shows the
         # original name verbatim.
-        token = "".join(ch for ch in name if ch.isalpha())
+        token = "".join(
+            _DIGIT_WORDS[ch] if ch.isdigit() else ch
+            for ch in name
+            if ch.isalpha() or ch.isdigit()
+        )
         if not token:
             token = "Frog"
         if token in _LATEX_BUILTINS:

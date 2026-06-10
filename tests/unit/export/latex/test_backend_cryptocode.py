@@ -40,6 +40,28 @@ def test_render_vstack_boxed() -> None:
     assert r"\end{pcvstack}" in out
 
 
+def test_render_vstack_with_heading() -> None:
+    b = CryptocodeBackend()
+    p = ir.ProcedureBlock(title=r"\KeyGen()", lines=[ir.Return(expr="k")])
+    out = b.render_vstack(ir.VStack(blocks=[p], boxed=True, heading="$T$"))
+    # title sits ABOVE the boxed inner stack: an outer pcvstack wraps the
+    # heading then the boxed inner pcvstack (two pcvstack envs total).
+    assert out.count(r"\begin{pcvstack}") == 2
+    assert out.index("$T$") < out.index(r"\begin{pcvstack}[boxed]")
+    assert out.index("$T$") < out.index(r"\procedure")
+
+
+def test_render_hstack_lays_columns_side_by_side() -> None:
+    b = CryptocodeBackend()
+    left = ir.VStack(blocks=[ir.ProcedureBlock(title=r"\L()", lines=[])])
+    right = ir.VStack(blocks=[ir.ProcedureBlock(title=r"\R()", lines=[])])
+    out = b.render_hstack(ir.HStack(stacks=[left, right]))
+    assert r"\begin{pchstack}" in out
+    assert r"\end{pchstack}" in out
+    assert r"\pchspace" in out
+    assert out.count(r"\begin{pcvstack}") == 2
+
+
 def test_required_packages() -> None:
     b = CryptocodeBackend()
     pkgs = b.required_packages()

@@ -63,10 +63,11 @@ def render_proof(
 def _definitions_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:
     parts = [r"\section*{Definitions}"]
     for game_file in ctx.security_game_files():
-        for game in game_file.games:
-            parts.append(
-                renderer.render_game(game, experiment_name=game_file.get_export_name())
+        parts.append(
+            renderer.render_game_file_games(
+                game_file.games, experiment_name=game_file.get_export_name()
             )
+        )
     return "\n\n".join(parts)
 
 

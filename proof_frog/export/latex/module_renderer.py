@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from ... import frog_ast
 from ...visitors import GetTypeMapVisitor, NameTypeMap
 from . import ir
@@ -149,14 +151,41 @@ class ModuleRenderer:
         ]
         return ir.VStack(blocks=blocks, boxed=True)
 
-    def render_game(self, g: frog_ast.Game, experiment_name: str | None = None) -> str:
-        vstack = self._method_blocks_vstack(g)
+    def _game_title(self, g: frog_ast.Game, experiment_name: str | None) -> str:
+        """The math-mode title (without ``$`` delimiters) for a game."""
         side_macro = self.macros.register_algorithm(g.name)
         params = ", ".join(self._render_param_name(p.name) for p in g.parameters)
         if experiment_name:
             exp_macro = self.macros.register_security_notion(experiment_name)
-            title = rf"\Experiment{{{exp_macro}}}{{{side_macro}}}{{{params}}}"
-        else:
-            title = rf"{side_macro}({params})" if params else side_macro
+            return rf"\Experiment{{{exp_macro}}}{{{side_macro}}}{{{params}}}"
+        return rf"{side_macro}({params})" if params else side_macro
+
+    def render_game(self, g: frog_ast.Game, experiment_name: str | None = None) -> str:
+        vstack = self._method_blocks_vstack(g)
+        title = self._game_title(g, experiment_name)
         header = rf"\noindent\textbf{{Game}} ${title}$\par\medskip"
         return header + "\n" + self.backend.render_vstack(vstack)
+
+    def render_game_file_games(
+        self, games: Sequence[frog_ast.Game], experiment_name: str | None = None
+    ) -> str:
+        """Render a game file's games, side by side when there are exactly two.
+
+        A two-game file is the Left/Right (or Real/Ideal) pair of a security
+        definition; papers show these side by side. Other counts fall back to
+        the vertically stacked per-game rendering.
+        """
+        if len(games) == 2:
+            return self._render_games_side_by_side(games, experiment_name)
+        return "\n\n".join(self.render_game(g, experiment_name) for g in games)
+
+    def _render_games_side_by_side(
+        self, games: Sequence[frog_ast.Game], experiment_name: str | None
+    ) -> str:
+        stacks = []
+        for g in games:
+            vstack = self._method_blocks_vstack(g)
+            vstack.heading = f"${self._game_title(g, experiment_name)}$"
+            stacks.append(vstack)
+        header = r"\noindent\textbf{Game}\par\medskip"
+        return header + "\n" + self.backend.render_hstack(ir.HStack(stacks=stacks))

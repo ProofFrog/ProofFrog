@@ -40,7 +40,55 @@ _BINOP_LATEX: dict[frog_ast.BinaryOperators, str] = {
     frog_ast.BinaryOperators.EXPONENTIATE: "^",
 }
 
-_KEYWORD_VARIABLES = {"lambda": r"\lambda"}
+# Greek-letter names auto-substitute to their LaTeX command (whole-token match
+# only, so `alphabet` stays literal while `alpha1` -> `\alpha_{1}`). Only Greek
+# letters with a distinct base-LaTeX command are included (e.g. no `\omicron`,
+# and uppercase letters that coincide with Latin glyphs like Alpha/Beta).
+_GREEK_LOWER = [
+    "alpha",
+    "beta",
+    "gamma",
+    "delta",
+    "epsilon",
+    "zeta",
+    "eta",
+    "theta",
+    "iota",
+    "kappa",
+    "lambda",
+    "mu",
+    "nu",
+    "xi",
+    "pi",
+    "rho",
+    "sigma",
+    "tau",
+    "upsilon",
+    "phi",
+    "chi",
+    "psi",
+    "omega",
+]
+_GREEK_UPPER = [
+    "Gamma",
+    "Delta",
+    "Theta",
+    "Lambda",
+    "Xi",
+    "Pi",
+    "Sigma",
+    "Upsilon",
+    "Phi",
+    "Psi",
+    "Omega",
+]
+_KEYWORD_VARIABLES = {name: "\\" + name for name in _GREEK_LOWER + _GREEK_UPPER}
+
+# Field members that denote a group's generator/order. On parse paths that
+# kept them as a plain ``FieldAccess`` (rather than the dedicated
+# ``GroupGenerator`` / ``GroupOrder`` nodes) they are routed to the same
+# per-group macro so both paths render identically.
+_GROUP_SYMBOL_MEMBERS = {"generator": "generator", "order": "order"}
 
 _SUBSCRIPT_RE = re.compile(r"^(.+?)(\d+)$")
 
@@ -59,6 +107,7 @@ class ExprRenderer:
         macros: MacroRegistry,
         type_of: dict[int, frog_ast.Type] | None = None,
         name_types: NameTypeMap | None = None,
+        member_overrides: dict[tuple[str, str], str] | None = None,
     ) -> None:
         self.macros = macros
         self.type_of = type_of or {}
@@ -66,6 +115,10 @@ class ExprRenderer:
         # renderers. Used to resolve a bare ``Variable`` operand's type when
         # ``type_of`` has no per-node entry.
         self.name_types = name_types
+        # Optional ``(object, member) -> symbol`` field-access overrides,
+        # consulted before the default rendering (e.g. a user style mapping
+        # ``H.digest`` to ``\delta``).
+        self.member_overrides = dict(member_overrides or {})
 
     def render(self, expr: frog_ast.Expression) -> str:
         return self._render(expr)
@@ -85,9 +138,9 @@ class ExprRenderer:
         if isinstance(expr, frog_ast.BitStringLiteral):
             return f"{expr.bit}^{{{self._render(expr.length)}}}"
         if isinstance(expr, frog_ast.GroupGenerator):
-            return "g"
+            return self._render_group_symbol(expr.group, "generator")
         if isinstance(expr, frog_ast.GroupOrder):
-            return "q"
+            return self._render_group_symbol(expr.group, "order")
         if isinstance(expr, frog_ast.BinaryOperation):
             return self._render_binop(expr)
         if isinstance(expr, frog_ast.UnaryOperation):
@@ -118,6 +171,12 @@ class ExprRenderer:
                 return head
             rendered_args = [self._render(a) for a in expr.args]
             return f"{head}({', '.join(rendered_args)})"
+        # ConcreteGame (`G(params).Side`) in expression position, e.g. as the
+        # object of a `.count` field access in an assumption expression.
+        if isinstance(expr, frog_ast.ConcreteGame):
+            head = self._render(expr.game)
+            side = self.macros.register_algorithm(expr.which)
+            return f"{head}.{side}"
         # A Type used in expression position (e.g. `a <- ModInt<q>;`):
         # delegate to TypeRenderer to avoid the fallback comment.
         if isinstance(expr, frog_ast.Type):
@@ -125,19 +184,28 @@ class ExprRenderer:
             from .type_renderer import TypeRenderer
 
             return TypeRenderer(self).render(expr)
-        # Unknown node: defer to repr-like fallback.
-        return f"% unsupported: {type(expr).__name__}"
+        # Unknown node: emit a math-safe placeholder. A bare `%` comment would
+        # comment out the rest of the line — fatal inside a `$...$` span.
+        return rf"\text{{[unsupported: {type(expr).__name__}]}}"
 
     def _render_variable(self, name: str) -> str:
+        # A single subscript level only: stacking subscripts (`}_{`) is a
+        # pdflatex "Double subscript" error. Split on the *first* underscore and
+        # drop everything after it into one subscript group (literal underscores
+        # escaped), matching ``macros._mathsf_body``. A bare trailing-digit run
+        # subscripts likewise. The head is never itself subscripted, so the two
+        # paths can never compound into a double subscript.
         if name in _KEYWORD_VARIABLES:
             return _KEYWORD_VARIABLES[name]
         if "_" in name:
-            base, _, sub = name.rpartition("_")
-            if base and sub:
-                return f"{self._render_variable(base)}_{{{sub}}}"
+            head, _, tail = name.partition("_")
+            return (
+                f"{_KEYWORD_VARIABLES.get(head, head)}_{{{tail.replace('_', r'\_')}}}"
+            )
         m = _SUBSCRIPT_RE.match(name)
         if m:
-            return f"{self._render_variable(m.group(1))}_{{{m.group(2)}}}"
+            head = m.group(1)
+            return f"{_KEYWORD_VARIABLES.get(head, head)}_{{{m.group(2)}}}"
         return name
 
     def _operand_type(self, op: frog_ast.Expression) -> frog_ast.Type | None:
@@ -167,6 +235,15 @@ class ExprRenderer:
         if op == frog_ast.BinaryOperators.OR:
             sym = r"\|" if self._is_bitstring_operand(expr) else r"\lor"
             return f"{left} {sym} {right}"
+        if op == frog_ast.BinaryOperators.EXPONENTIATE:
+            # Brace the exponent (so chained `^` never stacks into a "Double
+            # superscript") and the base when it is a compound expression.
+            base = (
+                f"{{{left}}}"
+                if isinstance(expr.left_expression, frog_ast.BinaryOperation)
+                else left
+            )
+            return f"{base}^{{{right}}}"
         return f"{left} {_BINOP_LATEX[op]} {right}"
 
     def _render_unop(self, expr: frog_ast.UnaryOperation) -> str:
@@ -190,18 +267,54 @@ class ExprRenderer:
         ):
             return self.macros.register_algorithm(func.name)
         if isinstance(func, frog_ast.FieldAccess):
-            return self._render_field(func)
+            # In call position the member is a method, so set it upright (as an
+            # algorithm name) even when lowercase: `G.evaluate(s)` reads
+            # `\G.\mathsf{evaluate}(s)`, matching paper convention.
+            return self._render_field(func, member_is_call=True)
         return self._render(func)
 
-    def _render_field(self, expr: frog_ast.FieldAccess) -> str:
+    def _member_override(self, obj_name: str | None, member: str) -> str | None:
+        if obj_name is not None:
+            exact = self.member_overrides.get((obj_name, member))
+            if exact is not None:
+                return exact
+        return self.member_overrides.get(("*", member))
+
+    def _render_group_symbol(self, group: frog_ast.Expression, kind: str) -> str:
+        if isinstance(group, frog_ast.Variable):
+            return self.macros.register_group_symbol(group.name, kind)
+        # Uncommon: the group is a compound expression rather than a bare name.
+        return f"{self._render(group)}.{kind}"
+
+    def _render_field(
+        self, expr: frog_ast.FieldAccess, member_is_call: bool = False
+    ) -> str:
         obj = expr.the_object
+        obj_name = obj.name if isinstance(obj, frog_ast.Variable) else None
+        override = self._member_override(obj_name, expr.name)
+        if override is not None:
+            return override
+        # A group generator/order member routes to the per-group macro (same as
+        # the dedicated GroupGenerator/GroupOrder nodes), unless it is actually
+        # a method call of that name.
+        if (
+            obj_name is not None
+            and not member_is_call
+            and expr.name in _GROUP_SYMBOL_MEMBERS
+        ):
+            return self.macros.register_group_symbol(
+                obj_name, _GROUP_SYMBOL_MEMBERS[expr.name]
+            )
         if isinstance(obj, frog_ast.Variable) and _looks_like_algorithm_name(obj.name):
             head = self.macros.register_algorithm(obj.name)
         else:
             head = self._render(obj)
-        tail = (
-            self.macros.register_algorithm(expr.name)
-            if _looks_like_algorithm_name(expr.name)
-            else expr.name
-        )
+        # An algorithm-like or call-position member is set upright via a macro;
+        # otherwise it renders like a variable, so Greek names (e.g.
+        # ``G.lambda`` -> ``\G.\lambda``) and trailing-digit subscripts stay
+        # consistent with expression-position identifiers.
+        if member_is_call or _looks_like_algorithm_name(expr.name):
+            tail = self.macros.register_algorithm(expr.name)
+        else:
+            tail = self._render_variable(expr.name)
         return f"{head}.{tail}"

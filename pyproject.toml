@@ -54,6 +54,9 @@ exclude = 'proof_frog/parsing/'
 [tool.pytest.ini_options]
 pythonpath = 'proof_frog'
 addopts = '-n auto'
+markers = [
+    "slow: long-running tests (e.g. the full pdflatex compile sweep); deselect with -m 'not slow'",
+]
 
 [tool.mypy]
 exclude = 'parsing'

@@ -9,7 +9,7 @@ python3 -m venv .venv
 
 ## Commands
 
-- **Run tests**: `pytest` (runs in parallel via `pytest-xdist` `-n auto` by default; use `-n0` to disable). Don't use `--timeout`.
+- **Run tests**: `pytest` (runs in parallel via `pytest-xdist` `-n auto` by default; use `-n0` to disable). Don't use `--timeout`. Long-running tests are marked `slow` (e.g. the LaTeX-export pdflatex compile sweep in `tests/unit/export/latex/test_pdflatex_sweep.py`, skipped without `pdflatex` on PATH); deselect with `-m "not slow"`.
 - **All CI checks**: `make lint` — runs `black --check`, `mypy`, and `pylint` in sequence (must all pass before committing)
 - **Auto-format**: `make format` — runs `black` to reformat in place, then re-run `make lint`
 - **CLI**: `python -m proof_frog [version|parse|check|prove|describe|step-detail|inlined-game|canonicalization-trace|step-after-transform|export-latex|download-examples|web|lsp|mcp] <file>`

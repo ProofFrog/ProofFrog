@@ -8,6 +8,7 @@ from proof_frog.export.latex.proof_context import ProofContext
 from proof_frog.export.latex import proof_renderer as pr
 
 DDH = "examples/Proofs/Group/DDH_implies_CDH.proof"
+MULTICHAL = "examples/Proofs/PubKeyEnc/INDCPA_implies_INDCPA_MultiChal.proof"
 
 
 def _renderer():
@@ -78,6 +79,18 @@ def test_render_proof_symbolic_has_figures_and_hops():
     # not nested inside a \procedure body.
     assert "{$Game " not in out
     assert r"\begin{pcvstack}" in out
+
+
+def test_concrete_game_count_renders_without_unsupported():
+    # `INDCPA(E).Left.count == 1` is a FieldAccess on a ConcreteGame; it must
+    # not fall through to the `% unsupported` branch (which, placed inside a
+    # `$...$` hop annotation, would emit a bare `%` and break pdflatex).
+    backend = CryptocodeBackend()
+    macros = MacroRegistry()
+    mr = ModuleRenderer(backend, macros)
+    ctx = ProofContext(MULTICHAL)
+    out = pr.render_proof(ctx, backend, macros, mr, composition="symbolic")
+    assert "% unsupported" not in out
 
 
 def test_render_proof_inlined_runs_clean():

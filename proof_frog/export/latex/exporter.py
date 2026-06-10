@@ -63,10 +63,9 @@ def export_file(
         return _document(backend, macros, body)
     if suffix == ".game":
         game_file = frog_parser.parse_game_file(path, desugar=False)
-        chunks = []
-        for game in game_file.games:
-            chunks.append(renderer.render_game(game, experiment_name=game_file.name))
-        body = "\n\n".join(chunks)
+        body = renderer.render_game_file_games(
+            game_file.games, experiment_name=game_file.name
+        )
         return _document(backend, macros, body)
     if suffix == ".proof":
         # pylint: disable=import-outside-toplevel

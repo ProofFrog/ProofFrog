@@ -98,7 +98,13 @@ class StmtRenderer:
         export path); otherwise the parser has already rewritten the node into
         temp+index reads.
         """
-        lhs = f"({', '.join(stmt.names)})"
+        # Route each name through the expression renderer so destructuring-LHS
+        # names get the same subscripting as in expression position (a raw
+        # `ss_T_e` would be a pdflatex double subscript).
+        names = ", ".join(
+            self.expr.render(frog_ast.Variable(name)) for name in stmt.names
+        )
+        lhs = f"({names})"
         rhs = self.expr.render(stmt.value)
         if stmt.kind == "assign":
             out.append(ir.Assign(lhs=lhs, rhs=rhs))

@@ -80,7 +80,18 @@ class CryptocodeBackend:
     def render_vstack(self, v: ir.VStack) -> str:
         opt = "[boxed]" if v.boxed else ""
         body = "\n\\pclb\n".join(self.render_procedure(b) for b in v.blocks)
-        return f"\\begin{{pcvstack}}{opt}\n{body}\n\\end{{pcvstack}}"
+        inner = f"\\begin{{pcvstack}}{opt}\n{body}\n\\end{{pcvstack}}"
+        if v.heading:
+            # Title *above* the box: an outer (unboxed) pcvstack whose first
+            # entry is the heading and second is the boxed inner stack. Entries
+            # in a pcvstack are separated by a blank line (\par); \pclb would
+            # keep them on one line (title beside the box instead of above it).
+            return f"\\begin{{pcvstack}}\n{v.heading}\n\n{inner}\n\\end{{pcvstack}}"
+        return inner
+
+    def render_hstack(self, h: ir.HStack) -> str:
+        body = "\n\\pchspace\n".join(self.render_vstack(v) for v in h.stacks)
+        return f"\\begin{{pchstack}}\n{body}\n\\end{{pchstack}}"
 
     def render_figure(self, f: ir.Figure) -> str:
         parts = ["\\begin{figure}[ht]", "\\centering"]

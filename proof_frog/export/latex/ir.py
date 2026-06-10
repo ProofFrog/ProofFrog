@@ -77,6 +77,16 @@ class ProcedureBlock:
 class VStack:
     blocks: list[ProcedureBlock]
     boxed: bool = True
+    # Optional math-mode heading line rendered above the blocks (used to label
+    # a column inside an HStack, e.g. the security-experiment title).
+    heading: str | None = None
+
+
+@dataclass
+class HStack:
+    """Lay several VStacks out side by side (e.g. the two sides of a notion)."""
+
+    stacks: list[VStack]
 
 
 @dataclass

@@ -50,3 +50,42 @@ def test_non_colliding_single_letter_keeps_macro() -> None:
     r = MacroRegistry()
     assert r.register_algorithm("G") == r"\G"
     assert r.register_algorithm("E") == r"\E"
+
+
+# --- A3: more base-LaTeX letter-command collisions are renamed ---
+
+
+def test_additional_letter_command_collisions_are_renamed() -> None:
+    # \NG \ng \DJ \dj are base-LaTeX text-mode letter commands that
+    # \providecommand cannot override, so they must be renamed.
+    r = MacroRegistry()
+    for name in ["NG", "ng", "DJ", "dj"]:
+        tok = r.register_algorithm(name)
+        assert tok != "\\" + name, f"{name} collided with a LaTeX builtin"
+
+
+# --- A2: LaTeX specials in displayed macro bodies are escaped ---
+
+
+def _no_bare_dollar(s: str) -> bool:
+    return "$" not in s.replace(r"\$", "")
+
+
+def test_register_algorithm_escapes_dollar_in_body() -> None:
+    r = MacroRegistry()
+    r.register_algorithm("INDOT$")
+    assert _no_bare_dollar(r.preamble())
+
+
+def test_register_security_notion_escapes_dollar_in_body() -> None:
+    r = MacroRegistry()
+    r.register_security_notion("INDCPA$")
+    assert _no_bare_dollar(r.preamble())
+
+
+def test_register_algorithm_escapes_specials_with_underscore() -> None:
+    # An underscore-bearing name with a special in the subscript portion must
+    # still produce a well-formed mathsf body.
+    r = MacroRegistry()
+    r.register_algorithm("IND_CPA$")
+    assert _no_bare_dollar(r.preamble())

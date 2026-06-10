@@ -7,7 +7,7 @@ def test_render_prg_security_game() -> None:
     from proof_frog.export.latex.exporter import export_file
 
     out = export_file(str(REPO / "examples/Games/PRG/PRGSecurity.game"))
-    assert r"\begin{pcvstack}[boxed]" in out
+    assert r"\begin{pcvstack}[boxed," in out
     assert r"\Real" in out
     assert r"\Random" in out
     assert r"\Query" in out
@@ -33,5 +33,22 @@ def test_two_game_file_renders_side_by_side() -> None:
     out = export_file(str(REPO / "examples/Games/PRG/PRGSecurity.game"))
     assert out.count(r"\begin{pchstack}") == 1
     # two columns, each an outer (title) pcvstack wrapping a boxed inner one
-    assert out.count(r"\begin{pcvstack}[boxed]") == 2
+    assert out.count(r"\begin{pcvstack}[boxed,") == 2
     assert out.count(r"\begin{pcvstack}") == 4
+
+
+def test_integer_game_param_renders_as_variable_not_macro() -> None:
+    # An Int (length) game parameter like Nss1 must render as a math variable
+    # (Nss_{1}) consistently with its use inside BitString<Nss1> -- never as the
+    # upright algorithm macro the uppercase initial would otherwise trigger.
+    from proof_frog.export.latex.exporter import export_file
+
+    out = export_file(
+        str(
+            REPO
+            / "examples/applications/cfrg-hybrid-kems/games/KDF/KDFFirstKeyPRF.game"
+        )
+    )
+    assert "Nss_{1}" in out
+    assert r"\NssOne" not in out  # no algorithm macro for an Int length param
+    assert r"\mathsf{Nss1}" not in out

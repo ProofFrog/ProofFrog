@@ -83,3 +83,15 @@ def test_game_fragment_round_trips() -> None:
     assert r"\documentclass" not in out
     assert r"\begin{pchstack}" in out
     assert r"\providecommand{\PRGSecurity}" in out
+
+
+def test_standalone_sets_letter_paper_and_margins() -> None:
+    # The self-contained document gets sensible page geometry.
+    out = _standalone(SCHEME)
+    assert r"\usepackage[letterpaper,margin=1in]{geometry}" in out
+
+
+def test_fragment_omits_geometry() -> None:
+    # Page geometry is document-level; an \input fragment inherits the host's,
+    # so geometry must not appear (not even in the commented header).
+    assert "geometry" not in _fragment(SCHEME)

@@ -217,21 +217,29 @@ class ExprRenderer:
 
     @staticmethod
     def _split_subscript(token: str) -> tuple[str, str | None]:
-        """Split a name into its rendered head and a single subscript group.
+        """Split a name into its rendered stem and a single subscript group.
 
-        Honors the single-subscript invariant: a first underscore drops the
-        tail into one subscript (literal underscores escaped), else a trailing
-        digit run subscripts. The head is mapped through the Greek table. The
-        head is never itself subscripted, so callers can append at most one
-        more axis (a decoration superscript) without a double subscript.
+        Subscript components are comma-joined into one group, honoring the
+        single-subscript invariant (a stacked ``}_{`` is a pdflatex "Double
+        subscript" error): a trailing-digit run on the stem and every
+        ``_``-delimited tail segment each become a comma-separated component, so
+        ``y0_pq`` -> ``y_{0,pq}`` and ``kem_pq_nseed`` -> ``kem_{pq,nseed}``.
+        The stem is mapped through the Greek table and is never itself
+        subscripted, so callers can append at most one more axis (a decoration
+        superscript) without a double subscript.
         """
-        if "_" in token:
-            head, _, tail = token.partition("_")
-            return _KEYWORD_VARIABLES.get(head, head), tail.replace("_", r"\_")
-        m = _SUBSCRIPT_RE.match(token)
+        segments = token.split("_")
+        stem = segments[0]
+        components: list[str] = []
+        m = _SUBSCRIPT_RE.match(stem)
         if m:
-            return _KEYWORD_VARIABLES.get(m.group(1), m.group(1)), m.group(2)
-        return _KEYWORD_VARIABLES.get(token, token), None
+            stem, digits = m.group(1), m.group(2)
+            components.append(digits)
+        components.extend(seg for seg in segments[1:] if seg)
+        stem = _KEYWORD_VARIABLES.get(stem, stem)
+        if not components:
+            return stem, None
+        return stem, ",".join(components)
 
     @classmethod
     def _render_decorated(cls, name: str) -> str | None:

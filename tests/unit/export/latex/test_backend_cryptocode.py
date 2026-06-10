@@ -36,7 +36,7 @@ def test_render_vstack_boxed() -> None:
     b = CryptocodeBackend()
     p = ir.ProcedureBlock(title=r"\KeyGen()", lines=[ir.Return(expr="k")])
     out = b.render_vstack(ir.VStack(blocks=[p], boxed=True))
-    assert r"\begin{pcvstack}[boxed]" in out
+    assert r"\begin{pcvstack}[boxed," in out
     assert r"\end{pcvstack}" in out
 
 
@@ -47,7 +47,7 @@ def test_render_vstack_with_heading() -> None:
     # title sits ABOVE the boxed inner stack: an outer pcvstack wraps the
     # heading then the boxed inner pcvstack (two pcvstack envs total).
     assert out.count(r"\begin{pcvstack}") == 2
-    assert out.index("$T$") < out.index(r"\begin{pcvstack}[boxed]")
+    assert out.index("$T$") < out.index(r"\begin{pcvstack}[boxed,")
     assert out.index("$T$") < out.index(r"\procedure")
 
 
@@ -137,3 +137,49 @@ def test_preamble_extras_defines_getsr() -> None:
     b = CryptocodeBackend()
     extras = b.preamble_extras()
     assert r"\providecommand{\getsr}{\sample}" in extras
+
+
+def test_experiment_macro_uses_exp_superscript_notation() -> None:
+    # The default \Experiment renders as Exp^{notion.side}_{params}.
+    extras = CryptocodeBackend().preamble_extras()
+    assert (
+        r"\providecommand{\Experiment}[3]{\ensuremath{\mathsf{Exp}^{#1.#2}_{#3}}}"
+        in extras
+    )
+
+
+def test_endif_emits_no_fi() -> None:
+    # The closing `fi` marker is dropped: A3 indentation already shows the
+    # guarded body's scope, and papers do not number a `fi` line.
+    b = CryptocodeBackend()
+    p = ir.ProcedureBlock(
+        title=r"\Foo()",
+        lines=[
+            ir.If(cond="x = 1", depth=0),
+            ir.Return(expr="x", depth=1),
+            ir.EndIf(depth=0),
+            ir.Return(expr="y", depth=0),
+        ],
+    )
+    out = b.render_procedure(p)
+    assert r"\pcfi" not in out
+    assert r"\pcif x = 1 \pcthen" in out
+    # Three content lines remain (If, two returns); the dropped EndIf takes no
+    # numbered line, so there are exactly two `\\` separators.
+    assert out.count(r"\\") == 2
+
+
+def test_vstack_adds_vertical_space_between_procedures() -> None:
+    # A little breathing room between stacked oracles, via pcvstack's space=
+    # key. (\pclb takes no argument -- a \pclb[..] would leak literal text.)
+    b = CryptocodeBackend()
+    v = ir.VStack(
+        blocks=[
+            ir.ProcedureBlock(title=r"\Oa()", lines=[ir.Return(expr="1")]),
+            ir.ProcedureBlock(title=r"\Ob()", lines=[ir.Return(expr="2")]),
+        ],
+        boxed=True,
+    )
+    out = b.render_vstack(v)
+    assert r"\begin{pcvstack}[boxed,space=\smallskipamount]" in out
+    assert r"\pclb[" not in out

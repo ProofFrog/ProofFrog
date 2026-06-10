@@ -64,7 +64,8 @@ class CryptocodeBackend:
         return (
             r"\newtheorem{theorem}{Theorem}" + "\n"
             r"\providecommand{\todo}[1]{\textbf{TODO:} #1}" + "\n"
-            r"\providecommand{\Experiment}[3]{\ensuremath{{#1}.{#2}(#3)}}" + "\n"
+            r"\providecommand{\Experiment}[3]{\ensuremath{\mathsf{Exp}^{#1.#2}_{#3}}}"
+            + "\n"
             r"\providecommand{\getsr}{\sample}"
         )
 
@@ -106,13 +107,24 @@ class CryptocodeBackend:
         return r"\pcind" * line.depth + " " + rendered
 
     def render_procedure(self, p: ir.ProcedureBlock) -> str:
-        if not p.lines:
+        # Drop the closing ``\pcfi``: A3 indentation already shows the guarded
+        # body's scope, and papers do not number a ``fi`` line. (``\pcelse`` /
+        # ``\pcendfor`` are kept -- only the redundant ``if`` terminator goes.)
+        lines = [ln for ln in p.lines if not isinstance(ln, ir.EndIf)]
+        if not lines:
             return "\\procedure[linenumbering]{$" + p.title + "$}{}"
-        body = " \\\\\n    ".join(self._indented_line(ln) for ln in p.lines)
+        body = " \\\\\n    ".join(self._indented_line(ln) for ln in lines)
         return "\\procedure[linenumbering]{$" + p.title + "$}{\n    " + body + "\n}"
 
     def render_vstack(self, v: ir.VStack) -> str:
-        opt = "[boxed]" if v.boxed else ""
+        # A little vertical breathing room between stacked oracles, via
+        # ``pcvstack``'s ``space=`` key (its inter-entry gap, default 0pt).
+        # ``\pclb`` itself takes no argument -- a ``\pclb[..]`` leaks the
+        # bracketed text into the next cell rather than adding space.
+        keys = ["space=\\smallskipamount"]
+        if v.boxed:
+            keys.insert(0, "boxed")
+        opt = "[" + ",".join(keys) + "]"
         body = "\n\\pclb\n".join(self.render_procedure(b) for b in v.blocks)
         inner = f"\\begin{{pcvstack}}{opt}\n{body}\n\\end{{pcvstack}}"
         if v.heading:

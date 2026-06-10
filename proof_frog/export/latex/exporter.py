@@ -69,6 +69,9 @@ def assemble(
     extras = backend.preamble_extras()
     parts = [
         r"\documentclass{article}",
+        # Page geometry is document-level, so it lives only in the self-contained
+        # build; an \input fragment inherits the host document's margins.
+        r"\usepackage[letterpaper,margin=1in]{geometry}",
         *_package_lines(backend),
         *([extras] if extras else []),
         macros.preamble().rstrip(),

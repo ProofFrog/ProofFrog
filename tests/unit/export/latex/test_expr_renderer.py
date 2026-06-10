@@ -50,11 +50,22 @@ def test_function_call_uses_macro_for_algorithm_names() -> None:
 
 def test_multi_underscore_single_subscript_level() -> None:
     # kem_pq_nseed must not stack subscripts (a `}_{` double subscript fails
-    # under pdflatex). Everything after the first underscore goes verbatim
-    # (with literal underscores escaped) into one subscript group.
+    # under pdflatex). The `_`-delimited tail segments are comma-joined into a
+    # single subscript group rather than escaped verbatim.
     out = render("kem_pq_nseed")
-    assert out == r"kem_{pq\_nseed}"
+    assert out == r"kem_{pq,nseed}"
     assert "}_{" not in out
+
+
+def test_digit_head_with_underscore_tail_merges() -> None:
+    # A trailing-digit run on the stem and the underscore tail combine into one
+    # comma-separated subscript: y0_pq -> y_{0,pq}.
+    assert render("y0_pq") == "y_{0,pq}"
+    assert "}_{" not in render("y0_pq")
+
+
+def test_greek_stem_with_merged_subscript() -> None:
+    assert render("sigma0_pq") == r"\sigma_{0,pq}"
 
 
 def test_underscore_plus_digit_no_double_subscript() -> None:

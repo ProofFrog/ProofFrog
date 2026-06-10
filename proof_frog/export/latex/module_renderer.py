@@ -57,29 +57,47 @@ class ModuleRenderer:
 
     def render_primitive(self, p: frog_ast.Primitive) -> str:
         head_macro = self.macros.register_algorithm(p.name)
-        params = ", ".join(self._param(par) for par in p.parameters)
         lines: list[str] = []
         lines.append(rf"\noindent\textbf{{Primitive {head_macro}}}")
-        if params:
-            lines.append(rf"\textit{{Parameters:}} ${params}$.")
         lines.append(r"\begin{itemize}")
-        if p.fields:
-            sets_str = ", ".join(rf"${head_macro}.{f.name}$" for f in p.fields)
+        if p.parameters:
+            params = ", ".join(self._param(par) for par in p.parameters)
+            lines.append(rf"  \item Parameters: ${params}$.")
+        # Only genuinely set-valued fields belong under "Sets:"; the integer
+        # length fields (re-exposed parameters) already appear under Parameters.
+        # Set names go through the algorithm macro so they read upright
+        # (\mathsf), matching how they render in the method signatures below.
+        set_fields = [f for f in p.fields if isinstance(f.type, frog_ast.SetType)]
+        if set_fields:
+            sets_str = ", ".join(
+                rf"${head_macro}.{self.macros.register_algorithm(f.name)}$"
+                for f in set_fields
+            )
             lines.append(rf"  \item Sets: {sets_str}.")
         for sig in p.methods:
-            lines.append(rf"  \item {self._signature_inline(sig, head_macro)}")
+            lines.append(rf"  \item {self._signature_inline(sig)}")
         lines.append(r"\end{itemize}")
         return "\n".join(lines)
 
-    def _render_param_name(self, name: str) -> str:
-        if _looks_like_algorithm_name(name):
+    def _render_typed_name(self, name: str, typ: frog_ast.Type) -> str:
+        """Render a parameter name consistently with how it is used elsewhere.
+
+        A numeric (length/index) parameter is a math variable, matching its use
+        inside sizes (``Nss1`` -> ``Nss_{1}`` both here and in
+        ``BitString<Nss1>``). A structural parameter (a set/group/scheme) keeps
+        the upright algorithm macro its capitalized name gets in every other
+        position.
+        """
+        numeric = isinstance(typ, (frog_ast.IntType, frog_ast.ModIntType))
+        if not numeric and _looks_like_algorithm_name(name):
             return self.macros.register_algorithm(name)
         return self.expr.render(frog_ast.Variable(name))
 
     def _param(self, par: frog_ast.Parameter) -> str:
-        return rf"{par.name} : {self.types.render(par.type)}"
+        name = self._render_typed_name(par.name, par.type)
+        return rf"{name} \in {self.types.render(par.type)}"
 
-    def _signature_inline(self, sig: frog_ast.MethodSignature, owner_macro: str) -> str:
+    def _signature_inline(self, sig: frog_ast.MethodSignature) -> str:
         method_macro = self.macros.register_algorithm(sig.name)
         args = ", ".join(self._param(p) for p in sig.parameters)
         ret = self.types.render(sig.return_type)
@@ -91,7 +109,7 @@ class ModuleRenderer:
         prefix = ""
         if modifiers:
             prefix = rf"\textit{{{', '.join(modifiers)}}}\ "
-        return rf"{prefix}${method_macro}({args}) \to {ret}$ \quad (in ${owner_macro}$)"
+        return rf"{prefix}${method_macro}({args}) \to {ret}$"
 
     # ---- Scheme ------------------------------------------------------------
 
@@ -159,7 +177,9 @@ class ModuleRenderer:
     def _game_title(self, g: frog_ast.Game, experiment_name: str | None) -> str:
         """The math-mode title (without ``$`` delimiters) for a game."""
         side_macro = self.macros.register_algorithm(g.name)
-        params = ", ".join(self._render_param_name(p.name) for p in g.parameters)
+        params = ", ".join(
+            self._render_typed_name(p.name, p.type) for p in g.parameters
+        )
         if experiment_name:
             exp_macro = self.macros.register_security_notion(experiment_name)
             return rf"\Experiment{{{exp_macro}}}{{{side_macro}}}{{{params}}}"

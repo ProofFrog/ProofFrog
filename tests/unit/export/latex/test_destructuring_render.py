@@ -79,14 +79,15 @@ def test_render_sample_destructuring() -> None:
 def test_destructuring_names_are_subscripted() -> None:
     # Each LHS name must route through the expression renderer so it gets the
     # same subscripting as in expression position. `ss_T_e` must become a
-    # single-level subscript (`ss_{T\_e}`), never a raw double-underscore name
-    # that pdflatex rejects as a double subscript.
+    # single-level subscript with the tail segments comma-joined (`ss_{T,e}`),
+    # never a raw double-underscore name that pdflatex rejects as a double
+    # subscript.
     stmt = frog_ast.DestructuringBinding(
         _TYPE, ["ss_T_e", "ct1"], frog_ast.Variable("E"), kind="sample"
     )
     line = _render_one(stmt)
     assert isinstance(line, ir.Sample)
-    assert line.lhs == r"(ss_{T\_e}, ct_{1})"
+    assert line.lhs == r"(ss_{T,e}, ct_{1})"
     assert "}_{" not in line.lhs
 
 

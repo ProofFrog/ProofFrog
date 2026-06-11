@@ -933,25 +933,251 @@ def _find_rf_call_of_var(
     return result  # type: ignore[return-value]
 
 
+# ---------------------------------------------------------------------------
+# Soundness gate for FreshInputRFToUniform
+# ---------------------------------------------------------------------------
+#
+# Replacing a call ``RF(arg)`` (where the fresh ``v <-uniq[S]`` sits at
+# projection position k of ``arg``) with a fresh uniform sample is sound only
+# if RF has *never been queried at the value `arg`* before, in any execution
+# and any oracle.  Since ``arg`` collides with a prior query iff that query
+# agrees with ``arg`` in the k-th component (tuples/concats are injective in
+# each leaf), it suffices that the exclusion set ``S`` contains the k-th
+# projection of every input RF is ever queried on.  Two checkable regimes
+# guarantee this:
+#
+#   (A) ``S`` is the called RF's own domain ``RF.domain`` (whole-argument
+#       case only): RF.domain by construction holds every prior query, and the
+#       RF's semantics keep it in sync (including adversary oracle queries).
+#
+#   (B) ``S`` is a persistent game field, never reset, into which EVERY RF
+#       call site inserts its argument's k-th projection (either the projection
+#       is itself ``<-uniq[S]`` sampled, or the call's method does
+#       ``S = S union {proj}``).  This is the projection-tracking idiom (e.g.
+#       an ``Eval``/``Hash`` oracle doing ``seen = seen union {x[0]}`` before
+#       ``KDF(x)``).
+#
+# The previously-missing check is what made an own-outputs-only exclusion set
+# (which does NOT track an adversary Hash oracle's queries) wrongly eligible.
+
+
+def _all_rf_call_args(
+    method: frog_ast.Method, rf_name: str
+) -> list[frog_ast.Expression]:
+    """Every single argument expression of a call ``rf_name(arg)`` in *method*."""
+    args: list[frog_ast.Expression] = []
+
+    def collector(node: frog_ast.ASTNode) -> bool:
+        if (
+            isinstance(node, frog_ast.FuncCall)
+            and isinstance(node.func, frog_ast.Variable)
+            and node.func.name == rf_name
+            and len(node.args) == 1
+        ):
+            args.append(node.args[0])
+        return False
+
+    SearchVisitor(collector).visit(method.block)
+    return args
+
+
+def _projection_expr(
+    arg: frog_ast.Expression, proj_index: int | None
+) -> frog_ast.Expression | None:
+    """The sub-expression of *arg* at projection *proj_index*.
+
+    ``proj_index is None`` means the whole argument (simple ``RF(v)``).  For a
+    tuple/concat we take the k-th element/leaf; for a whole-tuple variable we
+    synthesize ``arg[k]`` so it can be matched against ``S = S union {x[k]}``.
+    """
+    if proj_index is None:
+        return arg
+    if isinstance(arg, frog_ast.Tuple):
+        if 0 <= proj_index < len(arg.values):
+            return arg.values[proj_index]
+        return None
+    if (
+        isinstance(arg, frog_ast.BinaryOperation)
+        and arg.operator == frog_ast.BinaryOperators.OR
+    ):
+        leaves = _flatten_concat(arg)
+        if 0 <= proj_index < len(leaves):
+            return leaves[proj_index]
+        return None
+    if isinstance(arg, frog_ast.Variable):
+        return frog_ast.ArrayAccess(arg, frog_ast.Integer(proj_index))
+    return None
+
+
+def _index_of_var_in_arg(arg: frog_ast.Expression, var_name: str) -> int | None | bool:
+    """Position of *var_name* in an RF argument.
+
+    Returns ``None`` for the simple whole-argument case (``arg`` is the
+    variable itself), an ``int`` index for a tuple/concat leaf, or ``False``
+    when the variable cannot be located (gate should then refuse to fire).
+    """
+    if isinstance(arg, frog_ast.Variable) and arg.name == var_name:
+        return None
+    if isinstance(arg, frog_ast.Tuple):
+        for i, elem in enumerate(arg.values):
+            if isinstance(elem, frog_ast.Variable) and elem.name == var_name:
+                return i
+    if (
+        isinstance(arg, frog_ast.BinaryOperation)
+        and arg.operator == frog_ast.BinaryOperators.OR
+    ):
+        for i, leaf in enumerate(_flatten_concat(arg)):
+            if isinstance(leaf, frog_ast.Variable) and leaf.name == var_name:
+                return i
+    return False
+
+
+def _proj_tracked_in_set(
+    method: frog_ast.Method, set_name: str, proj: frog_ast.Expression
+) -> bool:
+    """True if *proj* is guaranteed to be in *set_name* within *method*.
+
+    Either *proj* is a variable sampled ``<-uniq[set_name]``, or *method*
+    contains ``set_name = set_name union {... proj ...}`` (or ``+``).
+    """
+    found = [False]
+
+    def visit(node: frog_ast.ASTNode) -> bool:
+        if (
+            isinstance(node, frog_ast.UniqueSample)
+            and isinstance(node.var, frog_ast.Variable)
+            and isinstance(proj, frog_ast.Variable)
+            and node.var.name == proj.name
+            and isinstance(node.unique_set, frog_ast.Variable)
+            and node.unique_set.name == set_name
+        ):
+            found[0] = True
+        if (
+            isinstance(node, frog_ast.Assignment)
+            and isinstance(node.var, frog_ast.Variable)
+            and node.var.name == set_name
+            and isinstance(node.value, frog_ast.BinaryOperation)
+            and node.value.operator
+            in (frog_ast.BinaryOperators.UNION, frog_ast.BinaryOperators.ADD)
+            and isinstance(node.value.left_expression, frog_ast.Variable)
+            and node.value.left_expression.name == set_name
+            and isinstance(node.value.right_expression, frog_ast.Set)
+            and any(elem == proj for elem in node.value.right_expression.elements)
+        ):
+            found[0] = True
+        return False
+
+    SearchVisitor(visit).visit(method.block)
+    return found[0]
+
+
+def _set_only_monotone(game: frog_ast.Game, set_name: str) -> bool:
+    """True if *set_name* is only ever grown monotonically (never reset).
+
+    Any assignment to *set_name* other than ``set_name = set_name union {..}``
+    / ``+ {..}`` breaks the accumulation invariant and makes the projection
+    unreliable.  A bare ``set_name = {}`` is tolerated only inside
+    ``Initialize`` (the one-time initial empty set).
+    """
+    ok = [True]
+
+    def visit_method(method: frog_ast.Method) -> None:
+        is_init = method.signature.name == "Initialize"
+
+        def visit(node: frog_ast.ASTNode) -> bool:
+            if isinstance(node, frog_ast.Assignment) and isinstance(
+                node.var, frog_ast.Variable
+            ):
+                if node.var.name == set_name:
+                    v = node.value
+                    monotone = (
+                        isinstance(v, frog_ast.BinaryOperation)
+                        and v.operator
+                        in (
+                            frog_ast.BinaryOperators.UNION,
+                            frog_ast.BinaryOperators.ADD,
+                        )
+                        and isinstance(v.left_expression, frog_ast.Variable)
+                        and v.left_expression.name == set_name
+                    )
+                    empty_init = (
+                        is_init and isinstance(v, frog_ast.Set) and len(v.elements) == 0
+                    )
+                    if not (monotone or empty_init):
+                        ok[0] = False
+            # element-level mutation of the set is also a reset-like change
+            if (
+                isinstance(node, frog_ast.Assignment)
+                and isinstance(node.var, frog_ast.ArrayAccess)
+                and isinstance(node.var.the_array, frog_ast.Variable)
+                and node.var.the_array.name == set_name
+            ):
+                ok[0] = False
+            return False
+
+        SearchVisitor(visit).visit(method.block)
+
+    for method in game.methods:
+        visit_method(method)
+    return ok[0]
+
+
+def _exclusion_adequate(
+    game: frog_ast.Game,
+    rf_name: str,
+    set_name: str,
+    proj_index: int | None,
+    field_names: set[str],
+) -> bool:
+    """Whether ``v <-uniq[set_name]`` at projection *proj_index* of an
+    ``rf_name(arg)`` call guarantees the queried point is fresh for ``rf_name``.
+    See the regime (A)/(B) discussion above."""
+    # Regime (A): the exclusion set is the called RF's own domain.
+    if set_name == f"{rf_name}.domain" and proj_index is None:
+        return True
+    # Regime (B): persistent, never-reset field that tracks the k-th
+    # projection of every RF call site.
+    if set_name not in field_names:
+        return False
+    if not _set_only_monotone(game, set_name):
+        return False
+    for method in game.methods:
+        for arg in _all_rf_call_args(method, rf_name):
+            proj = _projection_expr(arg, proj_index)
+            if proj is None:
+                return False
+            if not _proj_tracked_in_set(method, set_name, proj):
+                return False
+    return True
+
+
 class _FreshInputRFTransformer(BlockTransformer):
     """Replace ``RF(v)`` (or ``RF([..., v, ...])`` / ``RF(... || v || ...)``)
     with ``z <- RangeType`` when *v* is a ``<-uniq[S]`` sampled variable used
     only in that one RF call.
 
-    The exclusion set ``S`` guarantees that *v* differs from all inputs on
-    which the RF has been queried elsewhere (e.g., via an adversary oracle).
-    When *v* appears inside a tuple or concatenation, varying *v* produces a
-    distinct composite argument, so the RF output is still an independent
-    uniform draw.
+    The replacement is sound only when the exclusion set ``S`` provably
+    contains the relevant projection of every input the RF is queried on, so
+    that *v* (hence the composite argument) is genuinely fresh.  This is
+    enforced by :func:`_exclusion_adequate` (regimes A/B documented there);
+    when it cannot be established the transform refuses to fire and records a
+    near-miss.  When *v* appears inside a tuple or concatenation, the leaf is
+    injective, so a fresh leaf yields a fresh composite argument.
     """
 
     def __init__(
         self,
         rf_types: dict[str, frog_ast.FunctionType],
         ctx: PipelineContext | None = None,
+        game: frog_ast.Game | None = None,
+        field_names: set[str] | None = None,
     ) -> None:
         self.rf_types = rf_types
         self.ctx = ctx
+        # Original game and its field names, used by the soundness gate to
+        # verify the <-uniq exclusion set provably covers the RF's domain.
+        self.game = game
+        self.field_names = field_names if field_names is not None else set()
         self._loop_depth = 0
 
     def transform_numeric_for(  # type: ignore[override]
@@ -1018,6 +1244,49 @@ class _FreshInputRFTransformer(BlockTransformer):
             if _rf_call_in_loop(remaining, rf_name):
                 continue
 
+            # SOUNDNESS GATE: the <-uniq exclusion set must provably exclude
+            # every input the RF has been (or will be) queried on, in the
+            # k-th projection where the fresh variable sits.  Without this,
+            # an exclusion set that does not track the RF's full domain (e.g.
+            # an own-outputs-only set that ignores an adversary Hash oracle)
+            # would yield an unsound RF(v) -> uniform replacement.
+            set_name = _get_unique_set_name(stmt.unique_set)
+            proj_index = _index_of_var_in_arg(rf_call.args[0], var_name)
+            if proj_index is False or self.game is None:
+                _adequate = False
+            else:
+                _adequate = _exclusion_adequate(
+                    self.game,
+                    rf_name,
+                    set_name,
+                    proj_index,  # type: ignore[arg-type]
+                    self.field_names,
+                )
+            if not _adequate:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Fresh Input RF To Uniform",
+                            reason=(
+                                f"RF '{rf_name}' input is sampled <-uniq"
+                                f"[{set_name}], but '{set_name}' is not "
+                                f"provably a superset of '{rf_name}'.domain "
+                                "(its relevant projection): some RF call site "
+                                "does not add its argument to the exclusion "
+                                "set, so RF(input) may not be fresh"
+                            ),
+                            location=stmt.origin,
+                            suggestion=(
+                                f"sample with <-uniq[{rf_name}.domain], or "
+                                "ensure every RF call site inserts its input's "
+                                "matching component into the exclusion set"
+                            ),
+                            variable=rf_name,
+                            method=None,
+                        )
+                    )
+                continue
+
             range_type = copy.deepcopy(self.rf_types[rf_name].range_type)
 
             # Replace the RF call node with a fresh variable, and add a
@@ -1050,9 +1319,11 @@ class FreshInputRFToUniform(TransformPass):
     Handles bare variables, tuples containing the variable, and
     concatenations containing the variable.
 
-    When the input is sampled via ``<-uniq[S]``, the exclusion set
-    guarantees it differs from all other RF inputs.  This makes the
-    replacement exactly sound — no guessing loss.
+    The replacement is exactly sound (no guessing loss) only when the
+    ``<-uniq[S]`` exclusion set provably covers the RF's queried domain at the
+    variable's position; this is checked by :func:`_exclusion_adequate`
+    (regimes A/B).  When it cannot be established the pass declines and records
+    a near-miss rather than firing unsoundly.
     """
 
     name = "Fresh Input RF To Uniform"
@@ -1095,7 +1366,10 @@ class FreshInputRFToUniform(TransformPass):
         if not rf_types:
             return game
 
-        return _FreshInputRFTransformer(rf_types, ctx).transform(game)
+        field_names = {f.name for f in game.fields}
+        return _FreshInputRFTransformer(
+            rf_types, ctx, game=game, field_names=field_names
+        ).transform(game)
 
 
 # ---------------------------------------------------------------------------

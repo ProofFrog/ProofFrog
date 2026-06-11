@@ -294,8 +294,28 @@ def describe(file: str, json_output: bool) -> None:
         "for inclusion in a larger LaTeX file."
     ),
 )
-def export_latex(
-    file: str, output: str | None, backend: str, composition: str, standalone: bool
+@click.option(
+    "--diff/--no-diff",
+    default=True,
+    help=(
+        "Highlight, in each game of a proof, the lines that changed relative "
+        "to the previous game (default: on; proof files only)."
+    ),
+)
+@click.option(
+    "--diff-style",
+    default="box",
+    type=click.Choice(["box", "color"]),
+    help="How a changed line renders: gray box (default) or colored text.",
+)
+def export_latex(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    file: str,
+    output: str | None,
+    backend: str,
+    composition: str,
+    standalone: bool,
+    diff: bool,
+    diff_style: str,
 ) -> None:
     """Export a FrogLang file (.primitive, .scheme, .game, .proof) to LaTeX."""
     # pylint: disable=import-outside-toplevel
@@ -307,6 +327,8 @@ def export_latex(
             backend_name=backend,
             composition=composition,
             standalone=standalone,
+            diff=diff,
+            diff_style=diff_style,
         )
     except (frog_parser.ParseError, FileNotFoundError, ValueError) as e:
         click.echo(str(e), err=True)

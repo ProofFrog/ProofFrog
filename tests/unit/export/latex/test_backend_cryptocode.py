@@ -169,6 +169,52 @@ def test_endif_emits_no_fi() -> None:
     assert out.count(r"\\") == 2
 
 
+def test_highlighted_line_boxed_with_gamechange() -> None:
+    # Default diff style "box" wraps a changed line's content in cryptocode's
+    # \gamechange colorbox (D1). The \pcind indent stays outside the box.
+    b = CryptocodeBackend()
+    p = ir.ProcedureBlock(
+        title=r"\Enc(m)",
+        lines=[
+            ir.Assign(lhs="c", rhs=r"\ENC(k, m)", highlight=True),
+            ir.Return(expr="c"),
+        ],
+    )
+    out = b.render_procedure(p)
+    # \gamechange's colorbox is an LR box, so the math content is re-entered
+    # with $...$.
+    assert r"\gamechange{$c \gets \ENC(k, m)$}" in out
+    # the unchanged return line is not boxed
+    assert r"\gamechange{$\pcreturn c$}" not in out
+
+
+def test_highlighted_line_indent_outside_box() -> None:
+    b = CryptocodeBackend()
+    p = ir.ProcedureBlock(
+        title=r"\O()",
+        lines=[ir.Return(expr=r"\bot", depth=1, highlight=True)],
+    )
+    out = b.render_procedure(p)
+    assert r"\pcind \gamechange{$\pcreturn \bot$}" in out
+
+
+def test_highlighted_line_color_style() -> None:
+    # The "color" diff style wraps the content in a color group instead of a
+    # box; selectable by the user.
+    b = CryptocodeBackend(diff_style="color")
+    p = ir.ProcedureBlock(
+        title=r"\Enc(m)",
+        lines=[ir.Assign(lhs="c", rhs=r"\ENC(k, m)", highlight=True)],
+    )
+    out = b.render_procedure(p)
+    assert r"{\color{blue} c \gets \ENC(k, m)}" in out
+    assert r"\gamechange" not in out
+
+
+def test_default_diff_style_is_box() -> None:
+    assert CryptocodeBackend().diff_style == "box"
+
+
 def test_vstack_adds_vertical_space_between_procedures() -> None:
     # A little breathing room between stacked oracles, via pcvstack's space=
     # key. (\pclb takes no argument -- a \pclb[..] would leak literal text.)

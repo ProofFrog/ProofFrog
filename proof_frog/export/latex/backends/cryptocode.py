@@ -26,10 +26,19 @@ _CRYPTOCODE_OPTIONS = (
 )
 
 
+_DIFF_COLOR = "blue"
+
+
 class CryptocodeBackend:
     """Render IR using the LaTeX ``cryptocode`` package."""
 
     name = "cryptocode"
+
+    def __init__(self, diff_style: str = "box") -> None:
+        # How a diff-highlighted line (D1) renders: "box" wraps it in
+        # cryptocode's gray ``\gamechange`` colorbox; "color" wraps it in a
+        # color group. Selectable by the user via ``--diff-style``.
+        self.diff_style = diff_style
 
     def required_packages(self) -> list[PackageSpec]:
         return [
@@ -93,15 +102,35 @@ class CryptocodeBackend:
                 return latex
         raise TypeError(f"unknown IR line: {line!r}")
 
+    def highlight(self, content: str) -> str:
+        """Wrap diff-changed math content in the configured highlight (D1).
+
+        Used both for changed procedure lines and for the changed components of
+        a symbolic game heading (e.g. ``DDH.Left`` -> ``DDH.Right``). Procedure
+        cells and headings are both math mode, but ``\\gamechange`` typesets its
+        argument inside a ``\\colorbox`` (an LR box), where math mode is *off* --
+        so the math content must be re-entered explicitly with ``$...$`` or it
+        errors ("Missing $ inserted"). The ``\\color`` group, by contrast, keeps
+        the surrounding math mode, so it needs no delimiters. Any ``\\pcind``
+        indent is applied by the caller *outside* this wrapper so only the
+        content is marked.
+        """
+        if self.diff_style == "color":
+            return rf"{{\color{{{_DIFF_COLOR}}} {content}}}"
+        return rf"\gamechange{{${content}$}}"
+
     def _indented_line(self, line: ir.Line) -> str:
         """Render one IR line, prefixing one ``\\pcind`` per nesting depth.
 
         ``\\pcind`` is cryptocode's one-level procedure indent. The indent goes
         *after* the ``\\\\`` line break (added by the join) and *before* the
         line content, so guarded bodies sit one level deeper than their
-        If/For markers (A3).
+        If/For markers (A3). A diff-highlighted line is wrapped *inside* the
+        indent so the box/color hugs the content, not the leading space.
         """
         rendered = self._line(line)
+        if line.highlight:
+            rendered = self.highlight(rendered)
         if line.depth <= 0:
             return rendered
         return r"\pcind" * line.depth + " " + rendered

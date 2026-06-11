@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ... import frog_ast
@@ -15,6 +16,21 @@ if TYPE_CHECKING:
     from .proof_context import Hop, ProofContext
 
 
+@dataclass
+class _SymbolicHeading:
+    """Structured pieces of a symbolic game heading ``G_i = challenger [o R]``.
+
+    Kept alongside each figure so adjacent headings can be diffed component-wise
+    (challenger / reduction) and the changed part highlighted -- the symbolic
+    analogue of the body-line diff used in inlined mode.
+    """
+
+    index: int
+    challenger_tex: str
+    reduction_tex: str | None
+    sections_ref: bool  # start/end step: heading-only, references shared sections
+
+
 def render_proof(
     ctx: "ProofContext",
     backend: Backend,
@@ -22,12 +38,15 @@ def render_proof(
     renderer: ModuleRenderer,
     composition: str = "symbolic",
     standalone: bool = True,
+    diff: bool = True,
 ) -> str:
     """Render a proof file to LaTeX.
 
     ``ctx`` is a ``ProofContext`` that exposes game steps and resolution.
     ``composition`` is either ``"symbolic"`` (default) or ``"inlined"``.
     ``standalone`` selects a full document (default) or an ``\\input`` fragment.
+    ``diff`` (default True) highlights, in each game, the lines that changed
+    relative to the previous game (D1).
 
     The body is rendered first so macro registration populates the preamble,
     then the document (or fragment) is assembled.
@@ -42,7 +61,7 @@ def render_proof(
         _definitions_section(ctx, renderer),
         _construction_section(ctx, renderer),
         _theorem_section(ctx, renderer),
-        _games_sequence(ctx, renderer, backend, composition),
+        _games_sequence(ctx, renderer, backend, composition, diff),
     ]
     body = "\n\n".join(p for p in body_parts if p)
     return assemble(backend, macros, body, standalone)
@@ -157,16 +176,114 @@ def _games_sequence(
     renderer: ModuleRenderer,
     backend: Backend,
     composition: str,
+    diff: bool,
 ) -> str:
-    """Render the full game sequence with hop annotations between figures."""
+    """Render the full game sequence with hop annotations between figures.
+
+    Figures are built as IR first so the diff pass (D1) can run before the
+    backend turns the IR into LaTeX. Both modes highlight changed *body lines*
+    (``mark_diff``); symbolic mode adds two things, because there the delta also
+    lives in the heading and a reduction is often repeated verbatim:
+
+    * **inlined** -- each step is a full game; only the changed body lines are
+      highlighted.
+    * **symbolic** -- the body is a reduction (or intermediate game). Changed
+      body lines are still highlighted (``R`` vs ``Rprime`` genuinely differ),
+      *and* the changed heading component (which security game the reduction is
+      composed with) is highlighted. A reduction body that repeats the previous
+      game's verbatim is not redrawn -- its assumption-hop twin points back to
+      it (``_apply_symbolic_diff``).
+    """
+    # pylint: disable=import-outside-toplevel
+    from .diff import mark_diff
+
     steps = ctx.game_steps()
     hops = ctx.hop_kinds()
+    built = [
+        _step_figure_ir(ctx, step, renderer, i, composition)
+        for i, step in enumerate(steps)
+    ]
+    figures = [fig for fig, _ in built]
+    headings = [head for _, head in built]
+    if composition == "symbolic":
+        _apply_symbolic_diff(figures, headings, backend, diff)
+    elif diff:
+        for i in range(1, len(figures)):
+            mark_diff(figures[i - 1].body, figures[i].body)
     chunks: list[str] = []
-    for i, step in enumerate(steps):
+    for i, fig in enumerate(figures):
         if i > 0:
             chunks.append(_hop_annotation(i, hops[i - 1], renderer))
-        chunks.append(_step_figure(ctx, step, renderer, backend, i, composition))
+        chunks.append(backend.render_figure(fig))
     return "\n\n".join(chunks)
+
+
+def _apply_symbolic_diff(
+    figures: list[ir.Figure],
+    headings: list["_SymbolicHeading | None"],
+    backend: Backend,
+    diff: bool,
+) -> None:
+    """Highlight changed body lines + heading deltas, and de-dup repeats.
+
+    Mutates ``figures`` in place. For each game (against its predecessor):
+
+    * if the body repeats the predecessor's verbatim, drop it and point back
+      (the assumption-hop twin: same reduction, different composed challenger);
+    * otherwise highlight the body lines that changed (``mark_diff``) -- e.g.
+      ``R`` vs ``Rprime`` differ line by line;
+    * (re)assemble the heading, highlighting the challenger/reduction component
+      that changed.
+
+    The body comparison uses the predecessor's *original* body, so a game still
+    diffs against the reduction drawn above it even when the intervening twin
+    was collapsed. Figures with no structured heading (the error fallback) are
+    left untouched. Skipped entirely when ``diff`` is off, so ``--no-diff``
+    draws every game in full with no highlighting.
+    """
+    if not diff:
+        return
+    # pylint: disable=import-outside-toplevel
+    from .diff import bodies_equal, mark_diff
+
+    original_bodies = [fig.body for fig in figures]
+    for i, head in enumerate(headings):
+        if head is None:
+            continue
+        prev = headings[i - 1] if i > 0 else None
+        prev_body = original_bodies[i - 1] if i > 0 else None
+        deduped_from: int | None = None
+        if figures[i].body is not None and prev_body is not None:
+            if bodies_equal(prev_body, figures[i].body):
+                figures[i].body = None
+                deduped_from = i - 1
+            else:
+                mark_diff(prev_body, figures[i].body)
+        figures[i].heading = _symbolic_heading_tex(head, prev, backend, deduped_from)
+
+
+def _symbolic_heading_tex(
+    head: "_SymbolicHeading",
+    prev: "_SymbolicHeading | None",
+    backend: Backend,
+    deduped_from: int | None,
+) -> str:
+    """Assemble the ``$G_i = ...$`` heading, highlighting changed components."""
+    challenger = head.challenger_tex
+    if prev is not None and prev.challenger_tex != challenger:
+        challenger = backend.highlight(challenger)
+    body_tex = challenger
+    if head.reduction_tex is not None:
+        reduction = head.reduction_tex
+        if prev is not None and prev.reduction_tex != reduction:
+            reduction = backend.highlight(reduction)
+        body_tex = rf"{body_tex} \circ {reduction}"
+    math = rf"$G_{{{head.index}}} = {body_tex}$"
+    if head.sections_ref:
+        return math + r"\\\textit{(see Definitions and Construction)}"
+    if deduped_from is not None:
+        return math + rf"\\\textit{{(reduction as in $G_{{{deduped_from}}}$)}}"
+    return math
 
 
 def _hop_annotation(i: int, hop: "Hop", renderer: ModuleRenderer) -> str:
@@ -182,15 +299,24 @@ def _hop_annotation(i: int, hop: "Hop", renderer: ModuleRenderer) -> str:
     )
 
 
-def _step_figure(
+def _step_figure_ir(
     ctx: "ProofContext",
     step: frog_ast.Step,
     renderer: ModuleRenderer,
-    backend: Backend,
     index: int,
     composition: str,
-) -> str:
-    """Render a single game-step figure in the requested composition mode.
+) -> tuple[ir.Figure, "_SymbolicHeading | None"]:
+    """Build the IR ``Figure`` for one game step, plus its symbolic heading.
+
+    Returning IR rather than a LaTeX string lets the caller run the diff pass
+    over adjacent games before the backend renders them. Macro registration
+    still happens here (during body construction), so the preamble is populated
+    regardless of when rendering occurs.
+
+    In symbolic mode the returned ``_SymbolicHeading`` carries the heading's
+    structured pieces; ``_apply_symbolic_diff`` assembles the final
+    ``figure.heading`` from it. In inlined mode (and on the error fallback) the
+    second element is ``None``.
 
     On any resolution or render failure, prints a warning to stderr and emits
     the raw step text in a ``\\pccomment`` fallback block so partial proofs
@@ -204,35 +330,34 @@ def _step_figure(
             block = renderer._method_blocks_vstack(
                 game
             )  # pylint: disable=protected-access
-            body: ir.VStack | ir.ProcedureBlock = block
-            return backend.render_figure(
-                ir.Figure(body=body, caption=caption, label=label)
-            )
+            return ir.Figure(body=block, caption=caption, label=label), None
         # symbolic mode
         sr = ctx.resolve_symbolic(step)
         challenger_ref = _render_game_ref(sr.challenger, renderer, as_notion=True)
+        reduction_ref: str | None = None
         if sr.reduction_ref is not None:
-            comp = _render_game_ref(sr.reduction_ref, renderer, as_notion=False)
-            heading = rf"$G_{{{index}}} = {challenger_ref} \circ {comp}$"
-        else:
-            heading = rf"$G_{{{index}}} = {challenger_ref}$"
+            reduction_ref = _render_game_ref(
+                sr.reduction_ref, renderer, as_notion=False
+            )
+        head = _SymbolicHeading(
+            index=index,
+            challenger_tex=challenger_ref,
+            reduction_tex=reduction_ref,
+            sections_ref=sr.novel is None,
+        )
         if sr.novel is not None:
             vstack = renderer._method_blocks_vstack(
                 sr.novel
             )  # pylint: disable=protected-access
-            return backend.render_figure(
-                ir.Figure(body=vstack, heading=heading, caption=caption, label=label)
-            )
+            # heading is assembled later by _apply_symbolic_diff from `head`.
+            return ir.Figure(body=vstack, caption=caption, label=label), head
         # start/end step: heading only, referencing the shared sections.
-        heading_only = heading + r"\\\textit{(see Definitions and Construction)}"
-        return backend.render_figure(
-            ir.Figure(body=None, heading=heading_only, caption=caption, label=label)
-        )
+        return ir.Figure(body=None, caption=caption, label=label), head
     except Exception as exc:  # pylint: disable=broad-exception-caught
         import sys  # pylint: disable=import-outside-toplevel
 
         print(f"latex-export: could not render step {index}: {exc}", file=sys.stderr)
-        return backend.render_figure(
+        return (
             ir.Figure(
                 body=ir.ProcedureBlock(
                     title=caption,
@@ -240,7 +365,8 @@ def _step_figure(
                 ),
                 caption=caption,
                 label=label,
-            )
+            ),
+            None,
         )
 
 

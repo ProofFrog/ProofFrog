@@ -61,6 +61,81 @@ def test_export_latex_composition_flag(tmp_path: Path) -> None:
     assert r"\begin{document}" in text and r"\end{document}" in text
 
 
+def test_export_latex_diff_on_by_default(tmp_path: Path) -> None:
+    # D1: proof export highlights changed lines by default (\gamechange box).
+    out = tmp_path / "ddh.tex"
+    r = subprocess.run(
+        [
+            "python",
+            "-m",
+            "proof_frog",
+            "export-latex",
+            "examples/Proofs/Group/DDH_implies_CDH.proof",
+            "--composition",
+            "inlined",
+            "-o",
+            str(out),
+        ],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert r.returncode == 0, r.stderr
+    assert r"\gamechange{" in out.read_text()
+
+
+def test_export_latex_no_diff_flag(tmp_path: Path) -> None:
+    out = tmp_path / "ddh_nodiff.tex"
+    r = subprocess.run(
+        [
+            "python",
+            "-m",
+            "proof_frog",
+            "export-latex",
+            "examples/Proofs/Group/DDH_implies_CDH.proof",
+            "--composition",
+            "inlined",
+            "--no-diff",
+            "-o",
+            str(out),
+        ],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert r.returncode == 0, r.stderr
+    assert r"\gamechange{" not in out.read_text()
+
+
+def test_export_latex_diff_style_color(tmp_path: Path) -> None:
+    out = tmp_path / "ddh_color.tex"
+    r = subprocess.run(
+        [
+            "python",
+            "-m",
+            "proof_frog",
+            "export-latex",
+            "examples/Proofs/Group/DDH_implies_CDH.proof",
+            "--composition",
+            "inlined",
+            "--diff-style",
+            "color",
+            "-o",
+            str(out),
+        ],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert r.returncode == 0, r.stderr
+    text = out.read_text()
+    assert r"{\color{blue}" in text
+    assert r"\gamechange{" not in text
+
+
 def test_export_latex_no_standalone_flag(tmp_path: Path) -> None:
     out = tmp_path / "frag.tex"
     r = subprocess.run(

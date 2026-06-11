@@ -13,10 +13,10 @@ from .module_renderer import ModuleRenderer
 _BACKENDS: dict[str, type[Backend]] = {"cryptocode": CryptocodeBackend}  # type: ignore[type-abstract]
 
 
-def _make_backend(name: str) -> Backend:
+def _make_backend(name: str, diff_style: str = "box") -> Backend:
     if name not in _BACKENDS:
         raise ValueError(f"Unknown LaTeX backend: {name}")
-    return _BACKENDS[name]()  # type: ignore[abstract]
+    return _BACKENDS[name](diff_style=diff_style)  # type: ignore[abstract,call-arg]
 
 
 def _package_lines(backend: Backend) -> list[str]:
@@ -88,14 +88,19 @@ def export_file(
     backend_name: str = "cryptocode",
     composition: str = "symbolic",
     standalone: bool = True,
+    diff: bool = True,
+    diff_style: str = "box",
 ) -> str:
     """Dispatch on file extension. Returns rendered LaTeX as a string.
 
     ``standalone`` controls whether the output is a complete document
     (default) or an ``\\input``-able fragment for inclusion in a larger file.
+    ``diff`` (proof files only) highlights, in each game, the lines that
+    changed relative to the previous game; ``diff_style`` is ``"box"`` (gray
+    ``\\gamechange`` box) or ``"color"`` (colored text).
     """
     suffix = Path(path).suffix
-    backend = _make_backend(backend_name)
+    backend = _make_backend(backend_name, diff_style)
     macros = MacroRegistry()
     renderer = ModuleRenderer(backend, macros)
 
@@ -128,5 +133,6 @@ def export_file(
             renderer,
             composition=composition,
             standalone=standalone,
+            diff=diff,
         )
     raise ValueError(f"Unsupported file type for LaTeX export: {suffix}")

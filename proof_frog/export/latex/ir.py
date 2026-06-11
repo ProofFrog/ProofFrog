@@ -13,6 +13,10 @@ from typing import Union
 # (If/Else/EndIf/For/EndFor) take the depth of the *enclosing* block; the
 # statements between a header and its end-marker take depth + 1. Backends
 # prefix that many indents so nesting is visible (A3).
+#
+# Each line also carries a ``highlight`` flag, default False. The adjacent-game
+# diff pass (D1, ``diff.py``) flips it to True on lines of a game that changed
+# relative to its predecessor; backends wrap such lines in a change highlight.
 
 
 @dataclass
@@ -20,6 +24,7 @@ class Sample:
     lhs: str
     rhs: str
     depth: int = 0
+    highlight: bool = False
 
 
 @dataclass
@@ -27,45 +32,53 @@ class Assign:
     lhs: str
     rhs: str
     depth: int = 0
+    highlight: bool = False
 
 
 @dataclass
 class Return:
     expr: str
     depth: int = 0
+    highlight: bool = False
 
 
 @dataclass
 class If:
     cond: str
     depth: int = 0
+    highlight: bool = False
 
 
 @dataclass
 class Else:
     depth: int = 0
+    highlight: bool = False
 
 
 @dataclass
 class EndIf:
     depth: int = 0
+    highlight: bool = False
 
 
 @dataclass
 class For:
     header: str
     depth: int = 0
+    highlight: bool = False
 
 
 @dataclass
 class EndFor:
     depth: int = 0
+    highlight: bool = False
 
 
 @dataclass
 class Comment:
     text: str
     depth: int = 0
+    highlight: bool = False
 
 
 @dataclass
@@ -74,6 +87,7 @@ class Raw:
 
     latex: str
     depth: int = 0
+    highlight: bool = False
 
 
 Line = Union[Sample, Assign, Return, If, Else, EndIf, For, EndFor, Comment, Raw]

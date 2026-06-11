@@ -101,3 +101,79 @@ def test_render_proof_inlined_runs_clean():
     out = pr.render_proof(ctx, backend, macros, mr, composition="inlined")
     assert out.count(r"\begin{figure}") == len(ctx.game_steps())
     assert r"\end{document}" in out
+
+
+def test_render_proof_diff_highlights_changes_by_default():
+    # D1: diff highlighting is on by default in proofs. The inlined game
+    # sequence has adjacent full games that differ, so at least one changed
+    # line gets a \gamechange box.
+    backend = CryptocodeBackend()
+    macros = MacroRegistry()
+    mr = ModuleRenderer(backend, macros)
+    ctx = ProofContext(MULTICHAL)
+    out = pr.render_proof(ctx, backend, macros, mr, composition="inlined")
+    assert r"\gamechange{" in out
+
+
+def test_render_proof_no_diff_suppresses_highlight():
+    backend = CryptocodeBackend()
+    macros = MacroRegistry()
+    mr = ModuleRenderer(backend, macros)
+    ctx = ProofContext(MULTICHAL)
+    out = pr.render_proof(ctx, backend, macros, mr, composition="inlined", diff=False)
+    assert r"\gamechange{" not in out
+
+
+def _symbolic_ddh(diff=True):
+    backend = CryptocodeBackend()
+    macros = MacroRegistry()
+    mr = ModuleRenderer(backend, macros)
+    ctx = ProofContext(DDH)
+    out = pr.render_proof(
+        ctx, backend, macros, mr, composition="symbolic", diff=diff
+    )
+    return ctx, out
+
+
+def test_symbolic_dedups_repeated_reduction_body():
+    # The four-step reduction pattern draws the same reduction R on both sides
+    # of the assumption hop. With diff on, the twin (G_2) drops its identical
+    # body and instead points back to where the reduction was drawn (G_1).
+    _ctx, out = _symbolic_ddh(diff=True)
+    assert r"(reduction as in $G_{1}$)" in out
+    assert r"(reduction as in $G_{3}$)" in out
+
+
+def test_symbolic_dedup_reduces_drawn_bodies():
+    # The reduction R is drawn for G_1 and repeated for G_2; Rprime for G_3 and
+    # repeated for G_4. De-dup drops the two repeats, so two fewer boxed bodies
+    # are drawn than with diff off.
+    _ctx, on = _symbolic_ddh(diff=True)
+    _ctx2, off = _symbolic_ddh(diff=False)
+    boxed = r"\begin{pcvstack}[boxed,"
+    assert off.count(boxed) - on.count(boxed) == 2
+
+
+def test_symbolic_highlights_changed_challenger_in_heading():
+    # The assumption hop's real change is the composed challenger
+    # (DDH.Left -> DDH.Right); that delta is highlighted in the heading, not in
+    # the (identical) body.
+    _ctx, out = _symbolic_ddh(diff=True)
+    assert r"\gamechange{$\DDH(\G).\Right$}" in out
+
+
+def test_symbolic_highlights_changed_body_lines():
+    # R (G_1) and Rprime (G_3) are different reductions with different source
+    # lines; those changed lines are highlighted in G_3's body, not just the
+    # heading. G_3's Solve oracle returns challenger.Eq(c) where R returned
+    # c = z, so a \pcreturn body line is boxed.
+    _ctx, out = _symbolic_ddh(diff=True)
+    assert r"\gamechange{$\pcreturn challenger.\Eq(c)$}" in out
+
+
+def test_symbolic_no_diff_keeps_full_sequence():
+    # With diff off, every game is drawn in full and nothing is highlighted or
+    # deduped.
+    _ctx, out = _symbolic_ddh(diff=False)
+    assert r"\gamechange{" not in out
+    assert "(reduction as in" not in out

@@ -179,6 +179,62 @@ from proof_frog.transforms.control_flow import UniqExclusionBranchEliminationTra
             }
             """,
         ),
+        # Element write to the exclusion element's backing map invalidates:
+        # after M[0] = b, M[0] == b is true, so folding to false would be
+        # unsound.
+        (
+            """
+            Int f(Map<Int, BitString<8>> M) {
+                BitString<8> b <-uniq[{M[0]}] BitString<8>;
+                M[0] = b;
+                if (M[0] == b) {
+                    return 1;
+                }
+                return 0;
+            }
+            """,
+            """
+            Int f(Map<Int, BitString<8>> M) {
+                BitString<8> b <-uniq[{M[0]}] BitString<8>;
+                M[0] = b;
+                if (M[0] == b) {
+                    return 1;
+                }
+                return 0;
+            }
+            """,
+        ),
+        # Write nested inside an if-branch invalidates: on the c path a == b
+        # holds after a = b, so folding the later condition to false would be
+        # unsound.
+        (
+            """
+            Int f(Bool c) {
+                BitString<8> a <- BitString<8>;
+                BitString<8> b <-uniq[{a}] BitString<8>;
+                if (c) {
+                    a = b;
+                }
+                if (a == b) {
+                    return 1;
+                }
+                return 0;
+            }
+            """,
+            """
+            Int f(Bool c) {
+                BitString<8> a <- BitString<8>;
+                BitString<8> b <-uniq[{a}] BitString<8>;
+                if (c) {
+                    a = b;
+                }
+                if (a == b) {
+                    return 1;
+                }
+                return 0;
+            }
+            """,
+        ),
         # Condition with `==` deeper inside an AND chain: still rewritten.
         (
             """

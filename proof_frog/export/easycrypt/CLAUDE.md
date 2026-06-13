@@ -105,21 +105,44 @@ Key modules:
   `<M>_<m>_det` axioms) and routes `left ~ right` through two `ev`-functional
   **twin modules** `<state>_fdet` via 3-leg transitivity: `left ~ F_left`
   (top-down `seq 1 1` peel, program order — dodges the `exists*` freeze on
-  ISUV-inlined call args), `F_left ~ F_right` (pure-det reorder,
-  `(wp; call (_: true))*`), `F_right ~ right` (top-down peel). The gate
-  `_needs_det_functional_reorder` (same call multiset + identical probabilistic
-  subsequence) fires when **(a)** some declared module's own call order differs
-  (same-module → EC rejects any `swap`, shared `glob`; any transform), or **(b)**
-  for non-tuple transforms, the cross-module right→left calls-only alignment is
-  **data-invalid** (`_calls_only_alignment_invalid`: a reordered call pushed past
-  an assignment reading its result, e.g. `L.get` past the `kdf_in_d` concat — the
-  `_synth_isuv_walk` swap EC rejects as "statements not independent"). Tuple
-  transforms (`allow_cross_module=False`) keep their tuple-walk, which aligns to
-  the *inlined tuple* side — a valid direction (KEMPRF `K.decaps` past
-  `F.evaluate`). Cross-module *valid* reorders and non-reorders decline, so clean
-  proofs stay byte-identical. Determinism is threaded from the exporter as a
-  per-declared-module `det_methods` map. Validated end-to-end on
-  `CK_expanded_Correctness` (compile frontier advanced through hops 0-3).
+  ISUV-inlined call args), `F_left ~ F_right` (the *middle leg*,
+  `_det_reorder_leg`), `F_right ~ right` (top-down peel). The gate
+  `_needs_det_functional_reorder` (same call multiset + **each module's own
+  probabilistic-call order preserved**) fires when **(a)** some declared
+  module's own call order differs (same-module → EC rejects any `swap`, shared
+  `glob`; any transform), or **(b)** for non-tuple transforms, the cross-module
+  right→left calls-only alignment is **data-invalid**
+  (`_calls_only_alignment_invalid`: a reordered call pushed past an assignment
+  reading its result, e.g. `L.get` past the `kdf_in_d` concat — the
+  `_synth_isuv_walk` swap EC rejects as "statements not independent"). The
+  **middle leg** has two shapes: identical functionalized abstract-call order →
+  the `(wp; call (_: true))*` peel; *reordered* abstract calls (the
+  `Topological Sorting` shape — a same-module det reorder bundled with a
+  **cross-module probabilistic** reorder, e.g. `KEM_T.KeyGen` past
+  `KEM_PQ.Encaps`) → reorder `F_left`'s statements to exactly match `F_right`
+  with `swap{1}` (`_ec_full_perm_swaps`, full-signature bubble sort; sound
+  because both functionalized bodies are topological orderings of the same DAG,
+  so each left-to-right move crosses only not-yet-placed independent statements)
+  then `sim`. Tuple transforms (`allow_cross_module=False`) keep their
+  tuple-walk, which aligns to the *inlined tuple* side — a valid direction
+  (KEMPRF `K.decaps` past `F.evaluate`). Cross-module *valid* reorders and
+  non-reorders decline, so clean proofs stay byte-identical. Determinism is
+  threaded from the exporter as a per-declared-module `det_methods` map.
+  Validated end-to-end on `CK_expanded_Correctness` / `UK_expanded_Correctness`
+  (all 11 `Topological Sorting` micros close; `ec_compile` OK at 19 admits).
+  **Caveat:** the `(wp; call)*` middle leg and `_synth_isuv_walk` both stall on
+  `<$` samples (`wp` can't absorb a sample) — this is the open `CG`/`UG_expanded`
+  wall (NIKE-group schemes); the fix is to make those routes sample-aware
+  (swap+`sim`), not yet landed.
+- **Pure cross-module reorder fallback in the `_REORDER_TRANSFORMS` branch**
+  (`_tactic_for`): `_permutation_swaps` runs on the raw `app.game_before/after`
+  ASTs, which are normalized differently from the rendered flat-state modules
+  the lemma relates, so it can miss a reorder EC actually sees. When it declines,
+  recompute from the rendered modules via `_rendered_state_swaps` →
+  `_ec_perm_swaps`, gated by `_reorder_cross_module_safe` (every module's own
+  call subsequence preserved → purely cross-module → EC-`swap`-safe; same-module
+  reorders take the det route above). Closes the `L.get`-past-`KeyGen`
+  `Topological Sorting` micros.
 - `proof_translator.py`, `module_translator.py`, `expr_translator.py`,
   `stmt_translator.py`, `type_collector.py`, `scheme_instances.py`,
   `ec_ast.py` — FrogLang→EC translation primitives.

@@ -426,6 +426,31 @@ def emit_chain_for_hop(
             )
             if swaps is not None:
                 return [_res_tag(SYNTH_PARAM), "proc.", *swaps, "sim."]
+            # The raw transform-application ASTs are normalized differently from
+            # the rendered flat-state modules the micro lemma relates (the engine
+            # stores a separately-canonicalized ``game_before``), so the raw-AST
+            # ``_permutation_swaps`` above can miss a reorder EC actually sees
+            # between the two rendered states. Recompute it from the rendered
+            # modules -- but only when the reorder preserves every module's own
+            # call subsequence, i.e. it is purely *cross-module* (EC ``swap`` is
+            # rejected on two same-module abstract calls; those take the
+            # det-functional route at the head of this function instead).
+            if _reorder_cross_module_safe(left_state, right_state):
+                ec_swaps = _rendered_state_swaps(
+                    modules,
+                    left_state,
+                    right_state,
+                    external_module_types,
+                    method_return_types,
+                    flat_params,
+                )
+                if ec_swaps:
+                    return [
+                        _res_tag(SYNTH_PARAM),
+                        "proc.",
+                        *[f"{s}." for s in ec_swaps],
+                        "sim.",
+                    ]
             # Not a whole-body permutation: the reorder pass may instead have
             # dropped one or more dead, independent samples (e.g.
             # ``Topological Sorting``'s DFS prunes statements the return
@@ -656,6 +681,50 @@ def emit_chain_for_hop(
         return _ec_call_callees(left_mod.procs[0].body) != _ec_call_callees(
             right_mod.procs[0].body
         )
+
+    def _reorder_cross_module_safe(
+        left_state: frog_ast.Game | None, right_state: frog_ast.Game | None
+    ) -> bool:
+        """True if the rendered reorder is a same-multiset, purely *cross-module*
+        call permutation -- every declared module's own call subsequence is
+        identical on both sides, so the reorder only transposes calls of
+        *different* modules (independent ``glob``s), which EC ``swap`` accepts.
+
+        A same-module call transposition shares ``glob`` and is rejected by EC's
+        ``swap``; it takes the det-functional-twin route at the head of
+        :func:`_tactic_for` instead, so this guard keeps the rendered-swap
+        fallback from emitting an EC-invalid ``swap``.
+        """
+        if left_state is None or right_state is None:
+            return False
+        left_mod = _flat_state_module(
+            modules,
+            "_xmod_probe_left",
+            left_state,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        right_mod = _flat_state_module(
+            modules,
+            "_xmod_probe_right",
+            right_state,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        if not left_mod.procs or not right_mod.procs:
+            return False
+        lc = _ec_call_callees(left_mod.procs[0].body)
+        rc = _ec_call_callees(right_mod.procs[0].body)
+        if sorted(lc) != sorted(rc):
+            return False
+        for mod in {c.split(".")[0] for c in lc if "." in c}:
+            if [c for c in lc if c.startswith(mod + ".")] != [
+                c for c in rc if c.startswith(mod + ".")
+            ]:
+                return False
+        return True
 
     def _needs_data_aware_reorder(
         left_state: frog_ast.Game | None, right_state: frog_ast.Game | None
@@ -2431,6 +2500,47 @@ def _ec_perm_swaps(
     return swaps
 
 
+def _ec_full_perm_swaps(
+    before: list[ec_ast.EcStmt], after: list[ec_ast.EcStmt]
+) -> list[str] | None:
+    """``swap{1}`` tactics reordering ``before``'s exec statements to ``after``.
+
+    Matches by the *full* statement signature (kind, lhs, callee, data) so each
+    statement is uniquely identified -- unlike :func:`_ec_perm_swaps`, which
+    matches by coarse kind/callee and so cannot distinguish two assignments.
+    Used for the deterministic functional-twin middle leg, where the two fully
+    functionalized bodies are statement-permutations and must be aligned exactly
+    before ``sim``. Returns ``None`` when the two are not a duplicate-free
+    permutation (the caller then declines the whole route).
+
+    The left-to-right bubble sort emits only EC-acceptable swaps: both bodies are
+    topological orderings of the same dependency DAG, so when statement
+    ``after[target]`` is moved left to ``target``, every statement it crosses is
+    a not-yet-placed ``after[k>target]`` that cannot depend on it (it currently
+    precedes it in a valid order), and all of its own dependencies are already
+    placed in ``[0, target)``.
+    """
+    b = _exec_stmts(before)
+    a = _exec_stmts(after)
+    if len(b) != len(a):
+        return None
+    bsig = [_stmt_full_sig(s) for s in b]
+    asig = [_stmt_full_sig(s) for s in a]
+    if len(set(bsig)) != len(bsig) or sorted(map(str, bsig)) != sorted(map(str, asig)):
+        return None
+    cur = list(bsig)
+    swaps: list[str] = []
+    for target, sig in enumerate(asig):
+        if cur[target] == sig:
+            continue
+        src = next((i for i in range(target + 1, len(cur)) if cur[i] == sig), None)
+        if src is None:
+            return None
+        swaps.append(f"swap{{1}} {src + 1} {target - src}.")
+        cur.insert(target, cur.pop(src))
+    return swaps
+
+
 def _stmt_tokens(stmt: ec_ast.EcStmt) -> list[str]:
     """Identifier/number tokens in a statement's data content (sans callee)."""
     return re.findall(r"[A-Za-z_][A-Za-z0-9_]*|\d+", _stmt_text(stmt))
@@ -3169,29 +3279,49 @@ def _leads_with_noncall(body: list[ec_ast.EcStmt]) -> bool:
 
 def _det_reorder_leg(
     left_body: list[ec_ast.EcStmt], right_body: list[ec_ast.EcStmt]
-) -> list[str]:
+) -> list[str] | None:
     """``F_left ~ F_right`` leg: both fully functional, differ by a reorder.
 
-    Both sides hold the same probabilistic calls (same order, per the gate) plus
-    pure ``ev`` assignments distributed differently. EC's ``wp`` requires both
-    sides' tails to be deterministic, so a ``wp`` before *every* ``call (_:
-    true)`` clears whichever side currently trails in assignments (the reorder
-    can put an assign at one side's tail and a call at the other's). The number
-    of ``(wp; call)`` rounds is the abstract-call count (identical on both
-    sides). A final ``wp`` clears any *leading* assignment run (before the first
-    call) -- emitted only when a side actually leads with assignments, since
-    ``wp`` on an already-empty program is rejected. ``skip => /#`` discharges
-    the functional equality.
+    Returns ``None`` when the leg cannot be synthesized (the caller then declines
+    the whole functional-twin route).
+
+    Two shapes, distinguished by whether the probabilistic calls are in the same
+    order on both sides:
+
+    - **Same probabilistic-call order** (the original same-module-det-reorder
+      case): the sides hold the same probabilistic calls in the same order plus
+      pure ``ev`` assignments distributed differently. EC's ``wp`` requires both
+      sides' tails to be deterministic, so a ``wp`` before *every* ``call (_:
+      true)`` clears whichever side currently trails in assignments (the reorder
+      can put an assign at one side's tail and a call at the other's). The number
+      of ``(wp; call)`` rounds is the abstract-call count (identical on both
+      sides). A final ``wp`` clears any *leading* assignment run (before the
+      first call) -- emitted only when a side actually leads with assignments,
+      since ``wp`` on an already-empty program is rejected. ``skip => /#``
+      discharges the functional equality.
+
+    - **Reordered probabilistic calls** (the cross-module probabilistic reorder
+      bundled with a same-module det reorder, e.g. ``Topological Sorting``):
+      ``(wp; call)`` peeling would try to couple two different calls. Instead
+      reorder ``F_left``'s statements to exactly match ``F_right`` with
+      ``swap{1}`` (every reordered probabilistic pair is cross-module, hence
+      EC-independent -- the gate guarantees per-module probabilistic order is
+      preserved) and close the now-identical bodies with ``sim``.
     """
-    n_calls = len([s for s in _exec_stmts(left_body) if isinstance(s, ec_ast.Call)])
-    tac = ["proc."]
-    for _ in range(n_calls):
-        tac.append("wp.")
-        tac.append("call (_: true).")
-    if _leads_with_noncall(left_body) or _leads_with_noncall(right_body):
-        tac.append("wp.")
-    tac.append("skip => /#.")
-    return tac
+    if _ec_call_callees(left_body) == _ec_call_callees(right_body):
+        n_calls = len([s for s in _exec_stmts(left_body) if isinstance(s, ec_ast.Call)])
+        tac = ["proc."]
+        for _ in range(n_calls):
+            tac.append("wp.")
+            tac.append("call (_: true).")
+        if _leads_with_noncall(left_body) or _leads_with_noncall(right_body):
+            tac.append("wp.")
+        tac.append("skip => /#.")
+        return tac
+    swaps = _ec_full_perm_swaps(left_body, right_body)
+    if swaps is None:
+        return None
+    return ["proc.", *swaps, "sim."]
 
 
 def _prob_callees(
@@ -3238,8 +3368,21 @@ def _needs_det_functional_reorder(
     ac = _ec_call_callees(after_body)
     if not bc or sorted(bc) != sorted(ac):
         return False
-    if _prob_callees(before_body, det_pred) != _prob_callees(after_body, det_pred):
+    # The probabilistic calls must be the same multiset, and *each module's*
+    # probabilistic-call subsequence must be preserved. The ``F_left ~ F_right``
+    # leg aligns the functionalized twins by ``swap``; a probabilistic reorder is
+    # only EC-swappable when it is cross-module (independent ``glob``s). A
+    # same-module probabilistic reorder has neither a swap nor a functional form,
+    # so decline it here (falls through to the swap walker / cache / admit).
+    before_prob = _prob_callees(before_body, det_pred)
+    after_prob = _prob_callees(after_body, det_pred)
+    if sorted(before_prob) != sorted(after_prob):
         return False
+    for mod in {c.split(".")[0] for c in before_prob if "." in c}:
+        if [c for c in before_prob if c.startswith(mod + ".")] != [
+            c for c in after_prob if c.startswith(mod + ".")
+        ]:
+            return False
     mods = {c.split(".")[0] for c in bc if "." in c}
     for mod in mods:
         if [c for c in bc if c.startswith(mod + ".")] != [
@@ -3305,10 +3448,12 @@ def _synth_det_reorder(  # pylint: disable=too-many-arguments,too-many-positiona
         params=right_module.params,
     )
 
+    leg_mid = _det_reorder_leg(fl_body, fr_body)
+    if leg_mid is None:
+        return None
     spec = f"({pre} ==> {post}) ({pre} ==> {post})"
     ctr = [0]
     leg1 = _det_topdown_leg(left_body, 1, glob_items, det_pred, ctr)
-    leg_mid = _det_reorder_leg(fl_body, fr_body)
     leg3 = _det_topdown_leg(right_body, 2, glob_items, det_pred, ctr)
 
     tactic: list[str] = [_res_tag(SYNTH_PARAM)]

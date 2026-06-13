@@ -11,6 +11,8 @@ integration sweep on ``CK_expanded_Correctness``.
 from proof_frog.export.easycrypt import ec_ast
 from proof_frog.export.easycrypt.chain_emitter import (
     _calls_only_alignment_invalid,
+    _det_reorder_leg,
+    _ec_full_perm_swaps,
     _ec_functionalize,
     _needs_det_functional_reorder,
     _synth_det_reorder,
@@ -212,3 +214,134 @@ def test_gate_declines_cross_module_data_invalid_for_tuple_transform() -> None:
     # byte-identical tuple-walk path instead of the det route.
     left, right = _cross_module_dataflow_pair()
     assert not _needs_det_functional_reorder(left, right, _det_pred, False)
+
+
+def _mixed_reorder_pair() -> tuple[list[ec_ast.EcStmt], list[ec_ast.EcStmt]]:
+    """The ``Topological Sorting`` shape: a *cross-module* probabilistic reorder
+    (``M.keygen`` <-> ``N.keygen``) bundled with a *same-module* deterministic
+    reorder (``M.f`` <-> ``M.g``). Each module's own probabilistic-call order is
+    preserved, so the prob reorder is EC-swappable; the same-module det
+    transposition forces the functional-twin route.
+    """
+    left = [
+        ec_ast.Call("a", "M.keygen", ""),
+        ec_ast.Call("p", "N.keygen", ""),
+        ec_ast.Call("b", "M.f", "a"),
+        ec_ast.Call("c", "M.g", "a"),
+        ec_ast.Call("q", "N.h", "p"),
+        ec_ast.Return("(b, c, q)"),
+    ]
+    right = [  # keygens transposed (cross-module); M.f/M.g transposed (same-module)
+        ec_ast.Call("p", "N.keygen", ""),
+        ec_ast.Call("a", "M.keygen", ""),
+        ec_ast.Call("c", "M.g", "a"),
+        ec_ast.Call("b", "M.f", "a"),
+        ec_ast.Call("q", "N.h", "p"),
+        ec_ast.Return("(b, c, q)"),
+    ]
+    return left, right
+
+
+def test_gate_fires_on_mixed_crossmodule_prob_and_samemodule_det_reorder() -> None:
+    left, right = _mixed_reorder_pair()
+    assert _needs_det_functional_reorder(left, right, _det_pred, True)
+
+
+def test_gate_declines_samemodule_prob_reorder() -> None:
+    # Two *different* same-module probabilistic calls transposed: the middle leg
+    # has no EC ``swap`` for them (shared glob) and no functional form, so the
+    # per-module probabilistic-order check must decline.
+    left = [
+        ec_ast.Call("a", "M.keygen", ""),
+        ec_ast.Call("e", "M.encaps", "a"),
+        ec_ast.Call("b", "M.f", "a"),
+        ec_ast.Return("(a, e, b)"),
+    ]
+    right = [
+        ec_ast.Call("e", "M.encaps", "a"),
+        ec_ast.Call("a", "M.keygen", ""),
+        ec_ast.Call("b", "M.f", "a"),
+        ec_ast.Return("(a, e, b)"),
+    ]
+    assert not _needs_det_functional_reorder(left, right, _det_pred, True)
+
+
+def test_det_reorder_leg_swaps_then_sim_for_reordered_calls() -> None:
+    # When the functionalized twins differ in abstract-call order, the middle leg
+    # reorders the left to the right with swap{1} and closes with ``sim``.
+    fl = [
+        ec_ast.Call("p", "N.keygen", ""),
+        ec_ast.Call("a", "M.keygen", ""),
+        ec_ast.Return("(a, p)"),
+    ]
+    fr = [
+        ec_ast.Call("a", "M.keygen", ""),
+        ec_ast.Call("p", "N.keygen", ""),
+        ec_ast.Return("(a, p)"),
+    ]
+    leg = _det_reorder_leg(fl, fr)
+    assert leg is not None
+    assert leg[0] == "proc."
+    assert leg[-1] == "sim."
+    assert any(s.startswith("swap{1}") for s in leg)
+
+
+def test_det_reorder_leg_wpcall_for_identical_call_order() -> None:
+    # Identical abstract-call order (only the deterministic ``ev`` assignments
+    # differ): keep the ``(wp; call)*`` peel, not swaps.
+    fl = [
+        ec_ast.Call("a", "M.keygen", ""),
+        ec_ast.Assign("b", "M_c.ev_f (a)"),
+        ec_ast.Return("(a, b)"),
+    ]
+    fr = [
+        ec_ast.Call("a", "M.keygen", ""),
+        ec_ast.Assign("b", "M_c.ev_f (a)"),
+        ec_ast.Return("(a, b)"),
+    ]
+    leg = _det_reorder_leg(fl, fr)
+    assert leg is not None
+    assert "call (_: true)." in leg
+    assert not any(s.startswith("swap{1}") for s in leg)
+
+
+def test_ec_full_perm_swaps_reorders_to_target() -> None:
+    before = [
+        ec_ast.Call("a", "M.keygen", ""),
+        ec_ast.Assign("x", "1"),
+        ec_ast.Call("b", "N.keygen", ""),
+        ec_ast.Assign("y", "2"),
+        ec_ast.Return("(a, b)"),
+    ]
+    # target: move N.keygen and its assign before M.keygen's assign
+    after = [
+        ec_ast.Call("a", "M.keygen", ""),
+        ec_ast.Call("b", "N.keygen", ""),
+        ec_ast.Assign("y", "2"),
+        ec_ast.Assign("x", "1"),
+        ec_ast.Return("(a, b)"),
+    ]
+    swaps = _ec_full_perm_swaps(before, after)
+    assert swaps is not None and swaps  # non-empty, all swap{1} ... .
+    assert all(s.startswith("swap{1} ") and s.endswith(".") for s in swaps)
+
+
+def test_ec_full_perm_swaps_declines_on_duplicates() -> None:
+    # Two statements with identical full signatures cannot be uniquely matched.
+    before = [
+        ec_ast.Assign("x", "1"),
+        ec_ast.Assign("x", "1"),
+        ec_ast.Return("x"),
+    ]
+    after = [
+        ec_ast.Assign("x", "1"),
+        ec_ast.Assign("x", "1"),
+        ec_ast.Return("x"),
+    ]
+    assert _ec_full_perm_swaps(before, after) is None
+
+
+def test_ec_full_perm_swaps_declines_on_non_permutation() -> None:
+    before = [ec_ast.Call("a", "M.keygen", ""), ec_ast.Return("a")]
+    after = [ec_ast.Call("a", "N.keygen", ""), ec_ast.Return("a")]
+    assert _ec_full_perm_swaps(before, after) is None

@@ -130,10 +130,26 @@ Key modules:
   threaded from the exporter as a per-declared-module `det_methods` map.
   Validated end-to-end on `CK_expanded_Correctness` / `UK_expanded_Correctness`
   (all 11 `Topological Sorting` micros close; `ec_compile` OK at 19 admits).
-  **Caveat:** the `(wp; call)*` middle leg and `_synth_isuv_walk` both stall on
-  `<$` samples (`wp` can't absorb a sample) — this is the open `CG`/`UG_expanded`
-  wall (NIKE-group schemes); the fix is to make those routes sample-aware
-  (swap+`sim`), not yet landed. **Dedup extension** (`Deduplicate Deterministic
+  **Sample-aware peel (2026-06-13).** The middle leg, `_synth_isuv_walk`, and
+  `_synth_tuple_walk` no longer stall on `<$` samples: `_backbone_peel` walks the
+  call+sample backbone tail-to-front, coupling a sample with `rnd` and a call with
+  `call (_: true)` (sample-free micros stay byte-identical). The same-callee det
+  reorder (`NG.Encode(v8)`/`NG.Encode(v5)` — `Stabilize Independent Statements`) is
+  caught by `_det_call_sigs` (per-module `(callee,args)` order, det calls only).
+  `_det_topdown_leg` now seeds its `seq` invariant with the **proc parameters**
+  (`={pk,sk}`) — a det call consuming a parameter (`K.decaps(sk,ct)`) otherwise
+  leaves an undischarged `forall &1 &2`. `Inline Single-Use Variables` is in
+  `_PLUMBING_REWRITE_TRANSFORMS` so its count-differing inlined-tail shape routes
+  here instead of the canned `(sp;wp;sim)||sim` (which ran but left the goal open).
+  Verified: KEMPRF / CK_expanded / UK_expanded / GeneralDoubleSymEnc /
+  ChainedEncryptionSecure all still `ec_compile` OK. A same-distribution *sample
+  reorder* (two `<$` seeds swapped by `Topological Sorting`) must NOT take the
+  identity-`rnd` peel: `_call_sample_backbone` tags each sample by its bound
+  variable, so a reordered-sample backbone differs and the leg falls to the
+  `swap`+`sim` branch (samples are glob-independent, so EC `swap` reorders them
+  into position). This route is emitted but **its EC compilation is not yet
+  confirmed** (CG7 export not compiled) — the next thing to verify. **Dedup
+  extension** (`Deduplicate Deterministic
   Calls`, the non-contiguous *rewire* shape — a duplicate det call like `L.get`
   removed and its survivor hoisted): the gate also fires when the call multisets
   *differ* by a deterministic deduplication (`_is_dedup_rewire`: prob calls

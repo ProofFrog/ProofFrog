@@ -80,6 +80,22 @@ _PLUMBING_REWRITE_TRANSFORMS = frozenset(
         "Collapse Single-Index Tuple Access",
         "Expand Tuples",
         "Inline Single-Use Variables",
+        # Inlining a *pure multi-use expression* into its use sites: a local
+        # ``label <- concat ... ; F.evaluate(.., label)`` (used twice) becomes
+        # ``F.evaluate(.., concat ...)`` at each site. The abstract-call sequence
+        # is identical; only a deterministic assignment is dropped and its
+        # expression substituted into call args -- the identical-order ``(wp;
+        # call)*`` middle leg discharges the residual arg equality (``wp``
+        # collects the inlined assignment, ``skip => /#`` equates the substituted
+        # expressions). The static ``sp; wp; sim`` leaves that equality open.
+        "Inline Multi-Use Pure Expressions",
+        # The dual rewrite: a repeated deterministic tuple access
+        # (``v.`1`` used several times) is extracted to a CSE local
+        # (``__cse_v_0__ <- v.`1``) and the uses rewired to it. Again the
+        # abstract-call sequence is identical; the diff is the extra CSE
+        # assignments plus the rewired tuple-construction RHS, both absorbed by
+        # ``wp`` with ``skip => /#`` closing the construction equality.
+        "Extract Repeated Tuple Access",
         # A deterministic copy-alias rewrite that swaps a call argument for its
         # definitional equal (``encodeencapskey(__determ_4__.`1)`` <->
         # ``encodeencapskey(tup_01)`` given ``tup_01 <- __determ_4__.`1``). The
@@ -3344,11 +3360,74 @@ def _calls_only_align_swaps(
     relative order, so an independent different-module reorder the inline exposed
     (e.g. ``K.decaps`` past ``F.evaluate``) is recovered while interchangeable
     same-callee results are left for the walker.
+
+    The coarse-signature bubble sort (:func:`_ec_perm_swaps`) over the *whole*
+    exec list can slide a call past an independent assignment and then bubble
+    that assignment back across the call's result write -- a dependency-crossing
+    ``swap`` EC rejects ("the two statements are not independent"). So the coarse
+    swaps are dependency-validated (:func:`_swaps_dep_valid`); on failure they are
+    recomputed by moving only the calls (:func:`_calls_only_move_swaps`), leaving
+    every assignment in place. A clean proof's swaps are already valid, so it
+    keeps the coarse result byte-identical.
     """
     target_exec = _calls_only_target(other_body, inlined_body)
     if target_exec is None:
         return None
-    return _ec_perm_swaps(_exec_stmts(other_body), target_exec)
+    o_exec = _exec_stmts(other_body)
+    swaps = _ec_perm_swaps(o_exec, target_exec)
+    if swaps is not None and _swaps_dep_valid(o_exec, swaps):
+        return swaps
+    return _calls_only_move_swaps(o_exec, inlined_body)
+
+
+def _calls_only_move_swaps(
+    o_exec: list[ec_ast.EcStmt],
+    inlined_body: list[ec_ast.EcStmt],
+) -> list[str] | None:
+    """``swap{1}`` strings aligning ``o_exec``'s calls to ``inlined_body``'s call
+    order by moving *only* the calls.
+
+    Each call is slid left to its target slot across the intervening statements,
+    leaving assignments where they are (the walker's ``wp`` absorbs them). Because
+    slots fill left to right, a call only ever moves left, and every move is
+    dependency-validated (:func:`_ec_indep`). Returns ``None`` if a call cannot
+    reach its slot without crossing a statement it depends on -- the caller then
+    declines, falling to the deterministic functional-twin route.
+    """
+    i_calls = [s for s in _exec_stmts(inlined_body) if isinstance(s, ec_ast.Call)]
+    o_calls = [s for s in o_exec if isinstance(s, ec_ast.Call)]
+    if len(o_calls) != len(i_calls):
+        return None
+    used = [False] * len(o_calls)
+    order: list[ec_ast.Call] = []
+    for ic in i_calls:
+        match = next(
+            (
+                j
+                for j, oc in enumerate(o_calls)
+                if not used[j] and oc.callee == ic.callee
+            ),
+            None,
+        )
+        if match is None:
+            return None
+        used[match] = True
+        order.append(o_calls[match])
+    cur: list[ec_ast.EcStmt] = list(o_exec)
+    local = _ec_local_vars(cur)
+    swaps: list[str] = []
+    for i, want in enumerate(order):
+        positions = [j for j, s in enumerate(cur) if isinstance(s, ec_ast.Call)]
+        src = next(j for j in positions if cur[j] is want)
+        dst = positions[i]
+        if src == dst:
+            continue
+        crossed = cur[dst:src]
+        if any(not _ec_indep(want, c, local) for c in crossed):
+            return None
+        swaps.append(f"swap{{1}} {src + 1} {dst - src}")
+        cur.insert(dst, cur.pop(src))
+    return swaps
 
 
 def _synth_tuple_walk(

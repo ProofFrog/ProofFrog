@@ -66,6 +66,40 @@ Key modules:
   render, too late for the translator. Cleared GHP18's §2.3 wall: the proof now
   type-checks fully (boolean `||` gone). Regression: only the 3 KEMCombiner
   proofs re-export.
+- **GHP18_Correctness → clean (three coordinated fixes; the last correctness
+  `⛔`).** After the subset-carrier wall fell, GHP18 EC-rejected; three fixes
+  take it to EC-accepted, 0 admits:
+  1. **`_calls_only_align_swaps` dependency validation.** Its coarse-signature
+     bubble (`_ec_perm_swaps`) over the *whole* exec list slid a call to the
+     front (valid) and then bubbled an independent assignment back across the
+     call's result write to "match" the target layout — a dependency-crossing
+     `swap{2}` EC rejects ("statements not independent"). The coarse swaps are
+     now dependency-validated (`_swaps_dep_valid`); on failure they are
+     recomputed by `_calls_only_move_swaps`, which slides *only the calls* left
+     to their slots (assignments stay; the walker's `wp` absorbs them) and
+     validates each move with `_ec_indep`. A clean proof's swaps already
+     validate, so it keeps the coarse result byte-identical. Fixed the
+     `R_KEM2` reduction-side ISUV micro `micro_2_right_2_fwd` (was emitting a
+     spurious second `swap{2} 3 -1`).
+  2. **`Inline Multi-Use Pure Expressions` + `Extract Repeated Tuple Access`
+     added to `_PLUMBING_REWRITE_TRANSFORMS`.** Both keep the abstract-call
+     sequence identical and differ only by deterministic assignment plumbing
+     (a pure `label <- concat ...` inlined into its two `F.evaluate` use sites;
+     a repeated `v.\`1` extracted to a `__cse_*` local). The functional-twin
+     identical-order `(wp; call)*` middle leg discharges them — `wp` collects
+     the dropped/added assignment and `skip => /#` equates the substituted
+     expressions. Closed 6 of GHP18's 7 admits.
+  3. **`type_of` handles `ArrayAccess` (tuple projection).** GHP18's `hop_0`
+     flat states inline a tuple projection (`sk[2]` where `sk : SK1Space *
+     SK2Space * PK1Space * PK2Space`) directly into a `||` concat operand, so
+     the concat detector (`_bitstring_type_of`) called `type_of` on an
+     `ArrayAccess` and hit `NotImplementedError` → the whole body fell back to
+     `return witness;` → the hop chain was unrenderable → `admit`. The
+     exporter's `type_of` factory now types `t[i]` as the i-th component of
+     `t`'s `ProductType`. Cleared the last admit (`hop_0`).
+
+  Regression: only `GHP18_Correctness` re-exports (byte-identical clean set);
+  `ec_compile` OK at 0 admits.
 - **Intermediate-game body emission** (in `exporter.py` intermediate-game loop
   + `module_translator.translate_intermediate_game` + `proof_translator.
   _resolve_intermediate_game`): a proof-local `Game` helper referenced as a

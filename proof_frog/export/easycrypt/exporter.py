@@ -1064,6 +1064,19 @@ def export_proof_file(proof_path: str) -> str:
                             )
                         )
                 return lhs_t
+            if isinstance(e, frog_ast.ArrayAccess) and isinstance(
+                e.index, frog_ast.Integer
+            ):
+                # A tuple projection ``t[i]``: the type is the i-th component of
+                # ``t``'s product type. The engine inlines projections into
+                # concat (``||``) operands in some flat states (e.g. GHP18's
+                # ``sk[2]`` where ``sk : SK1Space * SK2Space * PK1Space *
+                # PK2Space``), so the concat detector needs the component type.
+                base = type_of(e.the_array)
+                if isinstance(base, frog_ast.ProductType) and 0 <= e.index.num < len(
+                    base.types
+                ):
+                    return base.types[e.index.num]
             if isinstance(e, frog_ast.Integer):
                 return frog_ast.IntType()
             if isinstance(e, frog_ast.BitStringLiteral):

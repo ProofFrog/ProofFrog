@@ -14,6 +14,8 @@ from proof_frog.export.easycrypt.chain_emitter import (
     _det_reorder_leg,
     _ec_full_perm_swaps,
     _ec_functionalize,
+    _is_contiguous_dedup,
+    _is_dedup_rewire,
     _needs_det_functional_reorder,
     _synth_det_reorder,
 )
@@ -345,3 +347,133 @@ def test_ec_full_perm_swaps_declines_on_non_permutation() -> None:
     before = [ec_ast.Call("a", "M.keygen", ""), ec_ast.Return("a")]
     after = [ec_ast.Call("a", "N.keygen", ""), ec_ast.Return("a")]
     assert _ec_full_perm_swaps(before, after) is None
+
+
+# ---------------------------------------------------------------------------
+# Deduplicate Deterministic Calls -- the non-contiguous "rewire" shape. A
+# duplicate deterministic call (``N.h``, modelling ``L.get``) is removed and the
+# survivor hoisted, so the calls are NON-adjacent. After functionalization both
+# twins hold the same abstract (prob) calls, so the functional-twin route closes
+# it. The *contiguous*-tail dedup stays on ``_synth_dedup_det`` (byte-identical
+# for clean KEMPRF_Correctness).
+# ---------------------------------------------------------------------------
+
+
+def _dedup_rewire_pair() -> tuple[list[ec_ast.EcStmt], list[ec_ast.EcStmt]]:
+    before = [  # two N.h (det) calls, separated by M.f; survivor rewired+hoisted
+        ec_ast.Call("a", "M.keygen", ""),
+        ec_ast.Call("x1", "N.h", ""),
+        ec_ast.Call("y", "M.f", "a"),
+        ec_ast.Call("x2", "N.h", ""),
+        ec_ast.Return("(x1, y, x2)"),
+    ]
+    after = [  # one N.h, hoisted before M.f, feeding both former uses
+        ec_ast.Call("a", "M.keygen", ""),
+        ec_ast.Call("x", "N.h", ""),
+        ec_ast.Call("y", "M.f", "a"),
+        ec_ast.Return("(x, y, x)"),
+    ]
+    return before, after
+
+
+def _contiguous_dedup_pair() -> tuple[list[ec_ast.EcStmt], list[ec_ast.EcStmt]]:
+    # The KEMPRF shape: N>=2 identical trailing det calls collapse to one.
+    before = [
+        ec_ast.Call("a", "M.keygen", ""),
+        ec_ast.Call("p", "M.f", "a"),
+        ec_ast.Call("e1", "N.h", "p"),
+        ec_ast.Call("e2", "N.h", "p"),
+        ec_ast.Return("(e1, e2)"),
+    ]
+    after = [
+        ec_ast.Call("a", "M.keygen", ""),
+        ec_ast.Call("p", "M.f", "a"),
+        ec_ast.Call("e", "N.h", "p"),
+        ec_ast.Return("(e, e)"),
+    ]
+    return before, after
+
+
+def test_is_dedup_rewire_detects_noncontiguous_dedup() -> None:
+    before, after = _dedup_rewire_pair()
+    assert _is_dedup_rewire(before, after, _det_pred)
+    assert not _is_contiguous_dedup(before, after)
+
+
+def test_is_dedup_rewire_declines_contiguous_dedup() -> None:
+    # The contiguous-tail dedup is _synth_dedup_det's job; the rewire route
+    # must decline it so KEMPRF_Correctness stays byte-identical.
+    before, after = _contiguous_dedup_pair()
+    assert _is_contiguous_dedup(before, after)
+    assert not _is_dedup_rewire(before, after, _det_pred)
+
+
+def test_is_dedup_rewire_declines_dead_call_drop() -> None:
+    # Dropping a call whose callee does NOT survive is a dead-call drop, not a
+    # deduplication -- the functional-twin route must not claim it.
+    before = [
+        ec_ast.Call("a", "M.keygen", ""),
+        ec_ast.Call("x", "N.h", ""),
+        ec_ast.Call("y", "M.f", "a"),
+        ec_ast.Return("(y)"),
+    ]
+    after = [
+        ec_ast.Call("a", "M.keygen", ""),
+        ec_ast.Call("y", "M.f", "a"),
+        ec_ast.Return("(y)"),
+    ]
+    assert not _is_dedup_rewire(before, after, _det_pred)
+
+
+def test_is_dedup_rewire_declines_probabilistic_count_change() -> None:
+    # Removing a *probabilistic* call is never a deterministic dedup.
+    before = [
+        ec_ast.Call("a", "M.keygen", ""),
+        ec_ast.Call("e", "M.keygen", ""),
+        ec_ast.Call("y", "M.f", "a"),
+        ec_ast.Return("(a, e, y)"),
+    ]
+    after = [
+        ec_ast.Call("a", "M.keygen", ""),
+        ec_ast.Call("y", "M.f", "a"),
+        ec_ast.Return("(a, y)"),
+    ]
+    assert not _is_dedup_rewire(before, after, _det_pred)
+
+
+def test_gate_fires_on_dedup_rewire_when_allowed() -> None:
+    before, after = _dedup_rewire_pair()
+    assert _needs_det_functional_reorder(before, after, _det_pred, True)
+
+
+def test_gate_declines_dedup_rewire_for_tuple_transform() -> None:
+    # Tuple-inline transforms keep their tuple-walk (allow_cross_module=False).
+    before, after = _dedup_rewire_pair()
+    assert not _needs_det_functional_reorder(before, after, _det_pred, False)
+
+
+def test_gate_declines_contiguous_dedup_even_when_allowed() -> None:
+    before, after = _contiguous_dedup_pair()
+    assert not _needs_det_functional_reorder(before, after, _det_pred, True)
+
+
+def test_synth_det_reorder_emits_twins_for_dedup_rewire() -> None:
+    before, after = _dedup_rewire_pair()
+    syn = _synth_det_reorder(
+        _module("S_before", before),
+        _module("S_after", after),
+        "S_before",
+        "S_after",
+        "",
+        "compute",
+        "={glob M, glob N}",
+        "={res, glob M, glob N}",
+        _det_pred,
+        _clone_of,
+        True,
+    )
+    assert syn is not None
+    assert syn.module_names == ["S_before_fdet", "S_after_fdet"]
+    # The middle leg keeps the (wp; call)* peel (the abstract-call lists match
+    # after functionalization), not a swap-based reorder.
+    assert "sim." not in syn.tactic or "call (_: true)." in syn.tactic

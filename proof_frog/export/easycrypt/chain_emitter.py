@@ -79,6 +79,7 @@ _PLUMBING_REWRITE_TRANSFORMS = frozenset(
     {
         "Collapse Single-Index Tuple Access",
         "Expand Tuples",
+        "Inline Single-Use Variables",
     }
 )
 
@@ -3127,9 +3128,7 @@ def _synth_tuple_walk(
     body = [_res_tag(SYNTH_PARAM), "proc."]
     for sw in swaps:
         body.append(sw.replace("{1}", "{" + str(other_side) + "}") + ".")
-    for _ in range(n_calls):
-        body.append("wp.")
-        body.append("call (_: true).")
+    body.extend(_backbone_peel(inlined))
     body.append("skip => /#.")
     return body
 
@@ -3173,9 +3172,7 @@ def _synth_isuv_walk(
     body = [_res_tag(SYNTH_PARAM), "proc."]
     for sw in swaps:
         body.append(sw.replace("{1}", "{2}") + ".")
-    for _ in range(n_calls):
-        body.append("wp.")
-        body.append("call (_: true).")
+    body.extend(_backbone_peel(l_body))
     body.append("skip => /#.")
     return body
 
@@ -3258,18 +3255,25 @@ def _det_topdown_leg(
     glob_items: list[str],
     det_pred: Callable[[str, str], bool],
     ctr: list[int],
+    proc_params: list[str] | None = None,
 ) -> list[str]:
     """Top-down ``seq 1 1`` peel functionalizing the call-side's det calls.
 
     ``call_body`` is the *state* body (with abstract calls); the other side is
     its ``ev_*``-functionalized twin (assignments threaded by ``wp``). Each
-    statement is split off with ``seq 1 1 : (={<globs>, <vars so far>})`` and
-    proved: a det call peeled one-sided (``exists*`` + ``call{side} (M_m_det
+    statement is split off with ``seq 1 1 : (={<globs>, <params>, <vars so far>})``
+    and proved: a det call peeled one-sided (``exists*`` + ``call{side} (M_m_det
     ...)``), a probabilistic call coupled (``call (_: true)``), an assignment by
     ``auto``. Program order keeps a det call's args already-functionalized.
+
+    The procedure parameters (``proc_params``) seed the coupling: they are equal
+    by the lemma precondition, and a det call consuming a parameter (e.g.
+    ``K.decaps(sk, ct)``) needs ``={sk}`` to discharge its determinism axiom's
+    result equality (``ev_decaps sk{1} ct = ev_decaps sk{2} ct``). Omitting them
+    leaves an undischarged ``forall &1 &2`` goal the next ``seq`` cannot apply to.
     """
     tac: list[str] = ["proc."]
-    coupled = list(glob_items)
+    coupled = list(proc_params or []) + list(glob_items)
     for stmt in _exec_stmts(call_body):
         if isinstance(stmt, ec_ast.Return):
             break
@@ -3302,10 +3306,60 @@ def _det_topdown_leg(
     return tac
 
 
-def _leads_with_noncall(body: list[ec_ast.EcStmt]) -> bool:
-    """True if ``body``'s first executable statement is not an abstract call."""
+def _call_sample_backbone(
+    body: list[ec_ast.EcStmt],
+) -> list[tuple[str, str | None]]:
+    """Ordered backbone of the ``wp``-opaque statements: each abstract call (by
+    callee) and each ``<$`` sample, in program order.
+
+    ``wp`` can absorb deterministic assignments but neither a ``call`` nor a
+    ``rnd`` sample, so the middle-leg peel must couple these explicitly. The
+    backbone is what two functionalized twins must share (same calls and samples,
+    same interleaving) for the identical-order ``(wp; couple)*`` peel to apply.
+
+    A sample is tagged by its *bound variable*, not a bare ``"sample"`` marker:
+    two twins whose samples were *reordered* (e.g. ``Topological Sorting`` swaps
+    ``seed_T0 <$ d; seed_E9 <$ d``) then have differing backbones, so the peel
+    declines (identity ``rnd`` would couple the wrong seeds) and the caller falls
+    to the ``swap``+``sim`` branch, which reorders the glob-independent samples
+    into position. Same-order samples (dedup/plumbing) keep matching names and
+    stay on the peel.
+    """
+    out: list[tuple[str, str | None]] = []
+    for stmt in _exec_stmts(body):
+        if isinstance(stmt, ec_ast.Call):
+            out.append(("call", stmt.callee))
+        elif isinstance(stmt, ec_ast.Sample):
+            out.append(("sample", getattr(stmt, "var", None)))
+    return out
+
+
+def _leads_with_det(body: list[ec_ast.EcStmt]) -> bool:
+    """True if ``body``'s first executable statement is a deterministic
+    assignment (a ``wp``-absorbable leading run the final ``wp`` must clear).
+
+    A leading call or sample is coupled by the peel loop itself, so only a
+    leading assignment needs the trailing ``wp``.
+    """
     execs = _exec_stmts(body)
-    return bool(execs) and not isinstance(execs[0], ec_ast.Call)
+    return bool(execs) and isinstance(execs[0], ec_ast.Assign)
+
+
+def _backbone_peel(body: list[ec_ast.EcStmt]) -> list[str]:
+    """The ``(wp; couple)*`` peel over ``body``'s call+sample backbone,
+    tail-to-front.
+
+    ``wp`` clears the deterministic run below the current backbone event, then
+    ``call (_: true)`` couples a trailing abstract call and ``rnd`` a trailing
+    ``<$`` sample. A body with no samples yields exactly the historical
+    ``(wp; call (_: true))*`` (one round per call), so sample-free micros are
+    byte-identical. Callers append any leading ``wp`` and the closing tactic.
+    """
+    tac: list[str] = []
+    for kind, _callee in reversed(_call_sample_backbone(body)):
+        tac.append("wp.")
+        tac.append("call (_: true)." if kind == "call" else "rnd.")
+    return tac
 
 
 def _det_reorder_leg(
@@ -3339,13 +3393,18 @@ def _det_reorder_leg(
       EC-independent -- the gate guarantees per-module probabilistic order is
       preserved) and close the now-identical bodies with ``sim``.
     """
-    if _ec_call_callees(left_body) == _ec_call_callees(right_body):
-        n_calls = len([s for s in _exec_stmts(left_body) if isinstance(s, ec_ast.Call)])
-        tac = ["proc."]
-        for _ in range(n_calls):
-            tac.append("wp.")
-            tac.append("call (_: true).")
-        if _leads_with_noncall(left_body) or _leads_with_noncall(right_body):
+    left_bb = _call_sample_backbone(left_body)
+    if left_bb == _call_sample_backbone(right_body):
+        # Both twins share the same call+sample backbone (same interleaving),
+        # differing only in the deterministic ``ev`` glue between events. Peel
+        # the backbone tail-to-front: a ``wp`` clears the deterministic run below
+        # the current event, then ``call (_: true)`` couples a trailing abstract
+        # call and ``rnd`` couples a trailing ``<$`` sample (the same distribution
+        # on both sides). ``wp`` can absorb neither, which is why each backbone
+        # event needs an explicit coupling. A final ``wp`` clears any leading
+        # deterministic run, then ``skip => /#`` discharges the ``ev`` equalities.
+        tac = ["proc.", *_backbone_peel(left_body)]
+        if _leads_with_det(left_body) or _leads_with_det(right_body):
             tac.append("wp.")
         tac.append("skip => /#.")
         return tac
@@ -3372,6 +3431,28 @@ def _callee_is_det(callee: str, det_pred: Callable[[str, str], bool]) -> bool:
     """True if ``callee`` (a ``Module.method`` string) is a deterministic call."""
     parts = _callee_parts(callee)
     return parts is not None and det_pred(parts[0], parts[1])
+
+
+def _det_call_sigs(
+    body: list[ec_ast.EcStmt], det_pred: Callable[[str, str], bool]
+) -> list[tuple[str, str]]:
+    """Ordered ``(callee, args)`` signatures of the *deterministic* abstract calls
+    in ``body`` (probabilistic calls and non-calls dropped).
+
+    Used to spot a same-module reorder of two *same-callee* det calls -- e.g.
+    ``NG.Encode(v8); NG.Encode(v5)`` swapping -- that the callee-name sequence
+    (:func:`_ec_call_callees`) cannot see because both calls share the callee
+    name. Probabilistic calls are excluded: a same-callee probabilistic reorder
+    has no functional form (functionalization leaves it a call, and the middle
+    leg would couple two differently-argued samples), so it must not route here.
+    """
+    out: list[tuple[str, str]] = []
+    for stmt in _exec_stmts(body):
+        if isinstance(stmt, ec_ast.Call):
+            parts = _callee_parts(stmt.callee)
+            if parts is not None and det_pred(parts[0], parts[1]):
+                out.append((stmt.callee, stmt.args))
+    return out
 
 
 def _is_contiguous_dedup(
@@ -3523,6 +3604,21 @@ def _needs_det_functional_reorder(
             c for c in ac if c.startswith(mod + ".")
         ]:
             return True
+    # The per-module callee-name order matches, but two *same-callee*
+    # deterministic calls of one module may still be reordered (differing only in
+    # arguments, e.g. ``NG.Encode(v8); NG.Encode(v5)`` <-> the swap, from
+    # ``Stabilize Independent Statements``). EC's ``swap`` rejects it (shared
+    # ``glob``); functionalizing both calls to ``ev_*`` assignments leaves the
+    # probabilistic-call order identical, so the same-order middle leg closes it.
+    # Equal multiset + differing order == a genuine reorder; a differing multiset
+    # would be a rename (leave it to the swap walker / cache).
+    b_det = _det_call_sigs(before_body, det_pred)
+    a_det = _det_call_sigs(after_body, det_pred)
+    for mod in mods:
+        bm = [sig for sig in b_det if sig[0].startswith(mod + ".")]
+        am = [sig for sig in a_det if sig[0].startswith(mod + ".")]
+        if sorted(bm) == sorted(am) and bm != am:
+            return True
     if (
         allow_cross_module
         and bc != ac
@@ -3588,8 +3684,10 @@ def _synth_det_reorder(  # pylint: disable=too-many-arguments,too-many-positiona
         return None
     spec = f"({pre} ==> {post}) ({pre} ==> {post})"
     ctr = [0]
-    leg1 = _det_topdown_leg(left_body, 1, glob_items, det_pred, ctr)
-    leg3 = _det_topdown_leg(right_body, 2, glob_items, det_pred, ctr)
+    l_params = [p.name for p in lp.params]
+    r_params = [p.name for p in rp.params]
+    leg1 = _det_topdown_leg(left_body, 1, glob_items, det_pred, ctr, l_params)
+    leg3 = _det_topdown_leg(right_body, 2, glob_items, det_pred, ctr, r_params)
 
     tactic: list[str] = [_res_tag(SYNTH_PARAM)]
     tactic.append(f"transitivity {fl_name}{inst_suffix}.{oracle} {spec}.")

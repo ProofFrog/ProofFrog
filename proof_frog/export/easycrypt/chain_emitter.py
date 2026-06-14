@@ -64,6 +64,24 @@ _TUPLE_INLINE_TRANSFORMS = frozenset(
     }
 )
 
+# Deterministic tuple-projection rewrites whose micro keeps the *whole* abstract-
+# call sequence identical (same callees, same order, same multiset) and only
+# rearranges deterministic tuple-construction/projection plumbing (e.g.
+# ``t <@ KeyGen(); x = t[0]`` <-> ``r <@ KeyGen(); t = r[0]; x = t``, or a tuple
+# literal ``ek = (a, b)`` <-> its expanded components ``ek_0 = a; ek_1 = b``).
+# There is no call reorder at all, so the swap routes have nothing to do and the
+# stateless/tuple-walk routes are single-module only; in a multi-declared-module
+# body these fall through to ``admit``. The functional-twin route closes them: in
+# the twins every det call is an ``ev_*`` assignment, so both sides hold the same
+# probabilistic calls in the same order and the identical-order ``(wp; call)*``
+# middle leg discharges the plumbing difference via ``wp`` + ``skip => /#``.
+_PLUMBING_REWRITE_TRANSFORMS = frozenset(
+    {
+        "Collapse Single-Index Tuple Access",
+        "Expand Tuples",
+    }
+)
+
 
 # Transforms whose micros are closed by a synthesizer that lives at the
 # chain-emitter level (the ``_try_*`` routes in ``emit_chain_for_hop``), not by
@@ -72,12 +90,15 @@ _TUPLE_INLINE_TRANSFORMS = frozenset(
 # otherwise -- i.e. they "degrade" like the reorder transforms. The dashboard
 # reads this set so its capability column credits them (the bucket tables alone
 # cannot see chain-emitter synthesis). Keep in sync with the ``_try_*`` gates:
-# ``_TUPLE_INLINE_TRANSFORMS`` (tuple-walk / congruence / stateless) and
-# ``Deduplicate Deterministic Calls`` (``_synth_dedup_det``). The reorder
-# transforms (``_synth_dead_call_drop``) are already credited via their empty
-# ``CANNED_TACTIC`` entry, so they are not repeated here.
+# ``_TUPLE_INLINE_TRANSFORMS`` (tuple-walk / congruence / stateless),
+# ``_PLUMBING_REWRITE_TRANSFORMS`` (the identical-call-sequence functional-twin
+# route) and ``Deduplicate Deterministic Calls`` (``_synth_dedup_det``). The
+# reorder transforms (``_synth_dead_call_drop``) are already credited via their
+# empty ``CANNED_TACTIC`` entry, so they are not repeated here.
 CHAIN_EMITTER_SYNTH_TRANSFORMS = frozenset(
-    _TUPLE_INLINE_TRANSFORMS | {"Deduplicate Deterministic Calls"}
+    _TUPLE_INLINE_TRANSFORMS
+    | _PLUMBING_REWRITE_TRANSFORMS
+    | {"Deduplicate Deterministic Calls"}
 )
 
 
@@ -402,6 +423,13 @@ def emit_chain_for_hop(
                     left_module_ref.split("(")[0],
                     right_module_ref.split("(")[0],
                     app.transform_name not in _TUPLE_INLINE_TRANSFORMS,
+                    # A pure deterministic tuple-projection plumbing rewrite (no
+                    # call reorder) routes through the twins only for the
+                    # tuple-projection transforms, and only in a multi-declared-
+                    # module body -- single-module proofs keep their tuple-walk /
+                    # stateless route byte-identical.
+                    app.transform_name in _PLUMBING_REWRITE_TRANSFORMS
+                    and len(flat_params) > 1,
                 )
             )
             if det_re is not None:
@@ -974,6 +1002,7 @@ def emit_chain_for_hop(
         name_left: str,
         name_right: str,
         allow_cross_module: bool,
+        allow_plumbing: bool = False,
     ) -> _DetReorderSynth | None:
         left_mod = _flat_state_module(
             modules,
@@ -1003,6 +1032,7 @@ def emit_chain_for_hop(
             _det_pred,
             _clone_of,
             allow_cross_module,
+            allow_plumbing,
         )
 
     def _apply_det_reorder(syn: _DetReorderSynth | None) -> list[str] | None:
@@ -3411,6 +3441,7 @@ def _needs_det_functional_reorder(
     after_body: list[ec_ast.EcStmt],
     det_pred: Callable[[str, str], bool],
     allow_cross_module: bool,
+    allow_plumbing: bool = False,
 ) -> bool:
     """True if a deterministic reorder needs the functional-twin route (no
     EC-acceptable swap exists for it).
@@ -3432,11 +3463,30 @@ def _needs_det_functional_reorder(
       non-tuple side to the (inlined) tuple side -- a different, valid direction
       (KEMPRF ``K.decaps`` past ``F.evaluate``) -- so those stay byte-identical
       on the swap path.
+    - **plumbing rewrite** (only when ``allow_plumbing``) -- the abstract-call
+      sequence is *identical* on both sides (no reorder at all); the diff is a
+      deterministic tuple-projection/construction rewrite. The identical-order
+      middle leg closes it. ``allow_plumbing`` is set only for the tuple-
+      projection transforms in a multi-declared-module body (single-module
+      proofs keep their tuple-walk / stateless route).
     """
     bc = _ec_call_callees(before_body)
     ac = _ec_call_callees(after_body)
     if not bc:
         return False
+    if allow_plumbing and bc == ac:
+        # No call reorder at all -- the abstract-call sequence is byte-identical
+        # on both sides (same callees, same order). The diff is a deterministic
+        # tuple-projection/construction plumbing rewrite (a ``Collapse Single-
+        # Index Tuple Access`` / ``Expand Tuples`` micro: ``t <@ KeyGen(); x =
+        # t[0]`` <-> ``r <@ KeyGen(); t = r[0]; x = t``). Functionalizing leaves
+        # both twins with the *same* probabilistic calls in the same order, so
+        # the identical-order ``(wp; call)*`` middle leg discharges the plumbing
+        # via ``wp`` + ``skip => /#``. Fire only when the bodies genuinely differ
+        # (a true EC no-op needs no twin and closes with plain ``sim``).
+        return [_stmt_full_sig(s) for s in _exec_stmts(before_body)] != [
+            _stmt_full_sig(s) for s in _exec_stmts(after_body)
+        ]
     if sorted(bc) != sorted(ac):
         # Unequal call multisets are not a plain reorder. The one exception the
         # functional-twin route handles is a *deterministic-call deduplication*
@@ -3498,6 +3548,7 @@ def _synth_det_reorder(  # pylint: disable=too-many-arguments,too-many-positiona
     det_pred: Callable[[str, str], bool],
     clone_of: Callable[[str], str | None],
     allow_cross_module: bool,
+    allow_plumbing: bool = False,
 ) -> _DetReorderSynth | None:
     """Synthesize the functional-module transitivity for a deterministic reorder.
 
@@ -3510,7 +3561,7 @@ def _synth_det_reorder(  # pylint: disable=too-many-arguments,too-many-positiona
     left_body = left_module.procs[0].body
     right_body = right_module.procs[0].body
     if not _needs_det_functional_reorder(
-        left_body, right_body, det_pred, allow_cross_module
+        left_body, right_body, det_pred, allow_cross_module, allow_plumbing
     ):
         return None
     glob_items = [f"glob {p.name}" for p in left_module.params]

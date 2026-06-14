@@ -80,6 +80,15 @@ _PLUMBING_REWRITE_TRANSFORMS = frozenset(
         "Collapse Single-Index Tuple Access",
         "Expand Tuples",
         "Inline Single-Use Variables",
+        # A deterministic copy-alias rewrite that swaps a call argument for its
+        # definitional equal (``encodeencapskey(__determ_4__.`1)`` <->
+        # ``encodeencapskey(tup_01)`` given ``tup_01 <- __determ_4__.`1``). The
+        # abstract-call *sequence* is identical (only one argument expression
+        # changed), so the identical-order ``(wp; call)*`` middle leg closes it:
+        # ``wp`` collects the alias assignment and ``skip => /#`` discharges the
+        # residual argument equality. The static ``sp; wp; sim`` otherwise leaves
+        # that equality open (a 0-admit file EC rejects).
+        "Forward Expression Alias",
     }
 )
 
@@ -2573,6 +2582,79 @@ def _ec_full_perm_swaps(
     return swaps
 
 
+def _ec_local_vars(exec_stmts: list[ec_ast.EcStmt]) -> set[str]:
+    """The set of variables bound (written) anywhere in ``exec_stmts``.
+
+    A token in a statement's data is a *variable read* only if it names a
+    local bound here; operator names (``slice_*``/``concat_*``), module
+    names and numeric constants are not.
+    """
+    return {
+        s.var
+        for s in exec_stmts
+        if isinstance(s, (ec_ast.Assign, ec_ast.Sample, ec_ast.Call))
+    }
+
+
+def _ec_stmt_rw(
+    stmt: ec_ast.EcStmt, local_vars: set[str]
+) -> tuple[set[str], set[str], str | None]:
+    """``(reads, writes, module)`` for ``stmt`` -- the data and glob footprint
+    EC uses to decide whether two statements are independent.
+
+    ``reads`` is restricted to ``local_vars`` (so pure operators and constants
+    don't manufacture false dependencies). ``module`` is the called module for
+    a ``Call`` (whose ``glob`` it touches), else ``None``."""
+    reads = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", _stmt_text(stmt))) & local_vars
+    writes: set[str] = set()
+    module: str | None = None
+    if isinstance(stmt, (ec_ast.Assign, ec_ast.Sample, ec_ast.Call)):
+        writes = {stmt.var}
+    if isinstance(stmt, ec_ast.Call):
+        module = stmt.callee.split(".", 1)[0]
+    return reads, writes, module
+
+
+def _ec_indep(a: ec_ast.EcStmt, b: ec_ast.EcStmt, local_vars: set[str]) -> bool:
+    """Whether ``a`` and ``b`` may be exchanged -- no read/write data conflict
+    on a local, and not two calls sharing a module ``glob`` (EC rejects the
+    latter)."""
+    ra, wa, ma = _ec_stmt_rw(a, local_vars)
+    rb, wb, mb = _ec_stmt_rw(b, local_vars)
+    if wa & (rb | wb) or wb & ra:
+        return False
+    if ma is not None and ma == mb:
+        return False
+    return True
+
+
+def _swaps_dep_valid(exec_stmts: list[ec_ast.EcStmt], swaps: list[str]) -> bool:
+    """Whether every ``swap{1} pos delta`` in ``swaps`` moves a statement only
+    across statements independent of it -- i.e. EC will accept the sequence.
+
+    Simulates the moves on a copy of ``exec_stmts``. A coarse-signature bubble
+    sort (:func:`_ec_perm_swaps`) can emit a swap that crosses a data
+    dependency when duplicate signatures make it pick the wrong source; this
+    catches that so the caller can retry with the full-signature sort."""
+    cur = list(exec_stmts)
+    local = _ec_local_vars(exec_stmts)
+    for sw in swaps:
+        m = re.match(r"swap\{1\}\s+(\d+)\s+(-?\d+)", sw)
+        if m is None:
+            return False
+        pos = int(m.group(1)) - 1
+        delta = int(m.group(2))
+        new = pos + delta
+        if not (0 <= pos < len(cur) and 0 <= new < len(cur)):
+            return False
+        moved = cur[pos]
+        crossed = cur[new:pos] if delta < 0 else cur[pos + 1 : new + 1]
+        if any(not _ec_indep(moved, c, local) for c in crossed):
+            return False
+        cur.insert(new, cur.pop(pos))
+    return True
+
+
 def _stmt_tokens(stmt: ec_ast.EcStmt) -> list[str]:
     """Identifier/number tokens in a statement's data content (sans callee)."""
     return re.findall(r"[A-Za-z_][A-Za-z0-9_]*|\d+", _stmt_text(stmt))
@@ -2700,7 +2782,26 @@ def _rendered_state_swaps(  # pylint: disable=too-many-arguments,too-many-positi
     )
     if not left_mod.procs or not right_mod.procs:
         return None
-    return _ec_perm_swaps(left_mod.procs[0].body, right_mod.procs[0].body)
+    left_body = left_mod.procs[0].body
+    right_body = right_mod.procs[0].body
+    left_exec = _exec_stmts(left_body)
+    # The coarse-signature bubble sort matches statements by kind/callee only,
+    # so duplicate signatures (two ``x <- __determ_1__`` assigns, repeated
+    # same-callee calls) can make it pick a source whose single move crosses a
+    # data dependency -- a ``swap`` EC rejects. Keep it when it is dependency-
+    # valid (the common case, and byte-identical for the clean set); otherwise
+    # retry with the full-signature sort, which identifies each statement
+    # uniquely and (both bodies being topological orderings of one DAG) emits
+    # only EC-acceptable swaps.
+    coarse = _ec_perm_swaps(left_body, right_body)
+    if coarse is not None and _swaps_dep_valid(left_exec, coarse):
+        return coarse
+    full = _ec_full_perm_swaps(left_body, right_body)
+    if full is not None:
+        stripped = [s.rstrip(".") for s in full]
+        if _swaps_dep_valid(left_exec, stripped):
+            return stripped
+    return coarse
 
 
 def _leg_sem_calls(body: list[ec_ast.EcStmt], module_name: str) -> str:

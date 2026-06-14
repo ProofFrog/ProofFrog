@@ -2,9 +2,11 @@
 
 Supported: VariableDeclaration, Sample, ReturnStatement (including
 return-value lifting for module calls), and Assignment whose RHS is a
-FuncCall on a module parameter (e.g. ``E.method(...)``). All ``var``
-decls for locally-declared variables are hoisted to the top of the
-enclosing proc (handled by translate_block).
+FuncCall on a module parameter (e.g. ``E.method(...)``). Nested module
+calls in argument position (``f(g(x))``) are flattened into preceding
+``<@`` statements, since EC has no nested proc calls. All ``var`` decls
+for locally-declared variables are hoisted to the top of the enclosing
+proc (handled by translate_block).
 """
 
 from __future__ import annotations
@@ -79,7 +81,6 @@ class StatementTranslator:
             if _is_module_call(stmt.expression):
                 call = stmt.expression
                 assert isinstance(call, frog_ast.FuncCall)
-                fresh = _fresh_name(decls, stmts)
                 # The lifted call's result is returned directly, so its
                 # type is the proc's declared return type. Prefer that
                 # (always concretely translatable) over the oracle
@@ -89,9 +90,10 @@ class StatementTranslator:
                     ec_type = return_type
                 else:
                     ec_type = self._types.translate_type(self._exprs.type_of(call))
+                args = self._render_call_args(call, decls, stmts)
+                fresh = _fresh_name(decls, stmts)
                 decls.append(ec_ast.VarDecl(fresh, ec_type))
                 callee = self._render_module_call_target(call.func)
-                args = ", ".join(self._exprs.translate(a) for a in call.args)
                 stmts.append(ec_ast.Call(fresh, callee, args))
                 stmts.append(ec_ast.Return(fresh))
                 return
@@ -140,19 +142,66 @@ class StatementTranslator:
             call = stmt.value
             assert isinstance(call, frog_ast.FuncCall)
             callee = self._render_module_call_target(call.func)
-            args = ", ".join(self._exprs.translate(a) for a in call.args)
+            args = self._render_call_args(call, decls, stmts)
             stmts.append(ec_ast.Call(var.name, callee, args))
             return
         rhs = self._exprs.translate(stmt.value)
         stmts.append(ec_ast.Assign(var.name, rhs))
 
     def _render_module_call_target(self, func: frog_ast.Expression) -> str:
-        """Render ``E.KeyGen`` as ``E.keygen``; apply module-var aliases."""
+        """Render ``E.KeyGen`` as ``E.keygen``; apply module-var aliases.
+
+        A scheme self-call (``this.DeriveKeyPair`` in FrogLang) renders as
+        the bare sibling proc name ``derivekeypair``: EC has no ``this``,
+        and within a module a sibling procedure is called by name (it must
+        be defined earlier in the module, which scheme-method emission
+        order guarantees)."""
         assert isinstance(func, frog_ast.FieldAccess)
         obj = func.the_object
         assert isinstance(obj, frog_ast.Variable)
+        if obj.name == "this":
+            return func.name.lower()
         obj_name = self._module_var_aliases.get(obj.name, obj.name)
         return f"{obj_name}.{func.name.lower()}"
+
+    def _render_call_args(
+        self,
+        call: frog_ast.FuncCall,
+        decls: list[ec_ast.VarDecl],
+        stmts: list[ec_ast.EcStmt],
+    ) -> str:
+        """Render a module call's arguments as a comma-separated string,
+        lifting any nested module call into a preceding ``<@`` statement.
+
+        EC has no nested procedure calls: ``f(g(x))`` with ``f``, ``g``
+        both proc calls must become ``r <@ g(x); ... <@ f(r)``. FrogLang
+        oracle bodies can nest them (e.g. NGCorrectness's
+        ``ElementToSharedSecret(Exp(Exp(Generator(), a), b))``). The
+        engine's canonicalization already flattens these in the chain
+        flat-states, but the raw oracle/reduction module is emitted from
+        the un-canonicalized AST, so we flatten here to match.
+        """
+        return ", ".join(self._lift_expr(a, decls, stmts) for a in call.args)
+
+    def _lift_expr(
+        self,
+        expr: frog_ast.Expression,
+        decls: list[ec_ast.VarDecl],
+        stmts: list[ec_ast.EcStmt],
+    ) -> str:
+        """Render ``expr`` as an EC expression string. If it is itself a
+        module call, lift it (and any calls it nests) into preceding
+        ``<@`` statements and return the fresh result variable."""
+        if _is_module_call(expr):
+            assert isinstance(expr, frog_ast.FuncCall)
+            args = self._render_call_args(expr, decls, stmts)
+            ec_type = self._types.translate_type(self._exprs.type_of(expr))
+            fresh = _fresh_name(decls, stmts)
+            decls.append(ec_ast.VarDecl(fresh, ec_type))
+            callee = self._render_module_call_target(expr.func)
+            stmts.append(ec_ast.Call(fresh, callee, args))
+            return fresh
+        return self._exprs.translate(expr)
 
 
 def _fresh_name(decls: list[ec_ast.VarDecl], stmts: list[ec_ast.EcStmt]) -> str:

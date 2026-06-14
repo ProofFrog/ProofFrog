@@ -145,6 +145,22 @@ Key modules:
   non-contiguous shape so clean `KEMPRF_Correctness` (contiguous-tail dedup via
   `_synth_dedup_det`, plus its tuple-walk) stays byte-identical. Validated on
   `CK`/`UK_expanded_Correctness` (19 -> 9 admits, `ec_compile` OK).
+  **Plumbing-rewrite extension** (`Collapse Single-Index Tuple Access`,
+  `Expand Tuples` — a deterministic tuple-projection/construction rewrite that
+  keeps the *whole* abstract-call sequence identical, e.g. `t <@ KeyGen(); x =
+  t[0]` <-> `r <@ KeyGen(); t = r[0]; x = t`): there is **no call reorder at
+  all** (`bc == ac`), so the swap routes have nothing to do and the
+  single-module tuple-walk / stateless route does not apply — in a
+  multi-declared-module body these fall through to `admit`. The gate also fires
+  when `allow_plumbing and bc == ac` and the bodies differ; after
+  functionalization both twins hold the same probabilistic calls in the same
+  order, so the **identical-order `(wp; call)*` middle leg** discharges the
+  plumbing difference (`wp` absorbs the extra projection assignments,
+  `skip => /#` closes the nested concat args). `allow_plumbing` is set only for
+  `_PLUMBING_REWRITE_TRANSFORMS` in a multi-module body (`len(flat_params) > 1`),
+  so single-module clean proofs keep their tuple-walk byte-identical. Validated
+  on `CK`/`UK_expanded_Correctness` (**9 -> 0 admits, `ec_compile` OK — both
+  flip to clean**).
 - **Pure cross-module reorder fallback in the `_REORDER_TRANSFORMS` branch**
   (`_tactic_for`): `_permutation_swaps` runs on the raw `app.game_before/after`
   ASTs, which are normalized differently from the rendered flat-state modules

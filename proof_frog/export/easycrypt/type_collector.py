@@ -127,6 +127,18 @@ class TypeCollector:
         # ``bs_lambda`` and the KEM carrier ``SharedSecretSpace`` as one
         # type (the ``requires K.SharedSecret == BitString<F.lambda>`` gap).
         self._type_alias_defs: dict[str, str] = {}
+        # Abstract carrier set names (e.g. ``PK1Space``) that a scheme
+        # ``requires X subsets/== BitString<n>`` clause makes
+        # bitstring-like, mapped to the ``BitString<n>`` type they unify
+        # with. Operators defined only on bitstrings -- notably ``||``
+        # concatenation -- treat such a carrier-typed operand as that
+        # bitstring (the engine inlines the set->bs coercion in flat
+        # states, so a concat operand can surface carrier-typed). Seeded
+        # by the exporter before chain emission via
+        # :meth:`register_subset_carrier` so the relationship is known when
+        # flat-state bodies render (it precedes the late ``requires``
+        # alias-emission pass).
+        self._subset_carriers: dict[str, frog_ast.BitStringType] = {}
 
     def resolve(
         self, t: frog_ast.Type, _visited: frozenset[str] = frozenset()
@@ -462,6 +474,33 @@ class TypeCollector:
         making the set-let carrier the canonical side.
         """
         self._type_alias_defs[bs_name] = definition
+
+    def register_subset_carrier(
+        self, carrier_name: str, bs_type: frog_ast.BitStringType
+    ) -> None:
+        """Record that abstract carrier set ``carrier_name`` is bitstring-like.
+
+        See :attr:`_subset_carriers`. Called by the exporter for each
+        ``requires X subsets/== BitString<n>`` clause so ``||`` on an
+        ``X``-typed operand renders as concatenation.
+        """
+        self._subset_carriers.setdefault(carrier_name, bs_type)
+
+    def bitstring_carrier_type(self, name: str) -> frog_ast.BitStringType | None:
+        """Return the BitString type an abstract carrier set unifies with,
+        or ``None`` if ``name`` is not such a carrier.
+
+        A scheme ``requires X subsets BitString<n>`` (or ``== BitString<n>``)
+        makes the abstract carrier set ``X`` interchangeable with ``bs_n``.
+        Operators defined only on bitstrings -- notably ``||``
+        concatenation -- must then treat an ``X``-typed operand as a
+        ``bs_n``: the engine inlines the set->bs coercion
+        (``BitString<n> b = x;``) in flat states, so a ``||`` operand can
+        surface carrier-typed. Returns the registered bitstring type so the
+        expression translator can render the concat instead of EC's boolean
+        ``||``.
+        """
+        return self._subset_carriers.get(name)
 
     def bs_length_for(self, bs_name: str) -> str | None:
         """Return the canonical length expression string for a registered

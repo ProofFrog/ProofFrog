@@ -2758,19 +2758,36 @@ def _ec_reorder_swaps(
     return swaps
 
 
+def _mask_idents(text: str) -> str:
+    """Replace every identifier run in ``text`` with ``ID``, keeping all
+    structural punctuation/operators/digits.
+
+    Used to derive a *shape* of an assignment's RHS that is blind to which
+    variables it references (so a consistent ``_rN`` renaming is invisible)
+    but keeps the structure that distinguishes genuinely different
+    assignments -- a tuple literal ``(ID, ID, ID)``, a projection ``ID.`1``
+    vs ``ID.`2``, an operator application, etc."""
+    return re.sub(r"[A-Za-z_][A-Za-z0-9_]*", "ID", text)
+
+
 def _reorder_sig(stmt: ec_ast.EcStmt) -> tuple[str, ...]:
     """Rename-tolerant statement signature for *validating* a reorder: a sample
-    by its distribution, a call by its callee, an assign/return by kind. Unlike
-    :func:`_ec_sig` it distinguishes samples of different distributions (so a
-    mis-ordered ``<$`` of a distinct distribution is caught); unlike
-    :func:`_stmt_full_sig` it ignores bound-variable names and call arguments, so
-    a consistent ``_rN`` renaming does not make a correct alignment look wrong."""
+    by its distribution, a call by its callee, an assign by its rename-masked
+    RHS *shape*, a return by kind. Unlike :func:`_ec_sig` it distinguishes
+    samples of different distributions (so a mis-ordered ``<$`` of a distinct
+    distribution is caught) and assignments of different RHS shape (so a
+    reorder that leaves two distinct assigns -- e.g. ``ct2 <- _tup_2.`2`` and
+    ``_tup_1 <- (..., ..., ...)`` -- mis-ordered is caught, where ``sim`` would
+    otherwise be left open); unlike :func:`_stmt_full_sig` it masks
+    bound-variable names and call arguments, so a consistent ``_rN`` renaming
+    does not make a correct alignment look wrong (both sides mask to the same
+    shape)."""
     if isinstance(stmt, ec_ast.Call):
         return ("call", stmt.callee)
     if isinstance(stmt, ec_ast.Sample):
         return ("sample", stmt.distr)
     if isinstance(stmt, ec_ast.Assign):
-        return ("assign",)
+        return ("assign", _mask_idents(stmt.rhs))
     if isinstance(stmt, ec_ast.Return):
         return ("return",)
     return ("?",)

@@ -97,12 +97,10 @@ class ExpressionTranslator:
         if expr.operator == frog_ast.BinaryOperators.OR:
             # ``||`` is overloaded: logical OR on Bool, concatenation on
             # BitString. Distinguish via the resolved operand types.
-            lhs_type = self._types.resolve(self._type_of(expr.left_expression))
-            rhs_type = self._types.resolve(self._type_of(expr.right_expression))
-            if isinstance(lhs_type, frog_ast.BitStringType) and isinstance(
-                rhs_type, frog_ast.BitStringType
-            ):
-                return self._translate_concat(expr, lhs_type, rhs_type)
+            lhs_bs = self._bitstring_type_of(expr.left_expression)
+            rhs_bs = self._bitstring_type_of(expr.right_expression)
+            if lhs_bs is not None and rhs_bs is not None:
+                return self._translate_concat(expr, lhs_bs, rhs_bs)
             return self._translate_arith(expr)
         if expr.operator == frog_ast.BinaryOperators.SUBTRACT:
             lhs_type = self._types.resolve(self._type_of(expr.left_expression))
@@ -121,6 +119,50 @@ class ExpressionTranslator:
         raise NotImplementedError(
             f"Binary operator translation not implemented: {expr.operator}"
         )
+
+    def _bitstring_type_of(
+        self, expr: frog_ast.Expression
+    ) -> frog_ast.BitStringType | None:
+        """The BitString type of ``expr`` for concatenation, or ``None``.
+
+        A nested ``||`` is computed *structurally* (recurse and sum the
+        operand lengths) -- the engine's recorded type for an inlined
+        concat node can be a single carrier rather than the summed
+        bitstring, so the concat op for the surrounding level would
+        otherwise be built with the wrong operand length. A leaf operand
+        resolves via its type: either (1) a genuine BitString, or (2) an
+        abstract carrier set unified with a bitstring via a ``requires
+        subsets/== BitString<n>`` clause -- the engine inlines the set->bs
+        coercion in flat states, so a ``||`` operand can surface
+        carrier-typed (e.g. a ``PK1Space``-typed ``pk1`` where
+        ``KEM1.PublicKey subsets BitString<pk1len>``).
+        """
+        if (
+            isinstance(expr, frog_ast.BinaryOperation)
+            and expr.operator == frog_ast.BinaryOperators.OR
+        ):
+            lhs = self._bitstring_type_of(expr.left_expression)
+            rhs = self._bitstring_type_of(expr.right_expression)
+            if (
+                lhs is not None
+                and rhs is not None
+                and lhs.parameterization is not None
+                and rhs.parameterization is not None
+            ):
+                return frog_ast.BitStringType(
+                    frog_ast.BinaryOperation(
+                        frog_ast.BinaryOperators.ADD,
+                        lhs.parameterization,
+                        rhs.parameterization,
+                    )
+                )
+            return None
+        resolved = self._types.resolve(self._type_of(expr))
+        if isinstance(resolved, frog_ast.BitStringType):
+            return resolved
+        if isinstance(resolved, (frog_ast.Variable, frog_ast.FieldAccess)):
+            return self._types.bitstring_carrier_type(resolved.name)
+        return None
 
     def _translate_arith(self, expr: frog_ast.BinaryOperation) -> str:
         """Render an integer/Bool binary op verbatim into EC source."""

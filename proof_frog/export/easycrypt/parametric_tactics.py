@@ -1224,6 +1224,66 @@ def split_uniform_samples_tactic(
             before_stmts[common + 1 :],
             s_orig.var.name,
         ):
+            # The slices feed a complex downstream tail (not a return-concat),
+            # so the simple Mid/Aug ``query`` templates don't apply. Route to
+            # the marginal-split synthesizer, which builds ``Mid``/``Aug`` as
+            # surgical copies of the actual flat-state modules (the whole tail
+            # rendered verbatim) and proves the marginal coupling. Falls back
+            # to a structured admit when prerequisites are missing.
+            #
+            # The marginal route's slice round-trip invariant assumes the
+            # standard orientation (the L slice ``[0, |L|)`` maps to the first
+            # new sample ``a``). If the engine mapped the first slice to ``b``
+            # instead (the ``swap_split`` shape), the synthesized invariant
+            # wouldn't line up; bail to an admit rather than emit a tactic that
+            # can't close.
+            first_slice = _find_first_slice_of(
+                before_stmts[common + 1 :], s_orig.var.name
+            )
+            first_var = _find_first_var_use(
+                after_stmts[common + 2 :], {s_a.var.name, s_b.var.name}
+            )
+            swapped_orientation = False
+            if first_slice is not None and first_var is not None:
+                first_is_left = (
+                    isinstance(first_slice.start, frog_ast.Integer)
+                    and first_slice.start.num == 0
+                )
+                if (first_is_left and first_var == s_b.var.name) or (
+                    not first_is_left and first_var == s_a.var.name
+                ):
+                    swapped_orientation = True
+            marginal = (
+                None
+                if swapped_orientation
+                else _marginal_split_helpers(
+                    types=types,
+                    app=app,
+                    len_l=len_l,
+                    len_r=len_r,
+                    len_res=len_res,
+                    name_l=name_l,
+                    name_r=name_r,
+                    name_res=name_res,
+                    orig_var=_ec_ident(s_orig.var.name),
+                    a_var=_ec_ident(s_a.var.name),
+                    b_var=_ec_ident(s_b.var.name),
+                    before_tail=before_stmts[common + 1 :],
+                    helpers=helpers,
+                    name_prefix=name_prefix,
+                    module_param_args=module_param_args,
+                    left_module_ref=left_module_ref,
+                    right_module_ref=right_module_ref,
+                    eq_args_strong=eq_args_strong,
+                    layout=layout,
+                    common=common,
+                    prefix_vars=_split_prefix_vars(before_stmts[:common]),
+                    reversed_dir=reversed_dir,
+                    render_state=_extra_kwargs.get("render_state"),
+                )
+            )
+            if marginal is not None:
+                return marginal
             return _partial_split_admit(
                 "Split Uniform Samples", name_l, name_r, name_res
             )
@@ -1996,6 +2056,304 @@ def _partial_split_helpers(
     # Main tactic body for the micro lemma: transitivity through Aug.
     return [
         f"transitivity {aug_inst}.query {spec} {spec};"
+        f" [ smt() | smt() | apply {l2a} | apply {a2r} ].",
+    ]
+
+
+def _splice_after_match(text: str, pattern: str, inserts: list[str]) -> str | None:
+    """Insert ``inserts`` (formatted with the matched line's indent) right
+    after the first line matching ``pattern``. Returns ``None`` if no line
+    matches. ``pattern`` is a regex anchored at line start; group 1 (if any)
+    is unused -- indent is taken from the matched leading whitespace.
+    """
+    lines = text.splitlines()
+    rx = re.compile(pattern)
+    for i, line in enumerate(lines):
+        if rx.match(line):
+            indent = line[: len(line) - len(line.lstrip())]
+            spliced = [f"{indent}{s}" for s in inserts]
+            lines[i + 1 : i + 1] = spliced
+            return "\n".join(lines)
+    return None
+
+
+def _replace_match(text: str, pattern: str, replacement: list[str]) -> str | None:
+    """Replace the first line matching ``pattern`` with ``replacement`` lines
+    (each formatted with the matched line's indent). Returns ``None`` if no
+    line matches.
+    """
+    lines = text.splitlines()
+    rx = re.compile(pattern)
+    for i, line in enumerate(lines):
+        if rx.match(line):
+            indent = line[: len(line) - len(line.lstrip())]
+            lines[i : i + 1] = [f"{indent}{s}" for s in replacement]
+            return "\n".join(lines)
+    return None
+
+
+# pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-statements,too-many-branches
+def _marginal_split_helpers(
+    *,
+    types: TypeCollector,
+    app: TransformApplication,
+    len_l: str,
+    len_r: str,
+    len_res: str,
+    name_l: str,
+    name_r: str,
+    name_res: str,
+    orig_var: str,
+    a_var: str,
+    b_var: str,
+    before_tail: list[frog_ast.Statement],
+    helpers: list[str] | None,
+    name_prefix: str,
+    module_param_args: str,
+    left_module_ref: str,
+    right_module_ref: str,
+    eq_args_strong: str,
+    layout: str,
+    common: int,
+    prefix_vars: list[str] | None,
+    reversed_dir: bool,
+    render_state: object,
+) -> list[str] | None:
+    """Synthesize a partial ``Split Uniform Samples`` whose slices feed a
+    complex downstream tail (not a return-concat) -- the PRG-stretch shape in
+    the ``*_seedbased`` proofs (``|L| + |R| < |RES|``).
+
+    Strategy (the marginal-distribution coupling; validated in
+    ``.ec-tmp/marginal_split.ec``). Build two intermediate modules that are
+    surgical copies of the actual flat states (the *whole tail* rendered
+    verbatim by ``render_state``):
+
+    * ``Mid`` = the whole-sample state with ``orig <$ d<RES>`` expanded to
+      three independent samples ``a <$ d<L>; b <$ d<R>; _gap <$ d<GAP>`` plus
+      ``orig <- concat3 a b _gap``. The tail (using ``slice <orig>``) is
+      unchanged.
+    * ``Aug`` = the two-sample state with a dead ``_gap <$ d<GAP>`` added.
+
+    and chain ``whole ~ Mid ~ Aug ~ two-sample``:
+
+    * ``left_to_mid``  : ``rndsem*{2}`` + ``rnd`` identity bijection +
+      ``d<RES>_split3`` (couple the one big sample to the 3-sample form),
+      then ``sim`` the identical tail.
+    * ``mid_to_aug``   : ``seq`` establishing the slice round-trips
+      ``slice_L <orig>{1} = a{2}`` / ``slice_R <orig>{1} = b{2}`` (via the
+      ``slice_concat3`` axioms), then peel the tail call-by-call -- the two
+      slice-consuming head calls get equal args from the invariant.
+    * ``aug_to_right`` : drop the dead ``_gap`` via ``rnd{1}`` + ``d<GAP>_ll``,
+      then ``sim``.
+
+    Returns the main micro tactic (``[symmetry.] transitivity Aug; ...``) and
+    appends the helper modules + sub-lemmas to ``helpers``. Returns ``None``
+    (caller falls back to a structured admit) when a prerequisite is missing
+    or the layout/orientation isn't supported.
+    """
+    if (
+        helpers is None
+        or not name_prefix
+        or not eq_args_strong
+        or not left_module_ref
+        or not right_module_ref
+        or render_state is None
+        or not callable(render_state)
+        or layout != "tail-gap"  # mid-gap marginal not yet supported
+    ):
+        return None
+    if common > 0 and prefix_vars is None:
+        return None  # prefix isn't a clean one-to-one-renderable peel
+    if not app.game_before.methods or not app.game_after.methods:
+        return None
+    gap_len = _subtract_canonical(len_res, _add_canonical(len_l, len_r))
+    if gap_len is None:
+        return None
+    name_gap = types.register_bs_by_length_str(gap_len)
+    # Register the concat3 triple in the source-layout (tail-gap) order so the
+    # round-trip / distribution-split axioms get emitted by TypeCollector.emit.
+    types.register_concat3(name_l, name_r, name_gap, name_res)
+    # The EC renderer emits the proc name lower-cased (see
+    # ``ModuleTranslator`` ``sig.name.lower()``); match it so the lemmas
+    # reference ``.compute`` not ``.Compute``.
+    method_name = app.game_before.methods[0].signature.name.lower()
+    concat3_op = f"concat3_{name_l}_{name_r}_{name_gap}_to_{name_res}"
+    split3_axiom = f"d{name_res}_split3_{name_l}_{name_r}_{name_gap}"
+    axiom_prefix = f"{name_l}_{name_r}_{name_gap}_{name_res}"
+    p1_axiom = f"slice_concat3_p1_{axiom_prefix}"
+    p2_axiom = f"slice_concat3_p2_{axiom_prefix}"
+    slice_l = f"slice_{name_res}_to_{name_l}"
+    slice_r = f"slice_{name_res}_to_{name_r}"
+    distr_gap = f"d{name_gap}"
+    len_l_p = _bs_length_arg(len_l)
+    canonical_sum = _add_canonical(len_l, len_r)
+    len_lr = _bs_length_arg(canonical_sum) if canonical_sum else f"({len_l} + {len_r})"
+
+    # --- build Mid and Aug as surgical copies of the rendered flat states ---
+    mid_mod = f"Mid_{name_prefix}"
+    aug_mod = f"Aug_{name_prefix}"
+    mid_text = render_state(mid_mod, app.game_before)  # type: ignore[operator]
+    aug_text = render_state(aug_mod, app.game_after)  # type: ignore[operator]
+    # Mid: declare a/b/gap, and replace the whole sample with 3 samples + concat3.
+    mid_text = _splice_after_match(
+        mid_text,
+        rf"^\s*var {re.escape(orig_var)} :",
+        [
+            f"var {a_var} : {name_l};",
+            f"var {b_var} : {name_r};",
+            f"var _gap : {name_gap};",
+        ],
+    )
+    if mid_text is not None:
+        mid_text = _replace_match(
+            mid_text,
+            rf"^\s*{re.escape(orig_var)} <\$ ",
+            [
+                f"{a_var} <$ d{name_l};",
+                f"{b_var} <$ d{name_r};",
+                f"_gap <$ {distr_gap};",
+                f"{orig_var} <- {concat3_op} {a_var} {b_var} _gap;",
+            ],
+        )
+    # Aug: declare gap and add a dead gap sample after the two marginal samples.
+    aug_text2 = _splice_after_match(
+        aug_text,
+        rf"^\s*var {re.escape(b_var)} :",
+        [f"var _gap : {name_gap};"],
+    )
+    if aug_text2 is not None:
+        aug_text2 = _splice_after_match(
+            aug_text2,
+            rf"^\s*{re.escape(b_var)} <\$ ",
+            [f"_gap <$ {distr_gap};"],
+        )
+    if mid_text is None or aug_text2 is None:
+        return None
+    aug_text = aug_text2
+    helpers.append(mid_text)
+    helpers.append(aug_text)
+
+    # --- the four sub-lemmas + the main micro body ---
+    eq_post_strong = eq_args_strong.replace("={", "={res, ", 1)
+    inv = eq_args_strong
+    if prefix_vars:
+        inv = f"{eq_args_strong} /\\ ={{{', '.join(prefix_vars)}}}"
+    whole_ref = right_module_ref if reversed_dir else left_module_ref
+    two_ref = left_module_ref if reversed_dir else right_module_ref
+    mid_inst = f"{mid_mod}{module_param_args}"
+    aug_inst = f"{aug_mod}{module_param_args}"
+    l2m = f"left_to_mid_{name_prefix}"
+    m2a = f"mid_to_aug_{name_prefix}"
+    a2r = f"aug_to_right_{name_prefix}"
+    l2a = f"left_to_aug_{name_prefix}"
+    spec = f"({eq_args_strong} ==> {eq_post_strong})"
+
+    def _prefix_peel() -> list[str]:
+        if common <= 0:
+            return []
+        return [f"  seq {common} {common} : ({inv}); first sim."]
+
+    # mid_to_aug tail peel: the entire downstream tail (the two slice-consuming
+    # head calls then the byte-identical remainder). Mirror the forward split's
+    # tail-peel shape so an interleaved assignment / sample doesn't strand a
+    # bare ``call`` on a non-call instruction.
+    tail_calls = sum(
+        _count_module_calls(e) for s in before_tail if (e := _expr_of(s)) is not None
+    )
+    tail_has_assigns = any(
+        isinstance(s, frog_ast.Assignment) and _count_module_calls(s.value) == 0
+        for s in before_tail
+    )
+    tail_samples = sum(isinstance(s, frog_ast.Sample) for s in before_tail)
+    if tail_has_assigns or tail_samples > 0:
+        steps = max(tail_calls + tail_samples, 1)
+        tail_peel = [
+            line
+            for _ in range(steps)
+            for line in ("  wp.", "  (call (_: true) || rnd).")
+        ] + ["  auto => /> *."]
+    else:
+        tail_peel = ["  call (_: true)." for _ in range(max(tail_calls, 1))] + [
+            "  auto => /> *."
+        ]
+
+    # left_to_mid: whole-sample state ~ Mid.
+    helpers.append(
+        "\n".join(
+            [
+                f"  lemma {l2m} :",
+                f"    equiv [ {whole_ref}.{method_name} ~ {mid_inst}.{method_name} :",
+                f"            {eq_args_strong} ==> {eq_post_strong} ].",
+                "  proof.",
+                "  proc.",
+                *_prefix_peel(),
+                f"  seq 1 4 : ({inv} /\\ {orig_var}{{1}} = {orig_var}{{2}});"
+                " last by sim.",
+                "  rndsem*{2} 0.",
+                f"  conseq (: {inv} ==> {inv} /\\ {orig_var}{{1}} = {orig_var}{{2}})"
+                " => //.",
+                f"  rnd (fun (z : {name_res}) => z) (fun (z : {name_res}) => z);"
+                " skip => />.",
+                f"  rewrite -{split3_axiom} /=; smt({split3_axiom}).",
+                "  qed.",
+            ]
+        )
+    )
+    # mid_to_aug: Mid ~ Aug (slice round-trip rewrite + tail peel).
+    helpers.append(
+        "\n".join(
+            [
+                f"  lemma {m2a} :",
+                f"    equiv [ {mid_inst}.{method_name} ~ {aug_inst}.{method_name} :",
+                f"            {eq_args_strong} ==> {eq_post_strong} ].",
+                "  proof.",
+                "  proc.",
+                *_prefix_peel(),
+                f"  seq 4 3 : ({inv} /\\ {a_var}{{1}} = {a_var}{{2}}"
+                f" /\\ {b_var}{{1}} = {b_var}{{2}} /\\ _gap{{1}} = _gap{{2}}"
+                f" /\\ {slice_l} {orig_var}{{1}} 0 {len_l_p} = {a_var}{{2}}"
+                f" /\\ {slice_r} {orig_var}{{1}} {len_l_p} {len_lr} = {b_var}{{2}}).",
+                f"  - by auto; smt({p1_axiom} {p2_axiom}).",
+                *tail_peel,
+                "  qed.",
+            ]
+        )
+    )
+    # aug_to_right: Aug ~ two-sample state (drop the dead gap, then sim).
+    helpers.append(
+        "\n".join(
+            [
+                f"  lemma {a2r} :",
+                f"    equiv [ {aug_inst}.{method_name} ~ {two_ref}.{method_name} :",
+                f"            {eq_args_strong} ==> {eq_post_strong} ].",
+                "  proof.",
+                "  proc.",
+                *_prefix_peel(),
+                f"  seq 3 2 : ({inv} /\\ {a_var}{{1}} = {a_var}{{2}}"
+                f" /\\ {b_var}{{1}} = {b_var}{{2}}).",
+                f"  - by rnd{{1}}; auto; smt({distr_gap}_ll).",
+                "  sim.",
+                "  qed.",
+            ]
+        )
+    )
+    # left_to_aug: chain whole ~ Aug via Mid.
+    helpers.append(
+        "\n".join(
+            [
+                f"  lemma {l2a} :",
+                f"    equiv [ {whole_ref}.{method_name} ~ {aug_inst}.{method_name} :",
+                f"            {eq_args_strong} ==> {eq_post_strong} ].",
+                "  proof.",
+                f"  transitivity {mid_inst}.{method_name} {spec} {spec};"
+                f" [ smt() | smt() | apply {l2m} | apply {m2a} ].",
+                "  qed.",
+            ]
+        )
+    )
+    prelude = ["symmetry."] if reversed_dir else []
+    return prelude + [
+        f"transitivity {aug_inst}.{method_name} {spec} {spec};"
         f" [ smt() | smt() | apply {l2a} | apply {a2r} ].",
     ]
 

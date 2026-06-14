@@ -186,6 +186,32 @@ Key modules:
   call subsequence preserved → purely cross-module → EC-`swap`-safe; same-module
   reorders take the det route above). Closes the `L.get`-past-`KeyGen`
   `Topological Sorting` micros.
+- **Marginal partial-split `Split Uniform Samples` synthesizer**
+  (`parametric_tactics._marginal_split_helpers`, reached from the
+  `_has_module_call_tail` branch of `split_uniform_samples_tactic`): the
+  PRG-stretch shape where one big sample `orig <$ d_RES` is consumed *only* via two
+  non-overlapping slices that feed a **complex downstream tail** (module calls +
+  assignments, not a return-concat), and `|L| + |R| < |RES|` (tail-gap). The simple
+  `_partial_split_helpers` Mid/Aug `query` templates can't capture the long tail.
+  Instead this route builds `Mid`/`Aug` as **surgical copies of the actual
+  flat-state modules** — the whole tail rendered verbatim by a `render_state`
+  callback `chain_emitter` passes in (a closure over `_render_flat_state`), with
+  only the sampling prefix patched: `Mid` = whole-side state with `orig <$ d_RES`
+  replaced by `a <$ d_L; b <$ d_R; _gap <$ d_GAP; orig <- concat3 a b _gap`;
+  `Aug` = two-sample state with a dead `_gap <$ d_GAP`. It chains
+  `whole ~ Mid ~ Aug ~ two-sample`: `left_to_mid` = `rndsem*{2}` + `rnd`-identity
+  bijection + `d_RES_split3` (couple the one big sample to the 3-sample form), then
+  `sim` the identical tail; `mid_to_aug` = `seq` establishing the `slice_concat3`
+  round-trips `slice_L orig{1} = a{2}` / `slice_R orig{1} = b{2}`, then peel the
+  whole tail call-by-call (`(wp; (call (_:true) || rnd))*` — `sim` can't use a
+  relational fact to equate the two slice-consuming head calls' args, but the
+  generic peel discharges them from the invariant); `aug_to_right` = drop the dead
+  gap via `rnd{1}` + `d_GAP_ll`, then `sim`. `reversed_dir` prepends `symmetry.`.
+  Common deterministic prefix (e.g. `L.get()`) is peeled with `seq c c; first sim`.
+  Only fires where the old code admitted, so clean proofs stay byte-identical;
+  mid-gap and reversed orientation (`swap_split`) fall back to admit. Validated:
+  `CK_seedbased` / `UK_seedbased` (EC OK, 0 admits → clean). Standalone skeleton
+  is the regression tripwire `tests/integration/ec_templates/marginal_split.ec`.
 - `proof_translator.py`, `module_translator.py`, `expr_translator.py`,
   `stmt_translator.py`, `type_collector.py`, `scheme_instances.py`,
   `ec_ast.py` — FrogLang→EC translation primitives.
@@ -260,6 +286,18 @@ rung-4 *cached-unguided* — is in
 counts for the whole `examples/` corpus. Use `--strict` to exit nonzero
 on missing entries. Run this after any change that affects which
 tactics fire or the canonical-text basis.
+
+## Iterating on a tactic — use the EC MCP interactively (not edit + full compile)
+
+When working out or debugging an EasyCrypt tactic, drive the proof **interactively**
+with the `easycrypt-mcp` tools: `cli_open` the `.ec`, `cli_step` one tactic at a
+time, inspect with `ec_print_goals`/`cli_print`, `cli_undo` to back up. Do **not**
+default to the edit-file-then-`ec_compile`-the-whole-thing loop — the real exported
+proofs are ~50k lines and take minutes to recheck, while stepping shows the live
+goal in seconds. Reserve `ec_compile` for a final whole-file confirmation or a small
+self-contained prototype. (The tools are deferred — `ToolSearch
+"select:mcp__easycrypt-mcp__cli_open,mcp__easycrypt-mcp__cli_step,..."` to load
+their schemas. See `docs/for_agents/MCP_GUIDE.md` for the full list.)
 
 ## When changing the exporter, also
 

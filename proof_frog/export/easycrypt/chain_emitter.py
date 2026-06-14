@@ -512,6 +512,21 @@ def emit_chain_for_hop(
         # "fell back to static".
         synth = PARAMETRIC_TACTIC.get(app.transform_name)
         if synth is not None:
+
+            def _render_state(mod_name: str, game: frog_ast.Game) -> str:
+                # Render an auxiliary flat-state module (e.g. the partial-split
+                # ``Mid``/``Aug`` intermediates) with the same functor signature
+                # and body translation as the surrounding chain's state modules,
+                # so a synthesizer can build a helper module from a state AST.
+                return _render_flat_state(
+                    modules,
+                    mod_name,
+                    game,
+                    external_module_types,
+                    method_return_types,
+                    flat_params,
+                )
+
             synthesized = synth(
                 app,
                 types,
@@ -526,6 +541,7 @@ def emit_chain_for_hop(
                 external_module_types=external_module_types,
                 method_return_types=method_return_types,
                 reversed_dir=reversed_dir,
+                render_state=_render_state,
             )
             if synthesized is not None:
                 # The ``Inline Single-Use Variables`` synthesizer emits a

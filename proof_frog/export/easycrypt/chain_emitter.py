@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import copy
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -3337,6 +3338,74 @@ def _prob_callees(
     return out
 
 
+def _callee_is_det(callee: str, det_pred: Callable[[str, str], bool]) -> bool:
+    """True if ``callee`` (a ``Module.method`` string) is a deterministic call."""
+    parts = _callee_parts(callee)
+    return parts is not None and det_pred(parts[0], parts[1])
+
+
+def _is_contiguous_dedup(
+    before_body: list[ec_ast.EcStmt], after_body: list[ec_ast.EcStmt]
+) -> bool:
+    """True if the diff is the *contiguous-tail* dedup shape ``_synth_dedup_det``
+    closes (``N>=2`` identical trailing calls collapsing to one). Orientation-
+    independent: the longer body is the duplicating side. Mirrors the shape test
+    in :func:`_synth_dedup_det` so the functional-twin route can decline it and
+    leave that path (clean ``KEMPRF_Correctness``) byte-identical.
+    """
+    ea = _exec_stmts(before_body)
+    eb = _exec_stmts(after_body)
+    dup, single = (ea, eb) if len(ea) >= len(eb) else (eb, ea)
+    prefix = 0
+    while (
+        prefix < len(dup)
+        and prefix < len(single)
+        and _stmt_full_sig(dup[prefix]) == _stmt_full_sig(single[prefix])
+    ):
+        prefix += 1
+    dup_tail = [s for s in dup[prefix:] if not isinstance(s, ec_ast.Return)]
+    single_tail = [s for s in single[prefix:] if not isinstance(s, ec_ast.Return)]
+    if len(single_tail) != 1 or not isinstance(single_tail[0], ec_ast.Call):
+        return False
+    dup_calls = [s for s in dup_tail if isinstance(s, ec_ast.Call)]
+    if not dup_tail or len(dup_calls) != len(dup_tail):
+        return False
+    canon = single_tail[0]
+    return all((s.callee, s.args) == (canon.callee, canon.args) for s in dup_calls)
+
+
+def _is_dedup_rewire(
+    before_body: list[ec_ast.EcStmt],
+    after_body: list[ec_ast.EcStmt],
+    det_pred: Callable[[str, str], bool],
+) -> bool:
+    """True if before/after differ as a *non-contiguous* deduplication of
+    deterministic calls (the rewire shape).
+
+    The probabilistic calls must be untouched (same ordered sequence -- a dedup
+    only removes a deterministic call), and the deterministic-call multisets must
+    differ by genuine duplicates (the smaller is a sub-multiset of the larger and
+    every removed callee still survives in the smaller). The *contiguous*-tail
+    dedup (the ``_synth_dedup_det`` shape) is excluded so that path stays
+    byte-identical.
+    """
+    bc = _ec_call_callees(before_body)
+    ac = _ec_call_callees(after_body)
+    if sorted(bc) == sorted(ac):
+        return False
+    if _prob_callees(before_body, det_pred) != _prob_callees(after_body, det_pred):
+        return False
+    det_b = Counter(c for c in bc if _callee_is_det(c, det_pred))
+    det_a = Counter(c for c in ac if _callee_is_det(c, det_pred))
+    larger, smaller = (
+        (det_b, det_a) if det_b.total() >= det_a.total() else (det_a, det_b)
+    )
+    extra = larger - smaller
+    if not extra or any(c not in smaller for c in extra):
+        return False
+    return not _is_contiguous_dedup(before_body, after_body)
+
+
 def _needs_det_functional_reorder(
     before_body: list[ec_ast.EcStmt],
     after_body: list[ec_ast.EcStmt],
@@ -3366,8 +3435,23 @@ def _needs_det_functional_reorder(
     """
     bc = _ec_call_callees(before_body)
     ac = _ec_call_callees(after_body)
-    if not bc or sorted(bc) != sorted(ac):
+    if not bc:
         return False
+    if sorted(bc) != sorted(ac):
+        # Unequal call multisets are not a plain reorder. The one exception the
+        # functional-twin route handles is a *deterministic-call deduplication*
+        # whose surviving call is non-contiguously rewired (a duplicate ``L.get``
+        # removed, its use rewired to an earlier ``L.get`` that the transform also
+        # hoists). After functionalization every det call becomes an ``ev_<m>``
+        # assignment, so both twins hold the *same* abstract (probabilistic) calls
+        # and the ``(wp; call)*`` middle leg closes them; the redundant ``ev_*``
+        # assignment on the dup side is absorbed by ``wp``. Restricted to non-tuple
+        # transforms (tuple micros keep their tuple-walk) and to the rewire shape
+        # (the contiguous-tail dedup stays on ``_synth_dedup_det`` -- byte-identical
+        # for clean ``KEMPRF_Correctness``).
+        return allow_cross_module and _is_dedup_rewire(
+            before_body, after_body, det_pred
+        )
     # The probabilistic calls must be the same multiset, and *each module's*
     # probabilistic-call subsequence must be preserved. The ``F_left ~ F_right``
     # leg aligns the functionalized twins by ``swap``; a probabilistic reorder is

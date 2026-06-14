@@ -218,6 +218,47 @@ def test_gate_declines_cross_module_data_invalid_for_tuple_transform() -> None:
     assert not _needs_det_functional_reorder(left, right, _det_pred, False)
 
 
+def _plumbing_rewrite_pair() -> tuple[list[ec_ast.EcStmt], list[ec_ast.EcStmt]]:
+    """The ``Collapse Single-Index Tuple Access`` shape: the abstract-call
+    sequence is *identical* on both sides (one ``M.keygen``), and only the
+    deterministic tuple-projection plumbing differs (``t <@ keygen(); x = t[0]``
+    vs ``r <@ keygen(); t = r[0]; x = t``).
+    """
+    left = [
+        ec_ast.Call("t", "M.keygen", ""),
+        ec_ast.Assign("x", "t[0]"),
+        ec_ast.Return("x"),
+    ]
+    right = [
+        ec_ast.Call("r", "M.keygen", ""),
+        ec_ast.Assign("t", "r[0]"),
+        ec_ast.Assign("x", "t"),
+        ec_ast.Return("x"),
+    ]
+    return left, right
+
+
+def test_gate_fires_on_plumbing_rewrite_when_allowed() -> None:
+    # Identical call sequence, differing deterministic plumbing -> the functional-
+    # twin route's identical-order middle leg closes it (allow_plumbing=True).
+    left, right = _plumbing_rewrite_pair()
+    assert _needs_det_functional_reorder(left, right, _det_pred, True, True)
+
+
+def test_gate_declines_plumbing_rewrite_when_not_allowed() -> None:
+    # Without allow_plumbing the gate is unchanged: an identical call sequence is
+    # not a reorder, so it declines (the default-arg call sites stay byte-identical).
+    left, right = _plumbing_rewrite_pair()
+    assert not _needs_det_functional_reorder(left, right, _det_pred, True)
+
+
+def test_gate_declines_plumbing_identity() -> None:
+    # A byte-identical body is a true EC no-op: no twin needed (plain ``sim``),
+    # so the plumbing branch must not fire even when allowed.
+    left, _ = _plumbing_rewrite_pair()
+    assert not _needs_det_functional_reorder(left, list(left), _det_pred, True, True)
+
+
 def _mixed_reorder_pair() -> tuple[list[ec_ast.EcStmt], list[ec_ast.EcStmt]]:
     """The ``Topological Sorting`` shape: a *cross-module* probabilistic reorder
     (``M.keygen`` <-> ``N.keygen``) bundled with a *same-module* deterministic

@@ -1092,6 +1092,11 @@ def split_uniform_samples_tactic(
     """
     if types is None:
         return None
+    # The right-side ``_rev`` micros relate ``after ~ before`` (the whole-sample
+    # side is EC side 2), but the shape match below reads ``app.game_before`` as
+    # the whole side. Flip the goal with ``symmetry`` so the forward tactic --
+    # which assumes the whole sample is on side 1 -- applies unchanged.
+    reversed_dir = bool(_extra_kwargs.get("reversed_dir", False))
     if len(app.game_before.methods) != 1 or len(app.game_after.methods) != 1:
         return None
     # Drop ``VariableDeclaration`` stmts — they are translator hoists and
@@ -1247,6 +1252,13 @@ def split_uniform_samples_tactic(
         if partial is not None:
             return partial
         return _partial_split_admit("Split Uniform Samples", name_l, name_r, name_res)
+    # The split sample may be preceded by a common prefix of deterministic
+    # statements / unrelated samples (the engine doesn't always hoist the split
+    # sample to the top). Peel that prefix before the ``seq 1 2`` split; bail to
+    # a structured admit if it isn't a clean one-to-one-renderable prefix.
+    prefix_vars = _split_prefix_vars(before_stmts[:common])
+    if common > 0 and prefix_vars is None:
+        return _partial_split_admit("Split Uniform Samples", name_l, name_r, name_res)
     # Register the concat triple so the round-trip + distribution-split
     # axioms get emitted in TypeCollector.emit(). For Split the (l, r,
     # res) concat doesn't appear in the actual game bodies (only slices
@@ -1286,6 +1298,15 @@ def split_uniform_samples_tactic(
     tail_calls = sum(
         _count_module_calls(e) for s in before_tail if (e := _expr_of(s)) is not None
     )
+    # Deterministic assignments interleaved in the tail (tuple projections like
+    # ``ek_PQ <- _tup.`1``) make a ``call (_: true)`` run aground on a non-call
+    # last instruction; an interleaved ``<$`` sample needs ``rnd``. Detect both
+    # so the tail peels with ``wp`` + ``(call || rnd)`` rather than bare calls.
+    tail_has_assigns = any(
+        isinstance(s, frog_ast.Assignment) and _count_module_calls(s.value) == 0
+        for s in before_tail
+    )
+    tail_samples = sum(isinstance(s, frog_ast.Sample) for s in before_tail)
     return _split_tactic_body(
         orig_var=_ec_ident(s_orig.var.name),
         a_var=_ec_ident(s_a.var.name),
@@ -1299,6 +1320,11 @@ def split_uniform_samples_tactic(
         swap_split=swap_split,
         eq_args_strong=eq_args_strong,
         tail_calls=tail_calls,
+        prefix_count=common,
+        prefix_vars=prefix_vars,
+        tail_has_assigns=tail_has_assigns,
+        tail_samples=tail_samples,
+        reversed_dir=reversed_dir,
     )
 
 
@@ -2427,6 +2453,46 @@ def _merge_tactic_body(  # pylint: disable=too-many-arguments,too-many-positiona
 
 
 # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+def _split_prefix_vars(
+    prefix_stmts: list[frog_ast.Statement],
+) -> list[str] | None:
+    """EC variable names assigned by a common prefix that renders one-to-one to
+    EC (so a ``seq c c`` prefix peel lines up), or ``None`` if any statement is
+    not such a simple Sample/Assignment.
+
+    The split synthesizer assumes the split sample is the proc's first
+    executable statement. When deterministic statements / module calls precede
+    it (e.g. ``seed_E <$ d; g <@ NG.generator(); l <@ L.get()`` before the
+    ``challenger_Query_r0 <$ d_RES`` sample), they must be peeled off first.
+    Each peeled statement must render to exactly one EC statement, so a nested
+    module call (which the EC hoister lifts into extra statements, breaking the
+    count) disqualifies the prefix. Names are taken verbatim (the EC renderer
+    emits ``Variable`` names unchanged -- see ``ExpressionTranslator.translate``).
+    """
+    names: list[str] = []
+    for s in prefix_stmts:
+        if not isinstance(s, (frog_ast.Sample, frog_ast.Assignment)):
+            return None
+        if not isinstance(s.var, frog_ast.Variable):
+            return None
+        if isinstance(s, frog_ast.Assignment):
+            value = s.value
+            top_is_call = isinstance(value, frog_ast.FuncCall) and isinstance(
+                value.func, frog_ast.FieldAccess
+            )
+            calls = _count_module_calls(value)
+            if calls > 1 or (calls == 1 and not top_is_call):
+                return None
+            if isinstance(value, frog_ast.FuncCall) and any(
+                _count_module_calls(a) for a in value.args
+            ):
+                return None
+        elif _count_module_calls(s.sampled_from):
+            return None
+        names.append(s.var.name)
+    return names
+
+
 def _split_tactic_body(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     *,
     orig_var: str,
@@ -2441,6 +2507,11 @@ def _split_tactic_body(  # pylint: disable=too-many-arguments,too-many-positiona
     swap_split: bool = False,
     eq_args_strong: str = "",
     tail_calls: int = 1,
+    prefix_count: int = 0,
+    prefix_vars: list[str] | None = None,
+    tail_has_assigns: bool = False,
+    tail_samples: int = 0,
+    reversed_dir: bool = False,
 ) -> list[str]:
     """Render the EC tactic body for a ``Split Uniform Samples`` micro.
 
@@ -2500,9 +2571,48 @@ def _split_tactic_body(  # pylint: disable=too-many-arguments,too-many-positiona
         eq_glob_inv = "={glob G}"
         eq_glob_pre = "={glob G}"
         eq_glob_post = "={glob G, " + orig_var + "}"
-    prelude = ["proc."]
+    # When deterministic statements / samples precede the split sample, carry
+    # their equalities through every invariant (the deterministic tail reads
+    # them, e.g. ``sk_E <@ NG.randomscalar(seed_E)`` needs ``={seed_E}``) and
+    # peel them up-front with ``seq c c``, closed by ``sim`` (the prefixes are
+    # byte-identical).
+    prefix_vars = prefix_vars or []
+    if prefix_vars:
+        prefix_eq = "={" + ", ".join(prefix_vars) + "}"
+        eq_glob_inv = f"{eq_glob_inv} /\\ {prefix_eq}"
+        eq_glob_pre = f"{eq_glob_pre} /\\ {prefix_eq}"
+        eq_glob_post = f"{eq_glob_post} /\\ {prefix_eq}"
+    prelude = ["symmetry."] if reversed_dir else []
+    prelude.append("proc.")
+    if prefix_count > 0:
+        prelude.append(
+            f"seq {prefix_count} {prefix_count} : ({eq_glob_inv}); first sim."
+        )
     if swap_split:
         prelude.append("swap{2} 1 1.")
+    # TAIL peel. The simple shape (the split sample's only uses are inside the
+    # tail's module-call arguments, e.g. 5_8/5_10) is closed by one
+    # ``call (_: true).`` per call + ``auto``. When the tail also has
+    # deterministic assignments (tuple projections from a destructured
+    # key-pair) and/or further ``<$`` samples interleaved between the calls, a
+    # bare ``call`` runs aground on a non-call last instruction. Peel ``wp`` (a
+    # safe no-op on a call/sample last instruction) then ``(call (_: true) ||
+    # rnd)`` -- left-biased, so a call is coupled by ``call`` and a sample
+    # falls through to ``rnd`` -- once per call/sample; ``auto => /> *`` then
+    # clears any leading assignments and discharges the slice/var equalities
+    # the invariant supplies.
+    if tail_has_assigns or tail_samples > 0:
+        steps = max(tail_calls + tail_samples, 1)
+        tail_steps = [
+            line
+            for _ in range(steps)
+            for line in ("  wp.", "  (call (_: true) || rnd).")
+        ] + ["  auto => /> *."]
+    else:
+        tail_steps = [
+            *["  call (_: true)." for _ in range(max(tail_calls, 1))],
+            "  auto => /> *.",
+        ]
     return [
         *prelude,
         f"seq 1 2 : ({eq_glob_inv} /\\",
@@ -2550,20 +2660,7 @@ def _split_tactic_body(  # pylint: disable=too-many-arguments,too-many-positiona
         "- (* TAIL: invariant supplies the slice/var equalities so the "
         "call args match  *)",
         "  (* and the return concats agree. *)",
-        # One ``call (_: true).`` per module call in the deterministic
-        # tail, processed back-to-front. The single-call concatenate
-        # shape (5_8_a/b, 5_10) emits exactly one; the XOR-of-two-PRG
-        # shape (5_8_f: ``G(sL) XOR G(sR)``) emits two, otherwise the
-        # second ``G.evaluate`` is left un-discharged and ``auto`` stalls
-        # on ``forall r, xor _r0{1} r = xor _r0{2} r``.
-        *["  call (_: true)." for _ in range(max(tail_calls, 1))],
-        # ``auto`` (not ``skip``) is needed when the deterministic tail
-        # contains an assignment like ``y = slice(orig, ...)`` ahead of
-        # the call: ``skip`` only closes the leaf, while ``auto`` peels
-        # off head/tail wp/sp to feed the invariant through. The locked-
-        # in proofs that use plain ``skip => /> *`` have no such pre-
-        # call assignment.
-        "  auto => /> *.",
+        *tail_steps,
     ]
 
 

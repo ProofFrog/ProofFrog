@@ -133,7 +133,18 @@ Key modules:
   **Caveat:** the `(wp; call)*` middle leg and `_synth_isuv_walk` both stall on
   `<$` samples (`wp` can't absorb a sample) — this is the open `CG`/`UG_expanded`
   wall (NIKE-group schemes); the fix is to make those routes sample-aware
-  (swap+`sim`), not yet landed.
+  (swap+`sim`), not yet landed. **Dedup extension** (`Deduplicate Deterministic
+  Calls`, the non-contiguous *rewire* shape — a duplicate det call like `L.get`
+  removed and its survivor hoisted): the gate also fires when the call multisets
+  *differ* by a deterministic deduplication (`_is_dedup_rewire`: prob calls
+  untouched, det multiset shrank by genuine duplicates, **not** the contiguous-tail
+  `_synth_dedup_det` shape — `_is_contiguous_dedup`). After functionalization the
+  dedup'd det call is an `ev_*` assignment, so both twins hold the same abstract
+  calls and the existing `(wp; call)*` middle leg closes them (the redundant
+  `ev_*` assignment is absorbed by `wp`). Gated on `allow_cross_module` and the
+  non-contiguous shape so clean `KEMPRF_Correctness` (contiguous-tail dedup via
+  `_synth_dedup_det`, plus its tuple-walk) stays byte-identical. Validated on
+  `CK`/`UK_expanded_Correctness` (19 -> 9 admits, `ec_compile` OK).
 - **Pure cross-module reorder fallback in the `_REORDER_TRANSFORMS` branch**
   (`_tactic_for`): `_permutation_swaps` runs on the raw `app.game_before/after`
   ASTs, which are normalized differently from the rendered flat-state modules

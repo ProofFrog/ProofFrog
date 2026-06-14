@@ -1651,6 +1651,7 @@ MULTI_ORACLE_ABSTRACT_CALL_TEMPLATE = (
 DEAD_SAMPLE_DROP_TEMPLATE = EC_TEMPLATES / "dead_sample_drop.ec"
 CALL_PAST_SAMPLE_SWAP_TEMPLATE = EC_TEMPLATES / "call_past_sample_swap.ec"
 MARGINAL_SPLIT_TEMPLATE = EC_TEMPLATES / "marginal_split.ec"
+SAMPLE_REORDER_TWIN_TEMPLATE = EC_TEMPLATES / "sample_reorder_twin.ec"
 MULTI_ORACLE_REDUCTION_ADV_TEMPLATE = (
     EC_TEMPLATES / "multi_oracle_reduction_adversary.ec"
 )
@@ -1778,6 +1779,40 @@ def test_marginal_split_template_compiles(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, (
         f"EasyCrypt rejected the marginal-split template.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_sample_reorder_twin_template_compiles(tmp_path: Path) -> None:
+    """Regression tripwire for the functional-twin sample-reorder middle leg.
+    The shape: two functionalized twins (every det call already an ``ev``
+    assignment) differ only in the order of their ``<$`` samples, with a
+    consistent ``_rN`` renaming dragged in by the reorder (so the
+    full-signature swap declines). The recipe reorders the samples with
+    ``swap{1}`` (each sample is glob/data-independent of everything before it,
+    so the hoist is EC-valid), then peels the now-common call+sample backbone
+    ``(wp; (call (_: true) || rnd))*``; ``wp`` dissolves the renamed
+    deterministic locals and ``skip => /#`` discharges the residual. See
+    ``chain_emitter._sample_reorder_swaps`` / ``_det_reorder_leg``. If this
+    stops compiling, that middle-leg recipe must be re-derived before any
+    automation relying on it (e.g. ``UG_seedbased_Correctness``) can be
+    trusted."""
+    ec_file = tmp_path / "sample_reorder_twin.ec"
+    ec_file.write_text(SAMPLE_REORDER_TWIN_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the sample-reorder-twin template.\n"
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )

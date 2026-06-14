@@ -186,6 +186,42 @@ Key modules:
   call subsequence preserved → purely cross-module → EC-`swap`-safe; same-module
   reorders take the det route above). Closes the `L.get`-past-`KeyGen`
   `Topological Sorting` micros.
+- **Sample-reorder closes for the functional-twin and swap routes** (three
+  coordinated fixes; validated end-to-end on `UG_seedbased_Correctness` →
+  clean). When a reorder, after functionalizing every det call, leaves the two
+  twins differing *only* in the order of their `<$` samples (probabilistic-call
+  subsequence identical), the existing middle-leg routes break: `_ec_full_perm_swaps`
+  chokes on the `_rN` renaming a reorder drags in (two calls that swap program
+  order get their auto-numbered result vars reassigned), and the coarse swap
+  routes can't tell two same- or distinct-distribution samples apart.
+  - `_det_reorder_leg` (functional-twin middle leg) gains a fallback after
+    `_ec_full_perm_swaps` declines: `_sample_reorder_swaps` emits `swap{1}`s
+    reordering the samples (a sample is glob/data-independent of everything
+    before it, so hoisting it up is always EC-valid), then the existing
+    `_backbone_peel` discharges the now-common backbone — `wp` dissolves the
+    renamed deterministic locals, so the rename never surfaces. Gated on
+    `allow_sample_reorder` (set only when functionalization actually turned a det
+    call into an `ev` assignment), so pure-probabilistic bodies keep their
+    simpler swap close. Tripwire:
+    `tests/integration/ec_templates/sample_reorder_twin.ec`. Closes the
+    `micro_*_right_9` `Topological Sorting` micros where a same-module call order
+    also differs.
+  - `_needs_det_functional_reorder` gains a clause routing a *cross-module*
+    reorder through the twins when its only probabilistic-backbone difference is
+    sample order AND a rename is present (detected as `_ec_full_perm_swaps` on
+    the rendered bodies declining) AND there are det calls to functionalize.
+    Rename-free reorders keep their shorter swap close (EC `swap` aligns them and
+    `sim` finishes). Closes the `Stabilize Independent Statements` micro
+    (`derivekeypair` shifting across the `NG` calls with `_r0`/`_r1` swapped).
+  - The `_REORDER_TRANSFORMS` swap branch now *validates* its swaps against the
+    rendered bodies (`_swaps_align_rendered` / `_swaps_realign` via `_reorder_sig`
+    — samples by distribution, calls by callee, rename-tolerant) before trusting
+    them: the raw-AST `_permutation_swaps` can return non-empty-but-wrong swaps
+    (raw vs rendered normalization mismatch), and `_rendered_state_swaps`'s coarse
+    `_ec_perm_swaps` conflates distinct-distribution samples. Both now require the
+    swaps to actually realign; `_rendered_state_swaps` falls through to the
+    full-signature sort (which distinguishes the samples by var) when coarse
+    doesn't realign. Closes the no-rename `micro_12_right_9` sample swap.
 - **Marginal partial-split `Split Uniform Samples` synthesizer**
   (`parametric_tactics._marginal_split_helpers`, reached from the
   `_has_module_call_tail` branch of `split_uniform_samples_tactic`): the

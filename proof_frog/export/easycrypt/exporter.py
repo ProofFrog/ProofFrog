@@ -1355,6 +1355,65 @@ def export_proof_file(proof_path: str) -> str:
     # bindings.
     instances_by_let_name = {inst.let_name: inst for inst in instances}
     primary_let = next(let for let in proof.lets if let.name == primary.let_name)
+
+    # Seed bitstring-carrier info for ``||`` concatenation *before* chain
+    # emission. A scheme ``requires X subsets/== BitString<n>`` makes the
+    # abstract carrier set ``X`` bitstring-like; the engine inlines the
+    # set->bs coercion in flat states, so a ``||`` operand can surface
+    # carrier-typed (e.g. ``pk1 : PK1Space`` in GHP18's KEMCombiner). The
+    # late ``requires`` pass (below) emits the *type alias*
+    # ``type bs_n = X.``, but that runs after the flat states render --
+    # too late for the expression translator to know the carrier concats.
+    # This emission-neutral pass (it registers no bitstring type, so it
+    # cannot reorder ``top_types.emit()``) records the carrier->BitString
+    # map up front. The carrier name is the ``Set X;`` let resolved through
+    # the scheme instance; the bitstring side is taken verbatim from the
+    # clause.
+    if scheme is not None and scheme.requirements:
+        _carrier_param_to_let: dict[str, str] = {}
+        if isinstance(primary_let.value, frog_ast.FuncCall):
+            for sp, arg in zip(scheme.parameters, primary_let.value.args):
+                if isinstance(arg, frog_ast.Variable):
+                    _carrier_param_to_let[sp.name] = arg.name
+
+        def _carrier_set_name(side: frog_ast.Expression) -> str | None:
+            if not (
+                isinstance(side, frog_ast.FieldAccess)
+                and isinstance(side.the_object, frog_ast.Variable)
+            ):
+                return None
+            let_name = _carrier_param_to_let.get(
+                side.the_object.name, side.the_object.name
+            )
+            found_inst = instances_by_let_name.get(let_name)
+            if found_inst is None:
+                return None
+            resolved_field = found_inst.concretized_fields.get(side.name)
+            if (
+                isinstance(resolved_field, frog_ast.Variable)
+                and resolved_field.name in known_abstract_types
+            ):
+                return resolved_field.name
+            return None
+
+        for req in scheme.requirements:
+            if not (
+                isinstance(req, frog_ast.BinaryOperation)
+                and req.operator
+                in (
+                    frog_ast.BinaryOperators.SUBSETS,
+                    frog_ast.BinaryOperators.EQUALS,
+                )
+            ):
+                continue
+            for set_side, bs_side in (
+                (req.left_expression, req.right_expression),
+                (req.right_expression, req.left_expression),
+            ):
+                carrier = _carrier_set_name(set_side)
+                if carrier is not None and isinstance(bs_side, frog_ast.BitStringType):
+                    top_types.register_subset_carrier(carrier, bs_side)
+
     scheme_module_params: list[ec_ast.ModuleParam] = []
     scheme_module_param_types: dict[str, str] = {}
     scheme_applied_args: list[str] = []

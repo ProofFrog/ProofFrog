@@ -49,6 +49,23 @@ Key modules:
   (`Uniform GroupElem Simplification`) is still INTERACTIVE; this is its
   template. Verified end-to-end by
   `examples/Proofs/SymEnc/ModOTP_INDOT.proof` (ec_compile OK).
+- **Subset-carrier concatenation** (in `type_collector.register_subset_carrier`
+  / `bitstring_carrier_type` + `expr_translator._bitstring_type_of` + an early
+  `exporter.py` pass): a scheme `requires X subsets/== BitString<n>` makes an
+  abstract carrier set `X` (e.g. GHP18's `KEM1.PublicKey` = `PK1Space`)
+  bitstring-like. The engine inlines the `BitString<n> b = x;` coercion into the
+  chain flat states, so a `||` operand surfaces *carrier-typed* — `pk1 :
+  PK1Space`, not `bs_pk1len` — and the old `||` path emitted EC's boolean `||`
+  ("no matching operator ||"). `_bitstring_type_of` now maps a carrier operand
+  to its `BitString<n>` and renders `concat_*`; nested `||` is summed
+  *structurally* (the engine's recorded type for an inlined concat node can be a
+  single carrier, not the summed bitstring). The carrier→bitstring map is seeded
+  on `top_types` *before* chain emission (an emission-neutral pass — it registers
+  no bitstring type, so `top_types.emit()` order is unchanged); the late
+  `requires` pass that emits `type bs_n = X.` runs *after* the flat states
+  render, too late for the translator. Cleared GHP18's §2.3 wall: the proof now
+  type-checks fully (boolean `||` gone). Regression: only the 3 KEMCombiner
+  proofs re-export.
 - **Intermediate-game body emission** (in `exporter.py` intermediate-game loop
   + `module_translator.translate_intermediate_game` + `proof_translator.
   _resolve_intermediate_game`): a proof-local `Game` helper referenced as a
@@ -222,6 +239,22 @@ Key modules:
     swaps to actually realign; `_rendered_state_swaps` falls through to the
     full-signature sort (which distinguishes the samples by var) when coarse
     doesn't realign. Closes the no-rename `micro_12_right_9` sample swap.
+  - **Rename-masked assign shape in `_reorder_sig`** (the validation signature
+    `_swaps_realign` uses): it previously collapsed *every* `Assign` to
+    `("assign",)`, so a swap sequence that left two distinct assigns
+    (`ct2 <- _tup_2.\`2` vs `_tup_1 <- (...)` vs `ct1 <- _tup_1.\`1`) mis-ordered
+    still validated — `sim` was then left open (a 0-admit file EC rejects). Now
+    an assign's signature includes its **rename-masked RHS shape** (`_mask_idents`
+    replaces every identifier run with `ID`, keeping punctuation/indices/arity):
+    finer than before (distinguishes `ID.\`1` / `ID.\`2` / `(ID, ID, ID)`) yet
+    still `_rN`-rename-tolerant (both sides mask alike). Strictly safe — it can
+    only *reject* a genuinely-misaligned swap set, falling back to the exact
+    full-signature sort (`_ec_full_perm_swaps`, dep-validated); a correct swap set
+    still passes (moved == right ⇒ equal masked shapes). Fixed GHP18's
+    `Topological Sorting` `micro_2_left_3` (raw `_permutation_swaps` returned only
+    2 of the 3 needed swaps and coarse-validated). Regression: `UK_seedbased`
+    gains one extra dep-valid `swap` (its `micro_0_left_13` was similarly
+    under-swapped; still `ec_compile` OK).
 - **Marginal partial-split `Split Uniform Samples` synthesizer**
   (`parametric_tactics._marginal_split_helpers`, reached from the
   `_has_module_call_tail` branch of `split_uniform_samples_tactic`): the

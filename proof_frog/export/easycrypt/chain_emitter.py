@@ -463,7 +463,15 @@ def emit_chain_for_hop(
             swaps = _permutation_swaps(
                 before_hoisted, after_hoisted, reversed_dir=reversed_dir
             )
-            if swaps is not None:
+            if swaps is not None and _swaps_align_rendered(
+                swaps,
+                modules,
+                left_state,
+                right_state,
+                external_module_types,
+                method_return_types,
+                flat_params,
+            ):
                 return [_res_tag(SYNTH_PARAM), "proc.", *swaps, "sim."]
             # The raw transform-application ASTs are normalized differently from
             # the rendered flat-state modules the micro lemma relates (the engine
@@ -2750,6 +2758,106 @@ def _ec_reorder_swaps(
     return swaps
 
 
+def _reorder_sig(stmt: ec_ast.EcStmt) -> tuple[str, ...]:
+    """Rename-tolerant statement signature for *validating* a reorder: a sample
+    by its distribution, a call by its callee, an assign/return by kind. Unlike
+    :func:`_ec_sig` it distinguishes samples of different distributions (so a
+    mis-ordered ``<$`` of a distinct distribution is caught); unlike
+    :func:`_stmt_full_sig` it ignores bound-variable names and call arguments, so
+    a consistent ``_rN`` renaming does not make a correct alignment look wrong."""
+    if isinstance(stmt, ec_ast.Call):
+        return ("call", stmt.callee)
+    if isinstance(stmt, ec_ast.Sample):
+        return ("sample", stmt.distr)
+    if isinstance(stmt, ec_ast.Assign):
+        return ("assign",)
+    if isinstance(stmt, ec_ast.Return):
+        return ("return",)
+    return ("?",)
+
+
+def _apply_swaps(
+    exec_list: list[ec_ast.EcStmt], swaps: list[str]
+) -> list[ec_ast.EcStmt] | None:
+    """Apply a ``swap{1} <pos> <delta>`` sequence to ``exec_list`` (EC's move-by-
+    delta semantics, the same model :func:`_ec_perm_swaps` emits), returning the
+    reordered list or ``None`` on an out-of-range / unparsable swap."""
+    cur = list(exec_list)
+    for swap in swaps:
+        match = re.fullmatch(r"swap\{1\} (\d+) (-?\d+)\.?", swap)
+        if match is None:
+            return None
+        src = int(match.group(1)) - 1
+        target = src + int(match.group(2))
+        if not 0 <= src < len(cur) or not 0 <= target < len(cur):
+            return None
+        cur.insert(target, cur.pop(src))
+    return cur
+
+
+def _swaps_realign(
+    swaps: list[str],
+    left_exec: list[ec_ast.EcStmt],
+    right_exec: list[ec_ast.EcStmt],
+) -> bool:
+    """True if applying ``swaps`` to ``left_exec`` reproduces ``right_exec`` up to
+    :func:`_reorder_sig` (samples by distribution, calls by callee, rename-
+    tolerant). A swap sequence that matches only a coarser signature (e.g. one
+    that leaves two distinct-distribution samples mis-ordered) fails here, so the
+    caller can fall back to a finer alignment instead of emitting a ``sim`` EC
+    leaves open."""
+    moved = _apply_swaps(left_exec, swaps)
+    if moved is None or len(moved) != len(right_exec):
+        return False
+    return [_reorder_sig(s) for s in moved] == [_reorder_sig(s) for s in right_exec]
+
+
+def _swaps_align_rendered(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    swaps: list[str],
+    modules: mt.ModuleTranslator,
+    left_state: frog_ast.Game | None,
+    right_state: frog_ast.Game | None,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+) -> bool:
+    """True if applying ``swaps`` to the *rendered* left flat-state body yields
+    the rendered right body (modulo renaming).
+
+    The raw-AST :func:`_permutation_swaps` is normalized differently from the
+    rendered modules the micro lemma actually relates, so it can return a
+    non-empty swap sequence that does **not** align the rendered bodies -- then
+    ``sim`` is left with an open reorder (a 0-admit file EC rejects). Validate
+    the raw swaps against the rendered bodies before trusting them; on failure
+    the caller recomputes the permutation from the rendered states.
+    """
+    if left_state is None or right_state is None:
+        return False
+    left_mod = _flat_state_module(
+        modules,
+        "_swap_check_left",
+        left_state,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    right_mod = _flat_state_module(
+        modules,
+        "_swap_check_right",
+        right_state,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    if not left_mod.procs or not right_mod.procs:
+        return False
+    return _swaps_realign(
+        swaps,
+        _exec_stmts(left_mod.procs[0].body),
+        _exec_stmts(right_mod.procs[0].body),
+    )
+
+
 def _rendered_state_swaps(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     modules: mt.ModuleTranslator,
     left_state: frog_ast.Game | None,
@@ -2801,23 +2909,35 @@ def _rendered_state_swaps(  # pylint: disable=too-many-arguments,too-many-positi
     left_body = left_mod.procs[0].body
     right_body = right_mod.procs[0].body
     left_exec = _exec_stmts(left_body)
+    right_exec = _exec_stmts(right_body)
     # The coarse-signature bubble sort matches statements by kind/callee only,
     # so duplicate signatures (two ``x <- __determ_1__`` assigns, repeated
-    # same-callee calls) can make it pick a source whose single move crosses a
-    # data dependency -- a ``swap`` EC rejects. Keep it when it is dependency-
-    # valid (the common case, and byte-identical for the clean set); otherwise
-    # retry with the full-signature sort, which identifies each statement
-    # uniquely and (both bodies being topological orderings of one DAG) emits
-    # only EC-acceptable swaps.
+    # same-callee calls, or two ``<$`` samples of *different* distributions) can
+    # make it (a) pick a source whose single move crosses a data dependency -- a
+    # ``swap`` EC rejects -- or (b) leave two distinct samples mis-ordered while
+    # still matching the coarse sequence (``sim`` then left open). Keep coarse
+    # only when it is dependency-valid AND actually realigns the bodies up to
+    # :func:`_reorder_sig`; otherwise retry with the full-signature sort, which
+    # identifies each statement uniquely (so distinct samples are distinguished)
+    # and (both bodies being topological orderings of one DAG) emits only
+    # EC-acceptable swaps.
     coarse = _ec_perm_swaps(left_body, right_body)
-    if coarse is not None and _swaps_dep_valid(left_exec, coarse):
+    if (
+        coarse is not None
+        and _swaps_dep_valid(left_exec, coarse)
+        and _swaps_realign(coarse, left_exec, right_exec)
+    ):
         return coarse
     full = _ec_full_perm_swaps(left_body, right_body)
     if full is not None:
         stripped = [s.rstrip(".") for s in full]
-        if _swaps_dep_valid(left_exec, stripped):
+        if _swaps_dep_valid(left_exec, stripped) and _swaps_realign(
+            stripped, left_exec, right_exec
+        ):
             return stripped
-    return coarse
+    return (
+        coarse if coarse is not None and _swaps_dep_valid(left_exec, coarse) else None
+    )
 
 
 def _leg_sem_calls(body: list[ec_ast.EcStmt], module_name: str) -> str:
@@ -3479,8 +3599,76 @@ def _backbone_peel(body: list[ec_ast.EcStmt]) -> list[str]:
     return tac
 
 
-def _det_reorder_leg(
+def _sample_reorder_swaps(
     left_body: list[ec_ast.EcStmt], right_body: list[ec_ast.EcStmt]
+) -> list[str] | None:
+    """``swap{1}`` tactics reordering ``left_body``'s samples to match
+    ``right_body``'s call+sample backbone, leaving every non-sample anchor in
+    place.
+
+    Returns ``None`` unless the two backbones have an *identical probabilistic-
+    call subsequence* and an *equal sample multiset* but differ only in the
+    *order of the samples* (so the deterministic-functional middle leg can align
+    them with sample ``swap``s, then peel the now-common backbone). A ``<$``
+    sample is glob- and data-independent of every statement that currently
+    precedes it (none can read a not-yet-sampled variable), so moving it *up* is
+    always an EC-acceptable ``swap`` -- which is why a left-to-right selection
+    that only ever hoists a sample is sound. This dodges the ``_rN`` renaming a
+    reorder bundles in (``DeriveKeyPair`` becomes ``_r0`` on one side and ``_r1``
+    on the other when its program-order index shifts), which defeats the
+    full-signature :func:`_ec_full_perm_swaps`; ``wp`` dissolves those renamed
+    deterministic locals during the subsequent peel.
+    """
+
+    def _bb_key(stmt: ec_ast.EcStmt) -> tuple[str, str | None] | None:
+        if isinstance(stmt, ec_ast.Sample):
+            return ("sample", getattr(stmt, "var", None))
+        if isinstance(stmt, ec_ast.Call):
+            return ("call", stmt.callee)
+        return None
+
+    lexec = _exec_stmts(left_body)
+    rexec = _exec_stmts(right_body)
+    l_bb = [k for s in lexec if (k := _bb_key(s)) is not None]
+    r_bb = [k for s in rexec if (k := _bb_key(s)) is not None]
+    if l_bb == r_bb:
+        return None  # identical backbone -- handled by the plain peel
+    if [e for e in l_bb if e[0] == "call"] != [e for e in r_bb if e[0] == "call"]:
+        return None  # a probabilistic-call reorder, not a pure sample reorder
+    if sorted(e[1] or "" for e in l_bb if e[0] == "sample") != sorted(
+        e[1] or "" for e in r_bb if e[0] == "sample"
+    ):
+        return None  # sample multisets differ -- not a permutation of samples
+
+    def _nth_bb_index(stmts: list[ec_ast.EcStmt], n: int) -> int | None:
+        seen = 0
+        for i, s in enumerate(stmts):
+            if _bb_key(s) is not None:
+                if seen == n:
+                    return i
+                seen += 1
+        return None
+
+    cur = list(lexec)
+    swaps: list[str] = []
+    for target, key in enumerate(r_bb):
+        pos = _nth_bb_index(cur, target)
+        if pos is None or _bb_key(cur[pos]) == key:
+            continue
+        src = next(
+            (j for j in range(pos + 1, len(cur)) if _bb_key(cur[j]) == key), None
+        )
+        if src is None:
+            return None
+        swaps.append(f"swap{{1}} {src + 1} {pos - src}.")
+        cur.insert(pos, cur.pop(src))
+    return swaps
+
+
+def _det_reorder_leg(
+    left_body: list[ec_ast.EcStmt],
+    right_body: list[ec_ast.EcStmt],
+    allow_sample_reorder: bool = False,
 ) -> list[str] | None:
     """``F_left ~ F_right`` leg: both fully functional, differ by a reorder.
 
@@ -3526,9 +3714,29 @@ def _det_reorder_leg(
         tac.append("skip => /#.")
         return tac
     swaps = _ec_full_perm_swaps(left_body, right_body)
-    if swaps is None:
+    if swaps is not None:
+        return ["proc.", *swaps, "sim."]
+    # Full-signature alignment declined -- typically a consistent ``_rN``
+    # renaming bundled with the reorder (when two calls swap program order their
+    # auto-numbered result vars swap too), so the before/after full-sig multisets
+    # don't match. If the backbones differ only by *sample* order (the
+    # probabilistic-call subsequence is identical), reorder the samples with
+    # ``swap`` (glob-independent) and peel the now-common backbone -- ``wp``
+    # dissolves the renamed deterministic locals, so the rename never surfaces.
+    # Gated on ``allow_sample_reorder`` (set only when functionalization actually
+    # turned some det call into an ``ev`` assignment): with no det calls the twin
+    # is identical to the original module, so the simpler swap routes downstream
+    # close it -- preempting them here would needlessly rewrite clean proofs.
+    if not allow_sample_reorder:
         return None
-    return ["proc.", *swaps, "sim."]
+    sample_swaps = _sample_reorder_swaps(left_body, right_body)
+    if sample_swaps is not None:
+        tac = ["proc.", *sample_swaps, *_backbone_peel(right_body)]
+        if _leads_with_det(left_body) or _leads_with_det(right_body):
+            tac.append("wp.")
+        tac.append("skip => /#.")
+        return tac
+    return None
 
 
 def _prob_callees(
@@ -3548,6 +3756,48 @@ def _callee_is_det(callee: str, det_pred: Callable[[str, str], bool]) -> bool:
     """True if ``callee`` (a ``Module.method`` string) is a deterministic call."""
     parts = _callee_parts(callee)
     return parts is not None and det_pred(parts[0], parts[1])
+
+
+def _has_det_call(
+    body: list[ec_ast.EcStmt], det_pred: Callable[[str, str], bool]
+) -> bool:
+    """True if ``body`` contains at least one deterministic abstract call (so
+    functionalizing it is non-trivial)."""
+    return any(
+        isinstance(s, ec_ast.Call) and _callee_is_det(s.callee, det_pred)
+        for s in _exec_stmts(body)
+    )
+
+
+def _backbones_differ_only_by_samples(
+    before_body: list[ec_ast.EcStmt],
+    after_body: list[ec_ast.EcStmt],
+    det_pred: Callable[[str, str], bool],
+) -> bool:
+    """True if the two bodies' *probabilistic* backbones (probabilistic calls +
+    ``<$`` samples, deterministic calls excluded -- they functionalize away)
+    differ *only* in the order of the samples: identical probabilistic-call
+    subsequence and equal sample multiset, but a differing interleaving."""
+
+    def _bb(body: list[ec_ast.EcStmt]) -> list[tuple[str, str | None]]:
+        out: list[tuple[str, str | None]] = []
+        for s in _exec_stmts(body):
+            if isinstance(s, ec_ast.Call):
+                if not _callee_is_det(s.callee, det_pred):
+                    out.append(("call", s.callee))
+            elif isinstance(s, ec_ast.Sample):
+                out.append(("sample", getattr(s, "var", None)))
+        return out
+
+    lb = _bb(before_body)
+    rb = _bb(after_body)
+    if lb == rb:
+        return False
+    if [e for e in lb if e[0] == "call"] != [e for e in rb if e[0] == "call"]:
+        return False
+    return sorted(e[1] or "" for e in lb if e[0] == "sample") == sorted(
+        e[1] or "" for e in rb if e[0] == "sample"
+    )
 
 
 def _det_call_sigs(
@@ -3746,6 +3996,26 @@ def _needs_det_functional_reorder(
         )
     ):
         return True
+    # Cross-module reorder whose only *probabilistic-backbone* difference is the
+    # order of the samples (a deterministic call shifting across other-module
+    # calls, dragging its consumed sample with it -- e.g. ``Stabilize
+    # Independent Statements`` moving ``KEM_PQ.derivekeypair`` and its seed
+    # across the ``NG`` calls). EC ``swap`` would accept the reorder, BUT only
+    # when no ``_rN`` renaming rides along: two calls that swap program order get
+    # their auto-numbered result vars reassigned, and that rename pervades the
+    # downstream call arguments, so neither the var-blind swap route's ``sim``
+    # nor the full-signature swap can close it. Detect the rename as
+    # ``_ec_full_perm_swaps`` declining despite the bodies being a reorder, and
+    # route those through the functional twins (``wp`` in the sample-reorder
+    # middle leg dissolves the renamed locals). Rename-free reorders keep their
+    # existing, shorter swap close. Requires det calls to functionalize.
+    if (
+        allow_cross_module
+        and _has_det_call(before_body, det_pred)
+        and _backbones_differ_only_by_samples(before_body, after_body, det_pred)
+        and _ec_full_perm_swaps(before_body, after_body) is None
+    ):
+        return True
     return False
 
 
@@ -3796,7 +4066,14 @@ def _synth_det_reorder(  # pylint: disable=too-many-arguments,too-many-positiona
         params=right_module.params,
     )
 
-    leg_mid = _det_reorder_leg(fl_body, fr_body)
+    # Functionalization is non-trivial iff it turned a det call into an ``ev``
+    # assignment (shrinking the call backbone). Only then is the functional-twin
+    # route's sample-reorder fallback worth preempting the simpler swap routes
+    # with -- a body of only probabilistic calls keeps its existing close.
+    funct_meaningful = _call_sample_backbone(fl_body) != _call_sample_backbone(
+        left_body
+    ) or _call_sample_backbone(fr_body) != _call_sample_backbone(right_body)
+    leg_mid = _det_reorder_leg(fl_body, fr_body, allow_sample_reorder=funct_meaningful)
     if leg_mid is None:
         return None
     spec = f"({pre} ==> {post}) ({pre} ==> {post})"

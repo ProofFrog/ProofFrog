@@ -1650,6 +1650,7 @@ MULTI_ORACLE_ABSTRACT_CALL_TEMPLATE = (
 )
 DEAD_SAMPLE_DROP_TEMPLATE = EC_TEMPLATES / "dead_sample_drop.ec"
 CALL_PAST_SAMPLE_SWAP_TEMPLATE = EC_TEMPLATES / "call_past_sample_swap.ec"
+MARGINAL_SPLIT_TEMPLATE = EC_TEMPLATES / "marginal_split.ec"
 MULTI_ORACLE_REDUCTION_ADV_TEMPLATE = (
     EC_TEMPLATES / "multi_oracle_reduction_adversary.ec"
 )
@@ -1746,6 +1747,37 @@ def test_multi_oracle_reduction_adversary_template_compiles(tmp_path: Path) -> N
     )
     assert result.returncode == 0, (
         f"EasyCrypt rejected the multi-oracle reduction-adversary template.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_marginal_split_template_compiles(tmp_path: Path) -> None:
+    """Regression tripwire for the marginal partial-split ``Split Uniform
+    Samples`` EC tactic template (the PRG-stretch shape: one big sample
+    ``orig <$ d_RES`` consumed only via two non-overlapping slices that feed a
+    complex downstream tail, with ``|L| + |R| < |RES|``). The recipe builds
+    ``Mid``/``Aug`` as surgical copies of the flat states (whole tail verbatim,
+    sampling prefix patched) and chains ``S5 ~ Mid ~ Aug ~ S6`` via the
+    ``d_RES_split3`` rnd-identity bijection, the ``slice_concat3`` round-trips,
+    and a dead-gap drop; see ``_marginal_split_helpers``. If this stops
+    compiling, that synthesizer's target tactic must be re-derived before any
+    automation relying on it can be trusted."""
+    ec_file = tmp_path / "marginal_split.ec"
+    ec_file.write_text(MARGINAL_SPLIT_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the marginal-split template.\n"
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )

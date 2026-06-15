@@ -343,11 +343,24 @@ class ModuleTranslator:
         emit no ``var`` block, so their output is byte-identical -- their
         fields are inlined to method locals by canonicalization.
         """
-        assert len(game.parameters) == 1, (
-            "Phase 1 skeleton only handles games with a single "
-            f"primitive parameter; got {game.parameters}"
-        )
-        param = game.parameters[0]
+        if len(game.parameters) == 1:
+            param = game.parameters[0]
+        else:
+            # A foreign assumption game may carry non-module (e.g. ``Int Nkey``
+            # length) parameters alongside its single primitive parameter, like
+            # ``Game Real(KDF H, Int Nkey)``. Mirror
+            # :meth:`translate_intermediate_game`: keep the one module-typed
+            # (primitive) parameter and drop the rest -- the Ints surface only
+            # inside abstract bitstring-length parameterizations, never as a
+            # free EC value.
+            module_params = [
+                p for p in game.parameters if isinstance(p.type, frog_ast.Variable)
+            ]
+            assert len(module_params) == 1, (
+                "Phase 1 skeleton only handles games with a single primitive "
+                f"(module-typed) parameter; got {[p.type for p in game.parameters]}"
+            )
+            param = module_params[0]
         module_param_types = {param.name: param_type_name}
         emitted_type = emitted_param_type or param_type_name
         field_types = {fld.name: fld.type for fld in game.fields}
@@ -1016,6 +1029,20 @@ class ModuleTranslator:
             type_map[p.name] = p.type
         for stmt in method.block.statements:
             _seed_type_map(stmt, type_map)
+
+        # Resolve tuple-typed aliases to their ProductType so ``type_of`` can
+        # type a projection ``k[i]`` whose base is declared via a Set alias
+        # (e.g. a scheme param ``Key k`` where ``Key = [BitString<l>,
+        # BitString<l>]``). Without this the projection's base resolves to a
+        # bare Variable and ``type_of`` raises NotImplementedError -> the whole
+        # method body falls back to ``return witness``. Gated to Variable/
+        # FieldAccess aliases that resolve to a ProductType, so non-tuple types
+        # are untouched.
+        for name, t in list(type_map.items()):
+            if isinstance(t, (frog_ast.Variable, frog_ast.FieldAccess)):
+                resolved = self._types.resolve(t)
+                if isinstance(resolved, frog_ast.ProductType):
+                    type_map[name] = resolved
 
         type_of = self._type_of_factory(type_map, module_param_types)
         exprs = expr_translator.ExpressionTranslator(self._types, type_of)

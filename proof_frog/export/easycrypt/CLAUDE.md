@@ -49,6 +49,27 @@ Key modules:
   (`Uniform GroupElem Simplification`) is still INTERACTIVE; this is its
   template. Verified end-to-end by
   `examples/Proofs/SymEnc/ModOTP_INDOT.proof` (ec_compile OK).
+- **Random-function foundation for `Function<A,B>`** (in `type_collector`
+  `translate_type`/`distr_for`/`emit` + `expr_translator` FuncCall +
+  `module_translator._ec_field_name`/`_field_renames_for`): a game field
+  `RF <- Function<A,B>` (sampled as a whole random function, applied as
+  `RF(x)`) translates to EC's native arrow type `A -> B`; the sample draws
+  from an abstract uniform distribution over the finite function space
+  (`op dfun_<dom>_to_<codom> : (A -> B) distr` + `_ll`/`_fu`/`_full` axioms,
+  emitted *after* the domain/codomain bitstring `type` decls so the arrow's
+  operands are in scope), and `RF(x)` renders as application `RF x`. The
+  three axioms are the standard facts about `dfun (fun _ => dB)` (EC's
+  `MUniFinFun`), so the foundation is sound and in principle derivable —
+  register it with the axiom-soundness audit. Because EC module-global
+  variables must be lowercase-initial, an uppercase field name like `RF` is
+  renamed (`RF` -> `rF`, first char only) at every decl + reference site via
+  a `field_renames` map threaded through `_translate_method` into the
+  expression translator; lowercase fields are unchanged, so every existing
+  export is byte-identical. Unblocks the 12 KDF-PRF track-A INDCCA proofs to
+  *export* (the 4 CG/UG `_T` variants then hit the separate `Variable: D`
+  ROM wall; the rest advance to a theory-mode `concat` structural blocker —
+  both out of scope here). Validated: foundation + rename parse and
+  typecheck in EC (`dfun` op accepted); export regression byte-identical.
 - **Subset-carrier concatenation** (in `type_collector.register_subset_carrier`
   / `bitstring_carrier_type` + `expr_translator._bitstring_type_of` + an early
   `exporter.py` pass): a scheme `requires X subsets/== BitString<n>` makes an

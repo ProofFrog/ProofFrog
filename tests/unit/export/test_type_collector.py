@@ -195,3 +195,43 @@ def test_modint_name_canonicalizes_modulus() -> None:
         )
     )
     assert a.text == b.text
+
+
+def _function_type() -> frog_ast.FunctionType:
+    return frog_ast.FunctionType(
+        frog_ast.BitStringType(parameterization=frog_ast.Variable("a")),
+        frog_ast.BitStringType(parameterization=frog_ast.Variable("b")),
+    )
+
+
+def test_translate_function_type_is_arrow() -> None:
+    """Function<A, B> translates to EC's native arrow type ``A -> B``."""
+    tc = TypeCollector()
+    ec = tc.translate_type(_function_type())
+    assert ec.text == "bs_a -> bs_b"
+
+
+def test_function_distr_for() -> None:
+    """A sampled random function yields the uniform function-space distr."""
+    tc = TypeCollector()
+    ec = tc.translate_type(_function_type())
+    assert tc.distr_for(ec) == "dfun_bs_a_to_bs_b"
+
+
+def test_function_emits_foundation_after_bitstring_types() -> None:
+    """Function emission carries a uniform function-space distribution plus
+    lossless/funiform/full axioms, declared *after* the domain/codomain
+    bitstring types so the arrow's operands are in scope."""
+    tc = TypeCollector()
+    tc.translate_type(_function_type())
+    ordered = [getattr(d, "name", None) for d in tc.emit()]
+    for expected in (
+        "dfun_bs_a_to_bs_b",
+        "dfun_bs_a_to_bs_b_ll",
+        "dfun_bs_a_to_bs_b_fu",
+        "dfun_bs_a_to_bs_b_full",
+    ):
+        assert expected in ordered, f"missing {expected}"
+    # The bitstring types must precede the function distribution op.
+    assert ordered.index("bs_a") < ordered.index("dfun_bs_a_to_bs_b")
+    assert ordered.index("bs_b") < ordered.index("dfun_bs_a_to_bs_b")

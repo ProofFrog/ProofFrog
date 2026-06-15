@@ -139,6 +139,18 @@ class TypeCollector:
         # flat-state bodies render (it precedes the late ``requires``
         # alias-emission pass).
         self._subset_carriers: dict[str, frog_ast.BitStringType] = {}
+        # Function types ``Function<A, B>`` seen, sampled as random
+        # functions (``RF <- Function<A, B>``; ``RF(x)`` applies them).
+        # Each distinct (domain_ec, codomain_ec) pair gets an abstract
+        # uniform distribution over the finite function space plus
+        # lossless/funiform/full axioms -- the random-function analogue of
+        # the bitstring ``dbs`` foundation. Sound: the uniform distribution
+        # over a finite function space ``A -> B`` exists and is
+        # constructible as ``dfun (fun _ => dB)`` (EC's ``MUniFinFun``);
+        # the three axioms are the standard facts about it. Order-
+        # preserving, deduped by (domain, codomain).
+        self._function_types: list[tuple[str, str]] = []
+        self._function_type_set: set[tuple[str, str]] = set()
 
     def resolve(
         self, t: frog_ast.Type, _visited: frozenset[str] = frozenset()
@@ -222,6 +234,14 @@ class TypeCollector:
             and resolved.name in self._known_abstract_types
         ):
             return ec_ast.EcType(resolved.name)
+        if isinstance(resolved, frog_ast.FunctionType):
+            dom = self.translate_type(resolved.domain_type).text
+            codom = self.translate_type(resolved.range_type).text
+            key = (dom, codom)
+            if key not in self._function_type_set:
+                self._function_type_set.add(key)
+                self._function_types.append(key)
+            return ec_ast.EcType(f"{dom} -> {codom}")
         raise NotImplementedError(
             f"Type translation not implemented for {type(resolved).__name__}: "
             f"{resolved}"
@@ -298,6 +318,12 @@ class TypeCollector:
         yields ``dbs...`` for bitstring types. Product EC types
         (``A * B * ...``) yield ``dA `*` dB `*` ...``.
         """
+        # Function type ``A -> B``: a sampled random function. Its
+        # distribution is the uniform-function-space op registered when the
+        # arrow type was translated (see ``_function_types``).
+        if " -> " in ec_type.text:
+            dom, codom = ec_type.text.split(" -> ", 1)
+            return _function_distr_name(dom.strip(), codom.strip())
         # Product type: recurse on each component.
         if " * " in ec_type.text and "(" not in ec_type.text:
             parts = [p.strip() for p in ec_type.text.split(" * ")]
@@ -589,6 +615,21 @@ class TypeCollector:
             else:
                 decls.append(ec_ast.TypeDecl(name))
             decls.append(ec_ast.OpDecl(distr, f"{name} distr"))
+            decls.append(ec_ast.Axiom(f"{distr}_ll", f"is_lossless {distr}"))
+            decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
+            decls.append(ec_ast.Axiom(f"{distr}_full", f"is_full {distr}"))
+        # Function types sampled as random functions: an abstract uniform
+        # distribution over the finite function space ``A -> B`` plus
+        # lossless/funiform/full axioms. The intended model is
+        # ``dfun (fun _ => dB)`` (EC's ``MUniFinFun``), for which all three
+        # facts hold; declaring them as a foundation keeps the export
+        # name-independent (the domain bitstring stays abstract). Emitted
+        # after the bitstring ``type`` declarations above so the arrow
+        # type's domain/codomain are in scope.
+        for dom, codom in self._function_types:
+            distr = _function_distr_name(dom, codom)
+            arrow = f"{dom} -> {codom}"
+            decls.append(ec_ast.OpDecl(distr, f"({arrow}) distr"))
             decls.append(ec_ast.Axiom(f"{distr}_ll", f"is_lossless {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_full", f"is_full {distr}"))
@@ -896,6 +937,11 @@ def _sub_name(modint_name: str) -> str:
     """Additive-group ``-`` op for a ModInt type (``modint_q`` -> ``sub_q``)."""
     suffix = modint_name.removeprefix("modint")
     return f"sub{suffix}"
+
+
+def _function_distr_name(dom: str, codom: str) -> str:
+    """Name for the uniform distribution over functions ``dom -> codom``."""
+    return f"dfun_{_sanitize(dom)}_to_{_sanitize(codom)}"
 
 
 def _slice_op_name(src_name: str, dst_name: str) -> str:

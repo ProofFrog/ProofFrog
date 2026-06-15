@@ -24,9 +24,16 @@ class ExpressionTranslator:
         self,
         types: tc.TypeCollector,
         type_of: Callable[[frog_ast.Expression], frog_ast.Type],
+        field_renames: dict[str, str] | None = None,
     ) -> None:
         self._types = types
         self._type_of = type_of
+        # EC module-global variables must be lowercase-initial. A FrogLang
+        # game field with an uppercase initial (e.g. the random function
+        # ``RF``) is renamed at its declaration; this map renders every
+        # reference to it with the same renamed identifier. Empty for the
+        # common all-lowercase case, so non-affected proofs are unchanged.
+        self._field_renames: dict[str, str] = field_renames or {}
 
     def type_of(self, expr: frog_ast.Expression) -> frog_ast.Type:
         """Return the FrogLang type of ``expr`` using the configured resolver."""
@@ -35,7 +42,7 @@ class ExpressionTranslator:
     def translate(self, expr: frog_ast.Expression) -> str:
         """Render `expr` as an EC expression string."""
         if isinstance(expr, frog_ast.Variable):
-            return expr.name
+            return self._field_renames.get(expr.name, expr.name)
         if isinstance(expr, frog_ast.Integer):
             return str(expr.num)
         if isinstance(expr, frog_ast.Boolean):
@@ -72,6 +79,16 @@ class ExpressionTranslator:
             return f"{_paren(inner)}.`{expr.index.num + 1}"
         if isinstance(expr, frog_ast.Slice):
             return self._translate_slice(expr)
+        if isinstance(expr, frog_ast.FuncCall) and isinstance(
+            expr.func, frog_ast.Variable
+        ):
+            # Application of a sampled random function ``RF(x)`` -> EC's
+            # function application ``RF x``. (Module calls ``E.m(...)`` --
+            # a FuncCall whose func is a FieldAccess -- are lifted to ``<@``
+            # statements by the statement translator and never reach here.)
+            func = self.translate(expr.func)
+            args = " ".join(_paren(self.translate(a)) for a in expr.args)
+            return f"{func} {args}"
         raise NotImplementedError(
             f"Expression translation not implemented for "
             f"{type(expr).__name__}: {expr}"

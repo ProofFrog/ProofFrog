@@ -221,6 +221,14 @@ def _substitute(
         return frog_ast.FieldAccess(base, node.name)
     if isinstance(node, frog_ast.Tuple):
         new_vals = [_substitute(v, sub, prior) for v in node.values]
+        # A tuple literal in a Set/type position (e.g. a scheme's
+        # ``Set Ciphertext = [GroupElem<G>, GroupElem<G>];``) carries Type
+        # elements; resolve it to a ProductType. An expression-valued tuple
+        # stays a Tuple.
+        if new_vals and all(isinstance(v, frog_ast.Type) for v in new_vals):
+            return frog_ast.ProductType(
+                [v for v in new_vals if isinstance(v, frog_ast.Type)]
+            )
         assert all(isinstance(v, frog_ast.Expression) for v in new_vals)
         return frog_ast.Tuple(
             [v for v in new_vals if isinstance(v, frog_ast.Expression)]

@@ -45,10 +45,45 @@ Key modules:
   round-trip/commutativity axioms). `+`/`-` on ModInt operands render to
   `add_q`/`sub_q`, and `Uniform ModInt Simplification` (`u +/- m -> u`)
   closes via an `rnd` bijection over add/sub — the additive analogue of
-  the bitstring `xor` foundation. The GroupElem multiplicative analogue
-  (`Uniform GroupElem Simplification`) is still INTERACTIVE; this is its
-  template. Verified end-to-end by
-  `examples/Proofs/SymEnc/ModOTP_INDOT.proof` (ec_compile OK).
+  the bitstring `xor` foundation. **Ring extension:** `*` on ModInt
+  renders to `mmul_<q>` (prefixed `mmul` to avoid colliding with the
+  GroupElem `mul_<G>`) and an integer literal `0` in a ModInt position
+  (the engine collapses `x - x` to `0`) renders to the additive zero
+  `mzero_<q>`; both are gated (`note_modint_mul`/`note_modint_zero`) so a
+  purely-additive ModInt proof keeps just add/sub. Their axioms
+  (`mmul_<q>_comm`, `sub_<q>_self : sub a a = mzero`) are sound for Z_q.
+  Verified end-to-end by `examples/Proofs/SymEnc/ModOTP_INDOT.proof`
+  (ec_compile OK).
+- **GroupElem multiplicative-group foundation** (in `type_collector`
+  `translate_type(GroupElemType)`/`_groupelem_name`/`emit` +
+  `expr_translator` `*`/`/`/`^` and `G.generator`/`G.identity` +
+  `exporter.type_of` FieldAccess): `GroupElem<G>` translates to an
+  abstract finite abelian cyclic group `groupelem_<G>` with
+  `generator_<G>`/`identity_<G>` constants, `mul_<G>`/`div_<G>` group ops,
+  and `exp_<G> : groupelem_<G> -> modint_<G.order> -> groupelem_<G>` (the
+  exponent ring is auto-registered as `ModInt<G.order>`, so `exp` is
+  emitted after the modint type). `*`/`/` on GroupElem operands render to
+  `mul`/`div`, `^` to `exp`, and `G.generator`/`G.identity` to the
+  abstract constants. **The group-law ops are uninterpreted -- no axioms
+  emitted** (the algebraic correctness chain is out of the type
+  foundation's scope; emitting them unjustified would enlarge the TCB).
+  Unblocks `ElGamal_Correctness` to *export* and EC-compile (⛔, 1 admit:
+  the per-oracle `hop_*_test` lemma's precondition is only `={m} /\
+  pk{1}=pk{2}` and lacks the `pk = g^sk` invariant `initialize`
+  establishes, so the test-oracle equivalence can't close in isolation;
+  the engine's flat-state chain *does* inline `pk = g^sk`, but wiring that
+  per-transform chain into the test lemma is chain-synthesis machinery --
+  the structural-blocker cluster's job). The DDH/ElGamal MultiChal family
+  needs the separate `Group`-parameterized assumption-game skeleton
+  (`exporter.py:761`) to also export. The `Uniform GroupElem
+  Simplification` tactic (for INDCPA, where a uniform group element
+  absorbs a multiplication) is the still-INTERACTIVE part and is *not*
+  needed for correctness (deterministic exponent algebra). Three general
+  emission fixes landed alongside it (each improves ~20 unrelated ⛔
+  proofs): `==`/`!=` render to EC `=`/`<>`; a `Sample` with no type
+  annotation (the engine can inline an assignment into the sample, e.g.
+  `sk = a` folded into `a <$ d`) takes the sampled variable's own type;
+  `type_of` types `G.generator`/`G.identity` as `GroupElem<G>`.
 - **Random-function foundation for `Function<A,B>`** (in `type_collector`
   `translate_type`/`distr_for`/`emit` + `expr_translator` FuncCall +
   `module_translator._ec_field_name`/`_field_renames_for`): a game field

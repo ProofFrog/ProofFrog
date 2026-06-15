@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+from . import ec_ast
 from . import type_collector as tc
 from ... import frog_ast
 
@@ -59,6 +60,18 @@ class ExpressionTranslator:
         if isinstance(expr, frog_ast.FieldAccess) and isinstance(
             expr.the_object, frog_ast.Variable
         ):
+            # ``G.generator`` / ``G.identity`` on a Group-typed object are
+            # the group's distinguished constants -- render them as the
+            # abstract ops the GroupElem foundation declares.
+            if expr.name in ("generator", "identity"):
+                field_type = self._types.resolve(self._type_of(expr))
+                if isinstance(field_type, frog_ast.GroupElemType):
+                    ec_type = self._types.translate_type(field_type)
+                    return (
+                        tc.group_generator_name_for(ec_type)
+                        if expr.name == "generator"
+                        else tc.group_identity_name_for(ec_type)
+                    )
             # ``T.lambda`` in a reduction body refers to the let-binding
             # T's lambda field. After alias substitution this is just
             # the let-name ``lambda``. Resolve through the TypeCollector's
@@ -95,6 +108,15 @@ class ExpressionTranslator:
         )
 
     def _translate_binop(self, expr: frog_ast.BinaryOperation) -> str:
+        if expr.operator in (
+            frog_ast.BinaryOperators.EQUALS,
+            frog_ast.BinaryOperators.NOTEQUALS,
+        ):
+            # EC uses ``=`` / ``<>`` for (in)equality on any type.
+            op = "=" if expr.operator == frog_ast.BinaryOperators.EQUALS else "<>"
+            left = self.translate(expr.left_expression)
+            right = self.translate(expr.right_expression)
+            return f"{_paren(left)} {op} {_paren(right)}"
         if expr.operator == frog_ast.BinaryOperators.ADD:
             lhs_type = self._types.resolve(self._type_of(expr.left_expression))
             if isinstance(lhs_type, frog_ast.BitStringType):
@@ -106,8 +128,8 @@ class ExpressionTranslator:
             if isinstance(lhs_type, frog_ast.ModIntType):
                 ec_type = self._types.translate_type(lhs_type)
                 add = tc.add_name_for(ec_type)
-                left = self.translate(expr.left_expression)
-                right = self.translate(expr.right_expression)
+                left = self._modint_operand(expr.left_expression, ec_type)
+                right = self._modint_operand(expr.right_expression, ec_type)
                 return f"{add} {_paren(left)} {_paren(right)}"
             # Integer (or other arithmetic) addition: defer to plain EC.
             return self._translate_arith(expr)
@@ -124,18 +146,67 @@ class ExpressionTranslator:
             if isinstance(lhs_type, frog_ast.ModIntType):
                 ec_type = self._types.translate_type(lhs_type)
                 sub = tc.sub_name_for(ec_type)
-                left = self.translate(expr.left_expression)
-                right = self.translate(expr.right_expression)
+                left = self._modint_operand(expr.left_expression, ec_type)
+                right = self._modint_operand(expr.right_expression, ec_type)
                 return f"{sub} {_paren(left)} {_paren(right)}"
             return self._translate_arith(expr)
         if expr.operator in (
             frog_ast.BinaryOperators.MULTIPLY,
             frog_ast.BinaryOperators.DIVIDE,
         ):
+            lhs_type = self._types.resolve(self._type_of(expr.left_expression))
+            if isinstance(lhs_type, frog_ast.GroupElemType):
+                ec_type = self._types.translate_type(lhs_type)
+                op = (
+                    tc.group_mul_name_for(ec_type)
+                    if expr.operator == frog_ast.BinaryOperators.MULTIPLY
+                    else tc.group_div_name_for(ec_type)
+                )
+                left = self.translate(expr.left_expression)
+                right = self.translate(expr.right_expression)
+                return f"{op} {_paren(left)} {_paren(right)}"
+            if (
+                isinstance(lhs_type, frog_ast.ModIntType)
+                and expr.operator == frog_ast.BinaryOperators.MULTIPLY
+            ):
+                # ModInt ring multiplication (the group's exponent ring).
+                ec_type = self._types.translate_type(lhs_type)
+                self._types.note_modint_mul(ec_type)
+                mmul = tc.modint_mul_name_for(ec_type)
+                left = self._modint_operand(expr.left_expression, ec_type)
+                right = self._modint_operand(expr.right_expression, ec_type)
+                return f"{mmul} {_paren(left)} {_paren(right)}"
+            return self._translate_arith(expr)
+        if expr.operator == frog_ast.BinaryOperators.EXPONENTIATE:
+            lhs_type = self._types.resolve(self._type_of(expr.left_expression))
+            if isinstance(lhs_type, frog_ast.GroupElemType):
+                ec_type = self._types.translate_type(lhs_type)
+                exp = tc.group_exp_name_for(ec_type)
+                left = self.translate(expr.left_expression)
+                # The exponent lives in the group's exponent ring
+                # ModInt<G.order>; render a literal ``0`` as that ring's zero.
+                exp_modint = self._types.translate_type(
+                    frog_ast.ModIntType(frog_ast.FieldAccess(lhs_type.group, "order"))
+                )
+                right = self._modint_operand(expr.right_expression, exp_modint)
+                return f"{exp} {_paren(left)} {_paren(right)}"
             return self._translate_arith(expr)
         raise NotImplementedError(
             f"Binary operator translation not implemented: {expr.operator}"
         )
+
+    def _modint_operand(
+        self, expr: frog_ast.Expression, ec_modint_type: ec_ast.EcType
+    ) -> str:
+        """Render ``expr`` in a position typed as ``ec_modint_type``.
+
+        The engine's symbolic exponent arithmetic can collapse a ModInt
+        expression to the integer literal ``0`` (e.g. ``x - x``); render it
+        as the ring's zero constant so the result stays well-typed."""
+        if isinstance(expr, frog_ast.Integer) and expr.num == 0:
+            self._types.note_modint_zero(ec_modint_type)
+            return tc.modint_zero_name_for(ec_modint_type)
+        return self.translate(expr)
 
     def _bitstring_type_of(
         self, expr: frog_ast.Expression

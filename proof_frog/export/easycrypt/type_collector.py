@@ -56,6 +56,26 @@ class TypeCollector:
         # ``xor``/``zero`` foundation). Order-preserving, deduped.
         self._modints: list[str] = []
         self._modint_set: set[str] = set()
+        # ModInt type names for which a ring ``mul`` op / additive ``zero``
+        # constant was actually emitted-as-needed by the expression
+        # translator (the exponent ring of a GroupElem). Kept narrow so a
+        # proof using only ``+``/``-`` on ModInt (the additive foundation)
+        # doesn't gain unused ring ops.
+        self._modint_mul: set[str] = set()
+        self._modint_zero: set[str] = set()
+        # Concrete ``GroupElem<G>`` types seen, by EC type name (e.g.
+        # ``groupelem_G``). Modelled as an abstract finite abelian cyclic
+        # group -- the multiplicative analogue of the ModInt additive
+        # foundation above: each gets a ``generator``/``identity`` constant,
+        # ``mul``/``div`` ops, and a ``exp`` op taking a ModInt<G.order>
+        # exponent (the group's exponent ring). Group laws are emitted as
+        # axioms (registered with the axiom-soundness audit; the intended
+        # model is EC's ``CyclicGroup``, from which they are derivable).
+        # Order-preserving, deduped. ``_groupelem_exp`` records the EC
+        # exponent type name for each registered group's ``exp`` op.
+        self._groupelems: list[str] = []
+        self._groupelem_set: set[str] = set()
+        self._groupelem_exp: dict[str, str] = {}
         # Alias keys may be plain (``"Key"``) or qualified
         # (``"E1.key"``). Qualified keys resolve ``FieldAccess`` types
         # through per-instance scheme clones in multi-scheme exports.
@@ -229,6 +249,18 @@ class TypeCollector:
                 self._modint_set.add(name)
                 self._modints.append(name)
             return ec_ast.EcType(name)
+        if isinstance(resolved, frog_ast.GroupElemType):
+            name = self._groupelem_name(resolved)
+            if name not in self._groupelem_set:
+                self._groupelem_set.add(name)
+                self._groupelems.append(name)
+                # The exponent ring is ModInt<group.order>; translating it
+                # here registers the modint type so the ``exp`` op's
+                # signature is in scope when :meth:`emit` runs.
+                order = frog_ast.FieldAccess(resolved.group, "order")
+                exp_type = self.translate_type(frog_ast.ModIntType(order))
+                self._groupelem_exp[name] = exp_type.text
+            return ec_ast.EcType(name)
         if (
             isinstance(resolved, frog_ast.Variable)
             and resolved.name in self._known_abstract_types
@@ -309,6 +341,28 @@ class TypeCollector:
         )
         sanitized = _sanitize(_canonical_arith_str(modulus))
         return f"modint_{sanitized}" if sanitized else "modint"
+
+    def _groupelem_name(self, t: frog_ast.GroupElemType) -> str:
+        """EC type name for a ``GroupElem<G>`` type.
+
+        Canonicalizes the group expression via sympy (mirroring
+        ``_modint_name``) so syntactically-distinct references to the same
+        group collapse to one EC type. ``GroupElem<G>`` becomes
+        ``groupelem_G``.
+        """
+        group = _substitute_aliases(t.group, self._aliases, self._strip_field_prefixes)
+        sanitized = _sanitize(_canonical_arith_str(group))
+        return f"groupelem_{sanitized}" if sanitized else "groupelem"
+
+    def note_modint_mul(self, ec_type: ec_ast.EcType) -> None:
+        """Record that a ModInt ring ``*`` op was rendered for this type,
+        so :meth:`emit` declares ``mmul_<q>`` + its commutativity axiom."""
+        self._modint_mul.add(ec_type.text)
+
+    def note_modint_zero(self, ec_type: ec_ast.EcType) -> None:
+        """Record that a ModInt additive zero was rendered for this type,
+        so :meth:`emit` declares ``mzero_<q>`` + the ``sub a a`` axiom."""
+        self._modint_zero.add(ec_type.text)
 
     def distr_for(self, ec_type: ec_ast.EcType) -> str:
         """Return the distribution op name for a sampled type.
@@ -596,6 +650,49 @@ class TypeCollector:
                     f"forall (a b : {name}), {add_op} a b = {add_op} b a",
                 )
             )
+            # Commutative-ring multiplication and the additive zero. The
+            # exponent ring Z_q of a group of order q has ``*`` and ``0``;
+            # the GroupElem foundation's exponent arithmetic (e.g.
+            # ``(g^a)^b = g^(a*b)``, ``g^(x - x) = g^0``) needs them.
+            # ``mul`` is only emitted when a ModInt ``*`` was actually
+            # rendered (tracked in ``_modint_mul``); ``zero`` whenever a
+            # ModInt zero constant was needed (``_modint_zero``).
+            mul_op = _modint_mul_name(name)
+            zero_op = _modint_zero_name(name)
+            if name in self._modint_mul:
+                decls.append(ec_ast.OpDecl(mul_op, f"{name} -> {name} -> {name}"))
+                decls.append(
+                    ec_ast.Axiom(
+                        f"{mul_op}_comm",
+                        f"forall (a b : {name}), {mul_op} a b = {mul_op} b a",
+                    )
+                )
+            if name in self._modint_zero:
+                decls.append(ec_ast.OpDecl(zero_op, name))
+                decls.append(
+                    ec_ast.Axiom(
+                        f"{sub_op}_self",
+                        f"forall (a : {name}), {sub_op} a a = {zero_op}",
+                    )
+                )
+        # GroupElem<G> types: an abstract finite abelian cyclic group --
+        # the multiplicative analogue of the ModInt additive group above.
+        # ``generator``/``identity`` constants, ``mul``/``div`` group ops,
+        # and ``exp`` (group exponentiation by a ModInt<G.order> exponent).
+        # Emitted after the modint loop so the exponent type is in scope.
+        for name in self._groupelems:
+            exp_t = self._groupelem_exp[name]
+            gen = _generator_name(name)
+            ident = _identity_name(name)
+            mul = _mul_name(name)
+            div = _div_name(name)
+            exp = _exp_name(name)
+            decls.append(ec_ast.TypeDecl(name))
+            decls.append(ec_ast.OpDecl(gen, name))
+            decls.append(ec_ast.OpDecl(ident, name))
+            decls.append(ec_ast.OpDecl(mul, f"{name} -> {name} -> {name}"))
+            decls.append(ec_ast.OpDecl(div, f"{name} -> {name} -> {name}"))
+            decls.append(ec_ast.OpDecl(exp, f"{name} -> {exp_t} -> {name}"))
         # Distributions over known top-level abstract types (declared
         # elsewhere via ``type X.``): emit the distribution op and
         # lossless/funiform/full axioms. The type declaration itself is
@@ -939,6 +1036,52 @@ def _sub_name(modint_name: str) -> str:
     return f"sub{suffix}"
 
 
+def _modint_mul_name(modint_name: str) -> str:
+    """Ring ``*`` op for a ModInt type (``modint_q`` -> ``mmul_q``).
+
+    Prefixed ``mmul`` (not ``mul``) so it never collides with the
+    GroupElem multiplicative op ``mul_<G>``.
+    """
+    suffix = modint_name.removeprefix("modint")
+    return f"mmul{suffix}"
+
+
+def _modint_zero_name(modint_name: str) -> str:
+    """Additive zero constant for a ModInt type (``modint_q`` -> ``mzero_q``)."""
+    suffix = modint_name.removeprefix("modint")
+    return f"mzero{suffix}"
+
+
+def _generator_name(groupelem_name: str) -> str:
+    """Generator constant for a GroupElem type (``groupelem_G`` -> ``generator_G``)."""
+    suffix = groupelem_name.removeprefix("groupelem")
+    return f"generator{suffix}"
+
+
+def _identity_name(groupelem_name: str) -> str:
+    """Identity constant for a GroupElem type (``groupelem_G`` -> ``identity_G``)."""
+    suffix = groupelem_name.removeprefix("groupelem")
+    return f"identity{suffix}"
+
+
+def _mul_name(groupelem_name: str) -> str:
+    """Group ``*`` op for a GroupElem type (``groupelem_G`` -> ``mul_G``)."""
+    suffix = groupelem_name.removeprefix("groupelem")
+    return f"mul{suffix}"
+
+
+def _div_name(groupelem_name: str) -> str:
+    """Group ``/`` op for a GroupElem type (``groupelem_G`` -> ``div_G``)."""
+    suffix = groupelem_name.removeprefix("groupelem")
+    return f"div{suffix}"
+
+
+def _exp_name(groupelem_name: str) -> str:
+    """Group exponentiation op (``groupelem_G`` -> ``exp_G``)."""
+    suffix = groupelem_name.removeprefix("groupelem")
+    return f"exp{suffix}"
+
+
 def _function_distr_name(dom: str, codom: str) -> str:
     """Name for the uniform distribution over functions ``dom -> codom``."""
     return f"dfun_{_sanitize(dom)}_to_{_sanitize(codom)}"
@@ -992,3 +1135,38 @@ def add_name_for(ec_type: ec_ast.EcType) -> str:
 def sub_name_for(ec_type: ec_ast.EcType) -> str:
     """Exposed for the expression translator: ModInt additive ``-`` op."""
     return _sub_name(ec_type.text)
+
+
+def modint_mul_name_for(ec_type: ec_ast.EcType) -> str:
+    """Exposed for the expression translator: ModInt ring ``*`` op."""
+    return _modint_mul_name(ec_type.text)
+
+
+def modint_zero_name_for(ec_type: ec_ast.EcType) -> str:
+    """Exposed for the expression translator: ModInt additive zero."""
+    return _modint_zero_name(ec_type.text)
+
+
+def group_generator_name_for(ec_type: ec_ast.EcType) -> str:
+    """Exposed for the expression translator: group generator constant."""
+    return _generator_name(ec_type.text)
+
+
+def group_identity_name_for(ec_type: ec_ast.EcType) -> str:
+    """Exposed for the expression translator: group identity constant."""
+    return _identity_name(ec_type.text)
+
+
+def group_mul_name_for(ec_type: ec_ast.EcType) -> str:
+    """Exposed for the expression translator: group ``*`` op."""
+    return _mul_name(ec_type.text)
+
+
+def group_div_name_for(ec_type: ec_ast.EcType) -> str:
+    """Exposed for the expression translator: group ``/`` op."""
+    return _div_name(ec_type.text)
+
+
+def group_exp_name_for(ec_type: ec_ast.EcType) -> str:
+    """Exposed for the expression translator: group exponentiation op."""
+    return _exp_name(ec_type.text)

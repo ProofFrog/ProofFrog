@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from proof_frog import frog_ast
+from proof_frog.export.easycrypt import ec_ast
 from proof_frog.export.easycrypt.type_collector import TypeCollector
 
 
@@ -235,3 +236,69 @@ def test_function_emits_foundation_after_bitstring_types() -> None:
     # The bitstring types must precede the function distribution op.
     assert ordered.index("bs_a") < ordered.index("dfun_bs_a_to_bs_b")
     assert ordered.index("bs_b") < ordered.index("dfun_bs_a_to_bs_b")
+
+
+def test_translate_groupelem_type_name() -> None:
+    """GroupElem<G> registers as an abstract ``groupelem_G`` type."""
+    tc = TypeCollector()
+    ec = tc.translate_type(frog_ast.GroupElemType(frog_ast.Variable("G")))
+    assert ec.text == "groupelem_G"
+
+
+def test_groupelem_emits_multiplicative_foundation() -> None:
+    """GroupElem emission carries generator/identity constants, mul/div group
+    ops, and an exp op over the exponent ring ModInt<G.order>."""
+    tc = TypeCollector()
+    tc.translate_type(frog_ast.GroupElemType(frog_ast.Variable("G")))
+    names = {getattr(d, "name", None) for d in tc.emit()}
+    for expected in (
+        "groupelem_G",
+        "generator_G",
+        "identity_G",
+        "mul_G",
+        "div_G",
+        "exp_G",
+        # the exponent ring is auto-registered
+        "modint_G_order",
+    ):
+        assert expected in names, f"missing {expected}"
+
+
+def test_groupelem_exp_declared_after_exponent_ring() -> None:
+    """The exp op (groupelem -> modint -> groupelem) must follow its modint
+    exponent type so the signature is in scope."""
+    tc = TypeCollector()
+    tc.translate_type(frog_ast.GroupElemType(frog_ast.Variable("G")))
+    ordered = [getattr(d, "name", None) for d in tc.emit()]
+    assert ordered.index("modint_G_order") < ordered.index("exp_G")
+
+
+def test_groupelem_has_no_axioms() -> None:
+    """The GroupElem ops are uninterpreted -- no group-law axioms are emitted
+    (the algebraic chain micro-lemmas are out of the type foundation's scope,
+    and emitting unjustified axioms would enlarge the TCB)."""
+    tc = TypeCollector()
+    tc.translate_type(frog_ast.GroupElemType(frog_ast.Variable("G")))
+    axioms = [
+        getattr(d, "name", "")
+        for d in tc.emit()
+        if isinstance(d, ec_ast.Axiom)
+    ]
+    group_axioms = [a for a in axioms if a.endswith(("_G",)) and "modint" not in a]
+    assert not group_axioms, f"unexpected GroupElem axioms: {group_axioms}"
+
+
+def test_modint_ring_ops_gated_on_use() -> None:
+    """ModInt ring ``mmul``/``mzero`` are only emitted when actually rendered;
+    a purely additive ModInt keeps just add/sub."""
+    tc = TypeCollector()
+    ec = tc.translate_type(frog_ast.ModIntType(frog_ast.Variable("q")))
+    names = {getattr(d, "name", None) for d in tc.emit()}
+    assert "mmul_q" not in names
+    assert "mzero_q" not in names
+    # After noting use, both appear with their soundness axioms.
+    tc.note_modint_mul(ec)
+    tc.note_modint_zero(ec)
+    names = {getattr(d, "name", None) for d in tc.emit()}
+    for expected in ("mmul_q", "mmul_q_comm", "mzero_q", "sub_q_self"):
+        assert expected in names, f"missing {expected}"

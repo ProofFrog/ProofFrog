@@ -111,11 +111,16 @@ class StatementTranslator:
         stmts: list[ec_ast.EcStmt],
     ) -> None:
         var = _require_variable(stmt.var)
-        if stmt.the_type is None:
-            raise NotImplementedError(
-                "Sample without type annotation not supported in Phase 1 skeleton"
-            )
-        ec_type = self._types.translate_type(stmt.the_type)
+        # A sample's distribution type is its declared annotation when
+        # present. The engine's canonicalization can inline an assignment
+        # into the sample (e.g. ``sk = a`` folded into ``a <$ d`` yields
+        # ``sk <$ d`` with no annotation); in that case the sampled
+        # variable's own type is the distribution type, which ``type_of``
+        # recovers from the module-field / local type map.
+        the_type = stmt.the_type
+        if the_type is None:
+            the_type = self._exprs.type_of(stmt.var)
+        ec_type = self._types.translate_type(the_type)
         decls.append(ec_ast.VarDecl(var.name, ec_type))
         distr = self._types.distr_for(ec_type)
         stmts.append(ec_ast.Sample(var.name, distr))

@@ -67,8 +67,9 @@ Key modules:
   abstract constants. **The group-law ops are uninterpreted -- no axioms
   emitted** (the algebraic correctness chain is out of the type
   foundation's scope; emitting them unjustified would enlarge the TCB).
-  Unblocks `ElGamal_Correctness` to *export* and EC-compile (⛔, 1 admit:
-  the per-oracle `hop_*_test` lemma's precondition is only `={m} /\
+  Unblocks `ElGamal_Correctness` to *export* and EC-accept with 1 admit
+  (dashboard ⚠, not ⛔: EC accepts the file; the per-oracle `hop_*_test`
+  lemma's precondition is only `={m} /\
   pk{1}=pk{2}` and lacks the `pk = g^sk` invariant `initialize`
   establishes, so the test-oracle equivalence can't close in isolation;
   the engine's flat-state chain *does* inline `pk = g^sk`, but wiring that

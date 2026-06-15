@@ -41,6 +41,27 @@ def test_translate_variable() -> None:
     assert tr.translate(frog_ast.Variable("x")) == "x"
 
 
+def test_translate_random_function_application() -> None:
+    """``RF(rest)`` -- application of a sampled random function -- renders as
+    EC's juxtaposition application ``RF rest``."""
+    tr = _make()
+    call = frog_ast.FuncCall(frog_ast.Variable("RF"), [frog_ast.Variable("rest")])
+    assert tr.translate(call) == "RF rest"
+
+
+def test_field_rename_applies_to_references() -> None:
+    """An uppercase-initial field (EC requires lowercase-initial module
+    variables) is renamed consistently at its reference sites."""
+    types = TypeCollector()
+
+    def _no_type(e: frog_ast.Expression) -> frog_ast.Type:
+        raise KeyError(e)
+
+    tr = ExpressionTranslator(types, _no_type, field_renames={"RF": "rF"})
+    call = frog_ast.FuncCall(frog_ast.Variable("RF"), [frog_ast.Variable("rest")])
+    assert tr.translate(call) == "rF rest"
+
+
 def test_translate_boolean_literal() -> None:
     tr = _make()
     assert tr.translate(frog_ast.Boolean(True)) == "true"

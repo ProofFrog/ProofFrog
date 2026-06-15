@@ -364,13 +364,21 @@ class ModuleTranslator:
         module_param_types = {param.name: param_type_name}
         emitted_type = emitted_param_type or param_type_name
         field_types = {fld.name: fld.type for fld in game.fields}
+        field_renames = _field_renames_for(game.fields)
         procs = [
-            self._translate_method(method, module_param_types, field_types=field_types)
+            self._translate_method(
+                method,
+                module_param_types,
+                field_types=field_types,
+                field_renames=field_renames,
+            )
             for method in game.methods
         ]
         module_vars = (
             [
-                ec_ast.VarDecl(fld.name, self._types.translate_type(fld.type))
+                ec_ast.VarDecl(
+                    _ec_field_name(fld.name), self._types.translate_type(fld.type)
+                )
                 for fld in game.fields
             ]
             if emit_state_vars
@@ -424,15 +432,21 @@ class ModuleTranslator:
             if p.name in param_module_types
         ]
         field_types = {fld.name: fld.type for fld in game.fields}
+        field_renames = _field_renames_for(game.fields)
         procs = [
             self._translate_method(
-                method, param_primitive_types, field_types=field_types
+                method,
+                param_primitive_types,
+                field_types=field_types,
+                field_renames=field_renames,
             )
             for method in game.methods
         ]
         module_vars = (
             [
-                ec_ast.VarDecl(fld.name, self._types.translate_type(fld.type))
+                ec_ast.VarDecl(
+                    _ec_field_name(fld.name), self._types.translate_type(fld.type)
+                )
                 for fld in game.fields
             ]
             if emit_state_vars
@@ -486,15 +500,21 @@ class ModuleTranslator:
                 f"got parameters {game.parameters}"
             )
         field_types = {fld.name: fld.type for fld in game.fields}
+        field_renames = _field_renames_for(game.fields)
         procs = [
             self._translate_method(
-                method, external_module_types, field_types=field_types
+                method,
+                external_module_types,
+                field_types=field_types,
+                field_renames=field_renames,
             )
             for method in game.methods
         ]
         module_vars = (
             [
-                ec_ast.VarDecl(fld.name, self._types.translate_type(fld.type))
+                ec_ast.VarDecl(
+                    _ec_field_name(fld.name), self._types.translate_type(fld.type)
+                )
                 for fld in game.fields
             ]
             if emit_state_vars
@@ -585,14 +605,21 @@ class ModuleTranslator:
             module_var_aliases[src] = dst
 
         module_vars = [
-            ec_ast.VarDecl(fld.name, self._types.translate_type(fld.type))
+            ec_ast.VarDecl(
+                _ec_field_name(fld.name), self._types.translate_type(fld.type)
+            )
             for fld in reduction.fields
         ]
         field_types = {fld.name: fld.type for fld in reduction.fields}
+        field_renames = _field_renames_for(reduction.fields)
 
         procs = [
             self._translate_method(
-                method, module_param_types, module_var_aliases, field_types=field_types
+                method,
+                module_param_types,
+                module_var_aliases,
+                field_types=field_types,
+                field_renames=field_renames,
             )
             for method in reduction.methods
         ]
@@ -1003,12 +1030,13 @@ class ModuleTranslator:
         ret = self._translate_param_type(sig.return_type)
         return ec_ast.ProcSig(sig.name.lower(), params, ret)
 
-    def _translate_method(
+    def _translate_method(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         method: frog_ast.Method,
         module_param_types: dict[str, str],
         module_var_aliases: dict[str, str] | None = None,
         field_types: dict[str, frog_ast.Type] | None = None,
+        field_renames: dict[str, str] | None = None,
     ) -> ec_ast.Proc:
         sig = method.signature
         ec_params = [
@@ -1045,7 +1073,9 @@ class ModuleTranslator:
                     type_map[name] = resolved
 
         type_of = self._type_of_factory(type_map, module_param_types)
-        exprs = expr_translator.ExpressionTranslator(self._types, type_of)
+        exprs = expr_translator.ExpressionTranslator(
+            self._types, type_of, field_renames=field_renames
+        )
         stmts = stmt_translator.StatementTranslator(
             self._types, exprs, module_var_aliases=module_var_aliases
         )
@@ -1070,6 +1100,31 @@ class ModuleTranslator:
 
     def _translate_param_type(self, t: frog_ast.Type) -> ec_ast.EcType:
         return self._types.translate_type(t)
+
+
+def _ec_field_name(name: str) -> str:
+    """EC module-global variables must be lowercase-initial.
+
+    A FrogLang game field with an uppercase initial (e.g. the random
+    function ``RF``) would otherwise emit ``var RF : ...``, which EC's
+    lexer rejects (a module variable is an ``lident``). Lowercasing only
+    the first character keeps the rename minimal and collision-resistant
+    (``RF`` -> ``rF``); an already-lowercase field is returned unchanged,
+    so the common case (and every existing export) is byte-identical.
+    """
+    if name and name[0].isupper():
+        return name[0].lower() + name[1:]
+    return name
+
+
+def _field_renames_for(game_fields: list[frog_ast.Field]) -> dict[str, str]:
+    """Rename map for fields whose EC identifier differs from the FrogLang
+    name (only uppercase-initial fields); empty for the all-lowercase case."""
+    return {
+        fld.name: _ec_field_name(fld.name)
+        for fld in game_fields
+        if _ec_field_name(fld.name) != fld.name
+    }
 
 
 def _seed_type_map(

@@ -1029,6 +1029,14 @@ def export_proof_file(proof_path: str) -> str:
                     key = (module_param_types[obj.name], e.func.name)
                     if key in method_return_types:
                         return method_return_types[key]
+            if isinstance(e, frog_ast.FieldAccess) and e.name in (
+                "generator",
+                "identity",
+            ):
+                # ``G.generator`` / ``G.identity`` are the group's
+                # distinguished elements -- typed ``GroupElem<G>`` so the
+                # GroupElem foundation renders them as abstract constants.
+                return frog_ast.GroupElemType(e.the_object)
             if isinstance(e, frog_ast.Slice):
                 # A slice's static type is ``BitString<end - start>``
                 # regardless of the source bitstring's length.

@@ -66,3 +66,104 @@ def test_translate_boolean_literal() -> None:
     tr = _make()
     assert tr.translate(frog_ast.Boolean(True)) == "true"
     assert tr.translate(frog_ast.Boolean(False)) == "false"
+
+
+def _binop(
+    op: frog_ast.BinaryOperators, left: frog_ast.Expression, right: frog_ast.Expression
+) -> frog_ast.BinaryOperation:
+    return frog_ast.BinaryOperation(op, left, right)
+
+
+def test_translate_group_multiplication() -> None:
+    """``*`` on GroupElem operands renders as the abstract ``mul_G`` op."""
+    g = frog_ast.GroupElemType(frog_ast.Variable("G"))
+    tr = _make({"a": g, "b": g})
+    expr = _binop(
+        frog_ast.BinaryOperators.MULTIPLY,
+        frog_ast.Variable("a"),
+        frog_ast.Variable("b"),
+    )
+    assert tr.translate(expr) == "mul_G a b"
+
+
+def test_translate_group_division() -> None:
+    """``/`` on GroupElem operands renders as ``div_G``."""
+    g = frog_ast.GroupElemType(frog_ast.Variable("G"))
+    tr = _make({"a": g, "b": g})
+    expr = _binop(
+        frog_ast.BinaryOperators.DIVIDE,
+        frog_ast.Variable("a"),
+        frog_ast.Variable("b"),
+    )
+    assert tr.translate(expr) == "div_G a b"
+
+
+def test_translate_group_exponentiation() -> None:
+    """``g ^ x`` (GroupElem base, ModInt exponent) renders as ``exp_G``."""
+    g = frog_ast.GroupElemType(frog_ast.Variable("G"))
+    x = frog_ast.ModIntType(frog_ast.FieldAccess(frog_ast.Variable("G"), "order"))
+    tr = _make({"a": g, "e": x})
+    expr = _binop(
+        frog_ast.BinaryOperators.EXPONENTIATE,
+        frog_ast.Variable("a"),
+        frog_ast.Variable("e"),
+    )
+    assert tr.translate(expr) == "exp_G a e"
+
+
+def test_translate_group_generator_constant() -> None:
+    """``G.generator`` renders as the abstract ``generator_G`` constant."""
+    tr = _make()
+    # type_of is consulted for the FieldAccess; supply a GroupElem type.
+    types = TypeCollector()
+
+    def type_of(e: frog_ast.Expression) -> frog_ast.Type:
+        if isinstance(e, frog_ast.FieldAccess):
+            return frog_ast.GroupElemType(frog_ast.Variable("G"))
+        raise KeyError(e)
+
+    tr = ExpressionTranslator(types, type_of)
+    gen = frog_ast.FieldAccess(frog_ast.Variable("G"), "generator")
+    assert tr.translate(gen) == "generator_G"
+
+
+def test_translate_modint_multiplication_is_ring_op() -> None:
+    """``*`` on ModInt operands (the exponent ring) renders as ``mmul_q``."""
+    q = frog_ast.ModIntType(frog_ast.Variable("q"))
+    tr = _make({"a": q, "b": q})
+    expr = _binop(
+        frog_ast.BinaryOperators.MULTIPLY,
+        frog_ast.Variable("a"),
+        frog_ast.Variable("b"),
+    )
+    assert tr.translate(expr) == "mmul_q a b"
+
+
+def test_translate_modint_zero_literal() -> None:
+    """An integer ``0`` in a ModInt subtraction position renders as the ring
+    zero ``mzero_q`` (the engine collapses ``x - x`` to a literal ``0``)."""
+    q = frog_ast.ModIntType(frog_ast.Variable("q"))
+    tr = _make({"a": q})
+    expr = _binop(
+        frog_ast.BinaryOperators.SUBTRACT,
+        frog_ast.Variable("a"),
+        frog_ast.Integer(0),
+    )
+    assert tr.translate(expr) == "sub_q a mzero_q"
+
+
+def test_translate_equality() -> None:
+    """``==`` / ``!=`` render as EC's ``=`` / ``<>``."""
+    tr = _make()
+    eq = _binop(
+        frog_ast.BinaryOperators.EQUALS,
+        frog_ast.Variable("a"),
+        frog_ast.Variable("b"),
+    )
+    assert tr.translate(eq) == "a = b"
+    ne = _binop(
+        frog_ast.BinaryOperators.NOTEQUALS,
+        frog_ast.Variable("a"),
+        frog_ast.Variable("b"),
+    )
+    assert tr.translate(ne) == "a <> b"

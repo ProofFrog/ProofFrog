@@ -613,6 +613,18 @@ class TypeCollector:
                     f"forall (a b : {name}), {xor_op} a b = {xor_op} b a",
                 )
             )
+            # Associativity: needed by the tactic for ``XOR Cancellation``
+            # when the engine reassociates ``xor a (xor b c)`` to
+            # ``xor (xor a b) c`` (e.g. DoubleOTP's chained key XOR). Not
+            # derivable from involution + commutativity, so it must be a
+            # standalone axiom; ``smt(<xor>_assoc)`` then closes the micro.
+            decls.append(
+                ec_ast.Axiom(
+                    f"{xor_op}_assoc",
+                    f"forall (a b c : {name}), "
+                    f"{xor_op} a ({xor_op} b c) = {xor_op} ({xor_op} a b) c",
+                )
+            )
         for src_name, dst_name in self._slice_ops:
             op = _slice_op_name(src_name, dst_name)
             decls.append(ec_ast.OpDecl(op, f"{src_name} -> int -> int -> {dst_name}"))

@@ -1558,12 +1558,19 @@ class ProofEngine:
 
         return reduced_game
 
-    # Takes in a game from a proof step, and returns the AST associated with that game
-    def _get_game_ast(
+    def resolve_step_game(
         self,
         challenger: frog_ast.ParameterizedGame | frog_ast.ConcreteGame,
         reduction: Optional[frog_ast.ParameterizedGame] = None,
     ) -> frog_ast.Game:
+        """Resolve a proof step's game to an inlined AST.
+
+        Instantiates the challenger, composes the reduction when given, and
+        inlines method calls to a fixed point. Public seam shared by the
+        prover, the diagnostic CLI/web helpers, and the LaTeX exporter so they
+        all use one resolution path. Names are *not* canonicalized (use
+        ``canonicalize_game`` for that).
+        """
         game: frog_ast.Game
         if isinstance(challenger, frog_ast.ConcreteGame):
             game_file = self.definition_namespace[challenger.game.name]
@@ -1580,7 +1587,7 @@ class ProofEngine:
 
         lookup = copy.deepcopy(self.method_lookup)
         if reduction:
-            reduction_ast = self._get_game_ast(reduction)
+            reduction_ast = self.resolve_step_game(reduction)
             assert isinstance(reduction_ast, frog_ast.Reduction)
             # Ensure independent methods list before mutation
             game = copy.copy(game)
@@ -1611,6 +1618,14 @@ class ProofEngine:
                 stacklevel=2,
             )
         return game
+
+    # Takes in a game from a proof step, and returns the AST associated with that game
+    def _get_game_ast(
+        self,
+        challenger: frog_ast.ParameterizedGame | frog_ast.ConcreteGame,
+        reduction: Optional[frog_ast.ParameterizedGame] = None,
+    ) -> frog_ast.Game:
+        return self.resolve_step_game(challenger, reduction)
 
     def get_method_lookup(self) -> None:
         self.method_lookup = {}

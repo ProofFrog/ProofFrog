@@ -266,6 +266,79 @@ def describe(file: str, json_output: bool) -> None:
         sys.exit(1)
 
 
+@cli.command(name="export-latex")
+@click.argument("file")
+@click.option(
+    "--output",
+    "-o",
+    default=None,
+    help="Output path for the .tex file (default: alongside the input, .tex extension).",
+)
+@click.option(
+    "--backend",
+    default="cryptocode",
+    type=click.Choice(["cryptocode"]),
+    help="Pseudocode package backend (only 'cryptocode' in v1).",
+)
+@click.option(
+    "--composition",
+    default="symbolic",
+    type=click.Choice(["symbolic", "inlined"]),
+    help="How reduction-based steps render (default: symbolic).",
+)
+@click.option(
+    "--standalone/--no-standalone",
+    default=True,
+    help=(
+        "Emit a complete document (default) or an \\input-able fragment "
+        "for inclusion in a larger LaTeX file."
+    ),
+)
+@click.option(
+    "--diff/--no-diff",
+    default=True,
+    help=(
+        "Highlight, in each game of a proof, the lines that changed relative "
+        "to the previous game (default: on; proof files only)."
+    ),
+)
+@click.option(
+    "--diff-style",
+    default="box",
+    type=click.Choice(["box", "color"]),
+    help="How a changed line renders: gray box (default) or colored text.",
+)
+def export_latex(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    file: str,
+    output: str | None,
+    backend: str,
+    composition: str,
+    standalone: bool,
+    diff: bool,
+    diff_style: str,
+) -> None:
+    """Export a FrogLang file (.primitive, .scheme, .game, .proof) to LaTeX."""
+    # pylint: disable=import-outside-toplevel
+    from .export.latex.exporter import export_file
+
+    try:
+        source = export_file(
+            file,
+            backend_name=backend,
+            composition=composition,
+            standalone=standalone,
+            diff=diff,
+            diff_style=diff_style,
+        )
+    except (frog_parser.ParseError, FileNotFoundError, ValueError) as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
+
+    out_path = output if output is not None else str(Path(file).with_suffix(".tex"))
+    Path(out_path).write_text(source, encoding="utf-8")
+    click.echo(f"Wrote {out_path}")
+
+
 @cli.command("step-detail")
 @click.argument("file")
 @click.argument("step_index", type=click.INT)

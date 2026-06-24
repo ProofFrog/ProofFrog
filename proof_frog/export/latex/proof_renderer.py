@@ -1,0 +1,388 @@
+"""Render a ``.proof`` file to a self-contained LaTeX document."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from ... import frog_ast
+from . import ir
+from .backends.base import Backend
+from .expr_renderer import _looks_like_algorithm_name
+from .macros import MacroRegistry
+from .module_renderer import ModuleRenderer
+
+if TYPE_CHECKING:
+    from .proof_context import Hop, ProofContext
+
+
+@dataclass
+class _SymbolicHeading:
+    """Structured pieces of a symbolic game heading ``G_i = challenger [o R]``.
+
+    Kept alongside each figure so adjacent headings can be diffed component-wise
+    (challenger / reduction) and the changed part highlighted -- the symbolic
+    analogue of the body-line diff used in inlined mode.
+    """
+
+    index: int
+    challenger_tex: str
+    reduction_tex: str | None
+    sections_ref: bool  # start/end step: heading-only, references shared sections
+
+
+def render_proof(
+    ctx: "ProofContext",
+    backend: Backend,
+    macros: MacroRegistry,
+    renderer: ModuleRenderer,
+    composition: str = "symbolic",
+    standalone: bool = True,
+    diff: bool = True,
+) -> str:
+    """Render a proof file to LaTeX.
+
+    ``ctx`` is a ``ProofContext`` that exposes game steps and resolution.
+    ``composition`` is either ``"symbolic"`` (default) or ``"inlined"``.
+    ``standalone`` selects a full document (default) or an ``\\input`` fragment.
+    ``diff`` (default True) highlights, in each game, the lines that changed
+    relative to the previous game (D1).
+
+    The body is rendered first so macro registration populates the preamble,
+    then the document (or fragment) is assembled.
+    """
+    # pylint: disable=import-outside-toplevel
+    from .exporter import assemble
+
+    # Make proof-level let types visible to operand disambiguation (`+`/`||`)
+    # inside reduction / intermediate-game bodies.
+    renderer.base_name_types = ctx.let_types()
+    body_parts = [
+        _definitions_section(ctx, renderer),
+        _construction_section(ctx, renderer),
+        _theorem_section(ctx, renderer),
+        _games_sequence(ctx, renderer, backend, composition, diff),
+    ]
+    body = "\n\n".join(p for p in body_parts if p)
+    return assemble(backend, macros, body, standalone)
+
+
+def _definitions_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:
+    parts = [r"\section*{Definitions}"]
+    for game_file in ctx.security_game_files():
+        parts.append(
+            renderer.render_game_file_games(
+                game_file.games, experiment_name=game_file.get_export_name()
+            )
+        )
+    return "\n\n".join(parts)
+
+
+def _construction_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:
+    parts = [r"\section*{Construction}"]
+    construction_names: set[str] = set()
+    for name, root in ctx.let_constructions():
+        construction_names.add(name)
+        if isinstance(root, frog_ast.Scheme):
+            parts.append(renderer.render_scheme(root))
+        elif isinstance(root, frog_ast.Primitive):
+            parts.append(renderer.render_primitive(root))
+    # Remaining lets (e.g. `Group G;`, which is a built-in type rather than a
+    # scheme/primitive body) are listed as a typed definition list, matching
+    # the v1 construction style so identifiers like `\G` still appear.
+    others = [let for let in ctx.proof_file.lets if let.name not in construction_names]
+    if others:
+        lines = [r"\begin{itemize}"]
+        for let in others:
+            if _looks_like_algorithm_name(let.name):
+                name_tex = renderer.macros.register_algorithm(let.name)
+            else:
+                name_tex = renderer.expr.render(frog_ast.Variable(let.name))
+            lines.append(rf"  \item ${name_tex} : {renderer.types.render(let.type)}$")
+        lines.append(r"\end{itemize}")
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts)
+
+
+def _render_game_ref(
+    game: frog_ast.Expression,
+    renderer: ModuleRenderer,
+    *,
+    as_notion: bool,
+) -> str:
+    """Render a ParameterizedGame / ConcreteGame as a LaTeX reference.
+
+    ``as_notion`` registers the head name via the security-notion macro
+    (underscores -> hyphens); otherwise via the algorithm macro. Arguments
+    may be Expressions or Types, so each is dispatched accordingly.
+    """
+    if isinstance(game, frog_ast.ConcreteGame):
+        head = _render_game_ref(game.game, renderer, as_notion=as_notion)
+        side = renderer.macros.register_algorithm(game.which)
+        return f"{head}.{side}"
+    if isinstance(game, frog_ast.ParameterizedGame):
+        if as_notion:
+            head = renderer.macros.register_security_notion(game.name)
+        else:
+            head = renderer.macros.register_algorithm(game.name)
+        if not game.args:
+            return head
+        rendered_args = [_render_game_arg(a, renderer) for a in game.args]
+        return f"{head}({', '.join(rendered_args)})"
+    return renderer.expr.render(game)
+
+
+def _render_game_arg(arg: object, renderer: ModuleRenderer) -> str:
+    # Algorithm-like variable args (scheme/group instances such as `G`, `E`)
+    # are macroified, matching ModuleRenderer._render_param_name, so a game
+    # reference reads `\DDH(\G)` rather than `\DDH(G)`.
+    # NOTE: Variable multiply-inherits both Expression and Type, so it
+    # satisfies both isinstance checks below and must be tested first. A pure
+    # Type (e.g. GroupElemType) is not an Expression, so the Type check must
+    # precede the Expression check. Order: Variable -> Type -> Expression.
+    if isinstance(arg, frog_ast.Variable) and _looks_like_algorithm_name(arg.name):
+        return renderer.macros.register_algorithm(arg.name)
+    if isinstance(arg, frog_ast.Type):
+        return renderer.types.render(arg)
+    if isinstance(arg, frog_ast.Expression):
+        return renderer.expr.render(arg)
+    return str(arg)
+
+
+def _theorem_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:
+    hyps = [_render_game_ref(a, renderer, as_notion=True) for a in ctx.assumptions()]
+    concl = _render_game_ref(ctx.theorem(), renderer, as_notion=True)
+    if hyps:
+        joined = " and ".join(f"${h}$" for h in hyps)
+        body = (
+            f"If indistinguishability holds for {joined}, then "
+            f"indistinguishability holds for ${concl}$."
+        )
+    else:
+        body = f"Indistinguishability holds for ${concl}$."
+    return (
+        r"\begin{theorem}"
+        + "\n"
+        + body
+        + "\n"
+        + r"\end{theorem}"
+        + "\n\n"
+        + r"\noindent\textit{Proof.}"
+    )
+
+
+def _games_sequence(
+    ctx: "ProofContext",
+    renderer: ModuleRenderer,
+    backend: Backend,
+    composition: str,
+    diff: bool,
+) -> str:
+    """Render the full game sequence with hop annotations between figures.
+
+    Figures are built as IR first so the diff pass (D1) can run before the
+    backend turns the IR into LaTeX. Both modes highlight changed *body lines*
+    (``mark_diff``); symbolic mode adds two things, because there the delta also
+    lives in the heading and a reduction is often repeated verbatim:
+
+    * **inlined** -- each step is a full game; only the changed body lines are
+      highlighted.
+    * **symbolic** -- the body is a reduction (or intermediate game). Changed
+      body lines are still highlighted (``R`` vs ``Rprime`` genuinely differ),
+      *and* the changed heading component (which security game the reduction is
+      composed with) is highlighted. A reduction body that repeats the previous
+      game's verbatim is not redrawn -- its assumption-hop twin points back to
+      it (``_apply_symbolic_diff``).
+    """
+    # pylint: disable=import-outside-toplevel
+    from .diff import mark_diff
+
+    steps = ctx.game_steps()
+    hops = ctx.hop_kinds()
+    built = [
+        _step_figure_ir(ctx, step, renderer, i, composition)
+        for i, step in enumerate(steps)
+    ]
+    figures = [fig for fig, _ in built]
+    headings = [head for _, head in built]
+    if composition == "symbolic":
+        _apply_symbolic_diff(figures, headings, backend, diff)
+    elif diff:
+        for i in range(1, len(figures)):
+            mark_diff(figures[i - 1].body, figures[i].body)
+    chunks: list[str] = []
+    for i, fig in enumerate(figures):
+        if i > 0:
+            chunks.append(_hop_annotation(i, hops[i - 1], renderer))
+        chunks.append(backend.render_figure(fig))
+    return "\n\n".join(chunks)
+
+
+def _apply_symbolic_diff(
+    figures: list[ir.Figure],
+    headings: list["_SymbolicHeading | None"],
+    backend: Backend,
+    diff: bool,
+) -> None:
+    """Highlight changed body lines + heading deltas, and de-dup repeats.
+
+    Mutates ``figures`` in place. For each game (against its predecessor):
+
+    * if the body repeats the predecessor's verbatim, drop it and point back
+      (the assumption-hop twin: same reduction, different composed challenger);
+    * otherwise highlight the body lines that changed (``mark_diff``) -- e.g.
+      ``R`` vs ``Rprime`` differ line by line;
+    * (re)assemble the heading, highlighting the challenger/reduction component
+      that changed.
+
+    The body comparison uses the predecessor's *original* body, so a game still
+    diffs against the reduction drawn above it even when the intervening twin
+    was collapsed. Figures with no structured heading (the error fallback) are
+    left untouched. Skipped entirely when ``diff`` is off, so ``--no-diff``
+    draws every game in full with no highlighting.
+    """
+    if not diff:
+        return
+    # pylint: disable=import-outside-toplevel
+    from .diff import bodies_equal, mark_diff
+
+    original_bodies = [fig.body for fig in figures]
+    for i, head in enumerate(headings):
+        if head is None:
+            continue
+        prev = headings[i - 1] if i > 0 else None
+        prev_body = original_bodies[i - 1] if i > 0 else None
+        deduped_from: int | None = None
+        if figures[i].body is not None and prev_body is not None:
+            if bodies_equal(prev_body, figures[i].body):
+                figures[i].body = None
+                deduped_from = i - 1
+            else:
+                mark_diff(prev_body, figures[i].body)
+        figures[i].heading = _symbolic_heading_tex(head, prev, backend, deduped_from)
+
+
+def _symbolic_heading_tex(
+    head: "_SymbolicHeading",
+    prev: "_SymbolicHeading | None",
+    backend: Backend,
+    deduped_from: int | None,
+) -> str:
+    """Assemble the ``$G_i = ...$`` heading, highlighting changed components."""
+    challenger = head.challenger_tex
+    if prev is not None and prev.challenger_tex != challenger:
+        challenger = backend.highlight(challenger)
+    body_tex = challenger
+    if head.reduction_tex is not None:
+        reduction = head.reduction_tex
+        if prev is not None and prev.reduction_tex != reduction:
+            reduction = backend.highlight(reduction)
+        body_tex = rf"{body_tex} \circ {reduction}"
+    math = rf"$G_{{{head.index}}} = {body_tex}$"
+    if head.sections_ref:
+        return math + r"\\\textit{(see Definitions and Construction)}"
+    if deduped_from is not None:
+        return math + rf"\\\textit{{(reduction as in $G_{{{deduped_from}}}$)}}"
+    return math
+
+
+def _hop_annotation(i: int, hop: "Hop", renderer: ModuleRenderer) -> str:
+    """Render the paragraph annotation for a hop between G_{i-1} and G_i."""
+    if hop.kind == "assumption" and hop.assumption is not None:
+        ref = _render_game_ref(hop.assumption, renderer, as_notion=True)
+        reason = f"by assumption ${ref}$"
+    else:
+        reason = "interchangeable"
+    return (
+        rf"\paragraph{{Game $G_{{{i-1}}} \to G_{{{i}}}$.}} "
+        rf"({reason}) \todo{{commentary}}"
+    )
+
+
+def _step_figure_ir(
+    ctx: "ProofContext",
+    step: frog_ast.Step,
+    renderer: ModuleRenderer,
+    index: int,
+    composition: str,
+) -> tuple[ir.Figure, "_SymbolicHeading | None"]:
+    """Build the IR ``Figure`` for one game step, plus its symbolic heading.
+
+    Returning IR rather than a LaTeX string lets the caller run the diff pass
+    over adjacent games before the backend renders them. Macro registration
+    still happens here (during body construction), so the preamble is populated
+    regardless of when rendering occurs.
+
+    In symbolic mode the returned ``_SymbolicHeading`` carries the heading's
+    structured pieces; ``_apply_symbolic_diff`` assembles the final
+    ``figure.heading`` from it. In inlined mode (and on the error fallback) the
+    second element is ``None``.
+
+    On any resolution or render failure, prints a warning to stderr and emits
+    the raw step text in a ``\\pccomment`` fallback block so partial proofs
+    still export.
+    """
+    caption = f"Game $G_{{{index}}}$"
+    label = f"fig:G{index}"
+    try:
+        if composition == "inlined":
+            game = ctx.resolve_inlined(step)
+            block = renderer._method_blocks_vstack(
+                game
+            )  # pylint: disable=protected-access
+            return ir.Figure(body=block, caption=caption, label=label), None
+        # symbolic mode
+        sr = ctx.resolve_symbolic(step)
+        challenger_ref = _render_game_ref(sr.challenger, renderer, as_notion=True)
+        reduction_ref: str | None = None
+        if sr.reduction_ref is not None:
+            reduction_ref = _render_game_ref(
+                sr.reduction_ref, renderer, as_notion=False
+            )
+        head = _SymbolicHeading(
+            index=index,
+            challenger_tex=challenger_ref,
+            reduction_tex=reduction_ref,
+            sections_ref=sr.novel is None,
+        )
+        if sr.novel is not None:
+            vstack = renderer._method_blocks_vstack(
+                sr.novel
+            )  # pylint: disable=protected-access
+            # heading is assembled later by _apply_symbolic_diff from `head`.
+            return ir.Figure(body=vstack, caption=caption, label=label), head
+        # start/end step: heading only, referencing the shared sections.
+        return ir.Figure(body=None, caption=caption, label=label), head
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        import sys  # pylint: disable=import-outside-toplevel
+
+        print(f"latex-export: could not render step {index}: {exc}", file=sys.stderr)
+        return (
+            ir.Figure(
+                body=ir.ProcedureBlock(
+                    title=caption,
+                    lines=[ir.Comment(text=_latex_escape(str(step).rstrip(";")))],
+                ),
+                caption=caption,
+                label=label,
+            ),
+            None,
+        )
+
+
+_LATEX_ESC = {
+    "\\": r"\textbackslash{}",
+    "&": r"\&",
+    "%": r"\%",
+    "$": r"\$",
+    "#": r"\#",
+    "_": r"\_",
+    "{": r"\{",
+    "}": r"\}",
+    "~": r"\textasciitilde{}",
+    "^": r"\textasciicircum{}",
+}
+
+
+def _latex_escape(s: str) -> str:
+    return "".join(_LATEX_ESC.get(c, c) for c in s)

@@ -1,0 +1,22 @@
+// Fixture: tuple-destructuring bindings for LaTeX export (Part 2).
+// Left uses both the assignment form ([T..] [a, b] = call;) and the sample
+// form ([T..] [u, v] <- Type;) so the no-desugar parse path and the
+// DestructuringBinding renderer can be exercised. Right is a trivial
+// counterpart so the file is a well-formed two-sided security property.
+
+Game Left() {
+    BitString<8> Run() {
+        [BitString<8>, BitString<8>] [a, b] = Pair();
+        [BitString<8>, BitString<8>] [u, v] <- [BitString<8>, BitString<8>];
+        return a;
+    }
+}
+
+Game Right() {
+    BitString<8> Run() {
+        BitString<8> a <- BitString<8>;
+        return a;
+    }
+}
+
+export as Destructure;

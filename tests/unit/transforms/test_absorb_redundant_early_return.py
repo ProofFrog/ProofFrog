@@ -266,3 +266,79 @@ def test_negation_normalizes_inequality_to_equality() -> None:
     expected_parsed = frog_parser.parse_method(expected)
     result = AbsorbRedundantEarlyReturnTransformer().transform(parsed)
     assert result == expected_parsed
+
+
+# ---------------------------------------------------------------------------
+# RC3 determinism guard (F-111): absorbing the early-return guard duplicates
+# its negation into the intervening guards; a non-deterministic guard would
+# be re-evaluated independently, so absorption must be declined.
+# ---------------------------------------------------------------------------
+
+from proof_frog.transforms.control_flow import AbsorbRedundantEarlyReturn
+from proof_frog.transforms._base import PipelineContext as _PipelineContext
+from proof_frog.visitors import NameTypeMap as _NameTypeMap
+
+
+def _aer_ctx(**namespace):
+    return _PipelineContext(
+        variables={},
+        proof_let_types=_NameTypeMap(),
+        proof_namespace=dict(namespace),
+        subsets_pairs=[],
+    )
+
+
+def _aer_nondet_prim():
+    return frog_parser.parse_primitive_file("Primitive P(Int n) { Bool f(Int x); }")
+
+
+def _aer_det_prim():
+    return frog_parser.parse_primitive_file(
+        "Primitive D(Int n) { deterministic Bool f(Int x); }"
+    )
+
+
+def test_aer_declines_on_nondeterministic_guard() -> None:
+    """The early-return guard ``F.f(x)`` is non-deterministic; absorbing it
+    would duplicate ``!F.f(x)`` into the intervening guard as an independent
+    re-evaluation. The pass must decline."""
+    game = frog_parser.parse_game("""
+        Game G(P F, Int n) {
+            Int O(Int x, Bool q) {
+                if (F.f(x)) {
+                    return 7;
+                }
+                if (q) {
+                    return 5;
+                }
+                return 7;
+            }
+        }
+        """)
+    ctx = _aer_ctx(P=_aer_nondet_prim(), F=_aer_nondet_prim())
+    result = AbsorbRedundantEarlyReturn().apply(game, ctx)
+    assert result == game  # declined
+    assert any(
+        nm.transform_name == "Absorb Redundant Early Return" for nm in ctx.near_misses
+    )
+
+
+def test_aer_fires_on_deterministic_control() -> None:
+    """Control: a deterministic early-return guard ``D.f(x)`` is absorbed into
+    the intervening guard as usual."""
+    game = frog_parser.parse_game("""
+        Game G(D F, Int n) {
+            Int O(Int x, Bool q) {
+                if (F.f(x)) {
+                    return 7;
+                }
+                if (q) {
+                    return 5;
+                }
+                return 7;
+            }
+        }
+        """)
+    ctx = _aer_ctx(D=_aer_det_prim(), F=_aer_det_prim())
+    result = AbsorbRedundantEarlyReturn().apply(game, ctx)
+    assert result != game  # the early-return guard was absorbed

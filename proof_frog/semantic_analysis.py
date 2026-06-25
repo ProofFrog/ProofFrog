@@ -453,6 +453,14 @@ class NameResolutionVisitor(VariableTypeVisitor):
     def visit_scheme(self, scheme: frog_ast.Scheme) -> None:
         super().visit_scheme(scheme)
         self._check_duplicate_names(scheme)
+        for sample_node, method_name in _deterministic_methods_with_sampling(scheme):
+            print_error(
+                sample_node,
+                f"method '{method_name}' is declared 'deterministic' but its "
+                f"body samples randomness; a deterministic method must be "
+                f"sampling-free (same inputs must always yield the same output)",
+                self.file_name,
+            )
         if scheme.primitive_name not in self.import_namespace:
             suggestion = _suggestions.suggest_identifier(
                 scheme.primitive_name, list(self.import_namespace.keys())
@@ -2560,6 +2568,31 @@ def _ast_to_sympy(  # pylint: disable=too-many-return-statements
                 return -val
         return None
     return None
+
+
+def _deterministic_methods_with_sampling(
+    scheme: frog_ast.Scheme,
+) -> list[tuple[frog_ast.ASTNode, str]]:
+    """Find ``deterministic`` scheme methods whose bodies sample randomness.
+
+    A method annotated ``deterministic`` promises the engine that it always
+    returns the same output for the same inputs; many canonicalization passes
+    (expression aliasing, call deduplication, field hoisting) trust that promise
+    via ``has_nondeterministic_call``. A body containing a ``<-`` / ``<-uniq``
+    sample violates it, so the annotation must not be accepted. Returns a list
+    of ``(sampling_node, method_name)`` for each violation (one entry per
+    sampling statement, in source order).
+    """
+    violations: list[tuple[frog_ast.ASTNode, str]] = []
+    for method in scheme.methods:
+        if not method.signature.deterministic:
+            continue
+        sample_node = visitors.SearchVisitor[frog_ast.Statement](
+            lambda n: isinstance(n, (frog_ast.Sample, frog_ast.UniqueSample))
+        ).visit(method.block)
+        if sample_node is not None:
+            violations.append((sample_node, method.signature.name))
+    return violations
 
 
 def _check_scheme_against_primitive(

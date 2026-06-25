@@ -310,3 +310,116 @@ def test_rf_call_inside_guard_block_not_replaced() -> None:
     assert (
         result == game
     ), "Init RF call should not be replaced when guard block contains RF call"
+
+
+# --------------------------------------------------------------------------
+# RC3 determinism / purity guards (verdict vectors a, c, d).
+# --------------------------------------------------------------------------
+
+
+def _fired(source: str) -> bool:
+    """True if the pass rewrote the Initialize RF call (single pass)."""
+    game = frog_parser.parse_game(source)
+    return ChallengeExclusionRFToUniformTransformer().transform(game) != game
+
+
+def test_known_function_not_simplified() -> None:
+    """Vector (a): a function field bound by ``H = F`` (a known / standard-
+    model function) is NOT a sampled random function, so ``H(cf)`` is a fixed
+    value and must NOT be rewritten to a uniform sample."""
+    source = """
+    Game G(Int n, Function<BitString<n>, BitString<n>> F) {
+        Function<BitString<n>, BitString<n>> H;
+        BitString<n> cf;
+        BitString<n> field;
+        BitString<n> Initialize() {
+            H = F;
+            cf <- BitString<n>;
+            field = H(cf);
+            return cf;
+        }
+        BitString<n>? Query(BitString<n> param) {
+            if (param == cf) {
+                return None;
+            }
+            return H(param);
+        }
+    }
+    """
+    assert not _fired(source)
+
+
+def test_sampled_function_positive_control_fires() -> None:
+    """Positive control for vector (a): an otherwise identical game whose
+    function is genuinely SAMPLED (``H <- Function<...>``) still fires."""
+    source = """
+    Game G(Int n) {
+        Function<BitString<n>, BitString<n>> H;
+        BitString<n> cf;
+        BitString<n> field;
+        BitString<n> Initialize() {
+            H <- Function<BitString<n>, BitString<n>>;
+            cf <- BitString<n>;
+            field = H(cf);
+            return cf;
+        }
+        BitString<n>? Query(BitString<n> param) {
+            if (param == cf) {
+                return None;
+            }
+            return H(param);
+        }
+    }
+    """
+    assert _fired(source)
+
+
+def test_aliased_rf_call_not_simplified() -> None:
+    """Vector (c): an RF reachable only through a local alias ``G = H`` is
+    invisible to the by-name call-site scan, so the rewrite must decline."""
+    source = """
+    Game G(Int n) {
+        Function<BitString<n>, BitString<n>> H;
+        BitString<n> cf;
+        BitString<n> field;
+        BitString<n> Initialize() {
+            H <- Function<BitString<n>, BitString<n>>;
+            cf <- BitString<n>;
+            field = H(cf);
+            return cf;
+        }
+        BitString<n> Query(BitString<n> param) {
+            Function<BitString<n>, BitString<n>> Galias = H;
+            return Galias(param);
+        }
+    }
+    """
+    assert not _fired(source)
+
+
+def test_embedded_second_init_call_not_simplified() -> None:
+    """Vector (d): a second RF evaluation embedded in a larger Initialize
+    expression (``leak = H(cf) || cf;``) would survive the rewrite and stay
+    correlated with the sampled field, so the pass must decline."""
+    source = """
+    Game G(Int n) {
+        Function<BitString<n>, BitString<n>> H;
+        BitString<n> cf;
+        BitString<n> field;
+        BitString<2 * n> leak;
+        BitString<n> Initialize() {
+            H <- Function<BitString<n>, BitString<n>>;
+            cf <- BitString<n>;
+            field = H(cf);
+            leak = H(cf) || cf;
+            return cf;
+        }
+        BitString<n>? Query(BitString<n> param) {
+            if (param == cf) {
+                return None;
+            }
+            return H(param);
+        }
+    }
+    """
+    assert not _fired(source)

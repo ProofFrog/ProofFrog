@@ -599,3 +599,86 @@ def test_unreachable_transformer(
     transformed_ast = RemoveUnreachableTransformer(method_ast).transform(method_ast)
     print("TRANSFORMED: ", transformed_ast)
     assert expected_ast == transformed_ast
+
+
+def _count_ifs(node) -> int:
+    from proof_frog import frog_ast
+
+    count = 0
+    stack = [node]
+    seen: set[int] = set()
+    while stack:
+        n = stack.pop()
+        if id(n) in seen:
+            continue
+        seen.add(id(n))
+        if isinstance(n, frog_ast.IfStatement):
+            count += 1
+        if isinstance(n, frog_ast.ASTNode):
+            for attr in vars(n).values():
+                if isinstance(attr, frog_ast.ASTNode):
+                    stack.append(attr)
+                elif isinstance(attr, (list, tuple)):
+                    stack.extend(a for a in attr if isinstance(a, frog_ast.ASTNode))
+    return count
+
+
+def test_remove_unreachable_nested_element_write_bumps_version() -> None:
+    """RC1 / F-104: a nested element write `M[0][0] = 0` mutates `M[0][0]`,
+    so the second `if (M[0][0] == 0)` is a fresh test, not a dead duplicate
+    of the first.  A depth-1-only write scan left `M` looking unmodified and
+    Case-B dedup wrongly deleted the reachable second if."""
+    method = frog_parser.parse_method(
+        """
+        Int O(Map<Int, Map<Int, Int>> M) {
+            if (M[0][0] == 0) { return 1; }
+            M[0][0] = 0;
+            if (M[0][0] == 0) { return 2; }
+            return 3;
+        }
+        """
+    )
+    transformed = RemoveUnreachableTransformer(method).transform(method)
+    assert _count_ifs(transformed) == 2, (
+        f"second if wrongly deleted after nested element write:\n{transformed}"
+    )
+
+
+def test_remove_unreachable_unique_sample_bumps_version() -> None:
+    """RC1: a `<-uniq` re-sample of a condition variable mutates it, so a
+    later structurally identical condition is not a dead duplicate.  The
+    write scan must recognise `UniqueSample.var` as a write."""
+    method = frog_parser.parse_method(
+        """
+        Int O() {
+            BitString<2> x <- BitString<2>;
+            if (x == 0b00) { return 1; }
+            x <-uniq[{x}] BitString<2>;
+            if (x == 0b00) { return 2; }
+            return 3;
+        }
+        """
+    )
+    transformed = RemoveUnreachableTransformer(method).transform(method)
+    assert _count_ifs(transformed) == 2, (
+        f"second if wrongly deleted after <-uniq re-sample:\n{transformed}"
+    )
+
+
+def test_remove_unreachable_still_dedups_genuine_duplicate() -> None:
+    """Positive control: with NO intervening write, two identical
+    conditions are genuinely redundant and the second must still be
+    removed (the version-tracking fix must not over-preserve)."""
+    method = frog_parser.parse_method(
+        """
+        Int O(Int x) {
+            if (x == 0) { return 1; }
+            if (x == 0) { return 2; }
+            return 3;
+        }
+        """
+    )
+    transformed = RemoveUnreachableTransformer(method).transform(method)
+    assert _count_ifs(transformed) == 1, (
+        f"genuinely dead duplicate if was not removed:\n{transformed}"
+    )

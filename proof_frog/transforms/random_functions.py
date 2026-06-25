@@ -21,7 +21,13 @@ from dataclasses import dataclass, field
 from sympy import Rational, Symbol, simplify as sympy_simplify
 
 from .. import frog_ast
-from ..visitors import BlockTransformer, SearchVisitor, ReplaceTransformer, Transformer
+from ..visitors import (
+    BlockTransformer,
+    SearchVisitor,
+    ReplaceTransformer,
+    Transformer,
+    lvalue_base_name,
+)
 from ._base import (
     TransformPass,
     PipelineContext,
@@ -75,9 +81,13 @@ def _exclusion_set_modified(game: frog_ast.Game, set_name: str) -> bool:
 
     Returns True if a problematic modification is found.
     """
-    # RF.domain sets are implicitly maintained by the RF's semantics.
-    # The RF initialization (Sample) is not a modification.
-    if "." in set_name:
+    # An ``RF.domain`` exclusion set is implicitly maintained by the RF's
+    # own semantics (querying ``RF(r)`` adds ``r`` to ``RF.domain``), so an
+    # explicit assignment is neither expected nor needed -- exempt it.  But
+    # only ``.domain`` is auto-maintained: any OTHER dotted set (e.g. a plain
+    # field accessed as ``obj.field``) must still be checked for an explicit
+    # modification that would break the implicit-maintenance assumption (F-020).
+    if set_name.endswith(".domain"):
         return False
 
     def _is_set_assign(node: frog_ast.ASTNode) -> bool:
@@ -86,25 +96,76 @@ def _exclusion_set_modified(game: frog_ast.Game, set_name: str) -> bool:
         ):
             return False
         var = node.var
-        # Direct assignment: S = ...
-        if isinstance(var, frog_ast.Variable) and var.name == set_name:
+        # Direct assignment: S = ...  (covers both a bare ``S`` and a dotted
+        # ``obj.field`` whose l-value base name matches the set).
+        target_name = _get_unique_set_name(var)
+        if target_name == set_name:
             # Typed declaration (field initializer) is OK — that's the
             # initial empty set.  Untyped assignment is a modification.
             if isinstance(node, frog_ast.Assignment) and node.the_type is not None:
                 return False
             return True
-        # Element assignment: S[k] = ...
-        if isinstance(var, frog_ast.ArrayAccess) and isinstance(
-            var.the_array, frog_ast.Variable
-        ):
-            if var.the_array.name == set_name:
-                return True
+        # Element/field-element assignment: S[k] = ... or obj.field[k] = ...
+        base = lvalue_base_name(var)
+        if base is not None and (base == set_name or set_name.startswith(base + ".")):
+            return True
         return False
 
     for method in game.methods:
         if SearchVisitor(_is_set_assign).visit(method.block) is not None:
             return True
     return False
+
+
+def _rf_value_escapes(game: frog_ast.Game, rf_name: str) -> bool:
+    """True if the function field *rf_name* appears anywhere other than a
+    safe position, i.e. it may be copied/passed and evaluated through an
+    alias that the call-site analysis cannot see (F-019).
+
+    Safe positions (each consumes one ``Variable(rf_name)`` occurrence):
+      - the ``func`` of a ``FuncCall`` (a direct call -- guards are checked
+        elsewhere);
+      - the ``the_object`` of a ``FieldAccess`` (a property like ``RF.domain``,
+        which reads metadata, not the function value);
+      - the l-value target of its own initialization (``RF <- Function<...>``).
+
+    Any *other* occurrence -- a bare copy ``g = RF``, an argument ``f(RF)``, a
+    set/tuple element -- lets the function value escape: an unguarded
+    evaluation through the alias would survive while a guarded site is
+    rewritten to an independent sample, breaking same-input consistency.
+    """
+    counts = {"total": 0, "calls": 0, "field_access": 0, "init_target": 0}
+
+    def visit(node: frog_ast.ASTNode) -> bool:
+        if isinstance(node, frog_ast.Variable) and node.name == rf_name:
+            counts["total"] += 1
+        if (
+            isinstance(node, frog_ast.FuncCall)
+            and isinstance(node.func, frog_ast.Variable)
+            and node.func.name == rf_name
+        ):
+            counts["calls"] += 1
+        if (
+            isinstance(node, frog_ast.FieldAccess)
+            and isinstance(node.the_object, frog_ast.Variable)
+            and node.the_object.name == rf_name
+        ):
+            counts["field_access"] += 1
+        if (
+            isinstance(
+                node,
+                (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample),
+            )
+            and isinstance(node.var, frog_ast.Variable)
+            and node.var.name == rf_name
+        ):
+            counts["init_target"] += 1
+        return False
+
+    for method in game.methods:
+        SearchVisitor(visit).visit(method.block)
+    safe = counts["calls"] + counts["field_access"] + counts["init_target"]
+    return counts["total"] > safe
 
 
 def _analyze_rf_eligibility(
@@ -121,6 +182,13 @@ def _analyze_rf_eligibility(
 
     for method in game.methods:
         _analyze_block(method.block, analysis, rf_types, field_names)
+
+    # Post-analysis: reject any RF whose function value escapes to a position
+    # the call-site walk cannot see (a copy/alias/argument), which could carry
+    # an unguarded evaluation (F-019).
+    for rf_name, rf_analysis in analysis.items():
+        if rf_analysis.eligible and _rf_value_escapes(game, rf_name):
+            rf_analysis.eligible = False
 
     # Post-analysis: reject RFs where any argument variable is used more
     # than once across call sites (RF is a function, so same input must
@@ -389,6 +457,30 @@ class UniqueRFSimplification(TransformPass):
             name: rf_types[name] for name, result in analysis.items() if result.eligible
         }
 
+        # Near-miss: an RF that has a guarded call but escapes via a copy /
+        # argument / alias cannot be soundly simplified (F-019).
+        if ctx is not None:
+            for rf_name, result in analysis.items():
+                if not result.eligible and _rf_value_escapes(game, rf_name):
+                    ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Unique RF Simplification",
+                            reason=(
+                                f"Random function '{rf_name}' not simplified: its "
+                                "function value escapes (copied, aliased, or passed "
+                                "as an argument), so an unguarded evaluation may "
+                                "survive"
+                            ),
+                            location=None,
+                            suggestion=(
+                                "Avoid copying or passing the random function "
+                                "value; call it directly at each use site"
+                            ),
+                            variable=rf_name,
+                            method=None,
+                        )
+                    )
+
         if not eligible:
             return game
 
@@ -442,11 +534,16 @@ def _rf_call_in_loop(block: frog_ast.Block, rf_name: str) -> bool:
 
 
 def _count_rf_calls(block: frog_ast.Block, rf_name: str) -> tuple[int, int]:
-    """Count RF calls and non-call references to *rf_name* in a block.
+    """Count RF calls and field-access references to *rf_name* in a block.
 
     Returns ``(call_count, field_access_count)``.  Field accesses are
     references like ``RF.domain`` that prevent simplification.  The
     ``Variable("RF")`` inside ``FuncCall(RF, x)`` is not counted separately.
+
+    NOTE: ``field_access_count`` is *only* the ``RF.domain`` style references.
+    A bare-variable copy (``RF2 = RF``) or argument pass (``f(RF)``) is NOT
+    counted here; callers that need the complete non-call reference set must
+    use :func:`_count_variable_refs` (``total occurrences - call_count``).
     """
     counts: list[int] = [0, 0]  # [calls, field_accesses]
 
@@ -515,7 +612,16 @@ class LocalRFToUniformTransformer(BlockTransformer):
 
             remaining = frog_ast.Block(block.statements[sample_idx + 1 :])
 
-            call_count, other_ref_count = _count_rf_calls(remaining, rf_name)
+            # The rewrite is sound only if the RF is evaluated exactly once and
+            # never otherwise referenced. ``_count_rf_calls`` reports only
+            # ``RF.domain``-style field accesses; a bare-variable copy
+            # (``RF2 = RF``), an argument pass (``f(RF)``), or a set/tuple
+            # element would let the function value escape and be evaluated a
+            # second time. Use the complete reference count: every
+            # ``Variable(rf_name)`` occurrence that is not the ``func`` position
+            # of a counted call is a blocking non-call reference (F-026).
+            call_count, _ = _count_rf_calls(remaining, rf_name)
+            other_ref_count = _count_variable_refs(remaining, rf_name) - call_count
 
             if call_count != 1 or other_ref_count > 0:
                 if self.ctx is not None and call_count > 0:
@@ -2140,6 +2246,18 @@ def _match_idiom_suffix(
     if not _expr_references_any(key_expr, param_names):
         return None
 
+    # (F-005) The key expression must not read the map itself.  A
+    # self-referential key such as ``(k in M)`` is history-dependent: the
+    # assign-site write ``M[key] = x`` changes the state ``key_expr`` reads on
+    # later calls, so the three structural key occurrences no longer evaluate
+    # identically and the collapsed ``return M(key);`` cannot reproduce the
+    # behaviour (and the output ``M(k in M)`` is ill-typed besides).  The
+    # if-condition's ``in M`` and the return/assign ``M[...]`` map occurrences
+    # are matched separately by ``_is_idiom_if_expr``; this guard targets
+    # references to ``M`` *inside* ``key_expr`` only.
+    if _references_map(key_expr, map_name):
+        return None
+
     # Purity: if any embedded FuncCall is non-deterministic, rewriting the
     # three occurrences of the key into one is unsound.
     if ctx is not None and has_nondeterministic_call(
@@ -2161,12 +2279,35 @@ def _match_idiom_suffix(
 
 
 def _references_map(node: frog_ast.ASTNode, map_name: str) -> bool:
-    """Return True if *node* syntactically references ``Variable(map_name)``."""
+    """Return True if *node* syntactically references the map field, whether
+    spelled as a bare ``Variable(map_name)`` or as a dotted
+    ``FieldAccess(_, map_name)`` (e.g. ``this.M``).
+
+    Both spellings denote the same field, so a node-kind-incomplete scan that
+    matched only ``Variable`` let dotted out-of-idiom uses such as
+    ``this.M[k] = v;`` evade the lazy-map preconditions (F-005/F-006)."""
 
     def matcher(n: frog_ast.ASTNode) -> bool:
-        return isinstance(n, frog_ast.Variable) and n.name == map_name
+        return (isinstance(n, frog_ast.Variable) and n.name == map_name) or (
+            isinstance(n, frog_ast.FieldAccess) and n.name == map_name
+        )
 
     return SearchVisitor(matcher).visit(node) is not None
+
+
+def _lvalue_targets_map(target: frog_ast.ASTNode, map_name: str) -> bool:
+    """Return True if assignment l-value *target* writes the map field, peeling
+    element/slice subscripts so that ``M``, ``M[k]``, ``this.M`` and
+    ``this.M[k]`` all count.  The dotted spellings (``FieldAccess``) were
+    invisible to the old ``Variable``/``ArrayAccess(Variable)``-only check,
+    letting ``Initialize`` pre-populate the map undetected (F-006)."""
+    while isinstance(target, (frog_ast.ArrayAccess, frog_ast.Slice)):
+        target = target.the_array
+    if isinstance(target, frog_ast.Variable):
+        return target.name == map_name
+    if isinstance(target, frog_ast.FieldAccess):
+        return target.name == map_name
+    return False
 
 
 class LazyMapToSampledFunction(TransformPass):
@@ -2217,6 +2358,24 @@ class LazyMapToSampledFunction(TransformPass):
             for m in game.methods
         )
 
+        # A field-level initializer (``Map<...> M = preset;``) is missed by the
+        # Initialize-body scan and dropped by the rebuild (same blind spot as
+        # F-009 in the pair sibling): a preset map would be silently replaced
+        # by a fresh empty sampled Function.
+        if fld.value is not None:
+            if any_idiom:
+                self._emit_near_miss(
+                    ctx,
+                    (
+                        f"Map '{map_name}' has a field initializer; lazy-map "
+                        "canonicalization requires an empty initial map"
+                    ),
+                    fld.origin,
+                    map_name,
+                    None,
+                )
+            return None
+
         if self._initialize_touches_map(game, map_name, value_type, ctx):
             return None
 
@@ -2265,15 +2424,7 @@ class LazyMapToSampledFunction(TransformPass):
             for stmt in method.block.statements:
                 if not isinstance(stmt, (frog_ast.Assignment, frog_ast.Sample)):
                     continue
-                v = stmt.var
-                target_var: frog_ast.Variable | None = None
-                if isinstance(v, frog_ast.Variable):
-                    target_var = v
-                elif isinstance(v, frog_ast.ArrayAccess) and isinstance(
-                    v.the_array, frog_ast.Variable
-                ):
-                    target_var = v.the_array
-                if target_var is None or target_var.name != map_name:
+                if not _lvalue_targets_map(stmt.var, map_name):
                     continue
                 if any(
                     _match_idiom_suffix(m, map_name, value_type, ctx) is not None
@@ -2505,6 +2656,15 @@ def _match_pair_idiom_suffix(
     if sample.sampled_from != value_type:
         return None
 
+    # Anti-alias (F-009): if the freshly-sampled local reuses the key
+    # parameter's name, the sample declaration shadows the parameter.  The
+    # guard ``if (k in Mi)`` then reads the parameter binding while the write
+    # ``Mi[k] = s`` and ``return s`` use the freshly sampled local -- two
+    # different bindings the collapsed ``return F(k)`` cannot reproduce.
+    # Mirrors the single-map guard in _match_idiom_suffix.
+    if s_name == k:
+        return None
+
     asgn = stmts[if_idx + 2]
     if not isinstance(asgn, frog_ast.Assignment):
         return None
@@ -2711,6 +2871,27 @@ class LazyMapPairToSampledFunction(TransformPass):
             for m in game.methods
             if m.signature.name != "Initialize"
         )
+
+        # (P2-2 / F-009) Neither map may carry a field-level initializer.  The
+        # Initialize-body scan below only inspects the Initialize *method*; a
+        # ``Map<...> M = preset;`` field initializer (``Field.value``) is never
+        # seen, and ``_build_rewritten_game`` creates the merged field with
+        # initializer ``None`` -- silently discarding the preset entries.
+        for fld in (m1, m2):
+            if fld.value is not None:
+                if any_idiom:
+                    self._emit_near_miss(
+                        ctx,
+                        (
+                            f"Map '{fld.name}' has a field initializer; "
+                            "lazy-map-pair canonicalization requires empty "
+                            "initial maps"
+                        ),
+                        fld.origin,
+                        fld.name,
+                        None,
+                    )
+                return None
 
         matches: dict[str, _PairIdiomMatch] = {}
         for method in game.methods:

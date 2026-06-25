@@ -9,7 +9,10 @@ from proof_frog.transforms.algebraic import (
     UniformModIntSimplification,
     XorCancellation,
 )
-from proof_frog.transforms.control_flow import BranchElimination
+from proof_frog.transforms.control_flow import (
+    BranchElimination,
+    GuardConditionSimplification,
+)
 from proof_frog.transforms.inlining import (
     InlineSingleUseVariable,
     InlineSingleUseField,
@@ -1588,3 +1591,56 @@ def test_rgfe_no_near_miss_when_only_one_candidate_field() -> None:
     ctx = _rgfe_ctx()
     RefactorGroupElemFieldExp().apply(game, ctx)
     assert not [nm for nm in ctx.near_misses if nm.transform_name == _RGFE_NAME]
+
+
+_GCS_NAME = "Guard Condition Simplification"
+
+
+def test_gcs_near_miss_when_guard_set_mutated() -> None:
+    """Guard not folded when an element write mutates the guard set: a
+    near-miss is recorded at the decline point."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Map<Int, Int> M;
+
+            Int O(Int k) {
+                if (k in M) {
+                    return 0;
+                } else {
+                    M[k] = 1;
+                    if (k in M) {
+                        return 100;
+                    } else {
+                        return 200;
+                    }
+                }
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    GuardConditionSimplification().apply(game, ctx)
+    gcs = [nm for nm in ctx.near_misses if nm.transform_name == _GCS_NAME]
+    assert len(gcs) >= 1
+    assert "k in M" in gcs[0].variable
+
+
+def test_gcs_no_near_miss_when_guard_stable() -> None:
+    """Stable guard re-tested with no intervening write: the pass fires and
+    emits no near-miss."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int O(Int k, Set<Int> S) {
+                if (k in S) {
+                    if (k in S) {
+                        return 1;
+                    }
+                    return 2;
+                }
+                return 0;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    GuardConditionSimplification().apply(game, ctx)
+    gcs = [nm for nm in ctx.near_misses if nm.transform_name == _GCS_NAME]
+    assert len(gcs) == 0

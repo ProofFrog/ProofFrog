@@ -694,3 +694,283 @@ def test_refactor_group_elem_field_exp_multicall() -> None:
     engine = _engine_with()
     result = engine.check_equivalent(pre, post)
     assert result.valid, result.failure_detail
+
+
+# --------------------------------------------------------------------------
+# Negative distinguishers: the engine must REJECT genuinely distinguishable
+# pairs.  Each pair below differs only in the ORDER of a state read relative
+# to a state write -- `... = read(state); write(state); return ...` versus
+# `write(state); return read(state)`.  These are advantage-1 distinguishable
+# (the read observes different state on the two sides), so check_equivalent
+# must return valid is False.  Before the RC1 reference/write-scan fixes the
+# canonicalizer (TopologicalSort dependency model, RemoveUnnecessaryFields
+# liveness, SimplifyReturn / the inliners) moved the read past the write on
+# one side and wrongly accepted the pair.  (audit findings F-126 + the
+# RC-front movers behind it.)
+# --------------------------------------------------------------------------
+
+
+def test_reject_read_moved_past_uniq_insertion() -> None:
+    """`<-uniq[S]` inserts the draw into S, so `|S|` read before vs after the
+    draw differs.  Must not be accepted as equivalent."""
+    real = frog_parser.parse_game(
+        """
+        Game Real() {
+            Set<BitString<2>> S;
+            BitString<2> t;
+            Void Initialize() { t = 0b00; }
+            [Int, Int] O() {
+                [Int, Int] s = [|S|, 0];
+                BitString<2> x <-uniq[S] BitString<2>;
+                t = x;
+                return s;
+            }
+            BitString<2> Peek() { return t; }
+        }
+        """
+    )
+    random = frog_parser.parse_game(
+        """
+        Game Random() {
+            Set<BitString<2>> S;
+            BitString<2> t;
+            Void Initialize() { t = 0b00; }
+            [Int, Int] O() {
+                BitString<2> x <-uniq[S] BitString<2>;
+                t = x;
+                return [|S|, 0];
+            }
+            BitString<2> Peek() { return t; }
+        }
+        """
+    )
+    assert not _engine_with().check_equivalent(real, random).valid
+
+
+def test_reject_read_moved_past_map_write_via_fieldaccess_view() -> None:
+    """`|M.keys|` reaches M only through a FieldAccess view; moving it past the
+    element write `M[0]=1` changes its value.  Must not be accepted."""
+    real = frog_parser.parse_game(
+        """
+        Game Real() {
+            Map<Int, Int> M;
+            [Int, Int] O() {
+                [Int, Int] s = [|M.keys|, 0];
+                M[0] = 1;
+                return s;
+            }
+            Int Size() { return M[0]; }
+        }
+        """
+    )
+    random = frog_parser.parse_game(
+        """
+        Game Random() {
+            Map<Int, Int> M;
+            [Int, Int] O() {
+                M[0] = 1;
+                return [|M.keys|, 0];
+            }
+            Int Size() { return M[0]; }
+        }
+        """
+    )
+    assert not _engine_with().check_equivalent(real, random).valid
+
+
+def test_reject_read_moved_past_nested_element_write() -> None:
+    """A read of `M[0]` moved past the nested element write `M[0][1]=1`
+    observes the mutated value.  Must not be accepted."""
+    real = frog_parser.parse_game(
+        """
+        Game Real() {
+            Map<Int, [Int, Int]> M;
+            Void Initialize() { M[0] = [0, 0]; }
+            [Int, Int] O() {
+                [Int, Int] s = M[0];
+                M[0][1] = 1;
+                return s;
+            }
+        }
+        """
+    )
+    random = frog_parser.parse_game(
+        """
+        Game Random() {
+            Map<Int, [Int, Int]> M;
+            Void Initialize() { M[0] = [0, 0]; }
+            [Int, Int] O() {
+                M[0][1] = 1;
+                return M[0];
+            }
+        }
+        """
+    )
+    assert not _engine_with().check_equivalent(real, random).valid
+
+
+# --------------------------------------------------------------------------
+# F-029 (SliceOfInlineConcat) — end-to-end soundness.
+#
+# `(a || b)[start:end]` may be rewritten to an operand ONLY when the slice
+# bounds match that operand's TRUE length at the slice site. Several engine
+# paths previously conspired to lose that length (a scope-blind length table
+# in the pass, a bare-declaration drop in TopologicalSort / RemoveUnnecessary,
+# a cross-scope CollapseAssignment merge, and a Z3 residual that modelled a
+# slice as its width alone). Each game pair below is distinguishable; the
+# engine must REJECT it. A sound control follows.
+# --------------------------------------------------------------------------
+
+
+def test_slice_of_concat_z3_residual_distinct_operands() -> None:
+    """Z3 residual: a full-width slice `(s || b)[0:2n]` of a concat must not
+    compare equal to `(s || s)[0:2n]`. The slice was previously modelled by
+    its width alone (`@@@opaque@...@2 * n`), collapsing distinct operands to
+    one atom. No shadowing here -- this is the bare equivalence-layer hole."""
+    real = frog_parser.parse_game(
+        """
+        Game Real(Int n) {
+            BitString<2 * n> Oracle(BitString<n> b) {
+                BitString<n> s <- BitString<n>;
+                return (s || b)[0 : 2 * n];
+            }
+        }
+        """
+    )
+    random = frog_parser.parse_game(
+        """
+        Game Random(Int n) {
+            BitString<2 * n> Oracle(BitString<n> b) {
+                BitString<n> s <- BitString<n>;
+                return (s || s)[0 : 2 * n];
+            }
+        }
+        """
+    )
+    assert not _engine_with().check_equivalent(real, random).valid
+
+
+def test_slice_of_concat_decl_shadow_param() -> None:
+    """Attack 1: a decl-only local `BitString<n> x;` shadows the 2n-bit
+    parameter `x`. The bare declaration must survive TopologicalSort /
+    RemoveUnnecessary so `x` keeps its n-bit binding, and the slice must not
+    be rewritten to `x` (dropping `b`)."""
+    real = frog_parser.parse_game(
+        """
+        Game Real(Int n) {
+            BitString<2 * n> Oracle(BitString<2 * n> x, BitString<n> b) {
+                BitString<n> x;
+                x <- BitString<n>;
+                return (x || b)[0 : 2 * n];
+            }
+        }
+        """
+    )
+    random = frog_parser.parse_game(
+        """
+        Game Random(Int n) {
+            BitString<2 * n> Oracle(BitString<2 * n> x, BitString<n> b) {
+                BitString<n> x;
+                x <- BitString<n>;
+                return (x || x)[0 : 2 * n];
+            }
+        }
+        """
+    )
+    assert not _engine_with().check_equivalent(real, random).valid
+
+
+def test_slice_of_concat_nested_redecl_case2() -> None:
+    """Attack 3b: a nested-block redeclaration `BitString<k + m> a` shadows
+    the outer `BitString<k> a`. SinkUniformSample + CollapseAssignment must
+    not merge the two `a`s across the scope boundary into a mistyped
+    `BitString<k> a <- BitString<k + m>`, which would let the Case 2 slice
+    fold to `b`."""
+    real = frog_parser.parse_game(
+        """
+        Game Real(Int k, Int m) {
+            [BitString<m>, BitString<m>] Oracle(Bool cond, BitString<m> b) {
+                BitString<k> a <- BitString<k>;
+                if (cond) {
+                    BitString<k + m> a <- BitString<k + m>;
+                    return [(a || b)[k : k + m], b];
+                }
+                return [b, b];
+            }
+        }
+        """
+    )
+    random = frog_parser.parse_game(
+        """
+        Game Random(Int k, Int m) {
+            [BitString<m>, BitString<m>] Oracle(Bool cond, BitString<m> b) {
+                return [b, b];
+            }
+        }
+        """
+    )
+    engine = _engine_with()
+    engine.variables["k"] = Symbol("k", positive=True, integer=True)
+    engine.variables["m"] = Symbol("m", positive=True, integer=True)
+    assert not engine.check_equivalent(real, random).valid
+
+
+def test_slice_of_concat_sound_identity_still_fires() -> None:
+    """Control: the genuine identity `(a || b)[0 : |a|] = a` must STILL be
+    recognized -- the fixes restrict the unsound cases, not the sound one."""
+    real = frog_parser.parse_game(
+        """
+        Game Real(Int n) {
+            BitString<n> Oracle(BitString<n> a, BitString<n> b) {
+                return (a || b)[0 : n];
+            }
+        }
+        """
+    )
+    post = frog_parser.parse_game(
+        """
+        Game Post(Int n) {
+            BitString<n> Oracle(BitString<n> a, BitString<n> b) {
+                return a;
+            }
+        }
+        """
+    )
+    assert _engine_with().check_equivalent(real, post).valid
+
+
+def test_guarded_field_element_write_not_dropped() -> None:
+    """F-075 / mover sweep: a field element-write nested in a guarded branch is
+    observable across calls (via a later read), so it must not be dropped. The
+    bug: TopologicalSort hoisted the constant `return 0` above the
+    `if (x == F) { F[k] = 99; }` branch because `mutates_field` only inspected
+    top-level statement kinds and missed the write nested in the if; the branch
+    then looked dead and was removed, equating a persistent field mutation
+    (Real) with a write to a local parameter (Random)."""
+    real = frog_parser.parse_game(
+        """
+        Game Real() {
+            Map<Int, Int> F;
+            Void SetF(Int k, Int v) { F[k] = v; }
+            Int Get(Int k) { return F[k]; }
+            Int Test(Map<Int, Int> x, Int k) {
+                if (x == F) { F[k] = 99; }
+                return 0;
+            }
+        }
+        """
+    )
+    random = frog_parser.parse_game(
+        """
+        Game Random() {
+            Map<Int, Int> F;
+            Void SetF(Int k, Int v) { F[k] = v; }
+            Int Get(Int k) { return F[k]; }
+            Int Test(Map<Int, Int> x, Int k) {
+                if (x == F) { x[k] = 99; }
+                return 0;
+            }
+        }
+        """
+    )
+    assert not _engine_with().check_equivalent(real, random).valid

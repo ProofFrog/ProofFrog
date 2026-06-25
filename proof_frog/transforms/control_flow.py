@@ -26,7 +26,9 @@ from ..visitors import (
     Z3FormulaVisitor,
     GetTypeMapVisitor,
     NameTypeMap,
-    assigns_variable,
+    lvalue_base_name,
+    referenced_variable_names,
+    reassigns_or_rebinds,
     block_unconditionally_returns,
 )
 from ._base import TransformPass, PipelineContext, NearMiss, has_nondeterministic_call
@@ -471,19 +473,24 @@ class GuardConditionSimplificationTransformer(Transformer):
         let_types = self.ctx.proof_let_types if self.ctx else None
         return not has_nondeterministic_call(expr, namespace, let_types)
 
-    @staticmethod
-    def _reassigns_any(names: set[str], block: frog_ast.Block) -> bool:
-        def writes(node: frog_ast.ASTNode) -> bool:
-            return (
-                isinstance(
-                    node,
-                    (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
-                )
-                and isinstance(node.var, frog_ast.Variable)
-                and node.var.name in names
+    def _note_unstable_guard(self, cond: frog_ast.Expression) -> None:
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Guard Condition Simplification",
+                reason=(
+                    "Guard not substituted into its branch: a variable the "
+                    "guard reads is reassigned, has an element/field/slice "
+                    "write, is inserted into via <-uniq, or is rebound by a "
+                    "loop in the branch, so the guard's value is not invariant"
+                ),
+                location=None,
+                suggestion=None,
+                variable=str(cond),
+                method=None,
             )
-
-        return SearchVisitor(writes).visit(block) is not None
+        )
 
     def _substitute(
         self, block: frog_ast.Block, cond: frog_ast.Expression, value: bool
@@ -499,13 +506,16 @@ class GuardConditionSimplificationTransformer(Transformer):
         if len(if_statement.conditions) == 1:
             cond = if_statement.conditions[0]
             if self._is_deterministic(cond) and not isinstance(cond, frog_ast.Boolean):
-                cond_vars = {v.name for v in VariableCollectionVisitor().visit(cond)}
-                if not self._reassigns_any(cond_vars, new_blocks[0]):
+                cond_vars = referenced_variable_names(cond)
+                if reassigns_or_rebinds(cond_vars, new_blocks[0]):
+                    self._note_unstable_guard(cond)
+                else:
                     new_blocks[0] = self._substitute(new_blocks[0], cond, True)
-                if if_statement.has_else_block() and not self._reassigns_any(
-                    cond_vars, new_blocks[1]
-                ):
-                    new_blocks[1] = self._substitute(new_blocks[1], cond, False)
+                if if_statement.has_else_block():
+                    if reassigns_or_rebinds(cond_vars, new_blocks[1]):
+                        self._note_unstable_guard(cond)
+                    else:
+                        new_blocks[1] = self._substitute(new_blocks[1], cond, False)
         # Recurse into the (possibly substituted) children.
         return frog_ast.IfStatement(
             [self.transform(c) for c in if_statement.conditions],
@@ -621,19 +631,16 @@ class SimplifyReturnTransformer(BlockTransformer):
             # Check that no intervening statement modifies a free variable
             # of the expression being inlined.  Without this check, moving
             # `expr` from its original evaluation point to the return point
-            # could change its value.
-            expr_free_vars = VariableCollectionVisitor().visit(
-                copy.deepcopy(statement.value)
-            )
+            # could change its value.  The read-set must see variables under
+            # FieldAccess (`M` in `|M.keys|`) and the write-set must see
+            # element/slice/field writes, `<-uniq[S]` exclusion-set insertion,
+            # and loop-binder shadowing -- so both use the node-kind-complete
+            # scanners rather than VariableCollectionVisitor/assigns_variable.
+            expr_free_vars = referenced_variable_names(statement.value)
             if expr_free_vars:
                 for skipped_idx in range(index + 1, len(block.statements) - 1):
                     skipped = block.statements[skipped_idx]
-                    if (
-                        SearchVisitor(
-                            functools.partial(assigns_variable, expr_free_vars)
-                        ).visit(skipped)
-                        is not None
-                    ):
+                    if reassigns_or_rebinds(expr_free_vars, skipped):
                         return block
             return self.transform_block(
                 frog_ast.Block(block.statements[:index])
@@ -710,19 +717,23 @@ class RemoveUnreachableTransformer(BlockTransformer):
             updated = []
 
             def assigns_variable_search(search_node: frog_ast.ASTNode) -> bool:
-                if not isinstance(search_node, (frog_ast.Assignment, frog_ast.Sample)):
-                    return False
-                var = None
-                if isinstance(search_node.var, frog_ast.Variable):
-                    var = search_node.var
-                if isinstance(search_node.var, frog_ast.ArrayAccess) and isinstance(
-                    search_node.var.the_array, frog_ast.Variable
+                if not isinstance(
+                    search_node,
+                    (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
                 ):
-                    var = search_node.var.the_array
-
-                if var in used_variables and var not in updated:
-                    variable_version_map[var.name] += 1
-                    updated.append(var)
+                    return False
+                # Peel element/slice/field accesses to the written base name so
+                # nested element writes (`M[0][0] = v`) bump the version too --
+                # a depth-1-only check left `M` looking unmodified and let Z3
+                # wrongly prove the following statements unreachable.
+                base_name = lvalue_base_name(search_node.var)
+                if (
+                    base_name is not None
+                    and base_name in variable_version_map
+                    and base_name not in updated
+                ):
+                    variable_version_map[base_name] += 1
+                    updated.append(base_name)
                     return True
                 return False
 
@@ -928,10 +939,13 @@ def _count_field_assigns_recursive(node: frog_ast.ASTNode, field_name: str) -> i
 
     def _counter(n: frog_ast.ASTNode) -> bool:
         nonlocal count
+        # Peel element/slice/field accesses: an element write `M[k] = v`
+        # mutates the field, so a field that is also element-written must not
+        # be miscounted as single-assignment (and therefore inlined as a
+        # constant).
         if (
             isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
-            and isinstance(n.var, frog_ast.Variable)
-            and n.var.name == field_name
+            and lvalue_base_name(n.var) == field_name
         ):
             count += 1
         return False  # never stop early — visit all nodes
@@ -1070,23 +1084,21 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
                 new_branch = SubstitutionTransformer(inline_map).transform(new_branch)
 
             # Phase 2: Substitute each comparison field with its replacement.
-            # Stop at the first reassignment of any comparison field within the
-            # branch, since after reassignment the field value may differ from
-            # the replacement.
+            # The substitution ``field -> replacement`` is valid only while the
+            # field still equals the replacement, i.e. until EITHER side is
+            # written. Stop at the first statement that writes (anywhere, incl.
+            # nested blocks and element/slice/field writes -- F-075 A2/A3) any
+            # comparison field OR any free variable of a replacement expression
+            # (reassigning the local breaks ``field == local`` -- A4). Keep that
+            # statement and everything after it unsubstituted.
             alias_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+            invalidating_names = set(field_var_names)
             for field_expr, replacement in alias_pairs:
                 alias_map.set(field_expr, replacement)
+                invalidating_names |= referenced_variable_names(replacement)
             new_stmts: list[frog_ast.Statement] = []
             for stmt_idx, branch_stmt in enumerate(new_branch.statements):
-                # Check if this statement reassigns one of the comparison fields
-                if (
-                    isinstance(
-                        branch_stmt,
-                        (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
-                    )
-                    and isinstance(branch_stmt.var, frog_ast.Variable)
-                    and branch_stmt.var.name in field_var_names
-                ):
+                if reassigns_or_rebinds(invalidating_names, branch_stmt):
                     # Stop substituting: keep this and all remaining as-is
                     new_stmts.extend(new_branch.statements[stmt_idx:])
                     break
@@ -2097,6 +2109,28 @@ class DeadGuardedAssignmentEliminationTransformer(BlockTransformer):
     ciphertexts.
     """
 
+    def __init__(self) -> None:
+        # Field names and their read counts across the WHOLE game, populated by
+        # ``transform_game``.  Empty when the transformer is driven on a bare
+        # block (unit tests): then every name is treated as a method-local and
+        # the block-scoped read count applies.
+        self._field_names: set[str] = set()
+        self._field_read_counts: dict[str, int] = {}
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        self._field_names = {f.name for f in game.fields}
+        # A field persists across oracle calls, so a read of it in ANY method
+        # observes the value.  Count reads of each field over every method
+        # block (F-099): a field whose value is read in a sibling oracle is not
+        # dead even though the block-scoped count over one method is 1.
+        self._field_read_counts = {
+            name: sum(self._read_count(m.block, name) for m in game.methods)
+            for name in self._field_names
+        }
+        new_game = copy.copy(game)
+        new_game.methods = [self.transform(m) for m in game.methods]
+        return new_game
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
             use = self._match_guarded_use(statement, block.statements[index + 1 :])
@@ -2107,8 +2141,26 @@ class DeadGuardedAssignmentEliminationTransformer(BlockTransformer):
             # read solely by the matched `if (v)` guard. Any other read of `v`
             # would observe the rewritten `false` value. Count reads (variable
             # occurrences that are not an assignment target); exactly one --
-            # the guard condition -- is required.
-            if self._read_count(block, v_name) != 1:
+            # the guard condition -- is required. A FIELD additionally persists
+            # across oracle calls (F-099), so:
+            #   - its value may be read in a sibling/later oracle -> the read
+            #     count must span the whole game (not just this block); and
+            #   - a guarded/conditional assignment leaves the field carrying its
+            #     previous-call value into the guard read, so the kill is sound
+            #     only if the field is UNCONDITIONALLY assigned before the guard
+            #     in this call (definite assignment overwrites any stale value).
+            if v_name in self._field_names:
+                if self._field_read_counts.get(v_name, 0) != 1:
+                    continue
+                prefix_stmts = block.statements[:index]
+                if not any(
+                    isinstance(s, frog_ast.Assignment)
+                    and isinstance(s.var, frog_ast.Variable)
+                    and s.var.name == v_name
+                    for s in prefix_stmts
+                ):
+                    continue
+            elif self._read_count(block, v_name) != 1:
                 continue
             guard_lits = [
                 _condition_literal(g, True) for g in _flatten_top_level_and(guard)

@@ -8,6 +8,51 @@ from proof_frog.transforms.random_functions import LocalRFToUniformTransformer
 @pytest.mark.parametrize(
     "method,expected",
     [
+        # F-026: a bare-variable copy of the RF value (`RF2 = RF`) is a second
+        # reference that lets the function escape and be evaluated again. The
+        # single-evaluation rewrite must DECLINE (expected == input), or the
+        # two evaluations `RF(0)` and `RF2(0)` -- equal in the input -- would be
+        # made independent.
+        (
+            """
+            [BitString<16>, BitString<16>] f() {
+                Function<BitString<8>, BitString<16>> RF <- Function<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF2 = RF;
+                BitString<16> a = RF(0^8);
+                BitString<16> b = RF2(0^8);
+                return [a, b];
+            }
+            """,
+            """
+            [BitString<16>, BitString<16>] f() {
+                Function<BitString<8>, BitString<16>> RF <- Function<BitString<8>, BitString<16>>;
+                Function<BitString<8>, BitString<16>> RF2 = RF;
+                BitString<16> a = RF(0^8);
+                BitString<16> b = RF2(0^8);
+                return [a, b];
+            }
+            """,
+        ),
+        # F-026: the RF value passed as a method argument is likewise a
+        # non-call reference that must block the rewrite.
+        (
+            """
+            BitString<16> f(BitString<8> x) {
+                Function<BitString<8>, BitString<16>> RF <- Function<BitString<8>, BitString<16>>;
+                BitString<16> z = RF(x);
+                use(RF);
+                return z;
+            }
+            """,
+            """
+            BitString<16> f(BitString<8> x) {
+                Function<BitString<8>, BitString<16>> RF <- Function<BitString<8>, BitString<16>>;
+                BitString<16> z = RF(x);
+                use(RF);
+                return z;
+            }
+            """,
+        ),
         # Basic: local RF sampled then called once -> uniform sample
         (
             """

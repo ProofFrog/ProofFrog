@@ -399,6 +399,97 @@ def test_integration_via_core_pipeline() -> None:
     assert len(hash_method.block.statements) == 1
 
 
+def test_self_referential_key_fails() -> None:
+    """F-005: a key expression that reads the map itself (`(k in M)`) is
+    history-dependent -- the assign-site write `M[key] = x` changes what the
+    key reads on later calls -- so the idiom must not collapse to
+    `return M(k in M);` (which is ill-typed besides)."""
+    _apply_and_expect_unchanged(
+        """
+        Game G() {
+            Map<Bool, BitString<8>> M;
+            BitString<8> Lookup(Bool k) {
+                if ((k in M) in M) {
+                    return M[k in M];
+                }
+                BitString<8> x <- BitString<8>;
+                M[k in M] = x;
+                return x;
+            }
+        }
+        """
+    )
+
+
+def test_field_initializer_fails() -> None:
+    """Same blind spot as F-009 (pair sibling): a field-level initializer
+    (`Map<...> M = preset;`) is missed by the Initialize-body scan and dropped
+    by the rebuild, so a preset map must disqualify the rewrite."""
+    _apply_and_expect_unchanged(
+        """
+        Game G(Map<BitString<8>, BitString<8>> preset) {
+            Map<BitString<8>, BitString<8>> M = preset;
+            BitString<8> Lookup(BitString<8> k) {
+                if (k in M) {
+                    return M[k];
+                }
+                BitString<8> x <- BitString<8>;
+                M[k] = x;
+                return x;
+            }
+        }
+        """
+    )
+
+
+def test_dotted_out_of_idiom_write_fails() -> None:
+    """F-006: an out-of-idiom write spelled as a FieldAccess (`this.M[k] = v`)
+    is still a write to the map field and must disqualify the rewrite, even
+    though it contains no bare `Variable(M)` node."""
+    _apply_and_expect_unchanged(
+        """
+        Game G() {
+            Map<BitString<8>, BitString<8>> M;
+            BitString<8> Lookup(BitString<8> k) {
+                if (k in M) {
+                    return M[k];
+                }
+                BitString<8> x <- BitString<8>;
+                M[k] = x;
+                return x;
+            }
+            Void Poison(BitString<8> k, BitString<8> v) {
+                this.M[k] = v;
+            }
+        }
+        """
+    )
+
+
+def test_dotted_initialize_prepopulation_fails() -> None:
+    """F-006: a dotted pre-population write in Initialize (`this.M[c] = v`)
+    must disqualify the rewrite; the map is not empty at the start of the
+    oracle phase."""
+    _apply_and_expect_unchanged(
+        """
+        Game G() {
+            Map<BitString<8>, BitString<8>> M;
+            Void Initialize() {
+                this.M[0b00000000] = 0b10101010;
+            }
+            BitString<8> Lookup(BitString<8> k) {
+                if (k in M) {
+                    return M[k];
+                }
+                BitString<8> x <- BitString<8>;
+                M[k] = x;
+                return x;
+            }
+        }
+        """
+    )
+
+
 def test_defensive_guard_sample_var_in_key_expr() -> None:
     """AST-level defense: if the sample variable name `s` appears
     syntactically inside `key_expr`, the three structural occurrences of

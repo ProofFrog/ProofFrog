@@ -373,3 +373,22 @@ def test_single_call_field_to_local(
     print("EXPECTED", expected_ast)
     print("TRANSFORMED", transformed_ast)
     assert transformed_ast == expected_ast
+
+
+def test_param_shadowed_field_not_localized() -> None:
+    """F-055: a non-Initialize method has a parameter named like the field.
+    Name-only reference detection cannot tell the field from the parameter, and
+    prepending a localized sample would clobber the adversary's argument -- the
+    pass must DECLINE (game unchanged)."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            BitString<8> x;
+            Void Initialize() {
+                x <- BitString<8>;
+            }
+            BitString<8> Echo(BitString<8> x) {
+                return x;
+            }
+        }
+        """)
+    assert _single_call_field_to_local(game) == game

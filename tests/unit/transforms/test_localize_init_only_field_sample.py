@@ -26,6 +26,38 @@ def _apply(source: str) -> str:
 @pytest.mark.parametrize(
     "source,expected_has_field",
     [
+        # F-044 A1: the field is read BEFORE its sample inside Initialize
+        # (reading its initializer value). Localizing would delete the field
+        # and dangle the pre-sample read -> must DECLINE (field survives).
+        (
+            """
+            Game Test() {
+                BitString<1> myfield = 0b1;
+                BitString<1> Initialize() {
+                    BitString<1> x = myfield;
+                    myfield <- BitString<1>;
+                    return x;
+                }
+            }
+            """,
+            True,
+        ),
+        # F-044 A2: the field is referenced only from another field's
+        # initializer expression -> deleting it would dangle that initializer
+        # -> must DECLINE.
+        (
+            """
+            Game Test() {
+                BitString<1> myfield = 0b1;
+                BitString<1> g = myfield;
+                BitString<1> Initialize() {
+                    myfield <- BitString<1>;
+                    return g;
+                }
+            }
+            """,
+            True,
+        ),
         # Field only used in Initialize — should become local
         (
             """
@@ -74,7 +106,13 @@ def _apply(source: str) -> str:
             False,
         ),
     ],
-    ids=["init-only", "used-in-oracle", "init-return"],
+    ids=[
+        "f044-read-before-sample",
+        "f044-other-field-initializer",
+        "init-only",
+        "used-in-oracle",
+        "init-return",
+    ],
 )
 def test_localize_init_only_field_sample(source: str, expected_has_field: bool) -> None:
     game = frog_parser.parse_game(source)

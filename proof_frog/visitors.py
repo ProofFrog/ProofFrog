@@ -862,6 +862,22 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         else:
             self.stack.append(None)
 
+    def leave_slice(self, node: frog_ast.Slice) -> None:
+        # Bit-slicing is not modelled in Z3 here. Previously the Slice node had
+        # NO handler at all, so its three visited children (array, start, end)
+        # were left on the stack and `result()` returned the topmost -- the
+        # END expression -- as the slice's "formula". Two slices of the same
+        # width (`(a||b)[0:2n]` and `(a||c)[0:2n]`) then collapsed to the same
+        # atom and compared *equal*, a soundness hole. Pop the three children
+        # and intern the WHOLE slice as a single opaque atom: structurally
+        # distinct slices get distinct atoms (sound; merely incomplete -- the
+        # genuine `(a||b)[0:|a|]=a` identity is handled by the AST pass).
+        children = [self.stack.pop() if self.stack else None for _ in range(3)]
+        if self.opaque_func_call_fallback and not any(c is None for c in children):
+            self.stack.append(self._intern_opaque(node))
+        else:
+            self.stack.append(None)
+
     def leave_unary_operation(self, operation: frog_ast.UnaryOperation) -> None:
         if not self.stack or operation.operator == frog_ast.UnaryOperators.SIZE:
             self.stack.append(None)
@@ -1173,15 +1189,122 @@ def build_game_type_map(
 def assigns_variable(
     used_variables: list[frog_ast.Variable], node: frog_ast.ASTNode
 ) -> bool:
-    return isinstance(
+    if not isinstance(
         node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
-    ) and (
-        (node.var in used_variables)
-        or (
-            isinstance(node.var, frog_ast.ArrayAccess)
-            and node.var.the_array in used_variables
-        )
-    )
+    ):
+        return False
+    # Peel element/slice/field accesses so nested element writes (`M[0][0]=v`)
+    # and field writes (`X.f=v`) -- not just depth-1 `M[k]=v` -- count as a
+    # write to the base variable.
+    base = lvalue_base_name(node.var)
+    return base is not None and base in {v.name for v in used_variables}
+
+
+def lvalue_base_name(target: frog_ast.ASTNode) -> Optional[str]:
+    """Base variable name written by an l-value, peeling element, slice, and
+    field accesses.
+
+    Returns ``M`` for ``M``, ``M[k]``, ``M[i][j]``, ``a[i : j]``, ``X.f``, and
+    ``X.f[k]``; returns ``None`` when the l-value bottoms out in a non-Variable
+    (e.g. a tuple-literal destructuring target).  This is the single source of
+    truth for "which variable does this assignment/sample target ultimately
+    mutate", so element/slice/field writes are not mistaken for no-ops.
+    """
+    while True:
+        if isinstance(target, (frog_ast.ArrayAccess, frog_ast.Slice)):
+            target = target.the_array
+        elif isinstance(target, frog_ast.FieldAccess):
+            target = target.the_object
+        else:
+            break
+    return target.name if isinstance(target, frog_ast.Variable) else None
+
+
+def referenced_variable_names(node: frog_ast.ASTNode) -> set[str]:
+    """Names of every ``Variable`` referenced anywhere in *node*, including the
+    base object of field/array/slice accesses (``M`` in ``M.keys`` / ``M[k]``).
+
+    Unlike :class:`VariableCollectionVisitor` this does **not** skip
+    field-access subtrees: a guard such as ``k in M.keys`` genuinely reads
+    ``M``, so soundness checks that need the complete read-set of an expression
+    must use this rather than ``VariableCollectionVisitor`` (which suppresses
+    collection inside any ``FieldAccess``).
+    """
+    names: set[str] = set()
+
+    def _collect(inner: frog_ast.ASTNode) -> bool:
+        if isinstance(inner, frog_ast.Variable):
+            names.add(inner.name)
+        return False
+
+    SearchVisitor(_collect).visit(node)
+    return names
+
+
+def referenced_variables_in_order(
+    node: frog_ast.ASTNode,
+) -> list[frog_ast.Variable]:
+    """Variables referenced in *node* in first-appearance (pre-order) order,
+    deduplicated by name -- the FieldAccess-complete analogue of
+    :class:`VariableCollectionVisitor`.  Used where iteration order is
+    observable (e.g. dependency-edge order)."""
+
+    class _OrderedReferenceVisitor(Visitor[list[frog_ast.Variable]]):
+        def __init__(self) -> None:
+            self.variables: list[frog_ast.Variable] = []
+            self.seen: set[str] = set()
+
+        def result(self) -> list[frog_ast.Variable]:
+            return self.variables
+
+        def visit_variable(self, inner: frog_ast.Variable) -> None:
+            if inner.name not in self.seen:
+                self.seen.add(inner.name)
+                self.variables.append(inner)
+
+    return _OrderedReferenceVisitor().visit(node)
+
+
+def reassigns_or_rebinds(names: set[str], node: frog_ast.ASTNode) -> bool:
+    """True if *node* contains a statement that could change the value or
+    binding of any name in *names*.
+
+    Node-kind-complete write/rebind detection: an occurrence counts when it is
+
+    - a write (``Assignment`` / ``Sample`` / ``UniqueSample``) whose l-value
+      base (see :func:`lvalue_base_name`) is one of *names* -- including
+      element, slice, and field writes (``M[k] = v``, ``a[i : j] = v``,
+      ``X.f = v``);
+    - an insertion into an exclusion set: ``x <-uniq[S] T`` where ``S``
+      references one of *names* (the draw implicitly adds ``x`` to ``S``); the
+      pure set-difference surface form ``x <- T \\ S`` performs no insertion and
+      is therefore not treated as a write;
+    - a loop binder (``for (Int i = ...)`` / ``for (T e in ...)``) that rebinds
+      one of *names*, shadowing it.
+
+    Conservative by design: any such occurrence anywhere in *node* -- including
+    nested branches and loop bodies -- counts, because callers substitute
+    structurally and are not scope-aware.
+    """
+
+    def _mutates(inner: frog_ast.ASTNode) -> bool:
+        if isinstance(
+            inner, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ) and (lvalue_base_name(inner.var) in names):
+            return True
+        if (
+            isinstance(inner, frog_ast.UniqueSample)
+            and inner.surface_form == "uniq"
+            and bool(referenced_variable_names(inner.unique_set) & names)
+        ):
+            return True
+        if isinstance(inner, frog_ast.NumericFor) and inner.name in names:
+            return True
+        if isinstance(inner, frog_ast.GenericFor) and inner.var_name in names:
+            return True
+        return False
+
+    return SearchVisitor(_mutates).visit(node) is not None
 
 
 class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):

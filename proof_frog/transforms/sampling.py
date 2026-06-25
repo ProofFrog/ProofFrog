@@ -89,11 +89,19 @@ class SimplifySpliceTransformer(BlockTransformer):
 
             # Step 1, find type of variables (to get lengths)
 
+            # The relevant declaration is the one in effect at the concat site:
+            # the LAST typed declaration of the component before this statement,
+            # not the first match in the whole block. A same-scope
+            # redeclaration with a different bit length before the concat would
+            # otherwise be missed and the splice would use a stale length
+            # (F-067). Visiting the prior statements in reverse makes the first
+            # match the most recent declaration.
+            prior_reversed = frog_ast.Block(list(reversed(block.statements[:index])))
             lengths: list[Symbol] = []
             for var in concatenated_var_names:
                 declaration = SearchVisitor(
                     functools.partial(find_declaration, var.name)
-                ).visit(block)
+                ).visit(prior_reversed)
                 if declaration is None:
                     break
                 assert isinstance(declaration, (frog_ast.Assignment, frog_ast.Sample))
@@ -237,8 +245,51 @@ class SliceOfInlineConcatTransformer(Transformer):
                     param.type.parameterization is not None
                 ):
                     self._var_lengths[param.name] = param.type.parameterization
-            for stmt in method.block.statements:
-                if (
+            # The method body's own declarations are recorded scope-aware by
+            # ``transform_block`` as the traversal descends -- a nested
+            # redeclaration shadows the outer length only within its own block,
+            # and is restored on block exit.  (F-029.)
+            return self.transform(method)
+        finally:
+            self._var_lengths = saved
+
+    @staticmethod
+    def _declared_length(
+        name_type: frog_ast.Type | None,
+    ) -> frog_ast.Expression | None:
+        """The ``BitString`` length expression for a declared type, else None."""
+        if (
+            isinstance(name_type, frog_ast.BitStringType)
+            and name_type.parameterization is not None
+        ):
+            return name_type.parameterization
+        return None
+
+    def _record_declaration(self, name: str, name_type: frog_ast.Type | None) -> None:
+        """Record (or, when the declared type is not a known-length
+        ``BitString``, *shadow-clear*) the length for ``name``.
+
+        Shadow-clearing is the soundness-critical half: a redeclaration of an
+        outer ``BitString`` to a non-``BitString`` (or unparameterized) type
+        must not leave the outer length in the map, or a slice on the inner
+        binding would resolve against the stale outer length."""
+        length = self._declared_length(name_type)
+        if length is not None:
+            self._var_lengths[name] = length
+        else:
+            self._var_lengths.pop(name, None)
+
+    def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
+        # Scope-aware length tracking: record this block's own declarations
+        # (including bare ``VariableDeclaration`` and untyped re-binds, which
+        # the previous flat top-level scan missed -- Gaps A and B of F-029),
+        # restoring the enclosing scope's lengths on exit.
+        saved = dict(self._var_lengths)
+        try:
+            for stmt in block.statements:
+                if isinstance(stmt, frog_ast.VariableDeclaration):
+                    self._record_declaration(stmt.name, stmt.type)
+                elif (
                     isinstance(
                         stmt,
                         (
@@ -248,13 +299,38 @@ class SliceOfInlineConcatTransformer(Transformer):
                         ),
                     )
                     and isinstance(stmt.var, frog_ast.Variable)
-                    and isinstance(stmt.the_type, frog_ast.BitStringType)
-                    and stmt.the_type.parameterization is not None
+                    and stmt.the_type is not None
                 ):
-                    self._var_lengths[stmt.var.name] = stmt.the_type.parameterization
-            return self.transform(method)
+                    self._record_declaration(stmt.var.name, stmt.the_type)
+            return frog_ast.Block(
+                [self.transform(statement) for statement in block.statements]
+            )
         finally:
             self._var_lengths = saved
+
+    def transform_numeric_for(self, node: frog_ast.NumericFor) -> frog_ast.NumericFor:
+        new_start = self.transform(node.start)
+        new_end = self.transform(node.end)
+        saved = dict(self._var_lengths)
+        try:
+            # The loop binder is an ``Int`` -- shadow any outer same-named
+            # BitString length so a slice on the binder doesn't resolve against
+            # the stale outer length.
+            self._var_lengths.pop(node.name, None)
+            new_block = self.transform(node.block)
+        finally:
+            self._var_lengths = saved
+        return frog_ast.NumericFor(node.name, new_start, new_end, new_block)
+
+    def transform_generic_for(self, node: frog_ast.GenericFor) -> frog_ast.GenericFor:
+        new_over = self.transform(node.over)
+        saved = dict(self._var_lengths)
+        try:
+            self._record_declaration(node.var_name, node.var_type)
+            new_block = self.transform(node.block)
+        finally:
+            self._var_lengths = saved
+        return frog_ast.GenericFor(node.var_type, node.var_name, new_over, new_block)
 
     @staticmethod
     def _exprs_equal(a: frog_ast.Expression, b: frog_ast.Expression) -> bool:
@@ -1048,6 +1124,12 @@ def _single_call_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
         if init_sample is None or init_sample_count > 1 or field_used_elsewhere_in_init:
             continue
 
+        # Reject if any oracle shadows the field name with a parameter/local:
+        # name-only reference detection cannot tell field from binding, and the
+        # prepended local sample would clobber the binding (F-055).
+        if _name_shadowed_in_any_oracle(game, field.name):
+            continue
+
         # Step 2: Find which non-Initialize methods reference this field
         using_methods: list[str] = []
         for method in game.methods:
@@ -1115,6 +1197,49 @@ def _references_name(node: frog_ast.ASTNode, name: str) -> bool:
     return SearchVisitor(check).visit(node) is not None
 
 
+def _method_binds_name(method: frog_ast.Method, name: str) -> bool:
+    """True if *method* binds *name* as a parameter or declares it as a local
+    (typed sample/assignment/declaration, or a loop binder), shadowing a
+    same-named game field within the method.
+
+    ``_references_name`` is name-only and cannot tell a field reference from a
+    same-named parameter/local. When a method shadows the field name, its
+    ``name`` occurrences are the binding, not the field -- and prepending a
+    localized ``name <- ...`` sample there would clobber the binding (F-050,
+    F-055). The field-to-local passes must not localize such a field."""
+    if any(p.name == name for p in method.signature.parameters):
+        return True
+
+    found = [False]
+
+    def _visit(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, frog_ast.VariableDeclaration) and n.name == name:
+            found[0] = True
+        elif (
+            isinstance(n, (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample))
+            and n.the_type is not None
+            and isinstance(n.var, frog_ast.Variable)
+            and n.var.name == name
+        ):
+            found[0] = True
+        elif isinstance(n, frog_ast.NumericFor) and n.name == name:
+            found[0] = True
+        elif isinstance(n, frog_ast.GenericFor) and n.var_name == name:
+            found[0] = True
+        return False
+
+    SearchVisitor(_visit).visit(method.block)
+    return found[0]
+
+
+def _name_shadowed_in_any_oracle(game: frog_ast.Game, name: str) -> bool:
+    """True if any non-Initialize method binds *name* (see _method_binds_name)."""
+    return any(
+        m.signature.name != "Initialize" and _method_binds_name(m, name)
+        for m in game.methods
+    )
+
+
 class SingleCallFieldToLocal(TransformPass):
     """When max_calls == 1, push field-initialized uniform samples to locals."""
 
@@ -1162,7 +1287,18 @@ def _localize_init_only_field_samples(game: frog_ast.Game) -> frog_ast.Game:
         if sample_count != 1 or init_sample_idx is None:
             continue
 
-        # Check: field NOT referenced in any non-Initialize method
+        # Gap A1: the sample must be the field's FIRST access inside Initialize.
+        # If any earlier statement reads the field, it reads the field's
+        # declared initializer value (SEMANTICS §6.2 step 1); deleting the
+        # field declaration would dangle that read.
+        read_before_sample = any(
+            _references_name(stmt, field.name)
+            for stmt in init_method.block.statements[:init_sample_idx]
+        )
+        if read_before_sample:
+            continue
+
+        # Check: field NOT referenced in any non-Initialize method body.
         used_outside = False
         for method in game.methods:
             if method.signature.name == "Initialize":
@@ -1170,8 +1306,29 @@ def _localize_init_only_field_samples(game: frog_ast.Game) -> frog_ast.Game:
             if _references_name(method.block, field.name):
                 used_outside = True
                 break
+            # Gap A3 (defense): a reference in a non-Initialize method's
+            # signature (parameter/return type parameterization) also keeps the
+            # field live.
+            if any(
+                _references_name(param.type, field.name)
+                for param in method.signature.parameters
+            ) or _references_name(method.signature.return_type, field.name):
+                used_outside = True
+                break
 
         if used_outside:
+            continue
+
+        # Gap A2: the field may be referenced only in ANOTHER field's
+        # initializer expression (set before Initialize runs).  Deleting the
+        # field would dangle that initializer.
+        referenced_in_initializer = any(
+            other.value is not None
+            and other.name != field.name
+            and _references_name(other.value, field.name)
+            for other in game.fields
+        )
+        if referenced_in_initializer:
             continue
 
         eligible.append((field, init_sample_idx))
@@ -1450,6 +1607,12 @@ def _counter_guarded_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
 
         # Reject if no sample, multiple samples, or field used elsewhere
         if init_sample is None or init_sample_count > 1 or field_used_elsewhere_in_init:
+            continue
+
+        # Reject if any oracle shadows the field name with a parameter/local
+        # (F-050): name-only reference detection conflates the field with the
+        # binding, and the prepended local sample would clobber it.
+        if _name_shadowed_in_any_oracle(game, field.name):
             continue
 
         # Step 2: Find which non-Initialize methods reference this field

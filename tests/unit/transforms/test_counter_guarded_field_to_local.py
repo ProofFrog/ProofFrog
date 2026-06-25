@@ -621,3 +621,27 @@ def test_counter_guarded_rejects_unsound_cases(game: str) -> None:
     transformed_ast = _counter_guarded_field_to_local(game_ast)
     # The transform should be a no-op — the game should be unchanged
     assert transformed_ast == game_ast
+
+
+def test_param_shadowed_field_not_localized() -> None:
+    """F-050: an oracle has a parameter named like the counter-guarded field.
+    The name-only reference scan conflates field and parameter; the pass must
+    DECLINE rather than prepend a sample that clobbers the parameter."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            BitString<8> v;
+            Int ctr;
+            Void Initialize() {
+                ctr = 0;
+                v <- BitString<8>;
+            }
+            BitString<8> O(BitString<8> v) {
+                if (ctr == 0) {
+                    ctr = ctr + 1;
+                    return v;
+                }
+                return v;
+            }
+        }
+        """)
+    assert _counter_guarded_field_to_local(game) == game

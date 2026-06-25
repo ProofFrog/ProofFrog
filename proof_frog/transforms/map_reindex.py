@@ -299,6 +299,13 @@ def _discover_shape(
                 if bad is not None:
                     return bad
 
+    # ids of `.entries` views that are the iterable of a recognized loop --
+    # those are validated by Pass 1 and must not be re-blocked in Pass 2.
+    entries_loop_over_ids: set[int] = set()
+    for method in game.methods:
+        for loop in _find_entries_loops(method, map_name):
+            entries_loop_over_ids.add(id(loop.over))
+
     # Pass 2: read sites.
     for method in game.methods:
         mname = method.signature.name
@@ -308,6 +315,26 @@ def _discover_shape(
                 continue
             key_expr = _extract_read_key(hit)
             if key_expr is None:
+                # Non-key access. ``|M|`` (size) and ``M.values`` are invariant
+                # under an injective key reindexing, and an ``M.entries`` that
+                # drives a recognized loop is validated by Pass 1. But a direct
+                # ``M.keys`` (or a loose ``M.entries`` not consumed by a
+                # recognized loop) exposes the map's KEY structure, which the
+                # reindexing would change -- block rather than silently skip
+                # (F-134).
+                if isinstance(hit, frog_ast.UnaryOperation):
+                    continue
+                if isinstance(hit, frog_ast.FieldAccess):
+                    if hit.name == "values":
+                        continue
+                    if hit.name == "entries" and id(hit) in entries_loop_over_ids:
+                        continue
+                    return _DiscoveryResult(
+                        None,
+                        f"map key-view '.{hit.name}' is read directly; key "
+                        "reindexing would change the observed keys",
+                        mname,
+                    )
                 continue
             whole_shape = first_match_whole(recognizers, key_expr, ctx, game)
             if whole_shape is None:

@@ -351,3 +351,49 @@ def test_invariant_violation_initialize_populates_m1() -> None:
         }
         """,
     )
+
+
+def test_declines_sample_aliases_key_parameter() -> None:
+    """F-008: when the freshly-sampled local reuses the key parameter's name
+    (`k`), the sample declaration shadows the parameter.  The guard reads the
+    parameter binding while the write `M1[k] = s` and `return s` use the
+    sampled local -- two different bindings the collapsed `return F(k)` cannot
+    reproduce.  The matcher's anti-alias guard must decline (mirrors the
+    single-map sibling)."""
+    _apply_and_expect_unchanged(
+        """
+        Game G() {
+            Map<BitString<8>, BitString<8>> M1;
+            Map<BitString<8>, BitString<8>> M2;
+            BitString<8> Oracle(BitString<8> k) {
+                if (k in M1) { return M1[k]; }
+                else if (k in M2) { return M2[k]; }
+                BitString<8> k <- BitString<8>;
+                M1[k] = k;
+                return k;
+            }
+        }
+        """,
+    )
+
+
+def test_declines_map_field_initializer() -> None:
+    """F-009: a field-level initializer (`Map<...> M1 = preset;`, Field.value)
+    is never scanned by the Initialize-body precondition and is dropped by the
+    rebuild (merged field gets initializer None), silently replacing a preset
+    map with a fresh empty sampled Function.  The pass must decline."""
+    _apply_and_expect_unchanged(
+        """
+        Game G(Map<BitString<8>, BitString<8>> preset) {
+            Map<BitString<8>, BitString<8>> M1 = preset;
+            Map<BitString<8>, BitString<8>> M2;
+            BitString<8> Oracle(BitString<8> k) {
+                if (k in M1) { return M1[k]; }
+                else if (k in M2) { return M2[k]; }
+                BitString<8> s <- BitString<8>;
+                M1[k] = s;
+                return s;
+            }
+        }
+        """,
+    )

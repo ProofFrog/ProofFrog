@@ -442,11 +442,16 @@ def _rf_call_in_loop(block: frog_ast.Block, rf_name: str) -> bool:
 
 
 def _count_rf_calls(block: frog_ast.Block, rf_name: str) -> tuple[int, int]:
-    """Count RF calls and non-call references to *rf_name* in a block.
+    """Count RF calls and field-access references to *rf_name* in a block.
 
     Returns ``(call_count, field_access_count)``.  Field accesses are
     references like ``RF.domain`` that prevent simplification.  The
     ``Variable("RF")`` inside ``FuncCall(RF, x)`` is not counted separately.
+
+    NOTE: ``field_access_count`` is *only* the ``RF.domain`` style references.
+    A bare-variable copy (``RF2 = RF``) or argument pass (``f(RF)``) is NOT
+    counted here; callers that need the complete non-call reference set must
+    use :func:`_count_variable_refs` (``total occurrences - call_count``).
     """
     counts: list[int] = [0, 0]  # [calls, field_accesses]
 
@@ -515,7 +520,16 @@ class LocalRFToUniformTransformer(BlockTransformer):
 
             remaining = frog_ast.Block(block.statements[sample_idx + 1 :])
 
-            call_count, other_ref_count = _count_rf_calls(remaining, rf_name)
+            # The rewrite is sound only if the RF is evaluated exactly once and
+            # never otherwise referenced. ``_count_rf_calls`` reports only
+            # ``RF.domain``-style field accesses; a bare-variable copy
+            # (``RF2 = RF``), an argument pass (``f(RF)``), or a set/tuple
+            # element would let the function value escape and be evaluated a
+            # second time. Use the complete reference count: every
+            # ``Variable(rf_name)`` occurrence that is not the ``func`` position
+            # of a counted call is a blocking non-call reference (F-026).
+            call_count, _ = _count_rf_calls(remaining, rf_name)
+            other_ref_count = _count_variable_refs(remaining, rf_name) - call_count
 
             if call_count != 1 or other_ref_count > 0:
                 if self.ctx is not None and call_count > 0:

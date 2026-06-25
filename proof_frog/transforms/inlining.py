@@ -610,6 +610,17 @@ class CollapseAssignmentTransformer(BlockTransformer):
                     and later_statement.var == statement.var
                 ):
                     break
+                # A *typed* later statement (`Type v <- e`) is a re-DECLARATION,
+                # i.e. a new binding (possibly shadowing the earlier `v` if an
+                # intervening scope was flattened into this block), not a plain
+                # reassignment of the same variable. Folding the declaration's
+                # type forward onto it would mis-type the new binding (RC1
+                # scope-awareness; SliceOfInlineConcat attack-3b, where a sunk
+                # outer `BitString<k> a` collided with an inner
+                # `BitString<k+m> a` and produced `BitString<k> a <- ...k+m...`).
+                # Only an untyped reassignment is a safe collapse target.
+                if later_statement.the_type is not None:
+                    break
                 later_rhs = (
                     later_statement.sampled_from
                     if isinstance(later_statement, frog_ast.Sample)

@@ -237,8 +237,51 @@ class SliceOfInlineConcatTransformer(Transformer):
                     param.type.parameterization is not None
                 ):
                     self._var_lengths[param.name] = param.type.parameterization
-            for stmt in method.block.statements:
-                if (
+            # The method body's own declarations are recorded scope-aware by
+            # ``transform_block`` as the traversal descends -- a nested
+            # redeclaration shadows the outer length only within its own block,
+            # and is restored on block exit.  (F-029.)
+            return self.transform(method)
+        finally:
+            self._var_lengths = saved
+
+    @staticmethod
+    def _declared_length(
+        name_type: frog_ast.Type | None,
+    ) -> frog_ast.Expression | None:
+        """The ``BitString`` length expression for a declared type, else None."""
+        if (
+            isinstance(name_type, frog_ast.BitStringType)
+            and name_type.parameterization is not None
+        ):
+            return name_type.parameterization
+        return None
+
+    def _record_declaration(self, name: str, name_type: frog_ast.Type | None) -> None:
+        """Record (or, when the declared type is not a known-length
+        ``BitString``, *shadow-clear*) the length for ``name``.
+
+        Shadow-clearing is the soundness-critical half: a redeclaration of an
+        outer ``BitString`` to a non-``BitString`` (or unparameterized) type
+        must not leave the outer length in the map, or a slice on the inner
+        binding would resolve against the stale outer length."""
+        length = self._declared_length(name_type)
+        if length is not None:
+            self._var_lengths[name] = length
+        else:
+            self._var_lengths.pop(name, None)
+
+    def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
+        # Scope-aware length tracking: record this block's own declarations
+        # (including bare ``VariableDeclaration`` and untyped re-binds, which
+        # the previous flat top-level scan missed -- Gaps A and B of F-029),
+        # restoring the enclosing scope's lengths on exit.
+        saved = dict(self._var_lengths)
+        try:
+            for stmt in block.statements:
+                if isinstance(stmt, frog_ast.VariableDeclaration):
+                    self._record_declaration(stmt.name, stmt.type)
+                elif (
                     isinstance(
                         stmt,
                         (
@@ -248,13 +291,38 @@ class SliceOfInlineConcatTransformer(Transformer):
                         ),
                     )
                     and isinstance(stmt.var, frog_ast.Variable)
-                    and isinstance(stmt.the_type, frog_ast.BitStringType)
-                    and stmt.the_type.parameterization is not None
+                    and stmt.the_type is not None
                 ):
-                    self._var_lengths[stmt.var.name] = stmt.the_type.parameterization
-            return self.transform(method)
+                    self._record_declaration(stmt.var.name, stmt.the_type)
+            return frog_ast.Block(
+                [self.transform(statement) for statement in block.statements]
+            )
         finally:
             self._var_lengths = saved
+
+    def transform_numeric_for(self, node: frog_ast.NumericFor) -> frog_ast.NumericFor:
+        new_start = self.transform(node.start)
+        new_end = self.transform(node.end)
+        saved = dict(self._var_lengths)
+        try:
+            # The loop binder is an ``Int`` -- shadow any outer same-named
+            # BitString length so a slice on the binder doesn't resolve against
+            # the stale outer length.
+            self._var_lengths.pop(node.name, None)
+            new_block = self.transform(node.block)
+        finally:
+            self._var_lengths = saved
+        return frog_ast.NumericFor(node.name, new_start, new_end, new_block)
+
+    def transform_generic_for(self, node: frog_ast.GenericFor) -> frog_ast.GenericFor:
+        new_over = self.transform(node.over)
+        saved = dict(self._var_lengths)
+        try:
+            self._record_declaration(node.var_name, node.var_type)
+            new_block = self.transform(node.block)
+        finally:
+            self._var_lengths = saved
+        return frog_ast.GenericFor(node.var_type, node.var_name, new_over, new_block)
 
     @staticmethod
     def _exprs_equal(a: frog_ast.Expression, b: frog_ast.Expression) -> bool:

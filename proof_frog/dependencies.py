@@ -9,6 +9,7 @@ def generate_dependency_graph(
     block: frog_ast.Block,
     fields: list[frog_ast.Field],
     proof_namespace: frog_ast.Namespace,
+    shadowed_names: set[str] | None = None,
 ) -> DependencyGraph:
     dependency_graph = DependencyGraph()
     for statement in block.statements:
@@ -18,6 +19,22 @@ def generate_dependency_graph(
         node_in_graph.add_neighbour(dependency_graph.get_node(statement))
 
     field_names = [field.name for field in fields]
+    # Names bound by an enclosing scope (method parameters, fields).  A bare
+    # ``VariableDeclaration`` of such a name is a *shadowing binder*: every
+    # later reference to the name resolves to the inner local, so the
+    # declaration must not be pruned as disconnected dead code (doing so
+    # rebinds those references to the outer binding -- RC1 scope-awareness,
+    # SliceOfInlineConcat attack-1).  We therefore make later uses of the name
+    # depend on the declaration so it is reachable from the return and ordered
+    # ahead of its uses.
+    shadowed = set(shadowed_names or set())
+
+    def binds_shadowed(stmt: frog_ast.Statement, name: str) -> bool:
+        return (
+            isinstance(stmt, frog_ast.VariableDeclaration)
+            and stmt.name == name
+            and name in shadowed
+        )
 
     def contains_return(node: frog_ast.ASTNode) -> bool:
         return isinstance(node, frog_ast.ReturnStatement)
@@ -100,6 +117,10 @@ def generate_dependency_graph(
                     related = name in visitors.referenced_variable_names(depends_on)
                 else:
                     related = writes_name(depends_on, name)
+                # A shadowing declaration of `name` is a binder the later use
+                # depends on, whether the use reads or writes.
+                if not related and binds_shadowed(depends_on, name):
+                    related = True
                 if related:
                     add_dependency(node_in_graph, depends_on)
                     break
@@ -275,28 +296,67 @@ def unnecessary_statement_info(
 
 
 def remove_unnecessary_statements(
-    fields: list[str], block: frog_ast.Block
+    fields: list[str], block: frog_ast.Block, outer_names: set[str] | None = None
 ) -> frog_ast.Block:
     required_map, _ = unnecessary_statement_info(fields, block)
+    base_outer_names = outer_names if outer_names is not None else set()
 
-    def construct_new(block: frog_ast.Block) -> frog_ast.Block:
+    def _block_local_names(block: frog_ast.Block) -> set[str]:
+        names: set[str] = set()
+        for statement in block.statements:
+            if isinstance(statement, frog_ast.VariableDeclaration):
+                names.add(statement.name)
+            elif isinstance(
+                statement,
+                (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+            ):
+                base = visitors.lvalue_base_name(statement.var)
+                if base is not None:
+                    names.add(base)
+        return names
+
+    def construct_new(block: frog_ast.Block, enclosing: set[str]) -> frog_ast.Block:
+        # Names bound by enclosing scopes (params, fields, outer-block locals).
+        # A bare ``VariableDeclaration`` that shadows one of these may NOT be
+        # dropped: removing it would silently rebind every subsequent reference
+        # of that name to the enclosing binding (a different variable, possibly
+        # of a different type/length), changing the program's meaning.  (RC1
+        # scope-awareness; surfaces e.g. SliceOfInlineConcat attack-1.)
+        #
+        # Names bound at *this* level are visible to any nested block, so they
+        # extend the enclosing set we hand to deeper recursion.
+        inner_enclosing = enclosing | _block_local_names(block)
         new_statements: list[frog_ast.Statement] = []
         for statement in block.statements:
             if isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
                 new_statement = copy.deepcopy(statement)
-                nested_block = construct_new(statement.block)
-                new_statement.block = nested_block
+                binder = (
+                    statement.name
+                    if isinstance(statement, frog_ast.NumericFor)
+                    else statement.var_name
+                )
+                new_statement.block = construct_new(
+                    statement.block, inner_enclosing | {binder}
+                )
                 new_statements.append(new_statement)
             elif isinstance(statement, frog_ast.IfStatement):
                 new_if_statement = copy.deepcopy(statement)
-                nested_blocks = [construct_new(block) for block in statement.blocks]
-                new_if_statement.blocks = nested_blocks
+                new_if_statement.blocks = [
+                    construct_new(b, inner_enclosing) for b in statement.blocks
+                ]
                 new_statements.append(new_if_statement)
             elif required_map.get(statement):
                 new_statements.append(statement)
+            elif (
+                isinstance(statement, frog_ast.VariableDeclaration)
+                and statement.name in enclosing
+            ):
+                # Shadowing declaration -- keep it so the inner binding (and its
+                # declared type) survives.
+                new_statements.append(statement)
         return frog_ast.Block(new_statements)
 
-    return construct_new(block)
+    return construct_new(block, set(base_outer_names))
 
 
 def _collect_field_access_refs(game: frog_ast.Game) -> list[frog_ast.Variable]:
@@ -351,9 +411,17 @@ def remove_unnecessary_fields(game: frog_ast.Game) -> frog_ast.Game:
         if frog_ast.Variable(field.name) in necessary_vars
     ]
     actually_necessary_field_names = [field.name for field in new_game.fields]
+    # Names bound outside any method body: every field (a method local may
+    # shadow even a field that this pass is about to drop) plus the method's
+    # own parameters.  A bare local declaration shadowing one of these must not
+    # be removed (it would rebind references to the outer binding).
+    all_field_names = {field.name for field in game.fields}
     for method in new_game.methods:
+        param_names = {param.name for param in method.signature.parameters}
         method.block = remove_unnecessary_statements(
-            actually_necessary_field_names, method.block
+            actually_necessary_field_names,
+            method.block,
+            outer_names=all_field_names | param_names,
         )
     # Remove Void methods with empty bodies (e.g., Initialize after field removal)
     new_game.methods = [

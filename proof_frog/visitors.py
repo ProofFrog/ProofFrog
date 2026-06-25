@@ -862,6 +862,22 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         else:
             self.stack.append(None)
 
+    def leave_slice(self, node: frog_ast.Slice) -> None:
+        # Bit-slicing is not modelled in Z3 here. Previously the Slice node had
+        # NO handler at all, so its three visited children (array, start, end)
+        # were left on the stack and `result()` returned the topmost -- the
+        # END expression -- as the slice's "formula". Two slices of the same
+        # width (`(a||b)[0:2n]` and `(a||c)[0:2n]`) then collapsed to the same
+        # atom and compared *equal*, a soundness hole. Pop the three children
+        # and intern the WHOLE slice as a single opaque atom: structurally
+        # distinct slices get distinct atoms (sound; merely incomplete -- the
+        # genuine `(a||b)[0:|a|]=a` identity is handled by the AST pass).
+        children = [self.stack.pop() if self.stack else None for _ in range(3)]
+        if self.opaque_func_call_fallback and not any(c is None for c in children):
+            self.stack.append(self._intern_opaque(node))
+        else:
+            self.stack.append(None)
+
     def leave_unary_operation(self, operation: frog_ast.UnaryOperation) -> None:
         if not self.stack or operation.operator == frog_ast.UnaryOperators.SIZE:
             self.stack.append(None)

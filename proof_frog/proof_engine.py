@@ -1708,6 +1708,14 @@ class ProofEngine:
                 node, frog_ast.ReturnStatement
             )
 
+        def contains_return(statement: frog_ast.Statement) -> bool:
+            return (
+                visitors.SearchVisitor(
+                    lambda n: isinstance(n, frog_ast.ReturnStatement)
+                ).visit(statement)
+                is not None
+            )
+
         dfs_stack: list[dependencies.Node] = []
         # Use identity-keyed visited set to handle duplicate statements
         dfs_visited_ids: set[int] = set()
@@ -1739,6 +1747,22 @@ class ProofEngine:
 
             found = visitors.SearchVisitor(uses_field).visit(statement)
             if id(statement) not in dfs_visited_ids and found is not None:
+                dfs_stack.append(graph.get_node(statement))
+                do_dfs()
+
+        # Rescue any statement that contains a return anywhere within it but
+        # has not been reached above. The two loops above seed only from a
+        # top-level ReturnStatement and from field-referencing statements, so
+        # an if/else whose branches each return -- with nothing after it and no
+        # field reference -- is missed by both. In the dependency graph such a
+        # return lives *inside* the if/else node, so there is no standalone
+        # return node to find; the if/else nonetheless determines the method's
+        # result and must not be dropped. Without this rescue the sort
+        # collapsed the method to an empty body, making semantically distinct
+        # methods compare equal (soundness bug #221). Statements that genuinely
+        # contain no return remain prunable as dead code.
+        for statement in block.statements:
+            if id(statement) not in dfs_visited_ids and contains_return(statement):
                 dfs_stack.append(graph.get_node(statement))
                 do_dfs()
 

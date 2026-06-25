@@ -681,6 +681,17 @@ class RemoveUnreachableTransformer(BlockTransformer):
         self._block_versions: dict[int, dict[str, int]] = {}
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        # Any statement following an unconditional top-level return is
+        # unreachable. Truncating here keeps blocks well-formed when an
+        # earlier pass flattens an if/else whose branches return into a
+        # straight-line sequence with a trailing dead return (e.g. the
+        # topological sort emitting `return a; return b;`).
+        for index, statement in enumerate(block.statements):
+            if isinstance(statement, frog_ast.ReturnStatement) and index + 1 < len(
+                block.statements
+            ):
+                return frog_ast.Block(block.statements[: index + 1])
+
         def contains_unconditional_return(block: frog_ast.Block) -> bool:
             return any(
                 isinstance(statement, frog_ast.ReturnStatement)

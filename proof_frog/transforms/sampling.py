@@ -1116,6 +1116,12 @@ def _single_call_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
         if init_sample is None or init_sample_count > 1 or field_used_elsewhere_in_init:
             continue
 
+        # Reject if any oracle shadows the field name with a parameter/local:
+        # name-only reference detection cannot tell field from binding, and the
+        # prepended local sample would clobber the binding (F-055).
+        if _name_shadowed_in_any_oracle(game, field.name):
+            continue
+
         # Step 2: Find which non-Initialize methods reference this field
         using_methods: list[str] = []
         for method in game.methods:
@@ -1181,6 +1187,49 @@ def _references_name(node: frog_ast.ASTNode, name: str) -> bool:
         return isinstance(n, frog_ast.Variable) and n.name == name
 
     return SearchVisitor(check).visit(node) is not None
+
+
+def _method_binds_name(method: frog_ast.Method, name: str) -> bool:
+    """True if *method* binds *name* as a parameter or declares it as a local
+    (typed sample/assignment/declaration, or a loop binder), shadowing a
+    same-named game field within the method.
+
+    ``_references_name`` is name-only and cannot tell a field reference from a
+    same-named parameter/local. When a method shadows the field name, its
+    ``name`` occurrences are the binding, not the field -- and prepending a
+    localized ``name <- ...`` sample there would clobber the binding (F-050,
+    F-055). The field-to-local passes must not localize such a field."""
+    if any(p.name == name for p in method.signature.parameters):
+        return True
+
+    found = [False]
+
+    def _visit(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, frog_ast.VariableDeclaration) and n.name == name:
+            found[0] = True
+        elif (
+            isinstance(n, (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample))
+            and n.the_type is not None
+            and isinstance(n.var, frog_ast.Variable)
+            and n.var.name == name
+        ):
+            found[0] = True
+        elif isinstance(n, frog_ast.NumericFor) and n.name == name:
+            found[0] = True
+        elif isinstance(n, frog_ast.GenericFor) and n.var_name == name:
+            found[0] = True
+        return False
+
+    SearchVisitor(_visit).visit(method.block)
+    return found[0]
+
+
+def _name_shadowed_in_any_oracle(game: frog_ast.Game, name: str) -> bool:
+    """True if any non-Initialize method binds *name* (see _method_binds_name)."""
+    return any(
+        m.signature.name != "Initialize" and _method_binds_name(m, name)
+        for m in game.methods
+    )
 
 
 class SingleCallFieldToLocal(TransformPass):
@@ -1550,6 +1599,12 @@ def _counter_guarded_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
 
         # Reject if no sample, multiple samples, or field used elsewhere
         if init_sample is None or init_sample_count > 1 or field_used_elsewhere_in_init:
+            continue
+
+        # Reject if any oracle shadows the field name with a parameter/local
+        # (F-050): name-only reference detection conflates the field with the
+        # binding, and the prepended local sample would clobber it.
+        if _name_shadowed_in_any_oracle(game, field.name):
             continue
 
         # Step 2: Find which non-Initialize methods reference this field

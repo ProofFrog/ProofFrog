@@ -40,14 +40,22 @@ def generate_dependency_graph(
         return isinstance(node, frog_ast.ReturnStatement)
 
     def mutates_field(stmt: frog_ast.Statement) -> bool:
-        if not isinstance(
-            stmt, (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample)
-        ):
-            return False
-        # Peel element/slice/field accesses so nested element writes
-        # (`M[0][0] = v`) and field writes (`X.f = v`) to a field still count.
-        base = visitors.lvalue_base_name(stmt.var)
-        return base is not None and base in field_names
+        # A statement mutates a field if it contains ANYWHERE -- including
+        # nested inside an if/for block -- a write whose l-value base is a
+        # field. Checking only the top-level statement kind missed a field
+        # write buried in a branch (`if (...) { F[k] = v; }`), letting a later
+        # return be hoisted above the side-effecting branch (the branch then
+        # looks dead and is dropped). Peel element/slice/field accesses so
+        # `M[0][0] = v` and `X.f = v` to a field still count.
+        def _is_field_write(node: frog_ast.ASTNode) -> bool:
+            if not isinstance(
+                node, (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample)
+            ):
+                return False
+            base = visitors.lvalue_base_name(node.var)
+            return base is not None and base in field_names
+
+        return visitors.SearchVisitor(_is_field_write).visit(stmt) is not None
 
     def writes_name(node: frog_ast.ASTNode, name: str) -> bool:
         """True if *node* contains a write whose l-value base is *name* --

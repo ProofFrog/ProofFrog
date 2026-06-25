@@ -493,3 +493,67 @@ def test_no_substitution_after_field_reassignment_in_branch() -> None:
     assert (
         result == game
     ), "Field references after field reassignment in branch should not be substituted"
+
+
+def test_no_substitution_after_nested_field_reassignment() -> None:
+    """F-075 A2: the comparison field is reassigned inside a NESTED block of
+    the branch. The Phase-2 stop must see the nested write and not substitute
+    references that follow it."""
+    source = """
+    Game Test() {
+        Int field1;
+        Int f(Int v, Bool c) {
+            if (v == field1) {
+                if (c) {
+                    field1 = 99;
+                }
+                return field1;
+            }
+            return 0;
+        }
+    }
+    """
+    game = frog_parser.parse_game(source)
+    result = IfConditionAliasSubstitutionTransformer().transform(game)
+    assert result == game, "nested field reassignment must stop substitution (A2)"
+
+
+def test_no_substitution_after_element_write() -> None:
+    """F-075 A3: an element/key write `F[k] = v` to the comparison field is a
+    mutation the Phase-2 stop must see (its l-value is an ArrayAccess, not a
+    bare Variable)."""
+    source = """
+    Game Test() {
+        Map<Int, Int> field1;
+        Int f(Map<Int, Int> x, Int k) {
+            if (x == field1) {
+                field1[k] = 99;
+                return field1[k];
+            }
+            return 0;
+        }
+    }
+    """
+    game = frog_parser.parse_game(source)
+    result = IfConditionAliasSubstitutionTransformer().transform(game)
+    assert result == game, "element write to the field must stop substitution (A3)"
+
+
+def test_no_substitution_after_replacement_reassignment() -> None:
+    """F-075 A4: reassigning the replacement local breaks `field == local`, so
+    substitution must stop once the replacement side is written."""
+    source = """
+    Game Test() {
+        Int field1;
+        Int f(Int v) {
+            if (v == field1) {
+                v = 7;
+                return field1;
+            }
+            return 0;
+        }
+    }
+    """
+    game = frog_parser.parse_game(source)
+    result = IfConditionAliasSubstitutionTransformer().transform(game)
+    assert result == game, "replacement reassignment must stop substitution (A4)"

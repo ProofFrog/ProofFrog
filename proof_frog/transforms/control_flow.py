@@ -1084,23 +1084,21 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
                 new_branch = SubstitutionTransformer(inline_map).transform(new_branch)
 
             # Phase 2: Substitute each comparison field with its replacement.
-            # Stop at the first reassignment of any comparison field within the
-            # branch, since after reassignment the field value may differ from
-            # the replacement.
+            # The substitution ``field -> replacement`` is valid only while the
+            # field still equals the replacement, i.e. until EITHER side is
+            # written. Stop at the first statement that writes (anywhere, incl.
+            # nested blocks and element/slice/field writes -- F-075 A2/A3) any
+            # comparison field OR any free variable of a replacement expression
+            # (reassigning the local breaks ``field == local`` -- A4). Keep that
+            # statement and everything after it unsubstituted.
             alias_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+            invalidating_names = set(field_var_names)
             for field_expr, replacement in alias_pairs:
                 alias_map.set(field_expr, replacement)
+                invalidating_names |= referenced_variable_names(replacement)
             new_stmts: list[frog_ast.Statement] = []
             for stmt_idx, branch_stmt in enumerate(new_branch.statements):
-                # Check if this statement reassigns one of the comparison fields
-                if (
-                    isinstance(
-                        branch_stmt,
-                        (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
-                    )
-                    and isinstance(branch_stmt.var, frog_ast.Variable)
-                    and branch_stmt.var.name in field_var_names
-                ):
+                if reassigns_or_rebinds(invalidating_names, branch_stmt):
                     # Stop substituting: keep this and all remaining as-is
                     new_stmts.extend(new_branch.statements[stmt_idx:])
                     break

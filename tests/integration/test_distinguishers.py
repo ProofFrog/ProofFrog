@@ -937,3 +937,40 @@ def test_slice_of_concat_sound_identity_still_fires() -> None:
         """
     )
     assert _engine_with().check_equivalent(real, post).valid
+
+
+def test_guarded_field_element_write_not_dropped() -> None:
+    """F-075 / mover sweep: a field element-write nested in a guarded branch is
+    observable across calls (via a later read), so it must not be dropped. The
+    bug: TopologicalSort hoisted the constant `return 0` above the
+    `if (x == F) { F[k] = 99; }` branch because `mutates_field` only inspected
+    top-level statement kinds and missed the write nested in the if; the branch
+    then looked dead and was removed, equating a persistent field mutation
+    (Real) with a write to a local parameter (Random)."""
+    real = frog_parser.parse_game(
+        """
+        Game Real() {
+            Map<Int, Int> F;
+            Void SetF(Int k, Int v) { F[k] = v; }
+            Int Get(Int k) { return F[k]; }
+            Int Test(Map<Int, Int> x, Int k) {
+                if (x == F) { F[k] = 99; }
+                return 0;
+            }
+        }
+        """
+    )
+    random = frog_parser.parse_game(
+        """
+        Game Random() {
+            Map<Int, Int> F;
+            Void SetF(Int k, Int v) { F[k] = v; }
+            Int Get(Int k) { return F[k]; }
+            Int Test(Map<Int, Int> x, Int k) {
+                if (x == F) { x[k] = 99; }
+                return 0;
+            }
+        }
+        """
+    )
+    assert not _engine_with().check_equivalent(real, random).valid

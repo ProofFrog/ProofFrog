@@ -1230,7 +1230,18 @@ def _localize_init_only_field_samples(game: frog_ast.Game) -> frog_ast.Game:
         if sample_count != 1 or init_sample_idx is None:
             continue
 
-        # Check: field NOT referenced in any non-Initialize method
+        # Gap A1: the sample must be the field's FIRST access inside Initialize.
+        # If any earlier statement reads the field, it reads the field's
+        # declared initializer value (SEMANTICS §6.2 step 1); deleting the
+        # field declaration would dangle that read.
+        read_before_sample = any(
+            _references_name(stmt, field.name)
+            for stmt in init_method.block.statements[:init_sample_idx]
+        )
+        if read_before_sample:
+            continue
+
+        # Check: field NOT referenced in any non-Initialize method body.
         used_outside = False
         for method in game.methods:
             if method.signature.name == "Initialize":
@@ -1238,8 +1249,29 @@ def _localize_init_only_field_samples(game: frog_ast.Game) -> frog_ast.Game:
             if _references_name(method.block, field.name):
                 used_outside = True
                 break
+            # Gap A3 (defense): a reference in a non-Initialize method's
+            # signature (parameter/return type parameterization) also keeps the
+            # field live.
+            if any(
+                _references_name(param.type, field.name)
+                for param in method.signature.parameters
+            ) or _references_name(method.signature.return_type, field.name):
+                used_outside = True
+                break
 
         if used_outside:
+            continue
+
+        # Gap A2: the field may be referenced only in ANOTHER field's
+        # initializer expression (set before Initialize runs).  Deleting the
+        # field would dangle that initializer.
+        referenced_in_initializer = any(
+            other.value is not None
+            and other.name != field.name
+            and _references_name(other.value, field.name)
+            for other in game.fields
+        )
+        if referenced_in_initializer:
             continue
 
         eligible.append((field, init_sample_idx))

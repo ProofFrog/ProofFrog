@@ -89,11 +89,19 @@ class SimplifySpliceTransformer(BlockTransformer):
 
             # Step 1, find type of variables (to get lengths)
 
+            # The relevant declaration is the one in effect at the concat site:
+            # the LAST typed declaration of the component before this statement,
+            # not the first match in the whole block. A same-scope
+            # redeclaration with a different bit length before the concat would
+            # otherwise be missed and the splice would use a stale length
+            # (F-067). Visiting the prior statements in reverse makes the first
+            # match the most recent declaration.
+            prior_reversed = frog_ast.Block(list(reversed(block.statements[:index])))
             lengths: list[Symbol] = []
             for var in concatenated_var_names:
                 declaration = SearchVisitor(
                     functools.partial(find_declaration, var.name)
-                ).visit(block)
+                ).visit(prior_reversed)
                 if declaration is None:
                     break
                 assert isinstance(declaration, (frog_ast.Assignment, frog_ast.Sample))

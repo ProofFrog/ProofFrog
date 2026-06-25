@@ -26,7 +26,7 @@ from ..visitors import (
     Z3FormulaVisitor,
     GetTypeMapVisitor,
     NameTypeMap,
-    assigns_variable,
+    lvalue_base_name,
     referenced_variable_names,
     reassigns_or_rebinds,
     block_unconditionally_returns,
@@ -631,19 +631,16 @@ class SimplifyReturnTransformer(BlockTransformer):
             # Check that no intervening statement modifies a free variable
             # of the expression being inlined.  Without this check, moving
             # `expr` from its original evaluation point to the return point
-            # could change its value.
-            expr_free_vars = VariableCollectionVisitor().visit(
-                copy.deepcopy(statement.value)
-            )
+            # could change its value.  The read-set must see variables under
+            # FieldAccess (`M` in `|M.keys|`) and the write-set must see
+            # element/slice/field writes, `<-uniq[S]` exclusion-set insertion,
+            # and loop-binder shadowing -- so both use the node-kind-complete
+            # scanners rather than VariableCollectionVisitor/assigns_variable.
+            expr_free_vars = referenced_variable_names(statement.value)
             if expr_free_vars:
                 for skipped_idx in range(index + 1, len(block.statements) - 1):
                     skipped = block.statements[skipped_idx]
-                    if (
-                        SearchVisitor(
-                            functools.partial(assigns_variable, expr_free_vars)
-                        ).visit(skipped)
-                        is not None
-                    ):
+                    if reassigns_or_rebinds(expr_free_vars, skipped):
                         return block
             return self.transform_block(
                 frog_ast.Block(block.statements[:index])
@@ -720,19 +717,23 @@ class RemoveUnreachableTransformer(BlockTransformer):
             updated = []
 
             def assigns_variable_search(search_node: frog_ast.ASTNode) -> bool:
-                if not isinstance(search_node, (frog_ast.Assignment, frog_ast.Sample)):
-                    return False
-                var = None
-                if isinstance(search_node.var, frog_ast.Variable):
-                    var = search_node.var
-                if isinstance(search_node.var, frog_ast.ArrayAccess) and isinstance(
-                    search_node.var.the_array, frog_ast.Variable
+                if not isinstance(
+                    search_node,
+                    (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
                 ):
-                    var = search_node.var.the_array
-
-                if var in used_variables and var not in updated:
-                    variable_version_map[var.name] += 1
-                    updated.append(var)
+                    return False
+                # Peel element/slice/field accesses to the written base name so
+                # nested element writes (`M[0][0] = v`) bump the version too --
+                # a depth-1-only check left `M` looking unmodified and let Z3
+                # wrongly prove the following statements unreachable.
+                base_name = lvalue_base_name(search_node.var)
+                if (
+                    base_name is not None
+                    and base_name in variable_version_map
+                    and base_name not in updated
+                ):
+                    variable_version_map[base_name] += 1
+                    updated.append(base_name)
                     return True
                 return False
 

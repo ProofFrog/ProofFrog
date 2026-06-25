@@ -1,5 +1,4 @@
 from __future__ import annotations
-import functools
 import copy
 from typing import Optional, Callable, Tuple
 from . import visitors
@@ -28,14 +27,33 @@ def generate_dependency_graph(
             stmt, (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample)
         ):
             return False
-        target = stmt.var
-        if isinstance(target, frog_ast.Variable):
-            return target.name in field_names
-        if isinstance(target, frog_ast.ArrayAccess) and isinstance(
-            target.the_array, frog_ast.Variable
-        ):
-            return target.the_array.name in field_names
-        return False
+        # Peel element/slice/field accesses so nested element writes
+        # (`M[0][0] = v`) and field writes (`X.f = v`) to a field still count.
+        base = visitors.lvalue_base_name(stmt.var)
+        return base is not None and base in field_names
+
+    def writes_name(node: frog_ast.ASTNode, name: str) -> bool:
+        """True if *node* contains a write whose l-value base is *name* --
+        a plain, element, slice, or field write."""
+
+        def _writes(inner: frog_ast.ASTNode) -> bool:
+            if (
+                isinstance(
+                    inner,
+                    (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+                )
+                and visitors.lvalue_base_name(inner.var) == name
+            ):
+                return True
+            # `x <-uniq[S] T` implicitly inserts the draw into S, so a read of S
+            # must be ordered relative to it.
+            return (
+                isinstance(inner, frog_ast.UniqueSample)
+                and inner.surface_form == "uniq"
+                and name in visitors.referenced_variable_names(inner.unique_set)
+            )
+
+        return visitors.SearchVisitor(_writes).visit(node) is not None
 
     for index, statement in enumerate(block.statements):
         node_in_graph = dependency_graph.get_node(statement)
@@ -61,53 +79,28 @@ def generate_dependency_graph(
                 ):
                     add_dependency(node_in_graph, preceding_statement)
 
-        variables = visitors.VariableCollectionVisitor().visit(statement)
-        for variable in variables:
+        # Complete read-set, in first-appearance order so dependency-edge order
+        # is deterministic: includes variables referenced through a FieldAccess
+        # (`M` in `|M.keys|`) or array/slice access, which
+        # VariableCollectionVisitor drops -- without them a read of a map view
+        # looks independent of a write to the map and gets reordered across it.
+        statement_write_cache: dict[str, bool] = {}
+        for variable in visitors.referenced_variables_in_order(statement):
+            name = variable.name
+            if name in proof_namespace:
+                continue
+            # Does *this* statement write `name`?  If so it must come after any
+            # earlier statement that references `name` (WAR / WAW); otherwise it
+            # only reads `name` and must come after any earlier writer (RAW).
+            if name not in statement_write_cache:
+                statement_write_cache[name] = writes_name(statement, name)
+            statement_writes = statement_write_cache[name]
             for depends_on in earlier_statements:
-                if variable.name in proof_namespace:
-                    continue
-
-                def search_for_assignment(
-                    variable: frog_ast.Variable, node: frog_ast.ASTNode
-                ) -> bool:
-                    return (
-                        isinstance(
-                            node,
-                            (
-                                frog_ast.Assignment,
-                                frog_ast.Sample,
-                                frog_ast.UniqueSample,
-                            ),
-                        )
-                    ) and node.var == variable
-
-                has_write = False
-                if (
-                    visitors.SearchVisitor(
-                        functools.partial(search_for_assignment, variable)
-                    ).visit(statement)
-                    is not None
-                ):
-                    has_write = True
-
-                def search_for_any(
-                    variable: frog_ast.Variable, node: frog_ast.ASTNode
-                ) -> bool:
-                    return variable == node
-
-                if (
-                    has_write
-                    and visitors.SearchVisitor(
-                        functools.partial(search_for_any, variable)
-                    ).visit(depends_on)
-                    is not None
-                ) or (
-                    not has_write
-                    and visitors.SearchVisitor(
-                        functools.partial(search_for_assignment, variable)
-                    ).visit(depends_on)
-                    is not None
-                ):
+                if statement_writes:
+                    related = name in visitors.referenced_variable_names(depends_on)
+                else:
+                    related = writes_name(depends_on, name)
+                if related:
                     add_dependency(node_in_graph, depends_on)
                     break
 
@@ -236,6 +229,12 @@ class BubbleSortFieldAssignment(visitors.BlockTransformer):
         return frog_ast.Block(new_statements)
 
 
+def _vars_of(node: frog_ast.ASTNode) -> list[frog_ast.Variable]:
+    """Complete read-set as Variable nodes -- includes variables under a
+    FieldAccess/ArrayAccess/Slice that VariableCollectionVisitor drops."""
+    return visitors.referenced_variables_in_order(node)
+
+
 def unnecessary_statement_info(
     fields: list[str], block: frog_ast.Block
 ) -> Tuple[frog_ast.ASTMap[bool], list[frog_ast.Variable]]:
@@ -251,27 +250,23 @@ def unnecessary_statement_info(
             if isinstance(
                 statement, frog_ast.ReturnStatement
             ) or visitors.assigns_variable(necessary_vars, statement):
-                all_vars = visitors.VariableCollectionVisitor().visit(statement)
+                # Complete read-set: variables reached through a FieldAccess
+                # (`M` in `|M.keys|`) keep their backing writes alive too.
+                all_vars = _vars_of(statement)
                 necessary_vars += all_vars
                 required_map.set(statement, True)
             elif isinstance(statement, frog_ast.NumericFor):
-                necessary_vars += visitors.VariableCollectionVisitor().visit(
-                    statement.start
-                ) + visitors.VariableCollectionVisitor().visit(statement.end)
+                necessary_vars += _vars_of(statement.start) + _vars_of(statement.end)
                 remove_helper(statement.block)
             elif isinstance(
                 statement,
                 frog_ast.GenericFor,
             ):
-                necessary_vars += visitors.VariableCollectionVisitor().visit(
-                    statement.over
-                )
+                necessary_vars += _vars_of(statement.over)
                 remove_helper(statement.block)
             elif isinstance(statement, frog_ast.IfStatement):
                 for condition in statement.conditions:
-                    necessary_vars += visitors.VariableCollectionVisitor().visit(
-                        condition
-                    )
+                    necessary_vars += _vars_of(condition)
                 for if_block in statement.blocks:
                     remove_helper(if_block)
 

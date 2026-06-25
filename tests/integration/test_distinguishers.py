@@ -694,3 +694,116 @@ def test_refactor_group_elem_field_exp_multicall() -> None:
     engine = _engine_with()
     result = engine.check_equivalent(pre, post)
     assert result.valid, result.failure_detail
+
+
+# --------------------------------------------------------------------------
+# Negative distinguishers: the engine must REJECT genuinely distinguishable
+# pairs.  Each pair below differs only in the ORDER of a state read relative
+# to a state write -- `... = read(state); write(state); return ...` versus
+# `write(state); return read(state)`.  These are advantage-1 distinguishable
+# (the read observes different state on the two sides), so check_equivalent
+# must return valid is False.  Before the RC1 reference/write-scan fixes the
+# canonicalizer (TopologicalSort dependency model, RemoveUnnecessaryFields
+# liveness, SimplifyReturn / the inliners) moved the read past the write on
+# one side and wrongly accepted the pair.  (audit findings F-126 + the
+# RC-front movers behind it.)
+# --------------------------------------------------------------------------
+
+
+def test_reject_read_moved_past_uniq_insertion() -> None:
+    """`<-uniq[S]` inserts the draw into S, so `|S|` read before vs after the
+    draw differs.  Must not be accepted as equivalent."""
+    real = frog_parser.parse_game(
+        """
+        Game Real() {
+            Set<BitString<2>> S;
+            BitString<2> t;
+            Void Initialize() { t = 0b00; }
+            [Int, Int] O() {
+                [Int, Int] s = [|S|, 0];
+                BitString<2> x <-uniq[S] BitString<2>;
+                t = x;
+                return s;
+            }
+            BitString<2> Peek() { return t; }
+        }
+        """
+    )
+    random = frog_parser.parse_game(
+        """
+        Game Random() {
+            Set<BitString<2>> S;
+            BitString<2> t;
+            Void Initialize() { t = 0b00; }
+            [Int, Int] O() {
+                BitString<2> x <-uniq[S] BitString<2>;
+                t = x;
+                return [|S|, 0];
+            }
+            BitString<2> Peek() { return t; }
+        }
+        """
+    )
+    assert not _engine_with().check_equivalent(real, random).valid
+
+
+def test_reject_read_moved_past_map_write_via_fieldaccess_view() -> None:
+    """`|M.keys|` reaches M only through a FieldAccess view; moving it past the
+    element write `M[0]=1` changes its value.  Must not be accepted."""
+    real = frog_parser.parse_game(
+        """
+        Game Real() {
+            Map<Int, Int> M;
+            [Int, Int] O() {
+                [Int, Int] s = [|M.keys|, 0];
+                M[0] = 1;
+                return s;
+            }
+            Int Size() { return M[0]; }
+        }
+        """
+    )
+    random = frog_parser.parse_game(
+        """
+        Game Random() {
+            Map<Int, Int> M;
+            [Int, Int] O() {
+                M[0] = 1;
+                return [|M.keys|, 0];
+            }
+            Int Size() { return M[0]; }
+        }
+        """
+    )
+    assert not _engine_with().check_equivalent(real, random).valid
+
+
+def test_reject_read_moved_past_nested_element_write() -> None:
+    """A read of `M[0]` moved past the nested element write `M[0][1]=1`
+    observes the mutated value.  Must not be accepted."""
+    real = frog_parser.parse_game(
+        """
+        Game Real() {
+            Map<Int, [Int, Int]> M;
+            Void Initialize() { M[0] = [0, 0]; }
+            [Int, Int] O() {
+                [Int, Int] s = M[0];
+                M[0][1] = 1;
+                return s;
+            }
+        }
+        """
+    )
+    random = frog_parser.parse_game(
+        """
+        Game Random() {
+            Map<Int, [Int, Int]> M;
+            Void Initialize() { M[0] = [0, 0]; }
+            [Int, Int] O() {
+                M[0][1] = 1;
+                return M[0];
+            }
+        }
+        """
+    )
+    assert not _engine_with().check_equivalent(real, random).valid

@@ -1173,15 +1173,15 @@ def build_game_type_map(
 def assigns_variable(
     used_variables: list[frog_ast.Variable], node: frog_ast.ASTNode
 ) -> bool:
-    return isinstance(
+    if not isinstance(
         node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
-    ) and (
-        (node.var in used_variables)
-        or (
-            isinstance(node.var, frog_ast.ArrayAccess)
-            and node.var.the_array in used_variables
-        )
-    )
+    ):
+        return False
+    # Peel element/slice/field accesses so nested element writes (`M[0][0]=v`)
+    # and field writes (`X.f=v`) -- not just depth-1 `M[k]=v` -- count as a
+    # write to the base variable.
+    base = lvalue_base_name(node.var)
+    return base is not None and base in {v.name for v in used_variables}
 
 
 def lvalue_base_name(target: frog_ast.ASTNode) -> Optional[str]:
@@ -1223,6 +1223,30 @@ def referenced_variable_names(node: frog_ast.ASTNode) -> set[str]:
 
     SearchVisitor(_collect).visit(node)
     return names
+
+
+def referenced_variables_in_order(
+    node: frog_ast.ASTNode,
+) -> list[frog_ast.Variable]:
+    """Variables referenced in *node* in first-appearance (pre-order) order,
+    deduplicated by name -- the FieldAccess-complete analogue of
+    :class:`VariableCollectionVisitor`.  Used where iteration order is
+    observable (e.g. dependency-edge order)."""
+
+    class _OrderedReferenceVisitor(Visitor[list[frog_ast.Variable]]):
+        def __init__(self) -> None:
+            self.variables: list[frog_ast.Variable] = []
+            self.seen: set[str] = set()
+
+        def result(self) -> list[frog_ast.Variable]:
+            return self.variables
+
+        def visit_variable(self, inner: frog_ast.Variable) -> None:
+            if inner.name not in self.seen:
+                self.seen.add(inner.name)
+                self.variables.append(inner)
+
+    return _OrderedReferenceVisitor().visit(node)
 
 
 def reassigns_or_rebinds(names: set[str], node: frog_ast.ASTNode) -> bool:

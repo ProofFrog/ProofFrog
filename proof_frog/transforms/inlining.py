@@ -23,6 +23,8 @@ from ..visitors import (
     Visitor,
     ReplaceTransformer,
     VariableCollectionVisitor,
+    referenced_variable_names,
+    reassigns_or_rebinds,
 )
 from ._base import (
     TransformPass,
@@ -191,20 +193,6 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
             var_name = statement.var.name
             expr = statement.value
 
-            def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
-                return (
-                    isinstance(
-                        node,
-                        (
-                            frog_ast.Sample,
-                            frog_ast.Assignment,
-                            frog_ast.UniqueSample,
-                        ),
-                    )
-                    and isinstance(node.var, frog_ast.Variable)
-                    and node.var.name == name
-                )
-
             def uses_var(name: str, node: frog_ast.ASTNode) -> bool:
                 return isinstance(node, frog_ast.Variable) and node.name == name
 
@@ -212,13 +200,9 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
                 copy.deepcopy(list(block.statements[index + 1 :]))
             )
 
-            # Skip if var is reassigned anywhere in remaining
-            if (
-                SearchVisitor(functools.partial(is_written_to, var_name)).visit(
-                    remaining_block
-                )
-                is not None
-            ):
+            # Skip if var is reassigned anywhere in remaining (element/field
+            # writes and <-uniq insertion count too, via the shared scanner).
+            if reassigns_or_rebinds({var_name}, remaining_block):
                 continue
 
             # Find the first use of var in remaining_block
@@ -257,19 +241,19 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
                     )
                 continue
 
-            # Collect free variables in expr and check none are written to
-            # between the declaration and the single use site
-            free_vars = VariableCollectionVisitor().visit(copy.deepcopy(expr))
+            # Collect free variables in expr (complete read-set: sees variables
+            # under FieldAccess such as `M` in `|M.keys|`) and check none are
+            # mutated between the declaration and the single use site -- where a
+            # mutation is any element/slice/field write, a <-uniq insertion, or a
+            # loop-binder rebind.
+            free_var_names = referenced_variable_names(expr)
             intermediate = frog_ast.Block(
                 list(remaining_block.statements[:first_use_idx])
             )
             modified_free_vars = [
-                fv.name
-                for fv in free_vars
-                if SearchVisitor(functools.partial(is_written_to, fv.name)).visit(
-                    intermediate
-                )
-                is not None
+                name
+                for name in sorted(free_var_names)
+                if reassigns_or_rebinds({name}, intermediate)
             ]
             if modified_free_vars:
                 if self.ctx is not None:
@@ -518,20 +502,6 @@ class InlineMultiUsePureExpressionTransformer(BlockTransformer):
             ):
                 continue
 
-            def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
-                return (
-                    isinstance(
-                        node,
-                        (
-                            frog_ast.Sample,
-                            frog_ast.Assignment,
-                            frog_ast.UniqueSample,
-                        ),
-                    )
-                    and isinstance(node.var, frog_ast.Variable)
-                    and node.var.name == name
-                )
-
             def uses_var(name: str, node: frog_ast.ASTNode) -> bool:
                 return isinstance(node, frog_ast.Variable) and node.name == name
 
@@ -539,13 +509,9 @@ class InlineMultiUsePureExpressionTransformer(BlockTransformer):
                 copy.deepcopy(list(block.statements[index + 1 :]))
             )
 
-            # Skip if var is reassigned
-            if (
-                SearchVisitor(functools.partial(is_written_to, var_name)).visit(
-                    remaining_block
-                )
-                is not None
-            ):
+            # Skip if var is reassigned (element/field writes and <-uniq
+            # insertion are reassignments too, via the shared scanner).
+            if reassigns_or_rebinds({var_name}, remaining_block):
                 continue
 
             # Skip if var is not used at all
@@ -557,15 +523,13 @@ class InlineMultiUsePureExpressionTransformer(BlockTransformer):
             ):
                 continue
 
-            # Skip if any free variable in expr is reassigned
-            free_vars = VariableCollectionVisitor().visit(copy.deepcopy(expr))
-            if any(
-                SearchVisitor(functools.partial(is_written_to, fv.name)).visit(
-                    remaining_block
-                )
-                is not None
-                for fv in free_vars
-            ):
+            # Skip if any free variable of expr is mutated between the binding
+            # and its use sites: the read-set must see variables under
+            # FieldAccess (`M` in `|M.keys|`) and the write-set must see
+            # element/slice/field writes, `<-uniq[S]` exclusion-set insertion,
+            # and loop-binder shadowing -- otherwise the inlined expression
+            # would silently take a different value at the use site.
+            if reassigns_or_rebinds(referenced_variable_names(expr), remaining_block):
                 continue
 
             # Replace all occurrences of var with expr
@@ -940,38 +904,15 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
                 copy.deepcopy(block.statements[index + 1 :])
             )
 
-            def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
-                return (
-                    isinstance(
-                        node,
-                        (
-                            frog_ast.Sample,
-                            frog_ast.Assignment,
-                            frog_ast.UniqueSample,
-                        ),
-                    )
-                    and isinstance(node.var, frog_ast.Variable)
-                    and node.var.name == name
-                )
-
-            # Skip if var is reassigned
-            if (
-                SearchVisitor(functools.partial(is_written_to, var_name)).visit(
-                    remaining_block
-                )
-                is not None
-            ):
+            # Skip if var is reassigned (element/field writes and <-uniq
+            # insertion count too, via the shared scanner).
+            if reassigns_or_rebinds({var_name}, remaining_block):
                 continue
 
-            # Skip if any free variable in expr is reassigned
-            free_vars = VariableCollectionVisitor().visit(copy.deepcopy(expr))
-            if any(
-                SearchVisitor(functools.partial(is_written_to, fv.name)).visit(
-                    remaining_block
-                )
-                is not None
-                for fv in free_vars
-            ):
+            # Skip if any free variable of expr is mutated later: a complete
+            # read-set (vars under FieldAccess) and write/rebind scan are
+            # required so the inlined expression keeps its original value.
+            if reassigns_or_rebinds(referenced_variable_names(expr), remaining_block):
                 continue
 
             # Find a structurally-equal occurrence of expr in remaining block

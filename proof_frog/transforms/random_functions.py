@@ -2140,6 +2140,18 @@ def _match_idiom_suffix(
     if not _expr_references_any(key_expr, param_names):
         return None
 
+    # (F-005) The key expression must not read the map itself.  A
+    # self-referential key such as ``(k in M)`` is history-dependent: the
+    # assign-site write ``M[key] = x`` changes the state ``key_expr`` reads on
+    # later calls, so the three structural key occurrences no longer evaluate
+    # identically and the collapsed ``return M(key);`` cannot reproduce the
+    # behaviour (and the output ``M(k in M)`` is ill-typed besides).  The
+    # if-condition's ``in M`` and the return/assign ``M[...]`` map occurrences
+    # are matched separately by ``_is_idiom_if_expr``; this guard targets
+    # references to ``M`` *inside* ``key_expr`` only.
+    if _references_map(key_expr, map_name):
+        return None
+
     # Purity: if any embedded FuncCall is non-deterministic, rewriting the
     # three occurrences of the key into one is unsound.
     if ctx is not None and has_nondeterministic_call(
@@ -2161,12 +2173,35 @@ def _match_idiom_suffix(
 
 
 def _references_map(node: frog_ast.ASTNode, map_name: str) -> bool:
-    """Return True if *node* syntactically references ``Variable(map_name)``."""
+    """Return True if *node* syntactically references the map field, whether
+    spelled as a bare ``Variable(map_name)`` or as a dotted
+    ``FieldAccess(_, map_name)`` (e.g. ``this.M``).
+
+    Both spellings denote the same field, so a node-kind-incomplete scan that
+    matched only ``Variable`` let dotted out-of-idiom uses such as
+    ``this.M[k] = v;`` evade the lazy-map preconditions (F-005/F-006)."""
 
     def matcher(n: frog_ast.ASTNode) -> bool:
-        return isinstance(n, frog_ast.Variable) and n.name == map_name
+        return (isinstance(n, frog_ast.Variable) and n.name == map_name) or (
+            isinstance(n, frog_ast.FieldAccess) and n.name == map_name
+        )
 
     return SearchVisitor(matcher).visit(node) is not None
+
+
+def _lvalue_targets_map(target: frog_ast.ASTNode, map_name: str) -> bool:
+    """Return True if assignment l-value *target* writes the map field, peeling
+    element/slice subscripts so that ``M``, ``M[k]``, ``this.M`` and
+    ``this.M[k]`` all count.  The dotted spellings (``FieldAccess``) were
+    invisible to the old ``Variable``/``ArrayAccess(Variable)``-only check,
+    letting ``Initialize`` pre-populate the map undetected (F-006)."""
+    while isinstance(target, (frog_ast.ArrayAccess, frog_ast.Slice)):
+        target = target.the_array
+    if isinstance(target, frog_ast.Variable):
+        return target.name == map_name
+    if isinstance(target, frog_ast.FieldAccess):
+        return target.name == map_name
+    return False
 
 
 class LazyMapToSampledFunction(TransformPass):
@@ -2217,6 +2252,24 @@ class LazyMapToSampledFunction(TransformPass):
             for m in game.methods
         )
 
+        # A field-level initializer (``Map<...> M = preset;``) is missed by the
+        # Initialize-body scan and dropped by the rebuild (same blind spot as
+        # F-009 in the pair sibling): a preset map would be silently replaced
+        # by a fresh empty sampled Function.
+        if fld.value is not None:
+            if any_idiom:
+                self._emit_near_miss(
+                    ctx,
+                    (
+                        f"Map '{map_name}' has a field initializer; lazy-map "
+                        "canonicalization requires an empty initial map"
+                    ),
+                    fld.origin,
+                    map_name,
+                    None,
+                )
+            return None
+
         if self._initialize_touches_map(game, map_name, value_type, ctx):
             return None
 
@@ -2265,15 +2318,7 @@ class LazyMapToSampledFunction(TransformPass):
             for stmt in method.block.statements:
                 if not isinstance(stmt, (frog_ast.Assignment, frog_ast.Sample)):
                     continue
-                v = stmt.var
-                target_var: frog_ast.Variable | None = None
-                if isinstance(v, frog_ast.Variable):
-                    target_var = v
-                elif isinstance(v, frog_ast.ArrayAccess) and isinstance(
-                    v.the_array, frog_ast.Variable
-                ):
-                    target_var = v.the_array
-                if target_var is None or target_var.name != map_name:
+                if not _lvalue_targets_map(stmt.var, map_name):
                     continue
                 if any(
                     _match_idiom_suffix(m, map_name, value_type, ctx) is not None
@@ -2505,6 +2550,15 @@ def _match_pair_idiom_suffix(
     if sample.sampled_from != value_type:
         return None
 
+    # Anti-alias (F-009): if the freshly-sampled local reuses the key
+    # parameter's name, the sample declaration shadows the parameter.  The
+    # guard ``if (k in Mi)`` then reads the parameter binding while the write
+    # ``Mi[k] = s`` and ``return s`` use the freshly sampled local -- two
+    # different bindings the collapsed ``return F(k)`` cannot reproduce.
+    # Mirrors the single-map guard in _match_idiom_suffix.
+    if s_name == k:
+        return None
+
     asgn = stmts[if_idx + 2]
     if not isinstance(asgn, frog_ast.Assignment):
         return None
@@ -2711,6 +2765,27 @@ class LazyMapPairToSampledFunction(TransformPass):
             for m in game.methods
             if m.signature.name != "Initialize"
         )
+
+        # (P2-2 / F-009) Neither map may carry a field-level initializer.  The
+        # Initialize-body scan below only inspects the Initialize *method*; a
+        # ``Map<...> M = preset;`` field initializer (``Field.value``) is never
+        # seen, and ``_build_rewritten_game`` creates the merged field with
+        # initializer ``None`` -- silently discarding the preset entries.
+        for fld in (m1, m2):
+            if fld.value is not None:
+                if any_idiom:
+                    self._emit_near_miss(
+                        ctx,
+                        (
+                            f"Map '{fld.name}' has a field initializer; "
+                            "lazy-map-pair canonicalization requires empty "
+                            "initial maps"
+                        ),
+                        fld.origin,
+                        fld.name,
+                        None,
+                    )
+                return None
 
         matches: dict[str, _PairIdiomMatch] = {}
         for method in game.methods:

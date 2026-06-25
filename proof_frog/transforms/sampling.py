@@ -836,6 +836,77 @@ class _SliceReplacer(Transformer):
         return _fallthrough()
 
 
+def _collect_block_names(block: frog_ast.Block) -> set[str]:
+    """Collect every variable/binder name appearing anywhere in *block*.
+
+    This is a deliberately conservative superset used as a fresh-name
+    avoid-set: it includes all ``Variable`` references plus the binder
+    targets that do not surface as ``Variable`` nodes (``VariableDeclaration``,
+    loop binders, and ``DestructuringBinding`` targets). Minting against this
+    set guarantees a newly introduced name cannot capture or be captured by
+    any existing binding in scope (F-034)."""
+    names: set[str] = set()
+
+    def _visit(node: frog_ast.ASTNode) -> bool:
+        if isinstance(node, frog_ast.Variable):
+            names.add(node.name)
+        elif isinstance(node, frog_ast.VariableDeclaration):
+            names.add(node.name)
+        elif isinstance(node, frog_ast.NumericFor):
+            names.add(node.name)
+        elif isinstance(node, frog_ast.GenericFor):
+            names.add(node.var_name)
+        elif isinstance(node, frog_ast.DestructuringBinding):
+            names.update(node.names)
+        return False
+
+    SearchVisitor(_visit).visit(block)
+    return names
+
+
+def _fresh_split_name(prefix: str, index: int, avoid: set[str]) -> str:
+    """Mint ``{prefix}_{index}`` but bump the index until the name is not in
+    *avoid*, so the minted split-piece name is genuinely fresh in scope
+    (F-034). The split keeps firing; only the suffix changes on collision."""
+    i = index
+    candidate = f"{prefix}_{i}"
+    while candidate in avoid:
+        i += 1
+        candidate = f"{prefix}_{i}"
+    return candidate
+
+
+def _block_redeclares_name(block: frog_ast.Block, name: str, except_idx: int) -> bool:
+    """True if *name* is declared/bound at any top-level statement of *block*
+    other than *except_idx*.
+
+    F-035: ``_SliceReplacer`` rewrites slices of *name* across the WHOLE block
+    by name + bound match, but the sound rewrite must only touch the binding
+    produced by the sample at ``except_idx``. A same-scope redeclaration of
+    *name* (a typed sample/assignment/declaration, or a destructuring target)
+    introduces a DIFFERENT binding whose slices would be wrongly rewritten to
+    the split pieces. Declining only on this actual redeclaration hazard keeps
+    the common single-declaration case firing."""
+    for idx, stmt in enumerate(block.statements):
+        if idx == except_idx:
+            continue
+        if (
+            isinstance(
+                stmt,
+                (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample),
+            )
+            and stmt.the_type is not None
+            and isinstance(stmt.var, frog_ast.Variable)
+            and stmt.var.name == name
+        ):
+            return True
+        if isinstance(stmt, frog_ast.VariableDeclaration) and stmt.name == name:
+            return True
+        if isinstance(stmt, frog_ast.DestructuringBinding) and name in stmt.names:
+            return True
+    return False
+
+
 class SplitUniformSampleTransformer(BlockTransformer):
     """Splits a uniform BitString sample accessed only via non-overlapping
     slices into multiple independent samples.
@@ -907,6 +978,33 @@ class SplitUniformSampleTransformer(BlockTransformer):
                 statement.sampled_from.parameterization
             )
             if total_len is None or sample_len is None or total_len != sample_len:
+                continue
+
+            # F-035: the bare-use guard below scans only the post-sample
+            # statements, but ``_SliceReplacer`` rewrites slices of ``var_name``
+            # across the WHOLE block by name + bound match. A same-scope
+            # REDECLARATION of ``var_name`` (before or after this sample)
+            # introduces a different binding whose slices would be wrongly
+            # rewritten to the split pieces (attack6f). Decline only on this
+            # actual redeclaration hazard; the common single-declaration case
+            # still fires.
+            if _block_redeclares_name(block, var_name, sample_idx):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Split Uniform Samples",
+                            reason=(
+                                f"Sample '{var_name}' not split: the name is "
+                                f"redeclared elsewhere in the same block, so a "
+                                f"block-wide slice rewrite could capture the "
+                                f"wrong binding"
+                            ),
+                            location=statement.origin,
+                            suggestion=None,
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
                 continue
 
             # Collect all usages of this variable in the rest of the block
@@ -1030,11 +1128,21 @@ class SplitUniformSampleTransformer(BlockTransformer):
                 []
             )
 
+            # F-034: mint split-piece names that are genuinely fresh in scope.
+            # The raw ``f"{var_name}_{i}"`` could collide with a pre-existing
+            # binding of that exact name (e.g. an author's ``z_0``), and the
+            # whole-block ``_SliceReplacer`` rewrite would then capture/rebind
+            # it (attack3). Build an avoid-set from every name in the block
+            # (plus the sampled name itself), and bump the suffix until fresh;
+            # the split keeps firing.
+            avoid_names = _collect_block_names(block) | {var_name}
+
             for i, (start, end) in enumerate(unique_bounds):
                 part_len = end - start
                 part_len_expr = frog_parser.parse_expression(str(part_len))
                 part_type = frog_ast.BitStringType(part_len_expr)
-                new_var_name = f"{var_name}_{i}"
+                new_var_name = _fresh_split_name(var_name, i, avoid_names)
+                avoid_names.add(new_var_name)
                 new_var = frog_ast.Variable(new_var_name)
                 new_sample = frog_ast.Sample(
                     part_type,

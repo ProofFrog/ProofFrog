@@ -570,7 +570,59 @@ class IfToBooleanAssignmentTransformer(BlockTransformer):
     This turns a control-flow encoding of a boolean back into a plain
     assignment, so downstream passes (e.g. IfSplitBranchAssignment) can treat
     the branch as ending in a direct assignment.
+
+    Binding-kind precondition (RC4 capture guard): the two branch statements
+    must denote the SAME binding kind -- both typed declarations
+    (``the_type is not None``) or both plain assignments to an existing
+    binding (``the_type is None``). A field write in one branch and a
+    branch-local typed declaration in the other share a name but write
+    DIFFERENT storage; merging them into a single enclosing-scope statement
+    hoists the local out of branch scope (capturing later field writes) or
+    turns a field write into a fresh local declaration. Such a kind-changing
+    merge is declined (with a near miss).
     """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+
+    def _note_kind_mismatch(self, var_name: str) -> None:
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="If To Boolean Assignment",
+                reason=(
+                    "If-to-boolean-assignment declined: the two branches write "
+                    "the same name with DIFFERENT binding kinds (one a typed "
+                    "local declaration, the other a plain assignment), so they "
+                    "denote different storage; merging them would hoist a local "
+                    "out of branch scope or rebind a field"
+                ),
+                location=None,
+                suggestion=None,
+                variable=var_name,
+                method=None,
+            )
+        )
+
+    def _note_hoist_capture(self, var_name: str) -> None:
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="If To Boolean Assignment",
+                reason=(
+                    "If-to-boolean-assignment declined: both branches declare "
+                    "the same typed local, but that name is referenced after "
+                    "the if, so hoisting the declaration into the enclosing "
+                    "scope would capture a later reference (e.g. a field write)"
+                ),
+                location=None,
+                suggestion=None,
+                variable=var_name,
+                method=None,
+            )
+        )
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -596,6 +648,29 @@ class IfToBooleanAssignmentTransformer(BlockTransformer):
                 and then_stmt.value.bool != else_stmt.value.bool
             ):
                 continue
+            # RC4 binding-kind guard: both branches must be the same kind of
+            # write -- both typed declarations or both plain assignments. A
+            # mixed merge changes which storage is written (field vs local) or
+            # hoists a branch-local out of scope, capturing later writes.
+            if (then_stmt.the_type is None) != (else_stmt.the_type is None):
+                self._note_kind_mismatch(then_stmt.var.name)
+                continue
+            # RC4 hoist guard: when both branches are typed declarations the
+            # merged statement is a typed declaration spliced into the
+            # ENCLOSING block, hoisting a branch-local out of branch scope. If
+            # the declared name is referenced anywhere in the rest of the
+            # enclosing block, the hoisted local would capture that reference
+            # (e.g. a later ``flag = true;`` field write becomes a write to the
+            # new local). Decline unless the name is unused after the if.
+            if then_stmt.the_type is not None:
+                rest = block.statements[index + 1 :]
+                if any(
+                    then_stmt.var.name in referenced_variable_names(s)
+                    or reassigns_or_rebinds({then_stmt.var.name}, s)
+                    for s in rest
+                ):
+                    self._note_hoist_capture(then_stmt.var.name)
+                    continue
             cond = statement.conditions[0]
             value: frog_ast.Expression = (
                 copy.deepcopy(cond) if then_stmt.value.bool else _negate_condition(cond)
@@ -1677,6 +1752,17 @@ class IfFalseReturnToConjunctionTransformer(BlockTransformer):
             assert isinstance(trailing, frog_ast.ReturnStatement)
             if trailing.expression is None:
                 continue
+            # RC4 capture/movement guard: the negated guard ``!P`` is moved
+            # from BEFORE the intervening declarations to AFTER them (into the
+            # trailing conjunction). If any intervening statement reassigns or
+            # rebinds a variable that ``P`` reads -- e.g. a shadowing local
+            # declaration ``Int a = ...;`` capturing an ``a`` free in ``P`` --
+            # then ``!P`` evaluated after the move reads the wrong binding.
+            guard_vars = referenced_variable_names(stmt.conditions[0])
+            intervening = block.statements[index + 1 : trailing_idx]
+            if any(reassigns_or_rebinds(guard_vars, s) for s in intervening):
+                self._note_guard_capture(stmt.conditions[0])
+                continue
             # Determinism precondition: the trailing expression ``Q`` is
             # conjoined and thus EVALUATED on the ``P``-true path that the
             # original skipped (the original returned ``false`` immediately).
@@ -1735,6 +1821,24 @@ class IfFalseReturnToConjunctionTransformer(BlockTransformer):
                 continue
             return None
         return None
+
+    def _note_guard_capture(self, guard: frog_ast.Expression) -> None:
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="If False Return To Conjunction",
+                reason=(
+                    "If-false-to-conjunction declined: a variable read by the "
+                    "guard is reassigned or rebound (e.g. a shadowing local "
+                    "declaration) by a statement between the early return and "
+                    "the trailing return, so moving the negated guard past it "
+                    "would read the wrong binding"
+                ),
+                location=None,
+                suggestion=None,
+                variable=str(guard),
+                method=None,
+            )
+        )
 
     def _guard_is_nondeterministic(self, expr: frog_ast.Expression) -> bool:
         if has_nondeterministic_call(
@@ -2538,7 +2642,7 @@ class IfToBooleanAssignment(TransformPass):
     name = "If To Boolean Assignment"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return IfToBooleanAssignmentTransformer().transform(game)
+        return IfToBooleanAssignmentTransformer(ctx).transform(game)
 
 
 class RedundantConditionalReturn(TransformPass):

@@ -298,6 +298,29 @@ def _analyze_block(
             _analyze_block(statement.block, analysis, rf_types, field_names)
 
 
+def _collect_names_in_scope(node: frog_ast.ASTNode) -> set[str]:
+    """Collect every identifier that could capture a freshly minted local
+    name: ``Variable`` references, ``Parameter`` names, and game/field names.
+
+    Used to build a capture-avoidance set for fresh-name minting (F-024,
+    F-027): a minted temporary must not coincide with any of these, or the
+    new binding would shadow an existing parameter, local, or field.
+    """
+    names: set[str] = set()
+
+    def visitor(child: frog_ast.ASTNode) -> bool:
+        if isinstance(child, frog_ast.Variable):
+            names.add(child.name)
+        elif isinstance(child, frog_ast.Parameter):
+            names.add(child.name)
+        elif isinstance(child, frog_ast.Field):
+            names.add(child.name)
+        return False
+
+    SearchVisitor(visitor).visit(node)
+    return names
+
+
 class _RFCallExtractor(BlockTransformer):
     """Extract RF calls embedded in expressions into separate assignments.
 
@@ -307,16 +330,33 @@ class _RFCallExtractor(BlockTransformer):
         return [v1, m + __rf_extract_0];
 
     This enables ``_RFCallReplacer`` to detect and simplify the call.
+
+    The minted temporary name is freshened against *avoid* (every
+    identifier in scope) so it cannot capture an existing parameter,
+    local, or field of the same name (F-024, F-027).
     """
 
     def __init__(
         self,
         rf_names: set[str],
         rf_types: dict[str, frog_ast.FunctionType],
+        avoid: set[str] | None = None,
     ) -> None:
         self.rf_names = rf_names
         self.rf_types = rf_types
         self.counter = 0
+        # Names already taken in scope; minted temporaries avoid these and
+        # are added to the set as they are created so distinct hoists never
+        # collide with each other either.
+        self.avoid: set[str] = set(avoid) if avoid is not None else set()
+
+    def _fresh_name(self) -> str:
+        while True:
+            name = f"__rf_extract_{self.counter}__"
+            self.counter += 1
+            if name not in self.avoid:
+                self.avoid.add(name)
+                return name
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -345,8 +385,7 @@ class _RFCallExtractor(BlockTransformer):
             rf_name = found.func.name
             range_type = copy.deepcopy(self.rf_types[rf_name].range_type)
 
-            var_name = f"__rf_extract_{self.counter}__"
-            self.counter += 1
+            var_name = self._fresh_name()
 
             new_assignment = frog_ast.Assignment(
                 range_type,  # type: ignore[arg-type]
@@ -501,7 +540,8 @@ class ExtractRFCalls(TransformPass):
         if not rf_types:
             return game
 
-        return _RFCallExtractor(set(rf_types.keys()), rf_types).transform(game)
+        avoid = _collect_names_in_scope(game)
+        return _RFCallExtractor(set(rf_types.keys()), rf_types, avoid).transform(game)
 
 
 # ---------------------------------------------------------------------------
@@ -583,8 +623,13 @@ class LocalRFToUniformTransformer(BlockTransformer):
     - RF is not referenced in any other context (e.g., ``RF.domain``)
     """
 
-    def __init__(self, ctx: PipelineContext | None = None) -> None:
+    def __init__(
+        self, ctx: PipelineContext | None = None, avoid: set[str] | None = None
+    ) -> None:
         self.ctx = ctx
+        # Identifiers in scope (game fields, method params/locals) that a
+        # minted extraction temp must not capture (F-027).
+        self.avoid: set[str] = set(avoid) if avoid is not None else set()
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for sample_idx, stmt in enumerate(block.statements):
@@ -660,7 +705,9 @@ class LocalRFToUniformTransformer(BlockTransformer):
                 # Also handle RF calls in return statements and other
                 # embedded positions by extracting then replacing
                 new_remaining = _RFCallExtractor(
-                    {rf_name}, {rf_name: rf_type}
+                    {rf_name},
+                    {rf_name: rf_type},
+                    self.avoid | _collect_names_in_scope(block),
                 ).transform(remaining)
                 if new_remaining != remaining:
                     new_remaining = _RFCallReplacer({rf_name: rf_type}).transform(
@@ -682,7 +729,8 @@ class LocalRFToUniform(TransformPass):
     name = "Local RF To Uniform"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return LocalRFToUniformTransformer(ctx).transform(game)
+        avoid = _collect_names_in_scope(game)
+        return LocalRFToUniformTransformer(ctx, avoid).transform(game)
 
 
 # ---------------------------------------------------------------------------
@@ -818,8 +866,13 @@ class _DistinctConstRFTransformer(BlockTransformer):
       bitstrings.
     """
 
-    def __init__(self, ctx: PipelineContext | None = None) -> None:
+    def __init__(
+        self, ctx: PipelineContext | None = None, avoid: set[str] | None = None
+    ) -> None:
         self.ctx = ctx
+        # Identifiers in scope that a minted extraction temp must not
+        # capture (shares the F-024 minting site).
+        self.avoid: set[str] = set(avoid) if avoid is not None else set()
 
     def _transform_block_wrapper(
         self, block: frog_ast.Block
@@ -949,9 +1002,11 @@ class _DistinctConstRFTransformer(BlockTransformer):
 
             # Extract every RF call into a standalone assignment so that
             # _RFCallReplacer can rewrite them uniformly into fresh samples.
-            extracted = _RFCallExtractor({rf_name}, {rf_name: rf_type}).transform(
-                remaining
-            )
+            extracted = _RFCallExtractor(
+                {rf_name},
+                {rf_name: rf_type},
+                self.avoid | _collect_names_in_scope(block),
+            ).transform(remaining)
             replaced = _RFCallReplacer({rf_name: rf_type}).transform(extracted)
 
             if replaced == remaining:
@@ -976,7 +1031,8 @@ class DistinctConstRFToUniform(TransformPass):
     name = "Distinct Const RF To Uniform"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return _DistinctConstRFTransformer(ctx).transform(game)
+        avoid = _collect_names_in_scope(game)
+        return _DistinctConstRFTransformer(ctx, avoid).transform(game)
 
 
 # ---------------------------------------------------------------------------
@@ -3627,7 +3683,44 @@ class LocalFunctionFieldToLet(TransformPass):
         ctx: PipelineContext,
         f_name: str,
     ) -> bool:
+        # P-5a: H must not be bound as a game parameter.  Such a binding
+        # would be captured by the F->H rename, conflating the secret RF
+        # with the (adversary-controlled) game parameter.
+        for game_param in game.parameters:
+            if game_param.name == h_name:
+                self._emit_near_miss(
+                    ctx,
+                    (
+                        f"Candidate let binding '{h_name}' collides with a "
+                        "game parameter of the same name; "
+                        "LocalFunctionFieldToLet would capture it"
+                    ),
+                    None,
+                    f_name,
+                    None,
+                )
+                return True
+
         for method in game.methods:
+            # P-5b: H must not be bound as a method signature parameter.
+            # `_count_variable_refs` scans only method *bodies*, so a
+            # parameter named H is otherwise invisible; the capture-unaware
+            # F->H rename would bind the secret RF onto that parameter
+            # (F-011, Attack B).
+            for param in method.signature.parameters:
+                if param.name == h_name:
+                    self._emit_near_miss(
+                        ctx,
+                        (
+                            f"Candidate let binding '{h_name}' collides with a "
+                            f"parameter of method '{method.signature.name}'; "
+                            "LocalFunctionFieldToLet would capture it"
+                        ),
+                        method.block.origin,
+                        f_name,
+                        method.signature.name,
+                    )
+                    return True
             if _count_variable_refs(method.block, h_name) > 0:
                 self._emit_near_miss(
                     ctx,

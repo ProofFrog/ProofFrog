@@ -2109,6 +2109,28 @@ class DeadGuardedAssignmentEliminationTransformer(BlockTransformer):
     ciphertexts.
     """
 
+    def __init__(self) -> None:
+        # Field names and their read counts across the WHOLE game, populated by
+        # ``transform_game``.  Empty when the transformer is driven on a bare
+        # block (unit tests): then every name is treated as a method-local and
+        # the block-scoped read count applies.
+        self._field_names: set[str] = set()
+        self._field_read_counts: dict[str, int] = {}
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        self._field_names = {f.name for f in game.fields}
+        # A field persists across oracle calls, so a read of it in ANY method
+        # observes the value.  Count reads of each field over every method
+        # block (F-099): a field whose value is read in a sibling oracle is not
+        # dead even though the block-scoped count over one method is 1.
+        self._field_read_counts = {
+            name: sum(self._read_count(m.block, name) for m in game.methods)
+            for name in self._field_names
+        }
+        new_game = copy.copy(game)
+        new_game.methods = [self.transform(m) for m in game.methods]
+        return new_game
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
             use = self._match_guarded_use(statement, block.statements[index + 1 :])
@@ -2119,8 +2141,26 @@ class DeadGuardedAssignmentEliminationTransformer(BlockTransformer):
             # read solely by the matched `if (v)` guard. Any other read of `v`
             # would observe the rewritten `false` value. Count reads (variable
             # occurrences that are not an assignment target); exactly one --
-            # the guard condition -- is required.
-            if self._read_count(block, v_name) != 1:
+            # the guard condition -- is required. A FIELD additionally persists
+            # across oracle calls (F-099), so:
+            #   - its value may be read in a sibling/later oracle -> the read
+            #     count must span the whole game (not just this block); and
+            #   - a guarded/conditional assignment leaves the field carrying its
+            #     previous-call value into the guard read, so the kill is sound
+            #     only if the field is UNCONDITIONALLY assigned before the guard
+            #     in this call (definite assignment overwrites any stale value).
+            if v_name in self._field_names:
+                if self._field_read_counts.get(v_name, 0) != 1:
+                    continue
+                prefix_stmts = block.statements[:index]
+                if not any(
+                    isinstance(s, frog_ast.Assignment)
+                    and isinstance(s.var, frog_ast.Variable)
+                    and s.var.name == v_name
+                    for s in prefix_stmts
+                ):
+                    continue
+            elif self._read_count(block, v_name) != 1:
                 continue
             guard_lits = [
                 _condition_literal(g, True) for g in _flatten_top_level_and(guard)

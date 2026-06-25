@@ -22,7 +22,13 @@ from proof_frog.transforms.inlining import (
     DeduplicateDeterministicCalls,
     HoistDeterministicCallToInitialize,
 )
-from proof_frog.transforms.sampling import MergeUniformSamples, SplitUniformSamples
+from proof_frog.transforms.sampling import (
+    MergeUniformSamples,
+    SplitUniformSamples,
+    MergeProductSamples,
+    SinkUniformSample,
+    SingleCallFieldToLocal,
+)
 from proof_frog.transforms.random_functions import (
     LocalRFToUniform,
     DistinctConstRFToUniform,
@@ -2132,5 +2138,126 @@ def test_if_false_return_to_conjunction_no_near_miss_when_capture_free():
     assert not any(
         nm.transform_name == "If False Return To Conjunction"
         and "wrong binding" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def _make_ctx_with_n() -> PipelineContext:
+    ctx = PipelineContext(
+        variables={"n": Symbol("n")},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    return ctx
+
+
+def test_sink_uniform_near_miss_on_domain_write() -> None:
+    """RC5: SinkUniformSample reports a near-miss when the if-branch it would
+    sink past writes the sampled domain name ``n``."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int n;
+            Void Initialize() { n = 1; }
+            ModInt<n> O(Bool b) {
+                ModInt<n> x <- ModInt<n>;
+                if (b) { n = 2; }
+                return x;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = SinkUniformSample().apply(game, ctx)
+    assert result == game  # declined
+    assert any(
+        nm.transform_name == "Sink Uniform Sample" and nm.variable == "x"
+        for nm in ctx.near_misses
+    )
+
+
+def test_sink_uniform_no_near_miss_when_clean() -> None:
+    """RC5 control: an unrelated write does not produce the domain near-miss
+    (and the sink fires)."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int n;
+            Int junk;
+            Void Initialize() { n = 2; }
+            ModInt<n> O(Bool b) {
+                ModInt<n> x <- ModInt<n>;
+                if (b) { junk = 5; }
+                return x;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = SinkUniformSample().apply(game, ctx)
+    assert result != game  # fired
+    assert not any(nm.transform_name == "Sink Uniform Sample" for nm in ctx.near_misses)
+
+
+def test_merge_uniform_near_miss_on_domain_write() -> None:
+    """RC5: MergeUniformSamples reports a near-miss when ``n`` is written
+    between the two ``BitString<n>`` samples it would merge."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            BitString<n + n> O() {
+                BitString<n> x <- BitString<n>;
+                n = 10;
+                BitString<n> y <- BitString<n>;
+                return x || y;
+            }
+        }
+        """)
+    ctx = _make_ctx_with_n()
+    result = MergeUniformSamples().apply(game, ctx)
+    assert result == game  # declined
+    assert any(
+        nm.transform_name == "Merge Uniform Samples" and "sampling domain" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_merge_product_near_miss_on_domain_write() -> None:
+    """RC5: MergeProductSamples reports a near-miss when a component's domain
+    name ``n`` is written between its sample and the return."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int n;
+            Void Initialize() { n = 4; }
+            [BitString<n>, BitString<n>] O() {
+                BitString<n> a <- BitString<n>;
+                n = 8;
+                BitString<n> b <- BitString<n>;
+                return [a, b];
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = MergeProductSamples().apply(game, ctx)
+    assert result == game  # declined
+    assert any(
+        nm.transform_name == "Merge Product Samples" and "sampling domain" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_single_call_field_to_local_near_miss_on_domain_write() -> None:
+    """RC5: SingleCallFieldToLocal reports a near-miss when the field's sampled
+    domain ``q`` is mutated after the sample in Initialize."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int q;
+            ModInt<q> x;
+            Void Initialize() { q = 2; x <- ModInt<q>; q = 3; }
+            ModInt<q> Get() { return x; }
+        }
+        """)
+    ctx = _make_ctx()
+    ctx.max_calls = 1
+    result = SingleCallFieldToLocal().apply(game, ctx)
+    assert result == game  # declined
+    assert any(
+        nm.transform_name == "Single Call Field To Local" and nm.variable == "x"
         for nm in ctx.near_misses
     )

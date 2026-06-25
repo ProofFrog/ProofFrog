@@ -229,3 +229,42 @@ def test_sink_uniform_sample(
     print("EXPECTED", expected_ast)
     print("TRANSFORMED", transformed_ast)
     assert expected_ast == transformed_ast
+
+
+def test_sink_declines_when_if_branch_writes_sampled_domain() -> None:
+    """RC5: case 2 must not sink a ``ModInt<n>`` sample past an if whose branch
+    writes the domain name ``n`` -- that would re-evaluate the sampling domain
+    at the new position."""
+    method = frog_parser.parse_method("""
+        ModInt<n> O(Bool b) {
+            ModInt<n> x <- ModInt<n>;
+            if (b) {
+                n = 2;
+            }
+            return x;
+        }
+        """)
+    assert SinkUniformSampleTransformer().transform(method) == method
+
+
+def test_sink_fires_when_if_branch_writes_unrelated_name() -> None:
+    """RC5 conservatism: a write to an unrelated name does not block the sink."""
+    method = frog_parser.parse_method("""
+        ModInt<n> O(Bool b) {
+            ModInt<n> x <- ModInt<n>;
+            if (b) {
+                junk = 2;
+            }
+            return x;
+        }
+        """)
+    expected = frog_parser.parse_method("""
+        ModInt<n> O(Bool b) {
+            if (b) {
+                junk = 2;
+            }
+            ModInt<n> x <- ModInt<n>;
+            return x;
+        }
+        """)
+    assert SinkUniformSampleTransformer().transform(method) == expected

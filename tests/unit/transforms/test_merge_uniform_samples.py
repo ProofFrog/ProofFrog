@@ -157,3 +157,37 @@ def test_merge_uniform_samples(
     print("EXPECTED", expected_ast)
     print("TRANSFORMED", transformed_ast)
     assert expected_ast == transformed_ast
+
+
+def test_merge_uniform_declines_on_domain_write_between_samples() -> None:
+    """RC5: do not merge two ``BitString<n>`` samples when ``n`` is written
+    between them -- the concatenation re-anchors both draws and the second
+    draw's domain would differ from the first."""
+    method = frog_parser.parse_method("""
+        BitString<n + n> f() {
+            BitString<n> x <- BitString<n>;
+            n = 10;
+            BitString<n> y <- BitString<n>;
+            return x || y;
+        }
+        """)
+    result = MergeUniformSamplesTransformer({"n": Symbol("n")}).transform(method)
+    assert result == method
+
+
+def test_merge_uniform_fires_when_no_domain_write() -> None:
+    """RC5 conservatism: with no write to ``n`` between the samples, the merge
+    still fires."""
+    method = frog_parser.parse_method("""
+        BitString<n + n> f() {
+            BitString<n> x <- BitString<n>;
+            BitString<n> y <- BitString<n>;
+            return x || y;
+        }
+        """)
+    result = MergeUniformSamplesTransformer({"n": Symbol("n")}).transform(method)
+    # The two independent BitString<n> samples merge into a single
+    # BitString<2 * n> sample (length arithmetic is engine-normalized).
+    assert "2*n" in str(result).replace(" ", "")
+    # Only one sample remains.
+    assert str(result).count("<-") == 1

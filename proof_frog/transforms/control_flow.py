@@ -27,6 +27,8 @@ from ..visitors import (
     GetTypeMapVisitor,
     NameTypeMap,
     assigns_variable,
+    referenced_variable_names,
+    reassigns_or_rebinds,
     block_unconditionally_returns,
 )
 from ._base import TransformPass, PipelineContext, NearMiss, has_nondeterministic_call
@@ -471,19 +473,24 @@ class GuardConditionSimplificationTransformer(Transformer):
         let_types = self.ctx.proof_let_types if self.ctx else None
         return not has_nondeterministic_call(expr, namespace, let_types)
 
-    @staticmethod
-    def _reassigns_any(names: set[str], block: frog_ast.Block) -> bool:
-        def writes(node: frog_ast.ASTNode) -> bool:
-            return (
-                isinstance(
-                    node,
-                    (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
-                )
-                and isinstance(node.var, frog_ast.Variable)
-                and node.var.name in names
+    def _note_unstable_guard(self, cond: frog_ast.Expression) -> None:
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Guard Condition Simplification",
+                reason=(
+                    "Guard not substituted into its branch: a variable the "
+                    "guard reads is reassigned, has an element/field/slice "
+                    "write, is inserted into via <-uniq, or is rebound by a "
+                    "loop in the branch, so the guard's value is not invariant"
+                ),
+                location=None,
+                suggestion=None,
+                variable=str(cond),
+                method=None,
             )
-
-        return SearchVisitor(writes).visit(block) is not None
+        )
 
     def _substitute(
         self, block: frog_ast.Block, cond: frog_ast.Expression, value: bool
@@ -499,13 +506,16 @@ class GuardConditionSimplificationTransformer(Transformer):
         if len(if_statement.conditions) == 1:
             cond = if_statement.conditions[0]
             if self._is_deterministic(cond) and not isinstance(cond, frog_ast.Boolean):
-                cond_vars = {v.name for v in VariableCollectionVisitor().visit(cond)}
-                if not self._reassigns_any(cond_vars, new_blocks[0]):
+                cond_vars = referenced_variable_names(cond)
+                if reassigns_or_rebinds(cond_vars, new_blocks[0]):
+                    self._note_unstable_guard(cond)
+                else:
                     new_blocks[0] = self._substitute(new_blocks[0], cond, True)
-                if if_statement.has_else_block() and not self._reassigns_any(
-                    cond_vars, new_blocks[1]
-                ):
-                    new_blocks[1] = self._substitute(new_blocks[1], cond, False)
+                if if_statement.has_else_block():
+                    if reassigns_or_rebinds(cond_vars, new_blocks[1]):
+                        self._note_unstable_guard(cond)
+                    else:
+                        new_blocks[1] = self._substitute(new_blocks[1], cond, False)
         # Recurse into the (possibly substituted) children.
         return frog_ast.IfStatement(
             [self.transform(c) for c in if_statement.conditions],

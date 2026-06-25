@@ -1184,6 +1184,89 @@ def assigns_variable(
     )
 
 
+def lvalue_base_name(target: frog_ast.ASTNode) -> Optional[str]:
+    """Base variable name written by an l-value, peeling element, slice, and
+    field accesses.
+
+    Returns ``M`` for ``M``, ``M[k]``, ``M[i][j]``, ``a[i : j]``, ``X.f``, and
+    ``X.f[k]``; returns ``None`` when the l-value bottoms out in a non-Variable
+    (e.g. a tuple-literal destructuring target).  This is the single source of
+    truth for "which variable does this assignment/sample target ultimately
+    mutate", so element/slice/field writes are not mistaken for no-ops.
+    """
+    while True:
+        if isinstance(target, (frog_ast.ArrayAccess, frog_ast.Slice)):
+            target = target.the_array
+        elif isinstance(target, frog_ast.FieldAccess):
+            target = target.the_object
+        else:
+            break
+    return target.name if isinstance(target, frog_ast.Variable) else None
+
+
+def referenced_variable_names(node: frog_ast.ASTNode) -> set[str]:
+    """Names of every ``Variable`` referenced anywhere in *node*, including the
+    base object of field/array/slice accesses (``M`` in ``M.keys`` / ``M[k]``).
+
+    Unlike :class:`VariableCollectionVisitor` this does **not** skip
+    field-access subtrees: a guard such as ``k in M.keys`` genuinely reads
+    ``M``, so soundness checks that need the complete read-set of an expression
+    must use this rather than ``VariableCollectionVisitor`` (which suppresses
+    collection inside any ``FieldAccess``).
+    """
+    names: set[str] = set()
+
+    def _collect(inner: frog_ast.ASTNode) -> bool:
+        if isinstance(inner, frog_ast.Variable):
+            names.add(inner.name)
+        return False
+
+    SearchVisitor(_collect).visit(node)
+    return names
+
+
+def reassigns_or_rebinds(names: set[str], node: frog_ast.ASTNode) -> bool:
+    """True if *node* contains a statement that could change the value or
+    binding of any name in *names*.
+
+    Node-kind-complete write/rebind detection: an occurrence counts when it is
+
+    - a write (``Assignment`` / ``Sample`` / ``UniqueSample``) whose l-value
+      base (see :func:`lvalue_base_name`) is one of *names* -- including
+      element, slice, and field writes (``M[k] = v``, ``a[i : j] = v``,
+      ``X.f = v``);
+    - an insertion into an exclusion set: ``x <-uniq[S] T`` where ``S``
+      references one of *names* (the draw implicitly adds ``x`` to ``S``); the
+      pure set-difference surface form ``x <- T \\ S`` performs no insertion and
+      is therefore not treated as a write;
+    - a loop binder (``for (Int i = ...)`` / ``for (T e in ...)``) that rebinds
+      one of *names*, shadowing it.
+
+    Conservative by design: any such occurrence anywhere in *node* -- including
+    nested branches and loop bodies -- counts, because callers substitute
+    structurally and are not scope-aware.
+    """
+
+    def _mutates(inner: frog_ast.ASTNode) -> bool:
+        if isinstance(
+            inner, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ) and (lvalue_base_name(inner.var) in names):
+            return True
+        if (
+            isinstance(inner, frog_ast.UniqueSample)
+            and inner.surface_form == "uniq"
+            and bool(referenced_variable_names(inner.unique_set) & names)
+        ):
+            return True
+        if isinstance(inner, frog_ast.NumericFor) and inner.name in names:
+            return True
+        if isinstance(inner, frog_ast.GenericFor) and inner.var_name in names:
+            return True
+        return False
+
+    return SearchVisitor(_mutates).visit(node) is not None
+
+
 class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
     def __init__(self, field_name_pair: tuple[str, str]):
         self.field_name_pair = field_name_pair

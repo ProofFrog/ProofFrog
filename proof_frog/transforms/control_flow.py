@@ -189,17 +189,34 @@ class UniqExclusionBranchEliminationTransformer(BlockTransformer):
 
     @staticmethod
     def _written_var_names(stmt: frog_ast.Statement) -> set[str]:
-        """Return the set of variable names written by *stmt*.
+        """Return the set of variable names written anywhere inside *stmt*.
 
         Used to invalidate constraints when a tracked variable (or a
         free variable of its exclusion-set elements) is reassigned.
+
+        Walks the full statement, so writes nested in if/for branches
+        count, and resolves element writes (``M[k] = v``) and slice
+        writes through ``ArrayAccess``/``Slice`` layers to the backing
+        variable. Invalidation happens before the statement's conditions
+        are rewritten, so an if-statement writing a tracked variable in
+        its own branch conservatively forgoes the fold of its own
+        condition.
         """
-        if isinstance(
-            stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
-        ):
-            if isinstance(stmt.var, frog_ast.Variable):
-                return {stmt.var.name}
-        return set()
+        names: set[str] = set()
+
+        def _collect(node: frog_ast.ASTNode) -> bool:
+            if isinstance(
+                node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+            ):
+                target: frog_ast.ASTNode = node.var
+                while isinstance(target, (frog_ast.ArrayAccess, frog_ast.Slice)):
+                    target = target.the_array
+                if isinstance(target, frog_ast.Variable):
+                    names.add(target.name)
+            return False
+
+        SearchVisitor(_collect).visit(stmt)
+        return names
 
     def _try_simplify_eq(
         self,

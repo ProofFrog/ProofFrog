@@ -245,3 +245,75 @@ def test_duplicate_rf_arg_not_simplified() -> None:
     assert (
         result == game
     ), "RF with duplicate argument variable should not be simplified"
+
+
+def test_aliased_rf_not_simplified() -> None:
+    """F-019: copying the function field into a local (``g = RF``) lets it be
+    re-queried through the alias on an adversary-chosen input. The call-site
+    walk only sees direct ``RF(...)`` calls, so the escape must be detected
+    separately and block the rewrite -- otherwise the guarded site becomes an
+    independent sample while the aliased query survives."""
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            Function<BitString<n>, BitString<n>> RF;
+            Set<BitString<n>> S;
+            Void Initialize() {
+                RF <- Function<BitString<n>, BitString<n>>;
+            }
+            [BitString<n>, BitString<n>] Chal() {
+                BitString<n> r <-uniq[S] BitString<n>;
+                BitString<n> z = RF(r);
+                return [r, z];
+            }
+            BitString<n> Probe(BitString<n> x) {
+                Function<BitString<n>, BitString<n>> g = RF;
+                BitString<n> y = g(x);
+                return y;
+            }
+        }
+        """)
+    result = UniqueRFSimplification().apply(game, _make_ctx())
+    assert result == game, "aliased RF must not be simplified (F-019)"
+
+
+def test_rf_passed_as_argument_not_simplified() -> None:
+    """F-019: passing the function field as a method argument is also an
+    escape that the call-site walk cannot follow."""
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            Function<BitString<n>, BitString<n>> RF;
+            Set<BitString<n>> S;
+            Void Initialize() {
+                RF <- Function<BitString<n>, BitString<n>>;
+            }
+            BitString<n> Chal() {
+                BitString<n> r <-uniq[S] BitString<n>;
+                BitString<n> z = RF(r);
+                sink(RF);
+                return z;
+            }
+        }
+        """)
+    result = UniqueRFSimplification().apply(game, _make_ctx())
+    assert result == game, "RF passed as an argument must not be simplified (F-019)"
+
+
+def test_dotted_nondomain_exclusion_set_modified_not_simplified() -> None:
+    """F-020: a non-``.domain`` dotted exclusion set is NOT auto-maintained, so
+    an explicit field assignment to it must still be detected. Previously every
+    dotted set name was exempted unconditionally."""
+    from proof_frog.transforms.random_functions import _exclusion_set_modified
+
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            Set<BitString<n>> S;
+            BitString<n> Query(BitString<n> v) {
+                S.field = v;
+                return v;
+            }
+        }
+        """)
+    # A `.domain` set is auto-maintained -> not flagged.
+    assert not _exclusion_set_modified(game, "RF.domain")
+    # A non-`.domain` dotted set with an explicit field assignment IS flagged.
+    assert _exclusion_set_modified(game, "S.field")

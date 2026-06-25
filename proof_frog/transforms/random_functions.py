@@ -21,7 +21,13 @@ from dataclasses import dataclass, field
 from sympy import Rational, Symbol, simplify as sympy_simplify
 
 from .. import frog_ast
-from ..visitors import BlockTransformer, SearchVisitor, ReplaceTransformer, Transformer
+from ..visitors import (
+    BlockTransformer,
+    SearchVisitor,
+    ReplaceTransformer,
+    Transformer,
+    lvalue_base_name,
+)
 from ._base import (
     TransformPass,
     PipelineContext,
@@ -75,9 +81,13 @@ def _exclusion_set_modified(game: frog_ast.Game, set_name: str) -> bool:
 
     Returns True if a problematic modification is found.
     """
-    # RF.domain sets are implicitly maintained by the RF's semantics.
-    # The RF initialization (Sample) is not a modification.
-    if "." in set_name:
+    # An ``RF.domain`` exclusion set is implicitly maintained by the RF's
+    # own semantics (querying ``RF(r)`` adds ``r`` to ``RF.domain``), so an
+    # explicit assignment is neither expected nor needed -- exempt it.  But
+    # only ``.domain`` is auto-maintained: any OTHER dotted set (e.g. a plain
+    # field accessed as ``obj.field``) must still be checked for an explicit
+    # modification that would break the implicit-maintenance assumption (F-020).
+    if set_name.endswith(".domain"):
         return False
 
     def _is_set_assign(node: frog_ast.ASTNode) -> bool:
@@ -86,25 +96,76 @@ def _exclusion_set_modified(game: frog_ast.Game, set_name: str) -> bool:
         ):
             return False
         var = node.var
-        # Direct assignment: S = ...
-        if isinstance(var, frog_ast.Variable) and var.name == set_name:
+        # Direct assignment: S = ...  (covers both a bare ``S`` and a dotted
+        # ``obj.field`` whose l-value base name matches the set).
+        target_name = _get_unique_set_name(var)
+        if target_name == set_name:
             # Typed declaration (field initializer) is OK — that's the
             # initial empty set.  Untyped assignment is a modification.
             if isinstance(node, frog_ast.Assignment) and node.the_type is not None:
                 return False
             return True
-        # Element assignment: S[k] = ...
-        if isinstance(var, frog_ast.ArrayAccess) and isinstance(
-            var.the_array, frog_ast.Variable
-        ):
-            if var.the_array.name == set_name:
-                return True
+        # Element/field-element assignment: S[k] = ... or obj.field[k] = ...
+        base = lvalue_base_name(var)
+        if base is not None and (base == set_name or set_name.startswith(base + ".")):
+            return True
         return False
 
     for method in game.methods:
         if SearchVisitor(_is_set_assign).visit(method.block) is not None:
             return True
     return False
+
+
+def _rf_value_escapes(game: frog_ast.Game, rf_name: str) -> bool:
+    """True if the function field *rf_name* appears anywhere other than a
+    safe position, i.e. it may be copied/passed and evaluated through an
+    alias that the call-site analysis cannot see (F-019).
+
+    Safe positions (each consumes one ``Variable(rf_name)`` occurrence):
+      - the ``func`` of a ``FuncCall`` (a direct call -- guards are checked
+        elsewhere);
+      - the ``the_object`` of a ``FieldAccess`` (a property like ``RF.domain``,
+        which reads metadata, not the function value);
+      - the l-value target of its own initialization (``RF <- Function<...>``).
+
+    Any *other* occurrence -- a bare copy ``g = RF``, an argument ``f(RF)``, a
+    set/tuple element -- lets the function value escape: an unguarded
+    evaluation through the alias would survive while a guarded site is
+    rewritten to an independent sample, breaking same-input consistency.
+    """
+    counts = {"total": 0, "calls": 0, "field_access": 0, "init_target": 0}
+
+    def visit(node: frog_ast.ASTNode) -> bool:
+        if isinstance(node, frog_ast.Variable) and node.name == rf_name:
+            counts["total"] += 1
+        if (
+            isinstance(node, frog_ast.FuncCall)
+            and isinstance(node.func, frog_ast.Variable)
+            and node.func.name == rf_name
+        ):
+            counts["calls"] += 1
+        if (
+            isinstance(node, frog_ast.FieldAccess)
+            and isinstance(node.the_object, frog_ast.Variable)
+            and node.the_object.name == rf_name
+        ):
+            counts["field_access"] += 1
+        if (
+            isinstance(
+                node,
+                (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample),
+            )
+            and isinstance(node.var, frog_ast.Variable)
+            and node.var.name == rf_name
+        ):
+            counts["init_target"] += 1
+        return False
+
+    for method in game.methods:
+        SearchVisitor(visit).visit(method.block)
+    safe = counts["calls"] + counts["field_access"] + counts["init_target"]
+    return counts["total"] > safe
 
 
 def _analyze_rf_eligibility(
@@ -121,6 +182,13 @@ def _analyze_rf_eligibility(
 
     for method in game.methods:
         _analyze_block(method.block, analysis, rf_types, field_names)
+
+    # Post-analysis: reject any RF whose function value escapes to a position
+    # the call-site walk cannot see (a copy/alias/argument), which could carry
+    # an unguarded evaluation (F-019).
+    for rf_name, rf_analysis in analysis.items():
+        if rf_analysis.eligible and _rf_value_escapes(game, rf_name):
+            rf_analysis.eligible = False
 
     # Post-analysis: reject RFs where any argument variable is used more
     # than once across call sites (RF is a function, so same input must
@@ -388,6 +456,30 @@ class UniqueRFSimplification(TransformPass):
         eligible = {
             name: rf_types[name] for name, result in analysis.items() if result.eligible
         }
+
+        # Near-miss: an RF that has a guarded call but escapes via a copy /
+        # argument / alias cannot be soundly simplified (F-019).
+        if ctx is not None:
+            for rf_name, result in analysis.items():
+                if not result.eligible and _rf_value_escapes(game, rf_name):
+                    ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Unique RF Simplification",
+                            reason=(
+                                f"Random function '{rf_name}' not simplified: its "
+                                "function value escapes (copied, aliased, or passed "
+                                "as an argument), so an unguarded evaluation may "
+                                "survive"
+                            ),
+                            location=None,
+                            suggestion=(
+                                "Avoid copying or passing the random function "
+                                "value; call it directly at each use site"
+                            ),
+                            variable=rf_name,
+                            method=None,
+                        )
+                    )
 
         if not eligible:
             return game

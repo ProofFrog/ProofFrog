@@ -939,10 +939,13 @@ def _count_field_assigns_recursive(node: frog_ast.ASTNode, field_name: str) -> i
 
     def _counter(n: frog_ast.ASTNode) -> bool:
         nonlocal count
+        # Peel element/slice/field accesses: an element write `M[k] = v`
+        # mutates the field, so a field that is also element-written must not
+        # be miscounted as single-assignment (and therefore inlined as a
+        # constant).
         if (
             isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
-            and isinstance(n.var, frog_ast.Variable)
-            and n.var.name == field_name
+            and lvalue_base_name(n.var) == field_name
         ):
             count += 1
         return False  # never stop early — visit all nodes

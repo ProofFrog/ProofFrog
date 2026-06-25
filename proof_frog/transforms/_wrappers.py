@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Hashable, Optional
 
 from .. import frog_ast
-from ..visitors import SearchVisitor
+from ..visitors import SearchVisitor, lvalue_base_name
 from ._base import PipelineContext, _lookup_primitive_method
 from ._requirements import is_known_nonzero
 
@@ -252,17 +252,17 @@ class _PrimCallShape(WrapperShape):
                 nonlocal bad
                 if bad is not None:
                     return False
-                target: Optional[frog_ast.Expression] = None
                 if isinstance(
                     n,
                     (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
                 ):
-                    target = n.var
-                if (
-                    isinstance(target, frog_ast.Variable)
-                    and target.name in context_names
-                ):
-                    bad = (target.name, "context arg is assigned outside Initialize")
+                    # Peel element/slice/field accesses so an element write
+                    # (`sk[0] = v`) or field write to a context arg counts as a
+                    # mutation -- a bare-Variable target check missed those
+                    # (F-135).
+                    base = lvalue_base_name(n.var)
+                    if base is not None and base in context_names:
+                        bad = (base, "context arg is mutated outside Initialize")
                 return False
 
             SearchVisitor(_visit).visit(method)

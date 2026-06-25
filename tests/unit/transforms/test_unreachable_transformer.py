@@ -6,6 +6,40 @@ from proof_frog.transforms.control_flow import RemoveUnreachableTransformer
 @pytest.mark.parametrize(
     "method,expected",
     [
+        # Statements after an unconditional top-level return are unreachable
+        # and must be dropped (regression coverage for the flattened
+        # `return a; return b;` shape the topological sort can emit).
+        (
+            """
+            Int f(Int x) {
+                Int y = x + 1;
+                return y;
+                return x;
+            }
+            """,
+            """
+            Int f(Int x) {
+                Int y = x + 1;
+                return y;
+            }
+            """,
+        ),
+        (
+            """
+            BitString<8> f() {
+                BitString<8> a <- BitString<8>;
+                return a;
+                BitString<8> b <- BitString<8>;
+                return b;
+            }
+            """,
+            """
+            BitString<8> f() {
+                BitString<8> a <- BitString<8>;
+                return a;
+            }
+            """,
+        ),
         (
             """
             Int f(Bool b) {

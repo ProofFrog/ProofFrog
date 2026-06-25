@@ -161,3 +161,53 @@ def test_early_return_guard_is_a_reorder_barrier() -> None:
         "guard `if (z == target) return ssStar;` — doing so changes the "
         "observable behavior on a second Hash query at the same z."
     )
+
+
+def test_if_else_returning_branches_not_dropped() -> None:
+    """Regression test for issue #221 (soundness bug).
+
+    A method whose body is a single `if (b) { return x; } else { return y; }`
+    has no top-level return statement and references no game field. The
+    topological sort previously seeded its dependency DFS only from a
+    top-level return statement and from field-using statements, so the
+    if/else (which is neither) was dropped entirely, collapsing the method
+    to an empty body.
+
+    Selector.pick and SelectorSwapped.pick return different values for the
+    same inputs, so they must NOT canonicalize to the same form.
+    """
+    selector = frog_parser.parse_game("""
+    Game Selector(Set T) {
+        T pick(T x, T y, Bool b) {
+            if (b) {
+                return x;
+            } else {
+                return y;
+            }
+        }
+    }
+    """)
+    selector_swapped = frog_parser.parse_game("""
+    Game SelectorSwapped(Set T) {
+        T pick(T x, T y, Bool b) {
+            if (b) {
+                return y;
+            } else {
+                return x;
+            }
+        }
+    }
+    """)
+    engine = _make_engine()
+    canonical_selector = engine.canonicalize_game(selector)
+    canonical_swapped = engine.canonicalize_game(selector_swapped)
+
+    # The if/else must survive canonicalization (not collapse to empty).
+    assert canonical_selector.methods[0].block.statements, (
+        "Issue #221: an if/else whose branches all return must not be "
+        "dropped by the topological sort"
+    )
+    assert canonical_selector != canonical_swapped, (
+        "Issue #221: Selector.pick(x, y, b) and SelectorSwapped.pick(x, y, b) "
+        "return different values and must NOT be interchangeable"
+    )

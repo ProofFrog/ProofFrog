@@ -143,11 +143,16 @@ def test_f084_same_binding_plain_assignment_control_accepted() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_f114_guard_var_rebound_by_intervening_decl_rejected() -> None:
-    """ATTACK-1d: a shadowing declaration ``Int a = M[b];`` rebinds ``a``,
-    which the guard ``a == b`` reads. Moving ``a != b`` past it reads the new
-    local. Distinguisher ``O(1, 0)`` with ``M[0] = 0`` -> true vs false.
-    Engine must REJECT."""
+def test_f114_capture_not_introduced_rejected() -> None:
+    """ATTACK-1d (soundness): in ``Left`` the shadowing declaration
+    ``Int a = M[b];`` rebinds ``a``, which the guard ``a == b`` reads. The
+    unsound merge would move ``a != b`` past the rebind so it reads the *local*
+    ``a`` (= ``M[b]``), i.e. ``captured`` below (``M[b] != b``).  ``Left`` is
+    NOT equivalent to ``captured`` -- distinguisher ``O(1, 0)`` with
+    ``M[0] = 0`` -> ``true`` vs ``false`` -- so the engine must REJECT.  (On
+    the full pipeline the ``AlphaRename`` pass uniquifies the local, so the
+    merge that fires reads the parameter ``a``, never producing ``captured``.)
+    """
     left = frog_parser.parse_game("""
         Game Left() {
             Map<Int, Int> M;
@@ -161,8 +166,40 @@ def test_f114_guard_var_rebound_by_intervening_decl_rejected() -> None:
             }
         }
         """)
-    right = frog_parser.parse_game("""
-        Game Right() {
+    captured = frog_parser.parse_game("""
+        Game Captured() {
+            Map<Int, Int> M;
+            Void Initialize() { M[0] = 0; }
+            Bool O(Int a, Int b) {
+                Int c = M[b];
+                return (c == 0 || c == 1) && c != b;
+            }
+        }
+        """)
+    assert not _engine().check_equivalent(left, captured).valid
+
+
+def test_f114_correct_uncaptured_merge_accepted() -> None:
+    """Completeness twin: the *correct* merge keeps ``!P`` reading the parameter
+    ``a`` (``a != b``).  ``Left`` IS equivalent to this form, and because
+    ``AlphaRename`` makes the shadowing local distinct from the parameter, the
+    engine certifies the equivalence instead of declining on a (now impossible)
+    capture hazard."""
+    left = frog_parser.parse_game("""
+        Game Left() {
+            Map<Int, Int> M;
+            Void Initialize() { M[0] = 0; }
+            Bool O(Int a, Int b) {
+                if (a == b) {
+                    return false;
+                }
+                Int a = M[b];
+                return a == 0 || a == 1;
+            }
+        }
+        """)
+    correct = frog_parser.parse_game("""
+        Game Correct() {
             Map<Int, Int> M;
             Void Initialize() { M[0] = 0; }
             Bool O(Int a, Int b) {
@@ -171,7 +208,7 @@ def test_f114_guard_var_rebound_by_intervening_decl_rejected() -> None:
             }
         }
         """)
-    assert not _engine().check_equivalent(left, right).valid
+    assert _engine().check_equivalent(left, correct).valid
 
 
 def test_f114_capture_free_intervening_decl_control_accepted() -> None:

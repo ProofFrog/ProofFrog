@@ -7,10 +7,10 @@ An Emacs major mode for editing [ProofFrog](https://github.com/ProofFrog/ProofFr
 ### Syntax Highlighting
 
 - **Declaration keywords:** `Primitive`, `Scheme`, `Game`, `Reduction`, `Phase`
-- **Proof structure:** `proof:`, `let:`, `assume:`, `theorem:`, `games:`
+- **Proof structure:** `proof:`, `let:`, `assume:`, `lemma:`, `theorem:`, `games:`, `by`
 - **Control flow:** `if`, `else`, `for`, `return`, `to`, `in`
-- **Language keywords:** `import`, `as`, `export`, `extends`, `requires`, `compose`, `against`, `Adversary`, `oracles`, `calls`, `union`, `subsets`
-- **Built-in types:** `Bool`, `Void`, `Int`, `BitString`, `Set`, `Map`, `Array`
+- **Language keywords:** `import`, `as`, `export`, `extends`, `requires`, `compose`, `against`, `Adversary`, `oracles`, `calls`, `union`, `subsets`, `deterministic`, `injective`
+- **Built-in types:** `Bool`, `Void`, `Int`, `BitString`, `ModInt`, `Set`, `Map`, `Array`, `Function`
 - **Constants:** `true`, `false`, `None`, binary literals (`0b101`), integers
 - **Sampling operator:** `<-`
 - **Import paths** in single quotes
@@ -18,7 +18,7 @@ An Emacs major mode for editing [ProofFrog](https://github.com/ProofFrog/ProofFr
 
 ### Indentation
 
-Automatic brace-based indentation with awareness of proof section labels (`let:`, `assume:`, `theorem:`, `games:`). Configurable via `prooffrog-indent-offset` (default: 4 spaces).
+Automatic brace-based indentation with awareness of proof section labels (`let:`, `assume:`, `lemma:`, `theorem:`, `games:`). Configurable via `prooffrog-indent-offset` (default: 4 spaces).
 
 ### Comment Support
 
@@ -155,10 +155,16 @@ Add an entry to the [NonGNU ELPA `elpa-packages`](https://git.savannah.gnu.org/c
 
 ### Release workflow
 
-Pushing a tag matching `v*` (e.g. `v0.3.1`) will:
+Emacs package releases use their own tag namespace, `emacs-v*`, separate from
+ProofFrog's main release tags (`v0.3.1`, ...) and the VS Code extension's
+`vscode-v*` tags. This keeps the Emacs mode's version independent of the
+ProofFrog distribution's version — the tarball contains only `prooffrog-mode.el`,
+not ProofFrog itself (which is installed separately via `pip`).
+
+Pushing a tag matching `emacs-v*` (e.g. `emacs-v0.1.0`) will:
 
 1. Run lint checks
-2. Update the version in the elisp header
+2. Update the version in the elisp header (from the part after `emacs-v`)
 3. Build a `.tar` package
 4. Create a GitHub release with the tarball attached
 

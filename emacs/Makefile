@@ -28,15 +28,17 @@ checkdoc:
 	$(EMACS) -Q --batch \
 	  --eval "(progn \
 	    (require 'checkdoc) \
-	    (let ((files '(\"$(PACKAGE_FILE)\")) \
-	          (errors nil)) \
-	      (dolist (file files) \
-	        (with-current-buffer (find-file-noselect file) \
-	          (let ((errs (checkdoc-file file))) \
-	            (when errs (push errs errors))))) \
-	      (when errors \
-	        (message \"checkdoc errors found\") \
-	        (kill-emacs 1))))"
+	    (defvar prooffrog--checkdoc-count 0) \
+	    (setq checkdoc-create-error-function \
+	          (lambda (text start end &optional unfixable) \
+	            (setq prooffrog--checkdoc-count (1+ prooffrog--checkdoc-count)) \
+	            (message \"%s:%s: %s\" \"$(PACKAGE_FILE)\" \
+	                     (if start (line-number-at-pos start) \"?\") text) \
+	            (list text start end unfixable))) \
+	    (checkdoc-file \"$(PACKAGE_FILE)\") \
+	    (when (> prooffrog--checkdoc-count 0) \
+	      (message \"checkdoc: %d issue(s) found\" prooffrog--checkdoc-count) \
+	      (kill-emacs 1)))"
 
 package:
 	$(EMACS) -Q --batch \

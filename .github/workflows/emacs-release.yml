@@ -1,10 +1,11 @@
 name: emacs-release
 
+# Triggered only by emacs-specific release tags (e.g. emacs-v0.1.0), mirroring
+# the vscode-v* tag convention. This must NOT fire on the main ProofFrog
+# release tags (v0.5.0, ...), which ship the Python package, not the Emacs mode.
 on:
-  release:
-    types: [published]
   push:
-    tags: ["v*"]
+    tags: ["emacs-v*"]
 
 jobs:
   release:
@@ -21,7 +22,7 @@ jobs:
       - name: Update version from tag
         working-directory: emacs
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${GITHUB_REF_NAME#emacs-v}"
           sed -i "s/;; Version: .*/;; Version: ${VERSION}/" prooffrog-mode.el
 
       - name: Byte-compile
@@ -36,18 +37,11 @@ jobs:
         working-directory: emacs
         run: make package
 
-      - name: Upload release asset
-        if: github.event_name == 'release'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" emacs/prooffrog-mode-*.tar
-
-      - name: Upload release asset (tag push)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Create release with package asset
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${GITHUB_REF_NAME#emacs-v}"
           gh release create "$GITHUB_REF_NAME" emacs/prooffrog-mode-*.tar \
             --title "prooffrog-mode ${VERSION}" \
             --notes "Emacs package release for prooffrog-mode ${VERSION}"

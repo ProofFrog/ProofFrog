@@ -53,9 +53,10 @@
 
 ;;; Code:
 
-;; Optional dependency declarations (eglot / lsp-mode)
+;; Optional dependency declarations (eglot / lsp-mode / elec-pair)
 (defvar eglot-server-programs)
 (defvar lsp-language-id-configuration)
+(defvar electric-pair-pairs)
 (declare-function eglot-ensure "eglot")
 (declare-function lsp "lsp-mode")
 (declare-function lsp-register-client "lsp-mode")
@@ -115,16 +116,17 @@
   (let* (;; Top-level declaration keywords
          (declaration-keywords '("Primitive" "Scheme" "Game" "Reduction" "Phase"))
          ;; Proof structure keywords
-         (proof-keywords '("proof" "let" "assume" "theorem" "games"
-                           "induction" "from"))
+         (proof-keywords '("proof" "let" "assume" "lemma" "theorem" "games"
+                           "induction" "from" "by"))
          ;; Control flow keywords
          (control-keywords '("if" "else" "for" "return" "to" "in"))
          ;; Other keywords
          (other-keywords '("import" "as" "export" "extends" "requires"
-                           "compose" "against" "Adversary" "oracles" "calls"))
+                           "compose" "against" "Adversary" "oracles" "calls"
+                           "deterministic" "injective"))
          ;; Built-in types
-         (type-keywords '("Bool" "Void" "Int" "BitString" "Set" "Map"
-                          "Array"))
+         (type-keywords '("Bool" "Void" "Int" "BitString" "ModInt" "Set" "Map"
+                          "Array" "Function"))
          ;; Constants
          (constant-keywords '("true" "false" "None"))
 
@@ -150,8 +152,8 @@
       ;; Integer literals
       ("\\<[0-9]+\\>" . font-lock-constant-face)
 
-      ;; Proof section labels (proof:, let:, assume:, theorem:, games:)
-      (,(concat "\\<" (regexp-opt '("proof" "let" "assume" "theorem" "games") t) ":")
+      ;; Proof section labels (proof:, let:, assume:, lemma:, theorem:, games:)
+      (,(concat "\\<" (regexp-opt '("proof" "let" "assume" "lemma" "theorem" "games") t) ":")
        . font-lock-preprocessor-face)
 
       ;; Top-level declaration keywords
@@ -180,14 +182,15 @@
                 "\\s-+\\([a-zA-Z_$][a-zA-Z_0-9$]*\\)")
        (2 font-lock-function-name-face))
 
-      ;; Method definitions: Type name(
-      ;; Match the method name before a paren when preceded by a type
-      (,(concat "\\<\\([a-zA-Z_$][a-zA-Z_0-9$]*\\)\\s-*(")
+      ;; Method names: an identifier immediately followed by a paren.
+      ;; The paren must be adjacent (no space) so control keywords such as
+      ;; `if (...)' and `for (...)' are not mistaken for calls.  This still
+      ;; highlights call sites as well as definitions.
+      (,(concat "\\<\\([a-zA-Z_$][a-zA-Z_0-9$]*\\)(")
        (1 font-lock-function-name-face))
 
       ;; Constants
-      (,constant-regexp . font-lock-constant-face)
-      ))
+      (,constant-regexp . font-lock-constant-face)))
   "Font-lock keywords for `prooffrog-mode'.")
 
 ;;; Indentation
@@ -228,8 +231,8 @@ Returns nil if no such line exists."
                                    (line-beginning-position) (line-end-position)))
               (setq cur-indent (current-indentation)))))
 
-         ;; Proof section labels (proof:, let:, assume:, theorem:, games:)
-         ((string-match-p "^\\s-*\\(proof\\|let\\|assume\\|theorem\\|games\\):" line)
+         ;; Proof section labels (proof:, let:, assume:, lemma:, theorem:, games:)
+         ((string-match-p "^\\s-*\\(proof\\|let\\|assume\\|lemma\\|theorem\\|games\\):" line)
           (setq cur-indent 0))
 
          ;; export as ... line
@@ -269,7 +272,7 @@ Returns nil if no such line exists."
                     (setq cur-indent (+ cur-indent prooffrog-indent-offset)))
 
                   ;; Increase indent after proof section labels
-                  (when (string-match-p "^\\s-*\\(let\\|assume\\|theorem\\|games\\):" prev-line)
+                  (when (string-match-p "^\\s-*\\(let\\|assume\\|lemma\\|theorem\\|games\\):" prev-line)
                     (setq cur-indent (+ cur-indent prooffrog-indent-offset)))))))))))
 
     ;; Apply the indentation
@@ -347,7 +350,7 @@ ProofFrog supports four file types:
   :group 'prooffrog)
 
 (defcustom prooffrog-lsp-enabled t
-  "When non-nil, automatically start the LSP client when entering `prooffrog-mode'.
+  "When non-nil, start the LSP client on entering `prooffrog-mode'.
 Requires either `eglot' (Emacs 29+) or `lsp-mode' to be installed."
   :type 'boolean
   :group 'prooffrog)
@@ -356,19 +359,35 @@ Requires either `eglot' (Emacs 29+) or `lsp-mode' to be installed."
   "Return the command to start the ProofFrog LSP server."
   (list prooffrog-python-path "-m" "proof_frog" "lsp"))
 
-;; Eglot support (built-in since Emacs 29)
-(with-eval-after-load 'eglot
-  (add-to-list 'eglot-server-programs
-               `(prooffrog-mode . ,(prooffrog--lsp-server-command))))
+;; The eglot/lsp-mode integration is registered lazily, the first time LSP is
+;; actually started for a ProofFrog buffer, rather than with a top-level
+;; `with-eval-after-load'.  This keeps the package side-effect-free at load
+;; time and avoids loading either client unless the user opts in.
 
-;; lsp-mode support
-(with-eval-after-load 'lsp-mode
-  (add-to-list 'lsp-language-id-configuration '(prooffrog-mode . "prooffrog"))
-  (lsp-register-client
-   (make-lsp-client
-    :new-connection (lsp-stdio-connection #'prooffrog--lsp-server-command)
-    :activation-fn (lsp-activate-on "prooffrog")
-    :server-id 'prooffrog-lsp)))
+(defun prooffrog--register-eglot ()
+  "Register the ProofFrog server with `eglot', if eglot is available."
+  (when (boundp 'eglot-server-programs)
+    (add-to-list 'eglot-server-programs
+                 (cons 'prooffrog-mode (prooffrog--lsp-server-command)))))
+
+(defvar prooffrog--lsp-client-registered nil
+  "Non-nil once the ProofFrog client has been registered with `lsp-mode'.")
+
+(defun prooffrog--register-lsp-mode ()
+  "Register the ProofFrog client with `lsp-mode', if available (once)."
+  (when (and (not prooffrog--lsp-client-registered)
+             (boundp 'lsp-language-id-configuration)
+             (fboundp 'lsp-register-client)
+             (fboundp 'make-lsp-client)
+             (fboundp 'lsp-stdio-connection)
+             (fboundp 'lsp-activate-on))
+    (add-to-list 'lsp-language-id-configuration '(prooffrog-mode . "prooffrog"))
+    (lsp-register-client
+     (make-lsp-client
+      :new-connection (lsp-stdio-connection #'prooffrog--lsp-server-command)
+      :activation-fn (lsp-activate-on "prooffrog")
+      :server-id 'prooffrog-lsp))
+    (setq prooffrog--lsp-client-registered t)))
 
 (defun prooffrog-start-lsp ()
   "Start the LSP client for the current ProofFrog buffer.
@@ -376,8 +395,10 @@ Uses `eglot' if available, otherwise falls back to `lsp-mode'."
   (interactive)
   (cond
    ((fboundp 'eglot-ensure)
+    (prooffrog--register-eglot)
     (eglot-ensure))
    ((fboundp 'lsp)
+    (prooffrog--register-lsp-mode)
     (lsp))
    (t
     (message "ProofFrog: Install `eglot' (Emacs 29+) or `lsp-mode' for LSP support"))))

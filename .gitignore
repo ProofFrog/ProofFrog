@@ -8,6 +8,9 @@ proofOutput.txt
 extras
 *~
 
+# Emacs
+emacs/*.elc
+
 # VSCode extension
 vscode-extension/node_modules/
 vscode-extension/out/

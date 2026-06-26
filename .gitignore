@@ -7,6 +7,10 @@ proofOutput.txt
 .vscode
 .worktrees
 extras
+*~
+
+# Emacs
+emacs/*.elc
 
 # VSCode extension
 vscode-extension/node_modules/

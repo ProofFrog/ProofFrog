@@ -56,6 +56,8 @@ Full documentation is available at [prooffrog.github.io](https://prooffrog.githu
 - Information about [editor plugins](https://prooffrog.github.io/manual/editor-plugins/) and [proving with AI assistants](https://prooffrog.github.io/researchers/gen-ai/)
 - [LaTeX export](docs/latex-export.md) — render FrogLang files to LaTeX (cryptocode pseudocode) via `python -m proof_frog export-latex`
 
+**Emacs**. An Emacs major mode providing syntax highlighting, indentation, Imenu navigation, and LSP integration (via eglot or lsp-mode) is available in the [emacs](https://github.com/ProofFrog/ProofFrog/tree/main/emacs) folder. See its README for installation instructions.
+
 ## License
 
 ProofFrog is released under the [MIT License](https://github.com/ProofFrog/ProofFrog/blob/main/LICENSE).

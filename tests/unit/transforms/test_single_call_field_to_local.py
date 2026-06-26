@@ -392,3 +392,54 @@ def test_param_shadowed_field_not_localized() -> None:
         }
         """)
     assert _single_call_field_to_local(game) == game
+
+
+def test_field_to_local_declines_when_domain_mutated_after_sample_in_init() -> None:
+    """RC5 (ATT-1): the field's sampled domain ``q`` (``ModInt<q>``) is mutated
+    later in Initialize, so relocating the draw into the using oracle would
+    re-evaluate the domain. The pass must DECLINE."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int q;
+            ModInt<q> x;
+            Void Initialize() { q = 2; x <- ModInt<q>; q = 3; }
+            ModInt<q> Get() { return x; }
+        }
+        """)
+    assert _single_call_field_to_local(game) == game
+
+
+def test_field_to_local_declines_when_domain_mutated_by_sibling() -> None:
+    """RC5 (ATT-2): a sibling oracle mutates the domain field ``q`` between
+    Initialize and the using oracle. The pass must DECLINE."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int q;
+            ModInt<q> x;
+            Void Initialize() { q = 2; x <- ModInt<q>; }
+            Void Bump() { q = 3; }
+            ModInt<q> Get() { return x; }
+        }
+        """)
+    assert _single_call_field_to_local(game) == game
+
+
+def test_field_to_local_fires_when_domain_not_mutated() -> None:
+    """RC5 conservatism: with the domain field ``q`` fixed before the sample and
+    never mutated afterwards, the field-to-local move still fires."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int q;
+            ModInt<q> x;
+            Void Initialize() { q = 3; x <- ModInt<q>; }
+            ModInt<q> Get() { return x; }
+        }
+        """)
+    expected = frog_parser.parse_game("""
+        Game G() {
+            Int q;
+            Void Initialize() { q = 3; }
+            ModInt<q> Get() { ModInt<q> x <- ModInt<q>; return x; }
+        }
+        """)
+    assert _single_call_field_to_local(game) == expected

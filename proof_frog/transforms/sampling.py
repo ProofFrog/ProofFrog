@@ -535,13 +535,21 @@ class MergeUniformSamplesTransformer(BlockTransformer):
                     ):
                         continue
 
-                    # Verify uniform sampling: type param == sampled_from param
-                    type_len = FrogToSympyVisitor(self.variables).visit(
-                        s.the_type.parameterization
-                    )
-                    sample_len = FrogToSympyVisitor(self.variables).visit(
-                        s.sampled_from.parameterization
-                    )
+                    # Verify uniform sampling: type param == sampled_from param.
+                    # Length names unknown to the engine (e.g. a mutable game
+                    # field, not a let constant) make ``FrogToSympyVisitor``
+                    # raise ``KeyError``; treat that as "cannot verify" and
+                    # decline rather than crash.
+                    try:
+                        type_len = FrogToSympyVisitor(self.variables).visit(
+                            s.the_type.parameterization
+                        )
+                        sample_len = FrogToSympyVisitor(self.variables).visit(
+                            s.sampled_from.parameterization
+                        )
+                    except KeyError:
+                        all_valid = False
+                        break
                     if type_len is None or sample_len is None or type_len != sample_len:
                         all_valid = False
                         break
@@ -599,6 +607,41 @@ class MergeUniformSamplesTransformer(BlockTransformer):
                             method=None,
                         )
                     )
+                continue
+
+            # RC5 domain-invariance: the merge re-anchors every component sample
+            # at the concatenation position. If any statement between a
+            # component's original sample and that position writes a name in the
+            # component's sampled type parameterization (e.g. a length symbol
+            # ``n`` for ``BitString<n>``, possibly a method-local shadowing a
+            # let Int), the component's sampling domain would change, so the
+            # merge is unsound. Decline.
+            domain_safe = True
+            for vi, var in enumerate(leaf_vars):
+                sample_stmt = block.statements[sample_indices[vi]]
+                assert isinstance(sample_stmt, frog_ast.Sample)
+                if not _domain_invariant_between(
+                    sample_stmt, sample_indices[vi] + 1, index, block
+                ):
+                    domain_safe = False
+                    if self.ctx is not None:
+                        self.ctx.near_misses.append(
+                            NearMiss(
+                                transform_name="Merge Uniform Samples",
+                                reason=(
+                                    f"Samples not merged: a name in the "
+                                    f"sampled type of '{var.name}' is written "
+                                    f"between its sample and the concatenation, "
+                                    f"which would change its sampling domain"
+                                ),
+                                location=None,
+                                suggestion=None,
+                                variable=var.name,
+                                method=None,
+                            )
+                        )
+                    break
+            if not domain_safe:
                 continue
 
             # Compute combined length
@@ -661,6 +704,9 @@ class MergeProductSamplesTransformer(BlockTransformer):
     product type independently and combining them is equivalent to sampling
     the product type jointly.
     """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -750,6 +796,41 @@ class MergeProductSamplesTransformer(BlockTransformer):
                     break
 
             if not all_single_use:
+                continue
+
+            # RC5 domain-invariance: each component sample is deleted and the
+            # combined product sample is re-anchored at the return site. If any
+            # statement between a component's original sample and the return
+            # writes a name in that component's sampled type parameterization
+            # (e.g. ``n`` in ``BitString<n>`` mutated by ``n = 8;``), the
+            # component's sampling domain would change, so the merge is unsound.
+            # Decline.
+            domain_safe = True
+            for vi, var in enumerate(leaf_vars):
+                sample_stmt = block.statements[sample_indices[vi]]
+                assert isinstance(sample_stmt, frog_ast.Sample)
+                if not _domain_invariant_between(
+                    sample_stmt, sample_indices[vi] + 1, index, block
+                ):
+                    domain_safe = False
+                    if self.ctx is not None:
+                        self.ctx.near_misses.append(
+                            NearMiss(
+                                transform_name="Merge Product Samples",
+                                reason=(
+                                    f"Samples not merged: a name in the "
+                                    f"sampled type of '{var.name}' is written "
+                                    f"between its sample and the return, which "
+                                    f"would change its sampling domain"
+                                ),
+                                location=None,
+                                suggestion=None,
+                                variable=var.name,
+                                method=None,
+                            )
+                        )
+                    break
+            if not domain_safe:
                 continue
 
             product_type: frog_ast.Type = frog_ast.ProductType(
@@ -970,13 +1051,20 @@ class SplitUniformSampleTransformer(BlockTransformer):
 
             var_name = statement.var.name
 
-            # Check it's uniform sampling
-            total_len = FrogToSympyVisitor(self.variables).visit(
-                statement.the_type.parameterization
-            )
-            sample_len = FrogToSympyVisitor(self.variables).visit(
-                statement.sampled_from.parameterization
-            )
+            # Check it's uniform sampling. The length expressions may reference
+            # names not known to the engine (e.g. a mutable game field ``n`` in
+            # ``BitString<n>`` that is not a let constant); ``FrogToSympyVisitor``
+            # raises ``KeyError`` on such names. Treat that as "cannot determine
+            # length" and decline rather than crash.
+            try:
+                total_len = FrogToSympyVisitor(self.variables).visit(
+                    statement.the_type.parameterization
+                )
+                sample_len = FrogToSympyVisitor(self.variables).visit(
+                    statement.sampled_from.parameterization
+                )
+            except KeyError:
+                continue
             if total_len is None or sample_len is None or total_len != sample_len:
                 continue
 
@@ -1182,7 +1270,9 @@ class SplitUniformSampleTransformer(BlockTransformer):
 # ---------------------------------------------------------------------------
 
 
-def _single_call_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
+def _single_call_field_to_local(
+    game: frog_ast.Game, ctx: PipelineContext | None = None
+) -> frog_ast.Game:
     """When each oracle is called at most once, push field-initialized uniform
     samples down to local variables in the oracle that uses them.
 
@@ -1256,7 +1346,47 @@ def _single_call_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
         if _is_written_in_recursive(target_method.block, field.name):
             continue
 
+        # RC5 domain-invariance: moving the sample out of Initialize and into
+        # the calling oracle re-evaluates its sampling domain at the new anchor.
+        # The original draw fixed the domain at Initialize time; if any name in
+        # the field's sampled type parameterization (e.g. ``q`` in
+        # ``ModInt<q>``) is written *after* the sample -- either later in
+        # Initialize (ATT-1) or by any other method between Initialize and the
+        # call (ATT-2) -- the relocated draw would use a different domain.
+        # Decline.
         assert init_sample_idx is not None
+        domain_names = _collect_type_parameter_names(field.type)
+        if isinstance(init_sample.sampled_from, frog_ast.Type):
+            domain_names |= _collect_type_parameter_names(init_sample.sampled_from)
+        if domain_names:
+            init_after = frog_ast.Block(
+                init_method.block.statements[init_sample_idx + 1 :]
+            )
+            written_after_in_init = _statement_writes_any(init_after, domain_names)
+            written_in_other_method = any(
+                _statement_writes_any(m.block, domain_names)
+                for m in game.methods
+                if m.signature.name != "Initialize"
+            )
+            if written_after_in_init or written_in_other_method:
+                if ctx is not None:
+                    ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Single Call Field To Local",
+                            reason=(
+                                f"Field '{field.name}' not localized: a name in "
+                                f"its sampled type is written after the sample, "
+                                f"so moving the sample would change its "
+                                f"sampling domain"
+                            ),
+                            location=None,
+                            suggestion=None,
+                            variable=field.name,
+                            method=None,
+                        )
+                    )
+                continue
+
         eligible.append((field, init_sample_idx, init_sample, target_method_name))
 
     if not eligible:
@@ -1356,7 +1486,7 @@ class SingleCallFieldToLocal(TransformPass):
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         if ctx.max_calls is None or ctx.max_calls > 1:
             return game
-        return _single_call_field_to_local(game)
+        return _single_call_field_to_local(game, ctx)
 
 
 def _localize_init_only_field_samples(game: frog_ast.Game) -> frog_ast.Game:
@@ -1662,6 +1792,97 @@ def _count_assignments_recursive(node: frog_ast.ASTNode, name: str) -> int:
     return count
 
 
+def _collect_type_parameter_names(typ: Optional[frog_ast.Type]) -> set[str]:
+    """Collect every variable name appearing in a Type's parameterization.
+
+    ``BitString<n + 1>`` -> ``{n}``; ``ModInt<q>`` -> ``{q}``; a product/tuple
+    type -> the union over its components. These are the *free names that
+    determine the sampling domain*: if any of them is written between a
+    sample's original position and a position it is moved/merged to, the
+    sample's distribution would change, so the move/merge is unsound
+    (RC5 domain-mutation blindness).
+    """
+    if typ is None:
+        return set()
+    names: set[str] = set()
+
+    def _collect(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, frog_ast.Variable):
+            names.add(n.name)
+        return False
+
+    SearchVisitor(_collect).visit(typ)
+    return names
+
+
+def _statement_writes_any(node: frog_ast.ASTNode, names: set[str]) -> bool:
+    """True if *node* contains any write (assignment/sample) whose lvalue base
+    name is in *names*.
+
+    Unlike the name-only ``_is_written_in_recursive``, this resolves the *base*
+    of element/field lvalues, so writes such as ``M[i] = v``, ``obj.f = v`` and
+    ``<-uniq`` samples are also recognized when the base name is in *names*.
+    """
+    if not names:
+        return False
+
+    def _lvalue_base_name(target: frog_ast.Expression) -> Optional[str]:
+        # Resolve the base variable name written by an lvalue. For element /
+        # field writes (``M[i]``, ``obj.f``) the *base* container is the thing
+        # mutated, so that is the name we attribute the write to.
+        current: frog_ast.Expression = target
+        while True:
+            if isinstance(current, frog_ast.ArrayAccess):
+                current = current.the_array
+            elif isinstance(current, frog_ast.Slice):
+                current = current.the_array
+            elif isinstance(current, frog_ast.FieldAccess):
+                current = current.the_object
+            else:
+                break
+        if isinstance(current, frog_ast.Variable):
+            return current.name
+        return None
+
+    def _check(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)):
+            base = _lvalue_base_name(n.var)
+            return base is not None and base in names
+        return False
+
+    return SearchVisitor(_check).visit(node) is not None
+
+
+def _domain_invariant_between(
+    sample: frog_ast.Sample,
+    start_idx: int,
+    end_idx: int,
+    block: frog_ast.Block,
+) -> bool:
+    """Return True (SAFE to move/merge) when none of the names that parameterize
+    *sample*'s sampled domain are written in ``block.statements[start_idx:end_idx]``.
+
+    Return False (UNSAFE, decline) when any such name is written in that region.
+    A sample whose type has no free names (e.g. ``BitString<8>``, ``Bool``) is
+    always safe. This is the RC5 domain-invariance check: moving or merging a
+    sample across a write to a name in its sampled type's parameterization
+    changes its distribution and is therefore unsound.
+    """
+    # Names that determine the sampling domain. Use both the declared type and
+    # the sampled-from expression: for a typed sample they should agree, but a
+    # sample-from-type form carries the domain in ``sampled_from``.
+    names = _collect_type_parameter_names(sample.the_type)
+    if isinstance(sample.sampled_from, frog_ast.Type):
+        names |= _collect_type_parameter_names(sample.sampled_from)
+    if not names:
+        return True
+
+    for stmt in block.statements[start_idx:end_idx]:
+        if _statement_writes_any(stmt, names):
+            return False
+    return True
+
+
 def _counter_guarded_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
     """Convert fields to locals when only read inside counter-guarded branches.
 
@@ -1835,6 +2056,26 @@ class SinkUniformSampleTransformer(BlockTransformer):
     sound because uniform sampling is independent of the branch condition.
     """
 
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+
+    def _decline_near_miss(self, var_name: str) -> None:
+        if self.ctx is not None:
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="Sink Uniform Sample",
+                    reason=(
+                        f"Sample '{var_name}' not sunk: a name in its sampled "
+                        f"type is written in the region it would be moved "
+                        f"across, which would change its sampling domain"
+                    ),
+                    location=None,
+                    suggestion=None,
+                    variable=var_name,
+                    method=None,
+                )
+            )
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for idx, stmt in enumerate(block.statements):
             if not (
@@ -1881,8 +2122,19 @@ class SinkUniformSampleTransformer(BlockTransformer):
                 if _references_name(branch_block, var_name):
                     using_branches.append(bi)
 
+            # RC5 domain-invariance: names in the moved sample's sampled type
+            # parameterization. Determine the region the sample is moved across.
+            sample_stmt = stmt
+
             if len(using_branches) == 1 and not after_uses:
-                # Sink into the one branch that uses the variable.
+                # Sink into the one branch that uses the variable. The sample
+                # crosses the skipped intermediate statements [idx+1:next_idx];
+                # if any of them writes a name in the sample's sampled type, the
+                # domain would change at the new position. Decline.
+                if not _domain_invariant_between(sample_stmt, idx + 1, next_idx, block):
+                    self._decline_near_miss(var_name)
+                    continue
+
                 target_bi = using_branches[0]
                 new_if = copy.deepcopy(next_stmt)
                 new_if.blocks[target_bi] = (
@@ -1905,6 +2157,25 @@ class SinkUniformSampleTransformer(BlockTransformer):
                 # observe it is sound (sampling is independent of branch
                 # outcomes). Any early-return path in the if makes the
                 # sample dead code anyway.
+                #
+                # RC5 domain-invariance: the sample crosses the skipped
+                # intermediates AND the entire if-statement. If any of those
+                # write a name in the sample's sampled type parameterization
+                # (e.g. a branch ``n = 2;`` for a ``ModInt<n>`` sample), the
+                # domain would re-evaluate at the new position. Decline.
+                domain_safe = _domain_invariant_between(
+                    sample_stmt, idx + 1, next_idx, block
+                )
+                if domain_safe:
+                    names = _collect_type_parameter_names(sample_stmt.the_type)
+                    if isinstance(sample_stmt.sampled_from, frog_ast.Type):
+                        names |= _collect_type_parameter_names(sample_stmt.sampled_from)
+                    if _statement_writes_any(next_stmt, names):
+                        domain_safe = False
+                if not domain_safe:
+                    self._decline_near_miss(var_name)
+                    continue
+
                 new_stmts = (
                     list(block.statements[:idx])
                     + list(block.statements[idx + 1 : next_idx])
@@ -1922,7 +2193,7 @@ class SinkUniformSample(TransformPass):
     name = "Sink Uniform Sample"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return SinkUniformSampleTransformer().transform(game)
+        return SinkUniformSampleTransformer(ctx).transform(game)
 
 
 class SimplifySplice(TransformPass):
@@ -1943,7 +2214,7 @@ class MergeProductSamples(TransformPass):
     name = "Merge Product Samples"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return MergeProductSamplesTransformer().transform(game)
+        return MergeProductSamplesTransformer(ctx).transform(game)
 
 
 class SplitUniformSamples(TransformPass):

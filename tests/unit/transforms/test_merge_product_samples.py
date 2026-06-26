@@ -122,3 +122,37 @@ def test_merge_product_samples(
     print("EXPECTED", expected_ast)
     print("TRANSFORMED", transformed_ast)
     assert expected_ast == transformed_ast
+
+
+def test_merge_product_declines_on_domain_write_between_samples() -> None:
+    """RC5: do not merge component samples when a name in a component's sampled
+    type (``n`` in ``BitString<n>``) is written between its sample and the
+    return -- the re-anchored product draw would use a mutated domain."""
+    method = frog_parser.parse_method("""
+        [BitString<n>, BitString<n>] O() {
+            BitString<n> a <- BitString<n>;
+            n = 8;
+            BitString<n> b <- BitString<n>;
+            return [a, b];
+        }
+        """)
+    assert MergeProductSamplesTransformer().transform(method) == method
+
+
+def test_merge_product_fires_when_no_domain_write() -> None:
+    """RC5 conservatism: with no domain mutation between the samples and the
+    return, the product merge still fires."""
+    method = frog_parser.parse_method("""
+        [BitString<n>, BitString<n>] O() {
+            BitString<n> a <- BitString<n>;
+            BitString<n> b <- BitString<n>;
+            return [a, b];
+        }
+        """)
+    expected = frog_parser.parse_method("""
+        [BitString<n>, BitString<n>] O() {
+            [BitString<n>, BitString<n>] a <- [BitString<n>, BitString<n>];
+            return a;
+        }
+        """)
+    assert MergeProductSamplesTransformer().transform(method) == expected

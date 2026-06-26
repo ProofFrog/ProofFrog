@@ -168,6 +168,48 @@ def test_simplify_if_field_read_before_decl_rejected() -> None:
     assert not _engine().check_equivalent(left, right).valid
 
 
+def test_simplify_if_loop_binder_capture_rejected() -> None:
+    # F-129 ATK-A9c: SimplifyIf's `_normalize_block_locals` renames a branch
+    # local and (buggily) rewrites a same-named generic-for BINDER use, merging
+    # two inequivalent branches.  THEN sums the loop binder `x` over D={1,2}
+    # (acc = 3); ELSE sums the sampled local `t` (acc = 2t).  Distinguisher
+    # Probe(false); GetAcc() -> 3 (odd) vs 2t (even), advantage 1.  AlphaRename
+    # renames the locals (x->fresh, t->fresh) so the THEN loop-binder use and
+    # the ELSE local use stay distinct and the buggy merge cannot fire.
+    left = frog_parser.parse_game("""
+        Game Left() {
+          ModInt<16> acc;
+          Set<ModInt<16>> D;
+          Void Initialize() { acc = 0; D = {1, 2}; }
+          Void Probe(Bool c) {
+            acc = 0;
+            if (c) {
+              ModInt<16> x <- ModInt<16>;
+              for (ModInt<16> x in D) { acc = acc + x; }
+            } else {
+              ModInt<16> t <- ModInt<16>;
+              for (ModInt<16> x in D) { acc = acc + t; }
+            }
+          }
+          ModInt<16> GetAcc() { return acc; }
+        }
+        """)
+    right = frog_parser.parse_game("""
+        Game Right() {
+          ModInt<16> acc;
+          Set<ModInt<16>> D;
+          Void Initialize() { acc = 0; D = {1, 2}; }
+          Void Probe(Bool c) {
+            acc = 0;
+            ModInt<16> x <- ModInt<16>;
+            for (ModInt<16> x in D) { acc = acc + x; }
+          }
+          ModInt<16> GetAcc() { return acc; }
+        }
+        """)
+    assert not _engine().check_equivalent(left, right).valid
+
+
 def test_simplify_if_identical_branches_control_accepted() -> None:
     # Sound: both branches genuinely read the SAME field x (just with different
     # local names), so merging the if into a single body is correct and the two

@@ -7,6 +7,7 @@ STANDARDIZATION_PIPELINE runs once after convergence to normalize names.
 from __future__ import annotations
 
 from ._base import TransformPass
+from .alpha_rename import AlphaRename
 from .symbolic import SymbolicComputation
 from .sampling import (
     SimplifySplice,
@@ -114,6 +115,7 @@ from .standardization import (
 )
 
 CORE_PIPELINE: list[TransformPass] = [
+    AlphaRename(),
     SingleCallFieldToLocal(),
     CounterGuardedFieldToLocal(),
     SymbolicComputation(),

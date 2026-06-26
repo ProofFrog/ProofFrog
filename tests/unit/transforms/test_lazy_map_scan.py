@@ -67,14 +67,29 @@ def _apply_with_ctx(
     game = frog_parser.parse_game(game_src)
     ctx = _ctx()
     if primitive_src:
-        prim = frog_parser.parse_string(
-            primitive_src, frog_ast.FileType.PRIMITIVE
-        )
+        prim = frog_parser.parse_string(primitive_src, frog_ast.FileType.PRIMITIVE)
         ctx.proof_namespace[prim.name] = prim
         # Also register under the conventional game-parameter alias "TT" used
         # in these unit tests (the real pipeline populates proof_namespace from
         # the proof's let: block).
         ctx.proof_namespace["TT"] = prim
+    result = LazyMapScan().apply(game, ctx)
+    return result, ctx
+
+
+def _apply_with_ctx_named(
+    game_src: str,
+    primitive_src: str,
+    prim_alias: str,
+    instance_alias: str,
+) -> tuple[frog_ast.Game, PipelineContext]:
+    """Apply LazyMapScan with a Primitive installed under both its declared
+    name and a chosen game-parameter instance alias in proof_namespace."""
+    game = frog_parser.parse_game(game_src)
+    ctx = _ctx()
+    prim = frog_parser.parse_string(primitive_src, frog_ast.FileType.PRIMITIVE)
+    ctx.proof_namespace[prim_alias] = prim
+    ctx.proof_namespace[instance_alias] = prim
     result = LazyMapScan().apply(game, ctx)
     return result, ctx
 
@@ -234,8 +249,7 @@ def test_two_maps_only_one_iterated() -> None:
 
 
 def test_body_has_multiple_statements_fails() -> None:
-    _apply_and_expect_unchanged(
-        """
+    _apply_and_expect_unchanged("""
         Game G() {
             Map<BitString<8>, BitString<16>> M;
             BitString<16> Oracle(BitString<8> arg) {
@@ -248,13 +262,11 @@ def test_body_has_multiple_statements_fails() -> None:
                 return 0b0000000000000000;
             }
         }
-        """
-    )
+        """)
 
 
 def test_if_has_else_fails() -> None:
-    _apply_and_expect_unchanged(
-        """
+    _apply_and_expect_unchanged("""
         Game G() {
             Map<BitString<8>, BitString<16>> M;
             BitString<16> Oracle(BitString<8> arg) {
@@ -268,13 +280,11 @@ def test_if_has_else_fails() -> None:
                 return 0b0000000000000000;
             }
         }
-        """
-    )
+        """)
 
 
 def test_non_equality_predicate_fails() -> None:
-    _apply_and_expect_unchanged(
-        """
+    _apply_and_expect_unchanged("""
         Game G() {
             Map<BitString<8>, BitString<16>> M;
             Set<BitString<8>> S;
@@ -287,13 +297,11 @@ def test_non_equality_predicate_fails() -> None:
                 return 0b0000000000000000;
             }
         }
-        """
-    )
+        """)
 
 
 def test_key_references_loop_var_fails() -> None:
-    _apply_and_expect_unchanged(
-        """
+    _apply_and_expect_unchanged("""
         Game G() {
             Map<BitString<8>, BitString<8>> M;
             BitString<8> Oracle() {
@@ -305,13 +313,11 @@ def test_key_references_loop_var_fails() -> None:
                 return 0b00000000;
             }
         }
-        """
-    )
+        """)
 
 
 def test_bare_loop_var_in_body_fails() -> None:
-    _apply_and_expect_unchanged(
-        """
+    _apply_and_expect_unchanged("""
         Game G() {
             Map<BitString<8>, BitString<16>> M;
             [BitString<8>, BitString<16>] Oracle(BitString<8> arg) {
@@ -323,13 +329,11 @@ def test_bare_loop_var_in_body_fails() -> None:
                 return [0b00000000, 0b0000000000000000];
             }
         }
-        """
-    )
+        """)
 
 
 def test_iteration_over_keys_not_entries_fails() -> None:
-    _apply_and_expect_unchanged(
-        """
+    _apply_and_expect_unchanged("""
         Game G() {
             Map<BitString<8>, BitString<16>> M;
             Bool Oracle(BitString<8> arg) {
@@ -341,13 +345,11 @@ def test_iteration_over_keys_not_entries_fails() -> None:
                 return false;
             }
         }
-        """
-    )
+        """)
 
 
 def test_iteration_over_non_map_field_fails() -> None:
-    _apply_and_expect_unchanged(
-        """
+    _apply_and_expect_unchanged("""
         Game G() {
             Set<BitString<8>> S;
             Bool Oracle(BitString<8> arg) {
@@ -359,8 +361,82 @@ def test_iteration_over_non_map_field_fails() -> None:
                 return false;
             }
         }
-        """
+        """)
+
+
+_NONDET_KEY_PRIMITIVE = """
+Primitive ND() {
+    BitString<8> draw();
+}
+"""
+
+
+_DETERMINISTIC_KEY_PRIMITIVE = """
+Primitive PF() {
+    deterministic BitString<8> eval(BitString<8> x);
+}
+"""
+
+
+def test_literal_equality_declines_on_nondeterministic_key() -> None:
+    """Soundness guard (verdict F-142, §8): a scan whose key is a
+    non-deterministic call (here an unannotated primitive method) must NOT
+    be rewritten, because the output re-evaluates the key at independent
+    fresh sites. Mirrors the injective-call branch's determinism gate."""
+    game_src = """
+        Game G(ND NN) {
+            Map<BitString<8>, BitString<16>> M;
+            BitString<16> Oracle() {
+                for ([BitString<8>, BitString<16>] e in M.entries) {
+                    if (e[0] == NN.draw()) {
+                        return e[1];
+                    }
+                }
+                return 0b0000000000000000;
+            }
+        }
+    """
+    result, ctx = _apply_with_ctx_named(game_src, _NONDET_KEY_PRIMITIVE, "ND", "NN")
+    assert result == frog_parser.parse_game(game_src)
+    assert any(
+        nm.transform_name == "Lazy Map Scan" and "non-deterministic call" in nm.reason
+        for nm in ctx.near_misses
     )
+
+
+def test_literal_equality_fires_on_deterministic_call_key() -> None:
+    """The guard must not over-fire: a key that is a ``deterministic``
+    primitive call is pure, so the scan still rewrites to direct lookup."""
+    before = """
+        Game G(PF FF) {
+            Map<BitString<8>, BitString<16>> M;
+            BitString<16> Oracle(BitString<8> arg) {
+                for ([BitString<8>, BitString<16>] e in M.entries) {
+                    if (e[0] == FF.eval(arg)) {
+                        return e[1];
+                    }
+                }
+                return 0b0000000000000000;
+            }
+        }
+    """
+    after = """
+        Game G(PF FF) {
+            Map<BitString<8>, BitString<16>> M;
+            BitString<16> Oracle(BitString<8> arg) {
+                if (FF.eval(arg) in M) {
+                    return M[FF.eval(arg)];
+                }
+                return 0b0000000000000000;
+            }
+        }
+    """
+    result, ctx = _apply_with_ctx_named(
+        before, _DETERMINISTIC_KEY_PRIMITIVE, "PF", "FF"
+    )
+    expected = frog_parser.parse_game(after)
+    assert result == expected, f"\nGOT:\n{result}\n\nEXPECTED:\n{expected}"
+    _assert_no_near_miss(ctx)
 
 
 def test_integration_via_core_pipeline() -> None:
@@ -371,8 +447,7 @@ def test_integration_via_core_pipeline() -> None:
     from proof_frog.transforms.pipelines import CORE_PIPELINE
     from proof_frog.visitors import SearchVisitor
 
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G() {
             Map<BitString<8>, BitString<16>> M;
             BitString<16> Oracle(BitString<8> arg) {
@@ -384,12 +459,9 @@ def test_integration_via_core_pipeline() -> None:
                 return 0b0000000000000000;
             }
         }
-        """
-    )
+        """)
     result = run_pipeline(game, CORE_PIPELINE, _ctx())
-    found = SearchVisitor(
-        lambda n: isinstance(n, frog_ast.GenericFor)
-    ).visit(result)
+    found = SearchVisitor(lambda n: isinstance(n, frog_ast.GenericFor)).visit(result)
     assert found is None, f"GenericFor should be eliminated, got:\n{result}"
 
 
@@ -529,8 +601,7 @@ def test_injective_call_fails_when_method_not_injective() -> None:
     result, ctx = _apply_with_ctx(game_src, _NON_INJECTIVE_PRIMITIVE)
     assert result == frog_parser.parse_game(game_src)
     assert any(
-        nm.transform_name == "Lazy Map Scan"
-        and "not annotated injective" in nm.reason
+        nm.transform_name == "Lazy Map Scan" and "not annotated injective" in nm.reason
         for nm in ctx.near_misses
     )
 
@@ -598,8 +669,7 @@ def test_injective_call_fails_when_callee_is_not_primitive_method() -> None:
     result, ctx = _apply_with_ctx(game_src)  # no primitive registered
     assert result == frog_parser.parse_game(game_src)
     assert any(
-        nm.transform_name == "Lazy Map Scan"
-        and "not a primitive method" in nm.reason
+        nm.transform_name == "Lazy Map Scan" and "not a primitive method" in nm.reason
         for nm in ctx.near_misses
     )
 

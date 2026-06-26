@@ -26,7 +26,13 @@ from typing import Optional, Union
 
 from .. import frog_ast
 from ..visitors import SearchVisitor, Transformer
-from ._base import NearMiss, PipelineContext, TransformPass, _lookup_primitive_method
+from ._base import (
+    NearMiss,
+    PipelineContext,
+    TransformPass,
+    _lookup_primitive_method,
+    has_nondeterministic_call,
+)
 
 _LAZY_MAP_SCAN_NAME = "Lazy Map Scan"
 
@@ -220,6 +226,17 @@ def _match_scan_body(
     if key_expr is not None:
         if _references_var(key_expr, e_name):
             return "key expression references the loop variable"
+        # Soundness gate (verdict §8, P6): the rewrite re-evaluates ``key``
+        # at independent fresh sites (membership test, ``M[key]`` lookup, and
+        # every substituted ``e[0]``), whereas the input loop evaluates it once
+        # per iteration. If ``key`` contains a non-deterministic call (a scheme/
+        # game method or an unannotated primitive method), those sites draw
+        # independently and the output distribution differs. Decline -- mirrors
+        # the injective-call branch's ``method.deterministic`` gate (L182-183).
+        if has_nondeterministic_call(
+            key_expr, ctx.proof_namespace, ctx.proof_let_types
+        ):
+            return "key expression contains a non-deterministic call"
         return _LiteralEqualityMatch(key_expr, body_expr)
     inj = _try_match_injective_call(cond, e_name, ctx)
     if isinstance(inj, _InjectiveCallMatch):

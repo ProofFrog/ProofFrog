@@ -27,6 +27,7 @@ from proof_frog.transforms.random_functions import (
     LocalFunctionFieldToLet,
 )
 from proof_frog.transforms.structural import UniformBijectionElimination
+from proof_frog.transforms.map_iteration import LazyMapScan
 from proof_frog.visitors import NameTypeMap
 
 
@@ -674,8 +675,7 @@ def _lazy_map_ctx() -> PipelineContext:
 
 
 def test_lazy_map_near_miss_cardinality_use() -> None:
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G() {
             Map<BitString<8>, BitString<16>> T;
             Int Size() {
@@ -690,8 +690,7 @@ def test_lazy_map_near_miss_cardinality_use() -> None:
                 return s;
             }
         }
-        """
-    )
+        """)
     ctx = _lazy_map_ctx()
     result = LazyMapToSampledFunction().apply(game, ctx)
     assert result == game
@@ -704,8 +703,7 @@ def test_lazy_map_near_miss_cardinality_use() -> None:
 
 
 def test_lazy_map_near_miss_explicit_initialize() -> None:
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G() {
             Map<BitString<8>, BitString<16>> T;
             Void Initialize() {
@@ -720,8 +718,7 @@ def test_lazy_map_near_miss_explicit_initialize() -> None:
                 return s;
             }
         }
-        """
-    )
+        """)
     ctx = _lazy_map_ctx()
     LazyMapToSampledFunction().apply(game, ctx)
     assert any(
@@ -733,21 +730,18 @@ def test_lazy_map_near_miss_explicit_initialize() -> None:
 
 
 def test_lazy_map_no_near_miss_when_no_idiom() -> None:
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G() {
             Map<BitString<8>, BitString<16>> T;
             Int Size() {
                 return |T|;
             }
         }
-        """
-    )
+        """)
     ctx = _lazy_map_ctx()
     LazyMapToSampledFunction().apply(game, ctx)
     assert not any(
-        nm.transform_name == "Lazy Map To Sampled Function"
-        for nm in ctx.near_misses
+        nm.transform_name == "Lazy Map To Sampled Function" for nm in ctx.near_misses
     )
 
 
@@ -764,8 +758,7 @@ def _lazy_scan_ctx() -> PipelineContext:
 
 
 def test_lazy_scan_near_miss_if_with_else() -> None:
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G() {
             Map<BitString<8>, BitString<16>> M;
             BitString<16> Oracle(BitString<8> arg) {
@@ -779,8 +772,7 @@ def test_lazy_scan_near_miss_if_with_else() -> None:
                 return 0b0000000000000000;
             }
         }
-        """
-    )
+        """)
     ctx = _lazy_scan_ctx()
     result = LazyMapScan().apply(game, ctx)
     assert result == game
@@ -794,8 +786,7 @@ def test_lazy_scan_near_miss_if_with_else() -> None:
 
 
 def test_lazy_scan_near_miss_key_references_loop_var() -> None:
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G() {
             Map<BitString<8>, BitString<8>> M;
             BitString<8> Oracle() {
@@ -807,8 +798,7 @@ def test_lazy_scan_near_miss_key_references_loop_var() -> None:
                 return 0b00000000;
             }
         }
-        """
-    )
+        """)
     ctx = _lazy_scan_ctx()
     LazyMapScan().apply(game, ctx)
     assert any(
@@ -820,22 +810,17 @@ def test_lazy_scan_near_miss_key_references_loop_var() -> None:
 
 
 def test_lazy_scan_no_near_miss_when_no_scan() -> None:
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G() {
             Map<BitString<8>, BitString<16>> M;
             Int Size() {
                 return |M|;
             }
         }
-        """
-    )
+        """)
     ctx = _lazy_scan_ctx()
     LazyMapScan().apply(game, ctx)
-    assert not any(
-        nm.transform_name == "Lazy Map Scan" for nm in ctx.near_misses
-    )
-
+    assert not any(nm.transform_name == "Lazy Map Scan" for nm in ctx.near_misses)
 
 
 _TRAPDOOR_TEST_PRIMITIVE_SRC = """
@@ -863,8 +848,7 @@ def _register_primitive(ctx: PipelineContext, src: str) -> None:
 
 
 def test_lazy_scan_injective_near_miss_not_injective() -> None:
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G(T TT) {
             Map<TT.Image, BitString<8>> M;
             BitString<8> Oracle(TT.Input c) {
@@ -876,8 +860,7 @@ def test_lazy_scan_injective_near_miss_not_injective() -> None:
                 return 0b00000000;
             }
         }
-        """
-    )
+        """)
     ctx = _lazy_scan_ctx()
     _register_primitive(ctx, _NON_INJECTIVE_PRIMITIVE_SRC)
     LazyMapScan().apply(game, ctx)
@@ -891,8 +874,7 @@ def test_lazy_scan_injective_near_miss_not_injective() -> None:
 
 
 def test_lazy_scan_injective_near_miss_callee_not_primitive() -> None:
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G() {
             Map<BitString<8>, BitString<8>> M;
             BitString<8> Oracle(BitString<8> c) {
@@ -904,8 +886,7 @@ def test_lazy_scan_injective_near_miss_callee_not_primitive() -> None:
                 return 0b00000000;
             }
         }
-        """
-    )
+        """)
     ctx = _lazy_scan_ctx()
     LazyMapScan().apply(game, ctx)
     assert any(
@@ -917,8 +898,7 @@ def test_lazy_scan_injective_near_miss_callee_not_primitive() -> None:
 
 
 def test_lazy_scan_injective_no_near_miss_when_valid() -> None:
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G(T TT) {
             Map<TT.Image, BitString<8>> M;
             BitString<8> Oracle(TT.Input c) {
@@ -930,14 +910,11 @@ def test_lazy_scan_injective_no_near_miss_when_valid() -> None:
                 return 0b00000000;
             }
         }
-        """
-    )
+        """)
     ctx = _lazy_scan_ctx()
     _register_primitive(ctx, _TRAPDOOR_TEST_PRIMITIVE_SRC)
     LazyMapScan().apply(game, ctx)
-    assert not any(
-        nm.transform_name == "Lazy Map Scan" for nm in ctx.near_misses
-    )
+    assert not any(nm.transform_name == "Lazy Map Scan" for nm in ctx.near_misses)
 
 
 # --- MapKeyReindex near-miss tests --------------------------------------------
@@ -1100,9 +1077,7 @@ def test_lazy_map_pair_near_miss_missing_guard():
         if nm.transform_name == "Lazy Map Pair to Sampled Function"
     ]
     assert misses
-    assert any(
-        "disjointness" in nm.reason or "guard" in nm.reason for nm in misses
-    )
+    assert any("disjointness" in nm.reason or "guard" in nm.reason for nm in misses)
 
 
 def test_lazy_map_pair_near_miss_mismatched_types():
@@ -1173,8 +1148,7 @@ def _local_fn_misses(ctx: PipelineContext) -> list:
 
 
 def test_local_fn_near_miss_reassigned() -> None:
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G() {
             Function<BitString<8>, BitString<16>> F;
             Void Initialize() {
@@ -1185,8 +1159,7 @@ def test_local_fn_near_miss_reassigned() -> None:
                 return F(x);
             }
         }
-        """
-    )
+        """)
     ctx = _local_fn_ctx(sampled={"H"})
     LocalFunctionFieldToLet().apply(game, ctx)
     misses = _local_fn_misses(ctx)
@@ -1195,8 +1168,7 @@ def test_local_fn_near_miss_reassigned() -> None:
 
 
 def test_local_fn_near_miss_non_call_use() -> None:
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G() {
             Function<BitString<8>, BitString<16>> F;
             Void Initialize() {
@@ -1207,8 +1179,7 @@ def test_local_fn_near_miss_non_call_use() -> None:
             }
             BitString<16> Hash(BitString<8> x) { return F(x); }
         }
-        """
-    )
+        """)
     ctx = _local_fn_ctx(sampled={"H"})
     LocalFunctionFieldToLet().apply(game, ctx)
     misses = _local_fn_misses(ctx)
@@ -1217,8 +1188,7 @@ def test_local_fn_near_miss_non_call_use() -> None:
 
 
 def test_local_fn_near_miss_h_referenced() -> None:
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G() {
             Function<BitString<8>, BitString<16>> F;
             Void Initialize() {
@@ -1227,8 +1197,7 @@ def test_local_fn_near_miss_h_referenced() -> None:
             BitString<16> Hash(BitString<8> x) { return F(x); }
             BitString<16> Other(BitString<8> y) { return H(y); }
         }
-        """
-    )
+        """)
     ctx = _local_fn_ctx(sampled={"H"})
     LocalFunctionFieldToLet().apply(game, ctx)
     misses = _local_fn_misses(ctx)
@@ -1237,8 +1206,7 @@ def test_local_fn_near_miss_h_referenced() -> None:
 
 
 def test_local_fn_near_miss_declared_not_sampled() -> None:
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G() {
             Function<BitString<8>, BitString<16>> F;
             Void Initialize() {
@@ -1246,15 +1214,12 @@ def test_local_fn_near_miss_declared_not_sampled() -> None:
             }
             BitString<16> Hash(BitString<8> x) { return F(x); }
         }
-        """
-    )
+        """)
     ctx = _local_fn_ctx(declared={"H"})
     LocalFunctionFieldToLet().apply(game, ctx)
     misses = _local_fn_misses(ctx)
     assert misses
-    assert any(
-        "declared (known deterministic)" in nm.reason for nm in misses
-    )
+    assert any("declared (known deterministic)" in nm.reason for nm in misses)
 
 
 # ---------------------------------------------------------------------------
@@ -1279,21 +1244,17 @@ def _concat_ctx() -> PipelineContext:
 def test_concat_equality_decompose_near_miss_unknown_length() -> None:
     """A term without a statically-derivable BitString length should emit
     a near-miss explaining that length derivation failed."""
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G() {
             Bool Q(BitString<16> x, BitString<8> a) {
                 return x == (a || unknown);
             }
         }
-        """
-    )
+        """)
     ctx = _concat_ctx()
     ConcatEqualityDecompose().apply(game, ctx)
     misses = [
-        nm
-        for nm in ctx.near_misses
-        if nm.transform_name == "Concat Equality Decompose"
+        nm for nm in ctx.near_misses if nm.transform_name == "Concat Equality Decompose"
     ]
     assert misses
     assert any("statically-derivable" in nm.reason for nm in misses)
@@ -1302,21 +1263,17 @@ def test_concat_equality_decompose_near_miss_unknown_length() -> None:
 def test_concat_equality_decompose_no_near_miss_when_fires() -> None:
     """When every term has a derivable length, the transform fires and
     emits no near-miss."""
-    game = frog_parser.parse_game(
-        """
+    game = frog_parser.parse_game("""
         Game G() {
             Bool Q(BitString<16> x, BitString<8> a, BitString<8> b) {
                 return x == (a || b);
             }
         }
-        """
-    )
+        """)
     ctx = _concat_ctx()
     ConcatEqualityDecompose().apply(game, ctx)
     misses = [
-        nm
-        for nm in ctx.near_misses
-        if nm.transform_name == "Concat Equality Decompose"
+        nm for nm in ctx.near_misses if nm.transform_name == "Concat Equality Decompose"
     ]
     assert not misses
 
@@ -1330,7 +1287,6 @@ from proof_frog.transforms.inlining import (  # noqa: E402
     HoistGroupExpToInitialize,
     RefactorGroupElemFieldExp,
 )
-
 
 _HGE_NAME = "Hoist GroupElem Exponent To Initialize"
 
@@ -1524,8 +1480,7 @@ def test_rgfe_near_miss_exponent_not_multiplication() -> None:
     RefactorGroupElemFieldExp().apply(game, ctx)
     misses = [nm for nm in ctx.near_misses if nm.transform_name == _RGFE_NAME]
     assert any(
-        nm.variable == "field1" and "multiplication" in nm.reason
-        for nm in misses
+        nm.variable == "field1" and "multiplication" in nm.reason for nm in misses
     )
     assert all(nm.method == "Initialize" for nm in misses)
 
@@ -1550,9 +1505,7 @@ def test_rgfe_near_miss_no_matching_second_field() -> None:
     ctx = _rgfe_ctx()
     RefactorGroupElemFieldExp().apply(game, ctx)
     misses = [nm for nm in ctx.near_misses if nm.transform_name == _RGFE_NAME]
-    assert any(
-        nm.variable == "field1" and "no peer" in nm.reason for nm in misses
-    )
+    assert any(nm.variable == "field1" and "no peer" in nm.reason for nm in misses)
 
 
 def test_rgfe_no_near_miss_when_fires() -> None:
@@ -1644,3 +1597,289 @@ def test_gcs_no_near_miss_when_guard_stable() -> None:
     GuardConditionSimplification().apply(game, ctx)
     gcs = [nm for nm in ctx.near_misses if nm.transform_name == _GCS_NAME]
     assert len(gcs) == 0
+
+
+# --- Lazy Map Scan near-miss tests (F-142 non-deterministic-key guard) ---
+
+
+_LMS_NAME = "Lazy Map Scan"
+
+
+def _lms_ctx(primitive_src: str) -> PipelineContext:
+    prim = frog_parser.parse_primitive_file(primitive_src)
+    return PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"ND": prim, "NN": prim},
+        subsets_pairs=[],
+    )
+
+
+def test_lazy_map_scan_near_miss_nondeterministic_key():
+    """LazyMapScan reports a near-miss and declines when the scan key is a
+    non-deterministic call (verdict F-142, §8)."""
+    game = frog_parser.parse_game("""
+        Game G(ND NN) {
+            Map<BitString<8>, BitString<16>> M;
+            BitString<16> Oracle() {
+                for ([BitString<8>, BitString<16>] e in M.entries) {
+                    if (e[0] == NN.draw()) {
+                        return e[1];
+                    }
+                }
+                return 0b0000000000000000;
+            }
+        }
+        """)
+    ctx = _lms_ctx("""
+        Primitive ND() {
+            BitString<8> draw();
+        }
+        """)
+    result = LazyMapScan().apply(game, ctx)
+    assert result == game
+    lms = [nm for nm in ctx.near_misses if nm.transform_name == _LMS_NAME]
+    assert len(lms) >= 1
+    assert "non-deterministic call" in lms[0].reason
+
+
+def test_lazy_map_scan_no_near_miss_deterministic_key():
+    """No near-miss when the scan key is a ``deterministic`` primitive call
+    (the transform fires)."""
+    game = frog_parser.parse_game("""
+        Game G(ND NN) {
+            Map<BitString<8>, BitString<16>> M;
+            BitString<16> Oracle(BitString<8> arg) {
+                for ([BitString<8>, BitString<16>] e in M.entries) {
+                    if (e[0] == NN.eval(arg)) {
+                        return e[1];
+                    }
+                }
+                return 0b0000000000000000;
+            }
+        }
+        """)
+    ctx = _lms_ctx("""
+        Primitive ND() {
+            deterministic BitString<8> eval(BitString<8> x);
+        }
+        """)
+    result = LazyMapScan().apply(game, ctx)
+    assert result != game  # transform fired
+    lms = [nm for nm in ctx.near_misses if nm.transform_name == _LMS_NAME]
+    assert len(lms) == 0
+
+
+# ---------------------------------------------------------------------------
+# RC3 determinism-guard near-miss tests (control_flow.py).
+#
+# Each control-flow pass that declines a rewrite because the relevant
+# expression contains a non-deterministic call appends a NearMiss naming the
+# pass. These tests confirm the near-miss is emitted at the decline point.
+# ---------------------------------------------------------------------------
+
+from proof_frog.transforms.control_flow import (
+    UniqExclusionBranchElimination as _RC3_UniqExcl,
+    RedundantConditionalReturn as _RC3_RCR,
+    DeadGuardedAssignmentElimination as _RC3_DGAE,
+    RemoveUnreachable as _RC3_RU,
+    AbsorbRedundantEarlyReturn as _RC3_AER,
+    IfFalseReturnToConjunction as _RC3_IFRC,
+    FoldEquivalentReturnBranch as _RC3_FERB,
+)
+from proof_frog.transforms.random_functions import (
+    ChallengeExclusionRFToUniform as _RC3_ChalExcl,
+)
+
+
+def _rc3_ctx(**namespace) -> PipelineContext:
+    return PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace=dict(namespace),
+        subsets_pairs=[],
+    )
+
+
+def _rc3_nondet_prim():
+    return frog_parser.parse_primitive_file(
+        "Primitive P(Int n) { BitString<n> eval(); Bool f(Int x); }"
+    )
+
+
+def test_rc3_uniq_exclusion_near_miss():
+    game = frog_parser.parse_game("""
+        Game G(P F, Int n) {
+            Bool Oracle() {
+                BitString<n> b <-uniq[{F.eval()}] BitString<n>;
+                if (b == F.eval()) {
+                    return true;
+                }
+                return false;
+            }
+        }
+        """)
+    ctx = _rc3_ctx(P=_rc3_nondet_prim(), F=_rc3_nondet_prim())
+    _RC3_UniqExcl().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Uniq Exclusion Branch Elimination"
+        for nm in ctx.near_misses
+    )
+
+
+def test_rc3_redundant_conditional_return_near_miss():
+    game = frog_parser.parse_game("""
+        Game G(P F, Int n) {
+            Int O(Int x) {
+                if (F.f(x)) {
+                    return 1;
+                }
+                return 1;
+            }
+        }
+        """)
+    ctx = _rc3_ctx(P=_rc3_nondet_prim(), F=_rc3_nondet_prim())
+    _RC3_RCR().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Redundant Conditional Return" for nm in ctx.near_misses
+    )
+
+
+def test_rc3_dead_guarded_assignment_near_miss():
+    game = frog_parser.parse_game("""
+        Game G(P F, Int n) {
+            Int O(Int x, Bool c) {
+                Bool v = false;
+                if (F.f(x)) {
+                    v = c;
+                }
+                if (v) {
+                    if (F.f(x)) {
+                        return 0;
+                    }
+                    return 1;
+                }
+                return 0;
+            }
+        }
+        """)
+    ctx = _rc3_ctx(P=_rc3_nondet_prim(), F=_rc3_nondet_prim())
+    _RC3_DGAE().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Dead Guarded Assignment Elimination"
+        for nm in ctx.near_misses
+    )
+
+
+def test_rc3_remove_unreachable_near_miss():
+    game = frog_parser.parse_game("""
+        Game G(P F, Int n) {
+            Int O(Int x) {
+                if (F.f(x)) {
+                    return 1;
+                }
+                if (F.f(x)) {
+                    return 2;
+                }
+                return 3;
+            }
+        }
+        """)
+    ctx = _rc3_ctx(P=_rc3_nondet_prim(), F=_rc3_nondet_prim())
+    _RC3_RU().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Remove unreachable blocks of code"
+        for nm in ctx.near_misses
+    )
+
+
+def test_rc3_absorb_early_return_near_miss():
+    game = frog_parser.parse_game("""
+        Game G(P F, Int n) {
+            Int O(Int x, Bool q) {
+                if (F.f(x)) {
+                    return 7;
+                }
+                if (q) {
+                    return 5;
+                }
+                return 7;
+            }
+        }
+        """)
+    ctx = _rc3_ctx(P=_rc3_nondet_prim(), F=_rc3_nondet_prim())
+    _RC3_AER().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Absorb Redundant Early Return" for nm in ctx.near_misses
+    )
+
+
+def test_rc3_if_false_return_near_miss():
+    game = frog_parser.parse_game("""
+        Game G(P F, Int n) {
+            Bool Test(Int x) {
+                if (x == 0) {
+                    return false;
+                }
+                return F.f(x);
+            }
+        }
+        """)
+    ctx = _rc3_ctx(P=_rc3_nondet_prim(), F=_rc3_nondet_prim())
+    _RC3_IFRC().apply(game, ctx)
+    assert any(
+        nm.transform_name == "If False Return To Conjunction" for nm in ctx.near_misses
+    )
+
+
+def test_rc3_fold_equivalent_return_near_miss():
+    game = frog_parser.parse_game("""
+        Game Collapse(P F, Int n) {
+            BitString<n> a;
+            Void Initialize() {
+                a = F.eval();
+            }
+            BitString<n> O(BitString<n> k) {
+                if (a == k) {
+                    return F.eval();
+                }
+                return a;
+            }
+        }
+        """)
+    ctx = _rc3_ctx(P=_rc3_nondet_prim(), F=_rc3_nondet_prim())
+    _RC3_FERB().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Fold Equivalent Return Branch" for nm in ctx.near_misses
+    )
+
+
+def test_rc3_challenge_exclusion_known_function_near_miss():
+    """ChallengeExclusionRFToUniform declines on a KNOWN function (``H = F``,
+    not sampled) and records a near-miss (verdict vector a)."""
+    game = frog_parser.parse_game("""
+        Game G(Int n, Function<BitString<n>, BitString<n>> F) {
+            Function<BitString<n>, BitString<n>> H;
+            BitString<n> cf;
+            BitString<n> field;
+            BitString<n> Initialize() {
+                H = F;
+                cf <- BitString<n>;
+                field = H(cf);
+                return cf;
+            }
+            BitString<n>? Query(BitString<n> param) {
+                if (param == cf) {
+                    return None;
+                }
+                return H(param);
+            }
+        }
+        """)
+    ctx = _rc3_ctx()
+    _RC3_ChalExcl().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Challenge Exclusion RF To Uniform"
+        and "sampled random function" in nm.reason
+        for nm in ctx.near_misses
+    )

@@ -1885,6 +1885,56 @@ def _rf_args_structurally_differ(
     return _check_exprs(init_arg, oracle_arg)
 
 
+def _sampled_function_fields_in_init(
+    game: frog_ast.Game,
+) -> set[str]:
+    """Return names of ``Function`` fields that are genuinely SAMPLED.
+
+    A function field is a *sampled random function* (re-samplable / ROM) only
+    when it is bound via ``H <- Function<...>`` in ``Initialize``.  A field
+    bound by an ordinary assignment ``H = F;`` (a known/standard-model
+    function) is NOT a random function, so the RF-to-uniform rewrite is invalid
+    for it (verdict vector (a)).
+    """
+    sampled: set[str] = set()
+    for method in game.methods:
+        if method.signature.name != "Initialize":
+            continue
+        for stmt in method.block.statements:
+            if (
+                isinstance(stmt, frog_ast.Sample)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and isinstance(stmt.sampled_from, frog_ast.FunctionType)
+            ):
+                sampled.add(stmt.var.name)
+    return sampled
+
+
+def _count_rf_calls_in_block(block: frog_ast.Block, rf_name: str) -> int:
+    """Count every ``rf_name(...)`` FuncCall in *block* (recursing everywhere).
+
+    Unlike :func:`_collect_rf_call_sites` this returns just the count; it is
+    used to detect a SECOND init call to the RF embedded in a larger
+    expression (verdict vector (d)), which ``init_calls`` (standalone
+    assignments only) does not see.
+    """
+    return len(_collect_rf_call_sites(block, rf_name))
+
+
+def _rf_aliased_in_game(game: frog_ast.Game, rf_name: str) -> bool:
+    """True if the function field *rf_name* is copied into a local alias.
+
+    A local alias ``G = H;`` (where ``H`` is the RF) makes any subsequent
+    ``G(...)`` an RF query that the call-site scan -- which matches only by the
+    name ``rf_name`` -- cannot see (verdict vector (c)).  More generally, any
+    occurrence of ``Variable(rf_name)`` outside a direct call / property-access /
+    its own initialization lets the function value escape.  Reuses the existing
+    escape predicate so the soundness condition matches
+    :class:`UniqueRFSimplification`.
+    """
+    return _rf_value_escapes(game, rf_name)
+
+
 class ChallengeExclusionRFToUniformTransformer:
     """Replace an RF field call in Initialize with a uniform sample when the
     call's input is guaranteed distinct from all oracle RF calls by a
@@ -1894,7 +1944,7 @@ class ChallengeExclusionRFToUniformTransformer:
     design and soundness argument.
     """
 
-    def transform(
+    def transform(  # pylint: disable=too-many-branches
         self,
         game: frog_ast.Game,
         proof_namespace: frog_ast.Namespace | None = None,
@@ -1905,9 +1955,36 @@ class ChallengeExclusionRFToUniformTransformer:
             proof_namespace = {}
         field_names = [f.name for f in game.fields]
         field_types: dict[str, frog_ast.Type] = {f.name: f.type for f in game.fields}
+        # Vector (a): only genuinely SAMPLED random functions are eligible.  A
+        # field bound by ``H = F;`` (a known function) denotes a fixed value the
+        # adversary can recompute, so H(cf) is not an independent uniform draw.
+        sampled_fields = _sampled_function_fields_in_init(game)
         rf_fields: dict[str, frog_ast.FunctionType] = {}
         for f in game.fields:
             if isinstance(f.type, frog_ast.FunctionType):
+                if f.name not in sampled_fields:
+                    if ctx is not None:
+                        ctx.near_misses.append(
+                            NearMiss(
+                                transform_name="Challenge Exclusion RF To Uniform",
+                                reason=(
+                                    f"Function field '{f.name}' is not a sampled "
+                                    "random function (it is bound to a known / "
+                                    "standard-model function, not '<- Function<"
+                                    "...>'), so RF(cf) is a fixed value, not an "
+                                    "independent uniform draw"
+                                ),
+                                location=None,
+                                suggestion=(
+                                    f"Only sample-bound functions ('{f.name} <- "
+                                    "Function<...>') may be simplified to a "
+                                    "uniform draw"
+                                ),
+                                variable=f.name,
+                                method=None,
+                            )
+                        )
+                    continue
                 rf_fields[f.name] = f.type
 
         if not rf_fields:
@@ -1939,6 +2016,58 @@ class ChallengeExclusionRFToUniformTransformer:
                     init_calls.append((idx, stmt))
 
             if len(init_calls) != 1:
+                continue
+
+            # Vector (c): if the RF value is copied into a local alias (or
+            # otherwise escapes), an aliased call ``G(cf)`` re-queries the init
+            # point but is invisible to the by-name call-site scan.  Decline.
+            if _rf_aliased_in_game(game, rf_name):
+                if ctx is not None:
+                    ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Challenge Exclusion RF To Uniform",
+                            reason=(
+                                f"Random function '{rf_name}' is copied, aliased, "
+                                "or passed as an argument; an RF query through the "
+                                "alias is invisible to the call-site scan and may "
+                                "re-query the challenge input"
+                            ),
+                            location=None,
+                            suggestion=(
+                                "Call the random function directly at every use "
+                                "site; do not bind it to another variable"
+                            ),
+                            variable=rf_name,
+                            method=None,
+                        )
+                    )
+                continue
+
+            # Vector (d): the single standalone ``field = H(arg)`` must be the
+            # ONLY call to the RF in Initialize.  A second evaluation embedded
+            # in a larger expression (e.g. ``leak = H(cf) || cf;``) is not
+            # counted by ``init_calls`` and would survive the rewrite, leaving
+            # ``field`` and ``leak`` incorrectly correlated.
+            if _count_rf_calls_in_block(init_method.block, rf_name) != 1:
+                if ctx is not None:
+                    ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Challenge Exclusion RF To Uniform",
+                            reason=(
+                                f"Initialize evaluates '{rf_name}' more than once; "
+                                "a second evaluation (possibly embedded in a "
+                                "larger expression) would survive the rewrite and "
+                                "stay correlated with the sampled field"
+                            ),
+                            location=None,
+                            suggestion=(
+                                "Ensure Initialize evaluates the random function "
+                                "exactly once, as a standalone assignment"
+                            ),
+                            variable=rf_name,
+                            method=None,
+                        )
+                    )
                 continue
 
             init_idx, init_stmt = init_calls[0]

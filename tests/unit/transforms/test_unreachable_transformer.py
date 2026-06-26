@@ -628,28 +628,25 @@ def test_remove_unreachable_nested_element_write_bumps_version() -> None:
     so the second `if (M[0][0] == 0)` is a fresh test, not a dead duplicate
     of the first.  A depth-1-only write scan left `M` looking unmodified and
     Case-B dedup wrongly deleted the reachable second if."""
-    method = frog_parser.parse_method(
-        """
+    method = frog_parser.parse_method("""
         Int O(Map<Int, Map<Int, Int>> M) {
             if (M[0][0] == 0) { return 1; }
             M[0][0] = 0;
             if (M[0][0] == 0) { return 2; }
             return 3;
         }
-        """
-    )
+        """)
     transformed = RemoveUnreachableTransformer(method).transform(method)
-    assert _count_ifs(transformed) == 2, (
-        f"second if wrongly deleted after nested element write:\n{transformed}"
-    )
+    assert (
+        _count_ifs(transformed) == 2
+    ), f"second if wrongly deleted after nested element write:\n{transformed}"
 
 
 def test_remove_unreachable_unique_sample_bumps_version() -> None:
     """RC1: a `<-uniq` re-sample of a condition variable mutates it, so a
     later structurally identical condition is not a dead duplicate.  The
     write scan must recognise `UniqueSample.var` as a write."""
-    method = frog_parser.parse_method(
-        """
+    method = frog_parser.parse_method("""
         Int O() {
             BitString<2> x <- BitString<2>;
             if (x == 0b00) { return 1; }
@@ -657,28 +654,102 @@ def test_remove_unreachable_unique_sample_bumps_version() -> None:
             if (x == 0b00) { return 2; }
             return 3;
         }
-        """
-    )
+        """)
     transformed = RemoveUnreachableTransformer(method).transform(method)
-    assert _count_ifs(transformed) == 2, (
-        f"second if wrongly deleted after <-uniq re-sample:\n{transformed}"
-    )
+    assert (
+        _count_ifs(transformed) == 2
+    ), f"second if wrongly deleted after <-uniq re-sample:\n{transformed}"
 
 
 def test_remove_unreachable_still_dedups_genuine_duplicate() -> None:
     """Positive control: with NO intervening write, two identical
     conditions are genuinely redundant and the second must still be
     removed (the version-tracking fix must not over-preserve)."""
-    method = frog_parser.parse_method(
-        """
+    method = frog_parser.parse_method("""
         Int O(Int x) {
             if (x == 0) { return 1; }
             if (x == 0) { return 2; }
             return 3;
         }
-        """
-    )
+        """)
     transformed = RemoveUnreachableTransformer(method).transform(method)
-    assert _count_ifs(transformed) == 1, (
-        f"genuinely dead duplicate if was not removed:\n{transformed}"
+    assert (
+        _count_ifs(transformed) == 1
+    ), f"genuinely dead duplicate if was not removed:\n{transformed}"
+
+
+# ---------------------------------------------------------------------------
+# RC3 determinism guard (F-107): Case B dedups structurally-equal
+# return-conditions; a non-deterministic condition re-evaluates independently,
+# so a later structurally-identical one is NOT subsumed and must survive.
+# ---------------------------------------------------------------------------
+
+from proof_frog.transforms.control_flow import RemoveUnreachable
+from proof_frog.transforms._base import PipelineContext as _PipelineContext
+from proof_frog.visitors import NameTypeMap as _NameTypeMap
+
+
+def _ru_ctx(**namespace):
+    return _PipelineContext(
+        variables={},
+        proof_let_types=_NameTypeMap(),
+        proof_namespace=dict(namespace),
+        subsets_pairs=[],
     )
+
+
+def _ru_nondet_prim():
+    return frog_parser.parse_primitive_file("Primitive P(Int n) { Bool f(Int x); }")
+
+
+def _ru_det_prim():
+    return frog_parser.parse_primitive_file(
+        "Primitive D(Int n) { deterministic Bool f(Int x); }"
+    )
+
+
+def test_ru_keeps_nondeterministic_duplicate_condition() -> None:
+    """Two ``if (F.f(x)) { return ...; }`` with a non-deterministic condition:
+    the second is an independent re-evaluation, so it must NOT be deduped."""
+    game = frog_parser.parse_game("""
+        Game G(P F, Int n) {
+            Int O(Int x) {
+                if (F.f(x)) {
+                    return 1;
+                }
+                if (F.f(x)) {
+                    return 2;
+                }
+                return 3;
+            }
+        }
+        """)
+    ctx = _ru_ctx(P=_ru_nondet_prim(), F=_ru_nondet_prim())
+    result = RemoveUnreachable().apply(game, ctx)
+    assert result == game  # second if survives
+    assert any(
+        nm.transform_name == "Remove unreachable blocks of code"
+        for nm in ctx.near_misses
+    )
+
+
+def test_ru_dedups_deterministic_duplicate_condition() -> None:
+    """Control: with a deterministic condition ``D.f(x)`` the second
+    structurally-identical if is dead (subsumed by the first) and is
+    removed."""
+    game = frog_parser.parse_game("""
+        Game G(D F, Int n) {
+            Int O(Int x) {
+                if (F.f(x)) {
+                    return 1;
+                }
+                if (F.f(x)) {
+                    return 2;
+                }
+                return 3;
+            }
+        }
+        """)
+    ctx = _ru_ctx(D=_ru_det_prim(), F=_ru_det_prim())
+    result = RemoveUnreachable().apply(game, ctx)
+    assert result != game  # the dead duplicate if was removed

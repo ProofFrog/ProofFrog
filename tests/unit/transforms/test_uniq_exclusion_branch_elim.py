@@ -2,7 +2,33 @@
 
 import pytest
 from proof_frog import frog_parser
-from proof_frog.transforms.control_flow import UniqExclusionBranchEliminationTransformer
+from proof_frog.transforms.control_flow import (
+    UniqExclusionBranchElimination,
+    UniqExclusionBranchEliminationTransformer,
+)
+from proof_frog.transforms._base import PipelineContext
+from proof_frog.visitors import NameTypeMap
+
+
+def _ctx_with(**namespace) -> PipelineContext:
+    return PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace=dict(namespace),
+        subsets_pairs=[],
+    )
+
+
+def _nondet_prim() -> object:
+    return frog_parser.parse_primitive_file(
+        "Primitive P(Int n) { BitString<n> eval(); }"
+    )
+
+
+def _det_prim() -> object:
+    return frog_parser.parse_primitive_file(
+        "Primitive D(Int n) { deterministic BitString<n> eval(BitString<n> x); }"
+    )
 
 
 @pytest.mark.parametrize(
@@ -265,3 +291,53 @@ def test_uniq_exclusion_branch_elim(method: str, expected: str) -> None:
     expected_ast = frog_parser.parse_method(expected)
     transformed = UniqExclusionBranchEliminationTransformer().transform(method_ast)
     assert transformed == expected_ast
+
+
+# ---------------------------------------------------------------------------
+# RC3 determinism guard (F-071): a non-deterministic exclusion element must
+# not be tracked, so the comparison is NOT folded.
+# ---------------------------------------------------------------------------
+
+
+def test_uniq_exclusion_declines_on_nondeterministic_element() -> None:
+    """An exclusion element ``F.eval()`` is a non-deterministic call; the
+    later ``b == F.eval()`` is an independent re-evaluation, so the pass must
+    NOT fold the comparison to false."""
+    game = frog_parser.parse_game("""
+        Game G(P F, Int n) {
+            Bool Oracle() {
+                BitString<n> b <-uniq[{F.eval()}] BitString<n>;
+                if (b == F.eval()) {
+                    return true;
+                }
+                return false;
+            }
+        }
+        """)
+    ctx = _ctx_with(P=_nondet_prim(), F=_nondet_prim())
+    result = UniqExclusionBranchElimination().apply(game, ctx)
+    assert result == game  # unchanged: no fold
+    assert any(
+        nm.transform_name == "Uniq Exclusion Branch Elimination"
+        for nm in ctx.near_misses
+    )
+
+
+def test_uniq_exclusion_fires_on_deterministic_control() -> None:
+    """Control: a plain sampled exclusion element still lets the pass fold
+    ``a == b`` to false."""
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            Bool Oracle() {
+                BitString<n> a <- BitString<n>;
+                BitString<n> b <-uniq[{a}] BitString<n>;
+                if (a == b) {
+                    return true;
+                }
+                return false;
+            }
+        }
+        """)
+    ctx = _ctx_with()
+    result = UniqExclusionBranchElimination().apply(game, ctx)
+    assert result != game  # the comparison was folded to false

@@ -32,8 +32,7 @@ def _apply(source: str) -> tuple[object, object]:
 def test_element_mutated_container_fields_not_folded() -> None:
     """Two container fields that are element-written with *different* values
     must not be folded into a single return branch."""
-    game, result = _apply(
-        """
+    game, result = _apply("""
         Game Containers(Dict D) {
             Map<Int, D.V> F1;
             Map<Int, D.V> F2;
@@ -52,16 +51,14 @@ def test_element_mutated_container_fields_not_folded() -> None:
                 return F2;
             }
         }
-        """
-    )
+        """)
     assert result == game, f"branch wrongly folded:\n{result}"
 
 
 def test_positive_fold_still_fires() -> None:
     """Control: the intended sound use -- ``if (a == b) return a; return b;``
     -- must still fold."""
-    game, result = _apply(
-        """
+    game, result = _apply("""
         Game Positive() {
             Int Oracle(Int a, Int b) {
                 if (a == b) {
@@ -70,6 +67,77 @@ def test_positive_fold_still_fires() -> None:
                 return b;
             }
         }
-        """
-    )
+        """)
     assert result != game, "intended fold did not fire"
+
+
+# ---------------------------------------------------------------------------
+# RC3 determinism guard (F-118): a field initialized from a non-deterministic
+# call must not be expanded to a textual copy of that call (which would let
+# the fold equate two independent draws).
+# ---------------------------------------------------------------------------
+
+
+def _ctx_with(**namespace) -> PipelineContext:
+    return PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace=dict(namespace),
+        subsets_pairs=[],
+    )
+
+
+def test_nondeterministic_init_field_rhs_not_folded() -> None:
+    """``a = F.eval()`` in Initialize is a non-deterministic field write; the
+    pass must not expand ``a`` to ``F.eval()`` and fold the case-split (the
+    if-body re-evaluates ``F.eval()`` independently)."""
+    prim = frog_parser.parse_primitive_file(
+        "Primitive P(Int n) { BitString<n> eval(); }"
+    )
+    game = frog_parser.parse_game("""
+        Game Collapse(P F, Int n) {
+            BitString<n> a;
+            Void Initialize() {
+                a = F.eval();
+            }
+            BitString<n> O(BitString<n> k) {
+                if (a == k) {
+                    return F.eval();
+                }
+                return a;
+            }
+        }
+        """)
+    ctx = _ctx_with(P=prim, F=prim)
+    result = FoldEquivalentReturnBranch().apply(game, ctx)
+    assert result == game  # branch not folded
+    assert any(
+        nm.transform_name == "Fold Equivalent Return Branch" for nm in ctx.near_misses
+    )
+
+
+def test_deterministic_init_field_rhs_enables_fold() -> None:
+    """Control: a field set from a deterministic call CAN be expanded so the
+    case-split ``if (a == k) return D.eval(k); return a;`` folds under the
+    Z3 model (``a == k`` makes ``D.eval(k)`` equal to ``a`` when ``a`` is the
+    same deterministic call -- here we use a directly self-consistent case)."""
+    prim = frog_parser.parse_primitive_file(
+        "Primitive D(Int n) { deterministic BitString<n> eval(BitString<n> x); }"
+    )
+    game = frog_parser.parse_game("""
+        Game Collapse(D F, Int n) {
+            BitString<n> a;
+            Void Initialize() {
+                a = F.eval(a);
+            }
+            BitString<n> O(BitString<n> k) {
+                if (a == k) {
+                    return a;
+                }
+                return a;
+            }
+        }
+        """)
+    ctx = _ctx_with(D=prim, F=prim)
+    result = FoldEquivalentReturnBranch().apply(game, ctx)
+    assert result != game  # the trivially-equal branch folded

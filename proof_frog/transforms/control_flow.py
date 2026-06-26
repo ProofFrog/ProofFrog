@@ -152,7 +152,18 @@ class UniqExclusionBranchEliminationTransformer(BlockTransformer):
     been mutated since, the structural equality ``v == s`` is provably
     ``false``.  This is the same reasoning that justifies
     ``FreshInputRFToUniform`` (see TRANSFORMS.md).
+
+    Determinism precondition: an exclusion element that contains a
+    non-deterministic call (e.g. an unannotated ``F.eval()``) denotes an
+    independent draw.  A later, structurally-identical ``v == F.eval()``
+    re-evaluates the call, so the two values are NOT provably distinct and
+    the fold to ``false`` would be unsound.  ``_exclusion_elements`` drops
+    any such element (and records a near-miss) so it is never tracked as a
+    constraint.
     """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
 
     @staticmethod
     def _free_variable_names(expr: frog_ast.Expression) -> set[str]:
@@ -171,23 +182,48 @@ class UniqExclusionBranchEliminationTransformer(BlockTransformer):
         SearchVisitor(_collect).visit(expr)
         return names
 
-    @classmethod
     def _exclusion_elements(
-        cls, unique_set: frog_ast.Expression
+        self, unique_set: frog_ast.Expression
     ) -> tuple[list[frog_ast.Expression], set[str]] | None:
         """Extract the list of exclusion elements from a ``<-uniq[S]`` set.
 
         Currently handles literal sets ``{a, b, ...}``.  Returns the list
         of elements together with the union of their free-variable names
         (used for invalidation tracking).  Returns ``None`` if the set is
-        not a literal.
+        not a literal or if any element contains a non-deterministic call
+        (such an element re-evaluates differently when re-stated in a
+        later comparison, so the exclusion does not justify folding).
         """
         if not isinstance(unique_set, frog_ast.Set):
             return None
+        namespace = self.ctx.proof_namespace if self.ctx else {}
+        let_types = self.ctx.proof_let_types if self.ctx else None
         all_free: set[str] = set()
         for el in unique_set.elements:
-            all_free |= cls._free_variable_names(el)
+            if has_nondeterministic_call(el, namespace, let_types):
+                self._note_nondeterministic_element(el)
+                return None
+            all_free |= self._free_variable_names(el)
         return list(unique_set.elements), all_free
+
+    def _note_nondeterministic_element(self, element: frog_ast.Expression) -> None:
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Uniq Exclusion Branch Elimination",
+                reason=(
+                    "Exclusion-set element contains a non-deterministic call, "
+                    "so a later structurally-identical comparison re-evaluates "
+                    "it to an independent value; the equality cannot be folded "
+                    "to false"
+                ),
+                location=None,
+                suggestion=None,
+                variable=str(element),
+                method=None,
+            )
+        )
 
     @staticmethod
     def _written_var_names(stmt: frog_ast.Statement) -> set[str]:
@@ -682,10 +718,36 @@ class RemoveUnreachableTransformer(BlockTransformer):
        proving that no execution can reach subsequent statements.
     """
 
-    def __init__(self, ast: frog_ast.ASTNode):
+    def __init__(
+        self, ast: frog_ast.ASTNode, ctx: PipelineContext | None = None
+    ) -> None:
         self.ast = ast
+        self.ctx = ctx
         self._block_path: dict[int, list[z3.AstRef]] = {}
         self._block_versions: dict[int, dict[str, int]] = {}
+
+    def _condition_is_nondeterministic(self, cond: frog_ast.Expression) -> bool:
+        namespace = self.ctx.proof_namespace if self.ctx else {}
+        let_types = self.ctx.proof_let_types if self.ctx else None
+        if has_nondeterministic_call(cond, namespace, let_types):
+            if self.ctx is not None:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Remove unreachable blocks of code",
+                        reason=(
+                            "Return-condition dedup declined: the condition "
+                            "contains a non-deterministic call, so a later "
+                            "structurally-identical condition re-evaluates to "
+                            "an independent value and is not subsumed"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=str(cond),
+                        method=None,
+                    )
+                )
+            return True
+        return False
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         # Any statement following an unconditional top-level return is
@@ -885,9 +947,15 @@ class RemoveUnreachableTransformer(BlockTransformer):
                     )
                 condition_formulae.append(individual_formula)
 
-            # Track conditions that lead to unconditional returns
+            # Track conditions that lead to unconditional returns. A
+            # non-deterministic condition is NOT tracked: a later,
+            # structurally-identical condition re-evaluates the call to an
+            # independent value, so the earlier return does not subsume it
+            # and deduping it (Case B above) would delete a live draw.
             for condition_index, condition in enumerate(statement.conditions):
                 if contains_unconditional_return(statement.blocks[condition_index]):
+                    if self._condition_is_nondeterministic(condition):
+                        continue
                     seen_return_conditions.append(condition)
 
             # Tag inner blocks with accumulated path constraints
@@ -1235,7 +1303,15 @@ class RedundantConditionalReturnTransformer(BlockTransformer):
     collapses to ``if (Verify(..)) return ss; return None;``. (This arises
     after IfConditionAliasSubstitution rewrites a redundant case-split branch
     into the same form as its fall-through.)
+
+    Determinism precondition: dropping the guard discards an evaluation of
+    ``cond``.  If ``cond`` contains a non-deterministic call, evaluating it
+    has an observable effect (e.g. consuming a fresh draw / advancing a
+    counter), so the guard is NOT redundant and the fold is declined.
     """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -1244,6 +1320,11 @@ class RedundantConditionalReturnTransformer(BlockTransformer):
             if statement.has_else_block():
                 continue
             if len(statement.conditions) != 1:
+                continue
+            # Dropping the if discards an evaluation of its condition. A
+            # non-deterministic condition is observable, so the guard is
+            # not redundant -- decline the fold.
+            if self._condition_is_nondeterministic(statement.conditions[0]):
                 continue
             if_body = statement.blocks[0]
             if not if_body.statements:
@@ -1266,6 +1347,28 @@ class RedundantConditionalReturnTransformer(BlockTransformer):
                 + frog_ast.Block(block.statements[index + 1 :])
             )
         return block
+
+    def _condition_is_nondeterministic(self, cond: frog_ast.Expression) -> bool:
+        namespace = self.ctx.proof_namespace if self.ctx else {}
+        let_types = self.ctx.proof_let_types if self.ctx else None
+        if has_nondeterministic_call(cond, namespace, let_types):
+            if self.ctx is not None:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Redundant Conditional Return",
+                        reason=(
+                            "Redundant-guard fold declined: the if-condition "
+                            "contains a non-deterministic call whose evaluation "
+                            "is observable, so the guard is not redundant"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=str(cond),
+                        method=None,
+                    )
+                )
+            return True
+        return False
 
 
 class AbsorbRedundantEarlyReturnTransformer(BlockTransformer):
@@ -1307,7 +1410,8 @@ class AbsorbRedundantEarlyReturnTransformer(BlockTransformer):
     ``!P`` that no other transform can drop.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
         self._nesting_depth = 0
 
     def transform_if_statement(
@@ -1356,6 +1460,13 @@ class AbsorbRedundantEarlyReturnTransformer(BlockTransformer):
                 continue
             assert isinstance(statement, frog_ast.IfStatement)
             early_p = statement.conditions[0]
+            # Determinism precondition: the rewrite duplicates ``!P`` into
+            # every intervening guard. If ``P`` contains a non-deterministic
+            # call, those k copies denote independent evaluations (and the
+            # original evaluated ``P`` exactly once), so absorbing it is
+            # unsound -- decline.
+            if self._early_p_is_nondeterministic(early_p):
+                continue
             return_stmt = statement.blocks[0].statements[0]
             assert isinstance(return_stmt, frog_ast.ReturnStatement)
             early_x = return_stmt.expression
@@ -1396,6 +1507,29 @@ class AbsorbRedundantEarlyReturnTransformer(BlockTransformer):
             )
             return self.transform_block(frog_ast.Block(new_stmts))
         return block
+
+    def _early_p_is_nondeterministic(self, early_p: frog_ast.Expression) -> bool:
+        namespace = self.ctx.proof_namespace if self.ctx else {}
+        let_types = self.ctx.proof_let_types if self.ctx else None
+        if has_nondeterministic_call(early_p, namespace, let_types):
+            if self.ctx is not None:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Absorb Redundant Early Return",
+                        reason=(
+                            "Early-return absorption declined: the early-return "
+                            "guard contains a non-deterministic call, so "
+                            "duplicating its negation into the intervening "
+                            "guards would create independent re-evaluations"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=str(early_p),
+                        method=None,
+                    )
+                )
+            return True
+        return False
 
 
 def _is_simple_early_return_if(stmt: frog_ast.Statement) -> bool:
@@ -1526,6 +1660,13 @@ class IfFalseReturnToConjunctionTransformer(BlockTransformer):
                 and inner.expression.bool is False
             ):
                 continue
+            # Determinism precondition: the guard ``P`` is moved into the
+            # trailing conjunction (``BoolExpr && !P``), so it is re-evaluated
+            # on the path where the original short-circuited at the early
+            # ``return false``. A non-deterministic ``P`` is observable; the
+            # rewrite would run it where the original did not -- decline.
+            if self._guard_is_nondeterministic(stmt.conditions[0]):
+                continue
             # Trailing return must be the last statement in the block,
             # with only side-effect-free typed-local declarations between
             # the if and it.
@@ -1535,6 +1676,12 @@ class IfFalseReturnToConjunctionTransformer(BlockTransformer):
             trailing = block.statements[trailing_idx]
             assert isinstance(trailing, frog_ast.ReturnStatement)
             if trailing.expression is None:
+                continue
+            # Determinism precondition: the trailing expression ``Q`` is
+            # conjoined and thus EVALUATED on the ``P``-true path that the
+            # original skipped (the original returned ``false`` immediately).
+            # A non-deterministic ``Q`` is observable there -- decline.
+            if self._guard_is_nondeterministic(trailing.expression):
                 continue
             neg_p = _negate_condition(stmt.conditions[0])
             # Place the original return expression FIRST and the
@@ -1589,6 +1736,28 @@ class IfFalseReturnToConjunctionTransformer(BlockTransformer):
             return None
         return None
 
+    def _guard_is_nondeterministic(self, expr: frog_ast.Expression) -> bool:
+        if has_nondeterministic_call(
+            expr, self.ctx.proof_namespace, self.ctx.proof_let_types
+        ):
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="If False Return To Conjunction",
+                    reason=(
+                        "If-false-to-conjunction declined: the guard or the "
+                        "trailing return expression contains a non-deterministic "
+                        "call, which the rewrite would evaluate on the path that "
+                        "the original early-return short-circuited"
+                    ),
+                    location=None,
+                    suggestion=None,
+                    variable=str(expr),
+                    method=None,
+                )
+            )
+            return True
+        return False
+
 
 class FoldEquivalentReturnBranchTransformer(BlockTransformer):
     """Folds ``if (P) { return X; } return Y;`` to ``return Y;`` when Z3
@@ -1642,13 +1811,18 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
         if isinstance(ast, frog_ast.Game):
             self._init_field_rhs = self._collect_init_field_rhs(ast)
 
-    @staticmethod
     def _collect_init_field_rhs(
+        self,
         game: frog_ast.Game,
     ) -> list[tuple[frog_ast.Variable, frog_ast.Expression]]:
         """Collect ``F → rhs`` substitutions for fields F that are
         single-write in Initialize with a deterministic FuncCall RHS and
         no other writes in the game.
+
+        A FuncCall RHS containing a non-deterministic call is rejected: the
+        substitution would expand the field to a textual copy of the call,
+        and a later comparison treats the two copies as the same value even
+        though each invocation draws independently.
         """
         field_names = {f.name for f in game.fields}
         # Count assignments per field across all methods.
@@ -1673,6 +1847,29 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             if counts.get(stmt.var.name, 0) != 1:
                 continue
             if not isinstance(stmt.value, frog_ast.FuncCall):
+                continue
+            # Reject a non-deterministic FuncCall RHS: expanding the field
+            # to a textual copy of the call would let the comparison fold
+            # two independent invocations into one.
+            if has_nondeterministic_call(
+                stmt.value,
+                self.ctx.proof_namespace,
+                self.ctx.proof_let_types,
+            ):
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Fold Equivalent Return Branch",
+                        reason=(
+                            "Init-only field RHS not expanded: the field is "
+                            "assigned a non-deterministic call, so substituting "
+                            "the call text would equate independent draws"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=stmt.var.name,
+                        method=None,
+                    )
+                )
                 continue
             result.append((stmt.var, stmt.value))
         return result
@@ -1792,6 +1989,12 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
                 type_map + (self.ctx.proof_let_types or NameTypeMap()),
                 variable_version_map={},
                 opaque_func_call_fallback=True,
+                # Enable the in-visitor non-determinism backstop: any P/X/Y
+                # containing a non-deterministic call must not be modelled as
+                # an opaque atom (which would fold independent draws). The
+                # primary Gap-F guard above already refuses such inputs; this
+                # is defense-in-depth on the substituted expressions.
+                proof_namespace=self.ctx.proof_namespace,
             )
             p_formula = visitor.visit(p_expr)
             x_formula = visitor.visit(x_sub)
@@ -2107,9 +2310,17 @@ class DeadGuardedAssignmentEliminationTransformer(BlockTransformer):
     rejection (``if (pk == pkS && c notin C) ...``) dominates a real-
     verification call that the simulated game performs only on recorded
     ciphertexts.
+
+    Determinism precondition: the kill matches the inner guard ``G`` (by
+    normalized string equality) against path facts derived from earlier
+    conditions.  If ``G`` contains a non-deterministic call, the path fact
+    records ONE evaluation while the inner guard performs a SECOND,
+    independent one; string equality wrongly treats them as the same value.
+    The kill is declined when ``G`` is non-deterministic.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
         # Field names and their read counts across the WHOLE game, populated by
         # ``transform_game``.  Empty when the transformer is driven on a bare
         # block (unit tests): then every name is treated as a method-local and
@@ -2137,6 +2348,12 @@ class DeadGuardedAssignmentEliminationTransformer(BlockTransformer):
             if use is None:
                 continue
             v_name, guard = use
+            # Determinism precondition: the kill compares the inner guard
+            # against earlier path facts by normalized string equality. A
+            # non-deterministic guard re-evaluates independently of the path
+            # fact, so the entailment does not hold -- decline the kill.
+            if self._guard_is_nondeterministic(guard):
+                continue
             # Soundness: the assignment's value may only be killed if `v` is
             # read solely by the matched `if (v)` guard. Any other read of `v`
             # would observe the rewritten `false` value. Count reads (variable
@@ -2172,6 +2389,29 @@ class DeadGuardedAssignmentEliminationTransformer(BlockTransformer):
                     frog_ast.Block(new_prefix + list(block.statements[index:]))
                 )
         return block
+
+    def _guard_is_nondeterministic(self, guard: frog_ast.Expression) -> bool:
+        namespace = self.ctx.proof_namespace if self.ctx else {}
+        let_types = self.ctx.proof_let_types if self.ctx else None
+        if has_nondeterministic_call(guard, namespace, let_types):
+            if self.ctx is not None:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Dead Guarded Assignment Elimination",
+                        reason=(
+                            "Dead-store kill declined: the dominating guard "
+                            "contains a non-deterministic call, so the path "
+                            "fact from an earlier evaluation does not entail "
+                            "the guard's independent re-evaluation"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=str(guard),
+                        method=None,
+                    )
+                )
+            return True
+        return False
 
     @staticmethod
     def _read_count(block: frog_ast.Block, name: str) -> int:
@@ -2305,14 +2545,14 @@ class RedundantConditionalReturn(TransformPass):
     name = "Redundant Conditional Return"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return RedundantConditionalReturnTransformer().transform(game)
+        return RedundantConditionalReturnTransformer(ctx).transform(game)
 
 
 class AbsorbRedundantEarlyReturn(TransformPass):
     name = "Absorb Redundant Early Return"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return AbsorbRedundantEarlyReturnTransformer().transform(game)
+        return AbsorbRedundantEarlyReturnTransformer(ctx).transform(game)
 
 
 class FactorCommonGuard(TransformPass):
@@ -2333,7 +2573,7 @@ class DeadGuardedAssignmentElimination(TransformPass):
     name = "Dead Guarded Assignment Elimination"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return DeadGuardedAssignmentEliminationTransformer().transform(game)
+        return DeadGuardedAssignmentEliminationTransformer(ctx).transform(game)
 
 
 class IfFalseReturnToConjunction(TransformPass):
@@ -2361,7 +2601,7 @@ class UniqExclusionBranchElimination(TransformPass):
     name = "Uniq Exclusion Branch Elimination"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return UniqExclusionBranchEliminationTransformer().transform(game)
+        return UniqExclusionBranchEliminationTransformer(ctx).transform(game)
 
 
 class ElseUnwrap(TransformPass):
@@ -2389,4 +2629,4 @@ class RemoveUnreachable(TransformPass):
     name = "Remove unreachable blocks of code"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return RemoveUnreachableTransformer(game).transform(game)
+        return RemoveUnreachableTransformer(game, ctx).transform(game)

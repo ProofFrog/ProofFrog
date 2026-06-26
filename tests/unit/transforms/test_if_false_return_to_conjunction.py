@@ -20,9 +20,7 @@ def _ctx(namespace: frog_ast.Namespace | None = None) -> PipelineContext:
     )
 
 
-def _apply(
-    source: str, namespace: frog_ast.Namespace | None = None
-) -> frog_ast.Game:
+def _apply(source: str, namespace: frog_ast.Namespace | None = None) -> frog_ast.Game:
     game = frog_parser.parse_game(source)
     return IfFalseReturnToConjunction().apply(game, _ctx(namespace))
 
@@ -152,3 +150,81 @@ def test_does_not_fire_when_if_has_else_block() -> None:
     }
     """
     assert _apply(source) == frog_parser.parse_game(source)
+
+
+# ---------------------------------------------------------------------------
+# RC3 determinism guard (F-116): the guard P and the trailing return Q are
+# evaluated on the P-true path that the original short-circuited; a
+# non-deterministic call in either must block the rewrite.
+# ---------------------------------------------------------------------------
+
+
+def _nondet_namespace() -> frog_ast.Namespace:
+    prim = frog_parser.parse_primitive_file("Primitive P(Int n) { Bool f(Int x); }")
+    return {"P": prim, "F": prim}
+
+
+def _det_namespace() -> frog_ast.Namespace:
+    prim = frog_parser.parse_primitive_file(
+        "Primitive D(Int n) { deterministic Bool f(Int x); }"
+    )
+    return {"D": prim, "F": prim}
+
+
+def test_does_not_fire_with_nondeterministic_trailing_return() -> None:
+    """The trailing ``return F.f(x)`` is non-deterministic; conjoining it
+    would evaluate the call on the ``x == 0`` (P-true) path that the
+    original skipped, so the pass must decline."""
+    source = """
+    Game G(P F, Int n) {
+        Bool Test(Int x) {
+            if (x == 0) {
+                return false;
+            }
+            return F.f(x);
+        }
+    }
+    """
+    ns = _nondet_namespace()
+    game = frog_parser.parse_game(source)
+    ctx = _ctx(ns)
+    result = IfFalseReturnToConjunction().apply(game, ctx)
+    assert result == game  # declined
+    assert any(
+        nm.transform_name == "If False Return To Conjunction" for nm in ctx.near_misses
+    )
+
+
+def test_does_not_fire_with_nondeterministic_guard() -> None:
+    """The guard ``F.f(x)`` is re-evaluated in ``Q && !F.f(x)``; a
+    non-deterministic guard blocks the rewrite."""
+    source = """
+    Game G(P F, Int n) {
+        Bool Test(Int x, Bool q) {
+            if (F.f(x)) {
+                return false;
+            }
+            return q;
+        }
+    }
+    """
+    game = frog_parser.parse_game(source)
+    assert IfFalseReturnToConjunction().apply(game, _ctx(_nondet_namespace())) == game
+
+
+def test_fires_with_deterministic_trailing_return() -> None:
+    """Control: a deterministic ``D.f(x)`` trailing return is conjoined as
+    usual."""
+    source = """
+    Game G(D F, Int n) {
+        Bool Test(Int x) {
+            if (x == 0) {
+                return false;
+            }
+            return F.f(x);
+        }
+    }
+    """
+    game = frog_parser.parse_game(source)
+    result = IfFalseReturnToConjunction().apply(game, _ctx(_det_namespace()))
+    assert result != game  # fired

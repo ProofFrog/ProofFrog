@@ -1,3 +1,4 @@
+from sympy import Symbol
 from proof_frog.transforms._base import (
     NearMiss,
     PipelineContext,
@@ -12,6 +13,8 @@ from proof_frog.transforms.algebraic import (
 from proof_frog.transforms.control_flow import (
     BranchElimination,
     GuardConditionSimplification,
+    IfToBooleanAssignment,
+    IfFalseReturnToConjunction,
 )
 from proof_frog.transforms.inlining import (
     InlineSingleUseVariable,
@@ -1222,6 +1225,76 @@ def test_local_fn_near_miss_declared_not_sampled() -> None:
     assert any("declared (known deterministic)" in nm.reason for nm in misses)
 
 
+def test_local_fn_near_miss_h_collides_with_method_parameter() -> None:
+    # F-011: H matches a sampled let, but an oracle PARAMETER is named H.
+    # `_h_referenced_in_game` scans only method bodies, so without the
+    # signature-parameter guard the capture-unaware F->H rename would bind
+    # the secret RF onto the adversary-supplied parameter H.  The pass must
+    # DECLINE (no rewrite) and report a near-miss.
+    game = frog_parser.parse_game("""
+        Game G() {
+            Function<BitString<8>, BitString<16>> F;
+            Void Initialize() {
+                F <- Function<BitString<8>, BitString<16>>;
+            }
+            BitString<16> Eval(Function<BitString<8>, BitString<16>> H, BitString<8> x) {
+                return F(x);
+            }
+        }
+        """)
+    ctx = _local_fn_ctx(sampled={"H"})
+    result = LocalFunctionFieldToLet().apply(game, ctx)
+    # Declined: field F is untouched.
+    assert any(fld.name == "F" for fld in result.fields)
+    misses = _local_fn_misses(ctx)
+    assert misses
+    assert any("collides with a parameter of method" in nm.reason for nm in misses)
+
+
+def test_local_fn_near_miss_h_collides_with_game_parameter() -> None:
+    # F-011: H matches a sampled let but is also bound as a game parameter.
+    game = frog_parser.parse_game("""
+        Game G(Function<BitString<8>, BitString<16>> H) {
+            Function<BitString<8>, BitString<16>> F;
+            Void Initialize() {
+                F <- Function<BitString<8>, BitString<16>>;
+            }
+            BitString<16> Hash(BitString<8> x) { return F(x); }
+        }
+        """)
+    ctx = _local_fn_ctx(sampled={"H"})
+    result = LocalFunctionFieldToLet().apply(game, ctx)
+    assert any(fld.name == "F" for fld in result.fields)
+    misses = _local_fn_misses(ctx)
+    assert misses
+    assert any("collides with a game parameter" in nm.reason for nm in misses)
+
+
+def test_local_fn_sound_control_no_collision_fires() -> None:
+    # SOUND control: H is a sampled let unused anywhere in the game (no
+    # parameter, no body reference).  The pass MUST still fire: F is folded
+    # onto H, the field and its Initialize sample are dropped, and every
+    # call F(x) becomes H(x).
+    game = frog_parser.parse_game("""
+        Game G() {
+            Function<BitString<8>, BitString<16>> F;
+            Void Initialize() {
+                F <- Function<BitString<8>, BitString<16>>;
+            }
+            BitString<16> Eval(Function<BitString<8>, BitString<16>> K, BitString<8> x) {
+                return F(x);
+            }
+        }
+        """)
+    ctx = _local_fn_ctx(sampled={"H"})
+    result = LocalFunctionFieldToLet().apply(game, ctx)
+    # Fired: field F dropped, no leftover F reference, H now called.
+    assert not any(fld.name == "F" for fld in result.fields)
+    body = str(result)
+    assert "return H(x)" in body
+    assert "F(x)" not in body
+
+
 # ---------------------------------------------------------------------------
 # ConcatEqualityDecompose near-miss
 # ---------------------------------------------------------------------------
@@ -1881,5 +1954,183 @@ def test_rc3_challenge_exclusion_known_function_near_miss():
     assert any(
         nm.transform_name == "Challenge Exclusion RF To Uniform"
         and "sampled random function" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_rc4_split_uniform_redeclaration_near_miss():
+    """F-035: SplitUniformSamples declines when the sampled name is redeclared
+    in the same block (a block-wide slice rewrite would capture the wrong
+    binding) and records a near-miss."""
+    game = frog_parser.parse_game("""
+        Game TestGame() {
+            BitString<4> Query() {
+                BitString<8> z = 0b10101010;
+                BitString<4> w = z[0 : 4];
+                BitString<8> z <- BitString<8>;
+                BitString<4> a = z[0 : 4];
+                return a;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = SplitUniformSamples().apply(game, ctx)
+    assert result == game  # declined
+    assert any(
+        nm.transform_name == "Split Uniform Samples"
+        and "redeclared" in nm.reason
+        and nm.variable == "z"
+        for nm in ctx.near_misses
+    )
+
+
+def test_rc4_split_uniform_no_near_miss_clean_case():
+    """No redeclaration: the split fires and emits no redeclaration near-miss."""
+    game = frog_parser.parse_game("""
+        Game TestGame() {
+            BitString<lambda> Query() {
+                BitString<2 * lambda> z <- BitString<2 * lambda>;
+                BitString<lambda> a = z[0 : lambda];
+                BitString<lambda> b = z[lambda : 2 * lambda];
+                return a;
+            }
+        }
+        """)
+    ctx = PipelineContext(
+        variables={"lambda": Symbol("lambda")},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    result = SplitUniformSamples().apply(game, ctx)
+    assert result != game  # fired
+    assert not any(
+        nm.transform_name == "Split Uniform Samples" and "redeclared" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+# ---------------------------------------------------------------------------
+# RC4 capture / non-fresh-binding near misses (control_flow.py)
+# ---------------------------------------------------------------------------
+
+
+def test_if_to_boolean_assignment_near_miss_mixed_kind():
+    """F-084: a field write in one branch and a branch-local typed declaration
+    in the other share a name but differ in binding kind -- decline with a
+    near miss."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Bool flag;
+            Void SetFlag(Bool c) {
+                if (c) {
+                    flag = true;
+                } else {
+                    Bool flag = false;
+                }
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = IfToBooleanAssignment().apply(game, ctx)
+    assert result == game  # declined
+    assert any(
+        nm.transform_name == "If To Boolean Assignment" and "binding kinds" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_if_to_boolean_assignment_near_miss_hoist_capture():
+    """F-084: both branches declare a typed local but the name is referenced
+    after the if (a field write), so hoisting would capture it -- decline."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Bool flag;
+            Void SetFlag(Bool c) {
+                if (c) {
+                    Bool flag = true;
+                } else {
+                    Bool flag = false;
+                }
+                flag = true;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = IfToBooleanAssignment().apply(game, ctx)
+    assert result == game  # declined
+    assert any(
+        nm.transform_name == "If To Boolean Assignment" and "capture" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_if_to_boolean_assignment_no_near_miss_when_fires():
+    """F-084 control: both branches plainly assign the same existing binding,
+    so the rewrite fires and records no near miss."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Void Store(Bool c) {
+                Bool x = false;
+                if (c) {
+                    x = true;
+                } else {
+                    x = false;
+                }
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = IfToBooleanAssignment().apply(game, ctx)
+    assert result != game  # fired
+    assert not any(
+        nm.transform_name == "If To Boolean Assignment" for nm in ctx.near_misses
+    )
+
+
+def test_if_false_return_to_conjunction_near_miss_guard_capture():
+    """F-114: an intervening declaration rebinds a variable the guard reads, so
+    moving the negated guard past it would read the wrong binding -- decline."""
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            Bool O(Int a, Int b) {
+                if (a == b) {
+                    return false;
+                }
+                Int a = b + 1;
+                return a == 0 || a == 1;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = IfFalseReturnToConjunction().apply(game, ctx)
+    assert result == game  # declined
+    assert any(
+        nm.transform_name == "If False Return To Conjunction"
+        and "wrong binding" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_if_false_return_to_conjunction_no_near_miss_when_capture_free():
+    """F-114 control: the intervening declaration introduces a fresh name not
+    read by the guard, so the rewrite fires with no capture near miss."""
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            Bool O(Int a, Int b) {
+                if (a == b) {
+                    return false;
+                }
+                Int z = a + b;
+                return z == 0 || z == 1;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = IfFalseReturnToConjunction().apply(game, ctx)
+    assert result != game  # fired
+    assert not any(
+        nm.transform_name == "If False Return To Conjunction"
+        and "wrong binding" in nm.reason
         for nm in ctx.near_misses
     )

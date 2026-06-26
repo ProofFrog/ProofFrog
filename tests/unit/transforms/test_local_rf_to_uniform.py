@@ -1,8 +1,13 @@
 """Tests for the LocalRFToUniform transform pass."""
 
 import pytest
-from proof_frog import frog_parser
-from proof_frog.transforms.random_functions import LocalRFToUniformTransformer
+from proof_frog import frog_ast, frog_parser
+from proof_frog.transforms.random_functions import (
+    LocalRFToUniform,
+    LocalRFToUniformTransformer,
+)
+from proof_frog.transforms._base import PipelineContext
+from proof_frog.visitors import NameTypeMap
 
 
 @pytest.mark.parametrize(
@@ -185,3 +190,51 @@ def test_local_rf_to_uniform(
     print("EXPECTED", expected_ast)
     print("TRANSFORMED", transformed_ast)
     assert expected_ast == transformed_ast
+
+
+def _ctx() -> PipelineContext:
+    return PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+
+
+def test_extract_temp_avoids_parameter_capture() -> None:
+    # F-027: the embedded-call extraction mints a temp __rf_extract_N__.
+    # Here a method PARAMETER is already named __rf_extract_0__.  Without a
+    # fresh-name discipline the minted temp would shadow and discard the
+    # parameter, turning the input-dependent output (uniform + p) into the
+    # constant 0^lambda (u + u under XOR).  The mint must avoid the param.
+    game = frog_parser.parse_game("""
+        Game Capture(Int lambda) {
+            BitString<lambda> Challenge(BitString<lambda> __rf_extract_0__) {
+                Function<BitString<lambda>, BitString<lambda>> RF <- Function<BitString<lambda>, BitString<lambda>>;
+                return RF(0^lambda) + __rf_extract_0__;
+            }
+        }
+        """)
+    out = LocalRFToUniform().apply(game, _ctx())
+    method = next(m for m in out.methods if m.signature.name == "Challenge")
+
+    # The parameter is untouched.
+    assert method.signature.parameters[0].name == "__rf_extract_0__"
+
+    # The minted sample must use a name distinct from the parameter.
+    minted_samples = [
+        stmt
+        for stmt in method.block.statements
+        if isinstance(stmt, frog_ast.Sample)
+        and isinstance(stmt.var, frog_ast.Variable)
+        and stmt.var.name.startswith("__rf_extract_")
+    ]
+    assert minted_samples, "expected the single RF call to become a uniform sample"
+    for stmt in minted_samples:
+        assert isinstance(stmt.var, frog_ast.Variable)
+        assert stmt.var.name != "__rf_extract_0__"
+
+    # The return still adds the (preserved) parameter, so output depends on it.
+    ret = method.block.statements[-1]
+    assert isinstance(ret, frog_ast.ReturnStatement)
+    assert "__rf_extract_0__" in str(ret.expression)

@@ -228,3 +228,56 @@ def test_fires_with_deterministic_trailing_return() -> None:
     game = frog_parser.parse_game(source)
     result = IfFalseReturnToConjunction().apply(game, _ctx(_det_namespace()))
     assert result != game  # fired
+
+
+# ---------------------------------------------------------------------------
+# RC4 capture/movement guard (F-114): the negated guard !P is moved past the
+# intervening typed-local declarations. If one of those declarations rebinds a
+# variable that P reads, the moved guard would read the wrong binding -- decline.
+# ---------------------------------------------------------------------------
+
+
+def test_does_not_fire_when_intervening_decl_rebinds_guard_var() -> None:
+    """A shadowing declaration ``Int a = M[b];`` rebinds ``a``, which the
+    guard ``a == b`` reads. Moving ``a != b`` past the declaration would read
+    the new local instead of the parameter; the pass must decline."""
+    source = """
+    Game G(Int n) {
+        Bool O(Int a, Int b) {
+            if (a == b) {
+                return false;
+            }
+            Int a = b + 1;
+            return a == 0 || a == 1;
+        }
+    }
+    """
+    game = frog_parser.parse_game(source)
+    ctx = _ctx()
+    result = IfFalseReturnToConjunction().apply(game, ctx)
+    assert result == game  # declined
+    assert any(
+        nm.transform_name == "If False Return To Conjunction"
+        and "wrong binding" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_fires_when_intervening_decl_does_not_touch_guard_vars() -> None:
+    """Control: the intervening declaration ``Int z = a + b;`` introduces a
+    fresh name not read by the guard, so moving ``a != b`` past it is safe and
+    the rewrite fires."""
+    source = """
+    Game G(Int n) {
+        Bool O(Int a, Int b) {
+            if (a == b) {
+                return false;
+            }
+            Int z = a + b;
+            return z == 0 || z == 1;
+        }
+    }
+    """
+    game = frog_parser.parse_game(source)
+    result = IfFalseReturnToConjunction().apply(game, _ctx())
+    assert result != game  # fired

@@ -518,3 +518,49 @@ def test_no_inline_when_field_assigned_in_nested_block() -> None:
     }
     """
     _transform_and_compare(source, expected)
+
+
+def test_self_referential_field_not_inlined() -> None:
+    """A self-referential accumulator assignment (``c = c + 1``) must not be
+    inlined: the field reads its own previous value, so substituting the
+    definition into uses both drops the cross-call accumulation and -- because
+    the value mentions the field -- would not terminate (audit F-045)."""
+    source = """
+    Game Test() {
+        Int c = 0;
+        Int Initialize() {
+            c = c + 1;
+            return c;
+        }
+    }
+    """
+    # The field is genuine state; the pass must leave the game unchanged.
+    _transform_and_compare(source, source)
+
+
+def test_self_referential_field_emits_near_miss() -> None:
+    from proof_frog.transforms._base import PipelineContext
+    from proof_frog import visitors
+
+    source = """
+    Game Test() {
+        Int c = 0;
+        Int Initialize() {
+            c = c + 1;
+            return c;
+        }
+    }
+    """
+    game = frog_parser.parse_game(source)
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=visitors.NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    InlineSingleUseFieldTransformer(ctx=ctx).transform(game)
+    assert any(
+        nm.transform_name == "Inline Single-Use Field"
+        and "references the field itself" in nm.reason
+        for nm in ctx.near_misses
+    )

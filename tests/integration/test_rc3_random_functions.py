@@ -155,3 +155,102 @@ def test_challenge_exclusion_direct_rf_control_fires() -> None:
     random = frog_parser.parse_game(_alias_game(_RANDOM_FIELD, aliased=False))
     result = engine.check_equivalent(real, random)
     assert result.valid, result.failure_detail
+
+
+# --------------------------------------------------------------------------
+# RC6 vectors F-013 / F-014: the challenge-exclusion invariant must survive
+# reassignment.  The challenge field must be immutable, and the guard variable
+# must not be reassigned to the challenge after the guard.  In both attacks the
+# adversary can observe H(cf), so Real (field = H(cf)) is NOT equivalent to
+# Random (field <- R) -- the engine must reject.
+# --------------------------------------------------------------------------
+
+
+def test_challenge_field_mutation_not_equivalent() -> None:
+    """F-013: a Mutate oracle reassigns the challenge field; H(cf) is
+    observable, so the games are distinguishable."""
+    engine = _engine()
+    real = frog_parser.parse_game("""
+        Game Real(Int n) {
+            Function<BitString<n>, BitString<n>> H;
+            BitString<n> cf;
+            BitString<n> field;
+            BitString<n> Initialize() {
+                H <- Function<BitString<n>, BitString<n>>;
+                cf <- BitString<n>;
+                field = H(cf);
+                return cf;
+            }
+            BitString<n> Reveal() { return field; }
+            Void Mutate(BitString<n> v) { cf = v; }
+            BitString<n>? Query(BitString<n> param) {
+                if (param == cf) { return None; }
+                return H(param);
+            }
+        }
+        """)
+    random = frog_parser.parse_game("""
+        Game Random(Int n) {
+            Function<BitString<n>, BitString<n>> H;
+            BitString<n> cf;
+            BitString<n> field;
+            BitString<n> Initialize() {
+                H <- Function<BitString<n>, BitString<n>>;
+                cf <- BitString<n>;
+                field <- BitString<n>;
+                return cf;
+            }
+            BitString<n> Reveal() { return field; }
+            Void Mutate(BitString<n> v) { cf = v; }
+            BitString<n>? Query(BitString<n> param) {
+                if (param == cf) { return None; }
+                return H(param);
+            }
+        }
+        """)
+    assert not engine.check_equivalent(real, random).valid
+
+
+def test_guard_var_reassigned_to_challenge_not_equivalent() -> None:
+    """F-014: the guard variable is reassigned to cf after the guard and then
+    fed to H, re-querying the excluded point."""
+    engine = _engine()
+    real = frog_parser.parse_game("""
+        Game Real(Int n) {
+            Function<BitString<n>, BitString<n>> H;
+            BitString<n> cf;
+            BitString<n> field;
+            BitString<n> Initialize() {
+                H <- Function<BitString<n>, BitString<n>>;
+                cf <- BitString<n>;
+                field = H(cf);
+                return cf;
+            }
+            BitString<n> Reveal() { return field; }
+            BitString<n>? Query(BitString<n> param) {
+                if (param == cf) { return None; }
+                param = cf;
+                return H(param);
+            }
+        }
+        """)
+    random = frog_parser.parse_game("""
+        Game Random(Int n) {
+            Function<BitString<n>, BitString<n>> H;
+            BitString<n> cf;
+            BitString<n> field;
+            BitString<n> Initialize() {
+                H <- Function<BitString<n>, BitString<n>>;
+                cf <- BitString<n>;
+                field <- BitString<n>;
+                return cf;
+            }
+            BitString<n> Reveal() { return field; }
+            BitString<n>? Query(BitString<n> param) {
+                if (param == cf) { return None; }
+                param = cf;
+                return H(param);
+            }
+        }
+        """)
+    assert not engine.check_equivalent(real, random).valid

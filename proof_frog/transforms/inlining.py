@@ -25,6 +25,7 @@ from ..visitors import (
     VariableCollectionVisitor,
     referenced_variable_names,
     reassigns_or_rebinds,
+    lvalue_base_name,
 )
 from ._base import (
     TransformPass,
@@ -1908,15 +1909,21 @@ class HoistFieldPureAlias(TransformPass):
 
 
 def _count_assigns_recursive(node: frog_ast.ASTNode, name: str) -> int:
-    """Count all assignments/samples to *name* recursively in the AST."""
+    """Count all assignments/samples to *name* recursively in the AST.
+
+    Peels element/slice/field accesses via :func:`lvalue_base_name` so an
+    in-place mutation (``B[0] = 5``, ``B.f = v``) counts as an assignment to
+    ``B`` -- otherwise a single-use-field stability check would treat a
+    later-mutated free-variable field as stable and inline a stale snapshot
+    across methods (audit F-079).
+    """
     count = 0
 
     def _counter(n: frog_ast.ASTNode) -> bool:
         nonlocal count
         if (
             isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
-            and isinstance(n.var, frog_ast.Variable)
-            and n.var.name == name
+            and lvalue_base_name(n.var) == name
         ):
             count += 1
         return False
@@ -2062,6 +2069,32 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
                     assign_expr = stmt.value
 
         if assign_count != 1 or assign_expr is None:
+            return None
+
+        # 1b. A self-referential assignment (``c = c + 1``) is accumulator
+        # state, not a single-use alias: the field reads its own previous value,
+        # so it cannot be eliminated by substituting the definition into uses
+        # (doing so both loses the cross-call accumulation and -- because the
+        # value mentions the field -- makes inlining non-terminating).
+        def _refs_self(node: frog_ast.ASTNode) -> bool:
+            return isinstance(node, frog_ast.Variable) and node.name == field_name
+
+        if SearchVisitor(_refs_self).visit(assign_expr) is not None:
+            if self.ctx is not None:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Inline Single-Use Field",
+                        reason=(
+                            f"Cannot inline field '{field_name}': its defining "
+                            f"expression references the field itself (accumulator "
+                            f"state, not a single-use alias)"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=field_name,
+                        method=None,
+                    )
+                )
             return None
 
         # 2. Count total uses of field_name across the entire game

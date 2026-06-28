@@ -423,3 +423,59 @@ def test_embedded_second_init_call_not_simplified() -> None:
     }
     """
     assert not _fired(source)
+
+
+def test_challenge_field_mutation_not_simplified() -> None:
+    """Vector F-013: a `Mutate(v){ cf = v; }` oracle reassigns the challenge
+    field, so the exclusion guard later protects a different value and H(cf)
+    becomes observable; the pass must decline."""
+    source = """
+    Game G(Int n) {
+        Function<BitString<n>, BitString<n>> H;
+        BitString<n> cf;
+        BitString<n> field;
+        BitString<n> Initialize() {
+            H <- Function<BitString<n>, BitString<n>>;
+            cf <- BitString<n>;
+            field = H(cf);
+            return cf;
+        }
+        Void Mutate(BitString<n> v) {
+            cf = v;
+        }
+        BitString<n>? Query(BitString<n> param) {
+            if (param == cf) {
+                return None;
+            }
+            return H(param);
+        }
+    }
+    """
+    assert not _fired(source)
+
+
+def test_guard_var_reassigned_to_challenge_not_simplified() -> None:
+    """Vector F-014: reassigning the guard variable to the challenge after the
+    guard (`param = cf; return H(param);`) re-queries the excluded point; the
+    pass must decline."""
+    source = """
+    Game G(Int n) {
+        Function<BitString<n>, BitString<n>> H;
+        BitString<n> cf;
+        BitString<n> field;
+        BitString<n> Initialize() {
+            H <- Function<BitString<n>, BitString<n>>;
+            cf <- BitString<n>;
+            field = H(cf);
+            return cf;
+        }
+        BitString<n>? Query(BitString<n> param) {
+            if (param == cf) {
+                return None;
+            }
+            param = cf;
+            return H(param);
+        }
+    }
+    """
+    assert not _fired(source)

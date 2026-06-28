@@ -23,6 +23,8 @@ from ..visitors import (
     ReplaceTransformer,
     VariableCollectionVisitor,
     FrogToSympyVisitor,
+    referenced_variable_names,
+    reassigns_or_rebinds,
 )
 from ._base import TransformPass, PipelineContext, NearMiss
 
@@ -1172,6 +1174,38 @@ class SplitUniformSampleTransformer(BlockTransformer):
             ):
                 continue
 
+            # Flow-sensitivity (F-032): the bounds are resolved by NAME to a
+            # single sympy symbol, so two textually-identical slices
+            # ``z[i : i+4]`` resolve to the same bounds and get deduplicated --
+            # but if the index ``i`` is reassigned between them (``i = i + 4``),
+            # they denote DIFFERENT, non-overlapping slices at run time, and
+            # collapsing them to one fresh piece changes the distribution
+            # (``z[0:4] xor z[4:8]`` is uniform, ``z[i] xor z[i]`` is 0).
+            # Decline when any variable in a slice's bounds is reassigned in the
+            # region the slices span.
+            bound_vars: set[str] = set()
+            for s in slices:
+                bound_vars |= referenced_variable_names(s.start)
+                bound_vars |= referenced_variable_names(s.end)
+            if bound_vars and reassigns_or_rebinds(bound_vars, remaining_block):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Split Uniform Samples",
+                            reason=(
+                                f"Sample '{var_name}' not split: a slice-bound "
+                                f"variable is reassigned between slice uses, so "
+                                f"textually-identical slices denote different "
+                                f"ranges at run time"
+                            ),
+                            location=statement.origin,
+                            suggestion=None,
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
+                continue
+
             # Resolve slice bounds to sympy
             slice_bounds: list[tuple[Symbol | int, Symbol | int]] = []
             all_resolved = True
@@ -1292,6 +1326,27 @@ class SplitUniformSampleTransformer(BlockTransformer):
 # ---------------------------------------------------------------------------
 
 
+def _method_is_internally_called(game: frog_ast.Game, method_name: str) -> bool:
+    """True if any method body contains a call to *method_name* -- a bare
+    ``method_name(...)`` or a qualified ``X.method_name(...)`` /
+    ``this.method_name(...)`` sibling call."""
+
+    def is_call(node: frog_ast.ASTNode) -> bool:
+        if not isinstance(node, frog_ast.FuncCall):
+            return False
+        func = node.func
+        if isinstance(func, frog_ast.Variable):
+            return func.name == method_name
+        if isinstance(func, frog_ast.FieldAccess):
+            return func.name == method_name
+        return False
+
+    for method in game.methods:
+        if SearchVisitor(is_call).visit(method.block) is not None:
+            return True
+    return False
+
+
 def _single_call_field_to_local(
     game: frog_ast.Game, ctx: PipelineContext | None = None
 ) -> frog_ast.Game:
@@ -1366,6 +1421,32 @@ def _single_call_field_to_local(
         target_method_name = using_methods[0]
         target_method = game.get_method(target_method_name)
         if _is_written_in_recursive(target_method.block, field.name):
+            continue
+
+        # F-056: the localization is sound only if the read site runs at most
+        # once.  If the using method is invoked by a SIBLING method (a call
+        # `X.Helper()` / `this.Helper()` / `Helper()` inside another oracle),
+        # one adversary call to that sibling triggers an extra execution of the
+        # read site -- so the persistent field (read repeatedly) is no longer
+        # interchangeable with a per-call fresh local.  This holds under any
+        # `calls <= N` reading, so decline conservatively.
+        if _method_is_internally_called(game, target_method_name):
+            if ctx is not None:
+                ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Single Call Field To Local",
+                        reason=(
+                            f"Field '{field.name}' not localized: its read site "
+                            f"'{target_method_name}' is called by another method, "
+                            f"so it can execute more than once and a per-call "
+                            f"local sample would diverge from the persistent field"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=field.name,
+                        method=None,
+                    )
+                )
             continue
 
         # RC5 domain-invariance: moving the sample out of Initialize and into
@@ -1715,6 +1796,26 @@ def _all_refs_in_counter_guarded_branches(
     *mutable_names* is the set of variable names that can change between oracle
     calls (game fields and method parameters).
     """
+    # A local assigned (transitively) from a field or parameter is itself
+    # adversary-controlled / non-constant across calls, even though it is
+    # neither a field nor a param.  A guard `ctr == t` with `t = x` (x a
+    # parameter) can then fire on EVERY call, so the field would be read every
+    # call rather than once (audit F-049).  Treat such tainted locals as
+    # mutable for the guard-constancy check below.
+    tainted: set[str] = set(mutable_names)
+    changed = True
+    while changed:
+        changed = False
+        for stmt in block.statements:
+            if (
+                isinstance(stmt, frog_ast.Assignment)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name not in tainted
+                and referenced_variable_names(stmt.value) & tainted
+            ):
+                tainted.add(stmt.var.name)
+                changed = True
+
     past_increment = False
     guarded_branch_count = 0
     for stmt in block.statements:
@@ -1758,10 +1859,11 @@ def _all_refs_in_counter_guarded_branches(
                 if guard_expr is None:
                     return False
                 # The guard expression (the non-counter side of the ==) must
-                # be constant across oracle calls.  Reject if it references
-                # any game field or method parameter, since those can differ
+                # be constant across oracle calls.  Reject if it references any
+                # game field, method parameter, or a local tainted by one (a
+                # `t = x` indirection -- audit F-049), since those can differ
                 # between calls and would let the branch fire multiple times.
-                for mname in mutable_names:
+                for mname in tainted:
                     if _references_name(guard_expr, mname):
                         return False
                 guarded_branch_count += 1

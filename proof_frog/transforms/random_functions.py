@@ -27,6 +27,7 @@ from ..visitors import (
     ReplaceTransformer,
     Transformer,
     lvalue_base_name,
+    reassigns_or_rebinds,
 )
 from ._base import (
     TransformPass,
@@ -229,6 +230,23 @@ def _analyze_block(
     uniq_guards: dict[str, str] = {}
 
     for statement in block.statements:
+        # F-022: any write to a guarded variable other than a fresh
+        # `<-uniq[S]` draw destroys the freshness that draw established -- after
+        # `r <-uniq[S]; r = c;` the variable holds an arbitrary, possibly
+        # previously-queried value, so `RF(r)` is no longer a distinct input.
+        # Invalidate the guard before this statement's RF-call check below.
+        if isinstance(
+            statement,
+            (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+        ):
+            written_base = lvalue_base_name(statement.var)
+            is_fresh_uniq = (
+                isinstance(statement, frog_ast.UniqueSample)
+                and statement.surface_form == "uniq"
+            )
+            if written_base in uniq_guards and not is_fresh_uniq:
+                del uniq_guards[written_base]
+
         # Track <-uniq bindings. Only the stateful `<-uniq[S]` form
         # accumulates draws into S (S = S union {x}); the pure `x <- T \ E`
         # form performs no insertion, so it does NOT guarantee cross-call
@@ -1239,46 +1257,75 @@ def _index_of_var_in_arg(arg: frog_ast.Expression, var_name: str) -> int | None 
     return False
 
 
+def _contains_return(node: frog_ast.ASTNode) -> bool:
+    """True if *node* contains a ``return`` statement anywhere."""
+    return (
+        SearchVisitor(lambda n: isinstance(n, frog_ast.ReturnStatement)).visit(node)
+        is not None
+    )
+
+
+def _is_union_add(
+    stmt: frog_ast.Statement, set_name: str, proj: frog_ast.Expression
+) -> bool:
+    """True if *stmt* is exactly ``set_name = set_name union {... proj ...}``."""
+    return (
+        isinstance(stmt, frog_ast.Assignment)
+        and isinstance(stmt.var, frog_ast.Variable)
+        and stmt.var.name == set_name
+        and isinstance(stmt.value, frog_ast.BinaryOperation)
+        and stmt.value.operator
+        in (frog_ast.BinaryOperators.UNION, frog_ast.BinaryOperators.ADD)
+        and isinstance(stmt.value.left_expression, frog_ast.Variable)
+        and stmt.value.left_expression.name == set_name
+        and isinstance(stmt.value.right_expression, frog_ast.Set)
+        and any(elem == proj for elem in stmt.value.right_expression.elements)
+    )
+
+
 def _proj_tracked_in_set(
     method: frog_ast.Method, set_name: str, proj: frog_ast.Expression
 ) -> bool:
-    """True if *proj* is guaranteed to be in *set_name* within *method*.
+    """True if *proj* is guaranteed to be in *set_name* on EVERY path through
+    *method* (path-sensitive -- audit F-001).
 
-    Either *proj* is a variable sampled ``<-uniq[set_name]``, or *method*
-    contains ``set_name = set_name union {... proj ...}`` (or ``+``).
+    Two tracking forms qualify:
+
+    - *proj* is a variable sampled ``<-uniq[set_name]``: the draw IS the
+      insertion and the RF call uses the same drawn value, so the two are
+      path-consistent wherever the draw occurs.
+    - an UNCONDITIONAL top-level ``set_name = set_name union {... proj ...}``
+      that runs on every invocation.  A conditional add (nested under an
+      ``if``) or one placed after an early return lets an RF query slip
+      through untracked, so only a top-level add reached before any
+      early-return-bearing statement counts.
     """
-    found = [False]
 
-    def visit(node: frog_ast.ASTNode) -> bool:
-        if (
+    # Form 1: <-uniq[set_name] draw (anywhere -- path-consistent with its use).
+    def is_uniq_draw(node: frog_ast.ASTNode) -> bool:
+        return (
             isinstance(node, frog_ast.UniqueSample)
-            # Only `<-uniq[S]` inserts the draw into S; `x <- T \ S` does not,
-            # so a minus-form draw is NOT guaranteed to be in set_name.
+            # Only `<-uniq[S]` inserts the draw into S; `x <- T \ S` does not.
             and node.surface_form == "uniq"
             and isinstance(node.var, frog_ast.Variable)
             and isinstance(proj, frog_ast.Variable)
             and node.var.name == proj.name
             and isinstance(node.unique_set, frog_ast.Variable)
             and node.unique_set.name == set_name
-        ):
-            found[0] = True
-        if (
-            isinstance(node, frog_ast.Assignment)
-            and isinstance(node.var, frog_ast.Variable)
-            and node.var.name == set_name
-            and isinstance(node.value, frog_ast.BinaryOperation)
-            and node.value.operator
-            in (frog_ast.BinaryOperators.UNION, frog_ast.BinaryOperators.ADD)
-            and isinstance(node.value.left_expression, frog_ast.Variable)
-            and node.value.left_expression.name == set_name
-            and isinstance(node.value.right_expression, frog_ast.Set)
-            and any(elem == proj for elem in node.value.right_expression.elements)
-        ):
-            found[0] = True
-        return False
+        )
 
-    SearchVisitor(visit).visit(method.block)
-    return found[0]
+    if SearchVisitor(is_uniq_draw).visit(method.block) is not None:
+        return True
+
+    # Form 2: an unconditional top-level union-add, reached before any
+    # statement that can return early on some path.
+    for stmt in method.block.statements:
+        if _is_union_add(stmt, set_name, proj):
+            return True
+        if _contains_return(stmt):
+            # An early return here would skip a later add on some path.
+            break
+    return False
 
 
 def _set_only_monotone(game: frog_ast.Game, set_name: str) -> bool:
@@ -1342,7 +1389,14 @@ def _exclusion_adequate(
     """Whether ``v <-uniq[set_name]`` at projection *proj_index* of an
     ``rf_name(arg)`` call guarantees the queried point is fresh for ``rf_name``.
     See the regime (A)/(B) discussion above."""
-    # Regime (A): the exclusion set is the called RF's own domain.
+    # Regime (A): the exclusion set is the called RF's own domain.  Whether
+    # `RF.domain` tracks plain `RF(x)` evaluations (standard ROM table) or only
+    # `<-uniq[RF.domain]` draws (USER-ATTENTION sec 1.b) is a CONTESTED semantics
+    # ruling and the crux of F-002/F-003: tightening regime A to require every
+    # RF query to be a tracked fresh draw rejects standard ROM proofs (the
+    # adversary `Hash(x){ return H(x); }` oracle) that the example corpus relies
+    # on.  Per Principle 6/7 this is left as-is pending the user's ruling; F-002
+    # is ESCALATED.
     if set_name == f"{rf_name}.domain" and proj_index is None:
         return True
     # Regime (B): persistent, never-reset field that tracks the k-th
@@ -2190,6 +2244,37 @@ class ChallengeExclusionRFToUniformTransformer:
             # Check that Init arg references at least one challenge field
             init_field_refs = _collect_field_vars(resolved_init_arg, field_names)
 
+            # Vector (F-013): the challenge value must be IMMUTABLE.  If any
+            # oracle reassigns a challenge field (e.g. a `Mutate(v){ cf = v; }`
+            # oracle), the per-oracle exclusion guard `param == cf` later
+            # protects a DIFFERENT, adversary-chosen value, so the adversary can
+            # query H at the original challenge point.  H(cf) is then observable
+            # and not an independent uniform draw -- decline.
+            challenge_reassigned = any(
+                reassigns_or_rebinds(init_field_refs, om.block) for om in oracle_methods
+            )
+            if challenge_reassigned:
+                if ctx is not None:
+                    ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Challenge Exclusion RF To Uniform",
+                            reason=(
+                                f"A challenge field used in the Initialize call "
+                                f"to '{rf_name}' is reassigned by an oracle, so the "
+                                "exclusion guard no longer protects the original "
+                                "challenge value; H(cf) becomes observable"
+                            ),
+                            location=None,
+                            suggestion=(
+                                "Do not reassign the challenge field outside "
+                                "Initialize"
+                            ),
+                            variable=rf_name,
+                            method=None,
+                        )
+                    )
+                continue
+
             # Check each oracle method
             all_oracle_ok = True
             for oracle_method in oracle_methods:
@@ -2208,6 +2293,12 @@ class ChallengeExclusionRFToUniformTransformer:
                 challenge_fields = guard.challenge_fields
                 guard_lhs_vars = guard.guard_lhs_vars
                 guard_idx = guard.guard_idx
+
+                # The variables actually appearing in the guard condition (e.g.
+                # `param` in `if (param == cf)`).  Their inequality-to-cf is the
+                # guard's invariant; a later reassignment of one of them breaks
+                # it (vector F-014), distinct from deriving a NEW var below.
+                original_guard_vars = set(guard_lhs_vars)
 
                 # Extend guard vars with variables derived from guard LHS
                 # (e.g., v4 = c[0] where c is the guard parameter)
@@ -2239,6 +2330,35 @@ class ChallengeExclusionRFToUniformTransformer:
                 post_guard_block = frog_ast.Block(
                     list(oracle_method.block.statements[guard_idx + 1 :])
                 )
+
+                # Vector (F-014): a guard variable reassigned after the guard no
+                # longer satisfies the guard's `!= cf` invariant.  E.g.
+                # `if (param == cf) return None; param = cf; return H(param);`
+                # re-queries the excluded point, but the alias resolver freezes
+                # guard vars as `!= cf` leaves and never sees the reassignment.
+                if reassigns_or_rebinds(original_guard_vars, post_guard_block):
+                    if ctx is not None:
+                        ctx.near_misses.append(
+                            NearMiss(
+                                transform_name="Challenge Exclusion RF To Uniform",
+                                reason=(
+                                    "A guard variable is reassigned after the "
+                                    "challenge-exclusion guard, so its inequality "
+                                    "to the challenge no longer holds and an RF "
+                                    "call may re-query the challenge input"
+                                ),
+                                location=None,
+                                suggestion=(
+                                    "Do not reassign the guarded variable between "
+                                    "the guard and the random-function call"
+                                ),
+                                variable=rf_name,
+                                method=oracle_method.signature.name,
+                            )
+                        )
+                    all_oracle_ok = False
+                    break
+
                 guard_stmt = oracle_method.block.statements[guard_idx]
                 assert isinstance(guard_stmt, frog_ast.IfStatement)
 

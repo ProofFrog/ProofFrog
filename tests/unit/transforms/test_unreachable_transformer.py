@@ -775,3 +775,23 @@ def test_ru_dedups_deterministic_duplicate_condition() -> None:
     ctx = _ru_ctx(D=_ru_det_prim(), F=_ru_det_prim())
     result = RemoveUnreachable().apply(game, ctx)
     assert result != game  # the dead duplicate if was removed
+
+
+def test_remove_unreachable_branch_write_clears_seen_condition() -> None:
+    """F-105 (Case B): an assignment INSIDE a kept if-branch (`if (b==0){ x=0; }`)
+    reassigns x between two `if (x==0) return` guards, so the second guard is
+    reachable (O(1,0) returns 2) and must NOT be deleted against the stale
+    `x==0` fact from the first guard."""
+    method = frog_parser.parse_method("""
+        Int O(Int a, Int b) {
+            Int x = a;
+            if (x == 0) { return 1; }
+            if (b == 0) { x = 0; }
+            if (x == 0) { return 2; }
+            return 3;
+        }
+        """)
+    transformed = RemoveUnreachableTransformer(method).transform(method)
+    assert (
+        _count_ifs(transformed) == 3
+    ), f"live `if (x==0) return 2` was wrongly deleted:\n{transformed}"

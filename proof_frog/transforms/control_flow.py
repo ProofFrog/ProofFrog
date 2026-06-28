@@ -1088,6 +1088,29 @@ class RemoveUnreachableTransformer(BlockTransformer):
                         continue
                     seen_return_conditions.append(condition)
 
+            # An assignment inside a KEPT if-branch (e.g. `if (b==0){ x=0; }`)
+            # may change a variable's value on some path.  Unlike a top-level
+            # assignment (handled above), the branch write would otherwise never
+            # bump the variable's Z3 version or invalidate syntactic tracking, so
+            # a later `if (x==0) return` is wrongly judged dead against a stale
+            # `x==0` fact (audit F-105, Case B).  Bump the versions of variables
+            # written in the branches and drop any seen return-condition that
+            # references one of them.
+            pre_branch_versions = dict(variable_version_map)
+            for branch in statement.blocks:
+                update_version(branch)
+            branch_writes = {
+                name
+                for name, ver in variable_version_map.items()
+                if ver != pre_branch_versions.get(name)
+            }
+            if branch_writes:
+                seen_return_conditions[:] = [
+                    cond
+                    for cond in seen_return_conditions
+                    if not (referenced_variable_names(cond) & branch_writes)
+                ]
+
             # Tag inner blocks with accumulated path constraints
             for cond_idx, cond in enumerate(statement.conditions):
                 if cond_idx < len(statement.blocks):
@@ -1205,6 +1228,8 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
         """
         assign_counts: dict[str, int] = {}
         definitions: dict[str, frog_ast.Expression] = {}
+        # Method that holds each field's (single, top-level) defining assignment.
+        def_methods: dict[str, str] = {}
 
         for method in game.methods:
             # Collect top-level definitions (for the expression value)
@@ -1215,6 +1240,7 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
                     and stmt.var.name in self.field_names
                 ):
                     definitions[stmt.var.name] = stmt.value
+                    def_methods[stmt.var.name] = method.signature.name
 
             # Count ALL assignments recursively (including nested blocks)
             for field_name in self.field_names:
@@ -1229,6 +1255,16 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
         for name, expr in definitions.items():
             if assign_counts.get(name, 0) != 1:
                 continue
+            # Flow-sensitivity (F-076): a single ASSIGNMENT SITE is not a single
+            # runtime write.  A field assigned once in an oracle (`SetA(){ A=B; }`)
+            # is rewritten on every call, and the adversary controls call order,
+            # so `A == B` (its definition) holds only at the instant SetA ran --
+            # a later `SetB` leaves A a stale snapshot.  The alias `A -> def(A)`
+            # is stable only when A is written exactly once in Initialize (which
+            # runs once, deterministically, before any oracle) AND every field in
+            # def(A) is likewise written only in Initialize.
+            if def_methods.get(name) != "Initialize":
+                continue
             used_vars = VariableCollectionVisitor().visit(expr)
             if not all(v.name in self.field_names for v in used_vars):
                 continue
@@ -1236,6 +1272,10 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
             # referenced field is reassigned after this definition, the
             # stored value diverges from the current field value.
             if not all(assign_counts.get(v.name, 0) == 1 for v in used_vars):
+                continue
+            # ...and that single assignment must be in Initialize too, so the
+            # referenced field cannot be re-set by an interleaved oracle call.
+            if not all(def_methods.get(v.name) == "Initialize" for v in used_vars):
                 continue
             if has_nondeterministic_call(
                 expr, self._proof_namespace, self._proof_let_types
@@ -1608,6 +1648,38 @@ class AbsorbRedundantEarlyReturnTransformer(BlockTransformer):
                 block.statements, index + 1, early_x
             )
             if trailing_idx is None:
+                continue
+
+            # Soundness (F-110): the rewrite re-evaluates ``!P`` at each
+            # intervening guard.  The docstring's argument that this is
+            # equivalent assumes ``P``'s value is unchanged between the early
+            # return and the trailing return.  But an intervening if-BODY may
+            # write a free variable of ``P`` (e.g. ``if (a) { flag = 1; }`` with
+            # ``P == flag == 1``): in the original the LATER bodies still run
+            # unconditionally, while the rewrite gates them on a now-false
+            # ``!P``.  Decline if any intervening statement reassigns a free
+            # variable of ``P``.
+            p_free_vars = referenced_variable_names(early_p)
+            intervening = frog_ast.Block(
+                list(block.statements[index + 1 : trailing_idx])
+            )
+            if reassigns_or_rebinds(p_free_vars, intervening):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Absorb Redundant Early Return",
+                            reason=(
+                                "Early-return absorption declined: an intervening "
+                                "if-body reassigns a free variable of the early "
+                                "guard P, so re-evaluating !P at the later guards "
+                                "no longer matches the original control flow"
+                            ),
+                            location=None,
+                            suggestion=None,
+                            variable=str(early_p),
+                            method=None,
+                        )
+                    )
                 continue
 
             # Build !P with light surface simplification (== ↔ !=); deeper
@@ -2022,6 +2094,31 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
                             "Init-only field RHS not expanded: the field is "
                             "assigned a non-deterministic call, so substituting "
                             "the call text would equate independent draws"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=stmt.var.name,
+                        method=None,
+                    )
+                )
+                continue
+            # Soundness (F-120): the recorded `F -> rhs` is only valid where
+            # `rhs` evaluates to the SAME value it had in Initialize.  If a field
+            # referenced by `rhs` (e.g. the key `k` in `G = F.eval(k)`) is
+            # reassigned in an oracle (`k = kp`), then at the fold site `rhs`
+            # denotes `F.eval(kp)`, not the stored `F.eval(k_init)` -- so the
+            # substitution would equate `G` with a different value.  Require every
+            # FIELD referenced by the RHS to be single-write (only its Initialize
+            # assignment).
+            rhs_field_refs = referenced_variable_names(stmt.value) & field_names
+            if any(counts.get(name, 0) > 1 for name in rhs_field_refs):
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Fold Equivalent Return Branch",
+                        reason=(
+                            "Init-only field RHS not expanded: a field referenced "
+                            "by the RHS is reassigned outside Initialize, so the "
+                            "stored value no longer matches the RHS at the fold site"
                         ),
                         location=None,
                         suggestion=None,
@@ -2538,10 +2635,39 @@ class DeadGuardedAssignmentEliminationTransformer(BlockTransformer):
                     continue
             elif self._read_count(block, v_name) != 1:
                 continue
+            # Soundness (F-098): the kill replaces `v = E` (sitting under path
+            # condition P) with `v = false`, justified by "P entails the inner
+            # guard G, and under G the output is R regardless of v".  That
+            # entailment compares G by string equality against earlier path
+            # facts, treating them as timeless.  It only holds if every variable
+            # in G has the SAME value at the assignment site and at the `if (v)`
+            # use site.  If a variable in G is reassigned anywhere in the prefix
+            # (e.g. `y = y + 1;` between `if (y==1){ v=c; }` and `if (v){ if
+            # (y==1) ... }`), the path fact is stale and the entailment fails --
+            # decline.
+            prefix = list(block.statements[:index])
+            guard_vars = referenced_variable_names(guard)
+            if reassigns_or_rebinds(guard_vars, frog_ast.Block(prefix)):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Dead Guarded Assignment Elimination",
+                            reason=(
+                                "Dead-store kill declined: a variable in the "
+                                "dominating guard is reassigned before the use, "
+                                "so the earlier path fact is stale and no longer "
+                                "entails the guard at the use site"
+                            ),
+                            location=None,
+                            suggestion=None,
+                            variable=v_name,
+                            method=None,
+                        )
+                    )
+                continue
             guard_lits = [
                 _condition_literal(g, True) for g in _flatten_top_level_and(guard)
             ]
-            prefix = list(block.statements[:index])
             new_prefix = [self._kill(s, v_name, guard_lits, []) for s in prefix]
             if new_prefix != prefix:
                 return self.transform_block(

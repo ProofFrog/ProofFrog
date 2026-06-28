@@ -167,7 +167,13 @@ class Transformer(ABC):
             if returned:
                 return returned
 
-        # Copy-on-write: only create a new node if a child changed
+        return self._transform_children(node)
+
+    def _transform_children(self, node: T) -> T:
+        # Copy-on-write recursion into a node's children, bypassing this
+        # transformer's own per-node hooks for *node* itself. Subclasses that
+        # override a container hook (e.g. ``transform_game``) to set up state
+        # call this to perform the default structural descent.
         changed = False
         new_attrs: dict[str, Any] = {}
         for attr_name in vars(node):
@@ -305,6 +311,30 @@ class SubstitutionTransformer(Transformer):
 class InstantiationTransformer(Transformer):
     def __init__(self, namespace: frog_ast.Namespace) -> None:
         self.namespace = dict(namespace)
+        # Field names that are reassigned somewhere in the module currently being
+        # transformed. Their initializer must NOT be substituted into method
+        # bodies: a field `Int c = 0` that is later mutated (`c = c + 1`) is
+        # genuine state, not a constant alias, so replacing reads of `c` with `0`
+        # would silently drop the mutation (see audit F-045).
+        self._mutable_fields: set[str] = set()
+
+    def _instantiate_module(self, node: T) -> T:
+        saved = self._mutable_fields
+        written: set[str] = set()
+        for field in getattr(node, "fields", []):
+            if field.value is not None and reassigns_or_rebinds({field.name}, node):
+                written.add(field.name)
+        self._mutable_fields = written
+        try:
+            return self._transform_children(node)
+        finally:
+            self._mutable_fields = saved
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.ASTNode:
+        return self._instantiate_module(game)
+
+    def transform_scheme(self, scheme: frog_ast.Scheme) -> frog_ast.ASTNode:
+        return self._instantiate_module(scheme)
 
     def transform_field(self, field: frog_ast.Field) -> frog_ast.ASTNode:
         new_field = frog_ast.Field(
@@ -323,7 +353,13 @@ class InstantiationTransformer(Transformer):
             ns_value = frog_ast.ProductType(
                 [v for v in ns_value.values if isinstance(v, frog_ast.Type)]
             )
-        self.namespace[field.name] = ns_value
+        # A reassigned field is genuine state, not a constant alias: do not
+        # register its initializer for substitution into reads (audit F-045).
+        # A pre-existing namespace binding (a proof-let constant) is left intact.
+        if field.name in self._mutable_fields:
+            self.namespace.pop(field.name, None)
+        else:
+            self.namespace[field.name] = ns_value
         return new_field
 
     def transform_variable(self, variable: frog_ast.Variable) -> frog_ast.ASTNode:

@@ -173,3 +173,56 @@ def test_deterministic_guard_still_kills() -> None:
     ctx = _ctx_with(D=_det_prim(), F=_det_prim())
     result = DeadGuardedAssignmentElimination().apply(game, ctx)
     assert result != game  # the dead store was killed
+
+
+def test_guard_var_reassigned_before_use_not_killed() -> None:
+    """F-098: the dominating guard's variable (`y`) is reassigned (`y = y + 1`)
+    between the guarded assignment and the `if (v)` use, so the path fact
+    `y == 1` is stale at the inner `if (y == 1)` -- the kill must DECLINE.
+    Here O(1, true) = 1 (Left) is distinguishable from the killed `v = false`
+    form which always returns 0."""
+    game, result = _apply("""
+        Game G() {
+            Int O(Int x, Bool c) {
+                Bool v = false;
+                Int y = x;
+                if (y == 1) {
+                    v = c;
+                }
+                y = y + 1;
+                if (v) {
+                    if (y == 1) {
+                        return 0;
+                    }
+                    return 1;
+                }
+                return 0;
+            }
+        }
+        """)
+    assert result == game, "stale-guard-fact kill must be declined"
+
+
+def test_guard_var_reassigned_emits_near_miss() -> None:
+    ctx = _make_ctx()
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int O(Int x, Bool c) {
+                Bool v = false;
+                Int y = x;
+                if (y == 1) { v = c; }
+                y = y + 1;
+                if (v) {
+                    if (y == 1) { return 0; }
+                    return 1;
+                }
+                return 0;
+            }
+        }
+        """)
+    DeadGuardedAssignmentElimination().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Dead Guarded Assignment Elimination"
+        and "stale" in nm.reason
+        for nm in ctx.near_misses
+    )

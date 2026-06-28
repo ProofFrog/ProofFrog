@@ -106,3 +106,57 @@ def test_funccall_field_unknown_scheme_returns_original() -> None:
     result = visitors.InstantiationTransformer(namespace).transform(node)
     assert isinstance(result, frog_ast.FieldAccess)
     assert result.name == "EncapsKey"
+
+
+def test_mutable_field_initializer_not_substituted_into_body() -> None:
+    """A field that is reassigned in a method body is genuine state, not a
+    constant alias.  ``InstantiationTransformer`` must NOT substitute its
+    initializer into reads -- doing so silently drops the mutation
+    (``c = c + 1; return c`` would become ``return 0``).  Audit F-045.
+    """
+    from proof_frog import frog_parser
+
+    game = frog_parser.parse_game(
+        """
+        Game Real() {
+            Int c = 0;
+            Int Initialize() {
+                c = c + 1;
+                return c;
+            }
+        }
+        """
+    )
+    result = visitors.InstantiationTransformer({}).transform(game)
+    # The mutating read/write must survive verbatim -- no `c -> 0` rewrite.
+    assert result == game
+
+
+def test_constant_field_initializer_still_substituted() -> None:
+    """Positive control: a field that is never reassigned IS a constant alias,
+    so its initializer is still substituted into reads (the legitimate
+    behaviour F-045's fix preserves)."""
+    from proof_frog import frog_parser
+
+    game = frog_parser.parse_game(
+        """
+        Game Const() {
+            Int n = 5;
+            Int Initialize() {
+                return n;
+            }
+        }
+        """
+    )
+    result = visitors.InstantiationTransformer({}).transform(game)
+    expected = frog_parser.parse_game(
+        """
+        Game Const() {
+            Int n = 5;
+            Int Initialize() {
+                return 5;
+            }
+        }
+        """
+    )
+    assert result == expected

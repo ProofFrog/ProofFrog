@@ -317,3 +317,48 @@ def test_dotted_nondomain_exclusion_set_modified_not_simplified() -> None:
     assert not _exclusion_set_modified(game, "RF.domain")
     # A non-`.domain` dotted set with an explicit field assignment IS flagged.
     assert _exclusion_set_modified(game, "S.field")
+
+
+def test_guard_var_reassigned_before_rf_call_not_simplified() -> None:
+    """F-022: a guarded variable `r <-uniq[S]` reassigned to an
+    adversary-controlled value (`r = c`) before `RF(r)` no longer holds the
+    fresh draw, so the freshness guard must be invalidated and the RF call
+    left unsimplified."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Set<BitString<8>> S;
+            Function<BitString<8>, BitString<16>> RF;
+            Void Initialize() {
+                RF <- Function<BitString<8>, BitString<16>>;
+            }
+            BitString<16> Query(BitString<8> c) {
+                BitString<8> r <-uniq[S] BitString<8>;
+                r = c;
+                BitString<16> z = RF(r);
+                return z;
+            }
+        }
+        """)
+    result = UniqueRFSimplification().apply(game, _make_ctx())
+    assert result == game, "RF(r) after `r = c` must not be simplified (stale guard)"
+
+
+def test_fresh_guard_without_reassignment_still_simplified() -> None:
+    """Positive control: with no intervening reassignment the guarded fresh
+    draw still enables simplification."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Set<BitString<8>> S;
+            Function<BitString<8>, BitString<16>> RF;
+            Void Initialize() {
+                RF <- Function<BitString<8>, BitString<16>>;
+            }
+            BitString<16> Query() {
+                BitString<8> r <-uniq[S] BitString<8>;
+                BitString<16> z = RF(r);
+                return z;
+            }
+        }
+        """)
+    result = UniqueRFSimplification().apply(game, _make_ctx())
+    assert result != game, "clean fresh-draw RF call should still simplify"

@@ -1044,3 +1044,62 @@ def test_redundant_conditional_return_uniq_not_collapsed_onto_minus() -> None:
         }
         """)
     assert not _engine_with().check_equivalent(real, ideal).valid
+
+
+def test_reassigned_field_initializer_not_substituted() -> None:
+    """A reassigned field is genuine state, not a constant alias.  The engine
+    must not substitute its initializer into a post-reassignment read:
+    ``Int c = 0; c = c + 1; return c`` returns 1, not 0, so it is not
+    equivalent to ``return 0``.  Audit F-045 (InstantiationTransformer +
+    InlineSingleUseField self-reference)."""
+    real = frog_parser.parse_game("""
+        Game Real() {
+            Int c = 0;
+            Int Initialize() {
+                c = c + 1;
+                return c;
+            }
+            BitString<1> Query() { return 0b0; }
+        }
+        """)
+    random = frog_parser.parse_game("""
+        Game Random() {
+            Int Initialize() {
+                return 0;
+            }
+            BitString<1> Query() { return 0b0; }
+        }
+        """)
+    assert not _engine_with().check_equivalent(real, random).valid
+
+
+def test_modint_loop_reused_uniform_not_absorbed() -> None:
+    """A uniform ModInt sampled once outside a two-iteration loop and added into
+    an accumulator each pass leaves `acc = 2t` (even-only support), which is not
+    distributionally equal to a single `acc = t` (uniform).  The engine must not
+    absorb the loop-reused uniform (audit F-132c)."""
+    twice = frog_parser.parse_game("""
+        Game Twice() {
+            ModInt<16> acc;
+            Void Probe() {
+                acc = 0;
+                ModInt<16> t <- ModInt<16>;
+                for (ModInt<16> i in {1, 2}) {
+                    acc = acc + t;
+                }
+            }
+            ModInt<16> GetAcc() { return acc; }
+        }
+        """)
+    once = frog_parser.parse_game("""
+        Game Once() {
+            ModInt<16> acc;
+            Void Probe() {
+                acc = 0;
+                ModInt<16> t <- ModInt<16>;
+                acc = t;
+            }
+            ModInt<16> GetAcc() { return acc; }
+        }
+        """)
+    assert not _engine_with().check_equivalent(twice, once).valid

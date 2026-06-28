@@ -23,6 +23,8 @@ from ..visitors import (
     ReplaceTransformer,
     VariableCollectionVisitor,
     FrogToSympyVisitor,
+    referenced_variable_names,
+    reassigns_or_rebinds,
 )
 from ._base import TransformPass, PipelineContext, NearMiss
 
@@ -1172,6 +1174,38 @@ class SplitUniformSampleTransformer(BlockTransformer):
             ):
                 continue
 
+            # Flow-sensitivity (F-032): the bounds are resolved by NAME to a
+            # single sympy symbol, so two textually-identical slices
+            # ``z[i : i+4]`` resolve to the same bounds and get deduplicated --
+            # but if the index ``i`` is reassigned between them (``i = i + 4``),
+            # they denote DIFFERENT, non-overlapping slices at run time, and
+            # collapsing them to one fresh piece changes the distribution
+            # (``z[0:4] xor z[4:8]`` is uniform, ``z[i] xor z[i]`` is 0).
+            # Decline when any variable in a slice's bounds is reassigned in the
+            # region the slices span.
+            bound_vars: set[str] = set()
+            for s in slices:
+                bound_vars |= referenced_variable_names(s.start)
+                bound_vars |= referenced_variable_names(s.end)
+            if bound_vars and reassigns_or_rebinds(bound_vars, remaining_block):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Split Uniform Samples",
+                            reason=(
+                                f"Sample '{var_name}' not split: a slice-bound "
+                                f"variable is reassigned between slice uses, so "
+                                f"textually-identical slices denote different "
+                                f"ranges at run time"
+                            ),
+                            location=statement.origin,
+                            suggestion=None,
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
+                continue
+
             # Resolve slice bounds to sympy
             slice_bounds: list[tuple[Symbol | int, Symbol | int]] = []
             all_resolved = True
@@ -1715,6 +1749,26 @@ def _all_refs_in_counter_guarded_branches(
     *mutable_names* is the set of variable names that can change between oracle
     calls (game fields and method parameters).
     """
+    # A local assigned (transitively) from a field or parameter is itself
+    # adversary-controlled / non-constant across calls, even though it is
+    # neither a field nor a param.  A guard `ctr == t` with `t = x` (x a
+    # parameter) can then fire on EVERY call, so the field would be read every
+    # call rather than once (audit F-049).  Treat such tainted locals as
+    # mutable for the guard-constancy check below.
+    tainted: set[str] = set(mutable_names)
+    changed = True
+    while changed:
+        changed = False
+        for stmt in block.statements:
+            if (
+                isinstance(stmt, frog_ast.Assignment)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name not in tainted
+                and referenced_variable_names(stmt.value) & tainted
+            ):
+                tainted.add(stmt.var.name)
+                changed = True
+
     past_increment = False
     guarded_branch_count = 0
     for stmt in block.statements:
@@ -1758,10 +1812,11 @@ def _all_refs_in_counter_guarded_branches(
                 if guard_expr is None:
                     return False
                 # The guard expression (the non-counter side of the ==) must
-                # be constant across oracle calls.  Reject if it references
-                # any game field or method parameter, since those can differ
+                # be constant across oracle calls.  Reject if it references any
+                # game field, method parameter, or a local tainted by one (a
+                # `t = x` indirection -- audit F-049), since those can differ
                 # between calls and would let the branch fire multiple times.
-                for mname in mutable_names:
+                for mname in tainted:
                     if _references_name(guard_expr, mname):
                         return False
                 guarded_branch_count += 1

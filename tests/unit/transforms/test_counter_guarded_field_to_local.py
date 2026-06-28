@@ -645,3 +645,54 @@ def test_param_shadowed_field_not_localized() -> None:
         }
         """)
     assert _counter_guarded_field_to_local(game) == game
+
+
+def test_counter_guard_local_aliasing_param_not_localized() -> None:
+    """F-049: the counter guard `ctr == t` reads a LOCAL `t = x` that aliases
+    the adversary-controlled parameter x, so the guarded branch can fire on
+    EVERY call (O(1), O(2), ...).  Moving the persistent Initialize sample F
+    into a per-call local would then return a fresh value each call instead of
+    the same one -- the pass must DECLINE (the constancy screen must see
+    through the `t = x` indirection)."""
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            Int ctr;
+            BitString<n> F;
+            Void Initialize() {
+                ctr = 0;
+                F <- BitString<n>;
+            }
+            BitString<n> O(Int x) {
+                ctr = ctr + 1;
+                Int t = x;
+                if (ctr == t) {
+                    return F;
+                }
+                return 0^n;
+            }
+        }
+        """)
+    assert _counter_guarded_field_to_local(game) == game
+
+
+def test_counter_guard_constant_local_still_localizes() -> None:
+    """Positive control: a local bound to a genuine constant (`Int t = 1`) keeps
+    the guard constant across calls, so the localization still fires."""
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            Int ctr;
+            BitString<n> F;
+            Void Initialize() {
+                ctr = 0;
+                F <- BitString<n>;
+            }
+            BitString<n> O(Int x) {
+                ctr = ctr + 1;
+                if (ctr == 1) {
+                    return F;
+                }
+                return 0^n;
+            }
+        }
+        """)
+    assert _counter_guarded_field_to_local(game) != game

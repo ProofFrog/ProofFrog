@@ -1228,6 +1228,8 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
         """
         assign_counts: dict[str, int] = {}
         definitions: dict[str, frog_ast.Expression] = {}
+        # Method that holds each field's (single, top-level) defining assignment.
+        def_methods: dict[str, str] = {}
 
         for method in game.methods:
             # Collect top-level definitions (for the expression value)
@@ -1238,6 +1240,7 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
                     and stmt.var.name in self.field_names
                 ):
                     definitions[stmt.var.name] = stmt.value
+                    def_methods[stmt.var.name] = method.signature.name
 
             # Count ALL assignments recursively (including nested blocks)
             for field_name in self.field_names:
@@ -1252,6 +1255,16 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
         for name, expr in definitions.items():
             if assign_counts.get(name, 0) != 1:
                 continue
+            # Flow-sensitivity (F-076): a single ASSIGNMENT SITE is not a single
+            # runtime write.  A field assigned once in an oracle (`SetA(){ A=B; }`)
+            # is rewritten on every call, and the adversary controls call order,
+            # so `A == B` (its definition) holds only at the instant SetA ran --
+            # a later `SetB` leaves A a stale snapshot.  The alias `A -> def(A)`
+            # is stable only when A is written exactly once in Initialize (which
+            # runs once, deterministically, before any oracle) AND every field in
+            # def(A) is likewise written only in Initialize.
+            if def_methods.get(name) != "Initialize":
+                continue
             used_vars = VariableCollectionVisitor().visit(expr)
             if not all(v.name in self.field_names for v in used_vars):
                 continue
@@ -1259,6 +1272,10 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
             # referenced field is reassigned after this definition, the
             # stored value diverges from the current field value.
             if not all(assign_counts.get(v.name, 0) == 1 for v in used_vars):
+                continue
+            # ...and that single assignment must be in Initialize too, so the
+            # referenced field cannot be re-set by an interleaved oracle call.
+            if not all(def_methods.get(v.name) == "Initialize" for v in used_vars):
                 continue
             if has_nondeterministic_call(
                 expr, self._proof_namespace, self._proof_let_types

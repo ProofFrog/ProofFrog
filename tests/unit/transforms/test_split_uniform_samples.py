@@ -370,3 +370,39 @@ def test_f035_clean_case_single_declaration_still_fires() -> None:
         frog_parser.parse_method(method)
     )
     assert transformed == frog_parser.parse_method(expected)
+
+
+def test_f032_declines_when_slice_index_reassigned() -> None:
+    """F-032: both slices are textually `z[i : i + 4]`, but `i = i + 4` between
+    them makes them the non-overlapping ranges `z[0:4]` and `z[4:8]`.  Resolving
+    `i` by name to one symbol would dedup them to a single fresh piece, turning
+    the uniform `z[0:4] xor z[4:8]` into 0.  The pass must DECLINE."""
+    method = """
+        BitString<4> f() {
+            Int i = 0;
+            BitString<8> z <- BitString<8>;
+            BitString<4> a = z[i : i + 4];
+            i = i + 4;
+            BitString<4> b = z[i : i + 4];
+            return a + b;
+        }
+        """
+    parsed = frog_parser.parse_method(method)
+    transformed = SplitUniformSampleTransformer({}).transform(parsed)
+    assert transformed == parsed, "split fired across a reassigned slice index"
+
+
+def test_f032_constant_bounds_still_split() -> None:
+    """Positive control: with constant (non-reassigned) bounds the split still
+    fires."""
+    method = """
+        BitString<4> f() {
+            BitString<8> z <- BitString<8>;
+            BitString<4> a = z[0 : 4];
+            BitString<4> b = z[4 : 8];
+            return a + b;
+        }
+        """
+    parsed = frog_parser.parse_method(method)
+    transformed = SplitUniformSampleTransformer({}).transform(parsed)
+    assert transformed != parsed, "constant-bound split should still fire"

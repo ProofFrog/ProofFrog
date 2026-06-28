@@ -557,3 +557,61 @@ def test_no_substitution_after_replacement_reassignment() -> None:
     game = frog_parser.parse_game(source)
     result = IfConditionAliasSubstitutionTransformer().transform(game)
     assert result == game, "replacement reassignment must stop substitution (A4)"
+
+
+def test_no_phase1_inline_when_field_defined_in_oracle() -> None:
+    """F-076: a field assigned once in an ORACLE (`SetA(){ A = B; }`) is a
+    single ASSIGNMENT SITE but not a single runtime write -- the adversary can
+    call SetA, then SetB to change B, then read A, leaving A a stale snapshot.
+    The alias `A -> B` is stable only when A and B are written exactly once in
+    Initialize.  Here neither is, so Phase 1 must NOT inline A in Test()."""
+    source = """
+    Game Real() {
+        Int A;
+        Int B;
+        Void SetB(Int x) { B = x; }
+        Void SetA() { A = B; }
+        Int Test(Int y) {
+            if (y == B) {
+                return A;
+            }
+            return 0;
+        }
+    }
+    """
+    game = frog_parser.parse_game(source)
+    result = IfConditionAliasSubstitutionTransformer().transform(game)
+    test_method = result.get_method("Test")
+    if_stmt = test_method.block.statements[0]
+    assert isinstance(if_stmt, frog_ast.IfStatement)
+    ret_stmt = if_stmt.blocks[0].statements[0]
+    assert isinstance(ret_stmt, frog_ast.ReturnStatement)
+    assert (
+        isinstance(ret_stmt.expression, frog_ast.Variable)
+        and ret_stmt.expression.name == "A"
+    ), "oracle-assigned field A must not be inlined to B (stale-snapshot)"
+
+
+def test_phase1_inline_still_fires_for_initialize_only_fields() -> None:
+    """Positive control: when both the field and its definition's free fields
+    are written exactly once in Initialize, the alias is stable and Phase 1
+    still inlines (the legitimate cross-method pattern)."""
+    source = """
+    Game G() {
+        Int A;
+        Int B;
+        Void Initialize() {
+            B = 5;
+            A = B;
+        }
+        Int Test(Int y) {
+            if (y == B) {
+                return A;
+            }
+            return 0;
+        }
+    }
+    """
+    game = frog_parser.parse_game(source)
+    result = IfConditionAliasSubstitutionTransformer().transform(game)
+    assert result != game, "Initialize-only field alias should still inline"

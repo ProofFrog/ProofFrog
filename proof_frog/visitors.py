@@ -322,9 +322,7 @@ class InstantiationTransformer(Transformer):
         saved = self._mutable_fields
         written: set[str] = set()
         for field in getattr(node, "fields", []):
-            if field.value is not None and reassigns_or_rebinds(
-                {field.name}, node
-            ):
+            if field.value is not None and reassigns_or_rebinds({field.name}, node):
                 written.add(field.name)
         self._mutable_fields = written
         try:

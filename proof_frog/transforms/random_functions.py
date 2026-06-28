@@ -229,9 +229,14 @@ def _analyze_block(
     uniq_guards: dict[str, str] = {}
 
     for statement in block.statements:
-        # Track <-uniq bindings
-        if isinstance(statement, frog_ast.UniqueSample) and isinstance(
-            statement.var, frog_ast.Variable
+        # Track <-uniq bindings. Only the stateful `<-uniq[S]` form
+        # accumulates draws into S (S = S union {x}); the pure `x <- T \ E`
+        # form performs no insertion, so it does NOT guarantee cross-call
+        # distinctness and must not seed a uniq guard.
+        if (
+            isinstance(statement, frog_ast.UniqueSample)
+            and statement.surface_form == "uniq"
+            and isinstance(statement.var, frog_ast.Variable)
         ):
             set_name = _get_unique_set_name(statement.unique_set)
             # The unique set must be a game field (persistent across oracle
@@ -1207,6 +1212,9 @@ def _proj_tracked_in_set(
     def visit(node: frog_ast.ASTNode) -> bool:
         if (
             isinstance(node, frog_ast.UniqueSample)
+            # Only `<-uniq[S]` inserts the draw into S; `x <- T \ S` does not,
+            # so a minus-form draw is NOT guaranteed to be in set_name.
+            and node.surface_form == "uniq"
             and isinstance(node.var, frog_ast.Variable)
             and isinstance(proj, frog_ast.Variable)
             and node.var.name == proj.name

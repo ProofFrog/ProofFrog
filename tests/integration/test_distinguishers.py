@@ -974,3 +974,150 @@ def test_guarded_field_element_write_not_dropped() -> None:
         """
     )
     assert not _engine_with().check_equivalent(real, random).valid
+
+
+# --------------------------------------------------------------------------
+# RC2 uniq/minus split. The two surface forms are distinct constructs:
+# `x <-uniq[S] T` inserts the draw into S (S = S union {x}, observable),
+# while `x <- T \ E` performs no insertion. The engine must not conflate
+# them, and the observable insertion must survive dead-code elimination.
+# --------------------------------------------------------------------------
+
+
+def test_uniq_sample_is_not_dead_code() -> None:
+    """F-004: an unused `x <-uniq[S]` still mutates S, so its insertion is
+    observable via |S| on a later call. Removing it (as if dead) would erase
+    that effect; the game with the sample is NOT equivalent to the one
+    without it."""
+    with_sample = frog_parser.parse_game(
+        """
+        Game WithSample() {
+            Set<BitString<8>> S;
+            Int Query() {
+                BitString<8> x <-uniq[S] BitString<8>;
+                return 0;
+            }
+            Int Size() { return |S|; }
+        }
+        """
+    )
+    without_sample = frog_parser.parse_game(
+        """
+        Game WithoutSample() {
+            Set<BitString<8>> S;
+            Int Query() {
+                return 0;
+            }
+            Int Size() { return |S|; }
+        }
+        """
+    )
+    assert not _engine_with().check_equivalent(with_sample, without_sample).valid
+
+
+def test_minus_sample_with_unused_target_is_dead_code() -> None:
+    """Control: the pure `x <- T \\ E` form has no side effect, so an unused
+    draw IS dead code -- the game with it equals the game without it."""
+    with_sample = frog_parser.parse_game(
+        """
+        Game WithSample() {
+            Set<BitString<8>> S;
+            Int Query() {
+                BitString<8> x <- BitString<8> \\ S;
+                return 0;
+            }
+            Int Size() { return |S|; }
+        }
+        """
+    )
+    without_sample = frog_parser.parse_game(
+        """
+        Game WithoutSample() {
+            Set<BitString<8>> S;
+            Int Query() {
+                return 0;
+            }
+            Int Size() { return |S|; }
+        }
+        """
+    )
+    assert _engine_with().check_equivalent(with_sample, without_sample).valid
+
+
+def test_uniq_and_minus_forms_not_equivalent() -> None:
+    """F-093/conflation: a game whose not-(p&&q) path draws via the stateful
+    uniq form is NOT equivalent to one drawing via the pure minus form on the
+    fall-through path -- they differ in the observable |S| after Query(false,
+    false). Previously the engine conflated the forms and accepted the hop."""
+    nested_minus = frog_parser.parse_game(
+        """
+        Game Left() {
+            Set<BitString<8>> S;
+            Int Query(Bool p, Bool q) {
+                if (p) {
+                    if (q) { return 0; }
+                    BitString<8> x <-uniq[S] BitString<8>;
+                    return 1;
+                }
+                BitString<8> y <- BitString<8> \\ S;
+                return 1;
+            }
+            Int Size() { return |S|; }
+        }
+        """
+    )
+    merged_uniq = frog_parser.parse_game(
+        """
+        Game Right() {
+            Set<BitString<8>> S;
+            Int Query(Bool p, Bool q) {
+                if (p && q) { return 0; }
+                BitString<8> x <-uniq[S] BitString<8>;
+                return 1;
+            }
+            Int Size() { return |S|; }
+        }
+        """
+    )
+    assert not _engine_with().check_equivalent(nested_minus, merged_uniq).valid
+
+
+def test_redundant_conditional_return_uniq_not_collapsed_onto_minus() -> None:
+    """F-089: RedundantConditionalReturn must not collapse a stateful
+    `<-uniq[Seen]` guarded body onto a pure `<- T \\ Seen` fall-through -- doing
+    so deletes the observable `Seen union {x}` insertion. With b always true,
+    Real grows Seen each Draw while Ideal never does, so they are not
+    equivalent (observable via |Seen|)."""
+    real = frog_parser.parse_game(
+        """
+        Game Real() {
+            Set<BitString<8>> Seen;
+            Bool b;
+            Void Initialize() { b = true; }
+            BitString<8> Draw() {
+                if (b) {
+                    BitString<8> x <-uniq[Seen] BitString<8>;
+                    return x;
+                }
+                BitString<8> y <- BitString<8> \\ Seen;
+                return y;
+            }
+            Int Count() { return |Seen|; }
+        }
+        """
+    )
+    ideal = frog_parser.parse_game(
+        """
+        Game Ideal() {
+            Set<BitString<8>> Seen;
+            Bool b;
+            Void Initialize() { b = true; }
+            BitString<8> Draw() {
+                BitString<8> y <- BitString<8> \\ Seen;
+                return y;
+            }
+            Int Count() { return |Seen|; }
+        }
+        """
+    )
+    assert not _engine_with().check_equivalent(real, ideal).valid

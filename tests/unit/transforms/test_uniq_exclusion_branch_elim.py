@@ -341,3 +341,108 @@ def test_uniq_exclusion_fires_on_deterministic_control() -> None:
     ctx = _ctx_with()
     result = UniqExclusionBranchElimination().apply(game, ctx)
     assert result != game  # the comparison was folded to false
+
+
+# ---------------------------------------------------------------------------
+# RC2 self-reference guard (F-070): an exclusion element that mentions the
+# sampled variable itself denotes the variable's pre-draw value, so a later
+# equality on that variable must NOT be folded (`x <- T \\ {x}; if (x == x)`).
+# ---------------------------------------------------------------------------
+
+
+def test_uniq_exclusion_self_reference_not_folded() -> None:
+    method = frog_parser.parse_method("""
+        Int f() {
+            BitString<8> x <- BitString<8>;
+            x <- BitString<8> \\ {x};
+            if (x == x) {
+                return 1;
+            }
+            return 0;
+        }
+        """)
+    ctx = _ctx_with()
+    transformer = UniqExclusionBranchEliminationTransformer(ctx)
+    transformed = transformer.transform(method)
+    assert transformed == method  # x == x not folded to false
+    assert any(
+        nm.transform_name == "Uniq Exclusion Branch Elimination"
+        and "pre-draw" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_uniq_exclusion_keeps_non_self_elements() -> None:
+    """Control: a self-referential element is dropped but a sibling
+    non-self element still folds (`c <- T \\ {a, c}` keeps the `a` exclusion)."""
+    method = frog_parser.parse_method("""
+        Int f() {
+            BitString<8> a <- BitString<8>;
+            BitString<8> c <- BitString<8> \\ {a, c};
+            if (c == a) {
+                return 1;
+            }
+            return 0;
+        }
+        """)
+    transformer = UniqExclusionBranchEliminationTransformer(_ctx_with())
+    transformed = transformer.transform(method)
+    expected = frog_parser.parse_method("""
+        Int f() {
+            BitString<8> a <- BitString<8>;
+            BitString<8> c <- BitString<8> \\ {a, c};
+            if (false) {
+                return 1;
+            }
+            return 0;
+        }
+        """)
+    assert transformed == expected
+
+
+# ---------------------------------------------------------------------------
+# RC2 auto-add tracking (F-072): the stateful `<-uniq[S]` form implicitly
+# inserts into S, so a constraint whose element reads S must be invalidated
+# when a later draw mutates S; otherwise it folds against a stale snapshot.
+# ---------------------------------------------------------------------------
+
+
+def test_uniq_exclusion_invalidated_by_later_auto_add() -> None:
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            Set<BitString<8>> S;
+            Array<BitString<8>, n> A;
+            Bool Oracle() {
+                BitString<8> x <- BitString<8> \\ {A[|S|]};
+                BitString<8> z <-uniq[S] BitString<8>;
+                if (x == A[|S|]) {
+                    return true;
+                }
+                return false;
+            }
+        }
+        """)
+    ctx = _ctx_with()
+    result = UniqExclusionBranchElimination().apply(game, ctx)
+    assert result == game  # |S| changed by the auto-add: no fold
+
+
+def test_uniq_exclusion_folds_without_intervening_auto_add() -> None:
+    """Control: with no later mutation of S, the `x != A[|S|]` constraint
+    holds and the comparison folds to false."""
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            Set<BitString<8>> S;
+            Array<BitString<8>, n> A;
+            Bool Oracle() {
+                BitString<8> x <- BitString<8> \\ {A[|S|]};
+                if (x == A[|S|]) {
+                    return true;
+                }
+                return false;
+            }
+        }
+        """)
+    ctx = _ctx_with()
+    result = UniqExclusionBranchElimination().apply(game, ctx)
+    assert result != game  # folded to false

@@ -1,4 +1,10 @@
-"""Tests for surface-sugar ``<- T \\ S`` desugaring to ``<-uniq[S] T``."""
+"""Tests for the ``<- T \\ S`` (set-minus) sampling form.
+
+``x <- T \\ S`` and ``x <-uniq[S] T`` parse to the same ``UniqueSample`` node
+kind but are DISTINCT constructs: ``<-uniq[S]`` is stateful freshness that
+implicitly inserts the draw into ``S`` (``S = S union {x}``), while ``<- T \\ S``
+is a pure one-shot exclusion draw with no insertion. They are recorded by
+``surface_form`` and are NOT equal under ``__eq__`` (RC2 uniq/minus split)."""
 
 import tempfile
 
@@ -46,16 +52,29 @@ def test_sugar_without_type_desugars_to_unique_sample() -> None:
     assert isinstance(stmt.sampled_from, frog_ast.ModIntType)
 
 
-def test_sugar_roundtrips_equal_to_uniq_form() -> None:
-    gf_sugar = _parse_game(
+def test_minus_and_uniq_forms_are_distinct() -> None:
+    # The two surface forms differ semantically (auto-add vs none), so they
+    # must NOT compare equal -- conflating them is the RC2 unsoundness
+    # (F-093/F-089). They differ only in `surface_form`.
+    gf_minus = _parse_game(
         _TEMPLATE.format(stmt="ModInt<5> x <- ModInt<5> \\ {0};")
     )
     gf_uniq = _parse_game(
         _TEMPLATE.format(stmt="ModInt<5> x <-uniq[{0}] ModInt<5>;")
     )
-    s1 = gf_sugar.games[0].methods[0].block.statements[0]
+    s1 = gf_minus.games[0].methods[0].block.statements[0]
     s2 = gf_uniq.games[0].methods[0].block.statements[0]
-    assert s1 == s2
+    assert isinstance(s1, frog_ast.UniqueSample)
+    assert isinstance(s2, frog_ast.UniqueSample)
+    assert s1.surface_form == "minus"
+    assert s2.surface_form == "uniq"
+    assert s1 != s2
+    # ... but two samples of the SAME form with equal operands are equal.
+    gf_minus2 = _parse_game(
+        _TEMPLATE.format(stmt="ModInt<5> x <- ModInt<5> \\ {0};")
+    )
+    s3 = gf_minus2.games[0].methods[0].block.statements[0]
+    assert s1 == s3
 
 
 def test_existing_sample_without_backslash_still_parses() -> None:

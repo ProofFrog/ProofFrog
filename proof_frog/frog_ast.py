@@ -44,11 +44,16 @@ class ASTNode:
         if type(self) is not type(other):
             return False
 
-        # Compare all attributes
+        # Compare all attributes. Only true source-position / provenance
+        # metadata is non-semantic and excluded. NOTE: `surface_form` on
+        # `UniqueSample` is deliberately NOT excluded -- the `<-uniq[S]`
+        # (stateful, auto-adds the draw to S) and `x <- T \ E` (pure one-shot
+        # exclusion, no insertion) surface forms are distinct constructs with
+        # different observable semantics, so they must not compare equal.
         return all(
             (
                 True
-                if attr in {"line_num", "column_num", "origin", "surface_form"}
+                if attr in {"line_num", "column_num", "origin"}
                 else getattr(self, attr) == getattr(other, attr)
             )
             for attr in self.__dict__
@@ -611,9 +616,13 @@ class UniqueSample(Statement):
         self.var = var
         self.unique_set = unique_set
         self.sampled_from = sampled_from
-        # Purely presentational; preserves author's chosen surface syntax
-        # through parse/unparse. Not compared in __eq__ (inherited from AST
-        # base, which ignores non-semantic metadata like `origin`).
+        # Semantic: distinguishes the two distinct sampling constructs.
+        # "uniq" (`x <-uniq[S] T`) is stateful freshness -- it implicitly
+        # inserts the draw into S (S = S union {x}), an adversary-observable
+        # mutation. "minus" (`x <- T \ E`) is a pure one-shot exclusion draw
+        # with no insertion. They have different semantics, so __eq__ compares
+        # this field; any pass that reconstructs a UniqueSample MUST preserve
+        # it.
         self.surface_form = surface_form
 
     def __str__(self) -> str:

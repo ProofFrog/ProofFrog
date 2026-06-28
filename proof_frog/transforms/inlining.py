@@ -2537,6 +2537,7 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
                     frog_ast.Variable(new_name),
                     copy.deepcopy(old.unique_set),
                     copy.deepcopy(old.sampled_from),
+                    old.surface_form,
                 )
             elif isinstance(old, frog_ast.Assignment):
                 new_stmts[def_idx] = frog_ast.Assignment(

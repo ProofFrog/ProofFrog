@@ -50,8 +50,11 @@ class TestModIntSampling:
 
 
 class TestModIntUniqSample:
-    def test_uniq_excludes_zero_literal(self) -> None:
-        _check_game("""
+    def test_uniq_literal_exclusion_rejected(self) -> None:
+        # The stateful `<-uniq[S]` form requires a mutable Set lvalue (or an
+        # RF `.domain`); a literal exclusion set has nowhere to insert and
+        # belongs to the pure `<- T \\ {0}` form (RC2 uniq/minus split).
+        _check_game_fails("""
             Game G(Int q) {
                 Void Initialize() {
                     ModInt<q> a <-uniq[{0}] ModInt<q>;
@@ -59,11 +62,22 @@ class TestModIntUniqSample:
             }
             """)
 
-    def test_uniq_excludes_multiple_literals(self) -> None:
-        _check_game("""
+    def test_uniq_multiple_literals_rejected(self) -> None:
+        _check_game_fails("""
             Game G(Int q) {
                 Void Initialize() {
                     ModInt<q> a <-uniq[{0, 1, 2}] ModInt<q>;
+                }
+            }
+            """)
+
+    def test_uniq_mutable_set_field_accepted(self) -> None:
+        # The mutable Set lvalue form is the valid `<-uniq[S]` use.
+        _check_game("""
+            Game G(Int q) {
+                Set<ModInt<q>> seen;
+                Void Initialize() {
+                    ModInt<q> a <-uniq[seen] ModInt<q>;
                 }
             }
             """)

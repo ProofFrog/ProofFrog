@@ -158,3 +158,45 @@ def test_stale_length_after_redeclaration_not_simplified() -> None:
     # correct 2*lambda length for `a`, z[lambda:2*lambda] does not align with a
     # component boundary, so the splice is left intact.
     assert "return b;" not in str(transformed), str(transformed)
+
+
+def test_unique_sample_rebind_blocks_splice() -> None:
+    """F-066: a `<- T \\ S` (or `<-uniq[S]`) rebind of a concat component
+    between the concatenation and a slice use must block the splice rewrite.
+    The slice reads the value at concat time; rewriting it to the re-sampled
+    component would read the wrong (post-rebind) value. The reassignment scan
+    previously saw only Assignment/Sample, so the UniqueSample rebind was
+    invisible and the slice was wrongly rewritten."""
+    method = """
+    Void f() {
+        BitString<lambda> a = g();
+        BitString<lambda> b = g();
+        BitString<2 * lambda> x = a || b;
+        a <- BitString<lambda> \\ {a};
+        BitString<lambda> a2 = x[0 : lambda];
+    }
+    """
+    method_ast = frog_parser.parse_method(method)
+    transformed = SimplifySpliceTransformer({"lambda": Symbol("lambda")}).transform(
+        method_ast
+    )
+    # Unchanged: the slice is not rewritten to the re-sampled `a`.
+    assert transformed == frog_parser.parse_method(method)
+
+
+def test_unrelated_unique_sample_does_not_block_splice() -> None:
+    """Control: a UniqueSample rebind of an UNRELATED variable does not block
+    the splice; `a2 = x[0:lambda]` still rewrites to `a`."""
+    method = """
+    Void f() {
+        BitString<lambda> a = g();
+        BitString<lambda> b = g();
+        BitString<2 * lambda> x = a || b;
+        BitString<lambda> c <- BitString<lambda> \\ {a};
+        BitString<lambda> a2 = x[0 : lambda];
+    }
+    """
+    transformed = SimplifySpliceTransformer({"lambda": Symbol("lambda")}).transform(
+        frog_parser.parse_method(method)
+    )
+    assert "a2 = a;" in str(transformed), str(transformed)

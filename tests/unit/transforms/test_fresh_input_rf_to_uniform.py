@@ -80,7 +80,11 @@ def test_fires_when_exclusion_is_rf_domain() -> None:
 
 
 def test_fires_rf_domain_even_with_adversary_oracle() -> None:
-    # H is also exposed via Hash, but S == H.domain covers those queries too.
+    # H is also exposed via Hash. Whether H.domain tracks those plain queries
+    # (standard ROM) or only `<-uniq[H.domain]` draws (USER-ATTENTION sec 1.b)
+    # is the contested F-002/F-003 ruling; regime A currently trusts the former,
+    # which the ROM example corpus relies on. F-002 is ESCALATED, so this stays
+    # a positive (fires) test pending the ruling.
     _assert_game(
         """
         Game G() {
@@ -300,3 +304,87 @@ def test_does_not_fire_inside_loop() -> None:
             }
         }
         """)
+
+
+def test_f001_conditional_tracking_add_not_fresh() -> None:
+    """F-001 (attack_a): the tracking-add `seen = seen union {x}` is nested under
+    `if (flag)`, so a Probe(x, false) queries RF(x) WITHOUT recording x; a later
+    `v <-uniq[seen]` could draw v == x, making RF(v) a stale re-query.  Decline."""
+    _assert_unchanged(
+        """
+        Game G(Int n, Int m) {
+            Function<BitString<n>, BitString<m>> RF;
+            Set<BitString<n>> seen;
+            Void Initialize() {
+                RF <- Function<BitString<n>, BitString<m>>;
+            }
+            BitString<m> Probe(BitString<n> x, Bool flag) {
+                BitString<m> z = RF(x);
+                if (flag) {
+                    seen = seen union {x};
+                }
+                return z;
+            }
+            BitString<m> Fresh() {
+                BitString<n> v <-uniq[seen] BitString<n>;
+                return RF(v);
+            }
+        }
+        """
+    )
+
+
+def test_f001_tracking_add_after_early_return_not_fresh() -> None:
+    """F-001 (attack_b): the tracking-add is placed AFTER an early return
+    `if (flag) return z;`, so on the flag=true path RF(x) ran but x was never
+    recorded.  Decline."""
+    _assert_unchanged(
+        """
+        Game G(Int n, Int m) {
+            Function<BitString<n>, BitString<m>> RF;
+            Set<BitString<n>> seen;
+            Void Initialize() {
+                RF <- Function<BitString<n>, BitString<m>>;
+            }
+            BitString<m> Probe(BitString<n> x, Bool flag) {
+                BitString<m> z = RF(x);
+                if (flag) {
+                    return z;
+                }
+                seen = seen union {x};
+                return z;
+            }
+            BitString<m> Fresh() {
+                BitString<n> v <-uniq[seen] BitString<n>;
+                return RF(v);
+            }
+        }
+        """
+    )
+
+
+def test_f001_unconditional_tracking_add_still_fires() -> None:
+    """Positive control: an unconditional top-level `seen = seen union {x}`
+    records every RF query, so the fresh-input rewrite still fires."""
+    transformed, _ = _apply(
+        """
+        Game G(Int n, Int m) {
+            Function<BitString<n>, BitString<m>> RF;
+            Set<BitString<n>> seen;
+            Void Initialize() {
+                RF <- Function<BitString<n>, BitString<m>>;
+            }
+            BitString<m> Probe(BitString<n> x) {
+                seen = seen union {x};
+                BitString<m> z = RF(x);
+                return z;
+            }
+            BitString<m> Fresh() {
+                BitString<n> v <-uniq[seen] BitString<n>;
+                return RF(v);
+            }
+        }
+        """
+    )
+    src = str(transformed)
+    assert "<- BitString<m>" in src and "RF(v)" not in src

@@ -1240,46 +1240,76 @@ def _index_of_var_in_arg(arg: frog_ast.Expression, var_name: str) -> int | None 
     return False
 
 
+def _contains_return(node: frog_ast.ASTNode) -> bool:
+    """True if *node* contains a ``return`` statement anywhere."""
+    return (
+        SearchVisitor(
+            lambda n: isinstance(n, frog_ast.ReturnStatement)
+        ).visit(node)
+        is not None
+    )
+
+
+def _is_union_add(
+    stmt: frog_ast.Statement, set_name: str, proj: frog_ast.Expression
+) -> bool:
+    """True if *stmt* is exactly ``set_name = set_name union {... proj ...}``."""
+    return (
+        isinstance(stmt, frog_ast.Assignment)
+        and isinstance(stmt.var, frog_ast.Variable)
+        and stmt.var.name == set_name
+        and isinstance(stmt.value, frog_ast.BinaryOperation)
+        and stmt.value.operator
+        in (frog_ast.BinaryOperators.UNION, frog_ast.BinaryOperators.ADD)
+        and isinstance(stmt.value.left_expression, frog_ast.Variable)
+        and stmt.value.left_expression.name == set_name
+        and isinstance(stmt.value.right_expression, frog_ast.Set)
+        and any(elem == proj for elem in stmt.value.right_expression.elements)
+    )
+
+
 def _proj_tracked_in_set(
     method: frog_ast.Method, set_name: str, proj: frog_ast.Expression
 ) -> bool:
-    """True if *proj* is guaranteed to be in *set_name* within *method*.
+    """True if *proj* is guaranteed to be in *set_name* on EVERY path through
+    *method* (path-sensitive -- audit F-001).
 
-    Either *proj* is a variable sampled ``<-uniq[set_name]``, or *method*
-    contains ``set_name = set_name union {... proj ...}`` (or ``+``).
+    Two tracking forms qualify:
+
+    - *proj* is a variable sampled ``<-uniq[set_name]``: the draw IS the
+      insertion and the RF call uses the same drawn value, so the two are
+      path-consistent wherever the draw occurs.
+    - an UNCONDITIONAL top-level ``set_name = set_name union {... proj ...}``
+      that runs on every invocation.  A conditional add (nested under an
+      ``if``) or one placed after an early return lets an RF query slip
+      through untracked, so only a top-level add reached before any
+      early-return-bearing statement counts.
     """
-    found = [False]
-
-    def visit(node: frog_ast.ASTNode) -> bool:
-        if (
+    # Form 1: <-uniq[set_name] draw (anywhere -- path-consistent with its use).
+    def is_uniq_draw(node: frog_ast.ASTNode) -> bool:
+        return (
             isinstance(node, frog_ast.UniqueSample)
-            # Only `<-uniq[S]` inserts the draw into S; `x <- T \ S` does not,
-            # so a minus-form draw is NOT guaranteed to be in set_name.
+            # Only `<-uniq[S]` inserts the draw into S; `x <- T \ S` does not.
             and node.surface_form == "uniq"
             and isinstance(node.var, frog_ast.Variable)
             and isinstance(proj, frog_ast.Variable)
             and node.var.name == proj.name
             and isinstance(node.unique_set, frog_ast.Variable)
             and node.unique_set.name == set_name
-        ):
-            found[0] = True
-        if (
-            isinstance(node, frog_ast.Assignment)
-            and isinstance(node.var, frog_ast.Variable)
-            and node.var.name == set_name
-            and isinstance(node.value, frog_ast.BinaryOperation)
-            and node.value.operator
-            in (frog_ast.BinaryOperators.UNION, frog_ast.BinaryOperators.ADD)
-            and isinstance(node.value.left_expression, frog_ast.Variable)
-            and node.value.left_expression.name == set_name
-            and isinstance(node.value.right_expression, frog_ast.Set)
-            and any(elem == proj for elem in node.value.right_expression.elements)
-        ):
-            found[0] = True
-        return False
+        )
 
-    SearchVisitor(visit).visit(method.block)
-    return found[0]
+    if SearchVisitor(is_uniq_draw).visit(method.block) is not None:
+        return True
+
+    # Form 2: an unconditional top-level union-add, reached before any
+    # statement that can return early on some path.
+    for stmt in method.block.statements:
+        if _is_union_add(stmt, set_name, proj):
+            return True
+        if _contains_return(stmt):
+            # An early return here would skip a later add on some path.
+            break
+    return False
 
 
 def _set_only_monotone(game: frog_ast.Game, set_name: str) -> bool:
@@ -1343,7 +1373,14 @@ def _exclusion_adequate(
     """Whether ``v <-uniq[set_name]`` at projection *proj_index* of an
     ``rf_name(arg)`` call guarantees the queried point is fresh for ``rf_name``.
     See the regime (A)/(B) discussion above."""
-    # Regime (A): the exclusion set is the called RF's own domain.
+    # Regime (A): the exclusion set is the called RF's own domain.  Whether
+    # `RF.domain` tracks plain `RF(x)` evaluations (standard ROM table) or only
+    # `<-uniq[RF.domain]` draws (USER-ATTENTION sec 1.b) is a CONTESTED semantics
+    # ruling and the crux of F-002/F-003: tightening regime A to require every
+    # RF query to be a tracked fresh draw rejects standard ROM proofs (the
+    # adversary `Hash(x){ return H(x); }` oracle) that the example corpus relies
+    # on.  Per Principle 6/7 this is left as-is pending the user's ruling; F-002
+    # is ESCALATED.
     if set_name == f"{rf_name}.domain" and proj_index is None:
         return True
     # Regime (B): persistent, never-reset field that tracks the k-th

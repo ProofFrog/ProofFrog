@@ -342,3 +342,29 @@ def test_aer_fires_on_deterministic_control() -> None:
     ctx = _aer_ctx(D=_aer_det_prim(), F=_aer_det_prim())
     result = AbsorbRedundantEarlyReturn().apply(game, ctx)
     assert result != game  # the early-return guard was absorbed
+
+
+def test_intervening_body_writes_guard_free_var_not_absorbed() -> None:
+    """F-110: an intervening if-body reassigns a free variable of the early
+    guard P (`if (a) { flag = 1; }` with `P == flag == 1`).  In the original
+    the later body `if (b) { out = flag; }` runs unconditionally, but the
+    rewrite would gate it on a now-false negated P -- O1(true, true) returns 1
+    in the original vs 0 in the rewrite.  Must DECLINE."""
+    method = """
+        Int O1(Bool a, Bool b) {
+            if (flag == 1) {
+                return out;
+            }
+            if (a) {
+                flag = 1;
+            }
+            if (b) {
+                out = flag;
+            }
+            return out;
+        }
+        """
+    parsed = frog_parser.parse_method(method)
+    expected = frog_parser.parse_method(method)
+    result = AbsorbRedundantEarlyReturnTransformer().transform(parsed)
+    assert result == expected, f"absorb wrongly fired across a guard-var write:\n{result}"

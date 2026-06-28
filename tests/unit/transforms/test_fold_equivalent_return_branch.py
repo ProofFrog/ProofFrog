@@ -141,3 +141,40 @@ def test_deterministic_init_field_rhs_enables_fold() -> None:
     ctx = _ctx_with(D=prim, F=prim)
     result = FoldEquivalentReturnBranch().apply(game, ctx)
     assert result != game  # the trivially-equal branch folded
+
+
+def test_init_rhs_field_reassigned_in_oracle_not_folded() -> None:
+    """F-120: the Init-only RHS ``G = F.eval(k)`` references the field ``k``,
+    which an oracle reassigns (``k = kp``).  At the fold site ``F.eval(k)``
+    denotes ``F.eval(kp)``, not the stored ``G = F.eval(k_init)``, so the
+    substitution that would fold ``if (flag) return G; return F.eval(k)`` into
+    ``return F.eval(k)`` is unsound -- the pass must DECLINE."""
+    prim = frog_parser.parse_primitive_file(
+        "Primitive D(Int n) { deterministic BitString<n> eval(BitString<n> x); "
+        "BitString<n> KeyGen(); }"
+    )
+    game = frog_parser.parse_game("""
+        Game Collapse(D F, Int n) {
+            BitString<n> k;
+            BitString<n> G;
+            Void Initialize() {
+                k = F.KeyGen();
+                G = F.eval(k);
+            }
+            BitString<n> Oracle(Bool flag, BitString<n> kp) {
+                k = kp;
+                if (flag) {
+                    return G;
+                }
+                return F.eval(k);
+            }
+        }
+        """)
+    ctx = _ctx_with(D=prim, F=prim)
+    result = FoldEquivalentReturnBranch().apply(game, ctx)
+    assert result == game, "fold wrongly fired across a reassigned RHS field"
+    assert any(
+        nm.transform_name == "Fold Equivalent Return Branch"
+        and "reassigned outside Initialize" in nm.reason
+        for nm in ctx.near_misses
+    )

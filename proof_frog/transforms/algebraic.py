@@ -280,6 +280,43 @@ class UniformModIntSimplificationTransformer(BlockTransformer):
             if add_node is None:
                 continue
 
+            # The "used exactly once" count above is textual.  If the single
+            # textual use sits inside a loop body while the sample is outside
+            # that loop, the same uniform value is consumed once PER ITERATION
+            # -- e.g. `t <- ModInt<q>; for (...) { acc = acc + t; }` over a
+            # two-element range leaves acc = 2t (even-only support), not the
+            # uniform t the absorption would produce.  Decline (audit F-132c).
+            def _loop_contains_use(
+                node: frog_ast.ASTNode, target: frog_ast.ASTNode = add_node
+            ) -> bool:
+                return isinstance(
+                    node, (frog_ast.NumericFor, frog_ast.GenericFor)
+                ) and (
+                    SearchVisitor(lambda n, t=target: n is t).visit(node) is not None
+                )
+
+            if SearchVisitor(_loop_contains_use).visit(remaining_block) is not None:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Uniform ModInt Simplification",
+                            reason=(
+                                f"Uniform-ModInt did not fire for '{var_name}': "
+                                f"its additive use is inside a loop while the "
+                                f"sample is outside, so the value is reused across "
+                                f"iterations (not single-use)"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"Move the sample of '{var_name}' inside the loop "
+                                f"if a fresh draw per iteration is intended"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
+                continue
+
             # Replace the BinaryOperation with just the uniform variable
             assert isinstance(add_node, frog_ast.BinaryOperation)
             if (

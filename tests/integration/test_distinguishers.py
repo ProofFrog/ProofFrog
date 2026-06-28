@@ -1071,3 +1071,35 @@ def test_reassigned_field_initializer_not_substituted() -> None:
         }
         """)
     assert not _engine_with().check_equivalent(real, random).valid
+
+
+def test_modint_loop_reused_uniform_not_absorbed() -> None:
+    """A uniform ModInt sampled once outside a two-iteration loop and added into
+    an accumulator each pass leaves `acc = 2t` (even-only support), which is not
+    distributionally equal to a single `acc = t` (uniform).  The engine must not
+    absorb the loop-reused uniform (audit F-132c)."""
+    twice = frog_parser.parse_game("""
+        Game Twice() {
+            ModInt<16> acc;
+            Void Probe() {
+                acc = 0;
+                ModInt<16> t <- ModInt<16>;
+                for (ModInt<16> i in {1, 2}) {
+                    acc = acc + t;
+                }
+            }
+            ModInt<16> GetAcc() { return acc; }
+        }
+        """)
+    once = frog_parser.parse_game("""
+        Game Once() {
+            ModInt<16> acc;
+            Void Probe() {
+                acc = 0;
+                ModInt<16> t <- ModInt<16>;
+                acc = t;
+            }
+            ModInt<16> GetAcc() { return acc; }
+        }
+        """)
+    assert not _engine_with().check_equivalent(twice, once).valid

@@ -497,8 +497,25 @@ class _GroupExpShape(WrapperShape):
             )
         k_expr = self.k_expr
         if isinstance(k_expr, frog_ast.Integer):
-            if k_expr.num == 0:  # pylint: disable=no-member
-                misses.append("exponent k is the literal 0; x^0 is not injective")
+            # On a group of (symbolic) prime order q, `x ↦ x^k` is injective
+            # iff `q` does not divide `k` (equivalently gcd(k, q) == 1).  For
+            # a LITERAL exponent and an UNKNOWN prime q (only `q is prime` is
+            # asserted, so q ranges over every prime >= 2), the only values
+            # provably coprime to every such q are k = +/-1: any |k| >= 2 has
+            # a prime factor p, and the instantiation q = p makes x^k =
+            # G.identity for all x, collapsing every key (F-139, e.g. q = 3,
+            # k = 3).  Reject any literal other than +/-1.
+            if abs(k_expr.num) != 1:  # pylint: disable=no-member
+                if k_expr.num == 0:  # pylint: disable=no-member
+                    misses.append("exponent k is the literal 0; x^0 is not injective")
+                else:
+                    misses.append(
+                        f"exponent k is the literal {k_expr.num}; on a group of "
+                        f"symbolic prime order q the map x^k is injective only "
+                        f"when q does not divide k, which a literal |k| >= 2 "
+                        f"cannot guarantee (q = a prime factor of k collapses "
+                        f"every key)"
+                    )
         elif isinstance(k_expr, frog_ast.Variable):
             if not is_known_nonzero(k_expr.name, game):
                 misses.append(
@@ -506,6 +523,18 @@ class _GroupExpShape(WrapperShape):
                     f"sample it via `<-uniq[{{0}}] T` (or `<- T \\ {{0}}`) "
                     f"so the engine can treat x^{k_expr.name} as injective"
                 )
+        else:
+            # F-140: a compound exponent expression (e.g. `k1 * k2`, a
+            # FuncCall, ...) is neither a literal nor a single variable, so
+            # the engine cannot certify it is nonzero / coprime to q.  Without
+            # an explicit fallback such a form silently passed every check and
+            # could evaluate to 0 (e.g. a product of plain uniform samples),
+            # making x^0 = G.identity and collapsing every key.  Refuse.
+            misses.append(
+                f"exponent `{k_expr}` is a compound expression that is not "
+                f"known-nonzero; the engine can only certify x^k injective "
+                f"for a literal +/-1 or a known-nonzero variable"
+            )
         return misses
 
 

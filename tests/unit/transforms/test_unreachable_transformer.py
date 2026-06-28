@@ -661,6 +661,28 @@ def test_remove_unreachable_unique_sample_bumps_version() -> None:
     ), f"second if wrongly deleted after <-uniq re-sample:\n{transformed}"
 
 
+def test_remove_unreachable_modint_wraparound_not_deleted() -> None:
+    """RC7 / F-106: Case C must NOT delete a live branch whose reachability
+    depends on ModInt wraparound.  Here ``y <- ModInt<2>`` and ``x = y + 1``,
+    so at ``y == 1`` we get ``x == 0`` (mod 2) and the branch fires (w.p. 1/2).
+    Modelling ModInt as unbounded z3.Int made ``x == y + 1`` imply ``x != 0``
+    when ``y == 1`` (2 != 0 over the integers), falsely proving the branch
+    unsat.  Modelling ModInt as an opaque const blocks the arithmetic, so the
+    branch survives."""
+    method = frog_parser.parse_method("""
+        Int O() {
+            ModInt<2> y <- ModInt<2>;
+            ModInt<2> x = y + 1;
+            if (x == 0 && y == 1) { return 0; }
+            return 1;
+        }
+        """)
+    transformed = RemoveUnreachableTransformer(method).transform(method)
+    assert (
+        _count_ifs(transformed) == 1
+    ), f"live ModInt wraparound branch wrongly deleted:\n{transformed}"
+
+
 def test_remove_unreachable_still_dedups_genuine_duplicate() -> None:
     """Positive control: with NO intervening write, two identical
     conditions are genuinely redundant and the second must still be

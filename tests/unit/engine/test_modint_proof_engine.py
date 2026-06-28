@@ -586,14 +586,18 @@ class TestSymbolicComputationExponentiate:
 
 
 class TestZ3FormulaVisitorModInt:
-    def test_modint_variable_maps_to_z3_int(self) -> None:
-        """ModInt<q> variables should be mapped to Z3 Int sort."""
+    def test_modint_variable_maps_to_opaque_const(self) -> None:
+        """F-106: ModInt<q> variables must NOT be mapped to Z3 Int sort -- mod-q
+        arithmetic differs from unbounded Int, so a ModInt is interned as an
+        opaque (uninterpreted) const.  Modelling it as z3.Int let wraparound-
+        true conditions be falsely proven unsat."""
         tm = _type_map_with(x=_modint(_var("q")))
         visitor = Z3FormulaVisitor(tm)
         expr = _var("x")
         result = visitor.visit(expr)
         assert result is not None
-        assert isinstance(result, z3.ArithRef)
+        # Opaque const, NOT an arithmetic (integer) term.
+        assert not isinstance(result, z3.ArithRef)
 
     def test_modint_equality_produces_z3_formula(self) -> None:
         """x == y where both are ModInt should produce a Z3 boolean formula."""
@@ -610,8 +614,11 @@ class TestZ3FormulaVisitorModInt:
         assert result is not None
         assert z3.is_bool(result)
 
-    def test_modint_addition_produces_z3_arith(self) -> None:
-        """x + y where both are ModInt should produce Z3 arithmetic."""
+    def test_modint_addition_is_untranslatable(self) -> None:
+        """F-106: x + y over ModInt must NOT be modelled as Z3 integer
+        arithmetic (that ignores the mod-q reduction).  With ModInt interned
+        as an opaque const, ``+`` over two opaque consts raises in Z3 and the
+        visitor falls back to None ("untranslatable"), the sound choice."""
         tm = _type_map_with(
             x=_modint(_var("q")),
             y=_modint(_var("q")),
@@ -622,8 +629,7 @@ class TestZ3FormulaVisitorModInt:
             _var("y"),
         )
         result = Z3FormulaVisitor(tm).visit(expr)
-        assert result is not None
-        assert isinstance(result, z3.ArithRef)
+        assert result is None
 
     def test_exponentiate_returns_none(self) -> None:
         """Exponentiation is not supported in Z3; should return None."""

@@ -27,6 +27,7 @@ from ..visitors import (
     ReplaceTransformer,
     Transformer,
     lvalue_base_name,
+    reassigns_or_rebinds,
 )
 from ._base import (
     TransformPass,
@@ -2190,6 +2191,38 @@ class ChallengeExclusionRFToUniformTransformer:
             # Check that Init arg references at least one challenge field
             init_field_refs = _collect_field_vars(resolved_init_arg, field_names)
 
+            # Vector (F-013): the challenge value must be IMMUTABLE.  If any
+            # oracle reassigns a challenge field (e.g. a `Mutate(v){ cf = v; }`
+            # oracle), the per-oracle exclusion guard `param == cf` later
+            # protects a DIFFERENT, adversary-chosen value, so the adversary can
+            # query H at the original challenge point.  H(cf) is then observable
+            # and not an independent uniform draw -- decline.
+            challenge_reassigned = any(
+                reassigns_or_rebinds(init_field_refs, om.block)
+                for om in oracle_methods
+            )
+            if challenge_reassigned:
+                if ctx is not None:
+                    ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Challenge Exclusion RF To Uniform",
+                            reason=(
+                                f"A challenge field used in the Initialize call "
+                                f"to '{rf_name}' is reassigned by an oracle, so the "
+                                "exclusion guard no longer protects the original "
+                                "challenge value; H(cf) becomes observable"
+                            ),
+                            location=None,
+                            suggestion=(
+                                "Do not reassign the challenge field outside "
+                                "Initialize"
+                            ),
+                            variable=rf_name,
+                            method=None,
+                        )
+                    )
+                continue
+
             # Check each oracle method
             all_oracle_ok = True
             for oracle_method in oracle_methods:
@@ -2208,6 +2241,12 @@ class ChallengeExclusionRFToUniformTransformer:
                 challenge_fields = guard.challenge_fields
                 guard_lhs_vars = guard.guard_lhs_vars
                 guard_idx = guard.guard_idx
+
+                # The variables actually appearing in the guard condition (e.g.
+                # `param` in `if (param == cf)`).  Their inequality-to-cf is the
+                # guard's invariant; a later reassignment of one of them breaks
+                # it (vector F-014), distinct from deriving a NEW var below.
+                original_guard_vars = set(guard_lhs_vars)
 
                 # Extend guard vars with variables derived from guard LHS
                 # (e.g., v4 = c[0] where c is the guard parameter)
@@ -2239,6 +2278,35 @@ class ChallengeExclusionRFToUniformTransformer:
                 post_guard_block = frog_ast.Block(
                     list(oracle_method.block.statements[guard_idx + 1 :])
                 )
+
+                # Vector (F-014): a guard variable reassigned after the guard no
+                # longer satisfies the guard's `!= cf` invariant.  E.g.
+                # `if (param == cf) return None; param = cf; return H(param);`
+                # re-queries the excluded point, but the alias resolver freezes
+                # guard vars as `!= cf` leaves and never sees the reassignment.
+                if reassigns_or_rebinds(original_guard_vars, post_guard_block):
+                    if ctx is not None:
+                        ctx.near_misses.append(
+                            NearMiss(
+                                transform_name="Challenge Exclusion RF To Uniform",
+                                reason=(
+                                    "A guard variable is reassigned after the "
+                                    "challenge-exclusion guard, so its inequality "
+                                    "to the challenge no longer holds and an RF "
+                                    "call may re-query the challenge input"
+                                ),
+                                location=None,
+                                suggestion=(
+                                    "Do not reassign the guarded variable between "
+                                    "the guard and the random-function call"
+                                ),
+                                variable=rf_name,
+                                method=oracle_method.signature.name,
+                            )
+                        )
+                    all_oracle_ok = False
+                    break
+
                 guard_stmt = oracle_method.block.statements[guard_idx]
                 assert isinstance(guard_stmt, frog_ast.IfStatement)
 

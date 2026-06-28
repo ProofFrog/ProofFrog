@@ -25,6 +25,7 @@ from ..visitors import (
     VariableCollectionVisitor,
     referenced_variable_names,
     reassigns_or_rebinds,
+    lvalue_base_name,
 )
 from ._base import (
     TransformPass,
@@ -1908,15 +1909,21 @@ class HoistFieldPureAlias(TransformPass):
 
 
 def _count_assigns_recursive(node: frog_ast.ASTNode, name: str) -> int:
-    """Count all assignments/samples to *name* recursively in the AST."""
+    """Count all assignments/samples to *name* recursively in the AST.
+
+    Peels element/slice/field accesses via :func:`lvalue_base_name` so an
+    in-place mutation (``B[0] = 5``, ``B.f = v``) counts as an assignment to
+    ``B`` -- otherwise a single-use-field stability check would treat a
+    later-mutated free-variable field as stable and inline a stale snapshot
+    across methods (audit F-079).
+    """
     count = 0
 
     def _counter(n: frog_ast.ASTNode) -> bool:
         nonlocal count
         if (
             isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
-            and isinstance(n.var, frog_ast.Variable)
-            and n.var.name == name
+            and lvalue_base_name(n.var) == name
         ):
             count += 1
         return False

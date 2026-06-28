@@ -564,3 +564,33 @@ def test_self_referential_field_emits_near_miss() -> None:
         and "references the field itself" in nm.reason
         for nm in ctx.near_misses
     )
+
+
+def test_cross_method_inline_declines_on_element_mutated_free_var() -> None:
+    """Cross-method inlining of ``A = B`` into a later use is only sound when
+    ``B`` is stable between the snapshot and the use.  An in-place element write
+    ``B[0] = 5`` mutates B, so the stability check (``B`` assigned at most once)
+    must now count that write via lvalue_base_name and decline the inline --
+    otherwise a stale snapshot of B is captured (audit F-079, the
+    InlineSingleUseField route of attack5)."""
+    source = """
+    Game Test() {
+        Map<Int, Int> A;
+        Map<Int, Int> B;
+        Void Setup(Map<Int, Int> b0) {
+            B = b0;
+            A = B;
+        }
+        Void Mut() {
+            B[0] = 5;
+        }
+        Int Probe(Map<Int, Int> y) {
+            if (y == B) {
+                return A[0];
+            }
+            return 7;
+        }
+    }
+    """
+    # A must NOT be inlined to B: the game is unchanged.
+    _transform_and_compare(source, source)

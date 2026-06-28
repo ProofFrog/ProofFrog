@@ -997,13 +997,53 @@ class _DistinctConstRFTransformer(BlockTransformer):
                     )
                 continue
 
-            # No overflow guard is needed here: the typechecker assigns
-            # every BinaryNum its concrete source-level width, every
-            # BitStringLiteral its declared length, and the well-formedness
-            # of the call site guarantees every argument typechecks against
-            # the RF's declared domain type.  Two arguments at the same call
-            # site therefore always have the same bit width, and pairwise
-            # distinct keys always represent pairwise distinct bitstrings.
+            # Distinct keys imply distinct bitstrings ONLY when the shared
+            # bit length is a concrete integer >= 1 (F-017).  At length 0 the
+            # type ``BitString<0>`` has a single inhabitant (the empty
+            # string), so EVERY literal -- including ``0^n`` and ``1^n``,
+            # whose keys ("0" vs "allones:n") are textually distinct --
+            # denotes the SAME value.  For a SYMBOLIC length ``n`` the engine
+            # cannot rule out ``n == 0`` (the positivity of a symbolic Int
+            # parameter is unruled; USER-ATTENTION 7.A), so distinct keys can
+            # no longer be trusted to mean distinct inputs and the two RF
+            # evaluations may collapse onto one point.  Require a concrete
+            # length >= 1 before treating the points as distinct.
+            assert literal_lengths  # all_literal implies a non-empty list
+            shared_length = literal_lengths[0]
+            if not (
+                isinstance(shared_length, frog_ast.Integer) and shared_length.num >= 1
+            ):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Distinct Const RF To Uniform",
+                            reason=(
+                                f"RF '{rf_name}' literal arguments have bit "
+                                f"length '{shared_length}', which is not a "
+                                "concrete integer >= 1; at length 0 all "
+                                "literals denote the empty string, so distinct "
+                                "keys cannot be trusted to mean distinct inputs"
+                            ),
+                            location=stmt.origin,
+                            suggestion=(
+                                "Use a concrete-width domain (e.g. "
+                                "BitString<1>) so distinctness of the RF "
+                                "inputs is guaranteed"
+                            ),
+                            variable=rf_name,
+                            method=None,
+                        )
+                    )
+                continue
+
+            # With a concrete length >= 1, no overflow guard is needed: the
+            # typechecker assigns every BinaryNum its concrete source-level
+            # width, every BitStringLiteral its declared length, and the
+            # well-formedness of the call site guarantees every argument
+            # typechecks against the RF's declared domain type.  Two arguments
+            # at the same call site therefore always have the same bit width,
+            # and pairwise distinct keys always represent pairwise distinct
+            # bitstrings.
 
             # Extract every RF call into a standalone assignment so that
             # _RFCallReplacer can rewrite them uniformly into fresh samples.

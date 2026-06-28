@@ -695,7 +695,16 @@ _OPAQUE_Z3_SORT = z3.DeclareSort("Opaque")
 
 def _z3_var_for_type(name: str, var_type: frog_ast.Type) -> z3.ExprRef:
     """Create a Z3 variable of the appropriate sort for a FrogLang type."""
-    if isinstance(var_type, (frog_ast.IntType, frog_ast.ModIntType)):
+    # NOTE (F-106): ``IntType`` maps to ``z3.Int`` (unbounded integers, the
+    # exact FrogLang semantics), but ``ModIntType`` does NOT.  ``ModInt<q>``
+    # arithmetic reduces mod q, which ``z3.Int`` does not model, so encoding
+    # `+`/`-`/`*` over a z3.Int makes wraparound-true conditions falsely
+    # unsat.  Modelling a ModInt value as an uninterpreted opaque constant is
+    # a sound over-approximation (Z3 treats it as a free variable, so it can
+    # only ever prove FEWER formulas UNSAT, never more): arithmetic over two
+    # opaque consts raises in Z3 and falls back to "untranslatable", while
+    # genuine same-atom equality (``x == x``) is still recognised.
+    if isinstance(var_type, frog_ast.IntType):
         return z3.Int(name)
     if isinstance(var_type, frog_ast.BoolType):
         return z3.Bool(name)
@@ -821,7 +830,10 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         if self.variable_version_map and name in self.variable_version_map:
             name = f"{name}@z3@{self.variable_version_map[name]}"
         var_type = self.type_map.get(var.name)
-        if isinstance(var_type, (frog_ast.IntType, frog_ast.ModIntType)):
+        # ModIntType is deliberately NOT modelled as z3.Int -- see _z3_var_for_type
+        # (F-106): mod-q arithmetic differs from unbounded Int, so a ModInt is
+        # interned as an opaque const (the final ``else`` branch) instead.
+        if isinstance(var_type, frog_ast.IntType):
             self.stack.append(z3.Int(name))
         elif isinstance(var_type, frog_ast.BoolType):
             self.stack.append(z3.Bool(name))

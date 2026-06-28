@@ -14,6 +14,7 @@ from proof_frog import frog_ast, frog_parser, visitors
 from proof_frog.transforms._base import PipelineContext
 from proof_frog.transforms.map_reindex import MapKeyReindex
 from proof_frog.transforms._requirements import is_known_nonzero
+from proof_frog.transforms._wrappers import _GroupExpShape
 
 _PRIM = """
 Primitive T() {
@@ -145,3 +146,59 @@ def test_is_known_nonzero_rejects_parameter() -> None:
         }
         """)
     assert not is_known_nonzero("k", game)
+
+
+# --- F-139 / F-140: group-exponent nonzero/coprime preconditions -------------
+
+_G = frog_ast.Variable("G")
+
+
+def _prime_ctx() -> PipelineContext:
+    """A ctx that declares ``G.order is prime`` so ``precondition_misses``
+    only flags the exponent (isolating the F-139/F-140 checks)."""
+    ctx = _ctx()
+    ctx.requirements.append(
+        frog_ast.StructuralRequirement(
+            "prime", frog_ast.FieldAccess(frog_ast.Variable("G"), "order")
+        )
+    )
+    return ctx
+
+
+def _exp_misses(k_expr: frog_ast.Expression) -> list[str]:
+    shape = _GroupExpShape(group_expr=_G, k_expr=k_expr)
+    game = frog_parser.parse_game("Game Pre(Group G) { Int O() { return 0; } }")
+    return shape.precondition_misses(game, _prime_ctx())
+
+
+def test_group_exp_literal_one_allowed() -> None:
+    """A literal exponent of +/-1 is coprime to every prime order, so it is the
+    only literal the reindex may accept."""
+    assert _exp_misses(frog_ast.Integer(1)) == []
+    assert _exp_misses(frog_ast.Integer(-1)) == []
+
+
+def test_group_exp_literal_three_blocks_reindex() -> None:
+    """F-139: a literal exponent k=3 is rejected -- under a *symbolic* prime
+    order q the instantiation q=3 makes x^3 = G.identity for all x, collapsing
+    every key. Only the old ``k == 0`` check passed it."""
+    misses = _exp_misses(frog_ast.Integer(3))
+    assert misses, "literal exponent 3 must be rejected for symbolic prime order"
+
+
+def test_group_exp_literal_zero_blocks_reindex() -> None:
+    """A literal exponent 0 is non-injective (x^0 = identity); still rejected."""
+    assert _exp_misses(frog_ast.Integer(0))
+
+
+def test_group_exp_compound_exponent_blocks_reindex() -> None:
+    """F-140: a compound exponent (e.g. ``k1 * k2``) is neither Integer nor
+    Variable; the dispatch previously had no else branch and silently passed.
+    The product of two plain uniform samples can be 0, collapsing every key."""
+    compound = frog_ast.BinaryOperation(
+        frog_ast.BinaryOperators.MULTIPLY,
+        frog_ast.Variable("k1"),
+        frog_ast.Variable("k2"),
+    )
+    misses = _exp_misses(compound)
+    assert misses, "a compound exponent must be rejected (F-140)"

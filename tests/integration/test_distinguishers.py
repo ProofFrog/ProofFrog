@@ -51,26 +51,21 @@ def _engine_with(**namespace) -> ProofEngine:
 
 def _two_prim_namespace() -> dict:
     """Namespace with a deterministic primitive H and a non-det primitive F."""
-    h = frog_parser.parse_primitive_file(
-        """
+    h = frog_parser.parse_primitive_file("""
         Primitive H(Int n) {
             deterministic BitString<n> det(BitString<n> x);
         }
-        """
-    )
-    f = frog_parser.parse_primitive_file(
-        """
+        """)
+    f = frog_parser.parse_primitive_file("""
         Primitive F(Int n) {
             BitString<n> nondet(BitString<n> x);
         }
-        """
-    )
+        """)
     return {"H": h, "F": f, "HH": h, "FF": f}
 
 
 def _game(return_expr: str):
-    return frog_parser.parse_game(
-        f"""
+    return frog_parser.parse_game(f"""
         Game Foo(H HH, F FF) {{
             BitString<n> seed;
             Void Initialize() {{
@@ -80,8 +75,7 @@ def _game(return_expr: str):
                 return {return_expr};
             }}
         }}
-        """
-    )
+        """)
 
 
 def test_z3_residual_refuses_on_nondeterministic_return() -> None:
@@ -148,15 +142,12 @@ def test_dedup_deterministic_if_condition_multicall() -> None:
     in both an if-condition and the fall-through return, is observably
     identical to the hand-deduplicated form across repeated oracle
     invocations."""
-    prim = frog_parser.parse_primitive_file(
-        """
+    prim = frog_parser.parse_primitive_file("""
         Primitive G(Int n) {
             deterministic BitString<n> evaluate(BitString<n> x);
         }
-        """
-    )
-    pre = frog_parser.parse_game(
-        """
+        """)
+    pre = frog_parser.parse_game("""
         Game Pre(G GG) {
             BitString<n> seed;
             Void Initialize() {
@@ -169,10 +160,8 @@ def test_dedup_deterministic_if_condition_multicall() -> None:
                 return GG.evaluate(seed);
             }
         }
-        """
-    )
-    post = frog_parser.parse_game(
-        """
+        """)
+    post = frog_parser.parse_game("""
         Game Post(G GG) {
             BitString<n> seed;
             Void Initialize() {
@@ -186,8 +175,7 @@ def test_dedup_deterministic_if_condition_multicall() -> None:
                 return v;
             }
         }
-        """
-    )
+        """)
     engine = _engine_with(G=prim, GG=prim)
     result = engine.check_equivalent(pre, post)
     assert result.valid, result.failure_detail
@@ -200,15 +188,12 @@ def test_split_opaque_tuple_field_multicall() -> None:
     component-split form. The two oracles witness the multi-call
     observation — each pins one tuple slot — so an unsound split that
     re-sampled per call would diverge."""
-    prim = frog_parser.parse_primitive_file(
-        """
+    prim = frog_parser.parse_primitive_file("""
         Primitive K(Int n) {
             deterministic [BitString<n>, BitString<n>] Gen(BitString<n> seed);
         }
-        """
-    )
-    pre = frog_parser.parse_game(
-        """
+        """)
+    pre = frog_parser.parse_game("""
         Game Pre(K KK) {
             BitString<n> seed;
             [BitString<n>, BitString<n>] keys;
@@ -223,10 +208,8 @@ def test_split_opaque_tuple_field_multicall() -> None:
                 return keys[1];
             }
         }
-        """
-    )
-    post = frog_parser.parse_game(
-        """
+        """)
+    post = frog_parser.parse_game("""
         Game Post(K KK) {
             BitString<n> seed;
             BitString<n> keys_0;
@@ -244,8 +227,7 @@ def test_split_opaque_tuple_field_multicall() -> None:
                 return keys_1;
             }
         }
-        """
-    )
+        """)
     engine = _engine_with(K=prim, KK=prim)
     result = engine.check_equivalent(pre, post)
     assert result.valid, result.failure_detail
@@ -258,8 +240,7 @@ def test_flatten_concat_chain_multicall() -> None:
     flattened form. Both forms must observe the same field values per
     call — a buggy flatten that reordered the operands would
     distinguish here."""
-    pre = frog_parser.parse_game(
-        """
+    pre = frog_parser.parse_game("""
         Game Pre() {
             BitString<n> a;
             BitString<n> b;
@@ -273,10 +254,8 @@ def test_flatten_concat_chain_multicall() -> None:
                 return a || (b || c);
             }
         }
-        """
-    )
-    post = frog_parser.parse_game(
-        """
+        """)
+    post = frog_parser.parse_game("""
         Game Post() {
             BitString<n> a;
             BitString<n> b;
@@ -290,8 +269,7 @@ def test_flatten_concat_chain_multicall() -> None:
                 return (a || b) || c;
             }
         }
-        """
-    )
+        """)
     engine = _engine_with()
     result = engine.check_equivalent(pre, post)
     assert result.valid, result.failure_detail
@@ -305,8 +283,7 @@ def test_absorb_redundant_early_return_multicall() -> None:
     one return value depend on shared state — an unsound absorption
     that dropped the early-return path would change observable
     behaviour for inputs satisfying ``P``."""
-    pre = frog_parser.parse_game(
-        """
+    pre = frog_parser.parse_game("""
         Game Pre() {
             BitString<n> stash;
             Void Initialize() {
@@ -323,10 +300,8 @@ def test_absorb_redundant_early_return_multicall() -> None:
                 return stash;
             }
         }
-        """
-    )
-    post = frog_parser.parse_game(
-        """
+        """)
+    post = frog_parser.parse_game("""
         Game Post() {
             BitString<n> stash;
             Void Initialize() {
@@ -340,8 +315,7 @@ def test_absorb_redundant_early_return_multicall() -> None:
                 return stash;
             }
         }
-        """
-    )
+        """)
     engine = _engine_with()
     result = engine.check_equivalent(pre, post)
     assert result.valid, result.failure_detail
@@ -364,8 +338,7 @@ def test_lazy_map_scan_multicall() -> None:
     on a shared ``Map<K, V>`` field is observably identical to direct
     membership-test + lookup, across multiple oracle calls that read
     keys populated by earlier writes."""
-    pre = frog_parser.parse_game(
-        """
+    pre = frog_parser.parse_game("""
         Game Pre() {
             Map<BitString<8>, BitString<16>> M;
             Void Store(BitString<8> k, BitString<16> v) {
@@ -380,10 +353,8 @@ def test_lazy_map_scan_multicall() -> None:
                 return 0b0000000000000000;
             }
         }
-        """
-    )
-    post = frog_parser.parse_game(
-        """
+        """)
+    post = frog_parser.parse_game("""
         Game Post() {
             Map<BitString<8>, BitString<16>> M;
             Void Store(BitString<8> k, BitString<16> v) {
@@ -396,8 +367,7 @@ def test_lazy_map_scan_multicall() -> None:
                 return 0b0000000000000000;
             }
         }
-        """
-    )
+        """)
     engine = _engine_with()
     result = engine.check_equivalent(pre, post)
     assert result.valid, result.failure_detail
@@ -409,17 +379,14 @@ def test_map_key_reindex_multicall() -> None:
     Eval'd value (and rewriting writes accordingly) preserves cross-call
     observation. Store and Lookup are separate oracles so any mismatch
     between the rewritten write site and the read site would surface."""
-    prim = frog_parser.parse_primitive_file(
-        """
+    prim = frog_parser.parse_primitive_file("""
         Primitive T(Set I, Set Y) {
             Set Input = I;
             Set Image = Y;
             deterministic injective Image Eval(Input x);
         }
-        """
-    )
-    pre = frog_parser.parse_game(
-        """
+        """)
+    pre = frog_parser.parse_game("""
         Game Pre(T TT) {
             Map<TT.Input, BitString<16>> M;
             Void Store(TT.Input a, BitString<16> s) {
@@ -432,10 +399,8 @@ def test_map_key_reindex_multicall() -> None:
                 return None;
             }
         }
-        """
-    )
-    post = frog_parser.parse_game(
-        """
+        """)
+    post = frog_parser.parse_game("""
         Game Post(T TT) {
             Map<TT.Image, BitString<16>> M;
             Void Store(TT.Input a, BitString<16> s) {
@@ -448,11 +413,39 @@ def test_map_key_reindex_multicall() -> None:
                 return None;
             }
         }
-        """
-    )
+        """)
     engine = _engine_with(T=prim, TT=prim)
     result = engine.check_equivalent(pre, post)
     assert result.valid, result.failure_detail
+
+
+def test_distinct_const_rf_symbolic_length_not_uniform() -> None:
+    """RC7 / F-017: a freshly-sampled RF evaluated at ``0^n`` and ``1^n`` for a
+    SYMBOLIC length ``n`` must NOT canonicalize to two independent uniforms.
+    At ``n == 0`` both literals denote the empty string, so the RF is queried
+    at a single point and both halves are EQUAL -- distinguishable from two
+    independent draws (which differ w.p. ``1 - 2^-1``).  Since the engine
+    cannot rule out ``n == 0``, certifying the equivalence is unsound; the
+    conservative-correct outcome is to refuse."""
+    real = frog_parser.parse_game("""
+        Game Real() {
+            BitString<2> Challenge() {
+                Function<BitString<n>, BitString<1>> RF;
+                RF <- Function<BitString<n>, BitString<1>>;
+                return RF(0^n) || RF(1^n);
+            }
+        }
+        """)
+    random = frog_parser.parse_game("""
+        Game Random() {
+            BitString<2> Challenge() {
+                BitString<1> a <- BitString<1>;
+                BitString<1> b <- BitString<1>;
+                return a || b;
+            }
+        }
+        """)
+    assert not _engine_with().check_equivalent(real, random).valid
 
 
 def test_lazy_map_to_sampled_function_multicall() -> None:
@@ -461,8 +454,7 @@ def test_lazy_map_to_sampled_function_multicall() -> None:
     observably identical to a single sampled ``Function<D, R>`` lookup
     across repeated calls with both fresh and repeated keys — the
     consistency property is exactly the random-function semantics."""
-    pre = frog_parser.parse_game(
-        """
+    pre = frog_parser.parse_game("""
         Game Pre() {
             Map<BitString<8>, BitString<16>> T;
             BitString<16> Hash(BitString<8> x) {
@@ -474,10 +466,8 @@ def test_lazy_map_to_sampled_function_multicall() -> None:
                 return s;
             }
         }
-        """
-    )
-    post = frog_parser.parse_game(
-        """
+        """)
+    post = frog_parser.parse_game("""
         Game Post() {
             Function<BitString<8>, BitString<16>> T;
             Void Initialize() {
@@ -487,8 +477,7 @@ def test_lazy_map_to_sampled_function_multicall() -> None:
                 return T(x);
             }
         }
-        """
-    )
+        """)
     engine = _engine_with()
     result = engine.check_equivalent(pre, post)
     assert result.valid, result.failure_detail
@@ -500,8 +489,7 @@ def test_lazy_map_pair_to_sampled_function_multicall() -> None:
     collapse to a single sampled ``Function<D, R>`` shared by both
     oracles. The cross-oracle consistency (calling QueryA then QueryB
     on the same key) is the multi-call observation under test."""
-    pre = frog_parser.parse_game(
-        """
+    pre = frog_parser.parse_game("""
         Game Pre() {
             Map<BitString<8>, BitString<16>> M1;
             Map<BitString<8>, BitString<16>> M2;
@@ -520,10 +508,8 @@ def test_lazy_map_pair_to_sampled_function_multicall() -> None:
                 return s;
             }
         }
-        """
-    )
-    post = frog_parser.parse_game(
-        """
+        """)
+    post = frog_parser.parse_game("""
         Game Post() {
             Function<BitString<8>, BitString<16>> F;
             Void Initialize() {
@@ -536,8 +522,7 @@ def test_lazy_map_pair_to_sampled_function_multicall() -> None:
                 return F(k);
             }
         }
-        """
-    )
+        """)
     engine = _engine_with()
     result = engine.check_equivalent(pre, post)
     assert result.valid, result.failure_detail
@@ -550,15 +535,12 @@ def test_hoist_deterministic_call_to_initialize_multicall() -> None:
     observation: every call to either oracle returns the same value,
     which holds iff the cached field is computed once at Initialize and
     referenced thereafter."""
-    prim = frog_parser.parse_primitive_file(
-        """
+    prim = frog_parser.parse_primitive_file("""
         Primitive G(Int n) {
             deterministic BitString<n> evaluate(BitString<n> x);
         }
-        """
-    )
-    pre = frog_parser.parse_game(
-        """
+        """)
+    pre = frog_parser.parse_game("""
         Game Pre(G GG) {
             BitString<n> seed;
             Void Initialize() {
@@ -571,10 +553,8 @@ def test_hoist_deterministic_call_to_initialize_multicall() -> None:
                 return GG.evaluate(seed);
             }
         }
-        """
-    )
-    post = frog_parser.parse_game(
-        """
+        """)
+    post = frog_parser.parse_game("""
         Game Post(G GG) {
             BitString<n> seed;
             BitString<n> cached;
@@ -589,8 +569,7 @@ def test_hoist_deterministic_call_to_initialize_multicall() -> None:
                 return cached;
             }
         }
-        """
-    )
+        """)
     engine = _engine_with(G=prim, GG=prim)
     result = engine.check_equivalent(pre, post)
     assert result.valid, result.failure_detail
@@ -602,8 +581,7 @@ def test_hoist_group_exp_to_initialize_multicall() -> None:
     Initialize lets the power-of-power be cached. Multi-call observation:
     every Hash call returns the same group element — the caching field
     must be Initialize-computed, not re-derived per call."""
-    pre = frog_parser.parse_game(
-        """
+    pre = frog_parser.parse_game("""
         Game Pre(Group G) {
             ModInt<G.order> field2;
             GroupElem<G> field1;
@@ -616,10 +594,8 @@ def test_hoist_group_exp_to_initialize_multicall() -> None:
                 return z == field1 ^ field2;
             }
         }
-        """
-    )
-    post = frog_parser.parse_game(
-        """
+        """)
+    post = frog_parser.parse_game("""
         Game Post(Group G) {
             ModInt<G.order> field2;
             GroupElem<G> field1;
@@ -634,8 +610,7 @@ def test_hoist_group_exp_to_initialize_multicall() -> None:
                 return z == _hge_0;
             }
         }
-        """
-    )
+        """)
     engine = _engine_with()
     result = engine.check_equivalent(pre, post)
     assert result.valid, result.failure_detail
@@ -647,8 +622,7 @@ def test_refactor_group_elem_field_exp_multicall() -> None:
     ``field2 ^ b`` (power-of-power). A reader oracle exposes both
     fields across calls; the rewrite must agree on every call —
     otherwise a stale or per-call recomputation would diverge."""
-    pre = frog_parser.parse_game(
-        """
+    pre = frog_parser.parse_game("""
         Game Pre(Group G) {
             GroupElem<G> field1;
             GroupElem<G> field2;
@@ -667,10 +641,8 @@ def test_refactor_group_elem_field_exp_multicall() -> None:
                 return field2;
             }
         }
-        """
-    )
-    post = frog_parser.parse_game(
-        """
+        """)
+    post = frog_parser.parse_game("""
         Game Post(Group G) {
             GroupElem<G> field1;
             GroupElem<G> field2;
@@ -689,8 +661,7 @@ def test_refactor_group_elem_field_exp_multicall() -> None:
                 return field2;
             }
         }
-        """
-    )
+        """)
     engine = _engine_with()
     result = engine.check_equivalent(pre, post)
     assert result.valid, result.failure_detail
@@ -713,8 +684,7 @@ def test_refactor_group_elem_field_exp_multicall() -> None:
 def test_reject_read_moved_past_uniq_insertion() -> None:
     """`<-uniq[S]` inserts the draw into S, so `|S|` read before vs after the
     draw differs.  Must not be accepted as equivalent."""
-    real = frog_parser.parse_game(
-        """
+    real = frog_parser.parse_game("""
         Game Real() {
             Set<BitString<2>> S;
             BitString<2> t;
@@ -727,10 +697,8 @@ def test_reject_read_moved_past_uniq_insertion() -> None:
             }
             BitString<2> Peek() { return t; }
         }
-        """
-    )
-    random = frog_parser.parse_game(
-        """
+        """)
+    random = frog_parser.parse_game("""
         Game Random() {
             Set<BitString<2>> S;
             BitString<2> t;
@@ -742,16 +710,14 @@ def test_reject_read_moved_past_uniq_insertion() -> None:
             }
             BitString<2> Peek() { return t; }
         }
-        """
-    )
+        """)
     assert not _engine_with().check_equivalent(real, random).valid
 
 
 def test_reject_read_moved_past_map_write_via_fieldaccess_view() -> None:
     """`|M.keys|` reaches M only through a FieldAccess view; moving it past the
     element write `M[0]=1` changes its value.  Must not be accepted."""
-    real = frog_parser.parse_game(
-        """
+    real = frog_parser.parse_game("""
         Game Real() {
             Map<Int, Int> M;
             [Int, Int] O() {
@@ -761,10 +727,8 @@ def test_reject_read_moved_past_map_write_via_fieldaccess_view() -> None:
             }
             Int Size() { return M[0]; }
         }
-        """
-    )
-    random = frog_parser.parse_game(
-        """
+        """)
+    random = frog_parser.parse_game("""
         Game Random() {
             Map<Int, Int> M;
             [Int, Int] O() {
@@ -773,16 +737,14 @@ def test_reject_read_moved_past_map_write_via_fieldaccess_view() -> None:
             }
             Int Size() { return M[0]; }
         }
-        """
-    )
+        """)
     assert not _engine_with().check_equivalent(real, random).valid
 
 
 def test_reject_read_moved_past_nested_element_write() -> None:
     """A read of `M[0]` moved past the nested element write `M[0][1]=1`
     observes the mutated value.  Must not be accepted."""
-    real = frog_parser.parse_game(
-        """
+    real = frog_parser.parse_game("""
         Game Real() {
             Map<Int, [Int, Int]> M;
             Void Initialize() { M[0] = [0, 0]; }
@@ -792,10 +754,8 @@ def test_reject_read_moved_past_nested_element_write() -> None:
                 return s;
             }
         }
-        """
-    )
-    random = frog_parser.parse_game(
-        """
+        """)
+    random = frog_parser.parse_game("""
         Game Random() {
             Map<Int, [Int, Int]> M;
             Void Initialize() { M[0] = [0, 0]; }
@@ -804,8 +764,7 @@ def test_reject_read_moved_past_nested_element_write() -> None:
                 return M[0];
             }
         }
-        """
-    )
+        """)
     assert not _engine_with().check_equivalent(real, random).valid
 
 
@@ -827,26 +786,22 @@ def test_slice_of_concat_z3_residual_distinct_operands() -> None:
     compare equal to `(s || s)[0:2n]`. The slice was previously modelled by
     its width alone (`@@@opaque@...@2 * n`), collapsing distinct operands to
     one atom. No shadowing here -- this is the bare equivalence-layer hole."""
-    real = frog_parser.parse_game(
-        """
+    real = frog_parser.parse_game("""
         Game Real(Int n) {
             BitString<2 * n> Oracle(BitString<n> b) {
                 BitString<n> s <- BitString<n>;
                 return (s || b)[0 : 2 * n];
             }
         }
-        """
-    )
-    random = frog_parser.parse_game(
-        """
+        """)
+    random = frog_parser.parse_game("""
         Game Random(Int n) {
             BitString<2 * n> Oracle(BitString<n> b) {
                 BitString<n> s <- BitString<n>;
                 return (s || s)[0 : 2 * n];
             }
         }
-        """
-    )
+        """)
     assert not _engine_with().check_equivalent(real, random).valid
 
 
@@ -855,8 +810,7 @@ def test_slice_of_concat_decl_shadow_param() -> None:
     parameter `x`. The bare declaration must survive TopologicalSort /
     RemoveUnnecessary so `x` keeps its n-bit binding, and the slice must not
     be rewritten to `x` (dropping `b`)."""
-    real = frog_parser.parse_game(
-        """
+    real = frog_parser.parse_game("""
         Game Real(Int n) {
             BitString<2 * n> Oracle(BitString<2 * n> x, BitString<n> b) {
                 BitString<n> x;
@@ -864,10 +818,8 @@ def test_slice_of_concat_decl_shadow_param() -> None:
                 return (x || b)[0 : 2 * n];
             }
         }
-        """
-    )
-    random = frog_parser.parse_game(
-        """
+        """)
+    random = frog_parser.parse_game("""
         Game Random(Int n) {
             BitString<2 * n> Oracle(BitString<2 * n> x, BitString<n> b) {
                 BitString<n> x;
@@ -875,8 +827,7 @@ def test_slice_of_concat_decl_shadow_param() -> None:
                 return (x || x)[0 : 2 * n];
             }
         }
-        """
-    )
+        """)
     assert not _engine_with().check_equivalent(real, random).valid
 
 
@@ -886,8 +837,7 @@ def test_slice_of_concat_nested_redecl_case2() -> None:
     not merge the two `a`s across the scope boundary into a mistyped
     `BitString<k> a <- BitString<k + m>`, which would let the Case 2 slice
     fold to `b`."""
-    real = frog_parser.parse_game(
-        """
+    real = frog_parser.parse_game("""
         Game Real(Int k, Int m) {
             [BitString<m>, BitString<m>] Oracle(Bool cond, BitString<m> b) {
                 BitString<k> a <- BitString<k>;
@@ -898,17 +848,14 @@ def test_slice_of_concat_nested_redecl_case2() -> None:
                 return [b, b];
             }
         }
-        """
-    )
-    random = frog_parser.parse_game(
-        """
+        """)
+    random = frog_parser.parse_game("""
         Game Random(Int k, Int m) {
             [BitString<m>, BitString<m>] Oracle(Bool cond, BitString<m> b) {
                 return [b, b];
             }
         }
-        """
-    )
+        """)
     engine = _engine_with()
     engine.variables["k"] = Symbol("k", positive=True, integer=True)
     engine.variables["m"] = Symbol("m", positive=True, integer=True)
@@ -918,24 +865,20 @@ def test_slice_of_concat_nested_redecl_case2() -> None:
 def test_slice_of_concat_sound_identity_still_fires() -> None:
     """Control: the genuine identity `(a || b)[0 : |a|] = a` must STILL be
     recognized -- the fixes restrict the unsound cases, not the sound one."""
-    real = frog_parser.parse_game(
-        """
+    real = frog_parser.parse_game("""
         Game Real(Int n) {
             BitString<n> Oracle(BitString<n> a, BitString<n> b) {
                 return (a || b)[0 : n];
             }
         }
-        """
-    )
-    post = frog_parser.parse_game(
-        """
+        """)
+    post = frog_parser.parse_game("""
         Game Post(Int n) {
             BitString<n> Oracle(BitString<n> a, BitString<n> b) {
                 return a;
             }
         }
-        """
-    )
+        """)
     assert _engine_with().check_equivalent(real, post).valid
 
 
@@ -947,8 +890,7 @@ def test_guarded_field_element_write_not_dropped() -> None:
     top-level statement kinds and missed the write nested in the if; the branch
     then looked dead and was removed, equating a persistent field mutation
     (Real) with a write to a local parameter (Random)."""
-    real = frog_parser.parse_game(
-        """
+    real = frog_parser.parse_game("""
         Game Real() {
             Map<Int, Int> F;
             Void SetF(Int k, Int v) { F[k] = v; }
@@ -958,10 +900,8 @@ def test_guarded_field_element_write_not_dropped() -> None:
                 return 0;
             }
         }
-        """
-    )
-    random = frog_parser.parse_game(
-        """
+        """)
+    random = frog_parser.parse_game("""
         Game Random() {
             Map<Int, Int> F;
             Void SetF(Int k, Int v) { F[k] = v; }
@@ -971,8 +911,7 @@ def test_guarded_field_element_write_not_dropped() -> None:
                 return 0;
             }
         }
-        """
-    )
+        """)
     assert not _engine_with().check_equivalent(real, random).valid
 
 
@@ -989,8 +928,7 @@ def test_uniq_sample_is_not_dead_code() -> None:
     observable via |S| on a later call. Removing it (as if dead) would erase
     that effect; the game with the sample is NOT equivalent to the one
     without it."""
-    with_sample = frog_parser.parse_game(
-        """
+    with_sample = frog_parser.parse_game("""
         Game WithSample() {
             Set<BitString<8>> S;
             Int Query() {
@@ -999,10 +937,8 @@ def test_uniq_sample_is_not_dead_code() -> None:
             }
             Int Size() { return |S|; }
         }
-        """
-    )
-    without_sample = frog_parser.parse_game(
-        """
+        """)
+    without_sample = frog_parser.parse_game("""
         Game WithoutSample() {
             Set<BitString<8>> S;
             Int Query() {
@@ -1010,16 +946,14 @@ def test_uniq_sample_is_not_dead_code() -> None:
             }
             Int Size() { return |S|; }
         }
-        """
-    )
+        """)
     assert not _engine_with().check_equivalent(with_sample, without_sample).valid
 
 
 def test_minus_sample_with_unused_target_is_dead_code() -> None:
     """Control: the pure `x <- T \\ E` form has no side effect, so an unused
     draw IS dead code -- the game with it equals the game without it."""
-    with_sample = frog_parser.parse_game(
-        """
+    with_sample = frog_parser.parse_game("""
         Game WithSample() {
             Set<BitString<8>> S;
             Int Query() {
@@ -1028,10 +962,8 @@ def test_minus_sample_with_unused_target_is_dead_code() -> None:
             }
             Int Size() { return |S|; }
         }
-        """
-    )
-    without_sample = frog_parser.parse_game(
-        """
+        """)
+    without_sample = frog_parser.parse_game("""
         Game WithoutSample() {
             Set<BitString<8>> S;
             Int Query() {
@@ -1039,8 +971,7 @@ def test_minus_sample_with_unused_target_is_dead_code() -> None:
             }
             Int Size() { return |S|; }
         }
-        """
-    )
+        """)
     assert _engine_with().check_equivalent(with_sample, without_sample).valid
 
 
@@ -1049,8 +980,7 @@ def test_uniq_and_minus_forms_not_equivalent() -> None:
     uniq form is NOT equivalent to one drawing via the pure minus form on the
     fall-through path -- they differ in the observable |S| after Query(false,
     false). Previously the engine conflated the forms and accepted the hop."""
-    nested_minus = frog_parser.parse_game(
-        """
+    nested_minus = frog_parser.parse_game("""
         Game Left() {
             Set<BitString<8>> S;
             Int Query(Bool p, Bool q) {
@@ -1064,10 +994,8 @@ def test_uniq_and_minus_forms_not_equivalent() -> None:
             }
             Int Size() { return |S|; }
         }
-        """
-    )
-    merged_uniq = frog_parser.parse_game(
-        """
+        """)
+    merged_uniq = frog_parser.parse_game("""
         Game Right() {
             Set<BitString<8>> S;
             Int Query(Bool p, Bool q) {
@@ -1077,8 +1005,7 @@ def test_uniq_and_minus_forms_not_equivalent() -> None:
             }
             Int Size() { return |S|; }
         }
-        """
-    )
+        """)
     assert not _engine_with().check_equivalent(nested_minus, merged_uniq).valid
 
 
@@ -1088,8 +1015,7 @@ def test_redundant_conditional_return_uniq_not_collapsed_onto_minus() -> None:
     so deletes the observable `Seen union {x}` insertion. With b always true,
     Real grows Seen each Draw while Ideal never does, so they are not
     equivalent (observable via |Seen|)."""
-    real = frog_parser.parse_game(
-        """
+    real = frog_parser.parse_game("""
         Game Real() {
             Set<BitString<8>> Seen;
             Bool b;
@@ -1104,10 +1030,8 @@ def test_redundant_conditional_return_uniq_not_collapsed_onto_minus() -> None:
             }
             Int Count() { return |Seen|; }
         }
-        """
-    )
-    ideal = frog_parser.parse_game(
-        """
+        """)
+    ideal = frog_parser.parse_game("""
         Game Ideal() {
             Set<BitString<8>> Seen;
             Bool b;
@@ -1118,6 +1042,5 @@ def test_redundant_conditional_return_uniq_not_collapsed_onto_minus() -> None:
             }
             Int Count() { return |Seen|; }
         }
-        """
-    )
+        """)
     assert not _engine_with().check_equivalent(real, ideal).valid

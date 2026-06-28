@@ -269,6 +269,45 @@ from proof_frog.transforms.random_functions import _DistinctConstRFTransformer
             }
             """,
         ),
+        # NOT fired (F-017): both literals share a SYMBOLIC length n, whose
+        # keys ("0" vs "allones:n") are textually distinct but denote the
+        # same empty string at n == 0.  Since n's positivity is unruled, the
+        # transform must refuse rather than treat the two RF evaluations as
+        # distinct points.
+        (
+            """
+            BitString<2> f() {
+                Function<BitString<n>, BitString<1>> RF;
+                RF <- Function<BitString<n>, BitString<1>>;
+                return RF(0^n) || RF(1^n);
+            }
+            """,
+            """
+            BitString<2> f() {
+                Function<BitString<n>, BitString<1>> RF;
+                RF <- Function<BitString<n>, BitString<1>>;
+                return RF(0^n) || RF(1^n);
+            }
+            """,
+        ),
+        # NOT fired (F-017): concrete length 0 also collapses all literals to
+        # the empty string, so distinct keys are meaningless.
+        (
+            """
+            BitString<2> f() {
+                Function<BitString<0>, BitString<1>> RF;
+                RF <- Function<BitString<0>, BitString<1>>;
+                return RF(0^0) || RF(1^0);
+            }
+            """,
+            """
+            BitString<2> f() {
+                Function<BitString<0>, BitString<1>> RF;
+                RF <- Function<BitString<0>, BitString<1>>;
+                return RF(0^0) || RF(1^0);
+            }
+            """,
+        ),
         # NOT fired: RF call inside a loop body
         (
             """

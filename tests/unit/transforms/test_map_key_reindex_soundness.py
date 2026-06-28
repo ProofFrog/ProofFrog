@@ -202,3 +202,20 @@ def test_group_exp_compound_exponent_blocks_reindex() -> None:
     )
     misses = _exp_misses(compound)
     assert misses, "a compound exponent must be rejected (F-140)"
+
+
+def test_is_known_nonzero_rekey_resamples_blocks_reindex() -> None:
+    """F-137: a `Rekey()` oracle resampling the group exponent `k` between store
+    and read breaks the stored-key/read-key correspondence even for nonzero
+    values.  The exponent-constancy requirement is subsumed by F-136's
+    "established in Initialize with NO other write anywhere" clause -- the Rekey
+    write voids the guarantee, so the reindex declines."""
+    game = _nonzero_game("""
+        Void Initialize() {
+            k <-uniq[{0}] ModInt<G.order>;
+        }
+        Void Rekey() {
+            k <-uniq[{0}] ModInt<G.order>;
+        }
+        """)
+    assert not is_known_nonzero("k", game)

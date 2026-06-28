@@ -230,6 +230,23 @@ def _analyze_block(
     uniq_guards: dict[str, str] = {}
 
     for statement in block.statements:
+        # F-022: any write to a guarded variable other than a fresh
+        # `<-uniq[S]` draw destroys the freshness that draw established -- after
+        # `r <-uniq[S]; r = c;` the variable holds an arbitrary, possibly
+        # previously-queried value, so `RF(r)` is no longer a distinct input.
+        # Invalidate the guard before this statement's RF-call check below.
+        if isinstance(
+            statement,
+            (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+        ):
+            written_base = lvalue_base_name(statement.var)
+            is_fresh_uniq = (
+                isinstance(statement, frog_ast.UniqueSample)
+                and statement.surface_form == "uniq"
+            )
+            if written_base in uniq_guards and not is_fresh_uniq:
+                del uniq_guards[written_base]
+
         # Track <-uniq bindings. Only the stateful `<-uniq[S]` form
         # accumulates draws into S (S = S union {x}); the pure `x <- T \ E`
         # form performs no insertion, so it does NOT guarantee cross-call
@@ -1243,9 +1260,7 @@ def _index_of_var_in_arg(arg: frog_ast.Expression, var_name: str) -> int | None 
 def _contains_return(node: frog_ast.ASTNode) -> bool:
     """True if *node* contains a ``return`` statement anywhere."""
     return (
-        SearchVisitor(
-            lambda n: isinstance(n, frog_ast.ReturnStatement)
-        ).visit(node)
+        SearchVisitor(lambda n: isinstance(n, frog_ast.ReturnStatement)).visit(node)
         is not None
     )
 
@@ -1285,6 +1300,7 @@ def _proj_tracked_in_set(
       through untracked, so only a top-level add reached before any
       early-return-bearing statement counts.
     """
+
     # Form 1: <-uniq[set_name] draw (anywhere -- path-consistent with its use).
     def is_uniq_draw(node: frog_ast.ASTNode) -> bool:
         return (
@@ -2235,8 +2251,7 @@ class ChallengeExclusionRFToUniformTransformer:
             # query H at the original challenge point.  H(cf) is then observable
             # and not an independent uniform draw -- decline.
             challenge_reassigned = any(
-                reassigns_or_rebinds(init_field_refs, om.block)
-                for om in oracle_methods
+                reassigns_or_rebinds(init_field_refs, om.block) for om in oracle_methods
             )
             if challenge_reassigned:
                 if ctx is not None:

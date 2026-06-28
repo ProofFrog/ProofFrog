@@ -1326,6 +1326,27 @@ class SplitUniformSampleTransformer(BlockTransformer):
 # ---------------------------------------------------------------------------
 
 
+def _method_is_internally_called(game: frog_ast.Game, method_name: str) -> bool:
+    """True if any method body contains a call to *method_name* -- a bare
+    ``method_name(...)`` or a qualified ``X.method_name(...)`` /
+    ``this.method_name(...)`` sibling call."""
+
+    def is_call(node: frog_ast.ASTNode) -> bool:
+        if not isinstance(node, frog_ast.FuncCall):
+            return False
+        func = node.func
+        if isinstance(func, frog_ast.Variable):
+            return func.name == method_name
+        if isinstance(func, frog_ast.FieldAccess):
+            return func.name == method_name
+        return False
+
+    for method in game.methods:
+        if SearchVisitor(is_call).visit(method.block) is not None:
+            return True
+    return False
+
+
 def _single_call_field_to_local(
     game: frog_ast.Game, ctx: PipelineContext | None = None
 ) -> frog_ast.Game:
@@ -1400,6 +1421,32 @@ def _single_call_field_to_local(
         target_method_name = using_methods[0]
         target_method = game.get_method(target_method_name)
         if _is_written_in_recursive(target_method.block, field.name):
+            continue
+
+        # F-056: the localization is sound only if the read site runs at most
+        # once.  If the using method is invoked by a SIBLING method (a call
+        # `X.Helper()` / `this.Helper()` / `Helper()` inside another oracle),
+        # one adversary call to that sibling triggers an extra execution of the
+        # read site -- so the persistent field (read repeatedly) is no longer
+        # interchangeable with a per-call fresh local.  This holds under any
+        # `calls <= N` reading, so decline conservatively.
+        if _method_is_internally_called(game, target_method_name):
+            if ctx is not None:
+                ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Single Call Field To Local",
+                        reason=(
+                            f"Field '{field.name}' not localized: its read site "
+                            f"'{target_method_name}' is called by another method, "
+                            f"so it can execute more than once and a per-call "
+                            f"local sample would diverge from the persistent field"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=field.name,
+                        method=None,
+                    )
+                )
             continue
 
         # RC5 domain-invariance: moving the sample out of Initialize and into

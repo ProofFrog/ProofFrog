@@ -225,6 +225,24 @@ class UniqExclusionBranchEliminationTransformer(BlockTransformer):
             )
         )
 
+    def _note_self_referential_element(self, var_name: str) -> None:
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Uniq Exclusion Branch Elimination",
+                reason=(
+                    "Exclusion-set element references the sampled variable "
+                    "itself, so it denotes the variable's pre-draw value; a "
+                    "later equality on that variable cannot be folded to false"
+                ),
+                location=None,
+                suggestion=None,
+                variable=var_name,
+                method=None,
+            )
+        )
+
     @staticmethod
     def _written_var_names(stmt: frog_ast.Statement) -> set[str]:
         """Return the set of variable names written anywhere inside *stmt*.
@@ -246,11 +264,31 @@ class UniqExclusionBranchEliminationTransformer(BlockTransformer):
             if isinstance(
                 node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
             ):
-                target: frog_ast.ASTNode = node.var
-                while isinstance(target, (frog_ast.ArrayAccess, frog_ast.Slice)):
-                    target = target.the_array
-                if isinstance(target, frog_ast.Variable):
-                    names.add(target.name)
+                # `lvalue_base_name` peels element/slice/field accesses to the
+                # written base name, so `M[k] = v`, `a[i:j] = v`, and the
+                # `X.f = b;` FieldAccess case (the latter previously invisible)
+                # all register a write.
+                base = lvalue_base_name(node.var)
+                if base is not None:
+                    names.add(base)
+                # The stateful `x <-uniq[S] T` form implicitly does
+                # `S = S union {x}`, an adversary-observable write to S. A
+                # constraint whose exclusion element reads S must be
+                # invalidated when a later draw mutates S; tracking only
+                # `node.var` left that constraint folding against a stale
+                # snapshot (F-072). We record the SET lvalue's base name
+                # (`S`, or the function of `F.domain`) via `lvalue_base_name`,
+                # which is None for a literal set (nothing to insert into) so
+                # element variables are not spuriously marked written. The
+                # pure `x <- T \ E` form performs no insertion, so it writes
+                # nothing beyond its target.
+                if (
+                    isinstance(node, frog_ast.UniqueSample)
+                    and node.surface_form == "uniq"
+                ):
+                    set_base = lvalue_base_name(node.unique_set)
+                    if set_base is not None:
+                        names.add(set_base)
             return False
 
         SearchVisitor(_collect).visit(stmt)
@@ -385,9 +423,26 @@ class UniqExclusionBranchEliminationTransformer(BlockTransformer):
             ):
                 extracted = self._exclusion_elements(stmt.unique_set)
                 if extracted is not None:
-                    elems, free_vars = extracted
-                    if elems:
-                        constraints[stmt.var.name] = elems
+                    elems, _ = extracted
+                    # F-070: an exclusion element that mentions the sampled
+                    # variable itself denotes that variable's PRE-draw value.
+                    # After the draw, a later `stmt.var == el` compares the new
+                    # value to the new value (true), but the element snapshot
+                    # records the dead pre-write value, so folding it to false
+                    # is unsound (e.g. `x <-uniq[{x}] T;` then `if (x == x)`).
+                    # Drop any such element; the snapshot is unreliable.
+                    kept = [
+                        el
+                        for el in elems
+                        if stmt.var.name not in self._free_variable_names(el)
+                    ]
+                    if len(kept) != len(elems):
+                        self._note_self_referential_element(stmt.var.name)
+                    if kept:
+                        free_vars: set[str] = set()
+                        for el in kept:
+                            free_vars |= self._free_variable_names(el)
+                        constraints[stmt.var.name] = kept
                         invalidators[stmt.var.name] = free_vars
                 new_stmts.append(stmt)
             else:

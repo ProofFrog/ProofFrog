@@ -53,7 +53,16 @@ def generate_dependency_graph(
             ):
                 return False
             base = visitors.lvalue_base_name(node.var)
-            return base is not None and base in field_names
+            if base is not None and base in field_names:
+                return True
+            # `x <-uniq[S] T` implicitly does `S = S union {x}`, so it mutates
+            # the field S even though its target `x` is a local. Without this,
+            # an unused uniq draw looked side-effect-free and was pruned as
+            # disconnected dead code, erasing the observable insertion (F-004).
+            if isinstance(node, frog_ast.UniqueSample) and node.surface_form == "uniq":
+                set_base = visitors.lvalue_base_name(node.unique_set)
+                return set_base is not None and set_base in field_names
+            return False
 
         return visitors.SearchVisitor(_is_field_write).visit(stmt) is not None
 
@@ -276,9 +285,19 @@ def unnecessary_statement_info(
             required_map.set(statement, False)
         nonlocal necessary_vars
         for statement in reversed(block.statements):
-            if isinstance(
-                statement, frog_ast.ReturnStatement
-            ) or visitors.assigns_variable(necessary_vars, statement):
+            if (
+                isinstance(statement, frog_ast.ReturnStatement)
+                or visitors.assigns_variable(necessary_vars, statement)
+                # The stateful `x <-uniq[S] T` form implicitly does
+                # `S = S union {x}`, an adversary-observable mutation of S, so
+                # it is NEVER dead even when its target `x` is unused; dropping
+                # it would erase the insertion (F-004). The pure `x <- T \ E`
+                # form has no such effect and stays removable when `x` is dead.
+                or (
+                    isinstance(statement, frog_ast.UniqueSample)
+                    and statement.surface_form == "uniq"
+                )
+            ):
                 # Complete read-set: variables reached through a FieldAccess
                 # (`M` in `|M.keys|`) keep their backing writes alive too.
                 all_vars = _vars_of(statement)

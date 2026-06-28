@@ -2222,6 +2222,33 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 "Unique sample set must be a parameterized Set<D>",
             )
             return
+        # The two surface forms are distinct constructs (see
+        # frog_ast.UniqueSample). `x <-uniq[S] T` is stateful freshness: it
+        # implicitly inserts the draw into S, so S must be a mutable Set
+        # lvalue (a Set variable/field) or a sampled Function's `.domain`
+        # (the hidden per-RF set). Literal/computed/view exclusion sets have
+        # nowhere to insert and belong to the pure one-shot form
+        # `x <- T \ E`, which carries no insertion.
+        if unique_sample.surface_form == "uniq":
+            exclusion = unique_sample.unique_set
+            is_rf_domain = (
+                isinstance(exclusion, frog_ast.FieldAccess)
+                and exclusion.name == "domain"
+            )
+            is_map_view = isinstance(
+                exclusion, frog_ast.FieldAccess
+            ) and exclusion.name in ("keys", "values", "entries")
+            is_lvalue = isinstance(exclusion, (frog_ast.Variable, frog_ast.FieldAccess))
+            if not is_rf_domain and (is_map_view or not is_lvalue):
+                self.print_error(
+                    unique_sample,
+                    "The `x <-uniq[S] T` form requires S to be a mutable Set "
+                    "variable/field or a sampled Function's `.domain`; got "
+                    f"`{exclusion}`. Use the one-shot exclusion form "
+                    "`x <- T \\ E;` for literal, computed, or view exclusion "
+                    "sets (it performs no insertion).",
+                )
+                return
         # Exclusion-set elements must be values in the sampled-from type,
         # so the sampled type plays the 'declared' role (mirrors
         # `ModInt<q> x = 0;` where ModInt accepts an Int literal).

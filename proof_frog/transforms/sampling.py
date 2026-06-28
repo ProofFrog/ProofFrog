@@ -146,15 +146,30 @@ class SimplifySpliceTransformer(BlockTransformer):
                 slices: list[frog_ast.Slice],
                 node: frog_ast.ASTNode,
             ) -> bool:
+                # A UniqueSample (`x <-uniq[S] T` / `x <- T \ S`) rebinds
+                # `x` just like an Assignment/Sample; missing it let a re-bind
+                # of the concat result or a component between the concat and
+                # its slice go unnoticed, so the slice was rewritten to the
+                # stale (pre-rebind) value (F-066).
                 return (
-                    isinstance(node, (frog_ast.Assignment, frog_ast.Sample))
+                    isinstance(
+                        node,
+                        (
+                            frog_ast.Assignment,
+                            frog_ast.Sample,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
                     and (node.var in no_touch_vars)
                 ) or node in slices
 
             made_transformation = False
             while True:
                 to_transform = SearchVisitor[
-                    frog_ast.Assignment | frog_ast.Sample | frog_ast.Slice
+                    frog_ast.Assignment
+                    | frog_ast.Sample
+                    | frog_ast.UniqueSample
+                    | frog_ast.Slice
                 ](
                     functools.partial(
                         use_or_reassignment,
@@ -166,7 +181,14 @@ class SimplifySpliceTransformer(BlockTransformer):
                 )
 
                 if (
-                    isinstance(to_transform, (frog_ast.Assignment, frog_ast.Sample))
+                    isinstance(
+                        to_transform,
+                        (
+                            frog_ast.Assignment,
+                            frog_ast.Sample,
+                            frog_ast.UniqueSample,
+                        ),
+                    )
                     or to_transform is None
                 ):
                     break

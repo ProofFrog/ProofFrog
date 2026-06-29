@@ -26,11 +26,14 @@ from .type_collector import TypeCollector
 from ...transforms._base import TransformApplication
 
 
-# Mirrors the mangler in exporter.py — duplicated here to avoid a
-# circular import. Keep them in sync.
+# Mirrors the mangler in canonical_form._ec_ident — duplicated here to
+# avoid a circular import. Keep them in sync. A leading underscore is a
+# valid EC local-variable start (the global AlphaRename pass renames
+# locals to ``__aN__``), so such names must NOT get the ``v_`` prefix or
+# the synthesized tactic references a variable that doesn't exist.
 def _ec_ident(name: str) -> str:
     mangled = re.sub(r"[^A-Za-z0-9_]", "_", name)
-    if not mangled or not mangled[0].islower():
+    if not mangled or not (mangled[0].islower() or mangled[0] == "_"):
         mangled = "v_" + mangled
     return mangled
 

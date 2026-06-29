@@ -51,6 +51,11 @@ TRANSFORM_BUCKET: dict[str, Bucket] = {
     "Reflexive Comparison": Bucket.CANNED,
     "Simplify Ifs": Bucket.CANNED,
     "Variable Standardization": Bucket.CANNED,
+    # Capture-avoiding rename of bound locals to fresh ``__aN__`` names
+    # (the global ``AlphaRename`` canonicalization pass). Like ``Variable
+    # Standardization`` it only renames locals, so both EC bodies are
+    # structurally identical and ``proc; auto.`` closes the equiv.
+    "Alpha Rename": Bucket.CANNED,
     "Standardize Field Names": Bucket.CANNED,
     "Subset Type Normalization": Bucket.CANNED,
     # ``Symbolic Computation`` and ``Normalize Commutative Chains`` only
@@ -104,6 +109,9 @@ CANNED_TACTIC: dict[str, list[str]] = {
     "Reflexive Comparison": ["proc; auto."],
     "Simplify Ifs": ["proc; auto."],
     "Variable Standardization": ["proc; auto."],
+    # Pure local-variable rename (capture avoidance); structurally a no-op
+    # on the EC body, same as ``Variable Standardization``.
+    "Alpha Rename": ["proc; auto."],
     "Standardize Field Names": ["proc; auto."],
     # Type-system rename only (e.g. KeySpace2 -> IntermediateSpace via a
     # ``requires`` subsets clause). EC's clone-driven type aliases make

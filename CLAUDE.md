@@ -31,10 +31,10 @@ python3 -m venv .venv
 
 ## Commands
 
-- **Run tests**: `pytest` (runs in parallel via `pytest-xdist` `-n auto` by default; use `-n0` to disable). Don't use `--timeout`.
+- **Run tests**: `pytest` (runs in parallel via `pytest-xdist` `-n auto` by default; use `-n0` to disable). Don't use `--timeout`. Long-running tests are marked `slow` (e.g. the LaTeX-export pdflatex compile sweep in `tests/unit/export/latex/test_pdflatex_sweep.py`, skipped without `pdflatex` on PATH); deselect with `-m "not slow"`.
 - **All CI checks**: `make lint` — runs `black --check`, `mypy`, and `pylint` in sequence (must all pass before committing)
 - **Auto-format**: `make format` — runs `black` to reformat in place, then re-run `make lint`
-- **CLI**: `python -m proof_frog [version|parse|check|prove|describe|step-detail|inlined-game|canonicalization-trace|step-after-transform|download-examples|web|lsp|mcp] <file>`
+- **CLI**: `python -m proof_frog [version|parse|check|prove|describe|step-detail|inlined-game|canonicalization-trace|step-after-transform|export-latex|download-examples|web|lsp|mcp] <file>`
 - **Build package**: `make build` — regenerates parser, stamps examples pin, stamps git SHA, syncs agent docs into the package, then runs `flit build`. Always use this instead of bare `flit build`.
 - **Build VSCode extension**: `make vscode-extension`
 - **Package VSCode extension**: `make vscode-vsix`
@@ -73,7 +73,7 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 - `proof_frog/proof_engine.py` — Proof verification (Z3 + SymPy)
 - `proof_frog/semantic_analysis.py` — Type checking / semantic analysis
 - `proof_frog/visitors.py` — AST visitor/transformer base classes (`Visitor[U]`, `Transformer`, `BlockTransformer`) and core utility visitors/transformers (substitution, inlining, Z3/SymPy conversion, type maps)
-- `proof_frog/transforms/` — Modular canonicalization pipeline; each file defines `TransformPass` subclasses in a specific domain (algebraic, sampling, control flow, inlining, symbolic, types, tuples, structural, standardization, assumptions). `pipelines.py` assembles passes into `CORE_PIPELINE` (fixed-point canonicalization) and `STANDARDIZATION_PIPELINE` (post-canonicalization normalization). `_base.py` provides `TransformPass`, `PipelineContext`, and the `run_pipeline()`/`run_standardization()` runners. See [proof_frog/transforms/CLAUDE.md](proof_frog/transforms/CLAUDE.md) when modifying.
+- `proof_frog/transforms/` — Modular canonicalization pipeline; each file defines `TransformPass` subclasses in a specific domain (algebraic, sampling, control flow, inlining, symbolic, types, tuples, structural, standardization, assumptions, alpha-rename). `pipelines.py` assembles passes into `CORE_PIPELINE` (fixed-point canonicalization) and `STANDARDIZATION_PIPELINE` (post-canonicalization normalization). `_base.py` provides `TransformPass`, `PipelineContext`, and the `run_pipeline()`/`run_standardization()` runners. See [proof_frog/transforms/CLAUDE.md](proof_frog/transforms/CLAUDE.md) when modifying.
 - `proof_frog/export/easycrypt/` — EasyCrypt exporter. See [proof_frog/export/easycrypt/CLAUDE.md](proof_frog/export/easycrypt/CLAUDE.md) when modifying.
 - `proof_frog/diagnostics.py` — Diagnostic engine for proof hop failures (diff classification, near-miss matching, explanation generation, engine limitation detection)
 - `proof_frog/describe.py` — Human-readable descriptions of primitives/schemes/games

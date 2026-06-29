@@ -17,3 +17,7 @@ proof_frog/claude_docs
 vscode-extension/node_modules/
 vscode-extension/out/
 vscode-extension/*.vsix
+
+# Emacs
+*~
+emacs/*.elc

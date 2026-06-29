@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from ... import frog_ast
 from . import ir
 from .backends.base import Backend
+from .document import assemble
 from .expr_renderer import _looks_like_algorithm_name
 from .macros import MacroRegistry
 from .module_renderer import ModuleRenderer
@@ -31,7 +32,7 @@ class _SymbolicHeading:
     sections_ref: bool  # start/end step: heading-only, references shared sections
 
 
-def render_proof(
+def render_proof(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     ctx: "ProofContext",
     backend: Backend,
     macros: MacroRegistry,
@@ -51,9 +52,6 @@ def render_proof(
     The body is rendered first so macro registration populates the preamble,
     then the document (or fragment) is assembled.
     """
-    # pylint: disable=import-outside-toplevel
-    from .exporter import assemble
-
     # Make proof-level let types visible to operand disambiguation (`+`/`||`)
     # inside reduction / intermediate-game bodies.
     renderer.base_name_types = ctx.let_types()
@@ -327,9 +325,9 @@ def _step_figure_ir(
     try:
         if composition == "inlined":
             game = ctx.resolve_inlined(step)
-            block = renderer._method_blocks_vstack(
+            block = renderer._method_blocks_vstack(  # pylint: disable=protected-access
                 game
-            )  # pylint: disable=protected-access
+            )
             return ir.Figure(body=block, caption=caption, label=label), None
         # symbolic mode
         sr = ctx.resolve_symbolic(step)
@@ -346,9 +344,9 @@ def _step_figure_ir(
             sections_ref=sr.novel is None,
         )
         if sr.novel is not None:
-            vstack = renderer._method_blocks_vstack(
+            vstack = renderer._method_blocks_vstack(  # pylint: disable=protected-access
                 sr.novel
-            )  # pylint: disable=protected-access
+            )
             # heading is assembled later by _apply_symbolic_diff from `head`.
             return ir.Figure(body=vstack, caption=caption, label=label), head
         # start/end step: heading only, referencing the shared sections.

@@ -1182,7 +1182,10 @@ def test_export_2_13_emits_statelessness_foundation_and_closes() -> None:
     # Synthesized transitivity through the all-Ideal instantiation + the
     # tuple-inlined intermediate module.
     assert "E_c.Ideal).eavesdrop" in output
-    assert "module Step_0L_state_1b" in output
+    # The augmented-intermediate ``_b`` module: index reflects the chain
+    # position of the tuple-inline reorder (after the leading Alpha Rename
+    # normalization step the global AlphaRename pass now inserts).
+    assert "module Step_0L_state_2b" in output
     # No admits.
     assert "admit." not in output
 
@@ -1436,8 +1439,8 @@ def test_export_2_15_backward_routes_expand_tuples_and_reorder_through_ideal() -
     assert "declare axiom E_keygen_sem" in output
     assert "declare axiom E_enc_sem" in output
     # Expand Tuples routes through Ideal with the tuple-inline intermediate.
-    assert "module Step_0R_state_1b (E : E_c.Scheme)" in output
-    assert "transitivity Step_0R_state_1b(E_c.Ideal).eavesdrop" in output
+    assert "module Step_0R_state_2b (E : E_c.Scheme)" in output
+    assert "transitivity Step_0R_state_2b(E_c.Ideal).eavesdrop" in output
     assert "proc; inline*; auto" in output
     # The same-module enc reorder uses the data-aware swap, not a bare lockstep.
     assert "proc; swap{1} 3 -2; swap{1} 4 -2; sim" in output

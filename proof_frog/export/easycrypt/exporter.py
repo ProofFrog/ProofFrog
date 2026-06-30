@@ -1151,16 +1151,23 @@ def export_proof_file(proof_path: str) -> str:
     game_file_by_name: dict[str, frog_ast.GameFile] = {gf.name: gf for gf in game_files}
 
     def multi_oracle_spec_for(
-        modules: mt.ModuleTranslator, game_file_name: str
+        modules: mt.ModuleTranslator,
+        game_file_name: str,
+        scheme_args: list[frog_ast.Expression] | None = None,
     ) -> mt.MultiOracleSpec | None:
         """``MultiOracleSpec`` for a game file in ``modules``' type scope.
 
         ``None`` for single-oracle game files (the emitters then take their
-        byte-identical legacy path).
+        byte-identical legacy path). ``scheme_args`` binds the game's formal
+        scheme parameter(s) to the actual instantiation so the ``Initialize``
+        return type resolves against the right scheme (see
+        ``ModuleTranslator.multi_oracle_spec``) -- needed at top-level scope
+        when the game's formal param name collides with a different proof let.
         """
         return modules.multi_oracle_spec(
             game_file_by_name[game_file_name],
             oracle_model_by_game_file[game_file_name],
+            scheme_args=scheme_args,
         )
 
     # "Primary" instance: the one bound to the theorem's target let-name.
@@ -2723,10 +2730,14 @@ def export_proof_file(proof_path: str) -> str:
                 reduction_arg_exprs=red_arg_exprs,
                 extra_module_params=declared_instance_params or None,
                 inner_multi_oracle=multi_oracle_spec_for(
-                    top_modules, helper.to_use.name
+                    top_modules,
+                    helper.to_use.name,
+                    scheme_args=list(helper.to_use.args),
                 ),
                 outer_multi_oracle=multi_oracle_spec_for(
-                    top_modules, outer_game_file_name
+                    top_modules,
+                    outer_game_file_name,
+                    scheme_args=list(proof.theorem.args),
                 ),
             )
         )
@@ -2786,8 +2797,19 @@ def export_proof_file(proof_path: str) -> str:
         wrapper_game_file = _wrapper_game_file_for(step, outer_game_file_name)
         if wrapper_game_file == outer_game_file_name:
             adv_type = qualified_outer_adv
+            # Composed / intermediate steps are played against the OUTER
+            # (theorem) adversary, so the lifted Initialize result is the outer
+            # game instantiated at the theorem's scheme argument(s).
+            wrapper_scheme_args = list(proof.theorem.args)
         else:
             adv_type = qualified_adv_type_by_game_file[wrapper_game_file]
+            # A plain step lifts its own game file's Initialize, instantiated at
+            # that step's own game argument(s).
+            wrapper_scheme_args = (
+                list(step.challenger.game.args)
+                if isinstance(step.challenger, frog_ast.ConcreteGame)
+                else []
+            )
         ec_game_wrappers.append(_describe_step_wrapper(i, step))
         ec_game_wrappers.append(
             top_modules.translate_game_wrapper(
@@ -2795,7 +2817,9 @@ def export_proof_file(proof_path: str) -> str:
                 adversary_type_name=adv_type,
                 oracle_module_expr=resolved_step.module_expr,
                 extra_module_params=declared_instance_params or None,
-                multi_oracle=multi_oracle_spec_for(top_modules, wrapper_game_file),
+                multi_oracle=multi_oracle_spec_for(
+                    top_modules, wrapper_game_file, scheme_args=wrapper_scheme_args
+                ),
             )
         )
 
@@ -2841,6 +2865,21 @@ def export_proof_file(proof_path: str) -> str:
         _wa, _wb = proof.steps[_wi], proof.steps[_wi + 1]
         if isinstance(_wa, frog_ast.Step) and isinstance(_wb, frog_ast.Step):
             _pr_multi_oracle_for(_wa, _wb)
+    # A reduction or intermediate game can hold module-global state (var fields)
+    # *other* than the live ``pk`` field tracked above -- e.g. ``R_KEM`` declares
+    # only ``ctStar`` (the challenge ciphertext used by its Decaps oracle), so
+    # ``_live_state_ref`` never records it as a ``pk``-holder. The abstract scheme
+    # modules ``K``/``F`` and the adversary still must be write-disjoint from
+    # *every* such stateful helper: when ``K.encaps``/``F.evaluate`` is related in
+    # a per-oracle equiv, EC otherwise assumes the abstract call could clobber the
+    # reduction's ``ctStar`` and rejects the proof ("module F can write
+    # R_KEM.ctStar"). Add every stateful helper to the restriction set. Gated on
+    # ``live_state_holders`` already being non-empty (a multi-oracle proof), so
+    # single-oracle / concrete-only proofs stay byte-identical.
+    if live_state_holders:
+        for _helper in proof.helpers:
+            if isinstance(_helper, frog_ast.Game) and _helper.fields:
+                live_state_holders.add(_helper.name)
     live_state_modules = sorted(live_state_holders)
 
     for i in range(len(proof.steps) - 1):

@@ -35,10 +35,18 @@ class StatementTranslator:
         types: tc.TypeCollector,
         exprs: expr_translator.ExpressionTranslator,
         module_var_aliases: dict[str, str] | None = None,
+        allow_void_call: bool = False,
     ) -> None:
         self._types = types
         self._exprs = exprs
         self._module_var_aliases: dict[str, str] = dict(module_var_aliases or {})
+        # When True, a bare module-call statement whose (unit) result is
+        # discarded -- e.g. a reduction's ``challenger.Initialize();`` -- is
+        # rendered as a result-less EC call. Off by default so every existing
+        # caller keeps its byte-identical behavior (such a statement otherwise
+        # raises NotImplementedError -> the method body falls back to
+        # ``return witness``). Enabled only by the group-only export path.
+        self._allow_void_call = allow_void_call
 
     def translate_block(
         self,
@@ -98,6 +106,18 @@ class StatementTranslator:
                 stmts.append(ec_ast.Return(fresh))
                 return
             stmts.append(ec_ast.Return(self._exprs.translate(stmt.expression)))
+            return
+        if (
+            self._allow_void_call
+            and isinstance(stmt, frog_ast.FuncCall)
+            and _is_module_call(stmt)
+        ):
+            # A bare module call whose (unit) result is discarded, e.g. a
+            # reduction's ``challenger.Initialize();``. EC renders it without a
+            # result binding (``Challenger.initialize();``).
+            callee = self._render_module_call_target(stmt.func)
+            args = self._render_call_args(stmt, decls, stmts)
+            stmts.append(ec_ast.Call("", callee, args))
             return
         raise NotImplementedError(
             f"Statement translation not implemented for "

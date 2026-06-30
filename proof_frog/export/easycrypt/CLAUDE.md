@@ -74,12 +74,43 @@ Key modules:
     `ring_theory_of`, `group_power_for`) derive the qualified op by stripping the EC
     type suffix (`.group`/`.zmod`/`.exp`). Non-group/modint proofs are byte-identical
     (all emission gated on group/modint registration). The `requires Group ZModP List`
-    preamble is added only when `has_stdlib_group_or_modint()`. The DDH/ElGamal
-    MultiChal family still needs the separate `Group`-parameterized assumption-game
-    skeleton (Phase B, `exporter.py:635`/`:759`) to export at all. Three general
+    preamble is added only when `has_stdlib_group_or_modint()`. The no-scheme
+    DDH/CDH **implication** proofs now export via the group-only mode (next bullet);
+    the `Group`-parameterized **scheme** family (ElGamal/HashedElGamal MultiChal) is
+    the deferred Phase-C scheme-axis case. Three general
     emission fixes that landed with the old GroupElem foundation remain: `==`/`!=` ->
     `=`/`<>`; a `Sample` with no type annotation takes the sampled variable's type;
     `type_of` types `G.generator`/`G.identity` as `GroupElem<G>`.
+- **Group-only export mode** (`exporter._group_only_let_name` + dispatch;
+  `exporter._export_group_only` + `_group_only_scaffold` + `_group_only_type_of_factory`):
+  a proof that imports **only game files** (no `.scheme`/`.primitive`) and attacks a
+  game parameterized by a `Group` math structure (`let: Group G; theorem: CDH(G);`,
+  e.g. `DDH_implies_CDH`) has no primitive theory. It is detected right after the
+  import loop (no scheme/primitive imported **and** the theorem-target let is a
+  `GroupType`) and routed to a **dedicated `_export_group_only` branch** that leaves
+  the entire `:683`->end primitive-theory orchestration untouched. The branch emits
+  the games **at top level over `clone CyclicGroup as <G>`** -- no `<primitive>_Theory`
+  wrapper, no `Em : Scheme` param -- reusing `translate_game_file_oracle` /
+  `translate_game` (the `Group G` module param **stripped** post-construction) /
+  `translate_adversary_type` (with the multi-oracle spec, so `distinguish` takes the
+  init result + `{O.<post>}`) / `translate_reduction`; a helper game's non-group param
+  is carrier-aliased to its instantiation arg (`RandomTargetGuessing(GroupElem<G>)` ->
+  `S = G.group`). The per-step wrappers, assumption `eps_<gf>` ops, **admit** hop
+  lemmas, and the main theorem are hand-built (`_group_only_scaffold`): a hop between
+  two steps of the same assumption game + reduction (differing only by side) is bounded
+  by `eps_<gf>`, every other hop is an admitted equality, and the main-theorem triangle
+  bound sums one epsilon **per assumption hop with repetition**. Two shared-translator
+  enablers are **gated to group-only** (existing exports byte-identical): a bare Void
+  module-call statement (`challenger.Initialize();`) translates via the new
+  `allow_void_call` flag (`translate_reduction` -> `_translate_method` ->
+  `StatementTranslator`, default off; otherwise such a statement raises
+  `NotImplementedError` -> `return witness`); and `ec_ast.Call` renders a result-less
+  call when its `var` is empty. **Verified:** `DDH_implies_CDH` +
+  `GapCDH_implies_GapCDH_NZ` export and `ec_compile` OK (admitted hops -- export-only
+  goal). The HashedDDH/MultiChal siblings still hit `translate_game`'s
+  single-module-param assertion (`module_translator.py:359`): their games carry
+  multiple math-structure params (Group+Int+`Function` random-oracle / Set+Set /
+  Set+Int multichal) -- deferred.
 - **Random-function foundation for `Function<A,B>`** (in `type_collector`
   `translate_type`/`distr_for`/`emit` + `expr_translator` FuncCall +
   `module_translator._ec_field_name`/`_field_renames_for`): a game field

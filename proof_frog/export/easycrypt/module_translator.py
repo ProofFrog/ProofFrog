@@ -536,6 +536,7 @@ class ModuleTranslator:
         emitted_primitive_type: str | None = None,
         param_renames: dict[str, str] | None = None,
         param_module_types: dict[str, str] | None = None,
+        allow_void_call: bool = False,
     ) -> ec_ast.Module:
         """Translate a Reduction to a multi-parameter EC module.
 
@@ -620,6 +621,7 @@ class ModuleTranslator:
                 module_var_aliases,
                 field_types=field_types,
                 field_renames=field_renames,
+                allow_void_call=allow_void_call,
             )
             for method in reduction.methods
         ]
@@ -1037,6 +1039,7 @@ class ModuleTranslator:
         module_var_aliases: dict[str, str] | None = None,
         field_types: dict[str, frog_ast.Type] | None = None,
         field_renames: dict[str, str] | None = None,
+        allow_void_call: bool = False,
     ) -> ec_ast.Proc:
         sig = method.signature
         ec_params = [
@@ -1077,7 +1080,10 @@ class ModuleTranslator:
             self._types, type_of, field_renames=field_renames
         )
         stmts = stmt_translator.StatementTranslator(
-            self._types, exprs, module_var_aliases=module_var_aliases
+            self._types,
+            exprs,
+            module_var_aliases=module_var_aliases,
+            allow_void_call=allow_void_call,
         )
         try:
             translated = stmts.translate_block(method.block, return_type=return_type)

@@ -314,6 +314,32 @@ def _prime_group_names(proof: frog_ast.ProofFile) -> set[str]:
     return names
 
 
+def _group_only_let_name(proof: frog_ast.ProofFile) -> str | None:
+    """Return the group let-name if this is a *group-only* proof, else None.
+
+    A group-only proof (e.g. ``DDH_implies_CDH``) imports only game files --
+    no ``.scheme``/``.primitive`` -- and attacks a game parameterized by a
+    ``Group`` math structure: ``let: Group G;``, ``theorem: CDH(G);``. The
+    theorem target's let has a :class:`~proof_frog.frog_ast.GroupType`. Such a
+    proof has no primitive theory; its games/reductions are emitted at top
+    level over the cloned group (see :func:`_export_group_only`). The caller
+    only consults this once it knows no primitive/scheme was imported, so a
+    ``Scheme ElGamal(Group G)`` proof (which DOES import a scheme) never takes
+    this path -- that is the deferred Phase-C scheme-axis case.
+    """
+    if not (
+        isinstance(proof.theorem, frog_ast.ParameterizedGame)
+        and proof.theorem.args
+        and isinstance(proof.theorem.args[0], frog_ast.Variable)
+    ):
+        return None
+    target = proof.theorem.args[0].name
+    for let in proof.lets:
+        if let.name == target and isinstance(let.type, frog_ast.GroupType):
+            return let.name
+    return None
+
+
 def _describe_step_wrapper(index: int, step: frog_ast.Step) -> str:
     """Render the per-step description comment for a ``Game_step_<i>``."""
     if not isinstance(step.challenger, frog_ast.ConcreteGame):
@@ -612,6 +638,315 @@ def _normalize_scheme_module_params(
     scheme.methods = [renamer.transform(m) for m in scheme.methods]
 
 
+def _group_only_type_of_factory(
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+) -> Callable[
+    [dict[str, frog_ast.Type], dict[str, str]],
+    Callable[[frog_ast.Expression], frog_ast.Type],
+]:
+    """A ``type_of`` factory covering the shapes group-only game/reduction
+    bodies use: variables, oracle-method calls (``challenger.Initialize()``),
+    the group constants ``G.generator``/``G.identity``, tuple projections,
+    group/ring binary ops, and integer literals."""
+
+    def type_of_factory(
+        local_types: dict[str, frog_ast.Type],
+        module_param_types: dict[str, str],
+    ) -> Callable[[frog_ast.Expression], frog_ast.Type]:
+        def type_of(e: frog_ast.Expression) -> frog_ast.Type:
+            if isinstance(e, frog_ast.Variable):
+                if e.name in local_types:
+                    return local_types[e.name]
+                raise KeyError(f"Unknown variable type for {e.name!r}")
+            if isinstance(e, frog_ast.FuncCall) and isinstance(
+                e.func, frog_ast.FieldAccess
+            ):
+                obj = e.func.the_object
+                if (
+                    isinstance(obj, frog_ast.Variable)
+                    and obj.name in module_param_types
+                ):
+                    key = (module_param_types[obj.name], e.func.name)
+                    if key in method_return_types:
+                        return method_return_types[key]
+            if isinstance(e, frog_ast.FieldAccess) and e.name in (
+                "generator",
+                "identity",
+            ):
+                return frog_ast.GroupElemType(e.the_object)
+            if isinstance(e, frog_ast.ArrayAccess) and isinstance(
+                e.index, frog_ast.Integer
+            ):
+                base = type_of(e.the_array)
+                if isinstance(base, frog_ast.ProductType) and 0 <= e.index.num < len(
+                    base.types
+                ):
+                    return base.types[e.index.num]
+            if isinstance(e, frog_ast.BinaryOperation):
+                # Group/ring ops (``*``/``/``/``^``/``+``/``-``) return their
+                # left operand's type.
+                return type_of(e.left_expression)
+            if isinstance(e, frog_ast.Integer):
+                return frog_ast.IntType()
+            raise NotImplementedError(
+                f"group-only type_of not implemented for {type(e).__name__}"
+            )
+
+        return type_of
+
+    return type_of_factory
+
+
+def _group_only_scaffold(  # pylint: disable=too-many-locals
+    steps: list[frog_ast.Step],
+    thm_adv: str,
+    ch_type: str,
+    assm_ids: set[str],
+) -> list[str]:
+    """Per-step game wrappers, assumption epsilons, admit hop lemmas, and the
+    main theorem for a group-only proof.
+
+    This is the scaffolding *around* the translator-produced games/reductions:
+    each step becomes a ``Game_step_i`` presenting the theorem oracle (init then
+    a single ``distinguish`` over the post-init oracle); a hop between two steps
+    of the same assumption game + reduction (differing only by side) is bounded
+    by that game's ``eps_<gf>`` axiom, every other hop is an admitted equality;
+    the main theorem sums the assumption epsilons. Every hop body is an
+    ``admit`` -- closing them is the structural-blocker cluster's job.
+    """
+
+    def _oracle_expr(step: frog_ast.Step) -> str:
+        cg = step.challenger
+        assert isinstance(cg, frog_ast.ConcreteGame)
+        base = f"{_ec_ident(cg.game.name)}_{cg.which}"
+        if step.reduction is not None:
+            return f"{_ec_ident(step.reduction.name)}({base})"
+        return base
+
+    def _assumption_eps(a: frog_ast.Step, b: frog_ast.Step) -> str | None:
+        ca = a.challenger
+        cb = b.challenger
+        if not isinstance(ca, frog_ast.ConcreteGame):
+            return None
+        if not isinstance(cb, frog_ast.ConcreteGame):
+            return None
+        if _ec_ident(ca.game.name) != _ec_ident(cb.game.name):
+            return None
+        ra = a.reduction.name if a.reduction else None
+        rb = b.reduction.name if b.reduction else None
+        if ra != rb or ca.which == cb.which:
+            return None
+        if _ec_ident(ca.game.name) not in assm_ids:
+            return None
+        return f"eps_{_ec_ident(ca.game.name)}"
+
+    scaffold: list[str] = []
+    for i, step in enumerate(steps):
+        oexpr = _oracle_expr(step)
+        scaffold.append(
+            f"module Game_step_{i} (A : {thm_adv}) = {{\n"
+            f"  proc main() : bool = {{\n"
+            f"    var b : bool;\n"
+            f"    var ch : {ch_type};\n"
+            f"    ch <@ {oexpr}.initialize();\n"
+            f"    b <@ A({oexpr}).distinguish(ch);\n"
+            f"    return b;\n"
+            f"  }}\n"
+            f"}}."
+        )
+
+    hop_eps: list[str | None] = [
+        _assumption_eps(steps[i], steps[i + 1]) for i in range(len(steps) - 1)
+    ]
+    eps_ids = sorted({eps for eps in hop_eps if eps is not None})
+    for eps in eps_ids:
+        scaffold.append(f"op {eps} : real.\naxiom {eps}_pos : 0%r <= {eps}.")
+
+    # Each hop body is an open ``admit`` -- emitted as a *standalone* ``admit.``
+    # line plus an ``admit-unguided`` resolution tag, so the dashboard counts it
+    # honestly (the proof EC-compiles WITH admits -> ``warn``, never ``clean``;
+    # a single-line ``proof. admit. qed.`` would slip past the admit scan and
+    # mis-report the proof as clean -- principle 2's worst case).
+    admit_body = f"proof.\n  {_res_tag(ADMIT_UNGUIDED)}\n  admit.\nqed."
+    for i, hop in enumerate(hop_eps):
+        if hop is not None:
+            scaffold.append(
+                f"lemma hop_{i}_pr (A <: {thm_adv}) &m :\n"
+                f"  `| Pr[Game_step_{i}(A).main() @ &m : res]\n"
+                f"   - Pr[Game_step_{i + 1}(A).main() @ &m : res] | <= {hop}.\n"
+                f"{admit_body}"
+            )
+        else:
+            scaffold.append(
+                f"lemma hop_{i}_pr (A <: {thm_adv}) &m :\n"
+                f"  Pr[Game_step_{i}(A).main() @ &m : res]\n"
+                f"  = Pr[Game_step_{i + 1}(A).main() @ &m : res].\n"
+                f"{admit_body}"
+            )
+
+    # The triangle-inequality bound sums one epsilon per assumption hop, *with
+    # repetition* (a proof may invoke the same assumption twice, e.g. GapCDH's
+    # two NonzeroSampling hops) -- distinct ``eps_ids`` are only for the op /
+    # axiom declarations and smt hints.
+    bound_terms = [eps for eps in hop_eps if eps is not None]
+    bound = " + ".join(bound_terms) if bound_terms else "0%r"
+    haves = "\n".join(f"  have h{i} := hop_{i}_pr A &m." for i in range(len(steps) - 1))
+    smt_hints = " ".join(f"{eps}_pos" for eps in eps_ids)
+    scaffold.append(
+        f"lemma main_theorem (A <: {thm_adv}) &m :\n"
+        f"  `| Pr[Game_step_0(A).main() @ &m : res]\n"
+        f"   - Pr[Game_step_{len(steps) - 1}(A).main() @ &m : res] | <= {bound}.\n"
+        f"proof.\n{haves}\n  smt({smt_hints}).\nqed."
+    )
+    return scaffold
+
+
+def _export_group_only(  # pylint: disable=too-many-locals
+    proof: frog_ast.ProofFile,
+    game_files: list[frog_ast.GameFile],
+    group_let_name: str,
+) -> str:
+    """Export a *group-only* proof (no scheme/primitive) to EC source.
+
+    The games and reductions are emitted at top level over a ``clone
+    CyclicGroup as <G>`` (plus the gated exponent-ring clone), with no
+    ``<primitive>_Theory`` wrapper and no ``Em : Scheme`` module parameter --
+    the structure validated in ``.ec-tmp/DDH_implies_CDH.target.ec`` (see the
+    Group-skeleton implementation plan, Task B.0). Game/reduction *bodies* are
+    faithfully translated from the FrogLang ASTs by the existing translators;
+    the per-step wrappers, assumption epsilons, hop lemmas and the main theorem
+    are emitted as scaffolding with guided ``admit`` hop bodies (export-only
+    goal for the DDH/CDH implication family -- closing the hops is the
+    structural-blocker cluster's job).
+    """
+    prime_groups = _prime_group_names(proof)
+
+    # Bind each game file's non-group parameters to their instantiation
+    # argument. ``RandomTargetGuessing(GroupElem<G>)`` instantiates the helper
+    # game ``Real(Set S)`` with ``S = GroupElem<G>``; the bodies/signatures then
+    # render ``S`` as ``G.group``. ``Group G`` params are the top-level clone,
+    # never a value type, so they are skipped.
+    game_file_by_id = {_ec_ident(gf.name): gf for gf in game_files}
+    carrier_aliases: dict[str, frog_ast.Type] = {}
+    refs: list[frog_ast.ParameterizedGame] = list(proof.assumptions)
+    if isinstance(proof.theorem, frog_ast.ParameterizedGame):
+        refs.append(proof.theorem)
+    for ref in refs:
+        gf = game_file_by_id.get(_ec_ident(ref.name))
+        if gf is None:
+            continue
+        for param, arg in zip(gf.games[0].parameters, ref.args):
+            if not isinstance(param.type, frog_ast.GroupType) and isinstance(
+                arg, frog_ast.Type
+            ):
+                carrier_aliases[param.name] = arg
+
+    top_types = tc.TypeCollector(
+        aliases=carrier_aliases, prime_group_names=prime_groups
+    )
+    top_types.translate_type(frog_ast.GroupElemType(frog_ast.Variable(group_let_name)))
+
+    # (oracle_type, method) -> return type, for the body translators' type_of.
+    method_return_types: dict[tuple[str, str], frog_ast.Type] = {}
+    for gf in game_files:
+        oracle_type = f"{_ec_ident(gf.name)}_Oracle"
+        for game_method in gf.games[0].methods:
+            method_return_types[(oracle_type, game_method.signature.name)] = (
+                game_method.signature.return_type
+            )
+
+    modules = mt.ModuleTranslator(
+        top_types, _group_only_type_of_factory(method_return_types)
+    )
+
+    def _init_method(gf: frog_ast.GameFile) -> frog_ast.Method:
+        return next(
+            m for m in gf.games[0].methods if m.signature.name.lower() == "initialize"
+        )
+
+    # --- Oracle types + game modules (top level, no scheme param) ---
+    game_decls: list[ec_ast.EcTopDecl] = []
+    for gf in game_files:
+        gf_id = _ec_ident(gf.name)
+        oracle_type_name = f"{gf_id}_Oracle"
+        game_decls.append(modules.translate_game_file_oracle(gf, oracle_type_name))
+        for side in gf.games:
+            mod = modules.translate_game(
+                side,
+                f"{gf_id}_{side.name}",
+                param_type_name=group_let_name,
+                implements=oracle_type_name,
+                emitted_param_type=group_let_name,
+                emit_state_vars=True,
+            )
+            # Drop the ``Group G`` module parameter: the group is the top-level
+            # clone, referenced directly by the body, not a functor argument.
+            game_decls.append(
+                ec_ast.Module(
+                    name=mod.name,
+                    procs=mod.procs,
+                    params=[],
+                    implements=mod.implements,
+                    module_vars=mod.module_vars,
+                )
+            )
+
+    # --- Adversary type for the theorem game ---
+    assert isinstance(proof.theorem, frog_ast.ParameterizedGame)
+    thm_id = _ec_ident(proof.theorem.name)
+    thm_gf = next(gf for gf in game_files if _ec_ident(gf.name) == thm_id)
+    thm_adv = f"{thm_id}_Adv"
+    thm_multi_oracle = modules.multi_oracle_spec(
+        thm_gf, oracle_model.classify_game_file(thm_gf)
+    )
+    game_decls.append(
+        modules.translate_adversary_type(
+            thm_gf,
+            f"{thm_id}_Oracle",
+            adv_type_name=thm_adv,
+            multi_oracle=thm_multi_oracle,
+        )
+    )
+
+    # --- Reductions (Group param filtered out by translate_reduction) ---
+    reductions = [h for h in proof.helpers if isinstance(h, frog_ast.Reduction)]
+    for red in reductions:
+        composed_oracle = f"{_ec_ident(red.to_use.name)}_Oracle"
+        game_decls.append(
+            modules.translate_reduction(
+                red,
+                primitive_name=group_let_name,
+                oracle_type_name=composed_oracle,
+                allow_void_call=True,
+            )
+        )
+
+    # --- Per-step wrappers + assumption epsilons + hop lemmas + theorem ---
+    steps = [s for s in proof.steps if isinstance(s, frog_ast.Step)]
+    if len(steps) != len(proof.steps):
+        raise ValueError(
+            "group-only export does not support Induction / StepAssumption "
+            "steps (out of scope -- see principle 5)."
+        )
+    ch_type = top_types.translate_type(_init_method(thm_gf).signature.return_type).text
+    assm_ids = {_ec_ident(a.name) for a in proof.assumptions}
+    scaffold = _group_only_scaffold(steps, thm_adv, ch_type, assm_ids)
+
+    decls: list[ec_ast.EcTopDecl] = [
+        *top_types.emit(),
+        *game_decls,
+        *scaffold,
+    ]
+    stdlib_requires = (
+        ["Group", "ZModP", "List"] if top_types.has_stdlib_group_or_modint() else []
+    )
+    ec_file = ec_ast.EcFile(
+        requires=["AllCore", "Distr", "DProd", "DMap", *stdlib_requires],
+        decls=decls,
+    )
+    return ec_ast.pretty_print(ec_file)
+
+
 # pylint: disable=too-many-locals,too-many-statements,too-many-branches
 def export_proof_file(proof_path: str) -> str:
     """Parse ``proof_path`` and return the EC source as a string.
@@ -658,10 +993,20 @@ def export_proof_file(proof_path: str) -> str:
         elif isinstance(root, frog_ast.GameFile):
             game_files.append(root)
 
-    if not schemes_by_name and not primitives_by_name:
-        raise ValueError("Exporter requires a Scheme or Primitive import.")
     if not game_files:
         raise ValueError("Exporter requires at least one GameFile import.")
+
+    # Group-only proofs (no scheme/primitive import; the theorem attacks a game
+    # parameterized by a ``Group`` math structure -- e.g. ``DDH_implies_CDH``)
+    # have no primitive theory. They take a dedicated top-level export path that
+    # emits the games/reductions over the cloned group, leaving the entire
+    # primitive-theory orchestration below untouched (so existing exports stay
+    # byte-identical).
+    if not schemes_by_name and not primitives_by_name:
+        group_let_name = _group_only_let_name(proof)
+        if group_let_name is not None:
+            return _export_group_only(proof, game_files, group_let_name)
+        raise ValueError("Exporter requires a Scheme or Primitive import.")
 
     # EC requires theory/module names to begin with an uppercase letter, but
     # the exporter emits scheme/primitive instance let-names and module-typed

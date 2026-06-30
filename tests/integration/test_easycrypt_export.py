@@ -117,6 +117,9 @@ CG_HON_BIND_K_PK_PROOF = (
 )
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
+DDH_IMPLIES_CDH_PROOF = EXAMPLES / "Proofs" / "Group" / "DDH_implies_CDH.proof"
+GAPCDH_NZ_PROOF = EXAMPLES / "Proofs" / "Group" / "GapCDH_implies_GapCDH_NZ.proof"
+
 
 def _docker_available() -> bool:
     if shutil.which("docker") is None:
@@ -2147,3 +2150,74 @@ def test_export_cg_expanded_correctness_compiles_in_easycrypt(tmp_path: Path) ->
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Group-only export mode (no scheme/primitive; games over a cloned CyclicGroup)
+# ---------------------------------------------------------------------------
+
+
+def test_export_ddh_implies_cdh_group_only_structure() -> None:
+    """``DDH_implies_CDH`` exports via the group-only path.
+
+    The proof imports only game files (no ``.scheme``/``.primitive``) and
+    attacks ``CDH(G)`` over a ``Group G``. It must emit top-level games over a
+    ``clone CyclicGroup as G`` with NO ``<primitive>_Theory`` wrapper and NO
+    ``Em : Scheme`` parameter -- the structure validated in
+    ``.ec-tmp/DDH_implies_CDH.target.ec`` (Group-skeleton plan, Task B.0).
+    """
+    output = exporter.export_proof_file(str(DDH_IMPLIES_CDH_PROOF))
+    assert "clone CyclicGroup as G." in output
+    assert "_Theory" not in output  # no primitive-theory wrapper
+    assert "Em : Scheme" not in output
+    # The two assumption hops are bounded by the assumption epsilons.
+    assert "op eps_DDH : real." in output
+    assert "op eps_RandomTargetGuessing : real." in output
+    assert "module type CDH_Oracle" in output
+    assert "module R (Challenger : DDH_Oracle)" in output
+    assert "lemma main_theorem" in output
+    # Each admitted hop must emit a STANDALONE ``admit.`` line (+ an
+    # admit-unguided resolution tag), so the dashboard counts the admits and
+    # classifies the proof as ``warn`` -- never a false ``clean``. A single-line
+    # ``proof. admit. qed.`` would slip past the admit scan (principle 2).
+    assert "\n  admit.\n" in output
+    assert output.count("(* resolution: admit-unguided *)") == output.count(
+        "\n  admit.\n"
+    )
+
+
+def test_export_gapcdh_nz_group_only_repeats_epsilon() -> None:
+    """``GapCDH_implies_GapCDH_NZ`` exports and its main-theorem bound sums one
+    epsilon per assumption hop *with repetition* (two NonzeroSampling hops)."""
+    output = exporter.export_proof_file(str(GAPCDH_NZ_PROOF))
+    assert "clone CyclicGroup as G." in output
+    assert "eps_NonzeroSampling + eps_GapCDH + eps_NonzeroSampling" in output
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_export_group_only_typechecks_in_easycrypt(tmp_path: Path) -> None:
+    """EasyCrypt accepts the group-only exports of ``DDH_implies_CDH`` and
+    ``GapCDH_implies_GapCDH_NZ`` (with admitted hop bodies -- export-only goal
+    for the DDH/CDH implication family)."""
+    for label, proof_path in (
+        ("ddh_implies_cdh", DDH_IMPLIES_CDH_PROOF),
+        ("gapcdh_nz", GAPCDH_NZ_PROOF),
+    ):
+        output = exporter.export_proof_file(str(proof_path))
+        ec_file = tmp_path / f"{label}.ec"
+        ec_file.write_text(output)
+        result = subprocess.run(
+            ["bash", str(EC_SCRIPT), str(ec_file)],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"EasyCrypt rejected the group-only export of {label}.\n"
+            f"stderr:\n{result.stderr}\n"
+            f"stdout:\n{result.stdout[-2000:]}"
+        )

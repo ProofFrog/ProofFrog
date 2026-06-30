@@ -490,7 +490,11 @@ def _render_stmt(stmt: EcStmt) -> str:
     if isinstance(stmt, Sample):
         return f"{stmt.var} <$ {stmt.distr};"
     if isinstance(stmt, Call):
-        return f"{stmt.var} <@ {stmt.callee}({stmt.args});"
+        if stmt.var:
+            return f"{stmt.var} <@ {stmt.callee}({stmt.args});"
+        # A unit-returning call whose result is discarded (e.g. a reduction's
+        # ``challenger.Initialize();``) renders without a result binding.
+        return f"{stmt.callee}({stmt.args});"
     if isinstance(stmt, Return):
         return f"return {stmt.expr};"
     raise TypeError(f"Unknown statement: {type(stmt).__name__}")

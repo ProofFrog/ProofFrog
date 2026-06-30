@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Callable
 
@@ -11,6 +12,7 @@ from . import oracle_model
 from . import stmt_translator
 from . import type_collector as tc
 from ... import frog_ast
+from ... import visitors
 
 #: Binder name for the lifted-``Initialize`` result threaded from the game
 #: wrapper's ``main()`` into the adversary's ``distinguish``. Matches the
@@ -636,6 +638,7 @@ class ModuleTranslator:
         self,
         game_file: frog_ast.GameFile,
         model: oracle_model.GameOracleModel | None = None,
+        scheme_args: list[frog_ast.Expression] | None = None,
     ) -> MultiOracleSpec | None:
         """Build the Initialize-lifted emission spec, or ``None`` if single-oracle.
 
@@ -643,6 +646,19 @@ class ModuleTranslator:
         already hold a model (the exporter threads one per game file) pass it to
         avoid re-classifying. Returns ``None`` for single-oracle games so the
         wrapper/adversary emitters take their legacy byte-identical path.
+
+        ``scheme_args`` binds the game's formal scheme parameter(s) to the
+        actual instantiation the spec describes, *before* translating the
+        ``Initialize`` return type. This matters at top-level (concrete) scope
+        when the game's formal scheme-param name collides with a different proof
+        let of the same name -- e.g. ``Game Real(KEM K)`` instantiated at the
+        outer scheme ``KF`` (``KEM_INDCCA_MultiChal(KF)``) while the proof also
+        has an inner ``KEM K``. Without binding, ``K.SharedSecret`` resolves to
+        the inner ``K``'s concrete type instead of ``KF``'s, so a wrapper's
+        ``Initialize`` result (passed to the outer adversary) gets the wrong
+        tuple type. Omitted (theory-mode emission) leaves the formal names in
+        place -- the abstract-theory types are theory-local and clone-resolved,
+        so that path stays byte-identical.
         """
         if model is None:
             model = oracle_model.classify_game_file(game_file)
@@ -653,11 +669,17 @@ class ModuleTranslator:
             for m in game_file.games[0].methods
             if m.signature.name.lower() == model.init_name
         )
+        return_type = init_method.signature.return_type
+        if scheme_args:
+            ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+            for param, arg in zip(game_file.games[0].parameters, scheme_args):
+                ast_map.set(frog_ast.Variable(param.name), copy.deepcopy(arg))
+            return_type = visitors.SubstitutionTransformer(ast_map).transform(
+                copy.deepcopy(return_type)
+            )
         return MultiOracleSpec(
             init_name=model.init_name or "",
-            init_return_type=self._translate_param_type(
-                init_method.signature.return_type
-            ),
+            init_return_type=self._translate_param_type(return_type),
             post_init_names=list(model.post_init_names),
         )
 
@@ -776,10 +798,26 @@ class ModuleTranslator:
             # result (and set the reduction's own state). Type-safe whenever
             # the reduction's Initialize does not call ``challenger.Initialize``.
             outer_init_local = f"{INIT_RESULT_NAME}0"
+            # ``pk0`` is literally ``<reduction>(...).initialize()``, so its EC
+            # type is the *reduction's own* Initialize return type, not the
+            # generic outer game file's. The outer game file (e.g.
+            # ``KEM_INDCCA_MultiChal``) is cloned once per scheme, so
+            # ``outer_spec.init_return_type`` -- computed from the generic file
+            # -- resolves the abstract shared-secret to whichever clone the type
+            # environment happens to bind (the inner scheme's), giving the wrong
+            # concrete type for the outer reduction. The reduction declares the
+            # outer clone's types explicitly (``[KF.PublicKey, KF.SharedSecret,
+            # KF.Ciphertext]``), which translate to the correct concrete tuple.
+            init_method = _reduction_init_method(reduction)
+            pk0_type = (
+                self._translate_param_type(init_method.signature.return_type)
+                if init_method is not None
+                else outer_spec.init_return_type
+            )
             body.append(
                 ec_ast.VarDecl(
                     name=outer_init_local,
-                    type=outer_spec.init_return_type,
+                    type=pk0_type,
                 )
             )
             body.append(

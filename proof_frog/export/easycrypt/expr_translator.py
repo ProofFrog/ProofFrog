@@ -171,7 +171,6 @@ class ExpressionTranslator:
             ):
                 # ModInt ring multiplication (the group's exponent ring).
                 ec_type = self._types.translate_type(lhs_type)
-                self._types.note_modint_mul(ec_type)
                 mmul = tc.modint_mul_name_for(ec_type)
                 left = self._modint_operand(expr.left_expression, ec_type)
                 right = self._modint_operand(expr.right_expression, ec_type)
@@ -181,7 +180,6 @@ class ExpressionTranslator:
             lhs_type = self._types.resolve(self._type_of(expr.left_expression))
             if isinstance(lhs_type, frog_ast.GroupElemType):
                 ec_type = self._types.translate_type(lhs_type)
-                exp = tc.group_exp_name_for(ec_type)
                 left = self.translate(expr.left_expression)
                 # The exponent lives in the group's exponent ring
                 # ModInt<G.order>; render a literal ``0`` as that ring's zero.
@@ -189,7 +187,9 @@ class ExpressionTranslator:
                     frog_ast.ModIntType(frog_ast.FieldAccess(lhs_type.group, "order"))
                 )
                 right = self._modint_operand(expr.right_expression, exp_modint)
-                return f"{exp} {_paren(left)} {_paren(right)}"
+                return tc.group_power_for(
+                    ec_type, exp_modint, _paren(left), _paren(right)
+                )
             return self._translate_arith(expr)
         raise NotImplementedError(
             f"Binary operator translation not implemented: {expr.operator}"
@@ -204,7 +204,6 @@ class ExpressionTranslator:
         expression to the integer literal ``0`` (e.g. ``x - x``); render it
         as the ring's zero constant so the result stays well-typed."""
         if isinstance(expr, frog_ast.Integer) and expr.num == 0:
-            self._types.note_modint_zero(ec_modint_type)
             return tc.modint_zero_name_for(ec_modint_type)
         return self.translate(expr)
 

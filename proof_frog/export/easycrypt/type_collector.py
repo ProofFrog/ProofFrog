@@ -34,6 +34,7 @@ class TypeCollector:
         known_abstract_types: set[str] | None = None,
         strip_field_prefixes: set[str] | None = None,
         theory_mode: bool = False,
+        prime_group_names: set[str] | None = None,
     ) -> None:
         # ``theory_mode``: when True, every distinct bitstring type seen
         # is registered as an abstract type inside the primitive's
@@ -49,33 +50,32 @@ class TypeCollector:
         self._abstract_bitstring_names: set[str] = set()
         self._names: list[str] = []  # ordered, unique
         self._seen: set[str] = set()
-        # Concrete ModInt<q> types seen, by EC type name (e.g.
-        # ``modint_q``). Modelled as an abstract finite additive group:
-        # each gets a uniform full distribution plus ``add``/``sub`` ops
-        # and group axioms (the additive analogue of the bitstring
-        # ``xor``/``zero`` foundation). Order-preserving, deduped.
+        # Standalone ``ModInt<q>`` clone aliases (e.g. ``ModInt_q``), each
+        # emitting one ``clone ZModP.ZModRing as <alias> with op p <- <q>``.
+        # The EC type is ``<alias>.zmod``; ring ops + uniform distr come from
+        # the stdlib (no per-type axioms). Order-preserving, deduped.
         self._modints: list[str] = []
         self._modint_set: set[str] = set()
-        # ModInt type names for which a ring ``mul`` op / additive ``zero``
-        # constant was actually emitted-as-needed by the expression
-        # translator (the exponent ring of a GroupElem). Kept narrow so a
-        # proof using only ``+``/``-`` on ModInt (the additive foundation)
-        # doesn't gain unused ring ops.
-        self._modint_mul: set[str] = set()
-        self._modint_zero: set[str] = set()
-        # Concrete ``GroupElem<G>`` types seen, by EC type name (e.g.
-        # ``groupelem_G``). Modelled as an abstract finite abelian cyclic
-        # group -- the multiplicative analogue of the ModInt additive
-        # foundation above: each gets a ``generator``/``identity`` constant,
-        # ``mul``/``div`` ops, and a ``exp`` op taking a ModInt<G.order>
-        # exponent (the group's exponent ring). Group laws are emitted as
-        # axioms (registered with the axiom-soundness audit; the intended
-        # model is EC's ``CyclicGroup``, from which they are derivable).
-        # Order-preserving, deduped. ``_groupelem_exp`` records the EC
-        # exponent type name for each registered group's ``exp`` op.
+        # Group clone aliases (the FrogLang ``Group <G>`` name, e.g. ``G``).
+        # Each emits a ``clone CyclicGroup as <G>`` plus an exponent-ring
+        # clone (prime: ``<G>.PowZMod``/``FDistr``; general: ``ZModRing as
+        # <G>_Exp``). The group type is ``<G>.group``. Order-preserving,
+        # deduped. ``_groupelem_exp`` records the EC exponent type
+        # (``<G>_P.ZModE.exp`` prime / ``<G>_Exp.zmod`` general) per group.
         self._groupelems: list[str] = []
         self._groupelem_set: set[str] = set()
         self._groupelem_exp: dict[str, str] = {}
+        # Uniform-distribution op for each registered exponent type and
+        # standalone-ModInt type, keyed by the EC type string. Populated at
+        # registration so ``distr_for`` resolves a sampled exponent / ModInt
+        # without string surgery (prime exp -> ``<G>_FD.dt``; general exp /
+        # standalone -> ``<theory>.DZmodP.dunifin``).
+        self._exp_distrs: dict[str, str] = {}
+        self._modint_distrs: dict[str, str] = {}
+        # EC modulus expression for each standalone ``ModInt<q>`` clone,
+        # keyed by clone alias (e.g. ``ModInt_q`` -> ``"q"``). Bound as the
+        # ZModRing ``op p`` so the ring is Z_<modulus>, not Z_<abstract p>.
+        self._modint_modulus: dict[str, str] = {}
         # Alias keys may be plain (``"Key"``) or qualified
         # (``"E1.key"``). Qualified keys resolve ``FieldAccess`` types
         # through per-instance scheme clones in multi-scheme exports.
@@ -171,6 +171,22 @@ class TypeCollector:
         # preserving, deduped by (domain, codomain).
         self._function_types: list[tuple[str, str]] = []
         self._function_type_set: set[tuple[str, str]] = set()
+        # Group names (FrogLang ``Group <G>`` parameters) for which the
+        # proof declared ``requires <G>.order is prime;``. These get the
+        # prime emission path (PowZMod field exponent + FDistr + a
+        # ``prime <G>.order`` axiom); every other group gets the general
+        # CyclicGroup + ZModRing path. Mirrors the engine's own gating
+        # (``PipelineContext.has_prime_order_requirement``).
+        self._prime_groups: set[str] = set(prime_group_names or ())
+
+    def is_prime_group(self, group_name: str) -> bool:
+        """True if the proof declared ``requires <group>.order is prime;``."""
+        return group_name in self._prime_groups
+
+    def has_stdlib_group_or_modint(self) -> bool:
+        """True if a ``GroupElem<G>`` or standalone ``ModInt<q>`` was
+        registered, so the export must ``require`` the Group/ZModP stdlib."""
+        return bool(self._groupelems or self._modints)
 
     def resolve(
         self, t: frog_ast.Type, _visited: frozenset[str] = frozenset()
@@ -244,23 +260,49 @@ class TypeCollector:
         if isinstance(resolved, frog_ast.IntType):
             return ec_ast.EcType("int")
         if isinstance(resolved, frog_ast.ModIntType):
-            name = self._modint_name(resolved)
-            if name not in self._modint_set:
-                self._modint_set.add(name)
-                self._modints.append(name)
-            return ec_ast.EcType(name)
+            # Dual role: ``ModInt<G.order>`` is the exponent ring of the
+            # group ``G`` -- alias it to ``G``'s cloned exponent type (no
+            # independent clone) so ``g ^ a`` type-checks against the same
+            # ring. A standalone ``ModInt<q>`` gets its own ``ZModRing`` clone.
+            group_alias = self._group_order_modulus_alias(resolved)
+            if group_alias is not None:
+                # Ensure the group is registered (sets its exponent type).
+                self.translate_type(
+                    frog_ast.GroupElemType(frog_ast.Variable(group_alias))
+                )
+                return ec_ast.EcType(self._groupelem_exp[group_alias])
+            alias = self._modint_name(resolved)
+            if alias not in self._modint_set:
+                self._modint_set.add(alias)
+                self._modints.append(alias)
+                self._modint_distrs[f"{alias}.zmod"] = f"{alias}.DZmodP.dunifin"
+                # Bind the ZModRing modulus to the actual FrogLang expression
+                # (e.g. ``q`` from an ``Int q`` let -> ``op q : int``), so the
+                # ring is genuinely Z_<modulus> rather than over an unrelated
+                # abstract ``p`` -- keeping ``ModInt<q>`` faithful for any
+                # future proof that relates ``q`` to the ring cardinality.
+                modulus = _substitute_aliases(
+                    resolved.modulus, self._aliases, self._strip_field_prefixes
+                )
+                self._modint_modulus[alias] = _canonical_arith_str(modulus)
+            return ec_ast.EcType(f"{alias}.zmod")
         if isinstance(resolved, frog_ast.GroupElemType):
-            name = self._groupelem_name(resolved)
-            if name not in self._groupelem_set:
-                self._groupelem_set.add(name)
-                self._groupelems.append(name)
-                # The exponent ring is ModInt<group.order>; translating it
-                # here registers the modint type so the ``exp`` op's
-                # signature is in scope when :meth:`emit` runs.
-                order = frog_ast.FieldAccess(resolved.group, "order")
-                exp_type = self.translate_type(frog_ast.ModIntType(order))
-                self._groupelem_exp[name] = exp_type.text
-            return ec_ast.EcType(name)
+            alias = self._groupelem_name(resolved)
+            if alias not in self._groupelem_set:
+                self._groupelem_set.add(alias)
+                self._groupelems.append(alias)
+                # Record the exponent type (and its uniform distr) for this
+                # group: prime declares the PowZMod field, general the
+                # ZModRing. Set directly (no recursive ModInt translation)
+                # so ``ModInt<G.order>`` later aliases back to it.
+                if self.is_prime_group(alias):
+                    exp_text = f"{alias}_P.ZModE.exp"
+                    self._exp_distrs[exp_text] = f"{alias}_FD.dt"
+                else:
+                    exp_text = f"{alias}_Exp.zmod"
+                    self._exp_distrs[exp_text] = f"{alias}_Exp.DZmodP.dunifin"
+                self._groupelem_exp[alias] = exp_text
+            return ec_ast.EcType(f"{alias}.group")
         if (
             isinstance(resolved, frog_ast.Variable)
             and resolved.name in self._known_abstract_types
@@ -329,40 +371,56 @@ class TypeCollector:
             t.parameterization, self._aliases, self._strip_field_prefixes
         )
 
-    def _modint_name(self, t: frog_ast.ModIntType) -> str:
-        """EC type name for a ``ModInt<q>`` type.
+    def _group_order_modulus_alias(self, t: frog_ast.ModIntType) -> str | None:
+        """Group clone alias if ``t`` is ``ModInt<G.order>``, else ``None``.
 
-        Canonicalizes the modulus expression via sympy (mirroring
-        ``_bitstring_name``) so arithmetically-equivalent moduli collapse
-        to one EC type. ``ModInt<q>`` becomes ``modint_q``.
+        Accepts ``FieldAccess(<G>, 'order')`` or ``GroupOrder(<G>)`` with a
+        ``Variable`` group, returning the (sanitized) group name so the
+        exponent ring aliases that group's cloned exponent type.
+        """
+        modulus = _substitute_aliases(
+            t.modulus, self._aliases, self._strip_field_prefixes
+        )
+        group_expr: frog_ast.Expression | None = None
+        if (
+            isinstance(modulus, frog_ast.FieldAccess)
+            and modulus.name == "order"
+            and isinstance(modulus.the_object, frog_ast.Variable)
+        ):
+            group_expr = modulus.the_object
+        elif isinstance(modulus, frog_ast.GroupOrder) and isinstance(
+            modulus.group, frog_ast.Variable
+        ):
+            group_expr = modulus.group
+        if group_expr is None:
+            return None
+        return _sanitize(_canonical_arith_str(group_expr))
+
+    def _modint_name(self, t: frog_ast.ModIntType) -> str:
+        """EC clone alias for a standalone ``ModInt<q>`` type.
+
+        Canonicalizes the modulus via sympy (mirroring ``_bitstring_name``)
+        so arithmetically-equivalent moduli collapse to one clone. The alias
+        must be EC-theory-valid (uppercase-initial), so ``ModInt<q>`` becomes
+        ``ModInt_q`` (the EC type is then ``ModInt_q.zmod``).
         """
         modulus = _substitute_aliases(
             t.modulus, self._aliases, self._strip_field_prefixes
         )
         sanitized = _sanitize(_canonical_arith_str(modulus))
-        return f"modint_{sanitized}" if sanitized else "modint"
+        return f"ModInt_{sanitized}" if sanitized else "ModInt"
 
     def _groupelem_name(self, t: frog_ast.GroupElemType) -> str:
-        """EC type name for a ``GroupElem<G>`` type.
+        """EC group clone alias for a ``GroupElem<G>`` type.
 
-        Canonicalizes the group expression via sympy (mirroring
-        ``_modint_name``) so syntactically-distinct references to the same
-        group collapse to one EC type. ``GroupElem<G>`` becomes
-        ``groupelem_G``.
+        The alias is the (sanitized) group name itself -- the ``clone
+        CyclicGroup as <G>`` alias -- so ``GroupElem<G>`` has EC type
+        ``<G>.group``. Group names are uppercase-initial by FrogLang
+        convention, which EC requires of a theory clone alias.
         """
         group = _substitute_aliases(t.group, self._aliases, self._strip_field_prefixes)
         sanitized = _sanitize(_canonical_arith_str(group))
-        return f"groupelem_{sanitized}" if sanitized else "groupelem"
-
-    def note_modint_mul(self, ec_type: ec_ast.EcType) -> None:
-        """Record that a ModInt ring ``*`` op was rendered for this type,
-        so :meth:`emit` declares ``mmul_<q>`` + its commutativity axiom."""
-        self._modint_mul.add(ec_type.text)
-
-    def note_modint_zero(self, ec_type: ec_ast.EcType) -> None:
-        """Record that a ModInt additive zero was rendered for this type,
-        so :meth:`emit` declares ``mzero_<q>`` + the ``sub a a`` axiom."""
-        self._modint_zero.add(ec_type.text)
+        return sanitized if sanitized else "G"
 
     def distr_for(self, ec_type: ec_ast.EcType) -> str:
         """Return the distribution op name for a sampled type.
@@ -382,6 +440,14 @@ class TypeCollector:
         if " * " in ec_type.text and "(" not in ec_type.text:
             parts = [p.strip() for p in ec_type.text.split(" * ")]
             return " `*` ".join(self.distr_for(ec_ast.EcType(p)) for p in parts)
+        # Stdlib group element: uniform over the finite group's enum.
+        if ec_type.text.endswith(".group"):
+            return f"duniform {ec_type.text[: -len('.group')]}.elems"
+        # Stdlib exponent ring / standalone ModInt: the cloned uniform distr.
+        if ec_type.text in self._exp_distrs:
+            return self._exp_distrs[ec_type.text]
+        if ec_type.text in self._modint_distrs:
+            return self._modint_distrs[ec_type.text]
         if ec_type.text in self._abstract_seen:
             distr = f"d{ec_type.text}"
             if distr not in self._abstract_distrs:
@@ -392,8 +458,6 @@ class TypeCollector:
             if distr not in self._known_abstract_distrs:
                 self._known_abstract_distrs.append(distr)
             return distr
-        if ec_type.text in self._modint_set:
-            return f"d{ec_type.text}"
         assert ec_type.text.startswith("bs_") or ec_type.text == "bs"
         suffix = ec_type.text.removeprefix("bs")
         distr = f"dbs{suffix}"
@@ -615,84 +679,43 @@ class TypeCollector:
     def emit(self) -> list[ec_ast.EcTopDecl]:
         """Produce top-level EC declarations for every registered type."""
         decls: list[ec_ast.EcTopDecl] = []
-        # ModInt<q> types: an abstract finite additive group with a
-        # uniform full distribution. ``add``/``sub`` model ``+``/``-``;
-        # the round-trip axioms make ``fun z => add z m`` a measure-
-        # preserving bijection (with ``sub`` as its inverse), which is
-        # what the ``Uniform ModInt Simplification`` synthesizer's ``rnd``
-        # bijection needs. ``add_comm`` covers the ``m + u`` orientation.
-        for name in self._modints:
-            distr = f"d{name}"
-            add_op = _add_name(name)
-            sub_op = _sub_name(name)
-            decls.append(ec_ast.TypeDecl(name))
-            decls.append(ec_ast.OpDecl(distr, f"{name} distr"))
-            decls.append(ec_ast.Axiom(f"{distr}_ll", f"is_lossless {distr}"))
-            decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
-            decls.append(ec_ast.Axiom(f"{distr}_full", f"is_full {distr}"))
-            decls.append(ec_ast.OpDecl(add_op, f"{name} -> {name} -> {name}"))
-            decls.append(ec_ast.OpDecl(sub_op, f"{name} -> {name} -> {name}"))
-            decls.append(
-                ec_ast.Axiom(
-                    f"{add_op}_sub",
-                    f"forall (a b : {name}), {sub_op} ({add_op} a b) b = a",
+        # GroupElem<G>: a clone of EC stdlib ``CyclicGroup`` (group laws
+        # derived, not axiomatized) plus its exponent ring. A proof that
+        # declared ``requires <G>.order is prime;`` gets the ``PowZMod``
+        # field exponent + ``FDistr`` (plus an assumed ``prime <G>.order``,
+        # justified by that declaration); every other group gets the general
+        # ``ZModRing`` exponent (Z_<order>, leaving the stdlib ``ge2_p :
+        # 2 <= <order>`` assumed -- registered with the axiom-soundness
+        # audit). Emitted before standalone ModInt clones (independent) and
+        # before any scheme clone referencing ``<G>.group``. Not ``import``ed
+        # -- every op is qualified (``<G>.( * )`` vs ``<G>_Exp.( * )`` would
+        # otherwise collide).
+        for alias in self._groupelems:
+            lines = [f"clone CyclicGroup as {alias}."]
+            if self.is_prime_group(alias):
+                lines.append(f"axiom {alias}_prime_order : IntDiv.prime {alias}.order.")
+                lines.append(
+                    f"clone {alias}.PowZMod as {alias}_P "
+                    f"with lemma prime_order <- {alias}_prime_order."
                 )
-            )
-            decls.append(
-                ec_ast.Axiom(
-                    f"{sub_op}_add",
-                    f"forall (a b : {name}), {add_op} ({sub_op} a b) b = a",
+                lines.append(f"clone {alias}_P.FDistr as {alias}_FD.")
+            else:
+                lines.append(
+                    f"clone ZModP.ZModRing as {alias}_Exp "
+                    f"with op p <- {alias}.order."
                 )
-            )
-            decls.append(
-                ec_ast.Axiom(
-                    f"{add_op}_comm",
-                    f"forall (a b : {name}), {add_op} a b = {add_op} b a",
-                )
-            )
-            # Commutative-ring multiplication and the additive zero. The
-            # exponent ring Z_q of a group of order q has ``*`` and ``0``;
-            # the GroupElem foundation's exponent arithmetic (e.g.
-            # ``(g^a)^b = g^(a*b)``, ``g^(x - x) = g^0``) needs them.
-            # ``mul`` is only emitted when a ModInt ``*`` was actually
-            # rendered (tracked in ``_modint_mul``); ``zero`` whenever a
-            # ModInt zero constant was needed (``_modint_zero``).
-            mul_op = _modint_mul_name(name)
-            zero_op = _modint_zero_name(name)
-            if name in self._modint_mul:
-                decls.append(ec_ast.OpDecl(mul_op, f"{name} -> {name} -> {name}"))
-                decls.append(
-                    ec_ast.Axiom(
-                        f"{mul_op}_comm",
-                        f"forall (a b : {name}), {mul_op} a b = {mul_op} b a",
-                    )
-                )
-            if name in self._modint_zero:
-                decls.append(ec_ast.OpDecl(zero_op, name))
-                decls.append(
-                    ec_ast.Axiom(
-                        f"{sub_op}_self",
-                        f"forall (a : {name}), {sub_op} a a = {zero_op}",
-                    )
-                )
-        # GroupElem<G> types: an abstract finite abelian cyclic group --
-        # the multiplicative analogue of the ModInt additive group above.
-        # ``generator``/``identity`` constants, ``mul``/``div`` group ops,
-        # and ``exp`` (group exponentiation by a ModInt<G.order> exponent).
-        # Emitted after the modint loop so the exponent type is in scope.
-        for name in self._groupelems:
-            exp_t = self._groupelem_exp[name]
-            gen = _generator_name(name)
-            ident = _identity_name(name)
-            mul = _mul_name(name)
-            div = _div_name(name)
-            exp = _exp_name(name)
-            decls.append(ec_ast.TypeDecl(name))
-            decls.append(ec_ast.OpDecl(gen, name))
-            decls.append(ec_ast.OpDecl(ident, name))
-            decls.append(ec_ast.OpDecl(mul, f"{name} -> {name} -> {name}"))
-            decls.append(ec_ast.OpDecl(div, f"{name} -> {name} -> {name}"))
-            decls.append(ec_ast.OpDecl(exp, f"{name} -> {exp_t} -> {name}"))
+            decls.append("\n".join(lines))
+        # Standalone ModInt<q> (e.g. the OTP additive group over Z_q): its
+        # own ``ZModRing`` clone. ``+``/``-``/``*``/``zero`` and the uniform
+        # ``DZmodP.dunifin`` come from the stdlib; the round-trip laws the
+        # OTP ``rnd`` bijection needs are derived ``ring`` lemmas (the 3
+        # former add/sub axioms dissolve). Leaves ``ge2_p : 2 <= q`` assumed.
+        for alias in self._modints:
+            modulus = self._modint_modulus.get(alias)
+            if modulus:
+                decls.append(f"clone ZModP.ZModRing as {alias} with op p <- {modulus}.")
+            else:
+                decls.append(f"clone ZModP.ZModRing as {alias}.")
         # Distributions over known top-level abstract types (declared
         # elsewhere via ``type X.``): emit the distribution op and
         # lossless/funiform/full axioms. The type declaration itself is
@@ -1024,62 +1047,69 @@ def _zero_name(bs_name: str) -> str:
     return f"zero{suffix}"
 
 
-def _add_name(modint_name: str) -> str:
-    """Additive-group ``+`` op for a ModInt type (``modint_q`` -> ``add_q``)."""
-    suffix = modint_name.removeprefix("modint")
-    return f"add{suffix}"
+def _ring_theory(exp_type: str) -> str:
+    """The EC theory qualifier of a stdlib exponent / ModInt type.
 
-
-def _sub_name(modint_name: str) -> str:
-    """Additive-group ``-`` op for a ModInt type (``modint_q`` -> ``sub_q``)."""
-    suffix = modint_name.removeprefix("modint")
-    return f"sub{suffix}"
-
-
-def _modint_mul_name(modint_name: str) -> str:
-    """Ring ``*`` op for a ModInt type (``modint_q`` -> ``mmul_q``).
-
-    Prefixed ``mmul`` (not ``mul``) so it never collides with the
-    GroupElem multiplicative op ``mul_<G>``.
+    ``Mq.zmod`` / ``G_Exp.zmod`` -> ``Mq`` / ``G_Exp`` (general ZModRing);
+    ``G_P.ZModE.exp`` -> ``G_P.ZModE`` (prime PowZMod field). The ring ops
+    are then ``<theory>.( + )`` etc.
     """
-    suffix = modint_name.removeprefix("modint")
-    return f"mmul{suffix}"
+    if exp_type.endswith(".zmod"):
+        return exp_type[: -len(".zmod")]
+    if exp_type.endswith(".exp"):
+        return exp_type[: -len(".exp")]
+    return exp_type
 
 
-def _modint_zero_name(modint_name: str) -> str:
-    """Additive zero constant for a ModInt type (``modint_q`` -> ``mzero_q``)."""
-    suffix = modint_name.removeprefix("modint")
-    return f"mzero{suffix}"
+def _group_theory(group_type: str) -> str:
+    """The EC clone alias of a stdlib group type (``G.group`` -> ``G``)."""
+    if group_type.endswith(".group"):
+        return group_type[: -len(".group")]
+    return group_type
 
 
-def _generator_name(groupelem_name: str) -> str:
-    """Generator constant for a GroupElem type (``groupelem_G`` -> ``generator_G``)."""
-    suffix = groupelem_name.removeprefix("groupelem")
-    return f"generator{suffix}"
+def _add_name(exp_type: str) -> str:
+    """Ring ``+`` op for a stdlib exponent/ModInt type (``Mq.zmod`` ->
+    ``Mq.( + )``)."""
+    return f"{_ring_theory(exp_type)}.( + )"
 
 
-def _identity_name(groupelem_name: str) -> str:
-    """Identity constant for a GroupElem type (``groupelem_G`` -> ``identity_G``)."""
-    suffix = groupelem_name.removeprefix("groupelem")
-    return f"identity{suffix}"
+def _sub_name(exp_type: str) -> str:
+    """Ring ``-`` op for a stdlib exponent/ModInt type (``Mq.zmod`` ->
+    ``Mq.( - )``)."""
+    return f"{_ring_theory(exp_type)}.( - )"
 
 
-def _mul_name(groupelem_name: str) -> str:
-    """Group ``*`` op for a GroupElem type (``groupelem_G`` -> ``mul_G``)."""
-    suffix = groupelem_name.removeprefix("groupelem")
-    return f"mul{suffix}"
+def _modint_mul_name(exp_type: str) -> str:
+    """Ring ``*`` op for a stdlib exponent/ModInt type (``Mq.zmod`` ->
+    ``Mq.( * )``)."""
+    return f"{_ring_theory(exp_type)}.( * )"
 
 
-def _div_name(groupelem_name: str) -> str:
-    """Group ``/`` op for a GroupElem type (``groupelem_G`` -> ``div_G``)."""
-    suffix = groupelem_name.removeprefix("groupelem")
-    return f"div{suffix}"
+def _modint_zero_name(exp_type: str) -> str:
+    """Ring zero for a stdlib exponent/ModInt type (``Mq.zmod`` ->
+    ``Mq.zero``)."""
+    return f"{_ring_theory(exp_type)}.zero"
 
 
-def _exp_name(groupelem_name: str) -> str:
-    """Group exponentiation op (``groupelem_G`` -> ``exp_G``)."""
-    suffix = groupelem_name.removeprefix("groupelem")
-    return f"exp{suffix}"
+def _generator_name(group_type: str) -> str:
+    """Generator of a stdlib group type (``G.group`` -> ``G.g``)."""
+    return f"{_group_theory(group_type)}.g"
+
+
+def _identity_name(group_type: str) -> str:
+    """Identity of a stdlib group type (``G.group`` -> ``G.e``)."""
+    return f"{_group_theory(group_type)}.e"
+
+
+def _mul_name(group_type: str) -> str:
+    """Group ``*`` op of a stdlib group type (``G.group`` -> ``G.( * )``)."""
+    return f"{_group_theory(group_type)}.( * )"
+
+
+def _div_name(group_type: str) -> str:
+    """Group ``/`` op of a stdlib group type (``G.group`` -> ``G.( / )``)."""
+    return f"{_group_theory(group_type)}.( / )"
 
 
 def _function_distr_name(dom: str, codom: str) -> str:
@@ -1127,6 +1157,13 @@ def zero_name_for(ec_type: ec_ast.EcType) -> str:
     return _zero_name(ec_type.text)
 
 
+def ring_theory_of(ec_type: ec_ast.EcType) -> str:
+    """Exposed: the EC ring-theory qualifier of a stdlib exponent/ModInt
+    type (``ModInt_q.zmod`` -> ``ModInt_q``; ``G_P.ZModE.exp`` ->
+    ``G_P.ZModE``). Used by tactics needing the ring's ``ring``/smt lemmas."""
+    return _ring_theory(ec_type.text)
+
+
 def add_name_for(ec_type: ec_ast.EcType) -> str:
     """Exposed for the expression translator: ModInt additive ``+`` op."""
     return _add_name(ec_type.text)
@@ -1167,6 +1204,25 @@ def group_div_name_for(ec_type: ec_ast.EcType) -> str:
     return _div_name(ec_type.text)
 
 
-def group_exp_name_for(ec_type: ec_ast.EcType) -> str:
-    """Exposed for the expression translator: group exponentiation op."""
-    return _exp_name(ec_type.text)
+def group_power_for(
+    group_type: ec_ast.EcType,
+    exp_type: ec_ast.EcType,
+    base: str,
+    exponent: str,
+) -> str:
+    """Render a stdlib group power ``base ^ exp`` for the translator.
+
+    ``base``/``exponent`` are the already-rendered (and parenthesized)
+    operands. Prime path uses the ergonomic field power ``<G>_P.( ^ )``;
+    the general path routes through the base integer power ``<G>.( ^ )``
+    over the ring representative ``<G>_Exp.asint``.
+    """
+    if exp_type.text.endswith(".exp"):
+        # Prime field exponent type ``<G>_P.ZModE.exp``: the group power lives
+        # on the PowZMod clone ``<G>_P`` (drop the trailing ``.ZModE.exp``).
+        pow_theory = _ring_theory(exp_type.text).removesuffix(".ZModE")
+        return f"{pow_theory}.( ^ ) {base} {exponent}"
+    # General ring exponent: base integer power via the ring representative.
+    group_alias = _group_theory(group_type.text)
+    ring = _ring_theory(exp_type.text)
+    return f"{group_alias}.( ^ ) {base} ({ring}.asint {exponent})"

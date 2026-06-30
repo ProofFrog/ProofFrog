@@ -10,8 +10,10 @@ from proof_frog.export.easycrypt.type_collector import TypeCollector
 def _make(
     local_types: dict[str, frog_ast.Type] | None = None,
     known_abstract: set[str] | None = None,
+    types: TypeCollector | None = None,
 ) -> ExpressionTranslator:
-    types = TypeCollector(known_abstract_types=known_abstract)
+    if types is None:
+        types = TypeCollector(known_abstract_types=known_abstract)
     local = local_types or {}
 
     def type_of(e: frog_ast.Expression) -> frog_ast.Type:
@@ -75,7 +77,7 @@ def _binop(
 
 
 def test_translate_group_multiplication() -> None:
-    """``*`` on GroupElem operands renders as the abstract ``mul_G`` op."""
+    """``*`` on GroupElem operands renders as the stdlib ``G.( * )`` op."""
     g = frog_ast.GroupElemType(frog_ast.Variable("G"))
     tr = _make({"a": g, "b": g})
     expr = _binop(
@@ -83,11 +85,11 @@ def test_translate_group_multiplication() -> None:
         frog_ast.Variable("a"),
         frog_ast.Variable("b"),
     )
-    assert tr.translate(expr) == "mul_G a b"
+    assert tr.translate(expr) == "G.( * ) a b"
 
 
 def test_translate_group_division() -> None:
-    """``/`` on GroupElem operands renders as ``div_G``."""
+    """``/`` on GroupElem operands renders as ``G.( / )``."""
     g = frog_ast.GroupElemType(frog_ast.Variable("G"))
     tr = _make({"a": g, "b": g})
     expr = _binop(
@@ -95,11 +97,12 @@ def test_translate_group_division() -> None:
         frog_ast.Variable("a"),
         frog_ast.Variable("b"),
     )
-    assert tr.translate(expr) == "div_G a b"
+    assert tr.translate(expr) == "G.( / ) a b"
 
 
-def test_translate_group_exponentiation() -> None:
-    """``g ^ x`` (GroupElem base, ModInt exponent) renders as ``exp_G``."""
+def test_translate_group_exponentiation_general() -> None:
+    """``g ^ x`` (general group) renders as the base integer power over the
+    ring representative: ``G.( ^ ) a (G_Exp.asint e)``."""
     g = frog_ast.GroupElemType(frog_ast.Variable("G"))
     x = frog_ast.ModIntType(frog_ast.FieldAccess(frog_ast.Variable("G"), "order"))
     tr = _make({"a": g, "e": x})
@@ -108,13 +111,26 @@ def test_translate_group_exponentiation() -> None:
         frog_ast.Variable("a"),
         frog_ast.Variable("e"),
     )
-    assert tr.translate(expr) == "exp_G a e"
+    assert tr.translate(expr) == "G.( ^ ) a (G_Exp.asint e)"
+
+
+def test_translate_group_exponentiation_prime() -> None:
+    """``g ^ x`` (prime group) uses the ergonomic PowZMod field power
+    ``G_P.( ^ ) a e`` (no asint)."""
+    g = frog_ast.GroupElemType(frog_ast.Variable("G"))
+    x = frog_ast.ModIntType(frog_ast.FieldAccess(frog_ast.Variable("G"), "order"))
+    types = TypeCollector(prime_group_names={"G"})
+    tr = _make({"a": g, "e": x}, types=types)
+    expr = _binop(
+        frog_ast.BinaryOperators.EXPONENTIATE,
+        frog_ast.Variable("a"),
+        frog_ast.Variable("e"),
+    )
+    assert tr.translate(expr) == "G_P.( ^ ) a e"
 
 
 def test_translate_group_generator_constant() -> None:
-    """``G.generator`` renders as the abstract ``generator_G`` constant."""
-    tr = _make()
-    # type_of is consulted for the FieldAccess; supply a GroupElem type.
+    """``G.generator`` renders as the stdlib generator ``G.g``."""
     types = TypeCollector()
 
     def type_of(e: frog_ast.Expression) -> frog_ast.Type:
@@ -124,11 +140,11 @@ def test_translate_group_generator_constant() -> None:
 
     tr = ExpressionTranslator(types, type_of)
     gen = frog_ast.FieldAccess(frog_ast.Variable("G"), "generator")
-    assert tr.translate(gen) == "generator_G"
+    assert tr.translate(gen) == "G.g"
 
 
 def test_translate_modint_multiplication_is_ring_op() -> None:
-    """``*`` on ModInt operands (the exponent ring) renders as ``mmul_q``."""
+    """``*`` on ModInt operands renders as the stdlib ring ``ModInt_q.( * )``."""
     q = frog_ast.ModIntType(frog_ast.Variable("q"))
     tr = _make({"a": q, "b": q})
     expr = _binop(
@@ -136,12 +152,12 @@ def test_translate_modint_multiplication_is_ring_op() -> None:
         frog_ast.Variable("a"),
         frog_ast.Variable("b"),
     )
-    assert tr.translate(expr) == "mmul_q a b"
+    assert tr.translate(expr) == "ModInt_q.( * ) a b"
 
 
 def test_translate_modint_zero_literal() -> None:
-    """An integer ``0`` in a ModInt subtraction position renders as the ring
-    zero ``mzero_q`` (the engine collapses ``x - x`` to a literal ``0``)."""
+    """An integer ``0`` in a ModInt subtraction position renders as the stdlib
+    ring zero ``ModInt_q.zero`` (the engine collapses ``x - x`` to ``0``)."""
     q = frog_ast.ModIntType(frog_ast.Variable("q"))
     tr = _make({"a": q})
     expr = _binop(
@@ -149,7 +165,7 @@ def test_translate_modint_zero_literal() -> None:
         frog_ast.Variable("a"),
         frog_ast.Integer(0),
     )
-    assert tr.translate(expr) == "sub_q a mzero_q"
+    assert tr.translate(expr) == "ModInt_q.( - ) a ModInt_q.zero"
 
 
 def test_translate_equality() -> None:

@@ -22,6 +22,7 @@ import re
 # pylint: disable=duplicate-code
 
 from ... import frog_ast
+from . import type_collector as _tc
 from .type_collector import TypeCollector
 from ...transforms._base import TransformApplication
 
@@ -207,19 +208,6 @@ def uniform_xor_tactic(
     return tactic
 
 
-def _modint_suffix(t: frog_ast.Type) -> str | None:
-    """EC op suffix for a ModInt type (``ModInt<q>`` -> ``q``).
-
-    Mirrors ``type_collector._modint_name`` so emitted tactics reference
-    the same ``add_<suffix>`` / ``sub_<suffix>`` / ``dmodint_<suffix>``
-    symbols as the preamble.
-    """
-    if not isinstance(t, frog_ast.ModIntType):
-        return None
-    sanitized = re.sub(r"\W+", "_", str(t.modulus)).strip("_")
-    return sanitized or None
-
-
 def uniform_modint_tactic(  # pylint: disable=too-many-locals,too-many-branches,too-many-return-statements,too-many-statements
     app: TransformApplication,
     _types: TypeCollector | None = None,
@@ -295,17 +283,19 @@ def uniform_modint_tactic(  # pylint: disable=too-many-locals,too-many-branches,
     if sample_type is None:
         return None
 
-    suffix = _modint_suffix(sample_type)
-    if suffix is None:
+    if not isinstance(sample_type, frog_ast.ModIntType) or _types is None:
         return None
 
     offset_ec = _ec_expr(dropped_expr)
     if offset_ec is None:
         return None
 
-    add_op = f"add_{suffix}"
-    sub_op = f"sub_{suffix}"
-    distr = f"dmodint_{suffix}"
+    # Stdlib ZModRing ops for this ModInt's EC type (``ModInt_q.zmod`` ->
+    # ``ModInt_q.( + )`` etc.; a group exponent ``G_Exp.zmod`` likewise).
+    ec_sample = _types.translate_type(sample_type)
+    add_op = _tc.add_name_for(ec_sample)
+    sub_op = _tc.sub_name_for(ec_sample)
+    distr = _types.distr_for(ec_sample)
     off = f"{offset_ec}{{2}}"
     # Pick the rnd bijection. EC's ``rnd g f`` couples left-sample z1 and
     # right-sample z2 with ``f`` mapping z1 -> z2 (the body value) and
@@ -357,10 +347,13 @@ def uniform_modint_tactic(  # pylint: disable=too-many-locals,too-many-branches,
     # value equals ``f z1`` (the forward/body-value map); ``finv`` is its
     # inverse. ``_full`` discharges the support-membership side-goal.
     tactic.append(f"rnd ({fwd}) ({inv}).")
-    tactic.append(
-        f"auto => />; progress; "
-        f"smt({add_op}_sub {sub_op}_add {add_op}_comm {distr}_fu {distr}_full)."
-    )
+    # The bijection cancellation goals (``z - off + off = z`` etc.) are now
+    # derived ``ring`` facts of the ZModRing exponent; the support side-goals
+    # close from the uniform distribution's fullness/uniformity. ``rExp`` is
+    # the ring theory qualifier (``ModInt_q`` / ``G_Exp``) so ``ring`` sees
+    # its comm-ring structure.
+    rexp = _tc.ring_theory_of(ec_sample)
+    tactic.append(f"auto => />; progress; " f"smt({distr}_fu {distr}_funi @{rexp}).")
     return tactic
 
 

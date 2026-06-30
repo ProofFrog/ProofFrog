@@ -287,6 +287,33 @@ def _section_header(label: str) -> str:
     return f"(* ===== {label} ===== *)"
 
 
+def _prime_group_names(proof: frog_ast.ProofFile) -> set[str]:
+    """Group names the proof declared ``requires <G>.order is prime;`` for.
+
+    Mirrors ``PipelineContext.has_prime_order_requirement``: a requirement
+    with ``kind == "prime"`` whose target is ``FieldAccess(<G>, 'order')``
+    or ``GroupOrder(<G>)``. These groups get the prime EC emission path
+    (PowZMod/ZModField + a ``prime <G>.order`` axiom); all others get the
+    general CyclicGroup/ZModRing path.
+    """
+    names: set[str] = set()
+    for req in proof.requirements:
+        if req.kind != "prime":
+            continue
+        target = req.target
+        if (
+            isinstance(target, frog_ast.FieldAccess)
+            and target.name == "order"
+            and isinstance(target.the_object, frog_ast.Variable)
+        ):
+            names.add(target.the_object.name)
+        elif isinstance(target, frog_ast.GroupOrder) and isinstance(
+            target.group, frog_ast.Variable
+        ):
+            names.add(target.group.name)
+    return names
+
+
 def _describe_step_wrapper(index: int, step: frog_ast.Step) -> str:
     """Render the per-step description comment for a ``Game_step_<i>``."""
     if not isinstance(step.challenger, frog_ast.ConcreteGame):
@@ -951,8 +978,11 @@ def export_proof_file(proof_path: str) -> str:
                 if key.startswith(arg_prefix):
                     field = key[len(arg_prefix) :]
                     top_aliases[f"{sp.name}.{field}"] = top_aliases[key]
+    prime_groups = _prime_group_names(proof)
     top_types = tc.TypeCollector(
-        aliases=top_aliases, known_abstract_types=known_abstract_types
+        aliases=top_aliases,
+        known_abstract_types=known_abstract_types,
+        prime_group_names=prime_groups,
     )
 
     # Primitive field names that act as abstract types inside the theory.
@@ -3062,12 +3092,19 @@ def export_proof_file(proof_path: str) -> str:
     else:
         decls.extend(proof_decls)
 
+    # ``Group`` / ``ZModP`` provide the stdlib CyclicGroup + ZModRing/ZModField
+    # theories cloned for ``GroupElem<G>`` / ``ModInt<q>`` types; ``List``
+    # provides ``duniform``'s enum for a uniform group element. Required only
+    # when such a type was registered, so non-group exports stay byte-identical.
+    stdlib_requires = (
+        ["Group", "ZModP", "List"] if top_types.has_stdlib_group_or_modint() else []
+    )
     ec_file = ec_ast.EcFile(
         # ``DProd`` / ``DMap`` provide the dprod/dmap lemmas
         # (``dmap_dprodE``, ``dmap1E``, ``dmap_id``, ``supp_dprod``,
         # etc.) consumed by the slice/concat round-trip + distribution-
         # split tactics emitted for Split/Merge Uniform Samples.
-        requires=["AllCore", "Distr", "DProd", "DMap"],
+        requires=["AllCore", "Distr", "DProd", "DMap", *stdlib_requires],
         decls=decls,
     )
     return ec_ast.pretty_print(ec_file)

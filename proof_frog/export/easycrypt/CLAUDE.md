@@ -39,52 +39,47 @@ Key modules:
   far. Design + extensions:
   `extras/docs/plans/in-progress/2026-06-01-scheme-statelessness-foundation.md`.
 - **ModInt additive-group foundation** (in `type_collector` +
-  `expr_translator` + `parametric_tactics.uniform_modint_tactic`):
-  `ModInt<q>` translates to an abstract finite additive group
-  (`modint_q` + uniform full `dmodint_q` + `add_q`/`sub_q` ops +
-  round-trip/commutativity axioms). `+`/`-` on ModInt operands render to
-  `add_q`/`sub_q`, and `Uniform ModInt Simplification` (`u +/- m -> u`)
-  closes via an `rnd` bijection over add/sub — the additive analogue of
-  the bitstring `xor` foundation. **Ring extension:** `*` on ModInt
-  renders to `mmul_<q>` (prefixed `mmul` to avoid colliding with the
-  GroupElem `mul_<G>`) and an integer literal `0` in a ModInt position
-  (the engine collapses `x - x` to `0`) renders to the additive zero
-  `mzero_<q>`; both are gated (`note_modint_mul`/`note_modint_zero`) so a
-  purely-additive ModInt proof keeps just add/sub. Their axioms
-  (`mmul_<q>_comm`, `sub_<q>_self : sub a a = mzero`) are sound for Z_q.
-  Verified end-to-end by `examples/Proofs/SymEnc/ModOTP_INDOT.proof`
-  (ec_compile OK).
-- **GroupElem multiplicative-group foundation** (in `type_collector`
-  `translate_type(GroupElemType)`/`_groupelem_name`/`emit` +
-  `expr_translator` `*`/`/`/`^` and `G.generator`/`G.identity` +
-  `exporter.type_of` FieldAccess): `GroupElem<G>` translates to an
-  abstract finite abelian cyclic group `groupelem_<G>` with
-  `generator_<G>`/`identity_<G>` constants, `mul_<G>`/`div_<G>` group ops,
-  and `exp_<G> : groupelem_<G> -> modint_<G.order> -> groupelem_<G>` (the
-  exponent ring is auto-registered as `ModInt<G.order>`, so `exp` is
-  emitted after the modint type). `*`/`/` on GroupElem operands render to
-  `mul`/`div`, `^` to `exp`, and `G.generator`/`G.identity` to the
-  abstract constants. **The group-law ops are uninterpreted -- no axioms
-  emitted** (the algebraic correctness chain is out of the type
-  foundation's scope; emitting them unjustified would enlarge the TCB).
-  Unblocks `ElGamal_Correctness` to *export* and EC-accept with 1 admit
-  (dashboard ⚠, not ⛔: EC accepts the file; the per-oracle `hop_*_test`
-  lemma's precondition is only `={m} /\
-  pk{1}=pk{2}` and lacks the `pk = g^sk` invariant `initialize`
-  establishes, so the test-oracle equivalence can't close in isolation;
-  the engine's flat-state chain *does* inline `pk = g^sk`, but wiring that
-  per-transform chain into the test lemma is chain-synthesis machinery --
-  the structural-blocker cluster's job). The DDH/ElGamal MultiChal family
-  needs the separate `Group`-parameterized assumption-game skeleton
-  (`exporter.py:761`) to also export. The `Uniform GroupElem
-  Simplification` tactic (for INDCPA, where a uniform group element
-  absorbs a multiplication) is the still-INTERACTIVE part and is *not*
-  needed for correctness (deterministic exponent algebra). Three general
-  emission fixes landed alongside it (each improves ~20 unrelated ⛔
-  proofs): `==`/`!=` render to EC `=`/`<>`; a `Sample` with no type
-  annotation (the engine can inline an assignment into the sample, e.g.
-  `sk = a` folded into `a <$ d`) takes the sampled variable's own type;
-  `type_of` types `G.generator`/`G.identity` as `GroupElem<G>`.
+  `expr_translator` + `parametric_tactics.uniform_modint_tactic` +
+  `exporter.type_of` FieldAccess): **migrated to EC stdlib clones (2026-06-29)**,
+  replacing the former uninterpreted-ops+axioms backend. Group + ring laws are now
+  *derived* from `Group.ec`/`ZModP.ec`, not axiomatized (principle 4's ideal). The
+  one new assumed axiom is `ge2_p : 2 <= <modulus>` (ZModRing's own
+  well-definedness side-condition) — registered + justified in the axiom-soundness
+  plan.
+  - **`GroupElem<G>` -> `clone CyclicGroup as <G>`** (not `import`ed — every op is
+    qualified, since the group's `( * )` and the ring's `( * )` would otherwise
+    collide). Type `<G>.group`; `G.generator`/`G.identity` -> `<G>.g`/`<G>.e`;
+    `*`/`/` -> `<G>.( * )`/`<G>.( / )` (rendered prefix: `<G>.( * ) a b`).
+  - **Exponent ring, gated on the per-proof `requires <G>.order is prime;`**
+    (threaded as `prime_group_names` -> `TypeCollector.is_prime_group`):
+    *general path* (default) clones `ZModP.ZModRing as <G>_Exp with op p <- <G>.order`
+    (exp type `<G>_Exp.zmod`, power `<G>.( ^ ) base (<G>_Exp.asint exp)` via the base
+    integer power); *prime path* (declaring proofs only) emits
+    `axiom <G>_prime_order : IntDiv.prime <G>.order` + `clone <G>.PowZMod as <G>_P` +
+    `clone <G>_P.FDistr as <G>_FD` (exp type `<G>_P.ZModE.exp`, ergonomic field power
+    `<G>_P.( ^ ) base exp`). Only `HashedElGamalKEM_INDCCA` declares it today.
+  - **`ModInt<q>` dual role** (`type_collector._group_order_modulus_alias`): a
+    `ModInt<<G>.order>` *aliases* the group's exponent ring (no independent clone); a
+    standalone `ModInt<q>` gets its own `clone ZModP.ZModRing as ModInt_q with op p
+    <- <q>` (type `ModInt_q.zmod`) — the modulus is *bound* to the FrogLang
+    expression so the ring is genuinely Z_<q>, not over an unrelated abstract `p`. `+`/`-`/`*`/zero render to `<T>.( + )`/`( - )`/`( * )`/`zero`;
+    the uniform distr is `<T>.DZmodP.dunifin` (group element samples use a direct
+    `duniform <G>.elems`). `Uniform ModInt Simplification` closes via an `rnd`
+    bijection whose cancellation is now a derived `ring` fact (discharge
+    `... smt(<distr>_fu <distr>_funi @<ring-theory>)`), with the 3 former round-trip
+    axioms dissolved into `ring` lemmas.
+  - **Verified:** `ModOTP_INDOT` -> clean (0 admits) and `ElGamal_Correctness` ->
+    EC-accepted at 1 admit (⚠), both on the stdlib backend (`ec_compile` OK).
+    Op-name helpers (`group_*_name_for`, `add`/`sub`/`modint_mul`/`modint_zero_name_for`,
+    `ring_theory_of`, `group_power_for`) derive the qualified op by stripping the EC
+    type suffix (`.group`/`.zmod`/`.exp`). Non-group/modint proofs are byte-identical
+    (all emission gated on group/modint registration). The `requires Group ZModP List`
+    preamble is added only when `has_stdlib_group_or_modint()`. The DDH/ElGamal
+    MultiChal family still needs the separate `Group`-parameterized assumption-game
+    skeleton (Phase B, `exporter.py:635`/`:759`) to export at all. Three general
+    emission fixes that landed with the old GroupElem foundation remain: `==`/`!=` ->
+    `=`/`<>`; a `Sample` with no type annotation takes the sampled variable's type;
+    `type_of` types `G.generator`/`G.identity` as `GroupElem<G>`.
 - **Random-function foundation for `Function<A,B>`** (in `type_collector`
   `translate_type`/`distr_for`/`emit` + `expr_translator` FuncCall +
   `module_translator._ec_field_name`/`_field_renames_for`): a game field

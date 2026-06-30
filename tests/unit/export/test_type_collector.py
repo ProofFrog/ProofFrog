@@ -139,39 +139,37 @@ def test_translate_int_type() -> None:
     assert ec.text == "int"
 
 
+def _emit_text(tc: TypeCollector) -> str:
+    """Render a collector's top-level decls to EC source text."""
+    return ec_ast.pretty_print(ec_ast.EcFile(requires=[], decls=tc.emit()))
+
+
 def test_translate_modint_type_name() -> None:
-    """ModInt<q> registers as an abstract ``modint_q`` type."""
+    """Standalone ModInt<q> -> the stdlib ``ZModRing`` clone type ``ModInt_q.zmod``."""
     tc = TypeCollector()
     ec = tc.translate_type(frog_ast.ModIntType(frog_ast.Variable("q")))
-    assert ec.text == "modint_q"
+    assert ec.text == "ModInt_q.zmod"
 
 
 def test_modint_distr_for() -> None:
-    """A registered ModInt type yields a ``dmodint_q`` distribution."""
+    """A standalone ModInt yields the clone's uniform ``DZmodP.dunifin``."""
     tc = TypeCollector()
     ec = tc.translate_type(frog_ast.ModIntType(frog_ast.Variable("q")))
-    assert tc.distr_for(ec) == "dmodint_q"
+    assert tc.distr_for(ec) == "ModInt_q.DZmodP.dunifin"
 
 
-def test_modint_emits_group_foundation() -> None:
-    """ModInt emission carries a uniform distribution and an additive group
-    (add/sub ops + round-trip + commutativity axioms)."""
+def test_modint_emits_zmodring_clone() -> None:
+    """Standalone ModInt emission is a single stdlib ZModRing clone whose
+    modulus is bound to the FrogLang expression (ring ops + uniform distr
+    derived, no per-type abstract axioms)."""
     tc = TypeCollector()
     tc.translate_type(frog_ast.ModIntType(frog_ast.Variable("q")))
-    names = {getattr(d, "name", None) for d in tc.emit()}
-    for expected in (
-        "modint_q",
-        "dmodint_q",
-        "dmodint_q_ll",
-        "dmodint_q_fu",
-        "dmodint_q_full",
-        "add_q",
-        "sub_q",
-        "add_q_sub",
-        "sub_q_add",
-        "add_q_comm",
-    ):
-        assert expected in names, f"missing {expected}"
+    text = _emit_text(tc)
+    # Modulus bound to ``q`` so the ring is genuinely Z_q, not Z_<abstract p>.
+    assert "clone ZModP.ZModRing as ModInt_q with op p <- q." in text
+    # No abstract op/axiom emission (the stdlib derives these).
+    assert "dmodint_q" not in text
+    assert "axiom" not in text
 
 
 def test_modint_name_canonicalizes_modulus() -> None:
@@ -239,66 +237,54 @@ def test_function_emits_foundation_after_bitstring_types() -> None:
 
 
 def test_translate_groupelem_type_name() -> None:
-    """GroupElem<G> registers as an abstract ``groupelem_G`` type."""
+    """GroupElem<G> -> the stdlib ``CyclicGroup`` clone type ``G.group``."""
     tc = TypeCollector()
     ec = tc.translate_type(frog_ast.GroupElemType(frog_ast.Variable("G")))
-    assert ec.text == "groupelem_G"
+    assert ec.text == "G.group"
 
 
-def test_groupelem_emits_multiplicative_foundation() -> None:
-    """GroupElem emission carries generator/identity constants, mul/div group
-    ops, and an exp op over the exponent ring ModInt<G.order>."""
+def test_groupelem_general_emits_cyclicgroup_and_zmodring() -> None:
+    """A non-prime GroupElem emits a CyclicGroup clone + a general ZModRing
+    exponent clone, and NO prime axiom."""
     tc = TypeCollector()
     tc.translate_type(frog_ast.GroupElemType(frog_ast.Variable("G")))
-    names = {getattr(d, "name", None) for d in tc.emit()}
-    for expected in (
-        "groupelem_G",
-        "generator_G",
-        "identity_G",
-        "mul_G",
-        "div_G",
-        "exp_G",
-        # the exponent ring is auto-registered
-        "modint_G_order",
-    ):
-        assert expected in names, f"missing {expected}"
+    text = _emit_text(tc)
+    assert "clone CyclicGroup as G." in text
+    assert "clone ZModP.ZModRing as G_Exp with op p <- G.order." in text
+    assert "prime" not in text  # general path: NO prime axiom
+    assert "PowZMod" not in text
 
 
-def test_groupelem_exp_declared_after_exponent_ring() -> None:
-    """The exp op (groupelem -> modint -> groupelem) must follow its modint
-    exponent type so the signature is in scope."""
+def test_groupelem_prime_emits_powzmod_and_prime_axiom() -> None:
+    """A prime-declaring GroupElem emits the PowZMod field exponent, FDistr,
+    and an assumed ``prime <G>.order`` axiom (justified by the requires)."""
+    tc = TypeCollector(prime_group_names={"G"})
+    tc.translate_type(frog_ast.GroupElemType(frog_ast.Variable("G")))
+    text = _emit_text(tc)
+    assert "clone CyclicGroup as G." in text
+    assert "axiom G_prime_order : IntDiv.prime G.order." in text
+    assert "clone G.PowZMod as G_P with lemma prime_order <- G_prime_order." in text
+    assert "clone G_P.FDistr as G_FD." in text
+    assert "ZModRing" not in text  # prime path uses the field, not ZModRing
+
+
+def test_groupelem_clone_precedes_exponent_clone() -> None:
+    """The ``clone CyclicGroup as G`` must precede the ``G_Exp`` exponent clone
+    (which references ``G.order``)."""
     tc = TypeCollector()
     tc.translate_type(frog_ast.GroupElemType(frog_ast.Variable("G")))
-    ordered = [getattr(d, "name", None) for d in tc.emit()]
-    assert ordered.index("modint_G_order") < ordered.index("exp_G")
+    text = _emit_text(tc)
+    assert text.index("clone CyclicGroup as G.") < text.index("ZModRing as G_Exp")
 
 
-def test_groupelem_has_no_axioms() -> None:
-    """The GroupElem ops are uninterpreted -- no group-law axioms are emitted
-    (the algebraic chain micro-lemmas are out of the type foundation's scope,
-    and emitting unjustified axioms would enlarge the TCB)."""
+def test_group_exponent_modint_aliases_exponent_ring() -> None:
+    """``ModInt<G.order>`` aliases the group's cloned exponent ring (no
+    independent ZModRing clone)."""
     tc = TypeCollector()
     tc.translate_type(frog_ast.GroupElemType(frog_ast.Variable("G")))
-    axioms = [
-        getattr(d, "name", "")
-        for d in tc.emit()
-        if isinstance(d, ec_ast.Axiom)
-    ]
-    group_axioms = [a for a in axioms if a.endswith(("_G",)) and "modint" not in a]
-    assert not group_axioms, f"unexpected GroupElem axioms: {group_axioms}"
-
-
-def test_modint_ring_ops_gated_on_use() -> None:
-    """ModInt ring ``mmul``/``mzero`` are only emitted when actually rendered;
-    a purely additive ModInt keeps just add/sub."""
-    tc = TypeCollector()
-    ec = tc.translate_type(frog_ast.ModIntType(frog_ast.Variable("q")))
-    names = {getattr(d, "name", None) for d in tc.emit()}
-    assert "mmul_q" not in names
-    assert "mzero_q" not in names
-    # After noting use, both appear with their soundness axioms.
-    tc.note_modint_mul(ec)
-    tc.note_modint_zero(ec)
-    names = {getattr(d, "name", None) for d in tc.emit()}
-    for expected in ("mmul_q", "mmul_q_comm", "mzero_q", "sub_q_self"):
-        assert expected in names, f"missing {expected}"
+    ec = tc.translate_type(
+        frog_ast.ModIntType(frog_ast.FieldAccess(frog_ast.Variable("G"), "order"))
+    )
+    assert ec.text == "G_Exp.zmod"
+    # No standalone ``ModInt_*`` clone for the group order.
+    assert "ModInt_" not in _emit_text(tc)

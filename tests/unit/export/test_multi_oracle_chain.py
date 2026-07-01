@@ -14,8 +14,10 @@ from typing import Callable
 from proof_frog import frog_ast
 from proof_frog.transforms._base import TransformApplication
 from proof_frog.export.easycrypt import type_collector as tc
+from proof_frog.export.easycrypt import module_translator as mt
 from proof_frog.export.easycrypt.chain_emitter import (
     _coupling_spec,
+    _dead_call_drop_tags,
     _emit_one_oracle_chain,
     _glob_coupling,
     _oracle_step_tactic,
@@ -60,6 +62,13 @@ def _type_of_factory() -> Callable[
     return factory
 
 
+def _modules() -> mt.ModuleTranslator:
+    """A ``ModuleTranslator`` for the direct ``_emit_one_oracle_chain`` calls
+    (the init backbone-peel synthesizer translates each endpoint to EC to read
+    off its probabilistic backbone)."""
+    return mt.ModuleTranslator(tc.TypeCollector(aliases={}), _type_of_factory())
+
+
 # --- pure helpers ----------------------------------------------------------
 
 
@@ -74,12 +83,17 @@ def test_coupling_spec_init_establishes_from_true() -> None:
 
 def test_coupling_spec_post_init_carries_args_and_coupling() -> None:
     spec = _coupling_spec("L", "R", is_init=False, eq_args="={m0}")
-    assert spec == "(={m0} /\\ (glob L){1} = (glob R){2} ==> " "={res} /\\ (glob L){1} = (glob R){2})"
+    assert (
+        spec == "(={m0} /\\ (glob L){1} = (glob R){2} ==> "
+        "={res} /\\ (glob L){1} = (glob R){2})"
+    )
 
 
 def test_coupling_spec_post_init_no_args_is_bare_coupling() -> None:
     spec = _coupling_spec("L", "R", is_init=False, eq_args="true")
-    assert spec == "((glob L){1} = (glob R){2} ==> ={res} /\\ (glob L){1} = (glob R){2})"
+    assert (
+        spec == "((glob L){1} = (glob R){2} ==> ={res} /\\ (glob L){1} = (glob R){2})"
+    )
 
 
 def test_project_to_method_picks_named_method() -> None:
@@ -90,12 +104,33 @@ def test_project_to_method_picks_named_method() -> None:
     assert _project_to_method(g, "nonexistent") is None
 
 
+def test_dead_call_drop_tags_marks_extra_deterministic_call() -> None:
+    # The PRF-random final hop: the longer side carries an extra deterministic
+    # ``F.evaluate`` (dead -- overwritten by a later fresh sample). Aligning the
+    # shorter backbone as a subsequence marks exactly that call as a drop.
+    longer = [
+        ("call", "K.keygen"),
+        ("call", "K.encaps"),
+        ("call", "F.evaluate"),
+        ("sample", "s0"),
+    ]
+    shorter = [("call", "K.keygen"), ("call", "K.encaps"), ("sample", "s1")]
+    tags = _dead_call_drop_tags(longer, shorter, {"F": {"evaluate"}})
+    assert tags == [False, False, True, False]
+
+
+def test_dead_call_drop_tags_rejects_non_deterministic_extra() -> None:
+    # An extra call whose method is NOT deterministic cannot be dropped soundly
+    # (no ``_pres`` axiom is justified) -> None, so the caller admits.
+    longer = [("call", "K.keygen"), ("call", "K.encaps"), ("sample", "s0")]
+    shorter = [("call", "K.keygen"), ("sample", "s1")]
+    assert _dead_call_drop_tags(longer, shorter, {"F": {"evaluate"}}) is None
+
+
 def test_oracle_step_tactic_identity_is_coupling_preserving_sim() -> None:
     g = _two_oracle_game("G")
     # Same game on both sides: the oracle body is unchanged -> proc; sim.
-    tac = _oracle_step_tactic(
-        g, _two_oracle_game("G"), "challenge", False, {}, {}
-    )
+    tac = _oracle_step_tactic(g, _two_oracle_game("G"), "challenge", False, {}, {})
     assert tac == ["proc; sim."]
 
 
@@ -104,7 +139,7 @@ def test_oracle_step_tactic_identity_is_coupling_preserving_sim() -> None:
 
 def test_emit_one_oracle_chain_no_transforms_init() -> None:
     g = _two_oracle_game("G")
-    chunks, outer = _emit_one_oracle_chain(
+    chunks, outer, _pres = _emit_one_oracle_chain(
         hop_index=0,
         oracle_name="initialize",
         is_init=True,
@@ -121,14 +156,20 @@ def test_emit_one_oracle_chain_no_transforms_init() -> None:
         bridge_tactic="proc; inline *; sp; wp; sim",
         external_module_types={},
         method_return_types={},
+        modules=_modules(),
+        flat_params=[],
+        det_methods={},
     )
     # Canonically-identical init endpoints (same game body) => the raw wrappers
-    # are inline-equivalent, so the lemma closes directly via the canned
-    # inline-equivalence tactic and emits NO per-transform chain artifacts.
+    # are inline-equivalent, so the lemma closes directly and emits NO per-
+    # transform chain artifacts. This init body has no *deterministic* call to
+    # trip ``sim`` up, so the synthesizer keeps the historical ``proc; inline *;
+    # sim.`` (byte-identical, rung ``synth-static``); the backbone peel is only
+    # for inits carrying an ``F.evaluate`` over renamed ``encaps`` projections.
     assert chunks == []
     outer_text = "\n".join(outer)
     assert "proc; inline *; sim." in outer_text
-    assert "synth-static" in outer_text  # ladder rung 1 (fixed canned tactic)
+    assert "synth-static" in outer_text
     assert outer[-1] == "qed."
 
 
@@ -144,7 +185,7 @@ def test_emit_one_oracle_chain_init_inline_equiv_gated_on_canonical_equality() -
     g_right.methods[0].block.statements.append(
         frog_ast.ReturnStatement(frog_ast.Variable("sk"))
     )
-    chunks, outer = _emit_one_oracle_chain(
+    chunks, outer, _pres = _emit_one_oracle_chain(
         hop_index=0,
         oracle_name="initialize",
         is_init=True,
@@ -161,6 +202,9 @@ def test_emit_one_oracle_chain_init_inline_equiv_gated_on_canonical_equality() -
         bridge_tactic="proc; inline *; sp; wp; sim",
         external_module_types={},
         method_return_types={},
+        modules=_modules(),
+        flat_params=[],
+        det_methods={},
     )
     text = "\n".join(chunks)
     assert chunks != []
@@ -170,7 +214,7 @@ def test_emit_one_oracle_chain_init_inline_equiv_gated_on_canonical_equality() -
 
 def test_emit_one_oracle_chain_post_init_carries_args() -> None:
     g = _two_oracle_game("G")
-    chunks, _outer = _emit_one_oracle_chain(
+    chunks, _outer, _pres = _emit_one_oracle_chain(
         hop_index=0,
         oracle_name="challenge",
         is_init=False,
@@ -187,6 +231,9 @@ def test_emit_one_oracle_chain_post_init_carries_args() -> None:
         bridge_tactic="proc; inline *; sp; wp; sim",
         external_module_types={},
         method_return_types={},
+        modules=_modules(),
+        flat_params=[],
+        det_methods={},
     )
     text = "\n".join(chunks)
     assert "canon_bridge_0_challenge" in text
@@ -252,6 +299,8 @@ def test_emit_multi_oracle_chain_full_shape() -> None:
     assert set(info.tactic_body_by_oracle) == {"initialize", "challenge"}
     init_body = "\n".join(info.tactic_body_by_oracle["initialize"])
     chal_body = "\n".join(info.tactic_body_by_oracle["challenge"])
+    # Call-free init endpoints (no deterministic call) => ``sim`` aligns them, so
+    # the synthesizer keeps the historical ``proc; inline *; sim.``.
     assert "proc; inline *; sim." in init_body
     assert "apply hop_0_challenge_chain" in chal_body
     # The post-init oracle threads its argument equality into the bridge spec.
@@ -296,6 +345,6 @@ def test_emit_multi_oracle_chain_admits_changed_post_init_body() -> None:
     )
     chal_body = "\n".join(info.tactic_body_by_oracle["challenge"])
     assert "admit." in chal_body
-    # init endpoints are canonically identical => inline-equivalence tactic.
+    # Call-free init endpoints (no deterministic call) => ``sim`` aligns them.
     init_body = "\n".join(info.tactic_body_by_oracle["initialize"])
     assert "proc; inline *; sim." in init_body

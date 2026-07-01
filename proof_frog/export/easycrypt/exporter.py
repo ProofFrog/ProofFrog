@@ -2651,8 +2651,10 @@ def export_proof_file(proof_path: str) -> str:
                 external_module_types=external_module_types,
                 method_return_types=method_return_types,
                 flat_module_params=flat_module_params,
+                det_methods=det_methods_by_module,
             )
             chain_extra_decls.extend(info.extra_decls)
+            pres_method_requests.update(info.pres_methods)
             multi_oracle_hop_cache[_i] = info.tactic_body_by_oracle
             multi_oracle_game_keys[_i] = (
                 canonical_form.canonical_text(

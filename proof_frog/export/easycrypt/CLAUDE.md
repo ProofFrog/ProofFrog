@@ -398,6 +398,28 @@ Key modules:
   mid-gap and reversed orientation (`swap_split`) fall back to admit. Validated:
   `CK_seedbased` / `UK_seedbased` (EC OK, 0 admits → clean). Standalone skeleton
   is the regression tripwire `tests/integration/ec_templates/marginal_split.ec`.
+- **Multi-oracle init-equiv synthesizer** (`chain_emitter._synth_init_backbone_peel`,
+  in the `is_init` branch of `_emit_one_oracle_chain`): the `Initialize`-lifted
+  hop equiv of an adaptive-oracle proof (KEM IND-CCA's `hop_N_initialize`) relates
+  two wrappers with identical *canonical* bodies but different `inline *`-generated
+  names. When the body has a deterministic cross-module call (an `F.evaluate`
+  challenge embedding whose args are tuple-projections of two abstract `encaps`
+  results), `proc; inline *; sim` silently leaves the goal open — a 0-admit file
+  EC rejects. Instead peel the shared probabilistic backbone tail-to-front
+  (`_backbone_peel`: `wp` clears each deterministic run incl. the `F.evaluate`
+  discharged by `skip => /#`; `call (_: true)` couples each abstract call
+  name-independently — `(_: ={glob K})` is rejected "module K can write K"; `rnd`
+  each sample). The PRF-random final hop carries a *dead* `F.evaluate` on one side
+  only (result overwritten by a fresh sample); the shorter backbone aligns as a
+  subsequence (`_dead_call_drop_tags`) and the gap deterministic call is dropped
+  one-sided via `call{i} (<M>_<m>_pres g)` (the existing glob-preservation axiom,
+  requested through `MultiOracleHopChainInfo.pres_methods` → `pres_method_requests`).
+  **Gated on the init backbone containing a deterministic call** (the exact case
+  `sim` fails), so keygen/sample-only correctness inits keep the historical
+  `proc; inline *; sim.` byte-identical. Fully AST-driven (backbone read off each
+  side's first flat state); no `inline`-name prediction. Verified: all four
+  `KEMPRF_INDCCA` inits close (`synth-param`; EC compiles through every init to
+  the pre-existing `hop_1_pr` reduction-adversary wall).
 - `proof_translator.py`, `module_translator.py`, `expr_translator.py`,
   `stmt_translator.py`, `type_collector.py`, `scheme_instances.py`,
   `ec_ast.py` — FrogLang→EC translation primitives.

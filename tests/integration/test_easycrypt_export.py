@@ -58,6 +58,14 @@ KEMPRF_INDCPA_PROOF = REPO_ROOT / "examples" / "Proofs" / "KEM" / "KEMPRF_INDCPA
 # an unconditional primitive-typed primary, (b) single-oracle intermediate-game
 # body emission, (c) the reversed-direction ModInt rnd bijection.
 MODOTP_INDOT_PROOF = REPO_ROOT / "examples" / "Proofs" / "SymEnc" / "ModOTP_INDOT.proof"
+# KEMPRF_INDCCA: the multi-oracle IND-CCA testbed. Its four Initialize-lifted
+# hop equivs have identical canonical bodies but the raw wrappers inline to
+# structurally-different bodies (an ``F.evaluate`` whose args are tuple-
+# projections of two abstract ``encaps`` results ``inline *`` names
+# differently), so ``proc; inline *; sim`` silently fails. The init synthesizer
+# closes them name-independently with the backbone peel; the PRF-random final
+# hop (a dead ``F.evaluate`` on one side only) declines to a guided admit.
+KEMPRF_INDCCA_PROOF = REPO_ROOT / "examples" / "Proofs" / "KEM" / "KEMPRF_INDCCA.proof"
 # GeneralDoubleSymEnc_INDOT$: Key = [S.Key, T.Key], so canonicalization
 # eliminates a local ``k <- (key1, key2)`` (built from two prior abstract
 # keygen results) and projects ``k.`1``/``k.`2`` into abstract ``S.enc``/
@@ -469,6 +477,44 @@ def test_export_hoisted_field_reference_is_typed() -> None:
     output = exporter.export_proof_file(str(CG_HON_BIND_K_PK_PROOF))
     # The hoisted field surfaces as a module-level state var in the flat games.
     assert "var _hoisted_0 :" in output
+
+
+def test_export_kemprf_indcca_init_synth_backbone_peel() -> None:
+    """The multi-oracle IND-CCA Initialize-lifted hop equivs close via the
+    name-independent backbone peel, not a silently-failing ``proc; inline*; sim``.
+
+    Each ``hop_<i>_initialize`` relates two wrappers whose canonical bodies are
+    identical but which ``inline *`` renders with different local names (the
+    ``F.evaluate`` challenge embedding reads tuple-projections of two abstract
+    ``encaps`` results). ``sim`` cannot align those, so the exporter peels the
+    shared probabilistic backbone tail-to-front: ``call (_: true)`` per abstract
+    call, ``rnd`` per sample, ``wp`` clearing the deterministic runs (including
+    the ``F.evaluate``, discharged by ``skip => /#``). The PRF-random final hop
+    carries a *dead* ``F.evaluate`` on one side only (its result overwritten by a
+    fresh sample); the peel drops it one-sided via the glob-preserving
+    ``F_evaluate_pres`` axiom, then couples the shared backbone.
+    """
+    output = exporter.export_proof_file(str(KEMPRF_INDCCA_PROOF))
+    # All four inits are synthesized (rung synth-param) and use the name-
+    # independent ``call (_: true)`` coupling, never ``call (_: ={glob K})``
+    # (which EC rejects as "module K can write K"). None is closed by the old
+    # silently-failing ``proc; inline *; sim.`` canned tactic.
+    for hop in (0, 2, 3, 5):
+        block = output.split(f"lemma hop_{hop}_initialize")[1].split("qed.")[0]
+        assert "(* resolution: synth-param *)" in block
+        assert "call (_: true)." in block
+        assert "skip => /#." in block
+        assert "call (_: ={glob" not in block
+        assert "proc; inline *; sim." not in block
+    # hop_2 / hop_3 / hop_5 sample a fresh key, so their peel includes an ``rnd``.
+    for hop in (2, 3, 5):
+        block = output.split(f"lemma hop_{hop}_initialize")[1].split("qed.")[0]
+        assert "rnd." in block
+    # The PRF-random final hop drops its dead ``F.evaluate`` one-sided via the
+    # glob-preservation axiom (which the exporter emits on request).
+    hop5 = output.split("lemma hop_5_initialize")[1].split("qed.")[0]
+    assert "call{2} (F_evaluate_pres " in hop5
+    assert "declare axiom F_evaluate_pres " in output
 
 
 @pytest.mark.skipif(

@@ -1560,6 +1560,7 @@ class MultiOracleHopChainInfo:
 
     extra_decls: list[str]
     tactic_body_by_oracle: dict[str, list[str]]
+    pres_methods: set[tuple[str, str]] = field(default_factory=set)
 
 
 def _glob_coupling(left_ref: str, right_ref: str) -> str:
@@ -1686,6 +1687,196 @@ def _oracle_pending_admit(hop_index: int, oracle_name: str) -> list[str]:
     ]
 
 
+def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    det_methods: dict[str, set[str]],
+) -> tuple[list[str], set[tuple[str, str]], str] | None:
+    """Closing tactic for an init-oracle equiv whose two endpoints have
+    identical canonical bodies.
+
+    Returns ``(tactic, pres_requests, rung)`` -- ``pres_requests`` is the set of
+    ``(module, method)`` glob-preservation axioms the tactic references (empty
+    unless a dead-call drop fired), and ``rung`` is the resolution token.
+    Returns ``None`` only when the backbones genuinely cannot be aligned (the
+    caller then emits an honest admit).
+
+    Backbone cases (the backbone is the ordered ``call``/``sample`` events read
+    off each side's flat state via :func:`_call_sample_backbone`):
+
+    * **No deterministic call** (equal backbones, and every call probabilistic
+      -- e.g. a keygen/sample-only correctness init) -- ``sim`` aligns the whole
+      symmetric body, so keep the historical ``proc; inline *; sim.``
+      (``synth-static``). This is the *byte-identical* path: the peel below is
+      only for inits ``sim`` cannot close.
+    * **Equal backbones with a deterministic call** -- the INDCCA challenge
+      embedding: a ``F.evaluate`` whose args are tuple-projections of two
+      abstract ``encaps`` results ``inline *`` names differently, so ``sim``
+      "cannot infer the set of equalities". Peel the backbone tail-to-front
+      (``wp`` clears each deterministic run incl. the ``F.evaluate``,
+      ``call (_: true)`` couples each abstract call name-independently -- ``(_:
+      ={glob K})`` is rejected "module K can write K" -- ``rnd`` each sample),
+      then ``skip => /#`` (``synth-param``).
+    * **One side carries extra deterministic calls** -- the PRF-random final
+      hop, where a wrapper still runs a now-dead ``F.evaluate`` whose result a
+      later fresh sample overwrites (canonicalization dropped it, which is why
+      the final bodies are equal). Each such call is a subsequence gap on the
+      longer side (:func:`_dead_call_drop_tags`); if every gap call is a
+      *deterministic* method (it has a ``_det`` axiom, so a glob-preserving
+      ``_pres`` spec is sound) the peel drops it one-sided
+      (``call{i} (<M>_<m>_pres g)``) and couples the shared backbone
+      (``synth-param``).
+
+    ``left_state0`` / ``right_state0`` are the *first* flat states (the
+    FrogLang-inlined wrappers), whose backbones match what EC's ``inline *``
+    exposes on the raw wrappers.
+    """
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+    lmod = _flat_state_module(
+        modules, "Init_bb_L", lproj, external_module_types, method_return_types, []
+    )
+    rmod = _flat_state_module(
+        modules, "Init_bb_R", rproj, external_module_types, method_return_types, []
+    )
+    del flat_params  # backbone is param-independent; kept for signature parity
+    if not lmod.procs or not rmod.procs:
+        return None
+    l_body, r_body = lmod.procs[0].body, rmod.procs[0].body
+    l_bb = _call_sample_backbone(l_body)
+    r_bb = _call_sample_backbone(r_body)
+
+    def _has_det_call(bb: list[tuple[str, str | None]]) -> bool:
+        for kind, callee in bb:
+            if kind != "call" or not callee or "." not in callee:
+                continue
+            mod, _, meth = callee.partition(".")
+            if meth in det_methods.get(mod, set()):
+                return True
+        return False
+
+    if [k for k, _ in l_bb] == [k for k, _ in r_bb]:
+        if not _has_det_call(l_bb):
+            # ``sim`` aligns the whole symmetric body (no deterministic call to
+            # trip it up). Keep the historical tactic verbatim -- byte-identical.
+            return (["proc; inline *; sim."], set(), SYNTH_STATIC)
+        tac = ["proc.", "inline *.", *_backbone_peel(l_body)]
+        if _leads_with_det(l_body) or _leads_with_det(r_body):
+            tac.append("wp.")
+        tac.append("skip => /#.")
+        return (tac, set(), SYNTH_PARAM)
+    # Unequal backbones: try the dead-deterministic-call drop. The longer side's
+    # backbone must be the shorter's with extra *deterministic* calls inserted.
+    if len(l_bb) > len(r_bb):
+        long_bb, long_body, short_body, side = l_bb, l_body, r_body, 1
+    else:
+        long_bb, long_body, short_body, side = r_bb, r_body, l_body, 2
+    short_bb = r_bb if side == 1 else l_bb
+    drops = _dead_call_drop_tags(long_bb, short_bb, det_methods)
+    if drops is None:
+        return None
+    tac = ["proc.", "inline *."]
+    pres: set[tuple[str, str]] = set()
+    drop_ctr = 0
+    for idx in reversed(range(len(long_bb))):
+        kind, callee = long_bb[idx]
+        tac.append("wp.")
+        if drops[idx]:
+            mod, _, meth = (callee or "").partition(".")
+            binder = f"gf{drop_ctr}"
+            drop_ctr += 1
+            tac.append(
+                f"exists* (glob {mod})" "{" f"{side}" "}" f"; elim* => {binder}."
+            )
+            tac.append(f"call" "{" f"{side}" "}" f" ({mod}_{meth}_pres {binder}).")
+            pres.add((mod, meth))
+        elif kind == "call":
+            tac.append("call (_: true).")
+        else:
+            tac.append("rnd.")
+    if _leads_with_det(long_body) or _leads_with_det(short_body):
+        tac.append("wp.")
+    tac.append("skip => /#.")
+    return (tac, pres, SYNTH_PARAM)
+
+
+def _dead_call_drop_tags(
+    long_bb: list[tuple[str, str | None]],
+    short_bb: list[tuple[str, str | None]],
+    det_methods: dict[str, set[str]],
+) -> list[bool] | None:
+    """Tag each event of ``long_bb`` as a drop (extra) or shared, matching
+    ``short_bb`` as a subsequence.
+
+    Two events match if both are samples, or both are calls with the same
+    callee. An unmatched ``long_bb`` event is a drop; it is only accepted if it
+    is a call to a *deterministic* method (present in ``det_methods``), so the
+    glob-preserving one-sided ``_pres`` drop is sound. Returns ``None`` if the
+    subsequence match fails or a gap event is not a droppable deterministic call.
+    """
+
+    def _match(a: tuple[str, str | None], b: tuple[str, str | None]) -> bool:
+        if a[0] != b[0]:
+            return False
+        return a[0] == "sample" or a[1] == b[1]
+
+    tags = [False] * len(long_bb)
+    i, j = len(long_bb) - 1, len(short_bb) - 1
+    while i >= 0:
+        if j >= 0 and _match(long_bb[i], short_bb[j]):
+            i -= 1
+            j -= 1
+            continue
+        kind, callee = long_bb[i]
+        if kind != "call" or not callee or "." not in callee:
+            return None
+        mod, _, meth = callee.partition(".")
+        if meth not in det_methods.get(mod, set()):
+            return None
+        tags[i] = True
+        i -= 1
+    if j >= 0:
+        return None
+    return tags
+
+
+def _init_backbone_admit(hop_index: int, oracle_name: str) -> list[str]:
+    """Honest guided admit for an init-oracle equiv whose two inlined wrappers
+    have *different* probabilistic backbones (the uniform peel does not apply).
+
+    The canonical bodies are identical, but one wrapper carries a dead
+    ``F.evaluate`` (its result overwritten by a subsequent fresh sample) the
+    other has already dropped -- the PRF-random final hop. Closing it needs a
+    one-sided drop of the dead call (``call{i} (F_evaluate_det ...)``, whose
+    result is unused) before the common ``keygen; encaps; sample`` backbone peel.
+    That one-sided step is inline-name-dependent, so it is left as a targeted
+    admit (ladder rung ``admit-guided``) rather than a silently-failing ``sim``.
+    """
+    return [
+        _res_tag(ADMIT_GUIDED),
+        f"(* multi-oracle hop {hop_index}, oracle {oracle_name!r}: init equiv",
+        "   with a dead F.evaluate on one side (PRF-random hop). The shared",
+        "   backbone is keygen; encaps; <fresh sample>, but one wrapper still",
+        "   runs an F.evaluate whose result the sample overwrites. Drop it with a",
+        "   one-sided phoare, then peel the common backbone:",
+        "     proc. inline *.",
+        "     (* drop the dead F.evaluate on the side that has it: *)",
+        "     seq <k> <k+1> : (={glob K, glob F} /\\ <live coupling>).",
+        "     + exists* (glob F){i}, <Fseedi>, <Finputi>; elim* => gf a0 a1;",
+        "       call{i} (F_evaluate_det gf a0 a1); auto.",
+        "     wp; rnd; wp; call (_: true); wp; call (_: true); skip => /#. *)",
+        "admit.",
+        "qed.",
+    ]
+
+
 # pylint: disable=too-many-locals,too-many-statements,too-many-arguments,too-many-positional-arguments
 def emit_multi_oracle_chain_for_hop(
     hop_index: int,
@@ -1705,6 +1896,7 @@ def emit_multi_oracle_chain_for_hop(
     external_module_types: dict[str, str],
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     flat_module_params: list[ec_ast.ModuleParam] | None = None,
+    det_methods: dict[str, set[str]] | None = None,
 ) -> MultiOracleHopChainInfo:
     """Emit the per-oracle per-transform chains for one multi-oracle hop.
 
@@ -1764,9 +1956,10 @@ def emit_multi_oracle_chain_for_hop(
 
     bridge_tactic = "proc; inline *; ((sp; wp; sim) || sim)"
     tactic_body_by_oracle: dict[str, list[str]] = {}
+    pres_methods: set[tuple[str, str]] = set()
     for oracle_name, is_init in oracles:
         eq_args = oracle_eq_args.get(oracle_name, "true")
-        oracle_chunks, outer_body = _emit_one_oracle_chain(
+        oracle_chunks, outer_body, oracle_pres = _emit_one_oracle_chain(
             hop_index=hop_index,
             oracle_name=oracle_name,
             is_init=is_init,
@@ -1783,12 +1976,18 @@ def emit_multi_oracle_chain_for_hop(
             bridge_tactic=bridge_tactic,
             external_module_types=external_module_types,
             method_return_types=method_return_types,
+            modules=modules,
+            flat_params=flat_params,
+            det_methods=det_methods or {},
         )
         chunks.extend(oracle_chunks)
         tactic_body_by_oracle[oracle_name] = outer_body
+        pres_methods |= oracle_pres
 
     return MultiOracleHopChainInfo(
-        extra_decls=chunks, tactic_body_by_oracle=tactic_body_by_oracle
+        extra_decls=chunks,
+        tactic_body_by_oracle=tactic_body_by_oracle,
+        pres_methods=pres_methods,
     )
 
 
@@ -1810,24 +2009,40 @@ def _emit_one_oracle_chain(
     bridge_tactic: str,
     external_module_types: dict[str, str],
     method_return_types: dict[tuple[str, str], frog_ast.Type],
-) -> tuple[list[str], list[str]]:
+    modules: mt.ModuleTranslator,
+    flat_params: list[ec_ast.ModuleParam],
+    det_methods: dict[str, set[str]],
+) -> tuple[list[str], list[str], set[tuple[str, str]]]:
     """Emit one oracle's chain artifacts + outer tactic body.
 
-    Returns ``(extra_decls, outer_body)``. If any chain step's micro cannot be
-    resolved (not identity, not a pure reorder), the chain is discarded and the
-    outer body is a coupling-pending admit (no oracle-suffixed artifacts).
+    Returns ``(extra_decls, outer_body, pres_methods)`` where ``pres_methods``
+    is the set of ``(module, method)`` glob-preservation axioms the outer body
+    references (empty unless the init synthesizer fired a dead-call drop). If any
+    chain step's micro cannot be resolved (not identity, not a pure reorder), the
+    chain is discarded and the outer body is a coupling-pending admit (no
+    oracle-suffixed artifacts).
     """
     # Inline-equivalent endpoints (the P5 identical-state finding at oracle
     # granularity): when the two endpoints' CANONICAL bodies for this oracle
-    # are identical, the raw wrapper modules are inline-equivalent, so
-    # ``proc; inline *; sim`` closes the lemma directly on the wrappers --
-    # sidestepping the per-transform chain (which the keygen-inlining steps of
-    # ``Initialize`` defeat: an inlining step is neither identity nor a pure
-    # reorder, so ``_oracle_step_tactic`` returns ``None`` and the chain admits).
-    # Scoped to the init oracle, where the body is a simple keygen delegation
-    # that ``sim`` aligns reliably under the ``={glob K} /\\ ={glob F}`` coupling;
-    # post-init oracles (tuple-plumbing / genuine body transforms) keep the
-    # per-transform chain / coupling-pending admit.
+    # are identical, the raw wrapper modules are inline-equivalent, so a single
+    # ``proc; inline *`` + backbone peel closes the lemma directly on the
+    # wrappers -- sidestepping the per-transform chain (which the keygen-inlining
+    # steps of ``Initialize`` defeat: an inlining step is neither identity nor a
+    # pure reorder, so ``_oracle_step_tactic`` returns ``None`` and the chain
+    # admits). Scoped to the init oracle.
+    #
+    # ``proc; inline *; sim`` closes a keygen/sample-only delegation (correctness
+    # inits, INDCPA) and stays the byte-identical tactic there. But an
+    # ``Initialize`` that also runs a deterministic ``F.evaluate`` challenge
+    # embedding (INDCCA) defeats ``sim``: it cannot align the ``F.evaluate``
+    # inputs -- tuple-projections of the two abstract ``encaps`` results, which
+    # ``inline *`` names differently on the two sides -- so it silently leaves the
+    # goal open (a 0-admit file EC rejects). :func:`_synth_init_backbone_peel`
+    # gates on that (a deterministic call in the backbone) and, when present,
+    # peels the shared probabilistic backbone tail-to-front instead
+    # (``(wp; call (_: true) | rnd)*`` + ``skip => /#``, plus a one-sided
+    # ``_pres`` drop for a dead ``F.evaluate``); fully name-independent, no
+    # ``inline``-name prediction.
     if is_init:
         proj_l = _project_to_method(left_states[-1], oracle_name)
         proj_r = _project_to_method(right_states[-1], oracle_name)
@@ -1836,7 +2051,23 @@ def _emit_one_oracle_chain(
             and proj_r is not None
             and proj_l.methods[0] == proj_r.methods[0]
         ):
-            return [], [_res_tag(SYNTH_STATIC), "proc; inline *; sim.", "qed."]
+            peel = _synth_init_backbone_peel(
+                modules,
+                oracle_name,
+                left_states[0],
+                right_states[0],
+                external_module_types,
+                method_return_types,
+                flat_params,
+                det_methods,
+            )
+            if peel is not None:
+                tactic, pres, rung = peel
+                return [], [_res_tag(rung), *tactic, "qed."], pres
+            # Backbones cannot be aligned (an extra call that is not a droppable
+            # deterministic method): the peel does not apply. Emit a targeted,
+            # honest admit rather than a silently-failing ``sim``.
+            return [], _init_backbone_admit(hop_index, oracle_name), set()
 
     def micro_pre(left_ref: str, right_ref: str) -> str:
         cpl = _glob_coupling(left_ref, right_ref)
@@ -1859,7 +2090,7 @@ def _emit_one_oracle_chain(
             method_return_types=method_return_types,
         )
         if tac is None:
-            return [], _oracle_pending_admit(hop_index, oracle_name)
+            return [], _oracle_pending_admit(hop_index, oracle_name), set()
         name = f"micro_{hop_index}_{oracle_name}_left_{k}"
         lref, rref = mod_ref(left_mods[k]), mod_ref(left_mods[k + 1])
         micros_left.append(name)
@@ -1888,7 +2119,7 @@ def _emit_one_oracle_chain(
             method_return_types=method_return_types,
         )
         if tac is None:
-            return [], _oracle_pending_admit(hop_index, oracle_name)
+            return [], _oracle_pending_admit(hop_index, oracle_name), set()
         name = f"micro_{hop_index}_{oracle_name}_right_{k}_rev"
         # Reversed: proves Step_R_state_{k+1} ~ Step_R_state_k.
         lref, rref = mod_ref(right_mods[k + 1]), mod_ref(right_mods[k])
@@ -1964,7 +2195,7 @@ def _emit_one_oracle_chain(
         f"[ smt() | smt() | apply {chain_name} | {bridge_tactic} ].",
         "qed.",
     ]
-    return chunks, outer_body
+    return chunks, outer_body, set()
 
 
 def _render_coupling_chain_body(  # pylint: disable=too-many-arguments,too-many-positional-arguments

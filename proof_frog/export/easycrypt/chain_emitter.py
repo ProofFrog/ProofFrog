@@ -1584,6 +1584,47 @@ def _ref_base(ref: str) -> str:
     return ref.split("(", 1)[0].strip()
 
 
+def _top_level_args(module_expr: str) -> list[str]:
+    """Top-level argument expressions of a functor application.
+
+    ``R(K, K_c.LEAK_BIND_K_CT_Breakable(K))`` -> ``["K",
+    "K_c.LEAK_BIND_K_CT_Breakable(K)"]``. Splits on top-level commas inside the
+    outermost parentheses, respecting nesting; returns ``[]`` when the expression
+    has no argument list.
+    """
+    open_idx = module_expr.find("(")
+    if open_idx == -1:
+        return []
+    depth = 0
+    inner = ""
+    for ch in module_expr[open_idx:]:
+        if ch == "(":
+            depth += 1
+            if depth == 1:
+                continue
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        inner += ch
+    args: list[str] = []
+    depth = 0
+    cur = ""
+    for ch in inner:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            args.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    if cur.strip():
+        args.append(cur.strip())
+    return args
+
+
 def _ec_module_fields(game: frog_ast.Game) -> list[str]:
     """Module-level EC ``glob`` field names of a flat-state game, in order.
 
@@ -1691,6 +1732,7 @@ def _make_field_aware_coupling(
     survivor: dict[str, str],
     glob_params: list[str],
     role_of: dict[str, str] | None = None,
+    qualified_ref_by_base: dict[str, dict[str, str]] | None = None,
 ) -> CouplingFn:
     """Build a coupling closure that is field-aware for cardinality-differing states.
 
@@ -1720,32 +1762,55 @@ def _make_field_aware_coupling(
     names the game state explicitly and so, unlike the whole-glob form, must carry
     the abstract module's own glob for the ``call (_: true)`` peel to couple its
     calls (validated: ``ec_templates/field_removal_coupling.ec``).
+
+    ``qualified_ref_by_base`` handles a **composite** base -- a reduction wrapper
+    ``R(K, Challenger)`` whose ``glob`` spans two modules (``R``'s own fields plus
+    the inner ``Challenger``'s). Its entry maps each role-field name to the fully
+    qualified ``glob`` ref (e.g. ``dk0`` -> ``R.dk0``, ``challenger_dk0`` ->
+    ``Chal.dk0``), so a coupling to that wrapper relates each flat field to the
+    module that actually holds it (wall 7). For a composite base the whole-glob
+    shortcut is skipped even at equal cardinality: the two globs list their fields
+    in different module order, so a positional whole-glob equality would mispair
+    them (a false coupling). A base absent from the map qualifies as ``base.field``.
     """
     roles = role_of or {}
+    qualified = qualified_ref_by_base or {}
+    composite = set(qualified)
 
     def role(f: str) -> str:
         return roles.get(f, f)
 
+    def qualify(base: str, f: str) -> str:
+        return qualified.get(base, {}).get(f, f"{base}.{f}")
+
     def coupling(left_ref: str, right_ref: str) -> str:
         lb, rb = _ref_base(left_ref), _ref_base(right_ref)
         fl, fr = fields_by_base.get(lb), fields_by_base.get(rb)
-        if fl is None or fr is None or len(fl) == len(fr):
+        is_composite = lb in composite or rb in composite
+        if fl is None or fr is None or (len(fl) == len(fr) and not is_composite):
             return _glob_coupling(left_ref, right_ref)
         setr = set(fr)
         fields_conj: list[str] = []
         # Cross-side: same-name preferred, then same-role (declaration-order rep).
-        paired_r: set[str] = set()
+        # Reserve every same-name right partner up front so the same-role fallback
+        # cannot steal a right field that a (later-in-order) same-name left field
+        # owns -- otherwise a copy field and its survivor would both pair to the
+        # same right field (a redundant, order-dependent conjunct).
+        paired_r: set[str] = {f for f in fl if f in setr}
         for f in fl:
             if f in setr:
-                fields_conj.append(f"{lb}.{f}" "{1}" f" = {rb}.{f}" "{2}")
-                paired_r.add(f)
+                fields_conj.append(
+                    f"{qualify(lb, f)}" "{1}" f" = {qualify(rb, f)}" "{2}"
+                )
             else:
                 g = next(
                     (h for h in fr if h not in paired_r and role(h) == role(f)),
                     None,
                 )
                 if g is not None:
-                    fields_conj.append(f"{lb}.{f}" "{1}" f" = {rb}.{g}" "{2}")
+                    fields_conj.append(
+                        f"{qualify(lb, f)}" "{1}" f" = {qualify(rb, g)}" "{2}"
+                    )
                     paired_r.add(g)
         # Within-side survivor invariants, both sides, emitted CONSISTENTLY (for
         # every field whose survivor source is also present on that side, not only
@@ -1760,7 +1825,10 @@ def _make_field_aware_coupling(
                 s = survivor.get(f)
                 if s is not None and s != f and s in present:
                     fields_conj.append(
-                        f"{base}.{f}" f"{{{side}}}" f" = {base}.{s}" f"{{{side}}}"
+                        f"{qualify(base, f)}"
+                        f"{{{side}}}"
+                        f" = {qualify(base, s)}"
+                        f"{{{side}}}"
                     )
         # No relatable field across these two states (different cardinality AND
         # no shared name / recoverable role -- a cross-game correspondence we do
@@ -2384,12 +2452,87 @@ def _emit_one_oracle_chain(
     norm_left = [norm_by_name[n] for n in left_mods]
     norm_right = [norm_by_name[n] for n in right_mods]
     survivor_map = _chain_survivor_map(list(norm_by_name.values()))
+
+    # Wrapper<->flat bridge coupling (wall 7). Each hop's two wrapper modules
+    # (``left_wrapper_expr`` / ``right_wrapper_expr``) are bridged to their
+    # side's flat state-0. The whole-glob bridge is ill-typed / mispaired when
+    # the wrapper's glob shape differs from that flat state. Register each
+    # wrapper in ``fields_by_base`` (keyed by its base name) so the field-aware
+    # coupling relates the right fields:
+    #   * a REDUCTION wrapper ``R(K, Challenger)`` that both holds its OWN live
+    #     field AND inlines a stateful ``Challenger`` -- its mirroring flat state
+    #     carries both ``challenger@``-prefixed fields and own fields -- is
+    #     COMPOSITE: its glob spans ``R`` (own) + ``Challenger`` (inner). Register
+    #     with a qualified-ref map (own -> ``R.f``; ``challenger@f`` -> ``Chal.f``).
+    #   * a PLAIN wrapper (no ``challenger@`` field) registers with its own field
+    #     list; the default ``base.field`` qualification is the correct glob ref
+    #     (its flat field names equal its module field names), which makes a
+    #     cross-card bridge to the OTHER side's reduction-side flat well-typed.
+    #   * a pure-DELEGATE reduction (``challenger@`` fields only, no own field) is
+    #     left to the whole-glob bridge -- its glob IS the challenger's glob and
+    #     the flat ``challenger@`` fields already line up positionally.
+    # Clean proofs (every wrapper bridge same-cardinality) take the whole-glob
+    # shortcut regardless, so they stay byte-identical.
+    qualified_ref_by_base: dict[str, dict[str, str]] = {}
+    for wrapper_expr, raw_state0, flat_base in (
+        (left_wrapper_expr, left_states[0], _ref_base(mod_ref(left_mods[0]))),
+        (right_wrapper_expr, right_states[0], _ref_base(mod_ref(right_mods[0]))),
+    ):
+        raw_names = [f.name for f in raw_state0.fields]
+        norm_names = fields_by_base.get(flat_base, [])
+        if len(raw_names) != len(norm_names):
+            continue
+        has_chal = any(n.startswith("challenger@") for n in raw_names)
+        has_own = any(not n.startswith("challenger@") for n in raw_names)
+        wrapper_base = _ref_base(wrapper_expr)
+        if has_chal and has_own:
+            chal_arg = next(
+                (a for a in reversed(_top_level_args(wrapper_expr)) if "(" in a),
+                None,
+            )
+            if chal_arg is None:
+                continue
+            chal_base = _ref_base(chal_arg)
+            qmap: dict[str, str] = {}
+            for raw_name, norm_name in zip(raw_names, norm_names):
+                if raw_name.startswith("challenger@"):
+                    own = raw_name[len("challenger@") :]
+                    # pylint: disable-next=protected-access
+                    qmap[norm_name] = f"{chal_base}.{mt._ec_field_name(own)}"
+                else:
+                    qmap[norm_name] = f"{wrapper_base}.{norm_name}"
+            fields_by_base[wrapper_base] = list(norm_names)
+            qualified_ref_by_base[wrapper_base] = qmap
+        elif not has_chal:
+            fields_by_base[wrapper_base] = list(norm_names)
+
     coupling = _make_field_aware_coupling(
         fields_by_base,
         survivor_map,
         [p.name for p in flat_params],
         _chain_role_map(norm_left, norm_right, survivor_map),
+        qualified_ref_by_base,
     )
+
+    # Composite-wrapper bridge tactic (wall 7). When the hop has a composite
+    # reduction wrapper, the wrapper<->flat bridges carry a cross-module field
+    # coupling that ``sim`` cannot infer ("cannot infer the set of equalities").
+    # Peel the oracle's shared call backbone instead -- the same tactic the init
+    # backbone peel uses -- discharging each abstract call's argument equality
+    # from the coupling. Gated on a composite wrapper being present, so every
+    # non-composite bridge (all clean proofs) keeps the byte-identical ``sim``
+    # fallback below.
+    if qualified_ref_by_base:
+        bridge_peel = _composite_bridge_tactic(
+            modules,
+            left_states[0],
+            oracle_name,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        if bridge_peel is not None:
+            bridge_tactic = bridge_peel
 
     def micro_pre(left_ref: str, right_ref: str) -> str:
         cpl = coupling(left_ref, right_ref)
@@ -4311,6 +4454,48 @@ def _backbone_peel(body: list[ec_ast.EcStmt]) -> list[str]:
         tac.append("wp.")
         tac.append("call (_: true)." if kind == "call" else "rnd.")
     return tac
+
+
+def _composite_bridge_tactic(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    modules: mt.ModuleTranslator,
+    state: frog_ast.Game,
+    oracle_name: str,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+) -> str | None:
+    """Per-oracle wrapper<->flat bridge tactic for a composite-wrapper hop.
+
+    Peels the oracle's shared call+sample backbone
+    (``proc; inline *; (wp; couple)*; auto``) rather than ``sim``: a composite
+    reduction-wrapper coupling relates a flat state's fields to a *different*
+    module's fields (the reduction's own + its inner challenger's), and ``sim``
+    cannot infer that cross-module equality set. ``call (_: true)`` couples each
+    abstract call name-independently and ``auto`` discharges its argument
+    equality from the coupling -- the same peel :func:`_synth_init_backbone_peel`
+    uses for the init oracle. Sized to the oracle's post-``inline`` backbone,
+    read off ``state`` (a flat state whose oracle body has the same call count as
+    the wrapper's inlined body). Returns ``None`` if the body cannot be rendered.
+    """
+    proj = _project_to_method(state, oracle_name)
+    if proj is None:
+        return None
+    mod = _flat_state_module(
+        modules,
+        "_bridge_peel",
+        proj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    if not mod.procs:
+        return None
+    body = mod.procs[0].body
+    steps = ["proc", "inline *", *(s.rstrip(".") for s in _backbone_peel(body))]
+    if _leads_with_det(body):
+        steps.append("wp")
+    steps.append("auto")
+    return "; ".join(steps)
 
 
 def _sample_reorder_swaps(

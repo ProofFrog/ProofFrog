@@ -141,6 +141,11 @@ class ExpressionTranslator:
             if lhs_bs is not None and rhs_bs is not None:
                 return self._translate_concat(expr, lhs_bs, rhs_bs)
             return self._translate_arith(expr)
+        if expr.operator == frog_ast.BinaryOperators.AND:
+            # Logical AND on Bool -- EC accepts ``&&`` (short-circuit bool)
+            # verbatim (the operator's ``.value``). ``&&`` is never overloaded
+            # (no BitString analogue), so it always renders as the arithmetic op.
+            return self._translate_arith(expr)
         if expr.operator == frog_ast.BinaryOperators.SUBTRACT:
             lhs_type = self._types.resolve(self._type_of(expr.left_expression))
             if isinstance(lhs_type, frog_ast.ModIntType):

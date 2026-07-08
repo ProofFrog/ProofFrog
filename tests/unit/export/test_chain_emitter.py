@@ -16,8 +16,10 @@ from proof_frog.export.easycrypt.chain_emitter import (
     _ec_perm_swaps,
     _has_tuple_repack,
     _is_tuple_literal,
+    _make_field_aware_coupling,
     _same_det_structure,
     _synth_isuv_walk,
+    _top_level_args,
 )
 
 
@@ -382,6 +384,50 @@ def test_same_det_structure_true_for_identical_bodies() -> None:
 
 def test_same_det_structure_false_for_repack_vs_direct() -> None:
     # The reduction repack carries extra assignments absent on the direct side.
-    assert not _same_det_structure(
-        _direct_keygen_body(), _reduction_init_repack_body()
+    assert not _same_det_structure(_direct_keygen_body(), _reduction_init_repack_body())
+
+
+# --- Composite reduction-wrapper bridge coupling (wall 7) -------------------
+
+
+def test_top_level_args_splits_nested_application() -> None:
+    assert _top_level_args("R(K, K_c.LEAK_BIND_K_CT_Breakable(K))") == [
+        "K",
+        "K_c.LEAK_BIND_K_CT_Breakable(K)",
+    ]
+    assert _top_level_args("R_MultiPRF") == []
+
+
+def test_field_aware_coupling_composite_qualified_refs() -> None:
+    """A composite base emits per-field qualified refs (own -> R.f,
+    challenger_f -> Chal.f) and forces field-aware even at equal cardinality."""
+    fields = ["challenger_dk0", "challenger_dk1", "dk0", "dk1"]
+    fields_by_base = {"Step_0R_state_0": fields, "R": fields}
+    qualified = {
+        "R": {
+            "challenger_dk0": "Chal.dk0",
+            "challenger_dk1": "Chal.dk1",
+            "dk0": "R.dk0",
+            "dk1": "R.dk1",
+        }
+    }
+    survivor = {"dk0": "challenger_dk0", "dk1": "challenger_dk1"}
+    coupling = _make_field_aware_coupling(
+        fields_by_base, survivor, ["K"], None, qualified
     )
+    out = coupling("Step_0R_state_0(K)", "R(K, Chal(K))")
+    # Cross-side pairing keeps the flat state qualified as itself, the composite
+    # wrapper by its per-field map -- NOT a positional whole-glob equality.
+    assert "Step_0R_state_0.dk0{1} = R.dk0{2}" in out
+    assert "Step_0R_state_0.challenger_dk0{1} = Chal.dk0{2}" in out
+    # The reduction-internal survivor rides on side 2, qualified across modules.
+    assert "R.dk0{2} = Chal.dk0{2}" in out
+    assert "(glob" not in out  # field-aware, never the whole-glob shortcut
+
+
+def test_field_aware_coupling_plain_bases_stay_whole_glob() -> None:
+    """Two non-composite equal-cardinality bases keep the byte-identical
+    whole-glob equality (the clean-proof path)."""
+    fields_by_base = {"A": ["dk0", "dk1"], "B": ["dk0", "dk1"]}
+    coupling = _make_field_aware_coupling(fields_by_base, {}, ["K"], None, None)
+    assert coupling("A(K)", "B(K)") == "(glob A(K)){1} = (glob B(K)){2}"

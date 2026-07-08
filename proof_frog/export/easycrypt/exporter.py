@@ -2630,7 +2630,78 @@ def export_proof_file(proof_path: str) -> str:
         live_state_holders.add(holder)
         return f"{holder}.{field}"
 
+    def _composite_reduction_step(
+        step: frog_ast.Step,
+    ) -> tuple[str, str, list[str]] | None:
+        """``(reduction_base, challenger_base, own_field_names)`` when ``step``'s
+        endpoint is a reduction whose ``glob`` spans BOTH its own live fields AND
+        a stateful inner challenger's (it holds its own fields *and* delegates
+        ``Initialize`` to the challenger, repacking the result into its globals);
+        else ``None``.
+
+        This is the wall-7 composite case: a single live-field coupling is too
+        weak to bridge the two wrappers (the reduction reads its own ``dk0`` in
+        ``Decaps0`` but forwards ``Challenge`` to the challenger, which reads the
+        challenger's ``dk0``), so the coupling must relate every live field on
+        BOTH the plain-game<->reduction seam and the reduction<->challenger seam.
+        A pure delegate (holds no own field) or a self-keygen reduction (holds a
+        field but never delegates -- ``R_MultiPRF``) returns ``None`` and keeps
+        the single-field path, so those proofs stay byte-identical."""
+        if step.reduction is None:
+            return None
+        helper = next(
+            (
+                h
+                for h in proof.helpers
+                if isinstance(h, frog_ast.Reduction) and h.name == step.reduction.name
+            ),
+            None,
+        )
+        fields = [f.name for f in helper.fields] if helper else []
+        if not fields or not _reduction_init_delegates(step.reduction.name):
+            return None
+        module_expr = resolver.resolve(step).module_expr
+        return (
+            pt.module_base_name(module_expr),
+            pt.module_base_name(pt.last_module_arg(module_expr)),
+            fields,
+        )
+
     def _live_state_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
+        # Wall-7 composite coupling: when one side is a field-holding delegating
+        # reduction, the single live-field equality cannot bridge the two
+        # wrappers. Relate every live field across BOTH seams: plain-game
+        # field <-> reduction's own field, AND reduction's own field <->
+        # challenger's field (the reduction repacks the challenger's Initialize
+        # result into its own globals, so the two are equal). This is exactly
+        # what the chain emitter's composite bridge couplings reduce to, so the
+        # per-oracle transitivity glue discharges. Gated tightly (see
+        # ``_composite_reduction_step``) so single-field proofs are untouched.
+        for red_step, other_step, red_side, other_side in (
+            (step_a, step_b, "1", "2"),
+            (step_b, step_a, "2", "1"),
+        ):
+            info = _composite_reduction_step(red_step)
+            if info is None:
+                continue
+            red_base, chal_base, fields = info
+            other_base = pt.module_base_name(resolver.resolve(other_step).module_expr)
+            # Preserve the abstract-scheme restriction set (mirrors the holder
+            # bookkeeping ``_live_state_ref`` does on the single-field path).
+            live_state_holders.update({red_base, chal_base, other_base})
+            conj: list[str] = []
+            for fld in fields:
+                ec_f = mt._ec_field_name(fld)  # pylint: disable=protected-access
+                conj.append(
+                    f"{other_base}.{ec_f}{{{other_side}}} = {red_base}.{ec_f}{{{red_side}}}"
+                )
+            for fld in fields:
+                ec_f = mt._ec_field_name(fld)  # pylint: disable=protected-access
+                conj.append(
+                    f"{red_base}.{ec_f}{{{red_side}}} = {chal_base}.{ec_f}{{{red_side}}}"
+                )
+            body = " /\\ ".join(conj)
+            return f"{glob_invariant_conj} /\\ {body}" if glob_invariant_conj else body
         field = pt.live_state_coupling(_live_state_ref(step_a), _live_state_ref(step_b))
         # Prefix the abstract-scheme glob equality so ``sim`` can relate the
         # post-init oracles' abstract calls (``K.encaps`` / ``F.evaluate``)

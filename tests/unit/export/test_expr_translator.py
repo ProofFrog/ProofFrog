@@ -183,3 +183,28 @@ def test_translate_equality() -> None:
         frog_ast.Variable("b"),
     )
     assert tr.translate(ne) == "a <> b"
+
+
+def test_translate_boolean_and() -> None:
+    """``&&`` renders verbatim (EC accepts short-circuit bool ``&&``).
+
+    A binding game's ``Challenge`` win condition
+    (``k0 == k1 && ct0 != ct1``) previously hit an unhandled ``AND`` operator,
+    so the whole method body fell back to ``return witness`` -- silently making
+    the challenge oracle vacuous. Regression guard for that rendering gap.
+    """
+    tr = _make()
+    conj = _binop(
+        frog_ast.BinaryOperators.AND,
+        _binop(
+            frog_ast.BinaryOperators.EQUALS,
+            frog_ast.Variable("k0"),
+            frog_ast.Variable("k1"),
+        ),
+        _binop(
+            frog_ast.BinaryOperators.NOTEQUALS,
+            frog_ast.Variable("ct0"),
+            frog_ast.Variable("ct1"),
+        ),
+    )
+    assert tr.translate(conj) == "(k0 = k1) && (ct0 <> ct1)"

@@ -1128,6 +1128,20 @@ class ModuleTranslator:
             body: list[ec_ast.EcStmt] = []
             body.extend(translated.var_decls)
             body.extend(translated.stmts)
+            # Drop statements after a top-level ``return``. Canonicalization can
+            # hoist a return above now-dead code (e.g. "Absorb Redundant Early
+            # Return" moving a challenge oracle's ``return false;`` above the
+            # decapsulations whose results it no longer reads), which is fine in
+            # FrogLang's semantics (the trailing statements are unreachable) but
+            # is a parse error in EC, where ``return`` must be a procedure's
+            # terminal statement. The tail is unreachable, so dropping it
+            # preserves behavior. A clean export never has this shape (it would
+            # already be EC-rejected), so this is a no-op for every passing
+            # proof.
+            for _idx, _st in enumerate(body):
+                if isinstance(_st, ec_ast.Return):
+                    del body[_idx + 1 :]
+                    break
         except NotImplementedError:
             # Fall back to a stub body that returns ``witness``. The
             # proc body still satisfies the module type; proving any

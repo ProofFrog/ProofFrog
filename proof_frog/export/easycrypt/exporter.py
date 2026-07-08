@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import pathlib
+import re
 from dataclasses import dataclass
 from typing import Callable
 
@@ -218,8 +219,6 @@ def _ec_ident(s: str) -> str:
     mapping is deterministic and injective for the names that actually
     appear in the corpus.
     """
-    import re  # pylint: disable=import-outside-toplevel
-
     return re.sub(r"[^A-Za-z0-9_]", "_", s)
 
 
@@ -3446,25 +3445,68 @@ def export_proof_file(proof_path: str) -> str:
         # Multi-oracle live-state coupling (M5 blocker A): the ``declare module
         # K/F`` restriction clauses name state-holding modules (reductions,
         # intermediate games, wrappers), so those module DEFINITIONS must be in
-        # scope before the declarations. Split ``proof_decls`` at the first
-        # lemma section -- everything before it is module definitions (functors
-        # over K/F; none reference the section-declared K/F), everything from it
-        # on is lemmas that DO reference the declared modules. The abstract
-        # modules + det/stateless axioms then sit between the two groups.
-        # (Gated on a multi-oracle coupling, where the per-oracle chain is
-        # always discarded to admit, so the chain section here is module-only.)
+        # scope before the declarations, and the declarations must precede every
+        # lemma that references the section-declared K/F. All module definitions
+        # (reductions/wrappers, and the per-transform chain's flat-state modules)
+        # are functors over K/F and reference no section-declared module, so they
+        # can all sit first; the abstract modules + det/stateless axioms then sit
+        # between the modules and the lemmas.
+        #
+        # A per-transform chain (e.g. the LEAK/HON binding proofs) emits its
+        # flat-state MODULES and its micro-LEMMAS interleaved, both *before* the
+        # "Per-hop equivalence lemmas" header, so we cannot split at that header
+        # -- the chain micro-lemmas would land ahead of ``declare module`` and
+        # reference an undeclared ``K``. Partition instead: every chain lemma
+        # chunk moves after the declarations, and ``K`` is additionally restricted
+        # from the flat-state modules its micro-lemmas couple (else EC assumes the
+        # abstract ``K.<m>`` call may clobber the coupled game state and rejects
+        # the coupling -- "module K can write Step_...dk0"; the call in fact only
+        # touches ``glob K``, the game fields being passed as arguments). When the
+        # chain is admit-only (no micro-lemmas, e.g. KEMPRF), the partition and the
+        # extra restriction are both no-ops and the output stays byte-identical.
         equiv_hdr = _section_header("Per-hop equivalence lemmas")
         split_at = proof_decls.index(equiv_hdr)
-        module_defs = proof_decls[:split_at]
-        lemma_decls = proof_decls[split_at:]
+        pre, post = proof_decls[:split_at], proof_decls[split_at:]
+
+        def _is_chain_lemma(decl: ec_ast.EcTopDecl) -> bool:
+            return (
+                isinstance(decl, str)
+                and re.search(r"(?m)^\s*lemma\s", decl) is not None
+                and re.search(r"(?m)^\s*module\s", decl) is None
+            )
+
+        pre_modules = [d for d in pre if not _is_chain_lemma(d)]
+        pre_lemmas = [d for d in pre if _is_chain_lemma(d)]
+
+        section_declare_modules = declare_modules
+        if pre_lemmas:
+            # Only string chunks in ``pre_modules`` are chain flat-state modules
+            # (reductions/wrappers are structured ``ec_ast.Module`` objects), so
+            # this collects exactly the flat-state module names to restrict from.
+            flat_state_names = [
+                name
+                for d in pre_modules
+                if isinstance(d, str)
+                for name in re.findall(r"(?m)^\s*module\s+(\w+)\s*\(", d)
+            ]
+            section_declare_modules = [
+                ec_ast.DeclareModule(
+                    name=dm.name,
+                    module_type=dm.module_type,
+                    disjoint_from=dm.disjoint_from + flat_state_names,
+                )
+                for dm in declare_modules
+            ]
+
         decls.append(
             ec_ast.Section(
                 name="Main",
                 decls=[
-                    *module_defs,
-                    *declare_modules,
+                    *pre_modules,
+                    *section_declare_modules,
                     *det_axiom_decls,
-                    *lemma_decls,
+                    *pre_lemmas,
+                    *post,
                 ],
             )
         )

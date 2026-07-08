@@ -1943,9 +1943,16 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     flat_params: list[ec_ast.ModuleParam],
     det_methods: dict[str, set[str]],
+    init_repacks: bool = False,
 ) -> tuple[list[str], set[tuple[str, str]], str] | None:
     """Closing tactic for an init-oracle equiv whose two endpoints have
     identical canonical bodies.
+
+    ``init_repacks`` is True when one side is a reduction that HOLDS the live
+    field itself and therefore repacks the challenger's ``Initialize`` tuple
+    result into its own globals (the case ``sim`` cannot align); it gates the
+    keygen/sample-only backbone peel so stateless-delegate reductions keep the
+    byte-identical ``sim``.
 
     Returns ``(tactic, pres_requests, rung)`` -- ``pres_requests`` is the set of
     ``(module, method)`` glob-preservation axioms the tactic references (empty
@@ -2011,8 +2018,41 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
 
     if [k for k, _ in l_bb] == [k for k, _ in r_bb]:
         if not _has_det_call(l_bb):
-            # ``sim`` aligns the whole symmetric body (no deterministic call to
-            # trip it up). Keep the historical tactic verbatim -- byte-identical.
+            if (
+                init_repacks
+                and not _same_det_structure(l_body, r_body)
+                and (_has_tuple_repack(l_body) or _has_tuple_repack(r_body))
+            ):
+                # Field-holding-reduction init: one side does its keygens
+                # directly, the other delegates ``Initialize`` to a stateful
+                # inner challenger AND -- because the reduction holds its own
+                # copy of the live field -- repacks the challenger's tuple
+                # result into the reduction's own cross-module globals
+                # (``R.dk0 <- _tup.`2``, a copy of the challenger's
+                # ``LEAK.dk0``). ``sim`` cannot align those cross-module field
+                # writes (nor prove the cross-module survivor invariant
+                # ``L.dk0{1} = R.dk0{2}`` in the postcondition). Peel the shared
+                # keygen/sample backbone tail-to-front (each ``call (_: true)``
+                # couples an abstract keygen name-independently) and close the
+                # residual assignment-derived field equalities with ``auto``
+                # (``auto`` runs wp+smt internally -- a separate ``skip => /#``
+                # leaves the field equalities open here). Validated interactively
+                # on ``Generic/LEAK_implies_HON_BIND_K_CT`` hop 0 + 2.
+                #
+                # Gated on ``init_repacks`` (the reduction holds the live field)
+                # AND the actual challenger-tuple repack fingerprint
+                # (:func:`_has_tuple_repack`), so ``sim`` stays byte-identical
+                # for: a STATELESS delegate that returns the challenger's result
+                # directly (``KEMPRF_INDCPA hop_2_initialize``), and a
+                # field-holding reduction that does its OWN keygen rather than
+                # delegating a multi-field challenger ``Initialize``
+                # (``KEMPRF_INDCPA hop_5_initialize`` / ``R_MultiPRF``) -- both
+                # of which ``sim`` closes even with a cross-module survivor.
+                tac = ["proc.", "inline *.", *_backbone_peel(l_body), "auto."]
+                return (tac, set(), SYNTH_PARAM)
+            # Identical structure, or a stateless-delegate reduction ``sim``
+            # aligns: keep the historical tactic verbatim (byte-identical path
+            # for the clean correctness / INDCPA / stateless-reduction inits).
             return (["proc; inline *; sim."], set(), SYNTH_STATIC)
         tac = ["proc.", "inline *.", *_backbone_peel(l_body)]
         if _leads_with_det(l_body) or _leads_with_det(r_body):
@@ -2144,6 +2184,7 @@ def emit_multi_oracle_chain_for_hop(
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     flat_module_params: list[ec_ast.ModuleParam] | None = None,
     det_methods: dict[str, set[str]] | None = None,
+    init_reduction_repacks: bool = False,
 ) -> MultiOracleHopChainInfo:
     """Emit the per-oracle per-transform chains for one multi-oracle hop.
 
@@ -2226,6 +2267,7 @@ def emit_multi_oracle_chain_for_hop(
             modules=modules,
             flat_params=flat_params,
             det_methods=det_methods or {},
+            init_repacks=init_reduction_repacks,
         )
         chunks.extend(oracle_chunks)
         tactic_body_by_oracle[oracle_name] = outer_body
@@ -2259,6 +2301,7 @@ def _emit_one_oracle_chain(
     modules: mt.ModuleTranslator,
     flat_params: list[ec_ast.ModuleParam],
     det_methods: dict[str, set[str]],
+    init_repacks: bool = False,
 ) -> tuple[list[str], list[str], set[tuple[str, str]]]:
     """Emit one oracle's chain artifacts + outer tactic body.
 
@@ -2307,6 +2350,7 @@ def _emit_one_oracle_chain(
                 method_return_types,
                 flat_params,
                 det_methods,
+                init_repacks=init_repacks,
             )
             if peel is not None:
                 tactic, pres, rung = peel
@@ -4192,6 +4236,64 @@ def _leads_with_det(body: list[ec_ast.EcStmt]) -> bool:
     """
     execs = _exec_stmts(body)
     return bool(execs) and isinstance(execs[0], ec_ast.Assign)
+
+
+def _is_tuple_literal(rhs: str) -> bool:
+    """True when ``rhs`` renders as a top-level tuple constructor ``(a, b, ...)``.
+
+    A parenthesized expression with a top-level comma inside the outermost
+    parens -- as opposed to a projection ``t.`1`` or a parenthesized single
+    expression. Used to spot the challenger-tuple repack an inlined reduction
+    ``Initialize`` leaves behind (``_tup <- (ek0, C.dk0, ek1, C.dk1)``)."""
+    s = rhs.strip()
+    if not (s.startswith("(") and s.endswith(")")):
+        return False
+    depth = 0
+    for ch in s[1:-1]:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return True
+    return False
+
+
+def _has_tuple_repack(body: list[ec_ast.EcStmt]) -> bool:
+    """True when ``body`` assigns a tuple-constructor literal to a local.
+
+    The fingerprint of a field-holding reduction's inlined ``Initialize``: the
+    inner challenger's multi-field ``Initialize`` return (``(ek0, dk0, ek1,
+    dk1)``) is inlined to a tuple literal that the reduction then unpacks into
+    its own globals. A direct-keygen init (``k <@ K.keygen(); pk <- k.`1``) and
+    a stateless single-value delegate never build such a literal, so ``sim``
+    aligns them -- this separates the peel case from the byte-identical ``sim``
+    case even among field-holding reductions (``KEMPRF_INDCPA`` ``R_MultiPRF``
+    holds ``pk`` but does its own keygen, so it keeps ``sim``)."""
+    return any(
+        isinstance(s, ec_ast.Assign) and _is_tuple_literal(s.rhs)
+        for s in _exec_stmts(body)
+    )
+
+
+def _same_det_structure(
+    left_body: list[ec_ast.EcStmt], right_body: list[ec_ast.EcStmt]
+) -> bool:
+    """True when the two bodies have the SAME deterministic statement structure.
+
+    Compares the full executable statement lists under the rename-tolerant
+    :func:`_reorder_sig` (a call by callee, a sample by distribution, an assign
+    by its identifier-masked RHS *shape*, a return by kind). Two bodies that
+    ``inline *; sim`` can align have identical such structure; a reduction-init
+    body that delegates to a stateful inner challenger and repacks its tuple
+    result carries extra assignments (a ``(ID, ID, ID, ID)`` pack + per-field
+    ``ID.`k`` unpacks) absent on the direct-keygen side, so its signature list
+    differs. Used to keep the byte-identical ``proc; inline *; sim`` init tactic
+    for the clean inits while routing the reduction-init case to the peel.
+    """
+    return [_reorder_sig(s) for s in _exec_stmts(left_body)] == [
+        _reorder_sig(s) for s in _exec_stmts(right_body)
+    ]
 
 
 def _backbone_peel(body: list[ec_ast.EcStmt]) -> list[str]:

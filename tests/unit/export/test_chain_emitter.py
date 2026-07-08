@@ -14,6 +14,9 @@ from proof_frog.export.easycrypt import ec_ast
 from proof_frog.export.easycrypt.chain_emitter import (
     _dead_sample_drop_plan,
     _ec_perm_swaps,
+    _has_tuple_repack,
+    _is_tuple_literal,
+    _same_det_structure,
     _synth_isuv_walk,
 )
 
@@ -319,3 +322,66 @@ def test_isuv_walk_declines_when_already_aligned() -> None:
 def test_isuv_walk_declines_without_calls() -> None:
     body = [ec_ast.Assign("x", "y"), ec_ast.Return("x")]
     assert _synth_isuv_walk(_isuv_module(body), _isuv_module(body)) is None
+
+
+# --- init backbone peel gate (wall 6): tuple-repack discriminator -----------
+
+
+def test_is_tuple_literal_recognizes_top_level_tuple() -> None:
+    assert _is_tuple_literal("(ek0, K_c.LEAK.dk0, ek1, K_c.LEAK.dk1)")
+    assert _is_tuple_literal("(a, b)")
+
+
+def test_is_tuple_literal_rejects_projection_and_paren_single() -> None:
+    # A projection ``t.`1`` is not a tuple constructor.
+    assert not _is_tuple_literal("_tup.`1")
+    # A parenthesized single expression has no top-level comma.
+    assert not _is_tuple_literal("(a.`1)")
+    # A comma nested inside an inner call must not count as top-level.
+    assert not _is_tuple_literal("(f (a, b)).`1")
+
+
+def _reduction_init_repack_body() -> list[ec_ast.EcStmt]:
+    # A field-holding reduction's inlined Initialize: two keygens, then the
+    # inner challenger's 4-tuple return packed and unpacked into own globals.
+    return [
+        ec_ast.Call("_tup0", "K.keygen", ""),
+        ec_ast.Assign("ek00", "_tup0.`1"),
+        ec_ast.Assign("C.dk0", "_tup0.`2"),
+        ec_ast.Call("_tup_0", "K.keygen", ""),
+        ec_ast.Assign("ek10", "_tup_0.`1"),
+        ec_ast.Assign("C.dk1", "_tup_0.`2"),
+        ec_ast.Assign("_tup", "(ek00, C.dk0, ek10, C.dk1)"),
+        ec_ast.Assign("R.dk0", "_tup.`2"),
+        ec_ast.Return("(ek00, ek10)"),
+    ]
+
+
+def _direct_keygen_body() -> list[ec_ast.EcStmt]:
+    # A direct-keygen init (HON side, or R_MultiPRF): no tuple constructor.
+    return [
+        ec_ast.Call("_tup", "K.keygen", ""),
+        ec_ast.Assign("ek0", "_tup.`1"),
+        ec_ast.Assign("dk0", "_tup.`2"),
+        ec_ast.Return("ek0"),
+    ]
+
+
+def test_has_tuple_repack_detects_reduction_pack() -> None:
+    assert _has_tuple_repack(_reduction_init_repack_body())
+
+
+def test_has_tuple_repack_false_for_direct_keygen() -> None:
+    # The byte-identical ``sim`` case: no repack literal, so the peel declines.
+    assert not _has_tuple_repack(_direct_keygen_body())
+
+
+def test_same_det_structure_true_for_identical_bodies() -> None:
+    assert _same_det_structure(_direct_keygen_body(), _direct_keygen_body())
+
+
+def test_same_det_structure_false_for_repack_vs_direct() -> None:
+    # The reduction repack carries extra assignments absent on the direct side.
+    assert not _same_det_structure(
+        _direct_keygen_body(), _reduction_init_repack_body()
+    )

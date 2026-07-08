@@ -2557,6 +2557,40 @@ def export_proof_file(proof_path: str) -> str:
         )
         return bool(helper and any(f.name == field for f in helper.fields))
 
+    def _reduction_init_delegates(reduction_name: str) -> bool:
+        """True when the named reduction's ``Initialize`` delegates to its inner
+        challenger's ``Initialize`` (``C.Initialize()``).
+
+        Only such a reduction writes the challenger's globals after ``inline *``
+        (and, when it also holds the live field, repacks the challenger's tuple
+        result into its own globals -- the case the init backbone peel handles).
+        A reduction whose ``Initialize`` does its own ``keygen`` instead
+        (``R_MultiPRF``) never touches the challenger's state, so the abstract
+        scheme need not be restricted from it -- keeping such proofs
+        byte-identical."""
+        helper = next(
+            (
+                h
+                for h in proof.helpers
+                if isinstance(h, frog_ast.Reduction) and h.name == reduction_name
+            ),
+            None,
+        )
+        if helper is None:
+            return False
+        init = next(
+            (m for m in helper.methods if m.signature.name.lower() == "initialize"),
+            None,
+        )
+        if init is None:
+            return False
+        search: visitors.SearchVisitor[frog_ast.FuncCall] = visitors.SearchVisitor(
+            lambda n: isinstance(n, frog_ast.FuncCall)
+            and isinstance(n.func, frog_ast.FieldAccess)
+            and n.func.name.lower() == "initialize"
+        )
+        return search.visit(init.block) is not None
+
     def _live_state_ref(step: frog_ast.Step) -> str:
         """Field-qualified EC reference to a step endpoint's live state, e.g.
         ``G_RandKey.pk`` or ``K_c.KEM_INDCPA_MultiChal_Random.pk``.
@@ -2567,12 +2601,30 @@ def export_proof_file(proof_path: str) -> str:
         be restricted from (M5 blocker A; see the file-assembly reorder below)."""
         module_expr = resolver.resolve(step).module_expr
         field = _live_state_field_name()
-        if step.reduction is not None and not _reduction_holds_field(
-            step.reduction.name, field
-        ):
-            # Stateless reduction delegates: the live state is in the challenger
-            # sub-module (the last functor argument of the resolved expression).
-            holder = pt.module_base_name(pt.last_module_arg(module_expr))
+        if step.reduction is not None:
+            inner = pt.module_base_name(pt.last_module_arg(module_expr))
+            if not _reduction_holds_field(step.reduction.name, field):
+                # Stateless reduction delegates: the live state is in the
+                # challenger sub-module.
+                holder = inner
+            else:
+                holder = pt.module_base_name(module_expr)
+                # A FIELD-HOLDING reduction couples on its own field, but if it
+                # ALSO delegates its ``Initialize`` to the inner challenger,
+                # then after ``inline *`` the challenger's own ``Initialize``
+                # writes the challenger's globals before the reduction repacks
+                # the tuple result into its own -- so the abstract scheme must
+                # be restricted from the inner challenger too, else the init
+                # backbone peel's ``wp`` is rejected ("K can write
+                # <Challenger>.dk1"). Gated on actual delegation (a field-holder
+                # that does its own ``keygen`` never touches the challenger's
+                # state), and on the inner arg not being an abstract scheme
+                # module (never restrict ``K`` from ``K``), so non-delegating
+                # reductions stay byte-identical.
+                if inner not in abstract_scheme_modules and _reduction_init_delegates(
+                    step.reduction.name
+                ):
+                    live_state_holders.add(inner)
         else:
             holder = pt.module_base_name(module_expr)
         live_state_holders.add(holder)
@@ -2635,6 +2687,18 @@ def export_proof_file(proof_path: str) -> str:
             # pylint: disable=import-outside-toplevel
             from .chain_emitter import emit_multi_oracle_chain_for_hop
 
+            # A reduction step that HOLDS the live field itself repacks the
+            # challenger's ``Initialize`` tuple result into its own globals,
+            # which ``sim`` cannot align -- the init backbone peel is needed
+            # there (a stateless delegate returns the challenger's result
+            # directly and keeps ``sim``). See ``_synth_init_backbone_peel``.
+            init_live_field = _live_state_field_name()
+            init_reduction_repacks = any(
+                s.reduction is not None
+                and _reduction_holds_field(s.reduction.name, init_live_field)
+                for s in (step_a, step_b)
+            )
+
             info = emit_multi_oracle_chain_for_hop(
                 hop_index=_i,
                 left_game=left_ast,
@@ -2651,6 +2715,7 @@ def export_proof_file(proof_path: str) -> str:
                 method_return_types=method_return_types,
                 flat_module_params=flat_module_params,
                 det_methods=det_methods_by_module,
+                init_reduction_repacks=init_reduction_repacks,
             )
             chain_extra_decls.extend(info.extra_decls)
             pres_method_requests.update(info.pres_methods)

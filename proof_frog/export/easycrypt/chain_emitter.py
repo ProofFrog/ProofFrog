@@ -1631,10 +1631,66 @@ def _chain_survivor_map(states: list[frog_ast.Game]) -> dict[str, str]:
     return survivor
 
 
+def _chain_role_map(
+    left_states: list[frog_ast.Game],
+    right_states: list[frog_ast.Game],
+    survivor: dict[str, str],
+) -> dict[str, str]:
+    """Map each ``glob`` field name to a canonical role representative, chain-wide.
+
+    Two field names share a *role* when they denote the same live value across the
+    chain's flat states. Roles unify by two name-independent relations:
+
+    * **survivor** (``r <- s`` in some ``initialize``): a redundant copy ``r`` has
+      the same value as its source ``s`` (recovered by :func:`_chain_survivor_map`);
+    * **positional rename** (an alpha-rename / canonicalization step ``dk0``->
+      ``field1``): between two adjacent flat states with the SAME field count, the
+      i-th field of one is the i-th field of the other -- sound by the
+      canonicalizer's positional field renaming.
+
+    The role map lets a cardinality-differing coupling relate fields that share no
+    NAME (e.g. a canonical endpoint ``field1`` to the anchor's ``dk0``): they are
+    the same role, so the coupling pairs them. Union-find over the field-name set;
+    the returned map sends each name to its role's representative name.
+    """
+    # pylint: disable=protected-access
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a: str, b: str) -> None:
+        parent[find(a)] = find(b)
+
+    def fields_of(game: frog_ast.Game) -> list[str]:
+        return [mt._ec_field_name(f.name) for f in game.fields]
+
+    for game in list(left_states) + list(right_states):
+        for f in fields_of(game):
+            find(f)
+    for r, s in survivor.items():
+        union(r, s)
+    # Positional-rename unions along each side's adjacency (same-cardinality only).
+    for states in (left_states, right_states):
+        for before, after in zip(states, states[1:]):
+            fb, fa = fields_of(before), fields_of(after)
+            if len(fb) == len(fa):
+                for x, y in zip(fb, fa):
+                    union(x, y)
+    return {name: find(name) for name in parent}
+
+
 def _make_field_aware_coupling(
     fields_by_base: dict[str, list[str]],
     survivor: dict[str, str],
     glob_params: list[str],
+    role_of: dict[str, str] | None = None,
 ) -> CouplingFn:
     """Build a coupling closure that is field-aware for cardinality-differing states.
 
@@ -1643,35 +1699,71 @@ def _make_field_aware_coupling(
     tuple equality ``(glob L){1}=(glob R){2}`` is well-typed and sound, and is
     emitted verbatim -- so every currently-clean proof (which never differs in
     cardinality) stays byte-identical. When the cardinalities DIFFER (a field was
-    removed on one side), the whole-glob equality is ill-typed; instead couple the
-    shared-by-name fields and add a survivor invariant for each removed-redundant
-    field, prefixed with ``={glob <param>}`` for each abstract module parameter
-    ``glob_params`` (e.g. the scheme ``K``) -- the field-aware coupling names the
-    game state explicitly and so, unlike the whole-glob form, must carry the
-    abstract module's own glob for the ``call (_: true)`` peel to couple its calls
-    (validated: ``ec_templates/field_removal_coupling.ec``).
+    removed on one side), the whole-glob equality is ill-typed; the coupling is
+    then synthesized field-wise:
+
+    * **cross-side correspondence** -- pair each left field with a right field of
+      the same role, preferring a same-NAME partner, else a same-ROLE partner
+      (``role_of``, recovered from survivor + positional-rename relations). This is
+      what lets a canonical endpoint ``field1`` couple to the anchor's ``dk0`` even
+      though they share no name (the P5 rename role-correspondence).
+    * **within-side survivor invariants** -- for each side, when two of that side's
+      own fields share a role (a redundant copy such as ``dk0 = challenger_dk0``),
+      relate the copy to its role representative. Emitted CONSISTENTLY on every
+      cardinality-differing coupling in the chain (not only where a field was
+      removed across the pair), so the invariant threads unbroken from the outer
+      coupling through every intermediate -- otherwise ``smt`` cannot introduce it
+      mid-chain at a transitivity side-condition (the composition wall).
+
+    All conjuncts are prefixed with ``={glob <param>}`` for each abstract module
+    parameter ``glob_params`` (e.g. the scheme ``K``): the field-aware coupling
+    names the game state explicitly and so, unlike the whole-glob form, must carry
+    the abstract module's own glob for the ``call (_: true)`` peel to couple its
+    calls (validated: ``ec_templates/field_removal_coupling.ec``).
     """
+    roles = role_of or {}
+
+    def role(f: str) -> str:
+        return roles.get(f, f)
 
     def coupling(left_ref: str, right_ref: str) -> str:
         lb, rb = _ref_base(left_ref), _ref_base(right_ref)
         fl, fr = fields_by_base.get(lb), fields_by_base.get(rb)
         if fl is None or fr is None or len(fl) == len(fr):
             return _glob_coupling(left_ref, right_ref)
-        setl, setr = set(fl), set(fr)
+        setr = set(fr)
         fields_conj: list[str] = []
-        for f in fl:  # shared-by-name fields, in left declaration order
+        # Cross-side: same-name preferred, then same-role (declaration-order rep).
+        paired_r: set[str] = set()
+        for f in fl:
             if f in setr:
                 fields_conj.append(f"{lb}.{f}" "{1}" f" = {rb}.{f}" "{2}")
-        for f in fl:  # fields removed on the right, survivor invariant on {1}
-            s = survivor.get(f)
-            if f not in setr and s is not None and s in setl:
-                fields_conj.append(f"{lb}.{f}" "{1}" f" = {lb}.{s}" "{1}")
-        for f in fr:  # fields removed on the left, survivor invariant on {2}
-            s = survivor.get(f)
-            if f not in setl and s is not None and s in setr:
-                fields_conj.append(f"{rb}.{f}" "{2}" f" = {rb}.{s}" "{2}")
+                paired_r.add(f)
+            else:
+                g = next(
+                    (h for h in fr if h not in paired_r and role(h) == role(f)),
+                    None,
+                )
+                if g is not None:
+                    fields_conj.append(f"{lb}.{f}" "{1}" f" = {rb}.{g}" "{2}")
+                    paired_r.add(g)
+        # Within-side survivor invariants, both sides, emitted CONSISTENTLY (for
+        # every field whose survivor source is also present on that side, not only
+        # where a field was removed across this pair). The survivor map -- not the
+        # role map -- is authoritative for "these two of a side's own fields are
+        # equal copies"; role is only for the cross-side rename pairing above.
+        # Consistency is what lets the invariant thread unbroken from the outer
+        # coupling through every intermediate (the composition fix).
+        for side, base, fields in (("1", lb, fl), ("2", rb, fr)):
+            present = set(fields)
+            for f in fields:
+                s = survivor.get(f)
+                if s is not None and s != f and s in present:
+                    fields_conj.append(
+                        f"{base}.{f}" f"{{{side}}}" f" = {base}.{s}" f"{{{side}}}"
+                    )
         # No relatable field across these two states (different cardinality AND
-        # no shared name / recoverable survivor -- e.g. a cross-game rename we do
+        # no shared name / recoverable role -- a cross-game correspondence we do
         # not yet resolve). Never emit a vacuous coupling (a bare ``={glob K}``
         # with no state correspondence could let ``smt()`` discharge a
         # transitivity side-condition that a real correspondence should have
@@ -2245,10 +2337,14 @@ def _emit_one_oracle_chain(
         _ref_base(mod_ref(name)): _ec_module_fields(game)
         for name, game in norm_by_name.items()
     }
+    norm_left = [norm_by_name[n] for n in left_mods]
+    norm_right = [norm_by_name[n] for n in right_mods]
+    survivor_map = _chain_survivor_map(list(norm_by_name.values()))
     coupling = _make_field_aware_coupling(
         fields_by_base,
-        _chain_survivor_map(list(norm_by_name.values())),
+        survivor_map,
         [p.name for p in flat_params],
+        _chain_role_map(norm_left, norm_right, survivor_map),
     )
 
     def micro_pre(left_ref: str, right_ref: str) -> str:

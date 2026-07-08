@@ -16,6 +16,7 @@ from proof_frog.transforms._base import TransformApplication
 from proof_frog.export.easycrypt import type_collector as tc
 from proof_frog.export.easycrypt import module_translator as mt
 from proof_frog.export.easycrypt.chain_emitter import (
+    _chain_role_map,
     _coupling_spec,
     _dead_call_drop_tags,
     _emit_one_oracle_chain,
@@ -116,6 +117,59 @@ def test_field_aware_coupling_removal_uses_survivor_invariant() -> None:
         "={glob K} /\\ "
         "L.challenger_dk0{1} = R.challenger_dk0{2} /\\ "
         "L.challenger_dk1{1} = R.challenger_dk1{2} /\\ "
+        "R.dk0{2} = R.challenger_dk0{2} /\\ "
+        "R.dk1{2} = R.challenger_dk1{2}"
+    )
+
+
+def _fields_game(name: str, field_names: list[str]) -> frog_ast.Game:
+    """A field-only flat-state game (methods irrelevant to the role map)."""
+    fields = [frog_ast.Field(_bs(), n, None) for n in field_names]
+    return frog_ast.Game((name, [], fields, []))
+
+
+def test_chain_role_map_unifies_survivor_and_positional_rename() -> None:
+    # L side renames dk0/dk1 -> field1/field2 (same cardinality, positional);
+    # R side removes dk0/dk1 (survivors challenger_dk0/1) then renames to
+    # field1/field2. The role map must unify {dk0, challenger_dk0, field1} and
+    # {dk1, challenger_dk1, field2} so a canonical endpoint couples by role.
+    left = [
+        _fields_game("L0", ["dk0", "dk1"]),
+        _fields_game("L1", ["field1", "field2"]),
+    ]
+    right = [
+        _fields_game("R0", ["challenger_dk0", "challenger_dk1", "dk0", "dk1"]),
+        _fields_game("R1", ["challenger_dk0", "challenger_dk1"]),
+        _fields_game("R2", ["field1", "field2"]),
+    ]
+    survivor = {"dk0": "challenger_dk0", "dk1": "challenger_dk1"}
+    role = _chain_role_map(left, right, survivor)
+    assert role["dk0"] == role["challenger_dk0"] == role["field1"]
+    assert role["dk1"] == role["challenger_dk1"] == role["field2"]
+    assert role["dk0"] != role["dk1"]
+
+
+def test_field_aware_coupling_rename_role_correspondence() -> None:
+    # The P5 case: a canonical endpoint L (field1/field2) coupled to the anchor R
+    # (challenger_dk0/1, dk0/1). No field is shared by NAME, but the role map pairs
+    # field1<->challenger_dk0 (declaration-order rep of role0) etc., and the within-R
+    # survivor invariants thread consistently. Without the role cross-side terms the
+    # coupling would be vacuous on {1} and the transitivity glue could not compose.
+    fields = {
+        "L": ["field1", "field2"],
+        "R": ["challenger_dk0", "challenger_dk1", "dk0", "dk1"],
+    }
+    survivor = {"dk0": "challenger_dk0", "dk1": "challenger_dk1"}
+    role = _chain_role_map(
+        [_fields_game("L", ["dk0", "dk1"]), _fields_game("L", ["field1", "field2"])],
+        [_fields_game("R", ["challenger_dk0", "challenger_dk1", "dk0", "dk1"])],
+        survivor,
+    )
+    coupling = _make_field_aware_coupling(fields, survivor, ["K"], role)
+    assert coupling("L(K)", "R(K)") == (
+        "={glob K} /\\ "
+        "L.field1{1} = R.challenger_dk0{2} /\\ "
+        "L.field2{1} = R.challenger_dk1{2} /\\ "
         "R.dk0{2} = R.challenger_dk0{2} /\\ "
         "R.dk1{2} = R.challenger_dk1{2}"
     )

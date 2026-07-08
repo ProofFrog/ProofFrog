@@ -249,6 +249,30 @@ class StepResolver:
         registered for it, the legacy first-method params apply, so
         single-oracle output is unchanged.
         """
+        # Per-oracle query (multi-oracle chain): the oracle's argument signature
+        # comes from the game file whose oracle model is actually emitted for this
+        # step -- which :meth:`oracle_model_for` keys the SAME way: a plain step
+        # uses its own game file; a composed (``compose R``) step and a bare
+        # intermediate game are played against the OUTER theorem adversary, so
+        # their oracle signatures are the outer game file's. Using the reduction's
+        # top-level params here (the whole-step fallback below) would drop each
+        # post-init oracle's own arguments (e.g. ``decaps0``'s ``ct``), leaving
+        # the micro's precondition without ``={ct}`` so ``sim`` cannot close it.
+        if oracle_name is not None:
+            if step.reduction is not None or isinstance(
+                step.challenger, frog_ast.ParameterizedGame
+            ):
+                oracle_key = self._outer_game_file_name
+            elif isinstance(step.challenger, frog_ast.ConcreteGame):
+                oracle_key = step.challenger.game.name
+            else:
+                oracle_key = None
+            if oracle_key is not None:
+                per_oracle = self._oracle_params_by_oracle.get(oracle_key, {})
+                if oracle_name in per_oracle:
+                    params = per_oracle[oracle_name]
+                    return "true" if not params else "={" + ", ".join(params) + "}"
+
         if step.reduction is not None:
             params = self._reduction_params.get(step.reduction.name, [])
         else:

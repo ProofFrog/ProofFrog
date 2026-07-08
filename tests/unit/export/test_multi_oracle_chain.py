@@ -20,8 +20,10 @@ from proof_frog.export.easycrypt.chain_emitter import (
     _dead_call_drop_tags,
     _emit_one_oracle_chain,
     _glob_coupling,
+    _make_field_aware_coupling,
     _oracle_step_tactic,
     _project_to_method,
+    _ref_base,
     _render_coupling_chain_body,
     emit_multi_oracle_chain_for_hop,
 )
@@ -89,6 +91,46 @@ def test_coupling_spec_post_init_carries_args_and_coupling() -> None:
     )
 
 
+def test_ref_base_strips_functor_application() -> None:
+    assert _ref_base("Step_0R_state_5(K)") == "Step_0R_state_5"
+    assert _ref_base("GR") == "GR"
+
+
+def test_field_aware_coupling_same_cardinality_is_whole_glob() -> None:
+    # Equal glob cardinality (identical names OR a pure positional rename) keeps
+    # the whole-glob tuple equality verbatim -- clean proofs stay byte-identical.
+    fields = {"L": ["dk0", "dk1"], "R": ["field1", "field2"]}
+    coupling = _make_field_aware_coupling(fields, {}, ["K"])
+    assert coupling("L(K)", "R(K)") == "(glob L(K)){1} = (glob R(K)){2}"
+
+
+def test_field_aware_coupling_removal_uses_survivor_invariant() -> None:
+    # R carries redundant dk0/dk1 (survivors challenger_dk0/1); L has them removed.
+    fields = {
+        "L": ["challenger_dk0", "challenger_dk1"],
+        "R": ["challenger_dk0", "challenger_dk1", "dk0", "dk1"],
+    }
+    survivor = {"dk0": "challenger_dk0", "dk1": "challenger_dk1"}
+    coupling = _make_field_aware_coupling(fields, survivor, ["K"])
+    assert coupling("L(K)", "R(K)") == (
+        "={glob K} /\\ "
+        "L.challenger_dk0{1} = R.challenger_dk0{2} /\\ "
+        "L.challenger_dk1{1} = R.challenger_dk1{2} /\\ "
+        "R.dk0{2} = R.challenger_dk0{2} /\\ "
+        "R.dk1{2} = R.challenger_dk1{2}"
+    )
+
+
+def test_field_aware_coupling_no_relatable_field_falls_back_not_vacuous() -> None:
+    # Different cardinality AND no shared name / recoverable survivor: never emit
+    # a vacuous coupling -- fall back to the (ill-typed) whole-glob so EC rejects
+    # loudly (honest gating), rather than a bare ={glob K} that could vacuously
+    # discharge a transitivity side-condition.
+    fields = {"L": ["field1", "field2"], "R": ["challenger_dk0"]}
+    coupling = _make_field_aware_coupling(fields, {}, ["K"])
+    assert coupling("L(K)", "R(K)") == "(glob L(K)){1} = (glob R(K)){2}"
+
+
 def test_coupling_spec_post_init_no_args_is_bare_coupling() -> None:
     spec = _coupling_spec("L", "R", is_init=False, eq_args="true")
     assert (
@@ -129,8 +171,18 @@ def test_dead_call_drop_tags_rejects_non_deterministic_extra() -> None:
 
 def test_oracle_step_tactic_identity_is_coupling_preserving_sim() -> None:
     g = _two_oracle_game("G")
-    # Same game on both sides: the oracle body is unchanged -> proc; sim.
-    tac = _oracle_step_tactic(g, _two_oracle_game("G"), "challenge", False, {}, {})
+    # Same game on both sides (equal glob cardinality): the oracle body is
+    # unchanged and no field is removed -> proc; sim (not the field-removal peel).
+    tac = _oracle_step_tactic(
+        g,
+        _two_oracle_game("G"),
+        "challenge",
+        False,
+        {},
+        {},
+        modules=_modules(),
+        flat_params=[],
+    )
     assert tac == ["proc; sim."]
 
 

@@ -1572,14 +1572,134 @@ def _glob_coupling(left_ref: str, right_ref: str) -> str:
     return f"(glob {left_ref})" "{1}" f" = (glob {right_ref})" "{2}"
 
 
-def _coupling_spec(left_ref: str, right_ref: str, is_init: bool, eq_args: str) -> str:
+# A coupling builder: ``(left_ref, right_ref) -> relational-invariant string``.
+# ``_glob_coupling`` is the identical-state default; the chain emitter passes a
+# field-aware closure (:func:`_field_aware_coupling`) for hops whose two sides
+# have structurally different module state (wall 4).
+CouplingFn = Callable[[str, str], str]
+
+
+def _ref_base(ref: str) -> str:
+    """Base module name of a functor-applied ref: ``Step_0R_state_5(K)`` -> ``Step_0R_state_5``."""
+    return ref.split("(", 1)[0].strip()
+
+
+def _ec_module_fields(game: frog_ast.Game) -> list[str]:
+    """Module-level EC ``glob`` field names of a flat-state game, in order.
+
+    Mirrors :meth:`ModuleTranslator.translate_flat_game`'s field emission
+    (``emit_state_vars``): each game-level field becomes one module-level ``var``,
+    under the same ``_ec_field_name`` lowercasing.
+    """
+    # pylint: disable=protected-access
+    return [mt._ec_field_name(f.name) for f in game.fields]
+
+
+def _chain_survivor_map(states: list[frog_ast.Game]) -> dict[str, str]:
+    """Map each redundant-copy field to its surviving source, chain-wide.
+
+    A field removed by "Remove redundant variables for fields" was redundant
+    because ``initialize`` set it ``r <- s`` from a surviving field ``s`` (e.g.
+    ``dk0 <- challenger_dk0``). Scanning every flat state's ``initialize`` for a
+    direct field-to-field assignment recovers ``{r: s}`` -- the invariant ``r=s``
+    holds in every state that still carries ``r``, so it can ride a coupling that
+    relates a state-with-``r`` to a state where ``r`` was removed. Recovery is
+    name-independent (read off the AST, no ``inline``-name prediction); when a
+    removed field has no such recoverable survivor the coupling simply omits the
+    invariant, and the affected micro fails loudly (honest gating) rather than
+    admitting a false lemma.
+    """
+    # pylint: disable=protected-access
+    survivor: dict[str, str] = {}
+    for game in states:
+        field_ec = {f.name: mt._ec_field_name(f.name) for f in game.fields}
+        init = next(
+            (m for m in game.methods if m.signature.name.lower() == "initialize"),
+            None,
+        )
+        if init is None:
+            continue
+        for stmt in init.block.statements:
+            if (
+                isinstance(stmt, frog_ast.Assignment)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and isinstance(stmt.value, frog_ast.Variable)
+                and stmt.var.name in field_ec
+                and stmt.value.name in field_ec
+            ):
+                survivor[field_ec[stmt.var.name]] = field_ec[stmt.value.name]
+    return survivor
+
+
+def _make_field_aware_coupling(
+    fields_by_base: dict[str, list[str]],
+    survivor: dict[str, str],
+    glob_params: list[str],
+) -> CouplingFn:
+    """Build a coupling closure that is field-aware for cardinality-differing states.
+
+    When the two modules' ``glob`` field sets have the SAME cardinality (identical
+    names, or a pure positional rename such as ``dk0``->``field1``), the whole-glob
+    tuple equality ``(glob L){1}=(glob R){2}`` is well-typed and sound, and is
+    emitted verbatim -- so every currently-clean proof (which never differs in
+    cardinality) stays byte-identical. When the cardinalities DIFFER (a field was
+    removed on one side), the whole-glob equality is ill-typed; instead couple the
+    shared-by-name fields and add a survivor invariant for each removed-redundant
+    field, prefixed with ``={glob <param>}`` for each abstract module parameter
+    ``glob_params`` (e.g. the scheme ``K``) -- the field-aware coupling names the
+    game state explicitly and so, unlike the whole-glob form, must carry the
+    abstract module's own glob for the ``call (_: true)`` peel to couple its calls
+    (validated: ``ec_templates/field_removal_coupling.ec``).
+    """
+
+    def coupling(left_ref: str, right_ref: str) -> str:
+        lb, rb = _ref_base(left_ref), _ref_base(right_ref)
+        fl, fr = fields_by_base.get(lb), fields_by_base.get(rb)
+        if fl is None or fr is None or len(fl) == len(fr):
+            return _glob_coupling(left_ref, right_ref)
+        setl, setr = set(fl), set(fr)
+        fields_conj: list[str] = []
+        for f in fl:  # shared-by-name fields, in left declaration order
+            if f in setr:
+                fields_conj.append(f"{lb}.{f}" "{1}" f" = {rb}.{f}" "{2}")
+        for f in fl:  # fields removed on the right, survivor invariant on {1}
+            s = survivor.get(f)
+            if f not in setr and s is not None and s in setl:
+                fields_conj.append(f"{lb}.{f}" "{1}" f" = {lb}.{s}" "{1}")
+        for f in fr:  # fields removed on the left, survivor invariant on {2}
+            s = survivor.get(f)
+            if f not in setl and s is not None and s in setr:
+                fields_conj.append(f"{rb}.{f}" "{2}" f" = {rb}.{s}" "{2}")
+        # No relatable field across these two states (different cardinality AND
+        # no shared name / recoverable survivor -- e.g. a cross-game rename we do
+        # not yet resolve). Never emit a vacuous coupling (a bare ``={glob K}``
+        # with no state correspondence could let ``smt()`` discharge a
+        # transitivity side-condition that a real correspondence should have
+        # carried -- the false-confidence trap). Fall back to the whole-glob
+        # equality, which is ill-typed here and makes EC reject the file loudly
+        # (honest gating -- blocked, never a false accept).
+        if not fields_conj:
+            return _glob_coupling(left_ref, right_ref)
+        return " /\\ ".join([f"={{glob {p}}}" for p in glob_params] + fields_conj)
+
+    return coupling
+
+
+def _coupling_spec(
+    left_ref: str,
+    right_ref: str,
+    is_init: bool,
+    eq_args: str,
+    coupling: CouplingFn = _glob_coupling,
+) -> str:
     """``(<pre> ==> ={res} /\\ <coupling>)`` for a transitivity middle-spec.
 
     The init oracle establishes the coupling from ``true``; a post-init oracle
     additionally requires its argument equality (``eq_args``) in the
-    precondition.
+    precondition. ``coupling`` defaults to the identical-state ``_glob_coupling``;
+    the chain emitter supplies a field-aware closure for non-identical-state hops.
     """
-    cpl = _glob_coupling(left_ref, right_ref)
+    cpl = coupling(left_ref, right_ref)
     if is_init:
         pre = "true"
     else:
@@ -1597,26 +1717,61 @@ def _project_to_method(game: frog_ast.Game, oracle_name: str) -> frog_ast.Game |
     return proj
 
 
-def _oracle_step_tactic(
+def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     state_before: frog_ast.Game,
     state_after: frog_ast.Game,
     oracle_name: str,
     reversed_dir: bool,
     external_module_types: dict[str, str],
     method_return_types: dict[tuple[str, str], frog_ast.Type],
+    modules: mt.ModuleTranslator,
+    flat_params: list[ec_ast.ModuleParam],
 ) -> list[str] | None:
     """Tactic for one chain step's micro lemma, restricted to ``oracle_name``.
 
     ``["proc; sim."]`` when that oracle's body is unchanged across the step
     (``sim`` preserves the coupling on untouched state); a ``proc; swap...;
     sim`` sequence when the step is a pure top-level reorder of that oracle's
-    body; ``None`` when neither applies (the caller routes the whole oracle to
-    a coupling-pending admit).
+    body; a backbone peel when the step is a "Remove redundant variables for
+    fields" removal (the two states differ in ``glob`` cardinality, so the
+    oracle reads a removed field via its survivor on one side and ``sim`` cannot
+    relate the differently-named reads -- wall 4); ``None`` when none applies
+    (the caller routes the whole oracle to a coupling-pending admit).
     """
     pb = _project_to_method(state_before, oracle_name)
     pa = _project_to_method(state_after, oracle_name)
     if pb is None or pa is None:
         return None
+    # Field-removal step: the field-aware coupling carries a survivor invariant
+    # (``dk0 = challenger_dk0``); peel the (structurally identical) call/sample
+    # backbone with ``call (_: true)``/``rnd`` so ``auto; smt()`` discharges each
+    # abstract-call arg equality from that invariant. ``sim`` cannot -- it has no
+    # way to use the relational fact to equate ``K.decaps(challenger_dk0){1}``
+    # with ``K.decaps(dk0){2}``. Validated: ``ec_templates/field_removal_coupling.ec``.
+    if len(state_before.fields) != len(state_after.fields):
+        amod = _flat_state_module(
+            modules,
+            "Step_rm",
+            pa,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        if not amod.procs:
+            return None
+        body = amod.procs[0].body
+        # Couple each abstract call (``call (_: true)``) / sample (``rnd``) of the
+        # shared backbone, tail-to-front, then close with a single ``auto.``.
+        # ``auto`` performs the trailing ``wp`` and the residual arg-equality
+        # ``smt`` internally -- an EXPLICIT leading ``wp`` (as in ``_backbone_peel``)
+        # instead leaves a first-order residual that batch ``smt()`` cannot close
+        # even though the interactive prover can (validated tactic:
+        # ``ec_templates/field_removal_coupling.ec`` -- ``proc; call (_: true); auto``).
+        tac = ["proc."]
+        for kind, _callee in reversed(_call_sample_backbone(body)):
+            tac.append("call (_: true)." if kind == "call" else "rnd.")
+        tac.append("auto.")
+        return tac
     if pb.methods[0] == pa.methods[0]:
         return ["proc; sim."]
     before_h = _normalize_for_ec(
@@ -2069,14 +2224,41 @@ def _emit_one_oracle_chain(
             # honest admit rather than a silently-failing ``sim``.
             return [], _init_backbone_admit(hop_index, oracle_name), set()
 
+    # Field-aware coupling: identical-state hops keep the whole-glob equality
+    # (byte-identical for clean proofs); a hop whose two sides differ in glob
+    # cardinality (a removed redundant field -- wall 4) couples shared fields +
+    # survivor invariants. Built once over every flat state of this chain, using
+    # the SAME ``_normalize_for_ec`` the module renderer applies -- so field
+    # names match the rendered ``glob`` (``@``-mangled reduction fields like
+    # ``challenger@dk0`` are sanitized to ``challenger_dk0``).
+    def _normalized(game: frog_ast.Game) -> frog_ast.Game:
+        return _normalize_for_ec(
+            copy.deepcopy(game), external_module_types, method_return_types
+        )
+
+    norm_by_name = {
+        name: _normalized(game)
+        for name, game in list(zip(left_mods, left_states))
+        + list(zip(right_mods, right_states))
+    }
+    fields_by_base = {
+        _ref_base(mod_ref(name)): _ec_module_fields(game)
+        for name, game in norm_by_name.items()
+    }
+    coupling = _make_field_aware_coupling(
+        fields_by_base,
+        _chain_survivor_map(list(norm_by_name.values())),
+        [p.name for p in flat_params],
+    )
+
     def micro_pre(left_ref: str, right_ref: str) -> str:
-        cpl = _glob_coupling(left_ref, right_ref)
+        cpl = coupling(left_ref, right_ref)
         if is_init:
             return "true"
         return cpl if eq_args == "true" else f"{eq_args} /\\ {cpl}"
 
     def micro_post(left_ref: str, right_ref: str) -> str:
-        return f"={{res}} /\\ {_glob_coupling(left_ref, right_ref)}"
+        return f"={{res}} /\\ {coupling(left_ref, right_ref)}"
 
     chunks: list[str] = []
     micros_left: list[str] = []
@@ -2088,6 +2270,8 @@ def _emit_one_oracle_chain(
             reversed_dir=False,
             external_module_types=external_module_types,
             method_return_types=method_return_types,
+            modules=modules,
+            flat_params=flat_params,
         )
         if tac is None:
             return [], _oracle_pending_admit(hop_index, oracle_name), set()
@@ -2117,6 +2301,8 @@ def _emit_one_oracle_chain(
             reversed_dir=True,
             external_module_types=external_module_types,
             method_return_types=method_return_types,
+            modules=modules,
+            flat_params=flat_params,
         )
         if tac is None:
             return [], _oracle_pending_admit(hop_index, oracle_name), set()
@@ -2165,6 +2351,7 @@ def _emit_one_oracle_chain(
         micros_left,
         micros_right_rev,
         bridge_name,
+        coupling,
     )
     chunks.append(
         "\n".join(
@@ -2186,12 +2373,12 @@ def _emit_one_oracle_chain(
     outer_body = [
         "(* Per-transform: bridge wrappers to flat states, chain through. *)",
         f"transitivity {l0}.{oracle_name} "
-        f"{_coupling_spec(left_wrapper_expr, l0, is_init, eq_args)} "
-        f"{_coupling_spec(l0, right_wrapper_expr, is_init, eq_args)}; "
+        f"{_coupling_spec(left_wrapper_expr, l0, is_init, eq_args, coupling)} "
+        f"{_coupling_spec(l0, right_wrapper_expr, is_init, eq_args, coupling)}; "
         f"[ smt() | smt() | {bridge_tactic} |].",
         f"transitivity {r0}.{oracle_name} "
-        f"{_coupling_spec(l0, r0, is_init, eq_args)} "
-        f"{_coupling_spec(r0, right_wrapper_expr, is_init, eq_args)}; "
+        f"{_coupling_spec(l0, r0, is_init, eq_args, coupling)} "
+        f"{_coupling_spec(r0, right_wrapper_expr, is_init, eq_args, coupling)}; "
         f"[ smt() | smt() | apply {chain_name} | {bridge_tactic} ].",
         "qed.",
     ]
@@ -2207,6 +2394,7 @@ def _render_coupling_chain_body(  # pylint: disable=too-many-arguments,too-many-
     micros_left: list[str],
     micros_right_rev: list[str],
     bridge_name: str,
+    coupling: CouplingFn = _glob_coupling,
 ) -> list[str]:
     """Transitivity chain body with per-step coupling specs.
 
@@ -2214,12 +2402,13 @@ def _render_coupling_chain_body(  # pylint: disable=too-many-arguments,too-many-
     oracle-suffixed micro. Unlike the single-oracle :func:`_render_chain_body`
     (uniform ``={res}`` spec), every transitivity middle-spec couples the
     current intermediate module to the relevant endpoint, because the coupling
-    invariant references the actual module names.
+    invariant references the actual module names. ``coupling`` is the field-aware
+    builder (defaults to the identical-state ``_glob_coupling``).
     """
     final_right = right_refs[0]
 
     def spec(a_ref: str, b_ref: str) -> str:
-        return _coupling_spec(a_ref, b_ref, is_init, eq_args)
+        return _coupling_spec(a_ref, b_ref, is_init, eq_args, coupling)
 
     body = ["(* Chain through per-transform micro-lemmas (coupling-preserving). *)"]
     cur = left_refs[0]

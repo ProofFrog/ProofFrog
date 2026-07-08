@@ -1707,6 +1707,7 @@ SAMPLE_REORDER_TWIN_TEMPLATE = EC_TEMPLATES / "sample_reorder_twin.ec"
 MULTI_ORACLE_REDUCTION_ADV_TEMPLATE = (
     EC_TEMPLATES / "multi_oracle_reduction_adversary.ec"
 )
+FIELD_REMOVAL_COUPLING_TEMPLATE = EC_TEMPLATES / "field_removal_coupling.ec"
 
 
 @pytest.mark.skipif(
@@ -1768,6 +1769,46 @@ def test_call_past_sample_swap_template_compiles(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, (
         f"EasyCrypt rejected the call-past-sample-swap template.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_field_removal_coupling_template_compiles(tmp_path: Path) -> None:
+    """Regression tripwire for the WALL-4 field-aware coupling (the general
+    non-identical-state coupling-synthesis piece; the "Remove redundant
+    variables for fields" within-chain case). The shape: two adjacent
+    flat-state modules whose module-level (``glob``) field sets differ because a
+    redundant field ``dk0`` (set ``dk0 <- challenger_dk0`` in ``initialize``)
+    was removed and its reads rewritten to the survivor ``challenger_dk0``. The
+    whole-glob coupling ``(glob S5){1} = (glob S4){2}`` is ill-typed (2-tuple vs
+    4-tuple). The fix couples shared-by-name fields plus a SURVIVOR INVARIANT
+    ``dk0{2} = challenger_dk0{2}`` for each removed-redundant field. The init
+    micro establishes it (``proc; wp; call (_: true); call (_: true); auto`` --
+    ``wp`` collapses the survivor invariant to reflexivity via the assignment,
+    the abstract keygen calls couple with ``call (_: true)``); the decaps micro
+    consumes it (``proc; call (_: true); auto`` -- the survivor invariant feeds
+    the ``K.decaps`` arg equality). The template documents the NON-VACUITY
+    check (dropping the survivor invariant makes the decaps micro unprovable).
+    If this stops compiling, the wall-4 field-aware-coupling synthesizer's
+    target shape must be re-derived before any binding proof relying on it can
+    be trusted (a wrong coupling would admit a false lemma -- the exact
+    false-confidence failure mode)."""
+    ec_file = tmp_path / "field_removal_coupling.ec"
+    ec_file.write_text(FIELD_REMOVAL_COUPLING_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the field-removal-coupling template.\n"
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )

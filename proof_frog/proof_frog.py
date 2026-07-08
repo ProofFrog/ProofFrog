@@ -175,12 +175,23 @@ def prove(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         # pylint: disable=import-outside-toplevel
         from .web_server import _capture_prove
 
-        output, success, hop_results, _has_induction, _err_line, _err_col = (
-            _capture_prove(file)
-        )
+        (
+            output,
+            success,
+            hop_results,
+            _has_induction,
+            _err_line,
+            _err_col,
+            advantage_bound,
+        ) = _capture_prove(file)
         click.echo(
             json.dumps(
-                {"output": output, "success": success, "hop_results": hop_results}
+                {
+                    "output": output,
+                    "success": success,
+                    "hop_results": hop_results,
+                    "advantage_bound": advantage_bound,
+                }
             )
         )
         return

@@ -77,6 +77,7 @@ class CryptocodeBackend:
             r"\providecommand{\todo}[1]{\textbf{TODO:} #1}" + "\n"
             r"\providecommand{\Experiment}[3]{\ensuremath{\mathsf{Exp}^{#1.#2}_{#3}}}"
             + "\n"
+            r"\providecommand{\Adv}[2]{\ensuremath{\mathsf{Adv}^{#1}_{#2}}}" + "\n"
             r"\providecommand{\getsr}{\sample}"
         )
 

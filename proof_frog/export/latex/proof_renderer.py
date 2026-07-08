@@ -14,6 +14,7 @@ from .macros import MacroRegistry
 from .module_renderer import ModuleRenderer
 
 if TYPE_CHECKING:
+    from ...advantage import AdvTerm, AdvantageBound
     from .proof_context import Hop, ProofContext
 
 
@@ -147,6 +148,27 @@ def _render_game_arg(arg: object, renderer: ModuleRenderer) -> str:
     return str(arg)
 
 
+def _adversary_tex(name: str) -> str:
+    """Render an adversary label (``B1``, ``A``) as ``\\mathcal{B}_{1}`` etc."""
+    letter, rest = name[0], name[1:]
+    base = rf"\mathcal{{{letter}}}"
+    return base + (rf"_{{{rest}}}" if rest else "")
+
+
+def _render_adv_term(term: "AdvTerm", renderer: ModuleRenderer) -> str:
+    notion = _render_game_ref(term.notion, renderer, as_notion=True)
+    return rf"\Adv{{{notion}}}{{{_adversary_tex(term.adversary)}}}"
+
+
+def _bound_tex(bound: "AdvantageBound", renderer: ModuleRenderer) -> str:
+    """Render the right-hand side of the advantage inequality as LaTeX."""
+    return bound.render(
+        term_renderer=lambda t: _render_adv_term(t, renderer),
+        mul=r" \cdot ",
+        joiner=" + ",
+    )
+
+
 def _theorem_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:
     hyps = [_render_game_ref(a, renderer, as_notion=True) for a in ctx.assumptions()]
     concl = _render_game_ref(ctx.theorem(), renderer, as_notion=True)
@@ -158,6 +180,23 @@ def _theorem_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:
         )
     else:
         body = f"Indistinguishability holds for ${concl}$."
+    bound = ctx.advantage_bound()
+    if bound.supported:
+        lhs = rf"\Adv{{{concl}}}{{\mathcal{{A}}}}"
+        rhs = _bound_tex(bound, renderer)
+        constructed = [t for t in bound.terms.values() if t.adversary != "A"]
+        if constructed:
+            names = ", ".join(f"${_adversary_tex(t.adversary)}$" for t in constructed)
+            tail = (
+                f" where each of {names} runs in approximately the time of "
+                r"$\mathcal{A}$."
+            )
+        else:
+            tail = "."
+        body += (
+            r" Concretely, for every adversary $\mathcal{A}$, "
+            f"${lhs} \\le {rhs}${tail}"
+        )
     return (
         r"\begin{theorem}"
         + "\n"
@@ -197,6 +236,15 @@ def _games_sequence(
 
     steps = ctx.game_steps()
     hops = ctx.hop_kinds()
+    bound = ctx.advantage_bound()
+    # Per-hop loss terms align 1:1 with `hops` (both are one-per-transition in
+    # game-step order) when the bound synthesized; otherwise annotate without a
+    # loss term.
+    hop_terms: list["AdvTerm | None"] = (
+        bound.hop_terms
+        if bound.supported and len(bound.hop_terms) == len(hops)
+        else [None] * len(hops)
+    )
     built = [
         _step_figure_ir(ctx, step, renderer, i, composition)
         for i, step in enumerate(steps)
@@ -211,7 +259,7 @@ def _games_sequence(
     chunks: list[str] = []
     for i, fig in enumerate(figures):
         if i > 0:
-            chunks.append(_hop_annotation(i, hops[i - 1], renderer))
+            chunks.append(_hop_annotation(i, hops[i - 1], renderer, hop_terms[i - 1]))
         chunks.append(backend.render_figure(fig))
     return "\n\n".join(chunks)
 
@@ -284,13 +332,24 @@ def _symbolic_heading_tex(
     return math
 
 
-def _hop_annotation(i: int, hop: "Hop", renderer: ModuleRenderer) -> str:
-    """Render the paragraph annotation for a hop between G_{i-1} and G_i."""
+def _hop_annotation(
+    i: int,
+    hop: "Hop",
+    renderer: ModuleRenderer,
+    loss: "AdvTerm | None" = None,
+) -> str:
+    """Render the paragraph annotation for a hop between G_{i-1} and G_i.
+
+    When the hop contributes a loss term to the advantage bound (a
+    reduction/assumption hop), it is appended as ``losing $\\Adv{...}$``.
+    """
     if hop.kind == "assumption" and hop.assumption is not None:
         ref = _render_game_ref(hop.assumption, renderer, as_notion=True)
         reason = f"by assumption ${ref}$"
     else:
         reason = "interchangeable"
+    if loss is not None:
+        reason += f", losing ${_render_adv_term(loss, renderer)}$"
     return (
         rf"\paragraph{{Game $G_{{{i-1}}} \to G_{{{i}}}$.}} "
         rf"({reason}) \todo{{commentary}}"

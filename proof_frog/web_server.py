@@ -416,7 +416,9 @@ def _capture_prove(
     allowed_root: str | None = None,
     verbosity: proof_engine.Verbosity = proof_engine.Verbosity.QUIET,
     skip_lemmas: bool = False,
-) -> tuple[str, bool, list[dict[str, object]], bool, int | None, int | None]:
+) -> tuple[
+    str, bool, list[dict[str, object]], bool, int | None, int | None, str | None
+]:
     buf = io.StringIO()
     engine = proof_engine.ProofEngine(verbosity, skip_lemmas=skip_lemmas)
     proof_succeeded = False
@@ -439,6 +441,7 @@ def _capture_prove(
                 has_induction,
                 check_err_line,
                 check_err_col,
+                None,
             )
 
         with redirect_stdout(buf), redirect_stderr(buf):
@@ -479,6 +482,13 @@ def _capture_prove(
             for r in engine.hop_results
             if r.depth == 0 and r.kind != "induction_rollover"
         ]
+        advantage_bound: str | None = None
+        if (
+            proof_succeeded
+            and engine.advantage_bound is not None
+            and engine.advantage_bound.supported
+        ):
+            advantage_bound = engine.advantage_bound.render()
         return (
             _strip_ansi(buf.getvalue()),
             proof_succeeded,
@@ -486,6 +496,7 @@ def _capture_prove(
             has_induction,
             None,
             None,
+            advantage_bound,
         )
     except frog_parser.ParseError as e:
         line = e.line if e.line >= 0 else None
@@ -497,6 +508,7 @@ def _capture_prove(
             False,
             line,
             col,
+            None,
         )
     except FileNotFoundError as e:
         return (
@@ -506,6 +518,7 @@ def _capture_prove(
             False,
             None,
             None,
+            None,
         )
     except Exception as e:  # pylint: disable=broad-exception-caught
         return (
@@ -513,6 +526,7 @@ def _capture_prove(
             False,
             [],
             False,
+            None,
             None,
             None,
         )
@@ -790,14 +804,21 @@ def create_app(directory: str, *, watch: bool = True) -> tuple[Flask, Any]:
         if abs_path is None:
             return jsonify({"error": "Invalid path"}), 403
         abs_path.write_text(content, encoding="utf-8")
-        output, success, hop_results, has_induction, error_line, error_column = (
-            _capture_prove(str(abs_path), allowed_root=directory, verbosity=verbosity)
-        )
+        (
+            output,
+            success,
+            hop_results,
+            has_induction,
+            error_line,
+            error_column,
+            advantage_bound,
+        ) = _capture_prove(str(abs_path), allowed_root=directory, verbosity=verbosity)
         prove_resp: dict[str, object] = {
             "output": output,
             "success": success,
             "hop_results": hop_results,
             "has_induction": has_induction,
+            "advantage_bound": advantage_bound,
         }
         if error_line is not None:
             prove_resp["error_line"] = error_line

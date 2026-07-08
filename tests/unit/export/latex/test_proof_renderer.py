@@ -35,6 +35,56 @@ def test_theorem_combined_hypothesis_form():
     assert "% unsupported" not in out
 
 
+def test_theorem_includes_concrete_advantage_bound():
+    _b, _m, mr = _renderer()
+    ctx = ProofContext(DDH)
+    out = pr._theorem_section(ctx, mr)
+    # A concrete-security inequality is stated for the theorem's own advantage.
+    assert "Concretely" in out
+    assert r"\Adv{\CDH(\G)}{\mathcal{A}} \le" in out
+    # The two reductions become distinct constructed adversaries.
+    assert r"\mathcal{B}_{1}" in out
+    assert r"\mathcal{B}_{2}" in out
+
+
+def test_hop_annotation_reports_loss_term():
+    _b, _m, mr = _renderer()
+    loss_hop = pr._hop_annotation(
+        1,
+        _make_assumption_hop(),
+        mr,
+        loss=_make_adv_term(),
+    )
+    assert "losing" in loss_hop
+    assert r"\Adv{" in loss_hop
+    # An equivalence hop with no loss term carries no "losing" clause.
+    plain = pr._hop_annotation(1, _make_interchangeable_hop(), mr, loss=None)
+    assert "losing" not in plain
+
+
+def _make_assumption_hop():
+    from proof_frog.export.latex.proof_context import Hop
+
+    return Hop(
+        "assumption", frog_ast.ParameterizedGame("DDH", [frog_ast.Variable("G")])
+    )
+
+
+def _make_interchangeable_hop():
+    from proof_frog.export.latex.proof_context import Hop
+
+    return Hop("interchangeable", None)
+
+
+def _make_adv_term():
+    from proof_frog.advantage import AdvTerm
+
+    return AdvTerm(
+        notion=frog_ast.ParameterizedGame("DDH", [frog_ast.Variable("G")]),
+        adversary="B1",
+    )
+
+
 def test_definitions_section_renders_both_sides():
     _b, _m, mr = _renderer()
     ctx = ProofContext(DDH)
@@ -129,9 +179,7 @@ def _symbolic_ddh(diff=True):
     macros = MacroRegistry()
     mr = ModuleRenderer(backend, macros)
     ctx = ProofContext(DDH)
-    out = pr.render_proof(
-        ctx, backend, macros, mr, composition="symbolic", diff=diff
-    )
+    out = pr.render_proof(ctx, backend, macros, mr, composition="symbolic", diff=diff)
     return ctx, out
 
 

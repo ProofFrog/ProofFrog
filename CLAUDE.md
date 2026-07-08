@@ -83,7 +83,7 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 - **Never commit to git unless explicitly asked by the user.**
 - Python 3.11+, built with Flit (`pyproject.toml`)
 - `parsing/` directory is excluded from black, mypy, and pylint
-- Proof imports use paths relative to the directory where the CLI is invoked
+- Proof imports and lemma paths resolve relative to the importing file's directory (`resolve_import_path` in `proof_frog/frog_parser.py`)
 - Tests live in `tests/`, organized into `tests/integration/` (proof runs, CLI, AST checks, web server endpoints, wizard scaffolding) and `tests/unit/` (by area: engine, transforms, typechecking, visitors, parsing, other); `tests/integration/test_proofs.py` runs all `examples/**/*.proof` files as subprocesses; `tests/integration/test_web_server.py` covers `/api/file-metadata`; `tests/integration/test_scaffolding.py` covers wizard scaffold endpoints with smoke / parse-splice / type-check-splice levels
 - Only use ASCII characters in primitive/scheme/game/proof files.
 - LSP server uses `pygls` and communicates over stdio; uses full document sync (`TextDocumentSyncKind.Full`)

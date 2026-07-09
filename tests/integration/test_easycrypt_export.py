@@ -1729,6 +1729,7 @@ FIELD_REMOVAL_COUPLING_TEMPLATE = EC_TEMPLATES / "field_removal_coupling.ec"
 DEAD_CALL_DROP_TEMPLATE = EC_TEMPLATES / "dead_call_drop.ec"
 DECOMPOSITION_COUPLING_TEMPLATE = EC_TEMPLATES / "decomposition_coupling.ec"
 TWO_KEM_INIT_REORDER_TEMPLATE = EC_TEMPLATES / "two_kem_init_reorder.ec"
+BINDING_CHALLENGE_CASESPLIT_TEMPLATE = EC_TEMPLATES / "binding_challenge_casesplit.ec"
 
 
 @pytest.mark.skipif(
@@ -1951,6 +1952,47 @@ def test_export_expanded_leak_emits_decomposition_coupling() -> None:
     # must be gone entirely.
     assert "Hybrid_c.LEAK_BIND_K_CT_Breakable.dk_PQ_0" not in output
     assert "Hybrid_c.LEAK_BIND_K_CT_Breakable.dk_T_0" not in output
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_binding_challenge_casesplit_template_compiles(tmp_path: Path) -> None:
+    """Regression tripwire for the CHALLENGE-oracle case-split ELIMINATION -- the
+    green-cell blocker for the concrete expanded-LEAK binding proofs (CG/CK/UG/UK
+    hop_0/2/4_challenge, currently ⚠admits). The game's DIRECT hybrid-binding
+    challenge and the reduction ``R_PQ_Bind``'s CASE-SPLIT challenge (which
+    forwards to ``challenger.Challenge`` -- the KEM_PQ Breakable predicate -- on
+    ``kdf0 = kdf1 /\\ ct_pq differ``) have BYTE-IDENTICAL canonical forms: the
+    engine dissolves the case-split, because in the branch ``kdf0 = kdf1`` gives
+    (concat/slice component-injectivity + EncodeSharedSecret injectivity) the two
+    PQ decapsulations equal, so the KEM_PQ predicate is true = the hybrid
+    predicate. The export relates the RAW wrappers (case-split present), so the
+    exporter must render the dissolution as an EC micro. This template pins the
+    validated STRATEGY: ``proc; inline <challenger>; wp`` (collapse the reduction
+    if/else into a conditional post), couple the abstract decaps calls
+    (``call (_: true)``), then ``skip; smt`` from the concat-injectivity,
+    Encode-injectivity, KDF-determinism and hybrid-ct-inequality facts. (The
+    KDF is modelled by a deterministic op ``hop``; the real export functionalizes
+    the two ``H.evaluate`` calls via ``H_evaluate_det`` first -- the KEMPRF
+    ``F_evaluate_det`` finisher pattern.) If this stops compiling, the
+    case-split-elimination synthesizer's target tactic must be re-derived before
+    any concrete binding proof can be driven to CLEAN."""
+    ec_file = tmp_path / "binding_challenge_casesplit.ec"
+    ec_file.write_text(BINDING_CHALLENGE_CASESPLIT_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the binding-challenge case-split template.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
 
 
 def test_export_two_kem_leak_init_swap_aligns_backbone() -> None:

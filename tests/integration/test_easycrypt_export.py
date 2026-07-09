@@ -1733,6 +1733,7 @@ BINDING_CHALLENGE_CASESPLIT_TEMPLATE = EC_TEMPLATES / "binding_challenge_casespl
 BINDING_CHALLENGE_REORDER_CASESPLIT_TEMPLATE = (
     EC_TEMPLATES / "binding_challenge_reorder_casesplit.ec"
 )
+BINDING_CHALLENGE_VALFN_TEMPLATE = EC_TEMPLATES / "binding_challenge_valfn.ec"
 
 
 @pytest.mark.skipif(
@@ -2032,6 +2033,45 @@ def test_binding_challenge_reorder_casesplit_template_compiles(tmp_path: Path) -
     assert result.returncode == 0, (
         f"EasyCrypt rejected the faithful binding-challenge reorder+case-split "
         f"template.\nstderr:\n{result.stderr}\nstdout:\n{result.stdout[-2000:]}"
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="EasyCrypt Docker image not available",
+)
+def test_binding_challenge_valfn_template_compiles(tmp_path: Path) -> None:
+    """The COMPLETE, name-independent challenge case-split elimination tactic --
+    the exact target the challenge-chain synthesizer must emit, validated
+    end-to-end (unlike the two *post-functionalization* tripwires, this one uses
+    real abstract-module calls and functionalizes them in-tactic). Pins:
+      * GAME side calls the concrete scheme's ``decaps`` -- functionalized via a
+        synthesized per-proc functional-value phoare lemma ``Sch_decaps_val`` and
+        ``call{1}`` at each site (args = the challenge's own ``St.dk``/``ct``,
+        extracted once via ``exists*``); NO ``inline *``.
+      * REDUCTION side is FLAT with exporter-controlled names -- a ``seq``
+        splits its prefix under an invariant carrying the glob/St/ct equalities +
+        each ``kdf_in`` in functional form; the prefix is functionalized FORWARD,
+        each ``encss`` given the *functional value* of its decaps input as its
+        ``call{2}`` arg (not an ``exists*`` of the intermediate, which captures
+        the pre-assignment value).
+      * BRANCH: ``case`` + ``rcondt{2}``/``rcondf{2}`` (guard by ``auto``);
+        if-branch closes ``skip => />; smt(mk_inj ev_enc_inj hneq_pq)`` (the
+        ``_inj`` axiom), else-branch with ``skip => />`` alone.
+    If this stops compiling, the challenge-chain synthesizer's target tactic must
+    be re-derived."""
+    ec_file = tmp_path / "binding_challenge_valfn.ec"
+    ec_file.write_text(BINDING_CHALLENGE_VALFN_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the complete binding-challenge val-fn template.\n"
+        f"stderr:\n{result.stderr}\nstdout:\n{result.stdout[-2000:]}"
     )
 
 

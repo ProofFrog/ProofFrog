@@ -8,7 +8,9 @@ import pytest
 
 from proof_frog import frog_ast, frog_parser
 from proof_frog.export.easycrypt import ec_ast
+from proof_frog.export.easycrypt import expr_translator
 from proof_frog.export.easycrypt import module_translator as mt
+from proof_frog.export.easycrypt import stmt_translator
 from proof_frog.export.easycrypt import type_collector as tc
 
 
@@ -147,6 +149,58 @@ def test_translate_reduction_drops_value_params_from_functor() -> None:
         oracle_type_name="Inner_Oracle",
     )
     assert [p.name for p in mod.params] == ["K", "F", "Challenger"]
+
+
+def test_return_with_embedded_calls_hoists_them() -> None:
+    """A ``return <expr>`` whose expression embeds module calls -- e.g. the KDF
+    collision-resistance challenger's ``return H.evaluate(x0) == H.evaluate(x1)
+    && x0 != x1`` -- must hoist every embedded call into a preceding ``<@``
+    statement and return the now call-free expression. EC has no calls inside
+    expressions, so before this the whole body fell back to ``return witness``
+    (the ``NotImplementedError`` path), silently making any dependent lemma
+    unprovable. Regression for that fix."""
+    types = tc.TypeCollector(aliases={})
+
+    def type_of(e: frog_ast.Expression) -> frog_ast.Type:
+        # Everything Bool-typed keeps the test independent of bitstring
+        # length registration; only the call-hoisting is under test.
+        del e
+        return frog_ast.BoolType()
+
+    exprs = expr_translator.ExpressionTranslator(types, type_of)
+    stmts = stmt_translator.StatementTranslator(types, exprs)
+
+    def _call(arg: str) -> frog_ast.FuncCall:
+        return frog_ast.FuncCall(
+            frog_ast.FieldAccess(frog_ast.Variable("H"), "evaluate"),
+            [frog_ast.Variable(arg)],
+        )
+
+    ret_expr = frog_ast.BinaryOperation(
+        frog_ast.BinaryOperators.AND,
+        frog_ast.BinaryOperation(
+            frog_ast.BinaryOperators.EQUALS, _call("x0"), _call("x1")
+        ),
+        frog_ast.BinaryOperation(
+            frog_ast.BinaryOperators.NOTEQUALS,
+            frog_ast.Variable("x0"),
+            frog_ast.Variable("x1"),
+        ),
+    )
+    block = frog_ast.Block([frog_ast.ReturnStatement(ret_expr)])
+    translated = stmts.translate_block(block, return_type=ec_ast.EcType("bool"))
+
+    calls = [s for s in translated.stmts if isinstance(s, ec_ast.Call)]
+    assert [c.callee for c in calls] == ["H.evaluate", "H.evaluate"]
+    assert [c.args for c in calls] == ["x0", "x1"]
+    ret = translated.stmts[-1]
+    assert isinstance(ret, ec_ast.Return)
+    # The returned expression is call-free: it references the hoisted result
+    # variables, and mentions neither ``evaluate`` nor ``witness``.
+    assert "evaluate" not in ret.expr
+    assert "witness" not in ret.expr
+    for c in calls:
+        assert c.var in ret.expr
 
 
 def test_reduction_return_call_is_lifted(

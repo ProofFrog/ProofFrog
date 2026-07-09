@@ -1148,7 +1148,7 @@ class ModuleTranslator:
             params=params,
         )
 
-    def _render_consumed_pk_init(
+    def _render_consumed_pk_init(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         reduction: frog_ast.Reduction,
         pk_param_name: str,

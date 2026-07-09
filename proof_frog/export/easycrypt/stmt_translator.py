@@ -190,7 +190,13 @@ class StatementTranslator:
                 stmts.append(ec_ast.Call(fresh, callee, args))
                 stmts.append(ec_ast.Return(fresh))
                 return
-            stmts.append(ec_ast.Return(self._exprs.translate(stmt.expression)))
+            # The returned expression may embed module calls (EC has no calls
+            # inside expressions): e.g. the KDF collision-resistance challenger
+            # returns ``H.evaluate(x0) == H.evaluate(x1) && x0 != x1``. Hoist
+            # every embedded call into a preceding ``<@`` statement, then
+            # return the now call-free expression.
+            hoisted = self._hoist_calls_in_expr(stmt.expression, decls, stmts)
+            stmts.append(ec_ast.Return(self._exprs.translate(hoisted)))
             return
         if (
             self._allow_void_call
@@ -312,6 +318,72 @@ class StatementTranslator:
             stmts.append(ec_ast.Call(fresh, callee, args))
             return fresh
         return self._exprs.translate(expr)
+
+    def _hoist_calls_in_expr(
+        self,
+        expr: frog_ast.Expression,
+        decls: list[ec_ast.VarDecl],
+        stmts: list[ec_ast.EcStmt],
+    ) -> frog_ast.Expression:
+        """Rewrite ``expr``, lifting every embedded module call into a
+        preceding ``<@`` statement and substituting the fresh result variable
+        in its place. Returns a call-free expression. Children are visited
+        left-to-right so the hoisted statements run in source evaluation order.
+        Fresh nodes are constructed rather than mutating ``expr`` in place,
+        since a method AST may be translated more than once (raw module +
+        canonicalized chain states)."""
+        if _is_module_call(expr):
+            assert isinstance(expr, frog_ast.FuncCall)
+            # Nested-call args evaluate before this call, so hoist them first.
+            arg_strs = [
+                self._exprs.translate(self._hoist_calls_in_expr(a, decls, stmts))
+                for a in expr.args
+            ]
+            ec_type = self._types.translate_type(self._exprs.type_of(expr))
+            fresh = _fresh_name(decls, stmts)
+            decls.append(ec_ast.VarDecl(fresh, ec_type))
+            callee = self._render_module_call_target(expr.func)
+            stmts.append(ec_ast.Call(fresh, callee, ", ".join(arg_strs)))
+            return frog_ast.Variable(fresh)
+        if isinstance(expr, frog_ast.BinaryOperation):
+            return frog_ast.BinaryOperation(
+                expr.operator,
+                self._hoist_calls_in_expr(expr.left_expression, decls, stmts),
+                self._hoist_calls_in_expr(expr.right_expression, decls, stmts),
+            )
+        if isinstance(expr, frog_ast.UnaryOperation):
+            return frog_ast.UnaryOperation(
+                expr.operator,
+                self._hoist_calls_in_expr(expr.expression, decls, stmts),
+            )
+        if isinstance(expr, frog_ast.Tuple):
+            return frog_ast.Tuple(
+                [self._hoist_calls_in_expr(v, decls, stmts) for v in expr.values]
+            )
+        if isinstance(expr, frog_ast.FuncCall):
+            # A non-module call (an operator-like builtin, e.g. concat/slice):
+            # keep the head, recurse into args.
+            return frog_ast.FuncCall(
+                expr.func,
+                [self._hoist_calls_in_expr(a, decls, stmts) for a in expr.args],
+            )
+        if isinstance(expr, frog_ast.FieldAccess):
+            return frog_ast.FieldAccess(
+                self._hoist_calls_in_expr(expr.the_object, decls, stmts),
+                expr.name,
+            )
+        if isinstance(expr, frog_ast.ArrayAccess):
+            return frog_ast.ArrayAccess(
+                self._hoist_calls_in_expr(expr.the_array, decls, stmts),
+                self._hoist_calls_in_expr(expr.index, decls, stmts),
+            )
+        if isinstance(expr, frog_ast.Slice):
+            return frog_ast.Slice(
+                self._hoist_calls_in_expr(expr.the_array, decls, stmts),
+                self._hoist_calls_in_expr(expr.start, decls, stmts),
+                self._hoist_calls_in_expr(expr.end, decls, stmts),
+            )
+        return expr
 
 
 def _fresh_name(decls: list[ec_ast.VarDecl], stmts: list[ec_ast.EcStmt]) -> str:

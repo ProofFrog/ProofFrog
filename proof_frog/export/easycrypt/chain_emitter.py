@@ -1886,17 +1886,27 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     modules: mt.ModuleTranslator,
     flat_params: list[ec_ast.ModuleParam],
-) -> list[str] | None:
+    det_methods: dict[str, set[str]],
+) -> tuple[list[str], set[tuple[str, str]]] | None:
     """Tactic for one chain step's micro lemma, restricted to ``oracle_name``.
 
-    ``["proc; sim."]`` when that oracle's body is unchanged across the step
-    (``sim`` preserves the coupling on untouched state); a ``proc; swap...;
-    sim`` sequence when the step is a pure top-level reorder of that oracle's
-    body; a backbone peel when the step is a "Remove redundant variables for
-    fields" removal (the two states differ in ``glob`` cardinality, so the
-    oracle reads a removed field via its survivor on one side and ``sim`` cannot
-    relate the differently-named reads -- wall 4); ``None`` when none applies
-    (the caller routes the whole oracle to a coupling-pending admit).
+    Returns ``(tactic, pres_methods)`` where ``pres_methods`` is the set of
+    ``(module, method)`` glob-preservation axioms the tactic references (empty
+    unless a dead-call drop fired), or ``None`` when no tactic applies (the
+    caller routes the whole oracle to a coupling-pending admit). The tactic is:
+
+    * ``["proc; sim."]`` when that oracle's body is unchanged across the step
+      (``sim`` preserves the coupling on untouched state);
+    * a ``proc; swap...; sim`` sequence when the step is a pure top-level
+      reorder of that oracle's body;
+    * a backbone peel when the step is a "Remove redundant variables for
+      fields" removal (the two states differ in ``glob`` cardinality, so the
+      oracle reads a removed field via its survivor on one side and ``sim``
+      cannot relate the differently-named reads -- wall 4);
+    * a one-sided dead-call drop when the step drops abstract calls whose
+      results the return does not use (``Absorb Redundant Early Return`` over a
+      constant-return oracle -- wall 5); each dropped deterministic call is
+      removed with ``call{side} (<M>_<m>_pres g)``.
     """
     pb = _project_to_method(state_before, oracle_name)
     pa = _project_to_method(state_after, oracle_name)
@@ -1931,9 +1941,9 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
         for kind, _callee in reversed(_call_sample_backbone(body)):
             tac.append("call (_: true)." if kind == "call" else "rnd.")
         tac.append("auto.")
-        return tac
+        return tac, set()
     if pb.methods[0] == pa.methods[0]:
-        return ["proc; sim."]
+        return ["proc; sim."], set()
     before_h = _normalize_for_ec(
         copy.deepcopy(pb), external_module_types, method_return_types
     )
@@ -1942,8 +1952,118 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     )
     swaps = _permutation_swaps(before_h, after_h, reversed_dir=reversed_dir)
     if swaps is not None:
-        return ["proc.", *swaps, "sim."]
-    return None
+        return ["proc.", *swaps, "sim."], set()
+    return _dead_call_drop_step(
+        pb,
+        pa,
+        reversed_dir,
+        external_module_types,
+        method_return_types,
+        modules,
+        flat_params,
+        det_methods,
+    )
+
+
+def _dead_call_drop_step(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    pb: frog_ast.Game,
+    pa: frog_ast.Game,
+    reversed_dir: bool,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    modules: mt.ModuleTranslator,
+    flat_params: list[ec_ast.ModuleParam],
+    det_methods: dict[str, set[str]],
+) -> tuple[list[str], set[tuple[str, str]]] | None:
+    """A chain step that drops dead (result-unused) abstract calls -- wall 5.
+
+    ``Absorb Redundant Early Return`` prunes the ``K.decaps`` calls of a
+    constant-return oracle (the ``Unbreakable`` binding challenge returns
+    ``false``, so its two decapsulations are dead) between two adjacent flat
+    states of *equal* ``glob`` cardinality. ``sim`` cannot relate the two bodies
+    (one has calls the other lacks) and the step is not a reorder, so the caller
+    would otherwise admit the whole oracle chain. Because each dropped call is a
+    *deterministic* scheme method (in ``det_methods``), it leaves ``glob``
+    unchanged, so it is removed one-sided with ``call{side} (<M>_<m>_pres g)``
+    (the same one-sided glob-preserving drop the init backbone peel uses).
+
+    Returns ``(tactic, pres_methods)`` -- the ``(module, method)`` set the tactic
+    needs ``_pres`` axioms for -- or ``None`` when the step is not a pure
+    dead-call drop. Validated end-to-end: ``ec_templates/dead_call_drop.ec``.
+    """
+    bmod = _flat_state_module(
+        modules, "Step_b", pb, external_module_types, method_return_types, flat_params
+    )
+    amod = _flat_state_module(
+        modules, "Step_a", pa, external_module_types, method_return_types, flat_params
+    )
+    if not bmod.procs or not amod.procs:
+        return None
+    b_body, a_body = bmod.procs[0].body, amod.procs[0].body
+    b_bb = _call_sample_backbone(b_body)
+    a_bb = _call_sample_backbone(a_body)
+    # The emitted micro's LEFT (side 1) is ``state_before`` in the forward
+    # direction and ``state_after`` in the reversed (right-chain) direction; the
+    # drop side follows whichever emitted side carries the extra calls.
+    s1_bb, s2_bb = (a_bb, b_bb) if reversed_dir else (b_bb, a_bb)
+    s1_body, s2_body = (a_body, b_body) if reversed_dir else (b_body, a_body)
+    # DEAD-call gate: this route only ever touches abstract calls that are
+    # result-unused (``Absorb Redundant Early Return`` on a constant-return
+    # oracle -- the binding ``Unbreakable`` challenge returns ``false``, so its
+    # decapsulations are dead). A live embedding whose result the return uses
+    # (KEMPRF's ``F.evaluate`` challenge) is NOT droppable, so ``_all_calls_dead``
+    # is False there and this route declines -- that oracle keeps its own cached
+    # tactic and stays byte-identical.
+    if len(s1_bb) == len(s2_bb):
+        # Equal backbones: either a dead-result rename the canonicalizer left
+        # un-normalized (the two bodies differ only in dead LHS names) or a
+        # call-free dead-var-decl cleanup. ``sim`` closes both -- it matches the
+        # program structurally and ignores dead result names -- but ONLY when the
+        # difference is confined to those dead names, so we do not mask a genuine
+        # body change (e.g. a live embedding, or an extra live statement).
+        if s1_bb != s2_bb:
+            return None
+        if s1_bb:
+            # Has calls: require they are all dead (never a live embedding such
+            # as KEMPRF's ``F.evaluate``, whose result the return uses).
+            if not _all_calls_dead(s1_body):
+                return None
+        elif _strip_decls(s1_body) != _strip_decls(s2_body):
+            # Call-free: the constant-return bodies must be identical once unused
+            # ``var`` decls are stripped; a real statement-level difference is not
+            # sim-closable and must fall through to a coupling-pending admit.
+            return None
+        return ["proc; sim."], set()
+    if len(s1_bb) > len(s2_bb):
+        long_bb, short_bb, side, long_body = s1_bb, s2_bb, 1, s1_body
+    else:
+        long_bb, short_bb, side, long_body = s2_bb, s1_bb, 2, s2_body
+    if not _all_calls_dead(long_body):
+        return None
+    tags = _dead_call_drop_tags(long_bb, short_bb, det_methods)
+    if tags is None or not any(tags):
+        return None
+    tac = ["proc."]
+    pres: set[tuple[str, str]] = set()
+    drop_ctr = 0
+    for idx in reversed(range(len(long_bb))):
+        kind, callee = long_bb[idx]
+        tac.append("wp.")
+        if tags[idx]:
+            mod, _, meth = (callee or "").partition(".")
+            binder = f"gd{drop_ctr}"
+            drop_ctr += 1
+            tac.append(
+                f"exists* (glob {mod})" "{" f"{side}" "}" f"; elim* => {binder}."
+            )
+            tac.append(f"call" "{" f"{side}" "}" f" ({mod}_{meth}_pres {binder}).")
+            pres.add((mod, meth))
+        elif kind == "call":
+            tac.append("call (_: true).")
+        else:
+            tac.append("rnd.")
+    tac.append("skip => /#.")
+    return tac, pres
 
 
 def _oracle_pending_admit(hop_index: int, oracle_name: str) -> list[str]:
@@ -2544,9 +2664,10 @@ def _emit_one_oracle_chain(
         return f"={{res}} /\\ {coupling(left_ref, right_ref)}"
 
     chunks: list[str] = []
+    step_pres: set[tuple[str, str]] = set()
     micros_left: list[str] = []
     for k, _app in enumerate(left_apps):
-        tac = _oracle_step_tactic(
+        step = _oracle_step_tactic(
             left_states[k],
             left_states[k + 1],
             oracle_name,
@@ -2555,9 +2676,12 @@ def _emit_one_oracle_chain(
             method_return_types=method_return_types,
             modules=modules,
             flat_params=flat_params,
+            det_methods=det_methods,
         )
-        if tac is None:
+        if step is None:
             return [], _oracle_pending_admit(hop_index, oracle_name), set()
+        tac, tac_pres = step
+        step_pres |= tac_pres
         name = f"micro_{hop_index}_{oracle_name}_left_{k}"
         lref, rref = mod_ref(left_mods[k]), mod_ref(left_mods[k + 1])
         micros_left.append(name)
@@ -2577,7 +2701,7 @@ def _emit_one_oracle_chain(
 
     micros_right_rev: list[str] = []
     for k, _app in enumerate(right_apps):
-        tac = _oracle_step_tactic(
+        step = _oracle_step_tactic(
             right_states[k],
             right_states[k + 1],
             oracle_name,
@@ -2586,9 +2710,12 @@ def _emit_one_oracle_chain(
             method_return_types=method_return_types,
             modules=modules,
             flat_params=flat_params,
+            det_methods=det_methods,
         )
-        if tac is None:
+        if step is None:
             return [], _oracle_pending_admit(hop_index, oracle_name), set()
+        tac, tac_pres = step
+        step_pres |= tac_pres
         name = f"micro_{hop_index}_{oracle_name}_right_{k}_rev"
         # Reversed: proves Step_R_state_{k+1} ~ Step_R_state_k.
         lref, rref = mod_ref(right_mods[k + 1]), mod_ref(right_mods[k])
@@ -2665,7 +2792,7 @@ def _emit_one_oracle_chain(
         f"[ smt() | smt() | apply {chain_name} | {bridge_tactic} ].",
         "qed.",
     ]
-    return chunks, outer_body, set()
+    return chunks, outer_body, step_pres
 
 
 def _render_coupling_chain_body(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -4368,6 +4495,46 @@ def _call_sample_backbone(
         elif isinstance(stmt, ec_ast.Sample):
             out.append(("sample", getattr(stmt, "var", None)))
     return out
+
+
+def _strip_decls(body: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt]:
+    """``body`` with its ``var`` declarations removed -- the executable core.
+
+    Two constant-return oracle bodies that differ only in unused local
+    declarations (a dead-decl cleanup step) have equal stripped cores, which is
+    what makes ``proc; sim`` sound for them; an added/removed *statement* does
+    not, so it must not be mistaken for a cleanup.
+    """
+    return [s for s in body if not isinstance(s, ec_ast.VarDecl)]
+
+
+def _all_calls_dead(body: list[ec_ast.EcStmt]) -> bool:
+    """True if every abstract-call result in ``body`` is unused -- no other
+    statement's rendered operand nor the ``return`` references it.
+
+    This is the ``Absorb Redundant Early Return`` dead-decapsulation shape: a
+    constant-return oracle (the binding ``Unbreakable`` challenge returns
+    ``false``) whose abstract calls compute nothing the result depends on, so
+    each is glob-preservingly droppable. It is False when *any* call feeds a
+    later operand or the return (a live embedding such as KEMPRF's
+    ``F.evaluate`` challenge), which must keep its own tactic. Returns False for
+    a call-free body (nothing to drop or realign here).
+    """
+    call_vars = [s.var for s in body if isinstance(s, ec_ast.Call) and s.var]
+    if not call_vars:
+        return False
+    operands: list[str] = []
+    for stmt in body:
+        if isinstance(stmt, ec_ast.Call):
+            operands.append(stmt.args)
+        elif isinstance(stmt, ec_ast.Assign):
+            operands.append(stmt.rhs)
+        elif isinstance(stmt, ec_ast.Sample):
+            operands.append(stmt.distr)
+        elif isinstance(stmt, ec_ast.Return):
+            operands.append(stmt.expr)
+    blob = " ".join(operands)
+    return not any(re.search(rf"\b{re.escape(v)}\b", blob) for v in call_vars)
 
 
 def _leads_with_det(body: list[ec_ast.EcStmt]) -> bool:

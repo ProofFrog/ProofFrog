@@ -1708,6 +1708,7 @@ MULTI_ORACLE_REDUCTION_ADV_TEMPLATE = (
     EC_TEMPLATES / "multi_oracle_reduction_adversary.ec"
 )
 FIELD_REMOVAL_COUPLING_TEMPLATE = EC_TEMPLATES / "field_removal_coupling.ec"
+DEAD_CALL_DROP_TEMPLATE = EC_TEMPLATES / "dead_call_drop.ec"
 
 
 @pytest.mark.skipif(
@@ -1809,6 +1810,40 @@ def test_field_removal_coupling_template_compiles(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, (
         f"EasyCrypt rejected the field-removal-coupling template.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_dead_call_drop_template_compiles(tmp_path: Path) -> None:
+    """Regression tripwire for the WALL-5 dead-call-drop EC tactic template. The
+    shape: a per-transform chain step of a CONSTANT-return oracle (the binding
+    ``Unbreakable`` challenge returns ``false``) where ``Absorb Redundant Early
+    Return`` prunes the now-dead ``K.decaps`` calls between two adjacent flat
+    states of equal ``glob`` cardinality. ``sim`` cannot relate the two bodies
+    (one has the calls, the other lacks them) and it is not a reorder. Because
+    each dropped call is deterministic (glob-preserving via ``K_decaps_pres``),
+    it is removed ONE-SIDED with ``call{side} (K_decaps_pres g)`` after binding
+    the current glob with ``exists*``; the shared (renamed) case closes with
+    ``proc; sim``. The template pins both the forward (drop on side 1) and
+    reversed (drop on side 2) micros plus the equal-backbone rename. If this
+    stops compiling, ``chain_emitter._dead_call_drop_step``'s target tactic must
+    be re-derived before the CFRG binding proofs relying on it can be trusted."""
+    ec_file = tmp_path / "dead_call_drop.ec"
+    ec_file.write_text(DEAD_CALL_DROP_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the dead-call-drop template.\n"
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )

@@ -236,8 +236,9 @@ def test_oracle_step_tactic_identity_is_coupling_preserving_sim() -> None:
         {},
         modules=_modules(),
         flat_params=[],
+        det_methods={},
     )
-    assert tac == ["proc; sim."]
+    assert tac == (["proc; sim."], set())
 
 
 # --- per-oracle chain assembly --------------------------------------------
@@ -419,10 +420,18 @@ def test_emit_multi_oracle_chain_admits_changed_post_init_body() -> None:
     # whole oracle routes to a coupling-pending admit, with no chain artifacts.
     g0 = _two_oracle_game("GL")
     g1 = _two_oracle_game("GL")
-    # Mutate challenge's body on the "after" state so it differs and is not a
-    # pure reorder (a single statement cannot be a permutation of two).
-    g1.methods[1].block.statements.append(
-        frog_ast.ReturnStatement(frog_ast.Variable("m0"))
+    # Mutate challenge's body on the "after" state so it genuinely differs by a
+    # live probabilistic statement: sample a fresh ``mPrime`` before the return.
+    # This is not the identical-state first cut, not a pure reorder, and not a
+    # dead-call drop (the extra backbone event is a sample, not a droppable
+    # deterministic call), so the oracle must route to a coupling-pending admit.
+    g1.methods[1].block.statements.insert(
+        0,
+        frog_ast.Sample(
+            frog_ast.Variable("MessageSpace"),
+            frog_ast.Variable("mPrime"),
+            frog_ast.Variable("MessageSpace"),
+        ),
     )
 
     left_apps = [

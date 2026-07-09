@@ -444,6 +444,26 @@ Key modules:
   path. Verified: `generic_ct` EC-compiles cleanly at 1 admit (the wall-5 `hop_2_challenge`
   dead-decaps drop remains). KEMPRF_INDCCA's own `hop_1_pr` is NOT closed by this — its computing
   repack needs a consume-pk-that-hoists variant (deferred).
+- **Dead-call drop for constant-return oracles (`hop_2_challenge` wall 5)** (`chain_emitter.
+  _dead_call_drop_step`, wired as the last branch of `_oracle_step_tactic`; `_all_calls_dead`,
+  `_strip_decls`). A binding `Unbreakable` challenge returns `false`, so its two `K.decaps` calls
+  are **dead**; `Absorb Redundant Early Return` prunes them along the chain, leaving adjacent
+  flat states of *equal* `glob` cardinality whose bodies differ by dropped calls. `sim` cannot
+  relate them (one has the calls) and it is not a reorder, so the whole oracle chain used to
+  decline → guided admit (declining the *first*, a dead-name **rename** step, because the
+  canonicalizer cannot rename an unused result var by usage). The route now: (1) an **equal
+  backbone** with matching callees is a dead rename (`proc; sim` — sim ignores the dead names;
+  gated `_all_calls_dead` so a live embedding never takes it) or, call-free, a dead-var-decl
+  cleanup (`proc; sim` when `_strip_decls` bodies match); (2) an **unequal backbone** drops the
+  extra dead deterministic calls one-sided via `call{side} (<M>_<m>_pres g)` (the same
+  glob-preserving `_pres` axiom the init peel uses, requested through the oracle chain's
+  `pres_methods`) after `exists* (glob <M>){side}`. **DEAD-call gate** (`_all_calls_dead`: no
+  call result feeds a later operand or the return) is load-bearing — it declines KEMPRF's *live*
+  `F.evaluate` challenge (result used), so that oracle keeps its cached det-finisher tactic and
+  stays byte-identical. Verified: `generic_ct` (LEAK⇒HON_BIND_K_CT) EC-compiles **clean, 0
+  admits** — the first CFRG binding proof to reach clean EC. Tripwire:
+  `ec_templates/dead_call_drop.ec` (both drop directions + the rename). The PK sibling now also
+  exports 0-admit but still hits the pre-existing wall-4 PK role-map field-type mispairing.
 - `proof_translator.py`, `module_translator.py`, `expr_translator.py`,
   `stmt_translator.py`, `type_collector.py`, `scheme_instances.py`,
   `ec_ast.py` — FrogLang→EC translation primitives.

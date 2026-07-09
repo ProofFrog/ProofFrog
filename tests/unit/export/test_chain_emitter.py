@@ -12,6 +12,7 @@ tests (``test_easycrypt_export.py``) and the pinned template
 from proof_frog import frog_ast
 from proof_frog.export.easycrypt import ec_ast
 from proof_frog.export.easycrypt.chain_emitter import (
+    _all_calls_dead,
     _dead_sample_drop_plan,
     _ec_perm_swaps,
     _has_tuple_repack,
@@ -431,3 +432,73 @@ def test_field_aware_coupling_plain_bases_stay_whole_glob() -> None:
     fields_by_base = {"A": ["dk0", "dk1"], "B": ["dk0", "dk1"]}
     coupling = _make_field_aware_coupling(fields_by_base, {}, ["K"], None, None)
     assert coupling("A(K)", "B(K)") == "(glob A(K)){1} = (glob B(K)){2}"
+
+
+# --- Dead-call-drop deadness gate (wall 5) -------------------------------
+#
+# ``_all_calls_dead`` is the load-bearing gate that lets the dead-call-drop
+# route fire on the constant-return binding challenge (drop-safe) while
+# leaving a live embedding (KEMPRF's ``F.evaluate`` challenge) to its own
+# cached tactic. A wrong answer here either misfires a one-sided drop on a
+# live call (unsound) or churns a clean proof's byte-identical export.
+
+
+def test_all_calls_dead_constant_return() -> None:
+    """The binding ``Unbreakable`` challenge: two dead decapsulations, then a
+    constant ``return false`` -- every call result is unused, so droppable."""
+    body = [
+        ec_ast.VarDecl("k0", _KS),
+        ec_ast.VarDecl("k1", _KS),
+        ec_ast.Call("k0", "K.decaps", "dk0, ct0"),
+        ec_ast.Call("k1", "K.decaps", "dk1, ct1"),
+        ec_ast.Return("false"),
+    ]
+    assert _all_calls_dead(body) is True
+
+
+def test_all_calls_dead_renamed_still_dead() -> None:
+    """A pure dead-result rename (the canonicalizer cannot rename an unused var
+    by usage) stays all-dead."""
+    body = [
+        ec_ast.Call("__a7__", "K.decaps", "challenger_dk0, ct0"),
+        ec_ast.Call("__a8__", "K.decaps", "challenger_dk1, ct1"),
+        ec_ast.Return("false"),
+    ]
+    assert _all_calls_dead(body) is True
+
+
+def test_all_calls_dead_declines_live_return() -> None:
+    """A call whose result the return uses (KEMPRF's ``F.evaluate`` challenge
+    embedding) is NOT droppable -- keep its cached tactic, stay byte-identical."""
+    body = [
+        ec_ast.Call("ss", "K.decaps", "dk0, ct0"),
+        ec_ast.Call("out", "F.evaluate", "seed, ss"),
+        ec_ast.Return("out"),
+    ]
+    assert _all_calls_dead(body) is False
+
+
+def test_all_calls_dead_declines_result_feeds_later_call() -> None:
+    """A call result consumed by a later call's argument is live."""
+    body = [
+        ec_ast.Call("k", "K.decaps", "dk0, ct0"),
+        ec_ast.Call("c", "K.encaps", "k"),
+        ec_ast.Return("false"),
+    ]
+    assert _all_calls_dead(body) is False
+
+
+def test_all_calls_dead_declines_call_free_body() -> None:
+    """No abstract call means nothing to drop or realign here."""
+    body = [ec_ast.Return("false")]
+    assert _all_calls_dead(body) is False
+
+
+def test_all_calls_dead_substring_not_a_false_match() -> None:
+    """A call var that is a substring of another identifier does not read as
+    used (word-boundary match)."""
+    body = [
+        ec_ast.Call("k", "K.decaps", "dk0, ct0"),
+        ec_ast.Return("k0 = k1"),
+    ]
+    assert _all_calls_dead(body) is True

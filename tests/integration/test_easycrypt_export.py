@@ -123,6 +123,15 @@ CG_HON_BIND_K_PK_PROOF = (
     / "CG"
     / "CG_seedbased_HON_BIND_K_PK.proof"
 )
+CG_EXPANDED_LEAK_CT_PROOF = (
+    REPO_ROOT
+    / "examples"
+    / "applications"
+    / "cfrg-hybrid-kems"
+    / "proofs"
+    / "CG"
+    / "CG_expanded_LEAK_BIND_K_CT.proof"
+)
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
 DDH_IMPLIES_CDH_PROOF = EXAMPLES / "Proofs" / "Group" / "DDH_implies_CDH.proof"
@@ -1709,6 +1718,7 @@ MULTI_ORACLE_REDUCTION_ADV_TEMPLATE = (
 )
 FIELD_REMOVAL_COUPLING_TEMPLATE = EC_TEMPLATES / "field_removal_coupling.ec"
 DEAD_CALL_DROP_TEMPLATE = EC_TEMPLATES / "dead_call_drop.ec"
+DECOMPOSITION_COUPLING_TEMPLATE = EC_TEMPLATES / "decomposition_coupling.ec"
 
 
 @pytest.mark.skipif(
@@ -1813,6 +1823,88 @@ def test_field_removal_coupling_template_compiles(tmp_path: Path) -> None:
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_decomposition_coupling_template_compiles(tmp_path: Path) -> None:
+    """Regression tripwire for the composite-reduction DECOMPOSITION coupling --
+    the next binding-layer wall for the concrete-framework expanded LEAK proofs
+    (``CG``/``CK``/``UG``/``UK`` expanded ``LEAK_BIND``). The shape: a hop between
+    a game holding a PACKED key ``dk0 : dpq * scal * elem`` and a reduction that
+    holds the DECOMPOSED components (``dk_pq_0``, ``dk_t_0``, ``ek_t_0``) plus an
+    inner challenger whose ``dk0`` it forwards. The current exporter emits
+    ``other_game.f = reduction.f`` for each reduction field (correct for the
+    Generic LEAK=>HON proofs, which share field NAMES), which references a
+    ``Hybrid.dk_pq_0`` the game does not have (EC "unknown variable"). The sound
+    coupling relates the game's packed field to the TUPLE of the reduction's
+    component fields (read off the reduction ``Initialize``'s packing) plus the
+    reduction<->challenger seam: ``G.dk0{1} = (R.dk_pq_0, R.dk_t_0, R.ek_t_0){2}
+    /\\ R.dk_pq_0{2} = C.dk0{2}``. The init micro establishes it (``wp`` collapses
+    the tuple equality to reflexivities via the packing assignment); the
+    challenge micro consumes it (the decomposition feeds the per-component
+    projection ``dk0.`i{1} = <component>{2}`` so the abstract calls couple with
+    ``call (_: true)``). The template documents the NON-VACUITY check (without the
+    decomposition invariant the challenge micro is unprovable). If this stops
+    compiling, the decomposition-coupling synthesizer's target shape must be
+    re-derived before any expanded-LEAK proof relying on it can be trusted (a
+    wrong coupling would admit a false lemma -- the exact false-confidence
+    failure mode this project exists to avoid)."""
+    ec_file = tmp_path / "decomposition_coupling.ec"
+    ec_file.write_text(DECOMPOSITION_COUPLING_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the decomposition-coupling template.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+def test_export_expanded_leak_emits_decomposition_coupling() -> None:
+    """The CFRG concrete-framework expanded-LEAK reductions (``R_PQ_Bind`` /
+    ``R_KDF``) DECOMPOSE the theorem game's packed hybrid decaps key
+    ``dk_i = [dk_PQ_i, dk_T_i, ek_T_i]`` into component fields. The composite
+    coupling must relate the game's *packed* field to the TUPLE of the
+    reduction's component fields -- NOT ``other_game.dk_PQ_0 = reduction.dk_PQ_0``
+    (the game has no ``dk_PQ_0`` field; EC rejects it "unknown variable").
+
+    Guards the three seam shapes of ``_decomposition_coupling``:
+      * game <-> delegating decomposition reduction: the packed = component-tuple
+        equality AND the reduction<->inner-challenger seam using the CHALLENGER's
+        own field name (``dk0``, not ``dk_PQ_0``);
+      * the ill-typed ``Hybrid...dk_PQ_0`` reference never appears.
+    A wrong coupling here manufactures the exact false confidence this project
+    exists to avoid, so this pins the well-formed shape at export time (EC
+    typecheck is covered by the compile of the full proof / the template test).
+    """
+    output = exporter.export_proof_file(str(CG_EXPANDED_LEAK_CT_PROOF))
+
+    # The packed game field couples to the component tuple, not a nonexistent
+    # ``other_game.dk_PQ_0``.
+    assert (
+        "Hybrid_c.LEAK_BIND_K_CT_Breakable.dk0{1} = "
+        "(R_PQ_Bind.dk_PQ_0, R_PQ_Bind.dk_T_0, R_PQ_Bind.ek_T_0){2}" in output
+    )
+    assert (
+        "Hybrid_c.LEAK_BIND_K_CT_Breakable.dk1{1} = "
+        "(R_PQ_Bind.dk_PQ_1, R_PQ_Bind.dk_T_1, R_PQ_Bind.ek_T_1){2}" in output
+    )
+    # The reduction<->challenger seam uses the challenger's OWN field name (the
+    # KEM_PQ binding game holds ``dk0``/``dk1``), only for the PQ components the
+    # reduction sources from ``challenger.Initialize()``.
+    assert "R_PQ_Bind.dk_PQ_0{2} = KEM_PQ_c.LEAK_BIND_K_CT_Breakable.dk0{2}" in output
+    # The old ill-typed shape (game field named after a reduction component)
+    # must be gone entirely.
+    assert "Hybrid_c.LEAK_BIND_K_CT_Breakable.dk_PQ_0" not in output
+    assert "Hybrid_c.LEAK_BIND_K_CT_Breakable.dk_T_0" not in output
 
 
 @pytest.mark.skipif(

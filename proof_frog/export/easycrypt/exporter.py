@@ -6,7 +6,7 @@ import copy
 import pathlib
 import re
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from . import canonical_form
 from . import ec_ast
@@ -1427,6 +1427,26 @@ def export_proof_file(proof_path: str) -> str:
                     )
                 )
             if isinstance(e, frog_ast.BinaryOperation):
+                # Comparison and logical operators always produce ``Bool``,
+                # independent of their operand types. Without this they would
+                # inherit the LHS operand's type (the fall-through below); when
+                # the operands are bitstrings, an enclosing logical ``||`` whose
+                # leaves are such comparisons (e.g. a win condition
+                # ``a <> b || c <> d``) would then be misread as a bitstring
+                # concatenation by ``_bitstring_type_of``, emitting an ill-typed
+                # ``concat_* (bool) (bool)``.
+                if e.operator in (
+                    frog_ast.BinaryOperators.EQUALS,
+                    frog_ast.BinaryOperators.NOTEQUALS,
+                    frog_ast.BinaryOperators.GT,
+                    frog_ast.BinaryOperators.LT,
+                    frog_ast.BinaryOperators.GEQ,
+                    frog_ast.BinaryOperators.LEQ,
+                    frog_ast.BinaryOperators.AND,
+                    frog_ast.BinaryOperators.IN,
+                    frog_ast.BinaryOperators.SUBSETS,
+                ):
+                    return frog_ast.BoolType()
                 # Recursively resolve through the operator. For ADD/OR
                 # on two bitstrings: ADD is xor (same length as LHS);
                 # OR is concat (sum of the two lengths). For arithmetic
@@ -2703,7 +2723,289 @@ def export_proof_file(proof_path: str) -> str:
             fields,
         )
 
+    def _find_init(
+        node: frog_ast.Reduction | frog_ast.Game,
+    ) -> frog_ast.Method | None:
+        return next(
+            (m for m in node.methods if m.signature.name.lower() == "initialize"),
+            None,
+        )
+
+    def _return_elems(
+        method: frog_ast.Method | None,
+    ) -> list[frog_ast.Expression] | None:
+        if method is None:
+            return None
+        for stmt in reversed(list(method.block.statements)):
+            if isinstance(stmt, frog_ast.ReturnStatement):
+                expr = stmt.expression
+                if isinstance(expr, frog_ast.Tuple):
+                    return list(expr.values)
+                return [expr]
+        return None
+
+    def _local_field_tuples(
+        init: frog_ast.Method, red_fields: set[str]
+    ) -> dict[str, list[str]]:
+        """Local vars assigned a tuple literal built entirely from the
+        reduction's own fields (``dk0 = [dk_PQ_0, dk_T_0, ek_T_0]``)."""
+        out: dict[str, list[str]] = {}
+        for stmt in init.block.statements:
+            if (
+                isinstance(stmt, frog_ast.Assignment)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and isinstance(stmt.value, frog_ast.Tuple)
+            ):
+                comps = [
+                    c.name
+                    for c in stmt.value.values
+                    if isinstance(c, frog_ast.Variable)
+                ]
+                if len(comps) == len(stmt.value.values) and all(
+                    c in red_fields for c in comps
+                ):
+                    out[stmt.var.name] = comps
+        return out
+
+    def _is_decomposition_reduction(reduction: frog_ast.Reduction) -> bool:
+        """True when the reduction's ``Initialize`` repacks >=2 of its own
+        component fields into a packed key it returns.
+
+        This is the CFRG concrete-framework shape: ``R_PQ_Bind`` / ``R_KDF``
+        hold decomposed ``dk_PQ_i`` / ``dk_T_i`` / ``ek_T_i`` and return
+        ``dk_i = [dk_PQ_i, dk_T_i, ek_T_i]`` -- a packed hybrid decaps key the
+        theorem game holds monolithically. The Generic ``LEAK=>HON`` reductions
+        hold the game's packed fields directly (no tuple repack), so this is
+        ``False`` there and the coupling falls through to the existing composite
+        / single-field path byte-identically. Name-independent (reads the return
+        + assignment structure, never a field name)."""
+        red_fields = {f.name for f in reduction.fields}
+        init = _find_init(reduction)
+        if init is None:
+            return False
+        red_elems = _return_elems(init)
+        if red_elems is None:
+            return False
+        local_tuples = _local_field_tuples(init, red_fields)
+        return any(
+            isinstance(e, frog_ast.Variable)
+            and e.name in local_tuples
+            and len(local_tuples[e.name]) >= 2
+            for e in red_elems
+        )
+
+    def _game_field_positions(game: frog_ast.Game) -> dict[str, int]:
+        """Each module field's index in ``Initialize``'s return tuple (the LEAK
+        game returns ``[ek0, dk0, ek1, dk1]`` with fields ``dk0`` at 1,
+        ``dk1`` at 3)."""
+        fnames = {f.name for f in game.fields}
+        elems = _return_elems(_find_init(game))
+        out: dict[str, int] = {}
+        if elems:
+            for i, e in enumerate(elems):
+                if isinstance(e, frog_ast.Variable) and e.name in fnames:
+                    out[e.name] = i
+        return out
+
+    def _reduction_decomp_map(
+        reduction: frog_ast.Reduction, game: frog_ast.Game
+    ) -> dict[str, list[str]]:
+        """Map each packed game field to the tuple of reduction component fields
+        it decomposes into, read off the reduction's ``Initialize`` return at the
+        game field's return position. Empty when the reduction does not repack
+        into that game's fields (so non-decomposition reductions decline)."""
+        positions = _game_field_positions(game)
+        init = _find_init(reduction)
+        if init is None or not positions:
+            return {}
+        red_elems = _return_elems(init)
+        if red_elems is None:
+            return {}
+        local_tuples = _local_field_tuples(init, {f.name for f in reduction.fields})
+        out: dict[str, list[str]] = {}
+        for gf, idx in positions.items():
+            if idx >= len(red_elems):
+                continue
+            e = red_elems[idx]
+            if isinstance(e, frog_ast.Variable) and e.name in local_tuples:
+                out[gf] = local_tuples[e.name]
+        return out
+
+    def _challenger_source_map(
+        reduction: frog_ast.Reduction, chal_game: frog_ast.Game
+    ) -> dict[str, str]:
+        """Map each reduction field sourced from ``challenger.Initialize()`` to
+        the challenger field it comes from (``dk_PQ_0 <- _tup[1]`` and the
+        challenger stores its return position 1 into ``dk0`` -> ``dk_PQ_0``
+        couples to the challenger's ``dk0``). Empty for a self-keygen reduction
+        (``R_KDF`` draws its own PQ keys), which then gets no challenger seam."""
+        init = _find_init(reduction)
+        if init is None:
+            return {}
+        red_fields = {f.name for f in reduction.fields}
+        chal_var: str | None = None
+        for stmt in init.block.statements:
+            if (
+                isinstance(stmt, frog_ast.Assignment)
+                and isinstance(stmt.value, frog_ast.FuncCall)
+                and isinstance(stmt.value.func, frog_ast.FieldAccess)
+                and isinstance(stmt.value.func.the_object, frog_ast.Variable)
+                and stmt.value.func.the_object.name == "challenger"
+                and stmt.value.func.name.lower() == "initialize"
+                and isinstance(stmt.var, frog_ast.Variable)
+            ):
+                chal_var = stmt.var.name
+                break
+        if chal_var is None:
+            return {}
+        pos_to_field = {i: f for f, i in _game_field_positions(chal_game).items()}
+        out: dict[str, str] = {}
+        for stmt in init.block.statements:
+            if (
+                isinstance(stmt, frog_ast.Assignment)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name in red_fields
+                and isinstance(stmt.value, frog_ast.ArrayAccess)
+                and isinstance(stmt.value.the_array, frog_ast.Variable)
+                and stmt.value.the_array.name == chal_var
+                and isinstance(stmt.value.index, frog_ast.Integer)
+                and stmt.value.index.num in pos_to_field
+            ):
+                out[stmt.var.name] = pos_to_field[stmt.value.index.num]
+        return out
+
+    def _get_reduction(name: str) -> frog_ast.Reduction | None:
+        return next(
+            (
+                h
+                for h in proof.helpers
+                if isinstance(h, frog_ast.Reduction) and h.name == name
+            ),
+            None,
+        )
+
+    def _decomposition_coupling(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> str | None:
+        """Coupling for a hop whose reduction endpoint DECOMPOSES the theorem
+        game's packed key into component fields (the CFRG concrete-framework
+        expanded-LEAK proofs: ``R_PQ_Bind`` / ``R_KDF`` hold ``dk_PQ_i`` /
+        ``dk_T_i`` / ``ek_T_i`` while the game holds packed ``dk_i =
+        [dk_PQ_i, dk_T_i, ek_T_i]``).
+
+        The wall-7 composite path (``_composite_reduction_step``) emits
+        ``other_game.f = reduction.f`` per reduction field -- correct when the
+        game and reduction share field names (the Generic proofs), but ILL-TYPED
+        here (``Hybrid.dk_PQ_0`` does not exist). The sound coupling relates the
+        game's packed field to the TUPLE of the reduction's component fields
+        (validated shape: ``ec_templates/decomposition_coupling.ec``):
+
+        * game <-> decomposition-reduction:
+          ``G.dk0{gs} = (R.dk_PQ_0, R.dk_T_0, R.ek_T_0){rs}`` per game field;
+        * decomposition-reduction <-> decomposition-reduction (both hold the same
+          component fields): component-wise ``R1.f{s1} = R2.f{s2}``;
+        * reduction <-> its inner challenger (challenger-sourced components only):
+          ``R.dk_PQ_0{rs} = C.dk0{rs}`` (the challenger holds only the PQ part).
+
+        Returns ``None`` when neither endpoint is a decomposition reduction, so
+        every non-decomposition proof keeps its existing coupling byte-identical.
+        """
+        if not any(
+            step.reduction is not None
+            and (r := _get_reduction(step.reduction.name)) is not None
+            and _is_decomposition_reduction(r)
+            for step in (step_a, step_b)
+        ):
+            return None
+
+        def _f(name: str) -> str:
+            return mt._ec_field_name(name)  # pylint: disable=protected-access
+
+        def _desc(step: frog_ast.Step, side: str) -> dict[str, Any]:
+            module_expr = resolver.resolve(step).module_expr
+            reduction = (
+                _get_reduction(step.reduction.name)
+                if step.reduction is not None
+                else None
+            )
+            chal_base = (
+                pt.module_base_name(pt.last_module_arg(module_expr))
+                if reduction is not None
+                else None
+            )
+            # pylint: disable=protected-access
+            game = engine._get_game_ast(step.challenger, None)
+            # pylint: enable=protected-access
+            return {
+                "side": side,
+                "base": pt.module_base_name(module_expr),
+                "reduction": reduction,
+                "chal_base": chal_base,
+                "game": game,
+            }
+
+        da = _desc(step_a, "1")
+        db = _desc(step_b, "2")
+        conj: list[str] = []
+        holders: set[str] = set()
+
+        def _emit_chal_seam(rd: dict[str, Any]) -> None:
+            src = _challenger_source_map(rd["reduction"], rd["game"])
+            if not src:
+                return
+            holders.add(rd["chal_base"])
+            for rf, cf in src.items():
+                conj.append(
+                    f"{rd['base']}.{_f(rf)}{{{rd['side']}}} = "
+                    f"{rd['chal_base']}.{_f(cf)}{{{rd['side']}}}"
+                )
+
+        game_descs = [d for d in (da, db) if d["reduction"] is None]
+        red_descs = [d for d in (da, db) if d["reduction"] is not None]
+
+        if len(game_descs) == 1 and len(red_descs) == 1:
+            gd, rd = game_descs[0], red_descs[0]
+            decomp = _reduction_decomp_map(rd["reduction"], gd["game"])
+            if not decomp:
+                return None
+            holders.update({gd["base"], rd["base"]})
+            for gf, comps in decomp.items():
+                tup = ", ".join(f"{rd['base']}.{_f(c)}" for c in comps)
+                conj.append(
+                    f"{gd['base']}.{_f(gf)}{{{gd['side']}}} = ({tup}){{{rd['side']}}}"
+                )
+            _emit_chal_seam(rd)
+        elif len(red_descs) == 2:
+            r1, r2 = red_descs
+            holders.update({r1["base"], r2["base"]})
+            r2_fields = {f.name for f in r2["reduction"].fields}
+            for name in (f.name for f in r1["reduction"].fields if f.name in r2_fields):
+                conj.append(
+                    f"{r1['base']}.{_f(name)}{{{r1['side']}}} = "
+                    f"{r2['base']}.{_f(name)}{{{r2['side']}}}"
+                )
+            _emit_chal_seam(r1)
+            _emit_chal_seam(r2)
+        else:
+            return None
+
+        if not conj:
+            return None
+        holders.discard(None)  # type: ignore[arg-type]
+        live_state_holders.update(holders)
+        body = " /\\ ".join(conj)
+        return f"{glob_invariant_conj} /\\ {body}" if glob_invariant_conj else body
+
     def _live_state_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
+        # CFRG concrete-framework decomposition coupling: when a reduction
+        # endpoint repacks its component fields into the theorem game's packed
+        # key, ``other_game.f = reduction.f`` references a nonexistent packed-key
+        # component. Relate the packed field to the component tuple instead
+        # (gated on a decomposition reduction; None -> existing paths run
+        # byte-identically). See ``_decomposition_coupling``.
+        decomp_coupling = _decomposition_coupling(step_a, step_b)
+        if decomp_coupling is not None:
+            return decomp_coupling
         # Wall-7 composite coupling: when one side is a field-holding delegating
         # reduction, the single live-field equality cannot bridge the two
         # wrappers. Relate every live field across BOTH seams: plain-game

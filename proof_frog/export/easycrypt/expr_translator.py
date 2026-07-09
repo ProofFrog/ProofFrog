@@ -349,6 +349,29 @@ class ExpressionTranslator:
         return f"{op} {_paren(left)} {_paren(right)}"
 
 
+def _has_wrapping_parens(s: str) -> bool:
+    """True iff ``s``'s leading ``(`` is closed by its trailing ``)``.
+
+    A mere ``s.startswith("(") and s.endswith(")")`` is *not* enough: a
+    string like ``(a <> b) || (c <> d)`` starts and ends with a paren yet is
+    not parenthesized as a whole -- the leading ``(`` closes after ``b``.
+    Treating it as atomic would drop the parens an enclosing operator needs,
+    silently changing precedence (e.g. rendering ``x && (y || z)`` as
+    ``x && y || z`` = ``(x && y) || z``).
+    """
+    if not (s.startswith("(") and s.endswith(")")):
+        return False
+    depth = 0
+    for i, ch in enumerate(s):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i == len(s) - 1
+    return False
+
+
 def _paren(s: str) -> str:
     """Wrap a rendered expression in parens if it isn't already atomic.
 
@@ -357,7 +380,7 @@ def _paren(s: str) -> str:
     whitespace or an infix operator is wrapped so it doesn't bind
     incorrectly when inlined as a function argument.
     """
-    if s.startswith("(") and s.endswith(")"):
+    if _has_wrapping_parens(s):
         return s
     if " " in s:
         return f"({s})"

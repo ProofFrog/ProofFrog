@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from proof_frog import frog_ast
-from proof_frog.export.easycrypt.expr_translator import ExpressionTranslator
+from proof_frog.export.easycrypt.expr_translator import (
+    ExpressionTranslator,
+    _has_wrapping_parens,
+    _paren,
+)
 from proof_frog.export.easycrypt.type_collector import TypeCollector
 
 
@@ -208,3 +212,121 @@ def test_translate_boolean_and() -> None:
         ),
     )
     assert tr.translate(conj) == "(k0 = k1) && (ct0 <> ct1)"
+
+
+def test_has_wrapping_parens() -> None:
+    """Only a leading ``(`` closed by the trailing ``)`` counts as wrapped.
+
+    ``(a <> b) || (c <> d)`` starts and ends with a paren yet is *not*
+    parenthesized as a whole -- its leading ``(`` closes after ``b``.
+    """
+    assert _has_wrapping_parens("(a || b)")
+    assert _has_wrapping_parens("((a || b))")
+    assert not _has_wrapping_parens("(a <> b) || (c <> d)")
+    assert not _has_wrapping_parens("a || b")
+    assert not _has_wrapping_parens("(a)(b)")
+
+
+def test_paren_wraps_non_wrapping_outer_parens() -> None:
+    """``_paren`` must wrap a compound whose outer parens don't span it.
+
+    Regression guard: a win condition ``x && (y || z)`` where ``y``/``z`` are
+    themselves parenthesized comparisons renders its ``||`` subtree as
+    ``(y) || (z)``. Treating that as already-atomic (the old
+    ``startswith("(") and endswith(")")`` test) dropped the parens the
+    enclosing ``&&`` needs, silently changing precedence to ``(x && y) || z``
+    -- a different, still-well-typed predicate (a clean-but-wrong export).
+    """
+    assert _paren("(a <> b) || (c <> d)") == "((a <> b) || (c <> d))"
+    # Genuinely-wrapped stays untouched (no double-wrap).
+    assert _paren("(a || b)") == "(a || b)"
+    # Atomic forms are left alone.
+    assert _paren("x") == "x"
+
+
+def test_win_condition_precedence_is_preserved() -> None:
+    """``k == k' && (ct0 != ct1)`` with a tuple-expanded inequality keeps the
+    disjunction parenthesized: ``(k = k') && ((..) || (..))``.
+
+    The tuple inequality ``ct0 != ct1`` canonicalizes to
+    ``ct0.0 != ct1.0 || ct0.1 != ct1.1``; without the ``_paren`` fix this
+    rendered as ``(k = k') && (ct0.0 <> ct1.0) || (ct0.1 <> ct1.1)``, which EC
+    reads as ``((k = k') && ..) || ..`` -- the wrong win predicate.
+    """
+
+    # ``type_of`` types a comparison as ``Bool`` (as the exporter factory now
+    # does), so the ``||`` disambiguation reads its operands as boolean and
+    # renders a logical OR rather than a bitstring concat.
+    def type_of(e: frog_ast.Expression) -> frog_ast.Type:
+        if isinstance(e, frog_ast.BinaryOperation) and e.operator in (
+            frog_ast.BinaryOperators.EQUALS,
+            frog_ast.BinaryOperators.NOTEQUALS,
+        ):
+            return frog_ast.BoolType()
+        raise KeyError(e)
+
+    tr = ExpressionTranslator(TypeCollector(), type_of)
+    disj = _binop(
+        frog_ast.BinaryOperators.OR,
+        _binop(
+            frog_ast.BinaryOperators.NOTEQUALS,
+            frog_ast.Variable("c0"),
+            frog_ast.Variable("d0"),
+        ),
+        _binop(
+            frog_ast.BinaryOperators.NOTEQUALS,
+            frog_ast.Variable("c1"),
+            frog_ast.Variable("d1"),
+        ),
+    )
+    conj = _binop(
+        frog_ast.BinaryOperators.AND,
+        _binop(
+            frog_ast.BinaryOperators.EQUALS,
+            frog_ast.Variable("k0"),
+            frog_ast.Variable("k1"),
+        ),
+        disj,
+    )
+    assert tr.translate(conj) == "(k0 = k1) && ((c0 <> d0) || (c1 <> d1))"
+
+
+def test_logical_or_of_bitstring_comparisons_is_not_concat() -> None:
+    """A logical ``||`` whose operands are *comparisons* over bitstrings must
+    render as boolean ``||``, never as a ``concat_*`` bitstring op.
+
+    ``_bitstring_type_of`` keys the ``||`` overload (concat vs logical OR) off
+    the operand types. A comparison result is ``Bool`` -- so long as the
+    exporter's ``type_of`` types ``a <> b`` as ``Bool`` (not as ``a``'s
+    bitstring type), the OR stays logical. This guards the interaction that
+    produced an ill-typed ``concat_* (bool) (bool)`` in the binding proofs.
+    """
+    bs = frog_ast.BitStringType(frog_ast.Variable("n"))
+
+    def type_of(e: frog_ast.Expression) -> frog_ast.Type:
+        if isinstance(e, frog_ast.Variable):
+            return bs
+        if isinstance(e, frog_ast.BinaryOperation) and e.operator in (
+            frog_ast.BinaryOperators.EQUALS,
+            frog_ast.BinaryOperators.NOTEQUALS,
+        ):
+            return frog_ast.BoolType()
+        raise KeyError(e)
+
+    tr = ExpressionTranslator(TypeCollector(), type_of)
+    disj = _binop(
+        frog_ast.BinaryOperators.OR,
+        _binop(
+            frog_ast.BinaryOperators.NOTEQUALS,
+            frog_ast.Variable("a"),
+            frog_ast.Variable("b"),
+        ),
+        _binop(
+            frog_ast.BinaryOperators.NOTEQUALS,
+            frog_ast.Variable("c"),
+            frog_ast.Variable("d"),
+        ),
+    )
+    rendered = tr.translate(disj)
+    assert "concat" not in rendered
+    assert rendered == "(a <> b) || (c <> d)"

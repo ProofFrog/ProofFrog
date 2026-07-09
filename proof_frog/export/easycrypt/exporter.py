@@ -2190,6 +2190,12 @@ def export_proof_file(proof_path: str) -> str:
     # preservation axiom per pair in section scope. Empty for proofs with no
     # such drop, so they are untouched.
     pres_method_requests: set[tuple[str, str]] = set()
+    # (declared module, EC method) pairs whose declared ``injective`` modifier a
+    # synthesized tactic relies on (the binding challenge case-split elimination:
+    # its ``smt`` needs encoding-injectivity to dissolve ``ev_<m> a = ev_<m> b``
+    # into ``a = b``). The exporter emits one ``<M>_<m>_inj`` axiom per pair in
+    # section scope. Empty for proofs with no such tactic, so they are untouched.
+    inj_method_requests: set[tuple[str, str]] = set()
     # Per-hop precondition/postcondition overrides emitted by the chain
     # when its artifacts use strengthened specs (``={glob E1, ...}``) in
     # multi-module proofs. The outer ``hop_<i>`` lemma must use the same
@@ -3876,6 +3882,27 @@ def export_proof_file(proof_path: str) -> str:
                         dm_type_binding,
                     )
                 )
+            # Reflect the declared ``injective`` modifier (faithful analogue of
+            # ``deterministic`` -> ``_det``): a joint-injectivity axiom over the
+            # method's ``ev_<m>`` op. Emitted only when a synthesizer REQUESTS it
+            # (``inj_method_requests``, e.g. the binding challenge case-split
+            # elimination whose ``smt`` needs encoding injectivity) -- following
+            # the ``pres_method_requests`` pattern, so every proof that does not
+            # request injectivity stays byte-identical. Only meaningful for a
+            # deterministic method (so ``ev_<m>`` exists) with >=1 argument.
+            if (
+                (dm.name, sig.name.lower()) in inj_method_requests
+                and sig.injective
+                and sig.name.lower() in proc_sig_by_name
+            ):
+                inj_axiom = mt.ModuleTranslator.injective_axiom(
+                    dm.name,
+                    dm_inst.clone_alias,
+                    proc_sig_by_name[sig.name.lower()],
+                    dm_type_binding,
+                )
+                if inj_axiom is not None:
+                    det_axioms.append(inj_axiom)
 
     # Statelessness specs: ``declare axiom <E>_<m>_sem`` per probabilistic
     # method, for each declared module that a synthesized stateless-scheme

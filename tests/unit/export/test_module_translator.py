@@ -232,6 +232,56 @@ def test_stateful_reduction_field_writes_are_assignments(
     assert any(isinstance(s, ec_ast.Call) and "dk0" in s.args for s in decaps0.body)
 
 
+def test_injective_axiom_states_joint_injectivity_over_ev_op() -> None:
+    """``injective_axiom`` reflects the declared ``injective`` modifier as a
+    joint-injectivity axiom over the method's ``ev_<m>`` op (equal outputs force
+    equal argument tuples), with binder types resolved to the clone's concrete
+    bindings -- faithful to FrogLang's ``injective`` semantics."""
+    sig = ec_ast.ProcSig(
+        name="encodesharedsecret",
+        params=[ec_ast.ProcParam("ss", ec_ast.EcType("bs_kem_pq_nss_t"))],
+        return_type=ec_ast.EcType("bs_Nss_t"),
+    )
+    axiom = mt.ModuleTranslator.injective_axiom(
+        "KEM_PQ", "KEM_PQ_c", sig, {"bs_kem_pq_nss_t": "bs_kem_pq_nss"}
+    )
+    assert axiom is not None
+    assert axiom.name == "KEM_PQ_encodesharedsecret_inj"
+    assert axiom.declare is True
+    assert (
+        "KEM_PQ_c.ev_encodesharedsecret a0 = KEM_PQ_c.ev_encodesharedsecret b0"
+        in axiom.formula
+    )
+    assert "=> a0 = b0" in axiom.formula
+    # Binder types resolve to the concrete bound type, not the theory-local name.
+    assert "(a0 : bs_kem_pq_nss)" in axiom.formula
+    assert "(b0 : bs_kem_pq_nss)" in axiom.formula
+
+
+def test_injective_axiom_joint_over_all_args() -> None:
+    """A multi-arg injective method (e.g. a keyed bijection ``Pack(st, q)``) is
+    injective in ALL arguments jointly -- the engine's ``injective`` semantics
+    (``InjectiveEqualitySimplifyTransformer``)."""
+    sig = ec_ast.ProcSig(
+        name="pack",
+        params=[
+            ec_ast.ProcParam("st", ec_ast.EcType("state")),
+            ec_ast.ProcParam("q", ec_ast.EcType("query")),
+        ],
+        return_type=ec_ast.EcType("bs_M"),
+    )
+    axiom = mt.ModuleTranslator.injective_axiom("P", "P_c", sig, {})
+    assert axiom is not None
+    assert "P_c.ev_pack a0 a1 = P_c.ev_pack b0 b1" in axiom.formula
+    assert "=> a0 = b0 /\\ a1 = b1" in axiom.formula
+
+
+def test_injective_axiom_none_for_zero_arg_method() -> None:
+    """Injectivity of a constant is degenerate: no axiom for a 0-arg method."""
+    sig = ec_ast.ProcSig(name="gen", params=[], return_type=ec_ast.EcType("t"))
+    assert mt.ModuleTranslator.injective_axiom("M", "M_c", sig, {}) is None
+
+
 def _kem_multichal_real_game() -> frog_ast.Game:
     """The Real side of the multi-oracle KEM INDCPA_MultiChal game (fields pk/sk)."""
     gf = frog_parser.parse_file("examples/Games/KEM/INDCPA_MultiChal.game")

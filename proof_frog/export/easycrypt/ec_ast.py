@@ -131,7 +131,24 @@ class Return:
     expr: str
 
 
-EcStmt = Union[VarDecl, Assign, Sample, Call, Return]
+@dataclass
+class If:
+    """``if (<guard>) { <then> } else { <else> }`` (structured branch).
+
+    ``guard`` is a raw EC boolean expression string. ``then_body`` and
+    ``else_body`` are nested statement lists (rendered indented). An empty
+    ``else_body`` renders the ``if`` without an ``else`` clause. Any
+    ``VarDecl`` inside a branch is lifted to the enclosing proc's top by
+    the method translator (EC requires all locals declared before the body),
+    so branch bodies normally hold only executable statements.
+    """
+
+    guard: str
+    then_body: list["EcStmt"]
+    else_body: list["EcStmt"] = field(default_factory=list)
+
+
+EcStmt = Union[VarDecl, Assign, Sample, Call, Return, If]
 
 
 @dataclass
@@ -477,7 +494,7 @@ def _render_proc_impl(proc: Proc) -> list[str]:
     param_str = ", ".join(f"{p.name} : {p.type.text}" for p in proc.params)
     out = [f"  proc {proc.name}({param_str}) : {proc.return_type.text} = {{"]
     for stmt in proc.body:
-        out.append(f"    {_render_stmt(stmt)}")
+        out.extend(_render_stmt_lines(stmt, "    "))
     out.append("  }")
     return out
 
@@ -497,7 +514,24 @@ def _render_stmt(stmt: EcStmt) -> str:
         return f"{stmt.callee}({stmt.args});"
     if isinstance(stmt, Return):
         return f"return {stmt.expr};"
+    if isinstance(stmt, If):
+        raise TypeError("If must be rendered via _render_stmt_lines")
     raise TypeError(f"Unknown statement: {type(stmt).__name__}")
+
+
+def _render_stmt_lines(stmt: EcStmt, indent: str) -> list[str]:
+    """Render one statement as indented lines (handles nested ``If``)."""
+    if isinstance(stmt, If):
+        lines = [f"{indent}if ({stmt.guard}) {{"]
+        for inner in stmt.then_body:
+            lines.extend(_render_stmt_lines(inner, indent + "  "))
+        if stmt.else_body:
+            lines.append(f"{indent}}} else {{")
+            for inner in stmt.else_body:
+                lines.extend(_render_stmt_lines(inner, indent + "  "))
+        lines.append(f"{indent}}}")
+        return lines
+    return [f"{indent}{_render_stmt(stmt)}"]
 
 
 def _render_lemma(lemma: Lemma) -> list[str]:

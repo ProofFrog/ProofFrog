@@ -724,10 +724,30 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
             # deterministic residual with ``skip => /#``. Validated end-to-end on
             # the ``LEAK_implies_HON_BIND_K_CT`` generic reduction.
             n_oracles = len(multi_oracle.post_init_oracles)
-            inv = (
-                f"={{glob {consume_pk_reduction_glob}, glob {consume_pk_scheme_glob},"
-                f" glob {challenger_glob}}}"
-            )
+            # The ``proc; sim`` obligation on each post-init oracle must carry
+            # ``={glob M}`` for every abstract module ``M`` the oracle calls --
+            # ``sim`` cannot relate two abstract calls without their glob
+            # equality. A simple-forward challenge (the generic LEAK=>HON
+            # reduction) touches only the scheme, so the invariant stays
+            # ``={glob R, glob <scheme>, glob <challenger>}``; a rich case-split
+            # challenge (the CFRG binding reductions, whose ``Challenge``
+            # recomputes both kdf_in's via KEM_T/H/L) touches the full game
+            # module set. Both are captured by the game modules already listed
+            # in ``byequiv_pre`` (minus the adversary ``A``): appending them to
+            # the ``[reduction, scheme]`` prefix leaves a proof whose byequiv_pre
+            # lists no module beyond the scheme byte-identical.
+            inv_globs = [consume_pk_reduction_glob, consume_pk_scheme_glob]
+            _pre = multi_oracle.byequiv_pre.strip()
+            if _pre.startswith("={") and _pre.endswith("}"):
+                _pre = _pre[2:-1]
+            for _term in _pre.split(","):
+                _term = _term.strip()
+                if _term.startswith("glob "):
+                    _mod = _term[len("glob ") :].strip()
+                    if _mod != "A" and _mod not in inv_globs:
+                        inv_globs.append(_mod)
+            inv_globs.append(challenger_glob)
+            inv = "={" + ", ".join(f"glob {g}" for g in inv_globs) + "}"
             if consume_pk_peel_events is not None:
                 # Event-aware peel: ``rnd`` a sample, ``call (_: true)`` an
                 # abstract call, in tail-to-front order. Sizes to the reduction's

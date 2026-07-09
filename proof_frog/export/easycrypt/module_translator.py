@@ -361,6 +361,53 @@ class ModuleTranslator:
         )
         return ec_ast.Axiom(f"{module_name}_{proc}_det", formula, declare=True)
 
+    @staticmethod
+    def injective_axiom(
+        module_name: str,
+        clone_prefix: str,
+        proc_sig: ec_ast.ProcSig,
+        type_bindings: dict[str, str],
+    ) -> ec_ast.Axiom | None:
+        """Emit ``declare axiom <module>_<m>_inj`` (joint injectivity of ``ev_<m>``).
+
+        Reflects the primitive's declared ``injective`` modifier: the pure
+        function ``<clone_prefix>.ev_<m>`` modelling the method (emitted for
+        every ``deterministic`` method) is injective in ALL its arguments
+        jointly -- equal outputs force equal argument tuples. This is faithful
+        to FrogLang's ``injective`` semantics, which the engine realises as the
+        joint rewrite ``f(a0..an) == f(b0..bn) -> a0==b0 /\\ ... /\\ an==bn``
+        (``InjectiveEqualitySimplifyTransformer``), the exact analogue of the
+        ``deterministic`` -> ``_det`` faithfulness.
+
+        Only meaningful for a method that is ALSO ``deterministic`` (so
+        ``ev_<m>`` exists to state injectivity over) and has at least one
+        argument; returns ``None`` otherwise. ``type_bindings`` resolves the
+        theory-local binder types exactly as :meth:`deterministic_axiom` does.
+        """
+        if not proc_sig.params:
+            return None
+        proc = proc_sig.name
+        op = f"{clone_prefix}.ev_{proc}"
+        binders: list[str] = []
+        eqs: list[str] = []
+        a_names: list[str] = []
+        b_names: list[str] = []
+        for i, pp in enumerate(proc_sig.params):
+            arg_type = type_bindings.get(pp.type.text, f"{clone_prefix}.{pp.type.text}")
+            a_arg, b_arg = f"a{i}", f"b{i}"
+            a_names.append(a_arg)
+            b_names.append(b_arg)
+            binders.append(f"({a_arg} : {arg_type})")
+            binders.append(f"({b_arg} : {arg_type})")
+            eqs.append(f"{a_arg} = {b_arg}")
+        a_app = "".join(f" {a}" for a in a_names)
+        b_app = "".join(f" {b}" for b in b_names)
+        formula = (
+            f"{' '.join(binders)} : "
+            f"{op}{a_app} = {op}{b_app} => {' /\\ '.join(eqs)}"
+        )
+        return ec_ast.Axiom(f"{module_name}_{proc}_inj", formula, declare=True)
+
     # ----- Statelessness foundation (probabilistic-method analogue of the
     # deterministic ``ev_<m>``/``_det`` foundation). Lets EC reorder two
     # calls to a *stateless* randomized scheme method: each is modelled as

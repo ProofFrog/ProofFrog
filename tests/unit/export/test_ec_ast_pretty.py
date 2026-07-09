@@ -33,6 +33,52 @@ def test_module_var_renders_without_trailing_semicolon() -> None:
     assert "var k : int;" in rendered
 
 
+def test_if_node_renders_result_var_branches() -> None:
+    """An ``If`` renders as ``if (g) { ... } else { ... }`` with nested,
+    indented branches -- the single-exit form the reduction Challenge lowering
+    produces (guarded early return -> result variable set in both branches)."""
+    mod = ec_ast.Module(
+        name="R",
+        procs=[
+            ec_ast.Proc(
+                name="challenge",
+                params=[ec_ast.ProcParam("ct0", ec_ast.EcType("ct"))],
+                return_type=ec_ast.EcType("bool"),
+                body=[
+                    ec_ast.VarDecl("r", ec_ast.EcType("bool")),
+                    ec_ast.If(
+                        guard="a = b",
+                        then_body=[ec_ast.Call("r", "Challenger.challenge", "ct0")],
+                        else_body=[ec_ast.Assign("r", "c <> d")],
+                    ),
+                    ec_ast.Return("r"),
+                ],
+            )
+        ],
+    )
+    rendered = "\n".join(ec_ast._render_module(mod))  # pylint: disable=protected-access
+    assert "if (a = b) {" in rendered
+    assert "r <@ Challenger.challenge(ct0);" in rendered
+    assert "} else {" in rendered
+    assert "r <- c <> d;" in rendered
+    assert "return r;" in rendered
+    # The call inside the branch is indented deeper than the ``if`` line.
+    if_line = next(ln for ln in rendered.splitlines() if "if (a = b)" in ln)
+    call_line = next(ln for ln in rendered.splitlines() if "Challenger.challenge" in ln)
+    assert len(call_line) - len(call_line.lstrip()) > len(if_line) - len(
+        if_line.lstrip()
+    )
+
+
+def test_empty_else_renders_if_without_else_clause() -> None:
+    """An ``If`` with an empty ``else_body`` renders no ``else`` keyword."""
+    stmt = ec_ast.If(guard="g", then_body=[ec_ast.Assign("x", "1")], else_body=[])
+    lines = ec_ast._render_stmt_lines(stmt, "")  # pylint: disable=protected-access
+    text = "\n".join(lines)
+    assert "if (g) {" in text
+    assert "else" not in text
+
+
 def test_axiom_with_module_and_memory_params() -> None:
     axiom = ec_ast.Axiom(
         name="OneTimeSecrecy_advantage",

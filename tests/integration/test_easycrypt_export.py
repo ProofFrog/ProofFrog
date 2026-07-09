@@ -2081,6 +2081,47 @@ def test_export_consume_pk_nested_hoist_and_sample_peel_cg() -> None:
     assert "wp; rnd;" in hop1
 
 
+def test_export_reduction_challenge_case_split_rendered_not_witness() -> None:
+    """The CFRG binding reductions' ``Challenge`` oracle is a *case-split*:
+    ``if (kdf_in_0 == kdf_in_1 && ct_PQ differ) return challenger.Challenge(..);
+    return H(..)==H(..) && ct differ``. EC procedures are single-exit, so the
+    exporter lowers this guarded early return to a result variable set in both
+    branches (an ``if (..) { r <@ Challenger.challenge(..) } else { .. r <- .. }``
+    followed by ``return r``), instead of the historical ``return witness`` stub
+    that made the challenge hops relate the game to a stub. This pins:
+      * R_PQ_Bind.challenge renders the if/else + result return (not witness);
+      * the then-branch forwards to ``Challenger.challenge``;
+      * R_KDF.challenge likewise (``if (ct0 = ct1) .. else Challenger.challenge``).
+    A wrong lowering yields an EC reject (never a false accept)."""
+    output = exporter.export_proof_file(str(CK_EXPANDED_LEAK_CT_PROOF))
+    r_pq = output.split("module R_PQ_Bind ", 1)[1].split("module R_KDF ", 1)[0]
+    challenge = r_pq.split("proc challenge", 1)[1]
+    assert "return witness;" not in challenge
+    assert "if (" in challenge
+    assert "} else {" in challenge
+    assert "Challenger.challenge(" in challenge
+    # R_KDF's simpler case-split (guard ct0 = ct1) also renders.
+    r_kdf = output.split("module R_KDF ", 1)[1].split("module R_PQ_Bind_Adv", 1)[0]
+    kdf_challenge = r_kdf.split("proc challenge", 1)[1]
+    assert "return witness;" not in kdf_challenge
+    assert "Challenger.challenge(" in kdf_challenge
+
+
+def test_export_consume_pk_bridge_invariant_covers_challenge_modules() -> None:
+    """When the reduction's rendered ``Challenge`` calls abstract modules beyond
+    the scheme (the CFRG binding reductions recompute both kdf_in's via
+    KEM_T/H/L), the hop_1_pr consume-pk bridge's ``call (_: <inv>)`` invariant
+    must carry ``={glob M}`` for every such module -- ``sim`` cannot relate two
+    abstract calls without their glob equality. The invariant is derived from
+    the game module set, so a rich case-split challenge gets the full set while
+    a simple-forward challenge (the generic reduction) stays byte-identical."""
+    output = exporter.export_proof_file(str(CK_EXPANDED_LEAK_CT_PROOF))
+    hop1 = output.split("lemma hop_1_pr", 1)[1].split("qed.", 1)[0]
+    inv = hop1.split("call (_: ={glob R_PQ_Bind", 1)[1].split("})", 1)[0]
+    for mod in ("KEM_PQ", "KEM_T", "H", "L"):
+        assert f"glob {mod}" in inv, (mod, inv)
+
+
 @pytest.mark.skipif(
     not _docker_available(),
     reason="Docker is not available; cannot run EasyCrypt.",

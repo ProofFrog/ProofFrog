@@ -65,9 +65,94 @@ class StatementTranslator:
         """
         decls: list[ec_ast.VarDecl] = []
         stmts: list[ec_ast.EcStmt] = []
-        for stmt in block.statements:
+        statements = list(block.statements)
+        for i, stmt in enumerate(statements):
+            rest = statements[i + 1 :]
+            # Guarded early return: ``if (g) { ...; return X; } <rest>; return Y``
+            # (a case-split oracle -- e.g. the CFRG binding reductions'
+            # ``Challenge`` forwarding to ``challenger.Challenge`` on a
+            # collision guard). EC procedures are single-exit, so lower this to
+            # a result variable set in both branches, with ``rest`` becoming the
+            # ``else``. Only fires on this exact shape (single-condition ``if``,
+            # no ``else``, then-block ending in a return, a fall-through final
+            # return); any other control flow falls through to the per-statement
+            # translator, whose ``NotImplementedError`` yields the historical
+            # ``return witness`` stub -- so unaffected bodies stay byte-identical.
+            if (
+                isinstance(stmt, frog_ast.IfStatement)
+                and self._is_guarded_early_return(stmt)
+                and rest
+                and isinstance(rest[-1], frog_ast.ReturnStatement)
+            ):
+                self._handle_guarded_early_return(stmt, rest, decls, stmts, return_type)
+                return TranslatedBlock(decls, stmts)
             self._translate_stmt(stmt, decls, stmts, return_type)
         return TranslatedBlock(decls, stmts)
+
+    @staticmethod
+    def _is_guarded_early_return(stmt: frog_ast.Statement) -> bool:
+        """True for ``if (g) { ...; return X; }`` with no ``else`` clause."""
+        return (
+            isinstance(stmt, frog_ast.IfStatement)
+            and len(stmt.conditions) == 1
+            and not stmt.has_else_block()
+            and len(stmt.blocks) == 1
+            and bool(stmt.blocks[0].statements)
+            and isinstance(stmt.blocks[0].statements[-1], frog_ast.ReturnStatement)
+        )
+
+    def _handle_guarded_early_return(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        if_stmt: frog_ast.IfStatement,
+        rest: list[frog_ast.Statement],
+        decls: list[ec_ast.VarDecl],
+        stmts: list[ec_ast.EcStmt],
+        return_type: ec_ast.EcType | None,
+    ) -> None:
+        if return_type is None:
+            raise NotImplementedError(
+                "guarded early return needs the proc return type for the "
+                "result variable"
+            )
+        then_block = list(if_stmt.blocks[0].statements)
+        # Reserve a result name that avoids every hoister-introduced ``_rN`` in
+        # the then-block and the fall-through ``rest`` (translated below), not
+        # just the already-emitted prefix.
+        avoid = _collect_bound_names(then_block) | _collect_bound_names(rest)
+        result = _fresh_name_avoiding(decls, stmts, avoid)
+        decls.append(ec_ast.VarDecl(result, return_type))
+
+        then_stmts: list[ec_ast.EcStmt] = []
+        for s in then_block[:-1]:
+            self._translate_stmt(s, decls, then_stmts, return_type)
+        self._lower_return_to(result, then_block[-1], decls, then_stmts)
+
+        else_stmts: list[ec_ast.EcStmt] = []
+        for s in rest[:-1]:
+            self._translate_stmt(s, decls, else_stmts, return_type)
+        self._lower_return_to(result, rest[-1], decls, else_stmts)
+
+        guard = self._exprs.translate(if_stmt.conditions[0])
+        stmts.append(ec_ast.If(guard, then_stmts, else_stmts))
+        stmts.append(ec_ast.Return(result))
+
+    def _lower_return_to(
+        self,
+        result: str,
+        ret_stmt: frog_ast.Statement,
+        decls: list[ec_ast.VarDecl],
+        out_stmts: list[ec_ast.EcStmt],
+    ) -> None:
+        """Render ``return X`` as an assignment ``result <- X`` / ``result <@ X``."""
+        assert isinstance(ret_stmt, frog_ast.ReturnStatement)
+        expr = ret_stmt.expression
+        if _is_module_call(expr):
+            assert isinstance(expr, frog_ast.FuncCall)
+            callee = self._render_module_call_target(expr.func)
+            args = self._render_call_args(expr, decls, out_stmts)
+            out_stmts.append(ec_ast.Call(result, callee, args))
+            return
+        out_stmts.append(ec_ast.Assign(result, self._exprs.translate(expr)))
 
     def _translate_stmt(
         self,
@@ -231,7 +316,19 @@ class StatementTranslator:
 
 def _fresh_name(decls: list[ec_ast.VarDecl], stmts: list[ec_ast.EcStmt]) -> str:
     """Return a var name not used by any decl or stmt in the current block."""
-    used = {d.name for d in decls}
+    return _fresh_name_avoiding(decls, stmts, set())
+
+
+def _fresh_name_avoiding(
+    decls: list[ec_ast.VarDecl], stmts: list[ec_ast.EcStmt], avoid: set[str]
+) -> str:
+    """Like :func:`_fresh_name` but also avoids the names in ``avoid``.
+
+    Used when a fresh name must dodge identifiers that are not yet emitted as
+    EC statements -- e.g. hoister-introduced ``_rN`` locals still living in the
+    untranslated fall-through of a guarded early return.
+    """
+    used = {d.name for d in decls} | set(avoid)
     for s in stmts:
         if isinstance(s, (ec_ast.Assign, ec_ast.Sample, ec_ast.Call)):
             used.add(s.var)
@@ -241,6 +338,21 @@ def _fresh_name(decls: list[ec_ast.VarDecl], stmts: list[ec_ast.EcStmt]) -> str:
         if candidate not in used:
             return candidate
         i += 1
+
+
+def _collect_bound_names(frog_stmts: list[frog_ast.Statement]) -> set[str]:
+    """Names bound by decls/assignments/samples in ``frog_stmts`` (recursive)."""
+    names: set[str] = set()
+    for s in frog_stmts:
+        if isinstance(s, frog_ast.VariableDeclaration):
+            names.add(s.name)
+        elif isinstance(s, (frog_ast.Assignment, frog_ast.Sample)):
+            if isinstance(s.var, frog_ast.Variable):
+                names.add(s.var.name)
+        elif isinstance(s, frog_ast.IfStatement):
+            for blk in s.blocks:
+                names |= _collect_bound_names(list(blk.statements))
+    return names
 
 
 def _require_variable(expr: frog_ast.Expression) -> frog_ast.Variable:

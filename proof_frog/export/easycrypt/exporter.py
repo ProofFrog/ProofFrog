@@ -2557,6 +2557,42 @@ def export_proof_file(proof_path: str) -> str:
         )
         return bool(helper and any(f.name == field for f in helper.fields))
 
+    def _reduction_holds_any_field(reduction_name: str) -> bool:
+        """True when the named reduction declares any field of its own (so its
+        ``Initialize`` stores into its own globals). Name-independent companion
+        to :func:`_reduction_holds_field` -- used by the init-peel pre-gate,
+        which must not depend on guessing a single live-field name when the
+        reduction holds only a subset of the game's live fields."""
+        helper = next(
+            (
+                h
+                for h in proof.helpers
+                if isinstance(h, frog_ast.Reduction) and h.name == reduction_name
+            ),
+            None,
+        )
+        return bool(helper and helper.fields)
+
+    def _field_read_post_init(game: frog_ast.Game, field_name: str) -> bool:
+        """True when a NON-``Initialize`` method of ``game`` references
+        ``field_name``.
+
+        Distinguishes a live forwarded field (read by some post-init oracle, e.g.
+        a binding game's ``ek`` read by ``Challenge``) from a dead one (the
+        ``Unbreakable`` variant's constant-``false`` ``Challenge`` reads no ek).
+        ``Initialize`` is excluded: it only sets the field and returns the public
+        value (coupled via ``={res}``), so an init-only field need not ride the
+        state coupling."""
+        for method in game.methods:
+            if method.signature.name.lower() == "initialize":
+                continue
+            search: visitors.SearchVisitor[frog_ast.Variable] = visitors.SearchVisitor(
+                lambda n: isinstance(n, frog_ast.Variable) and n.name == field_name
+            )
+            if search.visit(method.block) is not None:
+                return True
+        return False
+
     def _reduction_init_delegates(reduction_name: str) -> bool:
         """True when the named reduction's ``Initialize`` delegates to its inner
         challenger's ``Initialize`` (``C.Initialize()``).
@@ -2700,6 +2736,41 @@ def export_proof_file(proof_path: str) -> str:
                 conj.append(
                     f"{red_base}.{ec_f}{{{red_side}}} = {chal_base}.{ec_f}{{{red_side}}}"
                 )
+            # Forwarded live fields: a game live field the reduction does NOT hold
+            # (the reduction forwards the oracle reading it to the inner challenger
+            # -- e.g. a PK binding game holds ek0/ek1 that its ``Challenge`` reads,
+            # but the reduction holds only the decaps keys and delegates
+            # ``Challenge`` to the challenger). These never touch the reduction's
+            # own globals, so they couple across the game<->challenger seam
+            # directly (``HON.ek0{1} = LEAK.ek0{2}``). Omitting them leaves the flat
+            # bridge's ek coupling underivable from Theta (the transitivity glue's
+            # ``smt`` cannot prove the ek equality). Empty when the reduction holds
+            # every game field (the CT case), so single-decaps proofs stay
+            # byte-identical.
+            #
+            # Restricted to fields a POST-INIT oracle actually reads: on the
+            # ``Unbreakable`` side of a binding hop the ``Challenge`` is
+            # constant-``false`` and reads no ek, so ek is dead there -- coupling it
+            # would be both unnecessary AND unprovable (the per-oracle decaps chain
+            # drops the dead ek field mid-chain, so the transitivity cannot thread
+            # its equality). Including it only where live keeps the ek coupling on
+            # the ``Breakable`` side (where ``Challenge`` reads ek) and out of the
+            # ``Unbreakable`` side.
+            # pylint: disable=protected-access
+            other_game = engine._get_game_ast(other_step.challenger, None)
+            chal_game = engine._get_game_ast(red_step.challenger, None)
+            # pylint: enable=protected-access
+            held = set(fields)
+            chal_fields = {f.name for f in chal_game.fields}
+            for fld in (f.name for f in other_game.fields):
+                if fld in held or fld not in chal_fields:
+                    continue
+                if not _field_read_post_init(other_game, fld):
+                    continue
+                ec_f = mt._ec_field_name(fld)  # pylint: disable=protected-access
+                conj.append(
+                    f"{other_base}.{ec_f}{{{other_side}}} = {chal_base}.{ec_f}{{{red_side}}}"
+                )
             body = " /\\ ".join(conj)
             return f"{glob_invariant_conj} /\\ {body}" if glob_invariant_conj else body
         field = pt.live_state_coupling(_live_state_ref(step_a), _live_state_ref(step_b))
@@ -2758,15 +2829,24 @@ def export_proof_file(proof_path: str) -> str:
             # pylint: disable=import-outside-toplevel
             from .chain_emitter import emit_multi_oracle_chain_for_hop
 
-            # A reduction step that HOLDS the live field itself repacks the
-            # challenger's ``Initialize`` tuple result into its own globals,
-            # which ``sim`` cannot align -- the init backbone peel is needed
-            # there (a stateless delegate returns the challenger's result
-            # directly and keeps ``sim``). See ``_synth_init_backbone_peel``.
-            init_live_field = _live_state_field_name()
+            # A reduction step that HOLDS its own live fields AND delegates its
+            # ``Initialize`` to the inner challenger repacks the challenger's
+            # tuple result into those globals, which ``sim`` cannot align -- the
+            # init backbone peel is needed there (a stateless delegate returns
+            # the challenger's result directly and keeps ``sim``). This is a
+            # coarse pre-gate: the precise repack fingerprint (``_has_tuple_repack``
+            # / ``_same_det_structure``) discriminates inside
+            # ``_synth_init_backbone_peel``, so a self-keygen field-holder
+            # (``R_MultiPRF``, which does not delegate) still keeps ``sim``. The
+            # gate mirrors ``_composite_reduction_step``'s own condition
+            # (delegates + holds fields) so it is name-independent -- unlike a
+            # single guessed live-field name, which misfires when the reduction
+            # holds only a subset of the game's fields (a PK game holds ek+dk but
+            # its reduction holds only dk).
             init_reduction_repacks = any(
                 s.reduction is not None
-                and _reduction_holds_field(s.reduction.name, init_live_field)
+                and _reduction_init_delegates(s.reduction.name)
+                and _reduction_holds_any_field(s.reduction.name)
                 for s in (step_a, step_b)
             )
 

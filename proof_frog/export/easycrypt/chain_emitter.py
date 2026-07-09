@@ -1717,14 +1717,83 @@ def _chain_role_map(
             find(f)
     for r, s in survivor.items():
         union(r, s)
-    # Positional-rename unions along each side's adjacency (same-cardinality only).
+    # Cross-adjacency field correspondence (a same-cardinality alpha-rename /
+    # reorder step). Prefer a DATA-FLOW match -- pair two fields that each side's
+    # ``initialize`` assigns from the identical source expression (``v1[1]``) -- so a
+    # canonical rename that also REORDERS the field declarations (e.g. decaps keys
+    # sorted before encaps keys) still corresponds fields by role, not by
+    # declaration slot. A positional zip mispairs such a reorder by TYPE (an
+    # EncapsKey field to a DecapsKey field -> EC "no matching operator `='": the PK
+    # role-map field-type wall). Fall back to the positional zip only when the
+    # data-flow match is not a complete unambiguous bijection -- so with field order
+    # preserved (the common case) the two agree and every working chain is
+    # byte-identical.
     for states in (left_states, right_states):
         for before, after in zip(states, states[1:]):
             fb, fa = fields_of(before), fields_of(after)
-            if len(fb) == len(fa):
-                for x, y in zip(fb, fa):
-                    union(x, y)
+            if len(fb) != len(fa):
+                continue
+            pairs = _dataflow_field_pairs(before, after, fb, fa)
+            for x, y in pairs if pairs is not None else zip(fb, fa):
+                union(x, y)
     return {name: find(name) for name in parent}
+
+
+def _init_source_map(game: frog_ast.Game) -> dict[str, str]:
+    """Map each field to the string form of its defining ``initialize`` RHS.
+
+    A data-flow fingerprint used to correspond fields across an adjacent
+    same-cardinality flat-state pair: two fields that ``initialize`` assigns from
+    the *same* source expression hold the same value, so they share a role even when
+    a canonicalization step renamed AND reordered the field declarations (where a
+    positional zip would mispair them). Keyed by the EC field name; last write wins
+    (matches EC's final-value semantics). The source strings are stable across a
+    field-only rename/reorder step (they name locals + projections, not the renamed
+    fields), so identical strings denote identical values.
+    """
+    # pylint: disable=protected-access
+    field_ec = {f.name: mt._ec_field_name(f.name) for f in game.fields}
+    init = next(
+        (m for m in game.methods if m.signature.name.lower() == "initialize"),
+        None,
+    )
+    out: dict[str, str] = {}
+    if init is None:
+        return out
+    for stmt in init.block.statements:
+        if (
+            isinstance(stmt, frog_ast.Assignment)
+            and isinstance(stmt.var, frog_ast.Variable)
+            and stmt.var.name in field_ec
+        ):
+            out[field_ec[stmt.var.name]] = str(stmt.value)
+    return out
+
+
+def _dataflow_field_pairs(
+    before: frog_ast.Game,
+    after: frog_ast.Game,
+    fb: list[str],
+    fa: list[str],
+) -> list[tuple[str, str]] | None:
+    """Correspond ``before``'s fields to ``after``'s by their ``initialize`` source.
+
+    Returns a ``[(before_field, after_field)]`` bijection when the two states'
+    field-defining source expressions form a complete, unambiguous match (every
+    field on both sides is defined, its source is unique on its side, and the two
+    source sets are equal); otherwise ``None`` (the caller falls back to the
+    positional zip). Complete + unique guarantees the pairing is exact: identical
+    source expression => identical value, so a matched pair genuinely shares a role.
+    """
+    sb, sa = _init_source_map(before), _init_source_map(after)
+    if len(sb) != len(fb) or len(sa) != len(fa):
+        return None
+    if len(set(sb.values())) != len(fb) or len(set(sa.values())) != len(fa):
+        return None
+    if set(sb.values()) != set(sa.values()):
+        return None
+    by_source_after = {src: name for name, src in sa.items()}
+    return [(f, by_source_after[sb[f]]) for f in fb]
 
 
 def _make_field_aware_coupling(

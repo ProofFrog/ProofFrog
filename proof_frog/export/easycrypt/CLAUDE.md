@@ -462,8 +462,34 @@ Key modules:
   `F.evaluate` challenge (result used), so that oracle keeps its cached det-finisher tactic and
   stays byte-identical. Verified: `generic_ct` (LEAK⇒HON_BIND_K_CT) EC-compiles **clean, 0
   admits** — the first CFRG binding proof to reach clean EC. Tripwire:
-  `ec_templates/dead_call_drop.ec` (both drop directions + the rename). The PK sibling now also
-  exports 0-admit but still hits the pre-existing wall-4 PK role-map field-type mispairing.
+  `ec_templates/dead_call_drop.ec` (both drop directions + the rename).
+- **Subset-field composite reduction (`generic_pk` = LEAK⇒HON_BIND_K_PK)** — the wall-7 composite
+  machinery assumed the reduction holds *every* live field of the game; a PK binding game holds
+  ek0/ek1 (read by `Challenge`) AND dk0/dk1, but its decaps-only reduction `R` holds only the
+  decaps keys and forwards `Challenge` to the challenger. Four coordinated fixes take it to clean:
+  1. **Data-flow field correspondence** (`chain_emitter._chain_role_map` + `_init_source_map` +
+     `_dataflow_field_pairs`). A same-cardinality canonicalization step that RENAMES *and* REORDERS
+     the field declarations (PK sorts DecapsKeys ahead of EncapsKeys → `field1..4`) breaks the old
+     positional-zip role union, which pairs an EncapsKey field with a DecapsKey field → EC "no
+     matching operator `=`". Correspond adjacent-state fields by their `initialize` **source
+     expression** (`v1[1]` — stable across a field-only rename) when it forms a complete bijection;
+     fall back to the positional zip otherwise, so order-preserving renames stay byte-identical.
+  2. **Name-independent init-repack gate** (`exporter._reduction_holds_any_field`, replacing a
+     single guessed live-field name). The init backbone peel must fire when the reduction delegates
+     its `Initialize` AND holds any own field; the old name-guess fell back to `fields[0]` (an
+     EncapsKey R doesn't hold) when the game's `Initialize` returns a tuple, so the peel never fired.
+  3. **Forwarded-field Θ** (`exporter._live_state_coupling`). A live field the reduction does NOT
+     hold (ek, forwarded to the inner challenger) couples across the game↔challenger seam directly
+     (`HON.ek0{1}=LEAK.ek0{2}`), so the flat-bridge ek coupling is derivable from Θ.
+  4. **Post-init live-restriction** (`exporter._field_read_post_init`). Couple a forwarded field
+     only where a post-init oracle reads it: ek is live on the Breakable side (`Challenge` reads
+     `ek0!=ek1`) but dead on the Unbreakable side (`Challenge` → `false`). Coupling dead ek is both
+     unnecessary and *unprovable* — Remove-Redundant-Variables drops the dead ek field mid-chain,
+     so the transitivity can't thread its equality. (A `challenger_`-prefix role union was tried and
+     reverted — it injected un-threadable ek into the Unbreakable decaps chain.)
+  All four are byte-identical for clean proofs (role map only consulted for cardinality-differing /
+  composite couplings; the exporter gates only widen where a subset-field reduction delegates).
+  Verified: `generic_pk` EC-compiles **clean, 0 admits** — the second CFRG binding proof clean.
 - `proof_translator.py`, `module_translator.py`, `expr_translator.py`,
   `stmt_translator.py`, `type_collector.py`, `scheme_instances.py`,
   `ec_ast.py` — FrogLang→EC translation primitives.

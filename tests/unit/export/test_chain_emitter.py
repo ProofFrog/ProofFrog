@@ -13,9 +13,12 @@ from proof_frog import frog_ast
 from proof_frog.export.easycrypt import ec_ast
 from proof_frog.export.easycrypt.chain_emitter import (
     _all_calls_dead,
+    _chain_role_map,
+    _dataflow_field_pairs,
     _dead_sample_drop_plan,
     _ec_perm_swaps,
     _has_tuple_repack,
+    _init_source_map,
     _is_tuple_literal,
     _make_field_aware_coupling,
     _same_det_structure,
@@ -502,3 +505,109 @@ def test_all_calls_dead_substring_not_a_false_match() -> None:
         ec_ast.Return("k0 = k1"),
     ]
     assert _all_calls_dead(body) is True
+
+
+# --- Data-flow field correspondence in the chain role map ------------------
+# A same-cardinality canonicalization step that RENAMES and REORDERS a state's
+# fields (e.g. a PK binding game where the canonicalizer sorts decaps keys ahead
+# of encaps keys) must correspond fields by their ``initialize`` source, not by
+# declaration slot -- a positional zip mispairs them by type. See the PK
+# role-map field-type wall in the wall-4 plan.
+
+
+def _state_with_init(
+    fields: list[tuple[str, str]], assigns: list[tuple[str, str]]
+) -> frog_ast.Game:
+    """A flat-state ``Game``: ``fields`` = ``(name, type_name)``; ``assigns`` =
+    ``(field_name, source_var)`` becoming ``initialize`` body statements."""
+    decl = [frog_ast.Field(_var(ty), name, None) for name, ty in fields]
+    body = [frog_ast.Assignment(None, _var(f), _var(src)) for f, src in assigns]
+    sig = frog_ast.MethodSignature("initialize", _var("C"), [])
+    method = frog_ast.Method(sig, frog_ast.Block(body))
+    return frog_ast.Game(("S", [], decl, [method]))
+
+
+# state_4: (ek0,ek1,dk0,dk1) sourced a,c,b,d ; state_5 reorders + renames the
+# declarations to (field1,field2,field3,field4) but sources them the same.
+_STATE_BEFORE = _state_with_init(
+    [("ek0", "Enc"), ("ek1", "Enc"), ("dk0", "Dec"), ("dk1", "Dec")],
+    [("ek0", "src_a"), ("dk0", "src_b"), ("ek1", "src_c"), ("dk1", "src_d")],
+)
+_STATE_AFTER = _state_with_init(
+    [("field1", "Dec"), ("field2", "Dec"), ("field3", "Enc"), ("field4", "Enc")],
+    [("field3", "src_a"), ("field1", "src_b"), ("field4", "src_c"), ("field2", "src_d")],
+)
+
+
+def test_init_source_map_reads_field_rhs() -> None:
+    assert _init_source_map(_STATE_BEFORE) == {
+        "ek0": "src_a",
+        "dk0": "src_b",
+        "ek1": "src_c",
+        "dk1": "src_d",
+    }
+
+
+def test_dataflow_pairs_correspond_by_source_not_position() -> None:
+    """The reorder pairs ek0<->field3 (both src_a) etc., NOT ek0<->field1."""
+    pairs = _dataflow_field_pairs(
+        _STATE_BEFORE,
+        _STATE_AFTER,
+        ["ek0", "ek1", "dk0", "dk1"],
+        ["field1", "field2", "field3", "field4"],
+    )
+    assert pairs == [
+        ("ek0", "field3"),
+        ("ek1", "field4"),
+        ("dk0", "field1"),
+        ("dk1", "field2"),
+    ]
+
+
+def test_dataflow_pairs_decline_on_incomplete_source_map() -> None:
+    """A field with no ``initialize`` assignment leaves the match incomplete, so
+    the caller falls back to the positional zip (return None)."""
+    after = _state_with_init(
+        [("field1", "Dec"), ("field2", "Dec")],
+        [("field1", "src_b")],  # field2 undefined
+    )
+    assert (
+        _dataflow_field_pairs(
+            _state_with_init(
+                [("dk0", "Dec"), ("dk1", "Dec")],
+                [("dk0", "src_b"), ("dk1", "src_d")],
+            ),
+            after,
+            ["dk0", "dk1"],
+            ["field1", "field2"],
+        )
+        is None
+    )
+
+
+def test_role_map_unions_reordered_rename_by_dataflow() -> None:
+    """The reordered rename shares a role by data-flow: ek0's role == field3's
+    (both src_a), so a cross-card coupling pairs them by TYPE-consistent role."""
+    roles = _chain_role_map([_STATE_BEFORE, _STATE_AFTER], [], {})
+    assert roles["ek0"] == roles["field3"]
+    assert roles["ek1"] == roles["field4"]
+    assert roles["dk0"] == roles["field1"]
+    assert roles["dk1"] == roles["field2"]
+    # And a DIFFERENT-role pair is NOT unioned (ek0 an Enc, field1 a Dec).
+    assert roles["ek0"] != roles["field1"]
+
+
+def test_role_map_order_preserved_matches_positional() -> None:
+    """When the rename preserves field order, data-flow and positional agree, so
+    the role map is unchanged (byte-identity for the common case)."""
+    before = _state_with_init(
+        [("dk0", "Dec"), ("dk1", "Dec")],
+        [("dk0", "src_a"), ("dk1", "src_b")],
+    )
+    after = _state_with_init(
+        [("field1", "Dec"), ("field2", "Dec")],
+        [("field1", "src_a"), ("field2", "src_b")],
+    )
+    roles = _chain_role_map([before, after], [], {})
+    assert roles["dk0"] == roles["field1"]
+    assert roles["dk1"] == roles["field2"]

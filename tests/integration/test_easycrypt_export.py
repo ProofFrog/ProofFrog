@@ -1730,6 +1730,9 @@ DEAD_CALL_DROP_TEMPLATE = EC_TEMPLATES / "dead_call_drop.ec"
 DECOMPOSITION_COUPLING_TEMPLATE = EC_TEMPLATES / "decomposition_coupling.ec"
 TWO_KEM_INIT_REORDER_TEMPLATE = EC_TEMPLATES / "two_kem_init_reorder.ec"
 BINDING_CHALLENGE_CASESPLIT_TEMPLATE = EC_TEMPLATES / "binding_challenge_casesplit.ec"
+BINDING_CHALLENGE_REORDER_CASESPLIT_TEMPLATE = (
+    EC_TEMPLATES / "binding_challenge_reorder_casesplit.ec"
+)
 
 
 @pytest.mark.skipif(
@@ -1995,6 +1998,43 @@ def test_binding_challenge_casesplit_template_compiles(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="EasyCrypt Docker image not available",
+)
+def test_binding_challenge_reorder_casesplit_template_compiles(tmp_path: Path) -> None:
+    """Regression tripwire for the FAITHFUL challenge case-split elimination --
+    the shape the concrete expanded-LEAK binding proofs actually export, beyond
+    the simplified ``binding_challenge_casesplit.ec``. It adds the two real
+    complications: (1) a REORDERED deterministic backbone (the game computes both
+    component decapsulations then both encodings; the reduction interleaves them
+    -- a cross-abstract-module reorder), and (2) per-branch call structure (the
+    game applies the KDF unconditionally, the reduction only in the else branch;
+    KEM_PQ.decaps only in the if branch). It pins that, once every abstract call
+    is functionalized to its deterministic op (the real export does this via the
+    ``_det`` phoare axioms), ``wp`` collapses BOTH the reorder (order-agnostic for
+    pure assignments) AND the case-split (branch -> conditional post), ``skip =>
+    /`` discharges the else-branch, and ``smt`` closes the if-branch from
+    concat/slice injectivity (``mk_kdf_inj``), EncodeSharedSecret injectivity
+    (``encss_pq_inj`` = the ``_inj`` axiom) and the hybrid ct-inequality. No
+    manual ``swap`` or ``case`` tactic is needed. If this stops compiling, the
+    challenge-chain synthesizer's post-functionalization target must be
+    re-derived."""
+    ec_file = tmp_path / "binding_challenge_reorder_casesplit.ec"
+    ec_file.write_text(BINDING_CHALLENGE_REORDER_CASESPLIT_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the faithful binding-challenge reorder+case-split "
+        f"template.\nstderr:\n{result.stderr}\nstdout:\n{result.stdout[-2000:]}"
+    )
+
+
 def test_export_two_kem_leak_init_swap_aligns_backbone() -> None:
     """A two-KEM framework (``CK`` = ``KEM_PQ`` + ``KEM_T``) runs the SAME
     keygen multiset on both init endpoints but in a DIFFERENT ORDER: the game
@@ -2044,7 +2084,10 @@ def test_export_consume_pk_with_computation_ck() -> None:
     adv = output.split("module R_PQ_Bind_Adv", 1)[1].split("}.", 1)[0]
     # Consumes pk; never re-runs the reduction's own Initialize.
     assert "_tup <- pk;" in adv
-    assert "R_PQ_Bind(KEM_PQ, KEM_T, H, L, CK_expanded(KEM_PQ, KEM_T, G, H, L), C).initialize()" not in adv
+    assert (
+        "R_PQ_Bind(KEM_PQ, KEM_T, H, L, CK_expanded(KEM_PQ, KEM_T, G, H, L), C).initialize()"
+        not in adv
+    )
     # Keeps its own T-component keygens and qualifies the packed field read.
     assert "KEM_T.keygen();" in adv
     assert "R_PQ_Bind.ek_T_0" in adv

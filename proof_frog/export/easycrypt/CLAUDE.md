@@ -490,6 +490,24 @@ Key modules:
   All four are byte-identical for clean proofs (role map only consulted for cardinality-differing /
   composite couplings; the exporter gates only widen where a subset-field reduction delegates).
   Verified: `generic_pk` EC-compiles **clean, 0 admits** — the second CFRG binding proof clean.
+- **Binding challenge case-split synthesizer** (`binding_challenge.py` + `chain_emitter.
+  _challenge_casesplit_route` + exporter val-lemma/inj emission): eliminates the two-KEM binding reduction's
+  `Challenge` case-split (forward a KDF-input collision to the inner KEM binding challenger, else recompute
+  the game boolean). The route (fired in `_emit_one_oracle_chain` after the `is_init` block, declines to
+  `None` for every non-matching oracle) derives a `ChallengeHopSpec` from the flat-state game+reduction ASTs
+  + the wrapper exprs, and `binding_challenge.challenge_tactic` emits: game `exists*`+`<Scheme>_decaps_val`
+  functionalization, `seq 0 <prefix_len>` with the packed-key decomposition-coupling invariant, reduction-
+  prefix functionalization (per-call `<M>_<m>_det`), `case` on the collision guard, collision branch
+  (`inline{2}` the challenger, functionalize its decaps, slice-peel the KDF concat with `slice_concat_left_*`,
+  collapse via the requested `<M>_<m>_inj` axiom), no-collision branch (functionalize the two `H.evaluate`).
+  The `<Scheme>_decaps_val` phoare lemma is synthesized by symbolic-evaluating the concrete scheme's
+  translated `decaps` proc (`decaps_val_lemma`) and emitted into `det_axiom_decls`. Both game and reduction
+  flat states are pre-inlined, so packed key fields come from `left_state0.fields` and the challenger from the
+  wrapper's last arg. Requests thread via new `MultiOracleHopChainInfo.inj_methods`/`decaps_val_schemes` →
+  `inj_method_requests`/`decaps_val_requests`. Gated tightly (only fires on the game~case-split-reduction
+  shape), so every other proof is byte-identical. Verified: `CK_expanded_LEAK_BIND_K_CT` `hop_0_challenge`
+  fires `synth-param` and ec_compiles OK (hop_2/hop_4 still admit). Tripwire:
+  `ec_templates/binding_challenge_2kem_packed.ec`.
 - `proof_translator.py`, `module_translator.py`, `expr_translator.py`,
   `stmt_translator.py`, `type_collector.py`, `scheme_instances.py`,
   `ec_ast.py` — FrogLang→EC translation primitives.

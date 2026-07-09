@@ -18,12 +18,14 @@ from __future__ import annotations
 import copy
 import re
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Callable
 
 from ... import frog_ast
 from ...transforms._base import TransformApplication
 from ...visitors import VariableCollectionVisitor
+from . import binding_challenge as bch
 from . import ec_ast
 from . import module_translator as mt
 from . import type_collector as tc
@@ -1561,6 +1563,13 @@ class MultiOracleHopChainInfo:
     extra_decls: list[str]
     tactic_body_by_oracle: dict[str, list[str]]
     pres_methods: set[tuple[str, str]] = field(default_factory=set)
+    # (module, method) joint-injectivity axioms the challenge case-split route
+    # requests (mirrors ``pres_methods``); consumed by ``inj_method_requests``.
+    inj_methods: set[tuple[str, str]] = field(default_factory=set)
+    # Concrete scheme names whose ``<Scheme>_decaps_val`` phoare lemma the
+    # challenge route references; the exporter synthesizes them into section
+    # scope from the scheme's translated ``decaps`` proc.
+    decaps_val_schemes: set[str] = field(default_factory=set)
 
 
 def _glob_coupling(left_ref: str, right_ref: str) -> str:
@@ -2474,6 +2483,7 @@ def emit_multi_oracle_chain_for_hop(
     det_methods: dict[str, set[str]] | None = None,
     init_reduction_repacks: bool = False,
     init_decomposition: bool = False,
+    clone_alias: dict[str, str] | None = None,
 ) -> MultiOracleHopChainInfo:
     """Emit the per-oracle per-transform chains for one multi-oracle hop.
 
@@ -2534,6 +2544,8 @@ def emit_multi_oracle_chain_for_hop(
     bridge_tactic = "proc; inline *; ((sp; wp; sim) || sim)"
     tactic_body_by_oracle: dict[str, list[str]] = {}
     pres_methods: set[tuple[str, str]] = set()
+    inj_methods: set[tuple[str, str]] = set()
+    decaps_val_schemes: set[str] = set()
     for oracle_name, is_init in oracles:
         eq_args = oracle_eq_args.get(oracle_name, "true")
         oracle_chunks, outer_body, oracle_pres = _emit_one_oracle_chain(
@@ -2558,6 +2570,9 @@ def emit_multi_oracle_chain_for_hop(
             det_methods=det_methods or {},
             init_repacks=init_reduction_repacks,
             init_decomposition=init_decomposition,
+            clone_alias=clone_alias or {},
+            inj_acc=inj_methods,
+            decaps_val_acc=decaps_val_schemes,
         )
         chunks.extend(oracle_chunks)
         tactic_body_by_oracle[oracle_name] = outer_body
@@ -2567,6 +2582,8 @@ def emit_multi_oracle_chain_for_hop(
         extra_decls=chunks,
         tactic_body_by_oracle=tactic_body_by_oracle,
         pres_methods=pres_methods,
+        inj_methods=inj_methods,
+        decaps_val_schemes=decaps_val_schemes,
     )
 
 
@@ -2593,6 +2610,9 @@ def _emit_one_oracle_chain(
     det_methods: dict[str, set[str]],
     init_repacks: bool = False,
     init_decomposition: bool = False,
+    clone_alias: dict[str, str] | None = None,
+    inj_acc: set[tuple[str, str]] | None = None,
+    decaps_val_acc: set[str] | None = None,
 ) -> tuple[list[str], list[str], set[tuple[str, str]]]:
     """Emit one oracle's chain artifacts + outer tactic body.
 
@@ -2651,6 +2671,32 @@ def _emit_one_oracle_chain(
             # deterministic method): the peel does not apply. Emit a targeted,
             # honest admit rather than a silently-failing ``sim``.
             return [], _init_backbone_admit(hop_index, oracle_name), set()
+
+    # CFRG binding challenge case-split: the reduction's ``Challenge`` forwards a
+    # KDF-input collision to an inner KEM binding challenger and otherwise
+    # recomputes the game boolean; :func:`_challenge_casesplit_route` eliminates
+    # the split via encoding injectivity (fully AST-driven; declines to ``None``
+    # for every non-matching oracle so all other proofs stay byte-identical).
+    if not is_init and clone_alias:
+        route = _challenge_casesplit_route(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            left_wrapper_expr,
+            right_wrapper_expr,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            clone_alias,
+        )
+        if route is not None:
+            outer_body, inj_req, val_scheme = route
+            if inj_acc is not None:
+                inj_acc.add(inj_req)
+            if decaps_val_acc is not None:
+                decaps_val_acc.add(val_scheme)
+            return [], outer_body, set()
 
     # Field-aware coupling: identical-state hops keep the whole-glob equality
     # (byte-identical for clean proofs); a hop whose two sides differ in glob
@@ -3297,6 +3343,281 @@ def _render_flat_state(  # pylint: disable=too-many-arguments,too-many-positiona
         emit_state_vars=emit_state_vars,
     )
     return "\n".join(_render_module_decl(ec_module))
+
+
+def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    left_wrapper_expr: str,
+    right_wrapper_expr: str,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    clone_alias: dict[str, str],
+) -> tuple[list[str], tuple[str, str], str] | None:
+    """Derive the two-KEM binding challenge-elimination tactic for one hop.
+
+    Returns ``(outer_body, (pq_module, "encodesharedsecret"), scheme_name)`` --
+    the tactic plus the injectivity-axiom request and the ``<scheme>_decaps_val``
+    scheme name -- or ``None`` when the hop is not a game~case-split-reduction
+    challenge (every other oracle/proof then stays byte-identical).
+    """
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+    lmod = _flat_state_module(
+        modules,
+        "Chal_L",
+        lproj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    rmod = _flat_state_module(
+        modules,
+        "Chal_R",
+        rproj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    if not lmod.procs or not rmod.procs:
+        return None
+    game_proc, red_proc = lmod.procs[0], rmod.procs[0]
+    # Left = the game (decaps + boolean, no case-split); right = the reduction
+    # whose trailing ``if`` forwards a KDF-input collision to an inner KEM
+    # binding challenger. In the flat state the challenger's ``Challenge`` is
+    # already inlined, so the then-branch is that challenger's decaps calls (all
+    # of the PQ KEM); the outer hop lemma still relates the un-inlined wrappers,
+    # so the tactic ``inline{2} 1``s the wrapper's ``Challenger.challenge``.
+    if any(isinstance(s, ec_ast.If) for s in game_proc.body):
+        return None
+    red_if = next((s for s in red_proc.body if isinstance(s, ec_ast.If)), None)
+    if red_if is None:
+        return None
+
+    # -- module roles --------------------------------------------------------
+    game_args = _top_level_args(left_wrapper_expr)
+    right_args = _top_level_args(right_wrapper_expr)
+    if not game_args or not right_args:
+        return None
+    scheme_expr = game_args[0]
+    scheme_name = _ref_base(scheme_expr)
+    scheme_params = _top_level_args(scheme_expr)
+    challenger_ref = _ref_base(right_args[-1])
+    pq_clone = challenger_ref.split(".", 1)[0]
+    clone_to_mod = {c: m for m, c in clone_alias.items()}
+    pq_module = clone_to_mod.get(pq_clone)
+    if pq_module is None:
+        return None
+    # then-branch = the inlined PQ binding challenger (decaps of ``pq_module``).
+    then_calls = [s for s in red_if.then_body if isinstance(s, ec_ast.Call)]
+    if not then_calls or not all(c.callee == f"{pq_module}.decaps" for c in then_calls):
+        return None
+
+    prefix = [s for s in red_proc.body if not isinstance(s, ec_ast.If)]
+    groups = _kdf_groups(prefix)
+    if len(groups) != 2:
+        return None
+    shape = _concat_shape_from(prefix, groups[0], clone_alias, pq_module)
+    if shape is None:
+        return None
+    t_module = shape.ev_decaps_t.split(".", 1)[0]
+    t_module = clone_to_mod.get(t_module, t_module)
+    grp = [f for f in (_group_fields(g, pq_module) for g in groups) if f is not None]
+    if len(grp) != 2:
+        return None
+
+    # non-challenger callees, prefix-then-else, first appearance
+    red_glob_mods = _callee_mods(prefix, clone_alias)
+    else_mods = _callee_mods(red_if.else_body, clone_alias)
+    game_glob_mods = red_glob_mods + [m for m in else_mods if m not in red_glob_mods]
+    h_module = next(
+        (
+            s.callee.split(".", 1)[0]
+            for s in red_if.else_body
+            if isinstance(s, ec_ast.Call) and s.callee.endswith(".evaluate")
+        ),
+        None,
+    )
+    if h_module is None:
+        return None
+
+    # -- couplings & refs ----------------------------------------------------
+    game_base = _ref_base(left_wrapper_expr)
+    red_base = _ref_base(right_wrapper_expr)
+    # The game's packed decaps-key fields (``dk0``/``dk1``) are its own state --
+    # NOT read off the challenge body, whose scheme ``decaps`` is inlined in the
+    # flat state (the outer lemma relates the un-inlined wrappers, which hold the
+    # packed keys the ``<Scheme>_decaps_val`` lemma consumes).
+    # pylint: disable-next=protected-access
+    key_fields = [mt._ec_field_name(f.name) for f in left_state0.fields]
+    if len(key_fields) != 2:
+        return None
+    game_key_refs = [f"{game_base}.{k}" for k in key_fields]
+    chal_key_fields = key_fields  # binding challenger shares the dk0/dk1 shape
+    decomp = [
+        f"{game_key_refs[i]}"
+        "{1}"
+        f" = ({red_base}.{grp[i][0]}, {red_base}.{grp[i][1]}, {red_base}.{grp[i][2]})"
+        "{2}"
+        for i in range(2)
+    ]
+    challenger_coupling = [
+        f"{red_base}.{grp[i][0]}"
+        "{2}"
+        f" = {challenger_ref}.{chal_key_fields[i]}"
+        "{2}"
+        for i in range(2)
+    ]
+    extra_sync = [m for m in scheme_params if m not in game_glob_mods]
+
+    spec = bch.ChallengeHopSpec(
+        val_lemma_name=f"{scheme_name}_decaps_val",
+        game_glob_mods=game_glob_mods,
+        game_key_refs=game_key_refs,
+        ct_params=[p.name for p in game_proc.params],
+        red_base=red_base,
+        red_glob_mods=red_glob_mods,
+        red_component_fields=grp,
+        clone_alias=clone_alias,
+        decomp_coupling=decomp,
+        challenger_coupling=challenger_coupling,
+        extra_glob_sync_mods=extra_sync,
+        challenger_ref=challenger_ref,
+        challenger_key_fields=chal_key_fields,
+        pq_module=pq_module,
+        inj_axiom=f"{pq_module}_encodesharedsecret_inj",
+        h_module=h_module,
+        shape=shape,
+        red_proc=red_proc,
+    )
+    del t_module  # role check only
+    body = bch.challenge_tactic(spec)
+    if body is None:
+        return None
+    return (
+        [_res_tag(SYNTH_PARAM), *body[1:]],
+        (pq_module, "encodesharedsecret"),
+        scheme_name,
+    )
+
+
+def _kdf_groups(prefix: Sequence[ec_ast.EcStmt]) -> list[list[ec_ast.Call]]:
+    """Split a reduction-challenge prefix into per-KDF-input call groups (each
+    group ends at a ``kdf_in_*`` assignment)."""
+    groups: list[list[ec_ast.Call]] = []
+    cur: list[ec_ast.Call] = []
+    for stmt in prefix:
+        if isinstance(stmt, ec_ast.Call):
+            cur.append(stmt)
+        elif isinstance(stmt, ec_ast.Assign) and stmt.var.startswith("kdf_in"):
+            groups.append(cur)
+            cur = []
+    return groups
+
+
+def _callee_mods(
+    stmts: Sequence[ec_ast.EcStmt], clone_alias: dict[str, str]
+) -> list[str]:
+    """Distinct callee modules (in ``clone_alias``) in first-appearance order."""
+    out: list[str] = []
+    for stmt in stmts:
+        if isinstance(stmt, ec_ast.Call):
+            mod = stmt.callee.split(".", 1)[0]
+            if mod in clone_alias and mod not in out:
+                out.append(mod)
+    return out
+
+
+def _group_fields(group: list[ec_ast.Call], pq_module: str) -> list[str] | None:
+    """The ``[pq_dk, t_dk, ek]`` field names read off one KDF-input call group."""
+    pq_dk = t_dk = ek = None
+    for call in group:
+        mod, _, method = call.callee.partition(".")
+        args = call.args.split(",")
+        if method == "decaps":
+            if mod == pq_module:
+                pq_dk = args[0].strip()
+            else:
+                t_dk = args[0].strip()
+        elif method == "encodeencapskey":
+            ek = args[0].strip()
+    if pq_dk is None or t_dk is None or ek is None:
+        return None
+    return [pq_dk, t_dk, ek]
+
+
+def _game_key_fields(game_proc: ec_ast.Proc) -> list[str]:
+    """The game's two decaps-key field names, read off its ``decaps`` calls."""
+    out: list[str] = []
+    for stmt in game_proc.body:
+        if isinstance(stmt, ec_ast.Call) and stmt.callee.endswith(".decaps"):
+            out.append(stmt.args.split(",")[0].strip())
+    return out
+
+
+def _concat_shape_from(
+    prefix: Sequence[ec_ast.EcStmt],
+    group0: list[ec_ast.Call],
+    clone_alias: dict[str, str],
+    pq_module: str,
+) -> bch.ConcatShape | None:
+    """Build the :class:`ConcatShape` from the first KDF-input assignment's
+    concat ops + the group-0 component call roles."""
+    kdf0 = next(
+        (
+            s
+            for s in prefix
+            if isinstance(s, ec_ast.Assign) and s.var.startswith("kdf_in")
+        ),
+        None,
+    )
+    if kdf0 is None:
+        return None
+    concat_ops = re.findall(r"concat_[A-Za-z0-9_]+", kdf0.rhs)
+    if len(concat_ops) != 4:
+        return None
+    roles: dict[str, str] = {}
+    for call in group0:
+        mod, _, method = call.callee.partition(".")
+        if mod not in clone_alias:
+            return None
+        ev = f"{clone_alias[mod]}.ev_{method}"
+        is_pq = mod == pq_module
+        key = {
+            "decaps": "decaps_pq" if is_pq else "decaps_t",
+            "encodesharedsecret": "encss_pq" if is_pq else "encss_t",
+            "encodeciphertext": "encct_t",
+            "encodeencapskey": "encek_t",
+            "get": "label",
+        }.get(method)
+        if key is not None:
+            roles[key] = ev
+    needed = {
+        "decaps_pq",
+        "encss_pq",
+        "decaps_t",
+        "encss_t",
+        "encct_t",
+        "encek_t",
+        "label",
+    }
+    if not needed <= set(roles):
+        return None
+    return bch.ConcatShape(
+        concat_ops=concat_ops,
+        ev_decaps_pq=roles["decaps_pq"],
+        ev_encss_pq=roles["encss_pq"],
+        ev_decaps_t=roles["decaps_t"],
+        ev_encss_t=roles["encss_t"],
+        ev_encct_t=roles["encct_t"],
+        ev_encek_t=roles["encek_t"],
+        ev_label=roles["label"],
+    )
 
 
 # ---------------------------------------------------------------------------

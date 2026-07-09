@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from . import binding_challenge as bch
 from . import canonical_form
 from . import ec_ast
 from . import module_translator as mt
@@ -1119,6 +1120,12 @@ def export_proof_file(proof_path: str) -> str:
         det_methods_by_module[_inst.let_name] = {
             m.name.lower() for m in _prim.methods if m.deterministic
         }
+    # let-name -> ``ev_<m>`` clone prefix (``KEM_PQ`` -> ``KEM_PQ_c``): the
+    # namespace of a declared module's functional ops, for the binding challenge
+    # case-split synthesizer.
+    clone_alias_by_module: dict[str, str] = {
+        _inst.let_name: _inst.clone_alias for _inst in instances
+    }
 
     # Each game file's primitive is the type name of its first parameter
     # (e.g. ``Game Real(SymEnc E)`` → ``"SymEnc"``). Game files associated
@@ -2196,6 +2203,11 @@ def export_proof_file(proof_path: str) -> str:
     # into ``a = b``). The exporter emits one ``<M>_<m>_inj`` axiom per pair in
     # section scope. Empty for proofs with no such tactic, so they are untouched.
     inj_method_requests: set[tuple[str, str]] = set()
+    # Concrete scheme names whose ``<Scheme>_decaps_val`` functional-value phoare
+    # lemma the binding challenge case-split tactic references; the exporter
+    # synthesizes each from the scheme's translated ``decaps`` proc. Empty for
+    # proofs with no such tactic, so they are untouched.
+    decaps_val_requests: set[str] = set()
     # Per-hop precondition/postcondition overrides emitted by the chain
     # when its artifacts use strengthened specs (``={glob E1, ...}``) in
     # multi-module proofs. The outer ``hop_<i>`` lemma must use the same
@@ -3186,9 +3198,12 @@ def export_proof_file(proof_path: str) -> str:
                 det_methods=det_methods_by_module,
                 init_reduction_repacks=init_reduction_repacks,
                 init_decomposition=init_decomposition,
+                clone_alias=clone_alias_by_module,
             )
             chain_extra_decls.extend(info.extra_decls)
             pres_method_requests.update(info.pres_methods)
+            inj_method_requests.update(info.inj_methods)
+            decaps_val_requests.update(info.decaps_val_schemes)
             multi_oracle_hop_cache[_i] = info.tactic_body_by_oracle
             multi_oracle_game_keys[_i] = (
                 canonical_form.canonical_text(
@@ -4028,6 +4043,27 @@ def export_proof_file(proof_path: str) -> str:
         if det_axioms
         else []
     )
+    # ``<Scheme>_decaps_val`` functional-value phoare lemmas requested by the
+    # binding challenge case-split tactic (synthesized from the concrete scheme's
+    # translated ``decaps`` proc; sits after the ``_det`` axioms it peels with and
+    # before every hop lemma that ``call``s it).
+    if decaps_val_requests and ec_scheme is not None:
+        _decaps_proc = next((p for p in ec_scheme.procs if p.name == "decaps"), None)
+        if _decaps_proc is not None and ec_scheme.name in decaps_val_requests:
+            _scheme_expr = (
+                f"{ec_scheme.name}(" + ", ".join(p.name for p in ec_scheme.params) + ")"
+            )
+            _vl = bch.decaps_val_lemma(
+                f"{ec_scheme.name}_decaps_val",
+                _scheme_expr,
+                _decaps_proc,
+                clone_alias_by_module,
+            )
+            if _vl is not None:
+                det_axiom_decls += [
+                    _section_header("Functional-value spec (decaps)"),
+                    "\n".join(_vl[0]),
+                ]
     if stateless_axioms:
         det_axiom_decls += [
             _section_header("Statelessness specs"),

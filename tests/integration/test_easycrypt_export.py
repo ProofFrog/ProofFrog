@@ -1981,6 +1981,36 @@ def test_export_two_kem_leak_init_swap_aligns_backbone() -> None:
     assert "call (_: true)." in hop4
 
 
+def test_export_consume_pk_with_computation_ck() -> None:
+    """The CFRG two-KEM reduction ``R_PQ_Bind`` forwards the KEM_PQ challenger's
+    ``Initialize`` (the leaked ``pk``) AND does its own ``KEM_T.keygen`` for the
+    T components -- a *consume-pk-with-computation* shape. Lifted to the
+    assumption adversary, ``R_PQ_Bind_Adv.distinguish`` must CONSUME ``pk``
+    (never re-run the reduction's ``Initialize``, which would re-call
+    ``challenger.Initialize`` -> EC "invalid module application" + double-init)
+    while still running its own ``KEM_T.keygen``. This pins:
+      * the adversary consumes ``pk`` (``_tup <- pk``) instead of re-initializing;
+      * it keeps its own ``KEM_T.keygen()`` calls;
+      * field READS in the pack resolve to the reduction's globals
+        (``R_PQ_Bind.ek_T_0``), not bare locals;
+      * the hop_1_pr backbone-peel bridge is sized to the FULL init backbone
+        (2 challenger ``KEM_PQ.keygen`` + 2 reduction ``KEM_T.keygen`` = 4
+        ``call (_: true)``), not just the challenger's 2.
+    A wrong rendering/peel yields an EC reject (never a false accept), but this
+    catches the regression at export time."""
+    output = exporter.export_proof_file(str(CK_EXPANDED_LEAK_CT_PROOF))
+    adv = output.split("module R_PQ_Bind_Adv", 1)[1].split("}.", 1)[0]
+    # Consumes pk; never re-runs the reduction's own Initialize.
+    assert "_tup <- pk;" in adv
+    assert "R_PQ_Bind(KEM_PQ, KEM_T, H, L, CK_expanded(KEM_PQ, KEM_T, G, H, L), C).initialize()" not in adv
+    # Keeps its own T-component keygens and qualifies the packed field read.
+    assert "KEM_T.keygen();" in adv
+    assert "R_PQ_Bind.ek_T_0" in adv
+    # The hop_1_pr consume-pk bridge peels the full 4-call backbone.
+    hop1 = output.split("lemma hop_1_pr", 1)[1].split("qed.", 1)[0]
+    assert hop1.count("wp; call (_: true);") >= 4
+
+
 @pytest.mark.skipif(
     not _docker_available(),
     reason="Docker is not available; cannot run EasyCrypt.",

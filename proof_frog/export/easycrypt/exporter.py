@@ -3499,7 +3499,18 @@ def export_proof_file(proof_path: str) -> str:
                     multi_oracle=_pr_multi_oracle_for(step_a, step_b),
                     adv_state_restrictions=live_state_modules or None,
                     consume_pk_bridge=consume_pk_bridge,
-                    consume_pk_peel_count=mt.init_module_call_count(gf_a.games[0]),
+                    # Peel the FULL init backbone: the challenger's own init
+                    # calls PLUS the reduction's own calls (CFRG ``R_PQ_Bind``'s
+                    # ``KEM_T.keygen`` for the T components). Zero own-calls for a
+                    # pure forward+repack reduction (Generic), so byte-identical.
+                    consume_pk_peel_count=(
+                        mt.init_module_call_count(gf_a.games[0])
+                        + (
+                            mt.reduction_own_init_call_count(reduction_helper)
+                            if reduction_helper is not None
+                            else 0
+                        )
+                    ),
                     consume_pk_reduction_glob=_ec_ident(reduction_name),
                     consume_pk_scheme_glob=pt.module_base_name(assumption_scheme_expr),
                     consume_pk_left_challenger_glob=f"{hop_clone}.{gf_a_id}_{left_side}",

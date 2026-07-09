@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass
 from typing import Callable
 
@@ -150,28 +151,89 @@ def reduction_repacks_challenger_init(reduction: frog_ast.Reduction) -> bool:
     challenger). See :meth:`ModuleTranslator._render_consumed_pk_init` and the
     matching backbone-peel bridge tactic in ``proof_translator``.
 
-    Gated to the exact shape ``_render_consumed_pk_init`` handles: the reduction
-    holds field state, its ``Initialize`` is not a pure forward, and the body's
-    **only** module call -- counting nested calls in tuple/argument position --
-    is the single ``challenger.Initialize()`` (every other statement is
-    deterministic tuple plumbing). A reduction whose ``Initialize`` makes any
-    additional abstract call (e.g. KEMPRF's ``R_KEM``, which applies
-    ``F.evaluate`` while repacking) or holds no field state is left to the
-    re-init path, so its export stays byte-identical.
+    Gated to the shape ``_render_consumed_pk_init`` handles: the reduction holds
+    field state, its ``Initialize`` is not a pure forward, exactly one top-level
+    module call is ``challenger.Initialize()``, and **every** module call is
+    top-level (no call nested in argument/tuple position). Every other top-level
+    statement is either deterministic plumbing, a ``<$`` sample, or an abstract
+    call the reduction makes on its OWN behalf (a *consume-pk-with-computation*
+    shape -- e.g. the CFRG ``R_PQ_Bind``, which forwards the KEM_PQ challenger's
+    ``Initialize`` **and** does its own ``KEM_T.keygen`` for the T components):
+    those the consumed-init rendering keeps verbatim, and the backbone-peel
+    bridge sizes to the reduction's full init backbone (challenger calls + the
+    reduction's own calls/samples), not just the challenger's.
+
+    A reduction whose ``Initialize`` makes a call NESTED in an expression (e.g.
+    KEMPRF's ``R_KEM``, which applies ``F.evaluate`` while repacking, or the CFRG
+    ``R_PQ_Bind`` over a *NominalGroup*, whose ``ek_T <- NG.Exp(NG.Generator(),
+    dk_T)`` nests ``NG.Generator()``) is left to the re-init path -- the consumed
+    rendering seeds types on the un-hoisted body and cannot type a nested
+    ``FuncCall`` -- so its export stays byte-identical (nested-call hoisting is a
+    separate, deferred extension). A reduction that holds no field state or does
+    not delegate ``challenger.Initialize`` is likewise left to the re-init path.
     """
     init = _reduction_init_method(reduction)
     if init is None or not reduction.fields:
         return False
     if _is_pure_forward_init(init):
         return False
-    if _count_module_calls(init.block) != 1:
-        return False
     top_calls = [
         call
         for stmt in init.block.statements
         if (call := _statement_module_call(stmt)) is not None
     ]
-    return len(top_calls) == 1 and _is_challenger_init_call(top_calls[0])
+    # Reject any call NESTED in an expression (recursive count exceeds the
+    # top-level count) -- ``_render_consumed_pk_init`` cannot type a nested
+    # ``FuncCall`` (no hoisting). This keeps KEMPRF's ``R_KEM`` (``F.evaluate``
+    # in the return tuple) and the NominalGroup ``R_PQ_Bind`` (nested
+    # ``NG.Generator()``) on the re-init path.
+    if _count_module_calls(init.block) != len(top_calls):
+        return False
+    # Reject a reduction that draws its OWN ``<$`` sample in ``Initialize``: the
+    # backbone-peel bridge is call-only (``wp; call (_: true)`` per backbone
+    # event), so a sample would need an ``rnd`` the current peel cannot emit. The
+    # seedbased CFRG reductions (own seed samples) stay on the re-init path until
+    # the peel is made sample-aware; Generic (no own backbone) and CK/UK expanded
+    # ``R_PQ_Bind`` (own ``KEM_T.keygen`` calls, no samples) are unaffected.
+    if any(isinstance(stmt, frog_ast.Sample) for stmt in init.block.statements):
+        return False
+    challenger_calls = [c for c in top_calls if _is_challenger_init_call(c)]
+    if len(challenger_calls) != 1:
+        return False
+    # The single ``challenger.Initialize()`` must be captured by an ASSIGNMENT
+    # (``[...] = challenger.Initialize()``): that is the forward+repack shape
+    # ``_render_consumed_pk_init`` rewrites to ``[...] <- pk``. A reduction that
+    # calls ``challenger.Initialize()`` as a BARE statement (for side effects,
+    # storing nothing -- the multi-oracle INDCCA reductions of GHP18 /
+    # StarHunters) is not a repack the consumed rendering can rewrite, so it stays
+    # on the re-init path (which re-runs ``Initialize`` and works regardless of
+    # the reduction's internal shape).
+    return any(
+        isinstance(stmt, frog_ast.Assignment) and _is_challenger_init_call(stmt.value)
+        for stmt in init.block.statements
+    )
+
+
+def reduction_own_init_call_count(reduction: frog_ast.Reduction) -> int:
+    """Number of top-level module calls the reduction's ``Initialize`` makes on
+    its OWN behalf -- every top-level ``E.method(...)`` call except the single
+    ``challenger.Initialize()`` it forwards.
+
+    Sizes the extra portion of the consume-pk backbone peel: after ``inline *``
+    the assumption-adversary byequiv runs the challenger's own init calls
+    (:func:`init_module_call_count` of the assumption game) PLUS these
+    reduction-own calls (e.g. the CFRG ``R_PQ_Bind``'s two ``KEM_T.keygen``),
+    all of which the peel must couple. Zero for a pure forward+repack reduction
+    (the Generic ``LEAK=>HON`` ``R``), so its peel count is byte-identical."""
+    init = _reduction_init_method(reduction)
+    if init is None:
+        return 0
+    top_calls = [
+        call
+        for stmt in init.block.statements
+        if (call := _statement_module_call(stmt)) is not None
+    ]
+    return sum(1 for c in top_calls if not _is_challenger_init_call(c))
 
 
 @dataclass
@@ -1091,13 +1153,33 @@ class ModuleTranslator:
         stmts = stmt_translator.StatementTranslator(self._types, exprs)
         translated = stmts.translate_block(frog_ast.Block(new_stmts))
 
-        # The reduction's own field writes render as bare ``<field> <- ...``
-        # (the statement translator has no owning module); qualify them with the
-        # reduction's module name so the write targets ``<R>``'s global from the
-        # adversary wrapper.
+        # The reduction's own field writes/reads render as bare ``<field>`` (the
+        # statement translator has no owning module); qualify them with the
+        # reduction's module name so they target ``<R>``'s globals from the
+        # adversary wrapper. WRITES qualify the LHS ``st.var``; READS qualify
+        # whole-word field occurrences in RHS/args -- a consume-pk-with-
+        # computation reduction (CFRG ``R_PQ_Bind``) keygens its own component
+        # fields and then packs them (``ek0 <- (ek_PQ_0, ek_T_0)`` reads the
+        # field ``ek_T_0``), so the read must resolve to ``R.ek_T_0`` too. A pure
+        # forward+repack reduction (the Generic ``LEAK=>HON`` ``R``) packs only
+        # the consumed ``pk`` projections and holds no own-computed field it
+        # re-reads, so its RHS has no field token and stays byte-identical.
+        def _qualify_reads(text: str) -> str:
+            for fname in field_names:
+                text = re.sub(
+                    rf"(?<!\.)\b{re.escape(fname)}\b",
+                    f"{reduction.name}.{_ec_field_name(fname)}",
+                    text,
+                )
+            return text
+
         for st in translated.stmts:
             if isinstance(st, (ec_ast.Assign, ec_ast.Call)) and st.var in field_names:
                 st.var = f"{reduction.name}.{_ec_field_name(st.var)}"
+            if isinstance(st, ec_ast.Assign):
+                st.rhs = _qualify_reads(st.rhs)
+            elif isinstance(st, ec_ast.Call):
+                st.args = _qualify_reads(st.args)
         return translated.var_decls, translated.stmts
 
     def translate_game_wrapper(  # pylint: disable=too-many-arguments,too-many-positional-arguments

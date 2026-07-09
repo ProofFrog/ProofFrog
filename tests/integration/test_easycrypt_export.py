@@ -1740,6 +1740,9 @@ BINDING_CHALLENGE_2KEM_PACKED_TEMPLATE = (
 BINDING_CHALLENGE_HOP2_CASESPLIT_TEMPLATE = (
     EC_TEMPLATES / "binding_challenge_hop2_casesplit.ec"
 )
+BINDING_CHALLENGE_HOP4_FALSEFALSE_TEMPLATE = (
+    EC_TEMPLATES / "binding_challenge_hop4_falsefalse.ec"
+)
 
 
 @pytest.mark.skipif(
@@ -2139,6 +2142,38 @@ def test_binding_challenge_hop2_casesplit_template_compiles(tmp_path: Path) -> N
     )
     assert result.returncode == 0, (
         f"EasyCrypt rejected the hop_2 binding-challenge case-split template.\n"
+        f"stderr:\n{result.stderr}\nstdout:\n{result.stdout[-2000:]}"
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_binding_challenge_hop4_falsefalse_template_compiles(tmp_path: Path) -> None:
+    """The hop_4 challenge shape: ``R_KDF o Unbreakable ~
+    Hybrid_Unbreakable(CK_expanded)`` where BOTH sides return ``false`` (the KDF
+    Unbreakable challenger's ``challenge`` returns false, inlined in R_KDF's else;
+    the Hybrid Unbreakable game runs two concrete-scheme decapsulations then
+    returns false). Simpler than hop_2 (no injectivity), but a distinct shape: the
+    RHS is a game with concrete-scheme ``decaps`` calls, functionalized via the
+    same ``Sch_decaps_val`` val-lemma used for hop_0. Tactic: ``seq 16 2`` off BOTH
+    dead prefixes (LHS 16-stmt flat prefix, RHS 2 game decaps) under the trivial
+    invariant, then ``case (ct0 = ct1)`` -- ``rcondt`` collapses the LHS to
+    ``r <- false``; ``rcondf`` + ``inline{1}`` expands the Unbreakable challenger
+    to ``false`` -- both sides ``false``. If this stops compiling, the hop_4
+    challenge synthesizer's target tactic must be re-derived."""
+    ec_file = tmp_path / "binding_challenge_hop4_falsefalse.ec"
+    ec_file.write_text(BINDING_CHALLENGE_HOP4_FALSEFALSE_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the hop_4 binding-challenge false/false template.\n"
         f"stderr:\n{result.stderr}\nstdout:\n{result.stdout[-2000:]}"
     )
 

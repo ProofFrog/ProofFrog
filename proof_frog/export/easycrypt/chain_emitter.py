@@ -2201,6 +2201,7 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
     flat_params: list[ec_ast.ModuleParam],
     det_methods: dict[str, set[str]],
     init_repacks: bool = False,
+    init_decomposition: bool = False,
 ) -> tuple[list[str], set[tuple[str, str]], str] | None:
     """Closing tactic for an init-oracle equiv whose two endpoints have
     identical canonical bodies.
@@ -2209,7 +2210,12 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
     field itself and therefore repacks the challenger's ``Initialize`` tuple
     result into its own globals (the case ``sim`` cannot align); it gates the
     keygen/sample-only backbone peel so stateless-delegate reductions keep the
-    byte-identical ``sim``.
+    byte-identical ``sim``. ``init_decomposition`` is True when the hop's
+    coupling is a DECOMPOSITION coupling (a game's packed key = the tuple of a
+    reduction's component fields); it *also* needs the peel, because ``sim``
+    cannot infer the cross-module packed-vs-components equality -- even for a
+    reduction that does its OWN keygens rather than delegating a challenger
+    ``Initialize`` (the ``R_KDF`` side of the CFRG expanded LEAK/HON hops).
 
     Returns ``(tactic, pres_requests, rung)`` -- ``pres_requests`` is the set of
     ``(module, method)`` glob-preservation axioms the tactic references (empty
@@ -2276,7 +2282,7 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
     if [k for k, _ in l_bb] == [k for k, _ in r_bb]:
         if not _has_det_call(l_bb):
             if (
-                init_repacks
+                (init_repacks or init_decomposition)
                 and not _same_det_structure(l_body, r_body)
                 and (_has_tuple_repack(l_body) or _has_tuple_repack(r_body))
             ):
@@ -2305,7 +2311,32 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
                 # delegating a multi-field challenger ``Initialize``
                 # (``KEMPRF_INDCPA hop_5_initialize`` / ``R_MultiPRF``) -- both
                 # of which ``sim`` closes even with a cross-module survivor.
-                tac = ["proc.", "inline *.", *_backbone_peel(l_body), "auto."]
+                #
+                # TWO-KEM alignment: when the two endpoints run the SAME multiset
+                # of abstract keygens but in a DIFFERENT ORDER (the two-KEM CFRG
+                # binding init -- game ``[PQ, T, PQ, T]`` vs reduction
+                # ``[PQ, PQ, T, T]``), the lockstep ``call (_: true)`` peel would
+                # pair ``KEM_PQ.keygen{1}`` with ``KEM_T.keygen{2}`` (EC: "should
+                # be equal"). Reorder side 2's calls to side 1's order with
+                # ``swap{2}`` first; the flat-state exec positions match EC's
+                # post-``inline *`` numbering, so the swaps land correctly. When
+                # the callee orders already agree the aligner returns ``[]`` and
+                # the tactic is byte-identical (Generic / CG single-KEM inits).
+                l_callees = [c for k, c in l_bb if k == "call" and c is not None]
+                r_callees = [c for k, c in r_bb if k == "call" and c is not None]
+                swaps: list[str] = []
+                if l_callees != r_callees:
+                    if any(k == "sample" for k, _ in l_bb) or any(
+                        k == "sample" for k, _ in r_bb
+                    ):
+                        # Sample-interleaved call reorder is not handled here;
+                        # emit an honest admit rather than a mispairing peel.
+                        return None
+                    aligned = _align_call_order_swaps(_exec_stmts(r_body), l_callees, 2)
+                    if aligned is None:
+                        return None
+                    swaps = aligned
+                tac = ["proc.", "inline *.", *swaps, *_backbone_peel(l_body), "auto."]
                 return (tac, set(), SYNTH_PARAM)
             # Identical structure, or a stateless-delegate reduction ``sim``
             # aligns: keep the historical tactic verbatim (byte-identical path
@@ -2442,6 +2473,7 @@ def emit_multi_oracle_chain_for_hop(
     flat_module_params: list[ec_ast.ModuleParam] | None = None,
     det_methods: dict[str, set[str]] | None = None,
     init_reduction_repacks: bool = False,
+    init_decomposition: bool = False,
 ) -> MultiOracleHopChainInfo:
     """Emit the per-oracle per-transform chains for one multi-oracle hop.
 
@@ -2525,6 +2557,7 @@ def emit_multi_oracle_chain_for_hop(
             flat_params=flat_params,
             det_methods=det_methods or {},
             init_repacks=init_reduction_repacks,
+            init_decomposition=init_decomposition,
         )
         chunks.extend(oracle_chunks)
         tactic_body_by_oracle[oracle_name] = outer_body
@@ -2559,6 +2592,7 @@ def _emit_one_oracle_chain(
     flat_params: list[ec_ast.ModuleParam],
     det_methods: dict[str, set[str]],
     init_repacks: bool = False,
+    init_decomposition: bool = False,
 ) -> tuple[list[str], list[str], set[tuple[str, str]]]:
     """Emit one oracle's chain artifacts + outer tactic body.
 
@@ -2608,6 +2642,7 @@ def _emit_one_oracle_chain(
                 flat_params,
                 det_methods,
                 init_repacks=init_repacks,
+                init_decomposition=init_decomposition,
             )
             if peel is not None:
                 tactic, pres, rung = peel
@@ -3518,6 +3553,66 @@ def _ec_full_perm_swaps(
             return None
         swaps.append(f"swap{{1}} {src + 1} {target - src}.")
         cur.insert(target, cur.pop(src))
+    return swaps
+
+
+def _align_call_order_swaps(
+    exec_stmts: list[ec_ast.EcStmt],
+    target_callees: list[str],
+    side: int,
+) -> list[str] | None:
+    """``swap{side}`` tactics reordering ``exec_stmts``' abstract calls so their
+    callee sequence becomes ``target_callees``, leaving every non-call statement
+    in place.
+
+    Used by the init-backbone peel when the two endpoints run the SAME multiset
+    of abstract keygens but in a DIFFERENT ORDER -- the two-KEM CFRG binding
+    init: the game interleaves ``[KEM_PQ, KEM_T, KEM_PQ, KEM_T]`` (hybrid
+    keypair 0 then keypair 1) while the reduction blocks
+    ``[KEM_PQ, KEM_PQ, KEM_T, KEM_T]`` (its inner PQ challenger does both PQ
+    keygens, then it does both T keygens). ``call (_: true)`` couples the two
+    sides' current *last* calls, so it requires them to be the same procedure;
+    aligning the callee order first makes the lockstep peel pair like with like
+    (otherwise EC rejects ``KEM_PQ.keygen`` ~ ``KEM_T.keygen`` -- "should be
+    equal").
+
+    Each move slides a call UP to its target slot (selection sort). A keygen call
+    has no result-reading predecessor, so moving it up only crosses statements
+    that neither read its not-yet-defined result nor are read by it; the move is
+    additionally ``_ec_indep``-validated against every crossed statement (a
+    same-module call, or a genuine data conflict, is rejected -> ``None``). The
+    executable-statement positions of a rendered flat-state body match EC's
+    post-``inline *`` numbering verbatim (validated against ``CK_expanded_LEAK``
+    hop_0_initialize), so the emitted ``swap{side} p k`` land on the intended
+    statements. Returns ``[]`` when the calls are already in ``target_callees``
+    order (the byte-identical same-order path), and ``None`` when the callees are
+    not a permutation of ``target_callees`` or a required move is not
+    independent. Tripwire: ``ec_templates/two_kem_init_reorder.ec``.
+    """
+    stmts = list(exec_stmts)
+    local_vars = _ec_local_vars(stmts)
+
+    def _call_slots() -> list[tuple[int, str]]:
+        return [
+            (i, s.callee) for i, s in enumerate(stmts) if isinstance(s, ec_ast.Call)
+        ]
+
+    if sorted(c for _, c in _call_slots()) != sorted(target_callees):
+        return None
+    swaps: list[str] = []
+    for slot, want in enumerate(target_callees):
+        calls = _call_slots()
+        pos = calls[slot][0]
+        if calls[slot][1] == want:
+            continue
+        src = next((i for i, c in calls[slot + 1 :] if c == want), None)
+        if src is None:
+            return None
+        moving = stmts[src]
+        if not all(_ec_indep(moving, stmts[j], local_vars) for j in range(pos, src)):
+            return None
+        swaps.append(f"swap{{{side}}} {src + 1} {pos - src}.")
+        stmts.insert(pos, stmts.pop(src))
     return swaps
 
 

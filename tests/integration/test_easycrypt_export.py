@@ -132,6 +132,15 @@ CG_EXPANDED_LEAK_CT_PROOF = (
     / "CG"
     / "CG_expanded_LEAK_BIND_K_CT.proof"
 )
+CK_EXPANDED_LEAK_CT_PROOF = (
+    REPO_ROOT
+    / "examples"
+    / "applications"
+    / "cfrg-hybrid-kems"
+    / "proofs"
+    / "CK"
+    / "CK_expanded_LEAK_BIND_K_CT.proof"
+)
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
 DDH_IMPLIES_CDH_PROOF = EXAMPLES / "Proofs" / "Group" / "DDH_implies_CDH.proof"
@@ -1719,6 +1728,7 @@ MULTI_ORACLE_REDUCTION_ADV_TEMPLATE = (
 FIELD_REMOVAL_COUPLING_TEMPLATE = EC_TEMPLATES / "field_removal_coupling.ec"
 DEAD_CALL_DROP_TEMPLATE = EC_TEMPLATES / "dead_call_drop.ec"
 DECOMPOSITION_COUPLING_TEMPLATE = EC_TEMPLATES / "decomposition_coupling.ec"
+TWO_KEM_INIT_REORDER_TEMPLATE = EC_TEMPLATES / "two_kem_init_reorder.ec"
 
 
 @pytest.mark.skipif(
@@ -1868,6 +1878,42 @@ def test_decomposition_coupling_template_compiles(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_two_kem_init_reorder_template_compiles(tmp_path: Path) -> None:
+    """Regression tripwire for the TWO-KEM init-backbone peel ALIGNMENT
+    (``CK``/``UK`` expanded ``LEAK_BIND`` / ``INDCCA`` hop_0/hop_2 init). Both
+    endpoints run the SAME multiset of abstract keygens (``KEM_PQ`` x2,
+    ``KEM_T`` x2) but in a DIFFERENT ORDER: the game interleaves
+    ``[PQ, T, PQ, T]`` (hybrid keypair 0 then keypair 1) while the reduction
+    blocks ``[PQ, PQ, T, T]`` (its inner PQ challenger does both PQ keygens,
+    then it does both T keygens). The lockstep ``call (_: true)`` peel couples
+    the two sides' current *last* calls, so without alignment it pairs
+    ``KEM_PQ.keygen{1}`` with ``KEM_T.keygen{2}`` (EC: "should be equal"). The
+    fix (``chain_emitter._align_call_order_swaps``) ``swap``s one side's calls
+    into the other's order first -- ``KEM_PQ`` and ``KEM_T`` are distinct
+    abstract modules (disjoint ``glob``), so EC accepts reordering their
+    keygens -- then peels the now-aligned backbone and closes with ``auto``. If
+    this stops compiling, the alignment-swap positions or the peel shape must be
+    re-derived before any two-KEM init proof relying on it can be trusted."""
+    ec_file = tmp_path / "two_kem_init_reorder.ec"
+    ec_file.write_text(TWO_KEM_INIT_REORDER_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the two-KEM init-reorder template.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
 def test_export_expanded_leak_emits_decomposition_coupling() -> None:
     """The CFRG concrete-framework expanded-LEAK reductions (``R_PQ_Bind`` /
     ``R_KDF``) DECOMPOSE the theorem game's packed hybrid decaps key
@@ -1905,6 +1951,34 @@ def test_export_expanded_leak_emits_decomposition_coupling() -> None:
     # must be gone entirely.
     assert "Hybrid_c.LEAK_BIND_K_CT_Breakable.dk_PQ_0" not in output
     assert "Hybrid_c.LEAK_BIND_K_CT_Breakable.dk_T_0" not in output
+
+
+def test_export_two_kem_leak_init_swap_aligns_backbone() -> None:
+    """A two-KEM framework (``CK`` = ``KEM_PQ`` + ``KEM_T``) runs the SAME
+    keygen multiset on both init endpoints but in a DIFFERENT ORDER: the game
+    interleaves ``[PQ, T, PQ, T]`` while the reduction blocks ``[PQ, PQ, T, T]``
+    (its inner PQ challenger does both PQ keygens, then it does both T keygens).
+    The lockstep ``call (_: true)`` peel would pair ``KEM_PQ.keygen{1}`` with
+    ``KEM_T.keygen{2}`` (EC "should be equal"), so ``_align_call_order_swaps``
+    prefixes a ``swap{2}`` bringing side 2 into side 1's callee order. This pins
+    that the alignment swap is emitted for the two mismatched init hops
+    (``hop_0_initialize`` game<->R_PQ_Bind, ``hop_2_initialize``
+    R_PQ_Bind<->R_KDF) and that the matching-order hop (``hop_4_initialize``,
+    R_KDF<->game) needs none. A missing/wrong swap would mispair the keygens ->
+    EC reject (never a false accept), but this catches the regression at export
+    time."""
+    output = exporter.export_proof_file(str(CK_EXPANDED_LEAK_CT_PROOF))
+    # The two order-mismatched init hops each carry exactly one alignment swap on
+    # the right program (side 2), before the keygen backbone peel.
+    assert output.count("swap{2}") >= 2
+    # hop_0_initialize's peel closes with the decomposition coupling in scope.
+    hop0 = output.split("lemma hop_0_initialize", 1)[1].split("qed.", 1)[0]
+    assert "swap{2}" in hop0
+    assert "call (_: true)." in hop0
+    # hop_4_initialize (game<->R_KDF, matching order) peels with no swap.
+    hop4 = output.split("lemma hop_4_initialize", 1)[1].split("qed.", 1)[0]
+    assert "swap{" not in hop4
+    assert "call (_: true)." in hop4
 
 
 @pytest.mark.skipif(

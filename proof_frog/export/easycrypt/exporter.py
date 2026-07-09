@@ -3151,6 +3151,16 @@ def export_proof_file(proof_path: str) -> str:
                 and _reduction_holds_any_field(s.reduction.name)
                 for s in (step_a, step_b)
             )
+            # A hop whose coupling is a DECOMPOSITION coupling (game packed key =
+            # tuple of a reduction's component fields) also needs the init
+            # backbone peel, not ``sim`` -- even when the reduction does its OWN
+            # keygens rather than delegating a challenger ``Initialize`` (the
+            # ``R_KDF`` side of the CFRG expanded LEAK/HON hops:
+            # ``init_reduction_repacks`` is False there because it composes the
+            # KDF challenger, not a KEM one, but its packed-key coupling still
+            # relates cross-module component globals ``sim`` cannot infer). None
+            # -> no decomposition coupling -> byte-identical.
+            init_decomposition = _decomposition_coupling(step_a, step_b) is not None
 
             info = emit_multi_oracle_chain_for_hop(
                 hop_index=_i,
@@ -3169,6 +3179,7 @@ def export_proof_file(proof_path: str) -> str:
                 flat_module_params=flat_module_params,
                 det_methods=det_methods_by_module,
                 init_reduction_repacks=init_reduction_repacks,
+                init_decomposition=init_decomposition,
             )
             chain_extra_decls.extend(info.extra_decls)
             pres_method_requests.update(info.pres_methods)

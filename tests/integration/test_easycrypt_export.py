@@ -1734,6 +1734,9 @@ BINDING_CHALLENGE_REORDER_CASESPLIT_TEMPLATE = (
     EC_TEMPLATES / "binding_challenge_reorder_casesplit.ec"
 )
 BINDING_CHALLENGE_VALFN_TEMPLATE = EC_TEMPLATES / "binding_challenge_valfn.ec"
+BINDING_CHALLENGE_2KEM_PACKED_TEMPLATE = (
+    EC_TEMPLATES / "binding_challenge_2kem_packed.ec"
+)
 
 
 @pytest.mark.skipif(
@@ -2071,6 +2074,37 @@ def test_binding_challenge_valfn_template_compiles(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, (
         f"EasyCrypt rejected the complete binding-challenge val-fn template.\n"
+        f"stderr:\n{result.stderr}\nstdout:\n{result.stdout[-2000:]}"
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="EasyCrypt Docker image not available",
+)
+def test_binding_challenge_2kem_packed_template_compiles(tmp_path: Path) -> None:
+    """The FULL 2-KEM PACKED-KEY challenge case-split elimination -- the exact real
+    hop_0 structure (the ``binding_challenge_valfn.ec`` tripwire is single-KEM; this
+    adds the two remaining integration risks: a 4-deep concat over two component
+    KEMs, and a PACKED hybrid key on the game side vs DECOMPOSED component fields on
+    the reduction side with a decomposition-coupling precondition). Pins the exact
+    validated tactic (per-proc ``Sch_decaps_val`` + ``seq`` with the coupling +
+    ``kdfin`` functional invariant + FORWARD prefix functionalization + ``case`` /
+    ``rcondt`` / ``rcondf`` branch, if-branch closing via ``rewrite /kdfin`` +
+    ``smt(slice_concat_left_* )`` -> ``ev_epq_inj`` (the ``_inj`` axiom)). If this
+    stops compiling, the challenge synthesizer's multi-component target must be
+    re-derived."""
+    ec_file = tmp_path / "binding_challenge_2kem_packed.ec"
+    ec_file.write_text(BINDING_CHALLENGE_2KEM_PACKED_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the 2-KEM packed-key binding-challenge template.\n"
         f"stderr:\n{result.stderr}\nstdout:\n{result.stdout[-2000:]}"
     )
 

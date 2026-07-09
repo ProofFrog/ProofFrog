@@ -2011,6 +2011,34 @@ def test_export_consume_pk_with_computation_ck() -> None:
     assert hop1.count("wp; call (_: true);") >= 4
 
 
+def test_export_consume_pk_nested_hoist_and_sample_peel_cg() -> None:
+    """The CFRG NominalGroup reduction ``R_PQ_Bind`` (CG) forwards the KEM_PQ
+    challenger AND computes its own T components with a NESTED module call
+    (``ek_T <- NG.Exp(NG.Generator(), dk_T)``) and two seed ``<$`` samples.
+    Lifted to the assumption adversary it must consume ``pk`` while running its
+    own computation, so the consumed rendering HOISTS the nested
+    ``NG.Generator()`` out of ``NG.Exp`` (EC forbids a call inside an
+    expression) and the hop_1_pr backbone peel becomes event-aware -- ``rnd``
+    per seed sample, ``call (_: true)`` per abstract call. This pins:
+      * the nested call is hoisted (``_r0 <@ NG.generator();`` then
+        ``NG.exp(_r0, ...)`` -- never ``NG.exp(NG.generator(), ...)``);
+      * the reduction's own seed samples render (``seed_T_0 <$``);
+      * the peel couples them with ``wp; rnd;`` (2 seeds) in addition to the
+        abstract calls.
+    A wrong hoist/peel yields an EC reject (never a false accept), but this
+    catches the regression at export time."""
+    output = exporter.export_proof_file(str(CG_EXPANDED_LEAK_CT_PROOF))
+    adv = output.split("module R_PQ_Bind_Adv", 1)[1].split("}.", 1)[0]
+    assert "_tup <- pk;" in adv
+    # Nested NG.Generator() hoisted out of NG.Exp; no call-in-expression left.
+    assert "NG.generator();" in adv
+    assert "NG.exp(NG.generator()" not in adv
+    assert "seed_T_0 <$" in adv
+    # The hop_1_pr peel is event-aware: couples the two seed samples with rnd.
+    hop1 = output.split("lemma hop_1_pr", 1)[1].split("qed.", 1)[0]
+    assert "wp; rnd;" in hop1
+
+
 @pytest.mark.skipif(
     not _docker_available(),
     reason="Docker is not available; cannot run EasyCrypt.",

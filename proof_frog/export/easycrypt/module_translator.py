@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable
 
+from . import canonical_form
 from . import ec_ast
 from . import expr_translator
 from . import oracle_model
@@ -182,21 +183,13 @@ def reduction_repacks_challenger_init(reduction: frog_ast.Reduction) -> bool:
         for stmt in init.block.statements
         if (call := _statement_module_call(stmt)) is not None
     ]
-    # Reject any call NESTED in an expression (recursive count exceeds the
-    # top-level count) -- ``_render_consumed_pk_init`` cannot type a nested
-    # ``FuncCall`` (no hoisting). This keeps KEMPRF's ``R_KEM`` (``F.evaluate``
-    # in the return tuple) and the NominalGroup ``R_PQ_Bind`` (nested
-    # ``NG.Generator()``) on the re-init path.
-    if _count_module_calls(init.block) != len(top_calls):
-        return False
-    # Reject a reduction that draws its OWN ``<$`` sample in ``Initialize``: the
-    # backbone-peel bridge is call-only (``wp; call (_: true)`` per backbone
-    # event), so a sample would need an ``rnd`` the current peel cannot emit. The
-    # seedbased CFRG reductions (own seed samples) stay on the re-init path until
-    # the peel is made sample-aware; Generic (no own backbone) and CK/UK expanded
-    # ``R_PQ_Bind`` (own ``KEM_T.keygen`` calls, no samples) are unaffected.
-    if any(isinstance(stmt, frog_ast.Sample) for stmt in init.block.statements):
-        return False
+    # Nested calls (``ek_T <- NG.Exp(NG.Generator(), dk_T)``) and the reduction's
+    # own ``<$`` samples are BOTH handled: ``_render_consumed_pk_init`` hoists the
+    # nested calls (:func:`canonical_form.hoist_reduction_calls`) before rendering,
+    # and the backbone peel is event-aware (``rnd`` per sample). So no
+    # nested-call / sample rejection here -- the NominalGroup ``R_PQ_Bind`` (nested
+    # ``NG.Generator()`` + seed samples) and the KEMPRF ``R_KEM`` (nested
+    # ``F.evaluate``) now take the consume-pk path too.
     challenger_calls = [c for c in top_calls if _is_challenger_init_call(c)]
     if len(challenger_calls) != 1:
         return False
@@ -214,26 +207,44 @@ def reduction_repacks_challenger_init(reduction: frog_ast.Reduction) -> bool:
     )
 
 
-def reduction_own_init_call_count(reduction: frog_ast.Reduction) -> int:
-    """Number of top-level module calls the reduction's ``Initialize`` makes on
-    its OWN behalf -- every top-level ``E.method(...)`` call except the single
-    ``challenger.Initialize()`` it forwards.
+def consumed_pk_peel_events(
+    reduction: frog_ast.Reduction,
+    challenger_init_call_count: int,
+    challenger_oracle_type: str,
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+) -> list[str]:
+    """The consume-pk backbone-peel events, in PEEL (tail-to-front) order.
 
-    Sizes the extra portion of the consume-pk backbone peel: after ``inline *``
-    the assumption-adversary byequiv runs the challenger's own init calls
-    (:func:`init_module_call_count` of the assumption game) PLUS these
-    reduction-own calls (e.g. the CFRG ``R_PQ_Bind``'s two ``KEM_T.keygen``),
-    all of which the peel must couple. Zero for a pure forward+repack reduction
-    (the Generic ``LEAK=>HON`` ``R``), so its peel count is byte-identical."""
-    init = _reduction_init_method(reduction)
-    if init is None:
-        return 0
-    top_calls = [
-        call
-        for stmt in init.block.statements
-        if (call := _statement_module_call(stmt)) is not None
-    ]
-    return sum(1 for c in top_calls if not _is_challenger_init_call(c))
+    Each entry is ``"call"`` (couple with ``wp; call (_: true)``) or ``"sample"``
+    (couple with ``wp; rnd``). The full init backbone in *program* order is the
+    challenger's own init calls (``challenger_init_call_count`` keygens/samples --
+    here counted as calls, the KEM case) followed by the reduction's OWN
+    backbone read off its *hoisted* ``Initialize`` (nested calls flattened, so a
+    ``NG.Exp(NG.Generator(), dk)`` contributes two calls in ``Generator``-then-
+    ``Exp`` order, and seed ``<$`` draws contribute samples). The peel couples the
+    backbone tail-to-front, so the list is reversed. Byte-compatible with the
+    old call-only count when the reduction has no own samples and no nested calls
+    (Generic: empty own backbone; CK/UK ``R_PQ_Bind``: two own ``KEM_T.keygen``
+    calls)."""
+    hoisted = canonical_form.hoist_reduction_calls(
+        reduction, challenger_oracle_type, method_return_types
+    )
+    init = _reduction_init_method(hoisted)
+    own: list[str] = []
+    if init is not None:
+        for stmt in init.block.statements:
+            if isinstance(stmt, frog_ast.ReturnStatement):
+                continue
+            if isinstance(stmt, frog_ast.Assignment) and _is_challenger_init_call(
+                stmt.value
+            ):
+                continue  # the leaked pk -- its keygens are the challenger's own
+            if isinstance(stmt, frog_ast.Sample):
+                own.append("sample")
+            elif _statement_module_call(stmt) is not None:
+                own.append("call")
+    backbone = ["call"] * challenger_init_call_count + own
+    return list(reversed(backbone))
 
 
 @dataclass
@@ -917,6 +928,7 @@ class ModuleTranslator:
         extra_module_params: list[ec_ast.ModuleParam] | None = None,
         inner_multi_oracle: MultiOracleSpec | None = None,
         outer_multi_oracle: MultiOracleSpec | None = None,
+        method_return_types: dict[tuple[str, str], frog_ast.Type] | None = None,
     ) -> ec_ast.Module:
         """Lift a Reduction into an adversary against the inner game.
 
@@ -1046,6 +1058,8 @@ class ModuleTranslator:
                     reduction,
                     pk_param_name=INIT_RESULT_NAME,
                     pk0_local_name=outer_init_local,
+                    challenger_oracle_type=inner_oracle_type_name,
+                    method_return_types=method_return_types or {},
                 )
                 body.extend(consumed_decls)
                 body.extend(consumed_stmts)
@@ -1092,6 +1106,8 @@ class ModuleTranslator:
         reduction: frog_ast.Reduction,
         pk_param_name: str,
         pk0_local_name: str,
+        challenger_oracle_type: str = "",
+        method_return_types: dict[tuple[str, str], frog_ast.Type] | None = None,
     ) -> tuple[list[ec_ast.VarDecl], list[ec_ast.EcStmt]]:
         """Render the reduction's ``Initialize`` with the challenger's
         ``Initialize()`` result replaced by the leaked ``pk`` parameter.
@@ -1101,10 +1117,21 @@ class ModuleTranslator:
         since the assignment is emitted *outside* the reduction) and (b) bind
         the outer-init result to ``pk0_local_name``. Called only when
         :func:`reduction_repacks_challenger_init` holds, so the body's single
-        module call is exactly ``challenger.Initialize()`` and every other
-        statement is deterministic. The returned decls/stmts are spliced into
-        ``R_Adv.distinguish`` before the ``A(R(...)).distinguish(pk0)`` call.
+        module call is the ``challenger.Initialize()`` (captured by an
+        assignment) plus any calls/samples the reduction makes on its own behalf.
+
+        Nested module calls (``ek_T <- NG.Exp(NG.Generator(), dk_T)``) are hoisted
+        first via :func:`canonical_form.hoist_reduction_calls` -- EC forbids a
+        call inside an expression, and the type-map seeder cannot type a nested
+        ``FuncCall`` -- so the statement translator sees only top-level calls. A
+        reduction with no nested call is unchanged by the hoist. The returned
+        decls/stmts are spliced into ``R_Adv.distinguish`` before the
+        ``A(R(...)).distinguish(pk0)`` call.
         """
+        if method_return_types:
+            reduction = canonical_form.hoist_reduction_calls(
+                reduction, challenger_oracle_type, method_return_types
+            )
         init = _reduction_init_method(reduction)
         assert init is not None
         field_types = {fld.name: fld.type for fld in reduction.fields}

@@ -644,6 +644,7 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     adv_state_restrictions: list[str] | None = None,
     consume_pk_bridge: bool = False,
     consume_pk_peel_count: int = 0,
+    consume_pk_peel_events: list[str] | None = None,
     consume_pk_reduction_glob: str | None = None,
     consume_pk_scheme_glob: str | None = None,
     consume_pk_left_challenger_glob: str | None = None,
@@ -727,7 +728,17 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                 f"={{glob {consume_pk_reduction_glob}, glob {consume_pk_scheme_glob},"
                 f" glob {challenger_glob}}}"
             )
-            peel = " ".join(["wp; call (_: true);"] * consume_pk_peel_count)
+            if consume_pk_peel_events is not None:
+                # Event-aware peel: ``rnd`` a sample, ``call (_: true)`` an
+                # abstract call, in tail-to-front order. Sizes to the reduction's
+                # full init backbone incl. its own seed samples (CFRG NominalGroup
+                # ``R_PQ_Bind``) and its own hoisted keygens.
+                peel = " ".join(
+                    "wp; rnd;" if ev == "sample" else "wp; call (_: true);"
+                    for ev in consume_pk_peel_events
+                )
+            else:
+                peel = " ".join(["wp; call (_: true);"] * consume_pk_peel_count)
             branches = ["proc; sim"] * n_oracles + [f"{peel} skip => /#"]
             selector = " | ".join(branches)
             return (

@@ -556,9 +556,10 @@ def _repack_reduction(
     field and returns a *reduced* tuple (dropping the leaked decaps key), in the
     desugared shape the parser produces (temp assignment + per-element index
     reads). ``extra_compute_call`` adds an ``F.evaluate`` in the return so the
-    repack itself computes with a second abstract call -- the shape the gate must
-    decline (KEMPRF's ``R_KEM``), since ``_render_consumed_pk_init`` does not
-    hoist nested calls.
+    repack itself computes with a second (nested) abstract call -- the KEMPRF
+    ``R_KEM`` shape. The gate now FIRES on it: ``_render_consumed_pk_init`` hoists
+    the nested call before rendering, and the backbone peel is event-aware, so a
+    computing/hoisting repack is handled on the consume-pk path.
     """
     bs = frog_ast.BitStringType(parameterization=frog_ast.Variable("lambda"))
     prod = frog_ast.ProductType([bs, bs])
@@ -618,11 +619,12 @@ def test_reduction_repacks_gate_declines_pure_forward() -> None:
     assert not mt.reduction_repacks_challenger_init(_pure_forward_reduction())
 
 
-def test_reduction_repacks_gate_declines_extra_compute_call() -> None:
-    """KEMPRF's ``R_KEM`` repacks by applying ``F.evaluate`` -- a second abstract
-    call -- so the gate declines it (its export must stay on the re-init path,
-    byte-identical; consume-pk rendering can't hoist the nested call)."""
-    assert not mt.reduction_repacks_challenger_init(
+def test_reduction_repacks_gate_fires_for_extra_compute_call() -> None:
+    """A repack that computes with a second (nested) abstract call -- KEMPRF's
+    ``R_KEM`` applying ``F.evaluate``, or the CFRG NominalGroup ``R_PQ_Bind``'s
+    ``NG.Exp(NG.Generator(), ..)`` -- now FIRES the consume-pk gate: the consumed
+    rendering hoists the nested call and the backbone peel is event-aware."""
+    assert mt.reduction_repacks_challenger_init(
         _repack_reduction(extra_compute_call=True)
     )
 

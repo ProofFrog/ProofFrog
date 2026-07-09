@@ -3269,6 +3269,7 @@ def export_proof_file(proof_path: str) -> str:
                     outer_game_file_name,
                     scheme_args=list(proof.theorem.args),
                 ),
+                method_return_types=method_return_types,
             )
         )
 
@@ -3500,16 +3501,22 @@ def export_proof_file(proof_path: str) -> str:
                     adv_state_restrictions=live_state_modules or None,
                     consume_pk_bridge=consume_pk_bridge,
                     # Peel the FULL init backbone: the challenger's own init
-                    # calls PLUS the reduction's own calls (CFRG ``R_PQ_Bind``'s
-                    # ``KEM_T.keygen`` for the T components). Zero own-calls for a
-                    # pure forward+repack reduction (Generic), so byte-identical.
-                    consume_pk_peel_count=(
-                        mt.init_module_call_count(gf_a.games[0])
-                        + (
-                            mt.reduction_own_init_call_count(reduction_helper)
-                            if reduction_helper is not None
-                            else 0
+                    # calls PLUS the reduction's own backbone (CFRG ``R_PQ_Bind``'s
+                    # ``KEM_T.keygen`` calls and/or NominalGroup seed samples).
+                    # Event-aware so a seed ``<$`` peels with ``rnd``; empty own
+                    # backbone (Generic) reduces to the challenger-only peel.
+                    consume_pk_peel_events=(
+                        mt.consumed_pk_peel_events(
+                            reduction_helper,
+                            mt.init_module_call_count(gf_a.games[0]),
+                            # The ``challenger`` oracle type is irrelevant to the
+                            # OWN-call hoist (only reduction-param modules gate a
+                            # nested-call lift), so pass "".
+                            "",
+                            method_return_types,
                         )
+                        if consume_pk_bridge and reduction_helper is not None
+                        else None
                     ),
                     consume_pk_reduction_glob=_ec_ident(reduction_name),
                     consume_pk_scheme_glob=pt.module_base_name(assumption_scheme_expr),

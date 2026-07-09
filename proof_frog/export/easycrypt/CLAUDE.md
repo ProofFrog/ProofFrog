@@ -420,6 +420,30 @@ Key modules:
   side's first flat state); no `inline`-name prediction. Verified: all four
   `KEMPRF_INDCCA` inits close (`synth-param`; EC compiles through every init to
   the pre-existing `hop_1_pr` reduction-adversary wall).
+- **Consume-pk reduction-adversary (`hop_1_pr` double-init wall)** (`module_translator.
+  _render_consumed_pk_init` + `reduction_repacks_challenger_init` gate; `proof_translator.
+  translate_assumption_hop_pr_lemma` `consume_pk_*` params). A **forward+repack** reduction —
+  `R.Initialize` destructures `challenger.Initialize()`, stores the leaked keys in its own
+  fields, and returns only a *reduced* view (the CFRG generic `LEAK⇒HON_BIND` `R`) — cannot be
+  lifted to the assumption adversary by re-running `R(K,C).initialize()`: the LEAK game already
+  ran `initialize` and passed the full result as `pk`, so re-running re-calls `C.initialize`
+  (EC "invalid module application" — the `{O.challenge}`-restricted adversary may not call
+  `O.initialize`) **and** double-initializes the challenger. `R_Adv.distinguish` instead
+  **consumes** `pk`: it renders `R.Initialize`'s body with the `challenger.Initialize()` call
+  replaced by the `pk` parameter, field writes qualified `R.<field>` (`R.dk0 <- pk.\`2; …`), and
+  the return bound to `pk0`. The matching `hL`/`hR` byequiv bridge replaces `proc; inline *; sim`
+  (which "cannot infer the set of equalities" — both sides run the same challenger-init backbone
+  but differ in deterministic repack plumbing) with a **backbone peel**: `proc; inline*; wp;
+  call (_: ={glob R, glob K, glob <challenger>}); [ proc; sim | … | wp; call (_: true); …;
+  skip => /# ]` — one `proc; sim` per post-init oracle + a peel sized to the inner challenger's
+  init call count (`init_module_call_count`); hL uses the Breakable challenger glob, hR the
+  Unbreakable. **Gate is a recursive** module-call count (`_count_module_calls` via `SearchVisitor`):
+  it fires only when the init holds fields, is not a pure forward, and its ONLY call is
+  `challenger.Initialize` — so KEMPRF's `R_KEM` (whose repack applies `F.evaluate`, a second
+  call `_render_consumed_pk_init` can't hoist) declines and stays byte-identical on the re-init
+  path. Verified: `generic_ct` EC-compiles cleanly at 1 admit (the wall-5 `hop_2_challenge`
+  dead-decaps drop remains). KEMPRF_INDCCA's own `hop_1_pr` is NOT closed by this — its computing
+  repack needs a consume-pk-that-hoists variant (deferred).
 - `proof_translator.py`, `module_translator.py`, `expr_translator.py`,
   `stmt_translator.py`, `type_collector.py`, `scheme_instances.py`,
   `ec_ast.py` — FrogLang→EC translation primitives.

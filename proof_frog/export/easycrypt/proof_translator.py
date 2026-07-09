@@ -642,6 +642,12 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     wrapper_extra_args: list[str] | None = None,
     multi_oracle: MultiOraclePrSpec | None = None,
     adv_state_restrictions: list[str] | None = None,
+    consume_pk_bridge: bool = False,
+    consume_pk_peel_count: int = 0,
+    consume_pk_reduction_glob: str | None = None,
+    consume_pk_scheme_glob: str | None = None,
+    consume_pk_left_challenger_glob: str | None = None,
+    consume_pk_right_challenger_glob: str | None = None,
 ) -> ec_ast.ProbLemma:
     """Emit a ``hop_<i>_pr`` lemma for an assumption hop.
 
@@ -705,19 +711,49 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
         f" <= {eps_ref}"
     )
     if multi_oracle is not None:
-        bridge_close = (
-            f"  by byequiv (_: {multi_oracle.byequiv_pre} ==> ={{res}}) => //; "
-            "proc; inline *; sim."
-        )
+
+        def _consume_pk_bridge_close(challenger_glob: str | None) -> str:
+            # Consume-pk reduction (repacking Initialize): after ``inline *``
+            # the two sides run the same challenger-init backbone but differ in
+            # deterministic repack plumbing, so ``sim`` cannot infer the
+            # cross-named equalities. Couple the abstract adversary under the
+            # shared-state invariant (one ``proc; sim`` obligation per post-init
+            # oracle), then peel the init backbone call-by-call (``wp; call (_:
+            # true)`` per abstract challenger-Initialize call) and close the
+            # deterministic residual with ``skip => /#``. Validated end-to-end on
+            # the ``LEAK_implies_HON_BIND_K_CT`` generic reduction.
+            n_oracles = len(multi_oracle.post_init_oracles)
+            inv = (
+                f"={{glob {consume_pk_reduction_glob}, glob {consume_pk_scheme_glob},"
+                f" glob {challenger_glob}}}"
+            )
+            peel = " ".join(["wp; call (_: true);"] * consume_pk_peel_count)
+            branches = ["proc; sim"] * n_oracles + [f"{peel} skip => /#"]
+            selector = " | ".join(branches)
+            return (
+                f"  by byequiv (_: {multi_oracle.byequiv_pre} ==> ={{res}}) => //;"
+                f" proc; inline *; wp; call (_: {inv}); [ {selector} ]."
+            )
+
+        if consume_pk_bridge:
+            bridge_close_l = _consume_pk_bridge_close(consume_pk_left_challenger_glob)
+            bridge_close_r = _consume_pk_bridge_close(consume_pk_right_challenger_glob)
+        else:
+            shared = (
+                f"  by byequiv (_: {multi_oracle.byequiv_pre} ==> ={{res}}) => //; "
+                "proc; inline *; sim."
+            )
+            bridge_close_l = shared
+            bridge_close_r = shared
         body = [
             f"have hL : Pr[{left_app}.main() @ &m : res]",
             f"        = Pr[{left_wrapper_ref}({scheme_module_expr}, "
             f"{adv_applied}).main() @ &m : res]",
-            bridge_close,
+            bridge_close_l,
             f"have hR : Pr[{right_app}.main() @ &m : res]",
             f"        = Pr[{right_wrapper_ref}({scheme_module_expr}, "
             f"{adv_applied}).main() @ &m : res]",
-            bridge_close,
+            bridge_close_r,
             "rewrite hL hR.",
         ]
     else:

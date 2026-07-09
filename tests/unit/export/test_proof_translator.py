@@ -834,3 +834,72 @@ def test_translate_main_theorem_no_assumption_hops_uses_equality() -> None:
     assert "=" in lemma.statement
     assert "<=" not in lemma.statement
     assert "eps_" not in lemma.statement
+
+
+def test_assumption_hop_pr_lemma_consume_pk_bridge_uses_backbone_peel() -> None:
+    """The consume-pk bridge replaces the ``proc; inline *; sim`` close with a
+    per-side backbone peel: couple the abstract adversary under the shared-state
+    invariant (one ``proc; sim`` per post-init oracle), peel the init backbone
+    (``wp; call (_: true)`` per abstract init call), then ``skip => /#``. hL uses
+    the left challenger's glob, hR the right's.
+    """
+    spec = pt.MultiOraclePrSpec(
+        coupling="(glob L){1} = (glob R){2}",
+        init_oracle="initialize",
+        post_init_oracles=["decaps0", "decaps1", "challenge"],
+        byequiv_pre="={glob A, glob K}",
+    )
+    lemma = pt.translate_assumption_hop_pr_lemma(
+        hop_index=1,
+        adversary_type_name="HON_Adv",
+        scheme_module_expr="K",
+        left_wrapper_name="Game_step_1",
+        right_wrapper_name="Game_step_2",
+        assumption_name="LEAK",
+        reduction_adv_name="R_Adv",
+        left_assumption_wrapper="Game_LEAK_Breakable",
+        right_assumption_wrapper="Game_LEAK_Unbreakable",
+        reverse_direction=False,
+        multi_oracle=spec,
+        consume_pk_bridge=True,
+        consume_pk_peel_count=2,
+        consume_pk_reduction_glob="R",
+        consume_pk_scheme_glob="K",
+        consume_pk_left_challenger_glob="K_c.LEAK_Breakable",
+        consume_pk_right_challenger_glob="K_c.LEAK_Unbreakable",
+    )
+    body = "\n".join(lemma.body)
+    # hL peels under the Breakable challenger; hR under the Unbreakable one.
+    assert "call (_: ={glob R, glob K, glob K_c.LEAK_Breakable})" in body
+    assert "call (_: ={glob R, glob K, glob K_c.LEAK_Unbreakable})" in body
+    # One proc; sim per post-init oracle (3), then a 2-call peel + skip => /#.
+    assert "[ proc; sim | proc; sim | proc; sim |" in body
+    assert "wp; call (_: true); wp; call (_: true); skip => /# ]" in body
+    # The old sim close must be gone on the consume-pk path.
+    assert "proc; inline *; sim." not in body
+
+
+def test_assumption_hop_pr_lemma_default_bridge_keeps_sim_close() -> None:
+    """Without the consume-pk flag the bridge keeps the byte-identical
+    ``proc; inline *; sim`` close (existing multi-oracle proofs unchanged)."""
+    spec = pt.MultiOraclePrSpec(
+        coupling="(glob L){1} = (glob R){2}",
+        init_oracle="initialize",
+        post_init_oracles=["challenge"],
+    )
+    lemma = pt.translate_assumption_hop_pr_lemma(
+        hop_index=1,
+        adversary_type_name="KEM_Adv",
+        scheme_module_expr="K",
+        left_wrapper_name="Game_step_1",
+        right_wrapper_name="Game_step_2",
+        assumption_name="KEM_INDCPA",
+        reduction_adv_name="R_KEM_Adv",
+        left_assumption_wrapper="Game_KEM_Real",
+        right_assumption_wrapper="Game_KEM_Random",
+        reverse_direction=False,
+        multi_oracle=spec,
+    )
+    body = "\n".join(lemma.body)
+    assert "proc; inline *; sim." in body
+    assert "skip => /#" not in body

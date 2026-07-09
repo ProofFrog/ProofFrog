@@ -3065,6 +3065,26 @@ def export_proof_file(proof_path: str) -> str:
                 (assumption_game_file_name, right_side)
             ]
             reverse_direction = left_side == gf_a.games[1].name
+            # Consume-pk bridge: when the reduction's Initialize forwards+repacks
+            # the challenger's Initialize (holding the leaked decaps keys in its
+            # own fields), ``R_Adv.distinguish`` consumes the leaked ``pk``
+            # instead of re-initializing (see
+            # ``module_translator.reduction_repacks_challenger_init``). The
+            # ``hL``/``hR`` byequiv bridges then need the init-backbone-peel
+            # tactic rather than the ``sim`` close.
+            reduction_helper = next(
+                (
+                    h
+                    for h in proof.helpers
+                    if isinstance(h, frog_ast.Reduction) and h.name == reduction_name
+                ),
+                None,
+            )
+            consume_pk_bridge = (
+                reduction_helper is not None
+                and mt.reduction_repacks_challenger_init(reduction_helper)
+            )
+            gf_a_id = _ec_ident(assumption_game_file_name)
             ec_pr_lemmas.append(
                 pt.translate_assumption_hop_pr_lemma(
                     hop_index=i,
@@ -3085,6 +3105,14 @@ def export_proof_file(proof_path: str) -> str:
                     or None,
                     multi_oracle=_pr_multi_oracle_for(step_a, step_b),
                     adv_state_restrictions=live_state_modules or None,
+                    consume_pk_bridge=consume_pk_bridge,
+                    consume_pk_peel_count=mt.init_module_call_count(gf_a.games[0]),
+                    consume_pk_reduction_glob=_ec_ident(reduction_name),
+                    consume_pk_scheme_glob=pt.module_base_name(assumption_scheme_expr),
+                    consume_pk_left_challenger_glob=f"{hop_clone}.{gf_a_id}_{left_side}",
+                    consume_pk_right_challenger_glob=(
+                        f"{hop_clone}.{gf_a_id}_{right_side}"
+                    ),
                 )
             )
         else:

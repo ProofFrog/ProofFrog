@@ -547,6 +547,120 @@ def test_multi_oracle_reduction_adversary_forwards_pk_for_pure_forward_init() ->
     assert "pk0" not in body_str
 
 
+def _repack_reduction(
+    *, with_fields: bool = True, extra_compute_call: bool = False
+) -> frog_ast.Reduction:
+    """A forward+repack reduction like the CFRG generic ``LEAK => HON`` ``R``.
+
+    ``Initialize`` destructures ``challenger.Initialize()`` into a local + a
+    field and returns a *reduced* tuple (dropping the leaked decaps key), in the
+    desugared shape the parser produces (temp assignment + per-element index
+    reads). ``extra_compute_call`` adds an ``F.evaluate`` in the return so the
+    repack itself computes with a second abstract call -- the shape the gate must
+    decline (KEMPRF's ``R_KEM``), since ``_render_consumed_pk_init`` does not
+    hoist nested calls.
+    """
+    bs = frog_ast.BitStringType(parameterization=frog_ast.Variable("lambda"))
+    prod = frog_ast.ProductType([bs, bs])
+    tup = frog_ast.Variable("_tup")
+    init_call = frog_ast.FuncCall(
+        frog_ast.FieldAccess(frog_ast.Variable("challenger"), "Initialize"), []
+    )
+    ret_expr: frog_ast.Expression = frog_ast.Variable("ek0")
+    if extra_compute_call:
+        ret_expr = frog_ast.Tuple(
+            [
+                frog_ast.Variable("ek0"),
+                frog_ast.FuncCall(
+                    frog_ast.FieldAccess(frog_ast.Variable("F"), "evaluate"),
+                    [frog_ast.Variable("dk0")],
+                ),
+            ]
+        )
+    init = frog_ast.Method(
+        frog_ast.MethodSignature("Initialize", bs, []),
+        frog_ast.Block(
+            [
+                frog_ast.Assignment(prod, tup, init_call),
+                frog_ast.Assignment(
+                    bs,
+                    frog_ast.Variable("ek0"),
+                    frog_ast.ArrayAccess(tup, frog_ast.Integer(0)),
+                ),
+                frog_ast.Assignment(
+                    None,
+                    frog_ast.Variable("dk0"),
+                    frog_ast.ArrayAccess(tup, frog_ast.Integer(1)),
+                ),
+                frog_ast.ReturnStatement(ret_expr),
+            ]
+        ),
+    )
+    fields = [frog_ast.Field(bs, "dk0", None)] if with_fields else []
+    game = frog_ast.ParameterizedGame("LEAK", [frog_ast.Variable("K")])
+    return frog_ast.Reduction(
+        ("R", [frog_ast.Parameter(frog_ast.Variable("KEM"), "K")], fields, [init]),
+        game,
+        game,
+    )
+
+
+def test_reduction_repacks_gate_fires_for_forward_repack() -> None:
+    """The consume-pk gate recognises the generic ``LEAK => HON`` reduction: a
+    field-holding forward+repack whose only module call is challenger.Initialize.
+    """
+    assert mt.reduction_repacks_challenger_init(_repack_reduction())
+
+
+def test_reduction_repacks_gate_declines_pure_forward() -> None:
+    """A pure forward (``return challenger.Initialize();``) takes the forward-pk
+    path, not consume-pk."""
+    assert not mt.reduction_repacks_challenger_init(_pure_forward_reduction())
+
+
+def test_reduction_repacks_gate_declines_extra_compute_call() -> None:
+    """KEMPRF's ``R_KEM`` repacks by applying ``F.evaluate`` -- a second abstract
+    call -- so the gate declines it (its export must stay on the re-init path,
+    byte-identical; consume-pk rendering can't hoist the nested call)."""
+    assert not mt.reduction_repacks_challenger_init(
+        _repack_reduction(extra_compute_call=True)
+    )
+
+
+def test_reduction_repacks_gate_declines_when_stateless() -> None:
+    """A reduction with no field state has nothing to reconstruct from ``pk``, so
+    the gate declines (leaving it to the re-init path)."""
+    assert not mt.reduction_repacks_challenger_init(
+        _repack_reduction(with_fields=False)
+    )
+
+
+def test_multi_oracle_reduction_adversary_consumes_pk_for_repack_init() -> None:
+    """A forward+repack reduction against a multi-oracle inner game reconstructs
+    its field state and outer-init result from the leaked ``pk`` (setting
+    ``R.<field>``) instead of re-running ``Initialize`` (which would double-init
+    the challenger and violate the restricted adversary interface)."""
+    tx = _multi_oracle_translator()
+    reduction = _repack_reduction()
+    spec = tx.multi_oracle_spec(_multi_oracle_game_file())
+    adv = tx.translate_reduction_adversary(
+        reduction=reduction,
+        outer_adversary_type_name="KEM_Adv",
+        inner_oracle_type_name="KEM_Oracle",
+        scheme_module_expr="K",
+        inner_multi_oracle=spec,
+        outer_multi_oracle=spec,
+    )
+    distinguish = adv.procs[0]
+    assert [p.name for p in distinguish.params] == ["pk"]
+    body_str = "\n".join(_render_stmt_for_test(s) for s in distinguish.body)
+    # Field state reconstructed from pk, qualified on the reduction module R;
+    # no re-run of R.initialize (which would re-call C.initialize).
+    assert "R.dk0 <-" in body_str
+    assert "initialize()" not in body_str
+    assert "b <@ A(R(K, C)).distinguish(pk0);" in body_str
+
+
 def test_multi_oracle_reduction_adversary_reinit_for_single_oracle_inner() -> None:
     """When the inner game is single-oracle (no Initialize lifted), ``distinguish``
     takes NO parameter (matching the inner single-oracle adversary type) and the

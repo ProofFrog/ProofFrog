@@ -57,6 +57,123 @@ def _is_pure_forward_init(method: frog_ast.Method) -> bool:
     )
 
 
+def _is_challenger_init_call(expr: frog_ast.Expression) -> bool:
+    """True iff ``expr`` is a call ``challenger.Initialize(...)``."""
+    return (
+        isinstance(expr, frog_ast.FuncCall)
+        and isinstance(expr.func, frog_ast.FieldAccess)
+        and isinstance(expr.func.the_object, frog_ast.Variable)
+        and expr.func.the_object.name == "challenger"
+        and expr.func.name.lower() == "initialize"
+    )
+
+
+def _is_module_call_expr(expr: frog_ast.ASTNode) -> bool:
+    """Recognize ``E.method(...)`` -- a FuncCall whose func is a FieldAccess."""
+    return isinstance(expr, frog_ast.FuncCall) and isinstance(
+        expr.func, frog_ast.FieldAccess
+    )
+
+
+def _statement_module_call(
+    stmt: frog_ast.Statement,
+) -> frog_ast.Expression | None:
+    """Return the module-call sub-expression a statement performs, else ``None``.
+
+    Covers the three statement shapes that carry a top-level ``E.method(...)``
+    call: an assignment (``x <@ E.m()``), a bare-call statement, and a
+    ``return E.m()``. Nested calls in argument position are not counted (they
+    are hoisted before this runs).
+    """
+    if isinstance(stmt, frog_ast.Assignment) and _is_module_call_expr(stmt.value):
+        return stmt.value
+    if isinstance(stmt, frog_ast.ReturnStatement) and _is_module_call_expr(
+        stmt.expression
+    ):
+        return stmt.expression
+    if isinstance(stmt, frog_ast.FuncCall) and _is_module_call_expr(stmt):
+        return stmt
+    return None
+
+
+def _count_module_calls(node: frog_ast.ASTNode) -> int:
+    """Count every ``E.method(...)`` call anywhere under ``node`` (recursive).
+
+    Includes calls nested in argument / tuple position (e.g. ``return [pk,
+    F.evaluate(ss, ct), ct]``), which :func:`_statement_module_call` does not
+    see -- the consume-pk gate needs the *total* so it declines a repacking init
+    whose repack itself computes with an abstract call (KEMPRF's ``R_KEM``,
+    whose repack applies ``F.evaluate``).
+    """
+    count = 0
+
+    def _tally(n: frog_ast.ASTNode) -> bool:
+        nonlocal count
+        if _is_module_call_expr(n):
+            count += 1
+        return False
+
+    visitors.SearchVisitor(_tally).visit(node)
+    return count
+
+
+def init_module_call_count(game: frog_ast.Game) -> int:
+    """Number of top-level module calls in ``game``'s ``Initialize`` method.
+
+    Used by the consume-pk assumption-hop bridge tactic to size the init
+    backbone peel: after ``inline *`` both byequiv sides run exactly this many
+    abstract challenger-``Initialize`` calls (the reduction forwards to the
+    challenger's ``Initialize``, whose body holds these calls). Zero if the game
+    has no ``Initialize``.
+    """
+    init = next(
+        (m for m in game.methods if m.signature.name.lower() == "initialize"), None
+    )
+    if init is None:
+        return 0
+    return sum(
+        1 for stmt in init.block.statements if _statement_module_call(stmt) is not None
+    )
+
+
+def reduction_repacks_challenger_init(reduction: frog_ast.Reduction) -> bool:
+    """True iff the reduction's ``Initialize`` is a *forward+repack* of the
+    challenger's ``Initialize`` while storing challenger-derived state in its
+    own fields.
+
+    Such a reduction, lifted to an assumption-adversary, must **consume** the
+    leaked ``pk`` -- the assumption game already ran the challenger's
+    ``Initialize`` and passed its full result to ``distinguish`` -- rather than
+    re-run ``Initialize`` through the reduction (which would call
+    ``challenger.Initialize`` a second time, violating the restricted
+    post-init-only adversary interface **and** double-initializing the
+    challenger). See :meth:`ModuleTranslator._render_consumed_pk_init` and the
+    matching backbone-peel bridge tactic in ``proof_translator``.
+
+    Gated to the exact shape ``_render_consumed_pk_init`` handles: the reduction
+    holds field state, its ``Initialize`` is not a pure forward, and the body's
+    **only** module call -- counting nested calls in tuple/argument position --
+    is the single ``challenger.Initialize()`` (every other statement is
+    deterministic tuple plumbing). A reduction whose ``Initialize`` makes any
+    additional abstract call (e.g. KEMPRF's ``R_KEM``, which applies
+    ``F.evaluate`` while repacking) or holds no field state is left to the
+    re-init path, so its export stays byte-identical.
+    """
+    init = _reduction_init_method(reduction)
+    if init is None or not reduction.fields:
+        return False
+    if _is_pure_forward_init(init):
+        return False
+    if _count_module_calls(init.block) != 1:
+        return False
+    top_calls = [
+        call
+        for stmt in init.block.statements
+        if (call := _statement_module_call(stmt)) is not None
+    ]
+    return len(top_calls) == 1 and _is_challenger_init_call(top_calls[0])
+
+
 @dataclass
 class MultiOracleSpec:
     """Emission spec for a multi-oracle (Initialize-lifted) game file.
@@ -846,6 +963,31 @@ class ModuleTranslator:
                 # ``C.initialize`` again and violate the restricted post-init-only
                 # adversary interface.
                 distinguish_args = INIT_RESULT_NAME
+            elif reduction_repacks_challenger_init(reduction):
+                # Consume-pk path. The reduction's Initialize forwards the
+                # challenger's Initialize but *repacks* its result (keeping the
+                # leaked decaps keys in its own fields, handing the outer
+                # adversary only the reduced result). The assumption game already
+                # ran the challenger's Initialize and passed the full result as
+                # ``pk``, so ``distinguish`` reconstructs the reduction's field
+                # state and the outer-init result directly from ``pk`` -- never
+                # re-invoking ``C.initialize`` (which would double-initialize the
+                # challenger and violate the post-init-only restriction).
+                outer_init_local = f"{INIT_RESULT_NAME}0"
+                init_ret_type = (
+                    self._translate_param_type(init_method.signature.return_type)
+                    if init_method is not None
+                    else outer_multi_oracle.init_return_type
+                )
+                body.append(ec_ast.VarDecl(name=outer_init_local, type=init_ret_type))
+                consumed_decls, consumed_stmts = self._render_consumed_pk_init(
+                    reduction,
+                    pk_param_name=INIT_RESULT_NAME,
+                    pk0_local_name=outer_init_local,
+                )
+                body.extend(consumed_decls)
+                body.extend(consumed_stmts)
+                distinguish_args = outer_init_local
             else:
                 distinguish_args = reinit(outer_multi_oracle)
         else:
@@ -882,6 +1024,81 @@ class ModuleTranslator:
             ],
             params=params,
         )
+
+    def _render_consumed_pk_init(
+        self,
+        reduction: frog_ast.Reduction,
+        pk_param_name: str,
+        pk0_local_name: str,
+    ) -> tuple[list[ec_ast.VarDecl], list[ec_ast.EcStmt]]:
+        """Render the reduction's ``Initialize`` with the challenger's
+        ``Initialize()`` result replaced by the leaked ``pk`` parameter.
+
+        Produces the statements that (a) store the challenger-derived decaps
+        keys into the reduction's own module fields (qualified ``<R>.<field>``,
+        since the assignment is emitted *outside* the reduction) and (b) bind
+        the outer-init result to ``pk0_local_name``. Called only when
+        :func:`reduction_repacks_challenger_init` holds, so the body's single
+        module call is exactly ``challenger.Initialize()`` and every other
+        statement is deterministic. The returned decls/stmts are spliced into
+        ``R_Adv.distinguish`` before the ``A(R(...)).distinguish(pk0)`` call.
+        """
+        init = _reduction_init_method(reduction)
+        assert init is not None
+        field_types = {fld.name: fld.type for fld in reduction.fields}
+        field_renames = _field_renames_for(reduction.fields)
+        field_names = {fld.name for fld in reduction.fields}
+
+        # Rewrite the body: challenger.Initialize() -> the leaked ``pk``; the
+        # ``return E`` becomes ``pk0 <- E`` (the outer-init result binding).
+        new_stmts: list[frog_ast.Statement] = []
+        ret_expr: frog_ast.Expression | None = None
+        for stmt in init.block.statements:
+            if isinstance(stmt, frog_ast.ReturnStatement):
+                ret_expr = stmt.expression
+                continue
+            if isinstance(stmt, frog_ast.Assignment) and _is_challenger_init_call(
+                stmt.value
+            ):
+                new_stmts.append(
+                    frog_ast.Assignment(
+                        stmt.the_type, stmt.var, frog_ast.Variable(pk_param_name)
+                    )
+                )
+            else:
+                new_stmts.append(stmt)
+        assert ret_expr is not None
+        new_stmts.append(
+            frog_ast.Assignment(None, frog_ast.Variable(pk0_local_name), ret_expr)
+        )
+
+        # Type map (mirrors ``_translate_method``): seed fields first, then the
+        # rewritten body's local declarations, then resolve tuple aliases so a
+        # projection ``_tup.`i`` types.
+        type_map: dict[str, frog_ast.Type] = dict(field_types)
+        for stmt in new_stmts:
+            _seed_type_map(stmt, type_map)
+        for name, t in list(type_map.items()):
+            if isinstance(t, (frog_ast.Variable, frog_ast.FieldAccess)):
+                resolved = self._types.resolve(t)
+                if isinstance(resolved, frog_ast.ProductType):
+                    type_map[name] = resolved
+
+        type_of = self._type_of_factory(type_map, {})
+        exprs = expr_translator.ExpressionTranslator(
+            self._types, type_of, field_renames=field_renames
+        )
+        stmts = stmt_translator.StatementTranslator(self._types, exprs)
+        translated = stmts.translate_block(frog_ast.Block(new_stmts))
+
+        # The reduction's own field writes render as bare ``<field> <- ...``
+        # (the statement translator has no owning module); qualify them with the
+        # reduction's module name so the write targets ``<R>``'s global from the
+        # adversary wrapper.
+        for st in translated.stmts:
+            if isinstance(st, (ec_ast.Assign, ec_ast.Call)) and st.var in field_names:
+                st.var = f"{reduction.name}.{_ec_field_name(st.var)}"
+        return translated.var_decls, translated.stmts
 
     def translate_game_wrapper(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,

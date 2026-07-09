@@ -1737,6 +1737,9 @@ BINDING_CHALLENGE_VALFN_TEMPLATE = EC_TEMPLATES / "binding_challenge_valfn.ec"
 BINDING_CHALLENGE_2KEM_PACKED_TEMPLATE = (
     EC_TEMPLATES / "binding_challenge_2kem_packed.ec"
 )
+BINDING_CHALLENGE_HOP2_CASESPLIT_TEMPLATE = (
+    EC_TEMPLATES / "binding_challenge_hop2_casesplit.ec"
+)
 
 
 @pytest.mark.skipif(
@@ -2105,6 +2108,37 @@ def test_binding_challenge_2kem_packed_template_compiles(tmp_path: Path) -> None
     )
     assert result.returncode == 0, (
         f"EasyCrypt rejected the 2-KEM packed-key binding-challenge template.\n"
+        f"stderr:\n{result.stderr}\nstdout:\n{result.stdout[-2000:]}"
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_binding_challenge_hop2_casesplit_template_compiles(tmp_path: Path) -> None:
+    """The hop_2 challenge shape: BOTH sides are case-split reductions
+    (``R_PQ_Bind o Unbreakable ~ R_KDF o Breakable``) computing the SAME
+    ``kdf_in_0/kdf_in_1``. Unlike hop_0 (game-direct ~ reduction-case-split),
+    neither side is the direct game, so the tactic ``seq``s BOTH prefixes under a
+    ``kdfin`` invariant, then does a NESTED case analysis: outer on ``ct0 = ct1``
+    (RHS Breakable guard), inner on the LHS PQ-collision guard. The confidence-
+    critical step is the no-collision else branch, where ``kdf0 <> kdf1`` is
+    redundant: ``kdf0 = kdf1 => ev_ect ctT0 = ev_ect ctT1`` (right-slice to the
+    encodeciphertext component) ``=> ctT0 = ctT1`` (encodeciphertext injectivity)
+    ``=> ct0 = ct1``, contradicting ``ct0 <> ct1``. If this stops compiling, the
+    hop_2 challenge synthesizer's target tactic must be re-derived."""
+    ec_file = tmp_path / "binding_challenge_hop2_casesplit.ec"
+    ec_file.write_text(BINDING_CHALLENGE_HOP2_CASESPLIT_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the hop_2 binding-challenge case-split template.\n"
         f"stderr:\n{result.stderr}\nstdout:\n{result.stdout[-2000:]}"
     )
 

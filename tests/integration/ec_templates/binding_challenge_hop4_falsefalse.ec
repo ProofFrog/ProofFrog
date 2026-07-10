@@ -74,14 +74,17 @@ module RKU (P:KP, T:KT, L:LL, H:HH, CH:KDFOracle) = {
   var dp0 : dkpq  var dt0 : dkt  var ek0 : ekt
   var dp1 : dkpq  var dt1 : dkt  var ek1 : ekt
   proc challenge(ct0 ct1 : ctpq*ctt) : bool = {
+    var ct_PQ_0, ct_PQ_1 : ctpq; var ct_T_0, ct_T_1 : ctt;
     var sp0:sspq; var st0:sst; var a0:epq; var a1:et; var a2:ect; var a3:eek; var a4:lbl;
     var sp1:sspq; var st1:sst; var e0:epq; var e1:et; var e2:ect; var e3:eek; var e4:lbl;
     var kdf_in_0, kdf_in_1 : k4t; var r : bool;
-    sp0 <@ P.dpq(RKU.dp0, ct0.`1); st0 <@ T.dt(RKU.dt0, ct0.`2);
-    a0 <@ P.epq_(sp0); a1 <@ T.et_(st0); a2 <@ T.ect_(ct0.`2); a3 <@ T.eek_(RKU.ek0); a4 <@ L.get();
+    ct_PQ_0 <- ct0.`1; ct_T_0 <- ct0.`2;
+    sp0 <@ P.dpq(RKU.dp0, ct_PQ_0); st0 <@ T.dt(RKU.dt0, ct_T_0);
+    a0 <@ P.epq_(sp0); a1 <@ T.et_(st0); a2 <@ T.ect_(ct_T_0); a3 <@ T.eek_(RKU.ek0); a4 <@ L.get();
     kdf_in_0 <- c4 (c3 (c2 (c1 a0 a1) a2) a3) a4;
-    sp1 <@ P.dpq(RKU.dp1, ct1.`1); st1 <@ T.dt(RKU.dt1, ct1.`2);
-    e0 <@ P.epq_(sp1); e1 <@ T.et_(st1); e2 <@ T.ect_(ct1.`2); e3 <@ T.eek_(RKU.ek1); e4 <@ L.get();
+    ct_PQ_1 <- ct1.`1; ct_T_1 <- ct1.`2;
+    sp1 <@ P.dpq(RKU.dp1, ct_PQ_1); st1 <@ T.dt(RKU.dt1, ct_T_1);
+    e0 <@ P.epq_(sp1); e1 <@ T.et_(st1); e2 <@ T.ect_(ct_T_1); e3 <@ T.eek_(RKU.ek1); e4 <@ L.get();
     kdf_in_1 <- c4 (c3 (c2 (c1 e0 e1) e2) e3) e4;
     if (ct0 = ct1) {
       r <- false;
@@ -133,10 +136,12 @@ section.
        ==> ={res} ].
   proof.
     proc.
-    (* seq off BOTH prefixes (LHS 16 flat, RHS 2 game decaps) -- all dead, the
-       result is false regardless -- establishing only the trivial invariant. *)
-    seq 16 2 : (={glob P, glob T, glob L, glob H} /\ ct0{1} = ct0{2} /\ ct1{1} = ct1{2}).
-    + exists* (glob P){2}, (glob T){2}, (glob L){2}, (glob H){2}, St.dk0{2}, St.dk1{2}, ct0{2}, ct1{2},
+    (* seq off BOTH prefixes (LHS 20 flat with projections, RHS 2 game decaps) --
+       all dead, the result is false regardless -- establishing only the trivial
+       invariant. `sp` substitutes the LHS ct_PQ/ct_T projections. *)
+    seq 20 2 : (={glob P, glob T, glob L, glob H} /\ ct0{1} = ct0{2} /\ ct1{1} = ct1{2}).
+    + sp.
+      exists* (glob P){2}, (glob T){2}, (glob L){2}, (glob H){2}, St.dk0{2}, St.dk1{2}, ct0{2}, ct1{2},
               RKU.dp0{1}, RKU.dt0{1}, RKU.ek0{1}, RKU.dp1{1}, RKU.dt1{1}, RKU.ek1{1};
       elim* => gp gt gl gh D0 D1 C0 C1 dp0 dt0 ek0 dp1 dt1 ek1.
       call{2} (Sch_decaps_val gp gt gl gh D1 C1).

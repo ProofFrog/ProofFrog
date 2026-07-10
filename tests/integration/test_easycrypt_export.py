@@ -2120,17 +2120,22 @@ def test_binding_challenge_2kem_packed_template_compiles(tmp_path: Path) -> None
     reason="Docker is not available; cannot run EasyCrypt.",
 )
 def test_binding_challenge_hop2_casesplit_template_compiles(tmp_path: Path) -> None:
-    """The hop_2 challenge shape: BOTH sides are case-split reductions
-    (``R_PQ_Bind o Unbreakable ~ R_KDF o Breakable``) computing the SAME
-    ``kdf_in_0/kdf_in_1``. Unlike hop_0 (game-direct ~ reduction-case-split),
-    neither side is the direct game, so the tactic ``seq``s BOTH prefixes under a
-    ``kdfin`` invariant, then does a NESTED case analysis: outer on ``ct0 = ct1``
-    (RHS Breakable guard), inner on the LHS PQ-collision guard. The confidence-
-    critical step is the no-collision else branch, where ``kdf0 <> kdf1`` is
-    redundant: ``kdf0 = kdf1 => ev_ect ctT0 = ev_ect ctT1`` (right-slice to the
-    encodeciphertext component) ``=> ctT0 = ctT1`` (encodeciphertext injectivity)
-    ``=> ct0 = ct1``, contradicting ``ct0 <> ct1``. If this stops compiling, the
-    hop_2 challenge synthesizer's target tactic must be re-derived."""
+    """The hop_2 challenge shape, in the FAITHFUL wrapper form the real export
+    emits: BOTH sides are case-split reductions (``R_PQ_Bind o Unbreakable ~
+    R_KDF o Breakable``) computing the SAME ``kdf_in_0/kdf_in_1``, with un-inlined
+    challengers (the LHS then-branch forwards to the KEM_PQ Unbreakable binding
+    challenger with its own coupled ``dk0/dk1`` fields; the RHS else-branch
+    forwards to the stateless KDF Breakable) and ``ct_T <- ct.2`` projections in
+    the prefixes (LHS 18 stmts, RHS 20 stmts). Tactic: ``seq 18 20`` + ``sp`` to
+    substitute the projections, functionalize BOTH prefixes, then NESTED case --
+    outer ``ct0 = ct1`` (RHS Breakable guard, ``rcondf{2}`` + ``inline{2} 1`` +
+    ``sp``), inner LHS PQ-collision guard (``rcondt{1}`` + ``inline{1} 1`` +
+    ``sp``). The confidence-critical step is the no-collision else branch, where
+    the RHS's extra ``kdf0 <> kdf1`` is redundant: ``kdf0 = kdf1 => ev_ect ctT0 =
+    ev_ect ctT1`` (right-slice to the encodeciphertext component) ``=> ctT0 =
+    ctT1`` (encodeciphertext injectivity, declared in KEM.primitive) ``=> ct0 =
+    ct1``, contradicting ``ct0 <> ct1``. If this stops compiling, the hop_2
+    challenge synthesizer's target tactic must be re-derived."""
     ec_file = tmp_path / "binding_challenge_hop2_casesplit.ec"
     ec_file.write_text(BINDING_CHALLENGE_HOP2_CASESPLIT_TEMPLATE.read_text())
     result = subprocess.run(
@@ -2159,9 +2164,11 @@ def test_binding_challenge_hop4_falsefalse_template_compiles(tmp_path: Path) -> 
     RHS is a game with concrete-scheme ``decaps`` calls, functionalized via the
     same ``Sch_decaps_val`` val-lemma used for hop_0. Tactic: ``seq 16 2`` off BOTH
     dead prefixes (LHS 16-stmt flat prefix, RHS 2 game decaps) under the trivial
-    invariant, then ``case (ct0 = ct1)`` -- ``rcondt`` collapses the LHS to
-    ``r <- false``; ``rcondf`` + ``inline{1}`` expands the Unbreakable challenger
-    to ``false`` -- both sides ``false``. If this stops compiling, the hop_4
+    invariant (``seq 20 2`` for the faithful 20-stmt LHS prefix with the
+    ``ct_PQ``/``ct_T`` projections, ``sp`` to substitute them), then
+    ``case (ct0 = ct1)`` -- ``rcondt`` collapses the LHS to ``r <- false``;
+    ``rcondf`` + ``inline{1}`` (un-inlined Unbreakable challenger) + ``wp`` yields
+    ``false`` -- both sides ``false``. If this stops compiling, the hop_4
     challenge synthesizer's target tactic must be re-derived."""
     ec_file = tmp_path / "binding_challenge_hop4_falsefalse.ec"
     ec_file.write_text(BINDING_CHALLENGE_HOP4_FALSEFALSE_TEMPLATE.read_text())

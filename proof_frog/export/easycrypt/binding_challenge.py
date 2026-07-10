@@ -611,3 +611,118 @@ def _else_branch(spec: ChallengeHopSpec) -> list[str]:
         f"  call{{2}} ({hm}_evaluate_det gh2 ki0).",
         "  skip => />.",
     ]
+
+
+# ---------------------------------------------------------------------------
+# hop_4: ``R_KDF o Unbreakable ~ Hybrid_Unbreakable(<Scheme>)``.  BOTH sides
+# return ``false`` (the KDF Unbreakable challenger's ``challenge`` is ``false``,
+# inlined in R_KDF's else-branch; the Hybrid Unbreakable game runs two concrete
+# ``<Scheme>.decaps`` then returns ``false``).  Sides are MIRRORED from hop_0:
+# the game is on the RIGHT, the case-split reduction on the LEFT.  No injectivity
+# and no KDF-input coupling are needed -- the result is ``false`` regardless of
+# the keys, so both dead prefixes are functionalized and discarded.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Hop4Spec:
+    """Everything the hop_4 (false/false) tactic needs, derived from the hop's
+    reduction/game ASTs."""
+
+    val_lemma_name: str  # "<Scheme>_decaps_val"
+    game_glob_mods: list[str]  # val-lemma glob-binder order, e.g. [KEM_PQ,KEM_T,L,H]
+    game_key_refs: list[str]  # 2 game packed-key glob refs (no side annotation)
+    ct_params: list[str]  # ["ct0", "ct1"]
+    sync_mods: list[str]  # every module needing (glob M){1}=(glob M){2}
+    red_base: str  # "R_KDF"
+    red_glob_mods: list[str]  # reduction-prefix callee mods (subset of game mods)
+    red_component_fields: list[list[str]]  # [[dk_PQ_0,dk_T_0,ek_T_0], [...1]]
+    clone_alias: dict[str, str]
+    decomp_coupling: list[str]  # game packed key{2} = tuple of reduction fields{1}
+    red_proc: ec_ast.Proc  # reduction (left) challenge proc
+
+
+def _blk_env_hop4(spec: Hop4Spec, field_elim: list[str]) -> dict[str, str]:
+    """Functional env of the reduction prefix under the ``exists*`` elim names
+    (fields -> ``dp0``.. ; cts -> the game ct elims ``C0``/``C1``, since hop_4
+    reuses the game ciphertexts via the ``={ct}`` invariant rather than binding
+    separate reduction ct vars)."""
+    flat = [f for grp in spec.red_component_fields for f in grp]
+    env: dict[str, str] = dict(zip(flat, field_elim))
+    env[spec.ct_params[0]] = "C0"
+    env[spec.ct_params[1]] = "C1"
+    for stmt in spec.red_proc.body:
+        if isinstance(stmt, ec_ast.If):
+            break
+        if isinstance(stmt, ec_ast.Assign):
+            env[stmt.var] = _subst(stmt.rhs, env)
+        elif isinstance(stmt, ec_ast.Call):
+            module, _, method = stmt.callee.partition(".")
+            args = [_subst(a, env) for a in _split_top_args(stmt.args)]
+            ev = f"{spec.clone_alias[module]}.ev_{method}"
+            applied = "".join(f" {_paren(a)}" for a in args)
+            env[stmt.var] = f"({ev}{applied})"
+    return env
+
+
+def challenge_tactic_hop4(spec: Hop4Spec) -> list[str] | None:
+    """Emit the full ``hop_<i>_challenge`` tactic for the false/false shape."""
+    split = _prefix_and_if(spec.red_proc.body)
+    if split is None:
+        return None
+    prefix, _if = split
+    prefix = [s for s in prefix if not isinstance(s, ec_ast.VarDecl)]
+    red_len = len(prefix)
+    gmods = spec.game_glob_mods
+    gge = _game_glob_elim(gmods)
+    ct0, ct1 = spec.ct_params
+
+    inv = " /\\ ".join(
+        [f"(glob {m})" "{1}" f" = (glob {m})" "{2}" for m in spec.sync_mods]
+        + [f"{c}" "{1}" f" = {c}" "{2}" for c in spec.ct_params]
+        + spec.decomp_coupling
+    )
+    lines = ["proof.", "  proc.", f"  seq {red_len} 2 : ({inv})."]
+
+    # first subgoal: sp; exists* game globs+keys+ct + reduction fields;
+    # functionalize the game decaps (call{2} val-lemma) and the reduction prefix
+    # (call{1} _det peel).  The reduction peel reuses the game glob elims (the
+    # ``={glob}`` invariant makes the two sides' globs equal).
+    field_elim = _field_elim_names(spec.red_component_fields)
+    game_ex = (
+        [f"(glob {m})" "{2}" for m in gmods]
+        + [f"{r}" "{2}" for r in spec.game_key_refs]
+        + [f"{c}" "{2}" for c in spec.ct_params]
+        + [
+            f"{spec.red_base}.{f}" "{1}"
+            for grp in spec.red_component_fields
+            for f in grp
+        ]
+    )
+    elim = gge + ["D0", "D1", "C0", "C1"] + field_elim
+    gargs = " ".join(gge)
+    blk_env = _blk_env_hop4(spec, field_elim)
+    glob_of = {m: gge[gmods.index(m)] for m in spec.red_glob_mods}
+    peel = _peel_stmts(_drop_leading_assigns(prefix), blk_env, glob_of, "{1}")
+    lines += [
+        "  + sp.",
+        f"    exists* {', '.join(game_ex)};",
+        f"    elim* => {' '.join(elim)}.",
+        f"    call{{2}} ({spec.val_lemma_name} {gargs} D1 C1).",
+        f"    call{{2}} ({spec.val_lemma_name} {gargs} D0 C0).",
+        *[f"    {ln}" for ln in peel],
+        "    skip => />.",
+    ]
+
+    # both sides return false; select the branch on the reduction's ct guard.
+    lines += [
+        f"  case ({ct0}" "{1}" f" = {ct1}" "{1}).",
+        "  + rcondt{1} 1; first by auto.",
+        "    wp. skip => />.",
+        "  rcondf{1} 1; first by (auto; smt()).",
+        "  inline{1} 1.",
+        "  wp.",
+        "  skip => />.",
+        "  qed.",
+    ]
+    return lines

@@ -2697,6 +2697,23 @@ def _emit_one_oracle_chain(
             if decaps_val_acc is not None:
                 decaps_val_acc.add(val_scheme)
             return [], outer_body, set()
+        ff_route = _challenge_falsefalse_route(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            left_wrapper_expr,
+            right_wrapper_expr,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            clone_alias,
+        )
+        if ff_route is not None:
+            ff_body, ff_scheme = ff_route
+            if decaps_val_acc is not None:
+                decaps_val_acc.add(ff_scheme)
+            return [], ff_body, set()
 
     # Field-aware coupling: identical-state hops keep the whole-glob equality
     # (byte-identical for clean proofs); a hop whose two sides differ in glob
@@ -3504,6 +3521,122 @@ def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-p
         (pq_module, "encodesharedsecret"),
         scheme_name,
     )
+
+
+def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    left_wrapper_expr: str,
+    right_wrapper_expr: str,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    clone_alias: dict[str, str],
+) -> tuple[list[str], str] | None:
+    """Derive the hop_4 (false/false) challenge tactic.
+
+    Shape (MIRRORED from hop_0): LEFT is the case-split reduction (trailing
+    ``if``, else forwarding to an Unbreakable challenger that returns ``false``);
+    RIGHT is the Unbreakable game (no ``if``, two ``<Scheme>.decaps`` then
+    ``return false``). Returns ``(outer_body, scheme_name)`` -- the tactic plus
+    the ``<Scheme>_decaps_val`` request -- or ``None`` off-shape.
+    """
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+    lmod = _flat_state_module(
+        modules,
+        "Chal_L",
+        lproj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    rmod = _flat_state_module(
+        modules,
+        "Chal_R",
+        rproj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    if not lmod.procs or not rmod.procs:
+        return None
+    red_proc, game_proc = lmod.procs[0], rmod.procs[0]
+    # Left = reduction with a trailing case-split; right = game with no ``if``.
+    red_if = next((s for s in red_proc.body if isinstance(s, ec_ast.If)), None)
+    if red_if is None or any(isinstance(s, ec_ast.If) for s in game_proc.body):
+        return None
+
+    game_args = _top_level_args(right_wrapper_expr)
+    if not game_args:
+        return None
+    scheme_expr = game_args[0]
+    scheme_name = _ref_base(scheme_expr)
+    scheme_params = _top_level_args(scheme_expr)
+    # game-side glob order = the scheme decaps' component modules (first
+    # appearance in the inlined game body) = the val-lemma glob-binder order.
+    game_glob_mods = _callee_mods(game_proc.body, clone_alias)
+    if not game_glob_mods:
+        return None
+    game_base = _ref_base(right_wrapper_expr)
+    # pylint: disable-next=protected-access
+    key_fields = [mt._ec_field_name(f.name) for f in right_state0.fields]
+    if len(key_fields) != 2:
+        return None
+
+    prefix = [s for s in red_proc.body if not isinstance(s, ec_ast.If)]
+    pq_module = next(
+        (
+            s.callee.split(".", 1)[0]
+            for s in prefix
+            if isinstance(s, ec_ast.Call) and s.callee.endswith(".decaps")
+        ),
+        None,
+    )
+    if pq_module is None:
+        return None
+    groups = _kdf_groups(prefix)
+    if len(groups) != 2:
+        return None
+    grp = [f for f in (_group_fields(g, pq_module) for g in groups) if f is not None]
+    if len(grp) != 2:
+        return None
+
+    red_base = _ref_base(left_wrapper_expr)
+    game_key_refs = [f"{game_base}.{k}" for k in key_fields]
+    # Decomposition coupling (game packed key{2} = tuple of reduction fields{1});
+    # sides are mirrored from hop_0 (game right, reduction left). Read off the
+    # hop precondition's shape -- the game holds the packed key, the reduction
+    # the component fields.
+    decomp = [
+        f"{game_key_refs[i]}"
+        "{2}"
+        f" = ({red_base}.{grp[i][0]}, {red_base}.{grp[i][1]}, {red_base}.{grp[i][2]})"
+        "{1}"
+        for i in range(2)
+    ]
+    spec = bch.Hop4Spec(
+        val_lemma_name=f"{scheme_name}_decaps_val",
+        game_glob_mods=game_glob_mods,
+        game_key_refs=game_key_refs,
+        ct_params=[p.name for p in game_proc.params],
+        sync_mods=game_glob_mods
+        + [m for m in scheme_params if m not in game_glob_mods],
+        red_base=red_base,
+        red_glob_mods=_callee_mods(prefix, clone_alias),
+        red_component_fields=grp,
+        clone_alias=clone_alias,
+        decomp_coupling=decomp,
+        red_proc=red_proc,
+    )
+    body = bch.challenge_tactic_hop4(spec)
+    if body is None:
+        return None
+    return ([_res_tag(SYNTH_PARAM), *body[1:]], scheme_name)
 
 
 def _kdf_groups(prefix: Sequence[ec_ast.EcStmt]) -> list[list[ec_ast.Call]]:

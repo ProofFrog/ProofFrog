@@ -42,10 +42,14 @@ emitted with a `Frog` prefix (e.g. `\FrogPr`) to avoid clobbering them.
 - Single backend (`cryptocode`). A `Backend` Protocol exists in
   `proof_frog/export/latex/backends/base.py` so other pseudocode
   packages can be plugged in later.
-- No diff highlighting between adjacent games.
-- The generated proof document is a *scaffold*. Each game step gets a
-  `\paragraph{Game $G_i$.} \todo{commentary}` placeholder — narrative
-  prose is left to the author.
+- The generated proof document is a *scaffold*. The game sequence renders
+  in reading order (non-floating blocks) inside an `amsthm` proof
+  environment; each hop is stated as prose (the probability relation, or
+  the assumption and its advantage bound) followed by an invisible
+  `% commentary (author): ...` LaTeX comment where narrative intuition
+  can be filled in. Adjacent games highlight their changed lines with a
+  soft tint by default (`--no-diff` to disable, `--diff-style color` for
+  colored text instead).
 - XOR rendering: `+` between two `BitString` operands renders as
   `\oplus` only when the orchestrator passes a `type_of` map to the
   expression renderer. The proof orchestrator does not yet populate
@@ -77,6 +81,5 @@ The package layout (in `proof_frog/export/latex/`):
 - Type-aware expression rendering across full files (XOR detection,
   modular arithmetic).
 - Additional backends (e.g. `algorithm2e`, `algpseudocode`).
-- Game-diff highlighting between adjacent steps.
 - Optional inclusion of source `.scheme`/`.game`/`.primitive` text in a
   Construction appendix.

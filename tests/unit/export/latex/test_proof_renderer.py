@@ -132,7 +132,7 @@ def test_theorem_falls_back_to_synthesized_without_claim():
     assert r"\mathcal{B}_{1}" in out
 
 
-def test_hop_annotation_reports_loss_term():
+def test_hop_annotation_assumption_states_prose_bound():
     _b, _m, mr = _renderer()
     loss_hop = pr._hop_annotation(
         1,
@@ -140,11 +140,18 @@ def test_hop_annotation_reports_loss_term():
         mr,
         loss=_make_adv_term(),
     )
-    assert "losing" in loss_hop
+    # Prose names the assumption and states the advantage bound inequality.
+    assert r"\DDH(\G)" in loss_hop
+    assert r"\le" in loss_hop
     assert r"\Adv{" in loss_hop
-    # An equivalence hop with no loss term carries no "losing" clause.
+    assert r"\Pr[G_{0} = 1]" in loss_hop
+    # An invisible author-commentary placeholder follows (a LaTeX comment).
+    assert "% commentary (author)" in loss_hop
+    # An equivalence hop states perfect indistinguishability, with no bound.
     plain = pr._hop_annotation(1, _make_interchangeable_hop(), mr, loss=None)
-    assert "losing" not in plain
+    assert "perfectly indistinguishable" in plain
+    assert r"\le" not in plain
+    assert r"\Pr[G_{0} = 1] = \Pr[G_{1} = 1]" in plain
 
 
 def _make_assumption_hop():
@@ -187,7 +194,7 @@ def test_construction_section_renders_let_primitive():
     assert r"\G" in out
 
 
-def test_render_proof_symbolic_has_figures_and_hops():
+def test_render_proof_symbolic_has_games_and_hops():
     backend = CryptocodeBackend()
     macros = MacroRegistry()
     mr = ModuleRenderer(backend, macros)
@@ -197,21 +204,24 @@ def test_render_proof_symbolic_has_figures_and_hops():
     assert r"\section*{Definitions}" in out
     assert r"\section*{Construction}" in out
     assert r"\begin{theorem}" in out
-    # one figure per game step
-    assert out.count(r"\begin{figure}") == len(ctx.game_steps())
+    # The proof body is an amsthm proof environment, not floating figures.
+    assert r"\begin{proof}" in out
+    assert r"\end{proof}" in out
+    assert r"\begin{figure}" not in out
+    # One non-floating, centered game block per game step (reading order).
+    assert out.count(r"\begin{center}") == len(ctx.game_steps())
     # symbolic label uses composition
     assert r"\circ" in out
-    # hop annotations present
-    assert ("interchangeable" in out) or ("by assumption" in out)
-    # The games_sequence figures themselves should not have fallback comments
-    # (the Definitions section may have % unsupported for exotic types like
-    # ModIntType, which is a separate pre-existing limitation)
-    games_seq = out[out.find(r"\noindent\textit{Proof.}") :]
+    # prose hop annotations present
+    assert ("perfectly indistinguishable" in out) or ("differ only in" in out)
+    # The games sequence itself should not have fallback comments (the
+    # Definitions section may have % unsupported for exotic types like
+    # ModIntType, which is a separate pre-existing limitation).
+    games_seq = out[out.find(r"\begin{proof}") :]
     assert "% unsupported" not in games_seq
     # Structural: the symbolic heading must NOT be packed into a procedure
-    # title (that would double-wrap the caption as `{$Game $G_0$$}`), and a
-    # reduction step's novel game must render as a top-level boxed vstack,
-    # not nested inside a \procedure body.
+    # title (that would double-wrap it), and a reduction step's novel game must
+    # render as a top-level boxed vstack, not nested inside a \procedure body.
     assert "{$Game " not in out
     assert r"\begin{pcvstack}" in out
 
@@ -234,20 +244,22 @@ def test_render_proof_inlined_runs_clean():
     mr = ModuleRenderer(backend, macros)
     ctx = ProofContext(DDH)
     out = pr.render_proof(ctx, backend, macros, mr, composition="inlined")
-    assert out.count(r"\begin{figure}") == len(ctx.game_steps())
+    # One non-floating centered game block per step; no floats.
+    assert out.count(r"\begin{center}") == len(ctx.game_steps())
+    assert r"\begin{figure}" not in out
     assert r"\end{document}" in out
 
 
 def test_render_proof_diff_highlights_changes_by_default():
     # D1: diff highlighting is on by default in proofs. The inlined game
     # sequence has adjacent full games that differ, so at least one changed
-    # line gets a \gamechange box.
+    # line gets a soft \pfhighlight tint.
     backend = CryptocodeBackend()
     macros = MacroRegistry()
     mr = ModuleRenderer(backend, macros)
     ctx = ProofContext(MULTICHAL)
     out = pr.render_proof(ctx, backend, macros, mr, composition="inlined")
-    assert r"\gamechange{" in out
+    assert r"\pfhighlight{" in out
 
 
 def test_render_proof_no_diff_suppresses_highlight():
@@ -256,7 +268,7 @@ def test_render_proof_no_diff_suppresses_highlight():
     mr = ModuleRenderer(backend, macros)
     ctx = ProofContext(MULTICHAL)
     out = pr.render_proof(ctx, backend, macros, mr, composition="inlined", diff=False)
-    assert r"\gamechange{" not in out
+    assert r"\pfhighlight{" not in out
 
 
 def _symbolic_ddh(diff=True):
@@ -287,26 +299,28 @@ def test_symbolic_dedup_reduces_drawn_bodies():
     assert off.count(boxed) - on.count(boxed) == 2
 
 
-def test_symbolic_highlights_changed_challenger_in_heading():
-    # The assumption hop's real change is the composed challenger
-    # (DDH.Left -> DDH.Right); that delta is highlighted in the heading, not in
-    # the (identical) body.
+def test_symbolic_heading_not_highlighted():
+    # The assumption hop's challenger change (DDH.Left -> DDH.Right) is conveyed
+    # by the hop prose, so the heading is no longer highlighted.
     _ctx, out = _symbolic_ddh(diff=True)
-    assert r"\gamechange{$\DDH(\G).\Right$}" in out
+    assert r"\pfhighlight{$\DDH(\G).\Right$}" not in out
+    assert r"\gamechange" not in out
+    # The change is stated in prose instead.
+    assert "differ only in the" in out
 
 
 def test_symbolic_highlights_changed_body_lines():
     # R (G_1) and Rprime (G_3) are different reductions with different source
-    # lines; those changed lines are highlighted in G_3's body, not just the
-    # heading. G_3's Solve oracle returns challenger.Eq(c) where R returned
-    # c = z, so a \pcreturn body line is boxed.
+    # lines; those changed lines are highlighted in G_3's body. G_3's Solve
+    # oracle returns challenger.Eq(c), which renders as the bare oracle call
+    # \Eq(c), so that changed \pcreturn body line is tinted.
     _ctx, out = _symbolic_ddh(diff=True)
-    assert r"\gamechange{$\pcreturn challenger.\Eq(c)$}" in out
+    assert r"\pfhighlight{\pcreturn \Eq(c)}" in out
 
 
 def test_symbolic_no_diff_keeps_full_sequence():
     # With diff off, every game is drawn in full and nothing is highlighted or
     # deduped.
     _ctx, out = _symbolic_ddh(diff=False)
-    assert r"\gamechange{" not in out
+    assert r"\pfhighlight{" not in out
     assert "(reduction as in" not in out

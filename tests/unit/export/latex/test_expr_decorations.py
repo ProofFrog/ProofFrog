@@ -14,11 +14,13 @@ def _var(name: str) -> str:
 
 
 def test_star_renders_as_superscript_star() -> None:
-    assert _var("ctStar") == r"ct^{*}"
+    # Multi-letter stems render as one italic unit (\mathit); the star sits on
+    # the superscript axis.
+    assert _var("ctStar") == r"\mathit{ct}^{*}"
 
 
 def test_prime_renders_as_superscript_prime() -> None:
-    assert _var("ekPrime") == r"ek^{\prime}"
+    assert _var("ekPrime") == r"\mathit{ek}^{\prime}"
 
 
 def test_hat_renders_as_accent() -> None:
@@ -36,7 +38,7 @@ def test_bar_renders_as_overline() -> None:
 def test_star_with_trailing_digit_keeps_both_subscript_and_superscript() -> None:
     # Decoration sits on the superscript axis; the trailing digit subscripts,
     # so the two never collide into a double subscript.
-    assert _var("ctStar0") == r"ct_{0}^{*}"
+    assert _var("ctStar0") == r"\mathit{ct}_{0}^{*}"
 
 
 def test_accent_with_trailing_digit_subscripts_outside_the_accent() -> None:
@@ -46,14 +48,15 @@ def test_accent_with_trailing_digit_subscripts_outside_the_accent() -> None:
 def test_digit_before_decoration_subscripts() -> None:
     # An indexed challenge variable (ct1Star, ss2Star) puts the index on the
     # subscript axis and the star on the superscript: ct_{1}^{*}.
-    assert _var("ct1Star") == r"ct_{1}^{*}"
-    assert _var("ss2Star") == r"ss_{2}^{*}"
+    assert _var("ct1Star") == r"\mathit{ct}_{1}^{*}"
+    assert _var("ss2Star") == r"\mathit{ss}_{2}^{*}"
 
 
 def test_false_positive_lowercase_star_stays_literal() -> None:
     # Only the capitalized suffix form is a decoration; a lowercase trailing
-    # "star" (e.g. polestar) must not become a superscript.
-    assert _var("polestar") == "polestar"
+    # "star" (e.g. polestar) must not become a superscript -- it stays a plain
+    # multi-letter identifier (one italic unit).
+    assert _var("polestar") == r"\mathit{polestar}"
 
 
 def test_single_capital_stem_decorates() -> None:
@@ -64,13 +67,15 @@ def test_single_capital_stem_decorates() -> None:
 
 def test_capital_run_stem_decorates() -> None:
     # The greedy rule decorates any non-empty stem, including an all-caps run,
-    # so ABStar -> AB^{*} (previously left literal).
-    assert _var("ABStar") == r"AB^{*}"
+    # so ABStar -> AB^{*} (previously left literal), with the multi-letter stem
+    # set as one italic unit.
+    assert _var("ABStar") == r"\mathit{AB}^{*}"
 
 
 def test_bare_decoration_word_stays_literal() -> None:
-    # A decoration word with no stem in front is not a decoration.
-    assert _var("Star") == "Star"
+    # A decoration word with no stem in front is not a decoration; it renders as
+    # a plain multi-letter identifier (one italic unit).
+    assert _var("Star") == r"\mathit{Star}"
 
 
 def test_decoration_composes_with_underscore_subscript() -> None:
@@ -93,8 +98,9 @@ def test_stem_subscript_and_post_decoration_subscript_combine() -> None:
 
 
 def test_plain_underscore_subscript_still_works() -> None:
-    # Regression: the pre-existing single-subscript paths are unchanged.
-    assert _var("ss_T") == r"ss_{T}"
+    # Regression: the pre-existing single-subscript paths are unchanged (the
+    # multi-letter stem is now one italic unit).
+    assert _var("ss_T") == r"\mathit{ss}_{T}"
 
 
 def test_plain_trailing_digit_subscript_still_works() -> None:
@@ -114,4 +120,4 @@ def test_decorated_base_of_exponentiation_is_braced() -> None:
         frog_ast.Variable("xStar"),
         frog_ast.Variable("sk"),
     )
-    assert _r().render(expr) == r"{x^{*}}^{sk}"
+    assert _r().render(expr) == r"{x^{*}}^{\mathit{sk}}"

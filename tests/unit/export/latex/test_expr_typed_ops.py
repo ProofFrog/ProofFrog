@@ -85,4 +85,4 @@ def test_tripling_prg_concatenation_renders_correctly() -> None:
     renderer = ModuleRenderer(CryptocodeBackend())
     out = renderer.render_scheme(s)
     assert r"\lor" not in out
-    assert r"x \| result_{2}" in out
+    assert r"x \| \mathit{result}_{2}" in out

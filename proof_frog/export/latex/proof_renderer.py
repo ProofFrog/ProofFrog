@@ -22,9 +22,11 @@ if TYPE_CHECKING:
 class _SymbolicHeading:
     """Structured pieces of a symbolic game heading ``G_i = challenger [o R]``.
 
-    Kept alongside each figure so adjacent headings can be diffed component-wise
-    (challenger / reduction) and the changed part highlighted -- the symbolic
-    analogue of the body-line diff used in inlined mode.
+    Kept alongside each figure so the heading (challenger / composed reduction)
+    can be assembled after the body-diff pass. The heading itself is no longer
+    highlighted -- what changed between adjacent games is stated in the hop
+    prose -- but the structured pieces still drive dedup (a repeated reduction
+    body points back to where it was drawn).
     """
 
     index: int
@@ -60,10 +62,34 @@ def render_proof(  # pylint: disable=too-many-arguments,too-many-positional-argu
         _definitions_section(ctx, renderer),
         _construction_section(ctx, renderer),
         _theorem_section(ctx, renderer),
-        _games_sequence(ctx, renderer, backend, composition, diff),
+        _proof_section(ctx, renderer, backend, composition, diff),
     ]
     body = "\n\n".join(p for p in body_parts if p)
     return assemble(backend, macros, body, standalone)
+
+
+def _proof_section(
+    ctx: "ProofContext",
+    renderer: ModuleRenderer,
+    backend: Backend,
+    composition: str,
+    diff: bool,
+) -> str:
+    """The game sequence, wrapped in an ``amsthm`` proof environment.
+
+    A lead-in sentence orients the reader before the sequence; the ``proof``
+    environment supplies the italic "Proof." lead and the closing QED box.
+    """
+    sequence = _games_sequence(ctx, renderer, backend, composition, diff)
+    n = len(ctx.game_steps()) - 1
+    lead = ""
+    if n >= 1:
+        lead = (
+            rf"We proceed through the game sequence $G_0, \dots, G_{{{n}}}$ below; "
+            r"consecutive games differ only in the highlighted lines."
+            "\n\n"
+        )
+    return r"\begin{proof}" + "\n" + lead + sequence + "\n" + r"\end{proof}"
 
 
 def _definitions_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:
@@ -91,16 +117,28 @@ def _construction_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:
     # the v1 construction style so identifiers like `\G` still appear.
     others = [let for let in ctx.proof_file.lets if let.name not in construction_names]
     if others:
-        lines = [r"\begin{itemize}"]
+        items = []
         for let in others:
             if _looks_like_algorithm_name(let.name):
                 name_tex = renderer.macros.register_algorithm(let.name)
             else:
                 name_tex = renderer.expr.render(frog_ast.Variable(let.name))
-            lines.append(rf"  \item ${name_tex} : {renderer.types.render(let.type)}$")
-        lines.append(r"\end{itemize}")
-        parts.append("\n".join(lines))
+            items.append(rf"${name_tex} : {renderer.types.render(let.type)}$")
+        parts.append(
+            r"\noindent The construction is parameterized by "
+            + _join_with_and(items)
+            + "."
+        )
     return "\n\n".join(parts)
+
+
+def _join_with_and(items: list[str]) -> str:
+    """Join a list as an English series (``a``, ``a and b``, ``a, b, and c``)."""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
 
 
 def _render_game_ref(
@@ -359,15 +397,7 @@ def _theorem_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:
                 if t.adversary != "A"
             ]
             body += _bound_sentence(lhs, _bound_terms(bound, renderer), adversaries)
-    return (
-        r"\begin{theorem}"
-        + "\n"
-        + body
-        + "\n"
-        + r"\end{theorem}"
-        + "\n\n"
-        + r"\noindent\textit{Proof.}"
-    )
+    return r"\begin{theorem}" + "\n" + body + "\n" + r"\end{theorem}"
 
 
 def _games_sequence(
@@ -377,21 +407,20 @@ def _games_sequence(
     composition: str,
     diff: bool,
 ) -> str:
-    """Render the full game sequence with hop annotations between figures.
+    """Render the game sequence as non-floating blocks with hop prose between.
 
-    Figures are built as IR first so the diff pass (D1) can run before the
-    backend turns the IR into LaTeX. Both modes highlight changed *body lines*
-    (``mark_diff``); symbolic mode adds two things, because there the delta also
-    lives in the heading and a reduction is often repeated verbatim:
+    Each game is built as IR first so the diff pass (D1) can run before the
+    backend turns the IR into LaTeX; the backend then emits each as a centered,
+    non-floating ``render_game_step`` (no ``figure`` float) so the sequence stays
+    in reading order. Both modes highlight changed *body lines* (``mark_diff``):
 
     * **inlined** -- each step is a full game; only the changed body lines are
       highlighted.
     * **symbolic** -- the body is a reduction (or intermediate game). Changed
-      body lines are still highlighted (``R`` vs ``Rprime`` genuinely differ),
-      *and* the changed heading component (which security game the reduction is
-      composed with) is highlighted. A reduction body that repeats the previous
-      game's verbatim is not redrawn -- its assumption-hop twin points back to
-      it (``_apply_symbolic_diff``).
+      body lines are still highlighted (``R`` vs ``Rprime`` genuinely differ);
+      the heading is not highlighted (the change is stated in the hop prose). A
+      reduction body that repeats the previous game's verbatim is not redrawn --
+      its assumption-hop twin points back to it (``_apply_symbolic_diff``).
     """
     # pylint: disable=import-outside-toplevel
     from .diff import mark_diff
@@ -414,7 +443,7 @@ def _games_sequence(
     figures = [fig for fig, _ in built]
     headings = [head for _, head in built]
     if composition == "symbolic":
-        _apply_symbolic_diff(figures, headings, backend, diff)
+        _apply_symbolic_diff(figures, headings, diff)
     elif diff:
         for i in range(1, len(figures)):
             mark_diff(figures[i - 1].body, figures[i].body)
@@ -422,35 +451,32 @@ def _games_sequence(
     for i, fig in enumerate(figures):
         if i > 0:
             chunks.append(_hop_annotation(i, hops[i - 1], renderer, hop_terms[i - 1]))
-        chunks.append(backend.render_figure(fig))
+        heading = fig.heading or f"$G_{{{i}}}$"
+        chunks.append(backend.render_game_step(heading, fig.body))
     return "\n\n".join(chunks)
 
 
 def _apply_symbolic_diff(
     figures: list[ir.Figure],
     headings: list["_SymbolicHeading | None"],
-    backend: Backend,
     diff: bool,
 ) -> None:
-    """Highlight changed body lines + heading deltas, and de-dup repeats.
+    """Assemble headings, and (when ``diff``) highlight changes + de-dup repeats.
 
-    Mutates ``figures`` in place. For each game (against its predecessor):
+    Mutates ``figures`` in place. For each game with a structured heading:
 
-    * if the body repeats the predecessor's verbatim, drop it and point back
-      (the assumption-hop twin: same reduction, different composed challenger);
-    * otherwise highlight the body lines that changed (``mark_diff``) -- e.g.
-      ``R`` vs ``Rprime`` differ line by line;
-    * (re)assemble the heading, highlighting the challenger/reduction component
-      that changed.
+    * (when ``diff``) if the body repeats the predecessor's verbatim, drop it and
+      point back (the assumption-hop twin: same reduction, different composed
+      challenger); otherwise highlight the body lines that changed (``mark_diff``)
+      -- e.g. ``R`` vs ``Rprime`` differ line by line;
+    * assemble the ``$G_i = ...$`` heading (always, so ``--no-diff`` still labels
+      each game with its challenger/reduction).
 
     The body comparison uses the predecessor's *original* body, so a game still
     diffs against the reduction drawn above it even when the intervening twin
-    was collapsed. Figures with no structured heading (the error fallback) are
-    left untouched. Skipped entirely when ``diff`` is off, so ``--no-diff``
-    draws every game in full with no highlighting.
+    was collapsed. Figures with no structured heading (the error fallback) keep
+    the caller's fallback heading.
     """
-    if not diff:
-        return
     # pylint: disable=import-outside-toplevel
     from .diff import bodies_equal, mark_diff
 
@@ -458,34 +484,29 @@ def _apply_symbolic_diff(
     for i, head in enumerate(headings):
         if head is None:
             continue
-        prev = headings[i - 1] if i > 0 else None
         prev_body = original_bodies[i - 1] if i > 0 else None
         deduped_from: int | None = None
-        if figures[i].body is not None and prev_body is not None:
+        if diff and figures[i].body is not None and prev_body is not None:
             if bodies_equal(prev_body, figures[i].body):
                 figures[i].body = None
                 deduped_from = i - 1
             else:
                 mark_diff(prev_body, figures[i].body)
-        figures[i].heading = _symbolic_heading_tex(head, prev, backend, deduped_from)
+        figures[i].heading = _symbolic_heading_tex(head, deduped_from)
 
 
 def _symbolic_heading_tex(
     head: "_SymbolicHeading",
-    prev: "_SymbolicHeading | None",
-    backend: Backend,
     deduped_from: int | None,
 ) -> str:
-    """Assemble the ``$G_i = ...$`` heading, highlighting changed components."""
-    challenger = head.challenger_tex
-    if prev is not None and prev.challenger_tex != challenger:
-        challenger = backend.highlight(challenger)
-    body_tex = challenger
+    """Assemble the ``$G_i = ...$`` heading.
+
+    Heading components are no longer highlighted -- what changed between two
+    games is stated in the hop prose, so the heading reads plainly.
+    """
+    body_tex = head.challenger_tex
     if head.reduction_tex is not None:
-        reduction = head.reduction_tex
-        if prev is not None and prev.reduction_tex != reduction:
-            reduction = backend.highlight(reduction)
-        body_tex = rf"{body_tex} \circ {reduction}"
+        body_tex = rf"{body_tex} \circ {head.reduction_tex}"
     math = rf"$G_{{{head.index}}} = {body_tex}$"
     if head.sections_ref:
         return math + r"\\\textit{(see Definitions and Construction)}"
@@ -500,22 +521,45 @@ def _hop_annotation(
     renderer: ModuleRenderer,
     loss: "AdvTerm | None" = None,
 ) -> str:
-    """Render the paragraph annotation for a hop between G_{i-1} and G_i.
+    """Render the prose paragraph for a hop between $G_{i-1}$ and $G_i$.
 
-    When the hop contributes a loss term to the advantage bound (a
-    reduction/assumption hop), it is appended as ``losing $\\Adv{...}$``.
+    An interchangeability hop states the games are perfectly indistinguishable
+    ($\\Pr[G_{i-1}=1] = \\Pr[G_i=1]$); an assumption hop names the assumption and
+    (when the bound synthesized) states the advantage bound $|\\Pr[G_{i-1}=1] -
+    \\Pr[G_i=1]| \\le \\Adv{...}{...}$. Each paragraph is followed by an invisible
+    LaTeX comment inviting the author to supply the intuition.
     """
+    prev = rf"G_{{{i-1}}}"
+    cur = rf"G_{{{i}}}"
     if hop.kind == "assumption" and hop.assumption is not None:
         ref = _render_game_ref(hop.assumption, renderer, as_notion=True)
-        reason = f"by assumption ${ref}$"
+        if loss is not None:
+            adversary = _adversary_tex(loss.adversary)
+            adv = _render_adv_term(loss, renderer)
+            sentence = (
+                rf"Games $G_{{{i-1}}}$ and $G_{{{i}}}$ differ only in the "
+                rf"${ref}$ challenger; the reduction turns any distinguisher "
+                rf"into an adversary ${adversary}$ with "
+                rf"$\lvert \Pr[{prev} = 1] - \Pr[{cur} = 1] \rvert \le {adv}$."
+            )
+        else:
+            sentence = (
+                rf"Games $G_{{{i-1}}}$ and $G_{{{i}}}$ differ only in the "
+                rf"${ref}$ challenger, and are indistinguishable under that "
+                r"assumption."
+            )
     else:
-        reason = "interchangeable"
-    if loss is not None:
-        reason += f", losing ${_render_adv_term(loss, renderer)}$"
-    return (
-        rf"\paragraph{{Game $G_{{{i-1}}} \to G_{{{i}}}$.}} "
-        rf"({reason}) \todo{{commentary}}"
+        sentence = (
+            rf"Games $G_{{{i-1}}}$ and $G_{{{i}}}$ are perfectly "
+            rf"indistinguishable: $\Pr[{prev} = 1] = \Pr[{cur} = 1]$."
+        )
+    comment = (
+        rf"% commentary (author): explain the intuition for the {prev} -> {cur} hop"
     )
+    # A comment-only line is invisible in the PDF but visible in the source;
+    # strip the math braces from the marker so it reads plainly in the source.
+    comment = comment.replace("{", "").replace("}", "")
+    return sentence + "\n" + comment
 
 
 def _step_figure_ir(
@@ -543,13 +587,19 @@ def _step_figure_ir(
     """
     caption = f"Game $G_{{{index}}}$"
     label = f"fig:G{index}"
+    plain_heading = f"$G_{{{index}}}$"
     try:
         if composition == "inlined":
             game = ctx.resolve_inlined(step)
             block = renderer._method_blocks_vstack(  # pylint: disable=protected-access
                 game
             )
-            return ir.Figure(body=block, caption=caption, label=label), None
+            return (
+                ir.Figure(
+                    body=block, caption=caption, label=label, heading=plain_heading
+                ),
+                None,
+            )
         # symbolic mode
         sr = ctx.resolve_symbolic(step)
         challenger_ref = _render_game_ref(sr.challenger, renderer, as_notion=True)
@@ -584,6 +634,7 @@ def _step_figure_ir(
                 ),
                 caption=caption,
                 label=label,
+                heading=plain_heading,
             ),
             None,
         )

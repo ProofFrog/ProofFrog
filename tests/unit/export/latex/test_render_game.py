@@ -8,11 +8,13 @@ def test_render_prg_security_game() -> None:
 
     out = export_file(str(REPO / "examples/Games/PRG/PRGSecurity.game"))
     assert r"\begin{pcvstack}[boxed," in out
-    assert r"\Real" in out
-    assert r"\Random" in out
     assert r"\Query" in out
-    assert r"\Experiment{\PRGSecurity}{\Real}{\G}" in out
-    assert r"\Experiment{\PRGSecurity}{\Random}{\G}" in out
+    # The block is titled by the notion; the two sides are captioned by name.
+    assert r"\textbf{Game} $\PRGSecurity(\G)$" in out
+    assert r"$\Real$" in out
+    assert r"$\Random$" in out
+    # The old Exp^{Notion.Side} superscript label is gone.
+    assert r"\Experiment" not in out
 
 
 def test_side_by_side_games_wrapped_to_fit_width() -> None:
@@ -49,6 +51,6 @@ def test_integer_game_param_renders_as_variable_not_macro() -> None:
             / "examples/applications/cfrg-hybrid-kems/games/KDF/KDFFirstKeyPRF.game"
         )
     )
-    assert "Nss_{1}" in out
+    assert r"\mathit{Nss}_{1}" in out  # multi-letter stem as one italic unit
     assert r"\NssOne" not in out  # no algorithm macro for an Int length param
     assert r"\mathsf{Nss1}" not in out

@@ -146,13 +146,11 @@ def test_preamble_extras_defines_getsr() -> None:
     assert r"\providecommand{\getsr}{\sample}" in extras
 
 
-def test_experiment_macro_uses_exp_superscript_notation() -> None:
-    # The default \Experiment renders as Exp^{notion.side}_{params}.
+def test_no_dead_experiment_macro() -> None:
+    # Games are now titled by notion + side captions, so the old
+    # Exp^{notion.side} \Experiment macro is no longer emitted or defined.
     extras = CryptocodeBackend().preamble_extras()
-    assert (
-        r"\providecommand{\Experiment}[3]{\ensuremath{\mathsf{Exp}^{#1.#2}_{#3}}}"
-        in extras
-    )
+    assert r"\Experiment" not in extras
 
 
 def test_endif_emits_no_fi() -> None:
@@ -176,9 +174,10 @@ def test_endif_emits_no_fi() -> None:
     assert out.count(r"\\") == 2
 
 
-def test_highlighted_line_boxed_with_gamechange() -> None:
-    # Default diff style "box" wraps a changed line's content in cryptocode's
-    # \gamechange colorbox (D1). The \pcind indent stays outside the box.
+def test_highlighted_line_boxed_with_pfhighlight() -> None:
+    # Default diff style "box" wraps a changed line's content in the soft
+    # \pfhighlight tint (D1) -- lighter than cryptocode's \gamechange. The
+    # \pcind indent stays outside the box.
     b = CryptocodeBackend()
     p = ir.ProcedureBlock(
         title=r"\Enc(m)",
@@ -188,11 +187,12 @@ def test_highlighted_line_boxed_with_gamechange() -> None:
         ],
     )
     out = b.render_procedure(p)
-    # \gamechange's colorbox is an LR box, so the math content is re-entered
-    # with $...$.
-    assert r"\gamechange{$c \gets \ENC(k, m)$}" in out
+    # \pfhighlight re-enters math mode itself, so its argument is the raw line.
+    assert r"\pfhighlight{c \gets \ENC(k, m)}" in out
     # the unchanged return line is not boxed
-    assert r"\gamechange{$\pcreturn c$}" not in out
+    assert r"\pfhighlight{\pcreturn c}" not in out
+    # the old heavy \gamechange box is no longer emitted
+    assert r"\gamechange" not in out
 
 
 def test_highlighted_line_indent_outside_box() -> None:
@@ -202,7 +202,7 @@ def test_highlighted_line_indent_outside_box() -> None:
         lines=[ir.Return(expr=r"\bot", depth=1, highlight=True)],
     )
     out = b.render_procedure(p)
-    assert r"\pcind \gamechange{$\pcreturn \bot$}" in out
+    assert r"\pcind \pfhighlight{\pcreturn \bot}" in out
 
 
 def test_highlighted_line_color_style() -> None:
@@ -220,6 +220,38 @@ def test_highlighted_line_color_style() -> None:
 
 def test_default_diff_style_is_box() -> None:
     assert CryptocodeBackend().diff_style == "box"
+
+
+def test_preamble_defines_soft_pfhighlight() -> None:
+    # The soft change-highlight command is a light gray tint (black!8), far
+    # lighter than cryptocode's default \gamechange box.
+    extras = CryptocodeBackend().preamble_extras()
+    assert r"\providecommand{\pfhighlight}[1]{\colorbox{black!8}{$#1$}}" in extras
+    # The \todo placeholder macro is gone (no TODO markers in output).
+    assert r"\todo" not in extras
+
+
+def test_render_game_step_is_non_floating() -> None:
+    # A proof-sequence game renders as a centered, non-floating block -- no
+    # figure float, caption, or label -- so it stays in reading order.
+    b = CryptocodeBackend()
+    body = ir.VStack(blocks=[ir.ProcedureBlock(title=r"\O()", lines=[ir.Return("k")])])
+    out = b.render_game_step(r"$G_1 = \DDH(\G).\Left$", body)
+    assert out.startswith(r"\begin{center}")
+    assert out.strip().endswith(r"\end{center}")
+    assert r"$G_1 = \DDH(\G).\Left$" in out
+    assert r"\begin{figure}" not in out
+    assert r"\caption" not in out
+    assert r"\procedure" in out
+
+
+def test_render_game_step_heading_only() -> None:
+    # A start/end/dedup step has no body: just the heading, still non-floating.
+    b = CryptocodeBackend()
+    out = b.render_game_step(r"$G_0 = \DDH(\G).\Left$", None)
+    assert r"\begin{center}" in out
+    assert r"\procedure" not in out
+    assert r"\smallskip" not in out
 
 
 def test_vstack_adds_vertical_space_between_procedures() -> None:

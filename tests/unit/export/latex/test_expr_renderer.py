@@ -51,10 +51,13 @@ def test_function_call_uses_macro_for_algorithm_names() -> None:
 def test_multi_underscore_single_subscript_level() -> None:
     # kem_pq_nseed must not stack subscripts (a `}_{` double subscript fails
     # under pdflatex). The `_`-delimited tail segments are comma-joined into a
-    # single subscript group rather than escaped verbatim.
+    # single subscript group rather than escaped verbatim. The multi-letter stem
+    # is wrapped as one italic unit (\mathit); subscript components stay plain.
     out = render("kem_pq_nseed")
-    assert out == r"kem_{pq,nseed}"
-    assert "}_{" not in out
+    assert out == r"\mathit{kem}_{pq,nseed}"
+    # Exactly one subscript group (no stacked `_{...}_{...}` double subscript);
+    # the `}_{` inside `\mathit{kem}_{...}` is the stem brace, not a stack.
+    assert out.count("_{") == 1
 
 
 def test_digit_head_with_underscore_tail_merges() -> None:
@@ -69,14 +72,14 @@ def test_greek_stem_with_merged_subscript() -> None:
 
 
 def test_underscore_plus_digit_no_double_subscript() -> None:
-    assert render("pk_1") == "pk_{1}"
-    assert render("H_RO") == "H_{RO}"
+    assert render("pk_1") == r"\mathit{pk}_{1}"
+    assert render("H_RO") == "H_{RO}"  # single-letter stem stays bare
     assert "}_{" not in render("x1_y")
 
 
 def test_trailing_digit_still_subscripts() -> None:
-    assert render("x1") == "x_{1}"
-    assert render("ss1") == "ss_{1}"
+    assert render("x1") == "x_{1}"  # single-letter stem stays bare
+    assert render("ss1") == r"\mathit{ss}_{1}"
 
 
 # --- A4: exponentiation operands are braced ---
@@ -134,7 +137,7 @@ def test_member_override_takes_precedence_over_group_symbol() -> None:
 
 
 def test_member_override_leaves_other_members_unchanged() -> None:
-    assert render("E.length") == r"\E.length"
+    assert render("E.length") == r"\E.\mathit{length}"
 
 
 def test_field_member_greek_substitution() -> None:
@@ -143,7 +146,8 @@ def test_field_member_greek_substitution() -> None:
 
 
 def test_field_member_non_greek_unchanged() -> None:
-    assert render("G.stretch") == r"\G.stretch"
+    # A multi-letter data member renders as one italic unit (\mathit).
+    assert render("G.stretch") == r"\G.\mathit{stretch}"
 
 
 def test_lowercase_method_call_is_upright() -> None:
@@ -154,8 +158,9 @@ def test_lowercase_method_call_is_upright() -> None:
 
 
 def test_data_field_access_stays_italic() -> None:
-    # The same member name as a (non-call) data field is NOT macroified.
-    assert render("G.stretch") == r"\G.stretch"
+    # The same member name as a (non-call) data field is NOT macroified; a
+    # multi-letter data member is a single italic unit (\mathit).
+    assert render("G.stretch") == r"\G.\mathit{stretch}"
 
 
 def test_member_override_is_configurable() -> None:
@@ -178,9 +183,55 @@ def test_greek_letter_with_subscript() -> None:
     assert render("sigma1") == r"\sigma_{1}"
 
 
-def test_non_greek_token_unchanged() -> None:
-    assert render("sig") == "sig"
-    assert render("alphabet") == "alphabet"
+def test_non_greek_token_not_greekified() -> None:
+    # A non-Greek multi-letter token is not Greek-ified; it renders as one
+    # italic unit (\mathit) rather than a run of separate italic letters.
+    assert render("sig") == r"\mathit{sig}"
+    assert render("alphabet") == r"\mathit{alphabet}"
+
+
+# --- Multi-letter identifiers as one italic unit (\mathit) ---
+
+
+def test_multiletter_identifier_is_mathit() -> None:
+    assert render("HashTable") == r"\mathit{HashTable}"
+    assert render("entry") == r"\mathit{entry}"
+    assert render("ss") == r"\mathit{ss}"
+
+
+def test_single_letter_identifier_stays_bare() -> None:
+    assert render("k") == "k"
+    assert render("x") == "x"
+
+
+# --- challenger oracle handle ---
+
+
+def test_challenger_member_is_bare_oracle_call() -> None:
+    # `challenger.Query(m)` drops the object and renders the upright oracle name.
+    out = render("challenger.Query(m)")
+    assert out == r"\Query(m)"
+    assert "challenger" not in out
+
+
+def test_bare_challenger_is_oracle_symbol() -> None:
+    assert render("challenger") == r"\mathcal{O}"
+
+
+# --- capitalized in-scope data local renders as a variable, not a module ---
+
+
+def test_capitalized_data_local_is_italic_variable() -> None:
+    from proof_frog.visitors import NameTypeMap
+
+    scope = NameTypeMap()
+    scope.set("HashTable", frog_ast.MapType(frog_ast.IntType(), frog_ast.IntType()))
+    r = ExprRenderer(MacroRegistry(), name_types=scope)
+    # As a field-access object it is data (Map), so it stays an italic variable
+    # rather than becoming \mathsf{HashTable}.
+    out = r.render(frog_parser.parse_expression("HashTable.entries"))
+    assert out.startswith(r"\mathit{HashTable}.")
+    assert r"\mathsf{HashTable}" not in out
 
 
 def test_concrete_game_renders_dotted_without_unsupported() -> None:

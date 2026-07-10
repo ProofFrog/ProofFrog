@@ -27,9 +27,10 @@ def test_group_elem_macroifies_algorithm_like_group() -> None:
 
 
 def test_group_elem_keeps_lowercase_group_plain() -> None:
-    # A lowercase (non-algorithm-like) group name stays as-is.
+    # A lowercase (non-algorithm-like) group name is not macroified; it renders
+    # as a plain multi-letter identifier (one italic unit, not \mathsf).
     t = frog_ast.GroupElemType(frog_ast.Variable("grp"))
-    assert _types().render(t) == "grp"
+    assert _types().render(t) == r"\mathit{grp}"
 
 
 def test_bare_type_variable_macroifies_algorithm_like_name() -> None:

@@ -1,4 +1,5 @@
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,7 @@ REPO = Path(__file__).resolve().parents[2]
 
 def test_export_latex_cli_help() -> None:
     r = subprocess.run(
-        ["python", "-m", "proof_frog", "export-latex", "--help"],
+        [sys.executable, "-m", "proof_frog", "export-latex", "--help"],
         cwd=REPO,
         capture_output=True,
         text=True,
@@ -41,7 +42,7 @@ def test_export_latex_composition_flag(tmp_path: Path) -> None:
     out = tmp_path / "ddh.tex"
     r = subprocess.run(
         [
-            "python",
+            sys.executable,
             "-m",
             "proof_frog",
             "export-latex",
@@ -62,11 +63,11 @@ def test_export_latex_composition_flag(tmp_path: Path) -> None:
 
 
 def test_export_latex_diff_on_by_default(tmp_path: Path) -> None:
-    # D1: proof export highlights changed lines by default (\gamechange box).
+    # D1: proof export highlights changed lines by default (soft \pfhighlight).
     out = tmp_path / "ddh.tex"
     r = subprocess.run(
         [
-            "python",
+            sys.executable,
             "-m",
             "proof_frog",
             "export-latex",
@@ -82,14 +83,14 @@ def test_export_latex_diff_on_by_default(tmp_path: Path) -> None:
         check=False,
     )
     assert r.returncode == 0, r.stderr
-    assert r"\gamechange{" in out.read_text()
+    assert r"\pfhighlight{" in out.read_text()
 
 
 def test_export_latex_no_diff_flag(tmp_path: Path) -> None:
     out = tmp_path / "ddh_nodiff.tex"
     r = subprocess.run(
         [
-            "python",
+            sys.executable,
             "-m",
             "proof_frog",
             "export-latex",
@@ -106,14 +107,14 @@ def test_export_latex_no_diff_flag(tmp_path: Path) -> None:
         check=False,
     )
     assert r.returncode == 0, r.stderr
-    assert r"\gamechange{" not in out.read_text()
+    assert r"\pfhighlight{" not in out.read_text()
 
 
 def test_export_latex_diff_style_color(tmp_path: Path) -> None:
     out = tmp_path / "ddh_color.tex"
     r = subprocess.run(
         [
-            "python",
+            sys.executable,
             "-m",
             "proof_frog",
             "export-latex",
@@ -133,14 +134,14 @@ def test_export_latex_diff_style_color(tmp_path: Path) -> None:
     assert r.returncode == 0, r.stderr
     text = out.read_text()
     assert r"{\color{blue}" in text
-    assert r"\gamechange{" not in text
+    assert r"\pfhighlight{" not in text
 
 
 def test_export_latex_no_standalone_flag(tmp_path: Path) -> None:
     out = tmp_path / "frag.tex"
     r = subprocess.run(
         [
-            "python",
+            sys.executable,
             "-m",
             "proof_frog",
             "export-latex",

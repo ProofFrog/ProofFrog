@@ -16,7 +16,11 @@ def test_export_proof_smoke() -> None:
     assert r"\begin{document}" in out
     assert r"\end{document}" in out
     assert r"\begin{theorem}" in out
-    assert out.count(r"\begin{figure}") >= 1
+    # The proof body is an amsthm proof environment with non-floating game
+    # blocks (no figure floats that would drift out of reading order).
+    assert r"\begin{proof}" in out and r"\end{proof}" in out
+    assert r"\begin{figure}" not in out
+    assert out.count(r"\begin{center}") >= 1
 
 
 # ---------------------------------------------------------------------------

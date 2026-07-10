@@ -91,6 +91,18 @@ class ProofContext:
     def theorem(self) -> frog_ast.ParameterizedGame:
         return self.proof_file.theorem
 
+    def claimed_bound(self) -> frog_ast.Expression | None:
+        """The proof's author-claimed advantage bound, or None if absent.
+
+        This is the optional ``bound:`` clause -- a numeric expression over
+        ``advantage(...)`` references, per-oracle counts, cardinalities, and
+        parameters. When present it is the bound the theorem statement should
+        display (the author's intended, human-readable form); otherwise the
+        renderer falls back to the synthesized bound.
+        """
+        claimed = self.proof_file.claimed_bound
+        return None if claimed is None else claimed.bound
+
     def _referenced_game_names(self) -> list[str]:
         names: list[str] = []
         for game in [*self.proof_file.assumptions, self.proof_file.theorem]:

@@ -1,6 +1,6 @@
 """Tests for proof_renderer helpers added in Task 4."""
 
-from proof_frog import frog_ast
+from proof_frog import frog_ast, frog_parser
 from proof_frog.export.latex.backends.cryptocode import CryptocodeBackend
 from proof_frog.export.latex.macros import MacroRegistry
 from proof_frog.export.latex.module_renderer import ModuleRenderer
@@ -9,6 +9,19 @@ from proof_frog.export.latex import proof_renderer as pr
 
 DDH = "examples/Proofs/Group/DDH_implies_CDH.proof"
 MULTICHAL = "examples/Proofs/PubKeyEnc/INDCPA_implies_INDCPA_MultiChal.proof"
+CFRG_LEAK = (
+    "examples/applications/cfrg-hybrid-kems/proofs/CG/CG_expanded_LEAK_BIND_K_CT.proof"
+)
+
+
+def _claim(src: str) -> frog_ast.Expression:
+    """Parse a ``bound:`` expression via a minimal (parse-only) proof file."""
+    pf = frog_parser.parse_proof_file(
+        "proof:\ntheorem:\n  Foo(E);\nbound:\n  "
+        f"{src};\ngames:\n  Foo(E).Left against Foo(E).Adversary;\n"
+    )
+    assert pf.claimed_bound is not None
+    return pf.claimed_bound.bound
 
 
 def _renderer():
@@ -39,12 +52,84 @@ def test_theorem_includes_concrete_advantage_bound():
     _b, _m, mr = _renderer()
     ctx = ProofContext(DDH)
     out = pr._theorem_section(ctx, mr)
-    # A concrete-security inequality is stated for the theorem's own advantage.
+    # A concrete-security inequality is displayed for the theorem's advantage,
+    # broken across lines so a multi-term sum stays within the text width.
     assert "Concretely" in out
-    assert r"\Adv{\CDH(\G)}{\mathcal{A}} \le" in out
+    assert r"\begin{align*}" in out
+    assert r"\Adv{\CDH(\G)}{\mathcal{A}} &\le" in out
+    assert r"&\quad +" in out
     # The two reductions become distinct constructed adversaries.
     assert r"\mathcal{B}_{1}" in out
     assert r"\mathcal{B}_{2}" in out
+
+
+def test_claimed_bound_renders_advantage_term_with_named_reduction():
+    _b, _m, mr = _renderer()
+    out = pr._render_claimed_bound(_claim("advantage(PRFSecurity(F) compose R_PRF)"), mr)
+    assert out == r"\Adv{\PRFSecurity(\F)}{\RPRF}"
+
+
+def test_claimed_bound_direct_reference_uses_adversary_A():
+    _b, _m, mr = _renderer()
+    out = pr._render_claimed_bound(_claim("advantage(DDH(G))"), mr)
+    assert out == r"\Adv{\DDH(\G)}{\mathcal{A}}"
+
+
+def test_claimed_bound_renders_fraction_and_query_count():
+    _b, _m, mr = _renderer()
+    out = pr._render_claimed_bound(
+        _claim("count_CTXT * (count_CTXT - 1) / |BitString<F.in>|"), mr
+    )
+    # Division becomes a fraction; per-oracle counts become query-count symbols;
+    # the subtraction stays parenthesized under the multiplication.
+    assert r"\frac{" in out
+    assert r"q_{\mathsf{CTXT}}" in out
+    assert r"(q_{\mathsf{CTXT}} - 1)" in out
+    assert r"\left|" in out
+
+
+def test_claimed_bound_exponent():
+    _b, _m, mr = _renderer()
+    out = pr._render_claimed_bound(_claim("2 ^ (1 - lambda)"), mr)
+    assert out == r"2^{1 - \lambda}"
+
+
+def test_claimed_bound_multi_term_breaks_into_align():
+    _b, _m, mr = _renderer()
+    terms = pr._claimed_bound_terms(
+        _claim("advantage(PRFSecurity(F) compose R1) + advantage(PRGSec(G) compose R2)"),
+        mr,
+    )
+    assert len(terms) == 2
+    display = pr._bound_display(r"\Adv{\X}{\mathcal{A}}", terms)
+    assert display.startswith(r"\begin{align*}")
+    assert display.endswith(r"\end{align*}")
+    # First summand after `\le`, each further summand on its own `+` line.
+    assert r"&\le \Adv{\PRFSecurity(\F)}{\ROne}" in display
+    assert display.count(r"&\quad +") == 1
+    assert display.count(r"\\") == 1
+
+
+def test_theorem_prefers_claimed_bound_over_synthesized():
+    _b, _m, mr = _renderer()
+    ctx = ProofContext(CFRG_LEAK)
+    out = pr._theorem_section(ctx, mr)
+    assert "Concretely" in out
+    assert r"\begin{align*}" in out
+    # The claimed bound names its reductions as the constructed adversaries...
+    assert r"\Adv{\LEAKBINDKCT(\KEMPQ)}{\RPQBind}" in out
+    # ...not the synthesized B1/B2 placeholders.
+    assert r"\mathcal{B}_{1}" not in out
+    assert "% unsupported" not in out
+
+
+def test_theorem_falls_back_to_synthesized_without_claim():
+    # DDH proof has no bound: clause, so the synthesized B1/B2 form is used.
+    _b, _m, mr = _renderer()
+    ctx = ProofContext(DDH)
+    assert ctx.claimed_bound() is None
+    out = pr._theorem_section(ctx, mr)
+    assert r"\mathcal{B}_{1}" in out
 
 
 def test_hop_annotation_reports_loss_term():

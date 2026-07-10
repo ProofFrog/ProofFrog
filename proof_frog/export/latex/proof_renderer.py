@@ -160,13 +160,172 @@ def _render_adv_term(term: "AdvTerm", renderer: ModuleRenderer) -> str:
     return rf"\Adv{{{notion}}}{{{_adversary_tex(term.adversary)}}}"
 
 
-def _bound_tex(bound: "AdvantageBound", renderer: ModuleRenderer) -> str:
-    """Render the right-hand side of the advantage inequality as LaTeX."""
-    return bound.render(
+def _bound_terms(bound: "AdvantageBound", renderer: ModuleRenderer) -> list[str]:
+    """The synthesized bound's summands, each as its own LaTeX string.
+
+    Split on a sentinel joiner (rather than ``" + "``) so a term that itself
+    contains ``+`` internally is not split. One summand per element, in the
+    order ``render`` emits them.
+    """
+    joined = bound.render(
         term_renderer=lambda t: _render_adv_term(t, renderer),
         mul=r" \cdot ",
-        joiner=" + ",
+        joiner="\x00",
     )
+    return [part for part in joined.split("\x00") if part]
+
+
+def _render_advantage_reference(
+    ref: frog_ast.AdvantageReference, renderer: ModuleRenderer
+) -> str:
+    """Render an ``advantage(notion compose reduction)`` atom as ``\\Adv``.
+
+    The notion renders as a security-notion macro; the reduction (a bare name
+    in a claimed bound) as an algorithm macro. A reference with no reduction is
+    played directly by the adversary ``A``.
+    """
+    notion = _render_game_ref(ref.notion, renderer, as_notion=True)
+    if ref.reduction is None:
+        adversary = r"\mathcal{A}"
+    else:
+        adversary = _render_game_ref(ref.reduction, renderer, as_notion=False)
+    return rf"\Adv{{{notion}}}{{{adversary}}}"
+
+
+# Numeric operators a claimed bound may use, and their infix LaTeX (``/`` and
+# ``^`` are handled specially -- fraction and superscript -- so are absent).
+_CLAIM_INFIX: dict[frog_ast.BinaryOperators, str] = {
+    frog_ast.BinaryOperators.ADD: "+",
+    frog_ast.BinaryOperators.SUBTRACT: "-",
+    frog_ast.BinaryOperators.MULTIPLY: r"\cdot",
+}
+
+
+def _render_claimed_bound(
+    expr: frog_ast.Expression, renderer: ModuleRenderer, parent_prec: int = 0
+) -> str:
+    """Render a claimed ``bound:`` expression to LaTeX math.
+
+    Precedence-aware (the shared ``ExprRenderer`` is not, so it is used only for
+    leaves): ``/`` becomes a ``\\frac``, ``^`` a braced superscript, and ``+``
+    ``-`` ``*`` are parenthesized by operator precedence. ``advantage(...)``
+    atoms become ``\\Adv`` terms and ``count_<Oracle>`` a query-count symbol
+    ``q_{<Oracle>}``; any other leaf defers to the expression renderer.
+    """
+    if isinstance(expr, frog_ast.AdvantageReference):
+        return _render_advantage_reference(expr, renderer)
+    if isinstance(expr, frog_ast.BinaryOperation) and expr.operator in (
+        *_CLAIM_INFIX,
+        frog_ast.BinaryOperators.DIVIDE,
+        frog_ast.BinaryOperators.EXPONENTIATE,
+    ):
+        op = expr.operator
+        left, right = expr.left_expression, expr.right_expression
+        if op == frog_ast.BinaryOperators.DIVIDE:
+            num = _render_claimed_bound(left, renderer, 0)
+            den = _render_claimed_bound(right, renderer, 0)
+            return rf"\frac{{{num}}}{{{den}}}"
+        if op == frog_ast.BinaryOperators.EXPONENTIATE:
+            base = _render_claimed_bound(left, renderer, 99)
+            if isinstance(left, frog_ast.BinaryOperation):
+                base = f"({base})"
+            return f"{base}^{{{_render_claimed_bound(right, renderer, 0)}}}"
+        prec = op.precedence()
+        # The right operand of a left-associative subtraction needs a tighter
+        # threshold so ``a - (b + c)`` keeps its parentheses.
+        right_prec = prec + (1 if op == frog_ast.BinaryOperators.SUBTRACT else 0)
+        rendered = (
+            f"{_render_claimed_bound(left, renderer, prec)} {_CLAIM_INFIX[op]} "
+            f"{_render_claimed_bound(right, renderer, right_prec)}"
+        )
+        return f"({rendered})" if prec < parent_prec else rendered
+    if isinstance(expr, frog_ast.UnaryOperation):
+        if expr.operator == frog_ast.UnaryOperators.SIZE:
+            return (
+                rf"\left|{_render_claimed_bound(expr.expression, renderer, 0)}\right|"
+            )
+        if expr.operator == frog_ast.UnaryOperators.MINUS:
+            return f"-{_render_claimed_bound(expr.expression, renderer, 5)}"
+    if isinstance(expr, frog_ast.Variable) and expr.name.startswith("count_"):
+        oracle = expr.name[len("count_") :]
+        return rf"q_{{\mathsf{{{oracle}}}}}"
+    return renderer.expr.render(expr)
+
+
+def _flatten_sum(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
+    """Split a top-level ``+`` chain into its summands (left to right)."""
+    if (
+        isinstance(expr, frog_ast.BinaryOperation)
+        and expr.operator == frog_ast.BinaryOperators.ADD
+    ):
+        return _flatten_sum(expr.left_expression) + _flatten_sum(expr.right_expression)
+    return [expr]
+
+
+def _claimed_bound_terms(
+    expr: frog_ast.Expression, renderer: ModuleRenderer
+) -> list[str]:
+    """The claimed bound's summands, each as its own LaTeX string."""
+    return [_render_claimed_bound(term, renderer) for term in _flatten_sum(expr)]
+
+
+def _claimed_bound_reductions(
+    expr: frog_ast.Expression,
+) -> list[frog_ast.ParameterizedGame]:
+    """Distinct reductions named by ``advantage(... compose R)`` atoms, in order."""
+    found: list[frog_ast.ParameterizedGame] = []
+    seen: set[str] = set()
+
+    def walk(node: frog_ast.ASTNode) -> None:
+        if isinstance(node, frog_ast.AdvantageReference):
+            if node.reduction is not None and node.reduction.name not in seen:
+                seen.add(node.reduction.name)
+                found.append(node.reduction)
+            return
+        for attr in vars(node):
+            value = getattr(node, attr)
+            for child in value if isinstance(value, (list, tuple)) else [value]:
+                if isinstance(child, frog_ast.ASTNode):
+                    walk(child)
+
+    walk(expr)
+    return found
+
+
+def _bound_display(lhs: str, terms: list[str]) -> str:
+    """Render ``lhs <= t1 + t2 + ...`` as a broken ``align*`` display.
+
+    The summands go one per line (broken at each ``+``), continuation lines
+    aligned just past the ``\\le``. Breaking the sum keeps even a many-term
+    bound within the text width, where a single inline or displayed line would
+    overflow.
+    """
+    rows = [rf"{lhs} &\le {terms[0]}"]
+    rows += [rf"&\quad + {term}" for term in terms[1:]]
+    body = " \\\\\n".join(rows)
+    return "\\begin{align*}\n" + body + "\n\\end{align*}"
+
+
+def _bound_sentence(lhs: str, terms: list[str], adversaries: list[str]) -> str:
+    """The concrete-security statement appended to the theorem.
+
+    The bound renders as a displayed ``align*`` so a long sum wraps cleanly.
+    ``adversaries`` is the list of already-``$``-wrapped constructed-adversary
+    names, named in a trailing "runs in approximately the time of A" clause when
+    present (the usual case; a purely directly-played bound has none).
+    """
+    sentence = (
+        r" Concretely, for every adversary $\mathcal{A}$,"
+        + "\n"
+        + _bound_display(lhs, terms)
+    )
+    if adversaries:
+        names = ", ".join(adversaries)
+        sentence += (
+            f"\nwhere each of {names} runs in approximately the time of "
+            r"$\mathcal{A}$."
+        )
+    return sentence
 
 
 def _theorem_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:
@@ -180,23 +339,26 @@ def _theorem_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:
         )
     else:
         body = f"Indistinguishability holds for ${concl}$."
-    bound = ctx.advantage_bound()
-    if bound.supported:
-        lhs = rf"\Adv{{{concl}}}{{\mathcal{{A}}}}"
-        rhs = _bound_tex(bound, renderer)
-        constructed = [t for t in bound.terms.values() if t.adversary != "A"]
-        if constructed:
-            names = ", ".join(f"${_adversary_tex(t.adversary)}$" for t in constructed)
-            tail = (
-                f" where each of {names} runs in approximately the time of "
-                r"$\mathcal{A}$."
-            )
-        else:
-            tail = "."
-        body += (
-            r" Concretely, for every adversary $\mathcal{A}$, "
-            f"${lhs} \\le {rhs}${tail}"
-        )
+    lhs = rf"\Adv{{{concl}}}{{\mathcal{{A}}}}"
+    claimed = ctx.claimed_bound()
+    if claimed is not None:
+        # The author stated the bound explicitly: display it (the intended,
+        # human-readable form) rather than the synthesized one.
+        terms = _claimed_bound_terms(claimed, renderer)
+        adversaries = [
+            f"${_render_game_ref(r, renderer, as_notion=False)}$"
+            for r in _claimed_bound_reductions(claimed)
+        ]
+        body += _bound_sentence(lhs, terms, adversaries)
+    else:
+        bound = ctx.advantage_bound()
+        if bound.supported:
+            adversaries = [
+                f"${_adversary_tex(t.adversary)}$"
+                for t in bound.terms.values()
+                if t.adversary != "A"
+            ]
+            body += _bound_sentence(lhs, _bound_terms(bound, renderer), adversaries)
     return (
         r"\begin{theorem}"
         + "\n"

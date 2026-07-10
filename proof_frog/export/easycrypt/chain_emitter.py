@@ -3536,7 +3536,7 @@ def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-p
         red_proc=red_proc,
         win_is_ek=bool(ek_decomp),
         ek_component_fields=ek_decomp,
-        ek_inj_axiom=f"{t_module}_encodeencapskey_inj",
+        ek_inj_axiom=f"{t_module}_{_ev_method(shape.ev_encek_t)}_inj",
         challenger_ek_fields=chal_ek_names,
     )
     del game_ek_refs  # coupling built above
@@ -3544,8 +3544,9 @@ def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-p
     if body is None:
         return None
     inj_reqs = [(pq_module, "encodesharedsecret")]
-    if ek_decomp:  # PK: the encaps-key redundancy needs encodeencapskey injectivity
-        inj_reqs.append((t_module, "encodeencapskey"))
+    if ek_decomp:  # PK: the encaps-key redundancy needs the encaps-key encoding
+        # injective (KEM: ``encodeencapskey``; group/CG: ``NG.encode``).
+        inj_reqs.append((t_module, _ev_method(shape.ev_encek_t)))
     return (
         [_res_tag(SYNTH_PARAM), *body[1:]],
         inj_reqs,
@@ -3845,14 +3846,14 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
         h_module=h_module,
         l_challenger_ref=l_challenger_ref,
         l_challenger_key_fields=chal_fields,
-        ect_inj_axiom=f"{t_module}_encodeciphertext_inj",
+        ect_inj_axiom=f"{t_module}_{_ev_method(shape.ev_encct_t)}_inj",
     )
     body = bch.challenge_tactic_hop2(spec)
     if body is None:
         return None
     return (
         [_res_tag(SYNTH_PARAM), *body[1:]],
-        (t_module, "encodeciphertext"),
+        (t_module, _ev_method(shape.ev_encct_t)),
         scheme_name,
     )
 
@@ -3894,19 +3895,41 @@ def _callee_mods(
     return out
 
 
+def _ev_method(ev_op: str) -> str:
+    """The method name of a functional-value op, e.g. ``NG_c.ev_encode`` ->
+    ``encode``, ``KEM_T_c.ev_encodeciphertext`` -> ``encodeciphertext``."""
+    return ev_op.rsplit(".ev_", 1)[1]
+
+
 def _group_fields(group: list[ec_ast.Call], pq_module: str) -> list[str] | None:
-    """The ``[pq_dk, t_dk, ek]`` field names read off one KDF-input call group."""
+    """The ``[pq_dk, t_dk, ek]`` field names read off one KDF-input call group.
+
+    Handles both a KEM T component (``KEM_T.decaps(dk_T, ct_T)`` +
+    ``KEM_T.encodeencapskey(ek_T)``) and a group T component (CG:
+    ``NG.exp(ct_T, dk_T)`` + two ``NG.encode`` calls, the encaps-key one being
+    the ``encode`` whose argument is not the ciphertext fed to ``exp``)."""
     pq_dk = t_dk = ek = None
+    t_ct = None  # the T decaps ciphertext arg (to disambiguate the encode calls)
+    encode_args: list[str] = []
     for call in group:
         mod, _, method = call.callee.partition(".")
-        args = call.args.split(",")
+        args = [a.strip() for a in call.args.split(",")]
         if method == "decaps":
             if mod == pq_module:
-                pq_dk = args[0].strip()
-            else:
-                t_dk = args[0].strip()
+                pq_dk = args[0]
+            else:  # KEM T decaps: decaps(dk_T, ct_T)
+                t_dk = args[0]
+        elif method == "exp":  # group T decaps: exp(ct_T, dk_T)
+            t_ct, t_dk = args[0], args[1]
         elif method == "encodeencapskey":
-            ek = args[0].strip()
+            ek = args[0]
+        elif method == "encode":
+            encode_args.append(args[0])
+    if ek is None and t_ct is not None:
+        # Group flavor: ek = the encode arg that is not the exp's ciphertext.
+        non_ct = [a for a in encode_args if a != t_ct]
+        if len(non_ct) == 1:
+            ek = non_ct[0]
     if pq_dk is None or t_dk is None or ek is None:
         return None
     return [pq_dk, t_dk, ek]
@@ -4029,21 +4052,37 @@ def _concat_shape_from(
     if len(concat_ops) != 4:
         return None
     roles: dict[str, str] = {}
+    t_decaps_ct_first = False
+    encode_ev: str | None = None  # the group ``NG.ev_encode`` op (encct == encek)
     for call in group0:
         mod, _, method = call.callee.partition(".")
         if mod not in clone_alias:
             return None
         ev = f"{clone_alias[mod]}.ev_{method}"
         is_pq = mod == pq_module
+        # KEM roles by method name; group roles (CG): ``exp`` is the T decaps
+        # (ciphertext-first), ``elementtosharedsecret`` the T encss, and both
+        # the ciphertext and encaps-key leaves are ``NG.encode``.
         key = {
             "decaps": "decaps_pq" if is_pq else "decaps_t",
             "encodesharedsecret": "encss_pq" if is_pq else "encss_t",
+            "elementtosharedsecret": "encss_t",
             "encodeciphertext": "encct_t",
             "encodeencapskey": "encek_t",
             "get": "label",
         }.get(method)
-        if key is not None:
+        if method == "exp":
+            roles["decaps_t"] = ev
+            t_decaps_ct_first = True
+        elif method == "encode":
+            encode_ev = ev
+        elif key is not None:
             roles[key] = ev
+    if encode_ev is not None:
+        # Group flavor: the same ``NG.ev_encode`` serves the ciphertext and
+        # encaps-key leaves.
+        roles.setdefault("encct_t", encode_ev)
+        roles.setdefault("encek_t", encode_ev)
     needed = {
         "decaps_pq",
         "encss_pq",
@@ -4064,6 +4103,7 @@ def _concat_shape_from(
         ev_encct_t=roles["encct_t"],
         ev_encek_t=roles["encek_t"],
         ev_label=roles["label"],
+        t_decaps_ct_first=t_decaps_ct_first,
     )
 
 

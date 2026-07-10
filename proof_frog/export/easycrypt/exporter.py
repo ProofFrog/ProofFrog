@@ -462,6 +462,28 @@ def _scheme_functor_params(
     return params, param_types, applied
 
 
+def _rename_proc_call_modules(proc: ec_ast.Proc, rename: dict[str, str]) -> ec_ast.Proc:
+    """Return a copy of ``proc`` with each call's callee module-prefix renamed
+    per ``rename`` (e.g. a scheme functor param ``K`` -> its concrete arg
+    ``KEM_PQ``). Used so the synthesized ``<Scheme>_decaps_val`` lemma's ev-ops
+    and ``_det`` peels resolve against the declared clones even when the scheme's
+    parameter names differ from the instantiation arguments."""
+
+    def _fix(stmt: ec_ast.EcStmt) -> ec_ast.EcStmt:
+        if isinstance(stmt, ec_ast.Call):
+            mod, dot, method = stmt.callee.partition(".")
+            if dot and mod in rename:
+                return ec_ast.Call(stmt.var, f"{rename[mod]}.{method}", stmt.args)
+        return stmt
+
+    return ec_ast.Proc(
+        name=proc.name,
+        params=proc.params,
+        return_type=proc.return_type,
+        body=[_fix(s) for s in proc.body],
+    )
+
+
 def _reduction_arg_expr(
     param: frog_ast.Parameter,
     instance_module_expr: dict[str, str],
@@ -4050,9 +4072,17 @@ def export_proof_file(proof_path: str) -> str:
     if decaps_val_requests and ec_scheme is not None:
         _decaps_proc = next((p for p in ec_scheme.procs if p.name == "decaps"), None)
         if _decaps_proc is not None and ec_scheme.name in decaps_val_requests:
-            _scheme_expr = (
-                f"{ec_scheme.name}(" + ", ".join(p.name for p in ec_scheme.params) + ")"
+            # The scheme functor's parameter names may differ from the concrete
+            # instantiation arguments (CG_expanded's PQ KEM param is ``K``, bound
+            # to ``KEM_PQ``). Rename the decaps proc's call module-prefixes to the
+            # concrete args so the val-lemma resolves against the declared clones,
+            # and state the lemma over those concrete args (a no-op when the
+            # scheme's param names already match, e.g. CK_expanded).
+            _param_to_arg = dict(
+                zip((p.name for p in ec_scheme.params), scheme_applied_args)
             )
+            _decaps_proc = _rename_proc_call_modules(_decaps_proc, _param_to_arg)
+            _scheme_expr = f"{ec_scheme.name}(" + ", ".join(scheme_applied_args) + ")"
             _vl = bch.decaps_val_lemma(
                 f"{ec_scheme.name}_decaps_val",
                 _scheme_expr,

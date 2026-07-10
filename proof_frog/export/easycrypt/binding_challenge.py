@@ -288,6 +288,9 @@ class ConcatShape:
     ev_encct_t: str
     ev_encek_t: str
     ev_label: str  # e.g. "L_c.ev_get"
+    # For a group T component (CG), the T "decaps" is ``NG.Exp(ct_T, dk_T)`` --
+    # ciphertext-first, vs a KEM's ``KEM_T.Decaps(dk_T, ct_T)`` (key-first).
+    t_decaps_ct_first: bool = False
 
     def slice_axioms(self) -> list[str]:
         """``slice_concat_left_*`` round-trip axiom names, outer-first."""
@@ -306,7 +309,10 @@ class ConcatShape:
     def leaves(self, pq_key: str, t_key: str, ek: str, ct: str) -> tuple[str, ...]:
         """Return ``(pq, t, b_ct, b_ek, b_label, L1, L2, L3)`` at these bindings."""
         pq = f"({self.ev_encss_pq} ({self.ev_decaps_pq} {pq_key} {ct}.`1))"
-        t = f"({self.ev_encss_t} ({self.ev_decaps_t} {t_key} {ct}.`2))"
+        if self.t_decaps_ct_first:
+            t = f"({self.ev_encss_t} ({self.ev_decaps_t} {ct}.`2 {t_key}))"
+        else:
+            t = f"({self.ev_encss_t} ({self.ev_decaps_t} {t_key} {ct}.`2))"
         b_ct = f"({self.ev_encct_t} {ct}.`2)"
         b_ek = f"({self.ev_encek_t} {ek})"
         b_label = self.ev_label

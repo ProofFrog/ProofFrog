@@ -926,6 +926,23 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         else:
             self.stack.append(None)
 
+    def leave_bit_string_literal(self, node: frog_ast.BitStringLiteral) -> None:
+        # A bitstring literal (`0^n` / `1^n`) is a deterministic constant not
+        # modelled natively in Z3. Its `length` child was visited and left on
+        # the stack; pop it. With opaque fallback on, intern the WHOLE literal
+        # as a memoized opaque atom so two structurally identical literals
+        # share an atom (`0^n` == `0^n`), while distinct ones (`0^n` vs `1^n`,
+        # `0^n` vs `0^m`) get distinct atoms. Without a handler the `length`
+        # subexpression masqueraded as the literal's value, so `t == [0^n, 0^n]`
+        # produced `t@0 == n` -- an opaque-vs-Int sort-mismatch crash when
+        # compared against an opaque tuple component (issue #235).
+        if self.stack:
+            self.stack.pop()
+        if self.opaque_func_call_fallback:
+            self.stack.append(self._intern_opaque(node))
+        else:
+            self.stack.append(None)
+
     def leave_unary_operation(self, operation: frog_ast.UnaryOperation) -> None:
         if not self.stack or operation.operator == frog_ast.UnaryOperators.SIZE:
             self.stack.append(None)

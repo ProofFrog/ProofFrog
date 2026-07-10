@@ -1367,9 +1367,15 @@ class _GameASTGenerator(_SharedAST, GameVisitor):  # type: ignore[misc]
         imports = [self.visit(im) for im in ctx.moduleImport()]
         game1: frog_ast.Game = self.visit(ctx.game()[0])
         game2: frog_ast.Game = self.visit(ctx.game()[1])
+        advantage = self.visit(ctx.advantageClause()) if ctx.advantageClause() else None
         return frog_ast.GameFile(
-            imports, (game1, game2), ctx.gameExport().id_().getText()
+            imports, (game1, game2), ctx.gameExport().id_().getText(), advantage
         )
+
+    def visitAdvantageClause(
+        self, ctx: GameParser.AdvantageClauseContext
+    ) -> frog_ast.AdvantageClause:
+        return frog_ast.AdvantageClause(self.visit(ctx.expression()))
 
 
 @line_number_decorator

@@ -706,7 +706,9 @@ class ProofEngine:
             and first_step.adversary == final_step.adversary
         ):
             self.advantage_bound = advantage.synthesize_from_hop_results(
-                self.hop_results
+                self.hop_results,
+                definition_lookup=self.definition_namespace,
+                max_calls=proof_file.max_calls,
             )
             self._print_advantage_bound(proof_file.theorem)
             print(Fore.GREEN + "Proof Succeeded!" + Fore.RESET)
@@ -861,6 +863,8 @@ class ProofEngine:
             print(f"Advantage bound: {lhs} <= (not synthesized: {bound.note})")
             return
         print(f"Advantage bound: {lhs} <= {bound.render()}")
+        for note in bound.notes:
+            print(f"  note: {note}")
 
     def _print_failure_inline(self, equiv_result: EquivalenceResult) -> None:
         """Print Level 1 inline summary and Level 3 verbose detail for a failure."""

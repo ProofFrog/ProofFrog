@@ -139,3 +139,183 @@ class TestSynthesizeFromHopResults:
         ]
         bound = advantage.synthesize_from_hop_results(results)
         assert not bound.supported
+
+
+# --- Tier 2: per-oracle count derivation --------------------------------------
+
+_HELPER_GAME_FILE = """
+Game Replacement(Set S) {
+    S Samp() { S val <- S; return val; }
+}
+Game NoReplacement(Set S) {
+    Set<S> seen;
+    S Samp() { S val <-uniq[seen] S; return val; }
+}
+advantage <= count_Samp * (count_Samp - 1) / (2 * |S|);
+export as DistinctSampling;
+"""
+
+_ORDER_HELPER_FILE = """
+Game MaybeZero(Int order) {
+    ModInt<order> Samp() { ModInt<order> v <- ModInt<order>; return v; }
+}
+Game Nonzero(Int order) {
+    Set<ModInt<order>> seen;
+    ModInt<order> Samp() { ModInt<order> v <-uniq[seen] ModInt<order>; return v; }
+}
+advantage <= count_Samp / order;
+export as NonzeroSampling;
+"""
+
+
+def _challenger_call(oracle: str) -> frog_ast.FuncCall:
+    return frog_ast.FuncCall(
+        frog_ast.FieldAccess(frog_ast.Variable("challenger"), oracle), []
+    )
+
+
+def _reduction(name: str, methods: dict[str, list[str]]) -> frog_ast.Reduction:
+    """A reduction whose method `m` calls each challenger oracle in methods[m]."""
+    method_nodes = [
+        frog_ast.Method(
+            frog_ast.MethodSignature(mname, frog_ast.Void(), []),
+            frog_ast.Block([_challenger_call(c) for c in calls]),
+        )
+        for mname, calls in methods.items()
+    ]
+    return frog_ast.Reduction(
+        (name, [], [], method_nodes),
+        frog_ast.ParameterizedGame("H", []),
+        frog_ast.ParameterizedGame("Th", []),
+    )
+
+
+def _lookup(**reductions: dict[str, list[str]]) -> dict[str, object]:
+    from proof_frog import frog_parser
+
+    lk: dict[str, object] = {
+        "DistinctSampling": frog_parser.parse_game_file(_HELPER_GAME_FILE),
+        "NonzeroSampling": frog_parser.parse_game_file(_ORDER_HELPER_FILE),
+    }
+    for name, methods in reductions.items():
+        lk[name] = _reduction(name, methods)
+    return lk
+
+
+def _birthday_hop(reduction: str = "R") -> proof_engine.HopResult:
+    return _hop_result(
+        1,
+        "by_assumption",
+        notion=_game("DistinctSampling", "Message"),
+        reduction=_game(reduction),
+    )
+
+
+class TestOracleCountDerivation:
+    def test_oracle_count_becomes_theorem_query_count(self) -> None:
+        # Reduction's CTXT oracle calls Samp once -> count_Samp = count_CTXT.
+        bound = advantage.synthesize_from_hop_results(
+            [_birthday_hop()],
+            definition_lookup=_lookup(R={"CTXT": ["Samp"]}),
+        )
+        assert bound.render() == "count_CTXT*(count_CTXT - 1)/(2*|Message|)"
+
+    def test_initialize_sampling_is_a_constant(self) -> None:
+        # Samp fired once in Initialize (runs once) -> count_Samp = 1 -> term 0.
+        bound = advantage.synthesize_from_hop_results(
+            [_birthday_hop()],
+            definition_lookup=_lookup(R={"Initialize": ["Samp"]}),
+        )
+        assert bound.render() == "0"
+
+    def test_multiple_call_sites_multiply(self) -> None:
+        # Two Samp calls per CTXT invocation -> count_Samp = 2 * count_CTXT.
+        bound = advantage.synthesize_from_hop_results(
+            [_birthday_hop()],
+            definition_lookup=_lookup(R={"CTXT": ["Samp", "Samp"]}),
+        )
+        assert bound.render() == "count_CTXT*(2*count_CTXT - 1)/|Message|"
+
+    def test_integer_calls_cap_pins_count(self) -> None:
+        # A concrete `calls <= 1` pins count_CTXT -> 1, so the birthday term is 0.
+        bound = advantage.synthesize_from_hop_results(
+            [_birthday_hop()],
+            definition_lookup=_lookup(R={"CTXT": ["Samp"]}),
+            max_calls=frog_ast.Integer(1),
+        )
+        assert bound.render() == "0"
+
+    def test_two_reductions_collapse_into_one_sum(self) -> None:
+        bound = advantage.synthesize_from_hop_results(
+            [_birthday_hop("R1"), _birthday_hop("R2")],
+            definition_lookup=_lookup(
+                R1={"CTXT": ["Samp"]}, R2={"CTXT": ["Samp"]}
+            ),
+        )
+        assert bound.render() == "count_CTXT*(count_CTXT - 1)/|Message|"
+
+    def test_direct_hop_leaves_count_symbolic(self) -> None:
+        # No reduction: the helper's own oracle count survives as count_Samp.
+        results = [
+            _hop_result(
+                1, "by_assumption", notion=_game("DistinctSampling", "Message")
+            )
+        ]
+        bound = advantage.synthesize_from_hop_results(
+            results, definition_lookup=_lookup()
+        )
+        assert bound.render() == "count_Samp*(count_Samp - 1)/(2*|Message|)"
+
+    def test_order_param_helper_with_field_access(self) -> None:
+        notion = frog_ast.ParameterizedGame(
+            "NonzeroSampling", [frog_ast.FieldAccess(frog_ast.Variable("G"), "order")]
+        )
+        results = [
+            proof_engine.HopResult(
+                step_num=1,
+                valid=True,
+                kind="by_assumption",
+                depth=0,
+                current_desc="",
+                next_desc="",
+                justification=notion,
+                reduction=_game("R"),
+            )
+        ]
+        bound = advantage.synthesize_from_hop_results(
+            results,
+            definition_lookup=_lookup(R={"Initialize": ["Samp"]}),
+        )
+        assert bound.render() == "1/G.order"
+
+    def test_crypto_assumption_without_clause_stays_opaque(self) -> None:
+        results = [
+            _hop_result(
+                1,
+                "by_assumption",
+                notion=_game("PRFSecurity", "F"),
+                reduction=_game("R"),
+            )
+        ]
+        bound = advantage.synthesize_from_hop_results(
+            results, definition_lookup=_lookup(R={"CTXT": ["Samp"]})
+        )
+        assert bound.render() == "Adv^PRFSecurity(F)(B1)"
+
+    def test_mixed_and_substituted_expression(self) -> None:
+        results = [
+            _hop_result(
+                1, "by_assumption", notion=_game("PRFSecurity", "F"),
+                reduction=_game("Rp"),
+            ),
+            _birthday_hop("R"),
+        ]
+        bound = advantage.synthesize_from_hop_results(
+            results, definition_lookup=_lookup(R={"CTXT": ["Samp"]})
+        )
+        assert bound.render() == (
+            "Adv^PRFSecurity(F)(B1) + count_CTXT*(count_CTXT - 1)/(2*|Message|)"
+        )
+        substituted = str(bound.substituted_expression())
+        assert "Adv_0" in substituted
+        assert "count_CTXT" in substituted

@@ -121,6 +121,16 @@ class Visitor(ABC, Generic[U]):
     def result(self) -> U:
         pass
 
+    def should_descend(self, _node: frog_ast.ASTNode) -> bool:
+        """Whether to recurse into *node*'s children after visiting it.
+
+        Defaults to always descending. Subclasses override to treat a node as
+        opaque (its ``visit``/``leave`` hooks still fire, but its subtree is
+        skipped) -- e.g. a self-contained declared annotation that the generic
+        walk should not analyze.
+        """
+        return True
+
     def visit(self, visiting_node: frog_ast.ASTNode) -> U:
         cls = type(self)
 
@@ -137,8 +147,9 @@ class Visitor(ABC, Generic[U]):
                     for item in child:
                         visit_children(item)
 
-            for attr in vars(node):
-                visit_children(getattr(node, attr))
+            if self.should_descend(node):
+                for attr in vars(node):
+                    visit_children(getattr(node, attr))
 
             if leave_method is not None:
                 leave_method(self, node)

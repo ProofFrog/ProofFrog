@@ -40,6 +40,8 @@ _EXCLUDED = {
     frog_ast.Field,
     frog_ast.Parameter,
     frog_ast.Import,
+    # Game-file-level declared annotation (never appears inside a game AST)
+    frog_ast.AdvantageClause,
     # Proof-file-level nodes (never appear inside game canonicalization)
     frog_ast.ProofFile,
     frog_ast.Step,

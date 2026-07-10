@@ -63,6 +63,7 @@ def prepare_rename(state: DocumentState, position: lsp.Position) -> lsp.Range | 
         "import",
         "export",
         "as",
+        "advantage",
         "extends",
         "requires",
         "subsets",

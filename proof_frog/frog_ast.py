@@ -915,18 +915,45 @@ class Reduction(Game):
         )
 
 
+class AdvantageClause(ASTNode):
+    """A declared statistical advantage bound on a helper assumption game.
+
+    ``bound`` bounds the distinguishing advantage between the two games. Its
+    free variables are the games' shared parameters (e.g. a set ``S`` used as
+    ``|S|``, or a scalar ``order``) and per-oracle query counts written as
+    ``count_<OracleName>`` (e.g. ``count_Samp``), which the advantage
+    synthesizer resolves from how a composed reduction invokes that oracle.
+    This is a *declared* unconditional fact, trusted like the helper game it
+    annotates; the semantic checker enforces only its well-formedness.
+    """
+
+    def __init__(self, bound: Expression) -> None:
+        super().__init__()
+        self.bound = bound
+
+    def __str__(self) -> str:
+        return f"advantage <= {self.bound};"
+
+
 class GameFile(Root):
     def __init__(
-        self, imports: list[Import], games: tuple[Game, Game], name: str
+        self,
+        imports: list[Import],
+        games: tuple[Game, Game],
+        name: str,
+        advantage: Optional[AdvantageClause] = None,
     ) -> None:
         super().__init__()
         self.imports = imports
         self.games = games
         self.name = name
+        self.advantage = advantage
 
     def __str__(self) -> str:
         output_string = ("\n".join(str(im) for im in self.imports)) + "\n\n"
         output_string += f"{self.games[0]}\n\n{self.games[1]}\n\n"
+        if self.advantage is not None:
+            output_string += f"{self.advantage}\n\n"
         output_string += f"export as {self.name};"
         return output_string
 

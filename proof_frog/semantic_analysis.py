@@ -107,6 +107,13 @@ VariableTypeMapStackType: TypeAlias = Optional[
 
 
 class VariableTypeVisitor(visitors.Visitor[None]):
+    def should_descend(self, node: frog_ast.ASTNode) -> bool:
+        # An advantage clause is a self-contained declared bound over its own
+        # parameter scope (checked separately by ``_check_advantage_clause``);
+        # the generic name-resolution / type-checking walk must not descend
+        # into it, since its free variables are not in the game-file scope.
+        return not isinstance(node, frog_ast.AdvantageClause)
+
     def __init__(
         self,
         import_namespace: dict[str, frog_ast.Root | frog_ast.Game],
@@ -449,6 +456,80 @@ class NameResolutionVisitor(VariableTypeVisitor):
             print_error(
                 game_file, "Cannot have two games with the same name", self.file_name
             )
+
+        if game_file.advantage is not None:
+            self._check_advantage_clause(game_file)
+
+    def _check_advantage_clause(self, game_file: frog_ast.GameFile) -> None:
+        """Check an ``advantage <= ...`` clause is well-formed.
+
+        The bound's free variables must each be either a game parameter or a
+        per-oracle query count ``count_<OracleName>`` naming a (non-Initialize)
+        oracle of the games, and the bound must be numeric arithmetic (``+``,
+        ``-``, ``*``, ``/``, ``^``, ``|.|``, literals) -- no set/boolean
+        operators.
+        """
+        clause = game_file.advantage
+        assert clause is not None
+        params = {p.name for p in game_file.games[0].parameters}
+        oracle_counts = {
+            f"count_{m.signature.name}"
+            for game in game_file.games
+            for m in game.methods
+            if m.signature.name != "Initialize"
+        }
+        for var in visitors.VariableCollectionVisitor().visit(clause.bound):
+            if var.name in params or var.name in oracle_counts:
+                continue
+            if var.name.startswith("count_"):
+                oracle = var.name[len("count_") :]
+                print_error(
+                    clause,
+                    f"advantage bound references count of unknown oracle"
+                    f" '{oracle}'; no such method in the games",
+                    self.file_name,
+                )
+            else:
+                print_error(
+                    clause,
+                    f"advantage bound references unknown variable '{var.name}';"
+                    f" only game parameters and per-oracle counts"
+                    f" (count_<Oracle>) may appear",
+                    self.file_name,
+                )
+        numeric_operators = {
+            frog_ast.BinaryOperators.ADD,
+            frog_ast.BinaryOperators.SUBTRACT,
+            frog_ast.BinaryOperators.MULTIPLY,
+            frog_ast.BinaryOperators.DIVIDE,
+            frog_ast.BinaryOperators.EXPONENTIATE,
+        }
+
+        def check_numeric(expr: frog_ast.ASTNode) -> None:
+            if isinstance(expr, frog_ast.BinaryOperation):
+                if expr.operator not in numeric_operators:
+                    print_error(
+                        clause,
+                        f"advantage bound must be numeric arithmetic; operator"
+                        f" '{expr.operator.value}' is not allowed",
+                        self.file_name,
+                    )
+                check_numeric(expr.left_expression)
+                check_numeric(expr.right_expression)
+            elif isinstance(expr, frog_ast.UnaryOperation):
+                if expr.operator not in (
+                    frog_ast.UnaryOperators.SIZE,
+                    frog_ast.UnaryOperators.MINUS,
+                ):
+                    print_error(
+                        clause,
+                        f"advantage bound must be numeric arithmetic; operator"
+                        f" '{expr.operator.value}' is not allowed",
+                        self.file_name,
+                    )
+                check_numeric(expr.expression)
+
+        check_numeric(clause.bound)
 
     def visit_scheme(self, scheme: frog_ast.Scheme) -> None:
         super().visit_scheme(scheme)

@@ -2714,6 +2714,25 @@ def _emit_one_oracle_chain(
             if decaps_val_acc is not None:
                 decaps_val_acc.add(ff_scheme)
             return [], ff_body, set()
+        h2_route = _challenge_hop2_route(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            left_wrapper_expr,
+            right_wrapper_expr,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            clone_alias,
+        )
+        if h2_route is not None:
+            h2_body, h2_inj, h2_scheme = h2_route
+            if inj_acc is not None:
+                inj_acc.add(h2_inj)
+            if decaps_val_acc is not None:
+                decaps_val_acc.add(h2_scheme)
+            return [], h2_body, set()
 
     # Field-aware coupling: identical-state hops keep the whole-glob equality
     # (byte-identical for clean proofs); a hop whose two sides differ in glob
@@ -3637,6 +3656,140 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
     if body is None:
         return None
     return ([_res_tag(SYNTH_PARAM), *body[1:]], scheme_name)
+
+
+def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    left_wrapper_expr: str,
+    right_wrapper_expr: str,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    clone_alias: dict[str, str],
+) -> tuple[list[str], tuple[str, str], str] | None:
+    """Derive the hop_2 challenge tactic (both sides case-split reductions)."""
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+    lmod = _flat_state_module(
+        modules,
+        "Chal_L",
+        lproj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    rmod = _flat_state_module(
+        modules,
+        "Chal_R",
+        rproj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    if not lmod.procs or not rmod.procs:
+        return None
+    lred, rred = lmod.procs[0], rmod.procs[0]
+    lif = next((s for s in lred.body if isinstance(s, ec_ast.If)), None)
+    rif = next((s for s in rred.body if isinstance(s, ec_ast.If)), None)
+    if lif is None or rif is None:
+        return None
+    # LEFT then-branch = the inlined PQ binding challenger (2 pq.decaps);
+    # its else + the RIGHT else recompute the game predicate (H.evaluate).
+    l_then_calls = [s for s in lif.then_body if isinstance(s, ec_ast.Call)]
+    if not l_then_calls or not all(c.callee.endswith(".decaps") for c in l_then_calls):
+        return None
+    pq_module = l_then_calls[0].callee.split(".", 1)[0]
+
+    def _pre_if(body: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt]:
+        out: list[ec_ast.EcStmt] = []
+        for s in body:
+            if isinstance(s, ec_ast.If):
+                break
+            out.append(s)
+        return out
+
+    l_prefix = _pre_if(lred.body)
+    r_prefix = _pre_if(rred.body)
+    l_groups = _kdf_groups(l_prefix)
+    r_groups = _kdf_groups(r_prefix)
+    if len(l_groups) != 2 or len(r_groups) != 2:
+        return None
+    l_grp = [
+        f for f in (_group_fields(g, pq_module) for g in l_groups) if f is not None
+    ]
+    r_grp = [
+        f for f in (_group_fields(g, pq_module) for g in r_groups) if f is not None
+    ]
+    if len(l_grp) != 2 or len(r_grp) != 2:
+        return None
+    shape = _concat_shape_from(l_prefix, l_groups[0], clone_alias, pq_module)
+    if shape is None:
+        return None
+
+    h_module = next(
+        (
+            s.callee.split(".", 1)[0]
+            for s in lif.else_body
+            if isinstance(s, ec_ast.Call) and s.callee.endswith(".evaluate")
+        ),
+        None,
+    )
+    if h_module is None:
+        return None
+
+    l_args = _top_level_args(left_wrapper_expr)
+    if not l_args:
+        return None
+    l_challenger_ref = _ref_base(l_args[-1])
+    chal_fields = [f.name.split("@", 1)[1] for f in left_state0.fields if "@" in f.name]
+    if len(chal_fields) != 2:
+        return None
+    # sync mods (invariant ``={glob M}``) = the concrete scheme's params (the
+    # widest functor arg -- combiner over all component modules incl. the group).
+    scheme_expr = max(l_args, key=lambda a: len(_top_level_args(a)))
+    sync_mods = _top_level_args(scheme_expr)
+    if not sync_mods:
+        return None
+    glob_mods = _callee_mods(l_prefix, clone_alias)
+    # The KDF-input ciphertext leaf is the *T* KEM's ``encodeciphertext`` (the
+    # combiner binds the T ciphertext, the PQ ciphertext going only through the
+    # PQ shared-secret), so the redundancy proof uses ``<T>_encodeciphertext_inj``.
+    clone_to_mod = {c: m for m, c in clone_alias.items()}
+    t_clone = shape.ev_encct_t.split(".", 1)[0]
+    t_module = clone_to_mod.get(t_clone, pq_module)
+
+    spec = bch.Hop2Spec(
+        ct_params=[p.name for p in lred.params],
+        sync_mods=sync_mods,
+        l_base=_ref_base(left_wrapper_expr),
+        r_base=_ref_base(right_wrapper_expr),
+        l_prefix=l_prefix,
+        r_prefix=r_prefix,
+        glob_mods=glob_mods,
+        l_component_fields=l_grp,
+        r_component_fields=r_grp,
+        clone_alias=clone_alias,
+        shape=shape,
+        pq_module=pq_module,
+        h_module=h_module,
+        l_challenger_ref=l_challenger_ref,
+        l_challenger_key_fields=chal_fields,
+        ect_inj_axiom=f"{t_module}_encodeciphertext_inj",
+    )
+    body = bch.challenge_tactic_hop2(spec)
+    if body is None:
+        return None
+    scheme_name = _ref_base(scheme_expr)
+    return (
+        [_res_tag(SYNTH_PARAM), *body[1:]],
+        (t_module, "encodeciphertext"),
+        scheme_name,
+    )
 
 
 def _kdf_groups(prefix: Sequence[ec_ast.EcStmt]) -> list[list[ec_ast.Call]]:

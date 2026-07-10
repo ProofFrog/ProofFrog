@@ -296,6 +296,13 @@ class ConcatShape:
             for op in self.concat_ops
         ]
 
+    def right_slice_axioms(self) -> list[str]:
+        """``slice_concat_right_*`` round-trip axiom names, outer-first."""
+        return [
+            "slice_concat_right_" + op[len("concat_") :].replace("_to_", "_", 1)
+            for op in self.concat_ops
+        ]
+
     def leaves(self, pq_key: str, t_key: str, ek: str, ct: str) -> tuple[str, ...]:
         """Return ``(pq, t, b_ct, b_ek, b_label, L1, L2, L3)`` at these bindings."""
         pq = f"({self.ev_encss_pq} ({self.ev_decaps_pq} {pq_key} {ct}.`1))"
@@ -335,6 +342,27 @@ def slice_peel(
         f"have hc2 : {l2_0} = {l2_1} by rewrite -({sa3} {l2_0} {_be0}) -({sa3} {l2_1} {_be1}) hc3.",
         f"have hc1 : {l1_0} = {l1_1} by rewrite -({sa2} {l1_0} {_bc0}) -({sa2} {l1_1} {_bc1}) hc2.",
         f"have he : {p0} = {p1} by rewrite -({sa1} {p0} {t0}) -({sa1} {p1} {t1}) hc1.",
+    ]
+
+
+def slice_peel_to_ect(
+    shape: ConcatShape,
+    bind0: tuple[str, str, str, str],
+    bind1: tuple[str, str, str, str],
+) -> list[str]:
+    """Emit the three ``have hc3/hc2/hect`` steps deriving the encodeciphertext-
+    component equality (``ev_encct ct0 = ev_encct ct1``) from a KDF-input equality
+    hypothesis ``h``. Navigates two ``slice_concat_left`` levels (the c4 label and
+    c3 encapskey concats) then one ``slice_concat_right`` (the c2 ciphertext
+    concat, whose RIGHT component is the encodeciphertext leaf)."""
+    sa4, sa3, _sa2, _sa1 = shape.slice_axioms()
+    sr2 = shape.right_slice_axioms()[2]
+    _p0, _t0, bc0, be0, bl0, l1_0, l2_0, l3_0 = shape.leaves(*bind0)
+    _p1, _t1, bc1, be1, bl1, l1_1, l2_1, l3_1 = shape.leaves(*bind1)
+    return [
+        f"have hc3 : {l3_0} = {l3_1} by rewrite -({sa4} {l3_0} {bl0}) -({sa4} {l3_1} {bl1}) h.",
+        f"have hc2 : {l2_0} = {l2_1} by rewrite -({sa3} {l2_0} {be0}) -({sa3} {l2_1} {be1}) hc3.",
+        f"have hect : {bc0} = {bc1} by rewrite -({sr2} {l1_0} {bc0}) -({sr2} {l1_1} {bc1}) hc2.",
     ]
 
 
@@ -723,6 +751,284 @@ def challenge_tactic_hop4(spec: Hop4Spec) -> list[str] | None:
         "  inline{1} 1.",
         "  wp.",
         "  skip => />.",
+        "  qed.",
+    ]
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# hop_2: ``R_PQ_Bind o Unbreakable ~ R_KDF o Breakable``.  BOTH sides are
+# case-split reductions computing the SAME KDF-input pair.  LEFT forwards a
+# KDF-input collision (with differing PQ ciphertexts) to the KEM_PQ *Unbreakable*
+# binding challenger (returns false); RIGHT forwards non-equal ciphertexts to the
+# KDF *Breakable* collision challenger.  The equivalence's confidence-critical
+# step is the no-collision branch, where the RHS's extra ``kdf_in_0 <> kdf_in_1``
+# is redundant because ``kdf_in_0 = kdf_in_1`` forces (via the encodeciphertext
+# right-slice + injectivity) the two ciphertexts equal, contradicting ``ct0<>ct1``.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Hop2Spec:
+    """Everything the hop_2 (both-case-split) tactic needs."""
+
+    ct_params: list[str]
+    sync_mods: list[str]  # every module needing (glob M){1}=(glob M){2}
+    l_base: str  # "R_PQ_Bind"
+    r_base: str  # "R_KDF"
+    l_prefix: list[ec_ast.EcStmt]  # left reduction prefix (before its If)
+    r_prefix: list[ec_ast.EcStmt]  # right reduction prefix
+    glob_mods: list[str]  # peel glob elim order (KEM_PQ,KEM_T,L), first-appearance
+    l_component_fields: list[list[str]]  # [[dk_PQ_0,dk_T_0,ek_T_0],[...1]] (left)
+    r_component_fields: list[list[str]]  # right
+    clone_alias: dict[str, str]
+    shape: ConcatShape
+    pq_module: str  # "KEM_PQ"
+    h_module: str  # "H"
+    l_challenger_ref: str  # "KEM_PQ_c.LEAK_BIND_K_CT_Unbreakable"
+    l_challenger_key_fields: list[str]  # ["dk0", "dk1"]
+    ect_inj_axiom: str  # "KEM_PQ_encodeciphertext_inj"
+
+
+def _blk_env(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    base: str,
+    component_fields: list[list[str]],
+    field_elim: list[str],
+    ct_params: list[str],
+    ct_elim: tuple[str, str],
+    red_proc_prefix: list[ec_ast.EcStmt],
+    clone_alias: dict[str, str],
+) -> dict[str, str]:
+    """Functional env of a reduction prefix under exists* elim names."""
+    del base
+    flat = [f for grp in component_fields for f in grp]
+    env: dict[str, str] = dict(zip(flat, field_elim))
+    env[ct_params[0]] = ct_elim[0]
+    env[ct_params[1]] = ct_elim[1]
+    for stmt in red_proc_prefix:
+        if isinstance(stmt, ec_ast.Assign):
+            env[stmt.var] = _subst(stmt.rhs, env)
+        elif isinstance(stmt, ec_ast.Call):
+            module, _, method = stmt.callee.partition(".")
+            args = [_subst(a, env) for a in _split_top_args(stmt.args)]
+            ev = f"{clone_alias[module]}.ev_{method}"
+            applied = "".join(f" {_paren(a)}" for a in args)
+            env[stmt.var] = f"({ev}{applied})"
+    return env
+
+
+def challenge_tactic_hop2(spec: Hop2Spec) -> list[str] | None:
+    """Emit the full ``hop_<i>_challenge`` tactic for the both-case-split shape."""
+    ct0, ct1 = spec.ct_params
+    l_len = len([s for s in spec.l_prefix if not isinstance(s, ec_ast.VarDecl)])
+    r_len = len([s for s in spec.r_prefix if not isinstance(s, ec_ast.VarDecl)])
+    gm = spec.glob_mods
+    gge = [f"gg{i}" for i in range(len(gm))]
+    glob_of = dict(zip(gm, gge))
+    hm = spec.h_module
+    lchal = spec.l_challenger_ref
+    ck0, ck1 = spec.l_challenger_key_fields
+    lg0, lg1 = spec.l_component_fields
+
+    l_fe = [f"l{n}" for n in _field_elim_names(spec.l_component_fields)]
+    r_fe = [f"r{n}" for n in _field_elim_names(spec.r_component_fields)]
+
+    # -- invariant -----------------------------------------------------------
+    def _s2(ref: str) -> str:
+        return ref + "{2}"
+
+    rg0, rg1 = spec.r_component_fields
+    kdf0_term = spec.shape.kdf_in(
+        _s2(f"{spec.r_base}.{rg0[0]}"),
+        _s2(f"{spec.r_base}.{rg0[1]}"),
+        _s2(f"{spec.r_base}.{rg0[2]}"),
+        _s2(ct0),
+    )
+    kdf1_term = spec.shape.kdf_in(
+        _s2(f"{spec.r_base}.{rg1[0]}"),
+        _s2(f"{spec.r_base}.{rg1[1]}"),
+        _s2(f"{spec.r_base}.{rg1[2]}"),
+        _s2(ct1),
+    )
+    inv_terms = (
+        [f"{c}" "{1}" f" = {c}" "{2}" for c in spec.ct_params]
+        + [
+            "kdf_in_0{1} = kdf_in_0{2}",
+            "kdf_in_1{1} = kdf_in_1{2}",
+        ]
+        + [f"(glob {m})" "{1}" f" = (glob {m})" "{2}" for m in spec.sync_mods]
+        + [
+            f"{spec.l_base}.{lg0[0]}" "{1}" f" = {lchal}.{ck0}" "{1}",
+            f"{spec.l_base}.{lg1[0]}" "{1}" f" = {lchal}.{ck1}" "{1}",
+        ]
+        + [
+            f"{spec.l_base}.{f}" "{1}" f" = {spec.r_base}.{f}" "{2}"
+            for grp in spec.l_component_fields
+            for f in grp
+        ]
+        + [
+            "kdf_in_0" "{2}" f" = {kdf0_term}",
+            "kdf_in_1" "{2}" f" = {kdf1_term}",
+        ]
+    )
+    inv = " /\\ ".join(inv_terms)
+    lines = ["proof.", "  proc.", f"  seq {l_len} {r_len} : ({inv})."]
+
+    # -- prefix functionalization subgoal ------------------------------------
+    l_ex = (
+        [f"(glob {m})" "{1}" for m in gm]
+        + [f"{spec.l_base}.{f}" "{1}" for grp in spec.l_component_fields for f in grp]
+        + [f"{c}" "{1}" for c in spec.ct_params]
+        + [f"{spec.r_base}.{f}" "{2}" for grp in spec.r_component_fields for f in grp]
+    )
+    l_elim = gge + l_fe + ["lc0", "lc1"] + r_fe
+    l_env = _blk_env(
+        spec.l_base,
+        spec.l_component_fields,
+        l_fe,
+        spec.ct_params,
+        ("lc0", "lc1"),
+        [s for s in spec.l_prefix if not isinstance(s, ec_ast.VarDecl)],
+        spec.clone_alias,
+    )
+    r_env = _blk_env(
+        spec.r_base,
+        spec.r_component_fields,
+        r_fe,
+        spec.ct_params,
+        ("lc0", "lc1"),
+        [s for s in spec.r_prefix if not isinstance(s, ec_ast.VarDecl)],
+        spec.clone_alias,
+    )
+    l_peel = _peel_stmts(_drop_leading_assigns(spec.l_prefix), l_env, glob_of, "{1}")
+    r_peel = _peel_stmts(_drop_leading_assigns(spec.r_prefix), r_env, glob_of, "{2}")
+    lines += [
+        "  + sp.",
+        f"    exists* {', '.join(l_ex)};",
+        f"    elim* => {' '.join(l_elim)}.",
+        *[f"    {ln}" for ln in r_peel],
+        *[f"    {ln}" for ln in l_peel],
+        "    skip => />.",
+    ]
+
+    # -- outer case: RHS ct-equality guard -----------------------------------
+    lines += [
+        f"  case ({ct0}" "{2}" f" = {ct1}" "{2}).",
+        "  + rcondt{2} 1; first by auto.",
+        "    rcondf{1} 1; first by (auto; smt()).",
+        "    exists* (glob "
+        f"{hm})"
+        "{1}"
+        ", kdf_in_0"
+        "{1}"
+        ", kdf_in_1"
+        "{1}"
+        "; elim* => gh ki0 ki1.",
+        f"    wp. call{{1}} ({hm}_evaluate_det gh ki1). call{{1}} ({hm}_evaluate_det gh ki0).",
+        "    skip => />.",
+        "  rcondf{2} 1; first by (auto; smt()).",
+        "  inline{2} 1.",
+        "  sp.",
+    ]
+
+    # -- inner case: LHS PQ-collision guard ----------------------------------
+    inner_guard = (
+        "kdf_in_0"
+        "{1}"
+        " = kdf_in_1"
+        "{1}"
+        f" /\\ {ct0}"
+        "{1}"
+        ".`1 <> "
+        f"{ct1}"
+        "{1}"
+        ".`1"
+    )
+    lines += [
+        f"  case ({inner_guard}).",
+        "  + rcondt{1} 1; first by (auto; smt()).",
+        "    inline{1} 1.",
+        "    sp.",
+        f"    exists* (glob {spec.pq_module})"
+        "{1}"
+        f", {lchal}.{ck0}"
+        "{1}"
+        f", {lchal}.{ck1}"
+        "{1}"
+        f", {ct0}"
+        "{1}"
+        f", {ct1}"
+        "{1}"
+        "; elim* => gp3 xdp0 xdp1 xc0 xc1.",
+        "    exists* (glob "
+        f"{hm})"
+        "{2}"
+        ", kdf_in_0"
+        "{2}"
+        ", kdf_in_1"
+        "{2}"
+        "; elim* => gh2 ki0 ki1.",
+        f"    wp. call{{2}} ({hm}_evaluate_det gh2 ki1). call{{2}} ({hm}_evaluate_det gh2 ki0).",
+        f"    call{{1}} ({spec.pq_module}_decaps_det gp3 xdp1 xc1.`1). "
+        f"call{{1}} ({spec.pq_module}_decaps_det gp3 xdp0 xc0.`1).",
+        "    skip => />; smt().",
+    ]
+
+    # -- no-collision else: both are the hybrid predicate. The RHS's extra
+    # ``kdf_in_0 <> kdf_in_1`` conjunct is redundant: ``kdf_in_0 = kdf_in_1``
+    # forces (encodeciphertext right-slice + injectivity) the two ciphertexts'
+    # T-components equal; with the negated LEFT guard (``kdf`` equal =>
+    # PQ-components equal) the two full ciphertexts coincide, contradicting
+    # ``ct0 <> ct1``. Derive it with an explicit ``have`` chain (smt cannot
+    # navigate the 4-deep concat unaided).
+    rg0b, rg1b = spec.r_component_fields
+    b2 = "{2}"
+    bind0 = (
+        f"{spec.r_base}.{rg0b[0]}{b2}",
+        f"{spec.r_base}.{rg0b[1]}{b2}",
+        f"{spec.r_base}.{rg0b[2]}{b2}",
+        f"{ct0}{b2}",
+    )
+    bind1 = (
+        f"{spec.r_base}.{rg1b[0]}{b2}",
+        f"{spec.r_base}.{rg1b[1]}{b2}",
+        f"{spec.r_base}.{rg1b[2]}{b2}",
+        f"{ct1}{b2}",
+    )
+    kdf0 = spec.shape.kdf_in(*bind0)
+    kdf1 = spec.shape.kdf_in(*bind1)
+    peel = slice_peel_to_ect(spec.shape, bind0, bind1)
+    lines += [
+        "  rcondf{1} 1; first by (auto; smt()).",
+        "  exists* (glob "
+        f"{hm})"
+        "{1}"
+        ", kdf_in_0"
+        "{1}"
+        ", kdf_in_1"
+        "{1}"
+        "; elim* => gh ki0 ki1.",
+        "  exists* (glob "
+        f"{hm})"
+        "{2}"
+        ", kdf_in_0"
+        "{2}"
+        ", kdf_in_1"
+        "{2}"
+        "; elim* => gh2 ri0 ri1.",
+        f"  wp. call{{1}} ({hm}_evaluate_det gh ki1). call{{1}} ({hm}_evaluate_det gh ki0).",
+        f"  call{{2}} ({hm}_evaluate_det gh2 ri1). call{{2}} ({hm}_evaluate_det gh2 ri0).",
+        "  skip => />. move => &2 hne hg.",
+        f"  have hkct : {kdf0} = {kdf1} => {ct0}" "{2}" f" = {ct1}" "{2}" ".",
+        "  + move => h.",
+        *[f"    {ln}" for ln in peel],
+        f"    have hct2 : {ct0}"
+        "{2}"
+        f".`2 = {ct1}"
+        "{2}"
+        f".`2 by apply ({spec.ect_inj_axiom} _ _ hect).",
+        "    smt().",
+        "  smt().",
         "  qed.",
     ]
     return lines

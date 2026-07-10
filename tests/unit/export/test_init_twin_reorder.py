@@ -9,10 +9,17 @@ pin the AST-driven pieces of the tactic *generator*.
 
 from proof_frog.export.easycrypt import ec_ast
 from proof_frog.export.easycrypt.chain_emitter import (
+    _init_functionalize_side,
     _init_group_backbone,
     _init_prefix_len,
     _init_reorder_group_swaps,
 )
+
+_NG_DET = {("NG", "randomscalar"), ("NG", "generator"), ("NG", "exp")}
+
+
+def _ng_det(module: str, method: str) -> bool:
+    return (module, method) in _NG_DET
 
 
 def _cg_game_body() -> list[ec_ast.EcStmt]:
@@ -100,3 +107,68 @@ def test_seq_split_lengths_match_validated_tactic() -> None:
     _swaps, grouped_game = _init_group_backbone(_cg_game_body(), "KEM_PQ.keygen")
     assert _init_prefix_len(grouped_game) == 6
     assert _init_prefix_len(_cg_reduction_prefix()) == 13
+
+
+def _cg_reduction_ng_suffix() -> list[ec_ast.EcStmt]:
+    """The FR_calls NG suffix (grouped): randomscalar x2, then generator/exp per
+    index, then the four packing assignments."""
+    return [
+        ec_ast.Call("dk_T_0", "NG.randomscalar", "seed_T_0"),
+        ec_ast.Call("dk_T_1", "NG.randomscalar", "seed_T_1"),
+        ec_ast.Call("_r0", "NG.generator", ""),
+        ec_ast.Call("ek_T_0", "NG.exp", "_r0, dk_T_0"),
+        ec_ast.Call("_r1", "NG.generator", ""),
+        ec_ast.Call("ek_T_1", "NG.exp", "_r1, dk_T_1"),
+        ec_ast.Assign("ek0", "(ek_PQ_0, ek_T_0)"),
+        ec_ast.Assign("dk0", "(dk_PQ_0, dk_T_0, ek_T_0)"),
+        ec_ast.Assign("ek1", "(ek_PQ_1, ek_T_1)"),
+        ec_ast.Assign("dk1", "(dk_PQ_1, dk_T_1, ek_T_1)"),
+    ]
+
+
+def test_functionalize_reduction_suffix() -> None:
+    lines = _init_functionalize_side(
+        _cg_reduction_ng_suffix(),
+        side=2,
+        clone_alias="NG_c",
+        det_pred=_ng_det,
+        seed_binders={"seed_T_0": "es0", "seed_T_1": "es1"},
+        glob_binder="g",
+        skip_leading_wp=False,
+    )
+    assert lines == [
+        "wp.",
+        "call{2} (NG_exp_det g NG_c.ev_generator (NG_c.ev_randomscalar (es1))).",
+        "call{2} (NG_generator_det g).",
+        "call{2} (NG_exp_det g NG_c.ev_generator (NG_c.ev_randomscalar (es0))).",
+        "call{2} (NG_generator_det g).",
+        "call{2} (NG_randomscalar_det g es1).",
+        "call{2} (NG_randomscalar_det g es0).",
+    ]
+
+
+def test_functionalize_game_suffix_two_blocks() -> None:
+    # The game suffix (after grouping + the seq-6 split) has TWO NG blocks
+    # separated by index-0's packing; with skip_leading_wp the first block emits
+    # no leading wp (the reduction side's wp already cleared both tails) and the
+    # second block gets a wp -- matching VALIDATED_hop0_tactic.txt's {1} peel.
+    _swaps, grouped = _init_group_backbone(_cg_game_body(), "KEM_PQ.keygen")
+    suffix = grouped[6:]  # drop the 6-stmt probabilistic prefix
+    lines = _init_functionalize_side(
+        suffix,
+        side=1,
+        clone_alias="NG_c",
+        det_pred=_ng_det,
+        seed_binders={"seed_T0": "fs0", "seed_T1": "fs1"},
+        glob_binder="g",
+        skip_leading_wp=True,
+    )
+    assert lines == [
+        "call{1} (NG_exp_det g NG_c.ev_generator (NG_c.ev_randomscalar (fs1))).",
+        "call{1} (NG_generator_det g).",
+        "call{1} (NG_randomscalar_det g fs1).",
+        "wp.",
+        "call{1} (NG_exp_det g NG_c.ev_generator (NG_c.ev_randomscalar (fs0))).",
+        "call{1} (NG_generator_det g).",
+        "call{1} (NG_randomscalar_det g fs0).",
+    ]

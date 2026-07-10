@@ -2286,6 +2286,77 @@ def _init_prefix_len(exec_stmts: list[ec_ast.EcStmt]) -> int:
     return last
 
 
+def _init_functionalize_side(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    suffix: list[ec_ast.EcStmt],
+    side: int,
+    clone_alias: str,
+    det_pred: Callable[[str, str], bool],
+    seed_binders: dict[str, str],
+    glob_binder: str,
+    skip_leading_wp: bool,
+) -> list[str]:
+    """The ``call{side} (NG_<m>_det g <ev-args>)`` sequence that functionalizes
+    one side's deterministic NG-call suffix, processed tail-to-front.
+
+    A forward symbolic pass computes each call result's *functional value*
+    (``generator`` -> ``<clone>.ev_generator``; ``randomscalar seed`` ->
+    ``<clone>.ev_randomscalar (<seed binder>)``; ``exp r dt`` ->
+    ``<clone>.ev_exp (<fv r>) (<fv dt>)``), so the tail-to-front peel can pass
+    each call the functional values of its *actual* args (the det axiom's args
+    are the functional values, per the validated tactic). A ``wp`` precedes each
+    contiguous NG-call block to absorb the intervening packing assignments; the
+    *leading* ``wp`` is skipped when ``skip_leading_wp`` (the second side's
+    trailing packs were already cleared by the first side's ``wp``, which a
+    relational ``wp`` absorbs on both sides). ``seed_binders`` maps each seed
+    variable to its ``exists*`` binder; ``glob_binder`` is the ``(glob NG)``
+    binder.
+    """
+
+    def _is_det_ng(stmt: ec_ast.EcStmt) -> tuple[str, str] | None:
+        if not isinstance(stmt, ec_ast.Call):
+            return None
+        parts = _callee_parts(stmt.callee)
+        if parts is not None and det_pred(parts[0], parts[1]):
+            return parts
+        return None
+
+    exec_s = [s for s in _exec_stmts(suffix) if not isinstance(s, ec_ast.Return)]
+    func_val: dict[str, str] = dict(seed_binders)
+
+    def _fv(arg: str) -> str:
+        return func_val.get(arg, seed_binders.get(arg, arg))
+
+    for stmt in exec_s:
+        parts = _is_det_ng(stmt)
+        if parts is None:
+            continue
+        _mod, meth = parts
+        args = _split_top_args(stmt.args)  # type: ignore[union-attr]
+        if not args:
+            func_val[stmt.var] = f"{clone_alias}.ev_{meth}"  # type: ignore[union-attr]
+        else:
+            joined = " ".join(f"({_fv(a)})" for a in args)
+            func_val[stmt.var] = f"{clone_alias}.ev_{meth} {joined}"  # type: ignore[union-attr]
+
+    lines: list[str] = []
+    need_wp = False
+    seen_call = False
+    for stmt in reversed(exec_s):
+        parts = _is_det_ng(stmt)
+        if parts is None:
+            need_wp = True
+            continue
+        mod, meth = parts
+        if need_wp and not (skip_leading_wp and not seen_call):
+            lines.append("wp.")
+        need_wp = False
+        seen_call = True
+        arg_strs = [_fv(a) for a in _split_top_args(stmt.args)]  # type: ignore[union-attr]
+        rendered = "".join(f" {x}" if " " not in x else f" ({x})" for x in arg_strs)
+        lines.append(f"call{{{side}}} ({mod}_{meth}_det {glob_binder}{rendered}).")
+    return lines
+
+
 def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     modules: mt.ModuleTranslator,
     oracle_name: str,

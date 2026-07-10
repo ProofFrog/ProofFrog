@@ -2728,7 +2728,7 @@ def _emit_one_oracle_chain(
         )
         if h2_route is not None:
             h2_body, h2_inj, h2_scheme = h2_route
-            if inj_acc is not None:
+            if inj_acc is not None and h2_inj is not None:
                 inj_acc.add(h2_inj)
             if decaps_val_acc is not None:
                 decaps_val_acc.add(h2_scheme)
@@ -3677,8 +3677,12 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     flat_params: list[ec_ast.ModuleParam],
     clone_alias: dict[str, str],
-) -> tuple[list[str], tuple[str, str], str] | None:
-    """Derive the hop_2 challenge tactic (both sides case-split reductions)."""
+) -> tuple[list[str], tuple[str, str] | None, str] | None:
+    """Derive the hop_2 challenge tactic (both sides case-split reductions).
+
+    Returns ``(body, inj_request | None, scheme_name)`` -- the inj request is
+    ``encodeciphertext`` for the CT redundancy, ``None`` for the PK shape (a
+    pure boolean identity needing no injectivity)."""
     lproj = _project_to_method(left_state0, oracle_name)
     rproj = _project_to_method(right_state0, oracle_name)
     if lproj is None or rproj is None:
@@ -3754,7 +3758,17 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
     if not l_args:
         return None
     l_challenger_ref = _ref_base(l_args[-1])
-    chal_fields = [f.name.split("@", 1)[1] for f in left_state0.fields if "@" in f.name]
+    # The challenger's decaps-key fields (the two ``challenger.decaps`` first
+    # args in the inlined then-branch). CT's Unbreakable challenger holds only
+    # ``dk0/dk1``; PK's additionally holds ``ek0/ek1``, so filter to the fields
+    # actually consumed as decaps keys (the mangled ``challenger@dk0`` renders
+    # ``challenger_dk0`` at the call site). Keeps CT byte-identical.
+    dk_arg_names = {c.args.split(",")[0].strip() for c in l_then_calls}
+    chal_fields = [
+        f.name.split("@", 1)[1]
+        for f in left_state0.fields
+        if "@" in f.name and f.name.replace("@", "_") in dk_arg_names
+    ]
     if len(chal_fields) != 2:
         return None
     # sync mods (invariant ``={glob M}``) = the concrete scheme's params (the
@@ -3770,6 +3784,50 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
     clone_to_mod = {c: m for m, c in clone_alias.items()}
     t_clone = shape.ev_encct_t.split(".", 1)[0]
     t_module = clone_to_mod.get(t_clone, pq_module)
+    scheme_name = _ref_base(scheme_expr)
+
+    # PK shape: both reductions pack an encaps key (2-tuple). The win term is the
+    # encaps-key inequality (not the ct params), the guards are asymmetric (L on
+    # ``kdf_in_0=kdf_in_1``, R on ``ek0=ek1``), and NO injectivity is needed --
+    # both results are the same boolean. Dispatch to the PK 4-leaf tactic.
+    l_ek = _ek_decomp(lred.body, {f.name for f in left_state0.fields})
+    r_ek = _ek_decomp(rred.body, {f.name for f in right_state0.fields})
+    # The L challenger's encaps-key fields = its ``challenger@`` fields NOT
+    # consumed as decaps keys (order-preserving, index 0 then 1).
+    chal_ek_fields = [
+        f.name.split("@", 1)[1]
+        for f in left_state0.fields
+        if "@" in f.name and f.name.replace("@", "_") not in dk_arg_names
+    ]
+    if len(l_ek) == 2 and len(r_ek) == 2 and len(chal_ek_fields) == 2:
+        pk_spec = bch.Hop2Spec(
+            ct_params=[p.name for p in lred.params],
+            sync_mods=sync_mods,
+            l_base=_ref_base(left_wrapper_expr),
+            r_base=_ref_base(right_wrapper_expr),
+            l_prefix=l_prefix,
+            r_prefix=r_prefix,
+            glob_mods=glob_mods,
+            l_component_fields=l_grp,
+            r_component_fields=r_grp,
+            clone_alias=clone_alias,
+            shape=shape,
+            pq_module=pq_module,
+            h_module=h_module,
+            l_challenger_ref=l_challenger_ref,
+            l_challenger_key_fields=chal_fields,
+            ect_inj_axiom="",
+            win_is_ek=True,
+            l_ek_component_fields=l_ek,
+            r_ek_component_fields=r_ek,
+            l_challenger_ek_fields=chal_ek_fields,
+            l_guard=lif.guard,
+            r_guard=rif.guard,
+        )
+        pk_body = bch.challenge_tactic_hop2_pk(pk_spec)
+        if pk_body is None:
+            return None
+        return ([_res_tag(SYNTH_PARAM), *pk_body[1:]], None, scheme_name)
 
     spec = bch.Hop2Spec(
         ct_params=[p.name for p in lred.params],
@@ -3792,7 +3850,6 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
     body = bch.challenge_tactic_hop2(spec)
     if body is None:
         return None
-    scheme_name = _ref_base(scheme_expr)
     return (
         [_res_tag(SYNTH_PARAM), *body[1:]],
         (t_module, "encodeciphertext"),

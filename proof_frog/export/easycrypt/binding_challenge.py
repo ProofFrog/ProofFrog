@@ -914,6 +914,17 @@ class Hop2Spec:
     l_challenger_ref: str  # "KEM_PQ_c.LEAK_BIND_K_CT_Unbreakable"
     l_challenger_key_fields: list[str]  # ["dk0", "dk1"]
     ect_inj_axiom: str  # "KEM_PQ_encodeciphertext_inj"
+    # -- PK-shape extras (encaps-key binding); empty/False for CT --------------
+    win_is_ek: bool = False
+    l_ek_component_fields: list[list[str]] = field(
+        default_factory=list
+    )  # [[ek_PQ_0, ek_T_0], [ek_PQ_1, ek_T_1]] (left)
+    r_ek_component_fields: list[list[str]] = field(default_factory=list)  # right
+    l_challenger_ek_fields: list[str] = field(
+        default_factory=list
+    )  # the L challenger's encaps-key field names ["ek0", "ek1"]
+    l_guard: str = ""  # left reduction if-guard, raw ("kdf_in_0 = kdf_in_1")
+    r_guard: str = ""  # right reduction if-guard, raw ("ek0 = ek1")
 
 
 def _blk_env(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -1155,6 +1166,223 @@ def challenge_tactic_hop2(spec: Hop2Spec) -> list[str] | None:
         f".`2 by apply ({spec.ect_inj_axiom} _ _ hect).",
         "    smt().",
         "  smt().",
+        "  qed.",
+    ]
+    return lines
+
+
+def _annot_guard(guard: str, side: str) -> str:
+    """Annotate a simple ``a = b`` equality guard with a memory side."""
+    parts = guard.split(" = ")
+    if len(parts) != 2:
+        return f"({guard}){side}"
+    return f"{parts[0].strip()}{side} = {parts[1].strip()}{side}"
+
+
+def _hop2_pk_hkeval(hm: str, side: str, gname: str) -> list[str]:
+    """Functionalize one side's two ``H.evaluate(kdf_in_i)`` calls (last = kdf1).
+    Assumes a preceding ``wp`` absorbed the trailing result assignment."""
+    return [
+        f"    exists* (glob {hm})"
+        f"{side}"
+        ", kdf_in_0"
+        f"{side}"
+        ", kdf_in_1"
+        f"{side}"
+        f"; elim* => {gname} {gname}i0 {gname}i1.",
+        f"    call{side} ({hm}_evaluate_det {gname} {gname}i1).",
+        f"    call{side} ({hm}_evaluate_det {gname} {gname}i0).",
+    ]
+
+
+def _hop2_pk_drop_decaps(spec: Hop2Spec) -> list[str]:
+    """Peel the LEFT (inlined) Unbreakable challenger's two dead ``decaps`` --
+    glob-preserving, result unused (the challenger returns ``false``). Assumes a
+    preceding ``inline{1} 1; sp; wp`` reduced the then-branch to the two calls."""
+    pqm = spec.pq_module
+    lchal = spec.l_challenger_ref
+    ck0, ck1 = spec.l_challenger_key_fields
+    ct0, ct1 = spec.ct_params
+    return [
+        f"    exists* (glob {pqm})"
+        "{1}"
+        f", {lchal}.{ck0}"
+        "{1}"
+        f", {lchal}.{ck1}"
+        "{1}"
+        f", {ct0}"
+        "{1}"
+        f", {ct1}"
+        "{1}"
+        "; elim* => gpq bd0 bd1 lcc0 lcc1.",
+        f"    call{{1}} ({pqm}_decaps_det gpq bd1 lcc1.`1).",
+        f"    call{{1}} ({pqm}_decaps_det gpq bd0 lcc0.`1).",
+    ]
+
+
+def challenge_tactic_hop2_pk(spec: Hop2Spec) -> list[str] | None:
+    """Emit the hop_2 tactic for the PK (encaps-key) both-case-split shape.
+
+    ``R_PQ_Bind o Unbreakable`` (LEFT, guards on ``kdf_in_0 = kdf_in_1``) ~
+    ``R_KDF o Breakable`` (RIGHT, guards on ``ek0 = ek1``).  No injectivity is
+    needed: both results are the SAME boolean ``(kdf0<>kdf1) /\\ H(kdf0)=H(kdf1)
+    /\\ (ek0<>ek1)`` (the guards are asymmetric, so a 4-leaf case split relates
+    them).  Each leaf opens both ``if``s, drops the LEFT dead challenger decaps,
+    functionalizes the live ``H.evaluate``s, and closes with ``smt``.
+    """
+    ct0, ct1 = spec.ct_params
+    l_len = len([s for s in spec.l_prefix if not isinstance(s, ec_ast.VarDecl)])
+    r_len = len([s for s in spec.r_prefix if not isinstance(s, ec_ast.VarDecl)])
+    gm = spec.glob_mods
+    gge = [f"gg{i}" for i in range(len(gm))]
+    glob_of = dict(zip(gm, gge))
+    hm = spec.h_module
+    lchal = spec.l_challenger_ref
+    ck0, ck1 = spec.l_challenger_key_fields
+    lg0, lg1 = spec.l_component_fields
+    l_fe = [f"l{n}" for n in _field_elim_names(spec.l_component_fields)]
+    r_fe = [f"r{n}" for n in _field_elim_names(spec.r_component_fields)]
+
+    # -- invariant -----------------------------------------------------------
+    def _s2(ref: str) -> str:
+        return ref + "{2}"
+
+    rg0, rg1 = spec.r_component_fields
+    kdf0_term = spec.shape.kdf_in(
+        _s2(f"{spec.r_base}.{rg0[0]}"),
+        _s2(f"{spec.r_base}.{rg0[1]}"),
+        _s2(f"{spec.r_base}.{rg0[2]}"),
+        _s2(ct0),
+    )
+    kdf1_term = spec.shape.kdf_in(
+        _s2(f"{spec.r_base}.{rg1[0]}"),
+        _s2(f"{spec.r_base}.{rg1[1]}"),
+        _s2(f"{spec.r_base}.{rg1[2]}"),
+        _s2(ct1),
+    )
+    le0, le1 = spec.l_ek_component_fields
+    re0, re1 = spec.r_ek_component_fields
+    # distinct component field names (dk 3-tuple + ek 2-tuple share ek_T)
+    l_all_fields: list[str] = []
+    for grp in (*spec.l_component_fields, *spec.l_ek_component_fields):
+        for f in grp:
+            if f not in l_all_fields:
+                l_all_fields.append(f)
+    r_all_fields: list[str] = []
+    for grp in (*spec.r_component_fields, *spec.r_ek_component_fields):
+        for f in grp:
+            if f not in r_all_fields:
+                r_all_fields.append(f)
+    inv_terms = (
+        [f"{c}" "{1}" f" = {c}" "{2}" for c in spec.ct_params]
+        + ["kdf_in_0{1} = kdf_in_0{2}", "kdf_in_1{1} = kdf_in_1{2}"]
+        + [f"(glob {m})" "{1}" f" = (glob {m})" "{2}" for m in spec.sync_mods]
+        + [
+            f"{spec.l_base}.{lg0[0]}" "{1}" f" = {lchal}.{ck0}" "{1}",
+            f"{spec.l_base}.{lg1[0]}" "{1}" f" = {lchal}.{ck1}" "{1}",
+        ]
+        + [
+            f"{spec.l_base}.{le0[0]}"
+            "{1}"
+            f" = {lchal}.{spec.l_challenger_ek_fields[0]}"
+            "{1}",
+            f"{spec.l_base}.{le1[0]}"
+            "{1}"
+            f" = {lchal}.{spec.l_challenger_ek_fields[1]}"
+            "{1}",
+        ]
+        + [
+            f"{spec.l_base}.{lf}" "{1}" f" = {spec.r_base}.{rf}" "{2}"
+            for lf, rf in zip(l_all_fields, r_all_fields)
+        ]
+        + ["kdf_in_0" "{2}" f" = {kdf0_term}", "kdf_in_1" "{2}" f" = {kdf1_term}"]
+        + [
+            f"ek0" "{2}" f" = ({spec.r_base}.{re0[0]}, {spec.r_base}.{re0[1]})" "{2}",
+            f"ek1" "{2}" f" = ({spec.r_base}.{re1[0]}, {spec.r_base}.{re1[1]})" "{2}",
+        ]
+    )
+    inv = " /\\ ".join(inv_terms)
+    lines = ["proof.", "  proc.", f"  seq {l_len} {r_len} : ({inv})."]
+
+    # -- prefix functionalization subgoal ------------------------------------
+    l_ex = (
+        [f"(glob {m})" "{1}" for m in gm]
+        + [f"{spec.l_base}.{f}" "{1}" for grp in spec.l_component_fields for f in grp]
+        + [f"{c}" "{1}" for c in spec.ct_params]
+        + [f"{spec.r_base}.{f}" "{2}" for grp in spec.r_component_fields for f in grp]
+    )
+    l_elim = gge + l_fe + ["lc0", "lc1"] + r_fe
+    l_env = _blk_env(
+        spec.l_base,
+        spec.l_component_fields,
+        l_fe,
+        spec.ct_params,
+        ("lc0", "lc1"),
+        [s for s in spec.l_prefix if not isinstance(s, ec_ast.VarDecl)],
+        spec.clone_alias,
+    )
+    r_env = _blk_env(
+        spec.r_base,
+        spec.r_component_fields,
+        r_fe,
+        spec.ct_params,
+        ("lc0", "lc1"),
+        [s for s in spec.r_prefix if not isinstance(s, ec_ast.VarDecl)],
+        spec.clone_alias,
+    )
+    l_peel = _peel_stmts(_drop_leading_assigns(spec.l_prefix), l_env, glob_of, "{1}")
+    r_peel = _peel_stmts(_drop_leading_assigns(spec.r_prefix), r_env, glob_of, "{2}")
+    lines += [
+        "  + sp.",
+        f"    exists* {', '.join(l_ex)};",
+        f"    elim* => {' '.join(l_elim)}.",
+        *[f"    {ln}" for ln in r_peel],
+        *[f"    {ln}" for ln in l_peel],
+        "    skip => />.",
+    ]
+
+    # -- 4-leaf branch: outer case on R's ek guard, inner on L's kdf guard ----
+    # After ``seq`` both sides are at their trailing ``if``. Each leaf opens both
+    # ``if``s (rcondt/rcondf), then ``sp`` (substitute leading ct projections /
+    # ek packings, consume the dead-``false`` side) + ``wp`` (absorb the trailing
+    # result assigns on both sides), then peels the live calls (the LEFT dead
+    # challenger decaps and/or the ``H.evaluate``s) and closes with ``smt``.
+    e_guard = _annot_guard(spec.r_guard, "{2}")  # "ek0{2} = ek1{2}"
+    k_guard = _annot_guard(spec.l_guard, "{1}")  # "kdf_in_0{1} = kdf_in_1{1}"
+    lines += [f"  case ({e_guard})."]
+    # E true: R returns false. L: case on K.
+    lines += [
+        "  + rcondt{2} 1; first by (auto; smt()).",
+        f"    case ({k_guard}).",
+        # K true: L then (inline -> dead decaps + false); both false.
+        "    + rcondt{1} 1; first by (auto; smt()).",
+        "      inline{1} 1. sp. wp.",
+        *_hop2_pk_drop_decaps(spec),
+        "      skip => />.",
+        # K false: L else (H.eval + (h0=h1)&&(ek0<>ek1)); E => L false = R false.
+        "    rcondf{1} 1; first by (auto; smt()).",
+        "    sp. wp.",
+        *_hop2_pk_hkeval(hm, "{1}", "gh"),
+        "    skip => />; smt().",
+    ]
+    # E false: R else forwards to the (un-inlined) KDF Breakable challenger;
+    # inline it to expose ``H.evaluate(kdf0)``/``H.evaluate(kdf1)``. L: case on K.
+    lines += [
+        "  rcondf{2} 1; first by (auto; smt()).",
+        "  inline{2} 1.",
+        f"  case ({k_guard}).",
+        # K true: L then false; R's kdf0<>kdf1 is false (K) => R false.
+        "  + rcondt{1} 1; first by (auto; smt()).",
+        "    inline{1} 1. sp. wp.",
+        *_hop2_pk_drop_decaps(spec),
+        *_hop2_pk_hkeval(hm, "{2}", "gh2"),
+        "    skip => />; smt().",
+        # K false: both = (h0=h1) (both extra conjuncts hold under !E, !K).
+        "  rcondf{1} 1; first by (auto; smt()).",
+        "  sp. wp.",
+        *_hop2_pk_hkeval(hm, "{1}", "gh"),
+        *_hop2_pk_hkeval(hm, "{2}", "gh2"),
+        "  skip => />; smt().",
         "  qed.",
     ]
     return lines

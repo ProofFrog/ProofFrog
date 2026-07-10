@@ -11,6 +11,7 @@ from proof_frog.export.easycrypt import ec_ast
 from proof_frog.export.easycrypt.chain_emitter import (
     _init_functionalize_side,
     _init_group_backbone,
+    _init_legmid_inv,
     _init_prefix_len,
     _init_reorder_group_swaps,
 )
@@ -172,3 +173,78 @@ def test_functionalize_game_suffix_two_blocks() -> None:
         "call{1} (NG_generator_det g).",
         "call{1} (NG_randomscalar_det g fs0).",
     ]
+
+
+def _cg_game_prefix() -> list[ec_ast.EcStmt]:
+    """FG_calls grouped prefix (kg0 + its projections, kg1, both seeds), with the
+    exact _flat_state_module twin var names."""
+    return [
+        ec_ast.Call("v_Hybrid_KeyGen__tup0", "KEM_PQ.keygen", ""),
+        ec_ast.Assign("v_Hybrid_KeyGen_ek_PQ0", "v_Hybrid_KeyGen__tup0.`1"),
+        ec_ast.Assign("v_Hybrid_KeyGen_dk_PQ0", "v_Hybrid_KeyGen__tup0.`2"),
+        ec_ast.Call("v_Hybrid_KeyGen__tup9", "KEM_PQ.keygen", ""),
+        ec_ast.Sample("v_Hybrid_KeyGen_seed_T0", "dbs_ng_nseed"),
+        ec_ast.Sample("v_Hybrid_KeyGen_seed_T9", "dbs_ng_nseed"),
+    ]
+
+
+def _cg_red_prefix_full() -> list[ec_ast.EcStmt]:
+    """FR_calls prefix through both seeds, exact twin names (see FR_calls dump)."""
+    return [
+        ec_ast.Call("challenger_Initialize__tup0", "KEM_PQ.keygen", ""),
+        ec_ast.Assign("challenger_Initialize_ek00", "challenger_Initialize__tup0.`1"),
+        ec_ast.Assign("challenger_dk0", "challenger_Initialize__tup0.`2"),
+        ec_ast.Call("challenger_Initialize__tup_00", "KEM_PQ.keygen", ""),
+        ec_ast.Assign("challenger_Initialize_ek10", "challenger_Initialize__tup_00.`1"),
+        ec_ast.Assign("challenger_dk1", "challenger_Initialize__tup_00.`2"),
+        ec_ast.Assign(
+            "_tup",
+            "(challenger_Initialize_ek00, challenger_dk0, "
+            "challenger_Initialize_ek10, challenger_dk1)",
+        ),
+        ec_ast.Assign("ek_PQ_0", "_tup.`1"),
+        ec_ast.Assign("dk_PQ_0", "_tup.`2"),
+        ec_ast.Assign("ek_PQ_1", "_tup.`3"),
+        ec_ast.Assign("dk_PQ_1", "_tup.`4"),
+        ec_ast.Sample("seed_T_0", "dbs_ng_nseed"),
+        ec_ast.Sample("seed_T_1", "dbs_ng_nseed"),
+    ]
+
+
+def test_legmid_inv_matches_validated() -> None:
+    red_fields = {
+        "challenger_dk0",
+        "challenger_dk1",
+        "dk_PQ_0",
+        "dk_PQ_1",
+        "dk_T_0",
+        "dk_T_1",
+        "ek_T_0",
+        "ek_T_1",
+    }
+    inv = _init_legmid_inv(
+        _cg_game_prefix(),
+        _cg_red_prefix_full(),
+        keygen_callee="KEM_PQ.keygen",
+        glob_names=["KEM_PQ", "NG", "G", "H", "L"],
+        red_mod="FR_calls",
+        red_fields=red_fields,
+    )
+    expected = " /\\ ".join(
+        [
+            "(glob KEM_PQ){1} = (glob KEM_PQ){2}",
+            "(glob NG){1} = (glob NG){2}",
+            "(glob G){1} = (glob G){2}",
+            "(glob H){1} = (glob H){2}",
+            "(glob L){1} = (glob L){2}",
+            "v_Hybrid_KeyGen_ek_PQ0{1} = ek_PQ_0{2}",
+            "v_Hybrid_KeyGen_dk_PQ0{1} = FR_calls.dk_PQ_0{2}",
+            "FR_calls.dk_PQ_0{2} = FR_calls.challenger_dk0{2}",
+            "v_Hybrid_KeyGen__tup9{1}.`1 = ek_PQ_1{2}",
+            "v_Hybrid_KeyGen__tup9{1}.`2 = FR_calls.dk_PQ_1{2}",
+            "FR_calls.dk_PQ_1{2} = FR_calls.challenger_dk1{2}",
+            "v_Hybrid_KeyGen_seed_T0{1} = seed_T_0{2}",
+            "v_Hybrid_KeyGen_seed_T9{1} = seed_T_1{2}",
+        ]
+    )
+    assert inv == expected

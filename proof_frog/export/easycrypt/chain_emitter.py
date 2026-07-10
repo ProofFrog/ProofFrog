@@ -2357,6 +2357,83 @@ def _init_functionalize_side(  # pylint: disable=too-many-arguments,too-many-pos
     return lines
 
 
+def _init_legmid_inv(  # pylint: disable=too-many-locals
+    game_prefix: list[ec_ast.EcStmt],
+    red_prefix: list[ec_ast.EcStmt],
+    keygen_callee: str,
+    glob_names: list[str],
+    red_mod: str,
+    red_fields: set[str],
+) -> str | None:
+    """The ``seq`` invariant for the middle leg ``FG_calls ~ FR_calls`` -- the
+    coupling the aligned probabilistic prefix establishes and the deterministic
+    suffix consumes. Read off the two flat prefixes:
+
+    * glob equalities (``glob_names``);
+    * per keygen index ``i``: the game's ek/dk (its prefix projection variable
+      when the projection is in the prefix, else the raw ``<result>.`k``) coupled
+      to the reduction's ``ek_PQ_i`` local and ``dk_PQ_i`` field, plus the
+      challenger seam ``dk_PQ_i = challenger_dk_i`` (the reduction's packed-tuple
+      component that also feeds the inner challenger);
+    * per seed index: the game seed coupled to the reduction seed.
+
+    Reduction *fields* (in ``red_fields``) are qualified ``red_mod.<f>``; locals
+    are bare. Returns ``None`` if the reduction's keygen repack tuple cannot be
+    identified (the shape does not match, so the caller admits)."""
+    conj = [f"(glob {m}){{1}} = (glob {m}){{2}}" for m in glob_names]
+
+    def _r2(var: str) -> str:
+        return f"{red_mod}.{var}{{2}}" if var in red_fields else f"{var}{{2}}"
+
+    def _game_ref(kv: str, comp: str) -> str:
+        for s in game_prefix:
+            if isinstance(s, ec_ast.Assign) and s.rhs.strip() == f"{kv}.{comp}":
+                return f"{s.var}{{1}}"
+        return f"{kv}{{1}}.{comp}"
+
+    game_kgs = [
+        s
+        for s in game_prefix
+        if isinstance(s, ec_ast.Call) and s.callee == keygen_callee
+    ]
+    game_seeds = [s.var for s in game_prefix if isinstance(s, ec_ast.Sample)]
+    red_seeds = [s.var for s in red_prefix if isinstance(s, ec_ast.Sample)]
+    n = len(game_kgs)
+
+    pack: tuple[str, list[str]] | None = None
+    for s in red_prefix:
+        if isinstance(s, ec_ast.Assign):
+            rhs = s.rhs.strip()
+            if rhs.startswith("(") and rhs.endswith(")"):
+                comps = _split_top_args(rhs[1:-1])
+                if len(comps) == 2 * n:
+                    pack = (s.var, comps)
+                    break
+    if pack is None:
+        return None
+    packvar, comps = pack
+
+    def _red_proj(k: int) -> str | None:
+        for s in red_prefix:
+            if isinstance(s, ec_ast.Assign) and s.rhs.strip() == f"{packvar}.`{k}":
+                return s.var
+        return None
+
+    for i in range(n):
+        kv = game_kgs[i].var
+        r_ek = _red_proj(2 * i + 1)
+        r_dk = _red_proj(2 * i + 2)
+        if r_ek is None or r_dk is None:
+            return None
+        chal = comps[2 * i + 1]
+        conj.append(f"{_game_ref(kv, '`1')} = {_r2(r_ek)}")
+        conj.append(f"{_game_ref(kv, '`2')} = {_r2(r_dk)}")
+        conj.append(f"{_r2(r_dk)} = {_r2(chal)}")
+    for gs, rs in zip(game_seeds, red_seeds):
+        conj.append(f"{gs}{{1}} = {rs}{{2}}")
+    return " /\\ ".join(conj)
+
+
 def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     modules: mt.ModuleTranslator,
     oracle_name: str,

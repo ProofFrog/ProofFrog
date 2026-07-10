@@ -2691,9 +2691,9 @@ def _emit_one_oracle_chain(
             clone_alias,
         )
         if route is not None:
-            outer_body, inj_req, val_scheme = route
+            outer_body, inj_reqs, val_scheme = route
             if inj_acc is not None:
-                inj_acc.add(inj_req)
+                inj_acc.update(inj_reqs)
             if decaps_val_acc is not None:
                 decaps_val_acc.add(val_scheme)
             return [], outer_body, set()
@@ -3392,13 +3392,14 @@ def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-p
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     flat_params: list[ec_ast.ModuleParam],
     clone_alias: dict[str, str],
-) -> tuple[list[str], tuple[str, str], str] | None:
+) -> tuple[list[str], list[tuple[str, str]], str] | None:
     """Derive the two-KEM binding challenge-elimination tactic for one hop.
 
-    Returns ``(outer_body, (pq_module, "encodesharedsecret"), scheme_name)`` --
-    the tactic plus the injectivity-axiom request and the ``<scheme>_decaps_val``
-    scheme name -- or ``None`` when the hop is not a game~case-split-reduction
-    challenge (every other oracle/proof then stays byte-identical).
+    Returns ``(outer_body, inj_requests, scheme_name)`` -- the tactic, the list
+    of injectivity-axiom requests (``encodesharedsecret``; plus
+    ``encodeencapskey`` for the PK encaps-key shape), and the
+    ``<scheme>_decaps_val`` scheme name -- or ``None`` when the hop is not a
+    game~case-split-reduction challenge (all other proofs stay byte-identical).
     """
     lproj = _project_to_method(left_state0, oracle_name)
     rproj = _project_to_method(right_state0, oracle_name)
@@ -3485,29 +3486,32 @@ def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-p
     # -- couplings & refs ----------------------------------------------------
     game_base = _ref_base(left_wrapper_expr)
     red_base = _ref_base(right_wrapper_expr)
-    # The game's packed decaps-key fields (``dk0``/``dk1``) are its own state --
-    # NOT read off the challenge body, whose scheme ``decaps`` is inlined in the
-    # flat state (the outer lemma relates the un-inlined wrappers, which hold the
-    # packed keys the ``<Scheme>_decaps_val`` lemma consumes).
-    # pylint: disable-next=protected-access
-    key_fields = [mt._ec_field_name(f.name) for f in left_state0.fields]
-    if len(key_fields) != 2:
+    # The game's packed keys are its own state -- NOT read off the challenge body,
+    # whose scheme ``decaps`` is inlined in the flat state (the outer lemma
+    # relates the un-inlined wrappers, holding the packed keys). CT holds only the
+    # DecapsKey (dk 3-tuple); PK additionally holds the EncapsKey (ek 2-tuple),
+    # which is the win term -- couple every packed key + its challenger seam.
+    red_field_set = {f.name for f in right_state0.fields}
+    ek_decomp = _ek_decomp(red_proc.body, red_field_set)
+    decomp_info = _game_key_decomp(
+        list(left_state0.fields), grp, ek_decomp, game_base, red_base, "{1}", "{2}"
+    )
+    if decomp_info is None:
         return None
-    game_key_refs = [f"{game_base}.{k}" for k in key_fields]
-    chal_key_fields = key_fields  # binding challenger shares the dk0/dk1 shape
-    decomp = [
-        f"{game_key_refs[i]}"
-        "{1}"
-        f" = ({red_base}.{grp[i][0]}, {red_base}.{grp[i][1]}, {red_base}.{grp[i][2]})"
-        "{2}"
-        for i in range(2)
-    ]
+    game_key_refs, game_ek_refs, decomp = decomp_info
+    # challenger key/ek field names = the game's own dk/ek field names (the
+    # binding challenger shares the game's key-field shape and naming).
+    chal_dk_names = [r.split(".")[-1] for r in game_key_refs]
+    chal_ek_names = [r.split(".")[-1] for r in game_ek_refs]
     challenger_coupling = [
-        f"{red_base}.{grp[i][0]}"
+        f"{red_base}.{grp[i][0]}" "{2}" f" = {challenger_ref}.{chal_dk_names[i]}" "{2}"
+        for i in range(len(grp))
+    ] + [
+        f"{red_base}.{ek_decomp[i][0]}"
         "{2}"
-        f" = {challenger_ref}.{chal_key_fields[i]}"
+        f" = {challenger_ref}.{chal_ek_names[i]}"
         "{2}"
-        for i in range(2)
+        for i in range(len(ek_decomp))
     ]
     extra_sync = [m for m in scheme_params if m not in game_glob_mods]
 
@@ -3524,20 +3528,27 @@ def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-p
         challenger_coupling=challenger_coupling,
         extra_glob_sync_mods=extra_sync,
         challenger_ref=challenger_ref,
-        challenger_key_fields=chal_key_fields,
+        challenger_key_fields=chal_dk_names,
         pq_module=pq_module,
         inj_axiom=f"{pq_module}_encodesharedsecret_inj",
         h_module=h_module,
         shape=shape,
         red_proc=red_proc,
+        win_is_ek=bool(ek_decomp),
+        ek_component_fields=ek_decomp,
+        ek_inj_axiom=f"{t_module}_encodeencapskey_inj",
+        challenger_ek_fields=chal_ek_names,
     )
-    del t_module  # role check only
+    del game_ek_refs  # coupling built above
     body = bch.challenge_tactic(spec)
     if body is None:
         return None
+    inj_reqs = [(pq_module, "encodesharedsecret")]
+    if ek_decomp:  # PK: the encaps-key redundancy needs encodeencapskey injectivity
+        inj_reqs.append((t_module, "encodeencapskey"))
     return (
         [_res_tag(SYNTH_PARAM), *body[1:]],
-        (pq_module, "encodesharedsecret"),
+        inj_reqs,
         scheme_name,
     )
 
@@ -3602,10 +3613,6 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
     if not game_glob_mods:
         return None
     game_base = _ref_base(right_wrapper_expr)
-    # pylint: disable-next=protected-access
-    key_fields = [mt._ec_field_name(f.name) for f in right_state0.fields]
-    if len(key_fields) != 2:
-        return None
 
     prefix = [s for s in red_proc.body if not isinstance(s, ec_ast.If)]
     pq_module = next(
@@ -3626,18 +3633,18 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
         return None
 
     red_base = _ref_base(left_wrapper_expr)
-    game_key_refs = [f"{game_base}.{k}" for k in key_fields]
     # Decomposition coupling (game packed key{2} = tuple of reduction fields{1});
-    # sides are mirrored from hop_0 (game right, reduction left). Read off the
-    # hop precondition's shape -- the game holds the packed key, the reduction
-    # the component fields.
-    decomp = [
-        f"{game_key_refs[i]}"
-        "{2}"
-        f" = ({red_base}.{grp[i][0]}, {red_base}.{grp[i][1]}, {red_base}.{grp[i][2]})"
-        "{1}"
-        for i in range(2)
-    ]
+    # sides mirrored from hop_0 (game right, reduction left). The CT game holds
+    # only the DecapsKey (dk 3-tuple); the PK game holds BOTH ek (2-tuple) and dk,
+    # so couple every packed key, matching the emitted hop lemma invariant.
+    red_field_set = {f.name for f in left_state0.fields}
+    ek_decomp = _ek_decomp(red_proc.body, red_field_set)
+    decomp_info = _game_key_decomp(
+        list(right_state0.fields), grp, ek_decomp, game_base, red_base, "{2}", "{1}"
+    )
+    if decomp_info is None:
+        return None
+    game_key_refs, _ek_refs, decomp = decomp_info
     spec = bch.Hop4Spec(
         val_lemma_name=f"{scheme_name}_decaps_val",
         game_glob_mods=game_glob_mods,
@@ -3651,6 +3658,7 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
         clone_alias=clone_alias,
         decomp_coupling=decomp,
         red_proc=red_proc,
+        guard_annot=_annot_eq_guard(red_if.guard, "{1}"),
     )
     body = bch.challenge_tactic_hop4(spec)
     if body is None:
@@ -3792,6 +3800,16 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
     )
 
 
+def _annot_eq_guard(guard: str, side: str) -> str:
+    """Annotate a simple equality if-guard ``a = b`` with a memory side, e.g.
+    ``("ek0 = ek1", "{1}")`` -> ``"ek0{1} = ek1{1}"``. Both operands are bare
+    program-variable references (a ct param or a packed-key local)."""
+    parts = guard.split(" = ")
+    if len(parts) != 2:
+        return f"({guard}){side}"
+    return f"{parts[0].strip()}{side} = {parts[1].strip()}{side}"
+
+
 def _kdf_groups(prefix: Sequence[ec_ast.EcStmt]) -> list[list[ec_ast.Call]]:
     """Split a reduction-challenge prefix into per-KDF-input call groups (each
     group ends at a ``kdf_in_*`` assignment)."""
@@ -3844,6 +3862,92 @@ def _game_key_fields(game_proc: ec_ast.Proc) -> list[str]:
         if isinstance(stmt, ec_ast.Call) and stmt.callee.endswith(".decaps"):
             out.append(stmt.args.split(",")[0].strip())
     return out
+
+
+def _ek_decomp(body: Sequence[ec_ast.EcStmt], field_set: set[str]) -> list[list[str]]:
+    """The encaps-key decompositions ``[[ek_PQ_0, ek_T_0], [ek_PQ_1, ek_T_1]]``.
+
+    Read off the reduction challenge body's tuple-literal packing assignments
+    ``ek0 <- (ek_PQ_0, ek_T_0)`` (fully name-independent: matches any 2-tuple
+    literal whose components are all reduction fields, scanning branches too).
+    """
+    out: list[list[str]] = []
+
+    def scan(stmts: Sequence[ec_ast.EcStmt]) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, ec_ast.Assign):
+                rhs = stmt.rhs.strip()
+                if rhs.startswith("(") and rhs.endswith(")"):
+                    parts = [p.strip() for p in _top_level_args(rhs)]
+                    if len(parts) == 2 and all(p in field_set for p in parts):
+                        out.append(parts)
+            elif isinstance(stmt, ec_ast.If):
+                scan(stmt.then_body)
+                scan(stmt.else_body)
+
+    scan(body)
+    return out
+
+
+def _game_key_decomp(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    game_fields: list[frog_ast.Field],
+    grp: list[list[str]],
+    ek_decomp: list[list[str]],
+    game_base: str,
+    red_base: str,
+    game_side: str,
+    red_side: str,
+) -> tuple[list[str], list[str], list[str]] | None:
+    """Map each game packed-key field to its reduction-component decomposition.
+
+    Returns ``(dk_refs, ek_refs, decomp_coupling)``:
+    - ``dk_refs``: the game DecapsKey field glob refs, consumed by
+      ``<Scheme>_decaps_val`` -- ordered by declaration (index 0,1);
+    - ``ek_refs``: the game EncapsKey field glob refs, empty for the CT shape;
+    - ``decomp_coupling``: ``game_field{gs} = (red components){rs}`` for every
+      packed key (dk 3-tuples + ek 2-tuples), sound-by-construction from the
+      reduction's ``Initialize`` packing (mirrored here off the field roles).
+
+    ``None`` if the field roles do not line up (a shape the route declines).
+    """
+
+    def _couple(ref: str, comps: list[str]) -> str:
+        packed = ", ".join(f"{red_base}.{c}" for c in comps)
+        return f"{ref}{game_side} = ({packed}){red_side}"
+
+    # pylint: disable=protected-access
+    if not ek_decomp:
+        # CT shape: every game field is a DecapsKey coupled to its ``grp`` tuple.
+        # (No EncapsKey win term; keeps expanded AND seed-based CT byte-identical.)
+        if len(game_fields) != len(grp):
+            return None
+        dk_refs = [f"{game_base}.{mt._ec_field_name(f.name)}" for f in game_fields]
+        coupling = [_couple(dk_refs[i], grp[i]) for i in range(len(grp))]
+        return dk_refs, [], coupling
+    # PK shape: the game holds BOTH a DecapsKey (dk, ``grp`` arity) and an
+    # EncapsKey (ek, ``ek_decomp`` arity) per index; split by ProductType arity.
+    dk_arity = len(grp[0])
+    ek_arity = len(ek_decomp[0])
+    if dk_arity == ek_arity:
+        return None  # cannot disambiguate dk from ek by arity
+    dk_fields = [
+        f
+        for f in game_fields
+        if isinstance(f.type, frog_ast.ProductType) and len(f.type.types) == dk_arity
+    ]
+    ek_fields = [
+        f
+        for f in game_fields
+        if isinstance(f.type, frog_ast.ProductType) and len(f.type.types) == ek_arity
+    ]
+    if len(dk_fields) != len(grp) or len(ek_fields) != len(ek_decomp):
+        return None
+    dk_refs = [f"{game_base}.{mt._ec_field_name(f.name)}" for f in dk_fields]
+    ek_refs = [f"{game_base}.{mt._ec_field_name(f.name)}" for f in ek_fields]
+    # pylint: enable=protected-access
+    coupling = [_couple(dk_refs[i], grp[i]) for i in range(len(dk_refs))]
+    coupling += [_couple(ek_refs[i], ek_decomp[i]) for i in range(len(ek_refs))]
+    return dk_refs, ek_refs, coupling
 
 
 def _concat_shape_from(

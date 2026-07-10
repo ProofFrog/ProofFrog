@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import ec_ast
 
@@ -366,6 +366,26 @@ def slice_peel_to_ect(
     ]
 
 
+def slice_peel_to_eek(
+    shape: ConcatShape,
+    bind0: tuple[str, str, str, str],
+    bind1: tuple[str, str, str, str],
+) -> list[str]:
+    """Emit the two ``have hc3/heek`` steps deriving the encodeencapskey-component
+    equality (``ev_encek ek0 = ev_encek ek1``) from a KDF-input equality
+    hypothesis ``h``. Navigates one ``slice_concat_left`` level (the c4 label
+    concat) then one ``slice_concat_right`` (the c3 encapskey concat, whose RIGHT
+    component is the encodeencapskey leaf)."""
+    sa4, _sa3, _sa2, _sa1 = shape.slice_axioms()
+    sr3 = shape.right_slice_axioms()[1]
+    _p0, _t0, _bc0, be0, bl0, _l1_0, l2_0, l3_0 = shape.leaves(*bind0)
+    _p1, _t1, _bc1, be1, bl1, _l1_1, l2_1, l3_1 = shape.leaves(*bind1)
+    return [
+        f"have hg3 : {l3_0} = {l3_1} by rewrite -({sa4} {l3_0} {bl0}) -({sa4} {l3_1} {bl1}) h.",
+        f"have heek : {be0} = {be1} by rewrite -({sr3} {l2_0} {be0}) -({sr3} {l2_1} {be1}) hg3.",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # The whole hop_<i>_challenge tactic.
 # ---------------------------------------------------------------------------
@@ -394,6 +414,15 @@ class ChallengeHopSpec:
     h_module: str  # KDF module for the else-branch, "H"
     shape: ConcatShape
     red_proc: ec_ast.Proc  # reduction challenge proc
+    # -- PK-shape extras (encaps-key binding); all empty/False for CT ----------
+    win_is_ek: bool = False  # win term is the packed encaps key, not the ct params
+    ek_component_fields: list[list[str]] = field(
+        default_factory=list
+    )  # [[ek_PQ_0, ek_T_0], [ek_PQ_1, ek_T_1]]
+    ek_inj_axiom: str = ""  # "<T>_encodeencapskey_inj"
+    challenger_ek_fields: list[str] = field(
+        default_factory=list
+    )  # challenger's encaps-key field names ["ek0", "ek1"]
 
 
 def _game_glob_elim(mods: list[str]) -> list[str]:
@@ -496,21 +525,31 @@ def challenge_tactic(spec: ChallengeHopSpec) -> list[str] | None:
     ]
 
     # -- case split ------------------------------------------------------------
-    guard = (
-        "kdf_in_0"
-        "{2}"
-        " = kdf_in_1"
-        "{2}"
-        f" /\\ {ct0}"
-        "{2}"
-        ".`1 <> "
-        f"{ct1}"
-        "{2}"
-        ".`1"
-    )
+    # CT reduction guards ``kdf_in_0 = kdf_in_1 && ct_PQ_0 <> ct_PQ_1``; PK
+    # guards on the KDF-input collision alone (the PK challenger checks the PQ
+    # encaps-key distinctness itself).
+    if spec.win_is_ek:
+        guard = "kdf_in_0{2} = kdf_in_1{2}"
+    else:
+        guard = (
+            "kdf_in_0"
+            "{2}"
+            " = kdf_in_1"
+            "{2}"
+            f" /\\ {ct0}"
+            "{2}"
+            ".`1 <> "
+            f"{ct1}"
+            "{2}"
+            ".`1"
+        )
     lines.append(f"  case ({guard}).")
-    lines += _if_branch(spec)
-    lines += _else_branch(spec)
+    if spec.win_is_ek:
+        lines += _if_branch_pk(spec)
+        lines += _else_branch_pk(spec)
+    else:
+        lines += _if_branch(spec)
+        lines += _else_branch(spec)
     lines.append("  qed.")
     return lines
 
@@ -622,6 +661,88 @@ def _if_branch(spec: ChallengeHopSpec) -> list[str]:
     ]
 
 
+def _if_branch_pk(spec: ChallengeHopSpec) -> list[str]:
+    """PK collision branch: like the CT branch (inline the PQ binding challenger,
+    functionalize its two decaps, slice-peel the shared-secret leaf, collapse
+    the decaps via ``encodesharedsecret`` injectivity) PLUS an encodeencapskey
+    slice-peel deriving ``ek_T_0 = ek_T_1``, so the game's packed-encaps-key
+    inequality reduces to the challenger's PQ encaps-key inequality."""
+    pqc = spec.clone_alias[spec.pq_module]
+    pqm = spec.pq_module
+    ct0, ct1 = spec.ct_params
+    g0 = spec.red_component_fields[0]
+    g1 = spec.red_component_fields[1]
+    bind0 = (
+        "bd0",
+        f"{spec.red_base}.{g0[1]}" "{2}",
+        f"{spec.red_base}.{g0[2]}" "{2}",
+        "c0",
+    )
+    bind1 = (
+        "bd1",
+        f"{spec.red_base}.{g1[1]}" "{2}",
+        f"{spec.red_base}.{g1[2]}" "{2}",
+        "c1",
+    )
+    peel_ss = slice_peel(spec.shape, bind0, bind1)
+    peel_ek = slice_peel_to_eek(spec.shape, bind0, bind1)
+    e0 = spec.ek_component_fields[0]
+    e1 = spec.ek_component_fields[1]
+    ck0, ck1 = spec.challenger_key_fields
+    return [
+        "  + rcondt{2} 1; first by auto.",
+        "    inline{2} 1.",
+        "    sp.",
+        f"    exists* (glob {pqm})"
+        "{2}"
+        f", {spec.challenger_ref}.{ck0}"
+        "{2}"
+        f", {spec.challenger_ref}.{ck1}"
+        "{2}"
+        f", {ct0}"
+        "{2}"
+        f", {ct1}"
+        "{2}"
+        "; elim* => gp3 bd0 bd1 c0 c1.",
+        "    wp.",
+        f"    call{{2}} ({pqm}_decaps_det gp3 bd1 c1.`1).",
+        f"    call{{2}} ({pqm}_decaps_det gp3 bd0 c0.`1).",
+        "    skip => />. move => &2 h.",
+        *[f"    {ln}" for ln in peel_ss],
+        f"    have hd : {pqc}.ev_decaps bd0 c0.`1 = {pqc}.ev_decaps bd1 c1.`1"
+        f" by apply ({spec.inj_axiom} _ _ he).",
+        *[f"    {ln}" for ln in peel_ek],
+        f"    have hek : {spec.red_base}.{e0[1]}"
+        "{2}"
+        f" = {spec.red_base}.{e1[1]}"
+        "{2}"
+        f" by apply ({spec.ek_inj_axiom} _ _ heek).",
+        "    smt().",
+    ]
+
+
+def _else_branch_pk(spec: ChallengeHopSpec) -> list[str]:
+    """PK no-collision branch: functionalize the two ``H.evaluate`` calls; the
+    game's and reduction's packed-encaps-key inequalities coincide under the
+    decomposition coupling (``smt`` closes from the invariant)."""
+    hm = spec.h_module
+    return [
+        "  rcondf{2} 1; first by (auto; smt()).",
+        "  sp.",
+        f"  exists* (glob {hm})"
+        "{2}"
+        ", kdf_in_0"
+        "{2}"
+        ", kdf_in_1"
+        "{2}"
+        "; elim* => gh2 ki0 ki1.",
+        "  wp.",
+        f"  call{{2}} ({hm}_evaluate_det gh2 ki1).",
+        f"  call{{2}} ({hm}_evaluate_det gh2 ki0).",
+        "  skip => />.",
+    ]
+
+
 def _else_branch(spec: ChallengeHopSpec) -> list[str]:
     """No-collision branch: functionalize the two ``H.evaluate`` calls."""
     hm = spec.h_module
@@ -668,6 +789,9 @@ class Hop4Spec:
     clone_alias: dict[str, str]
     decomp_coupling: list[str]  # game packed key{2} = tuple of reduction fields{1}
     red_proc: ec_ast.Proc  # reduction (left) challenge proc
+    guard_annot: (
+        str  # the reduction if-guard, side-{1} annotated (e.g. "ek0{1} = ek1{1}")
+    )
 
 
 def _blk_env_hop4(spec: Hop4Spec, field_elim: list[str]) -> dict[str, str]:
@@ -742,9 +866,11 @@ def challenge_tactic_hop4(spec: Hop4Spec) -> list[str] | None:
         "    skip => />.",
     ]
 
-    # both sides return false; select the branch on the reduction's ct guard.
+    # both sides return false; select the branch on the reduction's if guard
+    # (CT: ``ct0 = ct1``; PK: ``ek0 = ek1`` over the packed encaps keys).
+    del ct0, ct1
     lines += [
-        f"  case ({ct0}" "{1}" f" = {ct1}" "{1}).",
+        f"  case ({spec.guard_annot}).",
         "  + rcondt{1} 1; first by auto.",
         "    wp. skip => />.",
         "  rcondf{1} 1; first by (auto; smt()).",

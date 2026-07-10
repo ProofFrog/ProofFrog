@@ -61,3 +61,9 @@ class TestSemantics:
     def test_non_numeric_operator_rejected(self) -> None:
         with pytest.raises(semantic_analysis.FailedTypeCheck):
             self._check("advantage <= count_Samp union count_Samp;\nexport as D;")
+
+    def test_bound_decreasing_in_count_rejected(self) -> None:
+        # A bound that shrinks as queries grow would make the count
+        # over-approximation / calls pin unsound.
+        with pytest.raises(semantic_analysis.FailedTypeCheck):
+            self._check("advantage <= 1 / (count_Samp + 1);\nexport as D;")

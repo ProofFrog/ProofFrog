@@ -3,6 +3,7 @@ import sys
 import copy
 from typing import Optional, TypeVar, Union, TypeAlias
 from sympy import Integer, Rational, Symbol
+from . import advantage
 from . import frog_ast
 from . import frog_parser
 from . import proof_engine
@@ -530,6 +531,21 @@ class NameResolutionVisitor(VariableTypeVisitor):
                 check_numeric(expr.expression)
 
         check_numeric(clause.bound)
+
+        # Soundness guardrail: a bound that *decreases* as an oracle count grows
+        # would make the advantage synthesizer's count over-approximation and
+        # integer `calls` pin unsound (they substitute an upper bound for the
+        # count). Reject a provably-decreasing bound; a merely undecidable one is
+        # left to the synthesizer, which keeps such a term opaque.
+        issue = advantage.count_monotonicity_issue(clause.bound)
+        if issue is not None and issue[1]:
+            print_error(
+                clause,
+                f"advantage bound must be nondecreasing in each query count, but"
+                f" it decreases as '{issue[0]}' grows; more queries cannot lower"
+                f" the distinguishing advantage",
+                self.file_name,
+            )
 
     def visit_scheme(self, scheme: frog_ast.Scheme) -> None:
         super().visit_scheme(scheme)

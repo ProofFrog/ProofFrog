@@ -230,6 +230,53 @@ def _frog_arith_to_sympy(expr: frog_ast.ASTNode) -> sympy.Expr:
     raise _UnconvertibleBound(str(expr))
 
 
+def count_monotonicity_issue(
+    bound: frog_ast.Expression,
+) -> Optional[tuple[str, bool]]:
+    """Check a declared bound is nondecreasing in each ``count_<Oracle>``.
+
+    Returns ``None`` when the bound is provably nondecreasing in every oracle
+    count it uses; otherwise ``(count_name, provably_decreasing)`` where
+    ``provably_decreasing`` is True if the bound is provably *decreasing* in that
+    count and False if monotonicity merely could not be decided.
+
+    This is a Tier-2 soundness guardrail. The count over-approximation
+    (``if``-branches summed, loops multiplied) and the integer ``calls <= N`` pin
+    both substitute an *upper bound* for a query count; that preserves the
+    advantage *upper* bound only when the declared bound is nondecreasing in the
+    count. The test is the discrete forward difference ``f(c+1) - f(c) >= 0``
+    over integer counts -- not the continuous derivative, which the birthday
+    bound ``c(c-1)/(2|S|)`` fails for real ``c`` in ``(0, 1)`` while being
+    nondecreasing over the integers. Set/scalar parameters are treated as
+    positive (their real domain).
+    """
+    try:
+        expr = _frog_arith_to_sympy(bound)
+    except _UnconvertibleBound:
+        return None
+    positive = {
+        s: sympy.Symbol(str(s), positive=True)
+        for s in expr.free_symbols
+        if not str(s).startswith("count_")
+    }
+    expr = expr.subs(positive)
+    undecided: Optional[str] = None
+    for sym in sorted(
+        (s for s in expr.free_symbols if str(s).startswith("count_")), key=str
+    ):
+        delta = sympy.simplify(expr.subs(sym, sym + 1) - expr)
+        nonneg = delta.is_nonnegative
+        if nonneg is True:
+            continue
+        if nonneg is False:
+            return str(sym), True
+        if undecided is None:
+            undecided = str(sym)
+    if undecided is not None:
+        return undecided, False
+    return None
+
+
 def _challenger_oracle(node: frog_ast.ASTNode) -> Optional[str]:
     """If *node* is a ``challenger.<Oracle>(...)`` call, return the oracle name."""
     if not isinstance(node, frog_ast.FuncCall):
@@ -335,6 +382,18 @@ def resolve_statistical(
     game_file = definition_lookup.get(notion.name)
     if not isinstance(game_file, frog_ast.GameFile) or game_file.advantage is None:
         return None, ""
+
+    # Soundness guardrail: deriving/pinning counts substitutes an upper bound
+    # for a query count, which is only sound when the bound is nondecreasing in
+    # that count. If we cannot establish that, keep the term opaque.
+    issue = count_monotonicity_issue(game_file.advantage.bound)
+    if issue is not None:
+        name, decreasing = issue
+        why = "decreases" if decreasing else "is not provably nondecreasing"
+        return None, (
+            f"statistical bound for {notion.name} left symbolic: it {why} in"
+            f" {name}, so the count over-approximation/pin could be unsound"
+        )
 
     # Substitute the games' set/scalar parameters by the assumption's arguments
     # (so e.g. |S| becomes |BitString<F.in>|); oracle-count names are disjoint.

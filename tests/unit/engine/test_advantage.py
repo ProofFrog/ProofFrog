@@ -248,18 +248,14 @@ class TestOracleCountDerivation:
     def test_two_reductions_collapse_into_one_sum(self) -> None:
         bound = advantage.synthesize_from_hop_results(
             [_birthday_hop("R1"), _birthday_hop("R2")],
-            definition_lookup=_lookup(
-                R1={"CTXT": ["Samp"]}, R2={"CTXT": ["Samp"]}
-            ),
+            definition_lookup=_lookup(R1={"CTXT": ["Samp"]}, R2={"CTXT": ["Samp"]}),
         )
         assert bound.render() == "count_CTXT*(count_CTXT - 1)/|Message|"
 
     def test_direct_hop_leaves_count_symbolic(self) -> None:
         # No reduction: the helper's own oracle count survives as count_Samp.
         results = [
-            _hop_result(
-                1, "by_assumption", notion=_game("DistinctSampling", "Message")
-            )
+            _hop_result(1, "by_assumption", notion=_game("DistinctSampling", "Message"))
         ]
         bound = advantage.synthesize_from_hop_results(
             results, definition_lookup=_lookup()
@@ -305,7 +301,9 @@ class TestOracleCountDerivation:
     def test_mixed_and_substituted_expression(self) -> None:
         results = [
             _hop_result(
-                1, "by_assumption", notion=_game("PRFSecurity", "F"),
+                1,
+                "by_assumption",
+                notion=_game("PRFSecurity", "F"),
                 reduction=_game("Rp"),
             ),
             _birthday_hop("R"),
@@ -319,3 +317,70 @@ class TestOracleCountDerivation:
         substituted = str(bound.substituted_expression())
         assert "Adv_0" in substituted
         assert "count_CTXT" in substituted
+
+
+# --- Tier 2: monotonicity guardrail -------------------------------------------
+
+
+def _clause(bound_src: str) -> frog_ast.Expression:
+    from proof_frog import frog_parser
+
+    gf = frog_parser.parse_game_file(
+        "Game A(Set S) { S Samp() { S v <- S; return v; } }\n"
+        "Game B(Set S) { Set<S> seen; S Samp() { S v <-uniq[seen] S; return v; } }\n"
+        f"advantage <= {bound_src};\nexport as D;"
+    )
+    assert gf.advantage is not None
+    return gf.advantage.bound
+
+
+class TestMonotonicityGuardrail:
+    def test_birthday_is_monotone(self) -> None:
+        assert (
+            advantage.count_monotonicity_issue(
+                _clause("count_Samp * (count_Samp - 1) / (2 * |S|)")
+            )
+            is None
+        )
+
+    def test_linear_and_constant_are_monotone(self) -> None:
+        assert advantage.count_monotonicity_issue(_clause("count_Samp / |S|")) is None
+        assert advantage.count_monotonicity_issue(_clause("0")) is None
+        assert advantage.count_monotonicity_issue(_clause("1 / (2 ^ |S|)")) is None
+
+    def test_decreasing_bound_flagged_as_provably_decreasing(self) -> None:
+        assert advantage.count_monotonicity_issue(_clause("1 / (count_Samp + 1)")) == (
+            "count_Samp",
+            True,
+        )
+        assert advantage.count_monotonicity_issue(_clause("|S| - count_Samp")) == (
+            "count_Samp",
+            True,
+        )
+
+    def test_non_monotone_helper_left_opaque_with_note(self) -> None:
+        from proof_frog import frog_parser
+
+        weird = frog_parser.parse_game_file(
+            "Game A(Set S) { S Samp() { S v <- S; return v; } }\n"
+            "Game B(Set S) { Set<S> seen; S Samp() { S v <-uniq[seen] S; return v; } }\n"
+            "advantage <= 1 / (count_Samp + 1);\nexport as Weird;"
+        )
+        results = [
+            _hop_result(
+                1,
+                "by_assumption",
+                notion=_game("Weird", "Message"),
+                reduction=_game("R"),
+            )
+        ]
+        bound = advantage.synthesize_from_hop_results(
+            results,
+            definition_lookup={
+                "Weird": weird,
+                "R": _reduction("R", {"CTXT": ["Samp"]}),
+            },
+        )
+        assert bound.render() == "Adv^Weird(Message)(B1)"
+        assert len(bound.notes) == 1
+        assert "decreases in count_Samp" in bound.notes[0]

@@ -2402,6 +2402,12 @@ def _init_legmid_inv(  # pylint: disable=too-many-locals
     red_seeds = [s.var for s in red_prefix if isinstance(s, ec_ast.Sample)]
     n = len(game_kgs)
 
+    def _red_ref(kv: str, comp: str) -> str:
+        for s in red_prefix:
+            if isinstance(s, ec_ast.Assign) and s.rhs.strip() == f"{kv}.{comp}":
+                return _r2(s.var)
+        return f"{kv}{{2}}.{comp}"
+
     pack: tuple[str, list[str]] | None = None
     for s in red_prefix:
         if isinstance(s, ec_ast.Assign):
@@ -2412,7 +2418,24 @@ def _init_legmid_inv(  # pylint: disable=too-many-locals
                     pack = (s.var, comps)
                     break
     if pack is None:
-        return None
+        # R_KDF (hop_4) shape: the reduction runs the SAME direct keygens as the
+        # game (no challenger repack tuple) and forwards to a keyless challenger
+        # (no seam). Couple each game keygen's ek/dk projection to the matching
+        # reduction keygen's, plus the seeds.
+        red_kgs = [
+            s
+            for s in red_prefix
+            if isinstance(s, ec_ast.Call) and s.callee == keygen_callee
+        ]
+        if len(red_kgs) != n:
+            return None
+        for i in range(n):
+            gkv, rkv = game_kgs[i].var, red_kgs[i].var
+            conj.append(f"{_game_ref(gkv, '`1')} = {_red_ref(rkv, '`1')}")
+            conj.append(f"{_game_ref(gkv, '`2')} = {_red_ref(rkv, '`2')}")
+        for gs, rs in zip(game_seeds, red_seeds):
+            conj.append(f"{gs}{{1}} = {rs}{{2}}")
+        return " /\\ ".join(conj)
     packvar, comps = pack
 
     def _red_proj(k: int) -> str | None:
@@ -2534,6 +2557,7 @@ def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-pos
     det_methods: dict[str, set[str]],
     clone_alias: dict[str, str],
     init_coupling: str | None = None,
+    hop_index: int = 0,
 ) -> tuple[list[str], list[str], set[tuple[str, str]]] | None:
     """The functional-twin reorder route for a CFRG init hop whose two endpoints
     run the SAME keygen/sample/NG-call multiset in DIFFERENT order (the game
@@ -2541,36 +2565,23 @@ def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-pos
     ``RawGame ~ FG_calls ~ FR_calls ~ RawReduction`` (the outer legs by ``proc;
     inline*; sim``, the middle by :func:`_init_legmid_tactic`), with the two flat
     twins as extra module decls and the leg posts derived from ``init_coupling``.
-    Handles the hop_0 orientation only (interleaved game on the left, with a
-    challenger seam); other shapes return ``None`` (caller admits).
+    Handles both orientations: hop_0 (interleaved game on the left, challenger
+    seam) directly, and the mirrored hop_4 (game on the right, no seam) by
+    flipping the coupling and prepending ``symmetry``. Off-shape hops (e.g. the PK
+    shared-component decomposition) return ``None`` (caller admits).
     Returns ``(extra_decls, outer_body, pres)`` or ``None`` off-shape."""
     if init_coupling is None:
         return None
+    # Per-hop unique twin names: several init hops (hop_0, hop_4) each emit their
+    # own twin pair, so a fixed ``FG_calls``/``FR_calls`` would collide ("symbol
+    # already exists"). The exporter's declare-module restriction scan picks up
+    # any ``transitivity <name>(`` name, so suffixed names stay restricted.
+    fg_name = f"FG_calls_{hop_index}"
+    fr_name = f"FR_calls_{hop_index}"
     lproj = _project_to_method(left_state0, oracle_name)
     rproj = _project_to_method(right_state0, oracle_name)
     if lproj is None or rproj is None:
         return None
-    lmod = _flat_state_module(
-        modules,
-        "FG_calls",
-        lproj,
-        external_module_types,
-        method_return_types,
-        flat_params,
-        emit_state_vars=True,
-    )
-    rmod = _flat_state_module(
-        modules,
-        "FR_calls",
-        rproj,
-        external_module_types,
-        method_return_types,
-        flat_params,
-        emit_state_vars=True,
-    )
-    if not lmod.procs or not rmod.procs:
-        return None
-    l_body, r_body = lmod.procs[0].body, rmod.procs[0].body
 
     def _det_pred(mod: str, meth: str) -> bool:
         return meth in det_methods.get(mod, set())
@@ -2592,15 +2603,57 @@ def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-pos
                 return False
         return True
 
-    keygen_callee = _keygen_callee(l_body)
+    # Detect orientation: the interleaved (per-index keygen; sample; NG) endpoint
+    # is the GAME; the grouped endpoint is the reduction. hop_0 has the game on
+    # the left; hop_4 mirrors it (reduction R_KDF on the left, game on the right,
+    # no challenger seam). We always build FG_calls from the game and FR_calls
+    # from the reduction and, for the mirrored hop_4, prepend ``symmetry`` so the
+    # transitivity runs in the same game-on-the-left frame as hop_0.
+    def _build(proj: frog_ast.Game, name: str) -> ec_ast.Module | None:
+        m = _flat_state_module(
+            modules,
+            name,
+            proj,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            emit_state_vars=True,
+        )
+        return m if m.procs else None
+
+    # Build each side once (left->FG_calls, right->FR_calls) to detect the
+    # interleaved (game) side. hop_0 keeps these directly; the mirrored hop_4
+    # rebuilds with the twin names swapped so FG_calls is always the game.
+    lmod = _build(lproj, fg_name)
+    rmod = _build(rproj, fr_name)
+    if lmod is None or rmod is None:
+        return None
+    kg_probe = _keygen_callee(lmod.procs[0].body) or _keygen_callee(rmod.procs[0].body)
+    if kg_probe is None:
+        return None
+    l_interleaved = not _grouped(lmod.procs[0].body, kg_probe)
+    r_interleaved = not _grouped(rmod.procs[0].body, kg_probe)
+    if l_interleaved == r_interleaved:
+        return None  # need exactly one interleaved (game) + one grouped (reduction)
+    game_is_left = l_interleaved
+    fgmod: ec_ast.Module
+    frmod: ec_ast.Module
+    if game_is_left:
+        fgmod, frmod = lmod, rmod
+    else:
+        fg = _build(rproj, fg_name)
+        fr = _build(lproj, fr_name)
+        if fg is None or fr is None:
+            return None
+        fgmod, frmod = fg, fr
+    game_body, red_body = fgmod.procs[0].body, frmod.procs[0].body
+    keygen_callee = _keygen_callee(game_body)
     if keygen_callee is None:
         return None
-    if _grouped(l_body, keygen_callee) or not _grouped(r_body, keygen_callee):
-        return None  # only the left-interleaved (hop_0) orientation, for now
     ng_mod = next(
         (
             _callee_parts(c)[0]  # type: ignore[index]
-            for k, c in _call_sample_backbone(l_body)
+            for k, c in _call_sample_backbone(game_body)
             if k == "call"
             and c is not None
             and (p := _callee_parts(c)) is not None
@@ -2612,13 +2665,13 @@ def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-pos
         return None
     glob_names = [p.name for p in flat_params]
     args = ", ".join(glob_names)
-    red_fields = {v.name for v in rmod.module_vars}
+    red_fields = {v.name for v in frmod.module_vars}
     legmid = _init_legmid_tactic(
-        l_body,
-        r_body,
+        game_body,
+        red_body,
         keygen_callee,
         glob_names,
-        "FR_calls",
+        fr_name,
         red_fields,
         clone_alias[ng_mod],
         _det_pred,
@@ -2627,9 +2680,15 @@ def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-pos
         return None
 
     # Parse the decomposition coupling into (game-field -> component tuple) and
-    # the challenger seam (reduction dk field = challenger field), all on the
-    # side-1 game / side-2 reduction orientation (hop_0).
-    conj = [p.strip() for p in init_coupling.split(" /\\ ")]
+    # the challenger seam (reduction dk field = challenger field), on the side-1
+    # game / side-2 reduction orientation. For the mirrored hop_4 the raw coupling
+    # has the game on side 2, so flip ``{1}<->{2}`` (and later prepend
+    # ``symmetry``) to reuse the hop_0-oriented assembly.
+    def _flip_sides(s: str) -> str:
+        return s.replace("{1}", "\x00").replace("{2}", "{1}").replace("\x00", "{2}")
+
+    coupling = init_coupling if game_is_left else _flip_sides(init_coupling)
+    conj = [p.strip() for p in coupling.split(" /\\ ")]
     globs = " /\\ ".join(p for p in conj if p.startswith("={glob"))
     body = " /\\ ".join(p for p in conj if not p.startswith("={glob"))
     decomp: list[tuple[str, list[str]]] = []
@@ -2642,7 +2701,7 @@ def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-pos
         m = re.match(r"^(\S+)\{2\} = (\S+)\{2\}$", cj)
         if m is not None:
             seam.append((m.group(1), m.group(2)))
-    if not decomp or not seam:
+    if not decomp:
         return None
     # The functionalizing middle leg leaves a deep nested-forall ``smt`` goal
     # whose size the closer cannot discharge once one NG-derived component (the
@@ -2655,26 +2714,25 @@ def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-pos
         return None
     game_base = decomp[0][0].rsplit(".", 1)[0]
     red_base = decomp[0][1][0].rsplit(".", 1)[0]
-    chal_base = seam[0][1].rsplit(".", 1)[0]
+    chal_base = seam[0][1].rsplit(".", 1)[0] if seam else None
 
     def _fld(full: str) -> str:
         return full.rsplit(".", 1)[1]
 
     def _fg(s: str) -> str:
-        return s.replace(game_base, "FG_calls")
+        return s.replace(game_base, fg_name)
 
     def _fr(s: str) -> str:
-        return (
-            _fg(s)
-            .replace(chal_base + ".", "FR_calls.challenger_")
-            .replace(red_base, "FR_calls")
-        )
+        out = _fg(s)
+        if chal_base is not None:
+            out = out.replace(chal_base + ".", fr_name + ".challenger_")
+        return out.replace(red_base, fr_name)
 
     res_eq = "res{1} = res{2}"
-    q1_eqs = " /\\ ".join(f"{gf}{{1}} = FG_calls.{_fld(gf)}{{2}}" for gf, _ in decomp)
+    q1_eqs = " /\\ ".join(f"{gf}{{1}} = {fg_name}.{_fld(gf)}{{2}}" for gf, _ in decomp)
     q4_eqs = " /\\ ".join(
-        [f"FR_calls.{_fld(c)}{{1}} = {c}{{2}}" for _, comps in decomp for c in comps]
-        + [f"FR_calls.challenger_{_fld(cf)}{{1}} = {cf}{{2}}" for _, cf in seam]
+        [f"{fr_name}.{_fld(c)}{{1}} = {c}{{2}}" for _, comps in decomp for c in comps]
+        + [f"{fr_name}.challenger_{_fld(cf)}{{1}} = {cf}{{2}}" for _, cf in seam]
     )
     q1 = f"{globs} /\\ {q1_eqs} /\\ {res_eq}"
     q2 = f"{_fg(body)} /\\ {globs} /\\ {res_eq}"
@@ -2698,22 +2756,25 @@ def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-pos
 
     outer = [
         _res_tag(SYNTH_PARAM),
-        f"transitivity FG_calls({args}).initialize "
+        # hop_4 (game on side 2) is the mirror of hop_0: flip it into the
+        # game-on-the-left frame so the same transitivity + leg posts apply.
+        *([] if game_is_left else ["symmetry."]),
+        f"transitivity {fg_name}({args}).initialize "
         f"({globs} ==> {q1}) ({globs} ==> {q2}).",
         "smt().",
         "smt().",
-        *_outer_leg(l_body),
-        f"transitivity FR_calls({args}).initialize "
+        *_outer_leg(game_body),
+        f"transitivity {fr_name}({args}).initialize "
         f"({globs} ==> {q3}) ({globs} ==> {q4}).",
         "smt().",
         "smt().",
         *legmid,
-        *_outer_leg(r_body),
+        *_outer_leg(red_body),
         "qed.",
     ]
     extra = [
-        "\n".join(_render_module_decl(lmod)),
-        "\n".join(_render_module_decl(rmod)),
+        "\n".join(_render_module_decl(fgmod)),
+        "\n".join(_render_module_decl(frmod)),
     ]
     return extra, outer, set()
 
@@ -3201,6 +3262,7 @@ def _emit_one_oracle_chain(
                 det_methods,
                 clone_alias or {},
                 init_coupling,
+                hop_index=hop_index,
             )
             if twin is not None:
                 return twin

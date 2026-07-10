@@ -2359,13 +2359,14 @@ def _init_functionalize_side(  # pylint: disable=too-many-arguments,too-many-pos
     return lines
 
 
-def _init_legmid_inv(  # pylint: disable=too-many-locals
+def _init_legmid_inv(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
     game_prefix: list[ec_ast.EcStmt],
     red_prefix: list[ec_ast.EcStmt],
     keygen_callee: str,
     glob_names: list[str],
     red_mod: str,
     red_fields: set[str],
+    include_ek_seam: bool = False,
 ) -> str | None:
     """The ``seq`` invariant for the middle leg ``FG_calls ~ FR_calls`` -- the
     coupling the aligned probabilistic prefix establishes and the deterministic
@@ -2454,9 +2455,73 @@ def _init_legmid_inv(  # pylint: disable=too-many-locals
         conj.append(f"{_game_ref(kv, '`1')} = {_r2(r_ek)}")
         conj.append(f"{_game_ref(kv, '`2')} = {_r2(r_dk)}")
         conj.append(f"{_r2(r_dk)} = {_r2(chal)}")
+        # The EK seam ``ek_PQ_i = challenger_ek_i`` (the reduction holds the
+        # challenger's ENCAPS key too, as in the PK binding reduction). Only the
+        # flat ``ev``-twin PK leg needs it in the invariant: the seam assignments
+        # sit in the prefix (before the ``seq`` split), so the post's EK seam is
+        # unrecoverable in the suffix unless carried here. Off by default so CT
+        # (dk-only seam) stays byte-identical.
+        if include_ek_seam:
+            conj.append(f"{_r2(r_ek)} = {_r2(comps[2 * i])}")
     for gs, rs in zip(game_seeds, red_seeds):
         conj.append(f"{gs}{{1}} = {rs}{{2}}")
     return " /\\ ".join(conj)
+
+
+def _init_legmid_flat_tactic(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    game_body_ev: list[ec_ast.EcStmt],
+    red_body_ev: list[ec_ast.EcStmt],
+    keygen_callee: str,
+    glob_names: list[str],
+    red_mod: str,
+    red_fields: set[str],
+) -> list[str] | None:
+    """The FLAT middle-leg ``FG_ev ~ FR_ev`` tactic for the PK nested route.
+
+    Both endpoints are ``ev``-ASSIGNMENT twins (the NG calls already
+    functionalized), so the only backbone events are the shared keygens and
+    samples and everything after the last sample is a pure deterministic
+    assignment run. Assembles the same probabilistic-prefix machinery as
+    :func:`_init_legmid_tactic` (grouping ``swap{1}``s + ``seq`` with the coupling
+    invariant + the aligned prefix peel) but closes with a FLAT ``sp. skip => /#``
+    instead of functionalizing NG suffixes: ``sp`` runs both sides' identical
+    ``ev``-assignment/packing suffix and the residual is ground (no nested
+    ``forall r, (r = ev ...) => ...`` chain, so ``/#`` scales to the PK
+    shared-``ek_T`` packing). Returns ``None`` if the invariant cannot be built.
+    """
+    swaps, grouped_game = _init_group_backbone(game_body_ev, keygen_callee, side=1)
+    red_exec: list[ec_ast.EcStmt] = [
+        s for s in _exec_stmts(red_body_ev) if not isinstance(s, ec_ast.Return)
+    ]
+    game_plen = _init_prefix_len(grouped_game)
+    red_plen = _init_prefix_len(red_exec)
+    game_prefix = grouped_game[:game_plen]
+    red_prefix = red_exec[:red_plen]
+    inv = _init_legmid_inv(
+        game_prefix,
+        red_prefix,
+        keygen_callee,
+        glob_names,
+        red_mod,
+        red_fields,
+        include_ek_seam=True,
+    )
+    if inv is None:
+        return None
+    game_seeds = [s.var for s in game_prefix if isinstance(s, ec_ast.Sample)]
+    n_kg = len(
+        [
+            s
+            for s in game_prefix
+            if isinstance(s, ec_ast.Call) and s.callee == keygen_callee
+        ]
+    )
+    tac: list[str] = ["proc.", *swaps, f"seq {game_plen} {red_plen} : ({inv})."]
+    tac += ["rnd."] * len(game_seeds)
+    tac += ["wp.", "call (_: true)."] * n_kg
+    tac += ["auto."]
+    tac += ["sp.", "skip => /#."]
+    return tac
 
 
 def _init_legmid_tactic(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
@@ -2544,6 +2609,132 @@ def _init_legmid_tactic(  # pylint: disable=too-many-arguments,too-many-position
     # packing too.
     tac += ["sp.", "skip.", "move => * /=.", "smt()."]
     return tac
+
+
+def _ev_twin_module(
+    base: ec_ast.Module,
+    new_name: str,
+    det_pred: Callable[[str, str], bool],
+    clone_of: Callable[[str], str | None],
+) -> ec_ast.Module:
+    """A copy of ``base`` renamed to ``new_name`` whose single procedure has its
+    deterministic NG calls replaced by their ``ev_<m>`` assignments (via
+    :func:`_ec_functionalize`). The ``ev``-assignment twin of an NG-calling flat
+    state; keeps the fields, params, and interface identical so it plugs into the
+    same transitivity chain."""
+    proc = base.procs[0]
+    ev_body = _ec_functionalize(proc.body, det_pred, clone_of)
+    ev_proc = ec_ast.Proc(proc.name, proc.params, proc.return_type, ev_body)
+    return ec_ast.Module(
+        new_name,
+        [ev_proc],
+        list(base.params),
+        base.implements,
+        list(base.module_vars),
+    )
+
+
+def _pk_nested_middle(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    fgmod: ec_ast.Module,
+    frmod: ec_ast.Module,
+    keygen_callee: str,
+    glob_names: list[str],
+    globs: str,
+    fg_name: str,
+    fr_name: str,
+    hop_index: int,
+    q3: str,
+    clone_alias: dict[str, str],
+    det_pred: Callable[[str, str], bool],
+) -> tuple[list[str], list[ec_ast.Module]] | None:
+    """The NESTED middle leg ``FG_ng ~ FR_ng : globs ==> q3`` for the PK
+    shared-``ek_T`` init shape, routed through two ``ev``-assignment twins:
+    ``FG_ng ~ FG_ev ~ FR_ev ~ FR_ng``.
+
+    The outer NG-calling twins (``fgmod``/``frmod``) keep their name-independent
+    backbone-peel legs (unchanged, in the caller). This middle leg instead nests:
+
+    * ``FG_ng ~ FG_ev`` and ``FR_ev ~ FR_ng`` -- :func:`_det_topdown_leg`
+      functionalizes each NG-calling side's det calls top-down; the twins share
+      local names (``FG_ev`` is ``FG_ng`` with NG calls turned to ``ev``
+      assignments), so the name-dependent per-statement coupling matches.
+    * ``FG_ev ~ FR_ev`` -- both ``ev``-assignment, so the middle is the FLAT
+      :func:`_init_legmid_flat_tactic` (swap-group + ``seq`` + prefix peel +
+      ``sp. skip => /#``), whose ground residual scales to the shared ``ek_T``.
+
+    The sub-leg posts are derived from ``q3`` by renaming the twin bases
+    (``fg_name`` -> ``FG_ev``, ``fr_name`` -> ``FR_ev``) so the transitivity
+    composition (the ``smt().`` side conditions) threads the packed-field
+    couplings and the challenger seam automatically. Returns
+    ``(middle_tactic, [FG_ev, FR_ev])`` or ``None`` if the flat leg's invariant
+    cannot be built."""
+    fgev_name = f"FG_ev_{hop_index}"
+    frev_name = f"FR_ev_{hop_index}"
+    args = ", ".join(glob_names)
+    glob_items = [f"glob {m}" for m in glob_names]
+
+    def _clone_of(m: str) -> str | None:
+        return clone_alias.get(m)
+
+    game_body = fgmod.procs[0].body
+    red_body = frmod.procs[0].body
+    fgev = _ev_twin_module(fgmod, fgev_name, det_pred, _clone_of)
+    frev = _ev_twin_module(frmod, frev_name, det_pred, _clone_of)
+    red_fields = {v.name for v in frmod.module_vars}
+    flat = _init_legmid_flat_tactic(
+        fgev.procs[0].body,
+        frev.procs[0].body,
+        keygen_callee,
+        glob_names,
+        frev_name,
+        red_fields,
+    )
+    if flat is None:
+        return None
+    game_flds = [v.name for v in fgmod.module_vars]
+    red_flds = [v.name for v in frmod.module_vars]
+    # ``res{1} = res{2}`` must ride on EVERY sub-leg post: the ``transitivity``
+    # composition threads the final ``res`` equality through the middle memory,
+    # so a leg that omits it leaves ``res{1} = res{m}`` (or ``res{m} = res{2}``)
+    # underivable and the composition ``smt()`` fails.
+    res_eq = "res{1} = res{2}"
+    qa = (
+        globs
+        + "".join(f" /\\ {fg_name}.{f}{{1}} = {fgev_name}.{f}{{2}}" for f in game_flds)
+        + f" /\\ {res_eq}"
+    )
+    qd = (
+        globs
+        + "".join(f" /\\ {frev_name}.{f}{{1}} = {fr_name}.{f}{{2}}" for f in red_flds)
+        + f" /\\ {res_eq}"
+    )
+    qb = q3.replace(fg_name, fgev_name)
+    qc = qb.replace(fr_name, frev_name)
+    ctr = [0]
+    game_field_set = set(game_flds)
+    red_field_set = set(red_flds)
+    # leg_g: FG_ng (side1, NG calls) ~ FG_ev (side2); leg_r: FR_ev (side1) ~
+    # FR_ng (side2, NG calls). The NG-calling side is the ``call_side``.
+    leg_g = _init_topdown_leg(
+        game_body, 1, glob_items, det_pred, ctr, fg_name, fgev_name, game_field_set
+    )
+    leg_r = _init_topdown_leg(
+        red_body, 2, glob_items, det_pred, ctr, frev_name, fr_name, red_field_set
+    )
+    middle = [
+        f"transitivity {fgev_name}({args}).initialize "
+        f"({globs} ==> {qa}) ({globs} ==> {qb}).",
+        "smt().",
+        "smt().",
+        *leg_g,
+        f"transitivity {frev_name}({args}).initialize "
+        f"({globs} ==> {qc}) ({globs} ==> {qd}).",
+        "smt().",
+        "smt().",
+        *flat,
+        *leg_r,
+    ]
+    return middle, [fgev, frev]
 
 
 def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
@@ -2703,15 +2894,18 @@ def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-pos
             seam.append((m.group(1), m.group(2)))
     if not decomp:
         return None
-    # The functionalizing middle leg leaves a deep nested-forall ``smt`` goal
-    # whose size the closer cannot discharge once one NG-derived component (the
-    # hybrid ephemeral ``ek_T``) is SHARED across two decomposed game fields (the
-    # PK ``ek0``+``dk0`` packing) -- decline that shape for now (stays a targeted
-    # admit; the ``ev``-assignment-twin re-architecture is the fix). CT's
-    # ``dk``-only decomposition has disjoint components and closes.
+    # The *flat* functionalizing middle leg (``_init_legmid_tactic``) leaves a
+    # deep nested-forall ``smt`` goal whose size the closer cannot discharge once
+    # one NG-derived component (the hybrid ephemeral ``ek_T``) is SHARED across
+    # two decomposed game fields (the PK ``ek0``+``dk0`` packing). CT's ``dk``-only
+    # decomposition has disjoint components, so its flat middle leg closes. The PK
+    # shared-component shape instead routes the middle leg through a NESTED
+    # transitivity ``FG_ng ~ FG_ev ~ FR_ev ~ FR_ng`` (:func:`_pk_nested_middle`):
+    # the NG calls are functionalized in the sub-legs (name-matched twins), and
+    # the innermost ``FG_ev ~ FR_ev`` leg is a FLAT ``sp. skip => /#`` with no
+    # nested foralls -- so ``smt`` scales to the shared ``ek_T``.
     _components = [c for _, comps in decomp for c in comps]
-    if len(_components) != len(set(_components)):
-        return None
+    pk_shared = len(_components) != len(set(_components))
     game_base = decomp[0][0].rsplit(".", 1)[0]
     red_base = decomp[0][1][0].rsplit(".", 1)[0]
     chal_base = seam[0][1].rsplit(".", 1)[0] if seam else None
@@ -2754,6 +2948,30 @@ def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-pos
         leg.append("auto.")
         return leg
 
+    # Choose the middle leg (``FG_ng ~ FR_ng : globs ==> q3``). CT keeps the flat
+    # functionalizing ``legmid``; the PK shared-``ek_T`` shape nests two more
+    # (``ev``-functionalized) twins so the innermost leg is a flat ``skip => /#``.
+    ev_modules: list[ec_ast.Module] = []
+    if pk_shared:
+        nested = _pk_nested_middle(
+            fgmod,
+            frmod,
+            keygen_callee,
+            glob_names,
+            globs,
+            fg_name,
+            fr_name,
+            hop_index,
+            q3,
+            clone_alias,
+            _det_pred,
+        )
+        if nested is None:
+            return None
+        middle, ev_modules = nested
+    else:
+        middle = legmid
+
     outer = [
         _res_tag(SYNTH_PARAM),
         # hop_4 (game on side 2) is the mirror of hop_0: flip it into the
@@ -2768,13 +2986,14 @@ def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-pos
         f"({globs} ==> {q3}) ({globs} ==> {q4}).",
         "smt().",
         "smt().",
-        *legmid,
+        *middle,
         *_outer_leg(red_body),
         "qed.",
     ]
     extra = [
         "\n".join(_render_module_decl(fgmod)),
         "\n".join(_render_module_decl(frmod)),
+        *("\n".join(_render_module_decl(m)) for m in ev_modules),
     ]
     return extra, outer, set()
 
@@ -6026,6 +6245,78 @@ def _det_topdown_leg(
                 cap = ", ".join(
                     [f"(glob {mod}){{{call_side}}}"]
                     + [f"({a}){{{call_side}}}" for a in args]
+                )
+                tac.append("wp.")
+                tac.append(f"exists* {cap}; elim* => {names}.")
+                tac.append(f"call{{{call_side}}} ({mod}_{meth}_det {names}).")
+                tac.append("auto.")
+                ctr[0] += 1
+            else:
+                tac.append("call (_: true); auto.")
+        else:
+            tac.append("auto.")
+    tac.append("skip => /#.")
+    return tac
+
+
+def _init_topdown_leg(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    state_body: list[ec_ast.EcStmt],
+    call_side: int,
+    glob_items: list[str],
+    det_pred: Callable[[str, str], bool],
+    ctr: list[int],
+    left_mod: str,
+    right_mod: str,
+    field_names: set[str],
+) -> list[str]:
+    """Field-aware top-down ``seq 1 1`` peel functionalizing ``call_side``'s det
+    calls -- the init variant of :func:`_det_topdown_leg`.
+
+    An init flat state packs its NG-derived results into *module fields* mid-body
+    (``ek0 <- _tup.`1`` interspersed between keygen blocks), and a module field
+    cannot appear bare in an ``={...}`` coupling (``unknown variable ek0``). So a
+    statement whose ``var`` is a field is coupled as an explicit qualified
+    equality ``<left>.<f>{1} = <right>.<f>{2}`` while locals stay in the bare
+    ``={...}`` set. ``left_mod``/``right_mod`` are the side-1/side-2 module names;
+    ``field_names`` is the flat state's field set. Otherwise identical to
+    :func:`_det_topdown_leg` (det call peeled one-sided, prob call coupled,
+    assignment by ``auto``), closing ``skip => /#``."""
+    tac: list[str] = ["proc."]
+    locs: list[str] = list(glob_items)
+    field_eqs: list[str] = []
+    # The module whose procedure runs on ``call_side`` -- its fields must be
+    # qualified when referenced in ``exists*`` captures (a bare field name is
+    # ``unknown variable``).
+    call_mod = left_mod if call_side == 1 else right_mod
+
+    def _q(a: str) -> str:
+        return f"{call_mod}.{a}" if a in field_names else a
+
+    def _inv() -> str:
+        parts = (["={" + ", ".join(locs) + "}"] if locs else []) + field_eqs
+        return " /\\ ".join(parts)
+
+    for stmt in _exec_stmts(state_body):
+        if isinstance(stmt, ec_ast.Return):
+            break
+        var = getattr(stmt, "var", None)
+        if var:
+            if var in field_names:
+                field_eqs.append(f"{left_mod}.{var}{{1}} = {right_mod}.{var}{{2}}")
+            else:
+                locs.append(var)
+        tac.append(f"seq 1 1 : ({_inv()}).")
+        if isinstance(stmt, ec_ast.Call):
+            parts = _callee_parts(stmt.callee)
+            if parts is not None and det_pred(parts[0], parts[1]):
+                mod, meth = parts
+                args = _split_top_args(stmt.args)
+                names = " ".join(
+                    [f"g{ctr[0]}"] + [f"a{ctr[0]}_{k}" for k in range(len(args))]
+                )
+                cap = ", ".join(
+                    [f"(glob {mod}){{{call_side}}}"]
+                    + [f"({_q(a)}){{{call_side}}}" for a in args]
                 )
                 tac.append("wp.")
                 tac.append(f"exists* {cap}; elim* => {names}.")

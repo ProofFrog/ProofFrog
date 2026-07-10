@@ -935,6 +935,57 @@ class AdvantageClause(ASTNode):
         return f"advantage <= {self.bound};"
 
 
+class AdvantageReference(Expression):
+    """A reference to an assumed security notion's advantage in a claimed bound.
+
+    Written ``advantage(<notion>)`` for a directly-played hop, or
+    ``advantage(<notion> compose <reduction>)`` for a reduction hop. ``notion``
+    is the assumed/lemma security game and ``reduction`` (when present) names the
+    constructed adversary. Appears only in a proof file's ``bound:`` clause; the
+    Tier-3 checker matches each reference against a synthesized advantage term by
+    the ``(notion, reduction)`` pair.
+    """
+
+    def __init__(
+        self,
+        notion: "ParameterizedGame",
+        reduction: Optional["ParameterizedGame"] = None,
+    ) -> None:
+        super().__init__()
+        self.notion = notion
+        self.reduction = reduction
+
+    def __str__(self) -> str:
+        if self.reduction is None:
+            return f"advantage({self.notion})"
+        # A bare reduction name (no arguments) is the readable default; only
+        # print the argument list when the reference actually supplies one.
+        reduction = (
+            self.reduction.name if not self.reduction.args else str(self.reduction)
+        )
+        return f"advantage({self.notion} compose {reduction})"
+
+
+class ClaimedBound(ASTNode):
+    """A proof's author-claimed advantage bound (its ``bound:`` clause).
+
+    ``bound`` is the claimed expression: numeric arithmetic over
+    :class:`AdvantageReference` atoms, per-oracle query counts ``count_<Oracle>``,
+    cardinalities, and ``let:`` parameters. Wrapped in a dedicated node (like
+    :class:`AdvantageClause`) so the generic name-resolution / type-checking walk
+    treats it as opaque -- its free variables (query counts, adversary
+    references) are not ordinary in-scope symbols -- and the Tier-3 checker
+    validates and compares it separately.
+    """
+
+    def __init__(self, bound: "Expression") -> None:
+        super().__init__()
+        self.bound = bound
+
+    def __str__(self) -> str:
+        return str(self.bound)
+
+
 class GameFile(Root):
     def __init__(
         self,
@@ -1061,6 +1112,7 @@ class ProofFile(Root):
         steps: list[ProofStep],
         requirements: Optional[list[StructuralRequirement]] = None,
         helpers_after_theorem_count: int = 0,
+        claimed_bound: Optional[ClaimedBound] = None,
     ) -> None:
         super().__init__()
         self.imports = imports
@@ -1074,6 +1126,9 @@ class ProofFile(Root):
         self.steps = steps
         self.requirements = requirements if requirements is not None else []
         self.helpers_after_theorem_count = helpers_after_theorem_count
+        # The author-claimed advantage bound (a ``bound:`` clause), checked
+        # against the synthesized bound after verification. ``None`` when absent.
+        self.claimed_bound = claimed_bound
 
     def __str__(self) -> str:
         output_string = ("\n".join(str(im) for im in self.imports)) + "\n\n"
@@ -1109,6 +1164,8 @@ class ProofFile(Root):
                 output_string += f"  {lemma}\n"
 
         output_string += f"theorem:\n  {self.theorem};\n"
+        if self.claimed_bound is not None:
+            output_string += f"bound:\n  {self.claimed_bound.bound};\n"
         output_string += "games:\n"
         for step in self.steps:
             output_string += f"  {step}\n"

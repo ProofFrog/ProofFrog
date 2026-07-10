@@ -706,6 +706,16 @@ def _binary_operation(
     )
 
 
+def _bound_binary_operation(
+    operator: frog_ast.BinaryOperators,
+    visit: Type[PrimitiveVisitor.visit],
+    ctx: Type[ProofParser.BoundExpressionContext],
+) -> frog_ast.BinaryOperation:
+    return frog_ast.BinaryOperation(
+        operator, visit(ctx.boundExpression()[0]), visit(ctx.boundExpression()[1])
+    )
+
+
 def add_line_number(
     func: Callable[[_SharedAST, ParserRuleContext], frog_ast.ASTNode],
 ) -> Callable[[_SharedAST, ParserRuleContext], frog_ast.ASTNode]:
@@ -1426,6 +1436,12 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
             for req_entry in proof.requirements().requirement():
                 requirements.append(self.visit(req_entry))
 
+        claimed_bound = (
+            frog_ast.ClaimedBound(self.visit(proof.boundExpression()))
+            if proof.boundExpression()
+            else None
+        )
+
         proof_file = frog_ast.ProofFile(
             [self.visit(im) for im in ctx.moduleImport()],
             game_list,
@@ -1437,6 +1453,7 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
             self.visit(proof.gameList()),
             requirements,
             helpers_after_theorem_count=helpers_after_count,
+            claimed_bound=claimed_bound,
         )
         proof_file.sampled_let_names = sampled_let_names
         return proof_file
@@ -1447,6 +1464,84 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
         return frog_ast.ParameterizedGame(
             ctx.id_().getText(), self.visit(ctx.argList()) if ctx.argList() else []
         )
+
+    def visitBoundExponentiate(
+        self, ctx: ProofParser.BoundExponentiateContext
+    ) -> frog_ast.BinaryOperation:
+        return _bound_binary_operation(
+            frog_ast.BinaryOperators.EXPONENTIATE, self.visit, ctx
+        )
+
+    def visitBoundMultiply(
+        self, ctx: ProofParser.BoundMultiplyContext
+    ) -> frog_ast.BinaryOperation:
+        return _bound_binary_operation(
+            frog_ast.BinaryOperators.MULTIPLY, self.visit, ctx
+        )
+
+    def visitBoundDivide(
+        self, ctx: ProofParser.BoundDivideContext
+    ) -> frog_ast.BinaryOperation:
+        return _bound_binary_operation(frog_ast.BinaryOperators.DIVIDE, self.visit, ctx)
+
+    def visitBoundAdd(
+        self, ctx: ProofParser.BoundAddContext
+    ) -> frog_ast.BinaryOperation:
+        return _bound_binary_operation(frog_ast.BinaryOperators.ADD, self.visit, ctx)
+
+    def visitBoundSubtract(
+        self, ctx: ProofParser.BoundSubtractContext
+    ) -> frog_ast.BinaryOperation:
+        return _bound_binary_operation(
+            frog_ast.BinaryOperators.SUBTRACT, self.visit, ctx
+        )
+
+    def visitBoundNegate(
+        self, ctx: ProofParser.BoundNegateContext
+    ) -> frog_ast.UnaryOperation:
+        return frog_ast.UnaryOperation(
+            frog_ast.UnaryOperators.MINUS, self.visit(ctx.boundExpression())
+        )
+
+    def visitBoundCardinality(
+        self, ctx: ProofParser.BoundCardinalityContext
+    ) -> frog_ast.UnaryOperation:
+        return frog_ast.UnaryOperation(
+            frog_ast.UnaryOperators.SIZE, self.visit(ctx.type_())
+        )
+
+    def visitBoundAdvantage(
+        self, ctx: ProofParser.BoundAdvantageContext
+    ) -> frog_ast.AdvantageReference:
+        notion = self.visit(ctx.parameterizedGame())
+        reduction = (
+            self.visit(ctx.reductionRef()) if ctx.reductionRef() is not None else None
+        )
+        return frog_ast.AdvantageReference(notion, reduction)
+
+    def visitReductionRef(
+        self, ctx: ProofParser.ReductionRefContext
+    ) -> frog_ast.ParameterizedGame:
+        # A reduction reference in a claimed bound: a name, optionally with the
+        # full argument list. A bare name (no args) is the readable default; the
+        # Tier-3 checker matches it to a synthesized term by reduction name.
+        args = self.visit(ctx.argList()) if ctx.argList() else []
+        return frog_ast.ParameterizedGame(ctx.id_().getText(), args)
+
+    def visitBoundLvalue(
+        self, ctx: ProofParser.BoundLvalueContext
+    ) -> frog_ast.Expression:
+        exp: frog_ast.Expression = self.visit(ctx.lvalue())
+        return exp
+
+    def visitBoundInt(self, ctx: ProofParser.BoundIntContext) -> frog_ast.Integer:
+        return frog_ast.Integer(int(ctx.INT().getText()))
+
+    def visitBoundParen(
+        self, ctx: ProofParser.BoundParenContext
+    ) -> frog_ast.Expression:
+        exp: frog_ast.Expression = self.visit(ctx.boundExpression())
+        return exp
 
     def visitReduction(self, ctx: ProofParser.ReductionContext) -> frog_ast.Reduction:
         return frog_ast.Reduction(

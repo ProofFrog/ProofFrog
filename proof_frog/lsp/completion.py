@@ -49,6 +49,8 @@ _PROOF_KEYWORDS = [
     "let",
     "assume",
     "theorem",
+    "bound",
+    "advantage",
     "games",
     "compose",
     "against",

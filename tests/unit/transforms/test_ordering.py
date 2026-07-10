@@ -49,6 +49,9 @@ _EXCLUDED = {
     frog_ast.Induction,
     frog_ast.Lemma,
     frog_ast.StructuralRequirement,
+    # Proof-file-level declared bound (its own vocabulary; never inside a game)
+    frog_ast.ClaimedBound,
+    frog_ast.AdvantageReference,
     # Parse-time-only sugar: the parser desugars these away immediately, so
     # they never reach canonicalization/ordering.
     frog_ast.DestructuringBinding,

@@ -1,6 +1,8 @@
 """Unit tests for advantage-bound synthesis (proof_frog.advantage)."""
 
-from proof_frog import advantage, frog_ast, proof_engine
+import sympy
+
+from proof_frog import advantage, frog_ast, frog_parser, proof_engine
 
 
 def _game(name: str, *args: str) -> frog_ast.ParameterizedGame:
@@ -384,3 +386,110 @@ class TestMonotonicityGuardrail:
         assert bound.render() == "Adv^Weird(Message)(B1)"
         assert len(bound.notes) == 1
         assert "decreases in count_Samp" in bound.notes[0]
+
+
+def _parse_claim(src: str) -> frog_ast.Expression:
+    """Parse a ``bound:`` expression via a minimal (parse-only) proof file."""
+    pf = frog_parser.parse_proof_file(
+        "proof:\n"
+        "theorem:\n"
+        "  Foo(E);\n"
+        "bound:\n"
+        f"  {src};\n"
+        "games:\n"
+        "  Foo(E).Left against Foo(E).Adversary;\n"
+    )
+    assert pf.claimed_bound is not None
+    return pf.claimed_bound.bound
+
+
+def _prf_reduction() -> frog_ast.ParameterizedGame:
+    return frog_ast.ParameterizedGame(
+        "R_PRF", [frog_ast.Variable("E"), frog_ast.Variable("F")]
+    )
+
+
+def _mixed_bound() -> advantage.AdvantageBound:
+    """A synthesized bound: one opaque crypto term plus one birthday term.
+
+    ``Adv^PRFSecurity(F)(R_PRF) + count_CTXT*(count_CTXT - 1)/|BitString<F.in>|``.
+    """
+    count = sympy.Symbol("count_CTXT", nonnegative=True)
+    card = sympy.Symbol("|BitString<F.in>|", positive=True)
+    birthday = count * (count - 1) / card
+    prf_hop = advantage.HopInfo(
+        "by_assumption", notion=_game("PRFSecurity", "F"), reduction=_prf_reduction()
+    )
+    birthday_hop = advantage.HopInfo(
+        "by_assumption",
+        notion=_game("DistinctSampling", "BitStringFin"),
+        reduction=_game("R_Uniq", "E", "F"),
+        statistical=birthday,
+    )
+    return advantage.synthesize_from_hops([prf_hop, birthday_hop])
+
+
+class TestCheckClaimedBound:
+    _ADV = "advantage(PRFSecurity(F) compose R_PRF(E, F))"
+    _BIRTHDAY = "count_CTXT * (count_CTXT - 1) / |BitString<F.in>|"
+
+    def test_exact_claim_verified(self) -> None:
+        claim = _parse_claim(f"{self._ADV} + {self._BIRTHDAY}")
+        assert advantage.check_claimed_bound(claim, _mixed_bound()).status == "verified"
+
+    def test_bare_reduction_name_matches(self) -> None:
+        # The synthesized reduction is R_PRF(E, F); a bare `R_PRF` in the claim
+        # matches it by name.
+        claim = _parse_claim(
+            f"advantage(PRFSecurity(F) compose R_PRF) + {self._BIRTHDAY}"
+        )
+        assert advantage.check_claimed_bound(claim, _mixed_bound()).status == "verified"
+
+    def test_loose_coefficient_verified(self) -> None:
+        claim = _parse_claim(f"3 * {self._ADV} + {self._BIRTHDAY}")
+        assert advantage.check_claimed_bound(claim, _mixed_bound()).status == "verified"
+
+    def test_loose_statistical_verified(self) -> None:
+        # count^2/|S| >= count(count-1)/|S|, so the claim is a valid upper bound.
+        claim = _parse_claim(f"{self._ADV} + count_CTXT ^ 2 / |BitString<F.in>|")
+        assert advantage.check_claimed_bound(claim, _mixed_bound()).status == "verified"
+
+    def test_missing_statistical_term_not_verified(self) -> None:
+        result = advantage.check_claimed_bound(_parse_claim(self._ADV), _mixed_bound())
+        assert result.status == "not_verified"
+        assert result.witness  # a concrete counterexample assignment
+
+    def test_missing_advantage_term_not_verified(self) -> None:
+        result = advantage.check_claimed_bound(
+            _parse_claim(self._BIRTHDAY), _mixed_bound()
+        )
+        assert result.status == "not_verified"
+
+    def test_unmatched_reference_is_slack_not_a_free_pass(self) -> None:
+        # Referencing an adversary the proof never constructs adds slack but
+        # cannot cover the omitted PRFSecurity term, so the claim fails.
+        claim = _parse_claim(
+            f"advantage(Other(X) compose R_PRF(E, F)) + {self._BIRTHDAY}"
+        )
+        assert (
+            advantage.check_claimed_bound(claim, _mixed_bound()).status
+            == "not_verified"
+        )
+
+    def test_symbolic_exponent_is_undecided(self) -> None:
+        claim = _parse_claim(f"{self._ADV} + 2 ^ count_CTXT")
+        assert advantage.check_claimed_bound(claim, _mixed_bound()).status == "undecided"
+
+    def test_cardinality_name_mismatch_not_verified(self) -> None:
+        # A differently-named cardinality does not cancel the synthesized term.
+        claim = _parse_claim(f"{self._ADV} + count_CTXT * (count_CTXT - 1) / |S|")
+        assert (
+            advantage.check_claimed_bound(claim, _mixed_bound()).status != "verified"
+        )
+
+    def test_unsupported_synthesized_bound_is_undecided(self) -> None:
+        unsupported = advantage.AdvantageBound(
+            expression=sympy.Integer(0), terms={}, supported=False, note="inductive"
+        )
+        result = advantage.check_claimed_bound(_parse_claim(self._ADV), unsupported)
+        assert result.status == "undecided"

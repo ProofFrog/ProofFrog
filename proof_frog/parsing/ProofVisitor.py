@@ -29,6 +29,66 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#boundCardinality.
+    def visitBoundCardinality(self, ctx:ProofParser.BoundCardinalityContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#boundMultiply.
+    def visitBoundMultiply(self, ctx:ProofParser.BoundMultiplyContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#boundDivide.
+    def visitBoundDivide(self, ctx:ProofParser.BoundDivideContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#boundNegate.
+    def visitBoundNegate(self, ctx:ProofParser.BoundNegateContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#boundAdvantage.
+    def visitBoundAdvantage(self, ctx:ProofParser.BoundAdvantageContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#boundParen.
+    def visitBoundParen(self, ctx:ProofParser.BoundParenContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#boundAdd.
+    def visitBoundAdd(self, ctx:ProofParser.BoundAddContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#boundLvalue.
+    def visitBoundLvalue(self, ctx:ProofParser.BoundLvalueContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#boundInt.
+    def visitBoundInt(self, ctx:ProofParser.BoundIntContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#boundExponentiate.
+    def visitBoundExponentiate(self, ctx:ProofParser.BoundExponentiateContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#boundSubtract.
+    def visitBoundSubtract(self, ctx:ProofParser.BoundSubtractContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#reductionRef.
+    def visitReductionRef(self, ctx:ProofParser.ReductionRefContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#requirements.
     def visitRequirements(self, ctx:ProofParser.RequirementsContext):
         return self.visitChildren(ctx)

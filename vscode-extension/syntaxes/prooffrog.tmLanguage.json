@@ -64,7 +64,7 @@
         },
         {
           "name": "keyword.proof.prooffrog",
-          "match": "\\b(proof|assume|theorem|games|let|induction|from|against|compose|lemma|by|is|prime)\\b"
+          "match": "\\b(proof|assume|theorem|bound|games|let|induction|from|against|compose|lemma|by|is|prime)\\b"
         },
         {
           "name": "keyword.other.prooffrog",

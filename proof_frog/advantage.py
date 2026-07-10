@@ -34,7 +34,7 @@ Genuine cryptographic assumptions carry no clause and stay symbolic by design.
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING, Callable, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence
 
 import sympy
 
@@ -61,6 +61,12 @@ class AdvTerm:
 
     notion: frog_ast.ParameterizedGame
     adversary: str
+    # The constructed adversary as a reduction over the notion, or ``None`` when
+    # the notion is played directly (adversary ``A``). Carried so the Tier-3
+    # bound checker can match a claim's ``advantage(notion compose reduction)``
+    # reference to this term by the exact ``(notion, reduction)`` pair, rather
+    # than by the display name ``adversary`` (``B1``, ``B2``, ...).
+    reduction: Optional[frog_ast.ParameterizedGame] = None
     # When the notion is a helper game carrying a declared ``advantage`` clause,
     # its instantiated statistical bound (a SymPy expression over derived
     # per-oracle query counts and opaque set-cardinality symbols). ``None`` for
@@ -194,16 +200,29 @@ _ARITH_BINOPS: dict[
 }
 
 
-def _frog_arith_to_sympy(expr: frog_ast.ASTNode) -> sympy.Expr:
+def _frog_arith_to_sympy(
+    expr: frog_ast.ASTNode,
+    on_advantage: Optional[
+        Callable[["frog_ast.AdvantageReference"], sympy.Expr]
+    ] = None,
+) -> sympy.Expr:
     """Convert a numeric FrogLang advantage-bound expression to SymPy.
 
-    Handles the small arithmetic fragment an ``advantage`` clause may use:
-    integer literals, variables, ``+ - * / ^`` and unary minus, plus set
-    cardinality ``|X|`` and scalar size/order leaves (a field access like
-    ``G.order`` or a group order) -- all rendered as opaque positive symbols
-    named by their instantiated form, since the fold does not reason about type
-    sizes. Anything outside this fragment raises :class:`_UnconvertibleBound`.
+    Handles the small arithmetic fragment an ``advantage`` clause (or a proof's
+    claimed ``bound:``) may use: integer literals, variables, ``+ - * / ^`` and
+    unary minus, plus set cardinality ``|X|`` and scalar size/order leaves (a
+    field access like ``G.order`` or a group order) -- all rendered as opaque
+    positive symbols named by their instantiated form, since the fold does not
+    reason about type sizes. A claimed bound additionally contains
+    :class:`~proof_frog.frog_ast.AdvantageReference` atoms, resolved by the
+    optional ``on_advantage`` callback (absent for helper-game clauses, which
+    carry no such atom). Anything outside this fragment raises
+    :class:`_UnconvertibleBound`.
     """
+    if isinstance(expr, frog_ast.AdvantageReference):
+        if on_advantage is None:
+            raise _UnconvertibleBound(str(expr))
+        return on_advantage(expr)
     if isinstance(expr, frog_ast.Integer):
         return sympy.Integer(expr.num)
     if isinstance(expr, frog_ast.Variable):
@@ -217,15 +236,15 @@ def _frog_arith_to_sympy(expr: frog_ast.ASTNode) -> sympy.Expr:
         if expr.operator == frog_ast.UnaryOperators.SIZE:
             return sympy.Symbol(f"|{expr.expression}|", positive=True)
         if expr.operator == frog_ast.UnaryOperators.MINUS:
-            return -_frog_arith_to_sympy(expr.expression)
+            return -_frog_arith_to_sympy(expr.expression, on_advantage)
         raise _UnconvertibleBound(str(expr))
     if isinstance(expr, frog_ast.BinaryOperation):
         combiner = _ARITH_BINOPS.get(expr.operator)
         if combiner is None:
             raise _UnconvertibleBound(str(expr))
         return combiner(
-            _frog_arith_to_sympy(expr.left_expression),
-            _frog_arith_to_sympy(expr.right_expression),
+            _frog_arith_to_sympy(expr.left_expression, on_advantage),
+            _frog_arith_to_sympy(expr.right_expression, on_advantage),
         )
     raise _UnconvertibleBound(str(expr))
 
@@ -479,7 +498,10 @@ def synthesize_from_hops(hops: Sequence[HopInfo]) -> AdvantageBound:
             symbol = sympy.Symbol(f"Adv_{len(symbol_by_key)}", nonnegative=True)
             symbol_by_key[key] = symbol
             terms[symbol] = AdvTerm(
-                notion=hop.notion, adversary=adversary, statistical=hop.statistical
+                notion=hop.notion,
+                adversary=adversary,
+                reduction=hop.reduction,
+                statistical=hop.statistical,
             )
         expression += symbol_by_key[key]
         hop_terms.append(terms[symbol_by_key[key]])
@@ -599,3 +621,227 @@ def synthesize_from_hop_results(
             )
         )
     return synthesize_from_hops(hops)
+
+
+# ---------------------------------------------------------------------------
+# Tier 3 -- check a proof's author-claimed ``bound:`` against the synthesized
+# bound. The claim is verified iff ``claimed >= synthesized`` over the whole
+# nonnegativity region of the advantage/count/parameter symbols, so a
+# "verified" claim is a valid (possibly loose) upper bound, never an
+# independent proof. The check is one-sided-safe: an omitted or under-weighted
+# term leaves a residual that is not provably nonnegative, reported as NOT
+# verified rather than silently accepted.
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class BoundCheckResult:
+    """The outcome of checking a claimed bound against the synthesized one.
+
+    ``status`` is ``"verified"`` (the claim is a valid upper bound on the
+    synthesized bound), ``"not_verified"`` (the claim is provably smaller on
+    some point of the nonnegativity region -- ``witness`` gives one), or
+    ``"undecided"`` (the solver could not decide, e.g. a non-polynomial
+    comparison or unconvertible arithmetic). ``detail`` is a human-readable
+    explanation; ``claimed`` / ``synthesized`` are the compared SymPy forms.
+    """
+
+    status: str
+    detail: str = ""
+    claimed: Optional[sympy.Expr] = None
+    synthesized: Optional[sympy.Expr] = None
+    witness: dict[str, str] = dataclasses.field(default_factory=dict)
+
+
+def _has_symbolic_exponent(expr: sympy.Expr) -> bool:
+    """True if *expr* contains a power with a non-constant exponent.
+
+    Such terms (e.g. ``2 ** lambda``) are transcendental for the real solver,
+    which decides only polynomial/rational arithmetic; the checker degrades
+    these to ``undecided`` rather than risk an unsound verdict.
+    """
+    for power in expr.atoms(sympy.Pow):
+        if not power.exp.is_number:
+            return True
+    return False
+
+
+def _sympy_to_z3(expr: sympy.Expr, z3_vars: Mapping[str, Any]) -> Any:
+    """Translate a rational-arithmetic SymPy expression to a Z3 real term.
+
+    Handles the fragment the checker produces: symbols (looked up in
+    ``z3_vars``), integer/rational constants, sums, products, and integer
+    powers (negative powers become reciprocals). Raises
+    :class:`_UnconvertibleBound` for anything else (e.g. a symbolic exponent,
+    already screened out before this is called).
+    """
+    import z3  # pylint: disable=import-outside-toplevel
+
+    if isinstance(expr, sympy.Symbol):
+        return z3_vars[str(expr)]
+    if isinstance(expr, sympy.Integer):
+        return z3.RealVal(int(expr))
+    if isinstance(expr, sympy.Rational):
+        return z3.RealVal(f"{expr.p}/{expr.q}")
+    if isinstance(expr, sympy.Add):
+        terms = [_sympy_to_z3(arg, z3_vars) for arg in expr.args]
+        result = terms[0]
+        for term in terms[1:]:
+            result = result + term
+        return result
+    if isinstance(expr, sympy.Mul):
+        factors = [_sympy_to_z3(arg, z3_vars) for arg in expr.args]
+        result = factors[0]
+        for factor in factors[1:]:
+            result = result * factor
+        return result
+    if isinstance(expr, sympy.Pow):
+        base = _sympy_to_z3(expr.base, z3_vars)
+        exponent = expr.exp
+        if not (isinstance(exponent, sympy.Integer) and exponent != 0):
+            raise _UnconvertibleBound(str(expr))
+        power = int(exponent)
+        magnitude = z3.RealVal(1)
+        for _ in range(abs(power)):
+            magnitude = magnitude * base
+        return magnitude if power > 0 else z3.RealVal(1) / magnitude
+    raise _UnconvertibleBound(str(expr))
+
+
+def _z3_constraints_for(
+    symbols: Sequence[sympy.Symbol], z3_vars: Mapping[str, Any]
+) -> list[Any]:
+    """Domain constraints for the checker's symbols, from SymPy assumptions.
+
+    Cardinalities/orders (``positive``) and unqualified parameters map to
+    ``> 0``; advantage and query-count symbols (``nonnegative``) map to
+    ``>= 0``. The modeled real region is a superset of the true integer domain
+    (counts are nonnegative integers; cardinalities/parameters are >= 1), which
+    keeps ``residual >= 0`` over this region sufficient for the integer domain.
+    """
+    constraints: list[Any] = []
+    for sym in symbols:
+        var = z3_vars[str(sym)]
+        if sym.is_nonnegative and not sym.is_positive:
+            constraints.append(var >= 0)
+        else:
+            constraints.append(var > 0)
+    return constraints
+
+
+def _decide_nonnegative(residual: sympy.Expr) -> tuple[str, dict[str, str]]:
+    """Decide whether *residual* is ``>= 0`` over its symbols' domain.
+
+    Returns ``("verified", {})`` when provably nonnegative, ``("not_verified",
+    witness)`` when a domain point makes it negative, or ``("undecided", {})``
+    when the solver cannot decide (non-polynomial, or ``unknown``/timeout).
+    """
+    residual = sympy.expand(residual)
+    if residual == 0 or residual.is_nonnegative:
+        return "verified", {}
+    if _has_symbolic_exponent(residual):
+        return "undecided", {}
+
+    import z3  # pylint: disable=import-outside-toplevel
+
+    symbols = sorted(residual.free_symbols, key=str)
+    z3_vars: dict[str, Any] = {str(sym): z3.Real(str(sym)) for sym in symbols}
+    try:
+        z3_residual = _sympy_to_z3(residual, z3_vars)
+    except _UnconvertibleBound:
+        return "undecided", {}
+
+    solver = z3.Solver()
+    solver.set("timeout", 5000)
+    for constraint in _z3_constraints_for(symbols, z3_vars):
+        solver.add(constraint)
+    solver.add(z3_residual < 0)
+    verdict = solver.check()
+    if verdict == z3.unsat:
+        return "verified", {}
+    if verdict == z3.sat:
+        model = solver.model()
+        witness = {str(sym): str(model.eval(z3_vars[str(sym)])) for sym in symbols}
+        return "not_verified", witness
+    return "undecided", {}
+
+
+def check_claimed_bound(
+    claim: frog_ast.Expression, bound: AdvantageBound
+) -> BoundCheckResult:
+    """Check a proof's claimed ``bound:`` against the synthesized ``bound``.
+
+    Each ``advantage(notion compose reduction)`` reference in the claim is
+    matched to the synthesized term with the same notion and reduction (a helper
+    term resolves to its statistical expression, mirroring
+    :meth:`AdvantageBound.substituted_expression`). The reduction may be written
+    as a bare name -- the readable default -- matched by reduction *name*, or
+    with its full argument list, matched exactly (falling back to the name). An
+    unmatched reference becomes a fresh nonnegative slack symbol (which can only
+    enlarge the claim, so it never yields an unsound ``verified``). The claim is
+    ``verified`` iff ``claimed - synthesized`` is nonnegative over the whole
+    domain.
+    """
+    if not bound.supported:
+        return BoundCheckResult(
+            "undecided", f"synthesized bound unavailable: {bound.note}"
+        )
+
+    # Index synthesized terms by (notion, full-reduction-str) for an exact match
+    # and by (notion, reduction-name) for a bare-name match. A name collision
+    # (same reduction name, different args) lets the later term win; the earlier
+    # one then stays uncovered in the residual, so the check fails closed
+    # (reports not-verified) rather than falsely passing.
+    by_full: dict[tuple[str, str | None], tuple[sympy.Symbol, AdvTerm]] = {}
+    by_name: dict[tuple[str, str | None], tuple[sympy.Symbol, AdvTerm]] = {}
+    for symbol, term in bound.terms.items():
+        notion = str(term.notion)
+        reduction_name = None if term.reduction is None else term.reduction.name
+        by_full[(notion, str(term.reduction) if term.reduction else None)] = (
+            symbol,
+            term,
+        )
+        by_name[(notion, reduction_name)] = (symbol, term)
+    extra_counter = [0]
+
+    def on_advantage(ref: frog_ast.AdvantageReference) -> sympy.Expr:
+        notion = str(ref.notion)
+        entry: Optional[tuple[sympy.Symbol, AdvTerm]]
+        if ref.reduction is None:
+            entry = by_name.get((notion, None))
+        elif ref.reduction.args:
+            entry = by_full.get((notion, str(ref.reduction))) or by_name.get(
+                (notion, ref.reduction.name)
+            )
+        else:
+            entry = by_name.get((notion, ref.reduction.name))
+        if entry is not None:
+            symbol, term = entry
+            return term.statistical if term.statistical is not None else symbol
+        # The claim names an adversary the proof does not construct; give it a
+        # fresh nonnegative symbol so it only adds slack (never a false pass).
+        extra_counter[0] += 1
+        return sympy.Symbol(f"AdvUnmatched_{extra_counter[0]}", nonnegative=True)
+
+    try:
+        claimed = _frog_arith_to_sympy(claim, on_advantage)
+    except _UnconvertibleBound as exc:
+        return BoundCheckResult(
+            "undecided", f"claimed bound uses unsupported arithmetic: {exc}"
+        )
+
+    synthesized = bound.substituted_expression()
+    status, witness = _decide_nonnegative(claimed - synthesized)
+    detail = {
+        "verified": "claim is a valid upper bound on the synthesized bound",
+        "not_verified": "claim is smaller than the synthesized bound on some"
+        " nonnegative assignment",
+        "undecided": "could not decide the claim against the synthesized bound",
+    }[status]
+    return BoundCheckResult(
+        status=status,
+        detail=detail,
+        claimed=claimed,
+        synthesized=synthesized,
+        witness=witness,
+    )

@@ -108,6 +108,7 @@ from .tuples import (
 )
 from .standardization import (
     VariableStandardize,
+    StandardizeParameters,
     StandardizeFieldNames,
     FieldLexMinByRHS,
     BubbleSortFieldAssignments,
@@ -202,6 +203,11 @@ CORE_PIPELINE: list[TransformPass] = [
 ]
 
 STANDARDIZATION_PIPELINE: list[TransformPass] = [
+    # Canonicalize oracle parameter names (arg1..argN) first, so an
+    # interchangeability hop is insensitive to a non-observable parameter name
+    # (e.g. Decaps(c) vs Decaps(ct)). Runs before local/field numbering, whose
+    # counters then never need to dodge a parameter name.
+    StandardizeParameters(),
     VariableStandardize(),
     StandardizeFieldNames(),
     NormalizeCommutativeChains(),

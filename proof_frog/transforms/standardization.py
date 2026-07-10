@@ -5,6 +5,12 @@ names to variables and fields, ensuring two semantically equivalent games
 produce identical ASTs.
 """
 
+# pylint: disable=duplicate-code
+# ``_ParameterStandardizer`` deliberately mirrors ``alpha_rename._AlphaRenamer``'s
+# position-sensitive scope walk (``_active`` / ``_rewrite`` / ``_rename_block``);
+# the two normalize different binder classes (parameters vs typed locals) and the
+# shared shape is the point, not accidental duplication.
+
 from __future__ import annotations
 
 import copy
@@ -22,6 +28,7 @@ from ..visitors import (
 )
 from ._base import TransformPass, PipelineContext
 from ._ordering import node_sort_key
+from .alpha_rename import _RefRewriter
 
 # ---------------------------------------------------------------------------
 # Transformer class (moved from visitors.py)
@@ -105,6 +112,133 @@ class VariableStandardizingTransformer(BlockTransformer):
             )
 
         return new_block
+
+
+class _ParameterStandardizer:
+    """Rename each method's parameters to canonical ``arg1..argN``.
+
+    Oracle/method parameter names are NOT adversary-observable: FrogLang calls
+    are positional, so a parameter is a purely syntactic binder. ``AlphaRename``
+    and ``VariableStandardizingTransformer`` normalize local binders and fields
+    but deliberately leave parameters alone, so two games that are identical up
+    to an oracle parameter name (``Decaps(c)`` vs ``Decaps(ct)``) canonicalize
+    differently and a sound interchangeability hop between them is rejected.
+    This pass closes that gap by giving every parameter a positional canonical
+    name and rewriting its references in the body.
+
+    Reference rewriting is position-sensitive, mirroring the scope model of
+    ``AlphaRename``: a local declaration or loop binder that shadows a parameter
+    name masks it from its binding point onward (its references then resolve to
+    the shadowing binder, not the parameter, and are left untouched). Because
+    normalization only removes a non-observable distinction, it can make two
+    canonical forms match but never conflates genuinely different behaviour.
+    """
+
+    def rename_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        new_methods = [self._rename_method(m) for m in game.methods]
+        return frog_ast.Game((game.name, game.parameters, game.fields, new_methods))
+
+    def _rename_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        params = method.signature.parameters
+        if not params:
+            return method
+        seed = {p.name: f"arg{i + 1}" for i, p in enumerate(params)}
+        new_method = copy.deepcopy(method)
+        new_method.block = self._rename_block(method.block, [seed])
+        for i, param in enumerate(new_method.signature.parameters):
+            param.name = f"arg{i + 1}"
+        return new_method
+
+    @staticmethod
+    def _active(scopes: list[dict[str, str]]) -> dict[str, str]:
+        merged: dict[str, str] = {}
+        for scope in scopes:
+            merged.update(scope)
+        return merged
+
+    def _rewrite(
+        self, node: frog_ast.Expression, scopes: list[dict[str, str]]
+    ) -> frog_ast.Expression:
+        return _RefRewriter(self._active(scopes)).transform(node)
+
+    def _rename_block(
+        self,
+        block: frog_ast.Block,
+        scopes: list[dict[str, str]],
+        initial: dict[str, str] | None = None,
+    ) -> frog_ast.Block:
+        local: dict[str, str] = dict(initial) if initial else {}
+        active = scopes + [local]
+        new_statements = [
+            self._rename_statement(s, active, local) for s in block.statements
+        ]
+        return frog_ast.Block(new_statements)
+
+    def _rename_statement(
+        self,
+        statement: frog_ast.Statement,
+        scopes: list[dict[str, str]],
+        local: dict[str, str],
+    ) -> frog_ast.Statement:
+        if isinstance(
+            statement, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ):
+            return self._rename_binding(statement, scopes, local)
+        if isinstance(statement, frog_ast.VariableDeclaration):
+            # A bare typed declaration binds its name, masking a same-named param.
+            local[statement.name] = statement.name
+            return statement
+        if isinstance(statement, frog_ast.ReturnStatement):
+            return frog_ast.ReturnStatement(self._rewrite(statement.expression, scopes))
+        if isinstance(statement, frog_ast.IfStatement):
+            conditions = [self._rewrite(c, scopes) for c in statement.conditions]
+            blocks = [self._rename_block(b, scopes) for b in statement.blocks]
+            return frog_ast.IfStatement(conditions, blocks)
+        if isinstance(statement, frog_ast.NumericFor):
+            start = self._rewrite(statement.start, scopes)
+            end = self._rewrite(statement.end, scopes)
+            body = self._rename_block(
+                statement.block, scopes, initial={statement.name: statement.name}
+            )
+            return frog_ast.NumericFor(statement.name, start, end, body)
+        if isinstance(statement, frog_ast.GenericFor):
+            over = self._rewrite(statement.over, scopes)
+            body = self._rename_block(
+                statement.block,
+                scopes,
+                initial={statement.var_name: statement.var_name},
+            )
+            return frog_ast.GenericFor(
+                statement.var_type, statement.var_name, over, body
+            )
+        # Any other statement (e.g. a bare FuncCall) only references names.
+        return _RefRewriter(self._active(scopes)).transform(statement)
+
+    def _rename_binding(
+        self,
+        statement: frog_ast.Assignment | frog_ast.Sample | frog_ast.UniqueSample,
+        scopes: list[dict[str, str]],
+        local: dict[str, str],
+    ) -> frog_ast.Statement:
+        # Rewrite the right-hand side in the pre-binding scope (a self-reference
+        # like `x = x` reads the outer/param `x`), then bind the target name.
+        new_stmt = copy.copy(statement)
+        if isinstance(new_stmt, frog_ast.Assignment):
+            new_stmt.value = self._rewrite(new_stmt.value, scopes)
+        elif isinstance(new_stmt, frog_ast.Sample):
+            new_stmt.sampled_from = self._rewrite(new_stmt.sampled_from, scopes)
+        else:  # UniqueSample
+            new_stmt.unique_set = self._rewrite(new_stmt.unique_set, scopes)
+        if new_stmt.the_type is not None and isinstance(
+            new_stmt.var, frog_ast.Variable
+        ):
+            # Typed declaration: a new binder that masks a same-named param.
+            local[new_stmt.var.name] = new_stmt.var.name
+        else:
+            # Untyped reassignment or non-Variable lvalue (`M[i]`, `obj.f`):
+            # references in the target position resolve under the active scope.
+            new_stmt.var = self._rewrite(new_stmt.var, scopes)
+        return new_stmt
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +432,13 @@ class VariableStandardize(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return VariableStandardizingTransformer().transform(game)
+
+
+class StandardizeParameters(TransformPass):
+    name = "Standardize Parameters"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return _ParameterStandardizer().rename_game(game)
 
 
 class StandardizeFieldNames(TransformPass):

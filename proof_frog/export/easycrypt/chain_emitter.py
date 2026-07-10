@@ -2200,6 +2200,79 @@ def _oracle_pending_admit(hop_index: int, oracle_name: str) -> list[str]:
     ]
 
 
+def _init_reorder_group_swaps(
+    exec_body: list[ec_ast.EcStmt], keygen_callee: str
+) -> list[str]:
+    """``swap{1}`` tactics that GROUP an interleaved keygen/sample backbone.
+
+    The CFRG game init interleaves per index -- ``keygen_i; <projections>;
+    seed_i <$ d; <NG calls>; <pack>`` -- while the reduction groups all keygens
+    then all samples. To relate them (the middle leg of the functional-twin
+    transitivity), the game side's keygens and samples are first moved to the
+    front so both prob backbones read ``kg0, kg1, ..., s0, s1, ...``. A
+    ``keygen`` call and a ``<$`` sample are glob-disjoint from the deterministic
+    NG calls they cross (and from each other's locals), so moving them *up* is an
+    EC-legal ``swap``; only the NG calls among themselves are swap-immovable
+    (shared ``glob NG``) -- and those are never moved.
+
+    Returns the ordered ``swap{1} <pos> <offset>`` strings (1-indexed executable
+    positions, matching EC's post-``proc`` numbering for a flat body). Offsets
+    are computed against a running simulation so successive swaps compose
+    correctly. Returns ``[]`` when the backbone is already grouped.
+    """
+    stmts = list(_exec_stmts(exec_body))
+    stmts = [s for s in stmts if not isinstance(s, ec_ast.Return)]
+
+    def _is_keygen(i: int) -> bool:
+        s = stmts[i]
+        return isinstance(s, ec_ast.Call) and s.callee == keygen_callee
+
+    def _is_sample(i: int) -> bool:
+        return isinstance(stmts[i], ec_ast.Sample)
+
+    swaps: list[str] = []
+
+    def _group(pred: Callable[[int], bool], anchor_end: int) -> int:
+        """Move every ``pred`` statement at a position past ``anchor_end`` up to
+        be contiguous starting at ``anchor_end + 1`` (0-indexed), preserving
+        relative order. A ``pred`` statement at or before the anchor stays put.
+        Returns one past the last grouped statement."""
+        nonlocal stmts
+        insert_at = anchor_end + 1
+        while True:
+            src = next((i for i in range(insert_at, len(stmts)) if pred(i)), None)
+            if src is None:
+                break
+            if src == insert_at:
+                insert_at += 1
+                continue
+            swaps.append(f"swap{{1}} {src + 1} {insert_at - src}.")
+            moved = stmts.pop(src)
+            stmts.insert(insert_at, moved)
+            insert_at += 1
+        return insert_at
+
+    # First keygen stays; its projection block (the assigns immediately after it)
+    # stays with it. Group the remaining keygens right after the first keygen's
+    # projections, then group all samples right after the last keygen.
+    first_kg = next((i for i in range(len(stmts)) if _is_keygen(i)), None)
+    if first_kg is None:
+        return []
+    proj_end = first_kg
+    j = first_kg + 1
+    while j < len(stmts) and isinstance(stmts[j], ec_ast.Assign):
+        proj_end = j
+        j += 1
+    _group(_is_keygen, proj_end)
+    # Group the samples so each one after the first is contiguous with it -- anchor
+    # on the first sample's own position (not right after the keygens) so an
+    # already-grouped body (samples already adjacent) needs no swaps.
+    first_s = next((i for i in range(len(stmts)) if _is_sample(i)), None)
+    if first_s is not None:
+        _group(_is_sample, first_s)
+    return swaps
+
+
 def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     modules: mt.ModuleTranslator,
     oracle_name: str,

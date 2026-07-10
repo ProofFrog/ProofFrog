@@ -6,6 +6,41 @@ from ... import frog_ast
 from . import ir
 from .expr_renderer import ExprRenderer
 
+# Boolean-valued (predicate) operators. A ``return`` of such an expression in a
+# ``Bool``-returning method is wrapped in an Iverson bracket (``\llbracket ...
+# \rrbracket``) so ``return A == B`` reads as ``[[A = B]]`` -- a 0/1-valued
+# predicate -- rather than a bare relation. ``||`` (OR) is included because the
+# ``Bool`` return-type gate already excludes the BitString-concatenation
+# overload of the same operator.
+_PREDICATE_BINOPS = frozenset(
+    {
+        frog_ast.BinaryOperators.EQUALS,
+        frog_ast.BinaryOperators.NOTEQUALS,
+        frog_ast.BinaryOperators.GT,
+        frog_ast.BinaryOperators.LT,
+        frog_ast.BinaryOperators.GEQ,
+        frog_ast.BinaryOperators.LEQ,
+        frog_ast.BinaryOperators.AND,
+        frog_ast.BinaryOperators.OR,
+        frog_ast.BinaryOperators.IN,
+        frog_ast.BinaryOperators.SUBSETS,
+    }
+)
+
+
+def _is_predicate(expr: frog_ast.Expression) -> bool:
+    """Whether ``expr`` is a boolean relation/combination worth Iverson-bracketing.
+
+    Bare booleans (a variable, ``true``/``false``) are excluded -- only actual
+    relations (``==``, ``<``, ...), logical combinations (``&&``, ``||``), set
+    membership (``in``, ``subsets``), and negation (``!``) are wrapped.
+    """
+    if isinstance(expr, frog_ast.BinaryOperation):
+        return expr.operator in _PREDICATE_BINOPS
+    if isinstance(expr, frog_ast.UnaryOperation):
+        return expr.operator == frog_ast.UnaryOperators.NOT
+    return False
+
 
 class StmtRenderer:
     """Walk a ``Block`` of FrogLang statements and produce a flat list of IR lines.
@@ -84,7 +119,16 @@ class StmtRenderer:
         if isinstance(stmt, frog_ast.ReturnStatement):
             if isinstance(self.return_type, frog_ast.BitStringType):
                 self.expr.note_bitstring_context(stmt.expression)
-            self._emit(out, ir.Return(expr=self.expr.render(stmt.expression)))
+            rendered = self.expr.render(stmt.expression)
+            # A predicate returned from a Bool-typed method is an Iverson
+            # bracket: `return A == B` -> `\llbracket A = B \rrbracket`. Gating
+            # on Bool keeps the concat overload of `||` (BitString return)
+            # untouched.
+            if isinstance(self.return_type, frog_ast.BoolType) and _is_predicate(
+                stmt.expression
+            ):
+                rendered = rf"\llbracket {rendered} \rrbracket"
+            self._emit(out, ir.Return(expr=rendered))
             return
         if isinstance(stmt, frog_ast.IfStatement):
             self._render_if(stmt, out)

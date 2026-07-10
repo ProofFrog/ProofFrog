@@ -51,15 +51,45 @@ def test_digit_before_decoration_subscripts() -> None:
 
 
 def test_false_positive_lowercase_star_stays_literal() -> None:
-    # Only the camelCase capital form is a decoration; a lowercase trailing
+    # Only the capitalized suffix form is a decoration; a lowercase trailing
     # "star" (e.g. polestar) must not become a superscript.
     assert _var("polestar") == "polestar"
 
 
-def test_uppercase_boundary_not_decorated() -> None:
-    # Decoration requires a camelCase boundary (lowercase/digit before the
-    # suffix), so an all-caps run like "ABStar" is left alone.
-    assert _var("ABStar") == "ABStar"
+def test_single_capital_stem_decorates() -> None:
+    # A lone group/scalar name like Z decorates: ZStar -> Z^{*}.
+    assert _var("ZStar") == r"Z^{*}"
+    assert _var("XPrime") == r"X^{\prime}"
+
+
+def test_capital_run_stem_decorates() -> None:
+    # The greedy rule decorates any non-empty stem, including an all-caps run,
+    # so ABStar -> AB^{*} (previously left literal).
+    assert _var("ABStar") == r"AB^{*}"
+
+
+def test_bare_decoration_word_stays_literal() -> None:
+    # A decoration word with no stem in front is not a decoration.
+    assert _var("Star") == "Star"
+
+
+def test_decoration_composes_with_underscore_subscript() -> None:
+    # A decoration followed by an `_`-suffix (e.g. an Initialize `_in`
+    # parameter) keeps the superscript on its own axis (subscript then
+    # superscript, as for `ctStar0`), not a literal "mStar" with the star
+    # unrendered.
+    assert _var("mStar_in") == r"m_{in}^{*}"
+    assert _var("qStar_in") == r"q_{in}^{*}"
+
+
+def test_accent_composes_with_underscore_subscript() -> None:
+    assert _var("yBar_prev") == r"\overline{y}_{prev}"
+
+
+def test_stem_subscript_and_post_decoration_subscript_combine() -> None:
+    # A subscript on the stem and one after the decoration join into a single
+    # comma-separated group (no stacked double subscript).
+    assert _var("k1Star_pq") == r"k_{1,pq}^{*}"
 
 
 def test_plain_underscore_subscript_still_works() -> None:

@@ -84,6 +84,12 @@ _GREEK_UPPER = [
 ]
 _KEYWORD_VARIABLES = {name: "\\" + name for name in _GREEK_LOWER + _GREEK_UPPER}
 
+# Reserved FrogLang keywords that appear in expression position (e.g. a scheme
+# self-call ``this.DeriveKeyPair(..)``). Set upright as keywords rather than let
+# them fall through to the variable path, where a multi-letter name renders as a
+# run of italic letters (``this`` -> ``t\,h\,i\,s``).
+_RESERVED_UPRIGHT = {"this": r"\mathsf{this}"}
+
 # Field members that denote a group's generator/order. On parse paths that
 # kept them as a plain ``FieldAccess`` (rather than the dedicated
 # ``GroupGenerator`` / ``GroupOrder`` nodes) they are routed to the same
@@ -93,15 +99,25 @@ _GROUP_SYMBOL_MEMBERS = {"generator": "generator", "order": "order"}
 _SUBSCRIPT_RE = re.compile(r"^(.+?)(\d+)$")
 
 # B4: a closed allow-list of name decorations rendered as math superscripts or
-# accents. Matched only at a camelCase boundary (a lowercase letter or digit
-# precedes the capitalized suffix), so literals like ``polestar`` and acronym
-# runs like ``ABStar`` are left untouched. Source identifiers stay legal
-# FrogLang; the operator-disambiguation maps key off the *raw* name, so this is
-# invisible to them.
+# accents. A trailing decoration word (capitalized first letter, e.g. ``Star``)
+# decorates whatever non-empty stem precedes it, whether that stem ends in a
+# lowercase/digit (``ctStar`` -> ``ct^{*}``), a single capital (``ZStar`` ->
+# ``Z^{*}``), or a capital run (``ABStar`` -> ``AB^{*}``). The capitalized-suffix
+# form is required, so all-lowercase literals like ``polestar`` never match.
+# Presentation intent that this greedy rule gets wrong (a real compound word
+# such as ``menuBar``) is not recoverable from the identifier alone; those are
+# rare in game code and are the caller's to override. Source identifiers stay
+# legal FrogLang; the operator-disambiguation maps key off the *raw* name, so
+# this is invisible to them.
 _DECORATION_SUPERSCRIPTS = {"Star": r"^{*}", "Prime": r"^{\prime}"}
 _DECORATION_ACCENTS = {"Hat": r"\hat", "Tilde": r"\tilde", "Bar": r"\overline"}
+# The optional ``tail`` folds a subscript that *follows* the decoration into the
+# subscript group, so a decorated name still subscripts cleanly: a trailing digit
+# run (``ctStar0`` -> ``ct_{0}^{*}``) or an ``_``-delimited suffix
+# (``mStar_in`` -> ``m^{*}_{in}``) both land on the subscript axis, alongside any
+# subscript already on the stem, without stacking into a double subscript.
 _DECORATION_RE = re.compile(
-    r"^(?P<head>.*[a-z0-9])(?P<deco>Star|Prime|Hat|Tilde|Bar)(?P<digits>\d*)$"
+    r"^(?P<head>.+)(?P<deco>Star|Prime|Hat|Tilde|Bar)(?P<tail>\d*(?:_.+)?)$"
 )
 
 
@@ -205,6 +221,8 @@ class ExprRenderer:
         # escaped), matching ``macros._mathsf_body``. A bare trailing-digit run
         # subscripts likewise. The head is never itself subscripted, so the two
         # paths can never compound into a double subscript.
+        if name in _RESERVED_UPRIGHT:
+            return _RESERVED_UPRIGHT[name]
         if name in _KEYWORD_VARIABLES:
             return _KEYWORD_VARIABLES[name]
         decorated = self._render_decorated(name)
@@ -245,16 +263,27 @@ class ExprRenderer:
 
         Superscript decorations (``Star``/``Prime``) sit on a different axis
         from the subscript, so an index composes safely whether it precedes the
-        decoration (``ct1Star`` -> ``ct_{1}^{*}``) or follows it
-        (``ctStar0`` -> ``ct_{0}^{*}``). Accents (``Hat``/``Tilde``/``Bar``)
+        decoration (``ct1Star`` -> ``ct_{1}^{*}``) or follows it, as a trailing
+        digit (``ctStar0`` -> ``ct_{0}^{*}``) or an ``_``-suffix
+        (``mStar_in`` -> ``m^{*}_{in}``). Accents (``Hat``/``Tilde``/``Bar``)
         wrap the base with the subscript kept *outside* the accent
-        (``mHat0`` -> ``\\hat{m}_{0}``), again avoiding a double subscript.
+        (``mHat0`` -> ``\\hat{m}_{0}``), again avoiding a double subscript. Every
+        subscript axis -- the stem's own, a post-decoration digit run, and each
+        ``_``-delimited tail segment -- is comma-joined into the one group.
         """
         m = _DECORATION_RE.match(name)
         if m is None:
             return None
         head, head_sub = cls._split_subscript(m.group("head"))
-        sub = head_sub or (m.group("digits") or None)
+        components: list[str] = []
+        if head_sub:
+            components.append(head_sub)
+        # ``tail`` is ``\d*(?:_.+)?``: the run before the first ``_`` is the
+        # post-decoration digit subscript, each ``_``-delimited segment after it
+        # is a further subscript component.
+        parts = m.group("tail").split("_")
+        components.extend(seg for seg in parts if seg)
+        sub = ",".join(components) if components else None
         subtex = f"_{{{sub}}}" if sub else ""
         deco = m.group("deco")
         if deco in _DECORATION_SUPERSCRIPTS:

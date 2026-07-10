@@ -2220,8 +2220,17 @@ def _init_reorder_group_swaps(
     are computed against a running simulation so successive swaps compose
     correctly. Returns ``[]`` when the backbone is already grouped.
     """
-    stmts = list(_exec_stmts(exec_body))
-    stmts = [s for s in stmts if not isinstance(s, ec_ast.Return)]
+    return _init_group_backbone(exec_body, keygen_callee)[0]
+
+
+def _init_group_backbone(
+    exec_body: list[ec_ast.EcStmt], keygen_callee: str
+) -> tuple[list[str], list[ec_ast.EcStmt]]:
+    """``(swaps, grouped_stmts)`` -- the grouping ``swap{1}``s plus the executable
+    statement list (``Return`` dropped) after applying them. The core of
+    :func:`_init_reorder_group_swaps`; the grouped statements feed the seq-split
+    length and the suffix functionalization."""
+    stmts = [s for s in _exec_stmts(exec_body) if not isinstance(s, ec_ast.Return)]
 
     def _is_keygen(i: int) -> bool:
         s = stmts[i]
@@ -2232,12 +2241,10 @@ def _init_reorder_group_swaps(
 
     swaps: list[str] = []
 
-    def _group(pred: Callable[[int], bool], anchor_end: int) -> int:
-        """Move every ``pred`` statement at a position past ``anchor_end`` up to
-        be contiguous starting at ``anchor_end + 1`` (0-indexed), preserving
-        relative order. A ``pred`` statement at or before the anchor stays put.
-        Returns one past the last grouped statement."""
-        nonlocal stmts
+    def _group(pred: Callable[[int], bool], anchor_end: int) -> None:
+        # Move every ``pred`` statement past ``anchor_end`` up to be contiguous
+        # from ``anchor_end + 1``, preserving order; a statement at or before the
+        # anchor stays put.
         insert_at = anchor_end + 1
         while True:
             src = next((i for i in range(insert_at, len(stmts)) if pred(i)), None)
@@ -2247,30 +2254,36 @@ def _init_reorder_group_swaps(
                 insert_at += 1
                 continue
             swaps.append(f"swap{{1}} {src + 1} {insert_at - src}.")
-            moved = stmts.pop(src)
-            stmts.insert(insert_at, moved)
+            stmts.insert(insert_at, stmts.pop(src))
             insert_at += 1
-        return insert_at
 
-    # First keygen stays; its projection block (the assigns immediately after it)
-    # stays with it. Group the remaining keygens right after the first keygen's
-    # projections, then group all samples right after the last keygen.
     first_kg = next((i for i in range(len(stmts)) if _is_keygen(i)), None)
     if first_kg is None:
-        return []
+        return [], stmts
     proj_end = first_kg
     j = first_kg + 1
     while j < len(stmts) and isinstance(stmts[j], ec_ast.Assign):
         proj_end = j
         j += 1
     _group(_is_keygen, proj_end)
-    # Group the samples so each one after the first is contiguous with it -- anchor
-    # on the first sample's own position (not right after the keygens) so an
-    # already-grouped body (samples already adjacent) needs no swaps.
+    # Group the samples so each after the first is contiguous with it -- anchor on
+    # the first sample so an already-grouped body needs no swaps.
     first_s = next((i for i in range(len(stmts)) if _is_sample(i)), None)
     if first_s is not None:
         _group(_is_sample, first_s)
-    return swaps
+    return swaps, stmts
+
+
+def _init_prefix_len(exec_stmts: list[ec_ast.EcStmt]) -> int:
+    """1-indexed executable position of the last ``<$`` sample -- the ``seq``
+    split point separating the probabilistic keygen/sample prefix from the
+    deterministic NG suffix. 0 when there is no sample."""
+    stmts = [s for s in exec_stmts if not isinstance(s, ec_ast.Return)]
+    last = 0
+    for i, s in enumerate(stmts):
+        if isinstance(s, ec_ast.Sample):
+            last = i + 1
+    return last
 
 
 def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-positional-arguments

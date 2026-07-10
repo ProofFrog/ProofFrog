@@ -2201,9 +2201,9 @@ def _oracle_pending_admit(hop_index: int, oracle_name: str) -> list[str]:
 
 
 def _init_reorder_group_swaps(
-    exec_body: list[ec_ast.EcStmt], keygen_callee: str
+    exec_body: list[ec_ast.EcStmt], keygen_callee: str, side: int = 1
 ) -> list[str]:
-    """``swap{1}`` tactics that GROUP an interleaved keygen/sample backbone.
+    """``swap{side}`` tactics that GROUP an interleaved keygen/sample backbone.
 
     The CFRG game init interleaves per index -- ``keygen_i; <projections>;
     seed_i <$ d; <NG calls>; <pack>`` -- while the reduction groups all keygens
@@ -2215,21 +2215,21 @@ def _init_reorder_group_swaps(
     EC-legal ``swap``; only the NG calls among themselves are swap-immovable
     (shared ``glob NG``) -- and those are never moved.
 
-    Returns the ordered ``swap{1} <pos> <offset>`` strings (1-indexed executable
-    positions, matching EC's post-``proc`` numbering for a flat body). Offsets
-    are computed against a running simulation so successive swaps compose
+    Returns the ordered ``swap{side} <pos> <offset>`` strings (1-indexed
+    executable positions, matching EC's post-``proc`` numbering for a flat body).
+    Offsets are computed against a running simulation so successive swaps compose
     correctly. Returns ``[]`` when the backbone is already grouped.
     """
-    return _init_group_backbone(exec_body, keygen_callee)[0]
+    return _init_group_backbone(exec_body, keygen_callee, side)[0]
 
 
 def _init_group_backbone(
-    exec_body: list[ec_ast.EcStmt], keygen_callee: str
+    exec_body: list[ec_ast.EcStmt], keygen_callee: str, side: int = 1
 ) -> tuple[list[str], list[ec_ast.EcStmt]]:
-    """``(swaps, grouped_stmts)`` -- the grouping ``swap{1}``s plus the executable
-    statement list (``Return`` dropped) after applying them. The core of
-    :func:`_init_reorder_group_swaps`; the grouped statements feed the seq-split
-    length and the suffix functionalization."""
+    """``(swaps, grouped_stmts)`` -- the grouping ``swap{side}``s plus the
+    executable statement list (``Return`` dropped) after applying them. The core
+    of :func:`_init_reorder_group_swaps`; the grouped statements feed the
+    seq-split length and the suffix functionalization."""
     stmts = [s for s in _exec_stmts(exec_body) if not isinstance(s, ec_ast.Return)]
 
     def _is_keygen(i: int) -> bool:
@@ -2253,7 +2253,7 @@ def _init_group_backbone(
             if src == insert_at:
                 insert_at += 1
                 continue
-            swaps.append(f"swap{{1}} {src + 1} {insert_at - src}.")
+            swaps.append(f"swap{{{side}}} {src + 1} {insert_at - src}.")
             stmts.insert(insert_at, stmts.pop(src))
             insert_at += 1
 
@@ -2432,6 +2432,70 @@ def _init_legmid_inv(  # pylint: disable=too-many-locals
     for gs, rs in zip(game_seeds, red_seeds):
         conj.append(f"{gs}{{1}} = {rs}{{2}}")
     return " /\\ ".join(conj)
+
+
+def _init_legmid_tactic(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    game_body: list[ec_ast.EcStmt],
+    red_body: list[ec_ast.EcStmt],
+    keygen_callee: str,
+    glob_names: list[str],
+    red_mod: str,
+    red_fields: set[str],
+    clone_alias: str,
+    det_pred: Callable[[str, str], bool],
+) -> list[str] | None:
+    """The middle-leg ``FG_calls ~ FR_calls`` tactic (hop_0 orientation: the
+    interleaved game is side 1, the grouped reduction side 2).
+
+    Assembles the validated pieces: ``proc`` + grouping ``swap{1}``s +
+    ``seq``-split with the coupling invariant + the aligned prefix peel
+    (``rnd``/``wp;call``/``auto``) + functionalize the grouped side first then the
+    interleaved side (its leading ``wp`` skipped) + ``sp; skip => /#``. Returns
+    ``None`` if the invariant cannot be built (caller admits)."""
+    swaps, grouped_game = _init_group_backbone(game_body, keygen_callee, side=1)
+    red_exec = [s for s in _exec_stmts(red_body) if not isinstance(s, ec_ast.Return)]
+    game_plen = _init_prefix_len(grouped_game)
+    red_plen = _init_prefix_len(red_exec)
+    game_prefix, game_suffix = grouped_game[:game_plen], grouped_game[game_plen:]
+    red_prefix, red_suffix = red_exec[:red_plen], red_exec[red_plen:]
+    inv = _init_legmid_inv(
+        game_prefix, red_prefix, keygen_callee, glob_names, red_mod, red_fields
+    )
+    if inv is None:
+        return None
+    game_seeds = [s.var for s in game_prefix if isinstance(s, ec_ast.Sample)]
+    red_seeds = [s.var for s in red_prefix if isinstance(s, ec_ast.Sample)]
+    n_kg = len(
+        [
+            s
+            for s in game_prefix
+            if isinstance(s, ec_ast.Call) and s.callee == keygen_callee
+        ]
+    )
+    tac: list[str] = ["proc.", *swaps, f"seq {game_plen} {red_plen} : ({inv})."]
+    tac += ["rnd."] * len(game_seeds)
+    tac += ["wp.", "call (_: true)."] * n_kg
+    tac += ["auto."]
+
+    def _exists(side: int, seeds: list[str], glob: str, binders: list[str]) -> str:
+        vs = ", ".join(f"{s}{{{side}}}" for s in seeds)
+        return (
+            f"exists* (glob NG){{{side}}}, {vs}; "
+            f"elim* => {glob} {' '.join(binders)}."
+        )
+
+    es = [f"es{i}" for i in range(len(red_seeds))]
+    tac.append(_exists(2, red_seeds, "g2", es))
+    tac += _init_functionalize_side(
+        red_suffix, 2, clone_alias, det_pred, dict(zip(red_seeds, es)), "g2", False
+    )
+    fs = [f"fs{i}" for i in range(len(game_seeds))]
+    tac.append(_exists(1, game_seeds, "g1", fs))
+    tac += _init_functionalize_side(
+        game_suffix, 1, clone_alias, det_pred, dict(zip(game_seeds, fs)), "g1", True
+    )
+    tac += ["sp.", "skip => /#."]
+    return tac
 
 
 def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-positional-arguments

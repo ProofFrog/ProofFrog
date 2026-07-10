@@ -11,6 +11,7 @@ from proof_frog.export.easycrypt import ec_ast
 from proof_frog.export.easycrypt.chain_emitter import (
     _init_functionalize_side,
     _init_group_backbone,
+    _init_legmid_tactic,
     _init_legmid_inv,
     _init_prefix_len,
     _init_reorder_group_swaps,
@@ -248,3 +249,45 @@ def test_legmid_inv_matches_validated() -> None:
         ]
     )
     assert inv == expected
+
+
+def test_legmid_tactic_assembles() -> None:
+    red_body = _cg_red_prefix_full() + _cg_reduction_ng_suffix()
+    red_fields = {
+        "challenger_dk0",
+        "challenger_dk1",
+        "dk_PQ_0",
+        "dk_PQ_1",
+        "dk_T_0",
+        "dk_T_1",
+        "ek_T_0",
+        "ek_T_1",
+    }
+    tac = _init_legmid_tactic(
+        _cg_game_body(),
+        red_body,
+        keygen_callee="KEM_PQ.keygen",
+        glob_names=["KEM_PQ", "NG", "G", "H", "L"],
+        red_mod="FR_calls",
+        red_fields=red_fields,
+        clone_alias="NG_c",
+        det_pred=_ng_det,
+    )
+    assert tac is not None
+    assert tac[:4] == ["proc.", "swap{1} 11 -7.", "swap{1} 14 -8.", tac[3]]
+    assert tac[3].startswith("seq 6 13 : (")
+    assert tac[-2:] == ["sp.", "skip => /#."]
+    # prefix peel: 2 rnd, 2 (wp;call), auto
+    assert tac[4:11] == [
+        "rnd.",
+        "rnd.",
+        "wp.",
+        "call (_: true).",
+        "wp.",
+        "call (_: true).",
+        "auto.",
+    ]
+    # one exists* per side + 6 NG calls each (2 exp, 2 gen, 2 rs)
+    assert sum(1 for t in tac if t.startswith("call{2} (NG_")) == 6
+    assert sum(1 for t in tac if t.startswith("call{1} (NG_")) == 6
+    assert sum(1 for t in tac if t.startswith("exists* (glob NG)")) == 2

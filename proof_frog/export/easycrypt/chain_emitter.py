@@ -2230,7 +2230,9 @@ def _init_group_backbone(
     executable statement list (``Return`` dropped) after applying them. The core
     of :func:`_init_reorder_group_swaps`; the grouped statements feed the
     seq-split length and the suffix functionalization."""
-    stmts = [s for s in _exec_stmts(exec_body) if not isinstance(s, ec_ast.Return)]
+    stmts: list[ec_ast.EcStmt] = [
+        s for s in _exec_stmts(exec_body) if not isinstance(s, ec_ast.Return)
+    ]
 
     def _is_keygen(i: int) -> bool:
         s = stmts[i]
@@ -2447,13 +2449,20 @@ def _init_legmid_tactic(  # pylint: disable=too-many-arguments,too-many-position
     """The middle-leg ``FG_calls ~ FR_calls`` tactic (hop_0 orientation: the
     interleaved game is side 1, the grouped reduction side 2).
 
-    Assembles the validated pieces: ``proc`` + grouping ``swap{1}``s +
-    ``seq``-split with the coupling invariant + the aligned prefix peel
-    (``rnd``/``wp;call``/``auto``) + functionalize the grouped side first then the
-    interleaved side (its leading ``wp`` skipped) + ``sp; skip => /#``. Returns
+    The two twins run the SAME keygen/sample/NG-call multiset but the reduction
+    orders the NG calls differently (grouped, e.g. ``rs0; rs1; gen0; exp0; ...``)
+    and they share ``glob NG`` (swap-immovable), so a lockstep peel would couple
+    mismatched calls. Instead each side's NG calls are *functionalized* to their
+    ``ev``-values (via ``<NG>_<m>_det``), after which the two are equal by the
+    coupled seeds. Assembles: ``proc`` + grouping ``swap{1}``s (keygens+samples to
+    the front) + ``seq``-split with the coupling invariant + the aligned prefix
+    peel (``rnd``/``wp;call``/``auto``) + functionalize the grouped side first then
+    the interleaved side (its leading ``wp`` skipped) + the tail closer. Returns
     ``None`` if the invariant cannot be built (caller admits)."""
     swaps, grouped_game = _init_group_backbone(game_body, keygen_callee, side=1)
-    red_exec = [s for s in _exec_stmts(red_body) if not isinstance(s, ec_ast.Return)]
+    red_exec: list[ec_ast.EcStmt] = [
+        s for s in _exec_stmts(red_body) if not isinstance(s, ec_ast.Return)
+    ]
     game_plen = _init_prefix_len(grouped_game)
     red_plen = _init_prefix_len(red_exec)
     game_prefix, game_suffix = grouped_game[:game_plen], grouped_game[game_plen:]
@@ -2494,8 +2503,219 @@ def _init_legmid_tactic(  # pylint: disable=too-many-arguments,too-many-position
     tac += _init_functionalize_side(
         game_suffix, 1, clone_alias, det_pred, dict(zip(game_seeds, fs)), "g1", True
     )
-    tac += ["sp.", "skip => /#."]
+    # Substitute the exists*-bound seeds so the two functionalized NG suffixes
+    # are syntactically equal, then discharge the packed-field couplings. ``sp``
+    # runs the cross-module field writes; ``move=> /> *`` introduces the twins'
+    # forall-result binders + their ``ev``-defining equations (subst-ing the
+    # seed couplings) so the residual is ground -- ``smt`` on the flat residual
+    # scales to the PK ``ek``+``dk`` packing, where a bare ``skip => /#`` on the
+    # nested-forall goal does not.
+    # ``sp`` runs the cross-module packing field writes; ``skip`` reduces the
+    # (now empty) programs to ``forall &1 &2, <inv> => <post>``. The post is the
+    # two functionalized NG suffixes as a deep right-nested
+    # ``A && forall r, (r = ev ...) => ...`` chain; a bare ``skip => /#`` hands
+    # that whole chain to ``smt`` at once, which does not scale past the CT
+    # ``dk``-only coupling. Introduce the memories + the invariant hypothesis
+    # first (``move => *``) so ``smt`` sees the nested chain with every seed
+    # coupling already in context -- then it discharges the PK ``ek``+``dk``
+    # packing too.
+    tac += ["sp.", "skip.", "move => * /=.", "smt()."]
     return tac
+
+
+def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    det_methods: dict[str, set[str]],
+    clone_alias: dict[str, str],
+    init_coupling: str | None = None,
+) -> tuple[list[str], list[str], set[tuple[str, str]]] | None:
+    """The functional-twin reorder route for a CFRG init hop whose two endpoints
+    run the SAME keygen/sample/NG-call multiset in DIFFERENT order (the game
+    interleaves per index; the reduction groups). Builds the 3-leg transitivity
+    ``RawGame ~ FG_calls ~ FR_calls ~ RawReduction`` (the outer legs by ``proc;
+    inline*; sim``, the middle by :func:`_init_legmid_tactic`), with the two flat
+    twins as extra module decls and the leg posts derived from ``init_coupling``.
+    Handles the hop_0 orientation only (interleaved game on the left, with a
+    challenger seam); other shapes return ``None`` (caller admits).
+    Returns ``(extra_decls, outer_body, pres)`` or ``None`` off-shape."""
+    if init_coupling is None:
+        return None
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+    lmod = _flat_state_module(
+        modules,
+        "FG_calls",
+        lproj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+        emit_state_vars=True,
+    )
+    rmod = _flat_state_module(
+        modules,
+        "FR_calls",
+        rproj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+        emit_state_vars=True,
+    )
+    if not lmod.procs or not rmod.procs:
+        return None
+    l_body, r_body = lmod.procs[0].body, rmod.procs[0].body
+
+    def _det_pred(mod: str, meth: str) -> bool:
+        return meth in det_methods.get(mod, set())
+
+    def _keygen_callee(body: list[ec_ast.EcStmt]) -> str | None:
+        for s in _exec_stmts(body):
+            if isinstance(s, ec_ast.Call):
+                parts = _callee_parts(s.callee)
+                if parts is not None and not _det_pred(*parts):
+                    return s.callee
+        return None
+
+    def _grouped(body: list[ec_ast.EcStmt], kg: str) -> bool:
+        seen = False
+        for s in _exec_stmts(body):
+            if isinstance(s, ec_ast.Sample):
+                seen = True
+            elif isinstance(s, ec_ast.Call) and s.callee == kg and seen:
+                return False
+        return True
+
+    keygen_callee = _keygen_callee(l_body)
+    if keygen_callee is None:
+        return None
+    if _grouped(l_body, keygen_callee) or not _grouped(r_body, keygen_callee):
+        return None  # only the left-interleaved (hop_0) orientation, for now
+    ng_mod = next(
+        (
+            _callee_parts(c)[0]  # type: ignore[index]
+            for k, c in _call_sample_backbone(l_body)
+            if k == "call"
+            and c is not None
+            and (p := _callee_parts(c)) is not None
+            and _det_pred(*p)
+        ),
+        None,
+    )
+    if ng_mod is None or ng_mod not in clone_alias:
+        return None
+    glob_names = [p.name for p in flat_params]
+    args = ", ".join(glob_names)
+    red_fields = {v.name for v in rmod.module_vars}
+    legmid = _init_legmid_tactic(
+        l_body,
+        r_body,
+        keygen_callee,
+        glob_names,
+        "FR_calls",
+        red_fields,
+        clone_alias[ng_mod],
+        _det_pred,
+    )
+    if legmid is None:
+        return None
+
+    # Parse the decomposition coupling into (game-field -> component tuple) and
+    # the challenger seam (reduction dk field = challenger field), all on the
+    # side-1 game / side-2 reduction orientation (hop_0).
+    conj = [p.strip() for p in init_coupling.split(" /\\ ")]
+    globs = " /\\ ".join(p for p in conj if p.startswith("={glob"))
+    body = " /\\ ".join(p for p in conj if not p.startswith("={glob"))
+    decomp: list[tuple[str, list[str]]] = []
+    seam: list[tuple[str, str]] = []
+    for cj in conj:
+        m = re.match(r"^(\S+)\{1\} = \((.+)\)\{2\}$", cj)
+        if m is not None:
+            decomp.append((m.group(1), [c.strip() for c in m.group(2).split(",")]))
+            continue
+        m = re.match(r"^(\S+)\{2\} = (\S+)\{2\}$", cj)
+        if m is not None:
+            seam.append((m.group(1), m.group(2)))
+    if not decomp or not seam:
+        return None
+    # The functionalizing middle leg leaves a deep nested-forall ``smt`` goal
+    # whose size the closer cannot discharge once one NG-derived component (the
+    # hybrid ephemeral ``ek_T``) is SHARED across two decomposed game fields (the
+    # PK ``ek0``+``dk0`` packing) -- decline that shape for now (stays a targeted
+    # admit; the ``ev``-assignment-twin re-architecture is the fix). CT's
+    # ``dk``-only decomposition has disjoint components and closes.
+    _components = [c for _, comps in decomp for c in comps]
+    if len(_components) != len(set(_components)):
+        return None
+    game_base = decomp[0][0].rsplit(".", 1)[0]
+    red_base = decomp[0][1][0].rsplit(".", 1)[0]
+    chal_base = seam[0][1].rsplit(".", 1)[0]
+
+    def _fld(full: str) -> str:
+        return full.rsplit(".", 1)[1]
+
+    def _fg(s: str) -> str:
+        return s.replace(game_base, "FG_calls")
+
+    def _fr(s: str) -> str:
+        return (
+            _fg(s)
+            .replace(chal_base + ".", "FR_calls.challenger_")
+            .replace(red_base, "FR_calls")
+        )
+
+    res_eq = "res{1} = res{2}"
+    q1_eqs = " /\\ ".join(f"{gf}{{1}} = FG_calls.{_fld(gf)}{{2}}" for gf, _ in decomp)
+    q4_eqs = " /\\ ".join(
+        [f"FR_calls.{_fld(c)}{{1}} = {c}{{2}}" for _, comps in decomp for c in comps]
+        + [f"FR_calls.challenger_{_fld(cf)}{{1}} = {cf}{{2}}" for _, cf in seam]
+    )
+    q1 = f"{globs} /\\ {q1_eqs} /\\ {res_eq}"
+    q2 = f"{_fg(body)} /\\ {globs} /\\ {res_eq}"
+    q3 = f"{_fr(body)} /\\ {globs} /\\ {res_eq}"
+    q4 = f"{globs} /\\ {q4_eqs} /\\ {res_eq}"
+
+    def _outer_leg(body: list[ec_ast.EcStmt]) -> list[str]:
+        # RawGame ~ FG_calls (and FR_calls ~ RawReduction) relate a flat state's
+        # fields to a *different* module's fields across an identical-order
+        # backbone, so ``sim`` cannot infer the cross-module equality set (and it
+        # declines the abstract deterministic NG calls outright). Peel the shared
+        # call+sample backbone name-independently -- the same composite-bridge
+        # pattern ``_composite_bridge_tactic`` uses: ``call (_: true)`` couples
+        # each abstract call, ``rnd`` each sample, ``wp`` clears the deterministic
+        # field-write plumbing, and ``auto`` discharges the residual couplings.
+        leg = ["proc.", "inline *.", *_backbone_peel(body)]
+        if _leads_with_det(body):
+            leg.append("wp.")
+        leg.append("auto.")
+        return leg
+
+    outer = [
+        _res_tag(SYNTH_PARAM),
+        f"transitivity FG_calls({args}).initialize "
+        f"({globs} ==> {q1}) ({globs} ==> {q2}).",
+        "smt().",
+        "smt().",
+        *_outer_leg(l_body),
+        f"transitivity FR_calls({args}).initialize "
+        f"({globs} ==> {q3}) ({globs} ==> {q4}).",
+        "smt().",
+        "smt().",
+        *legmid,
+        *_outer_leg(r_body),
+        "qed.",
+    ]
+    extra = [
+        "\n".join(_render_module_decl(lmod)),
+        "\n".join(_render_module_decl(rmod)),
+    ]
+    return extra, outer, set()
 
 
 def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -2782,6 +3002,7 @@ def emit_multi_oracle_chain_for_hop(
     init_reduction_repacks: bool = False,
     init_decomposition: bool = False,
     clone_alias: dict[str, str] | None = None,
+    init_coupling: str | None = None,
 ) -> MultiOracleHopChainInfo:
     """Emit the per-oracle per-transform chains for one multi-oracle hop.
 
@@ -2868,6 +3089,7 @@ def emit_multi_oracle_chain_for_hop(
             det_methods=det_methods or {},
             init_repacks=init_reduction_repacks,
             init_decomposition=init_decomposition,
+            init_coupling=init_coupling,
             clone_alias=clone_alias or {},
             inj_acc=inj_methods,
             decaps_val_acc=decaps_val_schemes,
@@ -2908,6 +3130,7 @@ def _emit_one_oracle_chain(
     det_methods: dict[str, set[str]],
     init_repacks: bool = False,
     init_decomposition: bool = False,
+    init_coupling: str | None = None,
     clone_alias: dict[str, str] | None = None,
     inj_acc: set[tuple[str, str]] | None = None,
     decaps_val_acc: set[str] | None = None,
@@ -2965,6 +3188,22 @@ def _emit_one_oracle_chain(
             if peel is not None:
                 tactic, pres, rung = peel
                 return [], [_res_tag(rung), *tactic, "qed."], pres
+            # Backbone reorder (same multiset, different order, functionalizable
+            # NG det calls): the functional-twin route.
+            twin = _synth_init_twin_reorder(
+                modules,
+                oracle_name,
+                left_states[0],
+                right_states[0],
+                external_module_types,
+                method_return_types,
+                flat_params,
+                det_methods,
+                clone_alias or {},
+                init_coupling,
+            )
+            if twin is not None:
+                return twin
             # Backbones cannot be aligned (an extra call that is not a droppable
             # deterministic method): the peel does not apply. Emit a targeted,
             # honest admit rather than a silently-failing ``sim``.

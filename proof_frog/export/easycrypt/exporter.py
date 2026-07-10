@@ -3220,6 +3220,7 @@ def export_proof_file(proof_path: str) -> str:
                 det_methods=det_methods_by_module,
                 init_reduction_repacks=init_reduction_repacks,
                 init_decomposition=init_decomposition,
+                init_coupling=_decomposition_coupling(step_a, step_b),
                 clone_alias=clone_alias_by_module,
             )
             chain_extra_decls.extend(info.extra_decls)
@@ -4147,21 +4148,42 @@ def export_proof_file(proof_path: str) -> str:
         pre_lemmas = [d for d in pre if _is_chain_lemma(d)]
 
         section_declare_modules = declare_modules
-        if pre_lemmas:
-            # Only string chunks in ``pre_modules`` are chain flat-state modules
-            # (reductions/wrappers are structured ``ec_ast.Module`` objects), so
-            # this collects exactly the flat-state module names to restrict from.
-            flat_state_names = [
-                name
-                for d in pre_modules
-                if isinstance(d, str)
-                for name in re.findall(r"(?m)^\s*module\s+(\w+)\s*\(", d)
-            ]
+        # Only string chunks in ``pre_modules`` are chain flat-state modules
+        # (reductions/wrappers are structured ``ec_ast.Module`` objects), so this
+        # collects exactly the flat-state module names to restrict from.
+        flat_state_names = [
+            name
+            for d in pre_modules
+            if isinstance(d, str)
+            for name in re.findall(r"(?m)^\s*module\s+(\w+)\s*\(", d)
+        ]
+        # A pre-header chain micro-lemma couples every such flat-state module, so
+        # the abstract modules must be restricted from all of them. But the CFRG
+        # init functional-twin route couples its twin (``FG_calls``/``FR_calls``)
+        # in a POST-header hop lemma via ``transitivity``, which the pre_lemmas
+        # test misses -- restrict from any flat-state module used as a
+        # ``transitivity`` bridge in a post lemma too (else EC rejects the peel's
+        # ``call`` on the abstract ``K.<m>``: "module K can write FG_calls.dk1").
+        transitivity_refs: set[str] = set()
+        for d in post:
+            lines = (
+                d.body
+                if isinstance(d, ec_ast.Lemma)
+                else [d] if isinstance(d, str) else []
+            )
+            for line in lines:
+                transitivity_refs.update(re.findall(r"\btransitivity\s+(\w+)", line))
+        restrict_names = (
+            list(flat_state_names)
+            if pre_lemmas
+            else [n for n in flat_state_names if n in transitivity_refs]
+        )
+        if restrict_names:
             section_declare_modules = [
                 ec_ast.DeclareModule(
                     name=dm.name,
                     module_type=dm.module_type,
-                    disjoint_from=dm.disjoint_from + flat_state_names,
+                    disjoint_from=dm.disjoint_from + restrict_names,
                 )
                 for dm in declare_modules
             ]

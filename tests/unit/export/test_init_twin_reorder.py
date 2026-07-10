@@ -276,7 +276,7 @@ def test_legmid_tactic_assembles() -> None:
     assert tac is not None
     assert tac[:4] == ["proc.", "swap{1} 11 -7.", "swap{1} 14 -8.", tac[3]]
     assert tac[3].startswith("seq 6 13 : (")
-    assert tac[-2:] == ["sp.", "skip => /#."]
+    assert tac[-4:] == ["sp.", "skip.", "move => * /=.", "smt()."]
     # prefix peel: 2 rnd, 2 (wp;call), auto
     assert tac[4:11] == [
         "rnd.",

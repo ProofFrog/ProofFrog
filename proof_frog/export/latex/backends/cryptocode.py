@@ -48,6 +48,8 @@ class CryptocodeBackend:
             PackageSpec("amsthm"),
             PackageSpec("adjustbox"),
             PackageSpec("varwidth"),
+            # \llbracket / \rrbracket for Iverson-bracketed boolean returns.
+            PackageSpec("stmaryrd"),
         ]
 
     def fit_width(self, content: str) -> str:

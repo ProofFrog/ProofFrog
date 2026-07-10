@@ -107,6 +107,13 @@ def test_required_packages_includes_adjustbox() -> None:
     assert "adjustbox" in names
 
 
+def test_required_packages_includes_stmaryrd() -> None:
+    # stmaryrd supplies \llbracket / \rrbracket for Iverson-bracketed returns.
+    b = CryptocodeBackend()
+    names = {p.name for p in b.required_packages()}
+    assert "stmaryrd" in names
+
+
 def test_fit_width_wraps_in_max_width_adjustbox() -> None:
     b = CryptocodeBackend()
     out = b.fit_width("CONTENT")

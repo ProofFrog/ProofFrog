@@ -50,6 +50,55 @@ def test_return_emits_return() -> None:
     assert line.expr == "x"
 
 
+def _eq(left: str, right: str) -> frog_ast.BinaryOperation:
+    return frog_ast.BinaryOperation(
+        frog_ast.BinaryOperators.EQUALS,
+        frog_ast.Variable(left),
+        frog_ast.Variable(right),
+    )
+
+
+def test_bool_return_equality_is_iverson_bracketed() -> None:
+    # `return A == B` in a Bool method reads as a 0/1 predicate.
+    r = _renderer()
+    r.return_type = frog_ast.BoolType()
+    [line] = r.render_block(_block([frog_ast.ReturnStatement(_eq("A", "B"))]))
+    assert isinstance(line, ir.Return)
+    assert line.expr == r"\llbracket A = B \rrbracket"
+
+
+def test_bool_return_negation_is_iverson_bracketed() -> None:
+    r = _renderer()
+    r.return_type = frog_ast.BoolType()
+    neg = frog_ast.UnaryOperation(frog_ast.UnaryOperators.NOT, frog_ast.Variable("b"))
+    [line] = r.render_block(_block([frog_ast.ReturnStatement(neg)]))
+    assert line.expr == r"\llbracket \neg b \rrbracket"
+
+
+def test_bool_return_bare_boolean_is_not_bracketed() -> None:
+    # `return false;` is not a relation, so it stays a bare literal.
+    r = _renderer()
+    r.return_type = frog_ast.BoolType()
+    [line] = r.render_block(_block([frog_ast.ReturnStatement(frog_ast.Boolean(False))]))
+    assert line.expr == r"\mathsf{false}"
+
+
+def test_bool_return_bare_variable_is_not_bracketed() -> None:
+    r = _renderer()
+    r.return_type = frog_ast.BoolType()
+    [line] = r.render_block(_block([frog_ast.ReturnStatement(frog_ast.Variable("b"))]))
+    assert line.expr == "b"
+
+
+def test_non_bool_return_equality_is_not_bracketed() -> None:
+    # Without a Bool return type we do not know the expression is a predicate,
+    # so no Iverson bracket is applied.
+    r = _renderer()
+    r.return_type = None
+    [line] = r.render_block(_block([frog_ast.ReturnStatement(_eq("A", "B"))]))
+    assert line.expr == "A = B"
+
+
 def test_if_emits_if_else_endif() -> None:
     cond = frog_ast.Variable("b")
     then_blk = _block([frog_ast.ReturnStatement(frog_ast.Integer(1))])

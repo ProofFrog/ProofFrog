@@ -190,3 +190,12 @@ def test_concrete_game_renders_dotted_without_unsupported() -> None:
     out = ExprRenderer(MacroRegistry()).render(game)
     assert "% unsupported" not in out
     assert "Left" in out
+
+
+def test_this_keyword_renders_upright() -> None:
+    # The `this` self-reference (e.g. `this.DeriveKeyPair(..)`) is a keyword,
+    # not a variable, so it is set upright rather than as an italic letter-run.
+    r = ExprRenderer(MacroRegistry())
+    assert r.render(frog_ast.Variable("this")) == r"\mathsf{this}"
+    call = frog_ast.FieldAccess(frog_ast.Variable("this"), "DeriveKeyPair")
+    assert r.render(call).startswith(r"\mathsf{this}.")

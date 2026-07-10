@@ -971,9 +971,22 @@ class RemoveUnreachableTransformer(BlockTransformer):
                         and not isinstance(rhs_formula, str)
                     ):
                         try:
-                            path_constraints.append(lhs_formula == rhs_formula)
+                            equality = lhs_formula == rhs_formula
                         except (z3.Z3Exception, TypeError):
-                            pass
+                            equality = None
+                        # The formula visitor returns non-z3 values (e.g. Python
+                        # lists) for product-typed expressions, so `==` yields a
+                        # plain Python bool rather than a symbolic equality.
+                        # Appending that bool -- always False for two distinct
+                        # names -- poisons the whole constraint set, so the
+                        # dead-branch solver finds every later guard
+                        # unsatisfiable and wrongly eliminates live branches
+                        # (e.g. an adversary-chosen `if (b) {...}`). Only record
+                        # genuine symbolic z3 equalities; dropping a fact merely
+                        # makes the dead-code check more conservative, which is
+                        # sound.
+                        if isinstance(equality, z3.BoolRef):
+                            path_constraints.append(equality)
                 else:
                     update_version(statement)
                 # If any variable was modified, invalidate syntactic

@@ -777,6 +777,52 @@ def test_ru_dedups_deterministic_duplicate_condition() -> None:
     assert result != game  # the dead duplicate if was removed
 
 
+def test_remove_unreachable_product_typed_assignment_keeps_live_branch() -> None:
+    """Soundness: a product-typed assignment ``[Int, Int] v = w;`` makes the
+    Z3 formula visitor return a non-z3 value for the LHS/RHS, so
+    ``lhs_formula == rhs_formula`` evaluated to the Python bool ``False`` and
+    that ``False`` was appended as a path constraint. It poisoned the whole
+    constraint set, so the Z3 dead-branch check found the *live* ``if (b)``
+    branch unsatisfiable and deleted it -- unsoundly. The fix only records
+    genuine z3 ``BoolRef`` equalities, so a bogus ``False`` never enters the
+    set and the branch survives.
+
+    (This is exactly the shape produced by canonicalizing the strengthened
+    ``*-BIND-K-CT`` game, whose two hybrid decapsulation keys are product
+    types and whose ``Challenge`` decapsulates ``ct1`` under an
+    adversary-chosen ``if (b) { ... } else { ... }``.)"""
+    method = frog_parser.parse_method("""
+        Bool O(Bool b, [Int, Int] w) {
+            [Int, Int] v = w;
+            if (b) { return true; }
+            return false;
+        }
+        """)
+    transformed = RemoveUnreachableTransformer(method).transform(method)
+    assert _count_ifs(transformed) == 1, (
+        "live `if (b)` branch wrongly deleted after a product-typed "
+        f"assignment poisoned the constraint set:\n{transformed}"
+    )
+
+
+def test_remove_unreachable_product_assignment_still_dedups_dead_branch() -> None:
+    """Negative control: dropping the bogus product-equality fact must not
+    make the check over-preserve. A genuinely dead duplicate condition is
+    still removed when a product-typed assignment is also present."""
+    method = frog_parser.parse_method("""
+        Int O(Int x, [Int, Int] w) {
+            [Int, Int] v = w;
+            if (x == 0) { return 1; }
+            if (x == 0) { return 2; }
+            return 3;
+        }
+        """)
+    transformed = RemoveUnreachableTransformer(method).transform(method)
+    assert (
+        _count_ifs(transformed) == 1
+    ), f"genuinely dead duplicate if was not removed:\n{transformed}"
+
+
 def test_remove_unreachable_branch_write_clears_seen_condition() -> None:
     """F-105 (Case B): an assignment INSIDE a kept if-branch (`if (b==0){ x=0; }`)
     reassigns x between two `if (x==0) return` guards, so the second guard is

@@ -165,6 +165,81 @@ def test_fallback_with_namespace_allows_deterministic_call() -> None:
     assert formula is not None
 
 
+# ---------------------------------------------------------------------------
+# Bitstring literals (`0^n` / `1^n`): deterministic constants modelled as
+# opaque atoms (issue #235). Without a handler the visitor left the literal's
+# `length` subexpression on the stack, so `t == [0^n, 0^n]` produced
+# `t@0 == n` -- an opaque-vs-Int sort-mismatch crash.
+# ---------------------------------------------------------------------------
+
+
+def _type_map_tuple_lambda() -> visitors.NameTypeMap:
+    lam = frog_ast.Variable("lambda")
+    bs = frog_ast.BitStringType(lam)
+    tm = visitors.NameTypeMap()
+    tm.set("t", frog_ast.ProductType([bs, bs]))
+    tm.set("lambda", frog_ast.IntType())
+    tm.set("n", frog_ast.IntType())
+    return tm
+
+
+def test_tuple_literal_vs_componentwise_equivalent() -> None:
+    # Regression for #235: `t == [0^lambda, 0^lambda]` and its component-wise
+    # form must translate to equivalent formulas instead of crashing with a
+    # Z3 "sort mismatch".
+    tm = _type_map_tuple_lambda()
+    fa = visitors.Z3FormulaVisitor(tm, opaque_func_call_fallback=True).visit(
+        _parse_expr("t == [0^lambda, 0^lambda]")
+    )
+    fb = visitors.Z3FormulaVisitor(tm, opaque_func_call_fallback=True).visit(
+        _parse_expr("t[0] == 0^lambda && t[1] == 0^lambda")
+    )
+    assert fa is not None and fb is not None
+    solver = z3.Solver()
+    solver.add(fa != fb)
+    assert solver.check() == z3.unsat
+
+
+def test_bit_string_literal_distinct_bit_distinct_atoms() -> None:
+    # `0^lambda` and `1^lambda` are different constants; they must not be
+    # equated (guards against over-merging in the opaque encoding).
+    tm = _type_map_tuple_lambda()
+    fa = visitors.Z3FormulaVisitor(tm, opaque_func_call_fallback=True).visit(
+        _parse_expr("t[0] == 0^lambda")
+    )
+    fb = visitors.Z3FormulaVisitor(tm, opaque_func_call_fallback=True).visit(
+        _parse_expr("t[0] == 1^lambda")
+    )
+    assert fa is not None and fb is not None
+    solver = z3.Solver()
+    solver.add(fa != fb)
+    assert solver.check() == z3.sat
+
+
+def test_bit_string_literal_distinct_length_distinct_atoms() -> None:
+    # `0^lambda` and `0^n` differ in length; they must map to distinct atoms.
+    tm = _type_map_tuple_lambda()
+    fa = visitors.Z3FormulaVisitor(tm, opaque_func_call_fallback=True).visit(
+        _parse_expr("t[0] == 0^lambda")
+    )
+    fb = visitors.Z3FormulaVisitor(tm, opaque_func_call_fallback=True).visit(
+        _parse_expr("t[0] == 0^n")
+    )
+    assert fa is not None and fb is not None
+    solver = z3.Solver()
+    solver.add(fa != fb)
+    assert solver.check() == z3.sat
+
+
+def test_bit_string_literal_off_by_default_returns_none() -> None:
+    # Without opt-in, a bitstring literal is untranslatable (None) and the
+    # stack stays balanced -- it must not leak its `length` child as a
+    # garbage sub-term (the pre-fix behavior).
+    visitor = visitors.Z3FormulaVisitor(_empty_type_map(), variable_version_map={})
+    assert visitor.visit(_parse_expr("0^lambda")) is None
+    assert visitor.stack == []
+
+
 def test_two_visitor_instances_share_opaque_atom_by_repr() -> None:
     # Equivalence checking constructs ONE visitor per game and translates
     # one expression each. For the formulas to compare cleanly, two

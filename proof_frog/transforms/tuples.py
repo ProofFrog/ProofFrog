@@ -18,6 +18,7 @@ from ..visitors import (
     ReplaceTransformer,
     AllConstantFieldAccesses,
     GetTypeMapVisitor,
+    lvalue_base_name,
 )
 from ._base import TransformPass, PipelineContext, has_nondeterministic_call
 
@@ -315,6 +316,43 @@ class CollapseSingleIndexTupleTransformer(BlockTransformer):
     when a scheme-inlined game drops unused components.
     """
 
+    def __init__(self) -> None:
+        self._multi_assigned: set[str] = set()
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        # A variable assigned in more than one place within the method
+        # (e.g. a phi-like variable declared in both arms of an if after
+        # If-Split Branch Assignment) must NOT be collapsed: rewriting one
+        # declaration to ``Ti v = expr[i]`` while leaving a sibling
+        # ``[T0,T1] v = expr2`` produces an inconsistently-typed variable,
+        # and a later inlining then substitutes the whole tuple in place of
+        # ``v`` (dropping the index). Precompute the set of names with two
+        # or more assignments in this method and skip them. Counting is
+        # per-method so a name reused as an independent local in another
+        # method is not affected.
+        counts: dict[str, int] = {}
+
+        def _count(node: frog_ast.ASTNode) -> bool:
+            if isinstance(
+                node,
+                (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+            ):
+                base = lvalue_base_name(node.var)
+                if base is not None:
+                    counts[base] = counts.get(base, 0) + 1
+            return False
+
+        SearchVisitor(_count).visit(method.block)
+        saved = self._multi_assigned
+        self._multi_assigned = {n for n, c in counts.items() if c > 1}
+        try:
+            new_block = self.transform(method.block)
+        finally:
+            self._multi_assigned = saved
+        if new_block is method.block:
+            return method
+        return frog_ast.Method(method.signature, new_block)
+
     @staticmethod
     def _analyse_uses(var_name: str, block: frog_ast.Block) -> tuple[bool, set[int]]:
         """Return (has_bare_use, indices_used) for *var_name* in *block*.
@@ -373,6 +411,8 @@ class CollapseSingleIndexTupleTransformer(BlockTransformer):
                 continue
 
             var_name = statement.var.name
+            if var_name in self._multi_assigned:
+                continue
             remaining = frog_ast.Block(list(block.statements[stmt_idx + 1 :]))
 
             has_bare, indices_used = self._analyse_uses(var_name, remaining)

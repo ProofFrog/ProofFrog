@@ -10,7 +10,8 @@ from proof_frog.export.latex import proof_renderer as pr
 DDH = "examples/Proofs/Group/DDH_implies_CDH.proof"
 MULTICHAL = "examples/Proofs/PubKeyEnc/INDCPA_implies_INDCPA_MultiChal.proof"
 CFRG_LEAK = (
-    "examples/applications/cfrg-hybrid-kems/proofs/CG/CG_expanded_LEAK_BIND_K_CT.proof"
+    "examples/applications/cfrg-hybrid-kems/proofs/CG/"
+    "CG_expanded_LEAK_BIND_K_CT_DIFFKEY.proof"
 )
 
 
@@ -117,7 +118,7 @@ def test_theorem_prefers_claimed_bound_over_synthesized():
     assert "Concretely" in out
     assert r"\begin{align*}" in out
     # The claimed bound names its reductions as the constructed adversaries...
-    assert r"\Adv{\LEAKBINDKCT(\KEMPQ)}{\RPQBind}" in out
+    assert r"\Adv{\LEAKBINDKCTDIFFKEY(\KEMPQ)}{\RPQBind}" in out
     # ...not the synthesized B1/B2 placeholders.
     assert r"\mathcal{B}_{1}" not in out
     assert "% unsupported" not in out

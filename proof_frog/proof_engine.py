@@ -481,7 +481,7 @@ class Verbosity(IntEnum):
 
 
 class ProofEngine:
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         verbose: bool | Verbosity = False,
         no_diagnose: bool = False,

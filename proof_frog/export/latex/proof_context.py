@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ... import frog_ast, frog_parser, proof_engine, visitors
+from ... import advantage, frog_ast, frog_parser, proof_engine, visitors
 
 
 @dataclass
@@ -90,6 +90,18 @@ class ProofContext:
 
     def theorem(self) -> frog_ast.ParameterizedGame:
         return self.proof_file.theorem
+
+    def claimed_bound(self) -> frog_ast.Expression | None:
+        """The proof's author-claimed advantage bound, or None if absent.
+
+        This is the optional ``bound:`` clause -- a numeric expression over
+        ``advantage(...)`` references, per-oracle counts, cardinalities, and
+        parameters. When present it is the bound the theorem statement should
+        display (the author's intended, human-readable form); otherwise the
+        renderer falls back to the synthesized bound.
+        """
+        claimed = self.proof_file.claimed_bound
+        return None if claimed is None else claimed.bound
 
     def _referenced_game_names(self) -> list[str]:
         names: list[str] = []
@@ -214,24 +226,18 @@ class ProofContext:
     ) -> frog_ast.ParameterizedGame | None:
         """Return the shared underlying game if (a, b) is a side-flip, else None.
 
-        A side-flip is the middle hop of the standard four-step reduction
-        pattern: both steps have a ``ConcreteGame`` challenger over the same
-        underlying ``ParameterizedGame`` (same name and str-equal args), the
-        same reduction (str-equal or both None), and differ only in ``which``
-        (Left vs Right).
+        Delegates to :func:`advantage.side_flip_game` so the exporter and the
+        bound synthesizer agree on what counts as an indistinguishability hop.
         """
-        ca, cb = a.challenger, b.challenger
-        if not (
-            isinstance(ca, frog_ast.ConcreteGame)
-            and isinstance(cb, frog_ast.ConcreteGame)
-        ):
-            return None
-        if ca.game.name != cb.game.name:
-            return None
-        if [str(x) for x in ca.game.args] != [str(x) for x in cb.game.args]:
-            return None
-        if str(a.reduction) != str(b.reduction):
-            return None
-        if ca.which == cb.which:
-            return None
-        return ca.game
+        return advantage.side_flip_game(a, b)
+
+    def advantage_bound(self) -> advantage.AdvantageBound:
+        """Synthesize the advantage bound this proof establishes.
+
+        Assumed (and lemma) security games license loss terms; every other
+        hop is a perfect equivalence. Mirrors the engine's synthesis so the
+        LaTeX theorem statement and the CLI report the same bound.
+        """
+        assumed = {a.name for a in self.proof_file.assumptions}
+        assumed |= {lemma.game.name for lemma in self.proof_file.lemmas}
+        return advantage.synthesize_from_steps(self.proof_file.steps, assumed)

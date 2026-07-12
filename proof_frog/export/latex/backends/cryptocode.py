@@ -50,6 +50,8 @@ class CryptocodeBackend:
             PackageSpec("varwidth"),
             # \llbracket / \rrbracket for Iverson-bracketed boolean returns.
             PackageSpec("stmaryrd"),
+            # xcolor (with the `!` tint syntax) for the soft \pfhighlight box.
+            PackageSpec("xcolor"),
         ]
 
     def fit_width(self, content: str) -> str:
@@ -74,9 +76,13 @@ class CryptocodeBackend:
     def preamble_extras(self) -> str:
         return (
             r"\newtheorem{theorem}{Theorem}" + "\n"
-            r"\providecommand{\todo}[1]{\textbf{TODO:} #1}" + "\n"
-            r"\providecommand{\Experiment}[3]{\ensuremath{\mathsf{Exp}^{#1.#2}_{#3}}}"
-            + "\n"
+            # A soft change-highlight (light gray tint) for diff-marked lines --
+            # far lighter than cryptocode's default \gamechange box, so a game
+            # whose body changed substantially is not flooded with gray. The
+            # argument is re-entered into math mode ($...$) because \colorbox
+            # typesets in LR (text) mode.
+            r"\providecommand{\pfhighlight}[1]{\colorbox{black!8}{$#1$}}" + "\n"
+            r"\providecommand{\Adv}[2]{\ensuremath{\mathsf{Adv}^{#1}_{#2}}}" + "\n"
             r"\providecommand{\getsr}{\sample}"
         )
 
@@ -119,7 +125,7 @@ class CryptocodeBackend:
         """
         if self.diff_style == "color":
             return rf"{{\color{{{_DIFF_COLOR}}} {content}}}"
-        return rf"\gamechange{{${content}$}}"
+        return rf"\pfhighlight{{{content}}}"
 
     def _indented_line(self, line: ir.Line) -> str:
         """Render one IR line, prefixing one ``\\pcind`` per nesting depth.
@@ -175,6 +181,30 @@ class CryptocodeBackend:
         # on an asymmetric pair; no key to add.
         body = "\n\\pchspace\n".join(self.render_vstack(v) for v in h.stacks)
         return f"\\begin{{pchstack}}\n{body}\n\\end{{pchstack}}"
+
+    def render_game_step(
+        self, heading: str, body: ir.VStack | ir.ProcedureBlock | None
+    ) -> str:
+        """Render one game of a proof sequence as a non-floating, centered block.
+
+        Unlike ``render_figure``, this emits no ``figure`` float, ``\\caption``,
+        or ``\\label`` -- a game-hopping proof must stay in reading order, beside
+        its hop prose, rather than drift to a later page. ``heading`` is the
+        already-assembled ``$G_i = \\dots$`` line (it may carry a trailing
+        ``\\\\\\textit{...}`` note); ``body`` is the boxed game (or ``None`` for a
+        start/end/dedup step that only references shared definitions).
+        """
+        parts = ["\\begin{center}", heading]
+        if body is not None:
+            inner = (
+                self.render_vstack(body)
+                if isinstance(body, ir.VStack)
+                else self.render_procedure(body)
+            )
+            parts.append("\\par\\smallskip")
+            parts.append(self.fit_width(inner))
+        parts.append("\\end{center}")
+        return "\n".join(parts)
 
     def render_figure(self, f: ir.Figure) -> str:
         parts = ["\\begin{figure}[ht]", "\\centering"]

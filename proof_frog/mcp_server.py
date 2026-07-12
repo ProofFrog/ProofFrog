@@ -200,15 +200,31 @@ def prove(proof_path: str, skip_lemmas: bool = False) -> dict[str, Any]:
       hop_results    — List of {"step_num": int, "valid": bool, "kind": str,
                         "failure_detail": str} per hop; failure_detail explains why
                         a failing step's canonical forms differ
+      advantage_bound — The advantage bound the proof establishes (right-hand
+                        side of the inequality), or None if not synthesized
+                        (e.g. inductive proofs) or the proof failed
 
     Imports in the proof are resolved relative to the server's working directory.
     Use write_file first to save the proof content to disk, then call prove.
     Set skip_lemmas=True to trust lemma proofs without re-checking them.
     """
-    output, success, hop_results, _has_induction, _err_line, _err_col = _capture_prove(
+    (
+        output,
+        success,
+        hop_results,
+        _has_induction,
+        _err_line,
+        _err_col,
+        advantage_bound,
+    ) = _capture_prove(
         _safe_resolve(proof_path), allowed_root=_directory, skip_lemmas=skip_lemmas
     )
-    return {"output": output, "success": success, "hop_results": hop_results}
+    return {
+        "output": output,
+        "success": success,
+        "hop_results": hop_results,
+        "advantage_bound": advantage_bound,
+    }
 
 
 @mcp.tool()  # type: ignore[misc, untyped-decorator]

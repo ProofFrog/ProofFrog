@@ -54,6 +54,8 @@ def prepare_rename(state: DocumentState, position: lsp.Position) -> lsp.Range | 
         "let",
         "assume",
         "theorem",
+        "bound",
+        "advantage",
         "games",
         "compose",
         "against",

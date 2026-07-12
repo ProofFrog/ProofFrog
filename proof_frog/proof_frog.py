@@ -155,6 +155,11 @@ def check(file: str, json_output: bool) -> None:
     help="Skip lemma proof verification (trust without re-checking).",
 )
 @click.option(
+    "--skip-bound",
+    is_flag=True,
+    help="Do not fail the proof when a claimed 'bound:' cannot be verified.",
+)
+@click.option(
     "--sequential",
     is_flag=True,
     help=(
@@ -168,6 +173,7 @@ def prove(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     json_output: bool,
     no_diagnose: bool,
     skip_lemmas: bool,
+    skip_bound: bool,
     sequential: bool,
 ) -> None:
     """Run proof verification on a .proof file."""
@@ -175,12 +181,23 @@ def prove(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         # pylint: disable=import-outside-toplevel
         from .web_server import _capture_prove
 
-        output, success, hop_results, _has_induction, _err_line, _err_col = (
-            _capture_prove(file)
-        )
+        (
+            output,
+            success,
+            hop_results,
+            _has_induction,
+            _err_line,
+            _err_col,
+            advantage_bound,
+        ) = _capture_prove(file)
         click.echo(
             json.dumps(
-                {"output": output, "success": success, "hop_results": hop_results}
+                {
+                    "output": output,
+                    "success": success,
+                    "hop_results": hop_results,
+                    "advantage_bound": advantage_bound,
+                }
             )
         )
         return
@@ -190,6 +207,7 @@ def prove(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         no_diagnose=no_diagnose,
         skip_lemmas=skip_lemmas,
         parallel=not sequential,
+        skip_bound=skip_bound,
     )
     proof_file: frog_ast.ProofFile
     try:

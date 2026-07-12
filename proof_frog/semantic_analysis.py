@@ -3,6 +3,7 @@ import sys
 import copy
 from typing import Optional, TypeVar, Union, TypeAlias
 from sympy import Integer, Rational, Symbol
+from . import advantage
 from . import frog_ast
 from . import frog_parser
 from . import proof_engine
@@ -12,6 +13,56 @@ from . import visitors
 
 class FailedTypeCheck(Exception):
     pass
+
+
+def _collect_advantage_references(
+    node: frog_ast.ASTNode,
+) -> list[frog_ast.AdvantageReference]:
+    """All ``advantage(...)`` references in a claimed-bound expression.
+
+    Does not descend into a reference's notion/reduction (their names are
+    validated as games/reductions, not as claim free variables).
+    """
+    found: list[frog_ast.AdvantageReference] = []
+
+    def walk(current: frog_ast.ASTNode) -> None:
+        if isinstance(current, frog_ast.AdvantageReference):
+            found.append(current)
+            return
+        for attr in vars(current):
+            value = getattr(current, attr)
+            children = value if isinstance(value, (list, tuple)) else [value]
+            for child in children:
+                if isinstance(child, frog_ast.ASTNode):
+                    walk(child)
+
+    walk(node)
+    return found
+
+
+def _collect_claim_variables(node: frog_ast.ASTNode) -> list[frog_ast.Variable]:
+    """Bare variables in a claimed-bound expression, outside ``advantage(...)``.
+
+    Reduction/notion arguments inside an ``advantage(...)`` reference are game
+    arguments, not claim free variables, so its subtree is skipped.
+    """
+    found: list[frog_ast.Variable] = []
+
+    def walk(current: frog_ast.ASTNode) -> None:
+        if isinstance(current, frog_ast.AdvantageReference):
+            return
+        if isinstance(current, frog_ast.Variable):
+            found.append(current)
+            return
+        for attr in vars(current):
+            value = getattr(current, attr)
+            children = value if isinstance(value, (list, tuple)) else [value]
+            for child in children:
+                if isinstance(child, frog_ast.ASTNode):
+                    walk(child)
+
+    walk(node)
+    return found
 
 
 def check_well_formed(
@@ -107,6 +158,15 @@ VariableTypeMapStackType: TypeAlias = Optional[
 
 
 class VariableTypeVisitor(visitors.Visitor[None]):
+    def should_descend(self, node: frog_ast.ASTNode) -> bool:
+        # An advantage clause (helper game) and a claimed ``bound:`` (proof) are
+        # self-contained declared bounds over their own symbol vocabulary
+        # (query counts, adversary references), checked separately by
+        # ``_check_advantage_clause`` / ``_check_claimed_bound``; the generic
+        # name-resolution / type-checking walk must not descend into them, since
+        # their free variables are not ordinary in-scope symbols.
+        return not isinstance(node, (frog_ast.AdvantageClause, frog_ast.ClaimedBound))
+
     def __init__(
         self,
         import_namespace: dict[str, frog_ast.Root | frog_ast.Game],
@@ -448,6 +508,187 @@ class NameResolutionVisitor(VariableTypeVisitor):
         if game_file.games[0].name == game_file.games[1].name:
             print_error(
                 game_file, "Cannot have two games with the same name", self.file_name
+            )
+
+        if game_file.advantage is not None:
+            self._check_advantage_clause(game_file)
+
+    def _check_advantage_clause(self, game_file: frog_ast.GameFile) -> None:
+        """Check an ``advantage <= ...`` clause is well-formed.
+
+        The bound's free variables must each be either a game parameter or a
+        per-oracle query count ``count_<OracleName>`` naming a (non-Initialize)
+        oracle of the games, and the bound must be numeric arithmetic (``+``,
+        ``-``, ``*``, ``/``, ``^``, ``|.|``, literals) -- no set/boolean
+        operators.
+        """
+        clause = game_file.advantage
+        assert clause is not None
+        params = {p.name for p in game_file.games[0].parameters}
+        oracle_counts = {
+            f"count_{m.signature.name}"
+            for game in game_file.games
+            for m in game.methods
+            if m.signature.name != "Initialize"
+        }
+        for var in visitors.VariableCollectionVisitor().visit(clause.bound):
+            if var.name in params or var.name in oracle_counts:
+                continue
+            if var.name.startswith("count_"):
+                oracle = var.name[len("count_") :]
+                print_error(
+                    clause,
+                    f"advantage bound references count of unknown oracle"
+                    f" '{oracle}'; no such method in the games",
+                    self.file_name,
+                )
+            else:
+                print_error(
+                    clause,
+                    f"advantage bound references unknown variable '{var.name}';"
+                    f" only game parameters and per-oracle counts"
+                    f" (count_<Oracle>) may appear",
+                    self.file_name,
+                )
+        numeric_operators = {
+            frog_ast.BinaryOperators.ADD,
+            frog_ast.BinaryOperators.SUBTRACT,
+            frog_ast.BinaryOperators.MULTIPLY,
+            frog_ast.BinaryOperators.DIVIDE,
+            frog_ast.BinaryOperators.EXPONENTIATE,
+        }
+
+        def check_numeric(expr: frog_ast.ASTNode) -> None:
+            if isinstance(expr, frog_ast.BinaryOperation):
+                if expr.operator not in numeric_operators:
+                    print_error(
+                        clause,
+                        f"advantage bound must be numeric arithmetic; operator"
+                        f" '{expr.operator.value}' is not allowed",
+                        self.file_name,
+                    )
+                check_numeric(expr.left_expression)
+                check_numeric(expr.right_expression)
+            elif isinstance(expr, frog_ast.UnaryOperation):
+                if expr.operator not in (
+                    frog_ast.UnaryOperators.SIZE,
+                    frog_ast.UnaryOperators.MINUS,
+                ):
+                    print_error(
+                        clause,
+                        f"advantage bound must be numeric arithmetic; operator"
+                        f" '{expr.operator.value}' is not allowed",
+                        self.file_name,
+                    )
+                check_numeric(expr.expression)
+
+        check_numeric(clause.bound)
+
+        # Soundness guardrail: a bound that *decreases* as an oracle count grows
+        # would make the advantage synthesizer's count over-approximation and
+        # integer `calls` pin unsound (they substitute an upper bound for the
+        # count). Reject a provably-decreasing bound; a merely undecidable one is
+        # left to the synthesizer, which keeps such a term opaque.
+        issue = advantage.count_monotonicity_issue(clause.bound)
+        if issue is not None and issue[1]:
+            print_error(
+                clause,
+                f"advantage bound must be nondecreasing in each query count, but"
+                f" it decreases as '{issue[0]}' grows; more queries cannot lower"
+                f" the distinguishing advantage",
+                self.file_name,
+            )
+
+    def visit_proof_file(self, proof_file: frog_ast.ProofFile) -> None:
+        if proof_file.claimed_bound is not None:
+            self._check_claimed_bound(proof_file)
+
+    def _check_claimed_bound(self, proof_file: frog_ast.ProofFile) -> None:
+        """Check a proof's ``bound:`` clause is well-formed.
+
+        Each ``advantage(notion compose reduction)`` must name an assumed/lemma
+        notion and a reduction declared in the proof file whose composed game is
+        that notion (``advantage(notion)`` for a directly-played hop needs only
+        the notion). Each bare variable must be a per-oracle count
+        ``count_<Oracle>`` naming a (non-Initialize) oracle of the theorem game,
+        or a ``let:`` parameter. The grammar already restricts the clause to
+        numeric arithmetic, so no operator check is needed here.
+        """
+        claim = proof_file.claimed_bound
+        assert claim is not None
+        bound = claim.bound
+
+        assumption_names = {a.name for a in proof_file.assumptions}
+        assumption_names |= {lemma.game.name for lemma in proof_file.lemmas}
+        reductions = {
+            helper.name: helper
+            for helper in proof_file.helpers
+            if isinstance(helper, frog_ast.Reduction)
+        }
+        let_names = {field.name for field in proof_file.lets}
+        theorem_oracles: set[str] = set()
+        theorem_def = self.import_namespace.get(proof_file.theorem.name)
+        if isinstance(theorem_def, frog_ast.GameFile):
+            theorem_oracles = {
+                method.signature.name
+                for game in theorem_def.games
+                for method in game.methods
+                if method.signature.name != "Initialize"
+            }
+
+        for ref in _collect_advantage_references(bound):
+            notion = ref.notion
+            if ref.reduction is not None:
+                reduction = reductions.get(ref.reduction.name)
+                if reduction is None:
+                    print_error(
+                        claim,
+                        f"claimed bound references undeclared reduction"
+                        f" '{ref.reduction.name}'; declare it in the proof file",
+                        self.file_name,
+                    )
+                    continue
+                if reduction.to_use.name != notion.name:
+                    print_error(
+                        claim,
+                        f"reduction '{ref.reduction.name}' composes"
+                        f" '{reduction.to_use.name}', not the referenced notion"
+                        f" '{notion.name}'",
+                        self.file_name,
+                    )
+            if notion.name not in assumption_names:
+                hint = (
+                    " (for a reduction hop write" " 'advantage(notion compose R)')"
+                    if ref.reduction is None
+                    else ""
+                )
+                print_error(
+                    claim,
+                    f"claimed bound references '{notion.name}', which is not an"
+                    f" assumed or lemma security notion{hint}",
+                    self.file_name,
+                )
+
+        for var in _collect_claim_variables(bound):
+            if var.name in let_names:
+                continue
+            if var.name.startswith("count_"):
+                oracle = var.name[len("count_") :]
+                if oracle not in theorem_oracles:
+                    print_error(
+                        claim,
+                        f"claimed bound references count of unknown oracle"
+                        f" '{oracle}'; no such oracle in the theorem game"
+                        f" {proof_file.theorem.name}",
+                        self.file_name,
+                    )
+                continue
+            print_error(
+                claim,
+                f"claimed bound references unknown variable '{var.name}'; only"
+                f" per-oracle counts (count_<Oracle>), let parameters, and"
+                f" advantage(...) references may appear",
+                self.file_name,
             )
 
     def visit_scheme(self, scheme: frog_ast.Scheme) -> None:

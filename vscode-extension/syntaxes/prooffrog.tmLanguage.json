@@ -64,11 +64,11 @@
         },
         {
           "name": "keyword.proof.prooffrog",
-          "match": "\\b(proof|assume|theorem|games|let|induction|from|against|compose|lemma|by|is|prime)\\b"
+          "match": "\\b(proof|assume|theorem|bound|games|let|induction|from|against|compose|lemma|by|is|prime)\\b"
         },
         {
           "name": "keyword.other.prooffrog",
-          "match": "\\b(import|export|as|requires|extends|calls|subsets|union|deterministic|injective)\\b"
+          "match": "\\b(import|export|as|requires|extends|calls|advantage|subsets|union|deterministic|injective)\\b"
         }
       ]
     },

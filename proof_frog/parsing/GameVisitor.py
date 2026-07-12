@@ -14,6 +14,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#advantageClause.
+    def visitAdvantageClause(self, ctx:GameParser.AdvantageClauseContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#gameExport.
     def visitGameExport(self, ctx:GameParser.GameExportContext):
         return self.visitChildren(ctx)

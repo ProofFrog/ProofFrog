@@ -18,6 +18,7 @@ from . import frog_ast
 from . import visitors
 from . import dependencies
 from . import diagnostics
+from . import advantage
 from .transforms._base import (
     NearMiss,
     PipelineContext,
@@ -70,6 +71,14 @@ class HopResult:
     next_desc: str
     failure_detail: str = ""
     diagnosis: diagnostics.Diagnosis | None = None
+    # Advantage-bound bookkeeping (populated for assumption/lemma hops):
+    # `justification` is the assumed/lemma security game that licenses the hop
+    # (e.g. PRFSecurity(F)); `reduction` is the constructed adversary composed
+    # with it (Step.reduction); `direction` records the (current, next) sides
+    # for rendering (the loss term is the same either way).
+    justification: frog_ast.ParameterizedGame | None = None
+    reduction: frog_ast.ParameterizedGame | None = None
+    direction: tuple[str, str] | None = None
 
 
 class FailedProof(Exception):
@@ -472,12 +481,13 @@ class Verbosity(IntEnum):
 
 
 class ProofEngine:
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         verbose: bool | Verbosity = False,
         no_diagnose: bool = False,
         skip_lemmas: bool = False,
         parallel: bool = True,
+        skip_bound: bool = False,
     ) -> None:
         self.definition_namespace: frog_ast.Namespace = {}
         self.proof_namespace: frog_ast.Namespace = {}
@@ -491,6 +501,7 @@ class ProofEngine:
             self.verbosity = verbose
         self.no_diagnose = no_diagnose
         self.skip_lemmas = skip_lemmas
+        self.skip_bound = skip_bound
         # Allow disabling parallelism via env var (e.g. for sandboxed
         # environments that block ProcessPoolExecutor).
         if os.environ.get("PROOFFROG_SEQUENTIAL"):
@@ -498,6 +509,7 @@ class ProofEngine:
         self.parallel = parallel
         self.step_assumptions: list[ProcessedAssumption] = []
         self.hop_results: list[HopResult] = []
+        self.advantage_bound: advantage.AdvantageBound | None = None
         self.variables: dict[str, Symbol | frog_ast.Expression] = {}
         self.method_lookup: MethodLookup = {}
         self.max_calls: Optional[int] = None
@@ -695,6 +707,14 @@ class ProofEngine:
             and first_step.challenger.which != final_step.challenger.which
             and first_step.adversary == final_step.adversary
         ):
+            self.advantage_bound = advantage.synthesize_from_hop_results(
+                self.hop_results,
+                definition_lookup=self.definition_namespace,
+                max_calls=proof_file.max_calls,
+            )
+            self._print_advantage_bound(proof_file.theorem)
+            if not self._check_claimed_bound(proof_file):
+                raise FailedProof()
             print(Fore.GREEN + "Proof Succeeded!" + Fore.RESET)
             return
 
@@ -831,6 +851,56 @@ class ProofEngine:
                     f"{result_str}"
                 )
 
+    def _print_advantage_bound(self, theorem: frog_ast.ParameterizedGame) -> None:
+        """Print the synthesized advantage bound for a successful proof.
+
+        The left side is the theorem's own distinguishing advantage against
+        the adversary ``A``; the right side is the triangle-inequality sum of
+        per-hop losses. An inductive (currently unsupported) proof prints an
+        explanatory note instead of a bound.
+        """
+        bound = self.advantage_bound
+        if bound is None:
+            return
+        lhs = f"Adv^{theorem}(A)"
+        if not bound.supported:
+            print(f"Advantage bound: {lhs} <= (not synthesized: {bound.note})")
+            return
+        print(f"Advantage bound: {lhs} <= {bound.render()}")
+        for note in bound.notes:
+            print(f"  note: {note}")
+
+    def _check_claimed_bound(self, proof_file: frog_ast.ProofFile) -> bool:
+        """Check the proof's claimed ``bound:`` against the synthesized bound.
+
+        Returns False (failing the proof) only when the claim is provably
+        smaller than the synthesized bound and ``--skip-bound`` was not passed;
+        an undecided comparison prints a warning but does not fail. A proof with
+        no ``bound:`` clause, or no synthesized bound, always returns True.
+        """
+        claim = proof_file.claimed_bound
+        if claim is None or self.advantage_bound is None:
+            return True
+        result = advantage.check_claimed_bound(claim.bound, self.advantage_bound)
+        if result.status == "verified":
+            print(Fore.GREEN + f"Claimed bound verified: {result.detail}." + Fore.RESET)
+            return True
+        if result.status == "undecided":
+            print(Fore.YELLOW + f"Claimed bound: {result.detail}." + Fore.RESET)
+            return True
+        # not_verified
+        witness = ", ".join(f"{k} = {v}" for k, v in sorted(result.witness.items()))
+        print(
+            Fore.RED
+            + f"Claimed bound NOT verified: {result.detail}"
+            + (f" (e.g. at {witness})" if witness else "")
+            + Fore.RESET
+        )
+        if self.skip_bound:
+            print(Fore.YELLOW + "  (continuing anyway: --skip-bound)" + Fore.RESET)
+            return True
+        return False
+
     def _print_failure_inline(self, equiv_result: EquivalenceResult) -> None:
         """Print Level 1 inline summary and Level 3 verbose detail for a failure."""
         if equiv_result.diagnosis is not None:
@@ -886,6 +956,10 @@ class ProofEngine:
         next_desc: str
         # For assumption/lemma hops:
         kind: str = ""  # "by_assumption", "by_lemma", or "" for equivalence
+        # For assumption/lemma hops, advantage-bound bookkeeping:
+        justification: frog_ast.ParameterizedGame | None = None
+        reduction: frog_ast.ParameterizedGame | None = None
+        direction: tuple[str, str] | None = None
         # For equivalence hops:
         current_game_ast: frog_ast.Game | None = None
         next_game_ast: frog_ast.Game | None = None
@@ -934,20 +1008,32 @@ class ProofEngine:
             if isinstance(current_step, frog_ast.Step) and isinstance(
                 next_step, frog_ast.Step
             ):
-                if self._is_by_indistinguishability(
+                justification = self._is_by_indistinguishability(
                     current_step, next_step, assumed_indistinguishable
-                ):
+                )
+                if justification is not None:
                     is_lemma = (
                         lemma_games is not None
                         and isinstance(current_step.challenger, frog_ast.ConcreteGame)
                         and str(current_step.challenger.game) in lemma_games
                     )
+                    direction: tuple[str, str] | None = None
+                    if isinstance(
+                        current_step.challenger, frog_ast.ConcreteGame
+                    ) and isinstance(next_step.challenger, frog_ast.ConcreteGame):
+                        direction = (
+                            current_step.challenger.which,
+                            next_step.challenger.which,
+                        )
                     prepared.append(
                         ProofEngine._PreparedHop(
                             step_num=step_num,
                             current_desc=self._step_display(current_step),
                             next_desc=self._step_display(next_step),
                             kind="by_lemma" if is_lemma else "by_assumption",
+                            justification=justification,
+                            reduction=current_step.reduction,
+                            direction=direction,
                         )
                     )
                     continue
@@ -1084,6 +1170,9 @@ class ProofEngine:
                 depth=depth,
                 current_desc=hop.current_desc,
                 next_desc=hop.next_desc,
+                justification=hop.justification,
+                reduction=hop.reduction,
+                direction=hop.direction,
             )
         )
 
@@ -1674,12 +1763,20 @@ class ProofEngine:
         current_step: frog_ast.Step,
         next_step: frog_ast.Step,
         assumed_indistinguishable: list[frog_ast.ParameterizedGame],
-    ) -> bool:
+    ) -> frog_ast.ParameterizedGame | None:
+        """Return the assumed game licensing this hop, or None if not one.
+
+        A hop is by indistinguishability when both steps play the same
+        underlying (assumed) security game against the same adversary,
+        with the same reduction (or none), differing only in the side.
+        The returned ``ParameterizedGame`` is the matched assumption, used
+        as the ``justification`` for advantage-bound synthesis.
+        """
         if not isinstance(
             current_step.challenger, frog_ast.ConcreteGame
         ) or not isinstance(next_step.challenger, frog_ast.ConcreteGame):
-            return False
-        return bool(
+            return None
+        if (
             current_step.challenger.game == next_step.challenger.game
             and current_step.adversary == next_step.adversary
             and current_step.challenger.game in assumed_indistinguishable
@@ -1690,7 +1787,9 @@ class ProofEngine:
                     and current_step.reduction == next_step.reduction
                 )
             )
-        )
+        ):
+            return current_step.challenger.game
+        return None
 
     def sort_game(self, game: frog_ast.Game) -> frog_ast.Game:
         new_game = copy.deepcopy(game)
@@ -1855,6 +1954,7 @@ def verify_proof_file(
     verbosity: Verbosity = Verbosity.QUIET,
     no_diagnose: bool = True,
     skip_lemmas: bool = False,
+    skip_bound: bool = False,
 ) -> frog_ast.ProofFile:
     """Parse, load imports, and verify a proof file. Returns the ProofFile on success."""
     # pylint: disable=import-outside-toplevel,cyclic-import
@@ -1863,7 +1963,12 @@ def verify_proof_file(
     proof_file = frog_parser.parse_proof_file(proof_path)
     semantic_analysis.check_well_formed(proof_file, proof_path)
 
-    engine = ProofEngine(verbosity, no_diagnose=no_diagnose, skip_lemmas=skip_lemmas)
+    engine = ProofEngine(
+        verbosity,
+        no_diagnose=no_diagnose,
+        skip_lemmas=skip_lemmas,
+        skip_bound=skip_bound,
+    )
 
     for imp in proof_file.imports:
         resolved = frog_parser.resolve_import_path(imp.filename, proof_path)

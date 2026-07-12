@@ -90,6 +90,32 @@ _KEYWORD_VARIABLES = {name: "\\" + name for name in _GREEK_LOWER + _GREEK_UPPER}
 # run of italic letters (``this`` -> ``t\,h\,i\,s``).
 _RESERVED_UPRIGHT = {"this": r"\mathsf{this}"}
 
+# The reduction's composed-game handle. By ProofFrog convention a reduction body
+# drives the security game it is reducing to through a free identifier named
+# ``challenger`` (the ``compose <Game>`` target). In output that composition is
+# already named in the game heading, so ``challenger.Query(m)`` renders as the
+# bare oracle call ``\Query(m)`` and a lone ``challenger`` as ``\mathcal{O}``.
+_ORACLE_VAR = "challenger"
+
+# Types whose values are ordinary data (rendered as italic variables) rather
+# than modules (schemes/groups/functions, rendered upright via a macro). Used to
+# decide a *capitalized* in-scope name: a ``Map``-typed local like ``HashTable``
+# is data (``\mathit{HashTable}``), whereas a ``Group`` ``G`` or ``Function`` H
+# is a module (``\mathsf{...}``). Names not in scope fall back to the lexical
+# capitalization heuristic.
+_DATA_TYPES = (
+    frog_ast.IntType,
+    frog_ast.BoolType,
+    frog_ast.BitStringType,
+    frog_ast.SetType,
+    frog_ast.ArrayType,
+    frog_ast.MapType,
+    frog_ast.ModIntType,
+    frog_ast.GroupElemType,
+    frog_ast.ProductType,
+    frog_ast.OptionalType,
+)
+
 # Field members that denote a group's generator/order. On parse paths that
 # kept them as a plain ``FieldAccess`` (rather than the dedicated
 # ``GroupGenerator`` / ``GroupOrder`` nodes) they are routed to the same
@@ -125,6 +151,23 @@ def _looks_like_algorithm_name(name: str) -> bool:
     if not name:
         return False
     return name[0].isupper() or name.isupper()
+
+
+def _style_identifier(stem: str) -> str:
+    """Wrap a multi-letter identifier stem as a single italic unit (``\\mathit``).
+
+    A run of italic letters (``HashTable`` -> ``H\\,a\\,s\\,h\\,T\\,a\\,b\\,l\\,e``)
+    reads as a product; ``\\mathit`` typesets the whole word as one variable,
+    matching paper convention. Applied only to a stem of two or more letters;
+    single letters are already correct as bare math italic, and an already-mapped
+    control sequence (a Greek command such as ``\\sigma``) or a token carrying
+    non-letters is left untouched.
+    """
+    if not stem or stem.startswith("\\"):
+        return stem
+    if len(stem) < 2 or not stem.isalpha():
+        return stem
+    return rf"\mathit{{{stem}}}"
 
 
 class ExprRenderer:
@@ -221,6 +264,8 @@ class ExprRenderer:
         # escaped), matching ``macros._mathsf_body``. A bare trailing-digit run
         # subscripts likewise. The head is never itself subscripted, so the two
         # paths can never compound into a double subscript.
+        if name == _ORACLE_VAR:
+            return r"\mathcal{O}"
         if name in _RESERVED_UPRIGHT:
             return _RESERVED_UPRIGHT[name]
         if name in _KEYWORD_VARIABLES:
@@ -252,7 +297,7 @@ class ExprRenderer:
             stem, digits = m.group(1), m.group(2)
             components.append(digits)
         components.extend(seg for seg in segments[1:] if seg)
-        stem = _KEYWORD_VARIABLES.get(stem, stem)
+        stem = _style_identifier(_KEYWORD_VARIABLES.get(stem, stem))
         if not components:
             return stem, None
         return stem, ",".join(components)
@@ -372,9 +417,7 @@ class ExprRenderer:
         return f"{callee}({args})"
 
     def _render_callee(self, func: frog_ast.Expression) -> str:
-        if isinstance(func, frog_ast.Variable) and _looks_like_algorithm_name(
-            func.name
-        ):
+        if isinstance(func, frog_ast.Variable) and self._is_module_name(func.name):
             return self.macros.register_algorithm(func.name)
         if isinstance(func, frog_ast.FieldAccess):
             # In call position the member is a method, so set it upright (as an
@@ -382,6 +425,23 @@ class ExprRenderer:
             # `\G.\mathsf{evaluate}(s)`, matching paper convention.
             return self._render_field(func, member_is_call=True)
         return self._render(func)
+
+    def _is_module_name(self, name: str) -> bool:
+        """Whether a *capitalized* ``name`` denotes a module (macro), not data.
+
+        A capitalized name is a module by default (a scheme/game/group/function
+        instance), *unless* it is a local bound in scope to a plain data type --
+        e.g. a ``Map``-typed reduction field ``HashTable`` is data and renders as
+        an italic variable, not ``\\mathsf{HashTable}``. Names absent from scope
+        keep the lexical capitalization heuristic.
+        """
+        if not _looks_like_algorithm_name(name):
+            return False
+        if self.name_types is not None:
+            scope_type = self.name_types.get(name)
+            if isinstance(scope_type, _DATA_TYPES):
+                return False
+        return True
 
     def _member_override(self, obj_name: str | None, member: str) -> str | None:
         if obj_name is not None:
@@ -401,6 +461,11 @@ class ExprRenderer:
     ) -> str:
         obj = expr.the_object
         obj_name = obj.name if isinstance(obj, frog_ast.Variable) else None
+        # A member of the reduction's challenger handle is an oracle call: drop
+        # the ``challenger.`` object and render just the (upright) oracle name --
+        # the composition is already named in the game heading.
+        if obj_name == _ORACLE_VAR:
+            return self.macros.register_algorithm(expr.name)
         override = self._member_override(obj_name, expr.name)
         if override is not None:
             return override
@@ -415,7 +480,7 @@ class ExprRenderer:
             return self.macros.register_group_symbol(
                 obj_name, _GROUP_SYMBOL_MEMBERS[expr.name]
             )
-        if isinstance(obj, frog_ast.Variable) and _looks_like_algorithm_name(obj.name):
+        if isinstance(obj, frog_ast.Variable) and self._is_module_name(obj.name):
             head = self.macros.register_algorithm(obj.name)
         else:
             head = self._render(obj)

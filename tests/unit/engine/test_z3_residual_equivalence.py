@@ -34,7 +34,7 @@ def test_return_tautology_redundant_disjunct_resolves() -> None:
     # `(a == b)` disjunct in game1's third conjunct resolves against the
     # `(a != b)` literal in another conjunct, leaving `c` which is
     # already a disjunct of game2's middle conjunct. This is the exact
-    # shape from CK_expanded_LEAK_BIND_K_CT step 3.
+    # shape from CK_expanded_LEAK_BIND_K_CT_DIFFKEY step 3.
     game1 = _parse_game(
         """
         Game G1() {

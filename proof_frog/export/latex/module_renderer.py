@@ -174,20 +174,31 @@ class ModuleRenderer:
         ]
         return ir.VStack(blocks=blocks, boxed=True)
 
-    def _game_title(self, g: frog_ast.Game, experiment_name: str | None) -> str:
-        """The math-mode title (without ``$`` delimiters) for a game."""
-        side_macro = self.macros.register_algorithm(g.name)
+    def _notion_title(self, g: frog_ast.Game, experiment_name: str | None) -> str:
+        """The math-mode block title ``Notion(params)`` (without ``$``).
+
+        The security notion names the whole definition (e.g. ``\\mathsf{GapCDH}(G)``);
+        the individual sides are labeled by the column captions below it. When no
+        experiment name is given (a bare game), the game's own name is the title.
+        """
         params = ", ".join(
             self._render_typed_name(p.name, p.type) for p in g.parameters
         )
         if experiment_name:
-            exp_macro = self.macros.register_security_notion(experiment_name)
-            return rf"\Experiment{{{exp_macro}}}{{{side_macro}}}{{{params}}}"
-        return rf"{side_macro}({params})" if params else side_macro
+            head = self.macros.register_security_notion(experiment_name)
+        else:
+            head = self.macros.register_algorithm(g.name)
+        return rf"{head}({params})" if params else head
+
+    def _side_caption(self, g: frog_ast.Game) -> str:
+        """The math-mode column caption for one side of a notion (its name)."""
+        return self.macros.register_algorithm(g.name)
 
     def render_game(self, g: frog_ast.Game, experiment_name: str | None = None) -> str:
         vstack = self._method_blocks_vstack(g)
-        title = self._game_title(g, experiment_name)
+        if experiment_name:
+            vstack.heading = f"${self._side_caption(g)}$"
+        title = self._notion_title(g, experiment_name)
         header = rf"\noindent\textbf{{Game}} ${title}$\par\medskip"
         return (
             header + "\n" + self.backend.fit_width(self.backend.render_vstack(vstack))
@@ -212,8 +223,10 @@ class ModuleRenderer:
         stacks = []
         for g in games:
             vstack = self._method_blocks_vstack(g)
-            vstack.heading = f"${self._game_title(g, experiment_name)}$"
+            vstack.heading = f"${self._side_caption(g)}$"
             stacks.append(vstack)
-        header = r"\noindent\textbf{Game}\par\medskip"
+        # One block title naming the notion, with the two sides captioned below.
+        title = self._notion_title(games[0], experiment_name)
+        header = rf"\noindent\textbf{{Game}} ${title}$\par\medskip"
         hstack = self.backend.render_hstack(ir.HStack(stacks=stacks))
         return header + "\n" + self.backend.fit_width(hstack)

@@ -87,8 +87,10 @@ def test_destructuring_names_are_subscripted() -> None:
     )
     line = _render_one(stmt)
     assert isinstance(line, ir.Sample)
-    assert line.lhs == r"(ss_{T,e}, ct_{1})"
-    assert "}_{" not in line.lhs
+    # Multi-letter stems are one italic unit; the tail segments comma-join into a
+    # single subscript group (never a stacked double subscript).
+    assert line.lhs == r"(\mathit{ss}_{T,e}, \mathit{ct}_{1})"
+    assert line.lhs.count("_{") == 2  # one subscript per name, no stacking
 
 
 def test_render_sample_minus_destructuring() -> None:

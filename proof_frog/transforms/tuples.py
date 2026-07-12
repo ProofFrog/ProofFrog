@@ -20,7 +20,12 @@ from ..visitors import (
     GetTypeMapVisitor,
     lvalue_base_name,
 )
-from ._base import TransformPass, PipelineContext, has_nondeterministic_call
+from ._base import (
+    TransformPass,
+    PipelineContext,
+    has_nondeterministic_call,
+    NearMiss,
+)
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
@@ -466,3 +471,168 @@ class CollapseSingleIndexTuple(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return CollapseSingleIndexTupleTransformer().transform(game)
+
+
+class _ProductLiteralValueRewriter(Transformer):
+    """Rewrites ``ProductType`` tuple literals into ``Tuple`` nodes inside a
+    single VALUE expression.
+
+    Instantiation and inlining substitute namespace values for variables, and
+    convert a ``Tuple`` whose members all satisfy ``isinstance(_, Type)`` into
+    a ``ProductType`` so that Set-alias substitutions land in type positions
+    as genuine types. Because ``Variable`` (and ``FieldAccess``) are both
+    ``Expression`` and ``Type``, this also mangles ordinary tuple literals of
+    bare variables (e.g. an inlined oracle argument ``[ss, ct]``) into
+    ``ProductType`` nodes in expression positions, which downstream passes
+    (``FoldTupleIndex``, ``TupleEqualityDecompose``) and ``Z3FormulaVisitor``
+    do not recognize as tuple literals.
+
+    This rewriter is applied only to expression slots that cannot hold a
+    type (if-conditions, assignment/return values, loop bounds/iterables,
+    map indices), so any ``ProductType`` it meets is a literal. Two guarded
+    positions are left untouched because a bare ``ProductType`` there
+    legitimately denotes a *space* rather than a literal: the operand of the
+    cardinality operator ``|...|``, and the right-hand side of
+    ``in``/``subsets``.
+    """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+
+    def transform_product_type(self, node: frog_ast.ProductType) -> frog_ast.ASTNode:
+        values = frog_ast.tuple_literal_values(node)
+        if values is not None and all(
+            isinstance(v, frog_ast.Expression) for v in values
+        ):
+            return frog_ast.Tuple([self.transform(v) for v in values])
+        if self.ctx is not None:
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="Normalize Product-Literal Tuples",
+                    reason=(
+                        "ProductType found in an expression position but not "
+                        "converted to a tuple literal: not all members are "
+                        "expressions"
+                    ),
+                    location=None,
+                    suggestion=None,
+                    variable=str(node),
+                    method=None,
+                )
+            )
+        return self._transform_children(node)
+
+    def transform_unary_operation(
+        self, node: frog_ast.UnaryOperation
+    ) -> frog_ast.ASTNode:
+        # `|X|` may take a space (type) operand: cardinality of a product
+        # space must stay a ProductType (a Tuple there would mean length).
+        if node.operator == frog_ast.UnaryOperators.SIZE:
+            return node
+        return self._transform_children(node)
+
+    def transform_binary_operation(
+        self, node: frog_ast.BinaryOperation
+    ) -> frog_ast.ASTNode:
+        # The RHS of `in` / `subsets` may be a space (type); leave it alone.
+        if node.operator in (
+            frog_ast.BinaryOperators.IN,
+            frog_ast.BinaryOperators.SUBSETS,
+        ):
+            new_left = self.transform(node.left_expression)
+            if new_left is node.left_expression:
+                return node
+            return frog_ast.BinaryOperation(
+                node.operator, new_left, node.right_expression
+            )
+        return self._transform_children(node)
+
+
+class NormalizeProductLiteralTransformer(BlockTransformer):
+    """Applies ``_ProductLiteralValueRewriter`` to every method-body
+    expression slot that can only hold a value, never a type. Declared types
+    (``the_type``, sample spaces, loop variable types) are never touched."""
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+
+    def _value(self, expr: frog_ast.Expression) -> frog_ast.Expression:
+        result: frog_ast.Expression = _ProductLiteralValueRewriter(self.ctx).transform(
+            expr
+        )
+        return result
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        new_statements: list[frog_ast.Statement] = []
+        changed = False
+        for statement in block.statements:
+            new_statement = self._rewrite_statement(statement)
+            changed = changed or new_statement is not statement
+            new_statements.append(new_statement)
+        return frog_ast.Block(new_statements) if changed else block
+
+    def _rewrite_statement(self, statement: frog_ast.Statement) -> frog_ast.Statement:
+        if isinstance(statement, frog_ast.Assignment):
+            # `Set S = ...;` binds a type alias; leave its RHS alone.
+            if isinstance(statement.the_type, frog_ast.SetType):
+                return statement
+            new_var = self._value(statement.var)
+            new_value = self._value(statement.value)
+            if new_var is statement.var and new_value is statement.value:
+                return statement
+            return frog_ast.Assignment(statement.the_type, new_var, new_value)
+        if isinstance(statement, frog_ast.Sample):
+            new_var = self._value(statement.var)
+            if new_var is statement.var:
+                return statement
+            return frog_ast.Sample(statement.the_type, new_var, statement.sampled_from)
+        if isinstance(statement, frog_ast.UniqueSample):
+            new_var = self._value(statement.var)
+            new_unique_set = self._value(statement.unique_set)
+            if new_var is statement.var and new_unique_set is statement.unique_set:
+                return statement
+            return frog_ast.UniqueSample(
+                statement.the_type,
+                new_var,
+                new_unique_set,
+                statement.sampled_from,
+                statement.surface_form,
+            )
+        if isinstance(statement, frog_ast.ReturnStatement):
+            new_expression = self._value(statement.expression)
+            if new_expression is statement.expression:
+                return statement
+            return frog_ast.ReturnStatement(new_expression)
+        if isinstance(statement, frog_ast.IfStatement):
+            new_conditions = [self._value(cond) for cond in statement.conditions]
+            if all(
+                new is old for new, old in zip(new_conditions, statement.conditions)
+            ):
+                return statement
+            return frog_ast.IfStatement(new_conditions, list(statement.blocks))
+        if isinstance(statement, frog_ast.NumericFor):
+            new_start = self._value(statement.start)
+            new_end = self._value(statement.end)
+            if new_start is statement.start and new_end is statement.end:
+                return statement
+            return frog_ast.NumericFor(
+                statement.name, new_start, new_end, statement.block
+            )
+        if isinstance(statement, frog_ast.GenericFor):
+            new_over = self._value(statement.over)
+            if new_over is statement.over:
+                return statement
+            return frog_ast.GenericFor(
+                statement.var_type,
+                statement.var_name,
+                new_over,
+                statement.block,
+            )
+        return statement
+
+
+class NormalizeProductLiteral(TransformPass):
+    name = "Normalize Product-Literal Tuples"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return NormalizeProductLiteralTransformer(ctx).transform(game)

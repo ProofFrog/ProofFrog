@@ -909,6 +909,29 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         else:
             self.stack.append(tuple(items))
 
+    def leave_product_type(self, node: frog_ast.ProductType) -> None:
+        # A ProductType can reach the formula visitor in EXPRESSION position:
+        # instantiation converts an all-Variable tuple literal (e.g. an
+        # inlined oracle argument `[ss, ct]`) into a ProductType because
+        # Variable is both Expression and Type. Without this handler the
+        # node's visited children leaked onto the stack (the same defect the
+        # Slice handler fixes above), so an enclosing equality popped the two
+        # nearest components and produced a WRONG formula -- e.g.
+        # `[a, b] == [c, d]` became `c == d`. Treat it exactly like a Tuple
+        # literal: pop one item per member and push the component tuple.
+        # NormalizeProductLiteral rewrites these nodes to Tuples during
+        # canonicalization; this handler is defense-in-depth for visitor
+        # uses on not-yet-normalized ASTs.
+        n = len(node.types)
+        items = []
+        for _ in range(n):
+            items.append(self.stack.pop() if self.stack else None)
+        items.reverse()
+        if any(item is None for item in items):
+            self.stack.append(None)
+        else:
+            self.stack.append(tuple(items))
+
     def leave_array_access(self, _node: frog_ast.ArrayAccess) -> None:
         index = self.stack.pop() if self.stack else None
         array = self.stack.pop() if self.stack else None
@@ -955,7 +978,16 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
             self.stack.append(None)
 
     def leave_unary_operation(self, operation: frog_ast.UnaryOperation) -> None:
-        if not self.stack or operation.operator == frog_ast.UnaryOperators.SIZE:
+        if operation.operator == frog_ast.UnaryOperators.SIZE:
+            # `|x|` is not modelled, but the operand's visited item must
+            # still be popped: leaving it on the stack misaligns every
+            # enclosing operation's pops (the same stack-discipline defect
+            # the Slice handler above describes).
+            if self.stack:
+                self.stack.pop()
+            self.stack.append(None)
+            return
+        if not self.stack:
             self.stack.append(None)
             return
 

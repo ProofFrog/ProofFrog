@@ -105,6 +105,7 @@ from .tuples import (
     ExpandTuple,
     SimplifyTuple,
     CollapseSingleIndexTuple,
+    NormalizeProductLiteral,
 )
 from .standardization import (
     VariableStandardize,
@@ -117,6 +118,7 @@ from .standardization import (
 
 CORE_PIPELINE: list[TransformPass] = [
     AlphaRename(),
+    NormalizeProductLiteral(),
     SingleCallFieldToLocal(),
     CounterGuardedFieldToLocal(),
     SymbolicComputation(),

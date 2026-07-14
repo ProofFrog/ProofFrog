@@ -280,17 +280,25 @@ def test_emit_one_oracle_chain_no_transforms_init() -> None:
     assert outer[-1] == "qed."
 
 
-def test_emit_one_oracle_chain_init_inline_equiv_gated_on_canonical_equality() -> None:
-    # When the two init endpoints' canonical bodies DIFFER, the inline-
-    # equivalence shortcut must NOT fire -- the chain (bridge + chain lemma) is
-    # emitted instead, so the emitter never silently claims inline-equivalence
-    # for genuinely different init bodies.
+def test_emit_one_oracle_chain_init_inline_equiv_gated_on_body_equality() -> None:
+    # The inline-equivalence shortcut (``proc; inline *; sim``) fires iff the two
+    # FIRST flat-state (raw-wrapper) bodies are identical -- what ``sim`` actually
+    # relates. It must NOT fire for GENUINELY different init bodies (else it is a
+    # silently-failing vacuous tactic). Here the right init SAMPLES its field (a
+    # real difference that survives flat rendering, unlike a dead post-``return``
+    # statement), so the raw wrappers differ and the chain (bridge + chain lemma)
+    # is emitted instead. (A later CHAIN state diverging while the raw wrappers
+    # stay equal -- e.g. one side unpacking a packed key it reads component-wise
+    # -- is the opposite case and DOES take the shortcut; see the expanded
+    # LEAK-BIND-K-CT proofs.)
     g_left = _two_oracle_game("G")
     g_right = _two_oracle_game("G")
-    # Make the right init body differ (append an extra return so it is not equal
-    # to the left init body, and not a pure reorder of a single statement).
-    g_right.methods[0].block.statements.append(
-        frog_ast.ReturnStatement(frog_ast.Variable("sk"))
+    # Make the right init body genuinely differ: sample the returned field. A
+    # sample is not dead code, so it survives into the flat state (an appended
+    # post-return statement would be dropped and leave the bodies equal).
+    g_right.methods[0].block.statements.insert(
+        0,
+        frog_ast.Sample(_bs(), frog_ast.Variable("sk"), frog_ast.Variable("D")),
     )
     chunks, outer, _pres = _emit_one_oracle_chain(
         hop_index=0,

@@ -3267,9 +3267,18 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
     det_methods: dict[str, set[str]],
     init_repacks: bool = False,
     init_decomposition: bool = False,
+    require_equal_bodies: bool = False,
 ) -> tuple[list[str], set[tuple[str, str]], str] | None:
     """Closing tactic for an init-oracle equiv whose two endpoints have
     identical canonical bodies.
+
+    ``require_equal_bodies`` (set when the caller reaches the peel WITHOUT the
+    last-flat-state equality gate) demands the two FIRST flat-state bodies be
+    identical before emitting any tactic: the backbone comparison ignores
+    non-call/sample statements, so a genuinely-different body (e.g. an extra
+    ``return``) can share a backbone -- ``proc; inline *; sim`` would then be a
+    silently-failing (vacuous) tactic. With equal bodies, ``inline *; sim``
+    provably closes.
 
     ``init_repacks`` is True when one side is a reduction that HOLDS the live
     field itself and therefore repacks the challenger's ``Initialize`` tuple
@@ -3332,6 +3341,8 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
     if not lmod.procs or not rmod.procs:
         return None
     l_body, r_body = lmod.procs[0].body, rmod.procs[0].body
+    if require_equal_bodies and l_body != r_body:
+        return None
     l_bb = _call_sample_backbone(l_body)
     r_bb = _call_sample_backbone(r_body)
 
@@ -3709,33 +3720,23 @@ def _emit_one_oracle_chain(
     if is_init:
         proj_l = _project_to_method(left_states[-1], oracle_name)
         proj_r = _project_to_method(right_states[-1], oracle_name)
-        if (
+        last_states_match = (
             proj_l is not None
             and proj_r is not None
             and proj_l.methods[0] == proj_r.methods[0]
+        )
+        # Seedbased PK binding: the coupling carries the ek-DERIVATION
+        # ``(R.ek, R.seed) = DeriveKeyPair_ev(R.seed)`` (contains ``ev_``),
+        # which ``proc; inline *`` cannot prove (unpredictable inline names).
+        # Route through the flat-state ev-twin transitivity. Gated on the
+        # ev-form so every non-ek init is byte-identical.
+        if (
+            last_states_match
+            and full_coupling is not None
+            and "ev_" in full_coupling
+            and clone_alias
         ):
-            # Seedbased PK binding: the coupling carries the ek-DERIVATION
-            # ``(R.ek, R.seed) = DeriveKeyPair_ev(R.seed)`` (contains ``ev_``),
-            # which ``proc; inline *`` cannot prove (unpredictable inline names).
-            # Route through the flat-state ev-twin transitivity. Gated on the
-            # ev-form so every non-ek init is byte-identical.
-            if full_coupling is not None and "ev_" in full_coupling and clone_alias:
-                ek_twin = _synth_init_ek_twin(
-                    modules,
-                    oracle_name,
-                    left_states[0],
-                    right_states[0],
-                    external_module_types,
-                    method_return_types,
-                    flat_params,
-                    det_methods,
-                    clone_alias,
-                    full_coupling,
-                    hop_index=hop_index,
-                )
-                if ek_twin is not None:
-                    return ek_twin
-            peel = _synth_init_backbone_peel(
+            ek_twin = _synth_init_ek_twin(
                 modules,
                 oracle_name,
                 left_states[0],
@@ -3744,12 +3745,38 @@ def _emit_one_oracle_chain(
                 method_return_types,
                 flat_params,
                 det_methods,
-                init_repacks=init_repacks,
-                init_decomposition=init_decomposition,
+                clone_alias,
+                full_coupling,
+                hop_index=hop_index,
             )
-            if peel is not None:
-                tactic, pres, rung = peel
-                return [], [_res_tag(rung), *tactic, "qed."], pres
+            if ek_twin is not None:
+                return ek_twin
+        # The backbone peel operates on the FIRST flat states (the raw wrappers
+        # the init lemma actually relates), so it is valid even when the LAST
+        # states diverge: a chain transform can unpack one side's packed key
+        # (the Breakable game reads its DecapsKey components in ``Challenge`` so
+        # the canonicalizer splits its field, while the reduction keeps it
+        # packed) without changing the raw-wrapper init -- ``proc; inline *; sim``
+        # still closes. It has its own conservative gate (matching first-state
+        # backbones, pure delegate), so it declines to ``None`` where a real
+        # coupling is needed and every other init stays byte-identical.
+        peel = _synth_init_backbone_peel(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            flat_params,
+            det_methods,
+            init_repacks=init_repacks,
+            init_decomposition=init_decomposition,
+            require_equal_bodies=not last_states_match,
+        )
+        if peel is not None:
+            tactic, pres, rung = peel
+            return [], [_res_tag(rung), *tactic, "qed."], pres
+        if last_states_match:
             # Backbone reorder (same multiset, different order, functionalizable
             # NG det calls): the functional-twin route.
             twin = _synth_init_twin_reorder(

@@ -2892,12 +2892,25 @@ def export_proof_file(proof_path: str) -> str:
         ``ArrayAccess`` element assigns (``ek = _tup[0]; seed = _tup[1]``); the
         scheme ``KeyGen`` return is ``[EncapsKey, DecapsKey]`` so element 0 is the
         EncapsKey, element 1 the seed. Only pairs where BOTH targets are declared
-        reduction FIELDS are returned: a reduction that discards the EncapsKey (CT
-        binding: ``ek`` is a local) yields nothing -> byte-identical coupling."""
+        reduction FIELDS are returned AND the DecapsKey field is a ``BitString``
+        seed: the ek-derivation coupling functionalizes ``DeriveKeyPair(seed)`` =
+        ``G.evaluate(seed) -> slice -> ...``, which is only well-typed when the
+        held DecapsKey IS the seed (the *seedbased* combiners, whose ``KeyGen``
+        samples a seed and stores it as the DecapsKey). The *expanded* combiners
+        hold a packed component-key tuple as the DecapsKey and call the component
+        KeyGens directly (no seed, no ``DeriveKeyPair``), so ``G.evaluate`` cannot
+        apply -- yielding no pairs keeps their coupling free of the ill-typed
+        ``ev_evaluate <packed key>``. A reduction that discards the EncapsKey (CT
+        binding: ``ek`` is a local) also yields nothing -> byte-identical."""
         init = _find_init(red)
         if init is None:
             return []
         field_names = {f.name for f in red.fields}
+        seed_field_types = {
+            f.name: f.type
+            for f in red.fields
+            if isinstance(f.type, frog_ast.BitStringType)
+        }
         keygen_tmps: list[str] = []  # ordered by Initialize statement order
         ek_of: dict[str, str] = {}
         seed_of: dict[str, str] = {}
@@ -2925,7 +2938,9 @@ def export_proof_file(proof_path: str) -> str:
                 elif val.index.num == 1:
                     seed_of[val.the_array.name] = stmt.var.name
         return [
-            (ek_of[t], seed_of[t]) for t in keygen_tmps if t in ek_of and t in seed_of
+            (ek_of[t], seed_of[t])
+            for t in keygen_tmps
+            if t in ek_of and t in seed_of and seed_of[t] in seed_field_types
         ]
 
     def _local_field_tuples(

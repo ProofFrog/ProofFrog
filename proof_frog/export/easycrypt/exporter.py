@@ -1404,6 +1404,24 @@ def export_proof_file(proof_path: str) -> str:
         if primitive_name_by_game_file[gf.name] == primitive.name
     ]
 
+    # A game file may carry ``Set``-typed formal parameters alongside its
+    # primitive parameter -- the random-oracle IND-CCA game
+    # ``Real(KEM K, Set D, Set R, Function<D,R> H)`` names its hash domain
+    # ``D`` and range ``R`` as abstract sets. Inside the abstract theory these
+    # are abstract types (``type d.`` / ``type r.``), exactly like a primitive
+    # Set-field carrier; the theorem instantiation (``BitString<hybrid.Nin>``
+    # etc.) binds them at the concrete-clone site. Register them here so an
+    # oracle signature ``hash(m : D) : R`` translates instead of crashing on
+    # ``Variable: D``. Byte-identical for every game file whose only non-Int
+    # parameter is the primitive one (no Set params -> no map entries).
+    for gf in primary_game_files:
+        for gp in gf.games[0].parameters:
+            if (
+                isinstance(gp.type, frog_ast.SetType)
+                and gp.name not in abstract_types_map
+            ):
+                abstract_types_map[gp.name] = gp.name.lower()
+
     # Each game inside the abstract theory takes a single primitive-typed
     # parameter (e.g. ``Game Real(PRG G)``). Inside the theory, that
     # parameter is just a module variable; ``G.lambda`` has no first-class

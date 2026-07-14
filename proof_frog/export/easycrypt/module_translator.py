@@ -1561,9 +1561,21 @@ def _field_renames_for(game_fields: list[frog_ast.Field]) -> dict[str, str]:
 def _seed_type_map(
     stmt: frog_ast.Statement, type_map: dict[str, frog_ast.Type]
 ) -> None:
-    """Record declared-variable types into the map for the expr translator."""
+    """Record declared-variable types into the map for the expr translator.
+
+    Recurses into a ``for e in m.entries`` map-iteration loop (a ``GenericFor``)
+    so locals declared in its body -- e.g. ``BitString<n> m = e[0];`` whose
+    ``m`` is later sliced -- plus the loop variable ``e`` are typed. Scoped to
+    ``GenericFor`` only: it is the sole loop the exporter translates (every
+    other body with one witness-stubs), so no pre-existing translated body is
+    affected. ``if`` blocks are NOT descended (that broadly perturbs the type
+    map and changes unrelated exports)."""
     if isinstance(stmt, (frog_ast.Sample, frog_ast.Assignment)):
         if stmt.the_type is not None and isinstance(stmt.var, frog_ast.Variable):
             type_map[stmt.var.name] = stmt.the_type
     elif isinstance(stmt, frog_ast.VariableDeclaration):
         type_map[stmt.name] = stmt.type
+    elif isinstance(stmt, frog_ast.GenericFor):
+        type_map[stmt.var_name] = stmt.var_type
+        for inner in stmt.block.statements:
+            _seed_type_map(inner, type_map)

@@ -56,6 +56,20 @@ class StatementTranslator:
             return False
         return isinstance(resolved, frog_ast.MapType)
 
+    def _is_optional_expr(self, expr: frog_ast.Expression) -> bool:
+        """True if ``expr`` already has an optional (``T?``) type.
+
+        A return of such an expression in an optional proc must NOT be
+        re-wrapped in ``Some`` (that would double-wrap to ``T option option``);
+        only a base-typed value is coerced up. Errs to ``False`` (wrap) when
+        the type is unknown -- the historical behavior for a plain value."""
+        try:
+            return self._types.translate_type(self._exprs.type_of(expr)).text.endswith(
+                " option"
+            )
+        except (NotImplementedError, KeyError):
+            return False
+
     def translate_block(
         self,
         block: frog_ast.Block,
@@ -178,7 +192,7 @@ class StatementTranslator:
                 self._lower_map_for(stmt, rest, decls, out_stmts, return_type, result)
                 return
             if isinstance(stmt, frog_ast.ReturnStatement):
-                self._lower_return_to(result, stmt, decls, out_stmts)
+                self._lower_return_to(result, stmt, decls, out_stmts, return_type)
                 return
             self._translate_stmt(stmt, decls, out_stmts, return_type)
 
@@ -266,7 +280,7 @@ class StatementTranslator:
         result: str,
         found: str,
     ) -> None:
-        """Translate a map-loop body whose match arm ends in a ``return``.
+        r"""Translate a map-loop body whose match arm ends in a ``return``.
 
         The arm ``if (COND) { ...; return X }`` becomes ``if (COND /\ !found)
         { ...; result <- X; found <- true }`` so the first matching entry wins
@@ -278,30 +292,55 @@ class StatementTranslator:
                 then_stmts: list[ec_ast.EcStmt] = []
                 for s in body[:-1]:
                     self._translate_stmt(s, decls, then_stmts, return_type)
-                self._lower_return_to(result, body[-1], decls, then_stmts)
+                self._lower_return_to(result, body[-1], decls, then_stmts, return_type)
                 then_stmts.append(ec_ast.Assign(found, "true"))
                 guard = self._exprs.translate(stmt.conditions[0])
                 out_stmts.append(ec_ast.If(f"({guard}) /\\ ! {found}", then_stmts, []))
             else:
                 self._translate_stmt(stmt, decls, out_stmts, return_type)
 
-    def _lower_return_to(
+    def _lower_return_to(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         result: str,
         ret_stmt: frog_ast.Statement,
         decls: list[ec_ast.VarDecl],
         out_stmts: list[ec_ast.EcStmt],
+        return_type: ec_ast.EcType | None = None,
     ) -> None:
-        """Render ``return X`` as an assignment ``result <- X`` / ``result <@ X``."""
+        """Render ``return X`` as an assignment ``result <- X`` / ``result <@ X``.
+
+        When the proc returns an optional (``T?`` -> ``T option``), a ``None``
+        return stays ``None`` and any other return is wrapped ``Some (...)``
+        (FrogLang implicitly coerces a base value into the optional). For a
+        non-optional proc this is byte-identical to the former direct form
+        (``None`` never appears there)."""
         assert isinstance(ret_stmt, frog_ast.ReturnStatement)
         expr = ret_stmt.expression
+        optional = return_type is not None and return_type.text.endswith(" option")
+        if isinstance(expr, frog_ast.NoneExpression):
+            out_stmts.append(ec_ast.Assign(result, "None"))
+            return
+        # Wrap ``Some`` only when coercing a *base* value up into the optional;
+        # an already-optional expression (e.g. an ``T?`` local, or another
+        # optional call) is returned as-is (wrapping would double it).
+        wrap = optional and not self._is_optional_expr(expr)
         if _is_module_call(expr):
             assert isinstance(expr, frog_ast.FuncCall)
             callee = self._render_module_call_target(expr.func)
             args = self._render_call_args(expr, decls, out_stmts)
-            out_stmts.append(ec_ast.Call(result, callee, args))
+            if wrap and return_type is not None:
+                base = ec_ast.EcType(return_type.text[: -len(" option")])
+                tmp = _fresh_name_avoiding(decls, out_stmts, set())
+                decls.append(ec_ast.VarDecl(tmp, base))
+                out_stmts.append(ec_ast.Call(tmp, callee, args))
+                out_stmts.append(ec_ast.Assign(result, f"Some ({tmp})"))
+            else:
+                out_stmts.append(ec_ast.Call(result, callee, args))
             return
-        out_stmts.append(ec_ast.Assign(result, self._exprs.translate(expr)))
+        rhs = self._exprs.translate(expr)
+        if wrap:
+            rhs = f"Some ({rhs})"
+        out_stmts.append(ec_ast.Assign(result, rhs))
 
     def _translate_stmt(
         self,
@@ -320,6 +359,14 @@ class StatementTranslator:
             self._handle_assign(stmt, decls, stmts)
             return
         if isinstance(stmt, frog_ast.ReturnStatement):
+            optional = return_type is not None and return_type.text.endswith(" option")
+            if isinstance(stmt.expression, frog_ast.NoneExpression):
+                stmts.append(ec_ast.Return("None"))
+                return
+            # Wrap ``Some`` only when coercing a base value up; an
+            # already-optional return (e.g. calling another optional method)
+            # passes through unwrapped.
+            wrap = optional and not self._is_optional_expr(stmt.expression)
             if _is_module_call(stmt.expression):
                 call = stmt.expression
                 assert isinstance(call, frog_ast.FuncCall)
@@ -334,10 +381,18 @@ class StatementTranslator:
                     ec_type = self._types.translate_type(self._exprs.type_of(call))
                 args = self._render_call_args(call, decls, stmts)
                 fresh = _fresh_name(decls, stmts)
-                decls.append(ec_ast.VarDecl(fresh, ec_type))
                 callee = self._render_module_call_target(call.func)
-                stmts.append(ec_ast.Call(fresh, callee, args))
-                stmts.append(ec_ast.Return(fresh))
+                if wrap and return_type is not None:
+                    # The call yields the base ``T``; wrap it ``Some`` to match
+                    # the ``T option`` return type.
+                    ec_type = ec_ast.EcType(return_type.text[: -len(" option")])
+                    decls.append(ec_ast.VarDecl(fresh, ec_type))
+                    stmts.append(ec_ast.Call(fresh, callee, args))
+                    stmts.append(ec_ast.Return(f"Some ({fresh})"))
+                else:
+                    decls.append(ec_ast.VarDecl(fresh, ec_type))
+                    stmts.append(ec_ast.Call(fresh, callee, args))
+                    stmts.append(ec_ast.Return(fresh))
                 return
             # The returned expression may embed module calls (EC has no calls
             # inside expressions): e.g. the KDF collision-resistance challenger
@@ -345,7 +400,10 @@ class StatementTranslator:
             # every embedded call into a preceding ``<@`` statement, then
             # return the now call-free expression.
             hoisted = self._hoist_calls_in_expr(stmt.expression, decls, stmts)
-            stmts.append(ec_ast.Return(self._exprs.translate(hoisted)))
+            rhs = self._exprs.translate(hoisted)
+            if wrap:
+                rhs = f"Some ({rhs})"
+            stmts.append(ec_ast.Return(rhs))
             return
         if (
             self._allow_void_call
@@ -423,7 +481,26 @@ class StatementTranslator:
             stmts.append(ec_ast.Call(var.name, callee, args))
             return
         rhs = self._exprs.translate(stmt.value)
+        # Reconcile optional-ness across the assignment: canonicalization makes
+        # optionals transparent, so a ``T? x = <base expr>`` flat-state decl
+        # assigns a base value to an optional local (needs ``Some``), and the
+        # reverse (a ``T?`` value into a base local) needs ``oget``. No-op when
+        # both sides agree -- so non-optional bodies are byte-identical.
+        lhs_opt = self._lhs_is_optional(var, stmt.the_type)
+        rhs_opt = self._is_optional_expr(stmt.value)
+        if lhs_opt and not rhs_opt:
+            rhs = f"Some ({rhs})"
+        elif rhs_opt and not lhs_opt:
+            rhs = f"oget ({rhs})"
         stmts.append(ec_ast.Assign(var.name, rhs))
+
+    def _lhs_is_optional(
+        self, var: frog_ast.Variable, the_type: frog_ast.Type | None
+    ) -> bool:
+        """True if the assignment target has an optional (``T?``) type."""
+        if the_type is not None:
+            return self._types.translate_type(the_type).text.endswith(" option")
+        return self._is_optional_expr(var)
 
     def _render_module_call_target(self, func: frog_ast.Expression) -> str:
         """Render ``E.KeyGen`` as ``E.keygen``; apply module-var aliases.

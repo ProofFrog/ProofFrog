@@ -225,6 +225,13 @@ class TypeCollector:
 
     def translate_type(self, t: frog_ast.Type) -> ec_ast.EcType:
         """Translate a FrogLang type to an EC type, registering it."""
+        # An optional type ``T?`` is EC's ``T option``. Handled first, before
+        # ``resolve`` (which unwraps ``OptionalType`` for its own alias-chasing
+        # purposes) would collapse it to the base ``T``. Optional-returning
+        # methods (``Decaps``/``Indirect``, and the SymEnc ``Dec`` family)
+        # become genuinely optional so a live ``return None`` is faithful.
+        if isinstance(t, frog_ast.OptionalType):
+            return ec_ast.EcType(f"{self.translate_type(t.the_type).text} option")
         # Abstract-types check runs before alias resolution so that
         # primitive-level types (Key, Message, Ciphertext) stay abstract
         # even when a scheme alias would otherwise concretize them.

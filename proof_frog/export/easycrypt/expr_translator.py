@@ -56,6 +56,9 @@ class ExpressionTranslator:
             return str(expr.num)
         if isinstance(expr, frog_ast.Boolean):
             return "true" if expr.bool else "false"
+        if isinstance(expr, frog_ast.NoneExpression):
+            # The ``None`` of an optional type ``T?`` -> ``T option``.
+            return "None"
         if isinstance(expr, frog_ast.BitStringLiteral):
             if expr.bit != 0:
                 raise NotImplementedError(

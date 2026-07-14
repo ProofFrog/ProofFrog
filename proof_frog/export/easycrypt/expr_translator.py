@@ -40,6 +40,14 @@ class ExpressionTranslator:
         """Return the FrogLang type of ``expr`` using the configured resolver."""
         return self._type_of(expr)
 
+    def _is_map(self, expr: frog_ast.Expression) -> bool:
+        """True if ``expr`` has a FrogLang finite-map type ``Map<K, V>``."""
+        try:
+            resolved = self._types.resolve(self._type_of(expr))
+        except (NotImplementedError, KeyError):
+            return False
+        return isinstance(resolved, frog_ast.MapType)
+
     def translate(self, expr: frog_ast.Expression) -> str:
         """Render `expr` as an EC expression string."""
         if isinstance(expr, frog_ast.Variable):
@@ -84,6 +92,16 @@ class ExpressionTranslator:
         if isinstance(expr, frog_ast.Tuple):
             parts = [self.translate(v) for v in expr.values]
             return "(" + ", ".join(parts) + ")"
+        if isinstance(expr, frog_ast.ArrayAccess) and self._is_map(expr.the_array):
+            # Finite-map lookup ``m[k]`` (a lazy random-oracle table read).
+            # SmtMap's ``m.[k]`` returns ``V option``; FrogLang's ``m[k]``
+            # returns the value ``V`` and is only evaluated where ``k`` is a
+            # key (the game guards every read with ``if (k in m)``), so
+            # ``oget`` extracts it. Checked before the integer-index tuple
+            # branch so a ``Map<Int, V>`` still routes here.
+            arr = self.translate(expr.the_array)
+            idx = self.translate(expr.index)
+            return f"(oget {_paren(arr)}.[{idx}])"
         if isinstance(expr, frog_ast.ArrayAccess) and isinstance(
             expr.index, frog_ast.Integer
         ):
@@ -117,6 +135,13 @@ class ExpressionTranslator:
             left = self.translate(expr.left_expression)
             right = self.translate(expr.right_expression)
             return f"{_paren(left)} {op} {_paren(right)}"
+        if expr.operator == frog_ast.BinaryOperators.IN:
+            # ``k in m`` membership. For a finite map this is SmtMap's
+            # ``k \in m`` (defined as ``k \in dom m``); EC's ``\in`` notation
+            # covers the fmap domain, so no ``dom`` is needed.
+            left = self.translate(expr.left_expression)
+            right = self.translate(expr.right_expression)
+            return f"{_paren(left)} \\in {_paren(right)}"
         if expr.operator == frog_ast.BinaryOperators.ADD:
             lhs_type = self._types.resolve(self._type_of(expr.left_expression))
             if isinstance(lhs_type, frog_ast.BitStringType):

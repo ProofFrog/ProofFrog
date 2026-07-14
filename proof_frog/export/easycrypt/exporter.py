@@ -2699,6 +2699,44 @@ def export_proof_file(proof_path: str) -> str:
         )
         return search.visit(init.block) is not None
 
+    def _reduction_renamed_live_field(reduction_name: str, field: str) -> str | None:
+        """The reduction's OWN field holding the game's live state under a
+        different name -- a self-keygen reduction that generates the theorem
+        game's key pair itself and returns its own field at the game live
+        field's return position (the game returns ``dk0`` there, the reduction
+        its own ``seed0``), then forwards the CHALLENGE oracle to a STATELESS
+        challenger. The live state is on the reduction, not the (stateless)
+        challenger, so couple to ``R.seed0`` -- ``R.<field>`` / ``challenger.dk0``
+        do not exist.
+
+        ``None`` unless the return-position element is a bare own field AND the
+        reduction's return has the SAME arity as the game's (so positions
+        correspond): a decomposition tuple (``dk0 = [dk_PQ_0, ...]``, the two-R
+        shape), a challenger-sourced projection (``dk0 <- _tup[1]``, the
+        pure-delegate shape), and an arity mismatch (the game's single composite
+        ``pk`` field constructed from the reduction's ``[pk1, pk2]`` return, as in
+        GHP18's ``R_PRF1``) all decline, keeping those proofs' existing coupling."""
+        reduction = _get_reduction(reduction_name)
+        if reduction is None:
+            return None
+        outer_gf = game_file_by_name.get(proof.theorem.name)
+        if outer_gf is None or not outer_gf.games:
+            return None
+        game = outer_gf.games[0]
+        idx = _game_field_positions(game).get(field)
+        game_elems = _return_elems(_find_init(game))
+        if idx is None or game_elems is None:
+            return None
+        red_elems = _return_elems(_find_init(reduction))
+        if red_elems is None or len(red_elems) != len(game_elems):
+            return None
+        elem = red_elems[idx]
+        if isinstance(elem, frog_ast.Variable) and elem.name in {
+            f.name for f in reduction.fields
+        }:
+            return elem.name
+        return None
+
     def _live_state_ref(step: frog_ast.Step) -> str:
         """Field-qualified EC reference to a step endpoint's live state, e.g.
         ``G_RandKey.pk`` or ``K_c.KEM_INDCPA_MultiChal_Random.pk``.
@@ -2712,6 +2750,31 @@ def export_proof_file(proof_path: str) -> str:
         if step.reduction is not None:
             inner = pt.module_base_name(pt.last_module_arg(module_expr))
             if not _reduction_holds_field(step.reduction.name, field):
+                # pylint: disable=protected-access
+                chal_game = engine._get_game_ast(step.challenger, None)
+                # pylint: enable=protected-access
+                # Stateless challenger: no ``Initialize`` (holds no live state
+                # across oracle calls, e.g. ``KDFCollisionResistance`` whose only
+                # oracle is ``Challenge(x0, x1)``). GHP18's PRF challenger HAS an
+                # ``Initialize`` (generates/stores its key) -> stateful -> excluded.
+                renamed = (
+                    _reduction_renamed_live_field(step.reduction.name, field)
+                    if chal_game is not None and _find_init(chal_game) is None
+                    else None
+                )
+                if renamed is not None:
+                    # Self-keygen reduction forwarding to a STATELESS challenger:
+                    # it generates the game key pair itself and holds the live
+                    # state under its own (renamed) field (game returns ``dk0``, R
+                    # its own ``seed0``), forwarding the oracle to a challenger that
+                    # holds no state. The live state is therefore on the reduction,
+                    # not the (stateless) challenger -- couple to ``R.<renamed>``.
+                    # A STATEFUL challenger (which itself holds the live field, e.g.
+                    # GHP18's PRF challenger) keeps the challenger-seam path, so
+                    # those proofs stay byte-identical.
+                    holder = pt.module_base_name(module_expr)
+                    live_state_holders.add(holder)
+                    return f"{holder}.{renamed}"
                 # Stateless reduction delegates: the live state is in the
                 # challenger sub-module.
                 holder = inner

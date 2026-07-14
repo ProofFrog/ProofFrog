@@ -289,6 +289,17 @@ The two games (typically named `Left`/`Right` or `Real`/`Random`) represent the 
 
 FrogLang uses the **left/right (indistinguishability)** formulation exclusively, rather than win/lose games. Security properties from the literature that are naturally stated as win/lose (e.g., unforgeability) can be reformulated as left/right indistinguishability games.
 
+**Advantage clause (helper games).** A `.game` file may declare its statistical distinguishing bound with an optional `advantage <= <expr>;` clause between the two games and `export as`:
+
+```
+Game Left(Set S) { ... }
+Game Right(Set S) { ... }
+advantage <= count_Samp * count_Samp / |S|;
+export as DistinctSampling;
+```
+
+The bound is numeric arithmetic (`+ - * / ^`, `|S|` cardinality, literals) over the games' shared parameters and per-oracle query counts written `count_<Oracle>`, where `<Oracle>` names a (non-`Initialize`) method of the games. It is a *declared, unconditional* fact — the semantic checker enforces only well-formedness, and it is trusted like the helper game itself. So only helper games that encode statistical facts (e.g. `examples/Games/Helpers/`) carry a clause; genuine cryptographic assumptions get none. When such a helper is used in an assumption hop, the engine substitutes the clause to turn the hop's opaque advantage term into this concrete statistical expression, stated in the theorem game's own query counts.
+
 ### 5.5 Phases
 
 Games may be organized into **phases** for security definitions that involve distinct stages of interaction (e.g., CCA security):
@@ -513,6 +524,7 @@ games:
 - **`let:`** — Declares parameters and instantiates schemes. These definitions are in scope throughout the proof.
 - **`assume:`** — Lists security properties assumed to hold for underlying primitives/schemes. These justify assumption hops.
 - **`theorem:`** — The target security property to be proven.
+- **`bound:`** (optional, between `theorem:` and `games:`) — the advantage bound the author claims the proof establishes. Numeric arithmetic over `advantage(<notion> compose <reduction>)` terms (the reduction named from the proof's own declarations; `advantage(<notion>)` for a directly-played hop), per-oracle counts `count_<Oracle>` of the theorem game, cardinalities `|Type|`, and `let:` parameters. After the proof verifies, the engine checks the claim is a valid upper bound on the bound it synthesizes from the hops and reports `verified` / `NOT verified` / `undecided`; a `NOT verified` claim fails `prove` unless `--skip-bound` is passed. "verified" means the claim is a valid (possibly loose) upper bound, not an independent security proof.
 - **`games:`** — A sequence of game steps forming the proof.
 
 ### 8.2 The Game Sequence

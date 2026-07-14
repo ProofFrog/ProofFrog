@@ -1048,6 +1048,13 @@ def export_proof_file(proof_path: str) -> str:
     # ``declare module``, functor parameters). Rename any lowercase such name
     # to an uppercase-initial form throughout the proof AST *before* the
     # engine inlines and the exporter emits, so every EC reference agrees.
+    # Keep the PRE-rename proof for the engine validation below: the rename is
+    # a purely cosmetic EC-naming pass, but it is applied to the theorem/steps
+    # and NOT the reduction helpers, which leaves a reduction that holds a
+    # packed scheme-typed field (Universal-combiner ``hybrid.DecapsKey``)
+    # unresolvable -> the internal ``engine.prove`` FailedProofs even though the
+    # proof verifies. Validate the consistent pre-rename proof instead.
+    proof_for_validation = copy.deepcopy(proof)
     _normalize_ec_module_names(proof, primitives_by_name, schemes_by_name)
 
     # The primary instance is the one whose instance appears in the theorem.
@@ -2175,19 +2182,37 @@ def export_proof_file(proof_path: str) -> str:
     )
 
     # Validate proof via the engine (same as before).
+    def _load_definitions(eng: pe.ProofEngine) -> None:
+        for imp in proof.imports:
+            resolved = frog_parser.resolve_import_path(imp.filename, proof_path)
+            root = frog_parser.parse_file(resolved)
+            eng.add_definition(root.get_export_name(), root)
+            if isinstance(root, frog_ast.Scheme):
+                for sub_imp in root.imports:
+                    sub_resolved = frog_parser.resolve_import_path(
+                        sub_imp.filename, resolved
+                    )
+                    sub_root = frog_parser.parse_file(sub_resolved)
+                    eng.add_definition(sub_root.get_export_name(), sub_root)
+
     engine = pe.ProofEngine(verbose=False)
-    for imp in proof.imports:
-        resolved = frog_parser.resolve_import_path(imp.filename, proof_path)
-        root = frog_parser.parse_file(resolved)
-        engine.add_definition(root.get_export_name(), root)
-        if isinstance(root, frog_ast.Scheme):
-            for sub_imp in root.imports:
-                sub_resolved = frog_parser.resolve_import_path(
-                    sub_imp.filename, resolved
-                )
-                sub_root = frog_parser.parse_file(sub_resolved)
-                engine.add_definition(sub_root.get_export_name(), sub_root)
-    engine.prove(proof, proof_path)
+    _load_definitions(engine)
+    try:
+        engine.prove(proof, proof_path)
+    except pe.FailedProof:
+        # The cosmetic EC-name rename (``_normalize_ec_module_names``) is applied
+        # to the theorem/steps but NOT to reduction helpers, so a reduction that
+        # holds a packed scheme-typed field (the Universal combiner's
+        # ``hybrid.DecapsKey``) becomes unresolvable and the RENAMED proof
+        # FailedProofs even though the proof is valid. ``prove`` populates the
+        # engine's proof context (``set_up_proof_context``) before it verifies
+        # any hop, so the main engine is still fully set up for chain emission;
+        # re-validate the consistent PRE-rename proof on a throwaway engine and,
+        # if it genuinely proves, let the export proceed. A truly broken proof
+        # re-raises here and aborts, exactly as before.
+        val_engine = pe.ProofEngine(verbose=False)
+        _load_definitions(val_engine)
+        val_engine.prove(proof_for_validation, proof_path)
 
     # Tactic-cache sidecar. Loaded once per export; consulted on every
     # micro-lemma that falls through the Synthesized rungs (1/2).

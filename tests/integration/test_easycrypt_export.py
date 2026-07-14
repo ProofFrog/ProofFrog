@@ -130,7 +130,7 @@ CG_EXPANDED_LEAK_CT_PROOF = (
     / "cfrg-hybrid-kems"
     / "proofs"
     / "CG"
-    / "CG_expanded_LEAK_BIND_K_CT.proof"
+    / "CG_expanded_LEAK_BIND_K_CT_DIFFKEY.proof"
 )
 CK_EXPANDED_LEAK_CT_PROOF = (
     REPO_ROOT
@@ -139,7 +139,7 @@ CK_EXPANDED_LEAK_CT_PROOF = (
     / "cfrg-hybrid-kems"
     / "proofs"
     / "CK"
-    / "CK_expanded_LEAK_BIND_K_CT.proof"
+    / "CK_expanded_LEAK_BIND_K_CT_DIFFKEY.proof"
 )
 EC_SCRIPT = REPO_ROOT / "scripts" / "easycrypt.sh"
 
@@ -1950,21 +1950,21 @@ def test_export_expanded_leak_emits_decomposition_coupling() -> None:
     # The packed game field couples to the component tuple, not a nonexistent
     # ``other_game.dk_PQ_0``.
     assert (
-        "Hybrid_c.LEAK_BIND_K_CT_Breakable.dk0{1} = "
+        "Hybrid_c.LEAK_BIND_K_CT_DIFFKEY_Breakable.dk0{1} = "
         "(R_PQ_Bind.dk_PQ_0, R_PQ_Bind.dk_T_0, R_PQ_Bind.ek_T_0){2}" in output
     )
     assert (
-        "Hybrid_c.LEAK_BIND_K_CT_Breakable.dk1{1} = "
+        "Hybrid_c.LEAK_BIND_K_CT_DIFFKEY_Breakable.dk1{1} = "
         "(R_PQ_Bind.dk_PQ_1, R_PQ_Bind.dk_T_1, R_PQ_Bind.ek_T_1){2}" in output
     )
     # The reduction<->challenger seam uses the challenger's OWN field name (the
     # KEM_PQ binding game holds ``dk0``/``dk1``), only for the PQ components the
     # reduction sources from ``challenger.Initialize()``.
-    assert "R_PQ_Bind.dk_PQ_0{2} = KEM_PQ_c.LEAK_BIND_K_CT_Breakable.dk0{2}" in output
+    assert "R_PQ_Bind.dk_PQ_0{2} = KEM_PQ_c.LEAK_BIND_K_CT_DIFFKEY_Breakable.dk0{2}" in output
     # The old ill-typed shape (game field named after a reduction component)
     # must be gone entirely.
-    assert "Hybrid_c.LEAK_BIND_K_CT_Breakable.dk_PQ_0" not in output
-    assert "Hybrid_c.LEAK_BIND_K_CT_Breakable.dk_T_0" not in output
+    assert "Hybrid_c.LEAK_BIND_K_CT_DIFFKEY_Breakable.dk_PQ_0" not in output
+    assert "Hybrid_c.LEAK_BIND_K_CT_DIFFKEY_Breakable.dk_T_0" not in output
 
 
 @pytest.mark.skipif(

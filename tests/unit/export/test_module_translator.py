@@ -223,7 +223,7 @@ def stateful_reduction() -> frog_ast.Reduction:
     """A reduction carrying module-level field state (``dk0``, ``dk1``)."""
     proof = frog_parser.parse_proof_file(
         "examples/applications/cfrg-hybrid-kems/proofs/Generic/"
-        "LEAK_implies_HON_BIND_K_CT.proof"
+        "LEAK_implies_HON_BIND_K_CT_DIFFKEY.proof"
     )
     return next(h for h in proof.helpers if isinstance(h, frog_ast.Reduction))
 

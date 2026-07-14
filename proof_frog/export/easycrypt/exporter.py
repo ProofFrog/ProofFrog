@@ -3111,6 +3111,65 @@ def export_proof_file(proof_path: str) -> str:
         body = " /\\ ".join(conj)
         return f"{glob_invariant_conj} /\\ {body}" if glob_invariant_conj else body
 
+    def _self_keygen_multikey_coupling(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> str | None:
+        """Coupling for a self-keygen reduction with a MULTI-key game (DIFFKEY:
+        the game holds ``dk0``/``dk1``; the reduction self-generates and holds
+        ``seed0``/``seed1``, returning each at the game key's ``Initialize`` return
+        position, and forwards the oracle to a STATELESS challenger). The
+        single-field coupling path emits only the one live field ``dk0=R.seed0``,
+        leaving ``dk1=R.seed1`` unstated; emit ``game.dkj{gs} = R.seedj{rs}`` for
+        every game key. Gated on >= 2 keys, so the single-key (SAMEKEY) shape keeps
+        the existing single-field path byte-identically. ``None`` off-shape."""
+        if step_a.reduction is None and step_b.reduction is not None:
+            game_step, red_step, gs, rs = step_a, step_b, "1", "2"
+        elif step_b.reduction is None and step_a.reduction is not None:
+            game_step, red_step, gs, rs = step_b, step_a, "2", "1"
+        else:
+            return None
+        assert red_step.reduction is not None
+        red = _get_reduction(red_step.reduction.name)
+        if red is None:
+            return None
+        # pylint: disable=protected-access
+        chal_game = engine._get_game_ast(red_step.challenger, None)
+        game = engine._get_game_ast(game_step.challenger, None)
+        # pylint: enable=protected-access
+        # Stateless challenger (no Initialize) + self-keygen: same gate as the
+        # single-field renamed-live-field path.
+        if chal_game is None or _find_init(chal_game) is not None or game is None:
+            return None
+        positions = _game_field_positions(game)
+        red_elems = _return_elems(_find_init(red))
+        if not positions or red_elems is None:
+            return None
+        red_field_names = {f.name for f in red.fields}
+        pairs: list[tuple[str, str]] = []
+        for gf, idx in positions.items():
+            if idx >= len(red_elems):
+                return None
+            elem = red_elems[idx]
+            if not (
+                isinstance(elem, frog_ast.Variable) and elem.name in red_field_names
+            ):
+                return None
+            pairs.append((gf, elem.name))
+        if len(pairs) < 2:
+            return None
+        game_base = pt.module_base_name(resolver.resolve(game_step).module_expr)
+        red_base = pt.module_base_name(resolver.resolve(red_step).module_expr)
+        live_state_holders.update({game_base, red_base})
+        # pylint: disable=protected-access
+        conj = [
+            f"{game_base}.{mt._ec_field_name(gf)}{{{gs}}} = "
+            f"{red_base}.{mt._ec_field_name(rf)}{{{rs}}}"
+            for gf, rf in pairs
+        ]
+        # pylint: enable=protected-access
+        body = " /\\ ".join(conj)
+        return f"{glob_invariant_conj} /\\ {body}" if glob_invariant_conj else body
+
     def _live_state_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
         # CFRG concrete-framework decomposition coupling: when a reduction
         # endpoint repacks its component fields into the theorem game's packed
@@ -3190,6 +3249,9 @@ def export_proof_file(proof_path: str) -> str:
                 )
             body = " /\\ ".join(conj)
             return f"{glob_invariant_conj} /\\ {body}" if glob_invariant_conj else body
+        multi = _self_keygen_multikey_coupling(step_a, step_b)
+        if multi is not None:
+            return multi
         field = pt.live_state_coupling(_live_state_ref(step_a), _live_state_ref(step_b))
         # Prefix the abstract-scheme glob equality so ``sim`` can relate the
         # post-init oracles' abstract calls (``K.encaps`` / ``F.evaluate``)

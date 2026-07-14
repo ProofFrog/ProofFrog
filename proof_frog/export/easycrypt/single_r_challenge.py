@@ -175,15 +175,18 @@ class SingleRHopSpec:
 
     val_lemma_name: str
     game_glob_mods: list[str]  # val-lemma glob-binder order
-    game_key_ref: str  # the game's single DecapsKey field glob ref (no side)
+    game_key_refs: list[str]  # the game DecapsKey field glob refs (SAMEKEY: 1)
     ct_params: list[str]  # ["ct0", "ct1"]
     red_base: str  # "R"
     red_glob_mods: list[str]  # reduction-prefix callee mods (subset of game mods)
-    seed_field: str  # "seed0"
+    seed_fields: list[str]  # reduction seed fields, one per game key (SAMEKEY: 1)
     clone_alias: dict[str, str]
     h_module: str  # KDF module, "H"
     red_proc: ec_ast.Proc  # reduction challenge proc (with the trailing if)
     sync_mods: list[str]  # every module needing (glob M){1}=(glob M){2}
+    # Which DISTINCT seed/key each ciphertext site decapsulates under. ``[0, 0]``
+    # SAMEKEY; ``[0, 1]`` DIFFKEY.
+    ct_seed_idx: list[int]
 
 
 def _seed_env(
@@ -251,12 +254,16 @@ def single_r_hop0_tactic(
     gge = _game_glob_elim(gmods)
     gargs = " ".join(gge)
     ct0, ct1 = spec.ct_params
-    seed_ref = f"{spec.red_base}.{spec.seed_field}" "{2}"
+    nkeys = len(spec.game_key_refs)
+    seed_refs = [f"{spec.red_base}.{sf}" "{2}" for sf in spec.seed_fields]
+    dkey = [f"D{i}" for i in range(nkeys)]
+    i0, i1 = spec.ct_seed_idx
 
-    # Reduction KDF ev-terms (side {2}), in terms of R.seed0{2} + ctN{2}.
+    # Reduction KDF ev-terms (side {2}), in terms of R.seedN{2} + ctN{2}.
     inv_env = _seed_env(
         prefix,
-        {spec.seed_field: seed_ref, ct0: f"{ct0}" "{2}", ct1: f"{ct1}" "{2}"},
+        {sf: seed_refs[j] for j, sf in enumerate(spec.seed_fields)}
+        | {ct0: f"{ct0}" "{2}", ct1: f"{ct1}" "{2}"},
         spec.clone_alias,
     )
     if "kdf_in_0" not in inv_env or "kdf_in_1" not in inv_env:
@@ -271,19 +278,19 @@ def single_r_hop0_tactic(
     if len(_ct_leaves(parsed0[1], f"{ct0}" "{2}", spec.clone_alias)) != 2:
         return None
 
-    # -- game side: functionalize both decaps via the val-lemma (single key) ----
+    # -- game side: functionalize both decaps via the val-lemma (per-ct key) ----
     game_ex = (
         [f"(glob {m})" "{1}" for m in gmods]
-        + [f"{spec.game_key_ref}" "{1}"]
+        + [f"{r}" "{1}" for r in spec.game_key_refs]
         + [f"{ct0}" "{1}", f"{ct1}" "{1}"]
     )
     lines = [
         "proof.",
         "  proc.",
         f"  exists* {', '.join(game_ex)};",
-        f"  elim* => {gargs} D0 C0 C1.",
-        f"  call{{1}} ({spec.val_lemma_name} {gargs} D0 C1).",
-        f"  call{{1}} ({spec.val_lemma_name} {gargs} D0 C0).",
+        f"  elim* => {gargs} {' '.join(dkey)} C0 C1.",
+        f"  call{{1}} ({spec.val_lemma_name} {gargs} {dkey[i1]} C1).",
+        f"  call{{1}} ({spec.val_lemma_name} {gargs} {dkey[i0]} C0).",
     ]
 
     # -- invariant + reduction-prefix functionalization ------------------------
@@ -298,13 +305,13 @@ def single_r_hop0_tactic(
     )
     inv = " /\\ ".join(
         glob_eqs
+        + [f"{dkey[j]} = {r}" "{1}" for j, r in enumerate(spec.game_key_refs)]
+        + [f"{r}" "{1}" f" = {seed_refs[j]}" for j, r in enumerate(spec.game_key_refs)]
         + [
-            f"D0 = {spec.game_key_ref}" "{1}",
             f"C0 = {ct0}" "{1}",
             f"C1 = {ct1}" "{1}",
             f"{ct0}" "{1}" f" = {ct0}" "{2}",
             f"{ct1}" "{1}" f" = {ct1}" "{2}",
-            f"{spec.game_key_ref}" "{1}" f" = {seed_ref}",
             f"kdf_in_0" "{2}" f" = {kdf_r0}",
             f"kdf_in_1" "{2}" f" = {kdf_r1}",
         ]
@@ -313,21 +320,26 @@ def single_r_hop0_tactic(
 
     rge = [f"gr{i}" for i in range(len(spec.red_glob_mods))]
     glob_of = dict(zip(spec.red_glob_mods, rge))
+    selim = [f"S{j}" for j in range(nkeys)]
     blk_env = _seed_env(
         prefix,
-        {spec.seed_field: "S", ct0: "c0", ct1: "c1"},
+        {sf: selim[j] for j, sf in enumerate(spec.seed_fields)}
+        | {ct0: "c0", ct1: "c1"},
         spec.clone_alias,
     )
     peel = _peel_stmts(prefix, blk_env, glob_of, "{2}")
     red_ex = (
         [f"(glob {m})" "{2}" for m in spec.red_glob_mods]
-        + [seed_ref]
+        + seed_refs
         + [f"{ct0}" "{2}", f"{ct1}" "{2}"]
     )
+    # ``/>`` establishes the KDF-input equalities + globs + the per-key ``Dj =
+    # Sj`` couplings (each game key is coupled to its seed in the lemma pre, for
+    # any number of keys), closing the subgoal.
     lines += [
         "  + sp.",
         f"    exists* {', '.join(red_ex)};",
-        f"    elim* => {' '.join(rge)} S c0 c1.",
+        f"    elim* => {' '.join(rge + selim)} c0 c1.",
         *[f"    {ln}" for ln in peel],
         "    skip => />.",
     ]
@@ -347,7 +359,9 @@ def single_r_hop0_tactic(
     # residual is ``C0<>C1 => (ev K0 = ev K1) = ((ev K0 = ev K1) && K0<>K1)``.
     hm = spec.h_module
     goal_env = _seed_env(
-        prefix, {spec.seed_field: "D0", ct0: "C0", ct1: "C1"}, spec.clone_alias
+        prefix,
+        {sf: dkey[j] for j, sf in enumerate(spec.seed_fields)} | {ct0: "C0", ct1: "C1"},
+        spec.clone_alias,
     )
     gparse0 = parse_left_nested_concat(goal_env.get("kdf_in_0", ""))
     gparse1 = parse_left_nested_concat(goal_env.get("kdf_in_1", ""))

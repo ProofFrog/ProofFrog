@@ -4496,18 +4496,24 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
     # so couple every packed key, matching the emitted hop lemma invariant.
     red_field_set = {f.name for f in left_state0.fields}
     # Single-R seedbased shape: the KDF-group component names are LOCALS derived
-    # from a single seed field, not reduction fields. Couple the game key to the
-    # seed (``game.dk0 = R.seed0``) and functionalize the prefix from the seed.
-    seed_field: str | None = None
+    # from seed fields (one per game key), not reduction fields. Couple each game
+    # key to its seed (``game.dkN = R.seedN``) and functionalize from the seeds.
+    seed_fields: list[str] = []
     if distinct_grp and not all(f in red_field_set for f in distinct_grp[0]):
         game_fields = list(right_state0.fields)
         red_own = list(left_state0.fields)
-        if len(game_fields) != 1 or len(red_own) != 1:
-            return None  # only the single-seed (SAMEKEY) single-R shape here
-        seed_field = red_own[0].name
-        gk = mt._ec_field_name(game_fields[0].name)  # pylint: disable=protected-access
-        game_key_refs = [f"{game_base}.{gk}"]
-        decomp = [f"{game_base}.{gk}" "{2}" f" = {red_base}.{seed_field}" "{1}"]
+        if len(game_fields) != len(red_own) or len(game_fields) != len(distinct_grp):
+            return None
+        seed_fields = [f.name for f in red_own]
+        # pylint: disable=protected-access
+        game_key_refs = [
+            f"{game_base}.{mt._ec_field_name(f.name)}" for f in game_fields
+        ]
+        decomp = [
+            f"{game_key_refs[j]}" "{2}" f" = {red_base}.{seed_fields[j]}" "{1}"
+            for j in range(len(game_fields))
+        ]
+        # pylint: enable=protected-access
     else:
         ek_decomp = _ek_decomp(red_proc.body, red_field_set)
         distinct_ek, _ek_idx = _dedup_groups(ek_decomp)
@@ -4538,7 +4544,7 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
         red_proc=red_proc,
         guard_annot=_annot_eq_guard(red_if.guard, "{1}"),
         ct_key_idx=ct_key_idx,
-        seed_field=seed_field,
+        seed_fields=seed_fields,
     )
     body = bch.challenge_tactic_hop4(spec)
     if body is None:
@@ -4816,25 +4822,42 @@ def _challenge_single_r_route(  # pylint: disable=too-many-arguments,too-many-po
         return None
     game_fields = list(left_state0.fields)
     red_fields = list(right_state0.fields)
-    if len(game_fields) != 1 or len(red_fields) != 1:
+    # One reduction seed field per game DecapsKey field (SAMEKEY: 1; DIFFKEY: 2).
+    if not game_fields or len(game_fields) != len(red_fields):
         return None
     game_base = _ref_base(left_wrapper_expr)
     # pylint: disable=protected-access
-    game_key_ref = f"{game_base}.{mt._ec_field_name(game_fields[0].name)}"
+    game_key_refs = [f"{game_base}.{mt._ec_field_name(f.name)}" for f in game_fields]
     # pylint: enable=protected-access
+    seed_fields = [f.name for f in red_fields]
     prefix = [s for s in red_proc.body if not isinstance(s, ec_ast.If)]
+    # ct_seed_idx: which seed each KDF input derives from (sentinel-taint the
+    # reduction prefix). SAMEKEY -> [0, 0]; DIFFKEY -> [0, 1].
+    taint = srb._seed_env(  # pylint: disable=protected-access
+        [s for s in prefix if not isinstance(s, ec_ast.VarDecl)],
+        {sf: f"__SEED{j}__" for j, sf in enumerate(seed_fields)},
+        clone_alias,
+    )
+    ct_seed_idx: list[int] = []
+    for kdf in ("kdf_in_0", "kdf_in_1"):
+        term = taint.get(kdf, "")
+        found = [j for j in range(len(seed_fields)) if f"__SEED{j}__" in term]
+        if len(found) != 1:
+            return None
+        ct_seed_idx.append(found[0])
     spec = srb.SingleRHopSpec(
         val_lemma_name=f"{scheme_name}_decaps_val",
         game_glob_mods=game_glob_mods,
-        game_key_ref=game_key_ref,
+        game_key_refs=game_key_refs,
         ct_params=ct_params,
         red_base=_ref_base(right_wrapper_expr),
         red_glob_mods=_callee_mods(prefix, clone_alias),
-        seed_field=red_fields[0].name,
+        seed_fields=seed_fields,
         clone_alias=clone_alias,
         h_module=h_module,
         red_proc=red_proc,
         sync_mods=_top_level_args(scheme_expr),
+        ct_seed_idx=ct_seed_idx,
     )
     result = srb.single_r_hop0_tactic(spec)
     if result is None:

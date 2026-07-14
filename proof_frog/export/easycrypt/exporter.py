@@ -1,5 +1,8 @@
 """End-to-end exporter: ProofFile path -> EasyCrypt source string."""
 
+# pylint: disable=duplicate-code  # shares the comparison/logical BinaryOperators
+# enumeration with export/latex/stmt_renderer.py by coincidence, not by design
+
 from __future__ import annotations
 
 import copy
@@ -22,6 +25,15 @@ from ... import frog_ast
 from ... import frog_parser
 from ... import proof_engine as pe
 from ... import visitors
+
+# Standardization passes the exporter omits from a hop's canonicalization chain.
+# ``Standardize Parameters`` renames oracle parameters to ``arg1..argN`` only in
+# the pipeline tail; keeping the game's own parameter names throughout a chain
+# lets the single per-oracle precondition string stay valid both as the
+# top-level equiv spec and in synthesizers' mid-proof ``seq``/``transitivity``
+# reuse. The rename is a non-observable cosmetic normalization, so every proof
+# that verified still has endpoint-matching left/right chains without it.
+_EXPORT_SKIP_PASSES = frozenset({"Standardize Parameters"})
 
 
 class _LengthInliner(visitors.Transformer):
@@ -2497,10 +2509,10 @@ def export_proof_file(proof_path: str) -> str:
         from .chain_emitter import emit_chain_for_hop
 
         _left_canon, left_apps = engine.canonicalize_game_with_states(
-            copy.deepcopy(left_ast)
+            copy.deepcopy(left_ast), skip_passes=_EXPORT_SKIP_PASSES
         )
         _right_canon, right_apps = engine.canonicalize_game_with_states(
-            copy.deepcopy(right_ast)
+            copy.deepcopy(right_ast), skip_passes=_EXPORT_SKIP_PASSES
         )
         # Each instance maps to its OWN primitive's name (not the primary's).
         # A multi-primitive proof has, e.g., ``G : PRG`` alongside ``P, E``
@@ -3157,10 +3169,10 @@ def export_proof_file(proof_path: str) -> str:
             right_ast = engine._get_game_ast(step_b.challenger, step_b.reduction)
             # pylint: enable=protected-access
             _lc, left_apps = engine.canonicalize_game_with_states(
-                copy.deepcopy(left_ast)
+                copy.deepcopy(left_ast), skip_passes=_EXPORT_SKIP_PASSES
             )
             _rc, right_apps = engine.canonicalize_game_with_states(
-                copy.deepcopy(right_ast)
+                copy.deepcopy(right_ast), skip_passes=_EXPORT_SKIP_PASSES
             )
             external_module_types = {
                 inst.let_name: inst.primitive_name for inst in instances

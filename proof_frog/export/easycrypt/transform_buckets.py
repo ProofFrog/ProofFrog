@@ -57,6 +57,13 @@ TRANSFORM_BUCKET: dict[str, Bucket] = {
     # structurally identical and ``proc; auto.`` closes the equiv.
     "Alpha Rename": Bucket.CANNED,
     "Standardize Field Names": Bucket.CANNED,
+    # NB: ``Standardize Parameters`` is intentionally absent. The exporter
+    # excludes that pass from a hop's canonicalization chain (see
+    # ``exporter._EXPORT_SKIP_PASSES``), so it never surfaces as a micro. It is
+    # left OPEN (default) deliberately: were it to escape the skip, a name-based
+    # ``proc; auto.`` could not close it (the two sides carry different
+    # parameter names), so an honest visible ``admit`` is preferable to a
+    # silently-non-closing canned tactic.
     "Subset Type Normalization": Bucket.CANNED,
     # ``Symbolic Computation`` and ``Normalize Commutative Chains`` only
     # rewrite at the FrogLang type level (sympy-canonical bitstring

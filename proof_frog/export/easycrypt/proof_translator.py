@@ -237,6 +237,15 @@ class StepResolver:
     ) -> str:
         """Return the EC precondition: ``={arg1, arg2, ...}`` or ``true``.
 
+        The oracle-argument equality is emitted by parameter name. The
+        exporter deliberately excludes the ``Standardize Parameters``
+        canonicalization pass from the per-hop chain (see
+        ``ExporterConfig``/``canonicalize_game_with_states(skip_passes=...)``),
+        so every flat state in a chain keeps the game's own oracle parameter
+        names and this name-based precondition stays valid both as the
+        top-level equiv spec and where synthesizers reuse it in mid-proof
+        ``seq``/``transitivity`` assertions.
+
         A composed step ``Game.Side compose R`` exposes the reduction's
         outer signature; use the reduction's params. A plain step
         ``Game.Side`` exposes the game's own signature.

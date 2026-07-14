@@ -1537,15 +1537,28 @@ class ProofEngine:
         }
 
     def canonicalize_game_with_states(
-        self, game: frog_ast.Game
+        self, game: frog_ast.Game, skip_passes: frozenset[str] = frozenset()
     ) -> tuple[frog_ast.Game, list[TransformApplication]]:
         """Same pipeline as canonicalize_game, but returns a list of
         TransformApplication entries — one per pass that actually changed
-        the AST.  Used by the per-transform EasyCrypt exporter."""
+        the AST.  Used by the per-transform EasyCrypt exporter.
+
+        ``skip_passes`` names STANDARDIZATION_PIPELINE passes to omit (by
+        ``TransformPass.name``). The EasyCrypt exporter skips
+        ``"Standardize Parameters"`` so a chain's flat states keep the game's
+        own oracle parameter names throughout: that pass renames parameters to
+        ``arg1..argN`` only in the pipeline tail, which would otherwise split a
+        single chain into a ``m``-named prefix and an ``arg1``-named suffix and
+        leave the exporter's one per-oracle precondition string valid on only
+        one part. The rename is a cosmetic, non-observable normalization, so
+        omitting it yields an equally valid (and, for every proof that verified,
+        endpoint-matching) export chain."""
         ctx = self._build_context()
         game, core_apps = run_pipeline_with_states(game, CORE_PIPELINE, ctx)
         std_apps: list[TransformApplication] = []
         for pass_ in STANDARDIZATION_PIPELINE:
+            if pass_.name in skip_passes:
+                continue
             before = game
             game = pass_.apply(game, ctx)
             if game != before:

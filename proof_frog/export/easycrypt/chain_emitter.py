@@ -4475,20 +4475,34 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
     # only the DecapsKey (dk 3-tuple); the PK game holds BOTH ek (2-tuple) and dk,
     # so couple every packed key, matching the emitted hop lemma invariant.
     red_field_set = {f.name for f in left_state0.fields}
-    ek_decomp = _ek_decomp(red_proc.body, red_field_set)
-    distinct_ek, _ek_idx = _dedup_groups(ek_decomp)
-    decomp_info = _game_key_decomp(
-        list(right_state0.fields),
-        distinct_grp,
-        distinct_ek,
-        game_base,
-        red_base,
-        "{2}",
-        "{1}",
-    )
-    if decomp_info is None:
-        return None
-    game_key_refs, _ek_refs, decomp = decomp_info
+    # Single-R seedbased shape: the KDF-group component names are LOCALS derived
+    # from a single seed field, not reduction fields. Couple the game key to the
+    # seed (``game.dk0 = R.seed0``) and functionalize the prefix from the seed.
+    seed_field: str | None = None
+    if distinct_grp and not all(f in red_field_set for f in distinct_grp[0]):
+        game_fields = list(right_state0.fields)
+        red_own = list(left_state0.fields)
+        if len(game_fields) != 1 or len(red_own) != 1:
+            return None  # only the single-seed (SAMEKEY) single-R shape here
+        seed_field = red_own[0].name
+        gk = mt._ec_field_name(game_fields[0].name)  # pylint: disable=protected-access
+        game_key_refs = [f"{game_base}.{gk}"]
+        decomp = [f"{game_base}.{gk}" "{2}" f" = {red_base}.{seed_field}" "{1}"]
+    else:
+        ek_decomp = _ek_decomp(red_proc.body, red_field_set)
+        distinct_ek, _ek_idx = _dedup_groups(ek_decomp)
+        decomp_info = _game_key_decomp(
+            list(right_state0.fields),
+            distinct_grp,
+            distinct_ek,
+            game_base,
+            red_base,
+            "{2}",
+            "{1}",
+        )
+        if decomp_info is None:
+            return None
+        game_key_refs, _ek_refs, decomp = decomp_info
     spec = bch.Hop4Spec(
         val_lemma_name=f"{scheme_name}_decaps_val",
         game_glob_mods=game_glob_mods,
@@ -4504,6 +4518,7 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
         red_proc=red_proc,
         guard_annot=_annot_eq_guard(red_if.guard, "{1}"),
         ct_key_idx=ct_key_idx,
+        seed_field=seed_field,
     )
     body = bch.challenge_tactic_hop4(spec)
     if body is None:

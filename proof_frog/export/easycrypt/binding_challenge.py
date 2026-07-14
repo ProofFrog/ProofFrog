@@ -808,15 +808,25 @@ class Hop4Spec:
     # DISTINCT-key site map; ``[0, 1]`` DIFFKEY, ``[0, 0]`` SAMEKEY. See
     # :class:`ChallengeHopSpec`.
     ct_key_idx: list[int] = field(default_factory=lambda: [0, 1])
+    # Single-R seedbased shape: the reduction derives its component keys as
+    # LOCALS from a single seed field (``seed0``) rather than holding
+    # ``dk_PQ``/``dk_T``/``ek_T`` as fields. When set, the prefix functionalizes
+    # FORWARD from the seed (``exists* R.seed0``, ``_peel_stmts`` seeded by
+    # ``{seed0: S}``) and the decomp coupling is ``game.dk0 = R.seed0``.
+    seed_field: str | None = None
 
 
 def _blk_env_hop4(spec: Hop4Spec, field_elim: list[str]) -> dict[str, str]:
     """Functional env of the reduction prefix under the ``exists*`` elim names
     (fields -> ``dp0``.. ; cts -> the game ct elims ``C0``/``C1``, since hop_4
     reuses the game ciphertexts via the ``={ct}`` invariant rather than binding
-    separate reduction ct vars)."""
-    flat = [f for grp in spec.red_component_fields for f in grp]
-    env: dict[str, str] = dict(zip(flat, field_elim))
+    separate reduction ct vars). Single-R: base on ``{seed0: S}`` and let the
+    prefix walk derive every component local functionally."""
+    if spec.seed_field is not None:
+        env: dict[str, str] = {spec.seed_field: "S"}
+    else:
+        flat = [f for grp in spec.red_component_fields for f in grp]
+        env = dict(zip(flat, field_elim))
     env[spec.ct_params[0]] = "C0"
     env[spec.ct_params[1]] = "C1"
     for stmt in spec.red_proc.body:
@@ -856,16 +866,22 @@ def challenge_tactic_hop4(spec: Hop4Spec) -> list[str] | None:
     # functionalize the game decaps (call{2} val-lemma) and the reduction prefix
     # (call{1} _det peel).  The reduction peel reuses the game glob elims (the
     # ``={glob}`` invariant makes the two sides' globs equal).
-    field_elim = _field_elim_names(spec.red_component_fields)
-    game_ex = (
-        [f"(glob {m})" "{2}" for m in gmods]
-        + [f"{r}" "{2}" for r in spec.game_key_refs]
-        + [f"{c}" "{2}" for c in spec.ct_params]
-        + [
+    if spec.seed_field is not None:
+        # Single-R: bind the single seed field; the prefix walk derives the rest.
+        field_elim = ["S"]
+        red_ex = [f"{spec.red_base}.{spec.seed_field}" "{1}"]
+    else:
+        field_elim = _field_elim_names(spec.red_component_fields)
+        red_ex = [
             f"{spec.red_base}.{f}" "{1}"
             for grp in spec.red_component_fields
             for f in grp
         ]
+    game_ex = (
+        [f"(glob {m})" "{2}" for m in gmods]
+        + [f"{r}" "{2}" for r in spec.game_key_refs]
+        + [f"{c}" "{2}" for c in spec.ct_params]
+        + red_ex
     )
     dkey = [f"D{i}" for i in range(len(spec.game_key_refs))]
     elim = gge + dkey + ["C0", "C1"] + field_elim

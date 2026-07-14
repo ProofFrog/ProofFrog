@@ -135,6 +135,28 @@ def model_from_proc(
     return DecapsModel(calls, result, glob_modules)
 
 
+def keygen_derived_ev(
+    derivekeypair_proc: ec_ast.Proc,
+    seed_value: str,
+    clone_alias: dict[str, str],
+) -> str | None:
+    """Symbolically evaluate a seedbased ``DeriveKeyPair(seed)`` with its single
+    seed parameter bound to ``seed_value``, returning the ev-form of the WHOLE
+    ``[EncapsKey, DecapsKey]`` return tuple.
+
+    Used by the self-keygen multi-key coupling to give a reduction's OPAQUE held
+    ``EncapsKey`` field its seed-derived functional form: the caller couples the
+    reduction's ``(ek_field, seed_field)`` pair to this result (return order is
+    ``[EncapsKey, DecapsKey]`` = ``[ek, seed]``). ``None`` if the body is not the
+    linear deterministic sequence :func:`model_from_proc` handles, or the proc is
+    not single-parameter (a non-seedbased scheme declines -> byte-identical)."""
+    if len(derivekeypair_proc.params) != 1:
+        return None
+    param_rename = {derivekeypair_proc.params[0].name: seed_value}
+    model = model_from_proc(derivekeypair_proc, param_rename, clone_alias)
+    return model.result if model is not None else None
+
+
 def _paren(expr: str) -> str:
     """Wrap ``expr`` in parens for use as a space-separated op argument."""
     e = expr.strip()

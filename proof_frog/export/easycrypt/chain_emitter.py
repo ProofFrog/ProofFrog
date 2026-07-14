@@ -2738,6 +2738,263 @@ def _pk_nested_middle(  # pylint: disable=too-many-arguments,too-many-positional
     return middle, [fgev, frev]
 
 
+def _two_sided_ek_functionalize_peel(  # pylint: disable=too-many-locals
+    l_body: list[ec_ast.EcStmt],
+    r_body: list[ec_ast.EcStmt],
+    glob_items: list[str],
+    det_pred: Callable[[str, str], bool],
+    clone_alias: dict[str, str],
+    left_mod: str,
+    right_mod: str,
+    left_fields: set[str],
+    right_fields: set[str],
+) -> list[str] | None:
+    """Lockstep ``seq`` peel functionalizing BOTH sides' keygen det-calls, for the
+    FLAT ``FG_calls ~ FR_calls`` middle leg of :func:`_synth_init_ek_twin`.
+
+    Applied to concrete flat-state modules (``proc.`` -- NO ``inline *`` -- so the
+    body's local names are exactly what EC sees, dodging the inline-name wall). At
+    each det call, functionalize both sides (``exists* (glob M){i}, arg{i}; elim*;
+    call{i} (M_m_det g a)``); the running invariant carries ``={glob..., seeds}``
+    (NEVER dropped -- the post's cross-side field equalities need the seed
+    couplings), per-local one-level ev/rhs facts, and per-field-store QUALIFIED
+    facts (``left_mod.lf{1}=lrhs{1} /\\ right_mod.rf{2}=rrhs{2}`` -- interspersed
+    field stores with different names per side). Validated:
+    ``ec_templates/init_ek_two_key_interspersed.ec`` + the transitivity tripwire.
+    ``None`` if the bodies differ in length or a det clone alias is unknown."""
+    l_exec = [s for s in _exec_stmts(l_body) if not isinstance(s, ec_ast.Return)]
+    r_exec = [s for s in _exec_stmts(r_body) if not isinstance(s, ec_ast.Return)]
+    if len(l_exec) != len(r_exec) or not l_exec:
+        return None
+    loc_eqs = list(glob_items)
+    locals_set: set[str] = set()
+    inv_conj: list[str] = []
+    ctr = 0
+    tac: list[str] = ["proc."]
+
+    def _tag(expr: str, side: int) -> str:
+        return re.sub(
+            r"[A-Za-z_]\w*",
+            lambda m: (
+                f"{m.group(0)}{{{side}}}" if m.group(0) in locals_set else m.group(0)
+            ),
+            expr,
+        )
+
+    def _pr(e: str) -> str:
+        e = e.strip()
+        if e.startswith("(") and e.endswith(")"):
+            return e
+        return f"({e})" if " " in e else e
+
+    def _inv() -> str:
+        parts = (["={" + ", ".join(loc_eqs) + "}"] if loc_eqs else []) + inv_conj
+        return " /\\ ".join(parts) if parts else "true"
+
+    i, n = 0, len(l_exec)
+    while i < n:
+        ls = l_exec[i]
+        if isinstance(ls, ec_ast.Sample):
+            loc_eqs.append(ls.var)
+            locals_set.add(ls.var)
+            tac.append(f"seq 1 1 : ({_inv()}).")
+            tac.append("+ rnd; skip => />.")
+            i += 1
+        elif isinstance(ls, ec_ast.Call):
+            parts = _callee_parts(ls.callee)
+            if parts is None or not det_pred(*parts) or parts[0] not in clone_alias:
+                return None
+            mod, meth = parts
+            clone = clone_alias[mod]
+            cargs = _split_top_args(ls.args)
+            for side in (1, 2):
+                applied = "".join(f" {_pr(_tag(a, side))}" for a in cargs)
+                inv_conj.append(f"{ls.var}{{{side}}} = ({clone}.ev_{meth}{applied})")
+            locals_set.add(ls.var)
+            tac.append(f"seq 1 1 : ({_inv()}).")
+            binders = [f"g{ctr}"] + [f"a{ctr}_{k}" for k in range(len(cargs))]
+            for side in (1, 2):
+                cap = ", ".join(
+                    [f"(glob {mod}){{{side}}}"] + [f"({a}){{{side}}}" for a in cargs]
+                )
+                bs = [f"{b}_{side}" for b in binders]
+                tac.append(f"exists* {cap}; elim* => {' '.join(bs)}.")
+                tac.append(f"call{{{side}}} ({mod}_{meth}_det {' '.join(bs)}).")
+            tac.append("skip => />.")
+            ctr += 1
+            i += 1
+        elif isinstance(ls, ec_ast.Assign):
+            j = i
+            while j < n:
+                la, ra = l_exec[j], r_exec[j]
+                if not isinstance(la, ec_ast.Assign) or not isinstance(
+                    ra, ec_ast.Assign
+                ):
+                    break
+                if la.var in left_fields or ra.var in right_fields:
+                    inv_conj.append(f"{left_mod}.{la.var}{{1}} = {_tag(la.rhs, 1)}")
+                    inv_conj.append(f"{right_mod}.{ra.var}{{2}} = {_tag(ra.rhs, 2)}")
+                else:
+                    inv_conj.append(f"{la.var}{{1}} = {_tag(la.rhs, 1)}")
+                    locals_set.add(la.var)
+                    inv_conj.append(f"{ra.var}{{2}} = {_tag(ra.rhs, 2)}")
+                j += 1
+            tac.append(f"seq {j - i} {j - i} : ({_inv()}).")
+            tac.append("+ wp; skip => />.")
+            i = j
+        else:
+            return None
+    tac.append("skip => /#.")
+    return tac
+
+
+def _synth_init_ek_twin(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    det_methods: dict[str, set[str]],
+    clone_alias: dict[str, str],
+    full_coupling: str,
+    hop_index: int = 0,
+) -> tuple[list[str], list[str], set[tuple[str, str]]] | None:
+    """Single-R ek-derivation init route: ``RawGame ~ FG_calls ~ FR_calls ~
+    RawReduction`` transitivity. The reduction self-generates keygens and HOLDS
+    the EncapsKey; the coupling states ``(R.ek, R.seed) = DeriveKeyPair_ev(R.seed)``
+    (contains ``ev_``), which ``proc; inline *`` cannot prove (unpredictable inline
+    names). Route through flat-state twins (CONTROLLED names): the outer legs
+    backbone-peel name-independently, the middle ``FG_calls ~ FR_calls`` peel
+    functionalizes both sides' det calls to prove the coupling. Mirrors
+    :func:`_synth_init_twin_reorder` (non-reorder, no decomposition). ``None``
+    off-shape (caller falls through to the abstract peel / admit)."""
+    fg_name = f"FG_calls_{hop_index}"
+    fr_name = f"FR_calls_{hop_index}"
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+
+    def _det_pred(mod: str, meth: str) -> bool:
+        return meth in det_methods.get(mod, set())
+
+    # The REDUCTION base + its side come from the ek-derivation conjunct
+    # ``(R.ek{s}, R.seed{s}) = ...ev...`` (R holds the EncapsKey). ``game`` is the
+    # other side. hop_0 has the game on side 1 (``game_is_left``); the mirrored
+    # hop_2 has it on side 2 -- flip the coupling ``{1}<->{2}`` and prepend
+    # ``symmetry`` so the same game-on-the-left assembly applies (mirrors
+    # ``_synth_init_twin_reorder``).
+    dm = re.search(
+        r"\(([\w.]+)\.\w+\{([12])\}, [\w.]+\.\w+\{[12]\}\) = ", full_coupling
+    )
+    if dm is None:
+        return None
+    red_base, red_side = dm.group(1), dm.group(2)
+    game_is_left = red_side == "2"
+
+    def _flip_sides(s: str) -> str:
+        return s.replace("{1}", "\x00").replace("{2}", "{1}").replace("\x00", "{2}")
+
+    coupling = full_coupling if game_is_left else _flip_sides(full_coupling)
+    conj = [p.strip() for p in coupling.split(" /\\ ")]
+    globs = " /\\ ".join(p for p in conj if p.startswith("={glob"))
+    body = " /\\ ".join(p for p in conj if not p.startswith("={glob"))
+    game_base: str | None = None
+    for cj in conj:
+        m = re.match(r"^([\w.]+)\.\w+\{1\} = ([\w.]+)\.\w+\{2\}$", cj)
+        if m is not None and m.group(2) == red_base:
+            game_base = m.group(1)
+            break
+    if game_base is None or not globs:
+        return None
+
+    # FG_calls is always the GAME flat state, FR_calls the REDUCTION -- swap the
+    # projections for the mirrored orientation.
+    game_proj, red_proj = (lproj, rproj) if game_is_left else (rproj, lproj)
+    fgmod = _flat_state_module(
+        modules,
+        fg_name,
+        game_proj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+        emit_state_vars=True,
+    )
+    frmod = _flat_state_module(
+        modules,
+        fr_name,
+        red_proj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+        emit_state_vars=True,
+    )
+    if not fgmod.procs or not frmod.procs:
+        return None
+    game_body, red_body = fgmod.procs[0].body, frmod.procs[0].body
+    glob_names = [p.name for p in flat_params]
+    args = ", ".join(glob_names)
+    game_flds = [v.name for v in fgmod.module_vars]
+    red_flds = [v.name for v in frmod.module_vars]
+    glob_items = [f"glob {m}" for m in glob_names]
+    mid = _two_sided_ek_functionalize_peel(
+        game_body,
+        red_body,
+        glob_items,
+        _det_pred,
+        clone_alias,
+        fg_name,
+        fr_name,
+        set(game_flds),
+        set(red_flds),
+    )
+    if mid is None:
+        return None
+    res_eq = "res{1} = res{2}"
+    q1_eqs = " /\\ ".join(
+        f"{game_base}.{f}{{1}} = {fg_name}.{f}{{2}}" for f in game_flds
+    )
+    q4_eqs = " /\\ ".join(f"{fr_name}.{f}{{1}} = {red_base}.{f}{{2}}" for f in red_flds)
+    q1 = f"{globs} /\\ {q1_eqs} /\\ {res_eq}"
+    q2 = f"{body.replace(game_base, fg_name)} /\\ {globs} /\\ {res_eq}"
+    q3 = (
+        f"{body.replace(game_base, fg_name).replace(red_base, fr_name)}"
+        f" /\\ {globs} /\\ {res_eq}"
+    )
+    q4 = f"{globs} /\\ {q4_eqs} /\\ {res_eq}"
+
+    def _outer_leg(b: list[ec_ast.EcStmt]) -> list[str]:
+        leg = ["proc.", "inline *.", *_backbone_peel(b)]
+        if _leads_with_det(b):
+            leg.append("wp.")
+        leg.append("auto.")
+        return leg
+
+    outer = [
+        _res_tag(SYNTH_PARAM),
+        *([] if game_is_left else ["symmetry."]),
+        f"transitivity {fg_name}({args}).initialize "
+        f"({globs} ==> {q1}) ({globs} ==> {q2}).",
+        "smt().",
+        "smt().",
+        *_outer_leg(game_body),
+        f"transitivity {fr_name}({args}).initialize "
+        f"({globs} ==> {q3}) ({globs} ==> {q4}).",
+        "smt().",
+        "smt().",
+        *mid,
+        *_outer_leg(red_body),
+        "qed.",
+    ]
+    extra = [
+        "\n".join(_render_module_decl(fgmod)),
+        "\n".join(_render_module_decl(frmod)),
+    ]
+    return extra, outer, set()
+
+
 def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -3284,6 +3541,7 @@ def emit_multi_oracle_chain_for_hop(
     init_decomposition: bool = False,
     clone_alias: dict[str, str] | None = None,
     init_coupling: str | None = None,
+    full_coupling: str | None = None,
 ) -> MultiOracleHopChainInfo:
     """Emit the per-oracle per-transform chains for one multi-oracle hop.
 
@@ -3371,6 +3629,7 @@ def emit_multi_oracle_chain_for_hop(
             init_repacks=init_reduction_repacks,
             init_decomposition=init_decomposition,
             init_coupling=init_coupling,
+            full_coupling=full_coupling,
             clone_alias=clone_alias or {},
             inj_acc=inj_methods,
             decaps_val_acc=decaps_val_schemes,
@@ -3412,6 +3671,7 @@ def _emit_one_oracle_chain(
     init_repacks: bool = False,
     init_decomposition: bool = False,
     init_coupling: str | None = None,
+    full_coupling: str | None = None,
     clone_alias: dict[str, str] | None = None,
     inj_acc: set[tuple[str, str]] | None = None,
     decaps_val_acc: set[str] | None = None,
@@ -3454,6 +3714,27 @@ def _emit_one_oracle_chain(
             and proj_r is not None
             and proj_l.methods[0] == proj_r.methods[0]
         ):
+            # Seedbased PK binding: the coupling carries the ek-DERIVATION
+            # ``(R.ek, R.seed) = DeriveKeyPair_ev(R.seed)`` (contains ``ev_``),
+            # which ``proc; inline *`` cannot prove (unpredictable inline names).
+            # Route through the flat-state ev-twin transitivity. Gated on the
+            # ev-form so every non-ek init is byte-identical.
+            if full_coupling is not None and "ev_" in full_coupling and clone_alias:
+                ek_twin = _synth_init_ek_twin(
+                    modules,
+                    oracle_name,
+                    left_states[0],
+                    right_states[0],
+                    external_module_types,
+                    method_return_types,
+                    flat_params,
+                    det_methods,
+                    clone_alias,
+                    full_coupling,
+                    hop_index=hop_index,
+                )
+                if ek_twin is not None:
+                    return ek_twin
             peel = _synth_init_backbone_peel(
                 modules,
                 oracle_name,

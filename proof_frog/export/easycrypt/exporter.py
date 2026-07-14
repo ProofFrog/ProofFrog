@@ -2859,6 +2859,50 @@ def export_proof_file(proof_path: str) -> str:
                 return [expr]
         return None
 
+    def _keygen_ek_seed_pairs(red: frog_ast.Reduction) -> list[tuple[str, str]]:
+        """``(ek_field, seed_field)`` pairs from each ``[ek, seed] =
+        hybrid.KeyGen()`` destructure in a self-keygen reduction's ``Initialize``.
+
+        Desugars to a temp assign (``_tup = hybrid.KeyGen()``) + two
+        ``ArrayAccess`` element assigns (``ek = _tup[0]; seed = _tup[1]``); the
+        scheme ``KeyGen`` return is ``[EncapsKey, DecapsKey]`` so element 0 is the
+        EncapsKey, element 1 the seed. Only pairs where BOTH targets are declared
+        reduction FIELDS are returned: a reduction that discards the EncapsKey (CT
+        binding: ``ek`` is a local) yields nothing -> byte-identical coupling."""
+        init = _find_init(red)
+        if init is None:
+            return []
+        field_names = {f.name for f in red.fields}
+        keygen_tmps: list[str] = []  # ordered by Initialize statement order
+        ek_of: dict[str, str] = {}
+        seed_of: dict[str, str] = {}
+        for stmt in init.block.statements:
+            if not isinstance(stmt, frog_ast.Assignment):
+                continue
+            if not isinstance(stmt.var, frog_ast.Variable):
+                continue
+            val = stmt.value
+            if isinstance(val, frog_ast.FuncCall):
+                func = val.func
+                if isinstance(func, frog_ast.FieldAccess) and func.name == "KeyGen":
+                    keygen_tmps.append(stmt.var.name)
+            elif isinstance(val, frog_ast.ArrayAccess) and isinstance(
+                val.the_array, frog_ast.Variable
+            ):
+                if val.the_array.name not in keygen_tmps:
+                    continue
+                if not isinstance(val.index, frog_ast.Integer):
+                    continue
+                if stmt.var.name not in field_names:
+                    continue
+                if val.index.num == 0:
+                    ek_of[val.the_array.name] = stmt.var.name
+                elif val.index.num == 1:
+                    seed_of[val.the_array.name] = stmt.var.name
+        return [
+            (ek_of[t], seed_of[t]) for t in keygen_tmps if t in ek_of and t in seed_of
+        ]
+
     def _local_field_tuples(
         init: frog_ast.Method, red_fields: set[str]
     ) -> dict[str, list[str]]:
@@ -3167,6 +3211,33 @@ def export_proof_file(proof_path: str) -> str:
             for gf, rf in pairs
         ]
         # pylint: enable=protected-access
+        # ek-derivation coupling (seedbased PK binding): a reduction that HOLDS
+        # the EncapsKey as a field leaves it OPAQUE -- the ``game.ek = R.ek``
+        # pairs above don't link it to the seed-DERIVED component keys the KDF
+        # binds. For each ``[ek, seed] = hybrid.KeyGen()`` destructure, couple
+        # ``(R.ek, R.seed)`` to ``DeriveKeyPair(R.seed)`` (KeyGen samples the seed
+        # then derives) -- SOUND, from the scheme's own ``DeriveKeyPair`` AST. The
+        # init hop's ev-twin route (``_synth_init_ek_twin``) proves it. CT
+        # reductions discard the EncapsKey -> ``_keygen_ek_seed_pairs`` empty ->
+        # byte-identical.
+        keygen_pairs = _keygen_ek_seed_pairs(red)
+        if keygen_pairs and ec_scheme is not None:
+            dk_proc = next(
+                (p for p in ec_scheme.procs if p.name == "derivekeypair"), None
+            )
+            if dk_proc is not None:
+                param_to_arg = dict(
+                    zip((p.name for p in ec_scheme.params), scheme_applied_args)
+                )
+                dk_proc = _rename_proc_call_modules(dk_proc, param_to_arg)
+                for ek_f, seed_f in keygen_pairs:
+                    # pylint: disable=protected-access
+                    seed_ref = f"{red_base}.{mt._ec_field_name(seed_f)}{{{rs}}}"
+                    ek_ref = f"{red_base}.{mt._ec_field_name(ek_f)}{{{rs}}}"
+                    # pylint: enable=protected-access
+                    ev = bch.keygen_derived_ev(dk_proc, seed_ref, clone_alias_by_module)
+                    if ev is not None:
+                        conj.append(f"({ek_ref}, {seed_ref}) = {ev}")
         body = " /\\ ".join(conj)
         return f"{glob_invariant_conj} /\\ {body}" if glob_invariant_conj else body
 
@@ -3358,6 +3429,7 @@ def export_proof_file(proof_path: str) -> str:
                 init_reduction_repacks=init_reduction_repacks,
                 init_decomposition=init_decomposition,
                 init_coupling=_decomposition_coupling(step_a, step_b),
+                full_coupling=_live_state_coupling(step_a, step_b),
                 clone_alias=clone_alias_by_module,
             )
             chain_extra_decls.extend(info.extra_decls)

@@ -28,6 +28,7 @@ from ...visitors import VariableCollectionVisitor
 from . import binding_challenge as bch
 from . import ec_ast
 from . import module_translator as mt
+from . import single_r_challenge as srb
 from . import type_collector as tc
 from .canonical_form import _normalize_for_ec, canonical_text
 from .resolution import (
@@ -3551,6 +3552,25 @@ def _emit_one_oracle_chain(
             if decaps_val_acc is not None:
                 decaps_val_acc.add(h2_scheme)
             return [], h2_body, set()
+        sr_route = _challenge_single_r_route(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            left_wrapper_expr,
+            right_wrapper_expr,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            clone_alias,
+        )
+        if sr_route is not None:
+            sr_body, sr_injs, sr_scheme = sr_route
+            if inj_acc is not None:
+                inj_acc.update(sr_injs)
+            if decaps_val_acc is not None:
+                decaps_val_acc.add(sr_scheme)
+            return [], sr_body, set()
 
     # Field-aware coupling: identical-state hops keep the whole-glob equality
     # (byte-identical for clean proofs); a hop whose two sides differ in glob
@@ -4721,6 +4741,106 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
         (t_module, _ev_method(shape.ev_encct_t)),
         scheme_name,
     )
+
+
+def _challenge_single_r_route(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    left_wrapper_expr: str,
+    right_wrapper_expr: str,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    clone_alias: dict[str, str],
+) -> tuple[list[str], list[tuple[str, str]], str] | None:
+    """Derive the single-R seedbased direct-to-KDF-collision hop_0 tactic.
+
+    Shape: LEFT is the binding game (no ``if``, two ``<Scheme>.decaps`` then a
+    boolean); RIGHT is a single reduction ``R`` that derives its component keys
+    from ONE seed field and, after computing the two KDF inputs, forwards a
+    ``ct0 <> ct1`` case to a STATELESS KDF collision challenger (guard ``ct0 =
+    ct1`` -> ``false``; else -> the inlined challenger's ``H.evaluate`` pair).
+    Returns ``(outer_body, inj_requests, scheme_name)`` or ``None`` off-shape."""
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+    lmod = _flat_state_module(
+        modules,
+        "Chal_L",
+        lproj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    rmod = _flat_state_module(
+        modules,
+        "Chal_R",
+        rproj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    if not lmod.procs or not rmod.procs:
+        return None
+    game_proc, red_proc = lmod.procs[0], rmod.procs[0]
+    if any(isinstance(s, ec_ast.If) for s in game_proc.body):
+        return None
+    red_if = next((s for s in red_proc.body if isinstance(s, ec_ast.If)), None)
+    if red_if is None:
+        return None
+    ct_params = [p.name for p in game_proc.params]
+    if len(ct_params) != 2:
+        return None
+    # guard = ``ct0 = ct1`` (the two ciphertext params); then = false (no calls);
+    # else = the inlined stateless KDF challenger (only ``H.evaluate`` calls).
+    guard_ops = [p.strip() for p in red_if.guard.strip("() ").split("=") if p.strip()]
+    if guard_ops != ct_params:
+        return None
+    if any(isinstance(s, ec_ast.Call) for s in red_if.then_body):
+        return None
+    else_calls = [s for s in red_if.else_body if isinstance(s, ec_ast.Call)]
+    if not else_calls or not all(c.callee.endswith(".evaluate") for c in else_calls):
+        return None
+    h_module = else_calls[0].callee.split(".", 1)[0]
+
+    game_args = _top_level_args(left_wrapper_expr)
+    if not game_args:
+        return None
+    scheme_expr = game_args[0]
+    scheme_name = _ref_base(scheme_expr)
+    game_glob_mods = _callee_mods(game_proc.body, clone_alias)
+    if not game_glob_mods:
+        return None
+    game_fields = list(left_state0.fields)
+    red_fields = list(right_state0.fields)
+    if len(game_fields) != 1 or len(red_fields) != 1:
+        return None
+    game_base = _ref_base(left_wrapper_expr)
+    # pylint: disable=protected-access
+    game_key_ref = f"{game_base}.{mt._ec_field_name(game_fields[0].name)}"
+    # pylint: enable=protected-access
+    prefix = [s for s in red_proc.body if not isinstance(s, ec_ast.If)]
+    spec = srb.SingleRHopSpec(
+        val_lemma_name=f"{scheme_name}_decaps_val",
+        game_glob_mods=game_glob_mods,
+        game_key_ref=game_key_ref,
+        ct_params=ct_params,
+        red_base=_ref_base(right_wrapper_expr),
+        red_glob_mods=_callee_mods(prefix, clone_alias),
+        seed_field=red_fields[0].name,
+        clone_alias=clone_alias,
+        h_module=h_module,
+        red_proc=red_proc,
+        sync_mods=_top_level_args(scheme_expr),
+    )
+    result = srb.single_r_hop0_tactic(spec)
+    if result is None:
+        return None
+    body, inj_reqs = result
+    return ([_res_tag(SYNTH_PARAM), *body[1:]], inj_reqs, scheme_name)
 
 
 def _annot_eq_guard(guard: str, side: str) -> str:

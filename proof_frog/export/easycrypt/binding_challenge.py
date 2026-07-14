@@ -836,6 +836,13 @@ class Hop4Spec:
     # FORWARD from the seeds (``exists* R.seedN``, seeded by ``{seedN: SN}``) and
     # the decomp coupling is ``game.dkN = R.seedN``.
     seed_fields: list[str] = field(default_factory=list)
+    # PK binding (ek-guard): the hop post threads the ek seams
+    # (``game.ekN{2} = R.ekN{1}``) + the ek-derivation coupling
+    # (``(R.ekN{1}, R.seedN{1}) = (ev-form, R.seedN{1})``). Both are preserved by
+    # the (ek/seed-untouching) prefix, so the ``seq`` invariant must RE-STATE them
+    # to reach the post, and each branch closes under ``=> /#`` (CT has no such
+    # coupling -> ``/>`` closes bare). Empty on the CT path (byte-identical).
+    ek_inv_conj: list[str] = field(default_factory=list)
 
 
 def _blk_env_hop4(spec: Hop4Spec, field_elim: list[str]) -> dict[str, str]:
@@ -881,6 +888,7 @@ def challenge_tactic_hop4(spec: Hop4Spec) -> list[str] | None:
         [f"(glob {m})" "{1}" f" = (glob {m})" "{2}" for m in spec.sync_mods]
         + [f"{c}" "{1}" f" = {c}" "{2}" for c in spec.ct_params]
         + spec.decomp_coupling
+        + spec.ek_inv_conj
     )
     lines = ["proof.", "  proc.", f"  seq {red_len} 2 : ({inv})."]
 
@@ -922,16 +930,24 @@ def challenge_tactic_hop4(spec: Hop4Spec) -> list[str] | None:
     ]
 
     # both sides return false; select the branch on the reduction's if guard
-    # (CT: ``ct0 = ct1``; PK: ``ek0 = ek1`` over the packed encaps keys).
+    # (CT: ``ct0 = ct1``; PK: ``ek0 = ek1`` over the packed encaps keys). PK's
+    # post threads the ek-derivation coupling, so each branch leaves a residual
+    # ek equality ``smt`` must close (CT's ``/>`` closes bare).
     del ct0, ct1
+    # PK: the post threads the ek-derivation coupling, so ``skip => />`` leaves a
+    # residual ek equality (``R.ek1 = ev-form``, chained via the branch guard) that
+    # keeps the pre hypotheses only under ``=> /#`` (``=> />`` discharges them and
+    # ``smt`` is then left a premise-free goal). CT has no such coupling.
+    then_tail = "    wp. skip => /#." if spec.ek_inv_conj else "    wp. skip => />."
+    else_skip = "  skip => /#." if spec.ek_inv_conj else "  skip => />."
     lines += [
         f"  case ({spec.guard_annot}).",
         "  + rcondt{1} 1; first by auto.",
-        "    wp. skip => />.",
+        then_tail,
         "  rcondf{1} 1; first by (auto; smt()).",
         "  inline{1} 1.",
         "  wp.",
-        "  skip => />.",
+        else_skip,
         "  qed.",
     ]
     return lines

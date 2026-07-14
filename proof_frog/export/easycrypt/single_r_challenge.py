@@ -22,7 +22,7 @@ generic (:func:`slice_to_leaf`), unlike the fixed 5-leaf two-KEM ``ConcatShape``
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import ec_ast
 from .binding_challenge import (
@@ -187,6 +187,15 @@ class SingleRHopSpec:
     # Which DISTINCT seed/key each ciphertext site decapsulates under. ``[0, 0]``
     # SAMEKEY; ``[0, 1]`` DIFFKEY.
     ct_seed_idx: list[int]
+    # PK-binding (LEAK-BIND-K-PK) extras. Empty on the CT path (byte-identical).
+    # ``guard_ek_refs`` = the reduction's own EncapsKey FIELD names (the guard
+    # ``ek0 == ek1`` operands, one per seed); ``game_ek_refs`` = the game's
+    # EncapsKey field glob-refs (the win term ``ek0 <> ek1``). When non-empty the
+    # tactic cases on the reduction ek-guard, closes the ``ek0 == ek1`` branch via
+    # the ek seams, and discharges the ``ek0 <> ek1`` branch by the redundancy
+    # ``kdf0 = kdf1 => ek0 = ek1`` through the two EncodeEncapsKey KDF leaves.
+    guard_ek_refs: list[str] = field(default_factory=list)
+    game_ek_refs: list[str] = field(default_factory=list)
 
 
 def _seed_env(
@@ -239,6 +248,33 @@ def _ct_leaves(
     return out
 
 
+def _ek_leaves(
+    leaves: list[str], clone_alias: dict[str, str]
+) -> list[tuple[int, str, str, str]]:
+    """Find the KDF leaves that encode a component EncapsKey: the two
+    ``ev_encodeencapskey`` leaves (``ek_PQ``, ``ek_T``) -- the PK win term.
+
+    Returns ``[(leaf_idx, module, method, ek_ev_arg), ...]`` where
+    ``<module>_encodeencapskey_inj`` is the injectivity axiom and ``ek_ev_arg`` is
+    the seed-derived encaps-key ev-form (``(<KEM>_c.ev_derivekeypair ...).\\`1``),
+    which is exactly the component of the ek-derivation coupling."""
+    out: list[tuple[int, str, str, str]] = []
+    clone_to_mod = {c: m for m, c in clone_alias.items()}
+    for idx, leaf in enumerate(leaves):
+        e = leaf.strip()
+        if not (e.startswith("(") and e.endswith(")")):
+            continue
+        head, _, arg = e[1:-1].strip().partition(" ")
+        if ".ev_" not in head:
+            continue
+        clone, method = head.split(".ev_", 1)
+        if method != "encodeencapskey":
+            continue
+        module = clone_to_mod.get(clone, clone)
+        out.append((idx, module, method, arg.strip()))
+    return out
+
+
 def single_r_hop0_tactic(
     spec: SingleRHopSpec,
 ) -> tuple[list[str], list[tuple[str, str]]] | None:
@@ -269,14 +305,41 @@ def single_r_hop0_tactic(
     if "kdf_in_0" not in inv_env or "kdf_in_1" not in inv_env:
         return None
     kdf_r0, kdf_r1 = inv_env["kdf_in_0"], inv_env["kdf_in_1"]
-    # Shape gate: the KDF input must parse as a left-nested concat with exactly
-    # two ciphertext-encoding leaves (the redundancy itself uses the game-elim
-    # form below).
+    kdf_rs = [kdf_r0, kdf_r1]
+    is_pk = bool(spec.guard_ek_refs)
+    # Shape gate: the KDF input must parse as a left-nested concat. CT binding
+    # needs exactly two ciphertext-encoding leaves; PK binding needs exactly two
+    # EncodeEncapsKey leaves (the win term).
     parsed0 = parse_left_nested_concat(kdf_r0)
     if parsed0 is None or parse_left_nested_concat(kdf_r1) is None:
         return None
-    if len(_ct_leaves(parsed0[1], f"{ct0}" "{2}", spec.clone_alias)) != 2:
+    if is_pk:
+        if len(_ek_leaves(parsed0[1], spec.clone_alias)) != 2:
+            return None
+    elif len(_ct_leaves(parsed0[1], f"{ct0}" "{2}", spec.clone_alias)) != 2:
         return None
+
+    # PK ek-derivation coupling (per seed): ``(R.ek_j, R.seed_j) = ((ek_PQ_ev,
+    # ek_T_ev), R.seed_j)`` where the two ev-forms are the EncodeEncapsKey KDF-leaf
+    # inners over R.seed_j -- exactly the coupling in the lemma pre
+    # (``_self_keygen_multikey_coupling``), which the ``seq`` invariant must carry
+    # (``seq`` forgets state not in its invariant). Also the game/reduction ek
+    # SEAMS ``game.ek_j{1} = R.ek_j{2}``.
+    ek_coupling_conj: list[str] = []
+    ek_seam_conj: list[str] = []
+    if is_pk:
+        for j in range(nkeys):
+            ks = [k for k in range(2) if spec.ct_seed_idx[k] == j]
+            parsed_j = parse_left_nested_concat(kdf_rs[ks[0]]) if ks else None
+            eklv = _ek_leaves(parsed_j[1], spec.clone_alias) if parsed_j else []
+            if len(eklv) != 2:
+                return None
+            pq_ev, t_ev = eklv[0][3], eklv[1][3]
+            ek_ref = f"{spec.red_base}.{spec.guard_ek_refs[j]}" "{2}"
+            ek_coupling_conj.append(
+                f"({ek_ref}, {seed_refs[j]}) = (({pq_ev}, {t_ev}), {seed_refs[j]})"
+            )
+            ek_seam_conj.append(f"{spec.game_ek_refs[j]}" "{1}" f" = {ek_ref}")
 
     # -- game side: functionalize both decaps via the val-lemma (per-ct key) ----
     game_ex = (
@@ -307,6 +370,8 @@ def single_r_hop0_tactic(
         glob_eqs
         + [f"{dkey[j]} = {r}" "{1}" for j, r in enumerate(spec.game_key_refs)]
         + [f"{r}" "{1}" f" = {seed_refs[j]}" for j, r in enumerate(spec.game_key_refs)]
+        + ek_seam_conj
+        + ek_coupling_conj
         + [
             f"C0 = {ct0}" "{1}",
             f"C1 = {ct1}" "{1}",
@@ -344,19 +409,40 @@ def single_r_hop0_tactic(
         "    skip => />.",
     ]
 
-    # -- case on the reduction guard ``ct0 = ct1`` -----------------------------
-    lines.append(f"  case ({ct0}" "{2}" f" = {ct1}" "{2}).")
-    # then: R returns false; the game predicate is false too (ct0{1}=ct1{1}
-    # follows from the ct couplings + the branch guard, so ``/>`` closes it).
-    lines += [
-        "  + rcondt{2} 1; first by auto.",
-        "    wp. skip => />.",
-    ]
+    # -- case on the reduction guard -------------------------------------------
+    # CT: ``ct0 = ct1``; PK: the reduction's own ek fields ``ek0 = ek1``.
+    if is_pk:
+        guard = (
+            f"{spec.red_base}.{spec.guard_ek_refs[0]}"
+            "{2}"
+            f" = {spec.red_base}.{spec.guard_ek_refs[1]}"
+            "{2}"
+        )
+    else:
+        guard = f"{ct0}" "{2}" f" = {ct1}" "{2}"
+    lines.append(f"  case ({guard}).")
+    # then: R returns false; the game predicate is false too. CT: ct0{1}=ct1{1}
+    # via the ct couplings + branch guard. PK: game.ek0{1}=game.ek1{1} via the ek
+    # seams + branch guard (the win term ``ek0<>ek1`` is then false), so ``smt``
+    # closes it after ``/>`` collapses the memories.
+    if is_pk:
+        lines += [
+            "  + rcondt{2} 1; first by auto.",
+            "    wp. skip => />.",
+        ]
+    else:
+        lines += [
+            "  + rcondt{2} 1; first by auto.",
+            "    wp. skip => />.",
+        ]
     # else: R forwards to the KDF Breakable challenger (H(x0)=H(x1) && x0<>x1).
-    # After ``skip => />`` the coupling ``D0 = seed0{2}`` + ``C_i = ct_i`` collapse
-    # both sides' KDF inputs to the SAME terms over the game elims ``D0``/``C0``/
-    # ``C1``, and the branch guard simplifies the game's ``ct0<>ct1`` to true; the
-    # residual is ``C0<>C1 => (ev K0 = ev K1) = ((ev K0 = ev K1) && K0<>K1)``.
+    # After ``skip => />`` the couplings collapse both sides' KDF inputs to the
+    # SAME terms over the game elims ``D_j``/``C0``/``C1``. CT: the residual is
+    # ``C0<>C1 => (ev K0 = ev K1) = ((ev K0 = ev K1) && K0<>K1)``. PK: the game's
+    # win term is ``ek0<>ek1``, which the ek-derivation coupling has rewritten to
+    # ``(ek_PQ_ev0, ek_T_ev0) <> (ek_PQ_ev1, ek_T_ev1)`` -- the extra ``K0<>K1``
+    # conjunct is redundant because ``K0=K1`` forces both EncodeEncapsKey leaves
+    # equal, hence both ek ev-forms equal.
     hm = spec.h_module
     goal_env = _seed_env(
         prefix,
@@ -369,8 +455,13 @@ def single_r_hop0_tactic(
         return None
     gops, gleaves0 = gparse0
     _gops1, gleaves1 = gparse1
-    gct_leaves = _ct_leaves(gleaves0, "C0", spec.clone_alias)
-    if len(gct_leaves) != 2:
+    if is_pk:
+        gkey_leaves0 = _ek_leaves(gleaves0, spec.clone_alias)
+        gkey_leaves1 = _ek_leaves(gleaves1, spec.clone_alias)
+    else:
+        gkey_leaves0 = _ct_leaves(gleaves0, "C0", spec.clone_alias)
+        gkey_leaves1 = _ct_leaves(gleaves1, "C1", spec.clone_alias)
+    if len(gkey_leaves0) != 2 or len(gkey_leaves1) != 2:
         return None
     lines += [
         "  rcondf{2} 1; first by (auto; smt()).",
@@ -388,14 +479,42 @@ def single_r_hop0_tactic(
         f"  call{{2}} ({hm}_evaluate_det gh2 ki0).",
         "  skip => />. move => hne.",
     ]
-    # redundancy: K0 = K1 forces C0 = C1 (both ct components are bound in the KDF
-    # input), so with the guard C0 <> C1 the extra K0 <> K1 conjunct is true.
+    inj_reqs: list[tuple[str, str]] = []
+    if is_pk:
+        # PK redundancy: ``kdf0 = kdf1 => (ek_PQ_ev0 = ek_PQ_ev1 /\ ek_T_ev0 =
+        # ek_T_ev1)`` -- the conjunction the coupling-rewritten win term ``hne``
+        # negates. Each conjunct comes from an EncodeEncapsKey leaf + inj.
+        concl = " /\\ ".join(
+            f"{gkey_leaves0[i][3]} = {gkey_leaves1[i][3]}" for i in range(2)
+        )
+        lines.append(
+            f"  have hkek : {goal_env['kdf_in_0']} = {goal_env['kdf_in_1']} "
+            f"=> ({concl})."
+        )
+        lines.append("  + move => h.")
+        for i in range(2):
+            idx, module, method, inner0 = gkey_leaves0[i]
+            inner1 = gkey_leaves1[i][3]
+            peel_lines, leaf_h = slice_to_leaf(
+                gops, gleaves0, gleaves1, idx, "h", f"ek{i}"
+            )
+            lines += [f"    {ln}" for ln in peel_lines]
+            lines.append(
+                f"    have hekeq{i} : {inner0} = {inner1} "
+                f"by apply ({module}_{method}_inj _ _ {leaf_h})."
+            )
+            inj_reqs.append((module, method))
+        lines.append("    smt().")
+        lines.append("  smt().")
+        lines.append("  qed.")
+        return lines, inj_reqs
+    # CT redundancy: K0 = K1 forces C0 = C1 (both ct components are bound in the
+    # KDF input), so with the guard C0 <> C1 the extra K0 <> K1 conjunct is true.
     lines.append(
         f"  have hkct : {goal_env['kdf_in_0']} = {goal_env['kdf_in_1']} => C0 = C1."
     )
     lines.append("  + move => h.")
-    inj_reqs: list[tuple[str, str]] = []
-    for i, (idx, module, method, proj) in enumerate(gct_leaves):
+    for i, (idx, module, method, proj) in enumerate(gkey_leaves0):
         peel_lines, leaf_h = slice_to_leaf(gops, gleaves0, gleaves1, idx, "h", f"c{i}")
         lines += [f"    {ln}" for ln in peel_lines]
         proj1 = proj.replace("C0", "C1")

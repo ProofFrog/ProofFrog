@@ -4690,6 +4690,60 @@ def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-p
     )
 
 
+def _falsefalse_ek_inv(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    prefix: list[ec_ast.EcStmt],
+    seed_fields: list[str],
+    guard_ops: list[str],
+    game_ek_refs: list[str],
+    red_base: str,
+    ct_params: list[str],
+    clone_alias: dict[str, str],
+) -> list[str] | None:
+    """PK ek seams + ek-derivation coupling for the false/false hop invariant (R
+    on side ``{1}``, game on side ``{2}``): mirror of the single-R hop_0 inv
+    (see :func:`single_r_challenge.single_r_hop0_tactic`). The lemma post threads
+    both (game ek is dead but the coupling still rides every hop), so the ``seq``
+    invariant must RE-STATE them. ``None`` off-shape."""
+    if len(game_ek_refs) != len(guard_ops) or len(seed_fields) != len(guard_ops):
+        return None
+    if len(ct_params) != 2:
+        return None
+    ct0, ct1 = ct_params
+    seed_refs = [f"{red_base}.{sf}" "{1}" for sf in seed_fields]
+    # pylint: disable=protected-access
+    inv_env = srb._seed_env(
+        prefix,
+        {sf: seed_refs[j] for j, sf in enumerate(seed_fields)}
+        | {ct0: f"{ct0}" "{1}", ct1: f"{ct1}" "{1}"},
+        clone_alias,
+    )
+    # pylint: enable=protected-access
+    conj = [
+        f"{game_ek_refs[j]}" "{2}" f" = {red_base}.{guard_ops[j]}" "{1}"
+        for j in range(len(guard_ops))
+    ]
+    for j in range(len(seed_fields)):
+        kdf = inv_env.get(f"kdf_in_{j}")
+        if kdf is None:
+            return None
+        parsed = srb.parse_left_nested_concat(kdf)
+        if parsed is None:
+            return None
+        eklv = srb._ek_leaves(
+            parsed[1], clone_alias
+        )  # pylint: disable=protected-access
+        if len(eklv) != 2:
+            return None
+        pq_ev, t_ev = eklv[0][3], eklv[1][3]
+        conj.append(
+            f"({red_base}.{guard_ops[j]}"
+            "{1}"
+            f", {seed_refs[j]}) = "
+            f"(({pq_ev}, {t_ev}), {seed_refs[j]})"
+        )
+    return conj
+
+
 def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -4737,6 +4791,15 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
     red_if = next((s for s in red_proc.body if isinstance(s, ec_ast.If)), None)
     if red_if is None or any(isinstance(s, ec_ast.If) for s in game_proc.body):
         return None
+    # PK binding: the reduction guard is ``ek0 = ek1`` over its own EncapsKey
+    # FIELDS (the win term is dead on the Unbreakable side -- both return false).
+    ff_guard_ops = [
+        p.strip() for p in red_if.guard.strip("() ").split("=") if p.strip()
+    ]
+    ff_red_fields = {f.name for f in left_state0.fields}
+    ff_is_ek_guard = len(ff_guard_ops) == 2 and all(
+        g in ff_red_fields for g in ff_guard_ops
+    )
 
     game_args = _top_level_args(right_wrapper_expr)
     if not game_args:
@@ -4780,13 +4843,35 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
     # from seed fields (one per game key), not reduction fields. Couple each game
     # key to its seed (``game.dkN = R.seedN``) and functionalize from the seeds.
     seed_fields: list[str] = []
+    ff_ek_inv: list[str] = []
     if distinct_grp and not all(f in red_field_set for f in distinct_grp[0]):
-        game_fields = list(right_state0.fields)
-        red_own = list(left_state0.fields)
+        # pylint: disable=protected-access
+        if ff_is_ek_guard:
+            # PK: split off the DecapsKey game fields (fed to ``G.evaluate`` -->
+            # appear as Call args) from the dead EncapsKey fields, and the seeds
+            # from the guard ek fields. Only the DecapsKey/seed derivation is
+            # functionalized; the ek fields are dead (both sides return false).
+            game_call_args = " ".join(
+                s.args for s in game_proc.body if isinstance(s, ec_ast.Call)
+            )
+            game_fields = [
+                f
+                for f in right_state0.fields
+                if re.search(r"\b" + re.escape(f.name) + r"\b", game_call_args)
+            ]
+            game_ek_refs = [
+                f"{game_base}.{mt._ec_field_name(f.name)}"
+                for f in right_state0.fields
+                if f not in game_fields
+            ]
+            red_own = [f for f in left_state0.fields if f.name not in ff_guard_ops]
+        else:
+            game_fields = list(right_state0.fields)
+            game_ek_refs = []
+            red_own = list(left_state0.fields)
         if len(game_fields) != len(red_own) or len(game_fields) != len(distinct_grp):
             return None
         seed_fields = [f.name for f in red_own]
-        # pylint: disable=protected-access
         game_key_refs = [
             f"{game_base}.{mt._ec_field_name(f.name)}" for f in game_fields
         ]
@@ -4794,6 +4879,19 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
             f"{game_key_refs[j]}" "{2}" f" = {red_base}.{seed_fields[j]}" "{1}"
             for j in range(len(game_fields))
         ]
+        if ff_is_ek_guard:
+            ek_inv = _falsefalse_ek_inv(
+                [s for s in prefix if not isinstance(s, ec_ast.VarDecl)],
+                seed_fields,
+                ff_guard_ops,
+                game_ek_refs,
+                red_base,
+                [p.name for p in game_proc.params],
+                clone_alias,
+            )
+            if ek_inv is None:
+                return None
+            ff_ek_inv = ek_inv
         # pylint: enable=protected-access
     else:
         ek_decomp = _ek_decomp(red_proc.body, red_field_set)
@@ -4823,9 +4921,17 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
         clone_alias=clone_alias,
         decomp_coupling=decomp,
         red_proc=red_proc,
-        guard_annot=_annot_eq_guard(red_if.guard, "{1}"),
+        guard_annot=(
+            f"{red_base}.{ff_guard_ops[0]}"
+            "{1}"
+            f" = {red_base}.{ff_guard_ops[1]}"
+            "{1}"
+            if ff_is_ek_guard
+            else _annot_eq_guard(red_if.guard, "{1}")
+        ),
         ct_key_idx=ct_key_idx,
         seed_fields=seed_fields,
+        ek_inv_conj=ff_ek_inv,
     )
     body = bch.challenge_tactic_hop4(spec)
     if body is None:
@@ -5081,10 +5187,15 @@ def _challenge_single_r_route(  # pylint: disable=too-many-arguments,too-many-po
     ct_params = [p.name for p in game_proc.params]
     if len(ct_params) != 2:
         return None
-    # guard = ``ct0 = ct1`` (the two ciphertext params); then = false (no calls);
-    # else = the inlined stateless KDF challenger (only ``H.evaluate`` calls).
+    # guard = ``ct0 = ct1`` (the two ciphertext params, CT binding); then = false
+    # (no calls); else = the inlined stateless KDF challenger (only ``H.evaluate``
+    # calls). For PK binding the guard is instead ``ek0 = ek1`` over the
+    # reduction's own EncapsKey FIELDS (the win term); that route is handled by
+    # ``_single_r_pk_spec`` below.
     guard_ops = [p.strip() for p in red_if.guard.strip("() ").split("=") if p.strip()]
-    if guard_ops != ct_params:
+    red_field_names = [f.name for f in right_state0.fields]
+    is_ek_guard = len(guard_ops) == 2 and all(g in red_field_names for g in guard_ops)
+    if guard_ops != ct_params and not is_ek_guard:
         return None
     if any(isinstance(s, ec_ast.Call) for s in red_if.then_body):
         return None
@@ -5107,10 +5218,41 @@ def _challenge_single_r_route(  # pylint: disable=too-many-arguments,too-many-po
     if not game_fields or len(game_fields) != len(red_fields):
         return None
     game_base = _ref_base(left_wrapper_expr)
-    # pylint: disable=protected-access
-    game_key_refs = [f"{game_base}.{mt._ec_field_name(f.name)}" for f in game_fields]
-    # pylint: enable=protected-access
-    seed_fields = [f.name for f in red_fields]
+
+    def _ec(name: str) -> str:
+        return mt._ec_field_name(name)  # pylint: disable=protected-access
+
+    guard_ek_refs: list[str] = []
+    game_ek_refs: list[str] = []
+    if is_ek_guard:
+        # PK binding: split the game fields into DecapsKey fields (fed to
+        # ``G.evaluate`` -- appear as Call args) and EncapsKey fields (the win
+        # term, return-only), and the reduction fields into seeds (the rest) and
+        # ek fields (the guard operands). The val-lemma functionalizes only the
+        # DecapsKey/seed derivation; the ek fields drive the case-split + win term.
+        call_arg_txt = " ".join(
+            s.args for s in game_proc.body if isinstance(s, ec_ast.Call)
+        )
+        game_seed_fields = [
+            f
+            for f in game_fields
+            if re.search(r"\b" + re.escape(f.name) + r"\b", call_arg_txt)
+        ]
+        game_ek_fields = [f for f in game_fields if f not in game_seed_fields]
+        red_seed_fields = [f for f in red_fields if f.name not in guard_ops]
+        if (
+            len(game_seed_fields) != len(red_seed_fields)
+            or len(game_ek_fields) != len(guard_ops)
+            or not game_seed_fields
+        ):
+            return None
+        game_key_refs = [f"{game_base}.{_ec(f.name)}" for f in game_seed_fields]
+        game_ek_refs = [f"{game_base}.{_ec(f.name)}" for f in game_ek_fields]
+        seed_fields = [f.name for f in red_seed_fields]
+        guard_ek_refs = list(guard_ops)
+    else:
+        game_key_refs = [f"{game_base}.{_ec(f.name)}" for f in game_fields]
+        seed_fields = [f.name for f in red_fields]
     prefix = [s for s in red_proc.body if not isinstance(s, ec_ast.If)]
     # ct_seed_idx: which seed each KDF input derives from (sentinel-taint the
     # reduction prefix). SAMEKEY -> [0, 0]; DIFFKEY -> [0, 1].
@@ -5139,6 +5281,8 @@ def _challenge_single_r_route(  # pylint: disable=too-many-arguments,too-many-po
         red_proc=red_proc,
         sync_mods=_top_level_args(scheme_expr),
         ct_seed_idx=ct_seed_idx,
+        guard_ek_refs=guard_ek_refs,
+        game_ek_refs=game_ek_refs,
     )
     result = srb.single_r_hop0_tactic(spec)
     if result is None:

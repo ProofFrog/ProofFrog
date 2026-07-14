@@ -48,6 +48,14 @@ class StatementTranslator:
         # ``return witness``). Enabled only by the group-only export path.
         self._allow_void_call = allow_void_call
 
+    def _is_map(self, expr: frog_ast.Expression) -> bool:
+        """True if ``expr`` has a FrogLang finite-map type ``Map<K, V>``."""
+        try:
+            resolved = self._types.resolve(self._exprs.type_of(expr))
+        except (NotImplementedError, KeyError):
+            return False
+        return isinstance(resolved, frog_ast.MapType)
+
     def translate_block(
         self,
         block: frog_ast.Block,
@@ -123,18 +131,159 @@ class StatementTranslator:
         decls.append(ec_ast.VarDecl(result, return_type))
 
         then_stmts: list[ec_ast.EcStmt] = []
-        for s in then_block[:-1]:
-            self._translate_stmt(s, decls, then_stmts, return_type)
-        self._lower_return_to(result, then_block[-1], decls, then_stmts)
-
+        self._lower_block(then_block, decls, then_stmts, return_type, result)
         else_stmts: list[ec_ast.EcStmt] = []
-        for s in rest[:-1]:
-            self._translate_stmt(s, decls, else_stmts, return_type)
-        self._lower_return_to(result, rest[-1], decls, else_stmts)
+        self._lower_block(rest, decls, else_stmts, return_type, result)
 
         guard = self._exprs.translate(if_stmt.conditions[0])
         stmts.append(ec_ast.If(guard, then_stmts, else_stmts))
         stmts.append(ec_ast.Return(result))
+
+    def _lower_block(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        statements: list[frog_ast.Statement],
+        decls: list[ec_ast.VarDecl],
+        out_stmts: list[ec_ast.EcStmt],
+        return_type: ec_ast.EcType | None,
+        result: str,
+    ) -> None:
+        """Lower a straight-line block into a single-exit form writing ``result``.
+
+        Handles a nested guarded early return (``if (g) { ...; return X }`` +
+        fall-through) and a map-iteration for-loop (``for e in m.entries { ...;
+        return X }`` + fall-through), each of which conditionalizes the code
+        after it; a bare ``return`` becomes ``result <- expr``; every other
+        statement translates in place. For a block whose only returning
+        construct is a trailing ``return`` (the pre-existing guarded-early-
+        return case), this is byte-identical to the former inline loop."""
+        for i, stmt in enumerate(statements):
+            rest = statements[i + 1 :]
+            if self._is_guarded_early_return(stmt):
+                assert isinstance(stmt, frog_ast.IfStatement)
+                inner_then: list[ec_ast.EcStmt] = []
+                self._lower_block(
+                    list(stmt.blocks[0].statements),
+                    decls,
+                    inner_then,
+                    return_type,
+                    result,
+                )
+                inner_else: list[ec_ast.EcStmt] = []
+                self._lower_block(rest, decls, inner_else, return_type, result)
+                guard = self._exprs.translate(stmt.conditions[0])
+                out_stmts.append(ec_ast.If(guard, inner_then, inner_else))
+                return
+            if self._is_map_for_early_return(stmt):
+                assert isinstance(stmt, frog_ast.GenericFor)
+                self._lower_map_for(stmt, rest, decls, out_stmts, return_type, result)
+                return
+            if isinstance(stmt, frog_ast.ReturnStatement):
+                self._lower_return_to(result, stmt, decls, out_stmts)
+                return
+            self._translate_stmt(stmt, decls, out_stmts, return_type)
+
+    def _is_map_for_early_return(self, stmt: frog_ast.Statement) -> bool:
+        """True for ``for ([K,V] e in m.entries) { ... }`` over a finite map."""
+        if not isinstance(stmt, frog_ast.GenericFor):
+            return False
+        over = stmt.over
+        return (
+            isinstance(over, frog_ast.FieldAccess)
+            and over.name == "entries"
+            and self._is_map(over.the_object)
+        )
+
+    def _lower_map_for(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+        self,
+        for_stmt: frog_ast.GenericFor,
+        rest: list[frog_ast.Statement],
+        decls: list[ec_ast.VarDecl],
+        out_stmts: list[ec_ast.EcStmt],
+        return_type: ec_ast.EcType | None,
+        result: str,
+    ) -> None:
+        """Lower ``for e in m.entries { ...; return X } <rest>`` to an EC while.
+
+        FrogLang iterates the map's entries and may ``return`` mid-loop; EC
+        procedures are single-exit, so this emits a found-flag loop over the
+        key list ``elems (fdom m)`` -- binding ``e = (k, oget m.[k])`` each
+        iteration, firing the match body (which writes ``result`` and sets
+        ``found``) only while ``!found`` -- and guards the fall-through
+        ``rest`` on ``!found``."""
+        over = for_stmt.over
+        assert isinstance(over, frog_ast.FieldAccess)
+        map_txt = self._exprs.translate(over.the_object)
+        map_type = self._types.resolve(self._exprs.type_of(over.the_object))
+        assert isinstance(map_type, frog_ast.MapType)
+        key_ec = self._types.translate_type(map_type.key_type).text
+
+        e_name = for_stmt.var_name
+        decls.append(
+            ec_ast.VarDecl(e_name, self._types.translate_type(for_stmt.var_type))
+        )
+        avoid = (
+            _collect_bound_names(list(for_stmt.block.statements))
+            | _collect_bound_names(rest)
+            | {e_name}
+        )
+        found = _fresh_name_avoiding(decls, out_stmts, avoid)
+        decls.append(ec_ast.VarDecl(found, ec_ast.EcType("bool")))
+        keys = _fresh_name_avoiding(decls, out_stmts, avoid)
+        decls.append(ec_ast.VarDecl(keys, ec_ast.EcType(f"{key_ec} list")))
+        idx = _fresh_name_avoiding(decls, out_stmts, avoid)
+        decls.append(ec_ast.VarDecl(idx, ec_ast.EcType("int")))
+
+        out_stmts.append(ec_ast.Assign(found, "false"))
+        out_stmts.append(ec_ast.Assign(keys, f"elems (fdom {map_txt})"))
+        out_stmts.append(ec_ast.Assign(idx, "0"))
+
+        nth_key = f"nth witness {keys} {idx}"
+        loop_body: list[ec_ast.EcStmt] = [
+            ec_ast.Assign(e_name, f"({nth_key}, oget {map_txt}.[{nth_key}])")
+        ]
+        self._lower_loop_body(
+            list(for_stmt.block.statements),
+            decls,
+            loop_body,
+            return_type,
+            result,
+            found,
+        )
+        loop_body.append(ec_ast.Assign(idx, f"{idx} + 1"))
+        out_stmts.append(ec_ast.While(f"{idx} < size {keys}", loop_body))
+
+        fall: list[ec_ast.EcStmt] = []
+        self._lower_block(rest, decls, fall, return_type, result)
+        if fall:
+            out_stmts.append(ec_ast.If(f"! {found}", fall, []))
+
+    def _lower_loop_body(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        statements: list[frog_ast.Statement],
+        decls: list[ec_ast.VarDecl],
+        out_stmts: list[ec_ast.EcStmt],
+        return_type: ec_ast.EcType | None,
+        result: str,
+        found: str,
+    ) -> None:
+        """Translate a map-loop body whose match arm ends in a ``return``.
+
+        The arm ``if (COND) { ...; return X }`` becomes ``if (COND /\ !found)
+        { ...; result <- X; found <- true }`` so the first matching entry wins
+        and later iterations are inert; other statements translate in place."""
+        for stmt in statements:
+            if self._is_guarded_early_return(stmt):
+                assert isinstance(stmt, frog_ast.IfStatement)
+                body = list(stmt.blocks[0].statements)
+                then_stmts: list[ec_ast.EcStmt] = []
+                for s in body[:-1]:
+                    self._translate_stmt(s, decls, then_stmts, return_type)
+                self._lower_return_to(result, body[-1], decls, then_stmts)
+                then_stmts.append(ec_ast.Assign(found, "true"))
+                guard = self._exprs.translate(stmt.conditions[0])
+                out_stmts.append(ec_ast.If(f"({guard}) /\\ ! {found}", then_stmts, []))
+            else:
+                self._translate_stmt(stmt, decls, out_stmts, return_type)
 
     def _lower_return_to(
         self,
@@ -250,6 +399,18 @@ class StatementTranslator:
         decls: list[ec_ast.VarDecl],
         stmts: list[ec_ast.EcStmt],
     ) -> None:
+        # Finite-map write ``m[k] = v`` -> the EC functional update
+        # ``m <- m.[k <- v]`` (a lazy random-oracle table store). The LHS is
+        # an ``ArrayAccess`` on a map-typed array, so it is handled before the
+        # simple-variable path below (which rejects a non-Variable LHS).
+        if isinstance(stmt.var, frog_ast.ArrayAccess) and self._is_map(
+            stmt.var.the_array
+        ):
+            arr = self._exprs.translate(stmt.var.the_array)
+            key = self._exprs.translate(stmt.var.index)
+            val = self._exprs.translate(stmt.value)
+            stmts.append(ec_ast.Assign(arr, f"{arr}.[{key} <- {val}]"))
+            return
         var = _require_variable(stmt.var)
         if stmt.the_type is not None:
             ec_type = self._types.translate_type(stmt.the_type)

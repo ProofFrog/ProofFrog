@@ -4496,7 +4496,10 @@ def export_proof_file(proof_path: str) -> str:
         or theory_types.has_map()
         or any(fs.theory_types.has_map() for fs in foreign_scopes.values())
     )
-    map_requires = ["FMap"] if uses_map else []
+    # ``List`` + ``FSet`` supply ``size`` / ``nth`` and ``elems`` / ``fdom``
+    # for the ``for e in m.entries`` map-iteration loop (lowered to a while
+    # over ``elems (fdom m)``); ordered before ``FMap`` (its dependency).
+    map_requires = ["List", "FSet", "FMap"] if uses_map else []
     ec_file = ec_ast.EcFile(
         # ``DProd`` / ``DMap`` provide the dprod/dmap lemmas
         # (``dmap_dprodE``, ``dmap1E``, ``dmap_id``, ``supp_dprod``,

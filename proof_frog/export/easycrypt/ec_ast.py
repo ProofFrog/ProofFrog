@@ -148,7 +148,22 @@ class If:
     else_body: list["EcStmt"] = field(default_factory=list)
 
 
-EcStmt = Union[VarDecl, Assign, Sample, Call, Return, If]
+@dataclass
+class While:
+    """``while (<guard>) { <body> }`` (EC pWhile loop).
+
+    ``guard`` is a raw EC boolean expression string; ``body`` is a nested
+    statement list (rendered indented). Used to translate a FrogLang
+    ``for e in m.entries { ... }`` map-iteration loop, whose early ``return``
+    is first rewritten into a found-flag assignment (EC procedures have no
+    early return). ``VarDecl``s are lifted to the proc top like ``If``.
+    """
+
+    guard: str
+    body: list["EcStmt"]
+
+
+EcStmt = Union[VarDecl, Assign, Sample, Call, Return, If, While]
 
 
 @dataclass
@@ -516,6 +531,8 @@ def _render_stmt(stmt: EcStmt) -> str:
         return f"return {stmt.expr};"
     if isinstance(stmt, If):
         raise TypeError("If must be rendered via _render_stmt_lines")
+    if isinstance(stmt, While):
+        raise TypeError("While must be rendered via _render_stmt_lines")
     raise TypeError(f"Unknown statement: {type(stmt).__name__}")
 
 
@@ -529,6 +546,12 @@ def _render_stmt_lines(stmt: EcStmt, indent: str) -> list[str]:
             lines.append(f"{indent}}} else {{")
             for inner in stmt.else_body:
                 lines.extend(_render_stmt_lines(inner, indent + "  "))
+        lines.append(f"{indent}}}")
+        return lines
+    if isinstance(stmt, While):
+        lines = [f"{indent}while ({stmt.guard}) {{"]
+        for inner in stmt.body:
+            lines.extend(_render_stmt_lines(inner, indent + "  "))
         lines.append(f"{indent}}}")
         return lines
     return [f"{indent}{_render_stmt(stmt)}"]

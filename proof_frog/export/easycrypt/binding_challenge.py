@@ -420,6 +420,11 @@ class ChallengeHopSpec:
     h_module: str  # KDF module for the else-branch, "H"
     shape: ConcatShape
     red_proc: ec_ast.Proc  # reduction challenge proc
+    # Which DISTINCT game key / reduction component group each of the two
+    # ciphertext sites decapsulates under. ``[0, 1]`` = DIFFKEY (two independent
+    # keys); ``[0, 0]`` = SAMEKEY (both ciphertexts under one key). ``game_key_refs``,
+    # ``red_component_fields``, and ``challenger_key_fields`` hold the DISTINCT keys.
+    ct_key_idx: list[int] = field(default_factory=lambda: [0, 1])
     # -- PK-shape extras (encaps-key binding); all empty/False for CT ----------
     win_is_ek: bool = False  # win term is the packed encaps key, not the ct params
     ek_component_fields: list[list[str]] = field(
@@ -468,15 +473,16 @@ def challenge_tactic(spec: ChallengeHopSpec) -> list[str] | None:
         + [f"{r}" "{1}" for r in spec.game_key_refs]
         + [f"{c}" "{1}" for c in spec.ct_params]
     )
-    game_elim = gge + ["D0", "D1", "C0", "C1"]
+    dkey = [f"D{i}" for i in range(len(spec.game_key_refs))]
+    game_elim = gge + dkey + ["C0", "C1"]
     gargs = " ".join(gge)
     lines = [
         "proof.",
         "  proc.",
         f"  exists* {', '.join(game_ex)};",
         f"  elim* => {' '.join(game_elim)}.",
-        f"  call{{1}} ({spec.val_lemma_name} {gargs} D1 C1).",
-        f"  call{{1}} ({spec.val_lemma_name} {gargs} D0 C0).",
+        f"  call{{1}} ({spec.val_lemma_name} {gargs} {dkey[spec.ct_key_idx[1]]} C1).",
+        f"  call{{1}} ({spec.val_lemma_name} {gargs} {dkey[spec.ct_key_idx[0]]} C0).",
     ]
 
     # -- invariant -------------------------------------------------------------
@@ -625,43 +631,44 @@ def _if_branch(spec: ChallengeHopSpec) -> list[str]:
     pqc = spec.clone_alias[spec.pq_module]
     pqm = spec.pq_module
     ct0, ct1 = spec.ct_params
-    g0 = spec.red_component_fields[0]
-    g1 = spec.red_component_fields[1]
+    i0, i1 = spec.ct_key_idx
+    g0 = spec.red_component_fields[i0]
+    g1 = spec.red_component_fields[i1]
+    bd = [f"bd{i}" for i in range(len(spec.challenger_key_fields))]
     bind0 = (
-        "bd0",
+        bd[i0],
         f"{spec.red_base}.{g0[1]}" "{2}",
         f"{spec.red_base}.{g0[2]}" "{2}",
         "c0",
     )
     bind1 = (
-        "bd1",
+        bd[i1],
         f"{spec.red_base}.{g1[1]}" "{2}",
         f"{spec.red_base}.{g1[2]}" "{2}",
         "c1",
     )
     peel = slice_peel(spec.shape, bind0, bind1)
-    ck0, ck1 = spec.challenger_key_fields
+    chal_keys = "".join(
+        f", {spec.challenger_ref}.{ck}" "{2}" for ck in spec.challenger_key_fields
+    )
     return [
         "  + rcondt{2} 1; first by auto.",
         "    inline{2} 1.",
         "    sp.",
         f"    exists* (glob {pqm})"
         "{2}"
-        f", {spec.challenger_ref}.{ck0}"
-        "{2}"
-        f", {spec.challenger_ref}.{ck1}"
-        "{2}"
+        f"{chal_keys}"
         f", {ct0}"
         "{2}"
         f", {ct1}"
         "{2}"
-        "; elim* => gp3 bd0 bd1 c0 c1.",
+        f"; elim* => gp3 {' '.join(bd)} c0 c1.",
         "    wp.",
-        f"    call{{2}} ({pqm}_decaps_det gp3 bd1 c1.`1).",
-        f"    call{{2}} ({pqm}_decaps_det gp3 bd0 c0.`1).",
+        f"    call{{2}} ({pqm}_decaps_det gp3 {bd[i1]} c1.`1).",
+        f"    call{{2}} ({pqm}_decaps_det gp3 {bd[i0]} c0.`1).",
         "    skip => />. move => &2 h hn.",
         *[f"    {ln}" for ln in peel],
-        f"    have hd : {pqc}.ev_decaps bd0 c0.`1 = {pqc}.ev_decaps bd1 c1.`1"
+        f"    have hd : {pqc}.ev_decaps {bd[i0]} c0.`1 = {pqc}.ev_decaps {bd[i1]} c1.`1"
         f" by apply ({spec.inj_axiom} _ _ he).",
         "    rewrite h /=. smt().",
     ]
@@ -798,6 +805,9 @@ class Hop4Spec:
     guard_annot: (
         str  # the reduction if-guard, side-{1} annotated (e.g. "ek0{1} = ek1{1}")
     )
+    # DISTINCT-key site map; ``[0, 1]`` DIFFKEY, ``[0, 0]`` SAMEKEY. See
+    # :class:`ChallengeHopSpec`.
+    ct_key_idx: list[int] = field(default_factory=lambda: [0, 1])
 
 
 def _blk_env_hop4(spec: Hop4Spec, field_elim: list[str]) -> dict[str, str]:
@@ -857,7 +867,8 @@ def challenge_tactic_hop4(spec: Hop4Spec) -> list[str] | None:
             for f in grp
         ]
     )
-    elim = gge + ["D0", "D1", "C0", "C1"] + field_elim
+    dkey = [f"D{i}" for i in range(len(spec.game_key_refs))]
+    elim = gge + dkey + ["C0", "C1"] + field_elim
     gargs = " ".join(gge)
     blk_env = _blk_env_hop4(spec, field_elim)
     glob_of = {m: gge[gmods.index(m)] for m in spec.red_glob_mods}
@@ -866,8 +877,8 @@ def challenge_tactic_hop4(spec: Hop4Spec) -> list[str] | None:
         "  + sp.",
         f"    exists* {', '.join(game_ex)};",
         f"    elim* => {' '.join(elim)}.",
-        f"    call{{2}} ({spec.val_lemma_name} {gargs} D1 C1).",
-        f"    call{{2}} ({spec.val_lemma_name} {gargs} D0 C0).",
+        f"    call{{2}} ({spec.val_lemma_name} {gargs} {dkey[spec.ct_key_idx[1]]} C1).",
+        f"    call{{2}} ({spec.val_lemma_name} {gargs} {dkey[spec.ct_key_idx[0]]} C0).",
         *[f"    {ln}" for ln in peel],
         "    skip => />.",
     ]
@@ -918,8 +929,11 @@ class Hop2Spec:
     pq_module: str  # "KEM_PQ"
     h_module: str  # "H"
     l_challenger_ref: str  # "KEM_PQ_c.LEAK_BIND_K_CT_Unbreakable"
-    l_challenger_key_fields: list[str]  # ["dk0", "dk1"]
+    l_challenger_key_fields: list[str]  # DISTINCT: ["dk0", "dk1"] / ["dk0"] SAMEKEY
     ect_inj_axiom: str  # "KEM_PQ_encodeciphertext_inj"
+    # DISTINCT-key site map; ``[0, 1]`` DIFFKEY, ``[0, 0]`` SAMEKEY. The
+    # ``*_component_fields`` and ``l_challenger_key_fields`` hold DISTINCT keys.
+    ct_key_idx: list[int] = field(default_factory=lambda: [0, 1])
     # -- PK-shape extras (encaps-key binding); empty/False for CT --------------
     win_is_ek: bool = False
     l_ek_component_fields: list[list[str]] = field(
@@ -970,8 +984,8 @@ def challenge_tactic_hop2(spec: Hop2Spec) -> list[str] | None:
     glob_of = dict(zip(gm, gge))
     hm = spec.h_module
     lchal = spec.l_challenger_ref
-    ck0, ck1 = spec.l_challenger_key_fields
-    lg0, lg1 = spec.l_component_fields
+    i0, i1 = spec.ct_key_idx
+    xdp = [f"xdp{i}" for i in range(len(spec.l_challenger_key_fields))]
 
     l_fe = [f"l{n}" for n in _field_elim_names(spec.l_component_fields)]
     r_fe = [f"r{n}" for n in _field_elim_names(spec.r_component_fields)]
@@ -980,7 +994,8 @@ def challenge_tactic_hop2(spec: Hop2Spec) -> list[str] | None:
     def _s2(ref: str) -> str:
         return ref + "{2}"
 
-    rg0, rg1 = spec.r_component_fields
+    rg0 = spec.r_component_fields[i0]
+    rg1 = spec.r_component_fields[i1]
     kdf0_term = spec.shape.kdf_in(
         _s2(f"{spec.r_base}.{rg0[0]}"),
         _s2(f"{spec.r_base}.{rg0[1]}"),
@@ -1001,8 +1016,8 @@ def challenge_tactic_hop2(spec: Hop2Spec) -> list[str] | None:
         ]
         + [f"(glob {m})" "{1}" f" = (glob {m})" "{2}" for m in spec.sync_mods]
         + [
-            f"{spec.l_base}.{lg0[0]}" "{1}" f" = {lchal}.{ck0}" "{1}",
-            f"{spec.l_base}.{lg1[0]}" "{1}" f" = {lchal}.{ck1}" "{1}",
+            f"{spec.l_base}.{lg[0]}" "{1}" f" = {lchal}.{ck}" "{1}"
+            for lg, ck in zip(spec.l_component_fields, spec.l_challenger_key_fields)
         ]
         + [
             f"{spec.l_base}.{f}" "{1}" f" = {spec.r_base}.{f}" "{2}"
@@ -1094,15 +1109,12 @@ def challenge_tactic_hop2(spec: Hop2Spec) -> list[str] | None:
         "    sp.",
         f"    exists* (glob {spec.pq_module})"
         "{1}"
-        f", {lchal}.{ck0}"
-        "{1}"
-        f", {lchal}.{ck1}"
-        "{1}"
-        f", {ct0}"
+        + "".join(f", {lchal}.{ck}" "{1}" for ck in spec.l_challenger_key_fields)
+        + f", {ct0}"
         "{1}"
         f", {ct1}"
         "{1}"
-        "; elim* => gp3 xdp0 xdp1 xc0 xc1.",
+        f"; elim* => gp3 {' '.join(xdp)} xc0 xc1.",
         "    exists* (glob "
         f"{hm})"
         "{2}"
@@ -1112,8 +1124,8 @@ def challenge_tactic_hop2(spec: Hop2Spec) -> list[str] | None:
         "{2}"
         "; elim* => gh2 ki0 ki1.",
         f"    wp. call{{2}} ({hm}_evaluate_det gh2 ki1). call{{2}} ({hm}_evaluate_det gh2 ki0).",
-        f"    call{{1}} ({spec.pq_module}_decaps_det gp3 xdp1 xc1.`1). "
-        f"call{{1}} ({spec.pq_module}_decaps_det gp3 xdp0 xc0.`1).",
+        f"    call{{1}} ({spec.pq_module}_decaps_det gp3 {xdp[i1]} xc1.`1). "
+        f"call{{1}} ({spec.pq_module}_decaps_det gp3 {xdp[i0]} xc0.`1).",
         "    skip => />; smt().",
     ]
 
@@ -1124,7 +1136,8 @@ def challenge_tactic_hop2(spec: Hop2Spec) -> list[str] | None:
     # PQ-components equal) the two full ciphertexts coincide, contradicting
     # ``ct0 <> ct1``. Derive it with an explicit ``have`` chain (smt cannot
     # navigate the 4-deep concat unaided).
-    rg0b, rg1b = spec.r_component_fields
+    rg0b = spec.r_component_fields[i0]
+    rg1b = spec.r_component_fields[i1]
     b2 = "{2}"
     bind0 = (
         f"{spec.r_base}.{rg0b[0]}{b2}",

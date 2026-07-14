@@ -4285,6 +4285,9 @@ def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-p
     grp = [f for f in (_group_fields(g, pq_module) for g in groups) if f is not None]
     if len(grp) != 2:
         return None
+    # SAMEKEY (both ciphertexts decapsulated under one key) collapses the two
+    # identical component groups to one; DIFFKEY keeps both (index ``[0, 1]``).
+    distinct_grp, ct_key_idx = _dedup_groups(grp)
 
     # non-challenger callees, prefix-then-else, first appearance
     red_glob_mods = _callee_mods(prefix, clone_alias)
@@ -4311,8 +4314,18 @@ def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-p
     # which is the win term -- couple every packed key + its challenger seam.
     red_field_set = {f.name for f in right_state0.fields}
     ek_decomp = _ek_decomp(red_proc.body, red_field_set)
+    # SAMEKEY collapses the two identical encaps-key decompositions too (its
+    # ``ct_key_idx`` matches the DecapsKey one, since both derive from the single
+    # shared key); DIFFKEY keeps both.
+    distinct_ek, _ek_idx = _dedup_groups(ek_decomp)
     decomp_info = _game_key_decomp(
-        list(left_state0.fields), grp, ek_decomp, game_base, red_base, "{1}", "{2}"
+        list(left_state0.fields),
+        distinct_grp,
+        distinct_ek,
+        game_base,
+        red_base,
+        "{1}",
+        "{2}",
     )
     if decomp_info is None:
         return None
@@ -4322,14 +4335,17 @@ def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-p
     chal_dk_names = [r.split(".")[-1] for r in game_key_refs]
     chal_ek_names = [r.split(".")[-1] for r in game_ek_refs]
     challenger_coupling = [
-        f"{red_base}.{grp[i][0]}" "{2}" f" = {challenger_ref}.{chal_dk_names[i]}" "{2}"
-        for i in range(len(grp))
+        f"{red_base}.{distinct_grp[i][0]}"
+        "{2}"
+        f" = {challenger_ref}.{chal_dk_names[i]}"
+        "{2}"
+        for i in range(len(distinct_grp))
     ] + [
-        f"{red_base}.{ek_decomp[i][0]}"
+        f"{red_base}.{distinct_ek[i][0]}"
         "{2}"
         f" = {challenger_ref}.{chal_ek_names[i]}"
         "{2}"
-        for i in range(len(ek_decomp))
+        for i in range(len(distinct_ek))
     ]
     extra_sync = [m for m in scheme_params if m not in game_glob_mods]
 
@@ -4340,7 +4356,7 @@ def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-p
         ct_params=[p.name for p in game_proc.params],
         red_base=red_base,
         red_glob_mods=red_glob_mods,
-        red_component_fields=grp,
+        red_component_fields=distinct_grp,
         clone_alias=clone_alias,
         decomp_coupling=decomp,
         challenger_coupling=challenger_coupling,
@@ -4352,8 +4368,9 @@ def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-p
         h_module=h_module,
         shape=shape,
         red_proc=red_proc,
+        ct_key_idx=ct_key_idx,
         win_is_ek=bool(ek_decomp),
-        ek_component_fields=ek_decomp,
+        ek_component_fields=distinct_ek,
         ek_inj_axiom=f"{t_module}_{_ev_method(shape.ev_encek_t)}_inj",
         challenger_ek_fields=chal_ek_names,
     )
@@ -4450,6 +4467,7 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
     grp = [f for f in (_group_fields(g, pq_module) for g in groups) if f is not None]
     if len(grp) != 2:
         return None
+    distinct_grp, ct_key_idx = _dedup_groups(grp)
 
     red_base = _ref_base(left_wrapper_expr)
     # Decomposition coupling (game packed key{2} = tuple of reduction fields{1});
@@ -4458,8 +4476,15 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
     # so couple every packed key, matching the emitted hop lemma invariant.
     red_field_set = {f.name for f in left_state0.fields}
     ek_decomp = _ek_decomp(red_proc.body, red_field_set)
+    distinct_ek, _ek_idx = _dedup_groups(ek_decomp)
     decomp_info = _game_key_decomp(
-        list(right_state0.fields), grp, ek_decomp, game_base, red_base, "{2}", "{1}"
+        list(right_state0.fields),
+        distinct_grp,
+        distinct_ek,
+        game_base,
+        red_base,
+        "{2}",
+        "{1}",
     )
     if decomp_info is None:
         return None
@@ -4473,11 +4498,12 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
         + [m for m in scheme_params if m not in game_glob_mods],
         red_base=red_base,
         red_glob_mods=_callee_mods(prefix, clone_alias),
-        red_component_fields=grp,
+        red_component_fields=distinct_grp,
         clone_alias=clone_alias,
         decomp_coupling=decomp,
         red_proc=red_proc,
         guard_annot=_annot_eq_guard(red_if.guard, "{1}"),
+        ct_key_idx=ct_key_idx,
     )
     body = bch.challenge_tactic_hop4(spec)
     if body is None:
@@ -4558,6 +4584,10 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
     ]
     if len(l_grp) != 2 or len(r_grp) != 2:
         return None
+    # SAMEKEY collapses each side's two identical groups to one (both ciphertexts
+    # under one key); DIFFKEY keeps both. Both sides share the site map.
+    distinct_l_grp, ct_key_idx = _dedup_groups(l_grp)
+    distinct_r_grp, _ = _dedup_groups(r_grp)
     shape = _concat_shape_from(l_prefix, l_groups[0], clone_alias, pq_module)
     if shape is None:
         return None
@@ -4588,7 +4618,8 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
         for f in left_state0.fields
         if "@" in f.name and f.name.replace("@", "_") in dk_arg_names
     ]
-    if len(chal_fields) != 2:
+    # One challenger decaps-key per DISTINCT group (SAMEKEY: 1; DIFFKEY: 2).
+    if len(chal_fields) != len(distinct_l_grp):
         return None
     # sync mods (invariant ``={glob M}``) = the concrete scheme's params (the
     # widest functor arg -- combiner over all component modules incl. the group).
@@ -4656,8 +4687,8 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
         l_prefix=l_prefix,
         r_prefix=r_prefix,
         glob_mods=glob_mods,
-        l_component_fields=l_grp,
-        r_component_fields=r_grp,
+        l_component_fields=distinct_l_grp,
+        r_component_fields=distinct_r_grp,
         clone_alias=clone_alias,
         shape=shape,
         pq_module=pq_module,
@@ -4665,6 +4696,7 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
         l_challenger_ref=l_challenger_ref,
         l_challenger_key_fields=chal_fields,
         ect_inj_axiom=f"{t_module}_{_ev_method(shape.ev_encct_t)}_inj",
+        ct_key_idx=ct_key_idx,
     )
     body = bch.challenge_tactic_hop2(spec)
     if body is None:
@@ -4717,6 +4749,25 @@ def _ev_method(ev_op: str) -> str:
     """The method name of a functional-value op, e.g. ``NG_c.ev_encode`` ->
     ``encode``, ``KEM_T_c.ev_encodeciphertext`` -> ``encodeciphertext``."""
     return ev_op.rsplit(".ev_", 1)[1]
+
+
+def _dedup_groups(grp: list[list[str]]) -> tuple[list[list[str]], list[int]]:
+    """Deduplicate KDF-input component groups, returning the DISTINCT groups and a
+    per-site index map. DIFFKEY (two independent keys) -> distinct == grp, index
+    ``[0, 1]``; SAMEKEY (both ciphertexts under one key -> identical field lists)
+    -> one distinct group, index ``[0, 0]``. The index tells the tactic which
+    distinct key each ciphertext site decapsulates under."""
+    distinct: list[list[str]] = []
+    idx: list[int] = []
+    for group in grp:
+        for i, seen in enumerate(distinct):
+            if seen == group:
+                idx.append(i)
+                break
+        else:
+            idx.append(len(distinct))
+            distinct.append(group)
+    return distinct, idx
 
 
 def _group_fields(group: list[ec_ast.Call], pq_module: str) -> list[str] | None:

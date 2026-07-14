@@ -178,6 +178,16 @@ class TypeCollector:
         # CyclicGroup + ZModRing path. Mirrors the engine's own gating
         # (``PipelineContext.has_prime_order_requirement``).
         self._prime_groups: set[str] = set(prime_group_names or ())
+        # True once a FrogLang ``Map<K, V>`` type is translated (to EC's
+        # ``(k, v) fmap``). Consulted so the export ``require``s ``SmtMap``
+        # only when a finite map is actually used (byte-identical otherwise:
+        # no map-free proof sets this).
+        self._uses_map: bool = False
+
+    def has_map(self) -> bool:
+        """True if a FrogLang ``Map<K, V>`` type was translated, so the
+        export must ``require import SmtMap``."""
+        return self._uses_map
 
     def is_prime_group(self, group_name: str) -> bool:
         """True if the proof declared ``requires <group>.order is prime;``."""
@@ -316,6 +326,16 @@ class TypeCollector:
                 self._function_type_set.add(key)
                 self._function_types.append(key)
             return ec_ast.EcType(f"{dom} -> {codom}")
+        if isinstance(resolved, frog_ast.MapType):
+            # A FrogLang finite map ``Map<K, V>`` (a lazy random-oracle table
+            # in the ROM games, e.g. ``Map<BitString<P.M>, BitString<n>>``)
+            # translates to EC's ``SmtMap`` finite-function type ``(k, v)
+            # fmap``. Register the key/value component types so they are
+            # emitted, and flag map usage so the file ``require``s ``SmtMap``.
+            key_txt = self.translate_type(resolved.key_type).text
+            val_txt = self.translate_type(resolved.value_type).text
+            self._uses_map = True
+            return ec_ast.EcType(f"({key_txt}, {val_txt}) fmap")
         raise NotImplementedError(
             f"Type translation not implemented for {type(resolved).__name__}: "
             f"{resolved}"

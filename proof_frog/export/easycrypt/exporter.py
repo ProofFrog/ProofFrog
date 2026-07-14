@@ -4484,12 +4484,24 @@ def export_proof_file(proof_path: str) -> str:
     stdlib_requires = (
         ["Group", "ZModP", "List"] if top_types.has_stdlib_group_or_modint() else []
     )
+    # ``SmtMap`` provides the finite-map type ``(k, v) fmap`` used for a
+    # FrogLang ``Map<K, V>`` (the lazy random-oracle tables of the ROM
+    # games). Required only when some type collector translated a map, so
+    # map-free exports stay byte-identical. Maps can surface in the foreign-
+    # primitive theory (a lazy-RO helper game) or the primary theory, so
+    # consult every collector.
+    uses_map = (
+        top_types.has_map()
+        or theory_types.has_map()
+        or any(fs.theory_types.has_map() for fs in foreign_scopes.values())
+    )
+    map_requires = ["SmtMap"] if uses_map else []
     ec_file = ec_ast.EcFile(
         # ``DProd`` / ``DMap`` provide the dprod/dmap lemmas
         # (``dmap_dprodE``, ``dmap1E``, ``dmap_id``, ``supp_dprod``,
         # etc.) consumed by the slice/concat round-trip + distribution-
         # split tactics emitted for Split/Merge Uniform Samples.
-        requires=["AllCore", "Distr", "DProd", "DMap", *stdlib_requires],
+        requires=["AllCore", "Distr", "DProd", "DMap", *stdlib_requires, *map_requires],
         decls=decls,
     )
     return ec_ast.pretty_print(ec_file)

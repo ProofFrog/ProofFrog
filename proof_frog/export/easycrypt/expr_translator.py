@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+from . import canonical_form
 from . import ec_ast
 from . import type_collector as tc
 from ... import frog_ast
@@ -52,11 +53,20 @@ class ExpressionTranslator:
         """Render `expr` as an EC expression string."""
         if isinstance(expr, frog_ast.Variable):
             name = self._field_renames.get(expr.name, expr.name)
-            # An engine-inlined field reference (``challenger@HT``) renders with
-            # the ``@`` scope separator normalized to ``_`` (a valid EC ident),
-            # matching how its declaration was emitted. No-op for ``@``-free
-            # names, so the common case is byte-identical.
-            return name.replace("@", "_") if "@" in name else name
+            if "@" in name:
+                name = name.replace("@", "_")
+            # A canonicalized flat-state field keeps its raw uppercase-initial
+            # FrogLang name (``QT``) in the body while its declaration was
+            # emitted under the mangled ``v_QT`` (an EC module var must be
+            # lowercase-initial). An uppercase-initial reference that survived
+            # ``field_renames`` is such a field -- mangle it to match the decl.
+            # Lowercase names (the common case, and ``field_renames``-lowered
+            # ``hT``/``qT``) are byte-identical.
+            if name and name[0].isupper():
+                name = canonical_form._ec_ident(
+                    name
+                )  # pylint: disable=protected-access
+            return name
         if isinstance(expr, frog_ast.Integer):
             return str(expr.num)
         if isinstance(expr, frog_ast.Boolean):

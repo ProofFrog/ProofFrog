@@ -691,12 +691,17 @@ def _group_only_type_of_factory(
             if isinstance(e, frog_ast.Variable):
                 if e.name in local_types:
                     return local_types[e.name]
-                # An engine-inlined field reference keeps the raw ``@`` scope
-                # separator (``challenger@HT``) while its declaration was seeded
-                # under the EC-normalized ``_`` form (``challenger_HT``). Fall
-                # back to the normalized name. No-op for ``@``-free names.
-                if "@" in e.name and e.name.replace("@", "_") in local_types:
-                    return local_types[e.name.replace("@", "_")]
+                # An engine-inlined / canonicalized field reference keeps its
+                # raw FrogLang name (``challenger@HT``, ``QT``) while its
+                # declaration was seeded under the EC-mangled form
+                # (``challenger_HT``, ``v_QT``). Fall back to the mangled name
+                # (``canonical_form._ec_ident`` is the mangling the flat-state
+                # renamer applied). No-op for an already-valid EC identifier.
+                mangled = canonical_form._ec_ident(
+                    e.name
+                )  # pylint: disable=protected-access
+                if mangled != e.name and mangled in local_types:
+                    return local_types[mangled]
                 raise KeyError(f"Unknown variable type for {e.name!r}")
             if isinstance(e, frog_ast.FuncCall) and isinstance(
                 e.func, frog_ast.FieldAccess
@@ -1481,12 +1486,17 @@ def export_proof_file(proof_path: str) -> str:
             if isinstance(e, frog_ast.Variable):
                 if e.name in local_types:
                     return local_types[e.name]
-                # An engine-inlined field reference keeps the raw ``@`` scope
-                # separator (``challenger@HT``) while its declaration was seeded
-                # under the EC-normalized ``_`` form (``challenger_HT``). Fall
-                # back to the normalized name. No-op for ``@``-free names.
-                if "@" in e.name and e.name.replace("@", "_") in local_types:
-                    return local_types[e.name.replace("@", "_")]
+                # An engine-inlined / canonicalized field reference keeps its
+                # raw FrogLang name (``challenger@HT``, ``QT``) while its
+                # declaration was seeded under the EC-mangled form
+                # (``challenger_HT``, ``v_QT``). Fall back to the mangled name
+                # (``canonical_form._ec_ident`` is the mangling the flat-state
+                # renamer applied). No-op for an already-valid EC identifier.
+                mangled = canonical_form._ec_ident(
+                    e.name
+                )  # pylint: disable=protected-access
+                if mangled != e.name and mangled in local_types:
+                    return local_types[mangled]
                 raise KeyError(f"Unknown variable type for {e.name!r}")
             if isinstance(e, frog_ast.FuncCall) and isinstance(
                 e.func, frog_ast.FieldAccess

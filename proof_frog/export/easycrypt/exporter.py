@@ -4059,6 +4059,28 @@ def export_proof_file(proof_path: str) -> str:
 
     # === Assemble the file ===
 
+    # An assumption game can carry an extra ``Int`` param beyond its primitive
+    # (``LazyROTwoViewsExcludedProgrammed(HashInputPacking P, Int n)``); a
+    # reduction composing ``G(P_inst, val)`` binds that Int param. Those bindings
+    # must reach the primitive theory's clone so the game's ``BitString<n>``
+    # instantiates concretely (``bs_n_t <- bs_Nout``, not a bare ``bs_n``). Keyed
+    # by the game's primitive name (the theory whose clone carries the game).
+    game_int_bindings: dict[str, dict[str, frog_ast.Expression]] = {}
+    for _helper in proof.helpers:
+        if not isinstance(_helper, frog_ast.Reduction):
+            continue
+        _gf = next((g for g in game_files if g.name == _helper.to_use.name), None)
+        if _gf is None:
+            continue
+        _prim_name = primitive_name_by_game_file.get(_gf.name)
+        if _prim_name is None:
+            continue
+        for _gp, _garg in zip(_gf.games[0].parameters, _helper.to_use.args):
+            if not isinstance(_gp.type, frog_ast.Variable) and isinstance(
+                _garg, frog_ast.Expression
+            ):
+                game_int_bindings.setdefault(_prim_name, {})[_gp.name] = _garg
+
     # Build one clone per scheme instance. For each instance:
     #   * every primitive abstract type (``message``/``key``) binds to
     #     the instance's concretized field type at the top level;
@@ -4091,10 +4113,18 @@ def export_proof_file(proof_path: str) -> str:
         # bitstring as a BitString<...> with the instance's field values
         # substituted in, then re-translating through ``top_types`` so the
         # resulting concrete type gets registered for top-level emission.
-        for abs_name, abs_expr in src_theory_types.abstract_bitstrings:
-            concrete_expr = _instantiate_bitstring_expr(
-                abs_expr, inst.concretized_fields
+        # Merge any assumption-game Int-param bindings (``n -> hybrid.Nss``) for
+        # this primitive's theory, so a game ``BitString<n>`` instantiates via
+        # the composition arg rather than staying a bare ``bs_n``.
+        instantiation_fields: dict[str, frog_ast.Type] = dict(inst.concretized_fields)
+        instantiation_fields.update(
+            cast(
+                "dict[str, frog_ast.Type]",
+                game_int_bindings.get(inst.primitive_name, {}),
             )
+        )
+        for abs_name, abs_expr in src_theory_types.abstract_bitstrings:
+            concrete_expr = _instantiate_bitstring_expr(abs_expr, instantiation_fields)
             concrete_type = top_types.translate_type(
                 frog_ast.BitStringType(concrete_expr)
             )

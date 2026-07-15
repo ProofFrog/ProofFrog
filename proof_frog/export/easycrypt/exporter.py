@@ -2216,7 +2216,13 @@ def export_proof_file(proof_path: str) -> str:
             # coincide for schemes whose params are named after their
             # instances (CES's ``E1``/``E2``) but differ when a scheme uses a
             # local param name (``DoubleSymEnc(SymEnc s)`` applied to ``E``).
-            applied_args = ", ".join(scheme_applied_args)
+            # A nested SCHEME-instance arg (the ROM ``CG_expanded(...,Hkdf,...)``
+            # where ``Hkdf`` is itself ``CGRandomOracleKDF(...)``) is applied by
+            # its concrete module expression, not its bare let-name (there is no
+            # module ``Hkdf``); primitive-instance args stay their declared name.
+            applied_args = ", ".join(
+                concrete_module_expr.get(a, a) for a in scheme_applied_args
+            )
             instance_module_expr[inst.let_name] = f"{scheme.name}({applied_args})"
         elif inst is primary:
             assert scheme is not None
@@ -4114,6 +4120,29 @@ def export_proof_file(proof_path: str) -> str:
             ):
                 game_int_bindings.setdefault(_prim_name, {})[_gp.name] = _garg
 
+    # The theorem instantiates the theorem game's abstract ``Set`` params (the
+    # ROM hash domain ``D`` / range ``R``) with concrete types --
+    # ``KEM_INDCCA_ROM(hybrid, BitString<hybrid.Nin>, BitString<hybrid.Nss>, H)``.
+    # The PRIMARY instance's clone (``Hybrid_c``) must bind the abstract ``d``/
+    # ``r`` to those concrete types, or the adversary's oracle interface
+    # (``hash(m : Hybrid_c.d)``) won't match the concrete reduction
+    # (``hash(m : bs_...)``). Byte-identical when the theorem has no Set args.
+    theorem_set_bindings: list[tuple[str, str]] = []
+    _thm_gf = next((gf for gf in game_files if gf.name == proof.theorem.name), None)
+    if _thm_gf is not None and proof.theorem.args:
+        for _gp, _targ in zip(_thm_gf.games[0].parameters, proof.theorem.args):
+            if (
+                isinstance(_gp.type, frog_ast.SetType)
+                and _gp.name in abstract_types_map
+                and isinstance(_targ, frog_ast.Type)
+            ):
+                theorem_set_bindings.append(
+                    (
+                        abstract_types_map[_gp.name],
+                        top_types.translate_type(_targ).text,
+                    )
+                )
+
     # Build one clone per scheme instance. For each instance:
     #   * every primitive abstract type (``message``/``key``) binds to
     #     the instance's concretized field type at the top level;
@@ -4142,6 +4171,11 @@ def export_proof_file(proof_path: str) -> str:
             if pf_name in inst.concretized_fields:
                 ec_concrete = top_types.translate_type(inst.concretized_fields[pf_name])
                 type_bindings_.append((abs_name, ec_concrete.text))
+        # The primary instance's clone binds the theorem game's abstract Set
+        # params (the ROM hash domain/range ``d``/``r``) to their concrete
+        # theorem instantiations.
+        if inst is primary:
+            type_bindings_.extend(theorem_set_bindings)
         # Build bitstring type bindings by reconstructing each abstract
         # bitstring as a BitString<...> with the instance's field values
         # substituted in, then re-translating through ``top_types`` so the

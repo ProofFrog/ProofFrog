@@ -1519,6 +1519,31 @@ def export_proof_file(proof_path: str) -> str:
         theory_mode=True,
     )
 
+    # A ``Function<D,R> H`` game param / proof let is the shared random-oracle
+    # function; it is referenced as an op (``v_H m``) but nothing samples it, so
+    # its value needs an ``op`` declaration in each scope it appears. The
+    # abstract theory game uses ``op v_H : d -> r`` (from the game's own
+    # Function param, whose D/R resolve to the abstract ``d``/``r``); section
+    # Main's concrete flat states use ``op v_H : bs_... -> bs_Nout`` (from the
+    # proof's Function let, whose D/R are concrete). Register both. Byte-
+    # identical for a proof with no Function-typed let (no ROM hash oracle).
+    theorem_game_file = next(
+        (gf for gf in game_files if gf.name == proof.theorem.name), None
+    )
+    # pylint: disable=protected-access
+    if theorem_game_file is not None:
+        for gparam in theorem_game_file.games[0].parameters:
+            if isinstance(gparam.type, frog_ast.FunctionType):
+                theory_types.register_function_value(
+                    canonical_form._ec_ident(gparam.name), gparam.type
+                )
+    for proof_let in proof.lets:
+        if isinstance(proof_let.type, frog_ast.FunctionType):
+            top_types.register_function_value(
+                canonical_form._ec_ident(proof_let.name), proof_let.type
+            )
+    # pylint: enable=protected-access
+
     # Method return types are global across ALL primitives so that
     # ``type_of`` resolves method calls like ``P.Enc(k, m)`` even when ``P``
     # is an auxiliary-primitive instance and the caller is a reduction in

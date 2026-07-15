@@ -171,6 +171,16 @@ class TypeCollector:
         # preserving, deduped by (domain, codomain).
         self._function_types: list[tuple[str, str]] = []
         self._function_type_set: set[tuple[str, str]] = set()
+        # Named ``Function<A,B>`` VALUES: a proof-level ``Function<D,R> H`` let /
+        # game parameter is the fixed (shared) random-oracle function itself,
+        # not a per-game sampled field. It is referenced as an operator (``v_H
+        # m``) but, unlike a sampled ``RF`` field, no ``<$ dfun`` binds it -- so
+        # its value needs an ``op`` declaration. Each entry ``(name, dom, codom)``
+        # emits ``op <name> : dom -> codom`` (an abstract fixed function; the
+        # random-oracle randomness the proof relies on is carried by the lazy-RO
+        # assumption games, whose bounds are abstract ``eps`` ops).
+        self._function_values: list[tuple[str, str, str]] = []
+        self._function_value_set: set[str] = set()
         # Group names (FrogLang ``Group <G>`` parameters) for which the
         # proof declared ``requires <G>.order is prime;``. These get the
         # prime emission path (PowZMod field exponent + FDistr + a
@@ -188,6 +198,20 @@ class TypeCollector:
         """True if a FrogLang ``Map<K, V>`` type was translated, so the
         export must ``require import SmtMap``."""
         return self._uses_map
+
+    def register_function_value(
+        self, name: str, func_type: frog_ast.FunctionType
+    ) -> None:
+        """Register a named ``Function<A,B>`` VALUE (e.g. a ``Function<D,R> H``
+        let / game param -- the shared random-oracle function). Translating the
+        type also registers its ``dfun`` distribution; the ``op <name> : A -> B``
+        declaration is emitted by :meth:`emit`. Deduped by name."""
+        if name in self._function_value_set:
+            return
+        dom = self.translate_type(func_type.domain_type).text
+        codom = self.translate_type(func_type.range_type).text
+        self._function_value_set.add(name)
+        self._function_values.append((name, dom, codom))
 
     def is_prime_group(self, group_name: str) -> bool:
         """True if the proof declared ``requires <group>.order is prime;``."""
@@ -333,6 +357,7 @@ class TypeCollector:
                 self._function_type_set.add(key)
                 self._function_types.append(key)
             return ec_ast.EcType(f"{dom} -> {codom}")
+        # (register_function_value defined below handles the named-value op.)
         if isinstance(resolved, frog_ast.MapType):
             # A FrogLang finite map ``Map<K, V>`` (a lazy random-oracle table
             # in the ROM games, e.g. ``Map<BitString<P.M>, BitString<n>>``)
@@ -519,6 +544,11 @@ class TypeCollector:
             decls.append(ec_ast.Axiom(f"{distr}_ll", f"is_lossless {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_full", f"is_full {distr}"))
+        # A ``Function<D,R> H`` game param inside the theory: the random-oracle
+        # function op ``op v_H : d -> r``, instantiated to the concrete function
+        # at the clone site.
+        for fname, dom, codom in self._function_values:
+            decls.append(ec_ast.OpDecl(fname, f"{dom} -> {codom}"))
         return decls
 
     @property
@@ -780,6 +810,8 @@ class TypeCollector:
             decls.append(ec_ast.Axiom(f"{distr}_ll", f"is_lossless {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_full", f"is_full {distr}"))
+        for fname, dom, codom in self._function_values:
+            decls.append(ec_ast.OpDecl(fname, f"{dom} -> {codom}"))
         for name in self._names:
             decls.append(ec_ast.OpDecl(_zero_name(name), name))
         for name in self._names:

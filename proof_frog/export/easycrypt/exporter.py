@@ -1774,7 +1774,10 @@ def export_proof_file(proof_path: str) -> str:
                     primitive.name,
                     implements=oracle_type_name,
                     emitted_param_type=scheme_type_name,
-                    emit_state_vars=oracle_model_by_game_file[gf.name].is_multi_oracle,
+                    emit_state_vars=(
+                        oracle_model_by_game_file[gf.name].is_multi_oracle
+                        or (bool(side.fields) and len(side.methods) > 1)
+                    ),
                 )
             )
         adv = theory_modules.translate_adversary_type(
@@ -1922,9 +1925,10 @@ def export_proof_file(proof_path: str) -> str:
                         fp.name,
                         implements=oracle_type_name,
                         emitted_param_type=scheme_type_name,
-                        emit_state_vars=oracle_model_by_game_file[
-                            gf.name
-                        ].is_multi_oracle,
+                        emit_state_vars=(
+                            oracle_model_by_game_file[gf.name].is_multi_oracle
+                            or (bool(side.fields) and len(side.methods) > 1)
+                        ),
                     )
                 )
             adv = fp_theory_modules.translate_adversary_type(
@@ -2255,13 +2259,23 @@ def export_proof_file(proof_path: str) -> str:
         # Register the qualified oracle name as a method_return_types
         # key so that type_of calls during reduction-body translation
         # resolve ``challenger.<M>(...)`` through the clone-qualified
-        # oracle type.
-        for game_method in (
-            next(g for g in game_files if g.name == helper.to_use.name).games[0].methods
-        ):
+        # oracle type. Substitute the composed assumption game's formal params
+        # with the composition's args -- ``LazyROTwoViewsExcludedProgrammed(P,
+        # hybrid.Nss)`` binds the game's ``Int n`` to ``hybrid.Nss`` -- so a
+        # parameterized oracle return type ``BitString<n>`` renders as the
+        # concrete ``BitString<hybrid.Nss>`` rather than a bare ``bs_n``.
+        inner_game = next(g for g in game_files if g.name == helper.to_use.name).games[
+            0
+        ]
+        oracle_ret_subst = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+        for gp, garg in zip(inner_game.parameters, helper.to_use.args):
+            oracle_ret_subst.set(frog_ast.Variable(gp.name), copy.deepcopy(garg))
+        for game_method in inner_game.methods:
             method_return_types[
                 (qualified_inner_oracle, game_method.signature.name)
-            ] = game_method.signature.return_type
+            ] = visitors.SubstitutionTransformer(oracle_ret_subst).transform(
+                copy.deepcopy(game_method.signature.return_type)
+            )
         renames = {
             p.name: f"{p.name}m" for p in helper.parameters if p.name == clone_alias
         }

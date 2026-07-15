@@ -78,6 +78,16 @@ def classify_game(game: frog_ast.Game) -> GameOracleModel:
             i
             for i, m in enumerate(game.methods)
             if m.signature.name.lower() == INIT_ORACLE_FROG_NAME.lower()
+            # Only a PARAMETERLESS ``Initialize`` is lifted into the experiment
+            # ``main()`` (the usual setup that returns the public info). A
+            # PARAMETERIZED ``Initialize`` -- the lazy-RO assumption games'
+            # ``Initialize(P.State, P.Query, BitString<P.M>)`` -- is invoked BY
+            # the adversary/reduction with its own computed args (the ProofFrog
+            # reduction calls ``challenger.Initialize(a, b, c)``), so it stays a
+            # regular adversary-facing oracle, not lifted. The hand-written .ec's
+            # advantage-0 bound is universal over those inputs, so it still
+            # validates this (adversary-chosen-input) formulation.
+            and not m.signature.parameters
         ),
         None,
     )

@@ -27,12 +27,26 @@ def mangle_ec_name(raw: str, field_renames: dict[str, str]) -> str:
     emissions are byte-identical. Applied at BOTH reference sites and binding
     sites (var decls, proc params, assignment/sample/call targets) so a name
     renders identically wherever it appears."""
-    name = field_renames.get(raw, raw)
+    # Direct hit on the raw FrogLang name (e.g. the ``RF`` -> ``rF`` uppercase
+    # lowering, or a canonical field whose reference matches its declared
+    # name verbatim). The rename value is already EC-safe.
+    if raw in field_renames:
+        return field_renames[raw]
+    # Otherwise mangle to the field's EC identifier (``@`` normalization plus
+    # the uppercase-initial ``X`` -> ``v_X`` mangling), then retry the rename
+    # against THAT form. A body reference carries the FrogLang name (``HT``,
+    # ``challenger@HT``) while the canonical flat-state rename keys by the
+    # DECLARED field name -- which is already the EC-mangled identifier
+    # (``v_HT``, ``challenger_HT``) -- so a reference and its declaration only
+    # meet after this normalization. Byte-identical for the non-canonical
+    # paths (an ``f<NN>`` value is never itself a key, and empty/uppercase-only
+    # rename maps have no mangled-name keys, so the final lookup is a no-op).
+    name = raw
     if "@" in name:
         name = name.replace("@", "_")
     if name and name[0].isupper():
         name = canonical_form._ec_ident(name)  # pylint: disable=protected-access
-    return name
+    return field_renames.get(name, name)
 
 
 class ExpressionTranslator:

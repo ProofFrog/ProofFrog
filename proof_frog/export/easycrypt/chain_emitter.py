@@ -1812,6 +1812,7 @@ def _make_field_aware_coupling(
     glob_params: list[str],
     role_of: dict[str, str] | None = None,
     qualified_ref_by_base: dict[str, dict[str, str]] | None = None,
+    canonical_by_base: dict[str, dict[str, str]] | None = None,
 ) -> CouplingFn:
     """Build a coupling closure that is field-aware for cardinality-differing states.
 
@@ -1854,13 +1855,25 @@ def _make_field_aware_coupling(
     """
     roles = role_of or {}
     qualified = qualified_ref_by_base or {}
+    canonical = canonical_by_base or {}
     composite = set(qualified)
 
     def role(f: str) -> str:
         return roles.get(f, f)
 
     def qualify(base: str, f: str) -> str:
-        return qualified.get(base, {}).get(f, f"{base}.{f}")
+        # Role/survivor unification runs on the STABLE ``_ec_field_name`` names
+        # (``dk``, ``ctStar``) -- they are consistent across a chain's states,
+        # unlike the per-state canonical ``f<NN>`` var names. Map the stable
+        # name to the module's actual declared var only at this final qualify
+        # step: a flat state emitted with a canonical ``f<NN>`` var block (the
+        # multi-oracle ``emit_state_vars`` path) declares ``base.f03``, not
+        # ``base.dk``. Composite reduction wrappers keep their explicit
+        # qualified ref (``R.dk0`` / ``Chal.dk0``); a base with no canonical map
+        # (a reduction/challenger module using stable names) qualifies verbatim.
+        if base in qualified:
+            return qualified[base].get(f, f"{base}.{f}")
+        return f"{base}.{canonical.get(base, {}).get(f, f)}"
 
     def coupling(left_ref: str, right_ref: str) -> str:
         lb, rb = _ref_base(left_ref), _ref_base(right_ref)
@@ -3901,6 +3914,23 @@ def _emit_one_oracle_chain(
         _ref_base(mod_ref(name)): _ec_module_fields(game)
         for name, game in norm_by_name.items()
     }
+    # Each flat state here is emitted with a canonical ``f<NN>`` var block
+    # (``emit_state_vars`` -> :func:`_canonical_field_renames`), so a field's
+    # DECLARED module var differs from its stable ``_ec_field_name``. Map the
+    # stable name to the canonical var per base so the field-aware coupling
+    # qualifies to the name EC actually sees (``Step_0L_state_5.f03``, not
+    # ``.dk``). Keyed by stable name, valued by the same ``f<NN>`` the var
+    # block uses. pylint: disable=protected-access
+    canonical_by_base = {
+        _ref_base(mod_ref(name)): {
+            mt._ec_field_name(f.name): renames[f.name]
+            for f in game.fields
+            if f.name in renames
+        }
+        for name, game in norm_by_name.items()
+        if mt.state_uses_canonical_fields(game.fields, modules._types)
+        for renames in (mt._canonical_field_renames(game.fields, modules._types),)
+    }
     norm_left = [norm_by_name[n] for n in left_mods]
     norm_right = [norm_by_name[n] for n in right_mods]
     survivor_map = _chain_survivor_map(list(norm_by_name.values()))
@@ -3964,6 +3994,7 @@ def _emit_one_oracle_chain(
         [p.name for p in flat_params],
         _chain_role_map(norm_left, norm_right, survivor_map),
         qualified_ref_by_base,
+        canonical_by_base,
     )
 
     # Composite-wrapper bridge tactic (wall 7). When the hop has a composite

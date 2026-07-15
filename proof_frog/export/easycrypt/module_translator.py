@@ -739,7 +739,16 @@ class ModuleTranslator:
                 f"got parameters {game.parameters}"
             )
         field_types = {fld.name: fld.type for fld in game.fields}
-        field_renames = _field_renames_for(game.fields)
+        # When the state is emitted with a module ``var`` block, canonically
+        # rename its fields to type-ordered ``f<NN>`` names so a chain's adjacent
+        # flat states name-sort their globs identically (EC orders ``glob`` by
+        # name); otherwise the fields inline to locals and only the uppercase
+        # lowering applies (byte-identical for non-state-var games).
+        field_renames = (
+            _canonical_field_renames(game.fields, self._types)
+            if emit_state_vars and state_uses_canonical_fields(game.fields, self._types)
+            else _field_renames_for(game.fields)
+        )
         procs = [
             self._translate_method(
                 method,
@@ -752,7 +761,8 @@ class ModuleTranslator:
         module_vars = (
             [
                 ec_ast.VarDecl(
-                    _ec_field_name(fld.name), self._types.translate_type(fld.type)
+                    field_renames.get(fld.name, _ec_field_name(fld.name)),
+                    self._types.translate_type(fld.type),
                 )
                 for fld in game.fields
             ]
@@ -1573,6 +1583,50 @@ def _field_renames_for(game_fields: list[frog_ast.Field]) -> dict[str, str]:
         for fld in game_fields
         if _ec_field_name(fld.name) != fld.name
     }
+
+
+def _canonical_field_renames(
+    game_fields: list[frog_ast.Field], types: tc.TypeCollector
+) -> dict[str, str]:
+    """Rename every state field to a canonical ``f<NN>`` name ordered by EC type.
+
+    A per-hop micro-lemma couples two adjacent flat states with
+    ``(glob S1){1} = (glob S2){2}``. EC orders ``glob`` by VARIABLE NAME
+    (alphabetical), so two states with the same field-type multiset but
+    DIFFERENT names (the engine keeps some semantic ``dk_0``/``_hoisted_0`` and
+    standardizes others to ``field1..k``) produce different glob tuple TYPES and
+    EC rejects the ``=``. Naming every field ``f00``, ``f01``, ... in EC-type
+    order makes the corresponding fields name-sort identically across the chain
+    (all-distinct types align uniquely; a stable secondary index by original
+    position keeps same-typed fields in a consistent relative order). Zero-padded
+    to 2 digits so the ``fNN`` names themselves sort in rank order."""
+    ordered = sorted(
+        enumerate(game_fields),
+        key=lambda p: (types.translate_type(p[1].type).text, p[0]),
+    )
+    return {fld.name: f"f{rank:02d}" for rank, (_, fld) in enumerate(ordered)}
+
+
+def state_uses_canonical_fields(
+    game_fields: list[frog_ast.Field], types: tc.TypeCollector
+) -> bool:
+    """Gate for :func:`_canonical_field_renames`: does this flat state carry a
+    finite-map (``fmap``) field -- the lazy random-oracle table that marks a ROM
+    proof? Only ROM chains hit the glob-by-name misalignment the canonical rename
+    fixes (a persistent adaptive RO table whose adjacent states share a field-type
+    multiset but differ in declared field names). Binding/correctness proofs have
+    no map field, so gating here keeps their stable ``_ec_field_name`` names --
+    and every coupling / functional-twin module that references them by stable
+    name -- byte-identical (the canonical rename otherwise leaks into twin-module
+    couplings that still name fields ``dk0``). Consistent across a ROM chain: the
+    adversary-queried RO table persists in every state."""
+    for fld in game_fields:
+        try:
+            if types.translate_type(fld.type).text.endswith("fmap"):
+                return True
+        except (NotImplementedError, KeyError, AssertionError):
+            continue
+    return False
 
 
 def _seed_type_map(

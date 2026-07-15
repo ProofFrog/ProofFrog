@@ -327,6 +327,10 @@ class StatementTranslator:
         map_type = self._types.resolve(self._exprs.type_of(over.the_object))
         assert isinstance(map_type, frog_ast.MapType)
         key_ec = self._types.translate_type(map_type.key_type).text
+        # ``T list`` binds ``list`` tighter than ``*``, so a product key type
+        # ``A * B`` must be parenthesized: ``(A * B) list``, not ``A * B list``
+        # (which EC reads as ``A * (B list)``).
+        key_list_ec = f"({key_ec}) list" if " * " in key_ec else f"{key_ec} list"
 
         e_name = for_stmt.var_name
         decls.append(
@@ -340,7 +344,7 @@ class StatementTranslator:
         found = _fresh_name_avoiding(decls, out_stmts, avoid)
         decls.append(ec_ast.VarDecl(found, ec_ast.EcType("bool")))
         keys = _fresh_name_avoiding(decls, out_stmts, avoid)
-        decls.append(ec_ast.VarDecl(keys, ec_ast.EcType(f"{key_ec} list")))
+        decls.append(ec_ast.VarDecl(keys, ec_ast.EcType(key_list_ec)))
         idx = _fresh_name_avoiding(decls, out_stmts, avoid)
         decls.append(ec_ast.VarDecl(idx, ec_ast.EcType("int")))
 

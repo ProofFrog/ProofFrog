@@ -9,7 +9,7 @@ import copy
 import pathlib
 import re
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from . import binding_challenge as bch
 from . import canonical_form
@@ -69,6 +69,25 @@ class _LengthInliner(visitors.Transformer):
             if key in self._qualified:
                 return copy.deepcopy(self._qualified[key])
         return field_access
+
+
+class _QualifyFields(visitors.Transformer):
+    """Qualify a bare int-field ``Variable`` in a bitstring length to a given
+    instance (``Nss`` -> ``inst.Nss``), but only for names the instance
+    actually has as a length field (``f"{inst}.{name}"`` in ``qualified``).
+
+    Used to turn a primitive method's raw return length ``BitString<Nss>`` into
+    the calling instance's concrete length, so it inlines through the seeded
+    ``inst.Nss`` alias to the base int rather than stripping to a bare width."""
+
+    def __init__(self, inst: str, qualified: dict[str, frog_ast.ASTNode]) -> None:
+        self._inst = inst
+        self._qualified = qualified
+
+    def transform_variable(self, variable: frog_ast.Variable) -> frog_ast.ASTNode:
+        if f"{self._inst}.{variable.name}" in self._qualified:
+            return frog_ast.FieldAccess(frog_ast.Variable(self._inst), variable.name)
+        return variable
 
 
 def _base_int_length_map(
@@ -1399,6 +1418,44 @@ def export_proof_file(proof_path: str) -> str:
                 if key.startswith(arg_prefix):
                     field = key[len(arg_prefix) :]
                     top_aliases[f"{sp.name}.{field}"] = top_aliases[key]
+    # Qualified integer-field aliases (``KEM_PQ.Nss`` -> ``kem_pq_nss``). A
+    # bitstring length can surface a primitive int field when a hoisted call
+    # temp is typed by a method's RAW return signature ``BitString<Nss>`` and
+    # that ``Nss`` is qualified to the calling instance (``KEM_PQ.Nss``) in the
+    # ``type_of`` FuncCall branch below; without this alias it would strip to a
+    # bare ``bs_Nss`` and mismatch the length-inlined ``bs_kem_pq_nss`` the rest
+    # of the module (and the registered concat ops) use. Qualified keys never
+    # shadow a base ``Int`` let, so this is safe for every proof.
+    # ``top_aliases`` holds carrier Types, but these int-length entries are
+    # Expressions consumed only by ``_substitute_aliases`` (never resolved as a
+    # carrier type), so casting to ``Type`` is sound (``Variable`` is both).
+    for _qk, _qv in int_qual_map.items():
+        if isinstance(_qv, frog_ast.Expression):
+            top_aliases.setdefault(_qk, cast(frog_ast.Type, _qv))
+    # Bare integer-field aliases (``Nss`` -> ``kem_pq_nss``) for a field owned by
+    # exactly ONE instance and not itself a base ``Int`` let. A bitstring length
+    # can surface a bare primitive field from many ``type_of`` paths -- a method
+    # return ``BitString<Nss>``, a slice bound, a concat operand -- so qualifying
+    # each site is whack-a-mole; instead inline the bare name at this single
+    # choke point (the flat-state alias map) so every path renders the
+    # length-inlined ``bs_kem_pq_nss`` that the registered concat ops carry,
+    # never a stray ``bs_Nss``. ``int_qual_map`` values are already base-resolved
+    # (no re-doubling), and excluding base-let names sidesteps the shadow hazard
+    # the qualified-only map was built around. Ambiguous fields (a name two
+    # instances both own) stay bare -- those need per-site qualification, out of
+    # scope here.
+    _base_int_lets = {
+        let.name for let in proof.lets if isinstance(let.type, frog_ast.IntType)
+    }
+    _bare_field_bases: dict[str, list[frog_ast.Expression]] = {}
+    for _qk, _qv in int_qual_map.items():
+        if "." not in _qk or not isinstance(_qv, frog_ast.Expression):
+            continue
+        _bare_field_bases.setdefault(_qk.split(".", 1)[1], []).append(_qv)
+    for _field, _vals in _bare_field_bases.items():
+        if _field in _base_int_lets or _field in top_aliases or len(_vals) != 1:
+            continue
+        top_aliases[_field] = cast(frog_ast.Type, _vals[0])
     prime_groups = _prime_group_names(proof)
     top_types = tc.TypeCollector(
         aliases=top_aliases,
@@ -1519,6 +1576,23 @@ def export_proof_file(proof_path: str) -> str:
                             return frog_ast.FieldAccess(
                                 frog_ast.Variable(obj.name), rt.name
                             )
+                        # A ``BitString<Nss>`` return whose length is a bare
+                        # primitive int field: qualify it to the calling
+                        # instance (``Nss`` -> ``KEM_PQ.Nss``) so the seeded
+                        # int-field aliases inline it to the base int
+                        # (``kem_pq_nss``) rather than stripping to a bare
+                        # ``bs_Nss`` -- which would mismatch the length-inlined
+                        # ``bs_kem_pq_nss`` every other use of this width (and
+                        # the registered concat ops) carries. Surfaces on a
+                        # hoisted call temp typed by the method's raw signature.
+                        if (
+                            isinstance(rt, frog_ast.BitStringType)
+                            and rt.parameterization is not None
+                        ):
+                            qualified_param = _QualifyFields(
+                                obj.name, int_qual_map
+                            ).transform(copy.deepcopy(rt.parameterization))
+                            return frog_ast.BitStringType(qualified_param)
                         return rt
             if isinstance(e, frog_ast.FieldAccess) and e.name in (
                 "generator",

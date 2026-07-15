@@ -55,6 +55,15 @@ class StatementTranslator:
         # raises NotImplementedError -> the method body falls back to
         # ``return witness``). Enabled only by the group-only export path.
         self._allow_void_call = allow_void_call
+        # Every name bound anywhere in the method body currently being
+        # translated -- in particular the ``_rN`` temps that
+        # ``canonical_form.hoist_*_calls`` introduced into the source AST before
+        # translation. A statement-level hoist (``_hoist_calls_in_expr``) or a
+        # return-lowering allocates its own fresh ``_rN`` by scanning only the
+        # already-emitted prefix, so without this it can re-pick an ``_rN`` that
+        # a source hoist uses LATER in the same proc -> EC "duplicated
+        # local/parameters name". Seeded at ``translate_block`` entry.
+        self._reserved_names: set[str] = set()
 
     def _is_map(self, expr: frog_ast.Expression) -> bool:
         """True if ``expr`` has a FrogLang finite-map type ``Map<K, V>``."""
@@ -110,6 +119,10 @@ class StatementTranslator:
         decls: list[ec_ast.VarDecl] = []
         stmts: list[ec_ast.EcStmt] = []
         statements = list(block.statements)
+        # Reserve every name bound anywhere in this method's source body so a
+        # statement-level hoist never re-picks a source ``_rN`` that appears
+        # later (see ``self._reserved_names``).
+        self._reserved_names = _collect_bound_names(statements)
         # A body with EC-inexpressible control flow (an ``if`` case-split whose
         # branches early-return, a lazy-RO ``if (m == mStar) { return yStar }``
         # exclusion, or a ``for e in m.entries`` map loop) is lowered to a
@@ -124,7 +137,7 @@ class StatementTranslator:
             decls.append(ec_ast.VarDecl(result, return_type))
             self._lower_block(statements, decls, stmts, return_type, result)
             stmts.append(ec_ast.Return(result))
-            return TranslatedBlock(decls, stmts)
+            return TranslatedBlock(_dedup_decls(decls), stmts)
         for stmt in statements:
             self._translate_stmt(stmt, decls, stmts, return_type)
         return TranslatedBlock(decls, stmts)
@@ -465,7 +478,7 @@ class StatementTranslator:
                 else:
                     ec_type = self._types.translate_type(self._exprs.type_of(call))
                 args = self._render_call_args(call, decls, stmts)
-                fresh = _fresh_name(decls, stmts)
+                fresh = _fresh_name_avoiding(decls, stmts, self._reserved_names)
                 callee = self._render_module_call_target(call.func)
                 if wrap and return_type is not None:
                     # The call yields the base ``T``; wrap it ``Some`` to match
@@ -639,7 +652,7 @@ class StatementTranslator:
             args = self._render_call_args(expr, decls, stmts)
             frog_type = self._exprs.type_of(expr)
             ec_type = self._types.translate_type(frog_type)
-            fresh = _fresh_name(decls, stmts)
+            fresh = _fresh_name_avoiding(decls, stmts, self._reserved_names)
             decls.append(ec_ast.VarDecl(fresh, ec_type))
             self._type_map[fresh] = frog_type
             callee = self._render_module_call_target(expr.func)
@@ -669,7 +682,7 @@ class StatementTranslator:
             ]
             frog_type = self._exprs.type_of(expr)
             ec_type = self._types.translate_type(frog_type)
-            fresh = _fresh_name(decls, stmts)
+            fresh = _fresh_name_avoiding(decls, stmts, self._reserved_names)
             decls.append(ec_ast.VarDecl(fresh, ec_type))
             self._type_map[fresh] = frog_type
             callee = self._render_module_call_target(expr.func)
@@ -746,6 +759,27 @@ def _expr_has_module_call(expr: frog_ast.Expression) -> bool:
     return False
 
 
+def _dedup_decls(decls: list[ec_ast.VarDecl]) -> list[ec_ast.VarDecl]:
+    """Collapse repeated var-decls of the same name, keeping the first.
+
+    EC var-decls are proc-scoped: a name declared in two branches of a
+    single-exit-lowered body (e.g. a ``__cse_*`` common-subexpression temp the
+    engine extracted in both arms of a case-split, or a source ``_rN`` the
+    hoister replicated) would emit two ``var x`` lines -> EC "duplicated
+    local/parameters name". Same-named decls here denote the same proc-scope
+    variable, so one decl suffices; a genuine type mismatch on the same name
+    still surfaces at the assignment sites (EC type-checks those). A body with
+    no repeats is unchanged (byte-identical)."""
+    seen: set[str] = set()
+    out: list[ec_ast.VarDecl] = []
+    for d in decls:
+        if d.name in seen:
+            continue
+        seen.add(d.name)
+        out.append(d)
+    return out
+
+
 def _fresh_name(decls: list[ec_ast.VarDecl], stmts: list[ec_ast.EcStmt]) -> str:
     """Return a var name not used by any decl or stmt in the current block."""
     return _fresh_name_avoiding(decls, stmts, set())
@@ -784,6 +818,11 @@ def _collect_bound_names(frog_stmts: list[frog_ast.Statement]) -> set[str]:
         elif isinstance(s, frog_ast.IfStatement):
             for blk in s.blocks:
                 names |= _collect_bound_names(list(blk.statements))
+        elif isinstance(s, frog_ast.NumericFor):
+            names.add(s.name)
+            names |= _collect_bound_names(list(s.block.statements))
+        elif isinstance(s, frog_ast.GenericFor):
+            names |= _collect_bound_names(list(s.block.statements))
     return names
 
 

@@ -508,7 +508,20 @@ def _render_module(module: Module) -> list[str]:
 def _render_proc_impl(proc: Proc) -> list[str]:
     param_str = ", ".join(f"{p.name} : {p.type.text}" for p in proc.params)
     out = [f"  proc {proc.name}({param_str}) : {proc.return_type.text} = {{"]
+    # Catch-all dedup of same-name var-decls. EC var-decls are proc-scoped, so
+    # two ``var x`` lines are ALWAYS an error ("duplicated local/parameters
+    # name") regardless of which builder produced the body -- a single-exit
+    # lowering flattening a case-split's per-branch CSE temps, a bespoke
+    # synthesizer, etc. Keeping the first decl per name is universally correct
+    # (a genuine type conflict still surfaces at the assignment sites) and is a
+    # no-op for any proc with no repeats, so every well-formed body is
+    # byte-identical.
+    seen_decls: set[str] = set()
     for stmt in proc.body:
+        if isinstance(stmt, VarDecl):
+            if stmt.name in seen_decls:
+                continue
+            seen_decls.add(stmt.name)
         out.extend(_render_stmt_lines(stmt, "    "))
     out.append("  }")
     return out

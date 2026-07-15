@@ -1224,7 +1224,9 @@ class ModuleTranslator:
         exprs = expr_translator.ExpressionTranslator(
             self._types, type_of, field_renames=field_renames
         )
-        stmts = stmt_translator.StatementTranslator(self._types, exprs)
+        stmts = stmt_translator.StatementTranslator(
+            self._types, exprs, type_map=type_map
+        )
         translated = stmts.translate_block(frog_ast.Block(new_stmts))
 
         # The reduction's own field writes/reads render as bare ``<field>`` (the
@@ -1495,6 +1497,7 @@ class ModuleTranslator:
             exprs,
             module_var_aliases=module_var_aliases,
             allow_void_call=allow_void_call,
+            type_map=type_map,
         )
         try:
             translated = stmts.translate_block(method.block, return_type=return_type)

@@ -691,6 +691,12 @@ def _group_only_type_of_factory(
             if isinstance(e, frog_ast.Variable):
                 if e.name in local_types:
                     return local_types[e.name]
+                # An engine-inlined field reference keeps the raw ``@`` scope
+                # separator (``challenger@HT``) while its declaration was seeded
+                # under the EC-normalized ``_`` form (``challenger_HT``). Fall
+                # back to the normalized name. No-op for ``@``-free names.
+                if "@" in e.name and e.name.replace("@", "_") in local_types:
+                    return local_types[e.name.replace("@", "_")]
                 raise KeyError(f"Unknown variable type for {e.name!r}")
             if isinstance(e, frog_ast.FuncCall) and isinstance(
                 e.func, frog_ast.FieldAccess
@@ -702,7 +708,18 @@ def _group_only_type_of_factory(
                 ):
                     key = (module_param_types[obj.name], e.func.name)
                     if key in method_return_types:
-                        return method_return_types[key]
+                        rt = method_return_types[key]
+                        # A bare carrier return type (``Element`` from
+                        # ``NG.Exp``) must be qualified by the instance so it
+                        # resolves through the alias map (``NG.Element`` ->
+                        # ``NGElementSpace``); an unqualified ``Element`` has no
+                        # top-level alias. Only surfaces when the call's type is
+                        # needed directly (e.g. hoisting it out of an expr).
+                        if isinstance(rt, frog_ast.Variable):
+                            return frog_ast.FieldAccess(
+                                frog_ast.Variable(obj.name), rt.name
+                            )
+                        return rt
             if isinstance(e, frog_ast.FieldAccess) and e.name in (
                 "generator",
                 "identity",
@@ -1464,6 +1481,12 @@ def export_proof_file(proof_path: str) -> str:
             if isinstance(e, frog_ast.Variable):
                 if e.name in local_types:
                     return local_types[e.name]
+                # An engine-inlined field reference keeps the raw ``@`` scope
+                # separator (``challenger@HT``) while its declaration was seeded
+                # under the EC-normalized ``_`` form (``challenger_HT``). Fall
+                # back to the normalized name. No-op for ``@``-free names.
+                if "@" in e.name and e.name.replace("@", "_") in local_types:
+                    return local_types[e.name.replace("@", "_")]
                 raise KeyError(f"Unknown variable type for {e.name!r}")
             if isinstance(e, frog_ast.FuncCall) and isinstance(
                 e.func, frog_ast.FieldAccess
@@ -1475,7 +1498,18 @@ def export_proof_file(proof_path: str) -> str:
                 ):
                     key = (module_param_types[obj.name], e.func.name)
                     if key in method_return_types:
-                        return method_return_types[key]
+                        rt = method_return_types[key]
+                        # A bare carrier return type (``Element`` from
+                        # ``NG.Exp``) must be qualified by the instance so it
+                        # resolves through the alias map (``NG.Element`` ->
+                        # ``NGElementSpace``); an unqualified ``Element`` has no
+                        # top-level alias. Only surfaces when the call's type is
+                        # needed directly (e.g. hoisting it out of an expr).
+                        if isinstance(rt, frog_ast.Variable):
+                            return frog_ast.FieldAccess(
+                                frog_ast.Variable(obj.name), rt.name
+                            )
+                        return rt
             if isinstance(e, frog_ast.FieldAccess) and e.name in (
                 "generator",
                 "identity",

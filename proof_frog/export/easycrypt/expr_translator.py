@@ -51,7 +51,12 @@ class ExpressionTranslator:
     def translate(self, expr: frog_ast.Expression) -> str:
         """Render `expr` as an EC expression string."""
         if isinstance(expr, frog_ast.Variable):
-            return self._field_renames.get(expr.name, expr.name)
+            name = self._field_renames.get(expr.name, expr.name)
+            # An engine-inlined field reference (``challenger@HT``) renders with
+            # the ``@`` scope separator normalized to ``_`` (a valid EC ident),
+            # matching how its declaration was emitted. No-op for ``@``-free
+            # names, so the common case is byte-identical.
+            return name.replace("@", "_") if "@" in name else name
         if isinstance(expr, frog_ast.Integer):
             return str(expr.num)
         if isinstance(expr, frog_ast.Boolean):
@@ -94,6 +99,13 @@ class ExpressionTranslator:
             return self._translate_binop(expr)
         if isinstance(expr, frog_ast.Tuple):
             parts = [self.translate(v) for v in expr.values]
+            return "(" + ", ".join(parts) + ")"
+        if isinstance(expr, frog_ast.ProductType):
+            # A tuple *value* ``[a, b]`` that the engine represents as a
+            # ProductType node (``[...]`` is syntactically ambiguous between a
+            # tuple type and a tuple literal); its components are value
+            # expressions. Render as an EC tuple ``(a, b)``.
+            parts = [self.translate(t) for t in expr.types]  # type: ignore[arg-type]
             return "(" + ", ".join(parts) + ")"
         if isinstance(expr, frog_ast.ArrayAccess) and self._is_map(expr.the_array):
             # Finite-map lookup ``m[k]`` (a lazy random-oracle table read).
@@ -277,7 +289,10 @@ class ExpressionTranslator:
                     )
                 )
             return None
-        resolved = self._types.resolve(self._type_of(expr))
+        try:
+            resolved = self._types.resolve(self._type_of(expr))
+        except (KeyError, NotImplementedError):
+            return None
         if isinstance(resolved, frog_ast.BitStringType):
             return resolved
         if isinstance(resolved, (frog_ast.Variable, frog_ast.FieldAccess)):

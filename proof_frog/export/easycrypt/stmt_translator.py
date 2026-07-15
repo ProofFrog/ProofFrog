@@ -30,15 +30,23 @@ class TranslatedBlock:
 class StatementTranslator:
     """Translate a FrogLang Block to an EC var-decl list + stmt list."""
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         types: tc.TypeCollector,
         exprs: expr_translator.ExpressionTranslator,
         module_var_aliases: dict[str, str] | None = None,
         allow_void_call: bool = False,
+        type_map: dict[str, frog_ast.Type] | None = None,
     ) -> None:
         self._types = types
         self._exprs = exprs
+        # The live FrogLang type map the expr translator's ``type_of`` closes
+        # over. When a module call is hoisted out of an expression into a fresh
+        # ``<@`` temp, or a local is declared mid-lowering, its type is recorded
+        # here so a later ``type_of`` of that name resolves.
+        self._type_map: dict[str, frog_ast.Type] = (
+            type_map if type_map is not None else {}
+        )
         self._module_var_aliases: dict[str, str] = dict(module_var_aliases or {})
         # When True, a bare module-call statement whose (unit) result is
         # discarded -- e.g. a reduction's ``challenger.Initialize();`` -- is
@@ -55,6 +63,20 @@ class StatementTranslator:
         except (NotImplementedError, KeyError):
             return False
         return isinstance(resolved, frog_ast.MapType)
+
+    def _translate_expr(
+        self,
+        expr: frog_ast.Expression,
+        decls: list[ec_ast.VarDecl],
+        out_stmts: list[ec_ast.EcStmt],
+    ) -> str:
+        """Render a statement-context expression, lifting any embedded module
+        call to a preceding ``<@`` (EC has no calls inside expressions). Gated
+        on the expr actually containing a module call, so a call-free expr
+        takes the direct path unchanged (byte-identical)."""
+        if _expr_has_module_call(expr):
+            expr = self._hoist_calls_in_expr(expr, decls, out_stmts)
+        return self._exprs.translate(expr)
 
     def _is_optional_expr(self, expr: frog_ast.Expression) -> bool:
         """True if ``expr`` already has an optional (``T?``) type.
@@ -88,28 +110,34 @@ class StatementTranslator:
         decls: list[ec_ast.VarDecl] = []
         stmts: list[ec_ast.EcStmt] = []
         statements = list(block.statements)
-        for i, stmt in enumerate(statements):
-            rest = statements[i + 1 :]
-            # Guarded early return: ``if (g) { ...; return X; } <rest>; return Y``
-            # (a case-split oracle -- e.g. the CFRG binding reductions'
-            # ``Challenge`` forwarding to ``challenger.Challenge`` on a
-            # collision guard). EC procedures are single-exit, so lower this to
-            # a result variable set in both branches, with ``rest`` becoming the
-            # ``else``. Only fires on this exact shape (single-condition ``if``,
-            # no ``else``, then-block ending in a return, a fall-through final
-            # return); any other control flow falls through to the per-statement
-            # translator, whose ``NotImplementedError`` yields the historical
-            # ``return witness`` stub -- so unaffected bodies stay byte-identical.
-            if (
-                isinstance(stmt, frog_ast.IfStatement)
-                and self._is_guarded_early_return(stmt)
-                and rest
-                and isinstance(rest[-1], frog_ast.ReturnStatement)
-            ):
-                self._handle_guarded_early_return(stmt, rest, decls, stmts, return_type)
-                return TranslatedBlock(decls, stmts)
+        # A body with EC-inexpressible control flow (an ``if`` case-split whose
+        # branches early-return, a lazy-RO ``if (m == mStar) { return yStar }``
+        # exclusion, or a ``for e in m.entries`` map loop) is lowered to a
+        # single-exit form: one ``result`` variable, control flow rewritten with
+        # ``returned`` flags, and a trailing ``return result``. A straight-line
+        # body with no such construct takes the historical per-statement path
+        # unchanged (byte-identical).
+        if return_type is not None and self._block_needs_lowering(statements):
+            result = _fresh_name_avoiding(
+                decls, stmts, _collect_bound_names(statements)
+            )
+            decls.append(ec_ast.VarDecl(result, return_type))
+            self._lower_block(statements, decls, stmts, return_type, result)
+            stmts.append(ec_ast.Return(result))
+            return TranslatedBlock(decls, stmts)
+        for stmt in statements:
             self._translate_stmt(stmt, decls, stmts, return_type)
         return TranslatedBlock(decls, stmts)
+
+    def _block_needs_lowering(self, statements: list[frog_ast.Statement]) -> bool:
+        """True if a top-level statement is a control-flow construct that the
+        single-exit lowering handles (a guarded/general ``if`` or a map loop)."""
+        return any(
+            self._is_guarded_early_return(s)
+            or (isinstance(s, frog_ast.IfStatement) and len(s.conditions) == 1)
+            or self._is_map_for_early_return(s)
+            for s in statements
+        )
 
     @staticmethod
     def _is_guarded_early_return(stmt: frog_ast.Statement) -> bool:
@@ -153,23 +181,24 @@ class StatementTranslator:
         stmts.append(ec_ast.If(guard, then_stmts, else_stmts))
         stmts.append(ec_ast.Return(result))
 
-    def _lower_block(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    def _lower_block(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-branches
         self,
         statements: list[frog_ast.Statement],
         decls: list[ec_ast.VarDecl],
         out_stmts: list[ec_ast.EcStmt],
         return_type: ec_ast.EcType | None,
         result: str,
+        returned_flag: str | None = None,
     ) -> None:
         """Lower a straight-line block into a single-exit form writing ``result``.
 
-        Handles a nested guarded early return (``if (g) { ...; return X }`` +
-        fall-through) and a map-iteration for-loop (``for e in m.entries { ...;
-        return X }`` + fall-through), each of which conditionalizes the code
-        after it; a bare ``return`` becomes ``result <- expr``; every other
-        statement translates in place. For a block whose only returning
-        construct is a trailing ``return`` (the pre-existing guarded-early-
-        return case), this is byte-identical to the former inline loop."""
+        Handles a guarded early return, a general ``if``/``if-else`` whose
+        branches may or may not return (lowered with a fresh ``returned`` flag
+        so the code after the ``if`` runs only on the no-return paths), a
+        map-iteration for-loop, and a bare ``return``; every other statement
+        translates in place. ``returned_flag`` (set when lowering a branch of an
+        enclosing general ``if``) is propagated so a return deep inside also
+        skips the enclosing fall-through."""
         for i, stmt in enumerate(statements):
             rest = statements[i + 1 :]
             if self._is_guarded_early_return(stmt):
@@ -181,20 +210,75 @@ class StatementTranslator:
                     inner_then,
                     return_type,
                     result,
+                    returned_flag,
                 )
                 inner_else: list[ec_ast.EcStmt] = []
-                self._lower_block(rest, decls, inner_else, return_type, result)
-                guard = self._exprs.translate(stmt.conditions[0])
+                self._lower_block(
+                    rest, decls, inner_else, return_type, result, returned_flag
+                )
+                guard = self._translate_expr(stmt.conditions[0], decls, out_stmts)
                 out_stmts.append(ec_ast.If(guard, inner_then, inner_else))
+                return
+            if isinstance(stmt, frog_ast.IfStatement) and len(stmt.conditions) == 1:
+                self._lower_general_if(
+                    stmt, rest, decls, out_stmts, return_type, result, returned_flag
+                )
                 return
             if self._is_map_for_early_return(stmt):
                 assert isinstance(stmt, frog_ast.GenericFor)
                 self._lower_map_for(stmt, rest, decls, out_stmts, return_type, result)
                 return
             if isinstance(stmt, frog_ast.ReturnStatement):
-                self._lower_return_to(result, stmt, decls, out_stmts, return_type)
+                self._lower_return_to(
+                    result, stmt, decls, out_stmts, return_type, returned_flag
+                )
                 return
             self._translate_stmt(stmt, decls, out_stmts, return_type)
+
+    def _lower_general_if(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+        self,
+        stmt: frog_ast.IfStatement,
+        rest: list[frog_ast.Statement],
+        decls: list[ec_ast.VarDecl],
+        out_stmts: list[ec_ast.EcStmt],
+        return_type: ec_ast.EcType | None,
+        result: str,
+        returned_flag: str | None,
+    ) -> None:
+        """Lower ``if (g) { A } [else { B }] <rest>`` where a branch may or may
+        not return. A fresh ``flag`` records whether either branch returned;
+        ``rest`` runs guarded on ``! flag`` (the no-return continuation), and a
+        return inside the ``if`` propagates to any enclosing ``returned_flag``."""
+        avoid = _collect_bound_names(rest)
+        for blk in stmt.blocks:
+            avoid |= _collect_bound_names(list(blk.statements))
+        flag = _fresh_name_avoiding(decls, out_stmts, avoid)
+        decls.append(ec_ast.VarDecl(flag, ec_ast.EcType("bool")))
+        out_stmts.append(ec_ast.Assign(flag, "false"))
+        guard = self._translate_expr(stmt.conditions[0], decls, out_stmts)
+        then_out: list[ec_ast.EcStmt] = []
+        self._lower_block(
+            list(stmt.blocks[0].statements), decls, then_out, return_type, result, flag
+        )
+        else_out: list[ec_ast.EcStmt] = []
+        if len(stmt.blocks) > 1:
+            self._lower_block(
+                list(stmt.blocks[1].statements),
+                decls,
+                else_out,
+                return_type,
+                result,
+                flag,
+            )
+        out_stmts.append(ec_ast.If(guard, then_out, else_out))
+        fall: list[ec_ast.EcStmt] = []
+        self._lower_block(rest, decls, fall, return_type, result, returned_flag)
+        if fall:
+            out_stmts.append(ec_ast.If(f"! {flag}", fall, []))
+        if returned_flag is not None:
+            out_stmts.append(
+                ec_ast.If(flag, [ec_ast.Assign(returned_flag, "true")], [])
+            )
 
     def _is_map_for_early_return(self, stmt: frog_ast.Statement) -> bool:
         """True for ``for ([K,V] e in m.entries) { ... }`` over a finite map."""
@@ -294,7 +378,7 @@ class StatementTranslator:
                     self._translate_stmt(s, decls, then_stmts, return_type)
                 self._lower_return_to(result, body[-1], decls, then_stmts, return_type)
                 then_stmts.append(ec_ast.Assign(found, "true"))
-                guard = self._exprs.translate(stmt.conditions[0])
+                guard = self._translate_expr(stmt.conditions[0], decls, out_stmts)
                 out_stmts.append(ec_ast.If(f"({guard}) /\\ ! {found}", then_stmts, []))
             else:
                 self._translate_stmt(stmt, decls, out_stmts, return_type)
@@ -306,41 +390,42 @@ class StatementTranslator:
         decls: list[ec_ast.VarDecl],
         out_stmts: list[ec_ast.EcStmt],
         return_type: ec_ast.EcType | None = None,
+        returned_flag: str | None = None,
     ) -> None:
         """Render ``return X`` as an assignment ``result <- X`` / ``result <@ X``.
 
         When the proc returns an optional (``T?`` -> ``T option``), a ``None``
-        return stays ``None`` and any other return is wrapped ``Some (...)``
-        (FrogLang implicitly coerces a base value into the optional). For a
-        non-optional proc this is byte-identical to the former direct form
-        (``None`` never appears there)."""
+        return stays ``None`` and any other return is wrapped ``Some (...)``.
+        ``returned_flag``, when a branch of a general ``if`` lowers this return,
+        is set ``true`` so the code after the ``if`` is skipped."""
         assert isinstance(ret_stmt, frog_ast.ReturnStatement)
         expr = ret_stmt.expression
         optional = return_type is not None and return_type.text.endswith(" option")
         if isinstance(expr, frog_ast.NoneExpression):
             out_stmts.append(ec_ast.Assign(result, "None"))
-            return
-        # Wrap ``Some`` only when coercing a *base* value up into the optional;
-        # an already-optional expression (e.g. an ``T?`` local, or another
-        # optional call) is returned as-is (wrapping would double it).
-        wrap = optional and not self._is_optional_expr(expr)
-        if _is_module_call(expr):
-            assert isinstance(expr, frog_ast.FuncCall)
-            callee = self._render_module_call_target(expr.func)
-            args = self._render_call_args(expr, decls, out_stmts)
-            if wrap and return_type is not None:
-                base = ec_ast.EcType(return_type.text[: -len(" option")])
-                tmp = _fresh_name_avoiding(decls, out_stmts, set())
-                decls.append(ec_ast.VarDecl(tmp, base))
-                out_stmts.append(ec_ast.Call(tmp, callee, args))
-                out_stmts.append(ec_ast.Assign(result, f"Some ({tmp})"))
+        else:
+            # Wrap ``Some`` only when coercing a *base* value up into the
+            # optional; an already-optional expression is returned as-is.
+            wrap = optional and not self._is_optional_expr(expr)
+            if _is_module_call(expr):
+                assert isinstance(expr, frog_ast.FuncCall)
+                callee = self._render_module_call_target(expr.func)
+                args = self._render_call_args(expr, decls, out_stmts)
+                if wrap and return_type is not None:
+                    base = ec_ast.EcType(return_type.text[: -len(" option")])
+                    tmp = _fresh_name_avoiding(decls, out_stmts, set())
+                    decls.append(ec_ast.VarDecl(tmp, base))
+                    out_stmts.append(ec_ast.Call(tmp, callee, args))
+                    out_stmts.append(ec_ast.Assign(result, f"Some ({tmp})"))
+                else:
+                    out_stmts.append(ec_ast.Call(result, callee, args))
             else:
-                out_stmts.append(ec_ast.Call(result, callee, args))
-            return
-        rhs = self._exprs.translate(expr)
-        if wrap:
-            rhs = f"Some ({rhs})"
-        out_stmts.append(ec_ast.Assign(result, rhs))
+                rhs = self._translate_expr(expr, decls, out_stmts)
+                if wrap:
+                    rhs = f"Some ({rhs})"
+                out_stmts.append(ec_ast.Assign(result, rhs))
+        if returned_flag is not None:
+            out_stmts.append(ec_ast.Assign(returned_flag, "true"))
 
     def _translate_stmt(
         self,
@@ -440,6 +525,7 @@ class StatementTranslator:
             the_type = self._exprs.type_of(stmt.var)
         ec_type = self._types.translate_type(the_type)
         decls.append(ec_ast.VarDecl(var.name, ec_type))
+        self._type_map[var.name] = the_type
         distr = self._types.distr_for(ec_type)
         stmts.append(ec_ast.Sample(var.name, distr))
 
@@ -450,6 +536,7 @@ class StatementTranslator:
     ) -> None:
         ec_type = self._types.translate_type(stmt.type)
         decls.append(ec_ast.VarDecl(stmt.name, ec_type))
+        self._type_map[stmt.name] = stmt.type
 
     def _handle_assign(
         self,
@@ -473,6 +560,7 @@ class StatementTranslator:
         if stmt.the_type is not None:
             ec_type = self._types.translate_type(stmt.the_type)
             decls.append(ec_ast.VarDecl(var.name, ec_type))
+            self._type_map[var.name] = stmt.the_type
         if _is_module_call(stmt.value):
             call = stmt.value
             assert isinstance(call, frog_ast.FuncCall)
@@ -480,7 +568,7 @@ class StatementTranslator:
             args = self._render_call_args(call, decls, stmts)
             stmts.append(ec_ast.Call(var.name, callee, args))
             return
-        rhs = self._exprs.translate(stmt.value)
+        rhs = self._translate_expr(stmt.value, decls, stmts)
         # Reconcile optional-ness across the assignment: canonicalization makes
         # optionals transparent, so a ``T? x = <base expr>`` flat-state decl
         # assigns a base value to an optional local (needs ``Some``), and the
@@ -549,9 +637,11 @@ class StatementTranslator:
         if _is_module_call(expr):
             assert isinstance(expr, frog_ast.FuncCall)
             args = self._render_call_args(expr, decls, stmts)
-            ec_type = self._types.translate_type(self._exprs.type_of(expr))
+            frog_type = self._exprs.type_of(expr)
+            ec_type = self._types.translate_type(frog_type)
             fresh = _fresh_name(decls, stmts)
             decls.append(ec_ast.VarDecl(fresh, ec_type))
+            self._type_map[fresh] = frog_type
             callee = self._render_module_call_target(expr.func)
             stmts.append(ec_ast.Call(fresh, callee, args))
             return fresh
@@ -577,9 +667,11 @@ class StatementTranslator:
                 self._exprs.translate(self._hoist_calls_in_expr(a, decls, stmts))
                 for a in expr.args
             ]
-            ec_type = self._types.translate_type(self._exprs.type_of(expr))
+            frog_type = self._exprs.type_of(expr)
+            ec_type = self._types.translate_type(frog_type)
             fresh = _fresh_name(decls, stmts)
             decls.append(ec_ast.VarDecl(fresh, ec_type))
+            self._type_map[fresh] = frog_type
             callee = self._render_module_call_target(expr.func)
             stmts.append(ec_ast.Call(fresh, callee, ", ".join(arg_strs)))
             return frog_ast.Variable(fresh)
@@ -622,6 +714,36 @@ class StatementTranslator:
                 self._hoist_calls_in_expr(expr.end, decls, stmts),
             )
         return expr
+
+
+def _expr_has_module_call(expr: frog_ast.Expression) -> bool:
+    """True if ``expr`` embeds a module call ``E.m(...)`` anywhere. Mirrors
+    :meth:`StatementTranslator._hoist_calls_in_expr`'s traversal."""
+    if _is_module_call(expr):
+        return True
+    if isinstance(expr, frog_ast.BinaryOperation):
+        return _expr_has_module_call(expr.left_expression) or _expr_has_module_call(
+            expr.right_expression
+        )
+    if isinstance(expr, frog_ast.UnaryOperation):
+        return _expr_has_module_call(expr.expression)
+    if isinstance(expr, frog_ast.Tuple):
+        return any(_expr_has_module_call(v) for v in expr.values)
+    if isinstance(expr, frog_ast.FuncCall):
+        return any(_expr_has_module_call(a) for a in expr.args)
+    if isinstance(expr, frog_ast.FieldAccess):
+        return _expr_has_module_call(expr.the_object)
+    if isinstance(expr, frog_ast.ArrayAccess):
+        return _expr_has_module_call(expr.the_array) or _expr_has_module_call(
+            expr.index
+        )
+    if isinstance(expr, frog_ast.Slice):
+        return (
+            _expr_has_module_call(expr.the_array)
+            or _expr_has_module_call(expr.start)
+            or _expr_has_module_call(expr.end)
+        )
+    return False
 
 
 def _fresh_name(decls: list[ec_ast.VarDecl], stmts: list[ec_ast.EcStmt]) -> str:

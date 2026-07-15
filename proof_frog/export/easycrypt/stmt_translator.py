@@ -537,10 +537,11 @@ class StatementTranslator:
         if the_type is None:
             the_type = self._exprs.type_of(stmt.var)
         ec_type = self._types.translate_type(the_type)
-        decls.append(ec_ast.VarDecl(var.name, ec_type))
+        ec_var = self._exprs.ec_name(var.name)
+        decls.append(ec_ast.VarDecl(ec_var, ec_type))
         self._type_map[var.name] = the_type
         distr = self._types.distr_for(ec_type)
-        stmts.append(ec_ast.Sample(var.name, distr))
+        stmts.append(ec_ast.Sample(ec_var, distr))
 
     def _handle_var_decl(
         self,
@@ -548,7 +549,7 @@ class StatementTranslator:
         decls: list[ec_ast.VarDecl],
     ) -> None:
         ec_type = self._types.translate_type(stmt.type)
-        decls.append(ec_ast.VarDecl(stmt.name, ec_type))
+        decls.append(ec_ast.VarDecl(self._exprs.ec_name(stmt.name), ec_type))
         self._type_map[stmt.name] = stmt.type
 
     def _handle_assign(
@@ -570,16 +571,17 @@ class StatementTranslator:
             stmts.append(ec_ast.Assign(arr, f"{arr}.[{key} <- {val}]"))
             return
         var = _require_variable(stmt.var)
+        ec_var = self._exprs.ec_name(var.name)
         if stmt.the_type is not None:
             ec_type = self._types.translate_type(stmt.the_type)
-            decls.append(ec_ast.VarDecl(var.name, ec_type))
+            decls.append(ec_ast.VarDecl(ec_var, ec_type))
             self._type_map[var.name] = stmt.the_type
         if _is_module_call(stmt.value):
             call = stmt.value
             assert isinstance(call, frog_ast.FuncCall)
             callee = self._render_module_call_target(call.func)
             args = self._render_call_args(call, decls, stmts)
-            stmts.append(ec_ast.Call(var.name, callee, args))
+            stmts.append(ec_ast.Call(ec_var, callee, args))
             return
         rhs = self._translate_expr(stmt.value, decls, stmts)
         # Reconcile optional-ness across the assignment: canonicalization makes
@@ -593,7 +595,7 @@ class StatementTranslator:
             rhs = f"Some ({rhs})"
         elif rhs_opt and not lhs_opt:
             rhs = f"oget ({rhs})"
-        stmts.append(ec_ast.Assign(var.name, rhs))
+        stmts.append(ec_ast.Assign(ec_var, rhs))
 
     def _lhs_is_optional(
         self, var: frog_ast.Variable, the_type: frog_ast.Type | None

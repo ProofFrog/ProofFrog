@@ -1467,7 +1467,10 @@ class ModuleTranslator:
     ) -> ec_ast.Proc:
         sig = method.signature
         ec_params = [
-            ec_ast.ProcParam(p.name, self._translate_param_type(p.type))
+            ec_ast.ProcParam(
+                expr_translator.mangle_ec_name(p.name, field_renames or {}),
+                self._translate_param_type(p.type),
+            )
             for p in sig.parameters
         ]
         return_type = self._translate_param_type(sig.return_type)

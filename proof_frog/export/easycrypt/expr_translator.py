@@ -15,6 +15,26 @@ from . import type_collector as tc
 from ... import frog_ast
 
 
+def mangle_ec_name(raw: str, field_renames: dict[str, str]) -> str:
+    """Map a FrogLang variable name to its EC identifier.
+
+    Applies ``field_renames`` (uppercase-initial field lowering), ``@``
+    normalization, and -- for any name still uppercase-initial (a game/reduction
+    local like the DH game's ``X``/``Y`` or param ``U``, or a canonicalized
+    flat-state field ``QT``) -- the ``canonical_form._ec_ident`` mangling
+    (``X`` -> ``v_X``), since EC var/param/op names must be lowercase-initial.
+    Lowercase names (the common case) are returned unchanged, so existing
+    emissions are byte-identical. Applied at BOTH reference sites and binding
+    sites (var decls, proc params, assignment/sample/call targets) so a name
+    renders identically wherever it appears."""
+    name = field_renames.get(raw, raw)
+    if "@" in name:
+        name = name.replace("@", "_")
+    if name and name[0].isupper():
+        name = canonical_form._ec_ident(name)  # pylint: disable=protected-access
+    return name
+
+
 class ExpressionTranslator:
     """Render a FrogLang expression as an EC expression string.
 
@@ -49,24 +69,15 @@ class ExpressionTranslator:
             return False
         return isinstance(resolved, frog_ast.MapType)
 
+    def ec_name(self, raw: str) -> str:
+        """Map a FrogLang variable name to its EC identifier (see
+        :func:`mangle_ec_name`), using this translator's field renames."""
+        return mangle_ec_name(raw, self._field_renames)
+
     def translate(self, expr: frog_ast.Expression) -> str:
         """Render `expr` as an EC expression string."""
         if isinstance(expr, frog_ast.Variable):
-            name = self._field_renames.get(expr.name, expr.name)
-            if "@" in name:
-                name = name.replace("@", "_")
-            # A canonicalized flat-state field keeps its raw uppercase-initial
-            # FrogLang name (``QT``) in the body while its declaration was
-            # emitted under the mangled ``v_QT`` (an EC module var must be
-            # lowercase-initial). An uppercase-initial reference that survived
-            # ``field_renames`` is such a field -- mangle it to match the decl.
-            # Lowercase names (the common case, and ``field_renames``-lowered
-            # ``hT``/``qT``) are byte-identical.
-            if name and name[0].isupper():
-                name = canonical_form._ec_ident(
-                    name
-                )  # pylint: disable=protected-access
-            return name
+            return self.ec_name(expr.name)
         if isinstance(expr, frog_ast.Integer):
             return str(expr.num)
         if isinstance(expr, frog_ast.Boolean):

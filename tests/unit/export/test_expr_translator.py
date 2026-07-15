@@ -49,10 +49,14 @@ def test_translate_variable() -> None:
 
 def test_translate_random_function_application() -> None:
     """``RF(rest)`` -- application of a sampled random function -- renders as
-    EC's juxtaposition application ``RF rest``."""
+    EC's juxtaposition application. An uppercase-initial callee with no field
+    rename (e.g. a ``Function<D,R>`` *parameter* like ``H``, which is not a
+    field so gets no rename) is EC-mangled to a lowercase-initial identifier
+    (``v_RF``); a field-renamed callee takes its rename instead (see
+    ``test_field_rename_applies_to_references``)."""
     tr = _make()
     call = frog_ast.FuncCall(frog_ast.Variable("RF"), [frog_ast.Variable("rest")])
-    assert tr.translate(call) == "RF rest"
+    assert tr.translate(call) == "v_RF rest"
 
 
 def test_field_rename_applies_to_references() -> None:

@@ -775,6 +775,7 @@ class ModuleTranslator:
         emitted_primitive_type: str | None = None,
         param_renames: dict[str, str] | None = None,
         param_module_types: dict[str, str] | None = None,
+        param_primitive_types: dict[str, str] | None = None,
         allow_void_call: bool = False,
     ) -> ec_ast.Module:
         """Translate a Reduction to a multi-parameter EC module.
@@ -835,8 +836,18 @@ class ModuleTranslator:
             ec_ast.ModuleParam(name=challenger_ec_name, module_type=oracle_type_name)
         )
 
+        # Each module-typed param resolves ``type_of`` for calls on it
+        # (``NG.Encode(...)`` -> the ``NominalGroup`` method-return-type key).
+        # A multi-primitive reduction (e.g. the ROM ``R_Combined(KEM_PQ,
+        # NominalGroup NG, PRG G, Label L, ...)``) has params of DIFFERENT
+        # primitive types, so mapping them all to the single primary
+        # ``primitive_name`` mis-keys every non-primary call. ``param_primitive_types``
+        # (from the caller's instance model) gives each param its own primitive
+        # type; the fallback to ``primitive_name`` keeps single-primitive
+        # reductions byte-identical (there every param IS that primitive).
+        param_prim = param_primitive_types or {}
         module_param_types: dict[str, str] = {
-            p.name: primitive_name for p in module_typed_params
+            p.name: param_prim.get(p.name, primitive_name) for p in module_typed_params
         }
         module_param_types["challenger"] = oracle_type_name
 

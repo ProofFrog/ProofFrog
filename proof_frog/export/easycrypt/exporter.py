@@ -1600,6 +1600,32 @@ def export_proof_file(proof_path: str) -> str:
                 return frog_ast.IntType()
             if isinstance(e, frog_ast.BitStringLiteral):
                 return frog_ast.BitStringType(e.length)
+            if isinstance(e, frog_ast.Boolean):
+                return frog_ast.BoolType()
+            if isinstance(e, frog_ast.FuncCall) and isinstance(
+                e.func, frog_ast.Variable
+            ):
+                # A random-function application ``H(m)`` / ``RF(x)``: the callee
+                # is a ``Function<D,R>``-typed field or param (rendered as EC's
+                # native arrow ``D -> R``), so the call's type is the range
+                # ``R``. Surfaces in the ROM ``Hash`` oracle, whose body applies
+                # the random function directly.
+                try:
+                    callee_t: frog_ast.Type | None = type_of(e.func)
+                except (KeyError, NotImplementedError):
+                    callee_t = None
+                if isinstance(callee_t, frog_ast.FunctionType):
+                    return callee_t.range_type
+            if isinstance(e, frog_ast.ArrayAccess):
+                # A map read ``QT[k]`` / ``HT[m]``: the value type of the map.
+                # (The Integer-index tuple-projection case is handled above; a
+                # map key is a variable or tuple, so the two do not collide.)
+                try:
+                    base_t: frog_ast.Type | None = type_of(e.the_array)
+                except (KeyError, NotImplementedError):
+                    base_t = None
+                if isinstance(base_t, frog_ast.MapType):
+                    return base_t.value_type
             raise NotImplementedError(f"type_of not implemented for {type(e).__name__}")
 
         return type_of
@@ -2145,10 +2171,16 @@ def export_proof_file(proof_path: str) -> str:
         # a no-op; for CES it gives each of ``CE``/``E1``/``E2`` the
         # correct per-clone ``.Scheme`` type.
         per_param_mod_types: dict[str, str] = {}
+        # Per-param *primitive type* for ``type_of`` resolution of calls on the
+        # param (``NG.Encode`` -> ``NominalGroup``). A multi-primitive reduction
+        # has params of different primitive types, so each maps to its own
+        # instance's primitive name rather than the single primary primitive.
+        per_param_prim_types: dict[str, str] = {}
         for p in helper.parameters:
             p_inst = instances_by_let_name.get(p.name)
             if p_inst is not None:
                 per_param_mod_types[p.name] = f"{p_inst.clone_alias}.{scheme_type_name}"
+                per_param_prim_types[p.name] = p_inst.primitive_name
         # Hoist nested module calls in the reduction body before
         # translation (same motivation as the scheme-body hoisting
         # above): the source body may use a primitive/challenger call
@@ -2172,6 +2204,7 @@ def export_proof_file(proof_path: str) -> str:
                 emitted_primitive_type=qualified_scheme_type,
                 param_renames=renames,
                 param_module_types=per_param_mod_types or None,
+                param_primitive_types=per_param_prim_types or None,
             )
         )
         if helper.methods:

@@ -544,6 +544,19 @@ class TypeCollector:
             decls.append(ec_ast.Axiom(f"{distr}_ll", f"is_lossless {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_full", f"is_full {distr}"))
+        # Random-function distributions for ``Function<A,B>`` fields sampled
+        # inside the theory (e.g. LazyRO's ``rF <$ dfun_bs_M_t_to_bs_n_t`` over
+        # the theory-mode ``bs_M_t``/``bs_n_t``). Same foundation as emit()'s
+        # top-level case, but these arrow types live in the theory, so their
+        # dfun op must too. Emitted after the codomain distrs above so the
+        # arrow's operands are in scope.
+        for dom, codom in self._function_types:
+            distr = _function_distr_name(dom, codom)
+            arrow = f"{dom} -> {codom}"
+            decls.append(ec_ast.OpDecl(distr, f"({arrow}) distr"))
+            decls.append(ec_ast.Axiom(f"{distr}_ll", f"is_lossless {distr}"))
+            decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
+            decls.append(ec_ast.Axiom(f"{distr}_full", f"is_full {distr}"))
         # A ``Function<D,R> H`` game param inside the theory: the random-oracle
         # function op ``op v_H : d -> r``, instantiated to the concrete function
         # at the clone site.

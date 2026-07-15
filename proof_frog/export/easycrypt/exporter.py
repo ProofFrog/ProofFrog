@@ -138,6 +138,19 @@ def _base_int_length_map(
         local: dict[str, frog_ast.ASTNode] = {}
         params_local: dict[str, frog_ast.ASTNode] = {}
         inliner = _LengthInliner(local, qualified)
+        # A scheme field like ``CG_expanded.Nss = H.Nout`` references the
+        # scheme's own MODULE param name (``H`` = the KDF param), not the
+        # instantiation arg (``Hkdf``). Substitute param -> arg first so the
+        # chained resolution ``hybrid.Nss -> H.Nout -> Hkdf.Nout -> Nout``
+        # completes (``qualified`` already holds ``Hkdf.Nout -> Nout`` from the
+        # earlier-declared let); otherwise ``H.Nout`` stays unresolved and the
+        # length renders as a stray ``bs_hybrid_Nss`` distinct from ``bs_Nout``.
+        module_param_subst = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+        for param, arg in zip(defn.parameters, let.value.args):
+            if not isinstance(getattr(param, "type", None), frog_ast.IntType):
+                module_param_subst.set(
+                    frog_ast.Variable(param.name), copy.deepcopy(arg)
+                )
         for param, arg in zip(defn.parameters, let.value.args):
             if isinstance(getattr(param, "type", None), frog_ast.IntType):
                 value = inliner.transform(arg)
@@ -145,7 +158,10 @@ def _base_int_length_map(
                 params_local[param.name] = value
         for fld in defn.fields:
             if isinstance(fld.type, frog_ast.IntType) and fld.value is not None:
-                local[fld.name] = inliner.transform(fld.value)
+                fld_value = visitors.SubstitutionTransformer(
+                    module_param_subst
+                ).transform(copy.deepcopy(fld.value))
+                local[fld.name] = inliner.transform(fld_value)
         local_by_let[let.name] = local
         param_by_let[let.name] = params_local
         names_by_let[let.name] = set(local.keys())
@@ -571,7 +587,7 @@ def _normalize_ec_module_names(
     proof: frog_ast.ProofFile,
     primitives_by_name: dict[str, frog_ast.Primitive],
     schemes_by_name: dict[str, frog_ast.Scheme],
-) -> None:
+) -> dict[str, str]:
     """Rename lowercase EC-module identifiers in ``proof`` to uppercase-initial.
 
     Two families of names are emitted verbatim as EC module identifiers and so
@@ -655,6 +671,8 @@ def _normalize_ec_module_names(
     # scheme's own param rename stays local to its definition + body.
     for scheme in schemes_by_name.values():
         _normalize_scheme_module_params(scheme, module_type_names)
+
+    return instance_rename
 
 
 def _normalize_scheme_module_params(
@@ -1096,7 +1114,9 @@ def export_proof_file(proof_path: str) -> str:
     # unresolvable -> the internal ``engine.prove`` FailedProofs even though the
     # proof verifies. Validate the consistent pre-rename proof instead.
     proof_for_validation = copy.deepcopy(proof)
-    _normalize_ec_module_names(proof, primitives_by_name, schemes_by_name)
+    instance_rename = _normalize_ec_module_names(
+        proof, primitives_by_name, schemes_by_name
+    )
 
     # The primary instance is the one whose instance appears in the theorem.
     # For ``theorem: PRGSecurity(H)`` with ``PRG_5_10 H = PRG_5_10(G);``,
@@ -1429,9 +1449,22 @@ def export_proof_file(proof_path: str) -> str:
     # ``top_aliases`` holds carrier Types, but these int-length entries are
     # Expressions consumed only by ``_substitute_aliases`` (never resolved as a
     # carrier type), so casting to ``Type`` is sound (``Variable`` is both).
+    # A primary scheme instance is renamed to an uppercase EC module ident
+    # (``hybrid`` -> ``Hybrid``) so ``int_qual_map`` keys it as ``Hybrid.Nss``,
+    # but a length FIELD ACCESS in a flat state keeps the FrogLang lowercase name
+    # (``BitString<hybrid.Nss>``, a value context the module rename doesn't
+    # touch). Seed the alias under the ORIGINAL name too so it inlines.
+    _rev_instance_rename = {v: k for k, v in instance_rename.items()}
     for _qk, _qv in int_qual_map.items():
-        if isinstance(_qv, frog_ast.Expression):
-            top_aliases.setdefault(_qk, cast(frog_ast.Type, _qv))
+        if not isinstance(_qv, frog_ast.Expression):
+            continue
+        top_aliases.setdefault(_qk, cast(frog_ast.Type, _qv))
+        _inst_part, _dot, _field_part = _qk.partition(".")
+        if _dot and _inst_part in _rev_instance_rename:
+            top_aliases.setdefault(
+                f"{_rev_instance_rename[_inst_part]}.{_field_part}",
+                cast(frog_ast.Type, _qv),
+            )
     # Bare integer-field aliases (``Nss`` -> ``kem_pq_nss``) for a field owned by
     # exactly ONE instance and not itself a base ``Int`` let. A bitstring length
     # can surface a bare primitive field from many ``type_of`` paths -- a method

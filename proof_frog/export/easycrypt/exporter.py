@@ -1577,6 +1577,24 @@ def export_proof_file(proof_path: str) -> str:
             )
     # pylint: enable=protected-access
 
+    # A ``Function<D,R>`` shared random oracle (a proof let or the theorem
+    # game's own param) marks a ROM proof. Its multi-oracle chains get CANONICAL
+    # f<NN> flat-state field naming, PROOF-WIDE: the glob-by-name misalignment
+    # the rename fixes lives in the hash oracle's EARLY hops too, whose states
+    # carry no ``fmap`` RO-table field yet (the table is inlined only in later
+    # hops), so a per-chain "has a map field" gate would miss them. Binding /
+    # correctness proofs have no Function-typed RO, so this stays False and every
+    # such export is byte-identical.
+    proof_uses_ro_function = any(
+        isinstance(pl.type, frog_ast.FunctionType) for pl in proof.lets
+    ) or (
+        theorem_game_file is not None
+        and any(
+            isinstance(gp.type, frog_ast.FunctionType)
+            for gp in theorem_game_file.games[0].parameters
+        )
+    )
+
     # Method return types are global across ALL primitives so that
     # ``type_of`` resolves method calls like ``P.Enc(k, m)`` even when ``P``
     # is an auxiliary-primitive instance and the caller is a reduction in
@@ -3718,6 +3736,7 @@ def export_proof_file(proof_path: str) -> str:
                 init_coupling=_decomposition_coupling(step_a, step_b),
                 full_coupling=_live_state_coupling(step_a, step_b),
                 clone_alias=clone_alias_by_module,
+                use_canonical_fields=proof_uses_ro_function,
             )
             chain_extra_decls.extend(info.extra_decls)
             pres_method_requests.update(info.pres_methods)

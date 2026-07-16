@@ -706,6 +706,7 @@ class ModuleTranslator:
         external_module_types: dict[str, str],
         module_params: list[ec_ast.ModuleParam] | None = None,
         emit_state_vars: bool = False,
+        use_canonical_fields: bool = False,
     ) -> ec_ast.Module:
         """Translate a parameterless intermediate game-state AST.
 
@@ -744,9 +745,15 @@ class ModuleTranslator:
         # flat states name-sort their globs identically (EC orders ``glob`` by
         # name); otherwise the fields inline to locals and only the uppercase
         # lowering applies (byte-identical for non-state-var games).
+        # ``use_canonical_fields`` is decided CHAIN-WIDE by the caller (a ROM
+        # chain: some state carries an ``fmap`` RO table). It must be uniform
+        # across every state of a chain -- an early state (before the RO is
+        # inlined) has no map field, so a per-state gate would leave it on
+        # stable names while its siblings go canonical, breaking the very
+        # glob-name alignment the rename exists to fix.
         field_renames = (
             _canonical_field_renames(game.fields, self._types)
-            if emit_state_vars and state_uses_canonical_fields(game.fields, self._types)
+            if emit_state_vars and use_canonical_fields
             else _field_renames_for(game.fields)
         )
         procs = [
@@ -1605,28 +1612,6 @@ def _canonical_field_renames(
         key=lambda p: (types.translate_type(p[1].type).text, p[0]),
     )
     return {fld.name: f"f{rank:02d}" for rank, (_, fld) in enumerate(ordered)}
-
-
-def state_uses_canonical_fields(
-    game_fields: list[frog_ast.Field], types: tc.TypeCollector
-) -> bool:
-    """Gate for :func:`_canonical_field_renames`: does this flat state carry a
-    finite-map (``fmap``) field -- the lazy random-oracle table that marks a ROM
-    proof? Only ROM chains hit the glob-by-name misalignment the canonical rename
-    fixes (a persistent adaptive RO table whose adjacent states share a field-type
-    multiset but differ in declared field names). Binding/correctness proofs have
-    no map field, so gating here keeps their stable ``_ec_field_name`` names --
-    and every coupling / functional-twin module that references them by stable
-    name -- byte-identical (the canonical rename otherwise leaks into twin-module
-    couplings that still name fields ``dk0``). Consistent across a ROM chain: the
-    adversary-queried RO table persists in every state."""
-    for fld in game_fields:
-        try:
-            if types.translate_type(fld.type).text.endswith("fmap"):
-                return True
-        except (NotImplementedError, KeyError, AssertionError):
-            continue
-    return False
 
 
 def _seed_type_map(

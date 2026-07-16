@@ -3566,6 +3566,7 @@ def emit_multi_oracle_chain_for_hop(
     clone_alias: dict[str, str] | None = None,
     init_coupling: str | None = None,
     full_coupling: str | None = None,
+    use_canonical_fields: bool = False,
 ) -> MultiOracleHopChainInfo:
     """Emit the per-oracle per-transform chains for one multi-oracle hop.
 
@@ -3596,6 +3597,13 @@ def emit_multi_oracle_chain_for_hop(
     def mod_ref(name: str) -> str:
         return f"{name}{inst_suffix}"
 
+    # Canonical f<NN> field naming is a PROOF-WIDE decision (a ROM proof, from
+    # its shared ``Function<D,R>`` random oracle): every ROM flat state -- incl.
+    # the hash oracle's early hops that carry no ``fmap`` field yet -- names its
+    # fields canonically so adjacent globs name-sort identically. Binding /
+    # correctness proofs pass False, keeping stable names byte-identical.
+    use_canonical = use_canonical_fields
+
     # Shared flat-state modules (full multi-oracle games) emitted ONCE.
     chunks: list[str] = []
     for mod_name, state in zip(left_mods, left_states):
@@ -3608,6 +3616,7 @@ def emit_multi_oracle_chain_for_hop(
                 method_return_types,
                 flat_params,
                 emit_state_vars=True,
+                use_canonical_fields=use_canonical,
             )
         )
     for mod_name, state in zip(right_mods, right_states):
@@ -3620,6 +3629,7 @@ def emit_multi_oracle_chain_for_hop(
                 method_return_types,
                 flat_params,
                 emit_state_vars=True,
+                use_canonical_fields=use_canonical,
             )
         )
 
@@ -3657,6 +3667,7 @@ def emit_multi_oracle_chain_for_hop(
             clone_alias=clone_alias or {},
             inj_acc=inj_methods,
             decaps_val_acc=decaps_val_schemes,
+            use_canonical_fields=use_canonical,
         )
         chunks.extend(oracle_chunks)
         tactic_body_by_oracle[oracle_name] = outer_body
@@ -3699,6 +3710,7 @@ def _emit_one_oracle_chain(
     clone_alias: dict[str, str] | None = None,
     inj_acc: set[tuple[str, str]] | None = None,
     decaps_val_acc: set[str] | None = None,
+    use_canonical_fields: bool = False,
 ) -> tuple[list[str], list[str], set[tuple[str, str]]]:
     """Emit one oracle's chain artifacts + outer tactic body.
 
@@ -3921,16 +3933,25 @@ def _emit_one_oracle_chain(
     # qualifies to the name EC actually sees (``Step_0L_state_5.f03``, not
     # ``.dk``). Keyed by stable name, valued by the same ``f<NN>`` the var
     # block uses. pylint: disable=protected-access
-    canonical_by_base = {
-        _ref_base(mod_ref(name)): {
-            mt._ec_field_name(f.name): renames[f.name]
-            for f in game.fields
-            if f.name in renames
+    # Proof-wide gate (matches the module rendering in
+    # ``emit_multi_oracle_chain_for_hop``): a ROM proof names every state's
+    # fields canonically, so ``qualify`` maps stable -> canonical for ALL its
+    # bases; a binding/correctness proof keeps stable names (empty map ->
+    # ``qualify`` verbatim, byte-identical).
+    use_canonical = use_canonical_fields
+    canonical_by_base = (
+        {
+            _ref_base(mod_ref(name)): {
+                mt._ec_field_name(f.name): renames[f.name]
+                for f in game.fields
+                if f.name in renames
+            }
+            for name, game in norm_by_name.items()
+            for renames in (mt._canonical_field_renames(game.fields, modules._types),)
         }
-        for name, game in norm_by_name.items()
-        if mt.state_uses_canonical_fields(game.fields, modules._types)
-        for renames in (mt._canonical_field_renames(game.fields, modules._types),)
-    }
+        if use_canonical
+        else {}
+    )
     norm_left = [norm_by_name[n] for n in left_mods]
     norm_right = [norm_by_name[n] for n in right_mods]
     survivor_map = _chain_survivor_map(list(norm_by_name.values()))
@@ -4522,6 +4543,7 @@ def _flat_state_module(  # pylint: disable=too-many-arguments,too-many-positiona
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     module_params: list[ec_ast.ModuleParam],
     emit_state_vars: bool = False,
+    use_canonical_fields: bool = False,
 ) -> ec_ast.Module:
     """Translate one intermediate flat-state game to an EC ``Module`` AST."""
     prepared = _normalize_for_ec(
@@ -4533,6 +4555,7 @@ def _flat_state_module(  # pylint: disable=too-many-arguments,too-many-positiona
         external_module_types,
         module_params=module_params,
         emit_state_vars=emit_state_vars,
+        use_canonical_fields=use_canonical_fields,
     )
 
 
@@ -4544,6 +4567,7 @@ def _render_flat_state(  # pylint: disable=too-many-arguments,too-many-positiona
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     module_params: list[ec_ast.ModuleParam],
     emit_state_vars: bool = False,
+    use_canonical_fields: bool = False,
 ) -> str:
     """Render one intermediate flat-state game as an EC module source string."""
     ec_module = _flat_state_module(
@@ -4554,6 +4578,7 @@ def _render_flat_state(  # pylint: disable=too-many-arguments,too-many-positiona
         method_return_types,
         module_params,
         emit_state_vars=emit_state_vars,
+        use_canonical_fields=use_canonical_fields,
     )
     return "\n".join(_render_module_decl(ec_module))
 

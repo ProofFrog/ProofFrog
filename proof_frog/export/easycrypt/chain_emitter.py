@@ -4334,6 +4334,7 @@ def _emit_one_oracle_chain(
                 coupling(nxt_ref, final_ref),
                 eq_args,
                 _ref_base(nxt_ref),
+                _top_level_args(nxt_ref),
             )
             if w is not None:
                 return w
@@ -4457,7 +4458,13 @@ def _oracle_is_stateless(game: frog_ast.Game, oracle_name: str) -> bool:
     return not has_call and not has_field
 
 
-def _precond_witness(pre1: str, pre2: str, eq_args: str, nxt_base: str) -> str | None:
+def _precond_witness(
+    pre1: str,
+    pre2: str,
+    eq_args: str,
+    nxt_base: str,
+    nxt_param_globs: list[str],
+) -> str | None:
     """Explicit-witness discharge for a FIELD-WISE transitivity's precondition
     goal, or ``None`` for a whole-glob leg (keep ``smt()``).
 
@@ -4531,8 +4538,30 @@ def _precond_witness(pre1: str, pre2: str, eq_args: str, nxt_base: str) -> str |
             field_wit.setdefault(fm.group(2), f"{fm.group(4)}.{fm.group(5)}{{1}}")
     if not field_wit:
         return None
-    witnesses = [f"(glob {p}){{1}}" for p in sorted(params)]
+    # EC's exists layout for the middle module's globs is, IN ORDER:
+    #   [ALL functor-param globs, alphabetical]  (the flat state's ``(A1,...,An)``
+    #     args -- EC includes EVERY param's glob whether or not the oracle uses it)
+    #   [the module's OWN fields, in field order]
+    #   [referenced GLOBAL-module globs (the shared RO holder), AFTER the fields]
+    #   [the oracle argument, last]
+    # Two consequences: (a) the param globs come from the middle module's actual
+    # functor arguments (``nxt_param_globs``), NOT from the coupling -- the
+    # coupling carries only the USED-param intersection, so a param used by one
+    # side but not the other (e.g. ``G``) is absent there yet still an existential
+    # here (witnessed by its own ``(glob G){1}`` -- free, since the coupling never
+    # constrains it). (b) A shared-RO holder glob (``<clone>.RO_H``) is a
+    # REFERENCED global, not a functor param, so it sorts AFTER the fields.
+    # Mis-ordering shifts every later witness one slot -> a value lands in the
+    # arrow-typed RO slot ("no matching operator"). Verified: ec_print_goals on
+    # hop_4_hash (both transitivities).
+    ro_globs = [p for p in params if p.split(".")[-1].startswith("RO_")]
+    witnesses = [f"(glob {p}){{1}}" for p in sorted(nxt_param_globs)]
     witnesses += [field_wit[y] for y in sorted(field_wit)]
+    # The RO holder's exists var is its single ``h`` field (an arrow), so witness
+    # it as ``<clone>.RO_H.h{1}`` -- the explicit field, not the opaque
+    # ``(glob <clone>.RO_H){1}`` (which ``smt`` does not always see as equal to
+    # the arrow field ``f06 = h`` in a materialized-RF middle state).
+    witnesses += [f"{p}.h{{1}}" for p in sorted(ro_globs)]
     if eq_args != "true":
         witnesses.append("arg{1}")
     # ``;``-chained, not ``.``-separated: this is ONE goal-slot inside a
@@ -4582,6 +4611,7 @@ def _render_coupling_chain_body(  # pylint: disable=too-many-arguments,too-many-
                 coupling(b_ref, final_right),
                 eq_args,
                 _ref_base(b_ref),
+                _top_level_args(b_ref),
             )
             if w is not None:
                 return w

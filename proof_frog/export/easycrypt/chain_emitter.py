@@ -1844,6 +1844,7 @@ def _make_field_aware_coupling(
         dict[str, tuple[tuple[tuple[str, str], ...], frozenset[str]]] | None
     ) = None,
     ro_by_arrow: dict[str, str] | None = None,
+    ro_challenger_by_base: dict[str, list[tuple[str, str]]] | None = None,
 ) -> CouplingFn:
     """Build a coupling closure that is field-aware for cardinality-differing states.
 
@@ -1889,6 +1890,7 @@ def _make_field_aware_coupling(
     canonical = canonical_by_base or {}
     ginfo = glob_info_by_base or {}
     ro_arrow = ro_by_arrow or {}
+    ro_challenger = ro_challenger_by_base or {}
     composite = set(qualified)
 
     def role(f: str) -> str:
@@ -2016,6 +2018,15 @@ def _make_field_aware_coupling(
                         fields_conj.append(
                             f"{base}.{cname}{{{side}}} = {ro_ref}{{{side}}}"
                         )
+        # A COMPOSITE wrapper's inner challenger holds an RO-materialized arrow
+        # field (``<Challenger>.rF = RO_H.h``) that lives in the wrapper's glob but
+        # NOT in the flat-state ``ginfo`` signature above, so emit it here from the
+        # detected ``(qualified-ref, RO-ref)`` pairs. Threads ``RO_H.h = rF`` into
+        # the wrapper<->flat transitivity precondition (the lazy-RO delegating
+        # hops); byte-identical when no composite RO challenger is present.
+        for side, base in (("1", lb), ("2", rb)):
+            for chal_ref, ro_ref in ro_challenger.get(base, []):
+                fields_conj.append(f"{chal_ref}{{{side}}} = {ro_ref}{{{side}}}")
         # No relatable field across these two states (different cardinality AND
         # no shared name / recoverable role -- a cross-game correspondence we do
         # not yet resolve). Never emit a vacuous coupling (a bare ``={glob K}``
@@ -4130,6 +4141,42 @@ def _emit_one_oracle_chain(
     ro_module_names = (
         [m for m, _ in modules._types.function_value_modules()] if use_canonical else []
     )
+    ro_by_arrow = modules._types.ro_by_arrow_type() if use_canonical else {}
+    # A COMPOSITE wrapper whose inner CHALLENGER holds a Function/arrow field
+    # materialized as the shared RO (the lazy-RO Honest game's ``rF`` field IS the
+    # shared RO -- part-10) must carry ``<Challenger>.rF{side} = RO_H.h{side}`` in
+    # the coupling. Without it the wrapper<->flat transitivity's precondition
+    # composition cannot derive ``RO_H.h = <Challenger>.rF`` -- the residual smt
+    # cannot close (validated: ec_print_goals hop_4_hash 2nd transitivity). The
+    # challenger's field surfaces as a ``challenger@<f>`` entry of the RAW flat
+    # state-0; a FunctionType one whose EC arrow type is the shared RO's is
+    # materialized. Sound: the LazyRO Honest ``initialize`` sets ``rF`` from the
+    # shared RO. Empty for non-composite / non-ROM (byte-identical).
+    ro_challenger_by_base: dict[str, list[tuple[str, str]]] = {}
+    for wrapper_expr, raw_state0 in (
+        (left_wrapper_expr, left_states[0]),
+        (right_wrapper_expr, right_states[0]),
+    ):
+        wrapper_base = _ref_base(wrapper_expr)
+        chal_arg = next(
+            (a for a in reversed(_top_level_args(wrapper_expr)) if "(" in a), None
+        )
+        if wrapper_base not in qualified_ref_by_base or chal_arg is None:
+            continue
+        chal_base = _ref_base(chal_arg)
+        pairs: list[tuple[str, str]] = []
+        for fld in raw_state0.fields:
+            if not fld.name.startswith("challenger@") or not isinstance(
+                fld.type, frog_ast.FunctionType
+            ):
+                continue
+            ro_ref = ro_by_arrow.get(modules._types.translate_type(fld.type).text)
+            if ro_ref is not None:
+                own = fld.name[len("challenger@") :]
+                # pylint: disable-next=protected-access
+                pairs.append((f"{chal_base}.{mt._ec_field_name(own)}", ro_ref))
+        if pairs:
+            ro_challenger_by_base[wrapper_base] = pairs
     coupling = _make_field_aware_coupling(
         fields_by_base,
         survivor_map,
@@ -4138,7 +4185,8 @@ def _emit_one_oracle_chain(
         qualified_ref_by_base,
         canonical_by_base,
         glob_info_by_base or {},
-        modules._types.ro_by_arrow_type() if use_canonical else {},
+        ro_by_arrow,
+        ro_challenger_by_base,
     )
 
     # Composite-wrapper bridge tactic (wall 7). When the hop has a composite

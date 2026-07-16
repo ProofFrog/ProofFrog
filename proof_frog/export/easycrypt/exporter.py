@@ -3777,7 +3777,7 @@ def export_proof_file(proof_path: str) -> str:
         body = " /\\ ".join(conj)
         return f"{glob_invariant_conj} /\\ {body}" if glob_invariant_conj else body
 
-    def _live_state_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
+    def _live_state_coupling_base(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
         # CFRG concrete-framework decomposition coupling: when a reduction
         # endpoint repacks its component fields into the theorem game's packed
         # key, ``other_game.f = reduction.f`` references a nonexistent packed-key
@@ -3872,6 +3872,51 @@ def export_proof_file(proof_path: str) -> str:
         # under this coupling. ``glob_invariant_conj`` is empty for proofs with
         # no declared abstract scheme module (output unchanged there).
         return f"{glob_invariant_conj} /\\ {field}" if glob_invariant_conj else field
+
+    def _ro_challenger_materialization(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> str:
+        """``<Challenger>.rF{side} = RO_H.h{side}`` for each hop endpoint that is a
+        composite reduction whose inner challenger holds a Function/arrow field
+        materialized as the shared RO (the lazy-RO Honest game's ``rF`` field IS
+        the shared RO -- part-10). Threaded into the OUTER coupling (regardless of
+        which base path built it) so a wrapper<->flat transitivity's first-leg
+        witness can derive ``RO_H.h = rF`` from the hop precondition. The challenger
+        GAME AST's Function field type is ABSTRACT (``Function<BitString<P.M>,
+        BitString<n>>``), so it does not arrow-match the CONCRETE RO; a ROM proof
+        has a single RO holder and the lazy-RO challenger's ONLY Function field IS
+        that RO (concrete arrows equal after instantiation), so materialize any
+        FunctionType challenger field to the single RO ref. Empty when no endpoint
+        has an RO-materialized challenger (byte-identical). Sound: LazyRO Honest
+        ``initialize`` sets ``rF`` from the shared RO."""
+        # pylint: disable=protected-access
+        ro_ref = next(iter(top_types.ro_by_arrow_type().values()), None)
+        if ro_ref is None:
+            return ""
+        conj: list[str] = []
+        for step, side in ((step_a, "1"), (step_b, "2")):
+            if step.reduction is None or not _reduction_init_delegates(
+                step.reduction.name
+            ):
+                continue
+            chal_base = pt.module_base_name(
+                pt.last_module_arg(resolver.resolve(step).module_expr)
+            )
+            chal_game = engine._get_game_ast(step.challenger, None)
+            for cf in chal_game.fields if chal_game else []:
+                if isinstance(cf.type, frog_ast.FunctionType):
+                    live_state_holders.add(chal_base)
+                    conj.append(
+                        f"{chal_base}.{mt._ec_field_name(cf.name)}{{{side}}} = "
+                        f"{ro_ref}{{{side}}}"
+                    )
+        # pylint: enable=protected-access
+        return " /\\ ".join(conj)
+
+    def _live_state_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
+        base = _live_state_coupling_base(step_a, step_b)
+        extra = _ro_challenger_materialization(step_a, step_b)
+        return f"{base} /\\ {extra}" if extra else base
 
     # Per-hop memo of the multi-oracle chain emission. ``translate_hops``
     # calls ``_oracle_body_for_hop`` once per oracle of a multi-oracle hop;

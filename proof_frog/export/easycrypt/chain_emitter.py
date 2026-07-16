@@ -4344,7 +4344,14 @@ def _oracle_is_stateless(game: frog_ast.Game, oracle_name: str) -> bool:
     )
     if method is None:
         return False
-    field_names = {f.name for f in game.fields}
+    # A ``Function``-typed field is a MATERIALIZED shared RO (``f06 <- RO_H.h``,
+    # coupled ``f06 = RO_H.h``), not real state -- reading it is reading the RO.
+    # So a lazy-RO Honest ``hash`` ``return f06 m`` is still RO-stateless: its
+    # chain collapses to ``proc; auto => /#`` (``={glob RO_H}`` + ``f06=RO_H.h``
+    # close ``={res}``). Only a NON-arrow field counts as real state.
+    non_ro_fields = {
+        f.name for f in game.fields if not isinstance(f.type, frog_ast.FunctionType)
+    }
     has_call = (
         SearchVisitor[frog_ast.FuncCall](
             lambda n: isinstance(n, frog_ast.FuncCall)
@@ -4354,7 +4361,7 @@ def _oracle_is_stateless(game: frog_ast.Game, oracle_name: str) -> bool:
     )
     has_field = (
         SearchVisitor[frog_ast.Variable](
-            lambda n: isinstance(n, frog_ast.Variable) and n.name in field_names
+            lambda n: isinstance(n, frog_ast.Variable) and n.name in non_ro_fields
         ).visit(method.block)
         is not None
     )

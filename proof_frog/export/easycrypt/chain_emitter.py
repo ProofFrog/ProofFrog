@@ -1843,6 +1843,7 @@ def _make_field_aware_coupling(
     glob_info_by_base: (
         dict[str, tuple[tuple[tuple[str, str], ...], frozenset[str]]] | None
     ) = None,
+    ro_by_arrow: dict[str, str] | None = None,
 ) -> CouplingFn:
     """Build a coupling closure that is field-aware for cardinality-differing states.
 
@@ -1887,6 +1888,7 @@ def _make_field_aware_coupling(
     qualified = qualified_ref_by_base or {}
     canonical = canonical_by_base or {}
     ginfo = glob_info_by_base or {}
+    ro_arrow = ro_by_arrow or {}
     composite = set(qualified)
 
     def role(f: str) -> str:
@@ -1966,6 +1968,19 @@ def _make_field_aware_coupling(
                         f" = {qualify(base, s)}"
                         f"{{{side}}}"
                     )
+        # A materialized-RO field (arrow-typed, assigned ``<- RO_H.h``) equals
+        # the shared RO on its side. Emit ``base.f{side} = RO_H.h{side}`` so a hop
+        # that DROPS this field and reverts to ``RO_H.h`` (the lazy-RO Honest
+        # eager-RF materialization) can thread ``res`` equality. Read the field's
+        # arrow TYPE off the glob signature (canonical name + type).
+        if ro_arrow:
+            for side, base in (("1", lb), ("2", rb)):
+                for cname, ctype in ginfo.get(base, ((), frozenset()))[0]:
+                    ro_ref = ro_arrow.get(ctype)
+                    if ro_ref is not None:
+                        fields_conj.append(
+                            f"{base}.{cname}{{{side}}} = {ro_ref}{{{side}}}"
+                        )
         # No relatable field across these two states (different cardinality AND
         # no shared name / recoverable role -- a cross-game correspondence we do
         # not yet resolve). Never emit a vacuous coupling (a bare ``={glob K}``
@@ -4088,6 +4103,7 @@ def _emit_one_oracle_chain(
         qualified_ref_by_base,
         canonical_by_base,
         glob_info_by_base or {},
+        modules._types.ro_by_arrow_type() if use_canonical else {},
     )
 
     # Composite-wrapper bridge tactic (wall 7). When the hop has a composite

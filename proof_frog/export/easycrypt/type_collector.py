@@ -231,6 +231,34 @@ class TypeCollector:
             for fname, dom, codom in self._function_values
         ]
 
+    def ro_by_arrow_type(self) -> dict[str, str]:
+        """``{arrow-type-text: holder-ref}`` per registered RO, e.g.
+        ``{"d -> r": "RO_H.h"}``. A flat-state field of that arrow type is a
+        materialized copy of the shared RO (assigned ``<- RO_H.h`` by
+        :meth:`ro_ref_for_dfun`); the coupling uses this to add the within-side
+        invariant ``field{side} = RO_H.h{side}`` so a hop that drops the field
+        and reverts to the shared RO can thread the equality."""
+        return {
+            f"{dom} -> {codom}": f"{_ro_module_name(fname)}.h"
+            for fname, dom, codom in self._function_values
+        }
+
+    def ro_ref_for_dfun(self, distr: str) -> str | None:
+        """If ``distr`` is the function distribution of a registered shared RO,
+        return that RO's holder ref (``RO_H.h``); else ``None``.
+
+        A lazy-RO ASSUMPTION game (``LazyRO.Honest``) samples its OWN function
+        field ``RF <- Function<D,R>`` and uses it as the oracle -- its "Honest
+        view" IS the shared RO ``H``. So a Function-field sample from the RO's
+        exact ``dfun`` is materializing the shared RO: assign ``RF <- RO_H.h``
+        rather than sample independently, making ``RF = RO_H.h`` a true invariant
+        (the ROM ``H``->fresh-RF rename, realized concretely). Only fires when a
+        Function VALUE is registered (ROM proofs); byte-identical otherwise."""
+        for mod_name, dfun in self.function_value_modules():
+            if dfun == distr:
+                return f"{mod_name}.h"
+        return None
+
     def is_prime_group(self, group_name: str) -> bool:
         """True if the proof declared ``requires <group>.order is prime;``."""
         return group_name in self._prime_groups

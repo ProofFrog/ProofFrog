@@ -545,7 +545,17 @@ class StatementTranslator:
         decls.append(ec_ast.VarDecl(ec_var, ec_type))
         self._type_map[var.name] = the_type
         distr = self._types.distr_for(ec_type)
-        stmts.append(ec_ast.Sample(ec_var, distr))
+        # A Function-field sample from the shared RO's own ``dfun`` is
+        # materializing that RO (a lazy-RO assumption game's ``RF <-
+        # Function<D,R>`` -- its Honest view IS ``H``): assign ``RF <- RO_H.h``
+        # so ``RF = RO_H.h`` holds, rather than sample an independent copy the
+        # ROM ``H``->fresh-RF rename would then have to re-couple. ``None`` (the
+        # common case / non-ROM) keeps the plain sample.
+        ro_ref = self._types.ro_ref_for_dfun(distr)
+        if ro_ref is not None:
+            stmts.append(ec_ast.Assign(ec_var, ro_ref))
+        else:
+            stmts.append(ec_ast.Sample(ec_var, distr))
 
     def _handle_var_decl(
         self,

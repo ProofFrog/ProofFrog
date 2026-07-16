@@ -213,6 +213,24 @@ class TypeCollector:
         self._function_value_set.add(name)
         self._function_values.append((name, dom, codom))
 
+    def function_value_ref(self, fname: str) -> str | None:
+        """If ``fname`` (an EC-mangled name like ``v_H``) is a registered
+        random-oracle function VALUE, return its holder-module reference
+        (``RO_H.h``); else ``None``. Used by the expression translator to render
+        an RO application ``H(m)`` as ``RO_H.h m`` instead of the fixed-op
+        ``v_H m``."""
+        if fname in self._function_value_set:
+            return f"{_ro_module_name(fname)}.h"
+        return None
+
+    def function_value_modules(self) -> list[tuple[str, str]]:
+        """``(module_name, dfun_name)`` per registered RO function value, so the
+        exporter can sample ``RO_H.h <$ dfun`` at each experiment's main."""
+        return [
+            (_ro_module_name(fname), _function_distr_name(dom, codom))
+            for fname, dom, codom in self._function_values
+        ]
+
     def is_prime_group(self, group_name: str) -> bool:
         """True if the proof declared ``requires <group>.order is prime;``."""
         return group_name in self._prime_groups
@@ -558,10 +576,19 @@ class TypeCollector:
             decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_full", f"is_full {distr}"))
         # A ``Function<D,R> H`` game param inside the theory: the random-oracle
-        # function op ``op v_H : d -> r``, instantiated to the concrete function
-        # at the clone site.
+        # function VALUE, sampled once (not a fixed op). Emitted as a read-only
+        # holder module ``module RO_H = { var h : d -> r }`` -- the abstract
+        # counterpart of the concrete Main-section RO, instantiated at the clone.
         for fname, dom, codom in self._function_values:
-            decls.append(ec_ast.OpDecl(fname, f"{dom} -> {codom}"))
+            decls.append(
+                ec_ast.Module(
+                    name=_ro_module_name(fname),
+                    procs=[],
+                    module_vars=[
+                        ec_ast.VarDecl("h", ec_ast.EcType(f"{dom} -> {codom}"))
+                    ],
+                )
+            )
         return decls
 
     @property
@@ -824,7 +851,15 @@ class TypeCollector:
             decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_full", f"is_full {distr}"))
         for fname, dom, codom in self._function_values:
-            decls.append(ec_ast.OpDecl(fname, f"{dom} -> {codom}"))
+            decls.append(
+                ec_ast.Module(
+                    name=_ro_module_name(fname),
+                    procs=[],
+                    module_vars=[
+                        ec_ast.VarDecl("h", ec_ast.EcType(f"{dom} -> {codom}"))
+                    ],
+                )
+            )
         for name in self._names:
             decls.append(ec_ast.OpDecl(_zero_name(name), name))
         for name in self._names:
@@ -1187,6 +1222,20 @@ def _div_name(group_type: str) -> str:
 def _function_distr_name(dom: str, codom: str) -> str:
     """Name for the uniform distribution over functions ``dom -> codom``."""
     return f"dfun_{_sanitize(dom)}_to_{_sanitize(codom)}"
+
+
+def _ro_module_name(fname: str) -> str:
+    """Holder-module name for a random-oracle function VALUE ``fname``.
+
+    The RO is a function SAMPLED once per experiment (the ProofFrog theorem's
+    ``let: Function<D,R> H <- Function<D,R>;``), not a fixed op. EC ``main()``
+    takes no args and a sub-module cannot read a local of ``main``, so the
+    sampled function lives in a tiny read-only holder module (``module RO_H = {
+    var h : dom -> codom }``, sampled ``RO_H.h <$ dfun`` at the top of each
+    ``Game_step`` main). ``v_H`` -> ``RO_H``; ``v_G`` -> ``RO_G`` (uppercase
+    initial, as EC module names require)."""
+    base = fname[2:] if fname.startswith("v_") else fname
+    return "RO_" + base
 
 
 def _slice_op_name(src_name: str, dst_name: str) -> str:

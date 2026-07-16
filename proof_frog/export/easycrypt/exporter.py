@@ -2196,6 +2196,17 @@ def export_proof_file(proof_path: str) -> str:
         foreign_types = tc.TypeCollector(
             aliases=foreign_aliases, known_abstract_types=known_abstract_types
         )
+        # Register the RO function values so a foreign scheme body applying the
+        # shared RO (``CGRandomOracleKDF.evaluate`` = ``return H(input)``) renders
+        # ``RO_H.h input``, not the fixed-op ``v_H input``. The holder module is
+        # emitted once by ``top_types``; this only affects reference rendering.
+        # pylint: disable=protected-access
+        for pl in proof.lets:
+            if isinstance(pl.type, frog_ast.FunctionType):
+                foreign_types.register_function_value(
+                    canonical_form._ec_ident(pl.name), pl.type
+                )
+        # pylint: enable=protected-access
         foreign_modules = mt.ModuleTranslator(foreign_types, type_of_factory)
         fmp, fmpt, applied = _scheme_functor_params(
             foreign_scheme, foreign_let.value, instances_by_let_name, scheme_type_name

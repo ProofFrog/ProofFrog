@@ -168,6 +168,9 @@ class ExpressionTranslator:
             # a FuncCall whose func is a FieldAccess -- are lifted to ``<@``
             # statements by the statement translator and never reach here.)
             func = self.translate(expr.func)
+            # A random-ORACLE function value ``H(x)`` is not a fixed op: the RO
+            # is sampled once into a holder module, so ``H`` -> ``RO_H.h``.
+            func = self._types.function_value_ref(func) or func
             args = " ".join(_paren(self.translate(a)) for a in expr.args)
             return f"{func} {args}"
         raise NotImplementedError(

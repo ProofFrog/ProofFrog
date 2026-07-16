@@ -3667,7 +3667,15 @@ def emit_multi_oracle_chain_for_hop(
     glob_info_by_base: dict[str, tuple[tuple[tuple[str, str], ...], frozenset[str]]] = (
         {}
     )
-    param_names = [p.name for p in flat_params]
+    # The shared random-oracle holder modules (``RO_H``) are read-only globals a
+    # hash oracle reads, so they couple like an abstract module param: add them
+    # to the coupling param set so ``={glob RO_H}`` threads wherever an oracle
+    # actually references ``RO_H.`` (the ``\bP\.`` footprint probe -- hash yes,
+    # decaps no). ROM-only (``use_canonical``); binding proofs have no RO module.
+    ro_module_names = (
+        [m for m, _ in modules._types.function_value_modules()] if use_canonical else []
+    )
+    param_names = [p.name for p in flat_params] + ro_module_names
     for mod_name, state in zip(
         list(left_mods) + list(right_mods), list(left_states) + list(right_states)
     ):
@@ -4067,10 +4075,15 @@ def _emit_one_oracle_chain(
         elif not has_chal:
             fields_by_base[wrapper_base] = list(norm_names)
 
+    # Shared RO holder modules couple like read-only globals (see the same
+    # computation in ``emit_multi_oracle_chain_for_hop``).
+    ro_module_names = (
+        [m for m, _ in modules._types.function_value_modules()] if use_canonical else []
+    )
     coupling = _make_field_aware_coupling(
         fields_by_base,
         survivor_map,
-        [p.name for p in flat_params],
+        [p.name for p in flat_params] + ro_module_names,
         _chain_role_map(norm_left, norm_right, survivor_map),
         qualified_ref_by_base,
         canonical_by_base,

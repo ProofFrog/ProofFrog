@@ -1332,14 +1332,23 @@ class ModuleTranslator:
         body: list[ec_ast.EcStmt] = [
             ec_ast.VarDecl(name="b", type=ec_ast.EcType("bool"))
         ]
-        if multi_oracle is None:
-            distinguish_args = ""
-        else:
+        if multi_oracle is not None:
             body.append(
                 ec_ast.VarDecl(
                     name=INIT_RESULT_NAME, type=multi_oracle.init_return_type
                 )
             )
+        # Sample each shared random oracle ONCE, before the experiment runs --
+        # the EC realization of the ProofFrog theorem's ``let: Function<D,R> H
+        # <- Function<D,R>;`` (sample the RO, pass it to the experiment). It is
+        # read-only thereafter (the adversary touches it only via the game's
+        # hash oracle). ``var`` decls must all precede statements, so this lands
+        # right after them.
+        for mod_name, dfun in self._types.function_value_modules():
+            body.append(ec_ast.Sample(f"{mod_name}.h", dfun))
+        if multi_oracle is None:
+            distinguish_args = ""
+        else:
             body.append(
                 ec_ast.Call(
                     var=INIT_RESULT_NAME,

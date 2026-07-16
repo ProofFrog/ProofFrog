@@ -3102,6 +3102,202 @@ def export_proof_file(proof_path: str) -> str:
         live_state_holders.add(holder)
         return f"{holder}.{field}"
 
+    def _packed_decomposition_coupling(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> str | None:
+        """Coupling for a hop where one endpoint is a plain theorem game holding a
+        PACKED scheme key field (``dk : K.DecapsKey`` = a component tuple) and the
+        other a delegating reduction that holds the key DECOMPOSED into separate
+        fields whose names do NOT match the game's (the CFRG expanded ROM hops:
+        ``R_Dist_Real`` holds ``pq_keys``/``dk_T``/``ctStar`` while the theorem game
+        holds packed ``dk``/``ctStar``).
+
+        The composite path (``_composite_reduction_step``) assumes the reduction's
+        fields ARE the game's fields (emits ``Game.pq_keys`` -- nonexistent); the
+        decomposition path (``_decomposition_coupling``) reads the reduction's
+        RETURN tuple (the encaps key here, not the packed dk). This route relates
+        the game's packed field COMPONENT-WISE to the reduction's sources,
+        classified from the SCHEME's ``KeyGen``: a component built by a fresh
+        keygen/sample (``dk_PQ``, ``dk_T``) type-matches a reduction field or
+        tuple-field projection; a component DERIVED from another (``ek_T =
+        NG.Exp(NG.Generator(), dk_T)``) is pinned by a WITHIN-side invariant
+        (``dk.`3{1} = NG_c.ev_exp NG_c.ev_generator dk.`2{1}``) -- necessary because
+        the decaps oracle reads it, so a coupling omitting it would be a FALSE
+        (unsound) statement. ``None`` unless exactly one plain game + one
+        non-subset-field reduction, keeping every other proof byte-identical."""
+        if step_a.reduction is None and step_b.reduction is not None:
+            game_step, red_step, gs, rs = step_a, step_b, "1", "2"
+        elif step_b.reduction is None and step_a.reduction is not None:
+            game_step, red_step, gs, rs = step_b, step_a, "2", "1"
+        else:
+            return None
+        assert red_step.reduction is not None
+        red = _get_reduction(red_step.reduction.name)
+        # pylint: disable=protected-access
+        game = engine._get_game_ast(game_step.challenger, None)
+        # pylint: enable=protected-access
+        if red is None or game is None:
+            return None
+        red_field_names = {f.name for f in red.fields}
+        game_field_names = {f.name for f in game.fields}
+        # Shared-name reductions take the composite/direct paths; this route is the
+        # DECOMPOSED case (the reduction's fields are not a subset of the game's).
+        if red_field_names <= game_field_names:
+            return None
+
+        def _prim(t: frog_ast.Type) -> str:
+            return t.name if isinstance(t, frog_ast.Variable) else str(t)
+
+        def _ev_render(
+            expr: frog_ast.Expression,
+            comp_ref: dict[str, str],
+            subst: dict[str, str],
+        ) -> str | None:
+            """Deterministic FrogLang expr -> ev-functional EC string, or ``None``
+            when a leaf is not another packed component / a nullary det op (that
+            marks a PRIMARY component -- fresh sample or keygen projection)."""
+            if isinstance(expr, frog_ast.Variable):
+                return comp_ref.get(expr.name)
+            if (
+                isinstance(expr, frog_ast.FuncCall)
+                and isinstance(expr.func, frog_ast.FieldAccess)
+                and isinstance(expr.func.the_object, frog_ast.Variable)
+            ):
+                mod = subst.get(expr.func.the_object.name, expr.func.the_object.name)
+                alias = clone_alias_by_module.get(mod)
+                if alias is None:
+                    return None
+                ev = f"{alias}.ev_{expr.func.name.lower()}"
+                parts: list[str] = []
+                for arg in expr.args:
+                    rendered = _ev_render(arg, comp_ref, subst)
+                    if rendered is None:
+                        return None
+                    parts.append(f"({rendered})")
+                return (ev + "".join(f" {p}" for p in parts)).strip()
+            return None
+
+        game_base = pt.module_base_name(resolver.resolve(game_step).module_expr)
+        red_base = pt.module_base_name(resolver.resolve(red_step).module_expr)
+        # pylint: disable=protected-access
+        # Reduction sources by structural type key -- ONLY from fields the game
+        # does not also hold by name (those couple directly), so a packed
+        # component never mis-matches a same-name field's component.
+        red_source_by_type: dict[str, str] = {}
+        for fld in red.fields:
+            if fld.name in game_field_names:
+                continue
+            ec_f = mt._ec_field_name(fld.name)
+            key = top_types.translate_type(fld.type).text
+            if key not in red_source_by_type:
+                red_source_by_type[key] = f"{red_base}.{ec_f}{{{rs}}}"
+            if isinstance(fld.type, frog_ast.ProductType):
+                for i, ct in enumerate(fld.type.types):
+                    ckey = top_types.translate_type(ct).text
+                    if ckey not in red_source_by_type:
+                        red_source_by_type[ckey] = f"{red_base}.{ec_f}.`{i + 1}{{{rs}}}"
+
+        conj: list[str] = []
+        has_derived = False
+        for gf in game.fields:
+            ec_gf = mt._ec_field_name(gf.name)
+            if gf.name in red_field_names:
+                conj.append(f"{game_base}.{ec_gf}{{{gs}}} = {red_base}.{ec_gf}{{{rs}}}")
+                continue
+            # The packed key surfaces as an already-RESOLVED product type
+            # (``dk : KEMPQDecapsKeySpace * NGScalarSpace * NGElementSpace``); its
+            # component types are matched (via ``translate_type``) against the
+            # reduction's decomposed sources. The DERIVATION structure (which
+            # component is recomputed) is read from the concrete scheme's
+            # ``KeyGen`` -- located by name from the game's module expression.
+            if not isinstance(gf.type, frog_ast.ProductType):
+                continue
+            comp_types = gf.type.types
+            n = len(comp_types)
+            modexpr_str = str(resolver.resolve(game_step).module_expr)
+
+            def _packed_keygen_return(
+                sch: frog_ast.Scheme, arity: int
+            ) -> frog_ast.Tuple | None:
+                kg = next(
+                    (m for m in sch.methods if m.signature.name.lower() == "keygen"),
+                    None,
+                )
+                elems = _return_elems(kg) if kg is not None else None
+                if elems is None:
+                    return None
+                return next(
+                    (
+                        e
+                        for e in elems
+                        if isinstance(e, frog_ast.Tuple)
+                        and len(e.values) == arity
+                        and all(isinstance(v, frog_ast.Variable) for v in e.values)
+                    ),
+                    None,
+                )
+
+            scheme = next(
+                (
+                    sch
+                    for name, sch in schemes_by_name.items()
+                    if name in modexpr_str and _packed_keygen_return(sch, n) is not None
+                ),
+                None,
+            )
+            if scheme is None:
+                continue
+            keygen = next(
+                m for m in scheme.methods if m.signature.name.lower() == "keygen"
+            )
+            packed = _packed_keygen_return(scheme, n)
+            assert packed is not None
+            comp_vars = [cast(frog_ast.Variable, v).name for v in packed.values]
+            subst: dict[str, str] = {}
+            for sp in scheme.parameters:
+                spk = _prim(sp.type)
+                match = next(
+                    (rp for rp in red.parameters if _prim(rp.type) == spk), None
+                )
+                if match is not None:
+                    subst[sp.name] = match.name
+            assign_map: dict[str, frog_ast.Expression] = {
+                st.var.name: st.value
+                for st in keygen.block.statements
+                if isinstance(st, frog_ast.Assignment)
+                and isinstance(st.var, frog_ast.Variable)
+            }
+            comp_ref = {
+                comp_vars[i]: f"{game_base}.{ec_gf}.`{i + 1}{{{gs}}}" for i in range(n)
+            }
+            for i in range(n):
+                proj = f"{game_base}.{ec_gf}.`{i + 1}{{{gs}}}"
+                defn = assign_map.get(comp_vars[i])
+                other_ref = {k: v for k, v in comp_ref.items() if k != comp_vars[i]}
+                derived = (
+                    _ev_render(defn, other_ref, subst) if defn is not None else None
+                )
+                if derived is not None:
+                    conj.append(f"{proj} = {derived}")
+                    has_derived = True
+                    continue
+                key = top_types.translate_type(comp_types[i]).text
+                src = red_source_by_type.get(key)
+                if src is not None:
+                    conj.append(f"{proj} = {src}")
+        # pylint: enable=protected-access
+        # Fire ONLY when the packed key has a component the reduction RECOMPUTES
+        # (a within-side ev-derivation) -- the unique case the composite path
+        # mis-handles (its ``Game.<reduction-field>`` is nonexistent AND no other
+        # path pins the derived component). A rename / whole-field decomposition
+        # with no recomputed component is left to the existing paths, keeping
+        # every non-``expanded``-ROM proof byte-identical.
+        if not conj or not has_derived:
+            return None
+        live_state_holders.update({game_base, red_base})
+        body = " /\\ ".join(conj)
+        return f"{glob_invariant_conj} /\\ {body}" if glob_invariant_conj else body
+
     def _composite_reduction_step(
         step: frog_ast.Step,
     ) -> tuple[str, str, list[str]] | None:
@@ -3567,6 +3763,13 @@ def export_proof_file(proof_path: str) -> str:
         decomp_coupling = _decomposition_coupling(step_a, step_b)
         if decomp_coupling is not None:
             return decomp_coupling
+        # Packed-vs-decomposed wrapper coupling (theorem game holds a packed
+        # scheme key; the delegating reduction holds it decomposed under
+        # different field names). Tried before the composite path, which would
+        # otherwise emit ``Game.<reduction-field>`` (a nonexistent field).
+        packed_coupling = _packed_decomposition_coupling(step_a, step_b)
+        if packed_coupling is not None:
+            return packed_coupling
         # Wall-7 composite coupling: when one side is a field-holding delegating
         # reduction, the single live-field equality cannot bridge the two
         # wrappers. Relate every live field across BOTH seams: plain-game

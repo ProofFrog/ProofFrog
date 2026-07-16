@@ -1788,6 +1788,16 @@ def export_proof_file(proof_path: str) -> str:
     # wrappers, reductions, lemmas).
     clone_alias = primary.clone_alias
 
+    # The shared random-oracle holder module lives inside the theorem primitive's
+    # abstract theory (emitted by ``theory_types``), so after the ``clone
+    # <prim>_Theory as <clone_alias>`` it is ``<clone_alias>.RO_H``. Point the
+    # top-level collector at THAT single module (rather than declaring a distinct
+    # top-level ``RO_H`` that never unifies with it) so the theorem-game wrapper
+    # (which reads the theory-local ``RO_H``) and the flat states / reduction /
+    # ``={glob RO_H}`` couplings all name the same module. Empty prefix (non-ROM
+    # proofs, no function value) leaves every existing export byte-identical.
+    top_types.ro_module_prefix = f"{clone_alias}."
+
     # Names used across the refactor
     theory_name = f"{primitive.name}_Theory"
     scheme_type_name = "Scheme"
@@ -2196,10 +2206,16 @@ def export_proof_file(proof_path: str) -> str:
         foreign_types = tc.TypeCollector(
             aliases=foreign_aliases, known_abstract_types=known_abstract_types
         )
+        # A foreign scheme (``CGRandomOracleKDF``) is emitted at TOP LEVEL, so its
+        # shared-RO reference must name the theory-owned holder ``<clone>.RO_H``,
+        # exactly like the flat states -- not a bare ``RO_H`` (no top-level holder
+        # exists; the single holder lives in the theorem primitive's theory clone).
+        foreign_types.ro_module_prefix = f"{clone_alias}."
         # Register the RO function values so a foreign scheme body applying the
         # shared RO (``CGRandomOracleKDF.evaluate`` = ``return H(input)``) renders
-        # ``RO_H.h input``, not the fixed-op ``v_H input``. The holder module is
-        # emitted once by ``top_types``; this only affects reference rendering.
+        # ``<clone>.RO_H.h input``, not the fixed-op ``v_H input``. The holder
+        # module is emitted once by ``theory_types``; this only affects reference
+        # rendering.
         # pylint: disable=protected-access
         for pl in proof.lets:
             if isinstance(pl.type, frog_ast.FunctionType):
@@ -2882,8 +2898,16 @@ def export_proof_file(proof_path: str) -> str:
     # Same list as ``declare_modules`` (built below); empty in single-oracle /
     # concrete-only proofs, so their output is byte-identical.
     abstract_scheme_modules = [p.name for p in declared_instance_params]
+    # A shared random-oracle HOLDER module (``RO_H``, the sampled-once ROM
+    # value) is a read-only global every oracle references, so it must ride the
+    # per-oracle coupling like the abstract scheme modules -- otherwise a
+    # stateless RO oracle (``return RO_H.h m``) cannot prove ``={res}`` and the
+    # wrapper<->flat bridge legs (which DO carry ``={glob RO_H}``) become
+    # underivable from the outer coupling. Empty for non-ROM proofs
+    # (``function_value_modules()`` returns none), so their output is unchanged.
+    ro_holder_modules = [m for m, _ in top_types.function_value_modules()]
     glob_invariant_conj = " /\\ ".join(
-        f"={{glob {m}}}" for m in abstract_scheme_modules
+        f"={{glob {m}}}" for m in abstract_scheme_modules + ro_holder_modules
     )
     multi_oracle_byequiv_pre = (
         "={"

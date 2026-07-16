@@ -1932,6 +1932,17 @@ def _make_field_aware_coupling(
         # byte-identical.
         if ginfo and li is not None and ri is not None:
             same_glob = li == ri
+        elif ro_arrow and ((li is None) != (ri is None)):
+            # Wrapper<->flat leg with a shared RO global module: only ONE side
+            # (the flat state) has a glob signature; the wrapper is registered
+            # by field count alone. A shared RO holder module (``RO_H``) lands at
+            # a DIFFERENT offset in the wrapper's ``glob`` (right after the scheme
+            # param globs) than in the flat state's (after its own fields), so the
+            # whole-glob tuple equality is ill-typed even at equal field
+            # cardinality ("no matching operator `='"). Force the field-wise
+            # coupling, which separates ``={glob RO_H}`` from the field pairings.
+            # Validated: ``.ec-tmp/trip_glob.ec``.
+            same_glob = False
         else:
             same_glob = fl is not None and fr is not None and len(fl) == len(fr)
         if fl is None or fr is None or (same_glob and not is_composite):
@@ -4309,19 +4320,97 @@ def _emit_one_oracle_chain(
     # Outer hop_<i>_<m> body: bridge the two wrappers to the flat chain ends,
     # then discharge via the chain lemma. The wrapper<->flat coupling is the
     # P5 piece; the structure mirrors the single-oracle outer tactic.
-    outer_body = [
-        "(* Per-transform: bridge wrappers to flat states, chain through. *)",
-        f"transitivity {l0}.{oracle_name} "
-        f"{_coupling_spec(left_wrapper_expr, l0, is_init, eq_args, coupling)} "
-        f"{_coupling_spec(l0, right_wrapper_expr, is_init, eq_args, coupling)}; "
-        f"[ smt() | smt() | {bridge_tactic} |].",
-        f"transitivity {r0}.{oracle_name} "
-        f"{_coupling_spec(l0, r0, is_init, eq_args, coupling)} "
-        f"{_coupling_spec(r0, right_wrapper_expr, is_init, eq_args, coupling)}; "
-        f"[ smt() | smt() | apply {chain_name} | {bridge_tactic} ].",
-        "qed.",
-    ]
+    #
+    # First-goal witness (precondition composition): a ROM field-wise
+    # wrapper<->flat leg (forced field-wise by the RO-module glob-offset fix)
+    # exposes the middle flat state's fields + abstract module globs as separate
+    # existentials ``smt`` cannot instantiate; ``_precond_witness`` supplies them
+    # explicitly. A whole-glob leg (no RO) returns ``None`` -> keep ``smt()``, so
+    # non-ROM proofs stay byte-identical.
+    def outer_g1(cur_ref: str, nxt_ref: str, final_ref: str) -> str:
+        if use_canonical and not is_init:
+            w = _precond_witness(
+                coupling(cur_ref, nxt_ref),
+                coupling(nxt_ref, final_ref),
+                eq_args,
+                _ref_base(nxt_ref),
+            )
+            if w is not None:
+                return w
+        return "smt()"
+
+    # A stateless RO oracle whose two WRAPPER bodies are IDENTICAL direct RO
+    # returns (``return RO_H.h m``, e.g. a reduction that forwards ``Hash``
+    # straight to the shared RO) closes by ``proc; auto => /#`` on the wrappers:
+    # the coupling carries ``={glob RO_H}`` + the argument equality, and every
+    # field coupling is a frame condition. This bypasses the wrapper<->flat glob
+    # bridge (ill-typed when a shared RO holder shifts the glob offset). It is
+    # gated on BOTH wrappers being direct-RO for this oracle: a wrapper that
+    # DELEGATES the oracle to a composed challenger (``R_Wrap_Prog.hash`` ->
+    # ``Challenger.direct(m)``) has a non-identical body, so it must take the
+    # bridge (which ``inline *`` unfolds the challenger). Validated: ``trip_glob.ec``.
+    both_wrappers_direct_ro = _oracle_is_direct_ro(
+        left_states[0], oracle_name
+    ) and _oracle_is_direct_ro(right_states[0], oracle_name)
+    if stateless_oracle and both_wrappers_direct_ro:
+        outer_body = [
+            "(* Stateless RO oracle: identical wrapper bodies, RO-coupled. *)",
+            "proc; auto => /#.",
+            "qed.",
+        ]
+    else:
+        outer_body = [
+            "(* Per-transform: bridge wrappers to flat states, chain through. *)",
+            f"transitivity {l0}.{oracle_name} "
+            f"{_coupling_spec(left_wrapper_expr, l0, is_init, eq_args, coupling)} "
+            f"{_coupling_spec(l0, right_wrapper_expr, is_init, eq_args, coupling)}; "
+            f"[ {outer_g1(left_wrapper_expr, l0, right_wrapper_expr)} | smt() "
+            f"| {bridge_tactic} |].",
+            f"transitivity {r0}.{oracle_name} "
+            f"{_coupling_spec(l0, r0, is_init, eq_args, coupling)} "
+            f"{_coupling_spec(r0, right_wrapper_expr, is_init, eq_args, coupling)}; "
+            f"[ {outer_g1(l0, r0, right_wrapper_expr)} | smt() "
+            f"| apply {chain_name} | {bridge_tactic} ].",
+            "qed.",
+        ]
     return chunks, outer_body, step_pres
+
+
+def _oracle_is_direct_ro(game: frog_ast.Game, oracle_name: str) -> bool:
+    """True if ``oracle_name``'s body reads NO game field (not even a
+    materialized-RO arrow field) and makes no module call -- i.e. it returns the
+    SHARED RO applied to its argument directly (``return H(m)`` -> ``RO_H.h m``).
+
+    Stricter than :func:`_oracle_is_stateless`, which treats a materialized RO
+    arrow field (``RF <- RO_H.h``) as RO-stateless. Here that field READ counts:
+    a wrapper that forwards ``Hash`` straight to the shared RO has a direct-RO
+    body on BOTH the wrapper and its (identical) flat state, so ``proc; auto =>
+    /#`` closes it on the wrappers directly. A wrapper that instead DELEGATES the
+    oracle to a composed challenger (``R_Wrap_Prog.hash`` -> ``Challenger.direct``,
+    whose flat state materializes ``RF m``) reads a field -> returns False -> the
+    outer body takes the wrapper<->flat bridge, which ``inline *`` unfolds the
+    challenger. Read off the flat state, a faithful proxy: a direct-RO wrapper
+    inlines to a direct-RO flat state; a delegating one to a field-reading one."""
+    method = next(
+        (m for m in game.methods if m.signature.name.lower() == oracle_name), None
+    )
+    if method is None:
+        return False
+    field_names = {f.name for f in game.fields}
+    has_call = (
+        SearchVisitor[frog_ast.FuncCall](
+            lambda n: isinstance(n, frog_ast.FuncCall)
+            and isinstance(n.func, frog_ast.FieldAccess)
+        ).visit(method.block)
+        is not None
+    )
+    has_field = (
+        SearchVisitor[frog_ast.Variable](
+            lambda n: isinstance(n, frog_ast.Variable) and n.name in field_names
+        ).visit(method.block)
+        is not None
+    )
+    return not has_call and not has_field
 
 
 def _oracle_is_stateless(game: frog_ast.Game, oracle_name: str) -> bool:
@@ -4399,7 +4488,7 @@ def _precond_witness(pre1: str, pre2: str, eq_args: str, nxt_base: str) -> str |
     field_wit: dict[str, str] = {}  # nxt field name -> witness expr
     pre1_fieldwise = False
     for part in (p.strip() for p in pre1.split("/\\")):
-        gm = re.fullmatch(r"=\{glob (\w+)\}", part)
+        gm = re.fullmatch(r"=\{glob ([\w.]+)\}", part)
         if gm:
             params.append(gm.group(1))
             pre1_fieldwise = True
@@ -4417,7 +4506,7 @@ def _precond_witness(pre1: str, pre2: str, eq_args: str, nxt_base: str) -> str |
             and fm.group(3) == "2"
             and fm.group(6) == "2"
             and fm.group(1) == nxt_base
-            and fm.group(4).startswith("RO_")
+            and fm.group(4).split(".")[-1].startswith("RO_")
         ):
             field_wit.setdefault(fm.group(2), f"{fm.group(4)}.{fm.group(5)}{{1}}")
             pre1_fieldwise = True
@@ -4437,7 +4526,7 @@ def _precond_witness(pre1: str, pre2: str, eq_args: str, nxt_base: str) -> str |
             and fm.group(3) == "1"
             and fm.group(6) == "1"
             and fm.group(1) == nxt_base
-            and fm.group(4).startswith("RO_")
+            and fm.group(4).split(".")[-1].startswith("RO_")
         ):
             field_wit.setdefault(fm.group(2), f"{fm.group(4)}.{fm.group(5)}{{1}}")
     if not field_wit:

@@ -35,7 +35,20 @@ class TypeCollector:
         strip_field_prefixes: set[str] | None = None,
         theory_mode: bool = False,
         prime_group_names: set[str] | None = None,
+        ro_module_prefix: str = "",
     ) -> None:
+        # Qualifier prepended to the random-oracle holder module name in REF
+        # sites (``function_value_ref``/``function_value_modules``/
+        # ``ro_by_arrow_type``) -- e.g. ``"Hybrid_c."`` so a top-level collector
+        # references the SINGLE holder module the theorem-primitive theory clone
+        # owns (``Hybrid_c.RO_H``) rather than declaring a distinct top-level copy.
+        # A collector with a non-empty prefix does NOT emit the holder itself
+        # (see :meth:`emit`); the abstract-theory collector (prefix ``""``) emits
+        # it once. This keeps the RO a SINGLE shared module across the
+        # theory/top-level boundary (a module cannot be clone-instantiated, so two
+        # separately-emitted holders never unify). Set post-construction once the
+        # theorem primitive's clone alias is known.
+        self.ro_module_prefix: str = ro_module_prefix
         # ``theory_mode``: when True, every distinct bitstring type seen
         # is registered as an abstract type inside the primitive's
         # abstract theory rather than as a top-level concrete type. Each
@@ -220,14 +233,17 @@ class TypeCollector:
         an RO application ``H(m)`` as ``RO_H.h m`` instead of the fixed-op
         ``v_H m``."""
         if fname in self._function_value_set:
-            return f"{_ro_module_name(fname)}.h"
+            return f"{self.ro_module_prefix}{_ro_module_name(fname)}.h"
         return None
 
     def function_value_modules(self) -> list[tuple[str, str]]:
         """``(module_name, dfun_name)`` per registered RO function value, so the
         exporter can sample ``RO_H.h <$ dfun`` at each experiment's main."""
         return [
-            (_ro_module_name(fname), _function_distr_name(dom, codom))
+            (
+                f"{self.ro_module_prefix}{_ro_module_name(fname)}",
+                _function_distr_name(dom, codom),
+            )
             for fname, dom, codom in self._function_values
         ]
 
@@ -239,7 +255,7 @@ class TypeCollector:
         invariant ``field{side} = RO_H.h{side}`` so a hop that drops the field
         and reverts to the shared RO can thread the equality."""
         return {
-            f"{dom} -> {codom}": f"{_ro_module_name(fname)}.h"
+            f"{dom} -> {codom}": f"{self.ro_module_prefix}{_ro_module_name(fname)}.h"
             for fname, dom, codom in self._function_values
         }
 
@@ -878,16 +894,23 @@ class TypeCollector:
             decls.append(ec_ast.Axiom(f"{distr}_ll", f"is_lossless {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_full", f"is_full {distr}"))
-        for fname, dom, codom in self._function_values:
-            decls.append(
-                ec_ast.Module(
-                    name=_ro_module_name(fname),
-                    procs=[],
-                    module_vars=[
-                        ec_ast.VarDecl("h", ec_ast.EcType(f"{dom} -> {codom}"))
-                    ],
+        # Emit the RO holder module ONLY when this collector owns it (empty
+        # prefix). A prefixed collector references the theorem-primitive theory
+        # clone's single holder (``Hybrid_c.RO_H``) instead of declaring a
+        # distinct top-level copy -- the two would never unify (a module cannot be
+        # clone-instantiated), leaving ``={glob RO_H}`` unable to bridge the
+        # theorem-game wrapper (which reads ``Hybrid_c.RO_H``) to the flat states.
+        if not self.ro_module_prefix:
+            for fname, dom, codom in self._function_values:
+                decls.append(
+                    ec_ast.Module(
+                        name=_ro_module_name(fname),
+                        procs=[],
+                        module_vars=[
+                            ec_ast.VarDecl("h", ec_ast.EcType(f"{dom} -> {codom}"))
+                        ],
+                    )
                 )
-            )
         for name in self._names:
             decls.append(ec_ast.OpDecl(_zero_name(name), name))
         for name in self._names:

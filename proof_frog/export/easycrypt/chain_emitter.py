@@ -24,7 +24,7 @@ from typing import Callable
 
 from ... import frog_ast
 from ...transforms._base import TransformApplication
-from ...visitors import VariableCollectionVisitor
+from ...visitors import SearchVisitor, VariableCollectionVisitor
 from . import binding_challenge as bch
 from . import ec_ast
 from . import module_translator as mt
@@ -4106,10 +4106,24 @@ def _emit_one_oracle_chain(
     def micro_post(left_ref: str, right_ref: str) -> str:
         return f"={{res}} /\\ {coupling(left_ref, right_ref)}"
 
+    # A stateless ROM oracle collapses the whole chain to ``proc; auto`` on the
+    # endpoints (see the chain-lemma assembly below), so its per-step micros and
+    # canon-bridge lemma are never referenced -- skip emitting them (they would
+    # otherwise still have to compile, and their own ``sim``-based tactics fail
+    # on the cross-name field couplings a stateless oracle's endpoints carry).
+    stateless_oracle = (
+        use_canonical
+        and not is_init
+        and _oracle_is_stateless(left_states[0], oracle_name)
+        and _oracle_is_stateless(right_states[0], oracle_name)
+    )
+
     chunks: list[str] = []
     step_pres: set[tuple[str, str]] = set()
     micros_left: list[str] = []
     for k, _app in enumerate(left_apps):
+        if stateless_oracle:
+            break
         step = _oracle_step_tactic(
             left_states[k],
             left_states[k + 1],
@@ -4144,6 +4158,8 @@ def _emit_one_oracle_chain(
 
     micros_right_rev: list[str] = []
     for k, _app in enumerate(right_apps):
+        if stateless_oracle:
+            break
         step = _oracle_step_tactic(
             right_states[k],
             right_states[k + 1],
@@ -4179,34 +4195,50 @@ def _emit_one_oracle_chain(
 
     bridge_name = f"canon_bridge_{hop_index}_{oracle_name}"
     bl, br = mod_ref(left_mods[-1]), mod_ref(right_mods[-1])
-    chunks.append(
-        "\n".join(
-            _render_lemma_block(
-                bridge_name,
-                bl,
-                br,
-                oracle_name,
-                micro_pre(bl, br),
-                ["proc; sim."],
-                postcondition=micro_post(bl, br),
+    if not stateless_oracle:
+        chunks.append(
+            "\n".join(
+                _render_lemma_block(
+                    bridge_name,
+                    bl,
+                    br,
+                    oracle_name,
+                    micro_pre(bl, br),
+                    ["proc; sim."],
+                    postcondition=micro_post(bl, br),
+                )
             )
         )
-    )
 
     chain_name = f"hop_{hop_index}_{oracle_name}_chain"
     l0, r0 = mod_ref(left_mods[0]), mod_ref(right_mods[0])
-    chain_body = _render_coupling_chain_body(
-        oracle_name,
-        is_init,
-        eq_args,
-        [mod_ref(n) for n in left_mods],
-        [mod_ref(n) for n in right_mods],
-        micros_left,
-        micros_right_rev,
-        bridge_name,
-        coupling,
-        use_canonical,
-    )
+    # A STATELESS oracle (no field read/write, no module call -- e.g. a ROM
+    # ``hash`` ``return H(m)``) is identical across every flat state, so the
+    # whole transitivity chain collapses to ``proc; sim`` on the endpoints: it
+    # relates the two identical bodies and preserves every field coupling
+    # (nothing is touched), sidestepping the composition machinery AND the
+    # tuple-split field-correspondence gap. Gated on ROM (``use_canonical``) so
+    # binding/correctness proofs stay byte-identical.
+    if stateless_oracle:
+        # ``auto`` (not ``sim``): the body touches no field, so each field
+        # coupling is a frame condition; ``sim`` tries to build a glob bijection
+        # and fails on cross-name pairings (``f02{1}=f07{2}``), whereas ``auto``
+        # discharges the return via ``wp`` and leaves the untouched fields to
+        # ``smt`` (``=> /#``).
+        chain_body = ["proc; auto => /#."]
+    else:
+        chain_body = _render_coupling_chain_body(
+            oracle_name,
+            is_init,
+            eq_args,
+            [mod_ref(n) for n in left_mods],
+            [mod_ref(n) for n in right_mods],
+            micros_left,
+            micros_right_rev,
+            bridge_name,
+            coupling,
+            use_canonical,
+        )
     chunks.append(
         "\n".join(
             _render_lemma_block(
@@ -4237,6 +4269,43 @@ def _emit_one_oracle_chain(
         "qed.",
     ]
     return chunks, outer_body, step_pres
+
+
+def _oracle_is_stateless(game: frog_ast.Game, oracle_name: str) -> bool:
+    """True if ``game``'s ``oracle_name`` method reads/writes NO module field and
+    makes NO module call -- a pure function of its arguments (e.g. a ROM ``hash``
+    oracle ``return H(m)``: ``H`` is a shared-op RO value, not a module).
+
+    Such an oracle is IDENTICAL across every flat state of a hop, so the whole
+    ``hop_<i>_<oracle>_chain`` -- a long transitivity through the intermediate
+    states -- collapses to a single ``proc; sim`` on the endpoints: ``sim``
+    relates the two identical bodies and PRESERVES every field-coupling
+    invariant (nothing is touched). This sidesteps the transitivity-composition
+    machinery entirely, and in particular the tuple-split field-correspondence
+    gap: a stateless oracle's chain never needs to thread a ctStar it doesn't
+    read. A module call is a ``FuncCall`` whose ``func`` is a ``FieldAccess``
+    (``E.m(...)``); a field reference is a ``Variable`` naming one of
+    ``game.fields``."""
+    method = next(
+        (m for m in game.methods if m.signature.name.lower() == oracle_name), None
+    )
+    if method is None:
+        return False
+    field_names = {f.name for f in game.fields}
+    has_call = (
+        SearchVisitor[frog_ast.FuncCall](
+            lambda n: isinstance(n, frog_ast.FuncCall)
+            and isinstance(n.func, frog_ast.FieldAccess)
+        ).visit(method.block)
+        is not None
+    )
+    has_field = (
+        SearchVisitor[frog_ast.Variable](
+            lambda n: isinstance(n, frog_ast.Variable) and n.name in field_names
+        ).visit(method.block)
+        is not None
+    )
+    return not has_call and not has_field
 
 
 def _precond_witness(pre1: str, pre2: str, eq_args: str, nxt_base: str) -> str | None:

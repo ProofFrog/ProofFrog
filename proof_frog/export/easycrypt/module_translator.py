@@ -1156,6 +1156,28 @@ class ModuleTranslator:
             )
         )
         body.append(ec_ast.Return(expr="b"))
+        # ROM: the reduction adversary simulates the theorem game for ``A``, which
+        # samples the shared random oracle ONCE up front (see the experiment-main
+        # builder). Sample it here too so ``A`` sees a fresh, consistent RO -- the
+        # Pr-lemma byequiv against the theorem game is otherwise unalignable (the
+        # game samples ``RO_H.h`` but the reduction-composed side never does).
+        # Sound: a fresh RO for ``A`` is exactly what the theorem game provides.
+        # Gated on registered RO holders, so non-ROM reduction adversaries (every
+        # binding/correctness proof) get no sample and stay byte-identical.
+        ro_samples: list[ec_ast.EcStmt] = [
+            ec_ast.Sample(f"{mod_name}.h", dfun)
+            for mod_name, dfun in self._types.function_value_modules()
+        ]
+        if ro_samples:
+            insert_at = next(
+                (
+                    idx
+                    for idx, st in enumerate(body)
+                    if not isinstance(st, ec_ast.VarDecl)
+                ),
+                len(body),
+            )
+            body[insert_at:insert_at] = ro_samples
         params = list(extra_module_params) if extra_module_params else []
         params.extend(
             [

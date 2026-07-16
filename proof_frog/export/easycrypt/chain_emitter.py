@@ -1646,6 +1646,33 @@ def _ec_module_fields(game: frog_ast.Game) -> list[str]:
     return [mt._ec_field_name(f.name) for f in game.fields]
 
 
+def _glob_signature(
+    module_text: str, param_names: list[str]
+) -> tuple[tuple[tuple[str, str], ...], frozenset[str]]:
+    """EC ``glob`` signature of a rendered flat-state module: the exact shape
+    EC compares when it typechecks ``(glob M){1} = (glob M'){2}``.
+
+    Returns ``(fields, used_params)`` where ``fields`` is the module-var
+    ``(name, type)`` list sorted by NAME (EC orders ``glob`` alphabetically), and
+    ``used_params`` is the set of module parameters the body actually CALLS -- a
+    param whose methods are never invoked is absent from ``(glob M)`` (EC drops
+    unused functor args). Two states' whole-glob equality typechecks iff their
+    signatures are identical; a param NOT in the shared used-set must not appear
+    in a ``={glob P}`` coupling conjunct (it would bind a middle-memory
+    existential over an abstract module glob that ``smt`` cannot witness).
+
+    Read off the RENDERED module -- the authoritative source for EC's ``(glob)``.
+    Module vars are the ``var`` lines BEFORE the first ``proc`` (proc-local vars
+    come after). ``\\bP\\.`` (word boundary) not substring: ``NG.`` contains the
+    substring ``G.``, so a substring probe would falsely mark ``G`` used."""
+    head = module_text.split("proc ", 1)[0]
+    fields = tuple(sorted(re.findall(r"var (\w+) : (.+)", head)))
+    used = frozenset(
+        p for p in param_names if re.search(rf"\b{re.escape(p)}\.", module_text)
+    )
+    return fields, used
+
+
 def _chain_survivor_map(states: list[frog_ast.Game]) -> dict[str, str]:
     """Map each redundant-copy field to its surviving source, chain-wide.
 
@@ -1813,6 +1840,9 @@ def _make_field_aware_coupling(
     role_of: dict[str, str] | None = None,
     qualified_ref_by_base: dict[str, dict[str, str]] | None = None,
     canonical_by_base: dict[str, dict[str, str]] | None = None,
+    glob_info_by_base: (
+        dict[str, tuple[tuple[tuple[str, str], ...], frozenset[str]]] | None
+    ) = None,
 ) -> CouplingFn:
     """Build a coupling closure that is field-aware for cardinality-differing states.
 
@@ -1856,6 +1886,7 @@ def _make_field_aware_coupling(
     roles = role_of or {}
     qualified = qualified_ref_by_base or {}
     canonical = canonical_by_base or {}
+    ginfo = glob_info_by_base or {}
     composite = set(qualified)
 
     def role(f: str) -> str:
@@ -1879,7 +1910,20 @@ def _make_field_aware_coupling(
         lb, rb = _ref_base(left_ref), _ref_base(right_ref)
         fl, fr = fields_by_base.get(lb), fields_by_base.get(rb)
         is_composite = lb in composite or rb in composite
-        if fl is None or fr is None or (len(fl) == len(fr) and not is_composite):
+        li, ri = ginfo.get(lb), ginfo.get(rb)
+        # Whole-glob `(glob L){1}=(glob R){2}` typechecks ONLY when the two
+        # globs have the SAME shape. With glob signatures available (ROM), take
+        # the shortcut only on an EXACT signature match (field name+type list AND
+        # used-param set); a mere equal field COUNT is insufficient -- two states
+        # can share a count yet differ in a field type or a used param, which EC
+        # rejects with "no matching operator `='". Without signatures (binding /
+        # correctness) keep the historical count test, so those stay
+        # byte-identical.
+        if ginfo and li is not None and ri is not None:
+            same_glob = li == ri
+        else:
+            same_glob = fl is not None and fr is not None and len(fl) == len(fr)
+        if fl is None or fr is None or (same_glob and not is_composite):
             return _glob_coupling(left_ref, right_ref)
         setr = set(fr)
         fields_conj: list[str] = []
@@ -1932,7 +1976,18 @@ def _make_field_aware_coupling(
         # (honest gating -- blocked, never a false accept).
         if not fields_conj:
             return _glob_coupling(left_ref, right_ref)
-        return " /\\ ".join([f"={{glob {p}}}" for p in glob_params] + fields_conj)
+        # ``={glob P}`` only for params BOTH states actually use. A param absent
+        # from a state's ``(glob)`` (its methods never called) but named in a
+        # coupling conjunct binds a middle-memory existential over an abstract
+        # module glob that ``smt`` cannot witness -- the transitivity precondition
+        # composition then fails "cannot prove goal (strict)". With signatures
+        # available (ROM) intersect the two used-param sets; otherwise keep all
+        # ``glob_params`` (binding / correctness stay byte-identical).
+        if ginfo and li is not None and ri is not None:
+            gparams = [p for p in glob_params if p in (li[1] & ri[1])]
+        else:
+            gparams = glob_params
+        return " /\\ ".join([f"={{glob {p}}}" for p in gparams] + fields_conj)
 
     return coupling
 
@@ -3604,34 +3659,33 @@ def emit_multi_oracle_chain_for_hop(
     # correctness proofs pass False, keeping stable names byte-identical.
     use_canonical = use_canonical_fields
 
-    # Shared flat-state modules (full multi-oracle games) emitted ONCE.
+    # Shared flat-state modules (full multi-oracle games) emitted ONCE. Record
+    # each module's rendered text so the field-aware coupling can read its EC
+    # ``glob`` signature (field name+type shape + actually-used params) off the
+    # authoritative source (ROM only; empty otherwise -> old behavior).
     chunks: list[str] = []
-    for mod_name, state in zip(left_mods, left_states):
-        chunks.append(
-            _render_flat_state(
-                modules,
-                mod_name,
-                state,
-                external_module_types,
-                method_return_types,
-                flat_params,
-                emit_state_vars=True,
-                use_canonical_fields=use_canonical,
-            )
+    glob_info_by_base: dict[str, tuple[tuple[tuple[str, str], ...], frozenset[str]]] = (
+        {}
+    )
+    param_names = [p.name for p in flat_params]
+    for mod_name, state in zip(
+        list(left_mods) + list(right_mods), list(left_states) + list(right_states)
+    ):
+        rendered = _render_flat_state(
+            modules,
+            mod_name,
+            state,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            emit_state_vars=True,
+            use_canonical_fields=use_canonical,
         )
-    for mod_name, state in zip(right_mods, right_states):
-        chunks.append(
-            _render_flat_state(
-                modules,
-                mod_name,
-                state,
-                external_module_types,
-                method_return_types,
-                flat_params,
-                emit_state_vars=True,
-                use_canonical_fields=use_canonical,
+        chunks.append(rendered)
+        if use_canonical:
+            glob_info_by_base[_ref_base(mod_ref(mod_name))] = _glob_signature(
+                rendered, param_names
             )
-        )
 
     bridge_tactic = "proc; inline *; ((sp; wp; sim) || sim)"
     tactic_body_by_oracle: dict[str, list[str]] = {}
@@ -3668,6 +3722,7 @@ def emit_multi_oracle_chain_for_hop(
             inj_acc=inj_methods,
             decaps_val_acc=decaps_val_schemes,
             use_canonical_fields=use_canonical,
+            glob_info_by_base=glob_info_by_base,
         )
         chunks.extend(oracle_chunks)
         tactic_body_by_oracle[oracle_name] = outer_body
@@ -3711,6 +3766,9 @@ def _emit_one_oracle_chain(
     inj_acc: set[tuple[str, str]] | None = None,
     decaps_val_acc: set[str] | None = None,
     use_canonical_fields: bool = False,
+    glob_info_by_base: (
+        dict[str, tuple[tuple[tuple[str, str], ...], frozenset[str]]] | None
+    ) = None,
 ) -> tuple[list[str], list[str], set[tuple[str, str]]]:
     """Emit one oracle's chain artifacts + outer tactic body.
 
@@ -4016,6 +4074,7 @@ def _emit_one_oracle_chain(
         _chain_role_map(norm_left, norm_right, survivor_map),
         qualified_ref_by_base,
         canonical_by_base,
+        glob_info_by_base or {},
     )
 
     # Composite-wrapper bridge tactic (wall 7). When the hop has a composite

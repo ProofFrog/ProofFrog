@@ -1894,6 +1894,15 @@ def _make_field_aware_coupling(
     def role(f: str) -> str:
         return roles.get(f, f)
 
+    def ftype(base: str, f: str) -> str | None:
+        """EC type of stable field ``f`` in ``base``, via its canonical name and
+        the glob signature. ``None`` when unknown (no signature)."""
+        cname = canonical.get(base, {}).get(f, f)
+        for name, typ in ginfo.get(base, ((), frozenset()))[0]:
+            if name == cname:
+                return typ
+        return None
+
     def qualify(base: str, f: str) -> str:
         # Role/survivor unification runs on the STABLE ``_ec_field_name`` names
         # (``dk``, ``ctStar``) -- they are consistent across a chain's states,
@@ -1941,8 +1950,23 @@ def _make_field_aware_coupling(
                     f"{qualify(lb, f)}" "{1}" f" = {qualify(rb, f)}" "{2}"
                 )
             else:
+                # Same-role fallback -- but ONLY pair fields of the SAME EC type.
+                # A cardinality-differing state (redundant tuple fields shift the
+                # type-rank) can put an ``f04:bs_kem_pq_nss`` in the same role as
+                # an ``f01:KEMPQDecapsKeySpace``; pairing them emits an ill-typed
+                # ``=`` EC rejects ("no matching operator"). A missing pairing is
+                # recoverable (``sim`` frames the untouched field); a type-clash
+                # pairing is a hard block. When no signature is available (binding
+                # / correctness) ``ftype`` is ``None`` on both -> unchanged.
+                lt = ftype(lb, f)
                 g = next(
-                    (h for h in fr if h not in paired_r and role(h) == role(f)),
+                    (
+                        h
+                        for h in fr
+                        if h not in paired_r
+                        and role(h) == role(f)
+                        and ftype(rb, h) == lt
+                    ),
                     None,
                 )
                 if g is not None:
@@ -4377,6 +4401,19 @@ def _precond_witness(pre1: str, pre2: str, eq_args: str, nxt_base: str) -> str |
         if fm and fm.group(3) == "1" and fm.group(6) == "2" and fm.group(4) == nxt_base:
             field_wit.setdefault(fm.group(5), f"{fm.group(1)}.{fm.group(2)}{{1}}")
             pre1_fieldwise = True
+        # RO-materialized field: ``nxt.f06{2} = RO_H.h{2}`` (within-side). The
+        # middle's arrow field EQUALS the shared RO, so its exists witness is
+        # ``RO_H.h{1}`` (``={glob RO_H}`` makes {1}/{m} agree). Without this the
+        # arrow field is absent from the witness and the exists mistypes.
+        elif (
+            fm
+            and fm.group(3) == "2"
+            and fm.group(6) == "2"
+            and fm.group(1) == nxt_base
+            and fm.group(4).startswith("RO_")
+        ):
+            field_wit.setdefault(fm.group(2), f"{fm.group(4)}.{fm.group(5)}{{1}}")
+            pre1_fieldwise = True
     # Only pre1's shape decides field-wise vs whole-glob: a whole-glob pre1
     # (``(glob L){1}=(glob R){2}``, no ``={glob P}`` / field conjunct) leaves EC
     # to thread the single glob-tuple witness -- keep ``smt()`` even if pre2
@@ -4387,6 +4424,15 @@ def _precond_witness(pre1: str, pre2: str, eq_args: str, nxt_base: str) -> str |
         fm = fld.fullmatch(part)
         if fm and fm.group(3) == "1" and fm.group(6) == "2" and fm.group(1) == nxt_base:
             field_wit.setdefault(fm.group(2), f"{fm.group(4)}.{fm.group(5)}{{2}}")
+        # RO-materialized field on the pre2 side (``nxt.f06{1} = RO_H.h{1}``).
+        elif (
+            fm
+            and fm.group(3) == "1"
+            and fm.group(6) == "1"
+            and fm.group(1) == nxt_base
+            and fm.group(4).startswith("RO_")
+        ):
+            field_wit.setdefault(fm.group(2), f"{fm.group(4)}.{fm.group(5)}{{1}}")
     if not field_wit:
         return None
     witnesses = [f"(glob {p}){{1}}" for p in sorted(params)]

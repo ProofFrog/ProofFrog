@@ -2300,7 +2300,14 @@ def export_proof_file(proof_path: str) -> str:
         # the scheme's own param names (``-S``) -- the latter are not declared
         # modules. These coincide when params are named after their instances
         # (CES) but differ for a local param name (``DoubleSymEnc(SymEnc s)``).
-        footprint_names.extend(scheme_applied_args)
+        # Exclude CONCRETE scheme args: a let bound to a functor application
+        # (e.g. the RO-materialized KDF ``Hkdf = CGRandomOracleKDF(...)``) is not
+        # a ``declare module``, so ``-Hkdf`` names an unknown module. An abstract
+        # instance maps to its own bare let-name in ``instance_module_expr``; a
+        # concrete one maps to a functor application (``CGRandomOracleKDF(...)``).
+        footprint_names.extend(
+            a for a in scheme_applied_args if instance_module_expr.get(a, a) == a
+        )
     elif not primitive_only:
         assert scheme is not None
         footprint_names.append(scheme.name)

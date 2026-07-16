@@ -2906,8 +2906,53 @@ def export_proof_file(proof_path: str) -> str:
     # underivable from the outer coupling. Empty for non-ROM proofs
     # (``function_value_modules()`` returns none), so their output is unchanged.
     ro_holder_modules = [m for m, _ in top_types.function_value_modules()]
+    # A declared abstract module that is NEVER referenced after canonicalization
+    # (e.g. the PRG of an "expanded" combiner -- passed as a functor arg but its
+    # methods dead-code-eliminated) is ABSENT from EC's ``glob`` of every flat
+    # state (``glob (F A)`` excludes ``glob A`` when ``F`` never uses ``A``). Its
+    # ``={glob m}`` in the whole-hop coupling is then a spurious frame the
+    # field-wise transitivity LEG couplings cannot carry, so the postcondition
+    # composition "cannot prove goal (strict)" -- ``(glob m){1} = (glob m){2}``
+    # with no hypothesis relating the two sides. Drop such dead modules from the
+    # invariant so outer and legs agree. ROM-gated (dead functor args only arise
+    # in the canonicalized combiner flat states); non-ROM proofs keep every
+    # module -> byte-identical.
+    live_abstract_modules = abstract_scheme_modules
+    if ro_holder_modules and abstract_scheme_modules:
+        probe_step = next(
+            (
+                s
+                for s in proof.steps
+                if isinstance(s, frog_ast.Step)
+                and isinstance(s.challenger, frog_ast.ConcreteGame)
+            ),
+            None,
+        )
+        if probe_step is not None:
+            # pylint: disable=protected-access
+            probe_ast = engine._get_game_ast(
+                probe_step.challenger, probe_step.reduction
+            )
+            # pylint: enable=protected-access
+            probe_canon, _ = engine.canonicalize_game_with_states(
+                copy.deepcopy(probe_ast), skip_passes=_EXPORT_SKIP_PASSES
+            )
+
+            def _module_referenced(mod: str) -> bool:
+                finder: visitors.SearchVisitor[frog_ast.FieldAccess] = (
+                    visitors.SearchVisitor(
+                        lambda n: isinstance(n, frog_ast.FieldAccess)
+                        and isinstance(n.the_object, frog_ast.Variable)
+                        and n.the_object.name == mod
+                    )
+                )
+                return finder.visit(probe_canon) is not None
+
+            live_abstract_modules = [
+                m for m in abstract_scheme_modules if _module_referenced(m)
+            ]
     glob_invariant_conj = " /\\ ".join(
-        f"={{glob {m}}}" for m in abstract_scheme_modules + ro_holder_modules
+        f"={{glob {m}}}" for m in live_abstract_modules + ro_holder_modules
     )
     multi_oracle_byequiv_pre = (
         "={"

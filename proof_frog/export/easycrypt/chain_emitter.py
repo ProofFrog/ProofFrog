@@ -2043,7 +2043,10 @@ def _make_field_aware_coupling(
         # module glob that ``smt`` cannot witness -- the transitivity precondition
         # composition then fails "cannot prove goal (strict)". With signatures
         # available (ROM) intersect the two used-param sets; otherwise keep all
-        # ``glob_params`` (binding / correctness stay byte-identical).
+        # ``glob_params`` (binding / correctness stay byte-identical). A wrapper is
+        # registered (in ``_emit_one_oracle_chain``) with its FLAT state's used-param
+        # set, so a flat<->wrapper leg intersects to the SAME set as the chain leg --
+        # the transitivity postcondition composition agrees on the param set.
         if ginfo and li is not None and ri is not None:
             gparams = [p for p in glob_params if p in (li[1] & ri[1])]
         else:
@@ -3756,6 +3759,26 @@ def emit_multi_oracle_chain_for_hop(
                 rendered, param_names
             )
 
+    # Register each wrapper with its FLAT state's used-param set (empty field list:
+    # the wrapper's fields still come from ``fields_by_base``, and its ``ftype`` was
+    # already ``None`` when unregistered, so nothing regresses there). This makes a
+    # flat<->wrapper coupling intersect to the SAME param set as the flat<->flat
+    # chain coupling, so the transitivity POSTcondition composition agrees on which
+    # ``={glob P}`` conjuncts appear -- without it the wrapper leg emitted ALL
+    # params (``ri is None`` -> the ``glob_params`` fallback) while the chain emitted
+    # the used-param intersection, and the composition then "cannot prove goal
+    # (strict)" for a param the wrapper carries but the chain dropped. The empty
+    # field tuple keeps the whole-glob ``li == ri`` shortcut off (field-wise).
+    if use_canonical:
+        for wrapper_expr, flat_mod in (
+            (left_wrapper_expr, left_mods[0]),
+            (right_wrapper_expr, right_mods[0]),
+        ):
+            flat_sig = glob_info_by_base.get(_ref_base(mod_ref(flat_mod)))
+            wrapper_base = _ref_base(wrapper_expr)
+            if flat_sig is not None and wrapper_base not in glob_info_by_base:
+                glob_info_by_base[wrapper_base] = ((), flat_sig[1])
+
     bridge_tactic = "proc; inline *; ((sp; wp; sim) || sim)"
     tactic_body_by_oracle: dict[str, list[str]] = {}
     pres_methods: set[tuple[str, str]] = set()
@@ -4382,7 +4405,6 @@ def _emit_one_oracle_chain(
                 coupling(nxt_ref, final_ref),
                 eq_args,
                 _ref_base(nxt_ref),
-                _top_level_args(nxt_ref),
             )
             if w is not None:
                 return w
@@ -4511,7 +4533,6 @@ def _precond_witness(
     pre2: str,
     eq_args: str,
     nxt_base: str,
-    nxt_param_globs: list[str],
 ) -> str | None:
     """Explicit-witness discharge for a FIELD-WISE transitivity's precondition
     goal, or ``None`` for a whole-glob leg (keep ``smt()``).
@@ -4572,6 +4593,17 @@ def _precond_witness(
     if not pre1_fieldwise:
         return None
     for part in (p.strip() for p in pre2.split("/\\")):
+        gm = re.fullmatch(r"=\{glob ([\w.]+)\}", part)
+        if gm:
+            # A param appears as an existential over the middle module iff SOME
+            # coupling of the pair constrains its glob -- i.e. iff the middle uses
+            # it. ``coupling(cur, nxt)`` and ``coupling(nxt, final)`` each carry the
+            # used-param INTERSECTION of their two endpoints, so a param the middle
+            # uses but ``cur`` does not (e.g. ``G`` for ``Step_4R``) is dropped from
+            # pre1 yet present in pre2; union the two so the witness covers exactly
+            # what EC's exists quantifies (the middle's own used-param set).
+            params.append(gm.group(1))
+            continue
         fm = fld.fullmatch(part)
         if fm and fm.group(3) == "1" and fm.group(6) == "2" and fm.group(1) == nxt_base:
             field_wit.setdefault(fm.group(2), f"{fm.group(4)}.{fm.group(5)}{{2}}")
@@ -4587,23 +4619,28 @@ def _precond_witness(
     if not field_wit:
         return None
     # EC's exists layout for the middle module's globs is, IN ORDER:
-    #   [ALL functor-param globs, alphabetical]  (the flat state's ``(A1,...,An)``
-    #     args -- EC includes EVERY param's glob whether or not the oracle uses it)
+    #   [the middle's USED-param globs, alphabetical]  (EC includes a functor arg's
+    #     glob iff the module actually uses it -- an UNused param, e.g. ``G`` for the
+    #     ``Step_4L`` flat state, is NOT in the module's ``(glob)`` and so is NOT an
+    #     existential; providing it mistypes the first slot "(glob G) vs (glob
+    #     KEM_PQ)")
     #   [the module's OWN fields, in field order]
     #   [referenced GLOBAL-module globs (the shared RO holder), AFTER the fields]
     #   [the oracle argument, last]
-    # Two consequences: (a) the param globs come from the middle module's actual
-    # functor arguments (``nxt_param_globs``), NOT from the coupling -- the
-    # coupling carries only the USED-param intersection, so a param used by one
-    # side but not the other (e.g. ``G``) is absent there yet still an existential
-    # here (witnessed by its own ``(glob G){1}`` -- free, since the coupling never
-    # constrains it). (b) A shared-RO holder glob (``<clone>.RO_H``) is a
-    # REFERENCED global, not a functor param, so it sorts AFTER the fields.
-    # Mis-ordering shifts every later witness one slot -> a value lands in the
+    # The used-param set is exactly the UNION of the two couplings' ``={glob P}``
+    # conjuncts (parsed above into ``params``): each coupling carries the used-param
+    # intersection of its endpoints, so a param the middle uses but one endpoint
+    # does not is dropped from one coupling yet present in the other, and the union
+    # recovers the middle's own set. A shared-RO holder glob (``<clone>.RO_H``) is a
+    # REFERENCED global, not a functor param, so it sorts AFTER the fields;
+    # mis-ordering shifts every later witness one slot -> a value lands in the
     # arrow-typed RO slot ("no matching operator"). Verified: ec_print_goals on
     # hop_4_hash (both transitivities).
-    ro_globs = [p for p in params if p.split(".")[-1].startswith("RO_")]
-    witnesses = [f"(glob {p}){{1}}" for p in sorted(nxt_param_globs)]
+    ro_globs = sorted({p for p in params if p.split(".")[-1].startswith("RO_")})
+    functor_globs = sorted(
+        {p for p in params if not p.split(".")[-1].startswith("RO_")}
+    )
+    witnesses = [f"(glob {p}){{1}}" for p in functor_globs]
     witnesses += [field_wit[y] for y in sorted(field_wit)]
     # The RO holder's exists var is its single ``h`` field (an arrow), so witness
     # it as ``<clone>.RO_H.h{1}`` -- the explicit field, not the opaque
@@ -4659,7 +4696,6 @@ def _render_coupling_chain_body(  # pylint: disable=too-many-arguments,too-many-
                 coupling(b_ref, final_right),
                 eq_args,
                 _ref_base(b_ref),
-                _top_level_args(b_ref),
             )
             if w is not None:
                 return w

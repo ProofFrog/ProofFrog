@@ -4205,6 +4205,7 @@ def _emit_one_oracle_chain(
         micros_right_rev,
         bridge_name,
         coupling,
+        use_canonical,
     )
     chunks.append(
         "\n".join(
@@ -4238,6 +4239,68 @@ def _emit_one_oracle_chain(
     return chunks, outer_body, step_pres
 
 
+def _precond_witness(pre1: str, pre2: str, eq_args: str, nxt_base: str) -> str | None:
+    """Explicit-witness discharge for a FIELD-WISE transitivity's precondition
+    goal, or ``None`` for a whole-glob leg (keep ``smt()``).
+
+    EC's ``transitivity`` precondition obligation is
+    ``pre => exists <MIDDLE-memory globs>, pre1{1,m} /\\ pre2{m,2}`` where the
+    middle module is ``nxt``. For a whole-glob middle predicate EC threads the
+    single glob-tuple witness automatically; a FIELD-WISE predicate exposes each
+    ``={glob P}`` and each ``nxt`` field as a SEPARATE existential var -- and the
+    module-glob ones (``P0:(glob P)``) are over an abstract sort ``smt`` cannot
+    instantiate, so plain ``smt()`` fails "cannot prove goal (strict)". Provide
+    the witnesses explicitly.
+
+    The exists ranges over EVERY ``nxt`` field mentioned in pre1 OR pre2, so BOTH
+    couplings must be parsed:
+    * pre1 = ``coupling(cur, nxt)`` has ``cur.X{1} = nxt.Y{2}`` -> witness
+      ``nxt.Y`` by its side-1 partner ``cur.X{1}``.
+    * pre2 = ``coupling(nxt, final)`` has ``nxt.Y{1} = final.Z{2}`` -> for a
+      ``nxt`` field NOT pinned by pre1, witness ``nxt.Y`` by the side-2 value
+      ``final.Z{2}`` (pre1 leaves it free; pre2 fixes it to the endpoint).
+    Order matches EC's exists layout (verified against the printed goal):
+    USED-param globs ``(glob P){1}`` ALPHABETICAL (EC orders glob by name), then
+    every ``nxt`` field sorted by name, then ``arg{1}`` if the oracle takes
+    arguments. Within-side survivor conjuncts (``base.a{s}=base.b{s}``, same side)
+    are not exists vars. Returns ``None`` when no ``nxt`` field is pinned across
+    the pair (a whole-glob leg)."""
+    fld = re.compile(r"(\w[\w.]*)\.(\w+)\{(\d)\} = (\w[\w.]*)\.(\w+)\{(\d)\}")
+    params: list[str] = []
+    field_wit: dict[str, str] = {}  # nxt field name -> witness expr
+    pre1_fieldwise = False
+    for part in (p.strip() for p in pre1.split("/\\")):
+        gm = re.fullmatch(r"=\{glob (\w+)\}", part)
+        if gm:
+            params.append(gm.group(1))
+            pre1_fieldwise = True
+            continue
+        fm = fld.fullmatch(part)
+        if fm and fm.group(3) == "1" and fm.group(6) == "2" and fm.group(4) == nxt_base:
+            field_wit.setdefault(fm.group(5), f"{fm.group(1)}.{fm.group(2)}{{1}}")
+            pre1_fieldwise = True
+    # Only pre1's shape decides field-wise vs whole-glob: a whole-glob pre1
+    # (``(glob L){1}=(glob R){2}``, no ``={glob P}`` / field conjunct) leaves EC
+    # to thread the single glob-tuple witness -- keep ``smt()`` even if pre2
+    # happens to be field-wise.
+    if not pre1_fieldwise:
+        return None
+    for part in (p.strip() for p in pre2.split("/\\")):
+        fm = fld.fullmatch(part)
+        if fm and fm.group(3) == "1" and fm.group(6) == "2" and fm.group(1) == nxt_base:
+            field_wit.setdefault(fm.group(2), f"{fm.group(4)}.{fm.group(5)}{{2}}")
+    if not field_wit:
+        return None
+    witnesses = [f"(glob {p}){{1}}" for p in sorted(params)]
+    witnesses += [field_wit[y] for y in sorted(field_wit)]
+    if eq_args != "true":
+        witnesses.append("arg{1}")
+    # ``;``-chained, not ``.``-separated: this is ONE goal-slot inside a
+    # ``transitivity ...; [ g1 | smt() | ... ]`` bracket, where a ``.`` would end
+    # the whole sentence and mis-parse.
+    return f"move=> &1 &2 hpre; exists {' '.join(witnesses)}; move: hpre; smt()"
+
+
 def _render_coupling_chain_body(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     oracle_name: str,
     is_init: bool,
@@ -4248,6 +4311,7 @@ def _render_coupling_chain_body(  # pylint: disable=too-many-arguments,too-many-
     micros_right_rev: list[str],
     bridge_name: str,
     coupling: CouplingFn = _glob_coupling,
+    use_witness: bool = False,
 ) -> list[str]:
     """Transitivity chain body with per-step coupling specs.
 
@@ -4263,6 +4327,26 @@ def _render_coupling_chain_body(  # pylint: disable=too-many-arguments,too-many-
     def spec(a_ref: str, b_ref: str) -> str:
         return _coupling_spec(a_ref, b_ref, is_init, eq_args, coupling)
 
+    def g1(a_ref: str, b_ref: str) -> str:
+        # First transitivity goal (precondition composition). A ROM field-wise
+        # leg needs explicit middle-memory witnesses (``smt`` can't instantiate
+        # the abstract module-glob existentials); a whole-glob leg keeps ``smt()``
+        # (``_precond_witness`` returns None). Init legs (``pre = true``) keep
+        # ``smt()``. Non-ROM proofs pass ``use_witness=False`` -> byte-identical.
+        # ``b_ref`` is the middle module ``nxt``; the exists ranges over its
+        # fields as pinned by pre1 = ``coupling(a,b)`` and pre2 = ``coupling(b,
+        # final)``.
+        if use_witness and not is_init:
+            w = _precond_witness(
+                coupling(a_ref, b_ref),
+                coupling(b_ref, final_right),
+                eq_args,
+                _ref_base(b_ref),
+            )
+            if w is not None:
+                return w
+        return "smt()"
+
     body = ["(* Chain through per-transform micro-lemmas (coupling-preserving). *)"]
     cur = left_refs[0]
     for i, micro in enumerate(micros_left):
@@ -4270,7 +4354,7 @@ def _render_coupling_chain_body(  # pylint: disable=too-many-arguments,too-many-
         body.append(
             f"transitivity {nxt}.{oracle_name} "
             f"{spec(cur, nxt)} {spec(nxt, final_right)}; "
-            f"[ smt() | smt() | apply {micro} |]."
+            f"[ {g1(cur, nxt)} | smt() | apply {micro} |]."
         )
         cur = nxt
     if micros_right_rev:
@@ -4278,7 +4362,7 @@ def _render_coupling_chain_body(  # pylint: disable=too-many-arguments,too-many-
         body.append(
             f"transitivity {rn}.{oracle_name} "
             f"{spec(cur, rn)} {spec(rn, final_right)}; "
-            f"[ smt() | smt() | apply {bridge_name} |]."
+            f"[ {g1(cur, rn)} | smt() | apply {bridge_name} |]."
         )
         for i in reversed(range(len(micros_right_rev))):
             rev = micros_right_rev[i]
@@ -4289,7 +4373,7 @@ def _render_coupling_chain_body(  # pylint: disable=too-many-arguments,too-many-
                 body.append(
                     f"transitivity {target}.{oracle_name} "
                     f"{spec(right_refs[i + 1], target)} {spec(target, final_right)}; "
-                    f"[ smt() | smt() | apply {rev} |]."
+                    f"[ {g1(right_refs[i + 1], target)} | smt() | apply {rev} |]."
                 )
     else:
         body.append(f"apply {bridge_name}.")

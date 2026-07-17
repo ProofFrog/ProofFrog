@@ -658,8 +658,21 @@ class StatementTranslator:
         engine's canonicalization already flattens these in the chain
         flat-states, but the raw oracle/reduction module is emitted from
         the un-canonicalized AST, so we flatten here to match.
+
+        A ``T?`` argument that reached a module call is FrogLang-narrowed to its
+        base ``T`` (guaranteed ``Some`` by an upstream ``if (x == None) return``
+        guard), and the primitive method's parameter is the base type, so unwrap
+        it with ``oget`` -- e.g. ``RB.decaps`` forwards
+        ``KEM_PQ.EncodeSharedSecret(dec_ss_PQ_opt)`` where ``dec_ss_PQ_opt :
+        SharedSecret?``. No-op when the arg is not optional (byte-identical).
         """
-        return ", ".join(self._lift_expr(a, decls, stmts) for a in call.args)
+        parts: list[str] = []
+        for a in call.args:
+            lifted = self._lift_expr(a, decls, stmts)
+            if self._is_optional_expr(a):
+                lifted = f"oget ({lifted})"
+            parts.append(lifted)
+        return ", ".join(parts)
 
     def _lift_expr(
         self,

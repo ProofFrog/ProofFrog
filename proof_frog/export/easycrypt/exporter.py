@@ -3954,10 +3954,16 @@ def export_proof_file(proof_path: str) -> str:
             chal_base = pt.module_base_name(
                 pt.last_module_arg(resolver.resolve(step).module_expr)
             )
+            # A plays against this composed challenger, so it must ride A's
+            # separation footprint regardless of whether it materializes the RO --
+            # the ``.Ideal``/``.Lazy`` side of an assumption game (HT/QT maps, no
+            # Function field) is a live state-holder too, and omitting it lets EC
+            # conclude "module A can write <Lazy>.mStar". Add unconditionally; the
+            # RO materialization below still fires only for Function fields.
+            live_state_holders.add(chal_base)
             chal_game = engine._get_game_ast(step.challenger, None)
             for cf in chal_game.fields if chal_game else []:
                 if isinstance(cf.type, frog_ast.FunctionType):
-                    live_state_holders.add(chal_base)
                     conj.append(
                         f"{chal_base}.{mt._ec_field_name(cf.name)}{{{side}}} = "
                         f"{ro_ref}{{{side}}}"

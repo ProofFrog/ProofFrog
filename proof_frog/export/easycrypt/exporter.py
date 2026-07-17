@@ -3867,13 +3867,53 @@ def export_proof_file(proof_path: str) -> str:
             # Preserve the abstract-scheme restriction set (mirrors the holder
             # bookkeeping ``_live_state_ref`` does on the single-field path).
             live_state_holders.update({red_base, chal_base, other_base})
+            # The cross-seam term ``other.<red-field> = red.<red-field>`` assumes
+            # the OTHER endpoint holds the reduction's field names -- true for a
+            # plain theorem game (the original composite case: generic_ct/pk). But
+            # in a reduction<->reduction hop (the CFRG ROM ``R_Dist_Real ~
+            # R_Wrap_Prog`` step) the other side is itself a reduction that need
+            # not store those fields: a STATELESS wrapper reduction recomputes /
+            # delegates rather than storing, so ``R_Wrap_Prog.pq_keys`` is a
+            # nonexistent global EC rejects. Guard the term on the other reduction
+            # actually declaring the field; game endpoints stay unguarded, so every
+            # existing composite proof is byte-identical.
+            other_field_names: set[str] | None = None
+            if other_step.reduction is not None:
+                other_red = _get_reduction(other_step.reduction.name)
+                other_field_names = (
+                    {f.name for f in other_red.fields}
+                    if other_red is not None
+                    else set()
+                )
+            # The within-side term ``red.<field> = chal.<field>`` holds because a
+            # delegating reduction REPACKS the challenger's ``Initialize`` result
+            # into its own globals -- so the challenger must actually hold that
+            # field. For generic_ct/pk the inner binding challenger holds the
+            # reduction's decaps keys, so every field matches (byte-identical). But
+            # the CFRG ROM ``R_Dist_Real`` only draws a SCALAR from its
+            # ``RandomScalarDist`` challenger (which holds ``x``/``y``) and
+            # self-generates ``pq_keys``/``ctStar``; those are not repacked from the
+            # challenger, so ``RandomScalarDist_Uniform.pq_keys`` is a nonexistent
+            # global. Guard on the challenger declaring the field.
+            # pylint: disable=protected-access
+            chal_game_ast = engine._get_game_ast(red_step.challenger, None)
+            # pylint: enable=protected-access
+            chal_field_names = (
+                {f.name for f in chal_game_ast.fields}
+                if chal_game_ast is not None
+                else None
+            )
             conj: list[str] = []
             for fld in fields:
+                if other_field_names is not None and fld not in other_field_names:
+                    continue
                 ec_f = mt._ec_field_name(fld)  # pylint: disable=protected-access
                 conj.append(
                     f"{other_base}.{ec_f}{{{other_side}}} = {red_base}.{ec_f}{{{red_side}}}"
                 )
             for fld in fields:
+                if chal_field_names is not None and fld not in chal_field_names:
+                    continue
                 ec_f = mt._ec_field_name(fld)  # pylint: disable=protected-access
                 conj.append(
                     f"{red_base}.{ec_f}{{{red_side}}} = {chal_base}.{ec_f}{{{red_side}}}"
@@ -3914,6 +3954,16 @@ def export_proof_file(proof_path: str) -> str:
                     f"{other_base}.{ec_f}{{{other_side}}} = {chal_base}.{ec_f}{{{red_side}}}"
                 )
             body = " /\\ ".join(conj)
+            # A reduction<->reduction hop can leave ``conj`` empty: neither the
+            # other reduction nor the challenger holds any of the reduction's
+            # fields (they share no couplable state -- the CFRG ROM
+            # ``R_Dist_Real ~ R_Wrap_Prog`` step). The meaningful coupling is then
+            # just the abstract-scheme globs (plus the ``={res}`` prepended
+            # elsewhere); returning ``glob_invariant_conj`` avoids a trailing
+            # ``/\``. Existing composite proofs hold their fields, so ``conj`` is
+            # non-empty and this branch never fires for them (byte-identical).
+            if not body:
+                return glob_invariant_conj
             return f"{glob_invariant_conj} /\\ {body}" if glob_invariant_conj else body
         multi = _self_keygen_multikey_coupling(step_a, step_b)
         if multi is not None:

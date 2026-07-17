@@ -443,6 +443,16 @@ class StepResolver:
             self._instance_module_expr[a.name]
             for a in game.args
             if isinstance(a, frog_ast.Variable) and a.name in self._instance_module_expr
+            # Drop the theorem-scheme instance argument (e.g. ``hybrid ->
+            # CG_expanded(...)``): ``translate_intermediate_game`` keeps only
+            # PRIMITIVE-typed params (``param_module_types``) and INLINES the
+            # scheme's methods to base-module calls, so the emitted module has no
+            # scheme functor param. Passing it here made the application arity
+            # exceed the definition ("expected 5, got 6"). A scheme instance's
+            # module expr is the scheme functor applied to the primitives, so it
+            # begins with the scheme name; primitive instances render as bare
+            # declared-module names.
+            and not self._instance_module_expr[a.name].startswith(self._scheme_name)
         ]
         module_expr = f"{game.name}({', '.join(arg_exprs)})" if arg_exprs else game.name
         # Played against the outer adversary -> the theorem game's oracle. Fall

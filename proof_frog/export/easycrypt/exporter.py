@@ -3365,21 +3365,39 @@ def export_proof_file(proof_path: str) -> str:
         # Fire when the packed key has a component the reduction RECOMPUTES
         # (a within-side ev-derivation) -- the case the composite path mis-handles
         # (its ``Game.<reduction-field>`` is nonexistent AND no other path pins the
-        # derived component) -- OR when the reduction delegates to a STATELESS
-        # challenger (no ``Initialize``): the single-field fallback
-        # (``_live_state_ref``) would then reference a NONEXISTENT field on the
-        # stateless challenger (``<Chal>.dk``, only a proc-local of its
-        # ``compute()``), so the whole-field decomposition is the only
-        # type-correct coupling (CK/UK's KEM-correctness reduction ``R_Correct``
-        # holds ``dk`` decomposed across ``pq_keys``/``corr``). A pure whole-field
-        # decomposition against a STATEFUL challenger is left to the existing
-        # single-field path, keeping every non-``expanded``-ROM proof
-        # byte-identical.
+        # derived component) -- OR when the single-field fallback
+        # (``_live_state_ref``) would resolve to a NONEXISTENT field on a STATELESS
+        # challenger (``fallback_to_stateless_chal``). That fallback fires exactly
+        # when the reduction delegates to a stateless challenger (no ``Initialize``)
+        # AND does not hold the game's live field -- neither by name
+        # (``_reduction_holds_field``) nor under a renamed field
+        # (``_reduction_renamed_live_field``, the self-keygen case). Then
+        # ``_live_state_ref`` falls to ``<Chal>.<field>`` (only a proc-local of the
+        # stateless challenger's ``compute()``), so the whole-field decomposition
+        # is the only type-correct coupling (CK/UK's ``_INDCCA_T`` KEM-correctness
+        # reduction holds the game's ``dk`` decomposed across ``pq_keys``/``corr``,
+        # so ``dk`` itself is unheld and unrenamed). This mirrors ``_live_state_ref``
+        # exactly, so it is load-bearing: a self-keygen reduction forwarding to a
+        # stateless challenger (the two-KEM binding ``R`` holding the game's
+        # ``dk0``/``dk1`` RENAMED to ``seed0``/``seed1``) has ``_live_state_ref``
+        # return the valid ``R.seed0``, so its composite path is already
+        # type-correct -- firing here clobbers its working challenge-case-split
+        # body. A STATEFUL challenger (which itself holds the field) is likewise
+        # left to the existing single-field path, keeping every
+        # non-``expanded``-ROM proof byte-identical.
         # pylint: disable=protected-access
         chal_ast = engine._get_game_ast(red_step.challenger, None)
         # pylint: enable=protected-access
         chal_stateless = chal_ast is not None and _find_init(chal_ast) is None
-        if not conj or (not has_derived and not chal_stateless):
+        live_field = _live_state_field_name()
+        fallback_to_stateless_chal = (
+            chal_stateless
+            and red_step.reduction is not None
+            and not _reduction_holds_field(red_step.reduction.name, live_field)
+            and _reduction_renamed_live_field(red_step.reduction.name, live_field)
+            is None
+        )
+        if not conj or (not has_derived and not fallback_to_stateless_chal):
             return None
         live_state_holders.update({game_base, red_base})
         body = " /\\ ".join(conj)

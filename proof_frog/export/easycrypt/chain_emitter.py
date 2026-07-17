@@ -3686,6 +3686,7 @@ def emit_multi_oracle_chain_for_hop(
     init_coupling: str | None = None,
     full_coupling: str | None = None,
     use_canonical_fields: bool = False,
+    stateless_wrapper_bases: frozenset[str] | set[str] | None = None,
 ) -> MultiOracleHopChainInfo:
     """Emit the per-oracle per-transform chains for one multi-oracle hop.
 
@@ -3815,6 +3816,7 @@ def emit_multi_oracle_chain_for_hop(
             decaps_val_acc=decaps_val_schemes,
             use_canonical_fields=use_canonical,
             glob_info_by_base=glob_info_by_base,
+            stateless_wrapper_bases=stateless_wrapper_bases,
         )
         chunks.extend(oracle_chunks)
         tactic_body_by_oracle[oracle_name] = outer_body
@@ -3861,6 +3863,7 @@ def _emit_one_oracle_chain(
     glob_info_by_base: (
         dict[str, tuple[tuple[tuple[str, str], ...], frozenset[str]]] | None
     ) = None,
+    stateless_wrapper_bases: frozenset[str] | set[str] | None = None,
 ) -> tuple[list[str], list[str], set[tuple[str, str]]]:
     """Emit one oracle's chain artifacts + outer tactic body.
 
@@ -4427,6 +4430,32 @@ def _emit_one_oracle_chain(
         outer_body = [
             "(* Stateless RO oracle: identical wrapper bodies, RO-coupled. *)",
             "proc; auto => /#.",
+            "qed.",
+        ]
+    elif stateless_oracle and (
+        _ref_base(left_wrapper_expr) in (stateless_wrapper_bases or set())
+        or _ref_base(right_wrapper_expr) in (stateless_wrapper_bases or set())
+    ):
+        # Stateless RO oracle where one wrapper is a STATELESS reduction (holds no
+        # own state field): the wrapper<->flat glob bridge ``(glob <flat>){1} =
+        # (glob <wrapper>){2}`` is ILL-TYPED because the flat state carries the
+        # inlined reduction's fields while the stateless wrapper's glob has none
+        # (the CFRG ROM ``R_Dist_Real ~ R_Wrap_Prog`` / ``R_Wrap_NoAbort ~ ...``
+        # steps). One wrapper returns the RO directly, the other DELEGATES to its
+        # composed challenger (``_r0 <@ Challenger.direct(m); return _r0``); both
+        # reduce to the shared RO once the concrete challenger's ``direct``
+        # (``return rF m``, with ``rF = RO_H.h`` in the coupling) is unfolded, so
+        # ``proc; inline *; auto => /#`` closes the two wrappers directly, bypassing
+        # the bridge. ``stateless_oracle`` guarantees both flat states (= the
+        # inlined wrappers) touch no real state, so nothing but the RO return
+        # survives -- symmetric in which side delegates. Gated on EITHER wrapper
+        # being a genuinely stateless reduction: a STATEFUL wrapper (CG expanded's
+        # ``R_Wrap_Prog`` with its own ``dk_PQ``/``ss_PQ_star``/``ct_PQ_star``
+        # fields, hop_4/hop_10 hash) whose glob matches the flat state keeps the
+        # byte-identical bridge; non-ROM proofs never reach here.
+        outer_body = [
+            "(* Stateless RO oracle, stateless wrapper: inline the RO, close. *)",
+            "proc; inline *; auto => /#.",
             "qed.",
         ]
     else:

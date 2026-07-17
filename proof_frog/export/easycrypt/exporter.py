@@ -4128,6 +4128,11 @@ def export_proof_file(proof_path: str) -> str:
                 full_coupling=_live_state_coupling(step_a, step_b),
                 clone_alias=clone_alias_by_module,
                 use_canonical_fields=proof_uses_ro_function,
+                stateless_wrapper_bases={
+                    h.name
+                    for h in proof.helpers
+                    if isinstance(h, frog_ast.Reduction) and not h.fields
+                },
             )
             chain_extra_decls.extend(info.extra_decls)
             pres_method_requests.update(info.pres_methods)

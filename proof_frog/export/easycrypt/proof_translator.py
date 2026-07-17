@@ -658,6 +658,7 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     consume_pk_scheme_glob: str | None = None,
     consume_pk_left_challenger_glob: str | None = None,
     consume_pk_right_challenger_glob: str | None = None,
+    ro_bridge_admit: bool = False,
 ) -> ec_ast.ProbLemma:
     """Emit a ``hop_<i>_pr`` lemma for an assumption hop.
 
@@ -775,7 +776,27 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                 f" proc; inline *; wp; call (_: {inv}); [ {selector} ]."
             )
 
-        if consume_pk_bridge:
+        if ro_bridge_admit:
+            # ROM: the theorem game samples the shared RO up front (in main) while
+            # the assumption-game composition samples it inside the reduction
+            # adversary's `distinguish` (AFTER the assumption game's own Initialize
+            # scalars). The RO sample therefore sits at DIFFERENT positions on the
+            # two byequiv sides -- a permutation the manual consume-pk peel cannot
+            # align (it hits SAMPLE vs CALL at the same tail-to-front step) and
+            # `sim` cannot bridge (it can't infer the repack equalities). Honest
+            # gate (MAP principle 2): emit a tagged admit rather than a tactic that
+            # hard-fails. Proper fix (documented in the CFRG binding plan): a
+            # per-side `swap{2}` hoisting the RO sample to the front + a full
+            # sample/call event peel. Non-ROM assumption hops keep the working
+            # peel / sim below (byte-identical).
+            admit = (
+                "  by admit."
+                "  (* ROM: shared-RO sample position mismatch; peel/sim cannot"
+                " align -- see CFRG binding plan *)"
+            )
+            bridge_close_l = admit
+            bridge_close_r = admit
+        elif consume_pk_bridge:
             bridge_close_l = _consume_pk_bridge_close(consume_pk_left_challenger_glob)
             bridge_close_r = _consume_pk_bridge_close(consume_pk_right_challenger_glob)
         else:

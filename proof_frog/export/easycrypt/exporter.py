@@ -4418,6 +4418,12 @@ def export_proof_file(proof_path: str) -> str:
                     consume_pk_right_challenger_glob=(
                         f"{hop_clone}.{gf_a_id}_{right_side}"
                     ),
+                    # ROM: the shared-RO sample sits at incompatible positions on
+                    # the two byequiv sides (game main vs reduction-adversary
+                    # distinguish), which neither the consume-pk peel nor `sim`
+                    # can align -- emit an honest tagged admit. Non-ROM proofs
+                    # (no RO holder) keep the working bridge byte-identical.
+                    ro_bridge_admit=bool(ro_holder_modules),
                 )
             )
         else:

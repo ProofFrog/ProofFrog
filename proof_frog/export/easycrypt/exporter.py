@@ -3857,6 +3857,7 @@ def export_proof_file(proof_path: str) -> str:
         packed_coupling = _packed_decomposition_coupling(step_a, step_b)
         if packed_coupling is not None:
             return packed_coupling
+
         # Wall-7 composite coupling: when one side is a field-holding delegating
         # reduction, the single live-field equality cannot bridge the two
         # wrappers. Relate every live field across BOTH seams: plain-game
@@ -3866,6 +3867,51 @@ def export_proof_file(proof_path: str) -> str:
         # what the chain emitter's composite bridge couplings reduce to, so the
         # per-oracle transitivity glue discharges. Gated tightly (see
         # ``_composite_reduction_step``) so single-field proofs are untouched.
+        def _ec_ty(t: frog_ast.Type) -> str:
+            return top_types.translate_type(t).text
+
+        def _field_or_component_ref(
+            target_ty: str,
+            mod_fields: list[frog_ast.Field],
+            base: str,
+            side: str,
+            prefer: str,
+        ) -> str | None:
+            # PACKED<->component matching: relate ``target_ty`` (the OTHER
+            # endpoint's field EC type) to a field of ``mod_fields`` -- direct
+            # same-EC-type match first (``base.f``), else a component of a
+            # ProductType field (``base.g.`i``). CK/UK hold a combiner key PACKED
+            # on one endpoint (``t_keys:(ek_T,dk_T)`` / ``ctStar:(ct_PQ,ct_T)``)
+            # and DECOMPOSED on another (``ek_T`` / ``ct_T``). The SAME-NAMED field
+            # is preferred so a packed ``ctStar`` couples via its ``.`2`` component,
+            # not a coincidentally same-typed ``kem_ct_T``. Same-name same-type ->
+            # ``base.f`` verbatim (byte-identical for the plain-game composite
+            # proofs).
+            # pylint: disable=protected-access
+            def _match(f: frog_ast.Field) -> str | None:
+                if _ec_ty(f.type) == target_ty:
+                    return f"{base}.{mt._ec_field_name(f.name)}{{{side}}}"
+                if isinstance(f.type, frog_ast.ProductType):
+                    for i, comp in enumerate(f.type.types):
+                        if _ec_ty(comp) == target_ty:
+                            return (
+                                f"{base}.{mt._ec_field_name(f.name)}.`{i + 1}{{{side}}}"
+                            )
+                return None
+
+            # pylint: enable=protected-access
+            pref = next((f for f in mod_fields if f.name == prefer), None)
+            if pref is not None:
+                hit = _match(pref)
+                if hit is not None:
+                    return hit
+            for other in mod_fields:
+                if other.name != prefer:
+                    hit = _match(other)
+                    if hit is not None:
+                        return hit
+            return None
+
         for red_step, other_step, red_side, other_side in (
             (step_a, step_b, "1", "2"),
             (step_b, step_a, "2", "1"),
@@ -3908,27 +3954,76 @@ def export_proof_file(proof_path: str) -> str:
             # global. Guard on the challenger declaring the field.
             # pylint: disable=protected-access
             chal_game_ast = engine._get_game_ast(red_step.challenger, None)
+            red_ast = (
+                _get_reduction(red_step.reduction.name)
+                if red_step.reduction is not None
+                else None
+            )
+            other_game_ast = (
+                engine._get_game_ast(other_step.challenger, None)
+                if other_step.reduction is None
+                else None
+            )
             # pylint: enable=protected-access
             chal_field_names = (
                 {f.name for f in chal_game_ast.fields}
                 if chal_game_ast is not None
                 else None
             )
+            red_type_by_name = (
+                {f.name: f.type for f in red_ast.fields} if red_ast is not None else {}
+            )
             conj: list[str] = []
             for fld in fields:
-                if other_field_names is not None and fld not in other_field_names:
-                    continue
                 ec_f = mt._ec_field_name(fld)  # pylint: disable=protected-access
-                conj.append(
-                    f"{other_base}.{ec_f}{{{other_side}}} = {red_base}.{ec_f}{{{red_side}}}"
-                )
+                red_ty = red_type_by_name.get(fld)
+                if other_game_ast is not None and red_ty is not None:
+                    # Game endpoint: it may hold the reduction's field PACKED under
+                    # a different name; match by type/component.
+                    other_ref = _field_or_component_ref(
+                        _ec_ty(red_ty),
+                        list(other_game_ast.fields),
+                        other_base,
+                        other_side,
+                        fld,
+                    )
+                    if other_ref is None:
+                        continue
+                else:
+                    # Reduction endpoint: keep the name-guard (byte-identical for
+                    # the reduction<->reduction stateless-wrapper hops).
+                    if other_field_names is not None and fld not in other_field_names:
+                        continue
+                    other_ref = f"{other_base}.{ec_f}{{{other_side}}}"
+                conj.append(f"{other_ref} = {red_base}.{ec_f}{{{red_side}}}")
             for fld in fields:
                 if chal_field_names is not None and fld not in chal_field_names:
                     continue
                 ec_f = mt._ec_field_name(fld)  # pylint: disable=protected-access
-                conj.append(
-                    f"{red_base}.{ec_f}{{{red_side}}} = {chal_base}.{ec_f}{{{red_side}}}"
+                chal_ty = (
+                    next(
+                        (f.type for f in chal_game_ast.fields if f.name == fld),
+                        None,
+                    )
+                    if chal_game_ast is not None
+                    else None
                 )
+                # The reduction may hold the field PACKED (``ctStar:(ct_PQ,ct_T)``)
+                # while the challenger holds the COMPONENT (``ct_T``); match the
+                # reduction side by the challenger field's type.
+                if chal_ty is not None and red_ast is not None:
+                    red_ref = _field_or_component_ref(
+                        _ec_ty(chal_ty),
+                        list(red_ast.fields),
+                        red_base,
+                        red_side,
+                        fld,
+                    )
+                    if red_ref is None:
+                        continue
+                else:
+                    red_ref = f"{red_base}.{ec_f}{{{red_side}}}"
+                conj.append(f"{red_ref} = {chal_base}.{ec_f}{{{red_side}}}")
             # Forwarded live fields: a game live field the reduction does NOT hold
             # (the reduction forwards the oracle reading it to the inner challenger
             # -- e.g. a PK binding game holds ek0/ek1 that its ``Challenge`` reads,

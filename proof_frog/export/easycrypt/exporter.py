@@ -3362,13 +3362,24 @@ def export_proof_file(proof_path: str) -> str:
                 if src is not None:
                     conj.append(f"{proj} = {src}")
         # pylint: enable=protected-access
-        # Fire ONLY when the packed key has a component the reduction RECOMPUTES
-        # (a within-side ev-derivation) -- the unique case the composite path
-        # mis-handles (its ``Game.<reduction-field>`` is nonexistent AND no other
-        # path pins the derived component). A rename / whole-field decomposition
-        # with no recomputed component is left to the existing paths, keeping
-        # every non-``expanded``-ROM proof byte-identical.
-        if not conj or not has_derived:
+        # Fire when the packed key has a component the reduction RECOMPUTES
+        # (a within-side ev-derivation) -- the case the composite path mis-handles
+        # (its ``Game.<reduction-field>`` is nonexistent AND no other path pins the
+        # derived component) -- OR when the reduction delegates to a STATELESS
+        # challenger (no ``Initialize``): the single-field fallback
+        # (``_live_state_ref``) would then reference a NONEXISTENT field on the
+        # stateless challenger (``<Chal>.dk``, only a proc-local of its
+        # ``compute()``), so the whole-field decomposition is the only
+        # type-correct coupling (CK/UK's KEM-correctness reduction ``R_Correct``
+        # holds ``dk`` decomposed across ``pq_keys``/``corr``). A pure whole-field
+        # decomposition against a STATEFUL challenger is left to the existing
+        # single-field path, keeping every non-``expanded``-ROM proof
+        # byte-identical.
+        # pylint: disable=protected-access
+        chal_ast = engine._get_game_ast(red_step.challenger, None)
+        # pylint: enable=protected-access
+        chal_stateless = chal_ast is not None and _find_init(chal_ast) is None
+        if not conj or (not has_derived and not chal_stateless):
             return None
         live_state_holders.update({game_base, red_base})
         body = " /\\ ".join(conj)

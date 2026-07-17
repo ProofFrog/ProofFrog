@@ -185,6 +185,32 @@ class ExpressionTranslator:
         ):
             # EC uses ``=`` / ``<>`` for (in)equality on any type.
             op = "=" if expr.operator == frog_ast.BinaryOperators.EQUALS else "<>"
+            # ``<base-expr> = None`` is a canonicalization artifact: the engine
+            # inlined an OPTIONAL challenger game-decaps into the reduction flat
+            # state and left a ``None`` test on the RAW (base) decaps result
+            # (``_r21 <@ KEM_T.decaps(dk, ct); if (_r21 = None) ...``), while the
+            # genuine challenge/None cases are handled by the separate ``ctStar``
+            # checks. A base (non-option) EC value is NEVER ``None``, so the test
+            # is a constant (its ``<- None`` branch is dead). EC rejects the
+            # mistyped ``bs_kem_t_nss = #a option``; render the constant instead.
+            # Fires ONLY when exactly one side is ``None`` and the other resolves
+            # to a non-optional type -- ``None = None`` (both option) and every
+            # ``<opt> = None`` are unchanged, so proofs that already compile (which
+            # cannot contain a base-vs-``None`` compare -- it is a type error) stay
+            # byte-identical.
+            left_none = isinstance(expr.left_expression, frog_ast.NoneExpression)
+            right_none = isinstance(expr.right_expression, frog_ast.NoneExpression)
+            if left_none != right_none:
+                other = expr.right_expression if left_none else expr.left_expression
+                other_type = self._types.resolve(self._type_of(other))
+                if other_type is not None and not isinstance(
+                    other_type, frog_ast.OptionalType
+                ):
+                    return (
+                        "false"
+                        if expr.operator == frog_ast.BinaryOperators.EQUALS
+                        else "true"
+                    )
             left = self.translate(expr.left_expression)
             right = self.translate(expr.right_expression)
             return f"{_paren(left)} {op} {_paren(right)}"

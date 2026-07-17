@@ -184,8 +184,15 @@ class StatementTranslator:
         then_block = list(if_stmt.blocks[0].statements)
         # Reserve a result name that avoids every hoister-introduced ``_rN`` in
         # the then-block and the fall-through ``rest`` (translated below), not
-        # just the already-emitted prefix.
-        avoid = _collect_bound_names(then_block) | _collect_bound_names(rest)
+        # just the already-emitted prefix -- and every name bound ANYWHERE in the
+        # method (``self._reserved_names``): EC hoists all var-decls to one proc
+        # scope, so a fresh lowering var must dodge a same-named source temp in a
+        # DISJOINT branch too, else the two collide in the flat proc.
+        avoid = (
+            _collect_bound_names(then_block)
+            | _collect_bound_names(rest)
+            | self._reserved_names
+        )
         result = _fresh_name_avoiding(decls, stmts, avoid)
         decls.append(ec_ast.VarDecl(result, return_type))
 
@@ -266,7 +273,12 @@ class StatementTranslator:
         not return. A fresh ``flag`` records whether either branch returned;
         ``rest`` runs guarded on ``! flag`` (the no-return continuation), and a
         return inside the ``if`` propagates to any enclosing ``returned_flag``."""
-        avoid = _collect_bound_names(rest)
+        # Avoid every name bound in the branches / fall-through AND anywhere else
+        # in the method (``self._reserved_names``): EC hoists all var-decls to one
+        # proc scope, so the fresh ``bool`` flag must dodge a same-named source
+        # temp in a DISJOINT branch (a differently-typed ``_r0`` there would
+        # otherwise collide -- "duplicated local" / a type mismatch at the reuse).
+        avoid = _collect_bound_names(rest) | self._reserved_names
         for blk in stmt.blocks:
             avoid |= _collect_bound_names(list(blk.statements))
         flag = _fresh_name_avoiding(decls, out_stmts, avoid)

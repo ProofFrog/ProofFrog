@@ -3546,6 +3546,19 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
                     swaps = aligned
                 tac = ["proc.", "inline *.", *swaps, *_backbone_peel(l_body), "auto."]
                 return (tac, set(), SYNTH_PARAM)
+            # ``sim`` relates globals BY NAME, so it aligns the two inits only when
+            # their call/sample backbones match exactly. A FIELD-HOLDING /
+            # repacking reduction whose backbone differs from the game's -- the
+            # same random-function sample bound to ``v_RF`` on the game vs
+            # ``challenger_RF`` on the reduction (CK's PRF hop ``G_AllRand ~
+            # R_PRF_Rev``) -- makes ``sim`` "cannot infer the set of equalities".
+            # Emit an honest admit there (MAP principle 2). A pure stateless-
+            # delegate reduction (``not init_repacks and not init_decomposition``)
+            # keeps ``sim``: inlining its delegated init realigns the bodies
+            # regardless of field renames, so those proofs stay byte-identical --
+            # as does any exact-backbone init (``l_bb == r_bb``).
+            if l_bb != r_bb and (init_repacks or init_decomposition):
+                return None
             # Identical structure, or a stateless-delegate reduction ``sim``
             # aligns: keep the historical tactic verbatim (byte-identical path
             # for the clean correctness / INDCPA / stateless-reduction inits).

@@ -430,7 +430,14 @@ class StatementTranslator:
                 args = self._render_call_args(expr, decls, out_stmts)
                 if wrap and return_type is not None:
                     base = ec_ast.EcType(return_type.text[: -len(" option")])
-                    tmp = _fresh_name_avoiding(decls, out_stmts, set())
+                    # Avoid ``self._reserved_names`` (every source-level bound name,
+                    # incl. the engine's hoisted ``_rN`` temps), like the other
+                    # hoist sites -- an empty avoid set let this return-tmp grab a
+                    # low ``_rN`` that a SIBLING if-branch (not yet lowered) already
+                    # uses for an engine temp of a different type, producing two
+                    # ``_r1`` decls that EC rejects (bs_kdf_nout vs bs_kem_pq_nss in
+                    # `R_Correct_Real.decaps`).
+                    tmp = _fresh_name_avoiding(decls, out_stmts, self._reserved_names)
                     decls.append(ec_ast.VarDecl(tmp, base))
                     out_stmts.append(ec_ast.Call(tmp, callee, args))
                     out_stmts.append(ec_ast.Assign(result, f"Some ({tmp})"))

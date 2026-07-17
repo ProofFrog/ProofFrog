@@ -94,6 +94,10 @@ class StatementTranslator:
         re-wrapped in ``Some`` (that would double-wrap to ``T option option``);
         only a base-typed value is coerced up. Errs to ``False`` (wrap) when
         the type is unknown -- the historical behavior for a plain value."""
+        # ``None`` is inherently optional; without this it errs to False and a
+        # ``T? x <- None`` assignment gets wrongly wrapped ``Some (None)``.
+        if isinstance(expr, frog_ast.NoneExpression):
+            return True
         try:
             return self._types.translate_type(self._exprs.type_of(expr)).text.endswith(
                 " option"
@@ -602,6 +606,32 @@ class StatementTranslator:
             assert isinstance(call, frog_ast.FuncCall)
             callee = self._render_module_call_target(call.func)
             args = self._render_call_args(call, decls, stmts)
+            # Some-wrap a base-returning call assigned to an optional target
+            # (canonicalization inlines an optional-returning oracle's non-None
+            # branch as the raw base decaps, e.g. a flat-state case-split
+            # ``dec_ss_PQ_opt <@ KEM_PQ.decaps(dk, ct)`` where
+            # ``dec_ss_PQ_opt : bs_kem_pq_nss option`` but ``decaps`` returns the
+            # base). Only this direction (target optional, callee base) is
+            # handled: on a compiling proof a base-target/base-call is a plain
+            # ``<@`` and a base-target/optional-call cannot occur, so no
+            # non-optional body changes -- byte-identical.
+            if self._lhs_is_optional(var, stmt.the_type) and not self._is_optional_expr(
+                call
+            ):
+                tgt_type = stmt.the_type or self._type_map.get(var.name)
+                tgt_txt = (
+                    self._types.translate_type(tgt_type).text
+                    if tgt_type is not None
+                    else None
+                )
+                if tgt_txt is not None and tgt_txt.endswith(" option"):
+                    tmp = _fresh_name_avoiding(decls, stmts, self._reserved_names)
+                    decls.append(
+                        ec_ast.VarDecl(tmp, ec_ast.EcType(tgt_txt[: -len(" option")]))
+                    )
+                    stmts.append(ec_ast.Call(tmp, callee, args))
+                    stmts.append(ec_ast.Assign(ec_var, f"Some ({tmp})"))
+                    return
             stmts.append(ec_ast.Call(ec_var, callee, args))
             return
         rhs = self._translate_expr(stmt.value, decls, stmts)

@@ -3550,6 +3550,15 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
             # aligns: keep the historical tactic verbatim (byte-identical path
             # for the clean correctness / INDCPA / stateless-reduction inits).
             return (["proc; inline *; sim."], set(), SYNTH_STATIC)
+        # The tail-to-front peel pairs the two sides' abstract calls positionally;
+        # if their callees differ (the two-KEM CFRG correctness init runs
+        # ``KEM_PQ.encaps`` where the other runs ``KEM_T.encaps``) the lockstep
+        # ``call (_: true)`` mis-pairs them (EC "should be equal"). This
+        # deterministic-call branch has no reorder machinery, so emit an honest
+        # admit rather than a failing tactic (MAP principle 2). Matching callees
+        # keep the historical peel (byte-identical).
+        if [c for k, c in l_bb if k == "call"] != [c for k, c in r_bb if k == "call"]:
+            return None
         tac = ["proc.", "inline *.", *_backbone_peel(l_body)]
         if _leads_with_det(l_body) or _leads_with_det(r_body):
             tac.append("wp.")

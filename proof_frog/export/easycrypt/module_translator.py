@@ -978,6 +978,18 @@ class ModuleTranslator:
                 params=[],
                 return_type=ec_ast.EcType("bool"),
             )
+        elif multi_oracle.init_return_type.text == "unit":
+            # A lifted Initialize returning ``unit`` (e.g. KDF-PRF, whose init
+            # only samples the key into a field) carries no result to thread, and
+            # EC rejects an explicit ``unit`` proc argument. The adversary takes
+            # no param; the oracle restriction still stands (init is run in
+            # ``main`` before the adversary, so ``O.init`` stays excluded).
+            distinguish = ec_ast.ProcSig(
+                name="distinguish",
+                params=[],
+                return_type=ec_ast.EcType("bool"),
+                oracle_restriction=multi_oracle.oracle_restriction("O"),
+            )
         else:
             distinguish = ec_ast.ProcSig(
                 name="distinguish",
@@ -1351,10 +1363,16 @@ class ModuleTranslator:
                 (e.g. declared module instances inside a section).
             multi_oracle: Initialize-lifted spec, or ``None`` for single-oracle.
         """
+        # A lifted Initialize returning ``unit`` (e.g. KDF-PRF) carries no result:
+        # run it for its side effect but thread no ``pk`` (EC rejects an explicit
+        # unit proc argument, and a ``pk : unit`` local would be unused).
+        unit_init = (
+            multi_oracle is not None and multi_oracle.init_return_type.text == "unit"
+        )
         body: list[ec_ast.EcStmt] = [
             ec_ast.VarDecl(name="b", type=ec_ast.EcType("bool"))
         ]
-        if multi_oracle is not None:
+        if multi_oracle is not None and not unit_init:
             body.append(
                 ec_ast.VarDecl(
                     name=INIT_RESULT_NAME, type=multi_oracle.init_return_type
@@ -1369,6 +1387,15 @@ class ModuleTranslator:
         for mod_name, dfun in self._types.function_value_modules():
             body.append(ec_ast.Sample(f"{mod_name}.h", dfun))
         if multi_oracle is None:
+            distinguish_args = ""
+        elif unit_init:
+            body.append(
+                ec_ast.Call(
+                    var="",
+                    callee=f"{oracle_module_expr}.{multi_oracle.init_name}",
+                    args="",
+                )
+            )
             distinguish_args = ""
         else:
             body.append(
@@ -1432,10 +1459,25 @@ class ModuleTranslator:
         scheme instance.
         """
         oracle_expr = f"{side_module_name}({scheme_param_name})"
+        # A lifted Initialize returning ``unit`` (e.g. KDF-PRF) carries no result:
+        # run it for its side effect but thread no ``pk`` (EC rejects an explicit
+        # unit proc argument; the adversary type drops the param to match).
+        unit_init = (
+            multi_oracle is not None and multi_oracle.init_return_type.text == "unit"
+        )
         body: list[ec_ast.EcStmt] = [
             ec_ast.VarDecl(name="b", type=ec_ast.EcType("bool"))
         ]
         if multi_oracle is None:
+            distinguish_args = ""
+        elif unit_init:
+            body.append(
+                ec_ast.Call(
+                    var="",
+                    callee=f"{oracle_expr}.{multi_oracle.init_name}",
+                    args="",
+                )
+            )
             distinguish_args = ""
         else:
             body.append(

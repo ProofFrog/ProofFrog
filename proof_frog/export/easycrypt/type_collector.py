@@ -633,6 +633,26 @@ class TypeCollector:
                     ],
                 )
             )
+        # Slice/concat op declarations for ops registered while translating THIS
+        # (theory-mode) collector's modules -- e.g. a FOREIGN primitive security
+        # game whose body reconstructs a KDF input (``KDFPRFSec.lookup`` prepends
+        # the key ``k`` to ``rest`` via ``concat_bs_Nkey_t_bs_Nin_Nkey_t_to_bs_Nin_t``).
+        # Such a concat lands in the foreign collector (its operands are foreign-
+        # theory bitstring types), yet was never emitted (only :meth:`emit`, on the
+        # TOP collector, declared concats) -> "no matching operator". Declare them
+        # here, inside the theory where their types live and where they are used.
+        # Round-trip / distr-split axioms are length-gated (skipped for abstract
+        # foreign lengths) and reference distrs that may be theory-external, so
+        # only the op decls are emitted here; a foreign tactic needing the axioms
+        # would surface as its own wall.
+        for src_name, dst_name in self._slice_ops:
+            op = _slice_op_name(src_name, dst_name)
+            decls.append(ec_ast.OpDecl(op, f"{src_name} -> int -> int -> {dst_name}"))
+        for left_name, right_name, result_name in self._concat_ops:
+            op = _concat_op_name(left_name, right_name, result_name)
+            decls.append(
+                ec_ast.OpDecl(op, f"{left_name} -> {right_name} -> {result_name}")
+            )
         return decls
 
     @property

@@ -200,6 +200,18 @@ class ExpressionTranslator:
             # byte-identical.
             left_none = isinstance(expr.left_expression, frog_ast.NoneExpression)
             right_none = isinstance(expr.right_expression, frog_ast.NoneExpression)
+            if left_none and right_none:
+                # ``None = None`` is reflexively true (the engine constant-folds
+                # an inlined optional-decaps ``ctStar`` guard to it). Written bare
+                # it is polymorphic ("only monomorphic types allowed"), so fold it
+                # to the constant. No compiling proof contains a bare ``None =
+                # None`` that survives EC's monomorphic-type check, so this is
+                # byte-identical.
+                return (
+                    "true"
+                    if expr.operator == frog_ast.BinaryOperators.EQUALS
+                    else "false"
+                )
             if left_none != right_none:
                 other = expr.right_expression if left_none else expr.left_expression
                 other_type = self._types.resolve(self._type_of(other))

@@ -742,10 +742,29 @@ class StatementTranslator:
         if _is_module_call(expr):
             assert isinstance(expr, frog_ast.FuncCall)
             # Nested-call args evaluate before this call, so hoist them first.
-            arg_strs = [
-                self._exprs.translate(self._hoist_calls_in_expr(a, decls, stmts))
-                for a in expr.args
-            ]
+            # An optional (``T?``) argument reaching a module call is unwrapped
+            # with ``oget`` -- the same coercion :meth:`_render_call_args` applies
+            # on the non-hoisted path (a ``T?`` narrowed to its base ``T``).
+            # Without it the hoisted call keeps the mistyped optional operand
+            # (``#a option`` vs the base param). A bare ``None`` reaching a
+            # base-typed param is a DEAD-branch placeholder the engine left where
+            # an inlined optional-decaps result flows into a base-arg method
+            # (``encodesharedsecret(None)`` in the else of an always-true
+            # ``if (None = None)``); ``oget None`` would be polymorphic ("only
+            # monomorphic types allowed"), so emit ``witness`` -- EC monomorphizes
+            # it from the param type, and the branch is dead so the value is never
+            # read. No-op when no arg is optional, so proofs whose hoisted calls
+            # take only base args are byte-identical.
+            arg_strs = []
+            for a in expr.args:
+                arg_str = self._exprs.translate(
+                    self._hoist_calls_in_expr(a, decls, stmts)
+                )
+                if isinstance(a, frog_ast.NoneExpression):
+                    arg_str = "witness"
+                elif self._is_optional_expr(a):
+                    arg_str = f"oget ({arg_str})"
+                arg_strs.append(arg_str)
             frog_type = self._exprs.type_of(expr)
             ec_type = self._types.translate_type(frog_type)
             fresh = _fresh_name_avoiding(decls, stmts, self._reserved_names)

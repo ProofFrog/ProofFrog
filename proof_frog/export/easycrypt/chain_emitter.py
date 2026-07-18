@@ -3989,6 +3989,37 @@ def _emit_one_oracle_chain(
         if peel is not None:
             tactic, pres, rung = peel
             return [], [_res_tag(rung), *tactic, "qed."], pres
+        # ek-twin fallback when the last states diverge. The ek-derivation twin
+        # route (tried above only when ``last_states_match``) builds its
+        # transitivity entirely off the FIRST flat states -- the raw-wrapper
+        # ``initialize`` the lemma actually relates -- so a divergent LAST state
+        # is irrelevant to it. The seedbased PK Breakable game unpacks its packed
+        # DecapsKey in ``Challenge`` (a post-init oracle), so the canonicalizer
+        # splits that field in the LAST state (``last_states_match=False``) while
+        # the raw-wrapper init is unchanged; without this fallback that hop_0
+        # admits though the identical hop_2 (Unbreakable, no unpack) closes. Same
+        # first-state reasoning as the backbone peel's last-states-diverge relax.
+        if (
+            not last_states_match
+            and full_coupling is not None
+            and "ev_" in full_coupling
+            and clone_alias
+        ):
+            ek_twin = _synth_init_ek_twin(
+                modules,
+                oracle_name,
+                left_states[0],
+                right_states[0],
+                external_module_types,
+                method_return_types,
+                flat_params,
+                det_methods,
+                clone_alias,
+                full_coupling,
+                hop_index=hop_index,
+            )
+            if ek_twin is not None:
+                return ek_twin
         if last_states_match:
             # Backbone reorder (same multiset, different order, functionalizable
             # NG det calls): the functional-twin route.

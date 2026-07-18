@@ -49,6 +49,11 @@ class TypeCollector:
         # separately-emitted holders never unify). Set post-construction once the
         # theorem primitive's clone alias is known.
         self.ro_module_prefix: str = ro_module_prefix
+        # Set by the statement translator when it emits an exclusion draw
+        # (``x <- T \ {..}`` -> EC ``d \ P``), so the preamble emits
+        # ``require import Dexcepted``. Conditional -> non-exclusion proofs stay
+        # byte-identical.
+        self.needs_dexcepted: bool = False
         # ``theory_mode``: when True, every distinct bitstring type seen
         # is registered as an abstract type inside the primitive's
         # abstract theory rather than as a top-level concrete type. Each

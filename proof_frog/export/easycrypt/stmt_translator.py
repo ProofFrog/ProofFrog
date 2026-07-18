@@ -477,6 +477,9 @@ class StatementTranslator:
         if isinstance(stmt, frog_ast.Sample):
             self._handle_sample(stmt, decls, stmts)
             return
+        if isinstance(stmt, frog_ast.UniqueSample) and stmt.surface_form == "minus":
+            self._handle_unique_sample_minus(stmt, decls, stmts)
+            return
         if isinstance(stmt, frog_ast.VariableDeclaration):
             self._handle_var_decl(stmt, decls)
             return
@@ -579,6 +582,53 @@ class StatementTranslator:
             stmts.append(ec_ast.Assign(ec_var, ro_ref))
         else:
             stmts.append(ec_ast.Sample(ec_var, distr))
+
+    def _handle_unique_sample_minus(
+        self,
+        stmt: frog_ast.UniqueSample,
+        decls: list[ec_ast.VarDecl],
+        stmts: list[ec_ast.EcStmt],
+    ) -> None:
+        """Translate a one-shot exclusion draw ``x <- T \\ {e0, ...}`` (the
+        ``minus`` surface form) to EC's stdlib exclusion distribution
+        ``d \\ P`` (``Dexcepted``): sample from the base distribution restricted
+        to values outside the excluded set. A singleton exclusion ``\\ {e}``
+        yields the predicate ``pred1 e``; a multi-element set folds to a
+        disjunction. Sets the ``needs_dexcepted`` flag so the preamble emits
+        ``require import Dexcepted``."""
+        var = _require_variable(stmt.var)
+        the_type = stmt.the_type if stmt.the_type is not None else stmt.sampled_from
+        ec_type = self._types.translate_type(the_type)
+        ec_var = self._exprs.ec_name(var.name)
+        decls.append(ec_ast.VarDecl(ec_var, ec_type))
+        self._type_map[var.name] = the_type
+        base_distr = self._types.distr_for(ec_type)
+        excluded = stmt.unique_set
+        if not isinstance(excluded, frog_ast.Set) or not excluded.elements:
+            raise NotImplementedError(
+                f"exclusion draw needs a non-empty set literal; got {excluded}"
+            )
+        # Render each excluded element in the sampled type's context. A ModInt
+        # exclusion ``\ {0}`` (GapCDH_NZ's nonzero-scalar draw) must render the
+        # literal ``0`` as the ring zero (``G_Exp.zero``), not the int ``0``,
+        # which ``_modint_operand`` does; a bitstring exclusion element is a
+        # plain typed variable.
+        if ec_type.text.endswith(".zmod"):
+            rendered = [
+                self._exprs._modint_operand(  # pylint: disable=protected-access
+                    e, ec_type
+                )
+                for e in excluded.elements
+            ]
+        else:
+            rendered = [self._exprs.translate(e) for e in excluded.elements]
+        if len(rendered) == 1:
+            pred = f"(pred1 {rendered[0]})"
+        else:
+            disj = " \\/ ".join(f"__x = {r}" for r in rendered)
+            pred = f"(fun __x => {disj})"
+        self._types.needs_dexcepted = True
+        stmts.append(ec_ast.Sample(ec_var, f"({base_distr} \\ {pred})"))
 
     def _handle_var_decl(
         self,

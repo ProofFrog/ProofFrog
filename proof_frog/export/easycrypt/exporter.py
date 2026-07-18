@@ -1033,8 +1033,19 @@ def _export_group_only(  # pylint: disable=too-many-locals
     stdlib_requires = (
         ["Group", "ZModP", "List"] if top_types.has_stdlib_group_or_modint() else []
     )
+    # ``Dexcepted`` provides the ``d \ P`` exclusion distribution for a one-shot
+    # exclusion draw (``x <- T \ {..}``). Required only when one was emitted, so
+    # exclusion-free exports stay byte-identical.
+    dexcepted_requires = ["Dexcepted"] if top_types.needs_dexcepted else []
     ec_file = ec_ast.EcFile(
-        requires=["AllCore", "Distr", "DProd", "DMap", *stdlib_requires],
+        requires=[
+            "AllCore",
+            "Distr",
+            "DProd",
+            "DMap",
+            *stdlib_requires,
+            *dexcepted_requires,
+        ],
         decls=decls,
     )
     return ec_ast.pretty_print(ec_file)
@@ -1818,6 +1829,11 @@ def export_proof_file(proof_path: str) -> str:
     oracle_type_by_game_file: dict[str, str] = {}
     module_name_by_concrete_game: dict[tuple[str, str], str] = {}
     adv_type_by_game_file: dict[str, str] = {}
+    # Per-let-name scheme-instance map (clone_alias/primitive_name are set at
+    # ``collect_all`` above, so this is available before the top-level
+    # ``instances_by_let_name`` is built). Used to give a MULTI-primitive game's
+    # params their own per-clone types.
+    inst_by_name = {inst.let_name: inst for inst in instances}
     for gf in primary_game_files:
         gf_id = _ec_ident(gf.name)
         oracle_type_name = f"{gf_id}_Oracle"
@@ -1825,6 +1841,28 @@ def export_proof_file(proof_path: str) -> str:
         theory_game_decls.append(
             theory_modules.translate_game_file_oracle(gf, oracle_type_name)
         )
+        # A game parameterized by MORE THAN ONE primitive (the seedbased ROM
+        # helper ``CGLazyROTwoSeeded(KEM_PQ, NG, lambda)``) cannot live inside a
+        # single primitive's abstract theory; give it per-param clone types so
+        # ``translate_game`` emits it as a multi-param functor.
+        gf_module_typed = [
+            p
+            for p in (gf.games[0].parameters if gf.games else [])
+            if isinstance(p.type, frog_ast.Variable)
+        ]
+        is_multi_primitive = len(gf_module_typed) > 1 and all(
+            p.name in inst_by_name for p in gf_module_typed
+        )
+        gf_param_mod_types: dict[str, str] | None = None
+        gf_param_prim_types: dict[str, str] | None = None
+        if is_multi_primitive:
+            gf_param_mod_types = {
+                p.name: f"{inst_by_name[p.name].clone_alias}.{scheme_type_name}"
+                for p in gf_module_typed
+            }
+            gf_param_prim_types = {
+                p.name: inst_by_name[p.name].primitive_name for p in gf_module_typed
+            }
         for side in gf.games:
             mod_name = f"{gf_id}_{side.name}"
             module_name_by_concrete_game[(gf.name, side.name)] = mod_name
@@ -1839,6 +1877,8 @@ def export_proof_file(proof_path: str) -> str:
                         oracle_model_by_game_file[gf.name].is_multi_oracle
                         or (bool(side.fields) and len(side.methods) > 1)
                     ),
+                    param_module_types=gf_param_mod_types,
+                    param_primitive_types=gf_param_prim_types,
                 )
             )
         adv = theory_modules.translate_adversary_type(
@@ -5332,12 +5372,29 @@ def export_proof_file(proof_path: str) -> str:
     # for the ``for e in m.entries`` map-iteration loop (lowered to a while
     # over ``elems (fdom m)``); ordered before ``FMap`` (its dependency).
     map_requires = ["List", "FSet", "FMap"] if uses_map else []
+    # ``Dexcepted`` (``d \ P``) for a one-shot exclusion draw; consult every
+    # collector since the exclusion can surface in a foreign-primitive/helper
+    # game body. Conditional -> exclusion-free exports stay byte-identical.
+    needs_dexcepted = (
+        top_types.needs_dexcepted
+        or theory_types.needs_dexcepted
+        or any(fs.theory_types.needs_dexcepted for fs in foreign_scopes.values())
+    )
+    dexcepted_requires = ["Dexcepted"] if needs_dexcepted else []
     ec_file = ec_ast.EcFile(
         # ``DProd`` / ``DMap`` provide the dprod/dmap lemmas
         # (``dmap_dprodE``, ``dmap1E``, ``dmap_id``, ``supp_dprod``,
         # etc.) consumed by the slice/concat round-trip + distribution-
         # split tactics emitted for Split/Merge Uniform Samples.
-        requires=["AllCore", "Distr", "DProd", "DMap", *stdlib_requires, *map_requires],
+        requires=[
+            "AllCore",
+            "Distr",
+            "DProd",
+            "DMap",
+            *stdlib_requires,
+            *map_requires,
+            *dexcepted_requires,
+        ],
         decls=decls,
     )
     return ec_ast.pretty_print(ec_file)

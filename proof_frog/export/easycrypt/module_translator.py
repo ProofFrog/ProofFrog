@@ -566,11 +566,19 @@ class ModuleTranslator:
         implements: str | None = None,
         emitted_param_type: str | None = None,
         emit_state_vars: bool = False,
+        param_module_types: dict[str, str] | None = None,
+        param_primitive_types: dict[str, str] | None = None,
     ) -> ec_ast.Module:
         """Translate a Game.
 
-        The game must take exactly one parameter, which is the primitive
-        instance (e.g. ``Game Real(SymEnc E)``).
+        A single-primitive game takes exactly one primitive-instance parameter
+        (e.g. ``Game Real(SymEnc E)``) and is emitted inside that primitive's
+        abstract theory. A MULTI-primitive game (``CGLazyROTwoSeeded(KEM_PQ, NG,
+        lambda)``) is emitted at top level after the sub-primitive clones; the
+        caller then supplies ``param_module_types`` (each param's EC functor
+        type, e.g. ``{"KEM_PQ": "KEM_PQ_c.Scheme", "NG": "NG_c.Scheme"}``) and
+        ``param_primitive_types`` (each param's primitive name, for body-call
+        ``type_of`` resolution), exactly like :meth:`translate_intermediate_game`.
 
         ``emit_state_vars`` declares each game-level field as a module-level
         ``var`` (mirroring :meth:`translate_flat_game` /
@@ -582,32 +590,53 @@ class ModuleTranslator:
         emit no ``var`` block, so their output is byte-identical -- their
         fields are inlined to method locals by canonicalization.
         """
-        if len(game.parameters) == 1:
-            param = game.parameters[0]
-        else:
-            # A foreign assumption game may carry non-module (e.g. ``Int Nkey``
-            # length) parameters alongside its single primitive parameter, like
-            # ``Game Real(KDF H, Int Nkey)``. Mirror
-            # :meth:`translate_intermediate_game`: keep the one module-typed
-            # (primitive) parameter and drop the rest -- the Ints surface only
-            # inside abstract bitstring-length parameterizations, never as a
-            # free EC value.
-            module_params = [
-                p for p in game.parameters if isinstance(p.type, frog_ast.Variable)
+        module_typed = [
+            p for p in game.parameters if isinstance(p.type, frog_ast.Variable)
+        ]
+        if len(game.parameters) != 1 and len(module_typed) > 1:
+            # A MULTI-PRIMITIVE game (e.g. the seedbased ROM helper
+            # ``CGLazyROTwoSeeded(KEM_PQ, NG, lambda)``) is parameterized by
+            # more than one primitive, so it cannot live inside a single
+            # primitive's abstract theory; the caller emits it at TOP LEVEL
+            # (after the sub-primitive clones) and supplies per-param EC/
+            # primitive types, exactly like :meth:`translate_intermediate_game`.
+            # Non-module (``Int``) params are dropped (compile-time indices).
+            if param_module_types is None or param_primitive_types is None:
+                raise ValueError(
+                    f"multi-primitive game {module_name!r} needs "
+                    "param_module_types/param_primitive_types from the caller"
+                )
+            emitted_module_params = [
+                ec_ast.ModuleParam(name=p.name, module_type=param_module_types[p.name])
+                for p in module_typed
             ]
-            assert len(module_params) == 1, (
-                "Phase 1 skeleton only handles games with a single primitive "
-                f"(module-typed) parameter; got {[p.type for p in game.parameters]}"
-            )
-            param = module_params[0]
-        module_param_types = {param.name: param_type_name}
-        emitted_type = emitted_param_type or param_type_name
+            body_param_types = param_primitive_types
+        else:
+            if len(game.parameters) == 1:
+                param = game.parameters[0]
+            else:
+                # A foreign assumption game may carry non-module (e.g. ``Int
+                # Nkey`` length) parameters alongside its single primitive
+                # parameter, like ``Game Real(KDF H, Int Nkey)``. Keep the one
+                # module-typed (primitive) parameter and drop the rest -- the
+                # Ints surface only inside abstract bitstring-length
+                # parameterizations, never as a free EC value.
+                assert len(module_typed) == 1, (
+                    "single-primitive path expects exactly one module-typed "
+                    f"parameter; got {[p.type for p in game.parameters]}"
+                )
+                param = module_typed[0]
+            emitted_type = emitted_param_type or param_type_name
+            emitted_module_params = [
+                ec_ast.ModuleParam(name=param.name, module_type=emitted_type)
+            ]
+            body_param_types = {param.name: param_type_name}
         field_types = {fld.name: fld.type for fld in game.fields}
         field_renames = _field_renames_for(game.fields)
         procs = [
             self._translate_method(
                 method,
-                module_param_types,
+                body_param_types,
                 field_types=field_types,
                 field_renames=field_renames,
             )
@@ -626,7 +655,7 @@ class ModuleTranslator:
         return ec_ast.Module(
             name=module_name,
             procs=procs,
-            params=[ec_ast.ModuleParam(name=param.name, module_type=emitted_type)],
+            params=emitted_module_params,
             implements=implements,
             module_vars=module_vars,
         )

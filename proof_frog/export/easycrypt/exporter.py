@@ -2289,6 +2289,30 @@ def export_proof_file(proof_path: str) -> str:
             # foreign ``OTP(3*lambda)`` would resolve bare ``Key`` to the
             # primary PseudoOTP's ``BitString<lambda>`` (different width).
             foreign_aliases[fname] = ftype
+        # A scheme wrapping a sub-primitive (``KEM_PQ = SeededKEMWrapper(
+        # KEM_PQ_inner)``) refers to its PARAM's carrier fields qualified in the
+        # body (``[K_inner.EncapsKey, K_inner.DecapsKey] = K_inner.DeriveKeyPair(
+        # seed)``). ``K_inner.DecapsKey`` must resolve to the INNER instance's
+        # carrier (``KEM_PQ_inner.DecapsKey`` -> ``KEMPQDecapsKeySpace``), NOT the
+        # wrapper's own same-named ``DecapsKey`` field (``BitString<Nseed>`` = the
+        # seed, a genuinely different type -- the wrapper re-derives the inner key
+        # from the seed then forwards to ``K_inner.Decaps``). Bind each param to
+        # its instantiation arg and alias ``<param>.<field>`` to the arg's
+        # already-resolved carrier (the ``<arg>.<field>`` qualified alias). The
+        # collector's ``resolve`` prefers this qualified key over the bare
+        # fallback. Carrier-fields analogue of wall-3d's ``<param>.<int>`` fix.
+        if isinstance(foreign_let.value, frog_ast.FuncCall):
+            for wrap_param, wrap_arg in zip(
+                foreign_scheme.parameters, foreign_let.value.args
+            ):
+                if not isinstance(wrap_arg, frog_ast.Variable):
+                    continue
+                wrap_arg_prefix = f"{wrap_arg.name}."
+                for tk, tv in top_aliases.items():
+                    if tk.startswith(wrap_arg_prefix):
+                        foreign_aliases[
+                            f"{wrap_param.name}.{tk[len(wrap_arg_prefix):]}"
+                        ] = tv
         foreign_types = tc.TypeCollector(
             aliases=foreign_aliases, known_abstract_types=known_abstract_types
         )

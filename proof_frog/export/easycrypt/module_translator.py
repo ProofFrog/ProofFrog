@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Callable
 
@@ -1622,6 +1623,19 @@ class ModuleTranslator:
                     type_map[name] = resolved
 
         type_of = self._type_of_factory(type_map, module_param_types)
+        # Infer types of engine-inlined UNTYPED assignments from their RHS so a
+        # later slice/projection of the var types instead of raising. The lazy-RO
+        # case-split (``__a <- y0 || y1;`` in one branch, ``__a <- H(x);`` in
+        # another) produces such a var used after the ``if`` as a full seed that
+        # is then sliced into its per-KEM components. Runs after ``type_of`` is
+        # built (it closes over ``type_map`` by reference, so newly-inferred
+        # entries feed later inferences) and gap-fills only (``setdefault`` +
+        # only where ``type_of`` on the RHS succeeds): a var that already has a
+        # type, or whose RHS is not yet typeable, is untouched -- so every proof
+        # that already exported is byte-identical (an untyped var used in a
+        # type-requiring position that resolves today never reaches here; one
+        # that does not resolve today crashes the export, so none exist).
+        _infer_untyped_assignment_types(method.block.statements, type_of, type_map)
         exprs = expr_translator.ExpressionTranslator(
             self._types, type_of, field_renames=field_renames
         )
@@ -1716,24 +1730,84 @@ def _canonical_field_renames(
     return {fld.name: f"f{rank:02d}" for rank, (_, fld) in enumerate(ordered)}
 
 
+def _infer_untyped_assignment_types(
+    statements: Sequence[frog_ast.Statement],
+    type_of: Callable[[frog_ast.Expression], frog_ast.Type],
+    type_map: dict[str, frog_ast.Type],
+) -> None:
+    """Fill ``type_map`` with the types of untyped assignments (``v <- rhs`` with
+    no annotation) by evaluating ``type_of`` on the RHS, to a fixpoint (an
+    inferred var can feed a later RHS). Descends ``if``/``for`` bodies. Gap-fill:
+    ``setdefault`` and only when ``type_of(rhs)`` succeeds, so an already-typed
+    var or an untypeable RHS is left as-is."""
+
+    def _walk(stmts: Sequence[frog_ast.Statement]) -> int:
+        added = 0
+        for st in stmts:
+            if isinstance(st, frog_ast.IfStatement):
+                for block in st.blocks:
+                    added += _walk(block.statements)
+            elif isinstance(st, frog_ast.GenericFor):
+                added += _walk(st.block.statements)
+            elif (
+                isinstance(st, frog_ast.Assignment)
+                and st.the_type is None
+                and isinstance(st.var, frog_ast.Variable)
+                and st.var.name not in type_map
+            ):
+                try:
+                    inferred = type_of(st.value)
+                except (KeyError, NotImplementedError):
+                    continue
+                type_map.setdefault(st.var.name, inferred)
+                added += 1
+        return added
+
+    for _ in range(len(type_map) + 4):  # fixpoint; bounded by the var count
+        if _walk(statements) == 0:
+            break
+
+
 def _seed_type_map(
-    stmt: frog_ast.Statement, type_map: dict[str, frog_ast.Type]
+    stmt: frog_ast.Statement,
+    type_map: dict[str, frog_ast.Type],
+    gap_fill: bool = False,
 ) -> None:
     """Record declared-variable types into the map for the expr translator.
 
     Recurses into a ``for e in m.entries`` map-iteration loop (a ``GenericFor``)
     so locals declared in its body -- e.g. ``BitString<n> m = e[0];`` whose
-    ``m`` is later sliced -- plus the loop variable ``e`` are typed. Scoped to
-    ``GenericFor`` only: it is the sole loop the exporter translates (every
-    other body with one witness-stubs), so no pre-existing translated body is
-    affected. ``if`` blocks are NOT descended (that broadly perturbs the type
-    map and changes unrelated exports)."""
+    ``m`` is later sliced -- plus the loop variable ``e`` are typed.
+
+    ``if`` branches are descended in **gap-fill** mode (``setdefault`` -- never
+    overwriting a type already seeded at the enclosing level): a var declared
+    inside a conditional (e.g. an exclusion-sampling case-split
+    ``if (s == s0) { BitString<n> a = ...; }``) and then used *after* the ``if``
+    otherwise has no type -> ``type_of`` raises and the whole body witness-stubs
+    (or, if that var is sliced, the export crashes). Gap-fill is byte-identical:
+    it only ADDS an entry for a name the top-level pass left unset, so a proof
+    whose top-level and branch reuse a name keeps its top-level type, and a name
+    used in a type-requiring position that already resolved is untouched.
+
+    ``gap_fill`` (set only while inside an ``if`` branch) makes every write here
+    a ``setdefault``."""
+
+    def _put(name: str, the_type: frog_ast.Type) -> None:
+        if gap_fill:
+            type_map.setdefault(name, the_type)
+        else:
+            type_map[name] = the_type
+
     if isinstance(stmt, (frog_ast.Sample, frog_ast.Assignment)):
         if stmt.the_type is not None and isinstance(stmt.var, frog_ast.Variable):
-            type_map[stmt.var.name] = stmt.the_type
+            _put(stmt.var.name, stmt.the_type)
     elif isinstance(stmt, frog_ast.VariableDeclaration):
-        type_map[stmt.name] = stmt.type
+        _put(stmt.name, stmt.type)
     elif isinstance(stmt, frog_ast.GenericFor):
-        type_map[stmt.var_name] = stmt.var_type
+        _put(stmt.var_name, stmt.var_type)
         for inner in stmt.block.statements:
-            _seed_type_map(inner, type_map)
+            _seed_type_map(inner, type_map, gap_fill)
+    elif isinstance(stmt, frog_ast.IfStatement):
+        for block in stmt.blocks:
+            for inner in block.statements:
+                _seed_type_map(inner, type_map, gap_fill=True)

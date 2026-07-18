@@ -248,16 +248,35 @@ def _ct_leaves(
     return out
 
 
+# The KDF leaf ops that serialize a component EncapsKey (the PK win term). A KEM
+# component's public key is serialized by ``EncodeEncapsKey``; a nominal-group
+# component's public key is a group element serialized by the group's ``Encode``.
+# Both are declared ``injective`` in their primitive (KEM.primitive /
+# NominalGroup.primitive), so both drive a faithful ``<M>_<m>_inj`` axiom, gated
+# on the ``sig.injective`` modifier in the exporter -- and the leaf shape + the
+# injectivity discharge are identical. The group ``Encode`` also serializes the
+# component CIPHERTEXT (both are group elements), so an ``encode`` leaf is an
+# encaps-key leaf only when its argument does NOT reference a ciphertext param
+# (that split mirrors ``_ct_leaves``); ``encodeencapskey`` is unambiguous.
+_EK_ENCODE_METHODS = ("encodeencapskey", "encode")
+
+
 def _ek_leaves(
-    leaves: list[str], clone_alias: dict[str, str]
+    leaves: list[str], clone_alias: dict[str, str], ct_refs: tuple[str, ...] = ()
 ) -> list[tuple[int, str, str, str]]:
-    """Find the KDF leaves that encode a component EncapsKey: the two
-    ``ev_encodeencapskey`` leaves (``ek_PQ``, ``ek_T``) -- the PK win term.
+    """Find the KDF leaves that encode a component EncapsKey: the two encaps-key
+    encoding leaves (``ev_encodeencapskey`` for a KEM component; the group
+    ``ev_encode`` for a nominal-group component) -- the PK win term.
+
+    ``ct_refs`` are the ciphertext-param reference strings in this leaf set's
+    rendering (e.g. ``("ct0{2}", "ct1{2}")`` reduction-side, ``("C0", "C1")`` in
+    the goal env); an ``ev_encode`` leaf whose argument references one is the
+    component ciphertext encoding, not the encaps key, so it is excluded.
 
     Returns ``[(leaf_idx, module, method, ek_ev_arg), ...]`` where
-    ``<module>_encodeencapskey_inj`` is the injectivity axiom and ``ek_ev_arg`` is
-    the seed-derived encaps-key ev-form (``(<KEM>_c.ev_derivekeypair ...).\\`1``),
-    which is exactly the component of the ek-derivation coupling."""
+    ``<module>_<method>_inj`` is the injectivity axiom and ``ek_ev_arg`` is the
+    seed-derived encaps-key ev-form, which is exactly the component of the
+    ek-derivation coupling."""
     out: list[tuple[int, str, str, str]] = []
     clone_to_mod = {c: m for m, c in clone_alias.items()}
     for idx, leaf in enumerate(leaves):
@@ -268,10 +287,13 @@ def _ek_leaves(
         if ".ev_" not in head:
             continue
         clone, method = head.split(".ev_", 1)
-        if method != "encodeencapskey":
+        if method not in _EK_ENCODE_METHODS:
+            continue
+        arg = arg.strip()
+        if method == "encode" and any(cr in arg for cr in ct_refs):
             continue
         module = clone_to_mod.get(clone, clone)
-        out.append((idx, module, method, arg.strip()))
+        out.append((idx, module, method, arg))
     return out
 
 
@@ -290,6 +312,10 @@ def single_r_hop0_tactic(
     gge = _game_glob_elim(gmods)
     gargs = " ".join(gge)
     ct0, ct1 = spec.ct_params
+    # Ciphertext-param references, used to exclude the component-ciphertext group
+    # ``encode`` leaves from the encaps-key ones: reduction-side the KDF renders
+    # ct params as ``ctN{2}``, the goal env as ``C0``/``C1`` (see below).
+    red_ct_refs = (f"{ct0}" "{2}", f"{ct1}" "{2}")
     nkeys = len(spec.game_key_refs)
     seed_refs = [f"{spec.red_base}.{sf}" "{2}" for sf in spec.seed_fields]
     dkey = [f"D{i}" for i in range(nkeys)]
@@ -314,7 +340,7 @@ def single_r_hop0_tactic(
     if parsed0 is None or parse_left_nested_concat(kdf_r1) is None:
         return None
     if is_pk:
-        if len(_ek_leaves(parsed0[1], spec.clone_alias)) != 2:
+        if len(_ek_leaves(parsed0[1], spec.clone_alias, red_ct_refs)) != 2:
             return None
     elif len(_ct_leaves(parsed0[1], f"{ct0}" "{2}", spec.clone_alias)) != 2:
         return None
@@ -331,7 +357,11 @@ def single_r_hop0_tactic(
         for j in range(nkeys):
             ks = [k for k in range(2) if spec.ct_seed_idx[k] == j]
             parsed_j = parse_left_nested_concat(kdf_rs[ks[0]]) if ks else None
-            eklv = _ek_leaves(parsed_j[1], spec.clone_alias) if parsed_j else []
+            eklv = (
+                _ek_leaves(parsed_j[1], spec.clone_alias, red_ct_refs)
+                if parsed_j
+                else []
+            )
             if len(eklv) != 2:
                 return None
             pq_ev, t_ev = eklv[0][3], eklv[1][3]
@@ -456,8 +486,9 @@ def single_r_hop0_tactic(
     gops, gleaves0 = gparse0
     _gops1, gleaves1 = gparse1
     if is_pk:
-        gkey_leaves0 = _ek_leaves(gleaves0, spec.clone_alias)
-        gkey_leaves1 = _ek_leaves(gleaves1, spec.clone_alias)
+        goal_ct_refs = ("C0", "C1")
+        gkey_leaves0 = _ek_leaves(gleaves0, spec.clone_alias, goal_ct_refs)
+        gkey_leaves1 = _ek_leaves(gleaves1, spec.clone_alias, goal_ct_refs)
     else:
         gkey_leaves0 = _ct_leaves(gleaves0, "C0", spec.clone_alias)
         gkey_leaves1 = _ct_leaves(gleaves1, "C1", spec.clone_alias)

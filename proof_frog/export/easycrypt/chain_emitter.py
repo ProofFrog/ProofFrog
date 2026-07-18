@@ -5404,8 +5404,10 @@ def _falsefalse_ek_inv(  # pylint: disable=too-many-arguments,too-many-positiona
         parsed = srb.parse_left_nested_concat(kdf)
         if parsed is None:
             return None
+        # ct params render on side {1} here (R is the left endpoint), so exclude
+        # the component-ciphertext group ``encode`` leaves by their ``ctN{1}`` ref.
         eklv = srb._ek_leaves(
-            parsed[1], clone_alias
+            parsed[1], clone_alias, (f"{ct0}" "{1}", f"{ct1}" "{1}")
         )  # pylint: disable=protected-access
         if len(eklv) != 2:
             return None

@@ -1894,6 +1894,15 @@ class CheckTypeVisitor(VariableTypeVisitor):
         my_type = self.get_type(variable.name)
         self.ast_type_map.set(variable, my_type)
 
+    def leave_bool_type(self, bool_type: frog_ast.BoolType) -> None:
+        self.ast_type_map.set(bool_type, bool_type)
+
+    def leave_int_type(self, int_type: frog_ast.IntType) -> None:
+        self.ast_type_map.set(int_type, int_type)
+
+    def leave_optional_type(self, optional_type: frog_ast.OptionalType) -> None:
+        self.ast_type_map.set(optional_type, optional_type)
+
     def leave_bit_string_type(self, bit_string_type: frog_ast.BitStringType) -> None:
         if bit_string_type.parameterization is not None:
             parameterized_type = self.get_type_from_ast(

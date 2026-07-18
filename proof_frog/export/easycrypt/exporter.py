@@ -90,6 +90,38 @@ class _QualifyFields(visitors.Transformer):
         return variable
 
 
+def _param_aliased_int_qual_map(
+    scheme: frog_ast.Scheme | None,
+    let_value: frog_ast.Expression | None,
+    int_qual_map: dict[str, frog_ast.ASTNode],
+) -> dict[str, frog_ast.ASTNode]:
+    """Extend ``int_qual_map`` so a scheme's PARAM length fields resolve.
+
+    A scheme wrapping a sub-primitive (``KEM_PQ = SeededKEMWrapper(KEM_PQ_inner)``)
+    has fields that reference its param's length directly (``Set DecapsKey =
+    BitString<K_inner.Nseed>``). The param is not a let, so ``int_qual_map``
+    (keyed ``<let>.<int>``) leaves ``K_inner.Nseed`` unresolved -> an invalid
+    ``bs_K_inner_Nseed``. Bind each param to its instantiation arg and alias
+    ``<param>.<int>`` to the already-resolved ``<arg>.<int>`` base value. Only
+    ADDS keys, so an instance without such a param-length field is byte-identical.
+    """
+    if (
+        scheme is None
+        or not scheme.parameters
+        or not isinstance(let_value, frog_ast.FuncCall)
+    ):
+        return int_qual_map
+    out = dict(int_qual_map)
+    for sp, sa in zip(scheme.parameters, let_value.args):
+        if not isinstance(sa, frog_ast.Variable):
+            continue
+        sa_prefix = f"{sa.name}."
+        for qk, qv in int_qual_map.items():
+            if qk.startswith(sa_prefix):
+                out[f"{sp.name}.{qk[len(sa_prefix):]}"] = qv
+    return out
+
+
 def _base_int_length_map(
     proof: frog_ast.ProofFile,
     primitives_by_name: dict[str, frog_ast.Primitive],
@@ -1397,8 +1429,22 @@ def export_proof_file(proof_path: str) -> str:
         # Resolve foreign field refs + this instance's int params, but NOT its
         # own field names: the concretized lengths are already in base/foreign
         # terms, so applying the field aliases would re-double a base symbol.
+        #
+        # A scheme wrapping a sub-primitive (``KEM_PQ = SeededKEMWrapper(
+        # KEM_PQ_inner)``) has a field that references the wrapper's PARAM's
+        # length directly (``Set DecapsKey = BitString<K_inner.Nseed>``). The
+        # param is not a let, so ``int_qual_map`` (keyed ``<let>.<int>``) leaves
+        # ``K_inner.Nseed`` unresolved -> an invalid ``bs_K_inner_Nseed`` in every
+        # consumer of this field alias. Bind each scheme param to its
+        # instantiation arg and alias ``<param>.<int>`` to the ALREADY-resolved
+        # ``<arg>.<int>`` base value; only ADDS keys, so an instance without such
+        # a param-length field reference is byte-identical.
+        let_value = next((l.value for l in proof.lets if l.name == inst.let_name), None)
+        aug_int_qual_map = _param_aliased_int_qual_map(
+            schemes_by_name.get(inst.ctor_name), let_value, int_qual_map
+        )
         inst_inliner = _LengthInliner(
-            param_int_by_let.get(inst.let_name, {}), int_qual_map
+            param_int_by_let.get(inst.let_name, {}), aug_int_qual_map
         )
         inst.concretized_fields = {
             fname: inst_inliner.transform(ftype)

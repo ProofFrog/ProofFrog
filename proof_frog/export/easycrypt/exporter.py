@@ -2349,8 +2349,20 @@ def export_proof_file(proof_path: str) -> str:
             module_params=fmp or None,
             module_param_types=fmpt or None,
         )
+        # An applied arg that is ITSELF a concrete scheme instance (``G =
+        # CGRandomOraclePRG(KEM_PQ, NG)`` where ``KEM_PQ =
+        # SeededKEMWrapper(KEM_PQ_inner)``) must render as that instance's module
+        # EXPRESSION, not its let-name: the derived ``KEM_PQ`` is not a declared
+        # module, so a bare ``CGRandomOraclePRG(KEM_PQ, NG)`` is an ``unknown
+        # module: KEM_PQ``. Instances are processed in declaration order, so a
+        # prior concrete instance already has its ``concrete_module_expr`` entry;
+        # substitute it. A plain abstract/primitive arg (``NG``) has no entry and
+        # stays its let-name, so single-level exports are byte-identical.
+        applied_resolved = [concrete_module_expr.get(a, a) for a in applied]
         concrete_module_expr[inst.let_name] = (
-            f"{inst.ctor_name}({', '.join(applied)})" if applied else inst.ctor_name
+            f"{inst.ctor_name}({', '.join(applied_resolved)})"
+            if applied_resolved
+            else inst.ctor_name
         )
 
     # Per-instance module expression. For a primitive instance

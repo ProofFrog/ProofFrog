@@ -90,6 +90,41 @@ class _QualifyFields(visitors.Transformer):
         return variable
 
 
+def _qualify_method_return_type(
+    rt: frog_ast.Type,
+    inst: str,
+    int_qual_map: dict[str, frog_ast.ASTNode],
+) -> frog_ast.Type:
+    """Qualify a primitive method's raw return type by the calling instance.
+
+    A method-signature return type names carriers/lengths in the primitive's own
+    namespace (``[EncapsKey, DecapsKey]`` from ``KEM.DeriveKeyPair``, ``Element``
+    from ``NG.Exp``, ``BitString<Nss>`` from an encode). Resolving those bare
+    names goes through whichever scheme registered that alias -- in a
+    multi-primitive proof the hybrid ``CG_seedbased`` re-registers bare
+    ``EncapsKey``/``DecapsKey`` as ITS carriers, so an inner ``KEM_PQ_inner``
+    call's result mistypes as the hybrid pk/seed. Qualifying each carrier to the
+    receiver (``EncapsKey`` -> ``inst.EncapsKey`` -> the instance's alias) and
+    each bitstring length to the receiver's int field pins the type to the
+    RECEIVER. Surfaces on a hoisted call temp (the ``the_type``-carrying
+    top-level assignment path is already engine-qualified); a single-primitive
+    proof's bare alias already resolves to the sole instance, so the qualified
+    form translates to the same EC type -- byte-identical.
+    """
+    if isinstance(rt, frog_ast.Variable):
+        return frog_ast.FieldAccess(frog_ast.Variable(inst), rt.name)
+    if isinstance(rt, frog_ast.BitStringType) and rt.parameterization is not None:
+        qualified_param = _QualifyFields(inst, int_qual_map).transform(
+            copy.deepcopy(rt.parameterization)
+        )
+        return frog_ast.BitStringType(qualified_param)
+    if isinstance(rt, frog_ast.ProductType):
+        return frog_ast.ProductType(
+            [_qualify_method_return_type(c, inst, int_qual_map) for c in rt.types]
+        )
+    return rt
+
+
 def _param_aliased_int_qual_map(
     scheme: frog_ast.Scheme | None,
     let_value: frog_ast.Expression | None,
@@ -1698,35 +1733,9 @@ def export_proof_file(proof_path: str) -> str:
                 ):
                     key = (module_param_types[obj.name], e.func.name)
                     if key in method_return_types:
-                        rt = method_return_types[key]
-                        # A bare carrier return type (``Element`` from
-                        # ``NG.Exp``) must be qualified by the instance so it
-                        # resolves through the alias map (``NG.Element`` ->
-                        # ``NGElementSpace``); an unqualified ``Element`` has no
-                        # top-level alias. Only surfaces when the call's type is
-                        # needed directly (e.g. hoisting it out of an expr).
-                        if isinstance(rt, frog_ast.Variable):
-                            return frog_ast.FieldAccess(
-                                frog_ast.Variable(obj.name), rt.name
-                            )
-                        # A ``BitString<Nss>`` return whose length is a bare
-                        # primitive int field: qualify it to the calling
-                        # instance (``Nss`` -> ``KEM_PQ.Nss``) so the seeded
-                        # int-field aliases inline it to the base int
-                        # (``kem_pq_nss``) rather than stripping to a bare
-                        # ``bs_Nss`` -- which would mismatch the length-inlined
-                        # ``bs_kem_pq_nss`` every other use of this width (and
-                        # the registered concat ops) carries. Surfaces on a
-                        # hoisted call temp typed by the method's raw signature.
-                        if (
-                            isinstance(rt, frog_ast.BitStringType)
-                            and rt.parameterization is not None
-                        ):
-                            qualified_param = _QualifyFields(
-                                obj.name, int_qual_map
-                            ).transform(copy.deepcopy(rt.parameterization))
-                            return frog_ast.BitStringType(qualified_param)
-                        return rt
+                        return _qualify_method_return_type(
+                            method_return_types[key], obj.name, int_qual_map
+                        )
             if isinstance(e, frog_ast.FieldAccess) and e.name in (
                 "generator",
                 "identity",

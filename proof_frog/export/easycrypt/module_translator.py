@@ -1328,8 +1328,19 @@ class ModuleTranslator:
         exprs = expr_translator.ExpressionTranslator(
             self._types, type_of, field_renames=field_renames
         )
+        # The reduction body may make OTHER challenger calls besides the
+        # ``challenger.Initialize()`` we replaced with ``pk`` (a ROM reduction's
+        # ``challenger.Hash(seed)``). The adversary wrapper names the challenger
+        # functor param ``C`` (see :meth:`translate_reduction_adversary`), so
+        # rewrite the FrogLang ``challenger`` -> ``C`` -- EC modules must be
+        # uppercase-initial, and a bare ``challenger.hash`` is a parse error.
+        # A pure forward+repack reduction has no residual ``challenger`` ref
+        # after the Initialize replacement, so this is a no-op there.
         stmts = stmt_translator.StatementTranslator(
-            self._types, exprs, type_map=type_map
+            self._types,
+            exprs,
+            module_var_aliases={"challenger": "C"},
+            type_map=type_map,
         )
         translated = stmts.translate_block(frog_ast.Block(new_stmts))
 

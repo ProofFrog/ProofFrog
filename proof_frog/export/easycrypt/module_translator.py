@@ -1671,7 +1671,9 @@ class ModuleTranslator:
         # that already exported is byte-identical (an untyped var used in a
         # type-requiring position that resolves today never reaches here; one
         # that does not resolve today crashes the export, so none exist).
-        _infer_untyped_assignment_types(method.block.statements, type_of, type_map)
+        inferred_untyped = _infer_untyped_assignment_types(
+            method.block.statements, type_of, type_map
+        )
         exprs = expr_translator.ExpressionTranslator(
             self._types, type_of, field_renames=field_renames
         )
@@ -1685,6 +1687,24 @@ class ModuleTranslator:
         try:
             translated = stmts.translate_block(method.block, return_type=return_type)
             body: list[ec_ast.EcStmt] = []
+            # Declare the locals inferred by ``_infer_untyped_assignment_types``:
+            # they are assigned untyped (``v <- rhs`` in an if/for body -- the
+            # lazy-RO case-split ``__a3__``), so the statement translator renders
+            # them bare (no ``VarDecl``) and EC rejects the undeclared module var.
+            # These names are locals (fields/params/typed-assignment vars are
+            # pre-seeded into ``type_map``, so the inference skips them), and none
+            # is already declared by the statement translator (it declares only
+            # typed assignments). Ordered by first-assignment position for
+            # determinism; deduped against the translator's own decls defensively.
+            already = {d.name for d in translated.var_decls}
+            for name in inferred_untyped:
+                ec_name = exprs.ec_name(name)
+                if ec_name in already:
+                    continue
+                already.add(ec_name)
+                body.append(
+                    ec_ast.VarDecl(ec_name, self._types.translate_type(type_map[name]))
+                )
             body.extend(translated.var_decls)
             body.extend(translated.stmts)
             # Drop statements after a top-level ``return``. Canonicalization can
@@ -1770,12 +1790,17 @@ def _infer_untyped_assignment_types(
     statements: Sequence[frog_ast.Statement],
     type_of: Callable[[frog_ast.Expression], frog_ast.Type],
     type_map: dict[str, frog_ast.Type],
-) -> None:
+) -> list[str]:
     """Fill ``type_map`` with the types of untyped assignments (``v <- rhs`` with
     no annotation) by evaluating ``type_of`` on the RHS, to a fixpoint (an
     inferred var can feed a later RHS). Descends ``if``/``for`` bodies. Gap-fill:
     ``setdefault`` and only when ``type_of(rhs)`` succeeds, so an already-typed
-    var or an untypeable RHS is left as-is."""
+    var or an untypeable RHS is left as-is. Returns the newly-inferred var names
+    in first-assignment order (these are locals -- fields are pre-seeded into
+    ``type_map`` -- so the caller can declare them, which the statement
+    translator does not do for untyped assignments)."""
+
+    inferred_order: list[str] = []
 
     def _walk(stmts: Sequence[frog_ast.Statement]) -> int:
         added = 0
@@ -1796,12 +1821,15 @@ def _infer_untyped_assignment_types(
                 except (KeyError, NotImplementedError):
                     continue
                 type_map.setdefault(st.var.name, inferred)
+                if st.var.name not in inferred_order:
+                    inferred_order.append(st.var.name)
                 added += 1
         return added
 
     for _ in range(len(type_map) + 4):  # fixpoint; bounded by the var count
         if _walk(statements) == 0:
             break
+    return inferred_order
 
 
 def _seed_type_map(

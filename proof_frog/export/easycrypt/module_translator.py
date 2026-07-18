@@ -1189,6 +1189,7 @@ class ModuleTranslator:
                     pk0_local_name=outer_init_local,
                     challenger_oracle_type=inner_oracle_type_name,
                     method_return_types=method_return_types or {},
+                    reduction_arg_exprs=reduction_arg_exprs,
                 )
                 body.extend(consumed_decls)
                 body.extend(consumed_stmts)
@@ -1259,6 +1260,7 @@ class ModuleTranslator:
         pk0_local_name: str,
         challenger_oracle_type: str = "",
         method_return_types: dict[tuple[str, str], frog_ast.Type] | None = None,
+        reduction_arg_exprs: list[str] | None = None,
     ) -> tuple[list[ec_ast.VarDecl], list[ec_ast.EcStmt]]:
         """Render the reduction's ``Initialize`` with the challenger's
         ``Initialize()`` result replaced by the leaked ``pk`` parameter.
@@ -1328,18 +1330,29 @@ class ModuleTranslator:
         exprs = expr_translator.ExpressionTranslator(
             self._types, type_of, field_renames=field_renames
         )
-        # The reduction body may make OTHER challenger calls besides the
-        # ``challenger.Initialize()`` we replaced with ``pk`` (a ROM reduction's
-        # ``challenger.Hash(seed)``). The adversary wrapper names the challenger
-        # functor param ``C`` (see :meth:`translate_reduction_adversary`), so
-        # rewrite the FrogLang ``challenger`` -> ``C`` -- EC modules must be
-        # uppercase-initial, and a bare ``challenger.hash`` is a parse error.
-        # A pure forward+repack reduction has no residual ``challenger`` ref
-        # after the Initialize replacement, so this is a no-op there.
+        # The spliced Initialize is emitted OUTSIDE the reduction module, so the
+        # reduction's own functor params (``KEM_PQ``, ``NG``, ...) are not in the
+        # adversary's scope. Rewrite each to the module EXPRESSION the adversary
+        # applies the reduction with (``KEM_PQ`` -> ``SeededKEMWrapper(
+        # KEM_PQ_inner)``), from ``reduction_arg_exprs`` (declaration order,
+        # challenger excluded). A ROM reduction also makes OTHER challenger calls
+        # besides the ``challenger.Initialize()`` replaced with ``pk`` (a
+        # ``challenger.Hash(seed)``); the adversary names the challenger functor
+        # param ``C`` (:meth:`translate_reduction_adversary`), so ``challenger``
+        # -> ``C`` too (EC modules are uppercase-initial; a bare
+        # ``challenger.hash`` is a parse error). A single-primitive reduction
+        # whose params ARE the adversary's own params, with a pure forward+repack
+        # Initialize (no residual ``challenger`` ref), is byte-identical: the
+        # ``<param> -> <param>`` aliases are identity, and no ``challenger``
+        # survives.
+        module_var_aliases = {
+            p.name: e for p, e in zip(reduction.parameters, reduction_arg_exprs or [])
+        }
+        module_var_aliases["challenger"] = "C"
         stmts = stmt_translator.StatementTranslator(
             self._types,
             exprs,
-            module_var_aliases={"challenger": "C"},
+            module_var_aliases=module_var_aliases,
             type_map=type_map,
         )
         translated = stmts.translate_block(frog_ast.Block(new_stmts))

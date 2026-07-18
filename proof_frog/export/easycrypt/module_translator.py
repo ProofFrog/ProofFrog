@@ -607,9 +607,21 @@ class ModuleTranslator:
                     f"multi-primitive game {module_name!r} needs "
                     "param_module_types/param_primitive_types from the caller"
                 )
+            # A multi-primitive ROM helper game (``CGLazyROTwoSeeded(KEM_PQ, NG,
+            # lambda)``) lives INSIDE the theorem primitive's abstract theory,
+            # where the sub-primitive clones (``KEM_PQ_c``/``NG_c``) are not in
+            # scope. But its body never CALLS those params -- it only samples the
+            # RO/seeds over theory-abstract bitstring types -- so the module-typed
+            # params are dead. Emit the standard single theory ``Scheme`` functor
+            # param (matching the ``Game_<name>(Em, A)`` wrapper's one-arg
+            # application), and keep every param in ``body_param_types`` so a
+            # (dead) type reference still resolves. This keeps the game in-theory
+            # and compiling. If a future multi-primitive game genuinely CALLS a
+            # sub-primitive param, EC rejects it (visible), and it needs the
+            # separate top-level-emission route instead.
+            emitted_type = emitted_param_type or param_type_name
             emitted_module_params = [
-                ec_ast.ModuleParam(name=p.name, module_type=param_module_types[p.name])
-                for p in module_typed
+                ec_ast.ModuleParam(name=module_typed[0].name, module_type=emitted_type)
             ]
             body_param_types = param_primitive_types
         else:

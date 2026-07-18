@@ -1659,6 +1659,24 @@ class ModuleTranslator:
                     type_map[name] = resolved
 
         type_of = self._type_of_factory(type_map, module_param_types)
+        # Rename a variable reassigned to a CONFLICTING type within a block (the
+        # engine's ``__determ_N__`` temp-counter can collide two disjoint-live
+        # values on one name across a branch boundary -- a seedbased binding
+        # collision branch reassigns an NG-scalar temp with a KEM DecapsKey). EC
+        # gives a variable one type, so the reassignment mis-types; the outer
+        # binding is dead in the branch, so a scope-local rename is sound.
+        # Byte-identical (returns the same list object) when no conflict fires.
+        method_statements = _rename_type_conflicting_reuse(
+            method.block.statements,
+            type_of,
+            type_map,
+            lambda t: self._types.translate_type(t).text,
+        )
+        method_block = (
+            method.block
+            if method_statements is method.block.statements
+            else frog_ast.Block(method_statements)
+        )
         # Infer types of engine-inlined UNTYPED assignments from their RHS so a
         # later slice/projection of the var types instead of raising. The lazy-RO
         # case-split (``__a <- y0 || y1;`` in one branch, ``__a <- H(x);`` in
@@ -1672,7 +1690,7 @@ class ModuleTranslator:
         # type-requiring position that resolves today never reaches here; one
         # that does not resolve today crashes the export, so none exist).
         inferred_untyped = _infer_untyped_assignment_types(
-            method.block.statements, type_of, type_map
+            method_statements, type_of, type_map
         )
         exprs = expr_translator.ExpressionTranslator(
             self._types, type_of, field_renames=field_renames
@@ -1685,7 +1703,7 @@ class ModuleTranslator:
             type_map=type_map,
         )
         try:
-            translated = stmts.translate_block(method.block, return_type=return_type)
+            translated = stmts.translate_block(method_block, return_type=return_type)
             body: list[ec_ast.EcStmt] = []
             # Declare the locals inferred by ``_infer_untyped_assignment_types``:
             # they are assigned untyped (``v <- rhs`` in an if/for body -- the
@@ -1830,6 +1848,93 @@ def _infer_untyped_assignment_types(
         if _walk(statements) == 0:
             break
     return inferred_order
+
+
+def _rename_type_conflicting_reuse(
+    statements: Sequence[frog_ast.Statement],
+    type_of: Callable[[frog_ast.Expression], frog_ast.Type],
+    type_map: dict[str, frog_ast.Type],
+    type_text: Callable[[frog_ast.Type], str],
+) -> Sequence[frog_ast.Statement]:
+    """Rename an engine ``__determ_N__`` temp reassigned to a type that CONFLICTS
+    with its established type WITHIN a block, to a fresh local.
+
+    The engine's ``__determ_N__`` deterministic-call temps (``inlining.py`` counter)
+    can collide two disjoint-live-range values on one name across a branch boundary:
+    a seedbased binding challenge's collision branch reassigns an outer NG-scalar
+    temp (``__determ_3__ : NGScalar`` from ``NG.RandomScalar``) with a KEM DecapsKey
+    (``__determ_3__ <- DeriveKeyPair(seed).\\`2``). EC gives a variable ONE type, so
+    the reassignment mis-types ("This expression has type ..."). The outer binding is
+    dead in that branch (the reassigned value never escapes it -- the branch ends, and
+    the sibling/post-branch statements read the outer value), so a scope-local rename
+    is sound: substitute the conflicting var -> a fresh name from the reassignment
+    onward, discarding the rename at the block boundary. Recurses into ``if``/``for``
+    bodies. Returns the original list object unchanged when no conflict fires, so every
+    proof without such a collision is byte-identical.
+
+    Gated to ``__determ_``-prefixed temps: this is the documented counter-collision
+    artifact, and its conflicts are genuine large type gaps. A bare-name conflict on
+    a semantic variable is instead almost always a ``type_of`` under-qualification (two
+    same-typed method calls whose return types RENDER differently) -- a false positive
+    that must not drive a rename. The fresh var is NOT pre-seeded into ``type_map``, so
+    the downstream statement translator (typed reassignment) or
+    ``_infer_untyped_assignment_types`` (untyped) declares it -- both paths covered."""
+    changed = [False]
+    counter = [0]
+
+    def _conflict_type(st: frog_ast.Assignment) -> frog_ast.Type | None:
+        if st.the_type is not None:
+            return st.the_type
+        try:
+            return type_of(st.value)
+        except (KeyError, NotImplementedError):
+            return None
+
+    def _rewrite(stmts: Sequence[frog_ast.Statement]) -> list[frog_ast.Statement]:
+        out: list[frog_ast.Statement] = []
+        rename: dict[str, str] = {}
+        for st in stmts:
+            if rename:
+                ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+                for old, new in rename.items():
+                    ast_map.set(frog_ast.Variable(old), frog_ast.Variable(new))
+                st = visitors.SubstitutionTransformer(ast_map).transform(st)
+            if isinstance(st, frog_ast.IfStatement):
+                st = frog_ast.IfStatement(
+                    st.conditions,
+                    [frog_ast.Block(_rewrite(b.statements)) for b in st.blocks],
+                )
+            elif isinstance(st, frog_ast.GenericFor):
+                st = frog_ast.GenericFor(
+                    st.var_type,
+                    st.var_name,
+                    st.over,
+                    frog_ast.Block(_rewrite(st.block.statements)),
+                )
+            elif isinstance(st, frog_ast.Assignment) and isinstance(
+                st.var, frog_ast.Variable
+            ):
+                v = st.var.name
+                prior = type_map.get(v)
+                t2 = _conflict_type(st)
+                if (
+                    v.startswith("__determ_")
+                    and prior is not None
+                    and t2 is not None
+                    and type_text(prior) != type_text(t2)
+                ):
+                    counter[0] += 1
+                    fresh = f"{v}_ty{counter[0]}"
+                    rename[v] = fresh
+                    st = frog_ast.Assignment(
+                        st.the_type, frog_ast.Variable(fresh), st.value
+                    )
+                    changed[0] = True
+            out.append(st)
+        return out
+
+    rewritten = _rewrite(statements)
+    return rewritten if changed[0] else statements
 
 
 def _seed_type_map(

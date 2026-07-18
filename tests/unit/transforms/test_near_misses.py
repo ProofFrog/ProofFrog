@@ -20,6 +20,7 @@ from proof_frog.transforms.inlining import (
     InlineSingleUseVariable,
     InlineSingleUseField,
     DeduplicateDeterministicCalls,
+    ExtractRepeatedTupleAccess,
     HoistDeterministicCallToInitialize,
 )
 from proof_frog.transforms.sampling import (
@@ -178,6 +179,72 @@ def test_inline_near_miss_free_var_modified():
     assert (
         "k" in ct_misses[0].reason.lower() or "modified" in ct_misses[0].reason.lower()
     )
+
+
+def test_extract_tuple_near_miss_shadowed_redeclaration():
+    """ExtractRepeatedTupleAccess reports a near-miss (and terminates) when
+    the only other occurrence of ``v[i]`` is inside an earlier branch block
+    that redeclares ``v``, so it cannot be replaced."""
+    game = frog_parser.parse_game(
+        """
+        Game TestGame() {
+            Int Run(Bool choice) {
+                if (choice) {
+                    [Int, Int] v = [1, 2];
+                    return v[1];
+                }
+                [Int, Int] v = [3, 4];
+                return v[1];
+            }
+        }
+        """
+    )
+    ctx = _make_ctx()
+    result = ExtractRepeatedTupleAccess().apply(game, ctx)
+
+    assert result == game  # transform should NOT have fired
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Extract Repeated Tuple Access"
+    ]
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert "v[1]" in misses[0].reason
+
+
+def test_extract_slice_near_miss_shadowed_redeclaration():
+    """The slice phase of the same pass reports a near-miss (and terminates)
+    when the only other occurrence of ``v[A:B]`` is inside an earlier branch
+    block that redeclares ``v``."""
+    game = frog_parser.parse_game(
+        """
+        Game TestGame() {
+            Int N;
+            Int K;
+            BitString<K> Run(Bool choice) {
+                if (choice) {
+                    BitString<N> m <- BitString<N>;
+                    return m[0 : K];
+                }
+                BitString<N> m <- BitString<N>;
+                return m[0 : K];
+            }
+        }
+        """
+    )
+    ctx = _make_ctx()
+    result = ExtractRepeatedTupleAccess().apply(game, ctx)
+
+    assert result == game  # transform should NOT have fired
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Extract Repeated Tuple Access"
+    ]
+    assert len(misses) == 1
+    assert misses[0].variable == "m"
+    assert "slice" in misses[0].reason
 
 
 # ---------------------------------------------------------------------------

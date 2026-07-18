@@ -149,6 +149,38 @@ def _transform_and_compare(source: str, expected: str) -> None:
             }
             """,
         ),
+        # 7. Shadowed redeclaration in an earlier branch block: the nested
+        # v[1] refers to a different (inner) v, and the outer v[1] appears
+        # only once after the outer definition -> no extraction. Previously
+        # both occurrences were counted together, firing an extraction whose
+        # replacement could never reach the nested occurrence, so the
+        # transform re-fired on every pass and recursed forever.
+        (
+            """
+            Game Test() {
+                Int Run(Bool choice) {
+                    if (choice) {
+                        [Int, Int] v = [1, 2];
+                        return v[1];
+                    }
+                    [Int, Int] v = [3, 4];
+                    return v[1];
+                }
+            }
+            """,
+            """
+            Game Test() {
+                Int Run(Bool choice) {
+                    if (choice) {
+                        [Int, Int] v = [1, 2];
+                        return v[1];
+                    }
+                    [Int, Int] v = [3, 4];
+                    return v[1];
+                }
+            }
+            """,
+        ),
     ],
 )
 def test_extract_repeated_tuple_access(source: str, expected: str) -> None:
@@ -279,6 +311,43 @@ def test_extract_repeated_tuple_access(source: str, expected: str) -> None:
                     m = m;
                     BitString<K> b = m[0 : K];
                     return a;
+                }
+            }
+            """,
+        ),
+        # Shadowed redeclaration in an earlier branch block -- the slice-phase
+        # analogue of case 7 above. The nested m[0 : K] belongs to a different
+        # (inner) m, so only one occurrence follows the outer definition and
+        # nothing is hoisted. Counting both fires a hoist whose replacement
+        # cannot reach the nested occurrence; because the inserted extraction
+        # itself contains a fresh m[0 : K], the count stays at 2 and the
+        # transform recurses until the recursion limit.
+        (
+            """
+            Game Test() {
+                Int N;
+                Int K;
+                BitString<K> F(Bool choice) {
+                    if (choice) {
+                        BitString<N> m <- BitString<N>;
+                        return m[0 : K];
+                    }
+                    BitString<N> m <- BitString<N>;
+                    return m[0 : K];
+                }
+            }
+            """,
+            """
+            Game Test() {
+                Int N;
+                Int K;
+                BitString<K> F(Bool choice) {
+                    if (choice) {
+                        BitString<N> m <- BitString<N>;
+                        return m[0 : K];
+                    }
+                    BitString<N> m <- BitString<N>;
+                    return m[0 : K];
                 }
             }
             """,

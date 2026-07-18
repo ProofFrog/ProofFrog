@@ -1622,8 +1622,10 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
         self,
         proof_namespace: frog_ast.Namespace | None = None,
         proof_let_types: NameTypeMap | None = None,
+        ctx: PipelineContext | None = None,
     ) -> None:
         super().__init__()
+        self.ctx = ctx
         # Loop-binder types visible from the enclosing ``GenericFor``.
         # Extraction for these is inserted at position 0 of the loop body.
         self._scope_types: dict[str, frog_ast.Type] = {}
@@ -1707,25 +1709,32 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
                 var_types[stmt.var.name] = stmt.the_type
                 var_def_idx[stmt.var.name] = idx
 
-        # Count occurrences of each (var_name, index) ArrayAccess pattern
-        access_counts: dict[tuple[str, int], int] = {}
-        for stmt in block.statements:
+        # Count occurrences of each (var_name, index) ArrayAccess pattern,
+        # tracking the statement index of each occurrence. Replacement only
+        # rewrites statements after the base variable's definition, so only
+        # occurrences there may count toward the 2+ threshold: an occurrence
+        # at or before the definition (e.g. inside an earlier branch block
+        # that redeclares the same name) can never be replaced, and counting
+        # it would re-fire the extraction on every pass, recursing forever.
+        access_stmt_idxs: dict[tuple[str, int], list[int]] = {}
+        for stmt_idx, stmt in enumerate(block.statements):
 
-            def counter(node: frog_ast.ASTNode) -> bool:
+            def counter(node: frog_ast.ASTNode, stmt_idx: int = stmt_idx) -> bool:
                 if (
                     isinstance(node, frog_ast.ArrayAccess)
                     and isinstance(node.the_array, frog_ast.Variable)
                     and isinstance(node.index, frog_ast.Integer)
                 ):
                     key = (node.the_array.name, node.index.num)
-                    access_counts[key] = access_counts.get(key, 0) + 1
+                    access_stmt_idxs.setdefault(key, []).append(stmt_idx)
                 return False
 
             SearchVisitor(counter).visit(stmt)
 
-        # Find first pattern with 2+ uses whose base var has a product type
-        for (var_name, idx_val), count in access_counts.items():
-            if count < 2:
+        # Find first pattern with 2+ replaceable uses whose base var has a
+        # product type
+        for (var_name, idx_val), occurrence_idxs in access_stmt_idxs.items():
+            if len(occurrence_idxs) < 2:
                 continue
             if var_name not in var_types:
                 continue
@@ -1733,6 +1742,31 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
             if not isinstance(base_type, frog_ast.ProductType):
                 continue
             if idx_val < 0 or idx_val >= len(base_type.types):
+                continue
+
+            count = sum(1 for i in occurrence_idxs if i > var_def_idx[var_name])
+            if count < 2:
+                if self.ctx is not None:
+                    def_idx = var_def_idx[var_name]
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Extract Repeated Tuple Access",
+                            reason=(
+                                f"Cannot extract '{var_name}[{idx_val}]':"
+                                f" appears {len(occurrence_idxs)} times but"
+                                f" only {count} after the definition of"
+                                f" '{var_name}'"
+                            ),
+                            location=(
+                                block.statements[def_idx].origin
+                                if def_idx >= 0
+                                else None
+                            ),
+                            suggestion=None,
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
                 continue
 
             # Skip if the base variable is reassigned after its definition
@@ -1818,30 +1852,36 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
         # Unlike the tuple path, method parameters are eligible as
         # bases (SimplifyTuple only folds ArrayAccess, not Slice, so
         # hoisting a slice of a param doesn't interact).
-        slice_occurrences: list[frog_ast.Slice] = []
-        for stmt in block.statements:
+        # As in the tuple phase, track the statement index of each occurrence:
+        # replacement only reaches statements after the base's definition, so
+        # an occurrence at or before it (e.g. inside an earlier branch block
+        # that redeclares the same name) must not count toward the threshold.
+        slice_occurrences: list[tuple[int, frog_ast.Slice]] = []
+        for stmt_idx, stmt in enumerate(block.statements):
 
-            def slice_collector(node: frog_ast.ASTNode) -> bool:
+            def slice_collector(
+                node: frog_ast.ASTNode, stmt_idx: int = stmt_idx
+            ) -> bool:
                 if isinstance(node, frog_ast.Slice) and isinstance(
                     node.the_array, frog_ast.Variable
                 ):
-                    slice_occurrences.append(node)
+                    slice_occurrences.append((stmt_idx, node))
                 return False
 
             SearchVisitor(slice_collector).visit(stmt)
 
         # Group by structural equality.
-        slice_groups: list[tuple[frog_ast.Slice, int]] = []
-        for sl in slice_occurrences:
-            for idx, (rep, cnt) in enumerate(slice_groups):
+        slice_groups: list[tuple[frog_ast.Slice, list[int]]] = []
+        for stmt_idx, sl in slice_occurrences:
+            for idx, (rep, idxs) in enumerate(slice_groups):
                 if sl == rep:
-                    slice_groups[idx] = (rep, cnt + 1)
+                    idxs.append(stmt_idx)
                     break
             else:
-                slice_groups.append((sl, 1))
+                slice_groups.append((sl, [stmt_idx]))
 
-        for rep_slice, count in slice_groups:
-            if count < 2:
+        for rep_slice, occurrence_idxs in slice_groups:
+            if len(occurrence_idxs) < 2:
                 continue
             # F-235: the slice BOUNDS must be deterministic. A non-deterministic
             # call in a bound (`v[I.Cut():j]`) means two structurally-equal
@@ -1875,6 +1915,35 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
                 ):
                     def_idx = idx
                     break
+
+            # Only occurrences the replacement step can actually reach may
+            # count toward the 2+ threshold. Counting an unreachable one
+            # re-fires the hoist on every pass -- and since the inserted
+            # extraction itself contains a fresh `v[A:B]`, the count never
+            # drops back below 2 and the recursion never terminates.
+            count = sum(1 for i in occurrence_idxs if i > def_idx)
+            if count < 2:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Extract Repeated Tuple Access",
+                            reason=(
+                                f"Cannot extract the slice '{rep_slice}':"
+                                f" appears {len(occurrence_idxs)} times but"
+                                f" only {count} after the definition of"
+                                f" '{var_name}'"
+                            ),
+                            location=(
+                                block.statements[def_idx].origin
+                                if def_idx >= 0
+                                else None
+                            ),
+                            suggestion=None,
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
+                continue
 
             # Skip if any of the slice's free variables -- the base AND the
             # bound expressions' variables -- is reassigned or rebound after
@@ -1953,6 +2022,7 @@ class ExtractRepeatedTupleAccess(TransformPass):
         return ExtractRepeatedTupleAccessTransformer(
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
+            ctx=ctx,
         ).transform(game)
 
 

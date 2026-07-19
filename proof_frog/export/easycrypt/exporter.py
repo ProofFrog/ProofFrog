@@ -1931,6 +1931,9 @@ def export_proof_file(proof_path: str) -> str:
     # (materialized) instead of sampled. Emitted AFTER the clones (so the shared
     # RO is in scope). Empty for non-reprogramming proofs (byte-identical).
     mat_challenger_decls: list[ec_ast.EcTopDecl] = []
+    # (game-file name, side name) of each reprogramming-Lazy game that got a
+    # ``_Mat`` copy: the resolver reroutes these steps' challenger to the Mat.
+    reprogramming_lazy_games: set[tuple[str, str]] = set()
     # Per-let-name scheme-instance map (clone_alias/primitive_name are set at
     # ``collect_all`` above, so this is available before the top-level
     # ``instances_by_let_name`` is built). Used to give a MULTI-primitive game's
@@ -1992,6 +1995,7 @@ def export_proof_file(proof_path: str) -> str:
             # prefix (its concrete types match top_modules' render of the game).
             if _reprogramming_lazy_ro_field(side) is not None and gf_module_typed:
                 chal_clone = inst_by_name[gf_module_typed[0].name].clone_alias
+                reprogramming_lazy_games.add((gf.name, side.name))
                 mat_challenger_decls.append(
                     top_modules.translate_game(
                         side,
@@ -2655,9 +2659,19 @@ def export_proof_file(proof_path: str) -> str:
     module_name_by_instance_game: dict[tuple[str, str, str], str] = {}
     for inst in instances:
         for (gf_name, side_name), name in module_name_by_concrete_game.items():
-            module_name_by_instance_game[(inst.let_name, gf_name, side_name)] = (
-                f"{inst.clone_alias}.{name}"
-            )
+            # WALL 3o STEP C: route a reprogramming-Lazy step's challenger to its
+            # TOP-LEVEL materialized `_Mat` copy (unqualified -- it lives at top
+            # level, not in a clone). Every consumer that derives the challenger
+            # from ``resolver.resolve(step).module_expr`` then sees the Mat, so
+            # the ``<Mat>.h = RO_G_RO.h`` coupling holds by materialization.
+            if (gf_name, side_name) in reprogramming_lazy_games:
+                module_name_by_instance_game[(inst.let_name, gf_name, side_name)] = (
+                    f"{name}_Mat"
+                )
+            else:
+                module_name_by_instance_game[(inst.let_name, gf_name, side_name)] = (
+                    f"{inst.clone_alias}.{name}"
+                )
     declared_module_names = [
         inst.let_name
         for inst in instances

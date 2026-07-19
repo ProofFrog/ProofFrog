@@ -4830,10 +4830,13 @@ def export_proof_file(proof_path: str) -> str:
                         mt.consumed_pk_peel_events(
                             reduction_helper,
                             mt.init_module_call_count(gf_a.games[0]),
-                            # The ``challenger`` oracle type is irrelevant to the
-                            # OWN-call hoist (only reduction-param modules gate a
-                            # nested-call lift), so pass "".
-                            "",
+                            # The reduction's OWN Initialize backbone may itself
+                            # call the challenger (a seedbased ``R_PQ_Bind`` queries
+                            # ``challenger.Hash(seed_0)`` and slices the result), so
+                            # the hoist needs the challenger's oracle type to type
+                            # that nested call. The reduction composes ``gf_a`` as
+                            # its challenger, so its oracle is ``{gf_a_id}_Oracle``.
+                            f"{gf_a_id}_Oracle",
                             method_return_types,
                         )
                         if consume_pk_bridge and reduction_helper is not None

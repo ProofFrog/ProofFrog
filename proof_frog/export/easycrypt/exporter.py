@@ -5153,6 +5153,21 @@ def export_proof_file(proof_path: str) -> str:
                         concrete_distr = "d" + t_name
                         op_bindings_.append((distr, concrete_distr))
                         break
+        # Random-function distributions ``dfun_<D>_to_<C>`` (a lazy-RO
+        # challenger's ``h <$ dfun``): bind the theory's dfun to the SHARED
+        # concrete RO distribution when the concretized domain/codomain match a
+        # registered RO holder's dfun. Then a lazy-RO Honest challenger samples
+        # the very distribution the game's RO does, so the pr-lemma's ``rnd``
+        # couples them with no unprovable ``mu1 d1 = mu1 d2`` side-condition (the
+        # two abstract dfun ops were otherwise distinct). Skip (leave abstract)
+        # when no matching concrete RO dfun exists -- non-ROM proofs stay
+        # byte-identical.
+        tb_map = dict(type_bindings_)
+        known_dfuns = {dfn for _, dfn in top_types.function_value_modules()}
+        for dfun_name, d_t, c_t in src_theory_types.function_distrs_seen():
+            concrete_dfun = f"dfun_{tb_map.get(d_t, d_t)}_to_{tb_map.get(c_t, c_t)}"
+            if concrete_dfun in known_dfuns and concrete_dfun != dfun_name:
+                op_bindings_.append((dfun_name, concrete_dfun))
         return ec_ast.Clone(
             source_theory=src_theory_name,
             alias=inst.clone_alias,

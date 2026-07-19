@@ -668,6 +668,15 @@ class TypeCollector:
     def abstract_distrs_seen(self) -> list[str]:
         return list(self._abstract_distrs)
 
+    def function_distrs_seen(self) -> list[tuple[str, str, str]]:
+        """``(dfun_name, dom, codom)`` for each ``Function<A,B>`` distribution the
+        theory samples (its ``dfun_<dom>_to_<codom>`` op). Lets a clone bind the
+        theory's random-function distribution to the shared concrete RO dfun."""
+        return [
+            (_function_distr_name(dom, codom), dom, codom)
+            for dom, codom in self._function_types
+        ]
+
     def resolve_value_alias(
         self, obj_name: str, field_name: str
     ) -> frog_ast.Expression | None:

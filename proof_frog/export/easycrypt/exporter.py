@@ -401,6 +401,48 @@ def _section_header(label: str) -> str:
     return f"(* ===== {label} ===== *)"
 
 
+def _reprogramming_lazy_ro_field(game: frog_ast.Game) -> str | None:
+    """Return the reprogramming RO Function-field name if ``game`` is a lazy-RO
+    *reprogramming* game, else ``None``.
+
+    A reprogramming game (the ``Lazy`` side of a ``CGLazyRO*Seeded`` assumption)
+    has a ``Function<...>`` field ``H`` AND a hash method whose body branches on
+    the exposed seed (``if (x == s0) { return y0_pq || y0_t; } return H(x);``) --
+    i.e. an ``IfStatement`` in a method that reads the Function field. The
+    ``Honest`` side is a plain ``return H(x)`` with no branch and is excluded, so
+    the Honest-hop machinery (its fresh-RO drop) is untouched. Name-independent:
+    keyed off the AST shape, not the game name.
+    """
+    func_fields = {
+        f.name for f in game.fields if isinstance(f.type, frog_ast.FunctionType)
+    }
+    if not func_fields:
+        return None
+
+    def _all_statements(
+        block: frog_ast.Block,
+    ) -> "list[frog_ast.Statement]":
+        out: list[frog_ast.Statement] = []
+        for stmt in block.statements:
+            out.append(stmt)
+            if isinstance(stmt, frog_ast.IfStatement):
+                for sub in stmt.blocks:
+                    out.extend(_all_statements(sub))
+        return out
+
+    for method in game.methods:
+        if any(
+            isinstance(s, frog_ast.IfStatement) for s in _all_statements(method.block)
+        ):
+            reads = {
+                v.name for v in visitors.VariableCollectionVisitor().visit(method.block)
+            }
+            hit = func_fields & reads
+            if hit:
+                return sorted(hit)[0]
+    return None
+
+
 def _prime_group_names(proof: frog_ast.ProofFile) -> set[str]:
     """Group names the proof declared ``requires <G>.order is prime;`` for.
 
@@ -1884,6 +1926,11 @@ def export_proof_file(proof_path: str) -> str:
     oracle_type_by_game_file: dict[str, str] = {}
     module_name_by_concrete_game: dict[tuple[str, str], str] = {}
     adv_type_by_game_file: dict[str, str] = {}
+    # Top-level MATERIALIZED challengers for reprogramming-Lazy games (wall 3o):
+    # a `_Mat` copy whose RO Function field is assigned `<clone>.RO_G_RO.h`
+    # (materialized) instead of sampled. Emitted AFTER the clones (so the shared
+    # RO is in scope). Empty for non-reprogramming proofs (byte-identical).
+    mat_challenger_decls: list[ec_ast.EcTopDecl] = []
     # Per-let-name scheme-instance map (clone_alias/primitive_name are set at
     # ``collect_all`` above, so this is available before the top-level
     # ``instances_by_let_name`` is built). Used to give a MULTI-primitive game's
@@ -1936,6 +1983,27 @@ def export_proof_file(proof_path: str) -> str:
                     param_primitive_types=gf_param_prim_types,
                 )
             )
+            # WALL 3o STEP B: for a reprogramming-Lazy game, emit a TOP-LEVEL
+            # materialized copy via top_modules (concrete types + ``h <-
+            # <primary>.RO_G_RO.h`` via ro_ref_for_dfun). The challenger is
+            # referenced through the FIRST module-param instance's clone (the
+            # reduction's ``Challenger : KEM_PQ_c.<gf>_Oracle``), so both the
+            # implemented oracle type and the dead scheme param carry that clone
+            # prefix (its concrete types match top_modules' render of the game).
+            if _reprogramming_lazy_ro_field(side) is not None and gf_module_typed:
+                chal_clone = inst_by_name[gf_module_typed[0].name].clone_alias
+                mat_challenger_decls.append(
+                    top_modules.translate_game(
+                        side,
+                        f"{mod_name}_Mat",
+                        primitive.name,
+                        implements=f"{chal_clone}.{oracle_type_name}",
+                        emitted_param_type=f"{chal_clone}.{scheme_type_name}",
+                        emit_state_vars=True,
+                        param_module_types=gf_param_mod_types,
+                        param_primitive_types=gf_param_prim_types,
+                    )
+                )
         adv = theory_modules.translate_adversary_type(
             gf,
             oracle_type_name,
@@ -5386,6 +5454,9 @@ def export_proof_file(proof_path: str) -> str:
         decls.append(fp_theory)
     decls.append(_section_header("Theory instantiation"))
     decls.extend(clones)
+    if mat_challenger_decls:
+        decls.append(_section_header("Materialized reprogramming-Lazy challengers"))
+        decls.extend(mat_challenger_decls)
     if clone_axioms:
         decls.append(_section_header("Per-clone distribution axioms"))
         decls.extend(clone_axioms)

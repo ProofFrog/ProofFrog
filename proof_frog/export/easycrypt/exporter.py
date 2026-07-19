@@ -4459,6 +4459,7 @@ def export_proof_file(proof_path: str) -> str:
                     for h in proof.helpers
                     if isinstance(h, frog_ast.Reduction) and not h.fields
                 },
+                is_lazyro_honest=_is_lazyro_honest_hop(step_a, step_b) is not None,
             )
             chain_extra_decls.extend(info.extra_decls)
             pres_method_requests.update(info.pres_methods)

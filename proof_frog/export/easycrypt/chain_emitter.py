@@ -1845,6 +1845,7 @@ def _make_field_aware_coupling(
     ) = None,
     ro_by_arrow: dict[str, str] | None = None,
     ro_challenger_by_base: dict[str, list[tuple[str, str]]] | None = None,
+    lazyro_cross: tuple[str, str, frozenset[str]] | None = None,
 ) -> CouplingFn:
     """Build a coupling closure that is field-aware for cardinality-differing states.
 
@@ -2009,8 +2010,13 @@ def _make_field_aware_coupling(
         # the shared RO on its side. Emit ``base.f{side} = RO_H.h{side}`` so a hop
         # that DROPS this field and reverts to ``RO_H.h`` (the lazy-RO Honest
         # eager-RF materialization) can thread ``res`` equality. Read the field's
-        # arrow TYPE off the glob signature (canonical name + type).
-        if ro_arrow:
+        # arrow TYPE off the glob signature (canonical name + type). SUPPRESSED for
+        # the lazy-RO Honest hop: there the reduction-flat RO field is NOT equal to
+        # any holder same-side (it is a fresh sample the flat state owns); its
+        # identity threads via the same-name field pairing (reduction-flat legs) and
+        # the seam cross below, so a same-side ``f{s}=holder{s}`` is a false conjunct
+        # that also over-generates a transitivity existential (wall 3n-CT-b).
+        if ro_arrow and lazyro_cross is None:
             for side, base in (("1", lb), ("2", rb)):
                 for cname, ctype in ginfo.get(base, ((), frozenset()))[0]:
                     ro_ref = ro_arrow.get(ctype)
@@ -2018,15 +2024,35 @@ def _make_field_aware_coupling(
                         fields_conj.append(
                             f"{base}.{cname}{{{side}}} = {ro_ref}{{{side}}}"
                         )
-        # A COMPOSITE wrapper's inner challenger holds an RO-materialized arrow
-        # field (``<Challenger>.rF = RO_H.h``) that lives in the wrapper's glob but
-        # NOT in the flat-state ``ginfo`` signature above, so emit it here from the
-        # detected ``(qualified-ref, RO-ref)`` pairs. Threads ``RO_H.h = rF`` into
-        # the wrapper<->flat transitivity precondition (the lazy-RO delegating
-        # hops); byte-identical when no composite RO challenger is present.
-        for side, base in (("1", lb), ("2", rb)):
-            for chal_ref, ro_ref in ro_challenger.get(base, []):
-                fields_conj.append(f"{chal_ref}{{{side}}} = {ro_ref}{{{side}}}")
+        # Lazy-RO Honest hop: a leg that CROSSES the game<->reduction seam couples
+        # the two sides' DISTINCT RO references directly. Each base's RO ref: the
+        # shared ``RO_G_RO.h`` (game side), the flat state's own arrow field
+        # ``<base>.f0N`` (a reduction FLAT state), or the challenger ``<Chal>.h`` (the
+        # reduction WRAPPER). Same-side legs need no cross (game legs thread via
+        # ``={glob RO_G_RO}``; reduction legs via the field pairing).
+        if lazyro_cross is not None:
+            _shared, _chal_h, _red_bases = lazyro_cross
+
+            def _lazy_ro_ref(b: str) -> str:
+                if b not in _red_bases:
+                    return _shared
+                for cn, ct in ginfo.get(b, ((), frozenset()))[0]:
+                    if ct in ro_arrow:
+                        return f"{b}.{cn}"
+                return _chal_h
+
+            if (lb in _red_bases) != (rb in _red_bases):
+                fields_conj.append(f"{_lazy_ro_ref(lb)}{{1}} = {_lazy_ro_ref(rb)}{{2}}")
+        else:
+            # A COMPOSITE wrapper's inner challenger holds an RO-materialized arrow
+            # field (``<Challenger>.rF = RO_H.h``) that lives in the wrapper's glob
+            # but NOT in the flat-state ``ginfo`` signature above, so emit it here
+            # from the detected ``(qualified-ref, RO-ref)`` pairs. Threads ``RO_H.h
+            # = rF`` into the wrapper<->flat transitivity precondition (the lazy-RO
+            # delegating hops); byte-identical when no composite RO challenger.
+            for side, base in (("1", lb), ("2", rb)):
+                for chal_ref, ro_ref in ro_challenger.get(base, []):
+                    fields_conj.append(f"{chal_ref}{{{side}}} = {ro_ref}{{{side}}}")
         # No relatable field across these two states (different cardinality AND
         # no shared name / recoverable role -- a cross-game correspondence we do
         # not yet resolve). Never emit a vacuous coupling (a bare ``={glob K}``
@@ -2051,6 +2077,21 @@ def _make_field_aware_coupling(
             gparams = [p for p in glob_params if p in (li[1] & ri[1])]
         else:
             gparams = glob_params
+        # LAZY-RO Honest hop: ``={glob RO_G_RO}`` (i.e. ``RO_G_RO.h{1}=RO_G_RO.h{2}``)
+        # holds ONLY between two game-side states (both read the shared RO). On any
+        # leg touching a reduction-derived base the reduction reads the challenger's
+        # fresh RO, never the shared one, so ``={glob RO_G_RO}`` is either false (the
+        # seam) or unthreadable baggage (reduction<->reduction: the outer coupling
+        # carries no RO_G_RO equality to compose it through). Drop it there; the RO
+        # identity threads via the seam cross and the reduction field pairing.
+        # Dropping only the conjunct -- not the param from the signature -- avoids
+        # perturbing the ``same_glob`` shortcut (a whole-glob equality on mismatched
+        # states is a type error).
+        if lazyro_cross is not None:
+            _shared, _chal_h, _red_bases = lazyro_cross
+            if (lb in _red_bases) or (rb in _red_bases):
+                ro_holder = _shared.rsplit(".", 1)[0]
+                gparams = [p for p in gparams if p != ro_holder]
         return " /\\ ".join([f"={{glob {p}}}" for p in gparams] + fields_conj)
 
     return coupling
@@ -3722,6 +3763,7 @@ def emit_multi_oracle_chain_for_hop(
     full_coupling: str | None = None,
     use_canonical_fields: bool = False,
     stateless_wrapper_bases: frozenset[str] | set[str] | None = None,
+    is_lazyro_honest: bool = False,
 ) -> MultiOracleHopChainInfo:
     """Emit the per-oracle per-transform chains for one multi-oracle hop.
 
@@ -3852,6 +3894,7 @@ def emit_multi_oracle_chain_for_hop(
             use_canonical_fields=use_canonical,
             glob_info_by_base=glob_info_by_base,
             stateless_wrapper_bases=stateless_wrapper_bases,
+            is_lazyro_honest=is_lazyro_honest,
         )
         chunks.extend(oracle_chunks)
         tactic_body_by_oracle[oracle_name] = outer_body
@@ -3899,6 +3942,7 @@ def _emit_one_oracle_chain(
         dict[str, tuple[tuple[tuple[str, str], ...], frozenset[str]]] | None
     ) = None,
     stateless_wrapper_bases: frozenset[str] | set[str] | None = None,
+    is_lazyro_honest: bool = False,
 ) -> tuple[list[str], list[str], set[tuple[str, str]]]:
     """Emit one oracle's chain artifacts + outer tactic body.
 
@@ -4269,6 +4313,34 @@ def _emit_one_oracle_chain(
                 pairs.append((f"{chal_base}.{mt._ec_field_name(own)}", ro_ref))
         if pairs:
             ro_challenger_by_base[wrapper_base] = pairs
+
+    # LAZY-RO Honest hop cross-coupling (wall 3n-CT-b). The reduction side reads a
+    # FRESH RO sampled inside its Honest challenger (``<Chal>.h``); the game side
+    # reads the pre-existing shared RO (``RO_G_RO.h``). These are DISTINCT RO
+    # values, so the same-side ``<Chal>.h{s} = RO_G_RO.h{s}`` the composite path
+    # emits is FALSE. Replace it with the CROSS identity ``RO_G_RO.h{1} =
+    # <Chal>.h{2}`` (established by the ``hop_N_pr`` byequiv's RO coupling), keyed
+    # by which flat/wrapper bases are reduction-derived. ``lazyro_cross`` = (shared
+    # RO ref, challenger RO ref, reduction-side base set).
+    lazyro_cross: tuple[str, str, frozenset[str]] | None = None
+    if is_lazyro_honest:
+        shared_ro_ref = next(iter(ro_by_arrow.values()), None)
+        # The composite reduction wrapper is the one carrying an RO-materialized
+        # challenger field; its detected ``(<Chal>.h, RO_G_RO.h)`` pair names the
+        # challenger RO ref, and its wrapper base tells us which side is reduction.
+        red_wrapper = next(iter(ro_challenger_by_base), None)
+        chal_h_ref = (
+            ro_challenger_by_base[red_wrapper][0][0]
+            if red_wrapper is not None and ro_challenger_by_base[red_wrapper]
+            else None
+        )
+        if shared_ro_ref is not None and chal_h_ref is not None:
+            red_is_right = red_wrapper == _ref_base(right_wrapper_expr)
+            red_mods = right_mods if red_is_right else left_mods
+            red_wrapper_expr = right_wrapper_expr if red_is_right else left_wrapper_expr
+            red_bases = {_ref_base(mod_ref(m)) for m in red_mods}
+            red_bases.add(_ref_base(red_wrapper_expr))
+            lazyro_cross = (shared_ro_ref, chal_h_ref, frozenset(red_bases))
     coupling = _make_field_aware_coupling(
         fields_by_base,
         survivor_map,
@@ -4279,6 +4351,7 @@ def _emit_one_oracle_chain(
         glob_info_by_base or {},
         ro_by_arrow,
         ro_challenger_by_base,
+        lazyro_cross,
     )
 
     # Composite-wrapper bridge tactic (wall 7). When the hop has a composite

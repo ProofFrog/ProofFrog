@@ -4230,6 +4230,54 @@ def export_proof_file(proof_path: str) -> str:
         # no declared abstract scheme module (output unchanged there).
         return f"{glob_invariant_conj} /\\ {field}" if glob_invariant_conj else field
 
+    def _is_lazyro_honest_hop(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> tuple[str, str, str, str, str] | None:
+        """When one hop endpoint is a plain game that reads the shared RO and the
+        other is a delegating reduction whose challenger is the CGLazyRO *Honest*
+        game (its ``Initialize`` samples a FRESH RO the reduction then uses for
+        every RO query -- HashG forwards to ``challenger.Hash``), the same-side
+        ``<chal>.h{2} = RO.h{2}`` coupling is UNPROVABLE: the reduction samples the
+        challenger RO and the game RO independently, so they are independent
+        uniforms on the reduction side. Return ``(game_side, red_side, chal_base,
+        chal_field, ro_ref)`` so the pr-lemma instead couples ``RO.h{game_side} =
+        <chal>.h{red_side}`` (both live) and drops the dead ``RO.h{red_side}``
+        sample (the validated ``ec_templates/lazyro_honest_main{,_calls}.ec``
+        tactic). ``None`` off-shape, so every other hop is byte-identical."""
+        # pylint: disable=protected-access
+        ro_ref = next(iter(top_types.ro_by_arrow_type().values()), None)
+        if ro_ref is None:
+            return None
+        game_sides = [
+            side for st, side in ((step_a, "1"), (step_b, "2")) if st.reduction is None
+        ]
+        red_pairs = [
+            (st, side)
+            for st, side in ((step_a, "1"), (step_b, "2"))
+            if st.reduction is not None and _reduction_init_delegates(st.reduction.name)
+        ]
+        if len(game_sides) != 1 or len(red_pairs) != 1:
+            return None
+        red_step, red_side = red_pairs[0]
+        chal_base = pt.module_base_name(
+            pt.last_module_arg(resolver.resolve(red_step).module_expr)
+        )
+        if "Honest" not in chal_base:
+            return None
+        chal_game = engine._get_game_ast(red_step.challenger, None)
+        chal_field = next(
+            (
+                mt._ec_field_name(cf.name)
+                for cf in (chal_game.fields if chal_game else [])
+                if isinstance(cf.type, frog_ast.FunctionType)
+            ),
+            None,
+        )
+        if chal_field is None:
+            return None
+        # pylint: enable=protected-access
+        return (game_sides[0], red_side, chal_base, chal_field, ro_ref)
+
     def _ro_challenger_materialization(
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> str:
@@ -4246,6 +4294,14 @@ def export_proof_file(proof_path: str) -> str:
         FunctionType challenger field to the single RO ref. Empty when no endpoint
         has an RO-materialized challenger (byte-identical). Sound: LazyRO Honest
         ``initialize`` sets ``rF`` from the shared RO."""
+        lazy = _is_lazyro_honest_hop(step_a, step_b)
+        if lazy is not None:
+            l_game_side, l_red_side, l_chal_base, l_chal_field, l_ro_ref = lazy
+            live_state_holders.add(l_chal_base)
+            return (
+                f"{l_ro_ref}{{{l_game_side}}} = "
+                f"{l_chal_base}.{l_chal_field}{{{l_red_side}}}"
+            )
         # pylint: disable=protected-access
         ro_ref = next(iter(top_types.ro_by_arrow_type().values()), None)
         if ro_ref is None:
@@ -4279,6 +4335,16 @@ def export_proof_file(proof_path: str) -> str:
     def _live_state_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
         base = _live_state_coupling_base(step_a, step_b)
         extra = _ro_challenger_materialization(step_a, step_b)
+        if _is_lazyro_honest_hop(step_a, step_b) is not None:
+            # The reduction side's shared-RO holder (RO_G_RO) is DEAD (it uses the
+            # Honest challenger's RO for every query), so ``={glob RO_G_RO}`` cannot
+            # hold post-init (the pr-lemma drops the dead sample). Strip it from the
+            # base -- the cross-side ``RO_G_RO.h{game}=<chal>.h{red}`` in ``extra`` is
+            # the real RO coupling the per-oracle lemmas need.
+            for m in ro_holder_modules:
+                base = base.replace(f" /\\ ={{glob {m}}}", "").replace(
+                    f"={{glob {m}}} /\\ ", ""
+                )
         return f"{base} /\\ {extra}" if extra else base
 
     # Per-hop memo of the multi-oracle chain emission. ``translate_hops``
@@ -4302,6 +4368,11 @@ def export_proof_file(proof_path: str) -> str:
         _is_init: bool,
     ) -> list[str] | None:
         if _is_assumption_hop(step_a, step_b):
+            return None
+        if _is_init and _is_lazyro_honest_hop(step_a, step_b) is not None:
+            # The init lemma is unprovable for a lazy-RO Honest hop (the challenger
+            # samples a fresh RO the game reads pre-existing) AND unused -- the
+            # pr-lemma inlines the init and couples the samples directly. Skip it.
             return None
         if _i not in multi_oracle_hop_cache:
             model = resolver.oracle_model_for(step_a)
@@ -4589,11 +4660,50 @@ def export_proof_file(proof_path: str) -> str:
         if model is None or not model.is_multi_oracle:
             return None
         assert model.init_name is not None
+        lazyro: pt.LazyroInitSpec | None = None
+        if _is_lazyro_honest_hop(step_a, step_b) is not None:
+            red_step = step_a if step_a.reduction is not None else step_b
+            assert red_step.reduction is not None
+            red = _get_reduction(red_step.reduction.name)
+            # pylint: disable=protected-access
+            chal_game = engine._get_game_ast(red_step.challenger, None)
+            # pylint: enable=protected-access
+            chal_init = _find_init(chal_game) if chal_game is not None else None
+            red_init = _find_init(red) if red is not None else None
+            dfun = next((d for _m, d in top_types.function_value_modules()), None)
+            if chal_init is not None and red_init is not None and dfun is not None:
+                swap_below = sum(
+                    isinstance(s, frog_ast.Sample) for s in chal_init.block.statements
+                )
+                # Count EVERY abstract-scheme call (nested included -- ``inline *``
+                # hoists a nested ``NG.Generator()`` inside ``NG.Exp(...)`` into its
+                # own ``<@`` statement, so the post-inline peel-round count is the
+                # total call count, not the top-level assignment count).
+                _n = [0]
+
+                def _count_call(n: frog_ast.ASTNode) -> bool:
+                    if (
+                        isinstance(n, frog_ast.FuncCall)
+                        and isinstance(n.func, frog_ast.FieldAccess)
+                        and isinstance(n.func.the_object, frog_ast.Variable)
+                        and n.func.the_object.name != "challenger"
+                    ):
+                        _n[0] += 1
+                    return False
+
+                visitors.SearchVisitor(_count_call).visit(red_init.block)
+                n_calls = _n[0]
+                lazyro = pt.LazyroInitSpec(
+                    swap_below=swap_below,
+                    n_calls=n_calls,
+                    dfun_ll=f"{dfun}_ll",
+                )
         return pt.MultiOraclePrSpec(
             coupling=_live_state_coupling(step_a, step_b),
             init_oracle=model.init_name,
             post_init_oracles=list(model.post_init_names),
             byequiv_pre=multi_oracle_byequiv_pre,
+            lazyro=lazyro,
         )
 
     # Warm-up: fully populate ``live_state_holders`` before the Pr loop, so the

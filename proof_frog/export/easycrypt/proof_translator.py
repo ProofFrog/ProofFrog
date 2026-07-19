@@ -22,6 +22,24 @@ class HopKind(enum.Enum):
 
 
 @dataclass
+class LazyroInitSpec:
+    """The counts for the lazy-RO Honest hop's pr-lemma init coupling (wall 3n-CT).
+
+    The reduction's ``Initialize`` calls a CGLazyRO *Honest* challenger that samples
+    a FRESH RO; the game reads the shared RO. Instead of the (unprovable) per-oracle
+    ``call hop_i_init``, the pr-lemma inlines the init and couples the game's RO
+    sample to the challenger's RO sample, dropping the game's dead RO copy on the
+    reduction side -- the validated ``ec_templates/lazyro_honest_main_calls.ec``
+    tactic. ``swap_below`` = the challenger init's live sample count (move the dead
+    RO sample below them); ``n_calls`` = the reduction init's abstract-scheme call
+    count (peel rounds); ``dfun_ll`` = the RO distribution's lossless axiom."""
+
+    swap_below: int
+    n_calls: int
+    dfun_ll: str
+
+
+@dataclass
 class ResolvedStep:
     """The EC module expression and oracle name referenced by a step."""
 
@@ -62,6 +80,7 @@ class MultiOraclePrSpec:
     init_oracle: str
     post_init_oracles: list[str]
     byequiv_pre: str = "={glob A}"
+    lazyro: LazyroInitSpec | None = None
 
 
 def coupling_invariant(left_module_expr: str, right_module_expr: str) -> str:
@@ -576,13 +595,34 @@ def translate_inlining_hop_pr_lemma(  # pylint: disable=too-many-arguments,too-m
         f"Pr[{left_app}.main() @ &m : res]" f" = Pr[{right_app}.main() @ &m : res]"
     )
     if multi_oracle is not None:
+        if multi_oracle.lazyro is not None:
+            # Lazy-RO Honest hop: the per-oracle init lemma is unprovable (the
+            # challenger samples a fresh RO the game reads pre-existing). Inline the
+            # init and couple the game's RO sample to the challenger's, dropping the
+            # dead RO copy -- the validated ec_templates/lazyro_honest_main_calls.ec
+            # tactic. The init lemma is not emitted for this hop.
+            li = multi_oracle.lazyro
+            init_tac = [
+                "inline *.",
+                f"swap{{2}} 1 {li.swap_below}.",
+                f"seq 1 1 : ({multi_oracle.coupling}).",
+                "+ rnd; skip => />.",
+                "wp.",
+            ]
+            for _ in range(li.n_calls):
+                init_tac += ["call (_: true).", "wp."]
+            init_tac += ["rnd{2}.", "rnd.", f"skip => />; smt({li.dfun_ll})."]
+        else:
+            init_tac = [
+                f"call hop_{hop_index}_{multi_oracle.init_oracle}.",
+                "auto.",
+            ]
         body = [
             f"byequiv (_: {multi_oracle.byequiv_pre} ==> ={{res}}) => //.",
             "proc.",
             f"call (_: {multi_oracle.coupling}).",
             *[f"+ conseq hop_{hop_index}_{m}." for m in multi_oracle.post_init_oracles],
-            f"call hop_{hop_index}_{multi_oracle.init_oracle}.",
-            "auto.",
+            *init_tac,
             "qed.",
         ]
         footprint = (

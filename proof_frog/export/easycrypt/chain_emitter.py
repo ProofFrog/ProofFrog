@@ -3826,6 +3826,58 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
             tac.append("wp.")
         tac.append("skip => /#.")
         return (tac, set(), SYNTH_PARAM)
+
+    # Sample-reorder init (the KDF-layer ``R_PQ_Bind ~ R_KDF`` hops): the two
+    # bodies run the SAME abstract calls in the SAME order and sample the SAME
+    # distribution multiset, but interleave the samples differently -- one draws
+    # the PQ seed first and derives immediately, the other draws all seeds up
+    # front (``S,C,S,S,C,C,C`` vs ``S,S,S,C,C,C,C``). The kind sequences differ
+    # (so the equal-kind block above declined) yet it is a sample PERMUTATION,
+    # not a subsequence with extra det calls (so the dead-drop below declines on
+    # the unmatched permuted sample). A ``<$`` is glob-independent, so hoisting
+    # the non-contiguous side's samples up to the OTHER (contiguous-front) side's
+    # sample order -- via occurrence-based ``swap ^ <${k} @ 0`` (position-ROBUST
+    # against the tuple-unpack assigns EC's ``inline *`` interposes, which the
+    # engine's flat state does not reproduce faithfully) -- makes both bodies
+    # ``[samples; calls]``, and the common backbone peels. Keyed on distribution
+    # (the two reductions name their samples differently), which requires the
+    # distributions distinct so the ordering is determined.
+    def _sample_distrs(body: list[ec_ast.EcStmt]) -> list[str]:
+        return [s.distr for s in _exec_stmts(body) if isinstance(s, ec_ast.Sample)]
+
+    def _call_callees(body: list[ec_ast.EcStmt]) -> list[str]:
+        return [s.callee for s in _exec_stmts(body) if isinstance(s, ec_ast.Call)]
+
+    def _samples_contiguous_front(body: list[ec_ast.EcStmt]) -> bool:
+        seen_call = False
+        for s in _exec_stmts(body):
+            if isinstance(s, ec_ast.Call):
+                seen_call = True
+            elif isinstance(s, ec_ast.Sample) and seen_call:
+                return False
+        return True
+
+    l_distrs, r_distrs = _sample_distrs(l_body), _sample_distrs(r_body)
+    if (
+        _call_callees(l_body) == _call_callees(r_body)
+        and sorted(l_distrs) == sorted(r_distrs)
+        and len(set(l_distrs)) == len(l_distrs)
+        and l_distrs != r_distrs
+    ):
+        # Reference = the contiguous-front side (unchanged); hoist the other to
+        # match its sample order, leaving both ``[samples; calls]``.
+        align_swaps: list[str] | None
+        if _samples_contiguous_front(r_body):
+            align_swaps = _lazyro_front_swaps(l_body, r_distrs, 1)
+        elif _samples_contiguous_front(l_body):
+            align_swaps = _lazyro_front_swaps(r_body, l_distrs, 2)
+        else:
+            align_swaps = None
+        if align_swaps is not None:
+            ncalls, nsamples = len(_call_callees(r_body)), len(r_distrs)
+            peel = ["wp.", "call (_: true)."] * ncalls + ["wp.", "rnd."] * nsamples
+            tac = ["proc.", "inline *.", *align_swaps, *peel, "skip => /#."]
+            return (tac, set(), SYNTH_PARAM)
     # Unequal backbones: try the dead-deterministic-call drop. The longer side's
     # backbone must be the shorter's with extra *deterministic* calls inserted.
     if len(l_bb) > len(r_bb):

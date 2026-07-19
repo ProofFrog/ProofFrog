@@ -3429,6 +3429,201 @@ def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-pos
     return extra, outer, set()
 
 
+def _is_reprogram_if(stmt: ec_ast.EcStmt) -> bool:
+    """True if ``stmt`` is a lazy-RO *reprogramming* ``if`` (always-true).
+
+    Shape: ``if (<seed> = <s0>) { <r> <- concat_... y0_pq y0_t; } else { <r> <-
+    <h> <seed>; }`` -- an equality guard whose then-branch assigns a ``concat``
+    of the reprogrammed samples. This is the reprogramming that
+    :func:`_call_sample_backbone` cannot see through (it buries the KEM/NG
+    backbone). Excludes the flat-state early-return artifact ``if (! _r2) {...}``
+    (negation guard, no ``concat`` then-branch) so only the genuine
+    reprogramming ``if``s -- the ones EC's ``inline *`` reproduces from the
+    challenger's ``hash`` -- are counted.
+    """
+    if not isinstance(stmt, ec_ast.If):
+        return False
+    if "=" not in stmt.guard or stmt.guard.lstrip().startswith("!"):
+        return False
+    return any(
+        isinstance(s, ec_ast.Assign) and s.rhs.startswith("concat")
+        for s in stmt.then_body
+    )
+
+
+def _count_reprogram_ifs(body: list[ec_ast.EcStmt]) -> int:
+    """Number of reprogramming ``if``s at the top level of ``body``."""
+    return sum(1 for s in _exec_stmts(body) if _is_reprogram_if(s))
+
+
+def _collapse_all_ifs(body: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt]:
+    """Flatten every ``if`` in ``body`` to its then-branch (recursively).
+
+    Only used for the gated reprogramming-Lazy route, where every ``if`` is
+    always-true-then (the reprogramming ``seed = s0`` after ``seed <- s0``, and
+    the flat-state early-return ``! _r2`` after ``_r2 <- false``). Exposes the
+    KEM/NG backbone that :func:`_call_sample_backbone` otherwise cannot see.
+    """
+    out: list[ec_ast.EcStmt] = []
+    for stmt in body:
+        if isinstance(stmt, ec_ast.If):
+            out.extend(_collapse_all_ifs(stmt.then_body))
+        else:
+            out.append(stmt)
+    return out
+
+
+def _slice_concat_axioms(collapsed: list[ec_ast.EcStmt]) -> list[str]:
+    """The ``slice_concat_left/right`` axiom names for the reprogramming concat.
+
+    The reprogramming then-branch assigns ``<r> <- concat_<MID>_to_<Z> a b``;
+    the exporter emits ``slice_concat_left_<MID>_<Z>`` / ``..._right_...`` (see
+    the binding-proof axiom preamble). Discharges the derived-seed argument
+    equalities ``slice_pq (concat y0_pq y0_t) = y0_pq`` at the closing ``smt``.
+    """
+    axioms: list[str] = []
+    for stmt in _exec_stmts(collapsed):
+        if not isinstance(stmt, ec_ast.Assign) or not stmt.rhs.startswith("concat"):
+            continue
+        op = stmt.rhs.split()[0]  # concat_<MID>_to_<Z>
+        if "_to_" not in op or not op.startswith("concat_"):
+            continue
+        mid, _, z = op[len("concat_") :].partition("_to_")
+        axioms.append(f"slice_concat_left_{mid}_{z}")
+        axioms.append(f"slice_concat_right_{mid}_{z}")
+    # preserve order, drop duplicates
+    seen: set[str] = set()
+    unique: list[str] = []
+    for a in axioms:
+        if a not in seen:
+            seen.add(a)
+            unique.append(a)
+    return unique
+
+
+def _lazyro_front_swaps(
+    body: list[ec_ast.EcStmt], target_distrs: list[str], side: int
+) -> list[str] | None:
+    """``swap{side}`` tactics hoisting ``body``'s samples to the front in
+    ``target_distrs`` order.
+
+    The reprogramming-Lazy hop's two init bodies draw the same multiset of
+    samples but in different positions (the ``KeyGen`` side interleaves its
+    ``derivekeypair`` between the PQ seed and the ``lambda``/``T`` seeds). To
+    couple them tail-to-front with ``rnd`` the samples must be positionally
+    distribution-aligned; a ``<$`` draw is glob/data-independent of everything
+    before it, so hoisting it up is always an EC-valid ``swap``.
+
+    Each swap addresses a sample by its *occurrence* among the samples
+    (``^ <${k}`` -- the k-th sample, a code-position pattern) and moves it to
+    gap ``0`` (the block front). This is position-ROBUST: it depends only on the
+    sample ordering, not on how many deterministic tuple-unpack assigns EC's
+    ``inline *`` interposes (which the engine's flat state does not reproduce
+    faithfully). Hoisting in *reverse* target order lands the samples at the
+    front in target order. Requires ``target_distrs`` distinct (so the ordering
+    is determined by distribution); returns ``None`` if it cannot align.
+    """
+    cur = [s.distr for s in _exec_stmts(body) if isinstance(s, ec_ast.Sample)]
+    if cur == target_distrs:
+        return []
+    swaps: list[str] = []
+    for distr in reversed(target_distrs):
+        if distr not in cur:
+            return None
+        occ = cur.index(distr) + 1  # 1-indexed occurrence among current samples
+        swaps.append(f"swap{{{side}}} ^ <${{{occ}}} @ 0.")
+        cur.insert(0, cur.pop(occ - 1))
+    if cur != target_distrs:
+        return None
+    return swaps
+
+
+def _synth_reprogram_lazy_init(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+) -> tuple[list[str], set[tuple[str, str]], str] | None:
+    """Closing tactic for the CGLazyRO *reprogramming-Lazy* init equiv.
+
+    One side (the materialized ``_Mat`` challenger reduction) reprograms the RO
+    at a fresh seed inside an always-true ``if`` -- ``if (seed = s0) { y <-
+    concat y0_pq y0_t } else { y <- h seed }`` -- then derives the key from the
+    slices; the other side (the ``KeyGen`` reduction) samples the derived seeds
+    directly. :func:`_synth_init_backbone_peel` mis-handles this: the ``if``
+    hides the KEM/NG backbone from :func:`_call_sample_backbone`, so the two
+    sides look like ``[S,S,S]`` vs ``[S,C,S,S,C,C,C]`` and it emits a spurious
+    one-sided dead-call drop.
+
+    This route instead:
+
+    * collapses the always-true reprogramming ``if`` with ``rcondt{i} ^if`` (a
+      code-position selector -- no fragile absolute index), exposing the buried
+      backbone;
+    * reorders the ``KeyGen`` side's samples to the reprogramming side's
+      distribution order (:func:`_lazyro_front_swaps`);
+    * peels the now-common ``derivekeypair; randomscalar; generator; exp``
+      backbone tail-to-front (:func:`_backbone_peel`), coupling each abstract
+      call name-independently and each sample with ``rnd``;
+    * discharges the derived-seed argument equalities
+      (``slice (concat ..) = ..``) with the emitted ``slice_concat`` axioms.
+
+    Gated on exactly one side carrying a reprogramming ``if`` with an aligned
+    backbone, so every other init stays byte-identical. Returns ``None`` where
+    the shape does not match (the caller falls through to the regular peel).
+    """
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+    lmod = _flat_state_module(
+        modules, "Init_rp_L", lproj, external_module_types, method_return_types, []
+    )
+    rmod = _flat_state_module(
+        modules, "Init_rp_R", rproj, external_module_types, method_return_types, []
+    )
+    if not lmod.procs or not rmod.procs:
+        return None
+    l_body, r_body = lmod.procs[0].body, rmod.procs[0].body
+    l_reprog = _count_reprogram_ifs(l_body)
+    r_reprog = _count_reprogram_ifs(r_body)
+    if (l_reprog > 0) == (r_reprog > 0):
+        return None  # exactly one side must carry the reprogramming if(s)
+    if l_reprog > 0:
+        if_side, other_side, if_body, other_body, n_ifs = 1, 2, l_body, r_body, l_reprog
+    else:
+        if_side, other_side, if_body, other_body, n_ifs = 2, 1, r_body, l_body, r_reprog
+    collapsed = _collapse_all_ifs(if_body)
+    if_bb = _call_sample_backbone(collapsed)
+    other_bb = _call_sample_backbone(other_body)
+    # the abstract-call callee subsequence must match on both sides
+    if [c for k, c in if_bb if k == "call"] != [c for k, c in other_bb if k == "call"]:
+        return None
+    if_distrs = [
+        s.distr for s in _exec_stmts(collapsed) if isinstance(s, ec_ast.Sample)
+    ]
+    other_distrs = [
+        s.distr for s in _exec_stmts(other_body) if isinstance(s, ec_ast.Sample)
+    ]
+    if sorted(if_distrs) != sorted(other_distrs):
+        return None  # sample multisets (by distribution) differ
+    if len(set(if_distrs)) != len(if_distrs):
+        return None  # a repeated distribution makes the reorder ambiguous
+    swaps = _lazyro_front_swaps(other_body, if_distrs, other_side)
+    if swaps is None:
+        return None
+    axioms = _slice_concat_axioms(collapsed)
+    tac = ["proc.", "inline *."]
+    tac += [f"rcondt{{{if_side}}} ^if.", "+ auto."] * n_ifs
+    tac += swaps
+    tac += _backbone_peel(collapsed)
+    tac.append("auto => />.")
+    tac.append(f"smt({' '.join(axioms)})." if axioms else "smt().")
+    return (tac, set(), SYNTH_PARAM)
+
+
 def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -4008,6 +4203,24 @@ def _emit_one_oracle_chain(
             )
             if ek_twin is not None:
                 return ek_twin
+        # CGLazyRO reprogramming-Lazy init: one side reprograms the RO inside an
+        # always-true ``if`` (hiding the KEM/NG backbone from the backbone peel,
+        # which would emit a spurious one-sided dead-call drop). Collapse the
+        # ``if`` (``rcondt ^if``), reorder the KeyGen side's samples, and peel
+        # the now-common backbone. Gated on exactly one side carrying the
+        # reprogramming ``if`` with an aligned backbone, so every other init is
+        # byte-identical.
+        reprogram = _synth_reprogram_lazy_init(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+        )
+        if reprogram is not None:
+            tactic, pres, rung = reprogram
+            return [], [_res_tag(rung), *tactic, "qed."], pres
         # The backbone peel operates on the FIRST flat states (the raw wrappers
         # the init lemma actually relates), so it is valid even when the LAST
         # states diverge: a chain transform can unpack one side's packed key

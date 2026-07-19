@@ -646,14 +646,24 @@ class ModuleTranslator:
             body_param_types = {param.name: param_type_name}
         field_types = {fld.name: fld.type for fld in game.fields}
         field_renames = _field_renames_for(game.fields)
+        # When fields are emitted as module ``var``s (a multi-oracle stateful
+        # game), a bare sample/assignment onto one of them writes the field -- the
+        # statement translator must not shadow it with a local decl. Empty when
+        # fields inline to locals (single-oracle), keeping those byte-identical.
+        state_fields = (
+            _cross_oracle_field_names(game.fields, game.methods)
+            if emit_state_vars
+            else None
+        )
         procs = [
             self._translate_method(
                 method,
                 body_param_types,
                 field_types=field_types,
                 field_renames=field_renames,
+                field_names=state_fields[i] if state_fields is not None else None,
             )
-            for method in game.methods
+            for i, method in enumerate(game.methods)
         ]
         module_vars = (
             [
@@ -714,14 +724,20 @@ class ModuleTranslator:
         ]
         field_types = {fld.name: fld.type for fld in game.fields}
         field_renames = _field_renames_for(game.fields)
+        state_fields = (
+            _cross_oracle_field_names(game.fields, game.methods)
+            if emit_state_vars
+            else None
+        )
         procs = [
             self._translate_method(
                 method,
                 param_primitive_types,
                 field_types=field_types,
                 field_renames=field_renames,
+                field_names=state_fields[i] if state_fields is not None else None,
             )
-            for method in game.methods
+            for i, method in enumerate(game.methods)
         ]
         module_vars = (
             [
@@ -798,14 +814,20 @@ class ModuleTranslator:
             if emit_state_vars and use_canonical_fields
             else _field_renames_for(game.fields)
         )
+        state_fields = (
+            _cross_oracle_field_names(game.fields, game.methods)
+            if emit_state_vars
+            else None
+        )
         procs = [
             self._translate_method(
                 method,
                 external_module_types,
                 field_types=field_types,
                 field_renames=field_renames,
+                field_names=state_fields[i] if state_fields is not None else None,
             )
-            for method in game.methods
+            for i, method in enumerate(game.methods)
         ]
         module_vars = (
             [
@@ -922,6 +944,10 @@ class ModuleTranslator:
         ]
         field_types = {fld.name: fld.type for fld in reduction.fields}
         field_renames = _field_renames_for(reduction.fields)
+        # A reduction's fields are ALWAYS module vars; a bare sample onto one that
+        # PERSISTS to another oracle writes the module field (per-method, so a
+        # sample used only within its own oracle stays a local -- byte-identical).
+        state_fields = _cross_oracle_field_names(reduction.fields, reduction.methods)
 
         procs = [
             self._translate_method(
@@ -931,8 +957,9 @@ class ModuleTranslator:
                 field_types=field_types,
                 field_renames=field_renames,
                 allow_void_call=allow_void_call,
+                field_names=state_fields[i],
             )
-            for method in reduction.methods
+            for i, method in enumerate(reduction.methods)
         ]
         return ec_ast.Module(
             name=reduction.name,
@@ -1620,6 +1647,7 @@ class ModuleTranslator:
         field_types: dict[str, frog_ast.Type] | None = None,
         field_renames: dict[str, str] | None = None,
         allow_void_call: bool = False,
+        field_names: set[str] | None = None,
     ) -> ec_ast.Proc:
         sig = method.signature
         ec_params = [
@@ -1701,6 +1729,7 @@ class ModuleTranslator:
             module_var_aliases=module_var_aliases,
             allow_void_call=allow_void_call,
             type_map=type_map,
+            field_names=field_names,
         )
         try:
             translated = stmts.translate_block(method_block, return_type=return_type)
@@ -1780,6 +1809,38 @@ def _field_renames_for(game_fields: list[frog_ast.Field]) -> dict[str, str]:
         for fld in game_fields
         if _ec_field_name(fld.name) != fld.name
     }
+
+
+def _cross_oracle_field_names(
+    fields: list[frog_ast.Field], methods: list[frog_ast.Method]
+) -> list[set[str]]:
+    """Per-method: the module-var fields that PERSIST across oracle calls.
+
+    Returns a list aligned with ``methods``; entry ``i`` is the set of field
+    names that appear in some method OTHER than ``methods[i]``. A bare sample or
+    assignment onto such a field in ``methods[i]`` WRITES the module field
+    (another oracle reads it later), so the statement translator must not shadow
+    it with a local ``var`` decl -- otherwise the field stays ``witness`` and the
+    reader sees the default (the lazy-RO ``H``/``s0``/``y0_*`` reprogramming bug).
+
+    A field used in only ONE method needs no persistence: sampling it into a
+    local is behaviourally identical and stays byte-identical, so it is excluded.
+    Field references in a game/reduction body are bare ``Variable`` nodes, which
+    ``VariableCollectionVisitor`` collects (it skips ``FieldAccess`` interiors,
+    irrelevant here). Single-method modules yield all-empty sets.
+    """
+    field_set = {fld.name for fld in fields}
+    if not field_set or len(methods) < 2:
+        return [set() for _ in methods]
+    appears: list[set[str]] = [
+        {v.name for v in visitors.VariableCollectionVisitor().visit(m.block)}
+        & field_set
+        for m in methods
+    ]
+    return [
+        set().union(*(appears[j] for j in range(len(methods)) if j != i))
+        for i in range(len(methods))
+    ]
 
 
 def _canonical_field_renames(

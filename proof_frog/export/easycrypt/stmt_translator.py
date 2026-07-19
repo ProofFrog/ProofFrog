@@ -37,9 +37,16 @@ class StatementTranslator:
         module_var_aliases: dict[str, str] | None = None,
         allow_void_call: bool = False,
         type_map: dict[str, frog_ast.Type] | None = None,
+        field_names: set[str] | None = None,
     ) -> None:
         self._types = types
         self._exprs = exprs
+        # Names of module-level ``var`` fields (the ``emit_state_vars`` state of a
+        # multi-oracle game / a reduction). A bare sample or assignment onto one of
+        # these WRITES the field and must not be shadowed by a local ``var`` decl.
+        # Empty for single-oracle games whose fields inline to locals -- so those
+        # renders stay byte-identical.
+        self._field_names: set[str] = field_names or set()
         # The live FrogLang type map the expr translator's ``type_of`` closes
         # over. When a module call is hoisted out of an expression into a fresh
         # ``<@`` temp, or a local is declared mid-lowering, its type is recorded
@@ -568,7 +575,21 @@ class StatementTranslator:
             the_type = self._exprs.type_of(stmt.var)
         ec_type = self._types.translate_type(the_type)
         ec_var = self._exprs.ec_name(var.name)
-        decls.append(ec_ast.VarDecl(ec_var, ec_type))
+        # A BARE sample onto a MODULE FIELD (``H <- Function<..>`` / ``s0 <-
+        # BitString<n>`` with NO LHS type, where ``H``/``s0`` persists to another
+        # oracle) WRITES that field -- it must NOT get a shadowing local ``var``
+        # decl (the field would then stay ``witness`` and a later oracle reading
+        # it would read the default, not the sampled value). This mirrors
+        # ``_handle_assign``, which omits the decl exactly when ``the_type is
+        # None`` (a bare field write). The LHS-type condition is load-bearing: a
+        # TYPED sample ``T x <- ...`` is an explicit LOCAL that may deliberately
+        # shadow a same-named field of a DIFFERENT type (ElGamal's
+        # ``G_Exp.zmod sk`` over the ``secretkey`` field), so it keeps its decl.
+        # Gated on ``field_names`` (cross-oracle module-var fields) too, so a
+        # bare-sample local -- the engine inlines ``sk = a`` into ``a <$ d`` as an
+        # un-annotated sample onto a local -- still gets its decl (byte-identical).
+        if stmt.the_type is not None or var.name not in self._field_names:
+            decls.append(ec_ast.VarDecl(ec_var, ec_type))
         self._type_map[var.name] = the_type
         distr = self._types.distr_for(ec_type)
         # A Function-field sample from the shared RO's own ``dfun`` is

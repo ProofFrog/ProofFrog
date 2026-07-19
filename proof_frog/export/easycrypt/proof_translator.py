@@ -37,6 +37,12 @@ class LazyroInitSpec:
     swap_below: int
     n_calls: int
     dfun_ll: str
+    # Side ("1"/"2") of the *reduction* -- the endpoint whose Honest challenger
+    # samples a fresh RO the game ignores, so the game's shared-RO sample is DEAD
+    # on this side. The swap that sinks the dead sample and the one-sided ``rnd``
+    # that drops it both act on this side. The forward hop has the reduction on
+    # side 2; the reverse-direction hop flips it to side 1.
+    red_side: str = "2"
 
 
 @dataclass
@@ -602,16 +608,44 @@ def translate_inlining_hop_pr_lemma(  # pylint: disable=too-many-arguments,too-m
             # dead RO copy -- the validated ec_templates/lazyro_honest_main_calls.ec
             # tactic. The init lemma is not emitted for this hop.
             li = multi_oracle.lazyro
+            # The ``seq`` mid-invariant must retain ``={glob A}``: the abstract
+            # adversary call's frame (the ``call (_: coupling)`` above) leaves the
+            # init's post carrying ``(glob A){1} = (glob A){2}``, but ``coupling``
+            # omits the adversary, so a bare ``seq 1 1 : (coupling)`` drops it and
+            # the post-init goal has an unprovable ``(glob A){1} = (glob A){2}``
+            # leaf. ``={glob A}`` holds from ``byequiv_pre`` and the init never
+            # touches ``glob A``, so threading it through the split is sound.
             init_tac = [
                 "inline *.",
-                f"swap{{2}} 1 {li.swap_below}.",
-                f"seq 1 1 : ({multi_oracle.coupling}).",
+                f"swap{{{li.red_side}}} 1 {li.swap_below}.",
+                f"seq 1 1 : (={{glob A}} /\\ {multi_oracle.coupling}).",
                 "+ rnd; skip => />.",
                 "wp.",
             ]
             for _ in range(li.n_calls):
                 init_tac += ["call (_: true).", "wp."]
-            init_tac += ["rnd{2}.", "rnd.", f"skip => />; smt({li.dfun_ll})."]
+            # After ``skip``, the accumulated byequiv post is a deep
+            # bool-``&&``-``forall``-``let`` nest (the binding adversary returns
+            # ``bool``, so ``={res}`` is a bool equation and every hop level
+            # contributes a ``&&`` conjunct under a ``forall``, with the RO
+            # derivations bound by intermediate ``let``s). A flat ``smt`` cannot
+            # discharge it (the higher-order ``forall`` from the dead-RO drop and
+            # the let-nesting defeat it). Fully destructure instead: at each level
+            # peel every leaf conjunct (``rewrite andaE`` turns the bool ``&&``
+            # into ``/\`` so ``split`` applies) closing it by the RO congruence
+            # (the ``RO.h{1} = <chal>.h{2}`` coupling makes both sides' slices
+            # equal), then cross the level's ``forall`` (``move => *``) and unfold
+            # its ``let``s (``simplify``). ``try`` keeps a shallow hop (whose
+            # ``=> />`` leaves no ``&&``) falling through to the final ``smt``.
+            # Validated on ``.ec-tmp/repro_goal`` (the transcribed real goal) and
+            # ``ec_templates/lazyro_pr_repack.ec``.
+            destructure = (
+                "skip => />; "
+                "try (do ! (do ! (rewrite andaE; split; "
+                f"first by smt({li.dfun_ll})); move => *; simplify)); "
+                f"smt({li.dfun_ll})."
+            )
+            init_tac += [f"rnd{{{li.red_side}}}.", "rnd.", destructure]
         else:
             init_tac = [
                 f"call hop_{hop_index}_{multi_oracle.init_oracle}.",

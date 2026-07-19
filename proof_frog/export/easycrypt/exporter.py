@@ -4812,7 +4812,12 @@ def export_proof_file(proof_path: str) -> str:
             return None
         assert model.init_name is not None
         lazyro: pt.LazyroInitSpec | None = None
-        if _is_lazyro_honest_hop(step_a, step_b) is not None:
+        lazy_hop = _is_lazyro_honest_hop(step_a, step_b)
+        if lazy_hop is not None:
+            # The reduction (delegating to the Honest challenger) may be on
+            # EITHER side: forward hop -> side 2, reverse-direction hop -> side 1.
+            # The dead-RO swap/drop must act on this side (``red_side``).
+            red_side = lazy_hop[1]
             red_step = step_a if step_a.reduction is not None else step_b
             assert red_step.reduction is not None
             red = _get_reduction(red_step.reduction.name)
@@ -4848,6 +4853,7 @@ def export_proof_file(proof_path: str) -> str:
                     swap_below=swap_below,
                     n_calls=n_calls,
                     dfun_ll=f"{dfun}_ll",
+                    red_side=red_side,
                 )
         return pt.MultiOraclePrSpec(
             coupling=_live_state_coupling(step_a, step_b),

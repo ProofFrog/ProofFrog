@@ -4414,6 +4414,50 @@ def export_proof_file(proof_path: str) -> str:
         # pylint: enable=protected-access
         return " /\\ ".join(conj)
 
+    hop_live_abstract_memo: dict[tuple[int, int], frozenset[str]] = {}
+
+    def _hop_live_abstract_modules(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> frozenset[str]:
+        """Abstract-scheme modules referenced in BOTH of the hop's canonicalized
+        flat states.
+
+        Mirrors the field-aware leg coupling's ``li[1] & ri[1]`` intersection
+        (:func:`chain_emitter._glob_signature`): a module used by neither state's
+        surviving methods is absent from its EC ``(glob)``, so a ``={glob P}``
+        coupling conjunct over it cannot be threaded through the per-oracle
+        transitivity. Read off the canonicalized ASTs (the same source the
+        chain-emission renders), memoized per hop."""
+        key = (id(step_a), id(step_b))
+        if key in hop_live_abstract_memo:
+            return hop_live_abstract_memo[key]
+        # pylint: disable=protected-access
+        la = engine._get_game_ast(step_a.challenger, step_a.reduction)
+        lb = engine._get_game_ast(step_b.challenger, step_b.reduction)
+        # pylint: enable=protected-access
+        lc, _ = engine.canonicalize_game_with_states(
+            copy.deepcopy(la), skip_passes=_EXPORT_SKIP_PASSES
+        )
+        rc, _ = engine.canonicalize_game_with_states(
+            copy.deepcopy(lb), skip_passes=_EXPORT_SKIP_PASSES
+        )
+
+        def _refs(game: frog_ast.Game, mod: str) -> bool:
+            finder: visitors.SearchVisitor[frog_ast.FieldAccess] = (
+                visitors.SearchVisitor(
+                    lambda n: isinstance(n, frog_ast.FieldAccess)
+                    and isinstance(n.the_object, frog_ast.Variable)
+                    and n.the_object.name == mod
+                )
+            )
+            return finder.visit(game) is not None
+
+        live = frozenset(
+            m for m in abstract_scheme_modules if _refs(lc, m) and _refs(rc, m)
+        )
+        hop_live_abstract_memo[key] = live
+        return live
+
     def _live_state_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
         base = _live_state_coupling_base(step_a, step_b)
         extra = _ro_challenger_materialization(step_a, step_b)
@@ -4423,7 +4467,22 @@ def export_proof_file(proof_path: str) -> str:
             # hold post-init (the pr-lemma drops the dead sample). Strip it from the
             # base -- the cross-side ``RO_G_RO.h{game}=<chal>.h{red}`` in ``extra`` is
             # the real RO coupling the per-oracle lemmas need.
-            for m in ro_holder_modules:
+            #
+            # ALSO strip ``={glob P}`` for an abstract module ``P`` DEAD in this
+            # hop's flat states: the ROM game's ``Challenge`` returns a constant
+            # (``Unbreakable`` = ``false``), so its KDF/label calls are dropped and
+            # ``H``/``L`` fall out of the flat states' ``(glob)``. The field-aware
+            # leg couplings then intersect them away (chain_emitter's ``li & ri``),
+            # so a ``={glob H}`` the wrapper still carries (its live ``Challenge``)
+            # in the OUTER lemma cannot thread the H-free intermediate states -- the
+            # transitivity post-composition "cannot prove goal (strict)". Match the
+            # legs by dropping the dead modules here too. Gated to lazyro-honest
+            # hops, so every other proof stays byte-identical.
+            live = _hop_live_abstract_modules(step_a, step_b)
+            dead = [m for m in ro_holder_modules] + [
+                m for m in abstract_scheme_modules if m not in live
+            ]
+            for m in dead:
                 base = base.replace(f" /\\ ={{glob {m}}}", "").replace(
                     f"={{glob {m}}} /\\ ", ""
                 )
@@ -4542,6 +4601,15 @@ def export_proof_file(proof_path: str) -> str:
                     if isinstance(h, frog_ast.Reduction) and not h.fields
                 },
                 is_lazyro_honest=_is_lazyro_honest_hop(step_a, step_b) is not None,
+                drop_globs=(
+                    frozenset(
+                        m
+                        for m in abstract_scheme_modules
+                        if m not in _hop_live_abstract_modules(step_a, step_b)
+                    )
+                    if _is_lazyro_honest_hop(step_a, step_b) is not None
+                    else frozenset()
+                ),
             )
             chain_extra_decls.extend(info.extra_decls)
             pres_method_requests.update(info.pres_methods)

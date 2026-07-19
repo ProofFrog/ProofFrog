@@ -3959,6 +3959,7 @@ def emit_multi_oracle_chain_for_hop(
     use_canonical_fields: bool = False,
     stateless_wrapper_bases: frozenset[str] | set[str] | None = None,
     is_lazyro_honest: bool = False,
+    drop_globs: frozenset[str] = frozenset(),
 ) -> MultiOracleHopChainInfo:
     """Emit the per-oracle per-transform chains for one multi-oracle hop.
 
@@ -4090,6 +4091,7 @@ def emit_multi_oracle_chain_for_hop(
             glob_info_by_base=glob_info_by_base,
             stateless_wrapper_bases=stateless_wrapper_bases,
             is_lazyro_honest=is_lazyro_honest,
+            drop_globs=drop_globs,
         )
         chunks.extend(oracle_chunks)
         tactic_body_by_oracle[oracle_name] = outer_body
@@ -4138,6 +4140,7 @@ def _emit_one_oracle_chain(
     ) = None,
     stateless_wrapper_bases: frozenset[str] | set[str] | None = None,
     is_lazyro_honest: bool = False,
+    drop_globs: frozenset[str] = frozenset(),
 ) -> tuple[list[str], list[str], set[tuple[str, str]]]:
     """Emit one oracle's chain artifacts + outer tactic body.
 
@@ -4557,7 +4560,7 @@ def _emit_one_oracle_chain(
     coupling = _make_field_aware_coupling(
         fields_by_base,
         survivor_map,
-        [p.name for p in flat_params] + ro_module_names,
+        [p.name for p in flat_params if p.name not in drop_globs] + ro_module_names,
         _chain_role_map(norm_left, norm_right, survivor_map),
         qualified_ref_by_base,
         canonical_by_base,
@@ -4943,7 +4946,27 @@ def _precond_witness(
     fld = re.compile(r"(\w[\w.]*)\.(\w+)\{(\d)\} = (\w[\w.]*)\.(\w+)\{(\d)\}")
     params: list[str] = []
     field_wit: dict[str, str] = {}  # nxt field name -> witness expr
+    ro_side: dict[str, str] = {}  # RO-holder glob -> witness side ("1" default)
     pre1_fieldwise = False
+
+    def _note_ro_side(coupling_text: str) -> None:
+        # A cross-form RO coupling ``<cur/outer-field>{1} = <RO>.h{2}`` (the RO
+        # holder on side 2, coupled to a field that is NOT the middle's own)
+        # pins the MIDDLE's shared RO to side 2's value, so its exists witness
+        # must be ``<RO>.h{2}`` -- not the default ``{1}``. This is the lazyro
+        # Honest chain-to-game leg (``Step_L.f03{1} = RO_G_RO.h{2}``); the
+        # materialized-RF hops (``nxt.f{1} = RO.h{1}``) keep side 1.
+        for part in (p.strip() for p in coupling_text.split("/\\")):
+            fm = fld.fullmatch(part)
+            if (
+                fm
+                and fm.group(3) == "1"
+                and fm.group(6) == "2"
+                and fm.group(4).split(".")[-1].startswith("RO_")
+                and fm.group(1) != nxt_base
+            ):
+                ro_side[fm.group(4)] = "2"
+
     for part in (p.strip() for p in pre1.split("/\\")):
         gm = re.fullmatch(r"=\{glob ([\w.]+)\}", part)
         if gm:
@@ -5024,10 +5047,14 @@ def _precond_witness(
     witnesses = [f"(glob {p}){{1}}" for p in functor_globs]
     witnesses += [field_wit[y] for y in sorted(field_wit)]
     # The RO holder's exists var is its single ``h`` field (an arrow), so witness
-    # it as ``<clone>.RO_H.h{1}`` -- the explicit field, not the opaque
-    # ``(glob <clone>.RO_H){1}`` (which ``smt`` does not always see as equal to
-    # the arrow field ``f06 = h`` in a materialized-RF middle state).
-    witnesses += [f"{p}.h{{1}}" for p in sorted(ro_globs)]
+    # it as ``<clone>.RO_H.h{s}`` -- the explicit field, not the opaque
+    # ``(glob <clone>.RO_H){s}`` (which ``smt`` does not always see as equal to
+    # the arrow field ``f06 = h`` in a materialized-RF middle state). The side
+    # ``s`` is 1 by default (materialized-RF hops) but 2 for a cross-form RO
+    # coupling (the lazyro Honest chain-to-game leg; see ``_note_ro_side``).
+    _note_ro_side(pre1)
+    _note_ro_side(pre2)
+    witnesses += [f"{p}.h{{{ro_side.get(p, '1')}}}" for p in sorted(ro_globs)]
     if eq_args != "true":
         witnesses.append("arg{1}")
     # ``;``-chained, not ``.``-separated: this is ONE goal-slot inside a

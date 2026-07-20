@@ -2374,6 +2374,68 @@ def _oracle_pending_admit(hop_index: int, oracle_name: str) -> list[str]:
     ]
 
 
+def _synth_reprogram_hashg(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+) -> tuple[list[str], set[tuple[str, str]], str] | None:
+    """Whole-oracle route for the seedbased-hybrid reprogramming ``HashG`` equiv.
+
+    Both endpoints answer ``HashG`` by ``if (x == <seed>) { r <- <a> || <b>; }
+    else { r <- H(x); }``. Given the reprogramming-field correspondences in the
+    coupling (emitted by ``exporter._reprogram_field_coupling``), the two-sided
+    ``if`` relates them: the guard equality follows from ``<seed>{1}=<seed>{2}``,
+    the then-branch from ``<a>/<b>`` correspondences, the else from the RO
+    coupling. A ``_Mat``-delegating endpoint (``R_LazyRO_L``) carries a leading
+    ``x0 <- x`` arg binding (``inline *`` of ``challenger.Hash(x)``); an
+    own-reprogramming endpoint (``R_KG_L``) has the ``if`` first. ``sp <kl> <kr>``
+    consumes each side's leading deterministic prefix (so both ``if``s are the
+    current statement) -- counts read off the flat state's ``HashG`` (leading
+    statements before the reprogramming ``if``). Returns ``None`` off-shape (no
+    reprogramming ``if`` on a side), so every other oracle keeps its chain."""
+
+    def _prefix(state: frog_ast.Game) -> int | None:
+        proj = _project_to_method(state, oracle_name)
+        if proj is None:
+            return None
+        mod = _flat_state_module(
+            modules, "HG_rp", proj, external_module_types, method_return_types, []
+        )
+        if not mod.procs:
+            return None
+        for i, s in enumerate(_exec_stmts(mod.procs[0].body)):
+            if isinstance(s, ec_ast.If):
+                # A reprogramming ``if`` reprograms with a concat assign first
+                # (a ``_Mat``-side then-branch also carries a flat-state
+                # ``_r <- true`` early-return flag after it); a binding
+                # ``Challenge`` collision ``if`` opens with a projection/keygen
+                # recompute -- decline there (keep its guided admit).
+                tb = s.then_body
+                if (
+                    tb
+                    and isinstance(tb[0], ec_ast.Assign)
+                    and tb[0].rhs.lstrip().startswith("concat")
+                ):
+                    return i
+                return None
+        return None
+
+    del flat_params  # prefix is param-independent; kept for call-site parity
+    kl = _prefix(left_state0)
+    kr = _prefix(right_state0)
+    if kl is None or kr is None:
+        return None
+    tac = ["proc.", "inline *."]
+    if kl or kr:
+        tac.append(f"sp {kl} {kr}.")
+    tac.append("if; auto.")
+    return (tac, set(), SYNTH_PARAM)
+
+
 def _init_reorder_group_swaps(
     exec_body: list[ec_ast.EcStmt], keygen_callee: str, side: int = 1
 ) -> list[str]:
@@ -4662,6 +4724,27 @@ def _emit_one_oracle_chain(
         and _oracle_is_stateless(left_states[0], oracle_name)
         and _oracle_is_stateless(right_states[0], oracle_name)
     )
+
+    # Reprogramming HashG whole-oracle route: both endpoints reprogram the shared
+    # RO in an ``if (x == <seed>) return <a> || <b>`` branch. The per-transform
+    # micro chain admits (the reprogramming-field change is not a sim/reorder),
+    # but with the reprogramming-field correspondences in the coupling
+    # (``exporter._reprogram_field_coupling``) the two-sided ``if`` closes it.
+    # Self-gated (``None`` when a side lacks a reprogramming ``if``), so every
+    # other oracle keeps its chain.
+    if not is_init and not stateless_oracle:
+        reprog_hashg = _synth_reprogram_hashg(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        if reprog_hashg is not None:
+            tactic, pres, rung = reprog_hashg
+            return [], [_res_tag(rung), *tactic, "qed."], pres
 
     chunks: list[str] = []
     step_pres: set[tuple[str, str]] = set()

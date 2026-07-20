@@ -443,6 +443,28 @@ def _reprogramming_lazy_ro_field(game: frog_ast.Game) -> str | None:
     return None
 
 
+def _is_reprogram_hash_if(node: frog_ast.ASTNode) -> bool:
+    """True if ``node`` is a lazy-RO reprogramming ``HashG`` branch:
+    ``if (x == <seed>) { return <a> || <b>; } ...`` -- an equality guard whose
+    then-branch returns the concatenation of the two reprogrammed halves."""
+    if not isinstance(node, frog_ast.IfStatement):
+        return False
+    if not node.conditions or not isinstance(
+        node.conditions[0], frog_ast.BinaryOperation
+    ):
+        return False
+    if node.conditions[0].operator != frog_ast.BinaryOperators.EQUALS:
+        return False
+    if not node.blocks or not node.blocks[0].statements:
+        return False
+    ret = node.blocks[0].statements[0]
+    return (
+        isinstance(ret, frog_ast.ReturnStatement)
+        and isinstance(ret.expression, frog_ast.BinaryOperation)
+        and ret.expression.operator == frog_ast.BinaryOperators.OR
+    )
+
+
 def _prime_group_names(proof: frog_ast.ProofFile) -> set[str]:
     """Group names the proof declared ``requires <G>.order is prime;`` for.
 
@@ -4458,6 +4480,102 @@ def export_proof_file(proof_path: str) -> str:
         hop_live_abstract_memo[key] = live
         return live
 
+    def _reprogram_side(
+        step: frog_ast.Step,
+    ) -> tuple[str, list[str]] | None:
+        """``(module, [guard, concat1, concat2])`` reprogramming-field names for a
+        reprogramming-Lazy hop endpoint, or ``None`` off-shape.
+
+        Every seedbased-hybrid reduction/challenger answers ``HashG`` by
+        reprogramming the RO at a fresh seed: ``if (x == <seed>) return <a> || <b>;
+        return H(x);``. A reduction that reprograms itself (``R_KG_L``,
+        ``R_PQ_Bind``, ``R_KDF``) carries that ``if`` in its own ``HashG``; a
+        reduction that delegates to the materialized ``_Mat`` Lazy challenger
+        (``R_LazyRO_L``) carries it in the challenger game's ``Hash`` (fields
+        ``s0``/``y0_pq``/``y0_t``). Both are found by the same shape probe."""
+
+        def _extract(methods: list[frog_ast.Method]) -> list[str] | None:
+            for m in methods:
+                params = m.signature.parameters
+                pname = params[0].name if params else None
+                finder: visitors.SearchVisitor[frog_ast.IfStatement] = (
+                    visitors.SearchVisitor(_is_reprogram_hash_if)
+                )
+                iff = finder.visit(m.block)
+                if iff is None:
+                    continue
+                cond = iff.conditions[0]
+                assert isinstance(cond, frog_ast.BinaryOperation)
+                ops = [cond.left_expression, cond.right_expression]
+                guard = next(
+                    (
+                        o
+                        for o in ops
+                        if not (isinstance(o, frog_ast.Variable) and o.name == pname)
+                    ),
+                    None,
+                )
+                ret = iff.blocks[0].statements[0]
+                assert isinstance(ret, frog_ast.ReturnStatement)
+                cat = ret.expression
+                assert isinstance(cat, frog_ast.BinaryOperation)
+                left, right = cat.left_expression, cat.right_expression
+                if (
+                    isinstance(guard, frog_ast.Variable)
+                    and isinstance(left, frog_ast.Variable)
+                    and isinstance(right, frog_ast.Variable)
+                ):
+                    return [guard.name, left.name, right.name]
+            return None
+
+        # pylint: disable=protected-access
+        red = _get_reduction(step.reduction.name) if step.reduction else None
+        if red is not None:
+            fields = _extract(red.methods)
+            if fields is not None:
+                return (
+                    pt.module_base_name(resolver.resolve(step).module_expr),
+                    fields,
+                )
+        chal_game = engine._get_game_ast(step.challenger, None)
+        if chal_game is not None:
+            fields = _extract(chal_game.methods)
+            if fields is not None:
+                chal_base = pt.module_base_name(
+                    pt.last_module_arg(resolver.resolve(step).module_expr)
+                )
+                return (chal_base, fields)
+        # pylint: enable=protected-access
+        return None
+
+    def _reprogram_field_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
+        """Cross-side reprogramming-field coupling for a reprogramming-Lazy hop.
+
+        Both endpoints reprogram the RO at a fresh seed with a KEM/NG seed pair;
+        their ``HashG`` returns are provably equal only when the reprogrammed
+        fields correspond. The chain's ``initialize`` couples the two reductions'
+        stored fields but not the ``_Mat`` challenger's reprogram fields, so the
+        ``HashG`` equiv's guard/then-branch is otherwise unprovable. Emit
+        ``<A>.<guard>{1}=<B>.<guard>{2} /\\ <A>.<c1>{1}=<B>.<c1>{2} /\\
+        <A>.<c2>{1}=<B>.<c2>{2}`` (positionally matched off each side's
+        reprogramming ``if``). Empty off-shape (either side lacks a reprogramming
+        ``HashG`` -- e.g. a Honest-hop endpoint) so every other hop is
+        byte-identical."""
+        la = _reprogram_side(step_a)
+        lb = _reprogram_side(step_b)
+        if la is None or lb is None:
+            return ""
+        (ma, fa), (mb, fb) = la, lb
+        # pylint: disable=protected-access
+        return " /\\ ".join(
+            f"{ma}.{mt._ec_field_name(fa[i])}"
+            "{1}"
+            f" = {mb}.{mt._ec_field_name(fb[i])}"
+            "{2}"
+            for i in range(3)
+        )
+        # pylint: enable=protected-access
+
     def _live_state_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
         base = _live_state_coupling_base(step_a, step_b)
         extra = _ro_challenger_materialization(step_a, step_b)
@@ -4486,7 +4604,13 @@ def export_proof_file(proof_path: str) -> str:
                 base = base.replace(f" /\\ ={{glob {m}}}", "").replace(
                     f"={{glob {m}}} /\\ ", ""
                 )
-        return f"{base} /\\ {extra}" if extra else base
+        coupled = f"{base} /\\ {extra}" if extra else base
+        # Reprogramming-Lazy hop: carry the cross-side reprogramming-field
+        # correspondences so the per-oracle ``HashG`` equiv's guard/then-branch is
+        # provable (the init couples the reductions' stored fields but not the
+        # ``_Mat`` challenger's reprogram fields). Empty off-shape -> byte-identical.
+        reprog = _reprogram_field_coupling(step_a, step_b)
+        return f"{coupled} /\\ {reprog}" if reprog else coupled
 
     # Per-hop memo of the multi-oracle chain emission. ``translate_hops``
     # calls ``_oracle_body_for_hop`` once per oracle of a multi-oracle hop;

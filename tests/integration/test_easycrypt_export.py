@@ -1743,6 +1743,9 @@ BINDING_CHALLENGE_HOP2_CASESPLIT_TEMPLATE = (
 BINDING_CHALLENGE_HOP4_FALSEFALSE_TEMPLATE = (
     EC_TEMPLATES / "binding_challenge_hop4_falsefalse.ec"
 )
+BINDING_CHALLENGE_SEEDED_WRAPPER_TEMPLATE = (
+    EC_TEMPLATES / "binding_challenge_seeded_wrapper.ec"
+)
 
 
 @pytest.mark.skipif(
@@ -1960,7 +1963,10 @@ def test_export_expanded_leak_emits_decomposition_coupling() -> None:
     # The reduction<->challenger seam uses the challenger's OWN field name (the
     # KEM_PQ binding game holds ``dk0``/``dk1``), only for the PQ components the
     # reduction sources from ``challenger.Initialize()``.
-    assert "R_PQ_Bind.dk_PQ_0{2} = KEM_PQ_c.LEAK_BIND_K_CT_DIFFKEY_Breakable.dk0{2}" in output
+    assert (
+        "R_PQ_Bind.dk_PQ_0{2} = KEM_PQ_c.LEAK_BIND_K_CT_DIFFKEY_Breakable.dk0{2}"
+        in output
+    )
     # The old ill-typed shape (game field named after a reduction component)
     # must be gone entirely.
     assert "Hybrid_c.LEAK_BIND_K_CT_DIFFKEY_Breakable.dk_PQ_0" not in output
@@ -2003,6 +2009,44 @@ def test_binding_challenge_casesplit_template_compiles(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, (
         f"EasyCrypt rejected the binding-challenge case-split template.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_binding_challenge_seeded_wrapper_template_compiles(tmp_path: Path) -> None:
+    """Regression tripwire for the SEEDED-WRAPPER challenge case-split -- the
+    seedbased LEAK_BIND chain's hop_4_challenge (R_KG_L ~ R_PQ_Bind). Same
+    EncodeSharedSecret-injectivity dissolution as the expanded variant, but the
+    KEM is ``SeededKEMWrapper(KEM_inner)``, so every ``decaps(seed, ct)`` inlines
+    to a TWO-call backbone ``derivekeypair(seed); decaps(dk, ct)`` and the
+    inlined PQ binding challenger in the collision branch RE-decapsulates (4
+    extra calls, NOT CSE-deduped). The existing case-split routes gate on bare
+    ``<clone>.decaps`` and decline. This pins the target tactic the exporter's
+    new wrapper route must synthesize: a per-side ``kdf_of_det`` phoare
+    functionalizes the whole wrapper decaps as one deterministic result;
+    ``seq 2 2`` splits the two IDENTICAL prefixes; ``if{2}`` opens the
+    reduction's case-split; the collision branch's re-decapsulation is dropped
+    ONE-SIDED via ``dec_det``/``dkp_det`` (the ``<M>_<m>_det`` foundation), which
+    pin ``b_i = ss_i``; then ``mk_kdf_inj``/``encss_inj``/``hyb_ct_neq_pq`` close
+    both branches. If this stops compiling, the seeded-wrapper case-split
+    synthesizer's target must be re-derived before any seedbased binding proof
+    can be driven to CLEAN."""
+    ec_file = tmp_path / "binding_challenge_seeded_wrapper.ec"
+    ec_file.write_text(BINDING_CHALLENGE_SEEDED_WRAPPER_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the seeded-wrapper challenge case-split template.\n"
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )

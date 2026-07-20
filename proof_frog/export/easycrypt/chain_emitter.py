@@ -2436,6 +2436,71 @@ def _synth_reprogram_hashg(  # pylint: disable=too-many-arguments,too-many-posit
     return (tac, set(), SYNTH_PARAM)
 
 
+def _synth_straightline_challenge(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+) -> tuple[list[str], set[tuple[str, str]], str] | None:
+    """Whole-oracle route for a straight-line binding ``Challenge`` equiv between
+    two REDUCTIONS whose bodies are identical up to the coupled fields they read.
+
+    The seedbased KeyGen challenge hop ``R_LazyRO_L ~ R_KG_L`` runs an identical
+    decaps/NG/KDF/``H.evaluate`` backbone on both sides, differing only in the
+    reduction field a deterministic assign reads (``R_LazyRO_L.dk_PQ_0`` vs
+    ``R_KG_L.dk_PQ_0`` -- coupled in the hop's pre). ``sim`` relates globals BY
+    NAME, so it cannot align the cross-named fields (the oracle admits); a
+    COUNT-FREE tail-to-front peel closes it: ``do ! (wp; call (_: true))`` couples
+    each abstract call name-independently (args match via the coupling) until no
+    call remains, then ``wp; skip => /#`` clears the leading run and discharges
+    the binding boolean.
+
+    The count is not read off the flat state on purpose: the lemma relates the
+    RAW wrappers (``proc; inline *``), and the canonicalized flat states can
+    DIVERGE from them (differing call count / multiset), so a fixed peel would
+    misfire -- ``do !`` self-sizes. The CALLER gates this on ``both_reductions``
+    (a LazyRO hop has a GAME endpoint that re-derives the seed via the RO, a
+    genuinely different backbone the peel would mispair); here we only require
+    both bodies straight-line (no ``if`` -- excludes the case-split ``Challenge``)
+    and non-identical (identical bodies close via the historical ``sim``)."""
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+    lmod = _flat_state_module(
+        modules, "SC_L", lproj, external_module_types, method_return_types, []
+    )
+    rmod = _flat_state_module(
+        modules, "SC_R", rproj, external_module_types, method_return_types, []
+    )
+    del flat_params  # peel is param-independent
+    if not lmod.procs or not rmod.procs:
+        return None
+    l_body, r_body = lmod.procs[0].body, rmod.procs[0].body
+    if any(isinstance(s, ec_ast.If) for s in _exec_stmts(l_body)):
+        return None
+    if any(isinstance(s, ec_ast.If) for s in _exec_stmts(r_body)):
+        return None
+    # NB: canonicalization renames the two reductions' differing field reads to
+    # the SAME positional ``fieldN``, so the flat bodies are typically EQUAL here
+    # even though the RAW wrappers the lemma relates differ (``sim`` fails, the
+    # micro chain admits). So we do NOT skip on ``l_body == r_body``; the peel is
+    # sound for identical raw wrappers too (it just does sim's job the long way),
+    # and the caller's ``both_reductions`` gate + a regression check keep clean
+    # proofs from silently changing tactic.
+    tac = [
+        "proc.",
+        "inline *.",
+        "do ! (wp; call (_: true)).",
+        "wp.",
+        "skip => /#.",
+    ]
+    return (tac, set(), SYNTH_PARAM)
+
+
 def _init_reorder_group_swaps(
     exec_body: list[ec_ast.EcStmt], keygen_callee: str, side: int = 1
 ) -> list[str]:
@@ -4074,6 +4139,7 @@ def emit_multi_oracle_chain_for_hop(
     stateless_wrapper_bases: frozenset[str] | set[str] | None = None,
     is_lazyro_honest: bool = False,
     drop_globs: frozenset[str] = frozenset(),
+    both_reductions: bool = False,
 ) -> MultiOracleHopChainInfo:
     """Emit the per-oracle per-transform chains for one multi-oracle hop.
 
@@ -4206,6 +4272,7 @@ def emit_multi_oracle_chain_for_hop(
             stateless_wrapper_bases=stateless_wrapper_bases,
             is_lazyro_honest=is_lazyro_honest,
             drop_globs=drop_globs,
+            both_reductions=both_reductions,
         )
         chunks.extend(oracle_chunks)
         tactic_body_by_oracle[oracle_name] = outer_body
@@ -4255,6 +4322,7 @@ def _emit_one_oracle_chain(
     stateless_wrapper_bases: frozenset[str] | set[str] | None = None,
     is_lazyro_honest: bool = False,
     drop_globs: frozenset[str] = frozenset(),
+    both_reductions: bool = False,
 ) -> tuple[list[str], list[str], set[tuple[str, str]]]:
     """Emit one oracle's chain artifacts + outer tactic body.
 
@@ -4746,6 +4814,28 @@ def _emit_one_oracle_chain(
             tactic, pres, rung = reprog_hashg
             return [], [_res_tag(rung), *tactic, "qed."], pres
 
+    def _admit_fallback() -> tuple[list[str], list[str], set[tuple[str, str]]]:
+        # Straight-line binding Challenge FALLBACK (only when the micro chain
+        # would admit -- so a clean oracle the chain closes never reaches it,
+        # keeping it byte-identical). Both endpoints are reductions with an
+        # identical backbone modulo coupled fields -> a count-free peel. Gated on
+        # ``both_reductions`` (a LazyRO hop's GAME endpoint re-derives the seed
+        # via the RO, a different backbone the peel would mispair).
+        if both_reductions and not is_init:
+            straightline = _synth_straightline_challenge(
+                modules,
+                oracle_name,
+                left_states[0],
+                right_states[0],
+                external_module_types,
+                method_return_types,
+                flat_params,
+            )
+            if straightline is not None:
+                tactic, pres, rung = straightline
+                return [], [_res_tag(rung), *tactic, "qed."], pres
+        return [], _oracle_pending_admit(hop_index, oracle_name), set()
+
     chunks: list[str] = []
     step_pres: set[tuple[str, str]] = set()
     micros_left: list[str] = []
@@ -4764,7 +4854,7 @@ def _emit_one_oracle_chain(
             det_methods=det_methods,
         )
         if step is None:
-            return [], _oracle_pending_admit(hop_index, oracle_name), set()
+            return _admit_fallback()
         tac, tac_pres = step
         step_pres |= tac_pres
         name = f"micro_{hop_index}_{oracle_name}_left_{k}"
@@ -4800,7 +4890,7 @@ def _emit_one_oracle_chain(
             det_methods=det_methods,
         )
         if step is None:
-            return [], _oracle_pending_admit(hop_index, oracle_name), set()
+            return _admit_fallback()
         tac, tac_pres = step
         step_pres |= tac_pres
         name = f"micro_{hop_index}_{oracle_name}_right_{k}_rev"

@@ -4597,7 +4597,7 @@ def export_proof_file(proof_path: str) -> str:
             # legs by dropping the dead modules here too. Gated to lazyro-honest
             # hops, so every other proof stays byte-identical.
             live = _hop_live_abstract_modules(step_a, step_b)
-            dead = [m for m in ro_holder_modules] + [
+            dead = list(ro_holder_modules) + [
                 m for m in abstract_scheme_modules if m not in live
             ]
             for m in dead:
@@ -4733,6 +4733,9 @@ def export_proof_file(proof_path: str) -> str:
                     )
                     if _is_lazyro_honest_hop(step_a, step_b) is not None
                     else frozenset()
+                ),
+                both_reductions=(
+                    step_a.reduction is not None and step_b.reduction is not None
                 ),
             )
             chain_extra_decls.extend(info.extra_decls)

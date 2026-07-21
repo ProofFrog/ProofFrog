@@ -1405,7 +1405,15 @@ class ModuleTranslator:
             return text
 
         for st in translated.stmts:
-            if isinstance(st, (ec_ast.Assign, ec_ast.Call)) and st.var in field_names:
+            if (
+                isinstance(st, (ec_ast.Assign, ec_ast.Call, ec_ast.Sample))
+                and st.var in field_names
+            ):
+                # A reduction that samples its OWN fields in ``Initialize`` (CFRG
+                # ``R_PQ_Bind``: ``seed_0 <$; s_T_0 <$``) must qualify the sample's
+                # LHS too -- else the lift writes a bare LOCAL ``seed_0`` while the
+                # rest of the body (and ``pk0``) reads the field ``R.seed_0``, which
+                # stays UNSET and breaks the theorem-vs-wrapper equality.
                 st.var = f"{reduction.name}.{_ec_field_name(st.var)}"
             if isinstance(st, ec_ast.Assign):
                 st.rhs = _qualify_reads(st.rhs)

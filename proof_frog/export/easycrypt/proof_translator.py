@@ -864,6 +864,7 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
         def _consume_pk_bridge_close(
             challenger_glob: str | None,
             dead_drop: "RoDeadDropSpec | None" = None,
+            ro_align: bool = False,
         ) -> str:
             # Consume-pk reduction (repacking Initialize): after ``inline *``
             # the two sides run the same challenger-init backbone but differ in
@@ -959,12 +960,31 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
             # non-dead-drop consume-pk path keeps the plain ``proc; sim`` (same-named
             # challenger) byte-identically.
             oracle_tac = "proc; inline *; sim" if dead_drop is not None else "proc; sim"
-            branches = [oracle_tac] * n_oracles + [f"{peel} skip => /#"]
+            # ``ro_align`` residual holds two more front samples than the reduction's
+            # own backbone -- the game RO and the challenger keygen's internal seed --
+            # so peel 2 extra ``rnd``s and a trailing ``wp`` clears the leading
+            # pk-unpack assigns before ``skip``.
+            peel_tail = (
+                f"{peel} wp; rnd; wp; rnd; wp; skip => /#"
+                if ro_align
+                else f"{peel} skip => /#"
+            )
+            branches = [oracle_tac] * n_oracles + [peel_tail]
             selector = " | ".join(branches)
             call_close = f"wp; call (_: {inv}); [ {selector} ]"
             byq = f"byequiv (_: {multi_oracle.byequiv_pre} ==> ={{res}}) => //"
             if dead_drop is None:
-                return f"  by {byq}; proc; inline *; {call_close}."
+                # ``ro_align`` (ROM binding consume-pk, R_PQ_Bind): hoist the shared
+                # RO to the front (``inline{2} 2; swap{2} ^ <${1} @ 0``) before the
+                # peel; no dead-drop / rcondt (the binding challenger has no
+                # reprogramming ``if``; its ``HashG`` reads the shared RO directly,
+                # same on both sides -> plain ``proc; sim``).
+                open_tac = (
+                    "proc; inline{2} 2; swap{2} ^ <${1} @ 0; inline *;"
+                    if ro_align
+                    else "proc; inline *;"
+                )
+                return f"  by {byq}; {open_tac} {call_close}."
             # Dead-drop (ROM Lazy/reprogramming side). ``seq N N`` splits the shared
             # front (the hoisted dead shared-RO sample + the challenger's own
             # samples); its TWO subgoals are handled by a bracket
@@ -1066,18 +1086,16 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                 # Per side: the Honest (sim-closeable) side flips by hop.
                 #   sim_ok            -> RO-align + sim (validated cont-91).
                 #   dead_drop present -> the Lazy dead-drop bridge (cont-91..98).
-                #   otherwise         -> honest admit. A ROM binding consume-pk
-                #     reduction (R_PQ_Bind, hop_5) needs RO-align (``inline{2} 2;
-                #     swap{2} ^ <${1} @ 0``) + the consume-pk peel, but the peel's rnd
-                #     interleaving (the front game-RO + the challenger keygen's
-                #     internal seed) needs an exact tail-to-front order that the
-                #     current ``consume_pk_peel_events`` undercounts by 2 -- deferred
-                #     (cont-103).
+                #   otherwise         -> RO-align + consume-pk peel: a ROM binding
+                #     consume-pk reduction (R_PQ_Bind, hop_5) with a STATEFUL,
+                #     NON-reprogramming challenger. Same repack shape as the non-ROM
+                #     Generic reductions with the shared-RO hoist prepended and 2
+                #     extra peel rnds (game RO + keygen seed) -- cont-104.
                 if sim_ok:
                     return ro_sim
                 if dead_drop is not None:
                     return _consume_pk_bridge_close(challenger_glob, dead_drop)
-                return admit
+                return _consume_pk_bridge_close(challenger_glob, ro_align=True)
 
             # Re-init-forward shape (STATELESS assumption challenger): the wrapper
             # ``main`` is a single ``b <@ A(chal).distinguish()`` and the reduction

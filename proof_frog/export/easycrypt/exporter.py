@@ -3996,6 +3996,80 @@ def export_proof_file(proof_path: str) -> str:
                 conj.append(f"{red_base}.{rf}{{{side}}} = {chal_base}.{cf}{{{side}}}")
         return " /\\ ".join(conj)
 
+    def _wrapper_stored_dk_coupling(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> str:
+        """Within-side ``red.<dk>{s} = red.<seed>{s}`` couplings for a reduction
+        whose Initialize STORES a wrapper-derived decaps key
+        (``_tup <@ KEM.derivekeypair(s_PQ_0); dk_PQ_0 <- _tup[1]``).  For the
+        concrete ``SeededKEMWrapper``, ``derivekeypair(seed)`` returns
+        ``(ek, seed)`` so the stored decaps key EQUALS the seed -- the fact the
+        hop_6 challenge tactic needs to unify R_KDF's ``decaps(dk_PQ_0, .)`` with
+        R_PQ_Bind's ``decaps(s_PQ_0, .)`` (their KDF inputs coincide).  The by-name
+        composite coupling misses it (``dk_PQ_0`` is only on the R_KDF side).
+        Gated on a ``Function<>`` (seedbased = wrapper) param so every non-seedbased
+        proof is byte-identical; EC-gated at the (clean) init hop, which establishes
+        ``dk = seed`` by inlining the concrete wrapper's ``derivekeypair``.
+        """
+        conj: list[str] = []
+        for step, side in ((step_a, "1"), (step_b, "2")):
+            if step.reduction is None:
+                continue
+            red = _get_reduction(step.reduction.name)
+            if red is None:
+                continue
+            if not any(
+                isinstance(p.type, frog_ast.FunctionType) for p in red.parameters
+            ):
+                continue
+            init = _find_init(red)
+            if init is None:
+                continue
+            red_fields = {f.name for f in red.fields}
+            fld_ty = {f.name: top_types.translate_type(f.type).text for f in red.fields}
+            tup_seed: dict[str, str] = {}
+            for stmt in init.block.statements:
+                if (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and isinstance(stmt.value, frog_ast.FuncCall)
+                    and isinstance(stmt.value.func, frog_ast.FieldAccess)
+                    and stmt.value.func.name.lower() == "derivekeypair"
+                    and len(stmt.value.args) == 1
+                    and isinstance(stmt.value.args[0], frog_ast.Variable)
+                    and stmt.value.args[0].name in red_fields
+                ):
+                    tup_seed[stmt.var.name] = stmt.value.args[0].name
+            red_base = pt.module_base_name(resolver.resolve(step).module_expr)
+            for stmt in init.block.statements:
+                if (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and isinstance(stmt.var, frog_ast.Variable)
+                    and stmt.var.name in red_fields
+                    and isinstance(stmt.value, frog_ast.ArrayAccess)
+                    and isinstance(stmt.value.the_array, frog_ast.Variable)
+                    and stmt.value.the_array.name in tup_seed
+                    and isinstance(stmt.value.index, frog_ast.Integer)
+                    and stmt.value.index.num == 1
+                ):
+                    seed_fld = tup_seed[stmt.value.the_array.name]
+                    # ``dk = seed`` holds ONLY for a SeededKEMWrapper (dk IS the
+                    # seed) -- necessarily the SAME EC type.  A REAL KEM's T-side
+                    # ``derivekeypair`` (CK/CK two-KEM) returns a distinct decaps key
+                    # (``dk_T_0 : DecapsKeySpace`` != ``s_T_0 : bs_..._nseed``); emit
+                    # only when the types match, else the coupling is ill-typed.
+                    if fld_ty.get(stmt.var.name) != fld_ty.get(seed_fld):
+                        continue
+                    # pylint: disable=protected-access
+                    df = mt._ec_field_name(stmt.var.name)
+                    sf = mt._ec_field_name(seed_fld)
+                    # pylint: enable=protected-access
+                    if df != sf:
+                        conj.append(
+                            f"{red_base}.{df}{{{side}}} = {red_base}.{sf}{{{side}}}"
+                        )
+        return " /\\ ".join(conj)
+
     def _decomposition_coupling(
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> str | None:
@@ -4713,6 +4787,12 @@ def export_proof_file(proof_path: str) -> str:
         wchal = _wrapper_challenger_coupling(step_a, step_b)
         if wchal:
             coupled = f"{coupled} /\\ {wchal}"
+        # Seedbased self-keygen reduction (R_KDF): couple its wrapper-derived stored
+        # decaps key to the seed it was derived from (``dk_PQ_0 = s_PQ_0``, since the
+        # concrete wrapper's derivekeypair returns the seed). Empty off-shape.
+        wdk = _wrapper_stored_dk_coupling(step_a, step_b)
+        if wdk:
+            coupled = f"{coupled} /\\ {wdk}"
         # Reprogramming-Lazy hop: carry the cross-side reprogramming-field
         # correspondences so the per-oracle ``HashG`` equiv's guard/then-branch is
         # provable (the init couples the reductions' stored fields but not the

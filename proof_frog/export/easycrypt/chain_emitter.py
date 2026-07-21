@@ -6467,16 +6467,13 @@ def _challenge_hop2_wrapper_route(  # pylint: disable=too-many-arguments,too-man
     seed_f = _split_top_args(dkp.args)[0]
     if seed_f not in own_all:
         return None
-    # STORED-DERIVED-KEY GAP: R_KDF re-derives through the wrapper from a stored
-    # derived key ``dk_PQ_0 = derivekeypair(s_PQ_0).`2`` (= ``s_PQ_0`` since the
-    # concrete SeededKEMWrapper's ``derivekeypair`` returns ``(ek, seed)``), so its
-    # challenge decaps reads a DIFFERENT field name (``dk_PQ_0``) than R_PQ_Bind's
-    # (``s_PQ_0``).  The two prefixes' PQ-decaps-key fields then differ, and the
-    # exported hop pre couples ``s_PQ_0{2}=s_PQ_0{1}`` but NOT the
-    # ``dk_PQ_0{2}=s_PQ_0{2}`` field-invariant (established in R_KDF's init) that
-    # ``kdf_in_0{1}=kdf_in_0{2}`` needs.  Until the coupling generation carries that
-    # invariant into the hop pre, decline (honest admit; byte-identical) when the
-    # two sides' derivekeypair-arg fields disagree.
+    # STORED-DERIVED-KEY: R_KDF re-derives through the wrapper from a stored derived
+    # key ``dk_PQ_0 = derivekeypair(s_PQ_0).`2`` (= ``s_PQ_0`` since the concrete
+    # SeededKEMWrapper's ``derivekeypair`` returns ``(ek, seed)``), so its challenge
+    # decaps reads a DIFFERENT field name (``dk_PQ_0``) than R_PQ_Bind's (``s_PQ_0``).
+    # ``exporter._wrapper_stored_dk_coupling`` carries the ``dk_PQ_0{2}=s_PQ_0{2}``
+    # invariant into the hop pre, so the tactic uses R_KDF's OWN field names for the
+    # RHS peel + kdf-input terms and the couplings discharge ``kdf_in_0{1}=kdf_in_0{2}``.
     r_dkp = next(
         (
             s
@@ -6485,24 +6482,30 @@ def _challenge_hop2_wrapper_route(  # pylint: disable=too-many-arguments,too-man
         ),
         None,
     )
-    if r_dkp is None or _split_top_args(r_dkp.args)[0] != seed_f:
+    if r_dkp is None:
         return None
-    # T scalar = the key arg of the T-decaps call (group: ``exp(ct, dk_T)`` -> arg1;
-    # KEM: ``decaps(dk_T, ct)`` -> arg0).
+    r_seed_f = _split_top_args(r_dkp.args)[0]
+
+    def _tkey_field(prefix: list[ec_ast.EcStmt]) -> str | None:
+        # T scalar = the key arg of the T-decaps call (group: ``exp(ct, dk_T)`` ->
+        # arg1; KEM: ``decaps(dk_T, ct)`` -> arg0).
+        t_decaps = next(
+            (
+                s
+                for s in prefix
+                if isinstance(s, ec_ast.Call) and s.callee.endswith(f".{t_method}")
+            ),
+            None,
+        )
+        if t_decaps is None:
+            return None
+        args = _split_top_args(t_decaps.args)
+        return args[1] if shape.t_decaps_ct_first else args[0]
+
     t_method = _ev_method(shape.ev_decaps_t)
-    t_decaps = next(
-        (
-            s
-            for s in l_prefix
-            if isinstance(s, ec_ast.Call) and s.callee.endswith(f".{t_method}")
-        ),
-        None,
-    )
-    if t_decaps is None:
-        return None
-    t_args = _split_top_args(t_decaps.args)
-    tkey_f = t_args[1] if shape.t_decaps_ct_first else t_args[0]
-    if tkey_f not in own_all or tkey_f == seed_f:
+    tkey_f = _tkey_field(l_prefix)
+    r_tkey_f = _tkey_field(r_prefix)
+    if tkey_f is None or r_tkey_f is None or tkey_f not in own_all or tkey_f == seed_f:
         return None
     l_args = _top_level_args(left_wrapper_expr)
     if not l_args:
@@ -6538,7 +6541,7 @@ def _challenge_hop2_wrapper_route(  # pylint: disable=too-many-arguments,too-man
         r_prefix=r_prefix,
         glob_mods=glob_mods,
         l_component_fields=[[seed_f, tkey_f]],
-        r_component_fields=[[seed_f, tkey_f]],
+        r_component_fields=[[r_seed_f, r_tkey_f]],
         clone_alias=clone_alias,
         shape=shape,
         pq_module=inner,
@@ -6550,6 +6553,9 @@ def _challenge_hop2_wrapper_route(  # pylint: disable=too-many-arguments,too-man
         wrapper_expr=wrapper_expr,
         inner_pq_module=inner,
         l_own_fields=[seed_f, tkey_f],
+        r_own_fields=[r_seed_f, r_tkey_f],
+        l_all_fields=own_all,
+        ro_ref=f"{clone_alias.get('Hybrid', 'Hybrid')}.RO_G_RO.h",
         l_red_proc=lred,
     )
     body = bch.challenge_tactic_hop2_wrapper(spec)

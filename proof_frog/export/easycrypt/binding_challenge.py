@@ -1395,7 +1395,14 @@ class Hop2Spec:
     kdf_col_lemma: str = "kdf_col_ss"  # aux lemma (concat_eq => decaps_eq)
     l_own_fields: list[str] = field(
         default_factory=list
-    )  # reduction own fields, exists*
+    )  # LHS reduction own [PQ-seed, T-scalar] fields, exists*
+    r_own_fields: list[str] = field(
+        default_factory=list
+    )  # RHS own [PQ-decaps-key, T-scalar] (R_KDF stores dk_PQ_0 = derivekeypair(seed))
+    l_all_fields: list[str] = field(
+        default_factory=list
+    )  # ALL LHS reduction fields (for the preserved-field couplings the post needs)
+    ro_ref: str = ""  # shared RO ref, e.g. "Hybrid_c.RO_G_RO.h" (preserved coupling)
     l_red_proc: ec_ast.Proc | None = None  # LHS reduction proc (collision then-body)
 
 
@@ -1662,10 +1669,15 @@ def challenge_tactic_hop2_wrapper(  # pylint: disable=too-many-locals,too-many-s
     """
     if spec.l_red_proc is None or not spec.wrapper_expr or not spec.inner_pq_module:
         return None
-    if len(spec.l_own_fields) != 2 or len(spec.l_challenger_key_fields) != 1:
+    if (
+        len(spec.l_own_fields) != 2
+        or len(spec.r_own_fields) != 2
+        or len(spec.l_challenger_key_fields) != 1
+    ):
         return None
     ct0, ct1 = spec.ct_params
-    seed_f, tkey_f = spec.l_own_fields  # PQ seed (decaps key), T scalar
+    seed_f, tkey_f = spec.l_own_fields  # LHS PQ seed (decaps key), T scalar
+    r_seed_f, r_tkey_f = spec.r_own_fields  # RHS PQ decaps key (dk_PQ_0), T scalar
     gm = spec.glob_mods
     gge = [f"gg{i}" for i in range(len(gm))]
     glob_of = dict(zip(gm, gge))
@@ -1676,55 +1688,117 @@ def challenge_tactic_hop2_wrapper(  # pylint: disable=too-many-locals,too-many-s
     inner_c = spec.clone_alias.get(inner, inner + "_c")
     t_clone = spec.shape.ev_decaps_t.split(".", 1)[0]
     ck = spec.l_challenger_key_fields[0]  # SAMEKEY single challenger key
-    l_len = len([s for s in spec.l_prefix if not isinstance(s, ec_ast.VarDecl)])
-    r_len = len([s for s in spec.r_prefix if not isinstance(s, ec_ast.VarDecl)])
 
-    def _wbind(ct: str) -> tuple[str, str, str, str]:
-        """KDF-input bindings at ct: seed-derived PQ decaps key, T scalar, the
-        recomputed group encaps key (``ev_exp(ev_generator, dk_T)``), ct."""
-        pq_key = f"({inner_c}.ev_derivekeypair {spec.r_base}.{seed_f}" "{2}).`2"
-        t_key = f"{spec.r_base}.{tkey_f}" "{2}"
+    def _atomic_len(prefix: list[ec_ast.EcStmt]) -> int:
+        # The ``seq`` runs on the ATOMIC (pre-``inline``) goal, where each
+        # SeededKEMWrapper ``decaps`` is ONE call.  The flat prefix has it EXPANDED
+        # (``derivekeypair; ek<-; dk<-; inner-decaps`` = 4 stmts), so subtract 3 per
+        # wrapper decaps (== per ``derivekeypair``) to recover the atomic length.
+        n = len(
+            [s for s in prefix if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))]
+        )
+        n_wrap = sum(
+            1
+            for s in prefix
+            if isinstance(s, ec_ast.Call) and s.callee.endswith(".derivekeypair")
+        )
+        return n - 3 * n_wrap
+
+    l_len = _atomic_len(spec.l_prefix)
+    r_len = _atomic_len(spec.r_prefix)
+
+    def _wbind(ct: str, sd_fld: str) -> tuple[str, str, str, str]:
+        """RHS KDF-input bindings at ct over the seed field ``sd_fld``: seed-derived
+        PQ decaps key, T scalar, the recomputed group encaps key
+        (``ev_exp(ev_generator, dk_T)``), ct.  The INVARIANT uses R_KDF's stored key
+        ``dk_PQ_0`` (what the peel produces); the no-collision ELSE uses ``s_PQ_0``
+        (the common field ``=> />`` rewrites the goal to, via the stored-dk coupling).
+        """
+        pq_key = f"({inner_c}.ev_derivekeypair {spec.r_base}.{sd_fld}" "{2}).`2"
+        t_key = f"{spec.r_base}.{r_tkey_f}" "{2}"
         ek = f"({spec.shape.ev_decaps_t} ({t_clone}.ev_generator) {t_key})"
         return (pq_key, t_key, ek, f"{ct}" "{2}")
 
-    kdf0_term = spec.shape.kdf_in(*_wbind(ct0))
-    kdf1_term = spec.shape.kdf_in(*_wbind(ct1))
+    kdf0_term = spec.shape.kdf_in(*_wbind(ct0, r_seed_f))
+    kdf1_term = spec.shape.kdf_in(*_wbind(ct1, r_seed_f))
 
     # -- invariant -----------------------------------------------------------
+    # PQ-key couplings: R_PQ_Bind's seed = R_KDF's COMMON seed field (in the hop
+    # pre), and R_KDF's stored decaps key = its seed (the wrapper's
+    # ``derivekeypair(seed).`2 = seed`` invariant, carried by
+    # ``exporter._wrapper_stored_dk_coupling``).  Together they give
+    # ``s_PQ_0{1} = dk_PQ_0{2}`` so ``kdf_in_0{1}=kdf_in_0{2}`` closes.
+    # Couple EVERY preserved LHS field (``s_PQ_0``/``s_T_0``/``dk_T_0``/``seed_0``)
+    # to its same-named R_KDF field + the shared RO -- the outer post threads all of
+    # them, not just the two the KDF reads.  Plus R_KDF's stored decaps key = its
+    # seed (the ``derivekeypair(seed).`2 = seed`` invariant).
+    all_flds = spec.l_all_fields or [seed_f, tkey_f]
+    pq_couplings = [
+        f"{spec.l_base}.{f}" "{1}" f" = {spec.r_base}.{f}" "{2}" for f in all_flds
+    ]
+    if r_seed_f != seed_f:
+        pq_couplings.append(
+            f"{spec.r_base}.{r_seed_f}" "{2}" f" = {spec.r_base}.{seed_f}" "{2}"
+        )
+    if spec.ro_ref:
+        pq_couplings.append(f"{spec.ro_ref}" "{1}" f" = {spec.ro_ref}" "{2}")
+    t_coupling: list[str] = []
+
+    def _lead_couplings(prefix: list[ec_ast.EcStmt], side: str) -> list[str]:
+        # The reduction's ``if`` guard is over the LEADING ct-projection LOCALS
+        # (``ct_PQ_0 <- ct0.`1``), which the ``seq`` consumes -- carry
+        # ``ct_PQ_0{s} = ct0{s}.`1`` into the invariant so the case-split's
+        # ``rcondt``/``rcondf`` can evaluate the guard.
+        out: list[str] = []
+        for s in prefix:
+            if isinstance(s, ec_ast.VarDecl):
+                continue
+            if isinstance(s, ec_ast.Assign):
+                rhs = s.rhs
+                for c in spec.ct_params:
+                    rhs = re.sub(rf"\b{re.escape(c)}\b", f"{c}{{{side}}}", rhs)
+                out.append(f"{s.var}{{{side}}} = {rhs}")
+            else:
+                break
+        return out
+
+    lead_couplings = _lead_couplings(spec.l_prefix, "1") + _lead_couplings(
+        spec.r_prefix, "2"
+    )
     inv_terms = (
         [f"{c}" "{1}" f" = {c}" "{2}" for c in spec.ct_params]
         + ["kdf_in_0{1} = kdf_in_0{2}", "kdf_in_1{1} = kdf_in_1{2}"]
         + [f"(glob {m})" "{1}" f" = (glob {m})" "{2}" for m in spec.sync_mods]
         + [f"{spec.l_base}.{seed_f}" "{1}" f" = {lchal}.{ck}" "{1}"]
-        + [
-            f"{spec.l_base}.{f}" "{1}" f" = {spec.r_base}.{f}" "{2}"
-            for f in spec.l_own_fields
-        ]
+        + lead_couplings
+        + pq_couplings
+        + t_coupling
         + ["kdf_in_0" "{2}" f" = {kdf0_term}", "kdf_in_1" "{2}" f" = {kdf1_term}"]
     )
     inv = " /\\ ".join(inv_terms)
+    # ``seq`` FIRST, on the atomic goal (BEFORE inline) -- so the count matches the
+    # un-inlined prefix; the wrappers are inlined INSIDE the prefix subgoal.
     lines = [
         "proof.",
         "  proc.",
-        f"  inline{{1}} {wrapper}.decaps {wrapper}.encodesharedsecret.",
-        f"  inline{{2}} {wrapper}.decaps {wrapper}.encodesharedsecret.",
         f"  seq {l_len} {r_len} : ({inv}).",
     ]
 
     # -- prefix functionalization subgoal (both sides, expanded flat state) ---
-    own = spec.l_own_fields
-    l_fe = [f"lf{i}" for i in range(len(own))]
-    r_fe = [f"rf{i}" for i in range(len(own))]
+    l_own = spec.l_own_fields
+    r_own = spec.r_own_fields
+    l_fe = [f"lf{i}" for i in range(len(l_own))]
+    r_fe = [f"rf{i}" for i in range(len(r_own))]
     l_ex = (
         [f"(glob {m})" "{1}" for m in gm]
-        + [f"{spec.l_base}.{f}" "{1}" for f in own]
+        + [f"{spec.l_base}.{f}" "{1}" for f in l_own]
         + [f"{c}" "{1}" for c in spec.ct_params]
-        + [f"{spec.r_base}.{f}" "{2}" for f in own]
+        + [f"{spec.r_base}.{f}" "{2}" for f in r_own]
     )
     l_elim = gge + l_fe + ["lc0", "lc1"] + r_fe
     l_env = _blk_env(
         spec.l_base,
-        [own],
+        [l_own],
         l_fe,
         spec.ct_params,
         ("lc0", "lc1"),
@@ -1733,26 +1807,60 @@ def challenge_tactic_hop2_wrapper(  # pylint: disable=too-many-locals,too-many-s
     )
     r_env = _blk_env(
         spec.r_base,
-        [own],
+        [r_own],
         r_fe,
         spec.ct_params,
         ("lc0", "lc1"),
         [s for s in spec.r_prefix if not isinstance(s, ec_ast.VarDecl)],
         spec.clone_alias,
     )
-    l_peel = _wp_before_calls(
-        _peel_stmts(_drop_leading_assigns(spec.l_prefix), l_env, glob_of, "{1}")
-    )
-    r_peel = _wp_before_calls(
-        _peel_stmts(_drop_leading_assigns(spec.r_prefix), r_env, glob_of, "{2}")
-    )
+    # Interleave the two sides' peels PER RUNG (both backbones align rung-for-rung),
+    # NOT all-r then all-l: the wrapper's expanded prefix has assigns between calls,
+    # and a two-sided ``wp.`` absorbs BOTH sides' assigns, so an all-r peel's ``wp``s
+    # would prematurely consume side-1 assigns and misalign the side-1 peel.  The
+    # per-rung ``wp. call{1}. call{2}.`` (the validated tripwire's shape) keeps both
+    # sides in lockstep.  Bare hop2 (adjacent calls) is a separate route, unaffected.
+    l_calls = [
+        ln
+        for ln in _peel_stmts(
+            _drop_leading_assigns(spec.l_prefix), l_env, glob_of, "{1}"
+        )
+        if ln.startswith("call")
+    ]
+    r_calls = [
+        ln
+        for ln in _peel_stmts(
+            _drop_leading_assigns(spec.r_prefix), r_env, glob_of, "{2}"
+        )
+        if ln.startswith("call")
+    ]
+    if len(l_calls) != len(r_calls):
+        return None
+    # Peel side 1 FULLY first (a ``wp.`` before every call absorbs side-1's
+    # deterministic plumbing + side-2's trailing assigns), leaving side 2 with only
+    # its calls; then peel side 2's now-adjacent calls.  This is robust to the two
+    # reductions' DIFFERING assign plumbing around the calls (R_PQ_Bind vs R_KDF),
+    # which an interleaved per-rung peel drifts out of lockstep on.
+    peel: list[str] = []
+    for lc in l_calls:
+        peel += ["wp.", lc]
+    for rc in r_calls:
+        peel += ["wp.", rc]
     lines += [
-        "  + sp.",
+        # Inline the wrappers INSIDE the prefix subgoal (the ``seq`` above ran on the
+        # atomic goal); the exposed inner ``derivekeypair``/``decaps``/``encss`` calls
+        # are what the peel functionalizes.
+        f"  + inline{{1}} {wrapper}.decaps {wrapper}.encodesharedsecret.",
+        f"    inline{{2}} {wrapper}.decaps {wrapper}.encodesharedsecret.",
         f"    exists* {', '.join(l_ex)};",
         f"    elim* => {' '.join(l_elim)}.",
-        *[f"    {ln}" for ln in r_peel],
-        *[f"    {ln}" for ln in l_peel],
-        "    skip => />.",
+        *[f"    {ln}" for ln in peel],
+        # A trailing ``wp`` absorbs the wrappers' leftover param-binds (``sd<-``,
+        # ``c<-``) + ct-projections; then the two functionalized KDF inputs coincide
+        # only after chaining the PQ-key couplings
+        # (``s_PQ_0{1} = s_PQ_0{2} = dk_PQ_0{2}``) + the T-scalar coupling through the
+        # concat by congruence, which ``=> />`` cannot do (so ``=> /#``).
+        "    wp. skip => /#.",
     ]
 
     # -- outer case: RHS ct-equality guard (H.evaluate only; no wrapper) ------
@@ -1801,19 +1909,22 @@ def challenge_tactic_hop2_wrapper(  # pylint: disable=too-many-locals,too-many-s
         "    exists* (glob "
         f"{hm})"
         "{2}, kdf_in_0{2}, kdf_in_1{2}; elim* => gh2 ki0 ki1.",
-        f"    wp. call{{2}} ({hm}_evaluate_det gh2 ki1). call{{2}} ({hm}_evaluate_det gh2 ki0).",
-        f"    wp. call{{1}} ({inner}_decaps_det gp3 ({inner_c}.ev_derivekeypair xsd).`2 xc1.`1)."
-        f" call{{1}} ({inner}_derivekeypair_det gp3 xsd).",
-        f"    wp. call{{1}} ({inner}_decaps_det gp3 ({inner_c}.ev_derivekeypair xsd).`2 xc0.`1)."
-        f" call{{1}} ({inner}_derivekeypair_det gp3 xsd).",
-        "    skip => />; smt().",
+        f"    wp. call{{2}} ({hm}_evaluate_det gh2 ki1). wp. call{{2}} ({hm}_evaluate_det gh2 ki0).",
+        # A ``wp`` between the decaps and derivekeypair calls absorbs the wrapper's
+        # projection assigns (``dk_inner<-`` etc.); the challenger re-decapsulates
+        # through the wrapper twice (ct1 then ct0).
+        f"    wp. call{{1}} ({inner}_decaps_det gp3 ({inner_c}.ev_derivekeypair xsd).`2 xc1.`1).",
+        f"    wp. call{{1}} ({inner}_derivekeypair_det gp3 xsd).",
+        f"    wp. call{{1}} ({inner}_decaps_det gp3 ({inner_c}.ev_derivekeypair xsd).`2 xc0.`1).",
+        f"    wp. call{{1}} ({inner}_derivekeypair_det gp3 xsd).",
+        "    wp. skip => />; smt().",
     ]
 
     # -- no-collision else: both compute the predicate; slice-peel the KDF
     # equality to the T-ciphertext (right slice) + injectivity, at the
     # seed-derived wrapper bindings (PQ leaf = ev_decaps (ev_dkp seed).`2 ct). --
-    bind0 = _wbind(ct0)
-    bind1 = _wbind(ct1)
+    bind0 = _wbind(ct0, seed_f)
+    bind1 = _wbind(ct1, seed_f)
     kdf0 = spec.shape.kdf_in(*bind0)
     kdf1 = spec.shape.kdf_in(*bind1)
     peel = slice_peel_to_ect(spec.shape, bind0, bind1)
@@ -1827,6 +1938,8 @@ def challenge_tactic_hop2_wrapper(  # pylint: disable=too-many-locals,too-many-s
         "{2}, kdf_in_0{2}, kdf_in_1{2}; elim* => gh2 ri0 ri1.",
         f"  wp. call{{1}} ({hm}_evaluate_det gh ki1). call{{1}} ({hm}_evaluate_det gh ki0).",
         f"  call{{2}} ({hm}_evaluate_det gh2 ri1). call{{2}} ({hm}_evaluate_det gh2 ri0).",
+        # ``=> />`` rewrites the goal's ``dk_PQ_0`` to ``s_PQ_0`` via the stored-dk
+        # coupling, so the ELSE kdf terms are built over ``s_PQ_0`` (``_wbind(_, seed_f)``).
         "  skip => />. move => &2 hne hg.",
         f"  have hkct : {kdf0} = {kdf1} => {ct0}" "{2}" f" = {ct1}" "{2}" ".",
         "  + move => h.",

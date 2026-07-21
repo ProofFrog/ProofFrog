@@ -46,6 +46,55 @@ class LazyroInitSpec:
 
 
 @dataclass
+class RoDeadDropSpec:
+    """Parameters for the ROM Lazy-side (reprogramming) dead-``h`` drop bridge.
+
+    The theorem side (``{1}``) runs a *materialized* ``<gf>_<side>_Mat`` challenger
+    whose RO ``Function`` field is ASSIGNED the shared RO (``h <- RO_G_RO.h``); the
+    assumption side (``{2}``) runs the plain ``<gf>_<side>`` challenger which SAMPLES
+    it fresh. That ``h`` is dead (the reprogramming hash is only queried at the
+    exposed seed ``s0`` -> the then-branch; the else-branch ``h x`` is never
+    reached), so the two are equal after dropping the fresh sample. The bridge close
+    prepends a dead-drop prefix (align the shared RO, sink+drop the dead ``h``,
+    collapse the reprogramming ``if`` via ``rcondt``) then reuses the consume-pk peel
+    continuation -- validated end-to-end on ``.ec-tmp/rom_hr_faithful.ec`` (prefix +
+    adversary ``call (_: inv)`` seam) and derived against the real ``hop_1_pr`` goal
+    (plan cont-91..98).
+
+    - ``n_samples`` -- the reprogramming challenger ``initialize``'s ``<$`` count;
+      ``N = 1 + n_samples`` is the ``seq`` split (the dead shared-RO sample hoisted
+      to the front + the challenger's own samples). The dead shared-RO sits at
+      position 1 on side ``{2}`` (hoisted by ``swap{2} ^ <${1} @ 0``), sunk to the
+      tail with offset ``N - 1`` then dropped.
+    - ``dfun_ll`` -- lossless lemma for the dead shared-RO's distribution (the
+      top-level RO holder's dfun; the one-sided ``rnd{2}`` drop leaves an
+      ``is_lossless`` obligation).
+    - ``mat_glob`` -- the materialized ``_Mat`` challenger module (top-level,
+      unqualified), read on side ``{1}``.
+    - ``lazy_glob`` -- the plain reprogramming challenger module (clone-qualified),
+      read on side ``{2}``.
+    - ``coupled_fields`` -- EC names of ALL the challenger's fields (the ``Function``
+      ``h`` + the exposed seed + the reprogram-value halves), cross-coupled
+      ``Mat.f{1} = Lazy.f{2}`` in both the ``seq`` invariant and the adversary
+      ``call (_: inv)``. The ``h`` coupling is what makes ``HashG``'s reprogramming
+      ``if`` agree on the else-branch.
+    - ``peel_count`` -- the number of the reduction's OWN (non-challenger) abstract
+      calls in ``Initialize`` (``derivekeypair``/``randomscalar``/``generator``/
+      ``exp`` ...). After the ``rcondt`` collapses the challenger ``hash``, the
+      pre-adversary residual holds exactly these calls, each peeled ``wp; call (_:
+      true)`` -- NOT the full ``consume_pk`` backbone (whose challenger-init/hash is
+      instead consumed by the ``seq`` + ``rcondt``).
+    """
+
+    n_samples: int
+    dfun_ll: str
+    mat_glob: str
+    lazy_glob: str
+    coupled_fields: list[str]
+    peel_count: int
+
+
+@dataclass
 class ResolvedStep:
     """The EC module expression and oracle name referenced by a step."""
 
@@ -745,6 +794,8 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     consume_pk_left_challenger_glob: str | None = None,
     consume_pk_right_challenger_glob: str | None = None,
     ro_bridge_admit: bool = False,
+    ro_dead_drop_left: "RoDeadDropSpec | None" = None,
+    ro_dead_drop_right: "RoDeadDropSpec | None" = None,
 ) -> ec_ast.ProbLemma:
     """Emit a ``hop_<i>_pr`` lemma for an assumption hop.
 
@@ -809,7 +860,10 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     )
     if multi_oracle is not None:
 
-        def _consume_pk_bridge_close(challenger_glob: str | None) -> str:
+        def _consume_pk_bridge_close(
+            challenger_glob: str | None,
+            dead_drop: "RoDeadDropSpec | None" = None,
+        ) -> str:
             # Consume-pk reduction (repacking Initialize): after ``inline *``
             # the two sides run the same challenger-init backbone but differ in
             # deterministic repack plumbing, so ``sim`` cannot infer the
@@ -819,6 +873,19 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
             # true)`` per abstract challenger-Initialize call) and close the
             # deterministic residual with ``skip => /#``. Validated end-to-end on
             # the ``LEAK_implies_HON_BIND_K_CT`` generic reduction.
+            #
+            # ``dead_drop`` (ROM Lazy/reprogramming side): the two sides use
+            # DIFFERENTLY-NAMED challenger modules -- materialized ``_Mat`` on {1}
+            # (``h <- RO_G_RO.h``, an assign) vs the plain reprogramming challenger
+            # on {2} (``h <$``, a fresh sample). ``sim``/``={glob challenger}`` can
+            # neither couple the cross-named modules nor relate an assign to a fresh
+            # sample, so instead of the plain ``proc; inline *;`` open we PREPEND a
+            # dead-drop prefix (RO-align, sink+drop the dead ``h``, ``rcondt`` the
+            # reprogramming ``if``) and cross-couple the non-``Function`` challenger
+            # fields (seed + reprogram halves) by name in both the ``seq`` invariant
+            # and the adversary ``call (_: inv)``. Prefix + seam validated on
+            # ``.ec-tmp/rom_hr_faithful.ec``; derived against the real ``hop_1_pr``
+            # goal (plan cont-91..98).
             n_oracles = len(multi_oracle.post_init_oracles)
             # The ``proc; sim`` obligation on each post-init oracle must carry
             # ``={glob M}`` for every abstract module ``M`` the oracle calls --
@@ -842,9 +909,30 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                     _mod = _term[len("glob ") :].strip()
                     if _mod != "A" and _mod not in inv_globs:
                         inv_globs.append(_mod)
-            inv_globs.append(challenger_glob)
-            inv = "={" + ", ".join(f"glob {g}" for g in inv_globs) + "}"
-            if consume_pk_peel_events is not None:
+            if dead_drop is None:
+                inv_globs.append(challenger_glob)
+                inv = "={" + ", ".join(f"glob {g}" for g in inv_globs) + "}"
+                field_couplings: list[str] = []
+            else:
+                # Cross-named challenger modules: couple EVERY challenger field
+                # (incl. the ``Function`` ``h``) by name instead of ``={glob
+                # challenger}``. Do NOT couple the shared RO holder -- its ``h`` is
+                # live on {1} (= the materialized challenger) but the {2} copy is the
+                # dead sample being dropped, so ``RO_G_RO.h{1} <> RO_G_RO.h{2}``.
+                field_couplings = [
+                    f"{dead_drop.mat_glob}.{fld}{{1}}"
+                    f" = {dead_drop.lazy_glob}.{fld}{{2}}"
+                    for fld in dead_drop.coupled_fields
+                ]
+                inv = "={" + ", ".join(f"glob {g}" for g in inv_globs) + "}"
+                if field_couplings:
+                    inv = inv + " /\\ " + " /\\ ".join(field_couplings)
+            if dead_drop is not None:
+                # ROM dead-drop: the ``seq`` + ``rcondt`` already consumed the
+                # challenger init + hash, so the residual holds only the reduction's
+                # OWN abstract calls -- peel exactly those.
+                peel = " ".join(["wp; call (_: true);"] * dead_drop.peel_count)
+            elif consume_pk_peel_events is not None:
                 # Event-aware peel: ``rnd`` a sample, ``call (_: true)`` an
                 # abstract call, in tail-to-front order. Sizes to the reduction's
                 # full init backbone incl. its own seed samples (CFRG NominalGroup
@@ -864,9 +952,47 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
             # challenger), which ``sim`` couples trivially -- no fixed rnd count.
             branches = ["proc; sim"] * n_oracles + [f"{peel} skip => /#"]
             selector = " | ".join(branches)
+            call_close = f"wp; call (_: {inv}); [ {selector} ]"
+            byq = f"byequiv (_: {multi_oracle.byequiv_pre} ==> ={{res}}) => //"
+            if dead_drop is None:
+                return f"  by {byq}; proc; inline *; {call_close}."
+            # Dead-drop (ROM Lazy/reprogramming side). ``seq N N`` splits the shared
+            # front (the hoisted dead shared-RO sample + the challenger's own
+            # samples); its TWO subgoals are handled by a bracket
+            # ``[ <drop> | <continuation> ]`` (a ``;``-chained ``by`` one-liner
+            # cannot use a ``+`` script bullet). The dead shared-RO sample sits at
+            # position 1 on side ``{2}`` (hoisted by ``swap{2} ^ <${1} @ 0``); sink
+            # it to the tail (``swap{2} 1 (N-1)``) and drop it (``rnd{2}``, leaving an
+            # ``is_lossless`` obligation). ``auto`` then couples the remaining sample
+            # pairs -- crucially the theorem-side eager RO sample to the
+            # assumption-side FRESH challenger ``h`` (both the same dfun), which with
+            # the ``Mat.h <- RO_G_RO.h`` assign gives ``Mat.h{1} = Lazy.h{2}``. The
+            # continuation collapses the two reprogramming ``if``s (``rcondt``) and
+            # reuses the consume-pk peel. The ``seq`` invariant carries exactly the
+            # ``byequiv_pre`` globs (``={glob A, scheme-mods}``) plus the field
+            # couplings -- NOT the reduction glob ``={glob R}``: at the ``seq`` point
+            # the reduction's own fields are still UNSET (the samples don't touch
+            # them and ``R`` is not in ``byequiv_pre``), so ``={glob R}`` is not yet
+            # provable. It becomes provable only after the init-tail writes the fields
+            # to equal values, so it lives solely in the later ``call (_: inv)``.
+            n_split = 1 + dead_drop.n_samples
+            seq_inv = multi_oracle.byequiv_pre
+            if field_couplings:
+                seq_inv = seq_inv + " /\\ " + " /\\ ".join(field_couplings)
+            drop_branch = (
+                f"swap{{2}} 1 {n_split - 1};"
+                f" rnd{{2}}; auto => />; smt({dead_drop.dfun_ll})"
+            )
+            cont_branch = (
+                "rcondt{1} ^if; first by auto;"
+                " rcondt{2} ^if; first by auto;"
+                f" {call_close}"
+            )
             return (
-                f"  by byequiv (_: {multi_oracle.byequiv_pre} ==> ={{res}}) => //;"
-                f" proc; inline *; wp; call (_: {inv}); [ {selector} ]."
+                f"  by {byq};"
+                " proc; inline{2} 2; swap{2} ^ <${1} @ 0; inline *;"
+                f" seq {n_split} {n_split} : ({seq_inv});"
+                f" [ {drop_branch} | {cont_branch} ]."
             )
 
         if ro_bridge_admit:
@@ -910,9 +1036,31 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                 f"  by byequiv (_: {multi_oracle.byequiv_pre} ==> ={{res}}) => //;"
                 " proc; inline{2} 2; swap{2} ^ <${1} @ 0; inline *; sim."
             )
+
+            def _ro_repro_close(
+                challenger_glob: str | None,
+                dead_drop: "RoDeadDropSpec | None",
+                sim_ok: bool,
+            ) -> str:
+                # Per side: the Honest (sim-closeable) side flips by hop.
+                #   sim_ok            -> RO-align + sim (validated cont-91).
+                #   dead_drop present -> the Lazy dead-drop bridge (cont-91..98).
+                #   otherwise         -> honest admit (a binding/forward shape).
+                if sim_ok:
+                    return ro_sim
+                if dead_drop is not None:
+                    return _consume_pk_bridge_close(challenger_glob, dead_drop)
+                return admit
+
             if consume_pk_bridge:
-                bridge_close_l = ro_sim if left_ro_sim_ok else admit
-                bridge_close_r = ro_sim if right_ro_sim_ok else admit
+                bridge_close_l = _ro_repro_close(
+                    consume_pk_left_challenger_glob, ro_dead_drop_left, left_ro_sim_ok
+                )
+                bridge_close_r = _ro_repro_close(
+                    consume_pk_right_challenger_glob,
+                    ro_dead_drop_right,
+                    right_ro_sim_ok,
+                )
             else:
                 bridge_close_l = admit
                 bridge_close_r = admit

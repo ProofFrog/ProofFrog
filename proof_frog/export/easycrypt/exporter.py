@@ -443,6 +443,75 @@ def _reprogramming_lazy_ro_field(game: frog_ast.Game) -> str | None:
     return None
 
 
+def _ro_dead_drop_spec(
+    repro_game: frog_ast.Game,
+    mat_glob: str,
+    lazy_glob: str,
+    dfun_ll: str,
+    peel_count: int,
+) -> "pt.RoDeadDropSpec | None":
+    """Build the ROM Lazy-side dead-shared-RO drop spec for a reprogramming game.
+
+    Returns ``None`` off-shape (no reprogramming ``Function`` field, or no
+    ``Initialize``), so a non-reprogramming (Honest / binding / forward) side is
+    unaffected and stays on its existing bridge close byte-identically.
+
+    The rendered reduction (e.g. ``R_LazyRO_L_Adv``) shows the *shared* RO
+    ``RO_G_RO.h`` is re-sampled on the assumption side but never used there -- the
+    KeyGen and the ``HashG`` oracle both read the *challenger's own* ``h`` (the Lazy
+    game's field). So on the assumption side the shared-RO sample is DEAD, while the
+    challenger's ``h`` is LIVE (observed through ``HashG``). The bridge therefore
+    couples EVERY challenger field ``Mat.f{1} = Lazy.f{2}`` -- including the
+    ``Function`` field ``h`` (materialized ``= RO_G_RO.h`` on the theorem side,
+    fresh on the assumption side; equated by coupling the theorem-side eager RO
+    sample to the assumption-side fresh ``h`` sample) -- and DROPS the dead
+    assumption-side shared-RO sample. The ``h`` coupling makes ``HashG``'s
+    reprogramming ``if`` agree on both the then- and else-branches, so ``proc; sim``
+    closes each oracle. Validated on ``.ec-tmp/rom_hr_hashg.ec`` (live ``HashG``).
+    """
+    dead_field = _reprogramming_lazy_ro_field(repro_game)
+    if dead_field is None:
+        return None
+    # BLOCKED (cont-99): when the reprogram value is a CONCAT of two halves (all
+    # current CFRG lazy-RO games: ``if (x==s0) return y0_pq || y0_t``), the tactic
+    # relates a TOP-LEVEL ``_Mat`` challenger against a THEORY ``Lazy`` challenger
+    # whose ``concat`` ops are DISTINCT uninterpreted ops (the clone binds types +
+    # distrs but NOT the concat op), so ``Mat.concat a b = Lazy.concat a b`` is
+    # unprovable and ``HashG``'s ``proc; sim`` fails. Everything else in the bridge
+    # is validated (``.ec-tmp/rom_hr_hashg.ec`` / ``rom_hr_tail.ec``); gate off the
+    # concat case so those sides keep the honest ``admit`` (no regression) until the
+    # theory-clone concat-op binding lands. A single-field reprogram (no concat)
+    # would relate directly -- there is no such game today, but keep the route live.
+    for method in repro_game.methods:
+        for stmt in method.block.statements:
+            if isinstance(stmt, frog_ast.IfStatement) and any(
+                isinstance(s, frog_ast.ReturnStatement)
+                and isinstance(s.expression, frog_ast.BinaryOperation)
+                for blk in stmt.blocks
+                for s in blk.statements
+            ):
+                return None
+    init = next(
+        (m for m in repro_game.methods if m.signature.name == "Initialize"),
+        None,
+    )
+    if init is None:
+        return None
+    n_samples = sum(1 for s in init.block.statements if isinstance(s, frog_ast.Sample))
+    coupled = [
+        (f.name[0].lower() + f.name[1:] if f.name[:1].isupper() else f.name)
+        for f in repro_game.fields
+    ]
+    return pt.RoDeadDropSpec(
+        n_samples=n_samples,
+        dfun_ll=dfun_ll,
+        mat_glob=mat_glob,
+        lazy_glob=lazy_glob,
+        coupled_fields=coupled,
+        peel_count=peel_count,
+    )
+
+
 def _is_reprogram_hash_if(node: frog_ast.ASTNode) -> bool:
     """True if ``node`` is a lazy-RO reprogramming ``HashG`` branch:
     ``if (x == <seed>) { return <a> || <b>; } ...`` -- an equality guard whose
@@ -5076,6 +5145,13 @@ def export_proof_file(proof_path: str) -> str:
             if isinstance(_helper, frog_ast.Game) and _helper.fields:
                 live_state_holders.add(_helper.name)
     live_state_modules = sorted(live_state_holders)
+    # ROM Lazy-side dead-drop: the reprogramming challenger's cross-named fields
+    # ride the ``call (_: inv)`` invariant, so the adversary must be write-separated
+    # from that (clone-qualified) challenger module. Accumulate the globs across
+    # hops; each dead-drop pr-lemma restricts A from its OWN challenger (a subset),
+    # and ``main_theorem`` from the full set (a superset) so ``hop_i_pr A`` still
+    # typechecks. Empty for non-ROM proofs (byte-identical).
+    repro_chal_globs: set[str] = set()
 
     for i in range(len(proof.steps) - 1):
         step_a = proof.steps[i]
@@ -5165,6 +5241,68 @@ def export_proof_file(proof_path: str) -> str:
                 and mt.reduction_repacks_challenger_init(reduction_helper)
             )
             gf_a_id = _ec_ident(assumption_game_file_name)
+            # ROM Lazy-side dead-``h`` drop spec, computed PER SIDE for the
+            # reprogramming (non-sim-ok) side of a lazy-RO consume-pk hop. The
+            # materialized ``_Mat`` challenger is a top-level module ``<gf>_<side>_Mat``
+            # (side {1}); the plain reprogramming challenger is the clone-qualified
+            # ``<clone>.<gf>_<side>`` (side {2}) -- the same string passed as
+            # ``consume_pk_<side>_challenger_glob``. ``_ro_dead_drop_spec`` returns
+            # ``None`` for a non-reprogramming (Honest / binding / forward) game, so
+            # those sides keep their existing close byte-identically.
+            ro_dead_drop_left: pt.RoDeadDropSpec | None = None
+            ro_dead_drop_right: pt.RoDeadDropSpec | None = None
+            if consume_pk_bridge and ro_holder_modules:
+                # The DROPPED sample is the dead SHARED RO ``RO_G_RO.h`` (re-sampled
+                # but unused on the assumption side), whose distribution is the
+                # top-level RO holder's dfun (``function_value_modules``) -- NOT the
+                # challenger's own (theory) ``h``, which stays LIVE and coupled.
+                _fv_mods = top_types.function_value_modules()
+                _dfun_ll = f"{_fv_mods[0][1]}_ll" if _fv_mods else ""
+                # Peel count = the reduction's OWN (non-challenger) abstract calls
+                # in ``Initialize``. After the ``rcondt`` collapses the challenger
+                # ``hash``, the pre-adversary residual holds exactly these (each
+                # ``inline *`` also hoists a nested ``NG.Generator()`` inside
+                # ``NG.Exp(...)`` into its own ``<@`` -- so count nested too).
+                _red_init = _find_init(reduction_helper) if reduction_helper else None
+                _peel_n = [0]
+
+                def _count_own_call(node: frog_ast.ASTNode) -> bool:
+                    if (
+                        isinstance(node, frog_ast.FuncCall)
+                        and isinstance(node.func, frog_ast.FieldAccess)
+                        and isinstance(node.func.the_object, frog_ast.Variable)
+                        and node.func.the_object.name != "challenger"
+                    ):
+                        _peel_n[0] += 1
+                    return False
+
+                if _red_init is not None:
+                    visitors.SearchVisitor(_count_own_call).visit(_red_init.block)
+                _peel_ct = _peel_n[0]
+                if not left_ro_sim_ok:
+                    ro_dead_drop_left = _ro_dead_drop_spec(
+                        next(g for g in gf_a.games if g.name == left_side),
+                        mat_glob=f"{gf_a_id}_{left_side}_Mat",
+                        lazy_glob=f"{hop_clone}.{gf_a_id}_{left_side}",
+                        dfun_ll=_dfun_ll,
+                        peel_count=_peel_ct,
+                    )
+                if not right_ro_sim_ok:
+                    ro_dead_drop_right = _ro_dead_drop_spec(
+                        next(g for g in gf_a.games if g.name == right_side),
+                        mat_glob=f"{gf_a_id}_{right_side}_Mat",
+                        lazy_glob=f"{hop_clone}.{gf_a_id}_{right_side}",
+                        dfun_ll=_dfun_ll,
+                        peel_count=_peel_ct,
+                    )
+            # Restrict A from each dead-drop side's reprogramming challenger (its
+            # cross-named fields ride the ``call (_: inv)`` invariant). This hop
+            # gets its own subset; ``main_theorem`` accumulates the full set.
+            hop_restrictions = list(live_state_modules)
+            for _spec in (ro_dead_drop_left, ro_dead_drop_right):
+                if _spec is not None and _spec.lazy_glob not in hop_restrictions:
+                    hop_restrictions.append(_spec.lazy_glob)
+                    repro_chal_globs.add(_spec.lazy_glob)
             ec_pr_lemmas.append(
                 pt.translate_assumption_hop_pr_lemma(
                     hop_index=i,
@@ -5184,7 +5322,7 @@ def export_proof_file(proof_path: str) -> str:
                     wrapper_extra_args=[p.name for p in declared_instance_params]
                     or None,
                     multi_oracle=_pr_multi_oracle_for(step_a, step_b),
-                    adv_state_restrictions=live_state_modules or None,
+                    adv_state_restrictions=sorted(hop_restrictions) or None,
                     consume_pk_bridge=consume_pk_bridge,
                     # Peel the FULL init backbone: the challenger's own init
                     # calls PLUS the reduction's own backbone (CFRG ``R_PQ_Bind``'s
@@ -5221,6 +5359,8 @@ def export_proof_file(proof_path: str) -> str:
                     ro_bridge_admit=bool(ro_holder_modules),
                     left_ro_sim_ok=left_ro_sim_ok,
                     right_ro_sim_ok=right_ro_sim_ok,
+                    ro_dead_drop_left=ro_dead_drop_left,
+                    ro_dead_drop_right=ro_dead_drop_right,
                 )
             )
         else:
@@ -5252,6 +5392,12 @@ def export_proof_file(proof_path: str) -> str:
                     adv_state_restrictions=live_state_modules or None,
                 )
             )
+
+    # Fold the ROM dead-drop reprogramming challengers into the shared restriction
+    # set so ``main_theorem`` (and every later consumer) separates A from the full
+    # set -- a superset of each per-hop pr-lemma restriction.
+    if repro_chal_globs:
+        live_state_modules = sorted(set(live_state_modules) | repro_chal_globs)
 
     # === Assemble the file ===
 

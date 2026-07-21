@@ -6419,6 +6419,149 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
     return ([_res_tag(SYNTH_PARAM), *body[1:]], scheme_name)
 
 
+def _challenge_hop2_wrapper_route(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-return-statements
+    lred: ec_ast.Proc,
+    rred: ec_ast.Proc,
+    lif: ec_ast.If,
+    left_state0: frog_ast.Game,
+    left_wrapper_expr: str,
+    right_wrapper_expr: str,
+    l_then_calls: list[ec_ast.Call],
+    clone_alias: dict[str, str],
+) -> tuple[list[str], tuple[str, str] | None, str] | None:
+    """Seedbased WRAPPER both-case-split (hop_6): ``R_PQ_Bind ~ R_KDF`` where both
+    reductions' PQ decaps is a ``SeededKEMWrapper``.  Builds the ``Hop2Spec`` at
+    wrapper bindings (own PQ-seed + T-scalar fields, seed-derived decaps key) --
+    NOT the component-field model ``_group_fields`` (which cannot read a
+    ``derivekeypair(seed).`2`` decaps key) -- and dispatches to
+    :func:`bch.challenge_tactic_hop2_wrapper`.  Declines (-> honest admit;
+    byte-identical) if any wrapper datum can't be derived."""
+    inner = next(
+        c.callee.split(".", 1)[0]
+        for c in l_then_calls
+        if c.callee.endswith(".derivekeypair")
+    )
+    l_prefix: list[ec_ast.EcStmt] = [
+        s for s in lred.body if not isinstance(s, ec_ast.If)
+    ]
+    r_prefix: list[ec_ast.EcStmt] = [
+        s for s in rred.body if not isinstance(s, ec_ast.If)
+    ]
+    groups = _kdf_groups(l_prefix)
+    if len(groups) != 2:
+        return None
+    shape = _concat_shape_from(l_prefix, groups[0], clone_alias, inner)
+    if shape is None:
+        return None
+    own_all = [f.name for f in left_state0.fields if "@" not in f.name]
+    dkp = next(
+        (
+            s
+            for s in l_prefix
+            if isinstance(s, ec_ast.Call) and s.callee == f"{inner}.derivekeypair"
+        ),
+        None,
+    )
+    if dkp is None:
+        return None
+    seed_f = _split_top_args(dkp.args)[0]
+    if seed_f not in own_all:
+        return None
+    # STORED-DERIVED-KEY GAP: R_KDF re-derives through the wrapper from a stored
+    # derived key ``dk_PQ_0 = derivekeypair(s_PQ_0).`2`` (= ``s_PQ_0`` since the
+    # concrete SeededKEMWrapper's ``derivekeypair`` returns ``(ek, seed)``), so its
+    # challenge decaps reads a DIFFERENT field name (``dk_PQ_0``) than R_PQ_Bind's
+    # (``s_PQ_0``).  The two prefixes' PQ-decaps-key fields then differ, and the
+    # exported hop pre couples ``s_PQ_0{2}=s_PQ_0{1}`` but NOT the
+    # ``dk_PQ_0{2}=s_PQ_0{2}`` field-invariant (established in R_KDF's init) that
+    # ``kdf_in_0{1}=kdf_in_0{2}`` needs.  Until the coupling generation carries that
+    # invariant into the hop pre, decline (honest admit; byte-identical) when the
+    # two sides' derivekeypair-arg fields disagree.
+    r_dkp = next(
+        (
+            s
+            for s in rred.body
+            if isinstance(s, ec_ast.Call) and s.callee == f"{inner}.derivekeypair"
+        ),
+        None,
+    )
+    if r_dkp is None or _split_top_args(r_dkp.args)[0] != seed_f:
+        return None
+    # T scalar = the key arg of the T-decaps call (group: ``exp(ct, dk_T)`` -> arg1;
+    # KEM: ``decaps(dk_T, ct)`` -> arg0).
+    t_method = _ev_method(shape.ev_decaps_t)
+    t_decaps = next(
+        (
+            s
+            for s in l_prefix
+            if isinstance(s, ec_ast.Call) and s.callee.endswith(f".{t_method}")
+        ),
+        None,
+    )
+    if t_decaps is None:
+        return None
+    t_args = _split_top_args(t_decaps.args)
+    tkey_f = t_args[1] if shape.t_decaps_ct_first else t_args[0]
+    if tkey_f not in own_all or tkey_f == seed_f:
+        return None
+    l_args = _top_level_args(left_wrapper_expr)
+    if not l_args:
+        return None
+    wrapper_expr = l_args[0]  # SeededKEMWrapper(KEM_PQ_inner)
+    l_challenger_ref = _ref_base(l_args[-1])
+    chal_flds = [f.name for f in left_state0.fields if "@" in f.name]
+    if len(chal_flds) != 1:
+        return None
+    ck = chal_flds[0].split("@", 1)[1]
+    h_module = next(
+        (
+            s.callee.split(".", 1)[0]
+            for s in lif.else_body
+            if isinstance(s, ec_ast.Call) and s.callee.endswith(".evaluate")
+        ),
+        None,
+    )
+    if h_module is None:
+        return None
+    glob_mods = _callee_mods(l_prefix, clone_alias)
+    sync_mods = list(dict.fromkeys(glob_mods + [h_module]))
+    clone_to_mod = {c: m for m, c in clone_alias.items()}
+    t_clone = shape.ev_encct_t.split(".", 1)[0]
+    t_module = clone_to_mod.get(t_clone, inner)
+    ect_method = _ev_method(shape.ev_encct_t)
+    spec = bch.Hop2Spec(
+        ct_params=[p.name for p in lred.params],
+        sync_mods=sync_mods,
+        l_base=_ref_base(left_wrapper_expr),
+        r_base=_ref_base(right_wrapper_expr),
+        l_prefix=l_prefix,
+        r_prefix=r_prefix,
+        glob_mods=glob_mods,
+        l_component_fields=[[seed_f, tkey_f]],
+        r_component_fields=[[seed_f, tkey_f]],
+        clone_alias=clone_alias,
+        shape=shape,
+        pq_module=inner,
+        h_module=h_module,
+        l_challenger_ref=l_challenger_ref,
+        l_challenger_key_fields=[ck],
+        ect_inj_axiom=f"{t_module}_{ect_method}_inj",
+        ct_key_idx=[0, 0],
+        wrapper_expr=wrapper_expr,
+        inner_pq_module=inner,
+        l_own_fields=[seed_f, tkey_f],
+        l_red_proc=lred,
+    )
+    body = bch.challenge_tactic_hop2_wrapper(spec)
+    if body is None:
+        return None
+    # Empty scheme_name: the wrapper tactic functionalizes via the INNER KEM's
+    # ``derivekeypair``/``decaps`` det axioms + ``inline``, so it needs no
+    # ``<scheme>_decaps_val`` phoare (whose CG_seedbased synthesis is malformed --
+    # references the group param ``G``). ``decaps_val_acc.add("")`` is inert.
+    return ([_res_tag(SYNTH_PARAM), *body[1:]], (t_module, ect_method), "")
+
+
 def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -6471,15 +6614,21 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
     # Seedbased wrapper: the challenger's ``decaps`` is a ``SeededKEMWrapper``
     # (``derivekeypair; inner-decaps``), so the then-branch holds
     # ``derivekeypair``+``decaps`` pairs rather than bare ``decaps``.  The
-    # both-case-split route's COMPONENT-field model is incompatible with the
-    # wrapper's seed-derived keys: ``_kdf_groups`` merges the two ciphertexts'
-    # groups (the ``derivekeypair`` calls break the boundaries) and
-    # ``_group_fields`` cannot read a decaps key that is ``derivekeypair(seed).2``
-    # rather than a reduction field.  Closing hop_6 (seedbased) needs the
-    # seed-based field model (like hop_4/hop_8) threaded through this route --
-    # deferred (plan cont-87); decline (admit) here.
+    # component-field model (``_group_fields``) below cannot read a decaps key
+    # that is ``derivekeypair(seed).`2`` rather than a reduction field, so route
+    # the seedbased shape to the dedicated wrapper tactic (seed-derived bindings,
+    # inline the wrapper before the prefix peel).
     if any(c.callee.endswith(".derivekeypair") for c in l_then_calls):
-        return None
+        return _challenge_hop2_wrapper_route(
+            lred,
+            rred,
+            lif,
+            left_state0,
+            left_wrapper_expr,
+            right_wrapper_expr,
+            l_then_calls,
+            clone_alias,
+        )
     if not all(c.callee.endswith(".decaps") for c in l_then_calls):
         return None
     pq_module = l_then_calls[0].callee.split(".", 1)[0]

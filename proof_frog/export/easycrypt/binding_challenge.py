@@ -1384,6 +1384,19 @@ class Hop2Spec:
     )  # the L challenger's encaps-key field names ["ek0", "ek1"]
     l_guard: str = ""  # left reduction if-guard, raw ("kdf_in_0 = kdf_in_1")
     r_guard: str = ""  # right reduction if-guard, raw ("ek0 = ek1")
+    # -- WRAPPER-shape extras (seedbased hop_6: both reductions' PQ decaps is a
+    # ``SeededKEMWrapper`` = ``derivekeypair; inner-decaps``, so both prefixes are
+    # functionalized via the EXPANDED flat-state bodies + an ``inline{i} <wrapper>``
+    # instead of the atomic ``<pq>_decaps_det``; the LHS collision challenger also
+    # re-decapsulates through the wrapper). All empty/None for the bare shape ->
+    # ``challenge_tactic_hop2`` unchanged (byte-identical). ----------------------
+    wrapper_expr: str = ""  # e.g. "SeededKEMWrapper(KEM_PQ_inner)"
+    inner_pq_module: str = ""  # inner KEM module, e.g. "KEM_PQ_inner"
+    kdf_col_lemma: str = "kdf_col_ss"  # aux lemma (concat_eq => decaps_eq)
+    l_own_fields: list[str] = field(
+        default_factory=list
+    )  # reduction own fields, exists*
+    l_red_proc: ec_ast.Proc | None = None  # LHS reduction proc (collision then-body)
 
 
 def _blk_env(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -1611,6 +1624,207 @@ def challenge_tactic_hop2(spec: Hop2Spec) -> list[str] | None:
         ", kdf_in_1"
         "{2}"
         "; elim* => gh2 ri0 ri1.",
+        f"  wp. call{{1}} ({hm}_evaluate_det gh ki1). call{{1}} ({hm}_evaluate_det gh ki0).",
+        f"  call{{2}} ({hm}_evaluate_det gh2 ri1). call{{2}} ({hm}_evaluate_det gh2 ri0).",
+        "  skip => />. move => &2 hne hg.",
+        f"  have hkct : {kdf0} = {kdf1} => {ct0}" "{2}" f" = {ct1}" "{2}" ".",
+        "  + move => h.",
+        *[f"    {ln}" for ln in peel],
+        f"    have hct2 : {ct0}"
+        "{2}"
+        f".`2 = {ct1}"
+        "{2}"
+        f".`2 by apply ({spec.ect_inj_axiom} _ _ hect).",
+        "    smt().",
+        "  smt().",
+        "  qed.",
+    ]
+    return lines
+
+
+def challenge_tactic_hop2_wrapper(  # pylint: disable=too-many-locals,too-many-statements
+    spec: Hop2Spec,
+) -> list[str] | None:
+    """hop_6 both-case-split (``R_PQ_Bind ~ R_KDF``) with a SeededKEMWrapper PQ decaps.
+
+    Like :func:`challenge_tactic_hop2` but both reductions' PQ ``decaps`` is a
+    ``SeededKEMWrapper`` (``derivekeypair; inner-decaps``).  The flat-state
+    prefixes are ALREADY expanded (single-var tuple + projections), so the generic
+    ``_blk_env``/``_peel_stmts`` functionalize them via the inner KEM's
+    ``derivekeypair``/``decaps`` det axioms -- but the EC goal must first
+    ``inline{i} <wrapper>.decaps <wrapper>.encodesharedsecret`` to expose those
+    inner calls (matching the expanded flat state), and the LHS collision
+    challenger re-decapsulates through the wrapper too.  Every KDF-input term
+    binds the PQ decaps key to the seed-derived ``(ev_derivekeypair seed).`2`` and
+    the T encaps key to the recomputed ``ev_exp(ev_generator, dk_T)`` (group T).
+    ``spec.l_own_fields`` are the reduction's own PQ-seed + T-scalar fields (in that
+    order); ``spec.l_red_proc`` is the LHS reduction proc (collision then-body).
+    """
+    if spec.l_red_proc is None or not spec.wrapper_expr or not spec.inner_pq_module:
+        return None
+    if len(spec.l_own_fields) != 2 or len(spec.l_challenger_key_fields) != 1:
+        return None
+    ct0, ct1 = spec.ct_params
+    seed_f, tkey_f = spec.l_own_fields  # PQ seed (decaps key), T scalar
+    gm = spec.glob_mods
+    gge = [f"gg{i}" for i in range(len(gm))]
+    glob_of = dict(zip(gm, gge))
+    hm = spec.h_module
+    lchal = spec.l_challenger_ref
+    wrapper = spec.wrapper_expr
+    inner = spec.inner_pq_module
+    inner_c = spec.clone_alias.get(inner, inner + "_c")
+    t_clone = spec.shape.ev_decaps_t.split(".", 1)[0]
+    ck = spec.l_challenger_key_fields[0]  # SAMEKEY single challenger key
+    l_len = len([s for s in spec.l_prefix if not isinstance(s, ec_ast.VarDecl)])
+    r_len = len([s for s in spec.r_prefix if not isinstance(s, ec_ast.VarDecl)])
+
+    def _wbind(ct: str) -> tuple[str, str, str, str]:
+        """KDF-input bindings at ct: seed-derived PQ decaps key, T scalar, the
+        recomputed group encaps key (``ev_exp(ev_generator, dk_T)``), ct."""
+        pq_key = f"({inner_c}.ev_derivekeypair {spec.r_base}.{seed_f}" "{2}).`2"
+        t_key = f"{spec.r_base}.{tkey_f}" "{2}"
+        ek = f"({spec.shape.ev_decaps_t} ({t_clone}.ev_generator) {t_key})"
+        return (pq_key, t_key, ek, f"{ct}" "{2}")
+
+    kdf0_term = spec.shape.kdf_in(*_wbind(ct0))
+    kdf1_term = spec.shape.kdf_in(*_wbind(ct1))
+
+    # -- invariant -----------------------------------------------------------
+    inv_terms = (
+        [f"{c}" "{1}" f" = {c}" "{2}" for c in spec.ct_params]
+        + ["kdf_in_0{1} = kdf_in_0{2}", "kdf_in_1{1} = kdf_in_1{2}"]
+        + [f"(glob {m})" "{1}" f" = (glob {m})" "{2}" for m in spec.sync_mods]
+        + [f"{spec.l_base}.{seed_f}" "{1}" f" = {lchal}.{ck}" "{1}"]
+        + [
+            f"{spec.l_base}.{f}" "{1}" f" = {spec.r_base}.{f}" "{2}"
+            for f in spec.l_own_fields
+        ]
+        + ["kdf_in_0" "{2}" f" = {kdf0_term}", "kdf_in_1" "{2}" f" = {kdf1_term}"]
+    )
+    inv = " /\\ ".join(inv_terms)
+    lines = [
+        "proof.",
+        "  proc.",
+        f"  inline{{1}} {wrapper}.decaps {wrapper}.encodesharedsecret.",
+        f"  inline{{2}} {wrapper}.decaps {wrapper}.encodesharedsecret.",
+        f"  seq {l_len} {r_len} : ({inv}).",
+    ]
+
+    # -- prefix functionalization subgoal (both sides, expanded flat state) ---
+    own = spec.l_own_fields
+    l_fe = [f"lf{i}" for i in range(len(own))]
+    r_fe = [f"rf{i}" for i in range(len(own))]
+    l_ex = (
+        [f"(glob {m})" "{1}" for m in gm]
+        + [f"{spec.l_base}.{f}" "{1}" for f in own]
+        + [f"{c}" "{1}" for c in spec.ct_params]
+        + [f"{spec.r_base}.{f}" "{2}" for f in own]
+    )
+    l_elim = gge + l_fe + ["lc0", "lc1"] + r_fe
+    l_env = _blk_env(
+        spec.l_base,
+        [own],
+        l_fe,
+        spec.ct_params,
+        ("lc0", "lc1"),
+        [s for s in spec.l_prefix if not isinstance(s, ec_ast.VarDecl)],
+        spec.clone_alias,
+    )
+    r_env = _blk_env(
+        spec.r_base,
+        [own],
+        r_fe,
+        spec.ct_params,
+        ("lc0", "lc1"),
+        [s for s in spec.r_prefix if not isinstance(s, ec_ast.VarDecl)],
+        spec.clone_alias,
+    )
+    l_peel = _wp_before_calls(
+        _peel_stmts(_drop_leading_assigns(spec.l_prefix), l_env, glob_of, "{1}")
+    )
+    r_peel = _wp_before_calls(
+        _peel_stmts(_drop_leading_assigns(spec.r_prefix), r_env, glob_of, "{2}")
+    )
+    lines += [
+        "  + sp.",
+        f"    exists* {', '.join(l_ex)};",
+        f"    elim* => {' '.join(l_elim)}.",
+        *[f"    {ln}" for ln in r_peel],
+        *[f"    {ln}" for ln in l_peel],
+        "    skip => />.",
+    ]
+
+    # -- outer case: RHS ct-equality guard (H.evaluate only; no wrapper) ------
+    lines += [
+        f"  case ({ct0}" "{2}" f" = {ct1}" "{2}).",
+        "  + rcondt{2} 1; first by auto.",
+        "    rcondf{1} 1; first by (auto; smt()).",
+        "    exists* (glob "
+        f"{hm})"
+        "{1}, kdf_in_0{1}, kdf_in_1{1}; elim* => gh ki0 ki1.",
+        f"    wp. call{{1}} ({hm}_evaluate_det gh ki1). call{{1}} ({hm}_evaluate_det gh ki0).",
+        "    skip => />.",
+        "  rcondf{2} 1; first by (auto; smt()).",
+        "  inline{2} 1.",
+        "  sp.",
+    ]
+
+    # -- inner case: LHS PQ-collision guard (wrapper challenger re-decaps) ----
+    inner_guard = (
+        "kdf_in_0"
+        "{1}"
+        " = kdf_in_1"
+        "{1}"
+        f" /\\ {ct0}"
+        "{1}"
+        ".`1 <> "
+        f"{ct1}"
+        "{1}"
+        ".`1"
+    )
+    lines += [
+        f"  case ({inner_guard}).",
+        "  + rcondt{1} 1; first by (auto; smt()).",
+        "    inline{1} 1.",
+        f"    inline{{1}} {wrapper}.decaps.",
+        "    sp.",
+        f"    exists* (glob {inner})"
+        "{1}"
+        f", {lchal}.{ck}"
+        "{1}"
+        f", {ct0}"
+        "{1}"
+        f", {ct1}"
+        "{1}"
+        "; elim* => gp3 xsd xc0 xc1.",
+        "    exists* (glob "
+        f"{hm})"
+        "{2}, kdf_in_0{2}, kdf_in_1{2}; elim* => gh2 ki0 ki1.",
+        f"    wp. call{{2}} ({hm}_evaluate_det gh2 ki1). call{{2}} ({hm}_evaluate_det gh2 ki0).",
+        f"    wp. call{{1}} ({inner}_decaps_det gp3 ({inner_c}.ev_derivekeypair xsd).`2 xc1.`1)."
+        f" call{{1}} ({inner}_derivekeypair_det gp3 xsd).",
+        f"    wp. call{{1}} ({inner}_decaps_det gp3 ({inner_c}.ev_derivekeypair xsd).`2 xc0.`1)."
+        f" call{{1}} ({inner}_derivekeypair_det gp3 xsd).",
+        "    skip => />; smt().",
+    ]
+
+    # -- no-collision else: both compute the predicate; slice-peel the KDF
+    # equality to the T-ciphertext (right slice) + injectivity, at the
+    # seed-derived wrapper bindings (PQ leaf = ev_decaps (ev_dkp seed).`2 ct). --
+    bind0 = _wbind(ct0)
+    bind1 = _wbind(ct1)
+    kdf0 = spec.shape.kdf_in(*bind0)
+    kdf1 = spec.shape.kdf_in(*bind1)
+    peel = slice_peel_to_ect(spec.shape, bind0, bind1)
+    lines += [
+        "  rcondf{1} 1; first by (auto; smt()).",
+        "  exists* (glob "
+        f"{hm})"
+        "{1}, kdf_in_0{1}, kdf_in_1{1}; elim* => gh ki0 ki1.",
+        "  exists* (glob "
+        f"{hm})"
+        "{2}, kdf_in_0{2}, kdf_in_1{2}; elim* => gh2 ri0 ri1.",
         f"  wp. call{{1}} ({hm}_evaluate_det gh ki1). call{{1}} ({hm}_evaluate_det gh ki0).",
         f"  call{{2}} ({hm}_evaluate_det gh2 ri1). call{{2}} ({hm}_evaluate_det gh2 ri0).",
         "  skip => />. move => &2 hne hg.",

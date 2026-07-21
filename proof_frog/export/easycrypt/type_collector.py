@@ -677,6 +677,24 @@ class TypeCollector:
             for dom, codom in self._function_types
         ]
 
+    def concat_ops_seen(self) -> list[tuple[str, str, str, str]]:
+        """``(op_name, left, right, result)`` for each registered concat op. Lets a
+        clone bind the theory's abstract concat op to the concretized top-level one
+        (same concatenation) so a top-level module and a theory module relate."""
+        return [
+            (_concat_op_name(left, right, result), left, right, result)
+            for left, right, result in self._concat_ops
+        ]
+
+    def concat_op_names(self) -> set[str]:
+        """The set of registered concat op names (a cross-clone binding guard: only
+        bind a theory concat when the concretized top-level concat actually exists,
+        so non-matching proofs stay byte-identical)."""
+        return {
+            _concat_op_name(left, right, result)
+            for left, right, result in self._concat_ops
+        }
+
     def resolve_value_alias(
         self, obj_name: str, field_name: str
     ) -> frog_ast.Expression | None:

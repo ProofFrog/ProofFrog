@@ -472,25 +472,6 @@ def _ro_dead_drop_spec(
     dead_field = _reprogramming_lazy_ro_field(repro_game)
     if dead_field is None:
         return None
-    # BLOCKED (cont-99): when the reprogram value is a CONCAT of two halves (all
-    # current CFRG lazy-RO games: ``if (x==s0) return y0_pq || y0_t``), the tactic
-    # relates a TOP-LEVEL ``_Mat`` challenger against a THEORY ``Lazy`` challenger
-    # whose ``concat`` ops are DISTINCT uninterpreted ops (the clone binds types +
-    # distrs but NOT the concat op), so ``Mat.concat a b = Lazy.concat a b`` is
-    # unprovable and ``HashG``'s ``proc; sim`` fails. Everything else in the bridge
-    # is validated (``.ec-tmp/rom_hr_hashg.ec`` / ``rom_hr_tail.ec``); gate off the
-    # concat case so those sides keep the honest ``admit`` (no regression) until the
-    # theory-clone concat-op binding lands. A single-field reprogram (no concat)
-    # would relate directly -- there is no such game today, but keep the route live.
-    for method in repro_game.methods:
-        for stmt in method.block.statements:
-            if isinstance(stmt, frog_ast.IfStatement) and any(
-                isinstance(s, frog_ast.ReturnStatement)
-                and isinstance(s.expression, frog_ast.BinaryOperation)
-                for blk in stmt.blocks
-                for s in blk.statements
-            ):
-                return None
     init = next(
         (m for m in repro_game.methods if m.signature.name == "Initialize"),
         None,
@@ -5531,6 +5512,21 @@ def export_proof_file(proof_path: str) -> str:
             concrete_dfun = f"dfun_{tb_map.get(d_t, d_t)}_to_{tb_map.get(c_t, c_t)}"
             if concrete_dfun in known_dfuns and concrete_dfun != dfun_name:
                 op_bindings_.append((dfun_name, concrete_dfun))
+        # Concat ops ``concat_<L>_<R>_to_<Res>``: a theory concat and the SAME
+        # concatenation registered at top level (e.g. a materialized ``_Mat`` lazy-RO
+        # challenger) are otherwise DISTINCT uninterpreted ops, so a top-level module
+        # cannot relate to a theory module through them (the ROM dead-drop bridge).
+        # Bind the theory concat to the concretized top-level one when it exists --
+        # sound (same concatenation), and guarded on registration so a proof with no
+        # matching top-level concat stays byte-identical.
+        known_concats = top_types.concat_op_names()
+        for concat_name, l_t, r_t, res_t in src_theory_types.concat_ops_seen():
+            concrete_concat = (
+                f"concat_{tb_map.get(l_t, l_t)}_{tb_map.get(r_t, r_t)}"
+                f"_to_{tb_map.get(res_t, res_t)}"
+            )
+            if concrete_concat in known_concats and concrete_concat != concat_name:
+                op_bindings_.append((concat_name, concrete_concat))
         return ec_ast.Clone(
             source_theory=src_theory_name,
             alias=inst.clone_alias,
@@ -5618,6 +5614,11 @@ def export_proof_file(proof_path: str) -> str:
             # both redundant and a syntactic mess (the ``*`` in the
             # axiom name is invalid EC).
             if not concrete_distr.isidentifier():
+                continue
+            # Non-distribution op-bindings (a bound ``concat_``/``slice_`` function
+            # op, threaded through the same clone ``op_bindings`` list) are NOT
+            # distributions -- ``is_funiform``/``is_lossless`` are ill-typed on them.
+            if concrete_distr.startswith(("concat_", "slice_")):
                 continue
             for suffix, predicate in (
                 ("funi", "is_funiform"),

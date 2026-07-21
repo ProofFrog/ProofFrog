@@ -950,7 +950,15 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
             # block of INDEPENDENT front samples (the RO plus the CONCRETE assumption
             # challenger's inlined ``initialize`` samples -- count varies per
             # challenger), which ``sim`` couples trivially -- no fixed rnd count.
-            branches = ["proc; sim"] * n_oracles + [f"{peel} skip => /#"]
+            # ROM dead-drop: the post-init oracles run the CROSS-named challenger
+            # (materialized ``_Mat`` on {1} vs the plain clone on {2}), so ``sim``
+            # cannot relate them without first inlining -- ``proc; inline *; sim``
+            # unfolds the challenger's ``hash``/decaps on both sides, and the field
+            # couplings + the bound concat op close the reprogramming ``if``. The
+            # non-dead-drop consume-pk path keeps the plain ``proc; sim`` (same-named
+            # challenger) byte-identically.
+            oracle_tac = "proc; inline *; sim" if dead_drop is not None else "proc; sim"
+            branches = [oracle_tac] * n_oracles + [f"{peel} skip => /#"]
             selector = " | ".join(branches)
             call_close = f"wp; call (_: {inv}); [ {selector} ]"
             byq = f"byequiv (_: {multi_oracle.byequiv_pre} ==> ={{res}}) => //"
@@ -983,16 +991,28 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                 f"swap{{2}} 1 {n_split - 1};"
                 f" rnd{{2}}; auto => />; smt({dead_drop.dfun_ll})"
             )
-            cont_branch = (
-                "rcondt{1} ^if; first by auto;"
-                " rcondt{2} ^if; first by auto;"
-                f" {call_close}"
-            )
-            return (
-                f"  by {byq};"
-                " proc; inline{2} 2; swap{2} ^ <${1} @ 0; inline *;"
-                f" seq {n_split} {n_split} : ({seq_inv});"
-                f" [ {drop_branch} | {cont_branch} ]."
+            # Emit MULTI-SENTENCE (`.`-separated), NOT a `;`-chained `by` one-liner:
+            # the one-liner's nested `[..|..]` brackets mis-count subgoals here
+            # ("expecting at least 1 subgoal"), whereas the `.`-sentence form isolates
+            # each subgoal cleanly (validated). Starts with `.` to terminate the
+            # enclosing `have <h> : <P>`. The `+` bullet closes the `seq`'s first goal
+            # (the sample block); then the reprogramming `if`s collapse, the adversary
+            # is coupled, and the `call`'s subgoals (one per oracle + the init-tail
+            # residual) are discharged one sentence each.
+            oracle_sentences = [f"  {oracle_tac}." for _ in range(n_oracles)]
+            return "\n".join(
+                [
+                    ".",
+                    f"  {byq}.",
+                    "  proc; inline{2} 2; swap{2} ^ <${1} @ 0; inline *.",
+                    f"  seq {n_split} {n_split} : ({seq_inv}).",
+                    f"  + {drop_branch}.",
+                    "  rcondt{1} ^if; first by auto.",
+                    "  rcondt{2} ^if; first by auto.",
+                    f"  wp; call (_: {inv}).",
+                    *oracle_sentences,
+                    f"  {peel} wp; skip => /#.",
+                ]
             )
 
         if ro_bridge_admit:

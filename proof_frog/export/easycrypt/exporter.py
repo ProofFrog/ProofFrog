@@ -5342,6 +5342,23 @@ def export_proof_file(proof_path: str) -> str:
                     right_ro_sim_ok=right_ro_sim_ok,
                     ro_dead_drop_left=ro_dead_drop_left,
                     ro_dead_drop_right=ro_dead_drop_right,
+                    # Re-init-forward shape: a STATELESS assumption challenger (no
+                    # ``Initialize``, e.g. KeyGenEquiv's ``Generate`` /
+                    # KDFCollisionResistance's ``Challenge``) makes the wrapper
+                    # ``main`` a single ``b <@ A(chal).distinguish()`` -- the
+                    # reduction re-inits internally, and the shared RO sits at the
+                    # FRONT of ``distinguish`` on both sides. Then ``proc; inline{2}
+                    # 1; inline *; sim`` closes (no swap, no dead-drop -- the two
+                    # sides are identical modulo the RO being eager vs first-in-
+                    # distinguish). A stateful challenger (LEAK_BIND's Initialize)
+                    # keeps the consume-pk / dead-drop / admit routes.
+                    ro_forward_shape=bool(ro_holder_modules)
+                    and not consume_pk_bridge
+                    and not any(
+                        m.signature.name == "Initialize"
+                        for g in gf_a.games
+                        for m in g.methods
+                    ),
                 )
             )
         else:

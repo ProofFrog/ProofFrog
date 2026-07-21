@@ -796,6 +796,7 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     ro_bridge_admit: bool = False,
     ro_dead_drop_left: "RoDeadDropSpec | None" = None,
     ro_dead_drop_right: "RoDeadDropSpec | None" = None,
+    ro_forward_shape: bool = False,
 ) -> ec_ast.ProbLemma:
     """Emit a ``hop_<i>_pr`` lemma for an assumption hop.
 
@@ -1072,6 +1073,17 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                     return _consume_pk_bridge_close(challenger_glob, dead_drop)
                 return admit
 
+            # Re-init-forward shape (STATELESS assumption challenger): the wrapper
+            # ``main`` is a single ``b <@ A(chal).distinguish()`` and the reduction
+            # re-inits internally, so the shared RO is first-in-``distinguish`` on the
+            # assumption side and eager on the theorem side -- ``inline{2} 1`` flattens
+            # the one-statement wrapper (no ``challenger.Initialize()`` precedes it, so
+            # NO swap), then ``inline *; sim`` relates the identical sides. Validated
+            # end-to-end on the real ``hop_3_pr`` (EC exit 0).
+            forward_close = (
+                f"  by byequiv (_: {multi_oracle.byequiv_pre} ==> ={{res}}) => //;"
+                " proc; inline{2} 1; inline *; sim."
+            )
             if consume_pk_bridge:
                 bridge_close_l = _ro_repro_close(
                     consume_pk_left_challenger_glob, ro_dead_drop_left, left_ro_sim_ok
@@ -1081,6 +1093,9 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                     ro_dead_drop_right,
                     right_ro_sim_ok,
                 )
+            elif ro_forward_shape:
+                bridge_close_l = forward_close
+                bridge_close_r = forward_close
             else:
                 bridge_close_l = admit
                 bridge_close_r = admit

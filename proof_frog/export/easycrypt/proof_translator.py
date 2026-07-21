@@ -1066,7 +1066,13 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                 # Per side: the Honest (sim-closeable) side flips by hop.
                 #   sim_ok            -> RO-align + sim (validated cont-91).
                 #   dead_drop present -> the Lazy dead-drop bridge (cont-91..98).
-                #   otherwise         -> honest admit (a binding/forward shape).
+                #   otherwise         -> honest admit. A ROM binding consume-pk
+                #     reduction (R_PQ_Bind, hop_5) needs RO-align (``inline{2} 2;
+                #     swap{2} ^ <${1} @ 0``) + the consume-pk peel, but the peel's rnd
+                #     interleaving (the front game-RO + the challenger keygen's
+                #     internal seed) needs an exact tail-to-front order that the
+                #     current ``consume_pk_peel_events`` undercounts by 2 -- deferred
+                #     (cont-103).
                 if sim_ok:
                     return ro_sim
                 if dead_drop is not None:

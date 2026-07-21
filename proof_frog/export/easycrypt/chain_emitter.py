@@ -1571,6 +1571,10 @@ class MultiOracleHopChainInfo:
     # challenge route references; the exporter synthesizes them into section
     # scope from the scheme's translated ``decaps`` proc.
     decaps_val_schemes: set[str] = field(default_factory=set)
+    # Section-level aux lemma text (``slice4_first`` + ``kdf_col_ss``) the seedbased
+    # WRAPPER challenge route emits; the exporter splices these lemmas in ahead of
+    # the hop lemmas (after the slice/inj axioms they depend on).
+    aux_lemmas: list[str] = field(default_factory=list)
 
 
 def _glob_coupling(left_ref: str, right_ref: str) -> str:
@@ -4238,6 +4242,7 @@ def emit_multi_oracle_chain_for_hop(
     pres_methods: set[tuple[str, str]] = set()
     inj_methods: set[tuple[str, str]] = set()
     decaps_val_schemes: set[str] = set()
+    aux_lemma_lines: list[str] = []
     for oracle_name, is_init in oracles:
         eq_args = oracle_eq_args.get(oracle_name, "true")
         oracle_chunks, outer_body, oracle_pres = _emit_one_oracle_chain(
@@ -4267,6 +4272,7 @@ def emit_multi_oracle_chain_for_hop(
             clone_alias=clone_alias or {},
             inj_acc=inj_methods,
             decaps_val_acc=decaps_val_schemes,
+            aux_lemma_acc=aux_lemma_lines,
             use_canonical_fields=use_canonical,
             glob_info_by_base=glob_info_by_base,
             stateless_wrapper_bases=stateless_wrapper_bases,
@@ -4284,6 +4290,7 @@ def emit_multi_oracle_chain_for_hop(
         pres_methods=pres_methods,
         inj_methods=inj_methods,
         decaps_val_schemes=decaps_val_schemes,
+        aux_lemmas=aux_lemma_lines,
     )
 
 
@@ -4315,6 +4322,7 @@ def _emit_one_oracle_chain(
     clone_alias: dict[str, str] | None = None,
     inj_acc: set[tuple[str, str]] | None = None,
     decaps_val_acc: set[str] | None = None,
+    aux_lemma_acc: list[str] | None = None,
     use_canonical_fields: bool = False,
     glob_info_by_base: (
         dict[str, tuple[tuple[tuple[str, str], ...], frozenset[str]]] | None
@@ -4504,11 +4512,15 @@ def _emit_one_oracle_chain(
             clone_alias,
         )
         if route is not None:
-            outer_body, inj_reqs, val_scheme = route
+            outer_body, inj_reqs, val_scheme, aux_lines = route
             if inj_acc is not None:
                 inj_acc.update(inj_reqs)
             if decaps_val_acc is not None:
                 decaps_val_acc.add(val_scheme)
+            # Aux lemmas are shared across a proof's wrapper hops (same concat
+            # shape) and have fixed names, so emit them once (dedup by first-wins).
+            if aux_lemma_acc is not None and aux_lines and not aux_lemma_acc:
+                aux_lemma_acc.extend(aux_lines)
             return [], outer_body, set()
         ff_route = _challenge_falsefalse_route(
             modules,
@@ -4521,10 +4533,11 @@ def _emit_one_oracle_chain(
             method_return_types,
             flat_params,
             clone_alias,
+            full_coupling,
         )
         if ff_route is not None:
             ff_body, ff_scheme = ff_route
-            if decaps_val_acc is not None:
+            if decaps_val_acc is not None and ff_scheme:
                 decaps_val_acc.add(ff_scheme)
             return [], ff_body, set()
         h2_route = _challenge_hop2_route(
@@ -5713,6 +5726,132 @@ def _render_flat_state(  # pylint: disable=too-many-arguments,too-many-positiona
     return "\n".join(_render_module_decl(ec_module))
 
 
+def _game_free_fields(proc: ec_ast.Proc, all_fields: list[str]) -> list[str]:
+    """The state fields (from ``all_fields``) referenced in the game challenge
+    body, in ``all_fields`` order. Used to pick the game's peel fields (the
+    decaps/DH keys the challenge reads; not the initialize-only fields)."""
+    field_set = set(all_fields)
+    used: set[str] = set()
+    for stmt in proc.body:
+        text = ""
+        if isinstance(stmt, ec_ast.Assign):
+            text = stmt.rhs
+        elif isinstance(stmt, ec_ast.Call):
+            text = stmt.args
+        for tok in re.findall(r"[A-Za-z_]\w*", text):
+            if tok in field_set:
+                used.add(tok)
+    return [f for f in all_fields if f in used]
+
+
+def _wrapper_challenge_route(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    modules: mt.ModuleTranslator,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    left_wrapper_expr: str,
+    right_wrapper_expr: str,
+    game_proc: ec_ast.Proc,
+    red_proc: ec_ast.Proc,
+    clone_alias: dict[str, str],
+    shape: bch.ConcatShape,
+    pq_module: str,
+    challenger_ref: str,
+    scheme_expr: str,
+    ct_key_idx: list[int],
+    game_glob_mods: list[str],
+    red_glob_mods: list[str],
+    h_module: str,
+) -> tuple[list[str], list[tuple[str, str]], str, list[str]] | None:
+    """Seedbased wrapper variant of the challenge case-split route.
+
+    The game ``decaps`` is a ``SeededKEMWrapper`` (``derivekeypair;
+    inner-decaps``), so dispatch to :func:`bch.challenge_tactic_wrapper` (in-place
+    game-side peel) instead of the atomic ``<Scheme>_decaps_val`` phoare. The game
+    state is DECOMPOSED (``dk_PQ_0, dk_T_0, ..``) not packed, so pair game<->reduction
+    fields by name (the single leftover game field couples to the leftover reduction
+    seed); the reduction also holds a ``challenger@dk0`` field (the inner binding
+    challenger's key). Declines to ``None`` if any wrapper datum can't be built
+    (-> honest admit; byte-identical). The ``slice4_first``/``kdf_col_ss`` aux
+    lemmas are emitted separately by the caller."""
+    game_base = _ref_base(left_wrapper_expr)
+    red_base = _ref_base(right_wrapper_expr)
+    game_flds = [f.name for f in left_state0.fields]
+    red_own = [f.name for f in right_state0.fields if "@" not in f.name]
+    chal_fld = next((f.name for f in right_state0.fields if "@" in f.name), None)
+    if chal_fld is None:
+        return None
+    game_extra = [g for g in game_flds if g not in red_own]
+    red_extra = [r for r in red_own if r not in game_flds]
+    if len(game_extra) != 1 or len(red_extra) != 1:
+        return None
+    pair = {g: g for g in game_flds if g in red_own}
+    pair[game_extra[0]] = red_extra[0]  # game PQ key -> reduction PQ seed
+    game_fields = _game_free_fields(game_proc, game_flds)
+    if not game_fields:
+        return None
+    decomp_coupling = [
+        f"{game_base}.{g}" "{1}" f" = {red_base}.{pair[g]}" "{2}" for g in game_fields
+    ]
+    ro_ref = f"{clone_alias.get('Hybrid', 'Hybrid')}.RO_G_RO.h"
+    extra_field_couplings = [f"{ro_ref}" "{1}" f" = {ro_ref}" "{2}"] + [
+        f"{game_base}.{g}" "{1}" f" = {red_base}.{pair[g]}" "{2}"
+        for g in game_flds
+        if g not in game_fields
+    ]
+    chal_key = chal_fld.split("@", 1)[1]  # ``challenger@dk0`` -> ``dk0``
+    challenger_coupling = [
+        f"{red_base}.{pair[game_extra[0]]}"
+        "{2}"
+        f" = {challenger_ref}.{chal_key}"
+        "{2}"
+    ]
+    comps = modules._types.concat_components(  # pylint: disable=protected-access
+        shape.concat_ops[-1]
+    )
+    if comps is None:
+        return None
+    inj_axiom = f"{pq_module}_encodesharedsecret_inj"
+    spec = bch.ChallengeHopSpec(
+        val_lemma_name="",
+        game_glob_mods=game_glob_mods,
+        game_key_refs=[],
+        ct_params=[p.name for p in game_proc.params],
+        red_base=red_base,
+        red_glob_mods=red_glob_mods,
+        red_component_fields=[[pair[g] for g in game_fields]],
+        clone_alias=clone_alias,
+        decomp_coupling=decomp_coupling,
+        challenger_coupling=challenger_coupling,
+        extra_glob_sync_mods=[],
+        challenger_ref=challenger_ref,
+        challenger_key_fields=[chal_key],
+        pq_module=pq_module,
+        inj_axiom=inj_axiom,
+        h_module=h_module,
+        shape=shape,
+        red_proc=red_proc,
+        ct_key_idx=ct_key_idx,
+        game_proc=game_proc,
+        wrapper_expr=scheme_expr,
+        game_base=game_base,
+        game_fields=game_fields,
+        inner_pq_module=pq_module,
+        extra_field_couplings=extra_field_couplings,
+        base_type=comps[0],
+        kdf_col_lemma="kdf_col_ss",
+    )
+    body = bch.challenge_tactic_wrapper(spec)
+    if body is None:
+        return None
+    aux = bch.slice_inj_lemmas(shape, comps[0], inj_axiom)
+    return (
+        [_res_tag(SYNTH_PARAM), *body[1:]],
+        [(pq_module, "encodesharedsecret")],
+        "",
+        aux,
+    )
+
+
 def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -5724,7 +5863,7 @@ def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-p
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     flat_params: list[ec_ast.ModuleParam],
     clone_alias: dict[str, str],
-) -> tuple[list[str], list[tuple[str, str]], str] | None:
+) -> tuple[list[str], list[tuple[str, str]], str, list[str]] | None:
     """Derive the two-KEM binding challenge-elimination tactic for one hop.
 
     Returns ``(outer_body, inj_requests, scheme_name)`` -- the tactic, the list
@@ -5782,10 +5921,21 @@ def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-p
     pq_module = clone_to_mod.get(pq_clone)
     if pq_module is None:
         return None
-    # then-branch = the inlined PQ binding challenger (decaps of ``pq_module``).
+    # then-branch = the inlined PQ binding challenger. BARE: ``decaps`` of
+    # ``pq_module`` (the atomic-decaps expanded shape). WRAPPER (seedbased): one
+    # INNER module's ``derivekeypair; decaps`` (the SeededKEMWrapper decaps), so
+    # override ``pq_module`` to that inner KEM.
     then_calls = [s for s in red_if.then_body if isinstance(s, ec_ast.Call)]
-    if not then_calls or not all(c.callee == f"{pq_module}.decaps" for c in then_calls):
+    if not then_calls:
         return None
+    is_wrapper = False
+    if not all(c.callee == f"{pq_module}.decaps" for c in then_calls):
+        callee_mods = {c.callee.split(".", 1)[0] for c in then_calls}
+        methods = {c.callee.split(".", 1)[1] for c in then_calls}
+        if len(callee_mods) != 1 or methods != {"derivekeypair", "decaps"}:
+            return None
+        pq_module = next(iter(callee_mods))
+        is_wrapper = True
 
     prefix = [s for s in red_proc.body if not isinstance(s, ec_ast.If)]
     groups = _kdf_groups(prefix)
@@ -5797,11 +5947,17 @@ def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-p
     t_module = shape.ev_decaps_t.split(".", 1)[0]
     t_module = clone_to_mod.get(t_module, t_module)
     grp = [f for f in (_group_fields(g, pq_module) for g in groups) if f is not None]
-    if len(grp) != 2:
-        return None
     # SAMEKEY (both ciphertexts decapsulated under one key) collapses the two
     # identical component groups to one; DIFFKEY keeps both (index ``[0, 1]``).
-    distinct_grp, ct_key_idx = _dedup_groups(grp)
+    # The WRAPPER (seedbased) path computes its reduction fields from the field
+    # pairing, not ``grp`` (whose ``_group_fields`` shape assumes the bare packed
+    # decaps), so a malformed ``grp`` only declines the BARE path.
+    if len(grp) == 2:
+        distinct_grp, ct_key_idx = _dedup_groups(grp)
+    elif is_wrapper:
+        distinct_grp, ct_key_idx = [], [0, 0]
+    else:
+        return None
 
     # non-challenger callees, prefix-then-else, first appearance
     red_glob_mods = _callee_mods(prefix, clone_alias)
@@ -5817,6 +5973,26 @@ def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-p
     )
     if h_module is None:
         return None
+
+    if is_wrapper:
+        return _wrapper_challenge_route(
+            modules,
+            left_state0,
+            right_state0,
+            left_wrapper_expr,
+            right_wrapper_expr,
+            game_proc,
+            red_proc,
+            clone_alias,
+            shape,
+            pq_module,
+            challenger_ref,
+            scheme_expr,
+            ct_key_idx,
+            game_glob_mods,
+            red_glob_mods,
+            h_module,
+        )
 
     # -- couplings & refs ----------------------------------------------------
     game_base = _ref_base(left_wrapper_expr)
@@ -5900,6 +6076,7 @@ def _challenge_casesplit_route(  # pylint: disable=too-many-arguments,too-many-p
         [_res_tag(SYNTH_PARAM), *body[1:]],
         inj_reqs,
         scheme_name,
+        [],
     )
 
 
@@ -5959,6 +6136,76 @@ def _falsefalse_ek_inv(  # pylint: disable=too-many-arguments,too-many-positiona
     return conj
 
 
+def _is_bare_false_return(body: Sequence[ec_ast.EcStmt]) -> bool:
+    """True when a challenge body is a single ``return false`` -- the game side
+    of a false/false hop whose dead decaps calls were pruned by ``Absorb
+    Redundant Early Return``."""
+    stmts = [s for s in body if not isinstance(s, ec_ast.VarDecl)]
+    return (
+        len(stmts) == 1
+        and isinstance(stmts[0], ec_ast.Return)
+        and str(stmts[0].expr).strip() == "false"
+    )
+
+
+def _challenge_barefalse_route(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    left_state0: frog_ast.Game,
+    red_proc: ec_ast.Proc,
+    red_if: ec_ast.If,
+    left_wrapper_expr: str,
+    clone_alias: dict[str, str],
+    flat_params: list[ec_ast.ModuleParam],
+    full_coupling: str | None,
+) -> tuple[list[str], str] | None:
+    """False/bare-false hop: LEFT is a case-split reduction whose every branch
+    returns ``false``; RIGHT is a pruned bare ``return false``.  Peel the LEFT's
+    dead deterministic prefix ONE-SIDED (freezing the reduction's own globs, no
+    ``={glob}`` coupling and no game functionalization) and collapse the trivial
+    ``if``.  Returns ``(body, "")`` (no ``<Scheme>_decaps_val`` request)."""
+    prefix = [
+        s
+        for s in red_proc.body
+        if not isinstance(s, (ec_ast.VarDecl, ec_ast.If, ec_ast.Return))
+    ]
+    seed_fields = [f.name for f in left_state0.fields]
+    if not seed_fields:
+        return None
+    wrapper_args = _top_level_args(left_wrapper_expr)
+    if not wrapper_args:
+        return None
+    wrapper_expr = wrapper_args[0]
+    # Seq invariant = the lemma post minus ``={res}``: the ``={glob M}`` equalities
+    # (one per abstract flat param -- preserved because the dead calls are
+    # glob-preserving ``_det``) plus the inter-reduction live-state coupling
+    # (seeds/keys -- untouched on {1}, empty on {2}). Both are already in the
+    # lemma pre, so the peel's ``skip => /#`` re-derives them.
+    inv_parts: list[str] = []
+    if flat_params:
+        inv_parts.append("={" + ", ".join(f"glob {p.name}" for p in flat_params) + "}")
+    if full_coupling:
+        inv_parts.append(full_coupling)
+    inv = " /\\ ".join(inv_parts) if inv_parts else "true"
+    spec = bch.Hop4Spec(
+        val_lemma_name="",
+        game_glob_mods=[],
+        game_key_refs=[],
+        ct_params=[p.name for p in red_proc.params],
+        sync_mods=[],
+        red_base=_ref_base(left_wrapper_expr),
+        red_glob_mods=_callee_mods(prefix, clone_alias),
+        red_component_fields=[],
+        clone_alias=clone_alias,
+        decomp_coupling=[],
+        red_proc=red_proc,
+        guard_annot=_annot_eq_guard(red_if.guard, "{1}"),
+        seed_fields=seed_fields,
+    )
+    body = bch.challenge_tactic_hop8_barefalse(spec, wrapper_expr, inv)
+    if body is None:
+        return None
+    return ([_res_tag(SYNTH_PARAM), *body[1:]], "")
+
+
 def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -5970,6 +6217,7 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     flat_params: list[ec_ast.ModuleParam],
     clone_alias: dict[str, str],
+    full_coupling: str | None = None,
 ) -> tuple[list[str], str] | None:
     """Derive the hop_4 (false/false) challenge tactic.
 
@@ -6024,6 +6272,23 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
     scheme_params = _top_level_args(scheme_expr)
     # game-side glob order = the scheme decaps' component modules (first
     # appearance in the inlined game body) = the val-lemma glob-binder order.
+    # Bare-false game: the RIGHT (game) side has been pruned to a single
+    # ``return false`` (its dead decaps calls absorbed by ``Absorb Redundant
+    # Early Return``), so there is nothing to functionalize on the game side and
+    # no ``={glob}`` coupling.  The LEFT is a case-split reduction whose every
+    # branch returns ``false``; peel its dead prefix ONE-SIDED and collapse the
+    # trivial ``if``.
+    if _is_bare_false_return(game_proc.body):
+        return _challenge_barefalse_route(
+            left_state0,
+            red_proc,
+            red_if,
+            left_wrapper_expr,
+            clone_alias,
+            flat_params,
+            full_coupling,
+        )
+
     game_glob_mods = _callee_mods(game_proc.body, clone_alias)
     if not game_glob_mods:
         return None
@@ -6201,7 +6466,21 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
     # LEFT then-branch = the inlined PQ binding challenger (2 pq.decaps);
     # its else + the RIGHT else recompute the game predicate (H.evaluate).
     l_then_calls = [s for s in lif.then_body if isinstance(s, ec_ast.Call)]
-    if not l_then_calls or not all(c.callee.endswith(".decaps") for c in l_then_calls):
+    if not l_then_calls:
+        return None
+    # Seedbased wrapper: the challenger's ``decaps`` is a ``SeededKEMWrapper``
+    # (``derivekeypair; inner-decaps``), so the then-branch holds
+    # ``derivekeypair``+``decaps`` pairs rather than bare ``decaps``.  The
+    # both-case-split route's COMPONENT-field model is incompatible with the
+    # wrapper's seed-derived keys: ``_kdf_groups`` merges the two ciphertexts'
+    # groups (the ``derivekeypair`` calls break the boundaries) and
+    # ``_group_fields`` cannot read a decaps key that is ``derivekeypair(seed).2``
+    # rather than a reduction field.  Closing hop_6 (seedbased) needs the
+    # seed-based field model (like hop_4/hop_8) threaded through this route --
+    # deferred (plan cont-87); decline (admit) here.
+    if any(c.callee.endswith(".derivekeypair") for c in l_then_calls):
+        return None
+    if not all(c.callee.endswith(".decaps") for c in l_then_calls):
         return None
     pq_module = l_then_calls[0].callee.split(".", 1)[0]
 

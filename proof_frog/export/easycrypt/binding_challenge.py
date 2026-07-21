@@ -456,6 +456,23 @@ class ChallengeHopSpec:
     challenger_ek_fields: list[str] = field(
         default_factory=list
     )  # challenger's encaps-key field names ["ek0", "ek1"]
+    # -- WRAPPER-shape extras (seedbased: game decaps is a SeededKEMWrapper =
+    # ``derivekeypair; inner-decaps``, so the game side is functionalized IN PLACE
+    # via a side-1 peel instead of the atomic ``<Scheme>_decaps_val`` phoare, whose
+    # single ``res = <boolean>`` post inlines the concat to a megabyte term). All
+    # empty/None for the bare-decaps (expanded) shape -> byte-identical.
+    game_proc: ec_ast.Proc | None = None  # game challenge proc, for the in-place peel
+    wrapper_expr: str = (
+        ""  # scheme wrapper module expr, e.g. SeededKEMWrapper(KEM_PQ_inner)
+    )
+    game_base: str = ""  # game reduction base, e.g. R_KG_L
+    game_fields: list[str] = field(
+        default_factory=list
+    )  # game field bare names, exists* order
+    inner_pq_module: str = ""  # inner KEM module (challenger's wrapper decaps callee)
+    extra_field_couplings: list[str] = field(default_factory=list)  # e.g. s_T_0/seed_0
+    base_type: str = ""  # innermost/encss bitstring type, for the aux lemma
+    kdf_col_lemma: str = "kdf_col_ss"  # aux lemma name (concat_eq => decaps_eq)
 
 
 def _game_glob_elim(mods: list[str]) -> list[str]:
@@ -588,6 +605,306 @@ def challenge_tactic(spec: ChallengeHopSpec) -> list[str] | None:
     return lines
 
 
+def slice_inj_lemmas(shape: ConcatShape, base_type: str, inj_axiom: str) -> list[str]:
+    """Emit the ``slice4_first`` + ``kdf_col_ss`` aux lemmas for the wrapper
+    collision branch (section-level, before the hop lemma).
+
+    ``slice4_first`` peels the N concat layers (``slice_concat_left_*``) to the
+    innermost equality; ``kdf_col_ss`` wraps it with ``encodesharedsecret``
+    injectivity, giving the clean forward implication ``<full concat over
+    encss x_i> equal ==> x0 = x1`` that closes the ``progress``-unfolded game
+    forall-nest leaf. Component types are recovered by parsing the concat-op
+    chain: each layer's ``concat_<left>_<right>_to_<result>`` has ``left`` = the
+    inner layer's ``result`` (innermost = ``base_type``), so ``right`` = the
+    layer's own component type.
+    """
+    ops_inner = list(reversed(shape.concat_ops))  # inner-first
+    sl_outer = shape.slice_axioms()  # outer-first
+    comps: list[str] = []
+    left = base_type
+    for op in ops_inner:
+        lr, _, result = op[len("concat_") :].rpartition("_to_")
+        comps.append(lr[len(left) + 1 :])
+        left = result
+    n = len(ops_inner)
+    cn = [f"a{i}" for i in range(n)]
+
+    def nest(head: str, sfx: str) -> str:
+        term = head
+        for op, comp in zip(ops_inner, cn):
+            term = f"{op} {_paren(term)} {comp}{sfx}"
+        return term
+
+    def partial(depth: int, sfx: str) -> str:
+        term = f"e{sfx}"
+        for j in range(depth):
+            term = f"{ops_inner[j]} {_paren(term)} {cn[j]}{sfx}"
+        return term
+
+    qty = [f"(e0 e1 : {base_type})"] + [
+        f"({cn[i]}0 {cn[i]}1 : {comps[i]})" for i in range(n)
+    ]
+    lines = [
+        f"  lemma slice4_first {' '.join(qty)} :",
+        f"    {nest('e0', '0')} =",
+        f"    {nest('e1', '1')} =>",
+        "    e0 = e1.",
+        "  proof.",
+        "    move => H.",
+    ]
+    prev = "H"
+    for k in range(n - 1):
+        depth = n - 1 - k
+        comp = cn[n - 1 - k]
+        t0, t1 = partial(depth, "0"), partial(depth, "1")
+        hyp = f"H{depth}"
+        lines.append(f"    have {hyp} : {t0} = {t1}")
+        lines.append(
+            f"      by rewrite -({sl_outer[k]} {_paren(t0)} {comp}0)"
+            f" -({sl_outer[k]} {_paren(t1)} {comp}1) {prev}."
+        )
+        prev = hyp
+    lines.append(
+        f"    by rewrite -({sl_outer[n - 1]} e0 {cn[0]}0)"
+        f" -({sl_outer[n - 1]} e1 {cn[0]}1) {prev}."
+    )
+    lines.append("  qed.")
+    qty2 = [f"(x0 x1 : {base_type})"] + [
+        f"({cn[i]}0 {cn[i]}1 : {comps[i]})" for i in range(n)
+    ]
+    unders = " ".join("_" for _ in range(2 * (n + 1)))
+    lines += [
+        f"  lemma kdf_col_ss {' '.join(qty2)} :",
+        f"    {nest(f'({shape.ev_encss_pq} x0)', '0')} =",
+        f"    {nest(f'({shape.ev_encss_pq} x1)', '1')} =>",
+        "    x0 = x1.",
+        f"  proof. move => H. apply ({inj_axiom} _ _ (slice4_first {unders} H)). qed.",
+    ]
+    return lines
+
+
+def _wp_before_calls(lines: list[str]) -> list[str]:
+    """Insert a ``wp.`` before every ``call`` line. The in-place game peel needs
+    a leading ``wp`` to absorb the game's trailing return expression (the KDF
+    boolean) before its ``H.evaluate`` calls; the extra ``wp``s before later calls
+    are no-ops. Matches the validated harness peel exactly."""
+    out: list[str] = []
+    for ln in lines:
+        if ln.startswith("call"):
+            out.append("wp.")
+        out.append(ln)
+    return out
+
+
+def _env_over(
+    body: Sequence[ec_ast.EcStmt], base: dict[str, str], clone_alias: dict[str, str]
+) -> dict[str, str]:
+    """Functional env over a raw statement list (like :func:`_build_env` but not
+    tied to a :class:`ec_ast.Proc`): ``x <- e`` substitutes; ``x <@ M.m(a..)``
+    becomes ``x = (<clone>.ev_m <a..>)``. ``VarDecl``/``Return`` pass through."""
+    env = dict(base)
+    for stmt in body:
+        if isinstance(stmt, ec_ast.Assign):
+            env[stmt.var] = _subst(stmt.rhs, env)
+        elif isinstance(stmt, ec_ast.Call):
+            module, _, method = stmt.callee.partition(".")
+            args = [_subst(a, env) for a in _split_top_args(stmt.args)]
+            ev = f"{clone_alias[module]}.ev_{method}"
+            applied = "".join(f" {_paren(a)}" for a in args)
+            env[stmt.var] = f"({ev}{applied})"
+    return env
+
+
+def challenge_tactic_wrapper(spec: ChallengeHopSpec) -> list[str] | None:
+    """Wrapper (seedbased) variant of :func:`challenge_tactic`.
+
+    The game's ``decaps`` is a ``SeededKEMWrapper`` (``derivekeypair;
+    inner-decaps``), so the atomic ``<Scheme>_decaps_val`` phoare -- whose single
+    ``res = <boolean>`` post inlines the KDF concat to a megabyte term -- does not
+    apply. Instead functionalize the game side IN PLACE with a side-1 ``_peel_stmts``
+    (order-independent: the two sides compute the KDF in different orders, so
+    ``sim`` cannot couple them). The collision branch's game ``forall``-nest is
+    unfolded by ``progress`` to a clean leaf, closed by the ``kdf_col_ss`` aux
+    lemma applied to the (progress-named) collision hyp ``H``.
+    """
+    assert spec.game_proc is not None
+    split = _prefix_and_if(spec.red_proc.body)
+    if split is None:
+        return None
+    prefix_raw, _red_if = split
+    prefix = [s for s in prefix_raw if not isinstance(s, ec_ast.VarDecl)]
+    gmods = spec.game_glob_mods
+    gge = _game_glob_elim(gmods)
+    ct0, ct1 = spec.ct_params
+    gfe = [f"D{i}" for i in range(len(spec.game_fields))]
+
+    # -- game side: in-place peel (inline wrapper, functionalize side 1) --------
+    game_ex = (
+        [f"(glob {m})" "{1}" for m in gmods]
+        + [f"{spec.game_base}.{f}" "{1}" for f in spec.game_fields]
+        + [f"{c}" "{1}" for c in spec.ct_params]
+    )
+    grename = dict(zip(spec.game_fields, gfe))
+    grename[ct0] = "C0"
+    grename[ct1] = "C1"
+    genv = _env_over(spec.game_proc.body, grename, spec.clone_alias)
+    gbody = [
+        s
+        for s in spec.game_proc.body
+        if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+    ]
+    lines = [
+        "proof.",
+        "  proc.",
+        f"  inline{{1}} {spec.wrapper_expr}.decaps {spec.wrapper_expr}.encodesharedsecret.",
+        f"  exists* {', '.join(game_ex)};",
+        f"  elim* => {' '.join(gge + gfe + ['C0', 'C1'])}.",
+        *[
+            f"  {ln}"
+            for ln in _wp_before_calls(
+                _peel_stmts(gbody, genv, dict(zip(gmods, gge)), "{1}")
+            )
+        ],
+    ]
+
+    # -- invariant (bare INV + extra field couplings + game-field couplings) ----
+    inv_env = _red_env(spec, rename="inv")
+    inv_kdf = [
+        "kdf_in_0" "{2}" f" = {inv_env['kdf_in_0']}",
+        "kdf_in_1" "{2}" f" = {inv_env['kdf_in_1']}",
+    ]
+    glob_eqs = (
+        [f"(glob {m})" "{1}" f" = {gge[i]}" for i, m in enumerate(gmods)]
+        + [f"(glob {m})" "{2}" f" = {gge[i]}" for i, m in enumerate(gmods)]
+        + [
+            f"(glob {m})" "{1}" " = " f"(glob {m})" "{2}"
+            for m in spec.extra_glob_sync_mods
+        ]
+    )
+    field_ct_eqs = (
+        [f"D{i} = {spec.game_base}.{f}" "{1}" for i, f in enumerate(spec.game_fields)]
+        + [f"C{i} = {c}" "{1}" for i, c in enumerate(spec.ct_params)]
+        + [f"{c}" "{1}" f" = {c}" "{2}" for c in spec.ct_params]
+    )
+    # The reduction's leading ct-component assigns (``ct_PQ_0 <- ct0.`1`` ..) as
+    # side-2 couplings: needed so the collision branch's ``rcondt`` (whose EC guard
+    # is over the ``ct_PQ_*`` locals) discharges from the ``case`` condition.
+    ct_annot = {ct0: f"{ct0}" "{2}", ct1: f"{ct1}" "{2}"}
+    ct_couplings: list[str] = []
+    for s in prefix:  # leading contiguous ct-projection assigns only
+        if not isinstance(s, ec_ast.Assign):
+            break
+        ct_couplings.append(f"{s.var}" "{2}" f" = {_subst(s.rhs, ct_annot)}")
+    inv = " /\\ ".join(
+        glob_eqs
+        + spec.decomp_coupling
+        + spec.challenger_coupling
+        + spec.extra_field_couplings
+        + field_ct_eqs
+        + ct_couplings
+        + inv_kdf
+    )
+    n_wrap = sum(
+        1
+        for s in prefix
+        if isinstance(s, ec_ast.Call)
+        and s.callee == f"{spec.inner_pq_module}.derivekeypair"
+    )
+    lines.append(f"  seq 0 {len(prefix) - 3 * n_wrap} : ({inv}).")
+
+    # -- reduction prefix peel (inline wrapper on side 2, then functionalize) ---
+    rge = [f"g{i}2" for i in range(len(spec.red_glob_mods))]
+    flat_fields = [f for grp in spec.red_component_fields for f in grp]
+    rfe = [f"rf{i}" for i in range(len(flat_fields))]
+    red_ex = (
+        [f"(glob {m})" "{2}" for m in spec.red_glob_mods]
+        + [f"{spec.red_base}.{f}" "{2}" for f in flat_fields]
+        + [f"{c}" "{2}" for c in spec.ct_params]
+    )
+    blk_env = _red_env(spec, rename="blk", field_elim=rfe)
+    glob_of_blk = dict(zip(spec.red_glob_mods, rge))
+    lines += [
+        f"  + inline{{2}} {spec.wrapper_expr}.decaps {spec.wrapper_expr}.encodesharedsecret. sp.",
+        f"    exists* {', '.join(red_ex)};",
+        f"    elim* => {' '.join(rge + rfe + ['c0', 'c1'])}.",
+        *[
+            f"    {ln}"
+            for ln in _wp_before_calls(
+                _peel_stmts(_drop_leading_assigns(prefix), blk_env, glob_of_blk, "{2}")
+            )
+        ],
+        "    skip => />.",
+    ]
+
+    # -- case split + branches -------------------------------------------------
+    # Match the EC guard's own locals (``ct_PQ_0`` .. not ``ct0.`1``): annotate the
+    # reduction ``if`` guard with ``{2}`` so ``rcondt``'s ``by auto`` discharges.
+    guard = re.sub(r"\b([a-zA-Z_]\w*)\b", r"\1{2}", str(_red_if.guard)).replace(
+        "&&", "/\\"
+    )
+    lines.append(f"  case ({guard}).")
+    lines += _if_branch_wrapper(spec)
+    lines += _else_branch(spec)
+    lines.append("  qed.")
+    return lines
+
+
+def _if_branch_wrapper(spec: ChallengeHopSpec) -> list[str]:
+    """Collision branch (wrapper): inline the challenger's ``SeededKEMWrapper``
+    decaps, functionalize it, then ``progress`` unfolds the game ``forall``-nest
+    to a clean leaf ``(H(c0)=H(c1) && c0<>c1) = (decaps(c0)=decaps(c1))`` (all in
+    the challenger's ``bd0``/``c0``/``c1`` vars -- progress substitutes the game's
+    key via the couplings). The ``kdf_col_ss`` aux lemma applied to the collision
+    hyp ``H`` gives the decaps equality; ``smt`` finishes."""
+    inner = spec.inner_pq_module
+    ct0, ct1 = spec.ct_params
+    red_if = next(s for s in spec.red_proc.body if isinstance(s, ec_ast.If))
+    then_body = [s for s in red_if.then_body if not isinstance(s, ec_ast.VarDecl)]
+    dkp_calls = [
+        s
+        for s in then_body
+        if isinstance(s, ec_ast.Call) and s.callee == f"{inner}.derivekeypair"
+    ]
+    dec_calls = [
+        s
+        for s in then_body
+        if isinstance(s, ec_ast.Call) and s.callee == f"{inner}.decaps"
+    ]
+    dk_field = _split_top_args(dkp_calls[0].args)[0]  # challenger key local
+    tenv_base = {dk_field: "bd0"}
+    for i, dc in enumerate(dec_calls):
+        tenv_base[_split_top_args(dc.args)[1]] = f"c{i}.`1"  # ct_PQ_i -> c_i.`1
+    tpeel = _wp_before_calls(
+        _peel_stmts(
+            then_body,
+            _env_over(then_body, tenv_base, spec.clone_alias),
+            {inner: "gp3"},
+            "{2}",
+        )
+    )
+    chal_keys = "".join(
+        f", {spec.challenger_ref}.{ck}" "{2}" for ck in spec.challenger_key_fields
+    )
+    bd = " ".join(f"bd{i}" for i in range(len(spec.challenger_key_fields)))
+    n_under = " ".join("_" for _ in range(2 * (len(spec.shape.concat_ops) + 1)))
+    return [
+        "  + rcondt{2} 1; first by auto.",
+        "    inline{2} 1.",
+        f"    inline{{2}} {spec.wrapper_expr}.decaps.",
+        "    sp.",
+        f"    exists* (glob {inner})"
+        "{2}"
+        f"{chal_keys}, {ct0}"
+        "{2}"
+        f", {ct1}"
+        "{2}"
+        f"; elim* => gp3 {bd} c0 c1.",
+        *[f"    {ln}" for ln in tpeel],
+        f"    skip => />. progress; (try (have Hd := {spec.kdf_col_lemma} {n_under} H;"
+        " smt()); smt()).",
+    ]
+
+
 def _field_elim_names(groups: list[list[str]]) -> list[str]:
     """Per-index reduction-field elim names: ``[[..0], [..1]]`` -> ``[dp0, dt0,
     ek0, dp1, dt1, ek1]``."""
@@ -597,13 +914,15 @@ def _field_elim_names(groups: list[list[str]]) -> list[str]:
     return out
 
 
-def _drop_leading_assigns(stmts: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt]:
+def _drop_leading_assigns(
+    stmts: Sequence[ec_ast.EcStmt],
+) -> list[ec_ast.EcStmt]:
     """Drop the leading assignment run (the ciphertext projections ``sp`` peels
     before the reduction-prefix functionalization)."""
     i = 0
     while i < len(stmts) and isinstance(stmts[i], ec_ast.Assign):
         i += 1
-    return stmts[i:]
+    return list(stmts[i:])
 
 
 def _red_env(
@@ -948,6 +1267,72 @@ def challenge_tactic_hop4(spec: Hop4Spec) -> list[str] | None:
         "  inline{1} 1.",
         "  wp.",
         else_skip,
+        "  qed.",
+    ]
+    return lines
+
+
+def challenge_tactic_hop8_barefalse(
+    spec: Hop4Spec, wrapper_expr: str, inv: str
+) -> list[str] | None:
+    """Emit the ``hop_<i>_challenge`` tactic for the false/BARE-false shape.
+
+    LEFT (side ``{1}``) is the single-R case-split reduction whose every branch
+    returns ``false``; RIGHT (side ``{2}``) has been pruned to a bare ``return
+    false`` (its dead decaps absorbed).  Unlike :func:`challenge_tactic_hop4`
+    there is nothing to functionalize on the game side and no ``={glob}``
+    coupling.  As in :func:`challenge_tactic_wrapper` the reduction's ``decaps``
+    is a ``SeededKEMWrapper`` (``derivekeypair; inner-decaps``), so ``inline{1}``
+    the wrapper first (the real proc holds ONE wrapper call; the peel is built
+    from the engine-inlined flat state) and size the ``seq`` split by the
+    EC-inlined instruction count ``len(prefix) - 3 * n_wrap``.  Split the LEFT's
+    dead deterministic prefix off with ``seq <n> 0 : (true)``, peel it ONE-SIDED
+    (freezing the reduction's OWN globs via ``exists* (glob M){1}``), then
+    collapse the trivial ``if`` (both branches ``false``) so both sides return
+    ``false``."""
+    if len(spec.ct_params) != 2 or not spec.seed_fields:
+        return None
+    split = _prefix_and_if(spec.red_proc.body)
+    if split is None:
+        return None
+    prefix_raw, _if = split
+    prefix = [s for s in prefix_raw if not isinstance(s, ec_ast.VarDecl)]
+    n_wrap = sum(
+        1
+        for s in prefix
+        if isinstance(s, ec_ast.Call) and s.callee.endswith(".derivekeypair")
+    )
+    seq_n = len(prefix) - 3 * n_wrap
+
+    field_elim = [f"S{j}" for j in range(len(spec.seed_fields))]
+    red_ex = [f"{spec.red_base}.{sf}" "{1}" for sf in spec.seed_fields]
+    gmods = spec.red_glob_mods
+    gge = [f"g{j}" for j in range(len(gmods))]
+    glob_ex = [f"(glob {m})" "{1}" for m in gmods]
+    glob_of = {m: gge[i] for i, m in enumerate(gmods)}
+    ct_ex = [f"{c}" "{1}" for c in spec.ct_params]
+
+    blk_env = _blk_env_hop4(spec, field_elim)
+    peel = _wp_before_calls(
+        _peel_stmts(_drop_leading_assigns(prefix), blk_env, glob_of, "{1}")
+    )
+
+    lines = [
+        "proof.",
+        "  proc.",
+        f"  seq {seq_n} 0 : ({inv}).",
+        f"  + inline{{1}} {wrapper_expr}.decaps {wrapper_expr}.encodesharedsecret. sp.",
+        f"    exists* {', '.join(glob_ex + ct_ex + red_ex)};",
+        f"    elim* => {' '.join(gge + ['C0', 'C1'] + field_elim)}.",
+        *[f"    {ln}" for ln in peel],
+        "    skip => /#.",
+        f"  case ({spec.guard_annot}).",
+        "  + rcondt{1} 1; first by auto.",
+        "    wp. skip => /#.",
+        "  rcondf{1} 1; first by (auto; smt()).",
+        "  inline{1} 1.",
+        "  wp.",
+        "  skip => /#.",
         "  qed.",
     ]
     return lines

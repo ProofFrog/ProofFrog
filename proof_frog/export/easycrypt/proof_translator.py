@@ -736,6 +736,8 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     multi_oracle: MultiOraclePrSpec | None = None,
     adv_state_restrictions: list[str] | None = None,
     consume_pk_bridge: bool = False,
+    left_ro_sim_ok: bool = False,
+    right_ro_sim_ok: bool = False,
     consume_pk_peel_count: int = 0,
     consume_pk_peel_events: list[str] | None = None,
     consume_pk_reduction_glob: str | None = None,
@@ -853,6 +855,13 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                 )
             else:
                 peel = " ".join(["wp; call (_: true);"] * consume_pk_peel_count)
+            # ROM: the shared RO ``RO_G_RO.h`` is sampled up front on the theorem
+            # side but inside ``R_Adv.distinguish`` on the assumption side. Hoist it
+            # to the front on {2} (``inline{2} 2; swap{2} ^ <${1} @ 0``) so both sides
+            # match; after peeling the reduction's repack calls the residual is a
+            # block of INDEPENDENT front samples (the RO plus the CONCRETE assumption
+            # challenger's inlined ``initialize`` samples -- count varies per
+            # challenger), which ``sim`` couples trivially -- no fixed rnd count.
             branches = ["proc; sim"] * n_oracles + [f"{peel} skip => /#"]
             selector = " | ".join(branches)
             return (
@@ -861,25 +870,52 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
             )
 
         if ro_bridge_admit:
-            # ROM: the theorem game samples the shared RO up front (in main) while
-            # the assumption-game composition samples it inside the reduction
-            # adversary's `distinguish` (AFTER the assumption game's own Initialize
-            # scalars). The RO sample therefore sits at DIFFERENT positions on the
-            # two byequiv sides -- a permutation the manual consume-pk peel cannot
-            # align (it hits SAMPLE vs CALL at the same tail-to-front step) and
-            # `sim` cannot bridge (it can't infer the repack equalities). Honest
-            # gate (MAP principle 2): emit a tagged admit rather than a tactic that
-            # hard-fails. Proper fix (documented in the CFRG binding plan): a
-            # per-side `swap{2}` hoisting the RO sample to the front + a full
-            # sample/call event peel. Non-ROM assumption hops keep the working
-            # peel / sim below (byte-identical).
+            # ROM: the theorem game (``Game_step_N.main``) samples the shared RO
+            # ``RO_G_RO.h`` up front, while the assumption-game composition samples
+            # it inside the reduction adversary's ``distinguish`` (AFTER the
+            # assumption game's own ``initialize`` scalars) -- so the RO sample sits
+            # at DIFFERENT positions on the two byequiv sides.  Alignment (VALIDATED,
+            # cont-88): ``proc; inline{2} 2; swap{2} ^ <${1} @ 0`` hoists the RO sample
+            # to the front (every reduction adversary opens ``distinguish`` with
+            # ``RO_G_RO.h <$ dfun``, so after inlining only ``distinguish`` it is the
+            # block's 1st sample; the swap is data-independent).  BUT ``inline *; sim``
+            # does NOT close: ``sim`` cannot infer the repack equalities between the
+            # theorem side's ``R.initialize`` and the assumption side's
+            # ``initialize + adv-distinguish`` factoring -- it needs a consume-pk-style
+            # call/sample peel, AND the ``_pr`` hops split into >=2 shapes (LazyRO
+            # REPACK adversary vs KeyGenEquiv RE-INIT-FORWARD adversary -- the latter
+            # even breaks the ``inline{2} 2`` position).  Honest gate: admit pending
+            # that per-shape peel (plan cont-88).
+            # cont-89: the RO-align (``inline{2} 2; swap{2} ^ <${1} @ 0``) is
+            # validated, and for the REPACK shape (consume_pk_bridge) the residual is
+            # the consume-pk bridge -- BUT the assumption challenger is CONCRETE, so
+            # ``inline *`` unfolds its ``hash``/``initialize``: the per-call peel's
+            # ``call (_: true)`` then hits the inlined ``hash`` body ("invalid last
+            # instruction"), and a plain ``sim`` "cannot infer the set of equalities"
+            # (the cross-named repack plumbing). A working close needs a peel that
+            # ``call``s only the reduction's OWN abstract calls (KEM_PQ_inner/NG) and
+            # ``sim``s the inlined-challenger + front samples. Deferred (plan cont-89).
             admit = (
                 "  by admit."
                 "  (* ROM: shared-RO sample position mismatch; peel/sim cannot"
                 " align -- see CFRG binding plan *)"
             )
-            bridge_close_l = admit
-            bridge_close_r = admit
+            # cont-94: for the REPACK shape (consume_pk_bridge) the RO-align + sim
+            # CLOSES a NON-reprogramming side (Honest / a binding challenger --
+            # validated cont-91); a REPROGRAMMING side (the Lazy ``CGLazyRO*`` game)
+            # has the materialized-vs-fresh RO asymmetry -> the dead-sample drop
+            # (derived + tripwire-validated cont-93, port deferred). The
+            # sim-closeable side flips by hop, so choose PER SIDE.
+            ro_sim = (
+                f"  by byequiv (_: {multi_oracle.byequiv_pre} ==> ={{res}}) => //;"
+                " proc; inline{2} 2; swap{2} ^ <${1} @ 0; inline *; sim."
+            )
+            if consume_pk_bridge:
+                bridge_close_l = ro_sim if left_ro_sim_ok else admit
+                bridge_close_r = ro_sim if right_ro_sim_ok else admit
+            else:
+                bridge_close_l = admit
+                bridge_close_r = admit
         elif consume_pk_bridge:
             bridge_close_l = _consume_pk_bridge_close(consume_pk_left_challenger_glob)
             bridge_close_r = _consume_pk_bridge_close(consume_pk_right_challenger_glob)

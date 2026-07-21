@@ -2801,6 +2801,9 @@ def export_proof_file(proof_path: str) -> str:
     # synthesizes each from the scheme's translated ``decaps`` proc. Empty for
     # proofs with no such tactic, so they are untouched.
     decaps_val_requests: set[str] = set()
+    # Section-level aux lemma text (``slice4_first`` + ``kdf_col_ss``) the seedbased
+    # wrapper binding-challenge route emits; spliced in ahead of the hop lemmas.
+    aux_lemma_lines: list[str] = []
     # Per-hop precondition/postcondition overrides emitted by the chain
     # when its artifacts use strengthened specs (``={glob E1, ...}``) in
     # multi-module proofs. The outer ``hop_<i>`` lemma must use the same
@@ -3895,6 +3898,54 @@ def export_proof_file(proof_path: str) -> str:
             None,
         )
 
+    def _wrapper_challenger_coupling(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> str:
+        """Within-side ``red.<seed>{s} = <challenger>.<dk>{s}`` couplings for a
+        reduction whose ``Initialize`` repacks a challenger ``Initialize`` result
+        into a DIFFERENTLY-NAMED own field (the seedbased binding reduction:
+        ``[ek, s_PQ_0] = challenger.Initialize()`` -> ``s_PQ_0`` IS the
+        challenger's ``dk0``). The composite-seam path (``_live_state_coupling_base``)
+        couples these by field NAME, so it MISSES the rename; the seedbased wrapper
+        challenge tactic needs the equality in the byequiv pre to unify the game's
+        decaps key with the inlined challenger's. Emitted only for the name-mismatch
+        case (empty otherwise -> byte-identical; same-name is handled by composite).
+        """
+        conj: list[str] = []
+        for step, side in ((step_a, "1"), (step_b, "2")):
+            if step.reduction is None:
+                continue
+            red = _get_reduction(step.reduction.name)
+            # pylint: disable=protected-access
+            chal_ast = engine._get_game_ast(step.challenger, None)
+            # pylint: enable=protected-access
+            if red is None or chal_ast is None:
+                continue
+            # SEEDBASED signal: a ``Function<>`` (seed-derivation RO) parameter.
+            # The seedbased binding reduction derives its PQ decaps key from the
+            # repacked SEED (via ``derivekeypair``), so its collision branch needs
+            # ``seed = challenger.dk0`` to unify with the inlined challenger. The
+            # atomic (expanded) reduction lacks the Function param and decapsulates
+            # with the challenger's key DIRECTLY, so it needs no coupling -> skip
+            # (keeps every non-seedbased proof byte-identical).
+            if not any(
+                isinstance(p.type, frog_ast.FunctionType) for p in red.parameters
+            ):
+                continue
+            src = _challenger_source_map(red, chal_ast)
+            module_expr = resolver.resolve(step).module_expr
+            red_base = pt.module_base_name(module_expr)
+            chal_base = pt.module_base_name(pt.last_module_arg(module_expr))
+            for red_fld, chal_fld in src.items():
+                if red_fld == chal_fld:
+                    continue  # same name: the composite name-match path handles it
+                # pylint: disable=protected-access
+                rf = mt._ec_field_name(red_fld)
+                cf = mt._ec_field_name(chal_fld)
+                # pylint: enable=protected-access
+                conj.append(f"{red_base}.{rf}{{{side}}} = {chal_base}.{cf}{{{side}}}")
+        return " /\\ ".join(conj)
+
     def _decomposition_coupling(
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> str | None:
@@ -4605,6 +4656,13 @@ def export_proof_file(proof_path: str) -> str:
                     f"={{glob {m}}} /\\ ", ""
                 )
         coupled = f"{base} /\\ {extra}" if extra else base
+        # Seedbased binding wrapper: couple the reduction's seed field to the
+        # inlined challenger's decaps key when the reduction's Initialize repacks
+        # it under a different name (``s_PQ_0`` = challenger's ``dk0``). The
+        # composite seam couples by name and misses the rename. Empty off-shape.
+        wchal = _wrapper_challenger_coupling(step_a, step_b)
+        if wchal:
+            coupled = f"{coupled} /\\ {wchal}"
         # Reprogramming-Lazy hop: carry the cross-side reprogramming-field
         # correspondences so the per-oracle ``HashG`` equiv's guard/then-branch is
         # provable (the init couples the reductions' stored fields but not the
@@ -4742,6 +4800,8 @@ def export_proof_file(proof_path: str) -> str:
             pres_method_requests.update(info.pres_methods)
             inj_method_requests.update(info.inj_methods)
             decaps_val_requests.update(info.decaps_val_schemes)
+            if info.aux_lemmas and not aux_lemma_lines:
+                aux_lemma_lines.extend(info.aux_lemmas)
             multi_oracle_hop_cache[_i] = info.tactic_body_by_oracle
             multi_oracle_game_keys[_i] = (
                 canonical_form.canonical_text(
@@ -5063,6 +5123,28 @@ def export_proof_file(proof_path: str) -> str:
                 (assumption_game_file_name, right_side)
             ]
             reverse_direction = left_side == gf_a.games[1].name
+            # ROM bridge: the RO-align + sim close is VALIDATED (cont-91) only for the
+            # ``Honest`` side of a lazy-RO assumption (``CGLazyRO*Seeded``) -- the side
+            # whose SIBLING game REPROGRAMS the RO but which itself does not. The Lazy
+            # (reprogramming) side has the materialized-vs-fresh RO asymmetry (dead-drop,
+            # deferred). A non-lazy-RO assumption (a binding/KeyGenEquiv challenger) does
+            # NOT close with plain sim (its repack is richer), so gate on the file having
+            # a reprogramming sibling. The sim-closeable side flips by hop.
+            _gf_a_has_reprogram = any(
+                _reprogramming_lazy_ro_field(g) is not None for g in gf_a.games
+            )
+            left_ro_sim_ok = _gf_a_has_reprogram and (
+                _reprogramming_lazy_ro_field(
+                    next(g for g in gf_a.games if g.name == left_side)
+                )
+                is None
+            )
+            right_ro_sim_ok = _gf_a_has_reprogram and (
+                _reprogramming_lazy_ro_field(
+                    next(g for g in gf_a.games if g.name == right_side)
+                )
+                is None
+            )
             # Consume-pk bridge: when the reduction's Initialize forwards+repacks
             # the challenger's Initialize (holding the leaked decaps keys in its
             # own fields), ``R_Adv.distinguish`` consumes the leaked ``pk``
@@ -5137,6 +5219,8 @@ def export_proof_file(proof_path: str) -> str:
                     # can align -- emit an honest tagged admit. Non-ROM proofs
                     # (no RO holder) keep the working bridge byte-identical.
                     ro_bridge_admit=bool(ro_holder_modules),
+                    left_ro_sim_ok=left_ro_sim_ok,
+                    right_ro_sim_ok=right_ro_sim_ok,
                 )
             )
         else:
@@ -5740,6 +5824,14 @@ def export_proof_file(proof_path: str) -> str:
                     _section_header("Functional-value spec (decaps)"),
                     "\n".join(_vl[0]),
                 ]
+    # ``slice4_first`` + ``kdf_col_ss`` aux lemmas for the seedbased WRAPPER
+    # binding-challenge collision branch (peel the KDF concat + apply encoding
+    # injectivity). They depend on the slice/inj axioms emitted above.
+    if aux_lemma_lines:
+        det_axiom_decls += [
+            _section_header("Binding-collision slice/injectivity aux lemmas"),
+            "\n".join(aux_lemma_lines),
+        ]
     if stateless_axioms:
         det_axiom_decls += [
             _section_header("Statelessness specs"),

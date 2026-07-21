@@ -729,6 +729,16 @@ class TypeCollector:
         self.register_slice(result_name, right_name)
         return _concat_op_name(left_name, right_name, result_name)
 
+    def concat_components(self, op_name: str) -> tuple[str, str, str] | None:
+        """Return the ``(left, right, result)`` type names of a registered
+        concat op, matched by its emitted op name (``concat_<l>_<r>_to_<res>``);
+        ``None`` if unregistered. Used by the binding-challenge wrapper route to
+        recover the innermost concat's ``left`` = the encss/decaps base type."""
+        for left, right, result in self._concat_ops:
+            if _concat_op_name(left, right, result) == op_name:
+                return (left, right, result)
+        return None
+
     def register_concat3(
         self, left_name: str, right_name: str, gap_name: str, result_name: str
     ) -> str:

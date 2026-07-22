@@ -2488,13 +2488,22 @@ def _synth_straightline_challenge(  # pylint: disable=too-many-arguments,too-man
         return None
     if any(isinstance(s, ec_ast.If) for s in _exec_stmts(r_body)):
         return None
-    # NB: canonicalization renames the two reductions' differing field reads to
-    # the SAME positional ``fieldN``, so the flat bodies are typically EQUAL here
-    # even though the RAW wrappers the lemma relates differ (``sim`` fails, the
-    # micro chain admits). So we do NOT skip on ``l_body == r_body``; the peel is
-    # sound for identical raw wrappers too (it just does sim's job the long way),
-    # and the caller's ``both_reductions`` gate + a regression check keep clean
-    # proofs from silently changing tactic.
+    # The lockstep ``do ! (wp; call (_: true))`` peel couples the two sides'
+    # abstract calls POSITIONALLY, so it is sound only when their callee sequences
+    # match. Canonicalization renames differing field READS to the same positional
+    # ``fieldN`` (so the bodies are typically equal for a working proof), but the
+    # two-keypair binding challenge relates reductions whose ``Challenge`` iterates
+    # the keypairs in a DIFFERENT ORDER (``R_KG_L`` does ``[PQ_0, PQ_1, NG_0, NG_1]``,
+    # ``R_LazyRO_L`` does ``[PQ_1, NG_1, PQ_0, NG_0]``): the callee sequences differ,
+    # the peel mispairs and leaves the goal open ("left instruction list is not
+    # empty"). Decline there so the caller emits an honest admit (a reordered
+    # deterministic challenge needs the functionalizing det-finisher, not this
+    # positional peel). Matching sequences (every clean proof on this route) keep
+    # the peel -- byte-identical.
+    l_calls = [c for k, c in _call_sample_backbone(l_body) if k == "call"]
+    r_calls = [c for k, c in _call_sample_backbone(r_body) if k == "call"]
+    if l_calls != r_calls:
+        return None
     tac = [
         "proc.",
         "inline *.",

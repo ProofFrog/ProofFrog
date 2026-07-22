@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import pathlib
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Callable, cast
 
@@ -4956,38 +4957,64 @@ def export_proof_file(proof_path: str) -> str:
         (``R_LazyRO_L``) carries it in the challenger game's ``Hash`` (fields
         ``s0``/``y0_pq``/``y0_t``). Both are found by the same shape probe."""
 
+        def _extract_one(
+            iff: frog_ast.IfStatement, pname: str | None
+        ) -> list[str] | None:
+            cond = iff.conditions[0]
+            if not isinstance(cond, frog_ast.BinaryOperation):
+                return None
+            ops = [cond.left_expression, cond.right_expression]
+            guard = next(
+                (
+                    o
+                    for o in ops
+                    if not (isinstance(o, frog_ast.Variable) and o.name == pname)
+                ),
+                None,
+            )
+            ret = iff.blocks[0].statements[0]
+            if not isinstance(ret, frog_ast.ReturnStatement) or not isinstance(
+                ret.expression, frog_ast.BinaryOperation
+            ):
+                return None
+            left, right = (
+                ret.expression.left_expression,
+                ret.expression.right_expression,
+            )
+            if (
+                isinstance(guard, frog_ast.Variable)
+                and isinstance(left, frog_ast.Variable)
+                and isinstance(right, frog_ast.Variable)
+            ):
+                return [guard.name, left.name, right.name]
+            return None
+
         def _extract(methods: list[frog_ast.Method]) -> list[str] | None:
+            # Collect EVERY reprogramming ``if`` -- the two-seed challenger/reduction
+            # reprograms at BOTH seeds (``if x=s0 return y0_pq||y0_t; if x=s1 return
+            # y1_pq||y1_t; return H(x)``), so its ``HashG`` equiv needs the s0- AND
+            # s1-field correspondences. A single-seed reduction yields one triple ->
+            # byte-identical. Sequential (each returns) or nested (else-branch) ifs
+            # are both handled.
             for m in methods:
                 params = m.signature.parameters
                 pname = params[0].name if params else None
-                finder: visitors.SearchVisitor[frog_ast.IfStatement] = (
-                    visitors.SearchVisitor(_is_reprogram_hash_if)
-                )
-                iff = finder.visit(m.block)
-                if iff is None:
-                    continue
-                cond = iff.conditions[0]
-                assert isinstance(cond, frog_ast.BinaryOperation)
-                ops = [cond.left_expression, cond.right_expression]
-                guard = next(
-                    (
-                        o
-                        for o in ops
-                        if not (isinstance(o, frog_ast.Variable) and o.name == pname)
-                    ),
-                    None,
-                )
-                ret = iff.blocks[0].statements[0]
-                assert isinstance(ret, frog_ast.ReturnStatement)
-                cat = ret.expression
-                assert isinstance(cat, frog_ast.BinaryOperation)
-                left, right = cat.left_expression, cat.right_expression
-                if (
-                    isinstance(guard, frog_ast.Variable)
-                    and isinstance(left, frog_ast.Variable)
-                    and isinstance(right, frog_ast.Variable)
-                ):
-                    return [guard.name, left.name, right.name]
+                collected: list[str] = []
+
+                def _collect(stmts: Sequence[frog_ast.Statement]) -> None:
+                    for s in stmts:
+                        if not isinstance(s, frog_ast.IfStatement):
+                            continue
+                        if _is_reprogram_hash_if(s):
+                            fields = _extract_one(s, pname)  # noqa: B023
+                            if fields is not None:
+                                collected.extend(fields)  # noqa: B023
+                        for blk in s.blocks[1:]:
+                            _collect(blk.statements)
+
+                _collect(m.block.statements)
+                if collected:
+                    return collected
             return None
 
         # pylint: disable=protected-access
@@ -5034,7 +5061,7 @@ def export_proof_file(proof_path: str) -> str:
             "{1}"
             f" = {mb}.{mt._ec_field_name(fb[i])}"
             "{2}"
-            for i in range(3)
+            for i in range(min(len(fa), len(fb)))
         )
         # pylint: enable=protected-access
 

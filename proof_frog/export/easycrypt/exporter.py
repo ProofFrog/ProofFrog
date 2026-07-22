@@ -14,6 +14,7 @@ from typing import Any, Callable, cast
 from . import binding_challenge as bch
 from . import canonical_form
 from . import ec_ast
+from . import expr_translator
 from . import module_translator as mt
 from . import oracle_model
 from . import proof_translator as pt
@@ -4611,6 +4612,261 @@ def export_proof_file(proof_path: str) -> str:
         # pylint: enable=protected-access
         return " /\\ ".join(conj)
 
+    def _lazyro_derived_key_coupling(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> str:
+        """``<red>.<field>{rs} = <fn of RO[<game_dk0>]{gs}>`` for each stored key
+        of a lazy-RO Honest reduction (``R_LazyRO_L``) that DERIVES its keys from
+        ``challenger.Hash(seed_0)`` but DISCARDS ``seed_0`` (a local, returned as
+        the decaps key).  The game stores only its seed ``dk0`` and re-derives the
+        SAME keys IN-challenge via the shared RO; the reduction's stored keys are
+        functions of ``RO[dk0]`` (``Hash(seed_0) = RO[seed_0] = RO[dk0]`` under the
+        RO coupling + init seed equality).  The per-oracle RO-only coupling can't
+        relate them, so the challenge peel (leg ii) needs THIS relation in its pre;
+        the pr-lemma's inline init establishes it and challenge/hashg preserve it
+        (neither writes the keys or the RO).  Each field's derivation is read off
+        the reduction's ``Initialize``: a direct ``<field> <@ <M>.<m>(<slice of
+        y_0>)`` -> ``<M>_c.ev_<m> (<slice, y_0 -> RO[dk0]>)``; a wrapper-passthrough
+        ``derivekeypair`` whose result IS the seed (field type == slice-result
+        type) -> the slice directly.  ``""`` off-shape (byte-identical for every
+        non-lazy-RO proof).  EC-GATED: the coupling is PROVEN (established at init,
+        consumed at challenge), never admitted, so a wrong text makes EC reject."""
+        lazy = _is_lazyro_honest_hop(step_a, step_b)
+        if lazy is None:
+            return ""
+        game_side, red_side, _cb, _cf, ro_ref = lazy
+        game_step = step_a if step_a.reduction is None else step_b
+        red_step = step_b if step_a.reduction is None else step_a
+        if red_step.reduction is None:
+            return ""
+        red = _get_reduction(red_step.reduction.name)
+        if red is None:
+            return ""
+        init = _find_init(red)
+        if init is None:
+            return ""
+        red_base = pt.module_base_name(resolver.resolve(red_step).module_expr)
+        game_ref = _live_state_ref(game_step)
+        ro_lookup = f"({ro_ref}{{{game_side}}} {game_ref}{{{game_side}}})"
+        # pylint: disable=protected-access
+        fld_ty = {f.name: top_types.translate_type(f.type).text for f in red.fields}
+        type_map: dict[str, frog_ast.Type] = {f.name: f.type for f in red.fields}
+        for stmt in init.block.statements:
+            mt._seed_type_map(stmt, type_map)
+        for nm, t in list(type_map.items()):
+            if isinstance(t, (frog_ast.Variable, frog_ast.FieldAccess)):
+                resolved = top_types.resolve(t)
+                if isinstance(resolved, frog_ast.ProductType):
+                    type_map[nm] = resolved
+        exprs = expr_translator.ExpressionTranslator(
+            top_types, type_of_factory(type_map, {})
+        )
+        # The hash-result local (y_0): the var assigned ``challenger.Hash(...)``.
+        hash_var: str | None = None
+        val: dict[str, frog_ast.Expression] = {}
+        for stmt in init.block.statements:
+            if isinstance(stmt, frog_ast.Assignment) and isinstance(
+                stmt.var, frog_ast.Variable
+            ):
+                val[stmt.var.name] = stmt.value
+                if (
+                    isinstance(stmt.value, frog_ast.FuncCall)
+                    and isinstance(stmt.value.func, frog_ast.FieldAccess)
+                    and stmt.value.func.name.lower() == "hash"
+                ):
+                    hash_var = stmt.var.name
+        if hash_var is None:
+            return ""
+        hash_ec = exprs.translate(frog_ast.Variable(hash_var))
+
+        def _slice_of_hash(e: frog_ast.Expression) -> frog_ast.Slice | None:
+            if (
+                isinstance(e, frog_ast.Slice)
+                and isinstance(e.the_array, frog_ast.Variable)
+                and e.the_array.name == hash_var
+            ):
+                return e
+            return None
+
+        def _render_slice(sl: frog_ast.Slice) -> str:
+            return re.sub(rf"\b{re.escape(hash_ec)}\b", ro_lookup, exprs.translate(sl))
+
+        conj: list[str] = []
+        for fld in red.fields:
+            v: frog_ast.Expression | None = val.get(fld.name)
+            hops = 0
+            while isinstance(v, frog_ast.Variable) and v.name in val and hops < 4:
+                v = val[v.name]
+                hops += 1
+            if v is None:
+                continue
+            efld = mt._ec_field_name(fld.name)
+            # (b) direct functionalized call ``<M>.<m>(<slice of y_0>)``.
+            if (
+                isinstance(v, frog_ast.FuncCall)
+                and isinstance(v.func, frog_ast.FieldAccess)
+                and isinstance(v.func.the_object, frog_ast.Variable)
+                and len(v.args) == 1
+                and (sl := _slice_of_hash(v.args[0])) is not None
+            ):
+                conj.append(
+                    f"{red_base}.{efld}{{{red_side}}} = "
+                    f"{v.func.the_object.name}_c.ev_{v.func.name.lower()} "
+                    f"({_render_slice(sl)})"
+                )
+                continue
+            # (a) wrapper-passthrough ``_tup[1]`` from ``derivekeypair(<slice>)``:
+            # the concrete wrapper returns ``(ek, seed)`` so ``_tup[1]`` IS the
+            # seed -> emit the slice directly (field type == slice-result type).
+            if (
+                isinstance(v, frog_ast.ArrayAccess)
+                and isinstance(v.the_array, frog_ast.Variable)
+                and isinstance(v.index, frog_ast.Integer)
+                and v.index.num == 1
+            ):
+                tup = val.get(v.the_array.name)
+                if (
+                    isinstance(tup, frog_ast.FuncCall)
+                    and isinstance(tup.func, frog_ast.FieldAccess)
+                    and tup.func.name.lower() == "derivekeypair"
+                    and len(tup.args) == 1
+                    and (sl := _slice_of_hash(tup.args[0])) is not None
+                ):
+                    slice_ty = top_types.translate_type(
+                        frog_ast.BitStringType(
+                            frog_ast.BinaryOperation(
+                                frog_ast.BinaryOperators.SUBTRACT, sl.end, sl.start
+                            )
+                        )
+                    ).text
+                    if fld_ty.get(fld.name) == slice_ty:
+                        conj.append(
+                            f"{red_base}.{efld}{{{red_side}}} = {_render_slice(sl)}"
+                        )
+        # pylint: enable=protected-access
+        return " /\\ ".join(conj)
+
+    def _lazyro_derived_init_fields(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        step_a: frog_ast.Step,
+        step_b: frog_ast.Step,
+        lazy_hop: tuple[str, str, str, str, str],
+        red: frog_ast.Reduction | None,
+        red_init: frog_ast.Method,
+        chal_init: frog_ast.Method,
+    ) -> dict[str, Any]:
+        """Fields for :class:`pt.LazyroInitSpec`'s DERIVED-coupling init tactic, or
+        ``{}`` (=> the OLD tactic runs, byte-identical). Mirrors
+        :func:`_lazyro_derived_key_coupling`'s translator setup. Extracts: the
+        game's keygen seed sample name + the challenger's returned seed sample name
+        (for the ``<gseed>{gs}=<rseed>{rs}`` seq-2-2 coupling); the ``randomscalar``
+        slice args RO-substituted per side (game reads ``RO[gseed]``, reduction
+        ``Honest.h[rseed]``); the NG determinism lemma; and randomscalar's position
+        among the abstract calls (peel counts). Any extraction miss returns ``{}``
+        so the hop keeps the old (RO-only-coupling) init."""
+        game_side, red_side_l, chal_base, chal_field, ro_ref = lazy_hop
+        honest_ref = f"{chal_base}.{chal_field}"
+        rret = _return_elems(chal_init)
+        if red is None or not rret or not isinstance(rret[0], frog_ast.Variable):
+            return {}
+        rseed = rret[0].name
+        # gseed: the game's scheme keygen samples the decaps-key seed. The EC
+        # scheme module uses SOURCE var names (as ``rseed`` does via chal_init), NOT
+        # the engine-canonicalized ``v1`` names -- so read the SOURCE scheme keygen,
+        # not the canonicalized game init.
+        game_step = step_b if step_a.reduction is not None else step_a
+        scheme_name = pt.module_base_name(
+            pt.last_module_arg(resolver.resolve(game_step).module_expr)
+        )
+        scheme_def = schemes_by_name.get(scheme_name)
+        if scheme_def is None:
+            return {}
+        keygen = next(
+            (m for m in scheme_def.methods if m.signature.name.lower() == "keygen"),
+            None,
+        )
+        if keygen is None:
+            return {}
+        # pylint: disable=protected-access
+        gseed = next(
+            (
+                s.var.name
+                for s in keygen.block.statements
+                if isinstance(s, frog_ast.Sample)
+                and isinstance(s.var, frog_ast.Variable)
+                and s.the_type is not None
+                and isinstance(top_types.resolve(s.the_type), frog_ast.BitStringType)
+            ),
+            None,
+        )
+        if gseed is None:
+            return {}
+        rs_finder: visitors.SearchVisitor[frog_ast.FuncCall] = visitors.SearchVisitor(
+            lambda n: isinstance(n, frog_ast.FuncCall)
+            and isinstance(n.func, frog_ast.FieldAccess)
+            and n.func.name.lower() == "randomscalar"
+        )
+        rs_call = rs_finder.visit(red_init.block)
+        if (
+            rs_call is None
+            or not rs_call.args
+            or not isinstance(rs_call.args[0], frog_ast.Slice)
+            or not isinstance(rs_call.args[0].the_array, frog_ast.Variable)
+            or not isinstance(rs_call.func, frog_ast.FieldAccess)
+            or not isinstance(rs_call.func.the_object, frog_ast.Variable)
+        ):
+            return {}
+        ng_mod = rs_call.func.the_object.name
+        type_map: dict[str, frog_ast.Type] = {f.name: f.type for f in red.fields}
+        for stmt in red_init.block.statements:
+            mt._seed_type_map(stmt, type_map)
+        exprs = expr_translator.ExpressionTranslator(
+            top_types, type_of_factory(type_map, {})
+        )
+        slice_ec = exprs.translate(rs_call.args[0])
+        y_ec = exprs.translate(rs_call.args[0].the_array)
+        lhs = re.sub(
+            rf"\b{re.escape(y_ec)}\b",
+            f"({ro_ref}{{{game_side}}} {gseed}{{{game_side}}})",
+            slice_ec,
+        )
+        rhs = re.sub(
+            rf"\b{re.escape(y_ec)}\b",
+            f"({honest_ref}{{{red_side_l}}} {rseed}{{{red_side_l}}})",
+            slice_ec,
+        )
+        order: list[str] = []
+
+        def _collect(n: frog_ast.ASTNode) -> bool:
+            if (
+                isinstance(n, frog_ast.FuncCall)
+                and isinstance(n.func, frog_ast.FieldAccess)
+                and isinstance(n.func.the_object, frog_ast.Variable)
+                and n.func.the_object.name != "challenger"
+            ):
+                order.append(n.func.name.lower())
+            return False
+
+        visitors.SearchVisitor(_collect).visit(red_init.block)
+        if "randomscalar" not in order:
+            return {}
+        idx = order.index("randomscalar")
+        # pylint: enable=protected-access
+        full = _live_state_coupling(step_a, step_b)
+        derived = _lazyro_derived_key_coupling(step_a, step_b)
+        base = full.replace(f" /\\ {derived}", "") if derived else full
+        return {
+            "game_side": game_side,
+            "seq_inv": (
+                f"={{glob A}} /\\ {base} /\\ "
+                f"{gseed}{{{game_side}}} = {rseed}{{{red_side_l}}}"
+            ),
+            "rs_lhs_arg": lhs,
+            "rs_rhs_arg": rhs,
+            "ng_det": f"{ng_mod}_randomscalar_det",
+            "n_after_rs": len(order) - idx - 1,
+            "n_before_rs": idx,
+        }
+
     hop_live_abstract_memo: dict[tuple[int, int], frozenset[str]] = {}
 
     def _hop_live_abstract_modules(
@@ -4793,6 +5049,14 @@ def export_proof_file(proof_path: str) -> str:
         wdk = _wrapper_stored_dk_coupling(step_a, step_b)
         if wdk:
             coupled = f"{coupled} /\\ {wdk}"
+        # Lazy-RO Honest hop: couple the reduction's stored keys to the RO
+        # evaluated at the game's stored seed (``dk_PQ_0 = slice(RO[dk0])``,
+        # ``dk_T_0 = ev_randomscalar(slice(RO[dk0]))``) -- the derived relation the
+        # LazyRO challenge peel needs (the reduction discards its seed). Empty
+        # off-shape -> byte-identical.
+        lzk = _lazyro_derived_key_coupling(step_a, step_b)
+        if lzk:
+            coupled = f"{coupled} /\\ {lzk}"
         # Reprogramming-Lazy hop: carry the cross-side reprogramming-field
         # correspondences so the per-oracle ``HashG`` equiv's guard/then-branch is
         # provable (the init couples the reductions' stored fields but not the
@@ -5166,11 +5430,15 @@ def export_proof_file(proof_path: str) -> str:
 
                 visitors.SearchVisitor(_count_call).visit(red_init.block)
                 n_calls = _n[0]
+                derived_kw = _lazyro_derived_init_fields(
+                    step_a, step_b, lazy_hop, red, red_init, chal_init
+                )
                 lazyro = pt.LazyroInitSpec(
                     swap_below=swap_below,
                     n_calls=n_calls,
                     dfun_ll=f"{dfun}_ll",
                     red_side=red_side,
+                    **derived_kw,
                 )
         return pt.MultiOraclePrSpec(
             coupling=_live_state_coupling(step_a, step_b),

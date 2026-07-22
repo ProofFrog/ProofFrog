@@ -43,6 +43,28 @@ class LazyroInitSpec:
     # that drops it both act on this side. The forward hop has the reduction on
     # side 2; the reverse-direction hop flips it to side 1.
     red_side: str = "2"
+    # DERIVED-COUPLING init: when the hop's coupling carries the lazy-RO derived
+    # key relation (``red.dk_PQ_0{rs} = slice(RO[game.dk0]{gs})`` etc., from
+    # :func:`exporter._lazyro_derived_key_coupling`), the OLD ``call (_: true)``
+    # backbone can't establish it (the reduction's ``randomscalar`` result stays
+    # abstract). Emit the couple-samples-first + ``sp`` + functionalize-randomscalar
+    # tactic instead. All fields None => old tactic (byte-identical). ``game_side``
+    # is the non-reduction side; ``seed_couple`` = ``<gseed>{gs}=<rseed>{rs}``;
+    # ``rs_lhs_arg``/``rs_rhs_arg`` = the game/reduction ``randomscalar`` slice
+    # args (RO-substituted); ``ng_det`` = the randomscalar determinism lemma;
+    # ``n_after_rs``/``n_before_rs`` = abstract calls after/before randomscalar in
+    # program order (peel order: n_after with ``call(_:true)``, functionalize rs,
+    # n_before with ``call(_:true)``). (cont-126/129; validated on cg_test.ec.)
+    game_side: str = "1"
+    # The seq-2-2 invariant (globs + RO coupling + ``<gseed>{gs}=<rseed>{rs}``) --
+    # WITHOUT the derived key coupling (unprovable after only the 2 samples). The
+    # derived coupling is established at the final ``skip => /#``.
+    seq_inv: str | None = None
+    rs_lhs_arg: str | None = None
+    rs_rhs_arg: str | None = None
+    ng_det: str | None = None
+    n_after_rs: int = 0
+    n_before_rs: int = 0
 
 
 @dataclass
@@ -664,37 +686,70 @@ def translate_inlining_hop_pr_lemma(  # pylint: disable=too-many-arguments,too-m
             # the post-init goal has an unprovable ``(glob A){1} = (glob A){2}``
             # leaf. ``={glob A}`` holds from ``byequiv_pre`` and the init never
             # touches ``glob A``, so threading it through the split is sound.
-            init_tac = [
-                "inline *.",
-                f"swap{{{li.red_side}}} 1 {li.swap_below}.",
-                f"seq 1 1 : (={{glob A}} /\\ {multi_oracle.coupling}).",
-                "+ rnd; skip => />.",
-                "wp.",
-            ]
-            for _ in range(li.n_calls):
-                init_tac += ["call (_: true).", "wp."]
-            # After ``skip``, the accumulated byequiv post is a deep
-            # bool-``&&``-``forall``-``let`` nest (the binding adversary returns
-            # ``bool``, so ``={res}`` is a bool equation and every hop level
-            # contributes a ``&&`` conjunct under a ``forall``, with the RO
-            # derivations bound by intermediate ``let``s). A flat ``smt`` cannot
-            # discharge it (the higher-order ``forall`` from the dead-RO drop and
-            # the let-nesting defeat it). Fully destructure instead: at each level
-            # peel every leaf conjunct (``rewrite andaE`` turns the bool ``&&``
-            # into ``/\`` so ``split`` applies) closing it by the RO congruence
-            # (the ``RO.h{1} = <chal>.h{2}`` coupling makes both sides' slices
-            # equal), then cross the level's ``forall`` (``move => *``) and unfold
-            # its ``let``s (``simplify``). ``try`` keeps a shallow hop (whose
-            # ``=> />`` leaves no ``&&``) falling through to the final ``smt``.
-            # Validated on ``.ec-tmp/repro_goal`` (the transcribed real goal) and
-            # ``ec_templates/lazyro_pr_repack.ec``.
-            destructure = (
-                "skip => />; "
-                "try (do ! (do ! (rewrite andaE; split; "
-                f"first by smt({li.dfun_ll})); move => *; simplify)); "
-                f"smt({li.dfun_ll})."
-            )
-            init_tac += [f"rnd{{{li.red_side}}}.", "rnd.", destructure]
+            if li.seq_inv is not None:
+                # DERIVED-COUPLING init (the hop's coupling carries the lazy-RO
+                # derived key relation): couple BOTH samples up front (``seq 2 2``
+                # -> RO + seed), drop the dead RO copy, ``sp`` to substitute the
+                # deterministic intermediates, peel the abstract calls AFTER
+                # randomscalar with ``call (_: true)``, FUNCTIONALIZE randomscalar
+                # both sides (so ``dk_T{rs} = ev_randomscalar(slice(RO[dk0]))``),
+                # peel the calls BEFORE it, ``skip => /#``. (cont-126; validated on
+                # ``.ec-tmp/cg_test.ec``.)
+                dead_seq = "0 1" if li.red_side == "2" else "1 0"
+                init_tac = [
+                    "inline *.",
+                    f"swap{{{li.red_side}}} 1 {li.swap_below}.",
+                    f"seq 2 2 : ({li.seq_inv}).",
+                    "+ auto.",
+                    f"seq {dead_seq} : ({li.seq_inv}).",
+                    f"+ rnd{{{li.red_side}}}; auto => />; smt({li.dfun_ll}).",
+                    "sp.",
+                ]
+                for _ in range(li.n_after_rs):
+                    init_tac += ["wp.", "call (_: true)."]
+                init_tac += [
+                    "wp.",
+                    f"exists* (glob NG){{{li.game_side}}}, ({li.rs_lhs_arg}), "
+                    f"(glob NG){{{li.red_side}}}, ({li.rs_rhs_arg}).",
+                    "elim* => gnl atl gnr atr.",
+                    f"call{{{li.game_side}}} ({li.ng_det} gnl atl).",
+                    f"call{{{li.red_side}}} ({li.ng_det} gnr atr).",
+                ]
+                for _ in range(li.n_before_rs):
+                    init_tac += ["wp.", "call (_: true)."]
+                init_tac += ["skip => /#."]
+            else:
+                init_tac = [
+                    "inline *.",
+                    f"swap{{{li.red_side}}} 1 {li.swap_below}.",
+                    f"seq 1 1 : (={{glob A}} /\\ {multi_oracle.coupling}).",
+                    "+ rnd; skip => />.",
+                    "wp.",
+                ]
+                for _ in range(li.n_calls):
+                    init_tac += ["call (_: true).", "wp."]
+                # After ``skip``, the accumulated byequiv post is a deep
+                # bool-``&&``-``forall``-``let`` nest (the binding adversary
+                # returns ``bool``, so ``={res}`` is a bool equation and every hop
+                # level contributes a ``&&`` conjunct under a ``forall``, with the
+                # RO derivations bound by intermediate ``let``s). A flat ``smt``
+                # cannot discharge it (the higher-order ``forall`` from the dead-RO
+                # drop and the let-nesting defeat it). Fully destructure instead: at
+                # each level peel every leaf conjunct (``rewrite andaE`` turns the
+                # bool ``&&`` into ``/\`` so ``split`` applies) closing it by the RO
+                # congruence (the ``RO.h{1} = <chal>.h{2}`` coupling makes both
+                # sides' slices equal), then cross the level's ``forall``
+                # (``move => *``) and unfold its ``let``s (``simplify``). ``try``
+                # keeps a shallow hop (whose ``=> />`` leaves no ``&&``) falling
+                # through to the final ``smt``. Validated on ``.ec-tmp/repro_goal``
+                # (the transcribed real goal) and ``ec_templates/lazyro_pr_repack.ec``.
+                destructure = (
+                    "skip => />; "
+                    "try (do ! (do ! (rewrite andaE; split; "
+                    f"first by smt({li.dfun_ll})); move => *; simplify)); "
+                    f"smt({li.dfun_ll})."
+                )
+                init_tac += [f"rnd{{{li.red_side}}}.", "rnd.", destructure]
         else:
             init_tac = [
                 f"call hop_{hop_index}_{multi_oracle.init_oracle}.",

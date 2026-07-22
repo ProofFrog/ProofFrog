@@ -4341,6 +4341,17 @@ def _emit_one_oracle_chain(
     chain is discarded and the outer body is a coupling-pending admit (no
     oracle-suffixed artifacts).
     """
+    # Lazy-RO Honest hashg is trivial: the game answers ``return RO_G_RO.h x`` and
+    # the reduction ``challenger.Hash(x)`` = ``return Honest.h x``; under the pre's
+    # ``RO_G_RO.h{1} = Honest.h{2}`` (every other glob + the derived-key coupling
+    # preserved, since hashg writes nothing) a DIRECT ``proc; inline *; auto``
+    # closes it. The field-threading transitivity (the default per-oracle tactic)
+    # instead breaks here -- its flat-state intermediate specs can't re-establish
+    # the derived-key coupling the pr-lemma's ``call`` invariant carries. Gated on
+    # the lazy-RO Honest hop, so every other proof keeps the transitivity
+    # byte-identical. (Validated on ``.ec-tmp/cg_test.ec``.)
+    if is_lazyro_honest and not is_init and oracle_name == "hashg":
+        return [], [_res_tag(SYNTH_PARAM), "proc. inline *. auto.", "qed."], set()
     # Inline-equivalent endpoints (the P5 identical-state finding at oracle
     # granularity): when the two endpoints' CANONICAL bodies for this oracle
     # are identical, the raw wrapper modules are inline-equivalent, so a single
@@ -4522,6 +4533,21 @@ def _emit_one_oracle_chain(
             if aux_lemma_acc is not None and aux_lines and not aux_lemma_acc:
                 aux_lemma_acc.extend(aux_lines)
             return [], outer_body, set()
+        if is_lazyro_honest:
+            lz_route = _challenge_lazyro_route(
+                modules,
+                oracle_name,
+                left_states[0],
+                right_states[0],
+                left_wrapper_expr,
+                right_wrapper_expr,
+                external_module_types,
+                method_return_types,
+                flat_params,
+                clone_alias or {},
+            )
+            if lz_route is not None:
+                return [], lz_route, set()
         ff_route = _challenge_falsefalse_route(
             modules,
             oracle_name,
@@ -6566,6 +6592,128 @@ def _challenge_hop2_wrapper_route(  # pylint: disable=too-many-arguments,too-man
     # ``<scheme>_decaps_val`` phoare (whose CG_seedbased synthesis is malformed --
     # references the group param ``G``). ``decaps_val_acc.add("")`` is inert.
     return ([_res_tag(SYNTH_PARAM), *body[1:]], (t_module, ect_method), "")
+
+
+def _challenge_lazyro_route(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    left_wrapper_expr: str,
+    right_wrapper_expr: str,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    clone_alias: dict[str, str],
+) -> list[str] | None:
+    """Lazy-RO Honest challenge (hop_0/12): game whole-``CG_seedbased.decaps`` (which
+    re-derives its keys IN-challenge via the shared RO ``G.evaluate``) ~ the reduction's
+    EXPANDED challenge (stored keys). No case-split -- both compute the KDF-collision
+    boolean. Functionalize EVERY abstract call on BOTH sides (``bch._peel_stmts``) and
+    close ``skip => /#`` via the derived key coupling (already in the lemma pre). The
+    game's in-challenge RO ``seed_full <- RO_G_RO.h input`` surfaces ``RO_G_RO.h`` in
+    the peel-call args (a mem-global, illegal in a proof term) -> ``exists*`` the RO and
+    substitute ``RO_G_RO.h`` -> ``roh`` in the game peel. Validated on
+    ``.ec-tmp/h0_lazyro_2comp.ec``. ``None`` off-shape (byte-identical)."""
+    # pylint: disable=protected-access
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+    lmod = _flat_state_module(
+        modules,
+        "Chal_L",
+        lproj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    rmod = _flat_state_module(
+        modules,
+        "Chal_R",
+        rproj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    if not lmod.procs or not rmod.procs:
+        return None
+    lproc, rproc = lmod.procs[0], rmod.procs[0]
+    ct_params = [p.name for p in lproc.params]
+    ro_ref = f"{clone_alias.get('Hybrid', 'Hybrid')}.RO_G_RO.h"
+    # The GAME endpoint (whole-decaps, re-derives keys in-challenge via the RO) holds
+    # the single ``dk0`` decaps-key field; the reduction holds ``dk_PQ_0``/``dk_T_0``.
+    # It may be on EITHER side (forward hop -> game left; reverse -> game right).
+    game_left = any(f.name == "dk0" for f in left_state0.fields)
+    gstate, rstate = (
+        (left_state0, right_state0) if game_left else (right_state0, left_state0)
+    )
+    gproc, rproc_ = (lproc, rproc) if game_left else (rproc, lproc)
+    gwrap, rwrap = (
+        (left_wrapper_expr, right_wrapper_expr)
+        if game_left
+        else (right_wrapper_expr, left_wrapper_expr)
+    )
+    gsi, rsi = ("1", "2") if game_left else ("2", "1")
+
+    def _body(proc: ec_ast.Proc) -> list[ec_ast.EcStmt]:
+        return [
+            s for s in proc.body if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+        ]
+
+    gbody, rbody = _body(gproc), _body(rproc_)
+    gmods, rmods = _callee_mods(gbody, clone_alias), _callee_mods(rbody, clone_alias)
+    gfields = [f.name for f in gstate.fields if "@" not in f.name]
+    rfields = [f.name for f in rstate.fields if "@" not in f.name]
+    gge = [f"gg{i}" for i in range(len(gmods))]
+    rge = [f"gr{i}" for i in range(len(rmods))]
+    gfe = [f"DG{i}" for i in range(len(gfields))]
+    rfe = [f"DR{i}" for i in range(len(rfields))]
+    gce = [f"CG{i}" for i in range(len(ct_params))]
+    rce = [f"CR{i}" for i in range(len(ct_params))]
+    exs = (
+        [f"(glob {m})" "{" f"{gsi}" "}" for m in gmods]
+        + [f"{_ref_base(gwrap)}.{f}" "{" f"{gsi}" "}" for f in gfields]
+        + [f"{ro_ref}" "{" f"{gsi}" "}"]
+        + [f"{c}" "{" f"{gsi}" "}" for c in ct_params]
+        + [f"(glob {m})" "{" f"{rsi}" "}" for m in rmods]
+        + [f"{_ref_base(rwrap)}.{f}" "{" f"{rsi}" "}" for f in rfields]
+        + [f"{c}" "{" f"{rsi}" "}" for c in ct_params]
+    )
+    elims = gge + gfe + ["roh"] + gce + rge + rfe + rce
+    grename: dict[str, str] = dict(zip(gfields, gfe))
+    grename.update(zip(ct_params, gce))
+    rrename: dict[str, str] = dict(zip(rfields, rfe))
+    rrename.update(zip(ct_params, rce))
+    genv = bch._env_over(gbody, grename, clone_alias)
+    renv = bch._env_over(rbody, rrename, clone_alias)
+    gpeel = bch._wp_before_calls(
+        bch._peel_stmts(gbody, genv, dict(zip(gmods, gge)), "{" f"{gsi}" "}")
+    )
+    rpeel = bch._wp_before_calls(
+        bch._peel_stmts(rbody, renv, dict(zip(rmods, rge)), "{" f"{rsi}" "}")
+    )
+    # The GAME's in-challenge RO lookup ``RO_G_RO.h input`` is an Assign RHS, so
+    # ``_env_over`` leaves it UNparenthesized -> as a slice/call arg it would parse
+    # as two args. Rewrite ``<ro_ref> <arg>`` -> ``(roh <arg>)`` (the exists*-bound
+    # ``roh`` + its single seed-field argument, parenthesized).
+    gpeel = [re.sub(rf"{re.escape(ro_ref)}\s+(\w+)", r"(roh \1)", ln) for ln in gpeel]
+    # pylint: enable=protected-access
+    return [
+        _res_tag(SYNTH_PARAM),
+        "proc.",
+        "inline *.",
+        f"exists* {', '.join(exs)};",
+        f"elim* => {' '.join(elims)}.",
+        *gpeel,
+        *rpeel,
+        # A trailing ``wp`` clears any leading deterministic assigns the wrapper
+        # decaps introduces (``dk <- dk_PQ_0; ct <- ct0.`1``) that ``inline *``
+        # exposes but the flat-state peel (VarDecl-filtered) doesn't wp away.
+        "wp.",
+        "skip => /#.",
+        "qed.",
+    ]
 
 
 def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements

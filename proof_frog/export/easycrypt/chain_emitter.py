@@ -3569,6 +3569,387 @@ def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-pos
     return extra, outer, set()
 
 
+def _group_samples_front_swaps(body: list[ec_ast.EcStmt], side: int) -> list[str]:
+    """``swap{side}`` sequence hoisting every ``<$`` sample of an interleaved
+    ev-twin body to a contiguous front block ``[samples; assignments]``.
+
+    The functionalized *grouped* twin already samples up front; its interleaved
+    counterpart (``s0; a0; b0; s1; a1; ...``) must be regrouped so a single ``wp``
+    peels every deterministic ev-assignment and ``rnd`` couples the aligned
+    samples. Each sample is glob/data-independent of the assignments it crosses,
+    so the hoist is always EC-valid. Processes left to right, moving the ``i``-th
+    sample up to slot ``i`` with ``swap{side} <pos> -<dist>``."""
+    kinds = [
+        "s" if isinstance(s, ec_ast.Sample) else "a"
+        for s in _exec_stmts(body)
+        if not isinstance(s, ec_ast.Return)
+    ]
+    swaps: list[str] = []
+    target = 0
+    i = 0
+    while i < len(kinds):
+        if kinds[i] == "s":
+            if i != target:
+                swaps.append(f"swap{{{side}}} {i + 1} -{i - target}.")
+                kinds.insert(target, kinds.pop(i))
+            target += 1
+            i = target
+        else:
+            i += 1
+    return swaps
+
+
+def _synth_init_plain_reorder(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    det_methods: dict[str, set[str]],
+    clone_alias: dict[str, str],
+    plain_coupling: str | None,
+    hop_index: int = 0,
+) -> tuple[list[str], list[str], set[tuple[str, str]]] | None:
+    """Plain-coupling FULLY-deterministic reorder init route (DIFFKEY
+    hop_6/8_initialize). Two reductions run the SAME keygen/NG-call multiset --
+    ALL of it deterministic (no abstract keygen, unlike hop_0/4) -- in interleaved
+    vs grouped order, coupled by plain 1:1 field equalities (so
+    ``_decomposition_coupling`` returns None and the decomposition reorder route
+    declines). Structure: ``RawGame ~ FG_calls ~ FR_calls ~ RawReduction`` with the
+    middle ``FG_calls ~ FR_calls`` routed through ev-twins
+    ``FG_calls ~ FG_ev ~ FR_ev ~ FR_calls`` -- the outer legs backbone-peel
+    (:func:`_backbone_peel`), the twin sub-legs functionalize each side's det calls
+    top-down (:func:`_init_topdown_leg`, field-aware), and the flat ``FG_ev ~ FR_ev``
+    middle regroups the interleaved twin's samples then ``wp; rnd*; skip`` (both
+    already functionalized -- no freeze). Validated end-to-end:
+    ``ec_templates`` field-reorder tripwire. Fed the hop's ``full_coupling``.
+    ``None`` off-shape (caller emits the honest backbone admit)."""
+    if plain_coupling is None:
+        return None
+    fg_name = f"FG_calls_{hop_index}"
+    fr_name = f"FR_calls_{hop_index}"
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+
+    def _det_pred(mod: str, meth: str) -> bool:
+        return meth in det_methods.get(mod, set())
+
+    def _all_det(body: list[ec_ast.EcStmt]) -> bool:
+        for s in _exec_stmts(body):
+            if isinstance(s, ec_ast.Call):
+                parts = _callee_parts(s.callee)
+                if parts is None or not _det_pred(*parts):
+                    return False
+        return True
+
+    def _grouped(body: list[ec_ast.EcStmt]) -> bool:
+        seen_call = False
+        for s in _exec_stmts(body):
+            if isinstance(s, ec_ast.Call):
+                seen_call = True
+            elif isinstance(s, ec_ast.Sample) and seen_call:
+                return False
+        return True
+
+    def _build(proj: frog_ast.Game, name: str) -> ec_ast.Module | None:
+        m = _flat_state_module(
+            modules,
+            name,
+            proj,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            emit_state_vars=True,
+            no_shadow_fields=True,
+        )
+        return m if m.procs else None
+
+    lmod = _build(lproj, fg_name)
+    rmod = _build(rproj, fr_name)
+    if lmod is None or rmod is None:
+        return None
+    l_body0, r_body0 = lmod.procs[0].body, rmod.procs[0].body
+    # Both sides must be FULLY deterministic (this route's distinguishing shape --
+    # the abstract-keygen reorder is the decomposition route's job) and a genuine
+    # interleaved-vs-grouped reorder.
+    if not _all_det(l_body0) or not _all_det(r_body0):
+        return None
+    l_grouped, r_grouped = _grouped(l_body0), _grouped(r_body0)
+    if l_grouped == r_grouped:
+        return None
+    game_is_left = not l_grouped  # the interleaved side is the "game"
+    if game_is_left:
+        fgmod, frmod = lmod, rmod
+    else:
+        fg = _build(rproj, fg_name)
+        fr = _build(lproj, fr_name)
+        if fg is None or fr is None:
+            return None
+        fgmod, frmod = fg, fr
+    game_body, red_body = fgmod.procs[0].body, frmod.procs[0].body
+    ng_mod = next(
+        (
+            _callee_parts(c)[0]  # type: ignore[index]
+            for k, c in _call_sample_backbone(game_body)
+            if k == "call"
+            and c is not None
+            and (p := _callee_parts(c)) is not None
+            and _det_pred(*p)
+        ),
+        None,
+    )
+    if ng_mod is None or ng_mod not in clone_alias:
+        return None
+
+    def _flip_sides(s: str) -> str:
+        return s.replace("{1}", "\x00").replace("{2}", "{1}").replace("\x00", "{2}")
+
+    coupling = plain_coupling if game_is_left else _flip_sides(plain_coupling)
+    conj = [p.strip() for p in coupling.split(" /\\ ")]
+    globs = " /\\ ".join(p for p in conj if p.startswith("={glob"))
+    if not globs:
+        return None
+    if any(re.match(r"^\S+\{1\} = \(.+\)\{2\}$", cj) for cj in conj):
+        return None  # a packed-key decomposition is the other route's shape
+    game_base: str | None = None
+    red_base: str | None = None
+    for cj in conj:
+        m = re.match(r"^([\w.]+)\.\w+\{2\} = ([\w.]+)\.\w+\{1\}$", cj)
+        if m is not None:
+            red_base, game_base = m.group(1), m.group(2)
+            break
+    if game_base is None or red_base is None:
+        return None
+    game_flds = [v.name for v in fgmod.module_vars]
+    red_flds = [v.name for v in frmod.module_vars]
+    glob_names = [p.name for p in flat_params]
+    # ``glob_items`` seeds the topdown-leg seq invariant. It must carry EVERY
+    # coupled glob module (not just the functor params): globs like the shared RO
+    # ``Hybrid_c.RO_G_RO`` are in the leg post (via ``globs``) and untouched by the
+    # init, so their coupling has to ride the invariant or the final ``skip`` can't
+    # discharge it. Parse them from ``globs`` rather than ``flat_params``.
+    glob_items = [f"glob {m}" for m in re.findall(r"=\{glob ([\w.]+)\}", globs)]
+    args = ", ".join(glob_names)
+    res_eq = "res{1} = res{2}"
+    body = " /\\ ".join(p for p in conj if not p.startswith("={glob"))
+
+    def _fg(s: str) -> str:
+        return s.replace(game_base, fg_name)
+
+    def _fr(s: str) -> str:
+        return _fg(s).replace(red_base, fr_name)
+
+    # The RAW reduction modules (``game_base``/``red_base``) hold only their own
+    # fields; the flat states additionally carry ``challenger_<f>`` fields (the
+    # inlined challenger's state), which the raw modules lack. Couple only the
+    # own fields at the raw<->flat seam (q1/q4); the ``challenger_`` fields are
+    # flat-state-internal and are threaded within the flat twins (qa/qd).
+    game_own = [f for f in game_flds if not f.startswith("challenger_")]
+    red_own = [f for f in red_flds if not f.startswith("challenger_")]
+    q1_eqs = " /\\ ".join(
+        f"{game_base}.{f}{{1}} = {fg_name}.{f}{{2}}" for f in game_own
+    )
+    q4_eqs = " /\\ ".join(f"{fr_name}.{f}{{1}} = {red_base}.{f}{{2}}" for f in red_own)
+    # Partition the coupling by memory side. A conjunct touching ONLY ``{1}`` is a
+    # game-side (raw memory-1) fact -- e.g. the challenger seam ``game.s{1} =
+    # chal.dk{1}``; it belongs in ``q1`` (established by the RawGame~FG_calls leg),
+    # NOT in the cross-side body: renamed into the middle memory it would reference
+    # the uncoupled challenger glob at ``{m}``. Symmetrically ``{2}``-only facts go
+    # in ``q4``. Cross-side (``{1}`` and ``{2}``) conjuncts thread through q2/q3.
+    non_glob = [p for p in conj if not p.startswith("={glob")]
+    seam1 = [cj for cj in non_glob if "{1}" in cj and "{2}" not in cj]
+    seam2 = [cj for cj in non_glob if "{2}" in cj and "{1}" not in cj]
+    cross = " /\\ ".join(cj for cj in non_glob if "{1}" in cj and "{2}" in cj)
+    q1 = " /\\ ".join([p for p in [globs, q1_eqs] if p] + seam1 + [res_eq])
+    q4 = " /\\ ".join([p for p in [globs, q4_eqs] if p] + seam2 + [res_eq])
+    q2 = " /\\ ".join([p for p in [_fg(cross)] if p] + seam2 + [globs, res_eq])
+    q3 = " /\\ ".join(
+        [p for p in [_fr(cross)] if p] + [_fr(c) for c in seam2] + [globs, res_eq]
+    )
+
+    # Nested middle ``FG_calls ~ FR_calls`` via ev-twins.
+    fgev_name = f"FG_ev_{hop_index}"
+    frev_name = f"FR_ev_{hop_index}"
+
+    def _clone_of(m: str) -> str | None:
+        return clone_alias.get(m)
+
+    fgev = _ev_twin_module(fgmod, fgev_name, _det_pred, _clone_of)
+    frev = _ev_twin_module(frmod, frev_name, _det_pred, _clone_of)
+    qa = (
+        globs
+        + "".join(f" /\\ {fg_name}.{f}{{1}} = {fgev_name}.{f}{{2}}" for f in game_flds)
+        + f" /\\ {res_eq}"
+    )
+    qd = (
+        globs
+        + "".join(f" /\\ {frev_name}.{f}{{1}} = {fr_name}.{f}{{2}}" for f in red_flds)
+        + f" /\\ {res_eq}"
+    )
+    qb = q3.replace(fg_name, fgev_name)
+    qc = qb.replace(fr_name, frev_name)
+    ctr = [0]
+    leg_a = _init_topdown_leg(
+        game_body,
+        1,
+        glob_items,
+        _det_pred,
+        ctr,
+        fg_name,
+        fgev_name,
+        set(game_flds),
+        closer="skip => /#.",
+    )
+    leg_c = _init_topdown_leg(
+        red_body,
+        2,
+        glob_items,
+        _det_pred,
+        ctr,
+        frev_name,
+        fr_name,
+        set(red_flds),
+        closer="skip => /#.",
+    )
+    # ``FG_ev`` (interleaved, does KeyGen) and ``FR_ev`` (grouped, samples the key
+    # directly) hold the SAME sample DISTRIBUTIONS but in different orders AND under
+    # different variable names (``KeyGen_seed0`` vs ``s_PQ_0``, both the KEM seed
+    # distribution). A positional ``rnd`` pairs incompatible supports; instead align
+    # ``FG_ev``'s samples to ``FR_ev``'s DISTRIBUTION order with the stable,
+    # dexcepted-normalizing front-hoist, then peel: ``wp`` clears the ev glue, one
+    # ``rnd`` per (now distribution-aligned) sample couples them.
+    fg_samples = [
+        (s.var, s.distr)
+        for s in _exec_stmts(fgev.procs[0].body)
+        if isinstance(s, ec_ast.Sample)
+    ]
+    fr_target = [
+        s.distr for s in _exec_stmts(frev.procs[0].body) if isinstance(s, ec_ast.Sample)
+    ]
+    align_swaps = _front_swaps_stable(fg_samples, fr_target, 1)
+    if align_swaps is None:
+        return None
+    mid = [
+        "proc.",
+        *align_swaps,
+        "wp.",
+        *(["rnd."] * len(fg_samples)),
+        "skip => /#.",
+    ]
+    legmid = [
+        f"transitivity {fgev_name}({args}).initialize "
+        f"({globs} ==> {qa}) ({globs} ==> {qb}).",
+        "smt().",
+        "smt().",
+        *leg_a,
+        f"transitivity {frev_name}({args}).initialize "
+        f"({globs} ==> {qc}) ({globs} ==> {qd}).",
+        "smt().",
+        "smt().",
+        *mid,
+        *leg_c,
+    ]
+
+    def _n_calls(b: list[ec_ast.EcStmt]) -> int:
+        return sum(1 for k, _ in _call_sample_backbone(b) if k == "call")
+
+    def _hoare_arm(mem: list[str], b: list[ec_ast.EcStmt]) -> list[str]:
+        # Close a conseq hoare arm. A TRIVIAL (``true``) side is a degenerate
+        # phoare that ``proc`` rejects -- close it directly with ``auto``. A real
+        # seam side is ``hoare[body : _ ==> seam]``: ``proc; inline*``, then peel
+        # (``auto`` clears the deterministic runs + samples, ``call (_: true)`` each
+        # abstract call -- the seam field-equality is independent of the results).
+        if not mem:
+            return ["auto."]
+        # Count-INDEPENDENT peel: ``do!`` repeats ``call (_: true); auto`` until no
+        # abstract call remains (EC's inlined call count can differ from the flat
+        # state's, so a fixed count over/under-peels and spills into the next goal).
+        del b  # kept for signature parity
+        return ["proc.", "inline *.", "auto.", "do! (call (_: true); auto)."]
+
+    def _outer_leg(
+        b: list[ec_ast.EcStmt], relational: str, mem1: list[str], mem2: list[str]
+    ) -> list[str]:
+        # RawGame IS the inlined flat state, so ``proc; inline*; sim`` proves the
+        # RELATIONAL cross-module field couplings (incl. ``={res}``) directly -- no
+        # monster, no smt-size wall. A single-memory SEAM (``game.s{1} =
+        # challenger.dk{1}``) defeats ``sim``, so split it off with ``conseq
+        # <equiv> <hoare_left> <hoare_right>``: ``sim`` the relational equiv,
+        # discharge each seam as a one-sided hoare. The ``conseq`` runs after a bare
+        # ``proc`` (NOT ``inline*``) so ``res`` -- the returned pk tuple -- is still
+        # bound in the relational post; each arm then ``inline*``s before closing.
+        if not mem1 and not mem2:
+            return ["proc.", "inline *.", "sim."]
+        # The hoare arms are SINGLE-memory: strip the ``{1}``/``{2}`` suffixes the
+        # seam conjuncts carry (they came from the relational coupling). ``conseq``
+        # runs at the EQUIV level (before ``proc``) so ``res`` -- the returned pk
+        # tuple -- is still bound in the relational post; each arm then ``proc;
+        # inline*``s before closing (order: implication, left hoare, right hoare,
+        # relational equiv).
+        m1 = " /\\ ".join(c.replace("{1}", "") for c in mem1) if mem1 else "true"
+        m2 = " /\\ ".join(c.replace("{2}", "") for c in mem2) if mem2 else "true"
+        return [
+            f"conseq (: {relational}) (: _ ==> {m1}) (: _ ==> {m2}).",
+            "smt().",
+            *_hoare_arm(mem1, b),
+            *_hoare_arm(mem2, b),
+            "proc.",
+            "inline *.",
+            "sim.",
+        ]
+
+    # The relational post carries ``res_eq`` (``res`` is the init's returned pk
+    # tuple; ``sim`` proves it). Valid because ``_outer_leg`` applies ``conseq``
+    # after a bare ``proc`` (before ``inline*``), where ``res`` is still bound.
+    game_rel = " /\\ ".join([p for p in [globs, q1_eqs] if p] + [res_eq])
+    red_rel = " /\\ ".join([p for p in [globs, q4_eqs] if p] + [res_eq])
+
+    def _mirror(conj: str, base: str, flat: str, side: int) -> str | None:
+        # Single-memory FLAT-STATE mirror of a seam conjunct, so BOTH conseq hoare
+        # arms are real (no trivial ``true`` arm -> no losslessness obligation).
+        # ``game.X{s} = chal.Y{s}`` (challenger seam) mirrors to ``flat.X =
+        # flat.challenger_Y``; ``red.A{s} = red.B{s}`` (self-derived) to ``flat.A =
+        # flat.B``. Both hold in the flat state and close with the same hoare peel.
+        m = re.match(r"^([\w.]+)\.(\w+)\{[12]\} = ([\w.]+)\.(\w+)\{[12]\}$", conj)
+        if m is None or m.group(1) != base:
+            return None
+        f_l, base_r, f_r = m.group(2), m.group(3), m.group(4)
+        rhs = f"{flat}.{f_r}" if base_r == base else f"{flat}.challenger_{f_r}"
+        return f"{flat}.{f_l}{{{side}}} = {rhs}{{{side}}}"
+
+    _gm2 = [_mirror(c, game_base, fg_name, 2) for c in seam1]
+    _rm1 = [_mirror(c, red_base, fr_name, 1) for c in seam2]
+    game_mem2 = [c for c in _gm2 if c is not None] if seam1 and all(_gm2) else []
+    red_mem1 = [c for c in _rm1 if c is not None] if seam2 and all(_rm1) else []
+    outer = [
+        _res_tag(SYNTH_PARAM),
+        *([] if game_is_left else ["symmetry."]),
+        f"transitivity {fg_name}({args}).initialize "
+        f"({globs} ==> {q1}) ({globs} ==> {q2}).",
+        "smt().",
+        "smt().",
+        *_outer_leg(game_body, f"{globs} ==> {game_rel}", seam1, game_mem2),
+        f"transitivity {fr_name}({args}).initialize "
+        f"({globs} ==> {q3}) ({globs} ==> {q4}).",
+        "smt().",
+        "smt().",
+        *legmid,
+        *_outer_leg(red_body, f"{globs} ==> {red_rel}", red_mem1, seam2),
+        "qed.",
+    ]
+    extra = [
+        "\n".join(_render_module_decl(fgmod)),
+        "\n".join(_render_module_decl(frmod)),
+        "\n".join(_render_module_decl(fgev)),
+        "\n".join(_render_module_decl(frev)),
+    ]
+    return extra, outer, set()
+
+
 def _is_reprogram_if(stmt: ec_ast.EcStmt) -> bool:
     """True if ``stmt`` is a lazy-RO *reprogramming* ``if`` (always-true).
 
@@ -4744,6 +5125,22 @@ def _emit_one_oracle_chain(
             )
             if twin is not None:
                 return twin
+            if full_coupling is not None and clone_alias:
+                plain = _synth_init_plain_reorder(
+                    modules,
+                    oracle_name,
+                    left_states[0],
+                    right_states[0],
+                    external_module_types,
+                    method_return_types,
+                    flat_params,
+                    det_methods,
+                    clone_alias,
+                    full_coupling,
+                    hop_index=hop_index,
+                )
+                if plain is not None:
+                    return plain
             # Backbones cannot be aligned (an extra call that is not a droppable
             # deterministic method): the peel does not apply. Emit a targeted,
             # honest admit rather than a silently-failing ``sim``.
@@ -4849,6 +5246,20 @@ def _emit_one_oracle_chain(
             if decaps_val_acc is not None:
                 decaps_val_acc.add(sr_scheme)
             return [], sr_body, set()
+        ro_route = _challenge_reorder_route(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            left_wrapper_expr,
+            right_wrapper_expr,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            clone_alias or {},
+        )
+        if ro_route is not None:
+            return [], ro_route, set()
 
     # Field-aware coupling: identical-state hops keep the whole-glob equality
     # (byte-identical for clean proofs); a hop whose two sides differ in glob
@@ -5958,6 +6369,7 @@ def _flat_state_module(  # pylint: disable=too-many-arguments,too-many-positiona
     module_params: list[ec_ast.ModuleParam],
     emit_state_vars: bool = False,
     use_canonical_fields: bool = False,
+    no_shadow_fields: bool = False,
 ) -> ec_ast.Module:
     """Translate one intermediate flat-state game to an EC ``Module`` AST."""
     prepared = _normalize_for_ec(
@@ -5970,6 +6382,7 @@ def _flat_state_module(  # pylint: disable=too-many-arguments,too-many-positiona
         module_params=module_params,
         emit_state_vars=emit_state_vars,
         use_canonical_fields=use_canonical_fields,
+        no_shadow_fields=no_shadow_fields,
     )
 
 
@@ -6839,6 +7252,26 @@ def _challenge_hop2_wrapper_route(  # pylint: disable=too-many-arguments,too-man
     return ([_res_tag(SYNTH_PARAM), *body[1:]], (t_module, ect_method), "")
 
 
+def _functionalized_challenge_closer(*bodies: list[ec_ast.EcStmt]) -> str:
+    """Closer for a challenge whose two functionalized decaps booleans are EQUAL
+    under the key coupling. A TWO-KEM body (``decaps`` on >=2 distinct KEM modules,
+    e.g. CK/UK's ``KEM_PQ`` + ``KEM_T``) builds a huge KDF-concat ground term a flat
+    ``skip => /#`` can't close by congruence -> split it into leaf coupling facts
+    with ``congr``. A single-KEM body (CG/UG single-keypair, DIFFKEY two-keypair --
+    one KEM + an ``NG`` group) closes with the flat ``skip => /#``; ``congr`` there
+    OVER-splits into an unprovable residual. Validated: `.ec-tmp/h0_lazyro_2kem.ec`
+    (congr) + CG/UG/DIFFKEY hop_0_challenge (skip => /#)."""
+    decaps_mods = {
+        s.callee
+        for body in bodies
+        for s in _exec_stmts(body)
+        if isinstance(s, ec_ast.Call) and (s.callee or "").endswith(".decaps")
+    }
+    if len(decaps_mods) >= 2:
+        return "skip => />; do ! congr; smt()."
+    return "skip => /#."
+
+
 def _challenge_lazyro_route(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -6956,7 +7389,122 @@ def _challenge_lazyro_route(  # pylint: disable=too-many-arguments,too-many-posi
         # decaps introduces (``dk <- dk_PQ_0; ct <- ct0.`1``) that ``inline *``
         # exposes but the flat-state peel (VarDecl-filtered) doesn't wp away.
         "wp.",
-        "skip => /#.",
+        _functionalized_challenge_closer(gbody, rbody),
+        "qed.",
+    ]
+
+
+def _challenge_reorder_route(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    left_wrapper_expr: str,
+    right_wrapper_expr: str,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    clone_alias: dict[str, str],
+) -> list[str] | None:
+    """Both-expanded coupled-key challenge with a deterministic decaps REORDER (the
+    two-KEM KeyGenEquiv reprogramming hop ``R_LazyRO_L ~ R_KG_L``): both reductions
+    run the SAME abstract decaps/encode/KDF/``H.evaluate`` calls over their OWN
+    stored keys (coupled cross-name by the lemma pre), differing only in call ORDER
+    (one interleaves ``[PQ0,T0,PQ1,T1]``, the other batches ``[PQ0,PQ1,T0,T1]``).
+    ``sim`` cannot relate the cross-named coupled fields under a reorder, so the
+    oracle otherwise admits. Functionalize EVERY call on BOTH sides to its ``ev_*``
+    form (order-independent pure assignments under ``wp``) then close
+    ``skip => />; do ! congr; smt()`` -- congr splits the KDF-concat equality into
+    leaf coupling facts ``smt`` discharges individually. Gated tightly (straight
+    bodies -- no case-split ``if``; no ``dk0`` game field, which the lazy-RO route
+    owns; equal abstract-call MULTISETS with calls present) so every other challenge
+    stays byte-identical. Validated on ``.ec-tmp/keep/chal_reorder.ec``."""
+    # pylint: disable=protected-access
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+    lmod = _flat_state_module(
+        modules,
+        "Chal_L",
+        lproj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    rmod = _flat_state_module(
+        modules,
+        "Chal_R",
+        rproj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    if not lmod.procs or not rmod.procs:
+        return None
+    lproc, rproc = lmod.procs[0], rmod.procs[0]
+
+    def _body(proc: ec_ast.Proc) -> list[ec_ast.EcStmt]:
+        return [
+            s for s in proc.body if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+        ]
+
+    lbody, rbody = _body(lproc), _body(rproc)
+    # Gate: straight bodies, no dk0 (the lazy-RO route owns the whole-decaps game),
+    # equal abstract-call multisets (a pure reorder) with calls to functionalize.
+    if any(isinstance(s, ec_ast.If) for s in _exec_stmts(lbody) + _exec_stmts(rbody)):
+        return None
+    if any(f.name == "dk0" for f in left_state0.fields + right_state0.fields):
+        return None
+    l_seq = [s.callee for s in _exec_stmts(lbody) if isinstance(s, ec_ast.Call)]
+    r_seq = [s.callee for s in _exec_stmts(rbody) if isinstance(s, ec_ast.Call)]
+    # Require calls present, the SAME multiset, and a GENUINE reorder (different
+    # order): an order-MATCHING challenge is handled by the earlier routes / generic
+    # ``sim`` and stays byte-identical (this route declines).
+    if not l_seq or sorted(l_seq) != sorted(r_seq) or l_seq == r_seq:
+        return None
+    lmods, rmods = _callee_mods(lbody, clone_alias), _callee_mods(rbody, clone_alias)
+    ct_params = [p.name for p in lproc.params]
+    lfields = [f.name for f in left_state0.fields if "@" not in f.name]
+    rfields = [f.name for f in right_state0.fields if "@" not in f.name]
+    lge = [f"gg{i}" for i in range(len(lmods))]
+    rge = [f"gr{i}" for i in range(len(rmods))]
+    lfe = [f"DG{i}" for i in range(len(lfields))]
+    rfe = [f"DR{i}" for i in range(len(rfields))]
+    lce = [f"CG{i}" for i in range(len(ct_params))]
+    rce = [f"CR{i}" for i in range(len(ct_params))]
+    exs = (
+        [f"(glob {m})" "{1}" for m in lmods]
+        + [f"{_ref_base(left_wrapper_expr)}.{f}" "{1}" for f in lfields]
+        + [f"{c}" "{1}" for c in ct_params]
+        + [f"(glob {m})" "{2}" for m in rmods]
+        + [f"{_ref_base(right_wrapper_expr)}.{f}" "{2}" for f in rfields]
+        + [f"{c}" "{2}" for c in ct_params]
+    )
+    elims = lge + lfe + lce + rge + rfe + rce
+    lrename: dict[str, str] = dict(zip(lfields, lfe))
+    lrename.update(zip(ct_params, lce))
+    rrename: dict[str, str] = dict(zip(rfields, rfe))
+    rrename.update(zip(ct_params, rce))
+    lenv = bch._env_over(lbody, lrename, clone_alias)
+    renv = bch._env_over(rbody, rrename, clone_alias)
+    lpeel = bch._wp_before_calls(
+        bch._peel_stmts(lbody, lenv, dict(zip(lmods, lge)), "{1}")
+    )
+    rpeel = bch._wp_before_calls(
+        bch._peel_stmts(rbody, renv, dict(zip(rmods, rge)), "{2}")
+    )
+    # pylint: enable=protected-access
+    return [
+        _res_tag(SYNTH_PARAM),
+        "proc.",
+        "inline *.",
+        f"exists* {', '.join(exs)};",
+        f"elim* => {' '.join(elims)}.",
+        *lpeel,
+        *rpeel,
+        "wp.",
+        _functionalized_challenge_closer(lbody, rbody),
         "qed.",
     ]
 
@@ -8944,9 +9492,16 @@ def _init_topdown_leg(  # pylint: disable=too-many-arguments,too-many-positional
     left_mod: str,
     right_mod: str,
     field_names: set[str],
+    closer: str = "skip => /#.",
 ) -> list[str]:
     """Field-aware top-down ``seq 1 1`` peel functionalizing ``call_side``'s det
     calls -- the init variant of :func:`_det_topdown_leg`.
+
+    ``closer`` is the final tactic (default ``skip => /#``). The plain-reorder
+    route overrides it: its leg post carries the returned pk TUPLE whose
+    component equalities are all in the invariant, but the plain ``/#`` smt does
+    not scale to the deep pair-nesting -- ``skip => /> /#`` (progressive simplify
+    then smt) closes it.
 
     An init flat state packs its NG-derived results into *module fields* mid-body
     (``ek0 <- _tup.`1`` interspersed between keygen blocks), and a module field
@@ -9003,7 +9558,7 @@ def _init_topdown_leg(  # pylint: disable=too-many-arguments,too-many-positional
                 tac.append("call (_: true); auto.")
         else:
             tac.append("auto.")
-    tac.append("skip => /#.")
+    tac.append(closer)
     return tac
 
 

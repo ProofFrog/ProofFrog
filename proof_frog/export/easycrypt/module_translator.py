@@ -765,6 +765,7 @@ class ModuleTranslator:
         module_params: list[ec_ast.ModuleParam] | None = None,
         emit_state_vars: bool = False,
         use_canonical_fields: bool = False,
+        no_shadow_fields: bool = False,
     ) -> ec_ast.Module:
         """Translate a parameterless intermediate game-state AST.
 
@@ -814,11 +815,23 @@ class ModuleTranslator:
             if emit_state_vars and use_canonical_fields
             else _field_renames_for(game.fields)
         )
-        state_fields = (
-            _cross_oracle_field_names(game.fields, game.methods)
-            if emit_state_vars
-            else None
-        )
+        # ``no_shadow_fields`` protects EVERY field (not just the cross-oracle
+        # ones) from the statement translator's local-shadowing, so a bare
+        # sample/assign WRITES the module field instead of a vestigial local. The
+        # plain-reorder init route couples every flat-state field across the
+        # RawReduction<->flat seam (``R.s_T_0{1} = flat.s_T_0{2}``); an init-only
+        # sampled field left shadowed stays ``witness`` and the coupling is
+        # unprovable. Gated to that route's own flat modules, so every other
+        # flat state stays byte-identical.
+        if emit_state_vars and no_shadow_fields:
+            _all_fields = {fld.name for fld in game.fields}
+            state_fields: list[set[str]] | None = [
+                set(_all_fields) for _ in game.methods
+            ]
+        elif emit_state_vars:
+            state_fields = _cross_oracle_field_names(game.fields, game.methods)
+        else:
+            state_fields = None
         procs = [
             self._translate_method(
                 method,

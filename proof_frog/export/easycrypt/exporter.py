@@ -517,6 +517,83 @@ def _is_reprogram_hash_if(node: frog_ast.ASTNode) -> bool:
     )
 
 
+def _is_inline_challenger_hash(node: frog_ast.ASTNode) -> bool:
+    """A nested ``challenger.Hash(seed)`` call. CK/UK inline it into the
+    ``DeriveKeyPair`` slice args instead of factoring ``y = challenger.Hash(seed)``
+    (CG/UG factor it out)."""
+    return (
+        isinstance(node, frog_ast.FuncCall)
+        and isinstance(node.func, frog_ast.FieldAccess)
+        and isinstance(node.func.the_object, frog_ast.Variable)
+        and node.func.the_object.name == "challenger"
+        and node.func.name.lower() == "hash"
+    )
+
+
+class _InlineHashSliceCollector(visitors.Visitor[list[frog_ast.Slice]]):
+    """Collect every ``Slice`` whose array is an inline ``challenger.Hash(seed)``."""
+
+    def __init__(self) -> None:
+        self.slices: list[frog_ast.Slice] = []
+
+    def result(self) -> list[frog_ast.Slice]:
+        return self.slices
+
+    def leave_slice(self, node: frog_ast.Slice) -> None:
+        if _is_inline_challenger_hash(node.the_array):
+            self.slices.append(node)
+
+
+def _hoist_inline_challenger_hashes(init: frog_ast.Method) -> frog_ast.Method:
+    """Return a copy of ``init`` with each distinct inline ``challenger.Hash(seed)``
+    hoisted into a synthetic typed ``__hash_k <- challenger.Hash(seed)`` assignment,
+    the nested occurrences rewritten to ``__hash_k`` so the lazy-RO coupling
+    extraction's hash-var model sees them (CK/UK inline these; CG/UG already factor
+    them out). No-op -- the caller keeps the original ``init`` -- when the source
+    already has a top-level ``y <- Hash(seed)`` (CG/UG stay byte-identical) or when a
+    hash's full seed-expansion width can't be uniquely determined (=> the coupling
+    stays admit rather than wrong). The width is the slice ``end`` that is NOT also a
+    slice ``start``: the last partition of a seed expansion covers its full length."""
+    if any(
+        isinstance(s, frog_ast.Assignment) and _is_inline_challenger_hash(s.value)
+        for s in init.block.statements
+    ):
+        return init
+    new_init = copy.deepcopy(init)
+    collector = _InlineHashSliceCollector()
+    collector.visit(new_init.block)
+    slices = collector.result()
+    if not slices:
+        return init
+    by_key: dict[str, list[frog_ast.Slice]] = {}
+    for sl in slices:
+        by_key.setdefault(str(sl.the_array), []).append(sl)
+    # key -> (synthetic var, its full-seed BitString type, the hash call to hoist)
+    info: dict[str, tuple[str, frog_ast.Type, frog_ast.Expression]] = {}
+    for i, (key, group) in enumerate(by_key.items()):
+        starts = {str(sl.start) for sl in group}
+        width_ends = [sl.end for sl in group if str(sl.end) not in starts]
+        if len(width_ends) != 1:
+            return init
+        info[key] = (
+            f"__hash_{i}",
+            frog_ast.BitStringType(copy.deepcopy(width_ends[0])),
+            copy.deepcopy(group[0].the_array),
+        )
+    block = new_init.block
+    for sl in slices:
+        new_sl = frog_ast.Slice(
+            frog_ast.Variable(info[str(sl.the_array)][0]), sl.start, sl.end
+        )
+        block = visitors.ReplaceTransformer(sl, new_sl).transform(block)
+    hoisted: list[frog_ast.Statement] = [
+        frog_ast.Assignment(ty, frog_ast.Variable(var), call)
+        for (var, ty, call) in info.values()
+    ]
+    new_init.block = frog_ast.Block(hoisted + list(block.statements))
+    return new_init
+
+
 def _prime_group_names(proof: frog_ast.ProofFile) -> set[str]:
     """Group names the proof declared ``requires <G>.order is prime;`` for.
 
@@ -4646,6 +4723,7 @@ def export_proof_file(proof_path: str) -> str:
         init = _find_init(red)
         if init is None:
             return ""
+        init = _hoist_inline_challenger_hashes(init)
         red_base = pt.module_base_name(resolver.resolve(red_step).module_expr)
         # pylint: disable=protected-access
         fld_ty = {f.name: top_types.translate_type(f.type).text for f in red.fields}
@@ -4724,12 +4802,57 @@ def export_proof_file(proof_path: str) -> str:
             )
 
         conj: list[str] = []
-        for fld in red.fields:
-            v: frog_ast.Expression | None = val.get(fld.name)
+
+        def _slice_result_ty(sl: frog_ast.Slice) -> str:
+            return top_types.translate_type(
+                frog_ast.BitStringType(
+                    frog_ast.BinaryOperation(
+                        frog_ast.BinaryOperators.SUBTRACT, sl.end, sl.start
+                    )
+                )
+            ).text
+
+        def _deref(name: str) -> frog_ast.Expression | None:
+            e: frog_ast.Expression | None = val.get(name)
             hops = 0
-            while isinstance(v, frog_ast.Variable) and v.name in val and hops < 4:
-                v = val[v.name]
+            while isinstance(e, frog_ast.Variable) and e.name in val and hops < 4:
+                e = val[e.name]
                 hops += 1
+            return e
+
+        def _kp_slice(arr: str) -> frog_ast.Slice | None:
+            """The RO slice arg of ``arr <@ <M>.derivekeypair(<slice of y_i>)``."""
+            t = val.get(arr)
+            if (
+                isinstance(t, frog_ast.FuncCall)
+                and isinstance(t.func, frog_ast.FieldAccess)
+                and isinstance(t.func.the_object, frog_ast.Variable)
+                and t.func.name.lower() == "derivekeypair"
+                and len(t.args) == 1
+            ):
+                return _slice_of_hash(t.args[0])
+            return None
+
+        # Tuple vars whose ``derivekeypair`` is a GENUINE keypair (its ``.`2`` decaps
+        # key is stored in a NON-slice-typed field -> not the SeededKEMWrapper seed
+        # passthrough). For these, BOTH projections need coupling (the KDF reads the
+        # ``.`1`` encaps key too); the wrapper's ``.`1`` stays uncoupled (CG/UG byte-
+        # identical), since only its slice-typed ``.`2`` is coupled below.
+        genuine_kp: set[str] = set()
+        for fld in red.fields:
+            v = _deref(fld.name)
+            if (
+                isinstance(v, frog_ast.ArrayAccess)
+                and isinstance(v.the_array, frog_ast.Variable)
+                and isinstance(v.index, frog_ast.Integer)
+                and v.index.num == 1
+                and (sl := _kp_slice(v.the_array.name)) is not None
+                and fld_ty.get(fld.name) != _slice_result_ty(sl)
+            ):
+                genuine_kp.add(v.the_array.name)
+
+        for fld in red.fields:
+            v = _deref(fld.name)
             if v is None:
                 continue
             efld = mt._ec_field_name(fld.name)
@@ -4747,34 +4870,29 @@ def export_proof_file(proof_path: str) -> str:
                     f"({_render_slice(sl)})"
                 )
                 continue
-            # (a) wrapper-passthrough ``_tup[1]`` from ``derivekeypair(<slice>)``:
-            # the concrete wrapper returns ``(ek, seed)`` so ``_tup[1]`` IS the
-            # seed -> emit the slice directly (field type == slice-result type).
-            if (
+            if not (
                 isinstance(v, frog_ast.ArrayAccess)
                 and isinstance(v.the_array, frog_ast.Variable)
                 and isinstance(v.index, frog_ast.Integer)
-                and v.index.num == 1
+                and (tup := val.get(v.the_array.name)) is not None
+                and isinstance(tup, frog_ast.FuncCall)
+                and isinstance(tup.func, frog_ast.FieldAccess)
+                and isinstance(tup.func.the_object, frog_ast.Variable)
+                and (sl := _kp_slice(v.the_array.name)) is not None
             ):
-                tup = val.get(v.the_array.name)
-                if (
-                    isinstance(tup, frog_ast.FuncCall)
-                    and isinstance(tup.func, frog_ast.FieldAccess)
-                    and tup.func.name.lower() == "derivekeypair"
-                    and len(tup.args) == 1
-                    and (sl := _slice_of_hash(tup.args[0])) is not None
-                ):
-                    slice_ty = top_types.translate_type(
-                        frog_ast.BitStringType(
-                            frog_ast.BinaryOperation(
-                                frog_ast.BinaryOperators.SUBTRACT, sl.end, sl.start
-                            )
-                        )
-                    ).text
-                    if fld_ty.get(fld.name) == slice_ty:
-                        conj.append(
-                            f"{red_base}.{efld}{{{red_side}}} = {_render_slice(sl)}"
-                        )
+                continue
+            mod = tup.func.the_object.name
+            if v.index.num == 1 and fld_ty.get(fld.name) == _slice_result_ty(sl):
+                # (a) wrapper-passthrough ``_tup[1]`` IS the seed -> the slice itself.
+                conj.append(f"{red_base}.{efld}{{{red_side}}} = {_render_slice(sl)}")
+            elif v.the_array.name in genuine_kp and v.index.num in (0, 1):
+                # (c) genuine (RAW-KEM, e.g. two-KEM ``KEM_T``) keypair projection:
+                # ``.`1`` (stored encaps key read by the KDF) or ``.`2`` (decaps key).
+                conj.append(
+                    f"{red_base}.{efld}{{{red_side}}} = "
+                    f"({mod}_c.ev_derivekeypair ({_render_slice(sl)}))"
+                    f".`{v.index.num + 1}"
+                )
         # pylint: enable=protected-access
         return " /\\ ".join(conj)
 

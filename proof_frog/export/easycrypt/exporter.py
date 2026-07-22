@@ -4646,8 +4646,6 @@ def export_proof_file(proof_path: str) -> str:
         if init is None:
             return ""
         red_base = pt.module_base_name(resolver.resolve(red_step).module_expr)
-        game_ref = _live_state_ref(game_step)
-        ro_lookup = f"({ro_ref}{{{game_side}}} {game_ref}{{{game_side}}})"
         # pylint: disable=protected-access
         fld_ty = {f.name: top_types.translate_type(f.type).text for f in red.fields}
         type_map: dict[str, frog_ast.Type] = {f.name: f.type for f in red.fields}
@@ -4661,8 +4659,17 @@ def export_proof_file(proof_path: str) -> str:
         exprs = expr_translator.ExpressionTranslator(
             top_types, type_of_factory(type_map, {})
         )
-        # The hash-result local (y_0): the var assigned ``challenger.Hash(...)``.
-        hash_var: str | None = None
+        # The hash-result locals (``y_0``, ``y_1``, ... one per stored seed): each
+        # is the var assigned ``challenger.Hash(seed_i)``, in program order. A
+        # DIFFKEY/two-keypair reduction hashes TWO seeds, deriving keypair-0 from
+        # ``y_0`` and keypair-1 from ``y_1``; the game stores TWO seeds ``dk0``,
+        # ``dk1`` and re-derives each in-challenge via ``RO[dk_i]``. So the i-th
+        # hash result couples to ``RO[game seed field i]`` (both draw keypair-0
+        # before keypair-1: the reduction hashes ``seed_0`` first and the game
+        # declares ``dk0`` first). A single-keypair (SAMEKEY) reduction has one
+        # hash var and one game field, so this reduces to ``RO[dk0]`` for every
+        # field -- byte-identical.
+        hash_vars: list[str] = []
         val: dict[str, frog_ast.Expression] = {}
         for stmt in init.block.statements:
             if isinstance(stmt, frog_ast.Assignment) and isinstance(
@@ -4674,22 +4681,46 @@ def export_proof_file(proof_path: str) -> str:
                     and isinstance(stmt.value.func, frog_ast.FieldAccess)
                     and stmt.value.func.name.lower() == "hash"
                 ):
-                    hash_var = stmt.var.name
-        if hash_var is None:
+                    hash_vars.append(stmt.var.name)
+        if not hash_vars:
             return ""
-        hash_ec = exprs.translate(frog_ast.Variable(hash_var))
+        # ``_live_state_ref`` yields ``<holder>.dk0`` (game field 0) and records the
+        # holder in ``live_state_holders``; the game's remaining seed fields are its
+        # siblings on the same holder, in declaration order (matching the hash
+        # order). Bail (admit) if the game does not expose one seed field per hash.
+        game_ref0 = _live_state_ref(game_step)
+        game_holder = game_ref0.rsplit(".", 1)[0]
+        outer_gf = game_file_by_name.get(proof.theorem.name)
+        game_seed_fields = (
+            [f.name for f in outer_gf.games[0].fields]
+            if outer_gf is not None and outer_gf.games
+            else []
+        )
+        if len(game_seed_fields) < len(hash_vars):
+            return ""
+        # Per-hash-var: its translated EC form and its ``RO[game seed field i]``.
+        hv_ec = {hv: exprs.translate(frog_ast.Variable(hv)) for hv in hash_vars}
+        hv_lookup = {
+            hv: f"({ro_ref}{{{game_side}}} {game_holder}.{game_seed_fields[i]}"
+            f"{{{game_side}}})"
+            for i, hv in enumerate(hash_vars)
+        }
+        hash_var_set = set(hash_vars)
 
         def _slice_of_hash(e: frog_ast.Expression) -> frog_ast.Slice | None:
             if (
                 isinstance(e, frog_ast.Slice)
                 and isinstance(e.the_array, frog_ast.Variable)
-                and e.the_array.name == hash_var
+                and e.the_array.name in hash_var_set
             ):
                 return e
             return None
 
         def _render_slice(sl: frog_ast.Slice) -> str:
-            return re.sub(rf"\b{re.escape(hash_ec)}\b", ro_lookup, exprs.translate(sl))
+            hv = sl.the_array.name  # type: ignore[attr-defined]
+            return re.sub(
+                rf"\b{re.escape(hv_ec[hv])}\b", hv_lookup[hv], exprs.translate(sl)
+            )
 
         conj: list[str] = []
         for fld in red.fields:
@@ -4701,7 +4732,7 @@ def export_proof_file(proof_path: str) -> str:
             if v is None:
                 continue
             efld = mt._ec_field_name(fld.name)
-            # (b) direct functionalized call ``<M>.<m>(<slice of y_0>)``.
+            # (b) direct functionalized call ``<M>.<m>(<slice of y_i>)``.
             if (
                 isinstance(v, frog_ast.FuncCall)
                 and isinstance(v.func, frog_ast.FieldAccess)

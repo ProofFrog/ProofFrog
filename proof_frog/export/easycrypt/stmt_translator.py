@@ -621,7 +621,14 @@ class StatementTranslator:
         the_type = stmt.the_type if stmt.the_type is not None else stmt.sampled_from
         ec_type = self._types.translate_type(the_type)
         ec_var = self._exprs.ec_name(var.name)
-        decls.append(ec_ast.VarDecl(ec_var, ec_type))
+        # A BARE exclusion draw onto a MODULE FIELD (``s1 <- BitString<n> \ {s0}``
+        # where ``s1`` is a game field a later oracle reads -- the two-seed lazy-RO
+        # challenger's second seed) must NOT get a shadowing local ``var`` decl, or
+        # the field stays ``witness`` and ``hash``'s ``if (x = s1)`` reprogramming
+        # reads the default. Mirrors :func:`_translate_sample`'s field guard: a
+        # TYPED draw (explicit local) or a non-field name still gets its decl.
+        if stmt.the_type is not None or var.name not in self._field_names:
+            decls.append(ec_ast.VarDecl(ec_var, ec_type))
         self._type_map[var.name] = the_type
         base_distr = self._types.distr_for(ec_type)
         excluded = stmt.unique_set

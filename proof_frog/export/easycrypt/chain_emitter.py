@@ -3669,6 +3669,220 @@ def _lazyro_front_swaps(
     return swaps
 
 
+def _front_swaps_stable(
+    cur_samples: list[tuple[str, str]], target_distrs: list[str], side: int
+) -> list[str] | None:
+    """``swap{side}`` tactics hoisting a body's samples to the front so their
+    distribution sequence becomes ``target_distrs``, tolerating REPEATED
+    distributions AND a forward sample DEPENDENCY (an exclusion sample
+    ``seed_1 <$ d \\ pred1 seed_0`` that reads an earlier sample).
+
+    ``cur_samples`` is the ``(var, distr)`` sequence of the body's samples in
+    program order. Unlike :func:`_lazyro_front_swaps` (which addresses each
+    sample by its distribution and so requires the distributions distinct), this
+    matches the ``k``-th occurrence of a distribution to the ``k``-th occurrence
+    in ``target_distrs`` -- a stable pairing, correct for the two-keypair binding
+    init where both sides draw keypair-0's seeds before keypair-1's. Excluded-lambda
+    distrs are normalized (``pred1 X`` -> ``pred1 _``) for MATCHING (the two sides
+    name the excluded seed differently) while dependency detection keeps the RAW
+    distr's var refs.
+
+    A plain ``<$`` is glob/data-independent of everything before it, so hoisting
+    it to the front (``^ <${occ} @ 0``) is always an EC-valid ``swap``. An
+    EXCLUSION sample reads its predecessor and may NOT be hoisted above it: when
+    the dependency is its target-adjacent predecessor (``order[p-1]``), the pair is
+    placed together -- the dependency ``@ 0`` and the dependent ``@ 1`` -- then
+    subsequent front hoists push the pair to its slot. Returns ``None`` on a
+    non-permutation or an unhandled dependency. For DISTINCT distributions with no
+    dependency it emits the identical swap list as :func:`_lazyro_front_swaps`.
+    """
+
+    def _norm(d: str) -> str:
+        return re.sub(r"\(pred1 [^)]*\)", "(pred1 _)", d)
+
+    cur_match = [_norm(d) for _, d in cur_samples]
+    target_match = [_norm(d) for d in target_distrs]
+    if sorted(cur_match) != sorted(target_match):
+        return None
+    if cur_match == target_match:
+        return []
+    target_positions_by_distr: dict[str, list[int]] = {}
+    for pos, distr in enumerate(target_match):
+        target_positions_by_distr.setdefault(distr, []).append(pos)
+    seen: Counter[str] = Counter()
+    target_pos: list[int] = []
+    for distr in cur_match:
+        occ_index = seen[distr]
+        seen[distr] += 1
+        target_pos.append(target_positions_by_distr[distr][occ_index])
+    order = sorted(range(len(cur_samples)), key=lambda i: target_pos[i])
+    var_to_index = {var: i for i, (var, _) in enumerate(cur_samples)}
+    deps: dict[int, set[int]] = {}
+    for i, (_, distr) in enumerate(cur_samples):
+        refs = {
+            var_to_index[m.group(0)]
+            for m in re.finditer(r"[A-Za-z_][A-Za-z0-9_]*", distr)
+            if m.group(0) in var_to_index and var_to_index[m.group(0)] != i
+        }
+        if refs:
+            deps[i] = refs
+    cur = list(range(len(cur_samples)))
+
+    def _hoist(orig_idx: int, dest: int) -> str | None:
+        occ = cur.index(orig_idx)
+        if occ == dest:
+            return None
+        cur.insert(dest, cur.pop(occ))
+        return f"swap{{{side}}} ^ <${{{occ + 1}}} @ {dest}."
+
+    swaps: list[str] = []
+    placed: set[int] = set()
+    for pos in reversed(range(len(order))):
+        if pos in placed:
+            continue
+        want = order[pos]
+        if want in deps:
+            if pos == 0 or deps[want] != {order[pos - 1]}:
+                return None
+            for swap in (_hoist(order[pos - 1], 0), _hoist(want, 1)):
+                if swap is not None:
+                    swaps.append(swap)
+            placed.add(pos - 1)
+        else:
+            swap = _hoist(want, 0)
+            if swap is not None:
+                swaps.append(swap)
+    return swaps
+
+
+def _collapse_to_true(
+    body: list[ec_ast.EcStmt],
+) -> tuple[list[ec_ast.EcStmt], list[str]] | None:
+    """Collapse every always-decidable ``if`` in ``body`` to its TRUE branch,
+    returning ``(collapsed_stmts, rconds)`` where ``rconds`` is the ordered list
+    of ``"rcondt"``/``"rcondf"`` selectors for the genuine reprogramming ``if``s
+    only.
+
+    The two-seed reprogramming init nests reprogramming ``if``s whose always-true
+    branch is NOT always the then-branch: ``if (seed_1 = s0) {concat y0} else {
+    if (seed_1 = s1) {concat y1} else {h}}`` takes the ELSE (``seed_1 = s1``, since
+    ``seed_1`` is the second seed) then the inner then. Each guard is evaluated
+    against the body's own assign chain (built incrementally as the taken branches
+    are descended, so a nested early-return flag is resolvable) + the
+    distinct-sample fact (two different ``<$`` seeds are distinct -- for the lambda
+    seeds provably so via the exclusion sampling; EC re-checks each ``rcondf`` so a
+    wrong pick just rejects).
+
+    An ``rcondt``/``rcondf`` is emitted ONLY for a seed-EQUALITY guard (a genuine
+    reprogramming ``if``). The flat-state ``! _rN`` / bare-``_rN`` early-return
+    artifacts are NOT present in the rendered EC module, so a rcond for them would
+    land on the next real ``if`` and mis-collapse it -- they are collapsed SILENTLY.
+    A single-keypair (SAMEKEY) reprogram yields one ``rcondt``. Returns ``None`` if
+    any guard cannot be decided.
+    """
+    assign_map: dict[str, str] = {}
+    sample_vars: set[str] = set()
+
+    def _split_commas(inner: str) -> list[str]:
+        parts, depth, cur = [], 0, ""
+        for ch in inner:
+            if ch in "([":
+                depth += 1
+            elif ch in ")]":
+                depth -= 1
+            if ch == "," and depth == 0:
+                parts.append(cur)
+                cur = ""
+            else:
+                cur += ch
+        parts.append(cur)
+        return [p.strip() for p in parts]
+
+    def _resolve_tuple(expr: str) -> list[str] | None:
+        expr = expr.strip()
+        if expr in assign_map:
+            return _resolve_tuple(assign_map[expr])
+        if expr.startswith("(") and expr.endswith(")"):
+            return _split_commas(expr[1:-1])
+        return None
+
+    def _resolve(expr: str, depth: int = 0) -> str | None:
+        expr = expr.strip()
+        if depth > 8 or not expr:
+            return None
+        if expr in sample_vars:
+            return expr
+        proj = re.match(r"^(.+)\.`(\d+)$", expr)
+        if proj is not None:
+            comps = _resolve_tuple(proj.group(1))
+            idx = int(proj.group(2))
+            if comps is not None and 1 <= idx <= len(comps):
+                return _resolve(comps[idx - 1], depth + 1)
+            return None
+        if expr in assign_map:
+            return _resolve(assign_map[expr], depth + 1)
+        return None
+
+    def _resolve_bool(expr: str, depth: int = 0) -> bool | None:
+        expr = expr.strip()
+        if depth > 8:
+            return None
+        if expr == "true":
+            return True
+        if expr == "false":
+            return False
+        if expr in assign_map:
+            return _resolve_bool(assign_map[expr], depth + 1)
+        return None
+
+    def _guard_true(guard: str) -> bool | None:
+        g = guard.strip()
+        if g.startswith("!"):
+            val = _resolve_bool(g[1:])
+            return (not val) if val is not None else None
+        if "=" in g and "<>" not in g:
+            lhs, rhs = g.split("=", 1)
+            lv, rv = _resolve(lhs), _resolve(rhs)
+            if lv is not None and rv is not None:
+                if lv == rv:
+                    return True
+                if lv in sample_vars and rv in sample_vars:
+                    return False  # two distinct samples (EC re-checks via rcondf)
+            return None
+        return _resolve_bool(g)  # a bare bool var early-return guard
+
+    def _walk(
+        stmts: list[ec_ast.EcStmt],
+    ) -> tuple[list[ec_ast.EcStmt], list[str]] | None:
+        out: list[ec_ast.EcStmt] = []
+        rconds: list[str] = []
+        for stmt in stmts:
+            if isinstance(stmt, ec_ast.Sample):
+                sample_vars.add(stmt.var)
+                out.append(stmt)
+            elif isinstance(stmt, ec_ast.Assign):
+                assign_map[stmt.var] = stmt.rhs
+                out.append(stmt)
+            elif isinstance(stmt, ec_ast.If):
+                truth = _guard_true(stmt.guard)
+                if truth is None:
+                    return None
+                g = stmt.guard.strip()
+                if "=" in g and "<>" not in g and not g.startswith("!"):
+                    rconds.append("rcondt" if truth else "rcondf")
+                branch = stmt.then_body if truth else (stmt.else_body or [])
+                sub = _walk(branch)
+                if sub is None:
+                    return None
+                out.extend(sub[0])
+                rconds.extend(sub[1])
+            else:
+                out.append(stmt)
+        return out, rconds
+
+    return _walk(body)
+
+
 def _synth_reprogram_lazy_init(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -3723,31 +3937,53 @@ def _synth_reprogram_lazy_init(  # pylint: disable=too-many-arguments,too-many-p
     if (l_reprog > 0) == (r_reprog > 0):
         return None  # exactly one side must carry the reprogramming if(s)
     if l_reprog > 0:
-        if_side, other_side, if_body, other_body, n_ifs = 1, 2, l_body, r_body, l_reprog
+        if_side, other_side, if_body, other_body = 1, 2, l_body, r_body
     else:
-        if_side, other_side, if_body, other_body, n_ifs = 2, 1, r_body, l_body, r_reprog
-    collapsed = _collapse_all_ifs(if_body)
+        if_side, other_side, if_body, other_body = 2, 1, r_body, l_body
+    # Guard-aware collapse of BOTH sides: the two-seed reprogramming nests ``if``s
+    # whose always-true branch is not always the then-branch (keypair-1's
+    # ``if(seed_1 = s0)`` is FALSE -> its ``concat y1`` is in the else). The KeyGen
+    # side may carry a ``! _rN`` early-return wrapper too. ``_collapse_to_true``
+    # picks the true branch per guard and returns the ordered ``rcondt``/``rcondf``
+    # selectors for the seed-equality reprogramming ``if``s only; a single-keypair
+    # reprogram (SAMEKEY) yields one ``rcondt`` on the if side and ``[]`` on the
+    # KeyGen side -- byte-identical.
+    if_collapse = _collapse_to_true(if_body)
+    other_collapse = _collapse_to_true(other_body)
+    if if_collapse is None or other_collapse is None:
+        return None
+    collapsed, rconds_if = if_collapse
+    collapsed_other, rconds_other = other_collapse
     if_bb = _call_sample_backbone(collapsed)
-    other_bb = _call_sample_backbone(other_body)
+    other_bb = _call_sample_backbone(collapsed_other)
     # the abstract-call callee subsequence must match on both sides
     if [c for k, c in if_bb if k == "call"] != [c for k, c in other_bb if k == "call"]:
         return None
     if_distrs = [
         s.distr for s in _exec_stmts(collapsed) if isinstance(s, ec_ast.Sample)
     ]
-    other_distrs = [
-        s.distr for s in _exec_stmts(other_body) if isinstance(s, ec_ast.Sample)
+    other_samples = [
+        (s.var, s.distr)
+        for s in _exec_stmts(collapsed_other)
+        if isinstance(s, ec_ast.Sample)
     ]
-    if sorted(if_distrs) != sorted(other_distrs):
-        return None  # sample multisets (by distribution) differ
-    if len(set(if_distrs)) != len(if_distrs):
-        return None  # a repeated distribution makes the reorder ambiguous
-    swaps = _lazyro_front_swaps(other_body, if_distrs, other_side)
+    # Reorder the KeyGen side's samples to the reprogram side's distribution order,
+    # stable on repeated distributions and safe with the exclusion (dependent)
+    # lambda seed (:func:`_front_swaps_stable`).
+    swaps = _front_swaps_stable(other_samples, if_distrs, other_side)
     if swaps is None:
         return None
     axioms = _slice_concat_axioms(collapsed)
     tac = ["proc.", "inline *."]
-    tac += [f"rcondt{{{if_side}}} ^if.", "+ auto."] * n_ifs
+    for side, rconds in ((if_side, rconds_if), (other_side, rconds_other)):
+        for rcond in rconds:
+            tac.append(f"{rcond}{{{side}}} ^if.")
+            # ``rcondt`` guards are definitionally true (``+ auto``); ``rcondf``
+            # guards are ``seed_k <> s0`` from the exclusion sampling, discharged
+            # with ``smt(supp_dexcepted)``.
+            tac.append(
+                "+ auto." if rcond == "rcondt" else "+ auto; smt(supp_dexcepted)."
+            )
     tac += swaps
     tac += _backbone_peel(collapsed)
     tac.append("auto => />.")

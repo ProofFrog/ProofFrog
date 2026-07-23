@@ -92,6 +92,28 @@ class _QualifyFields(visitors.Transformer):
         return variable
 
 
+def _own_call_counter(acc: list[int]) -> Callable[[frog_ast.ASTNode], bool]:
+    """A :class:`~...visitors.SearchVisitor` predicate that counts a reduction's
+    OWN abstract calls (everything not routed at ``challenger``) into ``acc[0]``.
+
+    A factory rather than a nested closure so the accumulator is bound as a
+    parameter -- the caller builds one per loop iteration, and a closure over the
+    loop's own variable would bind late.
+    """
+
+    def _count(node: frog_ast.ASTNode) -> bool:
+        if (
+            isinstance(node, frog_ast.FuncCall)
+            and isinstance(node.func, frog_ast.FieldAccess)
+            and isinstance(node.func.the_object, frog_ast.Variable)
+            and node.func.the_object.name != "challenger"
+        ):
+            acc[0] += 1
+        return False
+
+    return _count
+
+
 def _qualify_method_return_type(
     rt: frog_ast.Type,
     inst: str,
@@ -994,9 +1016,9 @@ def _group_only_type_of_factory(
                 # (``challenger_HT``, ``v_QT``). Fall back to the mangled name
                 # (``canonical_form._ec_ident`` is the mangling the flat-state
                 # renamer applied). No-op for an already-valid EC identifier.
-                mangled = canonical_form._ec_ident(
-                    e.name
-                )  # pylint: disable=protected-access
+                # pylint: disable=protected-access
+                mangled = canonical_form._ec_ident(e.name)
+                # pylint: enable=protected-access
                 if mangled != e.name and mangled in local_types:
                     return local_types[mangled]
                 raise KeyError(f"Unknown variable type for {e.name!r}")
@@ -1910,9 +1932,9 @@ def export_proof_file(proof_path: str) -> str:
                 # (``challenger_HT``, ``v_QT``). Fall back to the mangled name
                 # (``canonical_form._ec_ident`` is the mangling the flat-state
                 # renamer applied). No-op for an already-valid EC identifier.
-                mangled = canonical_form._ec_ident(
-                    e.name
-                )  # pylint: disable=protected-access
+                # pylint: disable=protected-access
+                mangled = canonical_form._ec_ident(e.name)
+                # pylint: enable=protected-access
                 if mangled != e.name and mangled in local_types:
                     return local_types[mangled]
                 raise KeyError(f"Unknown variable type for {e.name!r}")
@@ -5107,6 +5129,24 @@ def export_proof_file(proof_path: str) -> str:
                 return [guard.name, left.name, right.name]
             return None
 
+        def _collect(
+            stmts: Sequence[frog_ast.Statement],
+            pname: str | None,
+            collected: list[str],
+        ) -> None:
+            # ``pname``/``collected`` are passed explicitly rather than captured:
+            # ``_extract`` calls this once per method, and a closure over the loop
+            # variables would bind late.
+            for s in stmts:
+                if not isinstance(s, frog_ast.IfStatement):
+                    continue
+                if _is_reprogram_hash_if(s):
+                    fields = _extract_one(s, pname)
+                    if fields is not None:
+                        collected.extend(fields)
+                for blk in s.blocks[1:]:
+                    _collect(blk.statements, pname, collected)
+
         def _extract(methods: list[frog_ast.Method]) -> list[str] | None:
             # Collect EVERY reprogramming ``if`` -- the two-seed challenger/reduction
             # reprograms at BOTH seeds (``if x=s0 return y0_pq||y0_t; if x=s1 return
@@ -5118,19 +5158,7 @@ def export_proof_file(proof_path: str) -> str:
                 params = m.signature.parameters
                 pname = params[0].name if params else None
                 collected: list[str] = []
-
-                def _collect(stmts: Sequence[frog_ast.Statement]) -> None:
-                    for s in stmts:
-                        if not isinstance(s, frog_ast.IfStatement):
-                            continue
-                        if _is_reprogram_hash_if(s):
-                            fields = _extract_one(s, pname)  # noqa: B023
-                            if fields is not None:
-                                collected.extend(fields)  # noqa: B023
-                        for blk in s.blocks[1:]:
-                            _collect(blk.statements)
-
-                _collect(m.block.statements)
+                _collect(m.block.statements, pname, collected)
                 if collected:
                     return collected
             return None
@@ -5770,19 +5798,10 @@ def export_proof_file(proof_path: str) -> str:
                 # ``NG.Exp(...)`` into its own ``<@`` -- so count nested too).
                 _red_init = _find_init(reduction_helper) if reduction_helper else None
                 _peel_n = [0]
-
-                def _count_own_call(node: frog_ast.ASTNode) -> bool:
-                    if (
-                        isinstance(node, frog_ast.FuncCall)
-                        and isinstance(node.func, frog_ast.FieldAccess)
-                        and isinstance(node.func.the_object, frog_ast.Variable)
-                        and node.func.the_object.name != "challenger"
-                    ):
-                        _peel_n[0] += 1
-                    return False
-
                 if _red_init is not None:
-                    visitors.SearchVisitor(_count_own_call).visit(_red_init.block)
+                    visitors.SearchVisitor(_own_call_counter(_peel_n)).visit(
+                        _red_init.block
+                    )
                 _peel_ct = _peel_n[0]
                 if not left_ro_sim_ok:
                     ro_dead_drop_left = _ro_dead_drop_spec(

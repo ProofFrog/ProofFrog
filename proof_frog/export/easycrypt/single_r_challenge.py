@@ -20,19 +20,26 @@ injectivity. The seedbased KDF has 7 leaves / 6 concats, so the navigation is
 generic (:func:`slice_to_leaf`), unlike the fixed 5-leaf two-KEM ``ConcatShape``.
 """
 
+# ``SingleRHopSpec`` and ``binding_challenge.ChallengeHopSpec`` describe two
+# different routes over the same problem domain, so their field *names* coincide
+# (val_lemma_name, game_glob_mods, ct_params, red_base, ...) even though the
+# fields mean different things -- ``red_base`` is the two-KEM ``R_PQ_Bind`` there
+# and the single reduction ``R`` here, and the single-R spec carries seed fields
+# the two-KEM one has no analogue for. Merging them into a shared base would
+# couple two independent synthesizers to keep a name table in sync. The genuinely
+# shared *code* lives in ``challenge_common``.
+# pylint: disable=duplicate-code
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 from . import ec_ast
-from .binding_challenge import (
-    _game_glob_elim,
-    _paren,
-    _peel_stmts,
-    _prefix_and_if,
-    _split_top_args,
-    _subst,
-)
+from .binding_challenge import _game_glob_elim, _peel_stmts, _prefix_and_if
+from .challenge_common import kdf_freeze_and_evaluate, walk_env
+from .challenge_common import paren as _paren
+from .challenge_common import split_top_args as _split_top_args
+from .challenge_common import subst as _subst
 
 
 def parse_left_nested_concat(term: str) -> tuple[list[str], list[str]] | None:
@@ -89,7 +96,7 @@ def _split_top_args_space(rest: str) -> list[str]:
     return [rest.strip()]
 
 
-def slice_to_leaf(
+def slice_to_leaf(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     ops: list[str],
     leaves0: list[str],
     leaves1: list[str],
@@ -206,17 +213,7 @@ def _seed_env(
     """Forward walk over a reduction prefix building ``local -> ev-value``,
     seeded by ``base`` (the seed field + ct params bound to their glob refs or
     elim names)."""
-    env = dict(base)
-    for stmt in prefix:
-        if isinstance(stmt, ec_ast.Assign):
-            env[stmt.var] = _subst(stmt.rhs, env)
-        elif isinstance(stmt, ec_ast.Call):
-            module, _, method = stmt.callee.partition(".")
-            args = [_subst(a, env) for a in _split_top_args(stmt.args)]
-            ev = f"{clone_alias[module]}.ev_{method}"
-            applied = "".join(f" {_paren(a)}" for a in args)
-            env[stmt.var] = f"({ev}{applied})"
-    return env
+    return walk_env(prefix, base, clone_alias)
 
 
 def _ct_leaves(
@@ -261,7 +258,7 @@ def _ct_leaves(
 _EK_ENCODE_METHODS = ("encodeencapskey", "encode")
 
 
-def _ek_leaves(
+def ek_leaves(
     leaves: list[str], clone_alias: dict[str, str], ct_refs: tuple[str, ...] = ()
 ) -> list[tuple[int, str, str, str]]:
     """Find the KDF leaves that encode a component EncapsKey: the two encaps-key
@@ -340,7 +337,7 @@ def single_r_hop0_tactic(
     if parsed0 is None or parse_left_nested_concat(kdf_r1) is None:
         return None
     if is_pk:
-        if len(_ek_leaves(parsed0[1], spec.clone_alias, red_ct_refs)) != 2:
+        if len(ek_leaves(parsed0[1], spec.clone_alias, red_ct_refs)) != 2:
             return None
     elif len(_ct_leaves(parsed0[1], f"{ct0}" "{2}", spec.clone_alias)) != 2:
         return None
@@ -358,7 +355,7 @@ def single_r_hop0_tactic(
             ks = [k for k in range(2) if spec.ct_seed_idx[k] == j]
             parsed_j = parse_left_nested_concat(kdf_rs[ks[0]]) if ks else None
             eklv = (
-                _ek_leaves(parsed_j[1], spec.clone_alias, red_ct_refs)
+                ek_leaves(parsed_j[1], spec.clone_alias, red_ct_refs)
                 if parsed_j
                 else []
             )
@@ -487,8 +484,8 @@ def single_r_hop0_tactic(
     _gops1, gleaves1 = gparse1
     if is_pk:
         goal_ct_refs = ("C0", "C1")
-        gkey_leaves0 = _ek_leaves(gleaves0, spec.clone_alias, goal_ct_refs)
-        gkey_leaves1 = _ek_leaves(gleaves1, spec.clone_alias, goal_ct_refs)
+        gkey_leaves0 = ek_leaves(gleaves0, spec.clone_alias, goal_ct_refs)
+        gkey_leaves1 = ek_leaves(gleaves1, spec.clone_alias, goal_ct_refs)
     else:
         gkey_leaves0 = _ct_leaves(gleaves0, "C0", spec.clone_alias)
         gkey_leaves1 = _ct_leaves(gleaves1, "C1", spec.clone_alias)
@@ -498,16 +495,7 @@ def single_r_hop0_tactic(
         "  rcondf{2} 1; first by (auto; smt()).",
         "  inline{2} 1.",
         "  sp.",
-        f"  exists* (glob {hm})"
-        "{2}"
-        ", kdf_in_0"
-        "{2}"
-        ", kdf_in_1"
-        "{2}"
-        "; elim* => gh2 ki0 ki1.",
-        "  wp.",
-        f"  call{{2}} ({hm}_evaluate_det gh2 ki1).",
-        f"  call{{2}} ({hm}_evaluate_det gh2 ki0).",
+        *kdf_freeze_and_evaluate(hm, "{2}", ("gh2", "ki0", "ki1")),
         "  skip => />. move => hne.",
     ]
     inj_reqs: list[tuple[str, str]] = []

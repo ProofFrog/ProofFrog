@@ -3735,7 +3735,6 @@ def _synth_init_plain_reorder(  # pylint: disable=too-many-arguments,too-many-po
     glob_items = [f"glob {m}" for m in re.findall(r"=\{glob ([\w.]+)\}", globs)]
     args = ", ".join(glob_names)
     res_eq = "res{1} = res{2}"
-    body = " /\\ ".join(p for p in conj if not p.startswith("={glob"))
 
     def _fg(s: str) -> str:
         return s.replace(game_base, fg_name)
@@ -4821,7 +4820,7 @@ def emit_multi_oracle_chain_for_hop(
     # actually references ``RO_H.`` (the ``\bP\.`` footprint probe -- hash yes,
     # decaps no). ROM-only (``use_canonical``); binding proofs have no RO module.
     ro_module_names = (
-        [m for m, _ in modules._types.function_value_modules()] if use_canonical else []
+        [m for m, _ in modules.types.function_value_modules()] if use_canonical else []
     )
     param_names = [p.name for p in flat_params] + ro_module_names
     for mod_name, state in zip(
@@ -5303,7 +5302,7 @@ def _emit_one_oracle_chain(
                 if f.name in renames
             }
             for name, game in norm_by_name.items()
-            for renames in (mt._canonical_field_renames(game.fields, modules._types),)
+            for renames in (mt._canonical_field_renames(game.fields, modules.types),)
         }
         if use_canonical
         else {}
@@ -5368,9 +5367,9 @@ def _emit_one_oracle_chain(
     # Shared RO holder modules couple like read-only globals (see the same
     # computation in ``emit_multi_oracle_chain_for_hop``).
     ro_module_names = (
-        [m for m, _ in modules._types.function_value_modules()] if use_canonical else []
+        [m for m, _ in modules.types.function_value_modules()] if use_canonical else []
     )
-    ro_by_arrow = modules._types.ro_by_arrow_type() if use_canonical else {}
+    ro_by_arrow = modules.types.ro_by_arrow_type() if use_canonical else {}
     # A COMPOSITE wrapper whose inner CHALLENGER holds a Function/arrow field
     # materialized as the shared RO (the lazy-RO Honest game's ``rF`` field IS the
     # shared RO -- part-10) must carry ``<Challenger>.rF{side} = RO_H.h{side}`` in
@@ -5399,7 +5398,7 @@ def _emit_one_oracle_chain(
                 fld.type, frog_ast.FunctionType
             ):
                 continue
-            ro_ref = ro_by_arrow.get(modules._types.translate_type(fld.type).text)
+            ro_ref = ro_by_arrow.get(modules.types.translate_type(fld.type).text)
             if ro_ref is not None:
                 own = fld.name[len("challenger@") :]
                 # pylint: disable-next=protected-access
@@ -6489,7 +6488,7 @@ def _wrapper_challenge_route(  # pylint: disable=too-many-arguments,too-many-pos
         f" = {challenger_ref}.{chal_key}"
         "{2}"
     ]
-    comps = modules._types.concat_components(  # pylint: disable=protected-access
+    comps = modules.types.concat_components(  # pylint: disable=protected-access
         shape.concat_ops[-1]
     )
     if comps is None:
@@ -6805,9 +6804,7 @@ def _falsefalse_ek_inv(  # pylint: disable=too-many-arguments,too-many-positiona
             return None
         # ct params render on side {1} here (R is the left endpoint), so exclude
         # the component-ciphertext group ``encode`` leaves by their ``ctN{1}`` ref.
-        eklv = srb._ek_leaves(
-            parsed[1], clone_alias, (f"{ct0}" "{1}", f"{ct1}" "{1}")
-        )  # pylint: disable=protected-access
+        eklv = srb.ek_leaves(parsed[1], clone_alias, (f"{ct0}" "{1}", f"{ct1}" "{1}"))
         if len(eklv) != 2:
             return None
         pq_ev, t_ev = eklv[0][3], eklv[1][3]

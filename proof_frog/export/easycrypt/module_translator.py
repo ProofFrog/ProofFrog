@@ -290,6 +290,13 @@ class ModuleTranslator:
         self._types = types
         self._type_of_factory = type_of_factory
 
+    @property
+    def types(self) -> tc.TypeCollector:
+        """The shared :class:`~.type_collector.TypeCollector` this translator was
+        built over. Read-only; callers outside the translator (the chain emitter's
+        random-oracle coupling) need its registry, not its mutation surface."""
+        return self._types
+
     def translate_primitive(
         self, prim: frog_ast.Primitive, name: str | None = None
     ) -> ec_ast.ModuleType:

@@ -29,6 +29,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from . import ec_ast
+from .challenge_common import kdf_exists_elim, kdf_freeze_and_evaluate, walk_env
+from .challenge_common import paren as _paren
+from .challenge_common import split_top_args as _split_top_args
+from .challenge_common import subst as _subst
 
 # ---------------------------------------------------------------------------
 # Symbolic evaluation of a linear (deterministic) proc body into functional
@@ -56,41 +60,6 @@ class DecapsModel:
     calls: list[_Call]  # program order
     result: str  # closed functional value of the returned expression
     glob_modules: list[str]  # distinct callee modules, first-appearance order
-
-
-def _subst(expr: str, env: dict[str, str]) -> str:
-    """Single-pass whole-word substitution of ``env`` keys in ``expr``.
-
-    Keys are matched longest-first at word boundaries; a key never appears
-    inside its own replacement in a way that would double-substitute because
-    every referenced name is already fully resolved (the body is in SSA-ish
-    order), so one pass suffices.
-    """
-    if not env:
-        return expr
-    keys = sorted(env, key=len, reverse=True)
-    pattern = re.compile(r"\b(" + "|".join(re.escape(k) for k in keys) + r")\b")
-    return pattern.sub(lambda m: env[m.group(1)], expr)
-
-
-def _split_top_args(args: str) -> list[str]:
-    """Split a rendered ``args`` string on top-level commas (nesting-aware)."""
-    out: list[str] = []
-    depth = 0
-    cur = ""
-    for ch in args:
-        if ch in "([":
-            depth += 1
-        elif ch in ")]":
-            depth -= 1
-        if ch == "," and depth == 0:
-            out.append(cur.strip())
-            cur = ""
-        else:
-            cur += ch
-    if cur.strip():
-        out.append(cur.strip())
-    return out
 
 
 def model_from_proc(
@@ -157,14 +126,6 @@ def keygen_derived_ev(
     return model.result if model is not None else None
 
 
-def _paren(expr: str) -> str:
-    """Wrap ``expr`` in parens for use as a space-separated op argument."""
-    e = expr.strip()
-    if e.startswith("(") and e.endswith(")"):
-        return e
-    return f"({e})" if " " in e else e
-
-
 # ---------------------------------------------------------------------------
 # The ``<Scheme>_decaps_val`` phoare lemma: ``decaps`` returns its functional
 # value with probability 1, proved by peeling each det call back-to-front with
@@ -183,17 +144,7 @@ def _build_env(
     clone_alias: dict[str, str],
 ) -> dict[str, str]:
     """Forward walk building ``var -> functional value`` (SSA-ish, stable)."""
-    env: dict[str, str] = dict(param_rename)
-    for stmt in proc.body:
-        if isinstance(stmt, ec_ast.Assign):
-            env[stmt.var] = _subst(stmt.rhs, env)
-        elif isinstance(stmt, ec_ast.Call):
-            module, _, method = stmt.callee.partition(".")
-            args = [_subst(a, env) for a in _split_top_args(stmt.args)]
-            ev = f"{clone_alias[module]}.ev_{method}"
-            applied = "".join(f" {_paren(a)}" for a in args)
-            env[stmt.var] = f"({ev}{applied})"
-    return env
+    return walk_env(proc.body, param_rename, clone_alias)
 
 
 def _peel_stmts(
@@ -951,19 +902,7 @@ def _red_env(
         base = dict(zip(flat, felim))
         base[spec.ct_params[0]] = "c0"
         base[spec.ct_params[1]] = "c1"
-    env = dict(base)
-    for stmt in spec.red_proc.body:
-        if isinstance(stmt, ec_ast.If):
-            break
-        if isinstance(stmt, ec_ast.Assign):
-            env[stmt.var] = _subst(stmt.rhs, env)
-        elif isinstance(stmt, ec_ast.Call):
-            module, _, method = stmt.callee.partition(".")
-            args = [_subst(a, env) for a in _split_top_args(stmt.args)]
-            ev = f"{clone[module]}.ev_{method}"
-            applied = "".join(f" {_paren(a)}" for a in args)
-            env[stmt.var] = f"({ev}{applied})"
-    return env
+    return walk_env(spec.red_proc.body, base, clone, stop_at_if=True)
 
 
 def _if_branch(spec: ChallengeHopSpec) -> list[str]:
@@ -1083,16 +1022,7 @@ def _else_branch_pk(spec: ChallengeHopSpec) -> list[str]:
     return [
         "  rcondf{2} 1; first by (auto; smt()).",
         "  sp.",
-        f"  exists* (glob {hm})"
-        "{2}"
-        ", kdf_in_0"
-        "{2}"
-        ", kdf_in_1"
-        "{2}"
-        "; elim* => gh2 ki0 ki1.",
-        "  wp.",
-        f"  call{{2}} ({hm}_evaluate_det gh2 ki1).",
-        f"  call{{2}} ({hm}_evaluate_det gh2 ki0).",
+        *kdf_freeze_and_evaluate(hm, "{2}", ("gh2", "ki0", "ki1")),
         "  skip => />.",
     ]
 
@@ -1102,16 +1032,7 @@ def _else_branch(spec: ChallengeHopSpec) -> list[str]:
     hm = spec.h_module
     return [
         "  rcondf{2} 1; first by (auto; smt()).",
-        f"  exists* (glob {hm})"
-        "{2}"
-        ", kdf_in_0"
-        "{2}"
-        ", kdf_in_1"
-        "{2}"
-        "; elim* => gh2 ki0 ki1.",
-        "  wp.",
-        f"  call{{2}} ({hm}_evaluate_det gh2 ki1).",
-        f"  call{{2}} ({hm}_evaluate_det gh2 ki0).",
+        *kdf_freeze_and_evaluate(hm, "{2}", ("gh2", "ki0", "ki1")),
         "  skip => />.",
     ]
 
@@ -1574,14 +1495,7 @@ def challenge_tactic_hop2(spec: Hop2Spec) -> list[str] | None:
         f", {ct1}"
         "{1}"
         f"; elim* => gp3 {' '.join(xdp)} xc0 xc1.",
-        "    exists* (glob "
-        f"{hm})"
-        "{2}"
-        ", kdf_in_0"
-        "{2}"
-        ", kdf_in_1"
-        "{2}"
-        "; elim* => gh2 ki0 ki1.",
+        kdf_exists_elim(hm, "{2}", ("gh2", "ki0", "ki1"), "    "),
         f"    wp. call{{2}} ({hm}_evaluate_det gh2 ki1). call{{2}} ({hm}_evaluate_det gh2 ki0).",
         f"    call{{1}} ({spec.pq_module}_decaps_det gp3 {xdp[i1]} xc1.`1). "
         f"call{{1}} ({spec.pq_module}_decaps_det gp3 {xdp[i0]} xc0.`1).",
@@ -1615,22 +1529,8 @@ def challenge_tactic_hop2(spec: Hop2Spec) -> list[str] | None:
     peel = slice_peel_to_ect(spec.shape, bind0, bind1)
     lines += [
         "  rcondf{1} 1; first by (auto; smt()).",
-        "  exists* (glob "
-        f"{hm})"
-        "{1}"
-        ", kdf_in_0"
-        "{1}"
-        ", kdf_in_1"
-        "{1}"
-        "; elim* => gh ki0 ki1.",
-        "  exists* (glob "
-        f"{hm})"
-        "{2}"
-        ", kdf_in_0"
-        "{2}"
-        ", kdf_in_1"
-        "{2}"
-        "; elim* => gh2 ri0 ri1.",
+        kdf_exists_elim(hm, "{1}", ("gh", "ki0", "ki1")),
+        kdf_exists_elim(hm, "{2}", ("gh2", "ri0", "ri1")),
         f"  wp. call{{1}} ({hm}_evaluate_det gh ki1). call{{1}} ({hm}_evaluate_det gh ki0).",
         f"  call{{2}} ({hm}_evaluate_det gh2 ri1). call{{2}} ({hm}_evaluate_det gh2 ri0).",
         "  skip => />. move => &2 hne hg.",
@@ -1868,9 +1768,7 @@ def challenge_tactic_hop2_wrapper(  # pylint: disable=too-many-locals,too-many-s
         f"  case ({ct0}" "{2}" f" = {ct1}" "{2}).",
         "  + rcondt{2} 1; first by auto.",
         "    rcondf{1} 1; first by (auto; smt()).",
-        "    exists* (glob "
-        f"{hm})"
-        "{1}, kdf_in_0{1}, kdf_in_1{1}; elim* => gh ki0 ki1.",
+        kdf_exists_elim(hm, "{1}", ("gh", "ki0", "ki1"), "    "),
         f"    wp. call{{1}} ({hm}_evaluate_det gh ki1). call{{1}} ({hm}_evaluate_det gh ki0).",
         "    skip => />.",
         "  rcondf{2} 1; first by (auto; smt()).",
@@ -1906,9 +1804,7 @@ def challenge_tactic_hop2_wrapper(  # pylint: disable=too-many-locals,too-many-s
         f", {ct1}"
         "{1}"
         "; elim* => gp3 xsd xc0 xc1.",
-        "    exists* (glob "
-        f"{hm})"
-        "{2}, kdf_in_0{2}, kdf_in_1{2}; elim* => gh2 ki0 ki1.",
+        kdf_exists_elim(hm, "{2}", ("gh2", "ki0", "ki1"), "    "),
         f"    wp. call{{2}} ({hm}_evaluate_det gh2 ki1). wp. call{{2}} ({hm}_evaluate_det gh2 ki0).",
         # A ``wp`` between the decaps and derivekeypair calls absorbs the wrapper's
         # projection assigns (``dk_inner<-`` etc.); the challenger re-decapsulates
@@ -1930,12 +1826,8 @@ def challenge_tactic_hop2_wrapper(  # pylint: disable=too-many-locals,too-many-s
     peel = slice_peel_to_ect(spec.shape, bind0, bind1)
     lines += [
         "  rcondf{1} 1; first by (auto; smt()).",
-        "  exists* (glob "
-        f"{hm})"
-        "{1}, kdf_in_0{1}, kdf_in_1{1}; elim* => gh ki0 ki1.",
-        "  exists* (glob "
-        f"{hm})"
-        "{2}, kdf_in_0{2}, kdf_in_1{2}; elim* => gh2 ri0 ri1.",
+        kdf_exists_elim(hm, "{1}", ("gh", "ki0", "ki1")),
+        kdf_exists_elim(hm, "{2}", ("gh2", "ri0", "ri1")),
         f"  wp. call{{1}} ({hm}_evaluate_det gh ki1). call{{1}} ({hm}_evaluate_det gh ki0).",
         f"  call{{2}} ({hm}_evaluate_det gh2 ri1). call{{2}} ({hm}_evaluate_det gh2 ri0).",
         # ``=> />`` rewrites the goal's ``dk_PQ_0`` to ``s_PQ_0`` via the stored-dk
@@ -1968,13 +1860,7 @@ def _hop2_pk_hkeval(hm: str, side: str, gname: str) -> list[str]:
     """Functionalize one side's two ``H.evaluate(kdf_in_i)`` calls (last = kdf1).
     Assumes a preceding ``wp`` absorbed the trailing result assignment."""
     return [
-        f"    exists* (glob {hm})"
-        f"{side}"
-        ", kdf_in_0"
-        f"{side}"
-        ", kdf_in_1"
-        f"{side}"
-        f"; elim* => {gname} {gname}i0 {gname}i1.",
+        kdf_exists_elim(hm, side, (gname, f"{gname}i0", f"{gname}i1"), "    "),
         f"    call{side} ({hm}_evaluate_det {gname} {gname}i1).",
         f"    call{side} ({hm}_evaluate_det {gname} {gname}i0).",
     ]

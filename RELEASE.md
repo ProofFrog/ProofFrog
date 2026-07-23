@@ -1,111 +1,50 @@
-# Release Notes — v0.5.0
+# Release Notes — v0.6.0
 
-This release is driven by a large new case study: complete, machine-checked
-ProofFrog analyses of the four hybrid KEM combiners from
-[`draft-irtf-cfrg-hybrid-kems-10`](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-hybrid-kems-10), plus a Hashed ElGamal KEM. Writing these
-proofs motivated new FrogLang features for writing proofs over hash functions
-modelled as random oracles and over group-based schemes, a wave of new
-canonicalization power in the engine, and several correctness fixes that make
-the engine's interchangeability checks more trustworthy.
+This release allows a ProofFrog proof to state the concrete security bound it establishes, and has the engine check that claim. It also adds a LaTeX export backend, tuple-destructuring bindings, and a substantial wave of soundness fixes to the canonicalization and equivalence layers.
+
+## Concrete advantage bounds
+
+Previously `prove` told you a proof was valid but not what it proved quantitatively. It now synthesizes the bound ([#243](https://github.com/ProofFrog/ProofFrog/pull/243)):
+
+- **Synthesis.** After a proof verifies, the engine folds its hop sequence into a triangle-inequality sum over the assumptions used, and prints it. Repeated uses of one assumption collapse to `k * Adv^X(B)`; distinct reductions are numbered `B1`, `B2`, and so on.
+- **Statistical helper games.** A `.game` file may now declare `advantage <= ...;`. Where a hop reduces to such a game, the opaque advantage term is replaced by the declared expression, with per-oracle query counts derived by statically counting the reduction's oracle calls. So a bound comes out stated in the theorem game's own query counts rather than in symbols the reader has to chase.
+- **Checking a claimed bound.** A proof may declare a `bound:` clause stating the bound its author believes it establishes. `prove` decides whether the claim is a valid upper bound on the synthesized one, using SymPy where it can and Z3 over the reals otherwise. The verdict is three-valued: a claim proved smaller than what the proof establishes fails `prove` (override with `--skip-bound`), and an undecidable comparison warns rather than failing.
+
+## LaTeX export
+
+`export-latex` renders primitives, schemes, games, and proofs as typeset pseudocode ([#222](https://github.com/ProofFrog/ProofFrog/pull/222), [#236](https://github.com/ProofFrog/ProofFrog/pull/236)), including name decorations, Iverson-bracket rendering of boolean returns, and upright `this`. Synthesized advantage bounds are typeset alongside ([#243](https://github.com/ProofFrog/ProofFrog/pull/243)). This is preliminary: expect to hand-adjust the output, and for the output style to change in future versions.
 
 ## What's new in FrogLang
 
-These features let you write proofs that the engine previously could not check
-(all part of [#211](https://github.com/ProofFrog/ProofFrog/pull/211)):
-
-- **Random oracles via lazy maps.** A common way to model a random oracle is a
-  lazily-populated map: on each query, sample a fresh value if the input is new
-  and otherwise return the stored one. The engine now recognizes this idiom —
-  including the case where two oracles share one table, and the case where the
-  table is scanned to find a matching entry — and treats it as a sampled
-  `Function<D, R>`. In practice you can now write ROM proofs in the natural
-  lazy-table style instead of hand-massaging them into `Function` form.
-
-- **Iterating over collections.** `for` loops can now range over an
-  `Array<T, n>` and over a map's `keys`, `values`, or `entries`.
-
-- **Sampling with exclusions.** New `<- T \ S` syntax samples uniformly from
-  type `T` excluding the elements in set `S` (for example, sampling a challenge
-  that must differ from previously-seen values).
-
-- **Stating structural assumptions.** A proof may now include a `requires:`
-  block to declare structural facts the proof depends on (for example, that a
-  group has prime order). The engine uses these when justifying hops.
-
-- **More flexible file layout.** Reductions and games may now be written after
-  the `proof` block as well as before it.
-
-## Engine improvements
-
-The engine can now canonicalize — and therefore check the interchangeability of
-— many more pairs of games, particularly for proofs involving random oracles and
-group-based schemes:
-
-- **Lazy-map / random-oracle reasoning** (see above), which underpins the new
-  ROM proofs ([#211](https://github.com/ProofFrog/ProofFrog/pull/211)).
-- **Group-exponent algebra.** The engine recognizes more equalities and
-  rewrites involving group exponentiation (e.g. relating `g^(a*b)` to `f^b`
-  when `f = g^a`), and decomposes equalities of concatenations and of injective
-  functions into their component parts
-  ([#211](https://github.com/ProofFrog/ProofFrog/pull/211)).
-- **Control-flow normalization.** A range of new passes normalize equivalent
-  but differently-written conditional code, so that games that differ only in
-  how their `if`/`else` and early-return logic is arranged now canonicalize to
-  the same form ([#212](https://github.com/ProofFrog/ProofFrog/pull/212)).
-- **Better cross-method and inlining behavior**, plus a roughly 30% reduction in
-  canonicalization time on the new proofs
-  ([#211](https://github.com/ProofFrog/ProofFrog/pull/211)).
+- **Tuple-destructuring bindings**, so a tuple-returning call can bind its components in one statement ([#220](https://github.com/ProofFrog/ProofFrog/pull/220)).
+- **`bound:` clauses** on proofs, and **`advantage <= ...;`** clauses on games, described above ([#243](https://github.com/ProofFrog/ProofFrog/pull/243)).
 
 ## Correctness fixes
 
-Several fixes make the engine's "these two games are interchangeable" verdict
-more trustworthy by closing cases where it could previously canonicalize two
-genuinely-distinguishable games to the same form:
+This release closes a number of cases where the engine could canonicalize two genuinely distinguishable games to the same form, and so report a hop as an equivalence when it was not one. Anyone relying on a proof checked by v0.5.0 should re-run it under this release.
 
-- **Statement reordering across an early return.** The engine could move a state
-  update past an `if (...) return ...;` guard — including updates to a map or
-  array entry — yielding a game an adversary could tell apart by calling the
-  same oracle twice. Reordering now respects these guards as barriers
-  ([#209](https://github.com/ProofFrog/ProofFrog/pull/209)).
-- **A canonicalization crash** on certain function calls inside conditions has
-  been fixed, along with an inlining bug that could drop a variable declaration
-  when a returning call was distributed across `if` branches
-  ([#212](https://github.com/ProofFrog/ProofFrog/pull/212)).
-- Numerous existing transforms were hardened to decline in cases where they
-  previously fired unsoundly, with clearer "near-miss" diagnostics explaining
-  why a transform did not apply
-  ([#211](https://github.com/ProofFrog/ProofFrog/pull/211)).
+- **Variable capture.** A new global alpha-renaming pass closes a class of capture-based unsoundness, including a loop-binder capture in `SimplifyIf` ([#229](https://github.com/ProofFrog/ProofFrog/pull/229), [#230](https://github.com/ProofFrog/ProofFrog/pull/230)).
+- **Passes firing without their preconditions.** Determinism and purity guards, capture-aware fresh naming, and domain-invariance guards on sample-movement passes ([#223](https://github.com/ProofFrog/ProofFrog/pull/223), [RC3](https://github.com/ProofFrog/ProofFrog/pull/226), [RC4](https://github.com/ProofFrog/ProofFrog/pull/227), [RC5](https://github.com/ProofFrog/ProofFrog/pull/228)).
+- **Stale facts.** Passes that reused facts invalidated by a later reassignment or by call order ([#233](https://github.com/ProofFrog/ProofFrog/pull/233)), and reference/write-scan blindness ([#225](https://github.com/ProofFrog/ProofFrog/pull/225)).
+- **Control flow.** An `if`/`else` whose branches both return could be dropped ([#224](https://github.com/ProofFrog/ProofFrog/pull/224)); branch elimination in `RemoveUnreachable` was unsound for product-typed facts ([#240](https://github.com/ProofFrog/ProofFrog/pull/240)).
+- **Z3 and the equivalence layer.** Four soundness holes (F-017, F-106, F-139, F-140) ([#232](https://github.com/ProofFrog/ProofFrog/pull/232)), bitstring literals in the Z3 formula visitor ([#239](https://github.com/ProofFrog/ProofFrog/pull/239)), and the encoding of `ProductType` tuple literals in expression positions ([#244](https://github.com/ProofFrog/ProofFrog/pull/244)).
+- **Surface-form conflation.** `UniqueSample` forms are no longer conflated ([#231](https://github.com/ProofFrog/ProofFrog/pull/231)), and a tuple variable declared in more than one place is no longer collapsed ([#241](https://github.com/ProofFrog/ProofFrog/pull/241)).
+
+## Engine improvements
+
+- **Oracle parameter names are canonicalized**, so two games that differ only in what an oracle calls its argument now canonicalize together ([#237](https://github.com/ProofFrog/ProofFrog/pull/237)).
 
 ## Miscellaneous
 
-- Diagnostic commands (`canonicalization-trace`, `step-detail`) now use the same
-  proof context as `prove`, so the state they show matches what the proof
-  engine actually sees ([#211](https://github.com/ProofFrog/ProofFrog/pull/211)).
-- VSCode extension (0.1.1): syntax highlighting for the new `requires` clause
-  ([#217](https://github.com/ProofFrog/ProofFrog/pull/217)), plus dependency
-  updates ([#210](https://github.com/ProofFrog/ProofFrog/pull/210),
-  [#216](https://github.com/ProofFrog/ProofFrog/pull/216)).
-- Expanded test coverage, including a harness that checks each canonicalization
-  preserves behavior across repeated oracle calls
-  ([#211](https://github.com/ProofFrog/ProofFrog/pull/211)).
+- **Emacs mode** for FrogLang ([#170](https://github.com/ProofFrog/ProofFrog/pull/170)).
+- VSCode extension dependency updates ([#245](https://github.com/ProofFrog/ProofFrog/pull/245)).
 
-## New examples
+## Examples
 
-The `examples` submodule adds two case studies
-([examples #43](https://github.com/ProofFrog/examples/pull/43)):
+The `applications/cfrg-hybrid-kems/` case study, added in v0.5.0, now carries a report of the findings, a companion summarizing the advantage bound and assumptions of each of the 57 proofs, and a rewritten README describing the artifact itself. Every proof now declares a `bound:` clause, so `prove` checks the stated bound as well as the hop sequence.
 
-- **Hybrid KEM combiners from [`draft-irtf-cfrg-hybrid-kems-10`](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-hybrid-kems-10)**
-  (`applications/cfrg-hybrid-kems/`). FrogLang definitions and machine-checked
-  proofs for all four combiners in the draft (CG, CK, UG, and UK), each in two
-  variants. The proofs cover correctness, IND-CCA security (for both the
-  post-quantum and traditional branches), and the LEAK-BIND and HON-BIND binding
-  properties. A README documents the modelling choices, the mapping from draft
-  sections to files, and the assumptions each proof relies on.
-- **Hashed ElGamal KEM**: an IND-CCA proof from gap-CDH in the random oracle
-  model, together with the supporting group-theory proofs and a tidied-up
-  `HashedDDH` game and its reductions.
+Ten of those proofs reduce a hop to a statistical fact about reprogramming a random oracle, stated as one of six helper games in `games/ROM/`, each carrying a declared `advantage <= ...;` clause. Every one of those six games now ships with an EasyCrypt proof of the bound it declares (`games/ROM/*.ec`), so the numbers the helper games assert are checked by a second tool rather than taken on trust. These are written directly in EasyCrypt rather than produced by any exporter, and they cover the six helper games only, not the hybrid KEM theorems that use them.
 
-The example proofs have also been reorganized to place each proof's reductions
-and intermediate games after its main `proof` block, taking advantage of the
-more flexible file layout described above
-([examples #44](https://github.com/ProofFrog/examples/pull/44)).
+## Not included
+
+ProofFrog has a work-in-progress exporter that translates a proof into EasyCrypt. It is not part of this release, and no hybrid KEM theorem in the `examples` submodule has an EasyCrypt proof here; the exporter and the proofs it produces live on the `easycrypt` branches of the [engine](https://github.com/ProofFrog/ProofFrog/tree/easycrypt) and [examples](https://github.com/ProofFrog/examples/tree/easycrypt) repositories.

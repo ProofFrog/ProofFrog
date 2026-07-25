@@ -781,10 +781,6 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         self.stack: list[Any] = []
         self.type_map = type_map
         self.variable_version_map = variable_version_map
-        self.bool_num = 0
-        self.expression_formula_map: list[
-            tuple[tuple[frog_ast.Expression, dict[str, int]], z3.AstRef]
-        ] = []
         # Opt-in: when True, FuncCall expressions and BinaryOperations whose
         # operand types Z3 cannot mix (e.g. `||` over BitString operands)
         # are modelled as memoized opaque Z3 constants instead of None.
@@ -863,14 +859,6 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
 
     def set_variable_version_map(self, version_map: dict[str, int]) -> None:
         self.variable_version_map = version_map
-
-    def _search_expression_formula_map(
-        self, potential: tuple[frog_ast.Expression, dict[str, int]]
-    ) -> Optional[z3.AstRef]:
-        for item in self.expression_formula_map:
-            if item[0] == potential:
-                return item[1]
-        return None
 
     def visit_variable(self, var: frog_ast.Variable) -> None:
         name = var.name
@@ -1024,17 +1012,26 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
             and operation.operator
             in set([frog_ast.BinaryOperators.IN, frog_ast.BinaryOperators.SUBSETS])
         ):
-            assert self.variable_version_map is not None
-            z3_bool = self._search_expression_formula_map(
-                (operation, self.variable_version_map)
-            )
-            if z3_bool is None:
-                z3_bool = z3.Bool(f"@@@unknown_boolean{self.bool_num}")
-                self.bool_num += 1
-                self.expression_formula_map.append(
-                    ((operation, copy.deepcopy(self.variable_version_map)), z3_bool)
-                )
-            self.stack.append(z3_bool)
+            # A set membership/subset test is a deterministic Bool that Z3
+            # cannot model natively, so intern the WHOLE operation as a
+            # memoized opaque Bool atom keyed on its full structural string
+            # (plus the SSA version map). Two structurally identical tests
+            # under the same versions share the atom -- so `(k in S) || !(k in
+            # S)` still resolves -- while distinct tests (`k in S` vs `k2 in
+            # S`) get distinct atoms.
+            #
+            # SOUNDNESS (F-330/F-331): the previous code asserted
+            # `variable_version_map is not None` (crashing the residual
+            # escape hatch, which builds the visitor with no version map --
+            # F-330) and named the atom `@@@unknown_boolean{counter}` from a
+            # PER-INSTANCE counter. `_z3_check_expression_pair` builds one
+            # visitor per game, so both counters started at 0 and `k in S`
+            # (game 1) collided with `k2 in S` (game 2) as the same atom -- a
+            # cross-instance false accept (F-331). Structural interning via
+            # `_intern_opaque` fixes both: it tolerates a None version map and
+            # its Z3 const name is the structural key, so cross-instance
+            # atoms match iff the expressions match.
+            self.stack.append(self._intern_opaque(operation, sort=z3.BoolSort()))
             return
 
         # Handle tuple equality/inequality

@@ -354,3 +354,68 @@ def test_duplicate_return_with_equivalent_difference_still_passes() -> None:
         game1, game2, _empty_let_types(), _empty_namespace()
     )
     assert result.valid, result.failure_detail
+
+
+# ---------------------------------------------------------------------------
+# F-330/F-331: IN/SUBSETS membership atoms (audit round 2, family 8)
+#
+# The IN/SUBSETS branch of Z3FormulaVisitor asserted a non-None version map
+# (crashing the residual hatch, which supplies none -- F-330) and named its
+# atom from a per-visitor-instance counter, so two independently-built
+# formulas (one per game) collided `k in S` with `k2 in S` as the same atom
+# (F-331 cross-instance false accept). Membership tests are now interned
+# structurally, like the opaque-call fallback.
+# ---------------------------------------------------------------------------
+
+
+def test_f330_f331_membership_query_differs_rejected() -> None:
+    # Real.Query returns `k in S`, Fake.Query returns `k2 in S`. k and k2 are
+    # independent samples, so the games are distinguishable. Pre-fix: an
+    # AssertionError crash (F-330); a naive crash fix would false-accept via
+    # the counter-named atom collision (F-331). Must cleanly reject.
+    game1 = _parse_game(
+        """
+        Game Real() {
+            Set<BitString<8>> S;
+            BitString<8> k;
+            BitString<8> k2;
+            Void Initialize() { k <- BitString<8>; k2 <- BitString<8>; }
+            Bool Add(BitString<8> x) { S = S union {x}; return true; }
+            Bool Query() { return k in S; }
+        }
+        """
+    )
+    game2 = _parse_game(
+        """
+        Game Fake() {
+            Set<BitString<8>> S;
+            BitString<8> k;
+            BitString<8> k2;
+            Void Initialize() { k <- BitString<8>; k2 <- BitString<8>; }
+            Bool Add(BitString<8> x) { S = S union {x}; return true; }
+            Bool Query() { return k2 in S; }
+        }
+        """
+    )
+    result = _z3_residual_equivalence(
+        game1, game2, _empty_let_types(), _empty_namespace()
+    )
+    assert not result.valid
+    assert "return" in (result.failure_detail or "")
+
+
+def test_membership_identical_query_still_passes() -> None:
+    # Positive control: structurally identical membership tests must still
+    # intern to the same atom (no crash, no over-rejection).
+    src = """
+        Game G() {
+            Set<BitString<8>> S;
+            BitString<8> k;
+            Bool Add(BitString<8> x) { S = S union {x}; return true; }
+            Bool Query() { return k in S; }
+        }
+        """
+    result = _z3_residual_equivalence(
+        _parse_game(src), _parse_game(src), _empty_let_types(), _empty_namespace()
+    )
+    assert result.valid, result.failure_detail

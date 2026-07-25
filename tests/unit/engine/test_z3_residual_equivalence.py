@@ -198,3 +198,159 @@ def test_nondeterministic_call_in_return_refused() -> None:
     result = _z3_residual_equivalence(game1, game2, let_types, namespace)
     assert not result.valid
     assert "non-deterministic" in (result.failure_detail or "")
+
+
+# ---------------------------------------------------------------------------
+# F-328/F-329: duplicate-statement walk desync (audit round 2, family 8)
+#
+# An earlier version of `_z3_residual_equivalence` enumerated both games'
+# returns (and ifs) through a single shared list with structural `==`
+# membership. A game containing two structurally identical returns had its
+# second occurrence deduped away; the lockstep walk desynced, broke out on
+# `None`, and fell through to `valid=True` with a genuinely differing pair
+# never Z3-checked. The walk now pairs statements positionally with
+# per-game identity-based enumeration, so every pair is checked.
+# ---------------------------------------------------------------------------
+
+
+def test_f328_duplicate_return_masks_differing_return_rejected() -> None:
+    # game1's Peek and Guess both `return k` (structurally identical);
+    # game2's Guess instead returns the constant. The two games are
+    # distinguishable with advantage 1 - 2^-8 (call Peek, then Guess,
+    # compare). The desync bug certified this pair; it must be rejected.
+    game1 = _parse_game(
+        """
+        Game G1() {
+            BitString<8> k;
+            BitString<8> Peek() {
+                return k;
+            }
+            BitString<8> Guess(BitString<8> x) {
+                return k;
+            }
+        }
+        """
+    )
+    game2 = _parse_game(
+        """
+        Game G2() {
+            BitString<8> k;
+            BitString<8> Peek() {
+                return k;
+            }
+            BitString<8> Guess(BitString<8> x) {
+                return 0^8;
+            }
+        }
+        """
+    )
+    result = _z3_residual_equivalence(
+        game1, game2, _empty_let_types(), _empty_namespace()
+    )
+    assert not result.valid
+    assert "return" in (result.failure_detail or "")
+
+
+def test_f329_duplicate_if_masks_differing_condition_rejected() -> None:
+    # game1's A and B share a structurally identical `if (x == k)`;
+    # game2's B guards on `x == c` instead. Distinguishable; the
+    # if-condition walk variant of the desync certified it.
+    game1 = _parse_game(
+        """
+        Game G1() {
+            BitString<8> k;
+            BitString<8> c;
+            Bool A(BitString<8> x) {
+                if (x == k) {
+                    return true;
+                }
+                return false;
+            }
+            Bool B(BitString<8> x) {
+                if (x == k) {
+                    return true;
+                }
+                return false;
+            }
+        }
+        """
+    )
+    game2 = _parse_game(
+        """
+        Game G2() {
+            BitString<8> k;
+            BitString<8> c;
+            Bool A(BitString<8> x) {
+                if (x == k) {
+                    return true;
+                }
+                return false;
+            }
+            Bool B(BitString<8> x) {
+                if (x == c) {
+                    return true;
+                }
+                return false;
+            }
+        }
+        """
+    )
+    result = _z3_residual_equivalence(
+        game1, game2, _empty_let_types(), _empty_namespace()
+    )
+    assert not result.valid
+    assert "if-condition" in (result.failure_detail or "")
+
+
+def test_duplicate_identical_returns_still_pass() -> None:
+    # Positive control: duplicates on BOTH sides with no real difference
+    # must still be certified (the fix must not over-reject).
+    src = """
+        Game G() {
+            BitString<8> k;
+            BitString<8> Peek() {
+                return k;
+            }
+            BitString<8> Guess(BitString<8> x) {
+                return k;
+            }
+        }
+        """
+    result = _z3_residual_equivalence(
+        _parse_game(src), _parse_game(src), _empty_let_types(), _empty_namespace()
+    )
+    assert result.valid, result.failure_detail
+
+
+def test_duplicate_return_with_equivalent_difference_still_passes() -> None:
+    # Positive control: one game duplicates a return, and the differing
+    # pair is genuinely propositionally equivalent. The fixed walk must
+    # CHECK the pair (not skip it) and certify via Z3.
+    game1 = _parse_game(
+        """
+        Game G1() {
+            Bool P(Bool a, Bool b) {
+                return a && b;
+            }
+            Bool Q(Bool a, Bool b) {
+                return a && b;
+            }
+        }
+        """
+    )
+    game2 = _parse_game(
+        """
+        Game G2() {
+            Bool P(Bool a, Bool b) {
+                return a && b;
+            }
+            Bool Q(Bool a, Bool b) {
+                return b && a;
+            }
+        }
+        """
+    )
+    result = _z3_residual_equivalence(
+        game1, game2, _empty_let_types(), _empty_namespace()
+    )
+    assert result.valid, result.failure_detail

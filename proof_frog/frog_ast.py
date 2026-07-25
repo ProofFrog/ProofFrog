@@ -50,14 +50,21 @@ class ASTNode:
         # (stateful, auto-adds the draw to S) and `x <- T \ E` (pure one-shot
         # exclusion, no insertion) surface forms are distinct constructs with
         # different observable semantics, so they must not compare equal.
-        return all(
-            (
-                True
-                if attr in {"line_num", "column_num", "origin"}
-                else getattr(self, attr) == getattr(other, attr)
-            )
-            for attr in self.__dict__
-        )
+        #
+        # F-336: compare the attribute KEY SETS first, then values. Iterating
+        # only `self.__dict__` made equality partial and asymmetric on a
+        # malformed node (one missing an attribute its class normally has):
+        # a degenerate left operand subset-compared equal to a complete right
+        # operand, while the reflected direction raised AttributeError. Two
+        # well-formed instances of the same class have identical key sets, so
+        # this changes nothing for them; a malformed node now compares
+        # unequal (fail-closed) instead of accepting or raising.
+        excluded = {"line_num", "column_num", "origin"}
+        self_keys = self.__dict__.keys() - excluded
+        other_keys = other.__dict__.keys() - excluded
+        if self_keys != other_keys:
+            return False
+        return all(getattr(self, attr) == getattr(other, attr) for attr in self_keys)
 
 
 Namespace: TypeAlias = dict[str, Optional[ASTNode]]
@@ -846,8 +853,16 @@ class Game(ASTNode):
         self.methods = body[3]
 
     def __eq__(self, __value: object) -> bool:
-        if not isinstance(__value, Game):
+        # F-335: exact-type match, not `isinstance`. `Reduction` subclasses
+        # `Game`, so a loose `isinstance` check let a `Reduction` compare
+        # equal to a plain `Game` with the same body (and, via the inherited
+        # comparison, two `Reduction`s composing different security games
+        # compared equal -- see `Reduction.__eq__`). The exact-type guard
+        # keeps `Game == Reduction` and `Reduction == Game` both False and is
+        # symmetric.
+        if type(self) is not type(__value):
             return False
+        assert isinstance(__value, Game)
         return (
             self.parameters == __value.parameters
             and self.fields == __value.fields
@@ -906,6 +921,20 @@ class Reduction(Game):
         super().__init__(body)
         self.to_use = to_use
         self.play_against = play_against
+
+    def __eq__(self, __value: object) -> bool:
+        # F-335: a Reduction is defined by its composition (which game it
+        # plays and against what), not only by its body. Two Reductions with
+        # identical bodies but different `to_use`/`play_against` are distinct;
+        # the inherited `Game.__eq__` ignored those attributes. The exact-type
+        # guard in `Game.__eq__` already rejects a plain `Game`.
+        if not isinstance(__value, Reduction):
+            return False
+        return (
+            super().__eq__(__value)
+            and self.to_use == __value.to_use
+            and self.play_against == __value.play_against
+        )
 
     def _get_signature(self) -> str:
         return pretty_print(

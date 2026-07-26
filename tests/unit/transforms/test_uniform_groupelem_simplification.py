@@ -77,3 +77,31 @@ def test_f282_matching_group_still_absorbed() -> None:
     )
     result = UniformGroupElemSimplificationTransformer().transform(game)
     assert result != game, "matching-group uniform should still be absorbed"
+
+
+def test_f281_shared_object_reads_counted_as_two() -> None:
+    """F-281: two live reads that share ONE Variable object must count as two
+    uses, not one. The old count replaced one occurrence at a time via an
+    is-identity ReplaceTransformer, so a shared object was replaced at both
+    slots at once and tallied as a single use -- making a twice-used value look
+    single-use and wrongly absorbed. `_count_variable_uses` counts by AST
+    position."""
+    from proof_frog import frog_ast
+    from proof_frog.transforms.algebraic import _count_variable_uses
+
+    u = frog_ast.Variable("u")  # ONE object referenced at both operand slots
+    shared = frog_ast.BinaryOperation(frog_ast.BinaryOperators.MULTIPLY, u, u)
+    block = frog_ast.Block([frog_ast.ReturnStatement(shared)])
+    assert _count_variable_uses("u", block) == 2, "shared-object reads must count as two"
+
+    # Distinct objects: also two.
+    two = frog_ast.BinaryOperation(
+        frog_ast.BinaryOperators.MULTIPLY,
+        frog_ast.Variable("u"),
+        frog_ast.Variable("u"),
+    )
+    assert _count_variable_uses("u", frog_ast.Block([frog_ast.ReturnStatement(two)])) == 2
+
+    # Single use: one.
+    one = frog_ast.Block([frog_ast.ReturnStatement(frog_ast.Variable("u"))])
+    assert _count_variable_uses("u", one) == 1

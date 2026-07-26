@@ -75,6 +75,29 @@ def _use_node_inside_loop(block: frog_ast.Block, use_node: frog_ast.ASTNode) -> 
     return SearchVisitor(_loop_contains).visit(block) is not None
 
 
+def _count_variable_uses(name: str, block: frog_ast.Block) -> int:
+    """Count occurrences of ``Variable(name)`` in *block*, one per AST POSITION.
+
+    F-281: the uniform-absorption passes previously counted uses by replacing one
+    occurrence at a time with an ``is``-identity ``ReplaceTransformer``. Two live
+    reads that happen to SHARE a single ``Variable`` object (e.g. produced by a
+    transform that did not deep-copy) were both replaced at once and tallied as
+    ONE use, so a value used twice looked single-use and was wrongly absorbed.
+    Visiting each position (a shared object at two slots is visited twice) counts
+    correctly. Capped at 2 -- callers only need exactly-once vs not.
+    """
+    count = 0
+
+    def _matches(node: frog_ast.ASTNode) -> bool:
+        nonlocal count
+        if isinstance(node, frog_ast.Variable) and node.name == name:
+            count += 1
+        return count > 1
+
+    SearchVisitor(_matches).visit(block)
+    return count
+
+
 def _use_node_inside_type(block: frog_ast.Block, use_node: frog_ast.ASTNode) -> bool:
     """True if *use_node* occurs inside a ``Type`` node's subtree within *block*.
 
@@ -144,23 +167,9 @@ class UniformXorSimplificationTransformer(BlockTransformer):
             )
 
             # Count uses of var_name — must be exactly 1
-            def uses_var(name: str, node: frog_ast.ASTNode) -> bool:
-                return isinstance(node, frog_ast.Variable) and node.name == name
-
-            total_uses = 0
-            count_block = copy.deepcopy(remaining_block)
-            while True:
-                found = SearchVisitor(functools.partial(uses_var, var_name)).visit(
-                    count_block
-                )
-                if found is None:
-                    break
-                total_uses += 1
-                if total_uses > 1:
-                    break
-                count_block = ReplaceTransformer(
-                    found, frog_ast.Variable(var_name + "__counted__")
-                ).transform(count_block)
+            # F-281: count by AST position (not is-identity replacement) so two
+            # live reads sharing one Variable object are not tallied as one.
+            total_uses = _count_variable_uses(var_name, remaining_block)
 
             if total_uses != 1:
                 if total_uses > 1 and self.ctx is not None:
@@ -306,23 +315,9 @@ class UniformModIntSimplificationTransformer(BlockTransformer):
             )
 
             # Count uses of var_name — must be exactly 1
-            def uses_var(name: str, node: frog_ast.ASTNode) -> bool:
-                return isinstance(node, frog_ast.Variable) and node.name == name
-
-            total_uses = 0
-            count_block = copy.deepcopy(remaining_block)
-            while True:
-                found = SearchVisitor(functools.partial(uses_var, var_name)).visit(
-                    count_block
-                )
-                if found is None:
-                    break
-                total_uses += 1
-                if total_uses > 1:
-                    break
-                count_block = ReplaceTransformer(
-                    found, frog_ast.Variable(var_name + "__counted__")
-                ).transform(count_block)
+            # F-281: count by AST position (not is-identity replacement) so two
+            # live reads sharing one Variable object are not tallied as one.
+            total_uses = _count_variable_uses(var_name, remaining_block)
 
             if total_uses != 1:
                 if total_uses > 1 and self.ctx is not None:
@@ -1361,23 +1356,9 @@ class UniformGroupElemSimplificationTransformer(BlockTransformer):
                 copy.deepcopy(list(block.statements[index + 1 :]))
             )
 
-            def uses_var(name: str, node: frog_ast.ASTNode) -> bool:
-                return isinstance(node, frog_ast.Variable) and node.name == name
-
-            total_uses = 0
-            count_block = copy.deepcopy(remaining_block)
-            while True:
-                found = SearchVisitor(functools.partial(uses_var, var_name)).visit(
-                    count_block
-                )
-                if found is None:
-                    break
-                total_uses += 1
-                if total_uses > 1:
-                    break
-                count_block = ReplaceTransformer(
-                    found, frog_ast.Variable(var_name + "__counted__")
-                ).transform(count_block)
+            # F-281: count by AST position (not is-identity replacement) so two
+            # live reads sharing one Variable object are not tallied as one.
+            total_uses = _count_variable_uses(var_name, remaining_block)
 
             if total_uses != 1:
                 if total_uses > 1 and self.ctx is not None:

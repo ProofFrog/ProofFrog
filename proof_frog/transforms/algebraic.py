@@ -24,6 +24,7 @@ from ..visitors import (
     build_game_type_map,
     build_method_type_map,
     MethodScopedTypeMapMixin,
+    reassigns_or_rebinds,
 )
 from ._base import (
     TransformPass,
@@ -1558,21 +1559,10 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         }
         # Gap D: drop bindings whose call args reference free variables
         # that may differ between the binding site and the comparison
-        # site. A free variable is "stable" iff it has at most one write
-        # in the method (parameters and write-once typed-locals qualify;
-        # fields written anywhere in the method do not).
-        param_names = {p.name for p in method.signature.parameters}
-        field_names = {f.name for f in self.game.fields}
-        stable_field_names = {
-            f for f in field_names if _count_field_assigns(method.block, f) == 0
-        }
-        # Top-level single-write typed-init locals are stable (write once,
-        # read many). A locally-rebound name is excluded.
-        all_locals, all_reassigned = _scan_top_level_single_writes(
-            method.block, value_predicate=lambda v: True
-        )
-        single_write_locals = set(all_locals.keys()) - all_reassigned
-        stable_names = param_names | stable_field_names | single_write_locals
+        # site. A free variable is "stable" iff its value is fixed across
+        # the method (params, fields unwritten in this method, write-once
+        # typed-locals -- nested-aware). See _stable_value_names.
+        stable_names = _stable_value_names(method, self.game)
         for name in list(funccall_bindings.keys()):
             call = funccall_bindings[name]
             free = {
@@ -1818,7 +1808,8 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         if init is None:
             return expr
         rhs: Optional[frog_ast.Expression] = None
-        for stmt in init.block.statements:
+        def_idx = -1
+        for idx, stmt in enumerate(init.block.statements):
             if (
                 isinstance(stmt, frog_ast.Assignment)
                 and stmt.the_type is None
@@ -1828,6 +1819,7 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
                 if rhs is not None:
                     return expr  # multiple top-level assignments
                 rhs = stmt.value
+                def_idx = idx
         if rhs is None:
             return expr
         # No assignment may exist anywhere else in the game.
@@ -1843,12 +1835,30 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         # Free vars in rhs must be cross-method visible.  Anything else
         # (Init-local declarations) cannot legally be referenced from the
         # site where this resolved expression will be substituted in.
-        visible = {f.name for f in self.game.fields} | {
-            p.name for p in self.game.parameters
-        }
+        field_names = {f.name for f in self.game.fields}
+        visible = field_names | {p.name for p in self.game.parameters}
         free = {v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(rhs))}
         if not free.issubset(visible):
             return expr
+        # F-248: the resolved RHS is substituted at an arbitrary comparison
+        # site (any oracle, any time), so each free variable must hold the
+        # SAME value it had at Init when the field was frozen. Params are
+        # immutable; a field free var is stable only if it is never written
+        # AFTER the field's defining assignment -- neither later in Init nor
+        # in any non-Init method. Otherwise `F == E.Enc(t)` would collapse to
+        # `t == t` even though `F` holds the stale Init-time `E.Enc(t)`.
+        for t in free & field_names:
+            if any(
+                reassigns_or_rebinds({t}, s)
+                for s in init.block.statements[def_idx + 1 :]
+            ):
+                return expr
+            if any(
+                _count_field_assigns(m.block, t) > 0
+                for m in self.game.methods
+                if m is not init
+            ):
+                return expr
         return rhs
 
     @staticmethod
@@ -1916,12 +1926,19 @@ def _scan_top_level_single_writes(
     ``GenericFor`` statements. (Loop iteration overwrites the variable,
     so any earlier binding cannot be relied on at later use sites.)
 
-    Bindings declared inside nested blocks (if/for bodies) are NOT
+    Bindings *declared* inside nested blocks (if/for bodies) are NOT
     collected: a declaration inside a nested scope is not visible
-    outside it. This is the AST-level analogue of FrogLang's surface
-    scoping rules.
+    outside it. But a *write* to a top-level-bound name that occurs
+    inside a nested block DOES invalidate the binding: the name is still
+    in scope there, so the nested write can change its value before a
+    later use at the top level. A scan that ignored nested writes would
+    treat a stale binding as write-once and substitute it incorrectly
+    (audit F-247 / F-251), so the nested-aware invalidation below is
+    mandatory for soundness -- it uses the node-kind-complete,
+    recursive :func:`reassigns_or_rebinds`.
     """
     bindings: dict[str, frog_ast.Expression] = {}
+    binding_stmt: dict[str, frog_ast.Statement] = {}
     reassigned: set[str] = set()
     for stmt in block.statements:
         if isinstance(stmt, frog_ast.Assignment) and isinstance(
@@ -1934,6 +1951,7 @@ def _scan_top_level_single_writes(
                     reassigned.add(name)
                 else:
                     bindings[name] = stmt.value
+                    binding_stmt[name] = stmt
             else:
                 if name in bindings:
                     reassigned.add(name)
@@ -1948,7 +1966,45 @@ def _scan_top_level_single_writes(
         elif isinstance(stmt, frog_ast.GenericFor):
             if stmt.var_name in bindings:
                 reassigned.add(stmt.var_name)
+    # Nested-aware invalidation: any write to a bound name anywhere OTHER
+    # than its single defining init statement -- including element/field
+    # writes and writes inside if/for bodies -- means the binding is not
+    # write-once and must not be relied upon at later use sites.
+    for name, def_stmt in binding_stmt.items():
+        if name in reassigned:
+            continue
+        for stmt in block.statements:
+            if stmt is def_stmt:
+                continue
+            if reassigns_or_rebinds({name}, stmt):
+                reassigned.add(name)
+                break
     return bindings, reassigned
+
+
+def _stable_value_names(method: frog_ast.Method, game: frog_ast.Game) -> set[str]:
+    """Names whose VALUE is fixed across *method*'s execution.
+
+    A name is value-stable if it is a method parameter (immutable), a game
+    field never written in this method (``_count_field_assigns == 0``), or a
+    top-level write-once typed-init local (nested-aware via
+    :func:`_scan_top_level_single_writes`).
+
+    Used to decide whether a local binding ``v = f(...free...)`` /
+    ``v = a || b`` may be substituted at a later comparison site: the
+    substitution re-evaluates the RHS there, so every free variable of the
+    RHS must hold the same value it did at the binding site (audit F-252,
+    and the Gap-D stability set of InjectiveEqualitySimplify / F-247).
+    """
+    param_names = {p.name for p in method.signature.parameters}
+    stable_field_names = {
+        f.name for f in game.fields if _count_field_assigns(method.block, f.name) == 0
+    }
+    all_locals, all_reassigned = _scan_top_level_single_writes(
+        method.block, value_predicate=lambda v: True
+    )
+    single_write_locals = set(all_locals.keys()) - all_reassigned
+    return param_names | stable_field_names | single_write_locals
 
 
 def _flatten_concat(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
@@ -2076,6 +2132,22 @@ class ConcatEqualityDecomposeTransformer(MethodScopedTypeMapMixin):
         )
         for name in reassigned:
             bindings.pop(name, None)
+        # F-252: a concat binding `v = a || b` is substituted textually at
+        # the comparison site, re-evaluating its RHS there. Drop any binding
+        # whose RHS free variables are not all value-stable (a later write to
+        # `a` -- even at top level, or nested -- would make the substituted
+        # `a || b` read the mutated value, diverging from the frozen `v`).
+        if self._scope_game is not None:
+            stable_names = _stable_value_names(method, self._scope_game)
+            for name in list(bindings.keys()):
+                free = {
+                    v.name
+                    for v in VariableCollectionVisitor().visit(
+                        copy.deepcopy(bindings[name])
+                    )
+                }
+                if not free.issubset(stable_names):
+                    bindings.pop(name, None)
         old = self.local_concat_bindings
         self.local_concat_bindings = bindings
         # Scope the type map to THIS method (fields + this method's

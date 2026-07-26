@@ -159,3 +159,23 @@ def test_collapse_skips_variable_assigned_in_multiple_places() -> None:
         "a variable declared in both arms of an if must not be collapsed "
         f"(both declarations should stay product-typed):\n{transformed}"
     )
+
+
+def test_f313_prefix_access_not_collapsed() -> None:
+    """F-313: the collapse decision scans only the suffix (uses of THIS
+    declaration's ``v``), but the rewrite must not touch a ``v[i]`` in the
+    prefix, which refers to an outer/shadowed ``v`` (a different binding).
+    Here the parameter ``v`` is read as ``v[1]`` before a local ``[Int,Int] v``
+    shadows it; only the suffix ``v[1]`` may collapse to ``v``."""
+    method = frog_parser.parse_method("""
+        Int O([Int, Int] v, [Int, Int] w) {
+            Int a = v[1];
+            [Int, Int] v = w;
+            Int b = v[1];
+            return a + b;
+        }
+    """)
+    out = str(CollapseSingleIndexTupleTransformer().transform(method))
+    assert "Int a = v[1]" in out  # prefix (outer v) untouched
+    assert "Int v = w[1]" in out  # declaration collapsed to the single element
+    assert "Int b = v;" in out  # suffix access collapsed

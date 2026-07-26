@@ -511,14 +511,13 @@ class CollapseSingleIndexTupleTransformer(BlockTransformer):
                 ),
             )
 
-            new_stmts = (
-                list(block.statements[:stmt_idx])
-                + [new_decl]
-                + list(block.statements[stmt_idx + 1 :])
-            )
-            new_block = frog_ast.Block(new_stmts)
-
-            # Replace all ArrayAccess(v, idx) with Variable(v)
+            # F-313: the collapse decision is based ONLY on uses in the suffix
+            # (``remaining``), where ``v`` is this declaration's binding. Rewrite
+            # ``v[idx] -> v`` ONLY in the suffix. A ``v[idx]`` in the prefix
+            # refers to an outer/shadowed ``v`` (a different binding), and the
+            # new declaration's own RHS must also stay intact; rewriting the
+            # whole reconstructed block would collapse those unrelated accesses.
+            suffix_block = frog_ast.Block(list(block.statements[stmt_idx + 1 :]))
             target = frog_ast.ArrayAccess(
                 frog_ast.Variable(var_name), frog_ast.Integer(idx)
             )
@@ -527,13 +526,18 @@ class CollapseSingleIndexTupleTransformer(BlockTransformer):
                     lambda n, t=target: (  # type: ignore[misc]
                         isinstance(n, frog_ast.ArrayAccess) and n == t
                     )
-                ).visit(new_block)
+                ).visit(suffix_block)
                 if found is None:
                     break
-                new_block = ReplaceTransformer(
+                suffix_block = ReplaceTransformer(
                     found, frog_ast.Variable(var_name)
-                ).transform(new_block)
+                ).transform(suffix_block)
 
+            new_block = frog_ast.Block(
+                list(block.statements[:stmt_idx])
+                + [new_decl]
+                + list(suffix_block.statements)
+            )
             return self.transform(new_block)
 
         return block

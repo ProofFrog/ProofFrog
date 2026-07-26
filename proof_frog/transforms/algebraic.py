@@ -1020,7 +1020,33 @@ class BooleanAbsorptionTransformer(Transformer):
                     and self._is_subset(disj_sets[i], disj_sets[j])
                     and self._is_subset(disj_sets[j], disj_sets[i])
                 ):
-                    keep[j] = False
+                    # Gap F (dual): dropping conjunct j removes its evaluation.
+                    # If it contains a non-deterministic call, i and j are
+                    # INDEPENDENT draws (i.i.d. per ruling 7.A.6) even when
+                    # structurally equal, so `f() && f()` is not `f()` and
+                    # `_is_subset` multiplicity-blindness (F-243) does not make
+                    # them equal. Only dedup deterministic duplicates (F-242).
+                    if not has_nondeterministic_call(
+                        conjuncts[j],
+                        self.ctx.proof_namespace,
+                        self.ctx.proof_let_types,
+                    ):
+                        keep[j] = False
+                    elif self.ctx is not None:
+                        self.ctx.near_misses.append(
+                            NearMiss(
+                                transform_name="Boolean Absorption",
+                                reason=(
+                                    "duplicate conjuncts not deduplicated: the "
+                                    "conjunct contains a non-deterministic call, "
+                                    "so the two copies are independent draws"
+                                ),
+                                location=None,
+                                suggestion=None,
+                                variable=None,
+                                method=None,
+                            )
+                        )
         if all(keep):
             return transformed
         kept_conjuncts = [c for c, k in zip(conjuncts, keep) if k]
@@ -1992,6 +2018,31 @@ class ConcatEqualityDecomposeTransformer(MethodScopedTypeMapMixin):
         else:
             return transformed
 
+        # Gap A (other): `other` is sliced once per concat term below (a
+        # copy.deepcopy at each slice). If it contains a non-deterministic
+        # call, the k slices become k INDEPENDENT draws (i.i.d. per ruling
+        # 7.A.6) instead of k views of one value, so the decomposition is
+        # unsound. Decline (the resolved-binding RHS is already guarded in
+        # `_resolve_to_concat`; this guards the un-resolved `other`). (F-254)
+        if has_nondeterministic_call(
+            other, self.ctx.proof_namespace, self.ctx.proof_let_types
+        ):
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="Concat Equality Decompose",
+                    reason=(
+                        "the non-concat operand contains a non-deterministic "
+                        "call; slicing it per concat term would duplicate the "
+                        "call into independent draws"
+                    ),
+                    location=binary_operation.origin,
+                    suggestion=None,
+                    variable=None,
+                    method=None,
+                )
+            )
+            return transformed
+
         terms = _flatten_concat(concat_expr)
         if len(terms) < 2:
             return transformed
@@ -2223,6 +2274,35 @@ class TupleEqualityDecomposeTransformer(MethodScopedTypeMapMixin):
             arity = self._product_arity(right)
         if arity is None or arity < 1:
             return transformed
+        # Purity gate: `project` deep-copies a non-Tuple operand once per
+        # component (arity copies via ArrayAccess). A bare Variable is a
+        # deterministic re-read and a Tuple literal projects its distinct
+        # components, but any OTHER operand carrying a non-deterministic call
+        # (e.g. `Coin()` returning a tuple) would be evaluated `arity` times
+        # -- k INDEPENDENT draws (i.i.d. per ruling 7.A.6) instead of k views
+        # of one value. Decline. (F-257)
+        if arity >= 2:
+            for operand in (left, right):
+                if not isinstance(
+                    operand, (frog_ast.Tuple, frog_ast.Variable)
+                ) and has_nondeterministic_call(
+                    operand, self.ctx.proof_namespace, self.ctx.proof_let_types
+                ):
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Tuple Equality Decompose",
+                            reason=(
+                                "a tuple operand contains a non-deterministic "
+                                "call; projecting it per component would "
+                                "duplicate the call into independent draws"
+                            ),
+                            location=binary_operation.origin,
+                            suggestion=None,
+                            variable=None,
+                            method=None,
+                        )
+                    )
+                    return transformed
         # op is restricted to NOTEQUALS at the gate above; product
         # disequality decomposes via OR of per-component disequalities.
         combiner = frog_ast.BinaryOperators.OR

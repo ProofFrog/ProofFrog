@@ -1487,6 +1487,14 @@ class NormalizeCommutativeChainsTransformer(Transformer):
     structurally smaller one is on the left.
     """
 
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace | None = None,
+        proof_let_types: NameTypeMap | None = None,
+    ) -> None:
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
+        self._proof_let_types = proof_let_types
+
     def transform_binary_operation(
         self, expr: frog_ast.BinaryOperation
     ) -> frog_ast.Expression:
@@ -1496,6 +1504,18 @@ class NormalizeCommutativeChainsTransformer(Transformer):
             self.transform(expr.left_expression),
             self.transform(expr.right_expression),
         )
+
+        # F-260: reordering operands is sound only when it cannot change the
+        # order in which observable side effects fire. Operands that reduce to
+        # pure values commute freely, but a stateful call
+        # (`challenger.Inc() + challenger.Get()`) does not: swapping it past
+        # another call changes which side effect runs first, so two genuinely
+        # distinguishable expressions would canonicalize to the same form.
+        # Decline to reorder any chain containing a non-deterministic call.
+        if has_nondeterministic_call(
+            transformed, self._proof_namespace, self._proof_let_types
+        ):
+            return transformed
 
         # Commutative + associative: flatten and sort the full chain.
         if transformed.operator in _COMMUTATIVE_ASSOCIATIVE_OPS:
@@ -1527,7 +1547,10 @@ class NormalizeCommutativeChains(TransformPass):
     name = "Normalize Commutative Chains"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return NormalizeCommutativeChainsTransformer().transform(game)
+        return NormalizeCommutativeChainsTransformer(
+            proof_namespace=ctx.proof_namespace,
+            proof_let_types=ctx.proof_let_types,
+        ).transform(game)
 
 
 class FlattenConcatChainTransformer(Transformer):

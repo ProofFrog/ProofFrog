@@ -790,6 +790,20 @@ class SimplifyReturnTransformer(BlockTransformer):
         new_game.methods = [self.transform(method) for method in new_game.methods]
         return new_game
 
+    def transform_reduction(self, reduction: frog_ast.Reduction) -> frog_ast.Reduction:
+        # F-127: a Reduction is a Game subclass but dispatches to
+        # ``transform_reduction`` (not ``transform_game``), so without this hook
+        # ``self.fields`` stayed empty and the trailing-return inlining below
+        # deleted a Reduction field write (``f = 7; return f;`` -> ``return 7;``,
+        # dropping an observable state mutation). Populate fields the same way,
+        # preserving the Reduction's ``to_use`` / ``play_against`` via deepcopy.
+        self.fields = [field.name for field in reduction.fields]
+        new_reduction = copy.deepcopy(reduction)
+        new_reduction.methods = [
+            self.transform(method) for method in new_reduction.methods
+        ]
+        return new_reduction
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         if not block.statements:
             return block

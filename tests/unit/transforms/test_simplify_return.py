@@ -291,3 +291,40 @@ def test_simplify_return_soundness_still_fires(game: str, expected: str) -> None
         frog_parser.parse_game(game)
     )
     assert frog_parser.parse_game(expected) == transformed
+
+
+def test_f127_reduction_field_write_preserved() -> None:
+    """F-127: SimplifyReturn's field-write protection reads self.fields, which
+    was populated only by transform_game. A Reduction (a Game subclass, but
+    dispatched via transform_reduction) left it empty, so `f = 7; return f;` in
+    a reduction oracle was collapsed to `return 7;`, dropping the observable
+    field write. transform_reduction now populates the fields."""
+    reduction = frog_parser.parse_reduction("""
+        Reduction R() compose G() against H().Adversary {
+            Int f;
+            Void Initialize() { f = 0; }
+            Int Oracle() {
+                f = 7;
+                return f;
+            }
+        }
+    """)
+    out = SimplifyReturnTransformer().transform(reduction)
+    assert isinstance(out, type(reduction))  # still a Reduction
+    assert "f = 7" in str(out)  # field write not deleted
+
+
+def test_f127_reduction_local_still_inlined() -> None:
+    """Control for F-127: a genuine typed local in a reduction oracle is still
+    inlined into the trailing return."""
+    reduction = frog_parser.parse_reduction("""
+        Reduction R() compose G() against H().Adversary {
+            Void Initialize() { }
+            Int Oracle() {
+                Int v = 5;
+                return v;
+            }
+        }
+    """)
+    out = str(SimplifyReturnTransformer().transform(reduction))
+    assert "return 5" in out and "Int v = 5" not in out

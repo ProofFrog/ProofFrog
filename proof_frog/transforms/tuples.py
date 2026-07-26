@@ -1,3 +1,9 @@
+# pylint: disable=duplicate-code
+# The block-local scope-guard count helpers (_count_var_refs / _count_var_decls)
+# and the _local_escapes_block logic mirror the structurally identical helpers in
+# transforms.sampling (SinkUniformSample's F-042 guard); each transform module
+# keeps its own copy rather than coupling the two modules for a few small pure
+# functions.
 """Tuple-related passes: expand and simplify tuples.
 
 Product-typed values are expanded into individual components for

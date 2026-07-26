@@ -345,7 +345,16 @@ def test_guard_var_reassigned_before_rf_call_not_simplified() -> None:
 
 def test_fresh_guard_without_reassignment_still_simplified() -> None:
     """Positive control: with no intervening reassignment the guarded fresh
-    draw still enables simplification."""
+    draw still enables simplification.
+
+    This also locks the F-021 resolution. F-021 alleged the cross-call freshness
+    was unsound because a plain (non-``.domain``) ``Set`` field ``S`` stays empty,
+    so two ``<-uniq[S]`` draws could collide across calls. That was adjudicated
+    (USER-ATTENTION sec 1, RESOLVED 2026-06-12): ``x <-uniq[S] T`` has AUTO-ADD
+    semantics -- the sampled value is added to ``S`` -- so successive draws from
+    a persistent field ``S`` never collide, and rewriting the uniquely-keyed RF
+    evaluation to a fresh uniform is sound. Here ``S`` is exactly such a plain
+    ``Set`` field (not ``RF.domain``), so the simplification firing is correct."""
     game = frog_parser.parse_game("""
         Game G() {
             Set<BitString<8>> S;

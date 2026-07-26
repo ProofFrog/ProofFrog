@@ -1324,6 +1324,14 @@ class UniformGroupElemSimplificationTransformer(BlockTransformer):
                 and isinstance(statement.var, frog_ast.Variable)
                 and isinstance(statement.the_type, frog_ast.GroupElemType)
                 and isinstance(statement.sampled_from, frog_ast.GroupElemType)
+                # F-282: the absorption `u * c -> u` is sound only when `u` is
+                # uniform over the SAME group as the multiplication is carried
+                # out in (the declared type's group). If the sampled group
+                # differs (`GroupElem<G> u <- GroupElem<H>`), `u` is uniform over
+                # H but `u * g` lands in the coset `gH` -- a different support --
+                # so `u * g` is not distributed as `u`. Require the two groups to
+                # match structurally.
+                and statement.the_type.group == statement.sampled_from.group
             ):
                 continue
 

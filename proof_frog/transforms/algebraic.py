@@ -2486,6 +2486,14 @@ class TupleEqualityDecomposeTransformer(MethodScopedTypeMapMixin):
             t = self.type_map.get(expr.name)
             if isinstance(t, frog_ast.ProductType):
                 return len(t.types)
+        # F-258: a call returning a product type has that product's arity (e.g.
+        # `F.Coin() : [Bool, Bool]`). Needed so `t != F.Coin()` cross-checks as
+        # a same-arity pair rather than declining; the F-257 purity gate still
+        # blocks a NON-deterministic such call from being projected per element.
+        if isinstance(expr, frog_ast.FuncCall):
+            m = _lookup_primitive_method(expr.func, self.ctx.proof_namespace)
+            if m is not None and isinstance(m.return_type, frog_ast.ProductType):
+                return len(m.return_type.types)
         return None
 
     def transform_binary_operation(
@@ -2501,10 +2509,20 @@ class TupleEqualityDecomposeTransformer(MethodScopedTypeMapMixin):
             return transformed
         left = transformed.left_expression
         right = transformed.right_expression
-        arity = self._product_arity(left)
-        if arity is None:
-            arity = self._product_arity(right)
-        if arity is None or arity < 1:
+        # F-258: BOTH operands must be products of the SAME arity. The old
+        # one-sided read (left's arity, falling back to right's) let a product
+        # be compared against a NON-product operand -- e.g. a `[Int,Int]?`
+        # variable holding `None`. Projecting `right[i]` then manufactured
+        # `None[i]`, an undefined read that corrupted an everywhere-defined
+        # game (`[1,2] != None` is just `true`) into an always-aborting one, so
+        # a VALID hop was wrongly REJECTED. Require both arities present and
+        # equal; a non-product / optional operand declines the decomposition.
+        left_arity = self._product_arity(left)
+        right_arity = self._product_arity(right)
+        if left_arity is None or right_arity is None or left_arity != right_arity:
+            return transformed
+        arity = left_arity
+        if arity < 1:
             return transformed
         # Purity gate: `project` deep-copies a non-Tuple operand once per
         # component (arity copies via ArrayAccess). A bare Variable is a

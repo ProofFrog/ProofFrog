@@ -390,3 +390,58 @@ def test_expand_three_element_product_tuples(
 
     transformed_ast = ExpandTupleTransformer().transform(game_ast)
     assert expected_ast == transformed_ast
+
+
+def _bs(n: int) -> frog_ast.BitStringType:
+    return frog_ast.BitStringType(frog_ast.Integer(n))
+
+
+def test_f322_all_constant_declines_whole_var_product_sample() -> None:
+    """F-322: a whole-variable product-type sample ``v <- [T0, T1]`` must make
+    the AllConstantFieldAccesses gate decline -- ExpandTuple cannot split an
+    atomic aggregate draw into per-component draws. (Built as an AST because the
+    typechecker rejects product-type sample domains at the surface.)"""
+    prod = frog_ast.ProductType([_bs(4), _bs(4)])
+    block = frog_ast.Block(
+        [
+            frog_ast.Sample(prod, frog_ast.Variable("v"), prod),
+            frog_ast.ReturnStatement(
+                frog_ast.ArrayAccess(frog_ast.Variable("v"), frog_ast.Integer(0))
+            ),
+        ]
+    )
+    assert visitors.AllConstantFieldAccesses("v").visit(block) is False
+
+
+def test_f322_element_sample_still_splittable() -> None:
+    """Control: an element sample at a constant index ``v[0] <- T`` keeps its
+    ArrayAccess lvalue and does NOT block expansion."""
+    block = frog_ast.Block(
+        [
+            frog_ast.Sample(
+                _bs(4),
+                frog_ast.ArrayAccess(frog_ast.Variable("v"), frog_ast.Integer(0)),
+                _bs(4),
+            ),
+            frog_ast.ReturnStatement(
+                frog_ast.ArrayAccess(frog_ast.Variable("v"), frog_ast.Integer(1))
+            ),
+        ]
+    )
+    assert visitors.AllConstantFieldAccesses("v").visit(block) is True
+
+
+def test_f322_whole_var_unique_sample_declines() -> None:
+    """A whole-variable ``v <-uniq[S] [T0, T1]`` is equally unsplittable."""
+    prod = frog_ast.ProductType([_bs(4), _bs(4)])
+    block = frog_ast.Block(
+        [
+            frog_ast.UniqueSample(
+                prod, frog_ast.Variable("v"), frog_ast.Variable("S"), prod, "uniq"
+            ),
+            frog_ast.ReturnStatement(
+                frog_ast.ArrayAccess(frog_ast.Variable("v"), frog_ast.Integer(0))
+            ),
+        ]
+    )
+    assert visitors.AllConstantFieldAccesses("v").visit(block) is False

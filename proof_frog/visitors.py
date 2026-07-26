@@ -1139,6 +1139,21 @@ class AllConstantFieldAccesses(Visitor[bool]):
         if frog_ast.tuple_literal_values(assignment.value) is None:
             self.all_constant = False
 
+    def visit_sample(self, sample: frog_ast.Sample) -> None:
+        self._decline_on_whole_var_write(sample.var)
+
+    def visit_unique_sample(self, sample: frog_ast.UniqueSample) -> None:
+        self._decline_on_whole_var_write(sample.var)
+
+    def _decline_on_whole_var_write(self, target: frog_ast.ASTNode) -> None:
+        # F-322: a whole-variable sample of the tuple (``v <- ...`` /
+        # ``v <-uniq[S] ...``) draws the aggregate atomically; ExpandTuple
+        # cannot split it into per-component draws (an element sample
+        # ``v[0] <- T`` keeps its ArrayAccess lvalue and is handled by
+        # ``visit_array_access``). Decline so the field/local is left intact.
+        if isinstance(target, frog_ast.Variable) and target.name == self.tuple_name:
+            self.all_constant = False
+
 
 class FieldOrderingVisitor(Visitor[dict[str, str]]):
     def __init__(self) -> None:

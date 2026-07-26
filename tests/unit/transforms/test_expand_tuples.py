@@ -445,3 +445,40 @@ def test_f322_whole_var_unique_sample_declines() -> None:
         ]
     )
     assert visitors.AllConstantFieldAccesses("v").visit(block) is False
+
+
+def test_f324_declines_when_local_escapes_block() -> None:
+    """F-324: a block-local product declaration whose variable is also read in
+    an enclosing block (an out-of-scope AST the typechecker rejects) must not be
+    expanded -- splitting it here would leave the outer ``v[k]`` access dangling.
+    (Compare the control below, which expands when every use is in-block.)"""
+    method = frog_parser.parse_method("""
+        Int Oracle(Bool c) {
+            Int acc = 0;
+            if (c) {
+                [Int, Int] v = [1, 2];
+                acc = acc + v[0];
+            }
+            return v[1];
+        }
+        """)
+    out = str(ExpandTupleTransformer().transform(method))
+    assert "[1, 2]" in out  # tuple left intact
+    assert "v@1" not in out  # no dangling component reference
+
+
+def test_f324_control_expands_when_all_uses_in_block() -> None:
+    """Control for F-324: with every use inside the declaring block the local
+    still expands."""
+    method = frog_parser.parse_method("""
+        Int Oracle(Bool c) {
+            Int acc = 0;
+            if (c) {
+                [Int, Int] v = [1, 2];
+                acc = acc + v[0] + v[1];
+            }
+            return acc;
+        }
+        """)
+    out = str(ExpandTupleTransformer().transform(method))
+    assert "[1, 2]" not in out  # expanded into components

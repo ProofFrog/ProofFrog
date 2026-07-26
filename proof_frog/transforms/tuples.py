@@ -32,6 +32,44 @@ from ._base import (
 # ---------------------------------------------------------------------------
 
 
+def _count_var_refs(node: frog_ast.ASTNode, name: str) -> int:
+    """Count occurrences of *name* as a variable reference in *node*."""
+    count = [0]
+
+    def _p(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, frog_ast.Variable) and n.name == name:
+            count[0] += 1
+        return False
+
+    SearchVisitor(_p).visit(node)
+    return count[0]
+
+
+def _count_var_decls(node: frog_ast.ASTNode, name: str) -> int:
+    """Count local declarations that bind *name* in *node* (typed
+    sample/assignment/declaration, or a loop binder)."""
+    count = [0]
+
+    def _p(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, frog_ast.VariableDeclaration) and n.name == name:
+            count[0] += 1
+        elif (
+            isinstance(n, (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample))
+            and n.the_type is not None
+            and isinstance(n.var, frog_ast.Variable)
+            and n.var.name == name
+        ):
+            count[0] += 1
+        elif isinstance(n, frog_ast.NumericFor) and n.name == name:
+            count[0] += 1
+        elif isinstance(n, frog_ast.GenericFor) and n.var_name == name:
+            count[0] += 1
+        return False
+
+    SearchVisitor(_p).visit(node)
+    return count[0]
+
+
 class ExpandTupleTransformer(Transformer):
     """Expands product-typed variables into individual component variables.
 
@@ -44,6 +82,38 @@ class ExpandTupleTransformer(Transformer):
     def __init__(self) -> None:
         self.to_transform: list[str] = []
         self.lengths: list[int] = []
+        self._current_method: frog_ast.Method | None = None
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        # Capture the enclosing method so the F-324 scope guard can tell whether
+        # a block-local tuple declaration escapes the block being expanded.
+        self._current_method = method
+        result = self._transform_children(method)
+        assert isinstance(result, frog_ast.Method)
+        return result
+
+    def _local_escapes_block(self, block: frog_ast.Block, name: str) -> bool:
+        """F-324 scope guard (mirrors the SinkUniformSample F-042 guard).
+
+        A block-local product declaration is expanded in place, splitting
+        ``v`` into ``v@k`` components only within this block (a local's entry
+        in ``to_transform`` is popped when the block finishes). For well-typed
+        input a block-local is never referenced outside its block, so the
+        existing within-block ``_has_reference`` guard is exact. But on a
+        malformed, out-of-scope AST where ``v`` is also read in an enclosing
+        block, expanding here would leave that outer ``v[k]`` access unrewritten
+        (dangling). Decline when ``name`` is referenced in the method outside
+        ``block`` with no governing outer declaration."""
+        method = self._current_method
+        if method is None:
+            return False
+        refs_in_method = _count_var_refs(method.block, name)
+        refs_in_block = _count_var_refs(block, name)
+        if refs_in_method <= refs_in_block:
+            return False  # no references outside this block -> safe
+        decls_in_method = _count_var_decls(method.block, name)
+        decls_in_block = _count_var_decls(block, name)
+        return decls_in_method <= decls_in_block
 
     def _is_transformable_tuple(
         self, the_type: frog_ast.Type, name: str, search_space: frog_ast.ASTNode
@@ -140,6 +210,9 @@ class ExpandTupleTransformer(Transformer):
                     statement.var.name,
                     frog_ast.Block(list(block.statements[stmt_idx + 1 :])),
                 )
+                # F-324: also decline when the local escapes this block (an
+                # outer-scope ``v[k]`` would be left dangling by the split).
+                and not self._local_escapes_block(block, statement.var.name)
             ):
                 assert isinstance(statement.the_type, frog_ast.ProductType)
                 unfolded_types = statement.the_type.types

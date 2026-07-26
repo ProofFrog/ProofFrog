@@ -36,6 +36,23 @@ from ._base import (
 )
 
 
+def _contains_potential_undefined_read(node: frog_ast.ASTNode) -> bool:
+    """True if *node* contains a map/array index access ``M[k]``.
+
+    Reading an absent map key or an out-of-bounds array index is an observable
+    undefined-read abort (SEMANTICS 6.7). Relocating an evaluation that can
+    perform such a read to a position with BROADER reachability -- hoisting it
+    before a branch it only ran inside, forcing it onto a never-taken branch,
+    or making it unconditional -- changes the set of traces on which the abort
+    occurs, so a pass that hoists or duplicates an expression across control
+    flow must decline when it contains one (ruling 7.A.1).
+    """
+    return (
+        SearchVisitor(lambda n: isinstance(n, frog_ast.ArrayAccess)).visit(node)
+        is not None
+    )
+
+
 def _stmt_mutates_var(node: frog_ast.ASTNode, name: str) -> bool:
     """True if statement *node* mutates the variable *name*.
 
@@ -3495,8 +3512,15 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
                 self.proof_namespace, self._function_var_names
             )
             if isinstance(statement, frog_ast.IfStatement):
-                for condition in statement.conditions:
-                    collector.visit(condition)
+                # F-200: only the FIRST condition is always evaluated when the
+                # if is reached. An else-if condition (`conditions[1:]`) is
+                # reached only when every earlier condition was false, so a call
+                # extracted from it to a pre-if local would be evaluated on
+                # traces the earlier guards short-circuited past -- e.g. moving
+                # `F.Eval(M[x])` out of `else if (...)` past a `!(x in M)` guard
+                # makes the absent-key read unconditional.
+                if statement.conditions:
+                    collector.visit(statement.conditions[0])
             else:
                 collector.visit(statement)
             all_calls.extend(collector.result())
@@ -3582,8 +3606,10 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
                 self.proof_namespace, self._function_var_names
             )
             if isinstance(statement, frog_ast.IfStatement):
-                for condition in statement.conditions:
-                    collector.visit(condition)
+                # F-200: match only the first (always-evaluated) condition, so
+                # the insert point is never chosen from an else-if occurrence.
+                if statement.conditions:
+                    collector.visit(statement.conditions[0])
             else:
                 collector.visit(statement)
             for found_call in collector.result():
@@ -3844,6 +3870,12 @@ class HoistDuplicateBranchCallTransformer(BlockTransformer):
                 continue
             insert_index = containing[0]
             if not self._args_available(block, rep, insert_index):
+                continue
+            # F-206: hoisting the call before the branches evaluates it on the
+            # fall-through trace too. If its argument can perform an undefined
+            # read (`M[c]` on an absent key), the eager evaluation aborts on a
+            # trace where the original returned a value. Decline.
+            if _contains_potential_undefined_read(rep):
                 continue
             return_type = self._return_type(rep)
             if return_type is None:

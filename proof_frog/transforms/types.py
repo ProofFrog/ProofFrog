@@ -16,6 +16,7 @@ from ..visitors import (
     BlockTransformer,
     NameTypeMap,
     build_game_type_map,
+    MethodScopedTypeMapMixin,
 )
 from ._base import TransformPass, PipelineContext
 
@@ -24,7 +25,7 @@ from ._base import TransformPass, PipelineContext
 # ---------------------------------------------------------------------------
 
 
-class DeadNullGuardEliminator(BlockTransformer):
+class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
     """Removes if (x == None) { ... } guards that can never execute.
 
     Two cases are handled:
@@ -298,7 +299,11 @@ class DeadNullGuardElimination(TransformPass):
             for k, v in ctx.proof_namespace.items()
             if isinstance(v, (frog_ast.Primitive, frog_ast.Scheme, frog_ast.Game))
         }
-        return DeadNullGuardEliminator(type_map, instantiables).transform(game)
+        return (
+            DeadNullGuardEliminator(type_map, instantiables)
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )
 
 
 class SubsetTypeNormalization(TransformPass):

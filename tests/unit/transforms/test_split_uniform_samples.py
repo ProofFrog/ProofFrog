@@ -406,3 +406,86 @@ def test_f032_constant_bounds_still_split() -> None:
     parsed = frog_parser.parse_method(method)
     transformed = SplitUniformSampleTransformer({}).transform(parsed)
     assert transformed != parsed, "constant-bound split should still fire"
+
+
+def test_f036_out_of_bounds_slice_declines() -> None:
+    """F-036: `z[4:8]` on a BitString<4> reads outside the sampled range -- an
+    undefined out-of-bounds read, NOT an independent uniform sub-sample. The
+    split must decline (else it fabricates a fresh uniform for undefined bits)."""
+    method = """
+        BitString<4> f() {
+            BitString<4> z <- BitString<4>;
+            return z[4 : 8];
+        }
+        """
+    transformed = SplitUniformSampleTransformer({}).transform(
+        frog_parser.parse_method(method)
+    )
+    assert "z[4 : 8]" in str(transformed)  # not split
+
+
+def test_f036_in_bounds_constant_slices_still_split() -> None:
+    """Positive control: fully in-bounds constant slices of a BitString<8> still
+    split into independent uniform pieces."""
+    method = """
+        Void f() {
+            BitString<8> z <- BitString<8>;
+            BitString<4> a = z[0 : 4];
+            BitString<4> b = z[4 : 8];
+        }
+        """
+    transformed = SplitUniformSampleTransformer({}).transform(
+        frog_parser.parse_method(method)
+    )
+    text = str(transformed)
+    assert "z[0 : 4]" not in text and "z[4 : 8]" not in text  # split
+
+
+def test_f033_signed_offset_slices_not_split() -> None:
+    """F-033: slices `z[0:n]` and `z[n+c : n+c+n]` of a `BitString<n+n+c>` are
+    disjoint only when `c >= 0` (or `c <= -2n`). The offset `c` appears only
+    inside a compound length, so its sign is unconstrained -- at `c = -n` (legal:
+    the sampled length `n+n+c = n` is nonnegative) both slices are `z[0:n]`, the
+    same bits. The pass must NOT assume `c` positive and split them into
+    independent samples (it previously did, via blanket positivity)."""
+    game = frog_parser.parse_game(
+        """
+        Game Real(Int n, Int c) {
+            Bool Query() {
+                BitString<n + n + c> z <- BitString<n + n + c>;
+                BitString<n> a = z[0 : n];
+                BitString<n> b = z[n + c : n + c + n];
+                return a == b;
+            }
+        }
+        """
+    )
+    result = SplitUniformSampleTransformer(
+        {"n": Symbol("n"), "c": Symbol("c")}
+    ).transform(game)
+    assert result == game, "slices with a signed-offset gap must not be split"
+
+
+def test_f033_standalone_length_gap_still_split() -> None:
+    """F-033 positive control: when the gap between slices is a STANDALONE
+    BitString length symbol (`m` from a `BitString<m>` pad), well-formedness
+    forces `m >= 0`, so the slices are genuinely disjoint and the split must
+    still fire -- the fix restricts positivity to standalone length symbols, it
+    does not blanket-decline symbolic gaps."""
+    game = frog_parser.parse_game(
+        """
+        Game G(Int n, Int m) {
+            BitString<n + m + n> Query() {
+                BitString<n + m + n> z <- BitString<n + m + n>;
+                BitString<n> a = z[0 : n];
+                BitString<m> pad = z[n : n + m];
+                BitString<n> b = z[n + m : n + m + n];
+                return a || pad || b;
+            }
+        }
+        """
+    )
+    result = SplitUniformSampleTransformer(
+        {"n": Symbol("n"), "m": Symbol("m")}
+    ).transform(game)
+    assert result != game, "slices gapped by a standalone length must still split"

@@ -215,6 +215,24 @@ class TestXorIdentityTypeGuard:
         # Unchanged — no BitStringLiteral(0) to remove
         assert result == method
 
+    def test_f296_leading_literal_does_not_drop_modint_operand(self) -> None:
+        """F-296: `0^n + m` with `m: ModInt<q>` must NOT drop the `0^n` literal.
+
+        XorIdentity gates on `_is_bitstring_add_chain`, which used to return on
+        the FIRST evidence term -- the leading `BitStringLiteral` `0^n` -- and
+        wrongly classified the chain as XOR, rewriting `0^n + m` to `m`. Closed
+        by the F-264 shared-helper fix: `_is_bitstring_add_chain` now scans all
+        terms and lets the ModInt operand override the leading literal, so the
+        chain is not treated as bitstring XOR and the pass declines."""
+        method = frog_parser.parse_method("""
+            ModInt<q> f(ModInt<q> m) {
+                return 0^n + m;
+            }
+        """)
+        tm = _type_map_with(m=_modint(_var("q")))
+        result = XorIdentityTransformer(tm).transform(method)
+        assert result == method, "leading literal must not drop a ModInt operand"
+
 
 # ---------------------------------------------------------------------------
 # ModIntSimplificationTransformer (Step 6.3)

@@ -88,9 +88,23 @@ class BranchEliminiationTransformer(BlockTransformer):
                     len(new_if_statement.conditions) == 1
                     and isinstance(new_if_statement.conditions[0], frog_ast.Boolean)
                     and new_if_statement.conditions[0].bool
-                ) or not new_if_statement.conditions:
+                ):
+                    # ``if (true) { B } ...`` -> splice the then-branch B.
                     return self.transform_block(
                         prior_block + new_if_statement.blocks[0] + remaining_block
+                    )
+
+                if not new_if_statement.conditions:
+                    # No arm condition holds, so the else executes. F-125: splice
+                    # ``blocks[-1]`` -- the block ``has_else_block()`` designates
+                    # as the else -- not ``blocks[0]``. On the reachable path the
+                    # paired condition+block deletion above leaves a single block
+                    # (``blocks[-1] == blocks[0]``); the two differ only on a
+                    # malformed, directly-constructed ``IfStatement([], [b1, b2])``,
+                    # where splicing ``blocks[0]`` would run the wrong block and
+                    # drop the else.
+                    return self.transform_block(
+                        prior_block + new_if_statement.blocks[-1] + remaining_block
                     )
 
                 if new_if_statement != if_statement:
@@ -700,7 +714,14 @@ class IfToBooleanAssignmentTransformer(BlockTransformer):
                 and then_stmt.var.name == else_stmt.var.name
                 and isinstance(then_stmt.value, frog_ast.Boolean)
                 and isinstance(else_stmt.value, frog_ast.Boolean)
-                and then_stmt.value.bool != else_stmt.value.bool
+                # F-085: compare the branch literals by TRUTH VALUE, not by raw
+                # Python payload. A `!=` on the payloads fires on a non-canonical
+                # pair such as Boolean(2) vs Boolean(True) (2 != True), even
+                # though both mean `true`, then rewrites `x = c` -- a
+                # probability-changing merge where the sound result is the
+                # constant `x = true`. The parser only builds genuine bools, so
+                # this normalises a value only a future transform could produce.
+                and bool(then_stmt.value.bool) != bool(else_stmt.value.bool)
             ):
                 continue
             # RC4 binding-kind guard: both branches must be the same kind of
@@ -768,6 +789,20 @@ class SimplifyReturnTransformer(BlockTransformer):
         new_game = copy.deepcopy(game)
         new_game.methods = [self.transform(method) for method in new_game.methods]
         return new_game
+
+    def transform_reduction(self, reduction: frog_ast.Reduction) -> frog_ast.Reduction:
+        # F-127: a Reduction is a Game subclass but dispatches to
+        # ``transform_reduction`` (not ``transform_game``), so without this hook
+        # ``self.fields`` stayed empty and the trailing-return inlining below
+        # deleted a Reduction field write (``f = 7; return f;`` -> ``return 7;``,
+        # dropping an observable state mutation). Populate fields the same way,
+        # preserving the Reduction's ``to_use`` / ``play_against`` via deepcopy.
+        self.fields = [field.name for field in reduction.fields]
+        new_reduction = copy.deepcopy(reduction)
+        new_reduction.methods = [
+            self.transform(method) for method in new_reduction.methods
+        ]
+        return new_reduction
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         if not block.statements:
@@ -1890,7 +1925,15 @@ class IfFalseReturnToConjunctionTransformer(BlockTransformer):
                 continue
             trailing = block.statements[trailing_idx]
             assert isinstance(trailing, frog_ast.ReturnStatement)
-            if trailing.expression is None:
+            # F-117: ``trailing.expression is None`` is a Python None test for a
+            # bare ``return;``. It does NOT catch a FrogLang ``None`` literal
+            # (``frog_ast.NoneExpression``), which a well-typed ``T?`` method may
+            # return. Conjoining it (``!P && None``) is type-invalid and would
+            # canonicalize a well-typed game into a meaningless one, so decline
+            # -- the rewrite's soundness argument assumes a boolean trailing.
+            if trailing.expression is None or isinstance(
+                trailing.expression, frog_ast.NoneExpression
+            ):
                 continue
             # RC4 capture/movement guard: the negated guard ``!P`` is moved
             # from BEFORE the intervening declarations to AFTER them (into the
@@ -2330,6 +2373,13 @@ class ElseUnwrapTransformer(BlockTransformer):
             if len(statement.conditions) != 1:
                 continue
             if not statement.has_else_block():
+                continue
+            # F-123: has_else_block() only checks for a block surplus
+            # (len(blocks) > len(conditions)); it accepts a malformed
+            # IfStatement([C], [B0, B1, B2]) where blocks[1] is spliced as the
+            # else and blocks[2] would be silently dropped. A well-formed
+            # single-else if has exactly len(conditions)+1 blocks. Require it.
+            if len(statement.blocks) != len(statement.conditions) + 1:
                 continue
             # True branch must unconditionally return
             if not block_unconditionally_returns(statement.blocks[0]):

@@ -82,3 +82,36 @@ def test_non_tuple_neq_does_not_fire() -> None:
     }
     """
     assert _apply(source) == frog_parser.parse_game(source)
+
+
+def test_f258_optional_operand_not_decomposed() -> None:
+    """F-258: `[1,2] != m` where `m : [Int,Int]?` (could hold None) must NOT be
+    decomposed. The old one-sided arity read projected `m[i]` -> `None[i]`, an
+    undefined read that corrupted an everywhere-defined game (`[1,2] != None`
+    is just `true`) into an always-aborting one -> a valid hop wrongly rejected.
+    Both operands must be products of equal arity."""
+    source = """
+    Game A() {
+        [Int, Int]? m;
+        Bool O() {
+            m = None;
+            return [1, 2] != m;
+        }
+    }
+    """
+    # Unchanged: the non-equal / optional operand declines the decomposition
+    # (no `m[0]` / `m[1]` projection is manufactured).
+    assert _apply(source) == frog_parser.parse_game(source)
+
+
+def test_f258_both_products_still_decompose() -> None:
+    """Positive control: two products of equal arity still decompose."""
+    source = """
+    Game A() {
+        Bool O(Int a, Int b, Int c, Int d) {
+            return [a, b] != [c, d];
+        }
+    }
+    """
+    out = str(_apply(source))
+    assert "a != c" in out and "b != d" in out  # decomposed via OR

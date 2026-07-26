@@ -390,3 +390,95 @@ def test_expand_three_element_product_tuples(
 
     transformed_ast = ExpandTupleTransformer().transform(game_ast)
     assert expected_ast == transformed_ast
+
+
+def _bs(n: int) -> frog_ast.BitStringType:
+    return frog_ast.BitStringType(frog_ast.Integer(n))
+
+
+def test_f322_all_constant_declines_whole_var_product_sample() -> None:
+    """F-322: a whole-variable product-type sample ``v <- [T0, T1]`` must make
+    the AllConstantFieldAccesses gate decline -- ExpandTuple cannot split an
+    atomic aggregate draw into per-component draws. (Built as an AST because the
+    typechecker rejects product-type sample domains at the surface.)"""
+    prod = frog_ast.ProductType([_bs(4), _bs(4)])
+    block = frog_ast.Block(
+        [
+            frog_ast.Sample(prod, frog_ast.Variable("v"), prod),
+            frog_ast.ReturnStatement(
+                frog_ast.ArrayAccess(frog_ast.Variable("v"), frog_ast.Integer(0))
+            ),
+        ]
+    )
+    assert visitors.AllConstantFieldAccesses("v").visit(block) is False
+
+
+def test_f322_element_sample_still_splittable() -> None:
+    """Control: an element sample at a constant index ``v[0] <- T`` keeps its
+    ArrayAccess lvalue and does NOT block expansion."""
+    block = frog_ast.Block(
+        [
+            frog_ast.Sample(
+                _bs(4),
+                frog_ast.ArrayAccess(frog_ast.Variable("v"), frog_ast.Integer(0)),
+                _bs(4),
+            ),
+            frog_ast.ReturnStatement(
+                frog_ast.ArrayAccess(frog_ast.Variable("v"), frog_ast.Integer(1))
+            ),
+        ]
+    )
+    assert visitors.AllConstantFieldAccesses("v").visit(block) is True
+
+
+def test_f322_whole_var_unique_sample_declines() -> None:
+    """A whole-variable ``v <-uniq[S] [T0, T1]`` is equally unsplittable."""
+    prod = frog_ast.ProductType([_bs(4), _bs(4)])
+    block = frog_ast.Block(
+        [
+            frog_ast.UniqueSample(
+                prod, frog_ast.Variable("v"), frog_ast.Variable("S"), prod, "uniq"
+            ),
+            frog_ast.ReturnStatement(
+                frog_ast.ArrayAccess(frog_ast.Variable("v"), frog_ast.Integer(0))
+            ),
+        ]
+    )
+    assert visitors.AllConstantFieldAccesses("v").visit(block) is False
+
+
+def test_f324_declines_when_local_escapes_block() -> None:
+    """F-324: a block-local product declaration whose variable is also read in
+    an enclosing block (an out-of-scope AST the typechecker rejects) must not be
+    expanded -- splitting it here would leave the outer ``v[k]`` access dangling.
+    (Compare the control below, which expands when every use is in-block.)"""
+    method = frog_parser.parse_method("""
+        Int Oracle(Bool c) {
+            Int acc = 0;
+            if (c) {
+                [Int, Int] v = [1, 2];
+                acc = acc + v[0];
+            }
+            return v[1];
+        }
+        """)
+    out = str(ExpandTupleTransformer().transform(method))
+    assert "[1, 2]" in out  # tuple left intact
+    assert "v@1" not in out  # no dangling component reference
+
+
+def test_f324_control_expands_when_all_uses_in_block() -> None:
+    """Control for F-324: with every use inside the declaring block the local
+    still expands."""
+    method = frog_parser.parse_method("""
+        Int Oracle(Bool c) {
+            Int acc = 0;
+            if (c) {
+                [Int, Int] v = [1, 2];
+                acc = acc + v[0] + v[1];
+            }
+            return acc;
+        }
+        """)
+    out = str(ExpandTupleTransformer().transform(method))
+    assert "[1, 2]" not in out  # expanded into components

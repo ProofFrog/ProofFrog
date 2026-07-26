@@ -103,3 +103,58 @@ def test_loop_reuse_emits_near_miss() -> None:
         and "reused across" in nm.reason
         for nm in ctx.near_misses
     )
+
+
+def test_f292_modulus_mismatch_not_absorbed() -> None:
+    """F-292: `u <- ModInt<q_s>` is uniform over {0..q_s-1}, but `u + c` is
+    computed in the carrier `ModInt<q_t>`. When q_s != q_t (`ModInt<4> u <-
+    ModInt<2>; return u + 2;`) the support shifts from {0,1} to {2,3} -- disjoint
+    -- so absorbing `u + 2` to `u` is unsound and must be declined."""
+    result = _apply(
+        """
+        Game G() {
+            ModInt<4> O() {
+                ModInt<4> u <- ModInt<2>;
+                return u + 2;
+            }
+        }
+        """
+    )
+    assert "u + 2" in result, f"modulus-mismatch uniform was absorbed:\n{result}"
+
+
+def test_f292_matching_modulus_still_absorbed() -> None:
+    """F-292 positive control: when the sampled and carrier moduli match, the
+    absorption still fires (shift of a full-ring uniform is uniform)."""
+    result = _apply(
+        """
+        Game G() {
+            ModInt<4> O() {
+                ModInt<4> u <- ModInt<4>;
+                return u + 2;
+            }
+        }
+        """
+    )
+    assert "u + 2" not in result, f"matching-modulus uniform was not absorbed:\n{result}"
+
+
+def test_f293_type_parameterization_use_not_rewritten() -> None:
+    """F-293: the additive-use search descends into Type parameterizations, so a
+    `u + 3` inside a `ModInt<u + 3>` modulus position was found and rewritten to
+    `u`, editing the sampled type of `z` (changing Pr[z==0] from 1/(u+3) to 1/u).
+    A type parameter is not a value expression, so the absorption must decline."""
+    result = _apply(
+        """
+        Game G(Int q) {
+            Bool O() {
+                ModInt<q> z;
+                ModInt<q> u <- ModInt<q>;
+                z <- ModInt<u + 3>;
+                return z == 0;
+            }
+        }
+        """
+    )
+    assert "ModInt<u + 3>" in result, f"a type parameterization was rewritten:\n{result}"
+    assert "ModInt<u>" not in result, f"type edited to ModInt<u>:\n{result}"

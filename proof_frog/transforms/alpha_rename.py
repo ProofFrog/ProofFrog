@@ -48,9 +48,9 @@ from .. import frog_ast
 from ..visitors import Transformer
 from ._base import TransformPass, PipelineContext
 
-# Reserved prefix for engine-internal names.  We never rename a binder whose
-# name already begins with ``__`` (idempotency + don't clobber other passes).
-_RESERVED_PREFIX = "__"
+# AlphaRename's own fresh-name pattern.  These -- and ONLY these -- are left
+# unrenamed on later fixed-point iterations, so renaming converges.  Every
+# other binder (including user-written ``__``-prefixed locals) is renamed.
 _FRESH = "__a{0}__"
 _FRESH_RE = re.compile(r"__a(\d+)__")
 
@@ -131,17 +131,43 @@ class _AlphaRenamer:
     ) -> frog_ast.Expression:
         return _RefRewriter(self._active(scopes)).transform(node)
 
+    def _rewrite_type(
+        self, the_type: frog_ast.Type | None, scopes: list[dict[str, str]]
+    ) -> frog_ast.Type | None:
+        """Rewrite name references inside a type annotation (e.g. the ``n`` in
+        ``BitString<n>``) through the active scope.
+
+        A binder's declared type is evaluated in the scope BEFORE the binder
+        itself binds, so callers pass ``scopes`` as it stands before
+        ``_maybe_bind``. Without this, a length/parameter naming a shadowing
+        local re-binds to the outer field and the recorded type is falsified
+        (audit F-239; and the ``sampled_from`` sibling F-238)."""
+        if the_type is None:
+            return None
+        return _RefRewriter(self._active(scopes)).transform(the_type)
+
     def _maybe_bind(self, name: str, local: dict[str, str]) -> str | None:
         """Allocate a fresh name for binder *name* and record it, or skip.
 
-        Returns the fresh name, or ``None`` if *name* should not be renamed
-        (already reserved-prefixed).
+        Returns the fresh name, or ``None`` if *name* should not be renamed.
+
+        The ONLY names left alone are AlphaRename's OWN already-minted fresh
+        names (``__aN__``, matched by :data:`_FRESH_RE`): re-renaming them
+        every fixed-point iteration would never converge. Every other binder
+        -- including a *user-written* ``__``-prefixed local -- IS renamed. The
+        old code skipped every ``__``-prefixed name on the assumption they were
+        all engine-internal; a victim who named a local ``__x`` was then left
+        un-renamed, so the capture AlphaRename exists to prevent survived and a
+        downstream name-blind splice (BranchElimination) conflated the shadow
+        -- an advantage-1 false accept (audit F-237). Other engine temporaries
+        (``__cse_slice_...``, ``__rf_extract_...``) are just as capture-prone
+        and are safely renamed too: their producing passes re-mint by a
+        within-block counter, so a renamed temp is never re-matched.
         """
-        if name.startswith(_RESERVED_PREFIX):
-            # Leave engine-internal names alone; still record an identity
-            # binding so a later same-name reference resolves to it (not to an
-            # outer local with the same reserved name, which cannot happen, but
-            # keeps the scope model exact).
+        if _FRESH_RE.fullmatch(name):
+            # Already an AlphaRename fresh name: keep it (identity binding so a
+            # later same-name reference resolves to it) to guarantee
+            # fixed-point convergence.
             local[name] = name
             return None
         fresh = self._fresh()
@@ -161,10 +187,11 @@ class _AlphaRenamer:
         if isinstance(statement, frog_ast.UniqueSample):
             return self._rename_unique_sample(statement, scopes, local)
         if isinstance(statement, frog_ast.VariableDeclaration):
+            new_type = self._rewrite_type(statement.type, scopes)
             fresh = self._maybe_bind(statement.name, local)
-            if fresh is None:
-                return statement
-            return frog_ast.VariableDeclaration(statement.type, fresh)
+            name = fresh if fresh is not None else statement.name
+            assert new_type is not None
+            return frog_ast.VariableDeclaration(new_type, name)
         if isinstance(statement, frog_ast.ReturnStatement):
             return frog_ast.ReturnStatement(self._rewrite(statement.expression, scopes))
         if isinstance(statement, frog_ast.IfStatement):
@@ -184,6 +211,7 @@ class _AlphaRenamer:
         local: dict[str, str],
     ) -> frog_ast.Assignment:
         new_value = self._rewrite(statement.value, scopes)
+        new_type = self._rewrite_type(statement.the_type, scopes)
         if statement.the_type is not None and isinstance(
             statement.var, frog_ast.Variable
         ):
@@ -196,7 +224,7 @@ class _AlphaRenamer:
             # not a binder.  Rewrite the lvalue's references with the scope as
             # it stands (the target name, if a renamed local, must follow).
             new_var = self._rewrite(statement.var, scopes)
-        return frog_ast.Assignment(statement.the_type, new_var, new_value)
+        return frog_ast.Assignment(new_type, new_var, new_value)
 
     def _rename_sample(
         self,
@@ -205,6 +233,7 @@ class _AlphaRenamer:
         local: dict[str, str],
     ) -> frog_ast.Sample:
         new_from = self._rewrite(statement.sampled_from, scopes)
+        new_type = self._rewrite_type(statement.the_type, scopes)
         if statement.the_type is not None and isinstance(
             statement.var, frog_ast.Variable
         ):
@@ -214,7 +243,7 @@ class _AlphaRenamer:
             )
         else:
             new_var = self._rewrite(statement.var, scopes)
-        return frog_ast.Sample(statement.the_type, new_var, new_from)
+        return frog_ast.Sample(new_type, new_var, new_from)
 
     def _rename_unique_sample(
         self,
@@ -223,6 +252,7 @@ class _AlphaRenamer:
         local: dict[str, str],
     ) -> frog_ast.UniqueSample:
         new_set = self._rewrite(statement.unique_set, scopes)
+        new_type = self._rewrite_type(statement.the_type, scopes)
         if statement.the_type is not None and isinstance(
             statement.var, frog_ast.Variable
         ):
@@ -232,11 +262,18 @@ class _AlphaRenamer:
             )
         else:
             new_var = self._rewrite(statement.var, scopes)
+        # `sampled_from` (the draw's domain type in `<-uniq[S] T` / `<- T \ E`)
+        # can reference a shadowed field or local; it must be rewritten
+        # through the active scope like the exclusion set, or the domain
+        # re-binds to the wrong name (audit F-238). It is a Type, so it goes
+        # through `_rewrite_type` (cf. Sample.sampled_from, an Expression).
+        new_from = self._rewrite_type(statement.sampled_from, scopes)
+        assert new_from is not None
         return frog_ast.UniqueSample(
-            statement.the_type,
+            new_type,
             new_var,
             new_set,
-            statement.sampled_from,
+            new_from,
             statement.surface_form,
         )
 

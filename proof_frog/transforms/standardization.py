@@ -135,12 +135,54 @@ class _ParameterStandardizer:
     """
 
     def rename_game(self, game: frog_ast.Game) -> frog_ast.Game:
-        new_methods = [self._rename_method(m) for m in game.methods]
+        field_names = {field.name for field in game.fields}
+        new_methods = [self._rename_method(m, field_names) for m in game.methods]
         return frog_ast.Game((game.name, game.parameters, game.fields, new_methods))
 
-    def _rename_method(self, method: frog_ast.Method) -> frog_ast.Method:
+    @staticmethod
+    def _body_bound_names(block: frog_ast.Block) -> set[str]:
+        """Names bound WITHIN a method body: ``for`` binders and typed local
+        declarations. Parameters are excluded -- they are what this pass renames.
+        """
+        names: set[str] = set()
+
+        def _collect(node: frog_ast.ASTNode) -> bool:
+            if isinstance(node, frog_ast.NumericFor):
+                names.add(node.name)
+            elif isinstance(node, frog_ast.GenericFor):
+                names.add(node.var_name)
+            elif (
+                isinstance(
+                    node,
+                    (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+                )
+                and getattr(node, "the_type", None) is not None
+                and isinstance(node.var, frog_ast.Variable)
+            ):
+                names.add(node.var.name)
+            return False
+
+        SearchVisitor(_collect).visit(block)
+        return names
+
+    def _rename_method(
+        self, method: frog_ast.Method, field_names: set[str] | None = None
+    ) -> frog_ast.Method:
         params = method.signature.parameters
         if not params:
+            return method
+        # F-306/F-307: the canonical target names arg1..argN must be FRESH w.r.t.
+        # every name that could collide with a renamed parameter -- names bound
+        # inside the body (loop binders, typed local declarations; AlphaRename
+        # does not rename loop binders) AND the game's FIELDS. Renaming a
+        # parameter to `arg1` when a body binder or a field is already named
+        # `arg1` would capture/fuse the parameter with it (a body reference or a
+        # field store silently rebinds). Standardization is only
+        # canonicalization, so on a collision decline the rename for this method
+        # -- never conflate.
+        targets = {f"arg{i + 1}" for i in range(len(params))}
+        collides_with = self._body_bound_names(method.block) | (field_names or set())
+        if targets & collides_with:
             return method
         seed = {p.name: f"arg{i + 1}" for i, p in enumerate(params)}
         new_method = copy.deepcopy(method)

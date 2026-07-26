@@ -570,12 +570,24 @@ def _expr_is_group_elem_on_game(
         for param in game.parameters:
             if param.name == name and isinstance(param.type, frog_ast.GroupElemType):
                 return param.type.group
+        # F-249: a bare variable may be a method PARAMETER, but this helper has
+        # no method context. Scanning every method's parameters and taking the
+        # FIRST same-named one launders a `requires: G1.order is prime;`
+        # certificate from one method's `GroupElem<G1>` param onto a foreign
+        # `GroupElem<G2>` operand (rewriting `x^k == y^k -> x == y` where the
+        # map is not injective). Resolve against method parameters ONLY when
+        # every method that declares a same-named GroupElem parameter agrees on
+        # the SAME group -- then the type is unambiguous regardless of which
+        # method the expression is in. If the groups disagree, decline.
+        method_groups: list[frog_ast.Expression] = []
         for method in game.methods:
             for param in method.signature.parameters:
                 if param.name == name and isinstance(
                     param.type, frog_ast.GroupElemType
                 ):
-                    return param.type.group
+                    method_groups.append(param.type.group)
+        if method_groups and all(g == method_groups[0] for g in method_groups):
+            return method_groups[0]
         return None
     if isinstance(expr, frog_ast.GroupGenerator):
         return expr.group

@@ -281,3 +281,32 @@ def test_fires_when_intervening_decl_does_not_touch_guard_vars() -> None:
     game = frog_parser.parse_game(source)
     result = IfFalseReturnToConjunction().apply(game, _ctx())
     assert result != game  # fired
+
+
+def test_f117_return_none_not_absorbed() -> None:
+    """F-117: the trailing-return guard used a Python ``is None`` test, which
+    does not catch a FrogLang ``None`` literal. A well-typed ``Bool?`` oracle
+    returning ``None`` was absorbed into the type-invalid ``!P && None``. It must
+    now decline."""
+    source = """
+    Game G() {
+        Bool? O(Bool p) {
+            if (p) { return false; }
+            return None;
+        }
+    }
+    """
+    assert _apply(source) == frog_parser.parse_game(source)  # unchanged
+
+
+def test_f117_boolean_trailing_still_absorbed() -> None:
+    """Control for F-117: a genuine boolean trailing return still absorbs."""
+    source = """
+    Game G() {
+        Bool O(Bool p, Bool q) {
+            if (p) { return false; }
+            return q;
+        }
+    }
+    """
+    assert _apply(source) != frog_parser.parse_game(source)  # absorbed

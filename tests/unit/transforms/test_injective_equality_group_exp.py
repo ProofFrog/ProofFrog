@@ -289,3 +289,68 @@ def test_different_exponents_does_not_fire() -> None:
     """
     got = _apply(source, _ctx([_prime_req()]))
     assert got == frog_parser.parse_game(source), str(got)
+
+
+def test_f249_method_param_not_resolved_as_group_elem() -> None:
+    """F-249: `_expr_is_group_elem_on_game` must NOT type a bare variable by a
+    method PARAMETER -- a param is local to its method, and scanning every
+    method would launder a `GroupElem<G1>` param in one method onto a
+    same-named `GroupElem<G2>` operand in another (applying G1's prime-order
+    certificate to a composite-order G2 and rewriting `x^k == y^k -> x == y`)."""
+    from proof_frog.transforms._wrappers import _expr_is_group_elem_on_game
+
+    game = frog_parser.parse_game(
+        """
+        Game G(Group G1, Group G2) {
+            GroupElem<G1> Probe(GroupElem<G1> x) {
+                return x;
+            }
+            Bool Test(GroupElem<G2> x) {
+                return x == x;
+            }
+        }
+        """
+    )
+    # `x` is only a method parameter (GroupElem<G1> in Probe, GroupElem<G2> in
+    # Test) -- not a game field/parameter -- so it must not resolve.
+    assert _expr_is_group_elem_on_game(frog_ast.Variable("x"), game) is None
+
+
+def test_f249_game_field_still_resolved_as_group_elem() -> None:
+    """Positive control: a game FIELD typed GroupElem<G> (truly global) still
+    resolves to its group."""
+    from proof_frog.transforms._wrappers import _expr_is_group_elem_on_game
+
+    game = frog_parser.parse_game(
+        """
+        Game G(Group G1) {
+            GroupElem<G1> fld;
+            Bool Test() {
+                return fld == fld;
+            }
+        }
+        """
+    )
+    assert _expr_is_group_elem_on_game(frog_ast.Variable("fld"), game) is not None
+
+
+def test_f249_agreeing_method_params_resolve() -> None:
+    """Narrowed control: when every method that declares a same-named GroupElem
+    parameter agrees on the SAME group, the type is unambiguous and resolves
+    (so legitimate method-param group operands still work, e.g. HashedElGamal)."""
+    from proof_frog.transforms._wrappers import _expr_is_group_elem_on_game
+
+    game = frog_parser.parse_game(
+        """
+        Game G(Group G1) {
+            GroupElem<G1> A(GroupElem<G1> x) {
+                return x;
+            }
+            Bool B(GroupElem<G1> x) {
+                return x == x;
+            }
+        }
+        """
+    )
+    # `x` is a GroupElem<G1> parameter in BOTH methods -> unambiguous -> resolves.
+    assert _expr_is_group_elem_on_game(frog_ast.Variable("x"), game) is not None

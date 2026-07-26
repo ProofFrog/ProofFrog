@@ -294,3 +294,91 @@ def test_single_arg_call_rewrites() -> None:
     """
     result, _ = _apply(source, _ns(ns_src))
     assert result == frog_parser.parse_game(expected)
+
+
+# --------------------------------------------------------------------------
+# Value-stability of resolved bindings (audit F-247 / F-248)
+# --------------------------------------------------------------------------
+
+NS_INJ_ENC = """
+Primitive T(Int n) {
+    deterministic injective BitString<n> Enc1(BitString<n> x);
+}
+"""
+
+
+def test_f247_nested_write_binding_not_resolved() -> None:
+    """A local binding `w = T.Enc1(x)` whose arg `x` is reassigned inside an
+    if-body is NOT write-once; resolving `w == T.Enc1(x)` to `x == x` would be
+    unsound (the nested write is invisible to a top-level-only scan)."""
+    source = """
+    Game G(Int n) {
+        Bool Test(Bool c) {
+            BitString<n> x = 0^n;
+            BitString<n> w = T.Enc1(x);
+            if (c) {
+                x = 1^n;
+            }
+            return w == T.Enc1(x);
+        }
+    }
+    """
+    result, _ = _apply(source, _ns(NS_INJ_ENC))
+    assert "w == T.Enc1(x)" in str(result)  # not collapsed to x == x
+
+
+def test_f247_stable_arg_binding_still_resolves() -> None:
+    """Positive control: no reassignment of `x`, so `w == T.Enc1(x)` resolves
+    and the injective rewrite fires."""
+    source = """
+    Game G(Int n) {
+        Bool Test(BitString<n> x) {
+            BitString<n> w = T.Enc1(x);
+            return w == T.Enc1(x);
+        }
+    }
+    """
+    result, _ = _apply(source, _ns(NS_INJ_ENC))
+    assert "x == x" in str(result)
+
+
+def test_f248_mutated_field_rhs_not_resolved() -> None:
+    """A field `F = T.Enc1(t)` frozen at Init must not be resolved to its RHS
+    at a site where the free field `t` has since been mutated -- that would
+    collapse `F == T.Enc1(t)` to `t == t` though F holds the stale value."""
+    source = """
+    Game G(Int n) {
+        BitString<n> t;
+        BitString<n> F;
+        Void Initialize() {
+            t = 0^n;
+            F = T.Enc1(t);
+        }
+        Bool Test() {
+            t = 1^n;
+            return F == T.Enc1(t);
+        }
+    }
+    """
+    result, _ = _apply(source, _ns(NS_INJ_ENC))
+    assert "F == T.Enc1(t)" in str(result)  # not collapsed to t == t
+
+
+def test_f248_immutable_field_rhs_still_resolves() -> None:
+    """Positive control: `t` is never mutated after Init, so F resolves to its
+    RHS and the injective comparison collapses."""
+    source = """
+    Game G(Int n) {
+        BitString<n> t;
+        BitString<n> F;
+        Void Initialize() {
+            t = 0^n;
+            F = T.Enc1(t);
+        }
+        Bool Test() {
+            return F == T.Enc1(t);
+        }
+    }
+    """
+    result, _ = _apply(source, _ns(NS_INJ_ENC))
+    assert "t == t" in str(result)

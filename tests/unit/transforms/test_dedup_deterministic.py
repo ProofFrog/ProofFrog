@@ -422,3 +422,43 @@ class TestDeduplicateDeterministicCalls:
             proof_namespace=_make_det_namespace()
         ).transform(method)
         assert result == expected
+
+    def test_f201_first_statement_writes_arg_not_deduped(self) -> None:
+        """F-201: when the FIRST occurrence's own statement writes an argument
+        variable (`k = G.evaluate(k);`), the write happens after that call is
+        evaluated and before the second call, so the two calls read different
+        values (`G(k0)` vs `G(G(k0))`) and must NOT be deduplicated. The
+        intermediate-region scan excluded the first statement, missing this."""
+        method = frog_parser.parse_method("""
+            Void f(BitString<n> k) {
+                k = G.evaluate(k);
+                return G.evaluate(k);
+            }
+            """)
+        expected = frog_parser.parse_method("""
+            Void f(BitString<n> k) {
+                k = G.evaluate(k);
+                return G.evaluate(k);
+            }
+            """)
+        result = DeduplicateDeterministicCallsTransformer(
+            proof_namespace=_make_det_namespace()
+        ).transform(method)
+        assert result == expected
+
+    def test_f201_first_statement_writes_nonarg_still_deduped(self) -> None:
+        """F-201 positive control: when the first occurrence's statement writes a
+        NON-argument variable (`x = G.evaluate(k);`), the argument `k` is stable
+        between the two calls, so the deduplication must still fire."""
+        method = frog_parser.parse_method("""
+            Void f(BitString<n> k) {
+                BitString<n> x = G.evaluate(k);
+                BitString<n> y = G.evaluate(k);
+                return [x, y];
+            }
+            """)
+        result = DeduplicateDeterministicCallsTransformer(
+            proof_namespace=_make_det_namespace()
+        ).transform(method)
+        # The second G.evaluate(k) is replaced by a reference to the first result.
+        assert str(result) != str(method), "stable-arg dedup should still fire"

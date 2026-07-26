@@ -289,3 +289,40 @@ def test_transformer_no_change_returns_same_block() -> None:
     """)
     out = NormalizeProductLiteralTransformer(_ctx()).transform(game)
     assert out == game
+
+
+def test_f316_decline_path_does_not_graft_tuple_into_product_type() -> None:
+    """F-316: when a ProductType is NOT a literal (a genuine space -- here it
+    has a SetType member), the rewriter must leave it untouched. Previously the
+    decline path called ``_transform_children``, which recursed into
+    ``node.types`` and converted a nested literal member into a ``Tuple``,
+    grafting a ``Tuple`` into ``ProductType.types`` (a corrupt mixed node)."""
+    from proof_frog.transforms.tuples import _ProductLiteralValueRewriter
+
+    nested_literal = frog_ast.ProductType(
+        [frog_ast.Variable("a"), frog_ast.Variable("b")]
+    )
+    outer = frog_ast.ProductType(
+        [frog_ast.SetType(frog_ast.BitStringType(frog_ast.Integer(8))), nested_literal]
+    )
+    ctx = _ctx()
+    out = _ProductLiteralValueRewriter(ctx).transform(outer)
+    # The space is returned unchanged...
+    assert out is outer
+    # ...and no Tuple was grafted into its type members.
+    assert not any(isinstance(t, frog_ast.Tuple) for t in out.types)
+    # A decline near-miss is still reported.
+    assert any(
+        nm.transform_name == "Normalize Product-Literal Tuples"
+        for nm in ctx.near_misses
+    )
+
+
+def test_f316_genuine_literal_still_converts() -> None:
+    """Control for F-316: a genuine tuple literal (all members expressions) is
+    still rewritten into a ``Tuple``."""
+    from proof_frog.transforms.tuples import _ProductLiteralValueRewriter
+
+    lit = frog_ast.ProductType([frog_ast.Variable("x"), frog_ast.Variable("y")])
+    out = _ProductLiteralValueRewriter(_ctx()).transform(lit)
+    assert isinstance(out, frog_ast.Tuple)

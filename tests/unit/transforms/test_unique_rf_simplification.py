@@ -345,7 +345,16 @@ def test_guard_var_reassigned_before_rf_call_not_simplified() -> None:
 
 def test_fresh_guard_without_reassignment_still_simplified() -> None:
     """Positive control: with no intervening reassignment the guarded fresh
-    draw still enables simplification."""
+    draw still enables simplification.
+
+    This also locks the F-021 resolution. F-021 alleged the cross-call freshness
+    was unsound because a plain (non-``.domain``) ``Set`` field ``S`` stays empty,
+    so two ``<-uniq[S]`` draws could collide across calls. That was adjudicated
+    (USER-ATTENTION sec 1, RESOLVED 2026-06-12): ``x <-uniq[S] T`` has AUTO-ADD
+    semantics -- the sampled value is added to ``S`` -- so successive draws from
+    a persistent field ``S`` never collide, and rewriting the uniquely-keyed RF
+    evaluation to a fresh uniform is sound. Here ``S`` is exactly such a plain
+    ``Set`` field (not ``RF.domain``), so the simplification firing is correct."""
     game = frog_parser.parse_game("""
         Game G() {
             Set<BitString<8>> S;
@@ -362,3 +371,47 @@ def test_fresh_guard_without_reassignment_still_simplified() -> None:
         """)
     result = UniqueRFSimplification().apply(game, _make_ctx())
     assert result != game, "clean fresh-draw RF call should still simplify"
+
+
+def test_f023_unsampled_function_field_not_simplified() -> None:
+    """F-023: a Function field that is never SAMPLED (`H <- Function<...>`) is a
+    known, adversary-computable standard-model function, not a random function.
+    Rewriting a unique-input evaluation `RF(r)` to a fresh uniform draw would
+    replace computable outputs with randomness -- unsound. The game-level
+    `apply` path must decline (it previously collected every FunctionType field
+    regardless of whether it was sampled)."""
+    game = frog_parser.parse_game("""
+        Game RealRF(Int n) {
+            Function<BitString<n>, BitString<n>> RF;
+            Set<BitString<n>> S;
+            BitString<n> Chal() {
+                BitString<n> r <-uniq[S] BitString<n>;
+                BitString<n> z = RF(r);
+                return z;
+            }
+        }
+        """)
+    result = UniqueRFSimplification().apply(game, _make_ctx())
+    assert result == game, "unsampled (known) Function field must not be simplified"
+
+
+def test_f023_sampled_function_field_in_initialize_still_simplified() -> None:
+    """F-023 positive control: a Function field genuinely sampled in Initialize
+    (`RF <- Function<...>`) IS a random function, so the guarded unique-input
+    rewrite still fires -- the sampled-field gate must not over-decline."""
+    game = frog_parser.parse_game("""
+        Game ProbeRF(Int n) {
+            Function<BitString<n>, BitString<n>> RF;
+            Set<BitString<n>> S;
+            Void Initialize() {
+                RF <- Function<BitString<n>, BitString<n>>;
+            }
+            BitString<n> Chal() {
+                BitString<n> r <-uniq[S] BitString<n>;
+                BitString<n> z = RF(r);
+                return z;
+            }
+        }
+        """)
+    result = UniqueRFSimplification().apply(game, _make_ctx())
+    assert result != game, "sampled random function should still be simplified"

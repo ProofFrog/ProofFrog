@@ -200,3 +200,43 @@ def test_unrelated_unique_sample_does_not_block_splice() -> None:
         frog_parser.parse_method(method)
     )
     assert "a2 = a;" in str(transformed), str(transformed)
+
+
+def test_f065_duplicate_concat_operand_maps_positionally() -> None:
+    """F-065: for `z = a || a || b`, a slice must map to the operand physically
+    occupying its byte range. The de-duplicating VariableCollectionVisitor
+    collapsed the operands to [a, b], so the positional offsets rewrote
+    `z[lambda : 2*lambda]` (the SECOND copy of `a`) to `b` -- a false
+    equivalence when |a| == |b|. Preserving order + duplicates maps
+    `z[lambda:2*lambda]` to `a` and `z[2*lambda:3*lambda]` to `b`."""
+    second_a = frog_parser.parse_game(
+        """
+        Game G() {
+            BitString<lambda> Query() {
+                BitString<lambda> a <- BitString<lambda>;
+                BitString<lambda> b <- BitString<lambda>;
+                BitString<lambda + lambda + lambda> z = a || a || b;
+                return z[lambda : 2 * lambda];
+            }
+        }
+        """
+    )
+    out = SimplifySpliceTransformer({"lambda": Symbol("lambda")}).transform(second_a)
+    body = str(out)
+    assert "return a;" in body, "z[lambda:2*lambda] must map to the second `a`"
+    assert "return b;" not in body, "z[lambda:2*lambda] must NOT map to `b`"
+
+    third_b = frog_parser.parse_game(
+        """
+        Game G() {
+            BitString<lambda> Query() {
+                BitString<lambda> a <- BitString<lambda>;
+                BitString<lambda> b <- BitString<lambda>;
+                BitString<lambda + lambda + lambda> z = a || a || b;
+                return z[2 * lambda : 3 * lambda];
+            }
+        }
+        """
+    )
+    out_b = SimplifySpliceTransformer({"lambda": Symbol("lambda")}).transform(third_b)
+    assert "return b;" in str(out_b), "z[2*lambda:3*lambda] must map to `b`"

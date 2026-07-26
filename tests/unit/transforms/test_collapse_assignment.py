@@ -126,3 +126,38 @@ def test_element_mutation_not_collapsed() -> None:
     assert (
         transformed_ast == expected_ast
     ), "Element mutation M[0]=42 should not collapse the declaration of M"
+
+
+def test_f146_sample_initial_not_collapsed() -> None:
+    """F-146: the first statement's value is what the collapse DELETES. A Sample
+    (`x <- S`) is a side-effecting draw -- sampling a possibly-empty domain is an
+    observable termination event -- so deleting it by folding a later
+    reassignment onto it changes observable behaviour. The sample must survive."""
+    method = frog_parser.parse_method(
+        """
+        Int f() {
+            Int x <- S;
+            x = 0;
+            return x;
+        }
+        """
+    )
+    result = CollapseAssignmentTransformer().transform(method)
+    # The `x <- S` draw must NOT be deleted (no collapse into `Int x = 0`).
+    assert result == method, "a Sample-initial draw must not be collapsed away"
+
+
+def test_f146_sample_call_initial_not_collapsed() -> None:
+    """F-146: a Sample whose `sampled_from` carries a call is likewise a
+    side-effecting draw and must not be collapsed away."""
+    method = frog_parser.parse_method(
+        """
+        Int f() {
+            Int x <- G.Sample();
+            x = 0;
+            return x;
+        }
+        """
+    )
+    result = CollapseAssignmentTransformer().transform(method)
+    assert result == method, "a Sample-call initial must not be collapsed away"

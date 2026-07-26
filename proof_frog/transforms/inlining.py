@@ -1394,11 +1394,17 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
     decomposition.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace | None = None,
+        proof_let_types: NameTypeMap | None = None,
+    ) -> None:
         super().__init__()
         # Loop-binder types visible from the enclosing ``GenericFor``.
         # Extraction for these is inserted at position 0 of the loop body.
         self._scope_types: dict[str, frog_ast.Type] = {}
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
+        self._proof_let_types = proof_let_types
 
     def transform_generic_for(self, gf: frog_ast.GenericFor) -> frog_ast.GenericFor:
         new_over = self.transform(gf.over)
@@ -1613,6 +1619,16 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
         for rep_slice, count in slice_groups:
             if count < 2:
                 continue
+            # F-235: the slice BOUNDS must be deterministic. A non-deterministic
+            # call in a bound (`v[I.Cut():j]`) means two structurally-equal
+            # slices are actually independent draws (i.i.d. per ruling 7.A.6);
+            # merging them into one shared local correlates the draws.
+            if has_nondeterministic_call(
+                rep_slice.start, self._proof_namespace, self._proof_let_types
+            ) or has_nondeterministic_call(
+                rep_slice.end, self._proof_namespace, self._proof_let_types
+            ):
+                continue
             assert isinstance(rep_slice.the_array, frog_ast.Variable)
             var_name = rep_slice.the_array.name
 
@@ -1722,7 +1738,10 @@ class ExtractRepeatedTupleAccess(TransformPass):
     name = "Extract Repeated Tuple Access"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return ExtractRepeatedTupleAccessTransformer().transform(game)
+        return ExtractRepeatedTupleAccessTransformer(
+            proof_namespace=ctx.proof_namespace,
+            proof_let_types=ctx.proof_let_types,
+        ).transform(game)
 
 
 class InlineMultiUsePureExpression(TransformPass):

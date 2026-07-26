@@ -4226,6 +4226,32 @@ class CrossMethodFieldAliasTransformer:
                 if method.signature.name != "Initialize":
                     continue
 
+                # F-174: if Initialize has an early return (nested in an
+                # if/for), the field assignment may be skipped on that trace,
+                # leaving the field undefined; rewriting another oracle's
+                # `det_call(args)` to read that field would then read an
+                # uninitialized value on the early-return path. Three sibling
+                # Initialize-targeting passes already carry this guard; add it
+                # here too.
+                if _has_early_return_in_init(list(method.block.statements)):
+                    if self._ctx is not None:
+                        self._ctx.near_misses.append(
+                            NearMiss(
+                                transform_name="Cross Method Field Alias",
+                                reason=(
+                                    "Initialize has an early return (nested in "
+                                    "if/for); the aliased field assignment may "
+                                    "be skipped, so cross-method reads of it "
+                                    "could see an uninitialized value"
+                                ),
+                                location=stmt.origin,
+                                suggestion=None,
+                                variable=stmt.var.name,
+                                method="Initialize",
+                            )
+                        )
+                    continue
+
                 # Compute the expanded form of the call (with stable locals
                 # resolved). Use this for downstream cross-method matching
                 # and for collecting the underlying field dependencies, so

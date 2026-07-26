@@ -1045,6 +1045,34 @@ class SplitUniformSampleTransformer(BlockTransformer):
         return expr
 
     @staticmethod
+    def _nonneg_width_syms(
+        slice_bounds: list[tuple[Symbol | int, Symbol | int]],
+    ) -> set[str]:
+        """Names of symbols provably >= 0 from being (a positive multiple of) a
+        slice WIDTH.
+
+        A slice ``z[a:b]`` yields ``BitString<b - a>``, so ``b - a >= 0`` by
+        well-formedness. A symbol that is exactly a slice width (or a positive
+        integer multiple of one) is therefore nonnegative. This is the sound,
+        robust source of positivity for the disjointness test (F-033): a signed
+        offset like ``c`` in ``z[n+c : n+c+n]`` is never itself a width (that
+        slice's width is ``n``), so ``c`` is not assumed nonnegative and the
+        overlap at ``c = -n`` is caught. Using slice widths avoids traversing
+        declaration type annotations (which the AST visitors do not descend
+        into) and works uniformly for field-access lengths like ``H.lambda``.
+        """
+        names: set[str] = set()
+        for start, end in slice_bounds:
+            width = sympy_simplify(end - start)
+            if getattr(width, "is_Symbol", False):
+                names.add(width.name)  # type: ignore[union-attr]
+            elif getattr(width, "is_Mul", False):
+                coeff, rest = width.as_coeff_Mul()  # type: ignore[union-attr]
+                if coeff.is_positive and getattr(rest, "is_Symbol", False):
+                    names.add(rest.name)
+        return names
+
+    @staticmethod
     def _check_overlaps(
         slice_bounds: list[tuple[Symbol | int, Symbol | int]],
         pos_subs: dict[Symbol, Symbol],
@@ -1289,7 +1317,25 @@ class SplitUniformSampleTransformer(BlockTransformer):
             # Check unique slices are non-overlapping. Two slices [a,b) and
             # [c,d) don't overlap if b <= c or d <= a. Gaps are allowed
             # (unused portions are discarded).
-            overlaps = self._check_overlaps(unique_bounds, pos_subs)
+            #
+            # F-033: the disjointness gap must be provably nonnegative for ALL
+            # legal parameter values, and the sign facts well-formedness supplies
+            # are that each BitString LENGTH is >= 0 -- including every slice
+            # WIDTH (`z[a:b]` yields `BitString<b-a>`). A symbol that is (a
+            # positive multiple of) a slice width is therefore nonnegative; a
+            # symbol occurring only as an offset (e.g. `c` in `z[n+c:n+c+n]`,
+            # whose width is `n`) has unconstrained sign. Assuming every free
+            # symbol positive (as the OOB check does, where it is conservative)
+            # is UNSOUND here: for `z[0:n]` vs `z[n+c:n+c+n]` the gap `c` is
+            # declared >= 0, certifying the slices disjoint -- but at c = -n
+            # (legal: the sampled length n+n+c = n is nonnegative) both slices
+            # are `z[0:n]`, the same bits. Restrict the positivity assumption for
+            # the disjointness test to slice-width symbols.
+            nonneg_names = self._nonneg_width_syms(unique_bounds)
+            disjoint_pos_subs = {
+                s: repl for s, repl in pos_subs.items() if s.name in nonneg_names
+            }
+            overlaps = self._check_overlaps(unique_bounds, disjoint_pos_subs)
             if overlaps:
                 if self.ctx is not None:
                     self.ctx.near_misses.append(

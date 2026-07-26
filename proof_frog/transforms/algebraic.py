@@ -1183,11 +1183,18 @@ class BooleanAbsorptionTransformer(Transformer):
                         )
         if all(keep):
             return transformed
+        # F-245: keep the surviving conjuncts in SOURCE order. `&&` is
+        # left-to-right strict (SEMANTICS 3.4): a later conjunct may depend on
+        # an earlier one as a guard -- `x in M && M[x] == 0` evaluates `M[x]`
+        # only when `x in M`, so it never performs an absent-key read. Sorting
+        # by `node_sort_key` moved `M[x] == 0` ahead of its guard (`"EQUALS" <
+        # "IN"`), making the read unconditional and changing observable
+        # behaviour. (The previous rationale -- matching a form
+        # NormalizeCommutativeChains produces -- was mistaken: AND/OR are NOT in
+        # its commutative-op sets, so it never reorders a boolean chain. Source
+        # order is already the canonical form for a non-absorbed chain, so
+        # dropping absorbed conjuncts in place stays consistent with it.)
         kept_conjuncts = [c for c, k in zip(conjuncts, keep) if k]
-        # Sort by node_sort_key so the rebuilt chain is canonical and
-        # matches the form produced when no absorption was needed (where
-        # NormalizeCommutativeChains sorts the chain in a separate pass).
-        kept_conjuncts.sort(key=node_sort_key)
         if len(kept_conjuncts) == 1:
             return kept_conjuncts[0]
         result: frog_ast.Expression = kept_conjuncts[0]

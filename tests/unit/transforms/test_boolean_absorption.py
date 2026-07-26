@@ -119,3 +119,30 @@ def test_three_conjunct_chain_with_redundant_middle() -> None:
     }
     """
     assert _apply(source) == frog_parser.parse_game(expected)
+
+
+def test_f245_absorption_preserves_short_circuit_guard_order() -> None:
+    """F-245: `&&` is left-to-right strict, so a guard must stay ahead of a
+    conjunct it protects. After absorption drops a conjunct, the survivors must
+    keep SOURCE order -- sorting by node_sort_key moved `M[x] == 0` (an
+    absent-key read) ahead of its `x in M` guard (`"EQUALS" < "IN"`), making the
+    read unconditional."""
+    source = """
+    Game G() {
+        Map<Int, Int> M;
+        Bool Check(Int x, Bool z) {
+            return (x in M) && (M[x] == 0) && ((M[x] == 0) || z);
+        }
+    }
+    """
+    # `(M[x] == 0)` absorbs `((M[x] == 0) || z)`; the guard `x in M` must remain
+    # the FIRST conjunct, before `M[x] == 0`.
+    expected = """
+    Game G() {
+        Map<Int, Int> M;
+        Bool Check(Int x, Bool z) {
+            return (x in M) && (M[x] == 0);
+        }
+    }
+    """
+    assert _apply(source) == frog_parser.parse_game(expected)

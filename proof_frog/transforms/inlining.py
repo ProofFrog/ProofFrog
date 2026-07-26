@@ -3415,8 +3415,13 @@ class HoistGroupExpToInitialize(TransformPass):
 
 def _exp_with_generator_base(
     expr: frog_ast.Expression,
-) -> Optional[frog_ast.Expression]:
-    """If *expr* is ``<group>.generator ^ <e>``, return ``<e>``."""
+) -> Optional[tuple[frog_ast.Expression, frog_ast.Expression]]:
+    """If *expr* is ``<group>.generator ^ <e>``, return ``(<group>, <e>)``.
+
+    The group is returned (F-222) so callers can refuse to pair two
+    generator-based fields whose groups differ: ``g_G^(a*b)`` must not be
+    refactored as ``(g_H^a)^b`` -- that crosses groups and is ill-typed.
+    """
     if not isinstance(expr, frog_ast.BinaryOperation):
         return None
     if expr.operator != frog_ast.BinaryOperators.EXPONENTIATE:
@@ -3427,9 +3432,9 @@ def _exp_with_generator_base(
         and base.name == "generator"
         and isinstance(base.the_object, frog_ast.Variable)
     ):
-        return expr.right_expression
+        return (base.the_object, expr.right_expression)
     if isinstance(base, frog_ast.GroupGenerator):
-        return expr.right_expression
+        return (base.group, expr.right_expression)
     return None
 
 
@@ -3475,7 +3480,9 @@ class RefactorGroupElemFieldExpTransformer:
         # guard; refuse to refactor when Initialize can return early.
         if _has_early_return_in_init(init_stmts):
             return None
-        gen_field_assigns: dict[str, tuple[int, frog_ast.Expression]] = {}
+        gen_field_assigns: dict[
+            str, tuple[int, frog_ast.Expression, frog_ast.Expression]
+        ] = {}
         for si, stmt in enumerate(init_stmts):
             if not (
                 isinstance(stmt, frog_ast.Assignment)
@@ -3490,12 +3497,13 @@ class RefactorGroupElemFieldExpTransformer:
             total = sum(_count_assigns_recursive(m.block, name) for m in game.methods)
             if total != 1:
                 continue
-            exponent = _exp_with_generator_base(stmt.value)
-            if exponent is None:
+            gen = _exp_with_generator_base(stmt.value)
+            if gen is None:
                 continue
-            gen_field_assigns[name] = (si, exponent)
+            group, exponent = gen
+            gen_field_assigns[name] = (si, exponent, group)
 
-        for f1_name, (f1_idx, f1_exp) in gen_field_assigns.items():
+        for f1_name, (f1_idx, f1_exp, f1_group) in gen_field_assigns.items():
             if not isinstance(f1_exp, frog_ast.BinaryOperation):
                 # Bare exponent like ``g ^ a`` — not a Field1 candidate;
                 # such fields plausibly serve as Field2.  Stay silent.
@@ -3528,8 +3536,16 @@ class RefactorGroupElemFieldExpTransformer:
                     )
                 continue
             matched_any = False
-            for f2_name, (f2_idx, f2_exp) in gen_field_assigns.items():
+            for f2_name, (f2_idx, f2_exp, f2_group) in gen_field_assigns.items():
                 if f2_name == f1_name:
+                    continue
+                # F-222: both fields are `<group>.generator ^ ...`, but the
+                # power-of-power refactor `Field1 = Field2 ^ other` is only
+                # valid when the two generators are in the SAME group. Pairing
+                # `G.generator^(a*b)` with `H.generator^a` would rewrite the
+                # GroupElem<G> field as `(GroupElem<H>)^b` -- cross-group and
+                # ill-typed.
+                if f1_group != f2_group:
                     continue
                 a, b = f1_exp.left_expression, f1_exp.right_expression
                 other: Optional[frog_ast.Expression] = None

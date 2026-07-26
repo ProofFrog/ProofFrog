@@ -128,3 +128,37 @@ def test_f225_read_before_write_move_declines() -> None:
         }
         """
     )
+
+
+def test_f222_cross_group_generators_decline() -> None:
+    """F-222: `A = G.generator^(x*y)` must not be refactored as `B^y` when
+    `B = H.generator^x` is in a DIFFERENT group -- that crosses groups and is
+    ill-typed (`GroupElem<G>` field set to `(GroupElem<H>)^y`)."""
+    assert not _fires(
+        """
+        Game Cross(Group G, Group H, Int x, Int y) {
+            GroupElem<H> B;
+            GroupElem<G> A;
+            Void Initialize() {
+                B = H.generator ^ x;
+                A = G.generator ^ (x * y);
+            }
+        }
+        """
+    )
+
+
+def test_f222_same_group_generators_still_fire() -> None:
+    """Positive control: same group -> the refactor still fires."""
+    assert _fires(
+        """
+        Game Same(Group G, Int x, Int y) {
+            GroupElem<G> B;
+            GroupElem<G> A;
+            Void Initialize() {
+                B = G.generator ^ x;
+                A = G.generator ^ (x * y);
+            }
+        }
+        """
+    )

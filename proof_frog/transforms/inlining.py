@@ -3136,6 +3136,14 @@ class RefactorGroupElemFieldExpTransformer:
         if init_idx is None:
             return None
         init_stmts = list(game.methods[init_idx].block.statements)
+        # F-224: if Initialize has an early return (nested in if/for), the
+        # field assignments this pass reasons over may run on only some
+        # traces, and moving f2 across the early return changes which traces
+        # define it -- turning a guarded/undefined read into an always-defined
+        # one (attack A5). Three sibling Initialize-targeting passes carry this
+        # guard; refuse to refactor when Initialize can return early.
+        if _has_early_return_in_init(init_stmts):
+            return None
         gen_field_assigns: dict[str, tuple[int, frog_ast.Expression]] = {}
         for si, stmt in enumerate(init_stmts):
             if not (
@@ -3210,6 +3218,23 @@ class RefactorGroupElemFieldExpTransformer:
                     f2_exp, self.ctx.proof_namespace, self.ctx.proof_let_types
                 ):
                     continue
+                # F-221: the shared factor must have the SAME value at f1's
+                # position and f2's position. If any of its free variables is
+                # reassigned in the interval between the two field
+                # assignments, `Field2 = g^<factor>` (evaluated at f2) and the
+                # `<factor>` inside `Field1 = g^(a*b)` (evaluated at f1) are
+                # DIFFERENT values -- rewriting `Field1 = Field2 ^ other` then
+                # conflates two independent draws (attack2 re-samples `x`
+                # between `A = g^(x*x)` and `B = g^x`). `_defined_before` only
+                # checks defined-before, not unchanged-since.
+                lo, hi = sorted((f1_idx, f2_idx))
+                factor_free = referenced_variable_names(f2_exp)
+                if any(
+                    _stmt_mutates_var(init_stmts[k], name)
+                    for k in range(lo + 1, hi)
+                    for name in factor_free
+                ):
+                    continue
                 matched_any = True
                 # Soundness: at f1's def, f2 must already hold its value.
                 # If f2 is currently after f1, try to move f2 just before f1
@@ -3226,6 +3251,17 @@ class RefactorGroupElemFieldExpTransformer:
                     }
                     f2_free.discard(f2_name)
                     if not self._defined_before(stmts, f1_idx, f2_free):
+                        continue
+                    # F-225: moving f2's assignment up past an intervening
+                    # statement that READS f2 changes that read's value -- it
+                    # would see f2's new (assigned) value instead of the
+                    # prior/undefined one. Attack A6: `A=g^(x*3); C=B; B=g^x;`
+                    # -- `C=B` reads an unassigned B; hoisting B above it turns
+                    # an observable undefined read into a defined value.
+                    if any(
+                        f2_name in referenced_variable_names(init_stmts[k])
+                        for k in range(f1_idx, f2_idx)
+                    ):
                         continue
                     f2_stmt = stmts.pop(f2_idx)
                     # f2 was after f1; insert before f1 at f1_idx (new index).

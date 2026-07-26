@@ -1,7 +1,8 @@
 import pytest
 from proof_frog import frog_ast, frog_parser
 from proof_frog.transforms.control_flow import IfConditionAliasSubstitutionTransformer
-from proof_frog.visitors import SearchVisitor
+from proof_frog.transforms._base import has_nondeterministic_call
+from proof_frog.visitors import SearchVisitor, NameTypeMap
 
 
 def _transform_game(source: str) -> str:
@@ -615,3 +616,53 @@ def test_phase1_inline_still_fires_for_initialize_only_fields() -> None:
     game = frog_parser.parse_game(source)
     result = IfConditionAliasSubstitutionTransformer().transform(game)
     assert result != game, "Initialize-only field alias should still inline"
+
+
+def test_f077_resampled_rf_field_not_substituted_even_with_name_collision() -> None:
+    """F-077: a game field `Hcoll` of Function type that is RE-SAMPLED in an
+    oracle (`Rekey(){ Hcoll <- Function<...> }`) is an adaptive random function;
+    a field `A = Hcoll(B)` defined in Initialize is a stale snapshot once Rekey
+    re-samples, so substituting `return A -> return Hcoll(y)` is unsound.
+
+    The original prosecution route relied on `has_nondeterministic_call`
+    misclassifying `Hcoll` as deterministic when a proof-let `Function Hcoll`
+    shares the name (the _base.py name-only lookup blind spot). This test injects
+    exactly that collision (so `has_nondeterministic_call` returns False) and
+    confirms the pass STILL declines -- the F-075 structural guard subsumes it:
+    the re-sample makes `assign_counts[Hcoll] == 2`, so the "referenced fields
+    must be single-assignment in Initialize" precondition fails regardless. An
+    RF that passes the guards is sampled exactly once in Initialize, hence
+    stable, so no variant slips through."""
+    ftype = frog_ast.FunctionType(
+        frog_ast.IntType(),
+        frog_ast.BitStringType(frog_ast.Variable("n")),
+    )
+    let_types = NameTypeMap()
+    let_types.set("Hcoll", ftype)
+    # Sanity: the collision genuinely defeats has_nondeterministic_call.
+    call = frog_parser.parse_expression("Hcoll(B)")
+    assert has_nondeterministic_call(call, {}, let_types) is False
+
+    game = frog_parser.parse_game(
+        """
+        Game Real(Int n) {
+            Function<Int, BitString<n>> Hcoll;
+            BitString<n> A;
+            Int B;
+            Void Initialize() {
+                B = 1;
+                Hcoll <- Function<Int, BitString<n>>;
+                A = Hcoll(B);
+            }
+            Void Rekey() { Hcoll <- Function<Int, BitString<n>>; }
+            BitString<n> Test(Int y) {
+                if (y == B) { return A; }
+                return A;
+            }
+        }
+        """
+    )
+    result = IfConditionAliasSubstitutionTransformer(
+        proof_namespace={}, proof_let_types=let_types
+    ).transform(game)
+    assert result == game, "re-sampled RF field must not be substituted"

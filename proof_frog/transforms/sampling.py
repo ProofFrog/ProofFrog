@@ -25,6 +25,7 @@ from ..visitors import (
     FrogToSympyVisitor,
     referenced_variable_names,
     reassigns_or_rebinds,
+    lvalue_base_name,
 )
 from ._base import TransformPass, PipelineContext, NearMiss
 
@@ -2004,13 +2005,19 @@ def _all_refs_in_counter_guarded_branches(
 
 
 def _is_written_in_recursive(node: frog_ast.ASTNode, name: str) -> bool:
-    """Check if a variable is assigned or sampled anywhere in the AST."""
+    """Check if *name* is written anywhere in the AST.
+
+    F-058: peel the full l-value via ``lvalue_base_name`` so an element / slice /
+    field write to the name (``M[k] = v``, ``M[k][j] = v``, ``obj.f = v``) counts,
+    and include ``UniqueSample`` writes -- the previous bare-``Variable`` +
+    ``Assignment``/``Sample`` check missed both, so a field mutated only via an
+    element write or a ``<-uniq`` draw looked unwritten.
+    """
 
     def check(n: frog_ast.ASTNode) -> bool:
         return (
-            isinstance(n, (frog_ast.Assignment, frog_ast.Sample))
-            and isinstance(n.var, frog_ast.Variable)
-            and n.var.name == name
+            isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
+            and lvalue_base_name(n.var) == name
         )
 
     return SearchVisitor(check).visit(node) is not None

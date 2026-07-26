@@ -88,9 +88,23 @@ class BranchEliminiationTransformer(BlockTransformer):
                     len(new_if_statement.conditions) == 1
                     and isinstance(new_if_statement.conditions[0], frog_ast.Boolean)
                     and new_if_statement.conditions[0].bool
-                ) or not new_if_statement.conditions:
+                ):
+                    # ``if (true) { B } ...`` -> splice the then-branch B.
                     return self.transform_block(
                         prior_block + new_if_statement.blocks[0] + remaining_block
+                    )
+
+                if not new_if_statement.conditions:
+                    # No arm condition holds, so the else executes. F-125: splice
+                    # ``blocks[-1]`` -- the block ``has_else_block()`` designates
+                    # as the else -- not ``blocks[0]``. On the reachable path the
+                    # paired condition+block deletion above leaves a single block
+                    # (``blocks[-1] == blocks[0]``); the two differ only on a
+                    # malformed, directly-constructed ``IfStatement([], [b1, b2])``,
+                    # where splicing ``blocks[0]`` would run the wrong block and
+                    # drop the else.
+                    return self.transform_block(
+                        prior_block + new_if_statement.blocks[-1] + remaining_block
                     )
 
                 if new_if_statement != if_statement:

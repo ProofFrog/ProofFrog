@@ -195,3 +195,38 @@ def test_branch_elimination(
     transformed_ast = BranchEliminiationTransformer().transform(game_ast)
     print("TRANSFORMED: ", transformed_ast)
     assert expected_ast == transformed_ast
+
+
+def test_f125_malformed_empty_conditions_splices_else() -> None:
+    """F-125: for an ``IfStatement([], [b1, b2])`` (no conditions -- malformed,
+    only directly constructible) the executing block is the else that
+    ``has_else_block()`` designates, i.e. ``blocks[-1]``. The pass previously
+    spliced ``blocks[0]``, running the wrong block and dropping the else."""
+    from proof_frog import frog_ast
+
+    def asn(name: str, num: int) -> frog_ast.Assignment:
+        return frog_ast.Assignment(None, frog_ast.Variable(name), frog_ast.Integer(num))
+
+    malformed = frog_ast.IfStatement(
+        [], [frog_ast.Block([asn("x", 1)]), frog_ast.Block([asn("y", 2)])]
+    )
+    block = frog_ast.Block([malformed, frog_ast.ReturnStatement(frog_ast.Integer(0))])
+    out = str(BranchEliminiationTransformer().transform(block))
+    assert "y" in out and "x" not in out  # else (blocks[-1]) executed, not blocks[0]
+
+
+def test_f125_if_false_else_still_splices_else() -> None:
+    """Control: the reachable ``if (false) { x } else { y }`` still eliminates to
+    the else (blocks[-1] == blocks[0] after paired deletion)."""
+    from proof_frog import frog_ast
+
+    def asn(name: str, num: int) -> frog_ast.Assignment:
+        return frog_ast.Assignment(None, frog_ast.Variable(name), frog_ast.Integer(num))
+
+    stmt = frog_ast.IfStatement(
+        [frog_ast.Boolean(False)],
+        [frog_ast.Block([asn("x", 1)]), frog_ast.Block([asn("y", 2)])],
+    )
+    block = frog_ast.Block([stmt, frog_ast.ReturnStatement(frog_ast.Integer(0))])
+    out = str(BranchEliminiationTransformer().transform(block))
+    assert "y" in out and "x" not in out

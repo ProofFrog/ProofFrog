@@ -60,3 +60,61 @@ def test_f235_still_dedups_deterministic_slice_bounds() -> None:
         """)
     out = str(ExtractRepeatedTupleAccessTransformer().transform(game))
     assert "__cse_slice" in out
+
+
+def test_f231_declines_merge_across_bound_reassignment() -> None:
+    """F-231: two structurally-equal `v[t:t+n]` slices separated by `t = n`
+    span DIFFERENT ranges (t changed), so they must not be merged into one
+    shared local. The reassignment guard now covers the bound variables, not
+    just the base."""
+    game = frog_parser.parse_game(
+        """
+        Game G(Int n) {
+            Bool O(BitString<n + n + n> v, Int t) {
+                BitString<n> x = v[t : t + n];
+                t = n;
+                BitString<n> y = v[t : t + n];
+                return x == y;
+            }
+        }
+        """
+    )
+    out = str(ExtractRepeatedTupleAccessTransformer().transform(game))
+    assert "__cse_slice" not in out  # not merged
+
+
+def test_f234_declines_merge_across_forbinder_bound() -> None:
+    """F-234: two `v[j-n:j]` slices in sibling `for` loops share a bound
+    variable `j` that is a per-loop binder; they must not be hoisted/merged
+    across the binders (the shared reassigns_or_rebinds detects for-binders)."""
+    game = frog_parser.parse_game(
+        """
+        Game G(Int n) {
+            BitString<n> O(BitString<n + n + n> v) {
+                BitString<n> acc = 0^n;
+                for (Int j = n to n + n) { acc = v[j - n : j]; }
+                for (Int j = n to n + n) { acc = v[j - n : j]; }
+                return acc;
+            }
+        }
+        """
+    )
+    out = str(ExtractRepeatedTupleAccessTransformer().transform(game))
+    assert "__cse_slice" not in out  # not merged across the for-binders
+
+
+def test_f231_stable_bounds_still_merge() -> None:
+    """Positive control: constant bounds with no reassignment still merge."""
+    game = frog_parser.parse_game(
+        """
+        Game G(Int n) {
+            Bool O(BitString<n + n + n> v) {
+                BitString<n> x = v[0 : n];
+                BitString<n> y = v[0 : n];
+                return x == y;
+            }
+        }
+        """
+    )
+    out = str(ExtractRepeatedTupleAccessTransformer().transform(game))
+    assert "__cse_slice" in out  # merged

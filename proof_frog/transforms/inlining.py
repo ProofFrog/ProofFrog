@@ -1824,32 +1824,20 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
                     def_idx = idx
                     break
 
-            # Skip if base is reassigned anywhere after def (or anywhere
-            # in block for scope-external case). Reassignment would
-            # invalidate the hoist.
-            def _is_reassigned_slice(name: str, node: frog_ast.ASTNode) -> bool:
-                # F-233: peel the l-value so an element/slice write to the
-                # slice's base blocks the slice CSE too.
-                return (
-                    isinstance(
-                        node,
-                        (
-                            frog_ast.Assignment,
-                            frog_ast.Sample,
-                            frog_ast.UniqueSample,
-                        ),
-                    )
-                    and lvalue_base_name(node.var) == name
-                )
-
+            # Skip if any of the slice's free variables -- the base AND the
+            # bound expressions' variables -- is reassigned or rebound after
+            # the def. Reassignment invalidates the hoist:
+            #   - F-233: an element/slice write to the base (peeled l-value);
+            #   - F-231: a bound variable reassigned between two occurrences
+            #     (`v[t:t+n] ... t = n; ... v[t:t+n]`) makes the two slices span
+            #     different ranges even though they are structurally equal;
+            #   - F-234: a bound variable that is a `for` binder (rebound per
+            #     iteration / per sibling scope) -- the shared, node-kind-complete
+            #     `reassigns_or_rebinds` detects binders too.
+            slice_free = referenced_variable_names(rep_slice)
             check_from = def_idx + 1 if def_idx >= 0 else 0
             remaining_block = frog_ast.Block(list(block.statements[check_from:]))
-            if (
-                SearchVisitor(functools.partial(_is_reassigned_slice, var_name)).visit(
-                    remaining_block
-                )
-                is not None
-            ):
+            if reassigns_or_rebinds(slice_free, remaining_block):
                 continue
 
             insert_at = def_idx + 1 if def_idx >= 0 else 0

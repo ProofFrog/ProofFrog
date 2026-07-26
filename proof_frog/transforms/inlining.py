@@ -991,7 +991,13 @@ class RedundantFieldCopyTransformer(BlockTransformer):
                 # decl_index == -1 implies we weren't able to find
                 # the declaration of the variable on the RHS of the assignment. This means
                 # it is a field, and isn't a redundant copy
-                if not no_other_uses or decl_index == -1:
+                # F-199: the reconstruction below assumes the declaration comes
+                # BEFORE the field copy (`decl_index < index`); it slices the
+                # block as ``[:decl_index] + [moved] + [decl_index+1:index] +
+                # [index+1:]``. If ``decl_index >= index`` those slices overlap
+                # / drop statements, the block never shrinks, and the
+                # self-recursive transform diverges. Require the ordering.
+                if not no_other_uses or decl_index == -1 or decl_index >= index:
                     continue
                 # Check that the field is not accessed (read or written)
                 # between the declaration and the field assignment.
@@ -1104,6 +1110,18 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
             if is_field_assign and isinstance(statement.value, frog_ast.Variable):
                 local_name = statement.value.name
                 field_name = statement.var.name
+                # F-187: a self-copy `F = F;` is a no-op (F is unchanged).
+                # Propagating F -> F rewrites nothing but re-runs this pass on
+                # an unchanged block, driving unbounded recursion ("maximum
+                # recursion depth exceeded"). Drop the no-op statement (trivially
+                # sound) and re-run so the block still converges.
+                if local_name == field_name:
+                    return self._transform_block_wrapper(
+                        frog_ast.Block(
+                            list(block.statements[:index])
+                            + list(block.statements[index + 1 :])
+                        )
+                    )
                 remaining_block = frog_ast.Block(
                     copy.deepcopy(block.statements[index + 1 :])
                 )
@@ -1568,19 +1586,19 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
     loop body source writes ``m = e[0]`` explicitly against games whose
     loop body obtains the same accesses via inlining a helper method.
 
-    (Method parameters are intentionally NOT eligible for tuple
-    extraction: doing so breaks the ``[v[0], v[1], ...] -> v`` fold in
-    ``SimplifyTuple`` when a reconstructed tuple literal elsewhere
-    references the same indices.)
+    Method parameters of product (tuple) type ARE eligible:
+    ``transform_method`` records them in ``_scope_types`` so a game whose
+    source writes ``v = ct0[1]`` matches one that accesses ``ct0[1]``
+    inline (a block-local declaration of the same name still shadows the
+    parameter).
 
     **Slice phase.** When a ``v[A:B]`` slice expression (variable base,
     syntactically-equal bounds) appears 2+ times in a block, inserts
     ``BitString<B - A> __cse_slice_v_N__ = v[A:B];`` at the definition
     point (after ``v``'s block-local assignment, or at position 0 for
     method parameters / fields / enclosing-scope bases) and replaces
-    every matching slice with the new variable. Unlike the tuple phase,
-    method parameters ARE eligible, because no canonicalization pass
-    folds a concatenation of slices back into the base variable.
+    every matching slice with the new variable. Method parameters are
+    eligible here as well.
 
     The slice phase symmetrises canonical forms between games that
     hoist a named slice at source level (``k2enc = m[A:B];`` then using
@@ -5361,6 +5379,12 @@ class SplitOpaqueTupleFieldTransformer:
         # 5. Build the rewritten game.
         assert isinstance(field.type, frog_ast.ProductType)
         component_types = field.type.types
+        # F-193: a constant tuple index out of range (`field[5]` on a 2-tuple)
+        # is a malformed/undefined read. The typechecker shields it from source,
+        # but earlier AST transforms can synthesize one; ``component_types[k]``
+        # below would then raise IndexError. Decline instead of crashing.
+        if any(k < 0 or k >= len(component_types) for k in used_indices):
+            return None
         new_field_names: dict[int, str] = {}
         existing_names = {f.name for f in game.fields}
         for k in sorted(used_indices):

@@ -334,3 +334,24 @@ def test_f184_non_self_referential_field_assign_still_aliases() -> None:
     )
     out = str(ForwardExpressionAliasTransformer().transform(game))
     assert "a * b" not in out.split("return")[1]  # the return's a*b became s
+
+
+def test_f187_field_self_copy_dropped_no_recursion() -> None:
+    """F-187: a field self-copy `F = F;` is a no-op that drove Path P into
+    unbounded recursion ("maximum recursion depth exceeded"). It is now dropped
+    (trivially sound -- F is unchanged) and the pass terminates."""
+    game = frog_parser.parse_game(
+        """
+        Game G(Int lambda) {
+            Int F;
+            Int Oracle(Int a) {
+                F = a;
+                F = F;
+                return F;
+            }
+        }
+        """
+    )
+    out = str(ForwardExpressionAliasTransformer().transform(game))
+    assert "F = F" not in out  # the no-op self-copy is gone
+    assert "F = a" in out and "return F" in out

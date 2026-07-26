@@ -514,17 +514,22 @@ class InlineMultiUsePureExpressionTransformer(BlockTransformer):
             # FrogLang (same input → same output) AND their canonical
             # form should match the inline-form of games that don't
             # extract the call to a local; allow inlining for those.
-            if (
-                SearchVisitor(lambda n: isinstance(n, frog_ast.FuncCall)).visit(expr)
-                is not None
-            ):
-                if not (
-                    self._function_var_names
-                    and isinstance(expr, frog_ast.FuncCall)
-                    and isinstance(expr.func, frog_ast.Variable)
-                    and expr.func.name in self._function_var_names
-                ):
-                    continue
+            #
+            # F-194: the exception must hold for EVERY call in expr, not just
+            # the outermost one. A nested non-deterministic argument -- e.g.
+            # `H(P.Sample(0^n))` with `H` a Function-let but `P.Sample(...)`
+            # abstract-primitive -- was inlined and its i.i.d. draw duplicated
+            # per use. Decline if ANY call (nested included) is not a
+            # deterministic Function-let call.
+            def _is_non_function_let_call(node: frog_ast.ASTNode) -> bool:
+                return isinstance(node, frog_ast.FuncCall) and not (
+                    bool(self._function_var_names)
+                    and isinstance(node.func, frog_ast.Variable)
+                    and node.func.name in self._function_var_names
+                )
+
+            if SearchVisitor(_is_non_function_let_call).visit(expr) is not None:
+                continue
 
             # Skip expressions containing array access or slicing.
             # Inlining these spreads references to the indexed variable,
@@ -3194,6 +3199,16 @@ class RefactorGroupElemFieldExpTransformer:
                 elif f2_exp == b:
                     other = a
                 if other is None:
+                    continue
+                # F-223: the SHARED exponent factor (`f2_exp`, structurally
+                # equal to `a` or `b`) must be deterministic. If it contains a
+                # non-deterministic call, `Field2 = g^<factor>` and the same
+                # factor inside `Field1 = g^(a*b)` are independent i.i.d. draws
+                # (ruling 7.A.6), so rewriting `Field1 = Field2 ^ other` would
+                # correlate them -- unsound despite the syntactic `==` match.
+                if has_nondeterministic_call(
+                    f2_exp, self.ctx.proof_namespace, self.ctx.proof_let_types
+                ):
                     continue
                 matched_any = True
                 # Soundness: at f1's def, f2 must already hold its value.

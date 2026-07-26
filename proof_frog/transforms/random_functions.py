@@ -3103,7 +3103,27 @@ def _stmt_references_maps(stmt: frog_ast.ASTNode, m1: str, m2: str) -> bool:
 
 
 def _fresh_field_name(game: frog_ast.Game, base: str) -> str:
+    # F-010: the injected field name must be fresh w.r.t. EVERY name in the game,
+    # not just the field names. A collision with a method PARAMETER (or a loop
+    # binder / local declaration) would let that binder lexically capture the
+    # injected field -- a reference to the field inside such a method resolves to
+    # the binder instead. Collect field names, parameter names, loop binders, and
+    # every variable reference so the chosen name cannot be captured.
     existing = {f.name for f in game.fields}
+    for method in game.methods:
+        existing |= {p.name for p in method.signature.parameters}
+
+    def _collect(node: frog_ast.ASTNode) -> bool:
+        if isinstance(node, frog_ast.Variable):
+            existing.add(node.name)
+        elif isinstance(node, frog_ast.NumericFor):
+            existing.add(node.name)
+        elif isinstance(node, frog_ast.GenericFor):
+            existing.add(node.var_name)
+        return False
+
+    SearchVisitor(_collect).visit(game)
+
     if base not in existing:
         return base
     i = 1

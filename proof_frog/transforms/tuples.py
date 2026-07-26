@@ -593,7 +593,13 @@ class _ProductLiteralValueRewriter(Transformer):
                     method=None,
                 )
             )
-        return self._transform_children(node)
+        # F-316: a ProductType that is NOT a literal (values is None, or some
+        # member is a genuine type) denotes a *space*, not a tuple value. Do NOT
+        # descend with `_transform_children`: that recurses into `node.types` and
+        # converts any nested literal member into a `Tuple`, grafting a `Tuple`
+        # into `ProductType.types` -- a mixed-representation node that downstream
+        # passes and the Z3 visitor mis-read. Leave the space untouched.
+        return node
 
     def transform_unary_operation(
         self, node: frog_ast.UnaryOperation

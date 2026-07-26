@@ -268,3 +268,48 @@ def test_sink_fires_when_if_branch_writes_unrelated_name() -> None:
         }
         """)
     assert SinkUniformSampleTransformer().transform(method) == expected
+
+
+def test_f042_declines_when_variable_escapes_block() -> None:
+    """F-042 scope guard: a block-local sample whose name is referenced outside
+    its block with no governing outer declaration (an out-of-scope AST the
+    typechecker would reject) must NOT be sunk -- sinking would leave the
+    outside use reading a variable defined on only one path."""
+    method = frog_parser.parse_method("""
+        Bool O(Bool a, Bool b) {
+            if (a) {
+                ModInt<2> x <- ModInt<2>;
+                if (b) {
+                    ModInt<2> y = x;
+                }
+            }
+            return x == 0;
+        }
+        """)
+    # Unchanged: the guard declines because `x` escapes the `if (a)` block.
+    assert SinkUniformSampleTransformer().transform(method) == method
+
+
+def test_f042_still_fires_with_legitimate_shadowing() -> None:
+    """F-042 guard precision: a *separate* outer declaration of the same name
+    (legitimate block-scoped shadowing) governs the outside references, so the
+    inner sink must still fire -- the guard only blocks true escapes."""
+    method = frog_parser.parse_method("""
+        ModInt<2> O(Bool a, Bool c) {
+            if (a) {
+                ModInt<2> x <- ModInt<2>;
+                if (c) {
+                    ModInt<2> y = x;
+                }
+            }
+            if (c) {
+                ModInt<2> x <- ModInt<2>;
+                return x;
+            }
+            return 0;
+        }
+        """)
+    transformed = SinkUniformSampleTransformer().transform(method)
+    # The first block's `x` is sunk into its `if (c)` sub-branch; the sibling
+    # `x` (a distinct declaration) is untouched.
+    assert transformed != method

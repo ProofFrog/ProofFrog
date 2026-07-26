@@ -1712,6 +1712,48 @@ def _method_binds_name(method: frog_ast.Method, name: str) -> bool:
     return found[0]
 
 
+def _count_name_references(node: frog_ast.ASTNode, name: str) -> int:
+    """Count occurrences of *name* as a variable reference in *node*.
+
+    Uses the same name-only predicate as ``_references_name`` so the count is
+    consistent with this pass's liveness checks."""
+    count = [0]
+
+    def _p(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, frog_ast.Variable) and n.name == name:
+            count[0] += 1
+        return False
+
+    SearchVisitor(_p).visit(node)
+    return count[0]
+
+
+def _count_name_declarations(node: frog_ast.ASTNode, name: str) -> int:
+    """Count local declarations that bind *name* in *node* (typed
+    sample/assignment/declaration, or a loop binder). Mirrors the
+    declaration-detection in ``_method_binds_name``."""
+    count = [0]
+
+    def _p(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, frog_ast.VariableDeclaration) and n.name == name:
+            count[0] += 1
+        elif (
+            isinstance(n, (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample))
+            and n.the_type is not None
+            and isinstance(n.var, frog_ast.Variable)
+            and n.var.name == name
+        ):
+            count[0] += 1
+        elif isinstance(n, frog_ast.NumericFor) and n.name == name:
+            count[0] += 1
+        elif isinstance(n, frog_ast.GenericFor) and n.var_name == name:
+            count[0] += 1
+        return False
+
+    SearchVisitor(_p).visit(node)
+    return count[0]
+
+
 def _name_shadowed_in_any_oracle(game: frog_ast.Game, name: str) -> bool:
     """True if any non-Initialize method binds *name* (see _method_binds_name)."""
     return any(
@@ -2327,6 +2369,60 @@ class SinkUniformSampleTransformer(BlockTransformer):
 
     def __init__(self, ctx: PipelineContext | None = None) -> None:
         self.ctx = ctx
+        self._current_method: frog_ast.Method | None = None
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        # Capture the enclosing method so the sink guard can tell whether a
+        # block-local sample variable escapes the block being transformed
+        # (F-042). Descend normally afterwards.
+        self._current_method = method
+        result = self._transform_children(method)
+        assert isinstance(result, frog_ast.Method)
+        return result
+
+    def _variable_escapes_block(self, block: frog_ast.Block, var_name: str) -> bool:
+        """Defense-in-depth scope guard (F-042).
+
+        A freshly *typed* sample (``Type x <- Type``) declares ``var_name`` with
+        block-local scope, so the within-block liveness analysis below is exact
+        for well-typed input -- per-block scoping (semantic_analysis) guarantees
+        ``var_name`` is never referenced outside ``block``. If the enclosing
+        method nonetheless references ``var_name`` outside ``block`` with no
+        governing outer declaration, the AST is out of scope (the typechecker
+        rejects it) and sinking would leave that outside use reading a variable
+        now defined on only one path. Decline. On well-typed input this never
+        fires (there are no such outside references), so it is pure
+        defense-in-depth against a malformed AST reaching the pass directly."""
+        method = self._current_method
+        if method is None:
+            return False
+        refs_in_method = _count_name_references(method.block, var_name)
+        refs_in_block = _count_name_references(block, var_name)
+        if refs_in_method <= refs_in_block:
+            return False  # no references outside this block -> safe to sink
+        # Outside references exist. They are safe only if a *separate* outer
+        # declaration governs them (legitimate shadowing); otherwise they would
+        # bind to this block-local declaration -> escape.
+        decls_in_method = _count_name_declarations(method.block, var_name)
+        decls_in_block = _count_name_declarations(block, var_name)
+        return decls_in_method <= decls_in_block
+
+    def _decline_scope_near_miss(self, var_name: str) -> None:
+        if self.ctx is not None:
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="Sink Uniform Sample",
+                    reason=(
+                        f"Sample '{var_name}' not sunk: the variable is "
+                        f"referenced outside the block it would be sunk within, "
+                        f"with no governing outer declaration (out of scope)"
+                    ),
+                    location=None,
+                    suggestion=None,
+                    variable=var_name,
+                    method=None,
+                )
+            )
 
     def _decline_near_miss(self, var_name: str) -> None:
         if self.ctx is not None:
@@ -2396,6 +2492,11 @@ class SinkUniformSampleTransformer(BlockTransformer):
             sample_stmt = stmt
 
             if len(using_branches) == 1 and not after_uses:
+                # F-042 scope guard: never sink a variable that escapes this
+                # block (only reachable via a malformed, out-of-scope AST).
+                if self._variable_escapes_block(block, var_name):
+                    self._decline_scope_near_miss(var_name)
+                    continue
                 # Sink into the one branch that uses the variable. The sample
                 # crosses the skipped intermediate statements [idx+1:next_idx];
                 # if any of them writes a name in the sample's sampled type, the
@@ -2419,6 +2520,11 @@ class SinkUniformSampleTransformer(BlockTransformer):
                 return self.transform_block(frog_ast.Block(new_stmts))
 
             if not using_branches and after_uses:
+                # F-042 scope guard: never sink a variable that escapes this
+                # block (only reachable via a malformed, out-of-scope AST).
+                if self._variable_escapes_block(block, var_name):
+                    self._decline_scope_near_miss(var_name)
+                    continue
                 # Sink past the if-stmt: the sample is used only after the
                 # if, and the if references nothing that involves the sample
                 # variable (checked: not in conditions, not in any branch).

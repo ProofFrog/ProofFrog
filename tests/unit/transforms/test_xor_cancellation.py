@@ -501,3 +501,25 @@ def test_f267_unshadowed_let_function_still_reflexive() -> None:
         proof_let_types=let_types
     ).transform(method)
     assert "H(0) == H(0)" not in str(out)  # simplified to true
+
+
+def test_f264_modint_evidence_overrides_leading_bitstring_literal() -> None:
+    """F-264: `_is_bitstring_add_chain` must scan ALL terms, not return on the
+    first. A ModInt term in an ADD chain is definitive evidence of ModInt
+    addition (where `z + z` is `2z`, not `0`), so it overrides a leading
+    `BitStringLiteral`. `0^n + z + z` with `z: ModInt<q>` must be classified as
+    NOT a bitstring/XOR chain, or the pass would XOR-cancel `z + z` to 0."""
+    from proof_frog.transforms.algebraic import _is_bitstring_add_chain
+    from proof_frog.visitors import NameTypeMap
+
+    type_map = NameTypeMap()
+    type_map.set("z", frog_ast.ModIntType(frog_ast.Variable("q")))
+    # 0^n + z + z  (leading BitStringLiteral, later ModInt terms)
+    chain = frog_parser.parse_expression("0^n + z + z")
+    assert _is_bitstring_add_chain(chain, type_map) is False, (
+        "a ModInt term must override a leading BitStringLiteral"
+    )
+    # Control: a pure BitString chain with a leading literal still cancels.
+    type_map.set("x", frog_ast.BitStringType(frog_ast.Variable("n")))
+    bs_chain = frog_parser.parse_expression("0^n + x + x")
+    assert _is_bitstring_add_chain(bs_chain, type_map) is True

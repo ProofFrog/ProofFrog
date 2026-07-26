@@ -449,17 +449,26 @@ def _is_bitstring_add_chain(
     """
     if type_map is None:
         return True
+    # F-264: scan ALL terms rather than returning on the first evidence. A
+    # ModInt term in an ADD chain is DEFINITIVE evidence of ModInt addition
+    # (where `z + z` is `2z`, not `0`), so it must override any BitString
+    # evidence -- returning True on a leading `0^n` while a later term is
+    # `z: ModInt<q>` (`0^n + z + z`) would XOR-cancel `z + z` to `0`, an unsound
+    # rewrite. Returning True wrongly is the unsound direction (it enables the
+    # cancellation), so require BitString evidence AND the absence of any ModInt
+    # evidence.
     terms = _flatten_add_chain(expr)
+    has_bitstring_evidence = False
     for term in terms:
         if isinstance(term, frog_ast.BitStringLiteral):
-            return True
-        if isinstance(term, frog_ast.Variable):
+            has_bitstring_evidence = True
+        elif isinstance(term, frog_ast.Variable):
             var_type = type_map.get(term.name)
             if isinstance(var_type, frog_ast.ModIntType):
                 return False
             if isinstance(var_type, frog_ast.BitStringType):
-                return True
-    return False
+                has_bitstring_evidence = True
+    return has_bitstring_evidence
 
 
 def _flatten_add_chain(expr: frog_ast.Expression) -> list[frog_ast.Expression]:

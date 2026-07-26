@@ -2264,6 +2264,20 @@ def _counter_guarded_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
         if _name_shadowed_in_any_oracle(game, field.name):
             continue
 
+        # F-051: the field's init-sample domain is deep-copied verbatim into
+        # the target oracle. A genuine *type* domain (``BitString<n>``,
+        # ``ModInt<q>``, ...) is a fixed set, but an EXPRESSION domain -- e.g.
+        # sampling an element from a set variable ``k <- S`` -- re-evaluates
+        # under the oracle's scope, where ``S`` may be mutated or
+        # adversary-influenced between Initialize and the call, so relocating
+        # the draw changes its distribution. Decline. (``Expression`` subclasses
+        # ``Type`` in frog_ast, so the genuine-type test is ``Type and not
+        # Expression`` -- here, decline exactly when it IS an ``Expression``.
+        # Reachable only via typechecker-rejected set-variable field samples;
+        # latent defense-in-depth.)
+        if isinstance(init_sample.sampled_from, frog_ast.Expression):
+            continue
+
         # Step 2: Find which non-Initialize methods reference this field
         using_methods: list[str] = []
         for method in game.methods:

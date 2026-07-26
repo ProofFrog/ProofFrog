@@ -2552,7 +2552,19 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
             #   - be assigned at most once in the entire game (stable value)
             #   - be assigned in the same method and BEFORE the current
             #     field's assignment (so its value was already determined)
-            free_vars = VariableCollectionVisitor().visit(copy.deepcopy(assign_expr))
+            # F-218: use the FieldAccess-complete read-set so a view-carried
+            # read (`0 in M.keys`) contributes its backing field `M`. The
+            # VariableCollectionVisitor skips variables under a FieldAccess, so
+            # such an expression yielded an EMPTY free-var set and both
+            # stability gates below became vacuous -- letting a field whose RHS
+            # reads a mutated map inline cross-method as if it were stable.
+            # Subtract proof-namespace names: a primitive object like `G` in
+            # `G.evaluate(1)` is a FieldAccess object that
+            # referenced_variable_names reports but is not a game variable whose
+            # stability matters (VariableCollectionVisitor skipped it).
+            free_vars = referenced_variable_names(assign_expr) - set(
+                self._proof_namespace
+            )
             # Use the game's actual fields (not ``self.field_names``,
             # which is only refreshed at the ``transform_game`` level).
             field_name_set = {f.name for f in game.fields}
@@ -2573,12 +2585,9 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
                 isinstance(assign_expr, frog_ast.BinaryOperation)
                 and assign_expr.operator == frog_ast.BinaryOperators.OR
             )
-            local_fv_names: list[str] = []
-            seen: set[str] = set()
-            for fv in free_vars:
-                if fv.name not in field_name_set and fv.name not in seen:
-                    local_fv_names.append(fv.name)
-                    seen.add(fv.name)
+            local_fv_names: list[str] = sorted(
+                n for n in free_vars if n not in field_name_set
+            )
             if local_fv_names and is_concat_chain:
                 promoted = self._try_promote_locals(
                     game,
@@ -2591,14 +2600,14 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
                     return None
                 return self._try_inline_field(promoted, field_name)
             can_cross_method = True
-            for fv in free_vars:
-                if fv.name not in field_name_set:
+            for fv in sorted(free_vars):
+                if fv not in field_name_set:
                     can_cross_method = False
                     break
                 # Check that this free-variable field is assigned/sampled
                 # at most once across the whole game (stable value).
                 fv_assign_count = sum(
-                    _count_assigns_recursive(m.block, fv.name) for m in game.methods
+                    _count_assigns_recursive(m.block, fv) for m in game.methods
                 )
                 if fv_assign_count > 1:
                     can_cross_method = False
@@ -2620,7 +2629,7 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
                             ),
                         )
                         and isinstance(stmt.var, frog_ast.Variable)
-                        and stmt.var.name == fv.name
+                        and stmt.var.name == fv
                     ):
                         fv_assigned_before = True
                         break
@@ -2691,8 +2700,12 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
             # 5. Check that no free variable in expr is modified between
             #    def and last use
             if last_use_idx >= 0:
-                free_vars = VariableCollectionVisitor().visit(
-                    copy.deepcopy(assign_expr)
+                # F-218: FieldAccess-complete read-set (sees `M` in `0 in
+                # M.keys`) so the interference window is not vacuous for
+                # view-carried reads; drop proof-namespace objects (`G` in
+                # `G.evaluate(..)`) which are not game variables.
+                free_vars = referenced_variable_names(assign_expr) - set(
+                    self._proof_namespace
                 )
                 intermediate_stmts = game.methods[assign_method_idx].block.statements[
                     assign_stmt_idx + 1 : last_use_idx
@@ -2704,7 +2717,7 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
                 # `<-uniq[S]` insertion that grows S (ATK-3/ATK-3u) -- the
                 # private bare-Variable scan missed both. (The F-079 counter
                 # fix never reached this step-5 scan.)
-                if reassigns_or_rebinds({fv.name for fv in free_vars}, intermediate):
+                if reassigns_or_rebinds(free_vars, intermediate):
                     return None
 
         # 6. Perform the inlining — replace occurrences across methods.

@@ -2086,15 +2086,24 @@ def _is_written_in_recursive(node: frog_ast.ASTNode, name: str) -> bool:
 
 
 def _count_assignments_recursive(node: frog_ast.ASTNode, name: str) -> int:
-    """Count how many times *name* is assigned or sampled anywhere in the AST."""
+    """Count how many times *name* is written anywhere in the AST.
+
+    F-052: kept consistent with ``_is_written_in_recursive`` -- peel the full
+    l-value via ``lvalue_base_name`` (so an element / slice / field write like
+    ``ctr[i] = v`` counts) and include ``UniqueSample`` (``ctr <-uniq[E] Int``).
+    The previous bare-``Variable`` + ``Assignment``/``Sample`` check
+    undercounted, so a counter written a second time via a ``<-uniq`` draw or an
+    element write looked written exactly once and the ``!= 1`` guard passed --
+    letting the pass fire while the write-once monotonicity premise was broken.
+    Overcounting only declines (sound); it never fires the pass spuriously.
+    """
     count = 0
 
     def counter(n: frog_ast.ASTNode) -> bool:
         nonlocal count
         if (
-            isinstance(n, (frog_ast.Assignment, frog_ast.Sample))
-            and isinstance(n.var, frog_ast.Variable)
-            and n.var.name == name
+            isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
+            and lvalue_base_name(n.var) == name
         ):
             count += 1
         return False

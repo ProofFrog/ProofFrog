@@ -613,6 +613,34 @@ def test_counter_guarded_field_to_local(
         }""",
             id="counter_decremented_by_other_method",
         ),
+        # F-052: counter written a SECOND time in the target method via a
+        # <-uniq draw. The write-once monotonicity premise (the guarded branch
+        # fires at most once) is broken, but the old count-only-Assignment/Sample
+        # scan missed the UniqueSample write and counted exactly one increment.
+        # _count_assignments_recursive now counts UniqueSample too -> declines.
+        pytest.param(
+            """
+        Game Test() {
+            BitString<lambda> k;
+            Int count;
+            Set<Int> S;
+            Void Initialize() {
+                k <- BitString<lambda>;
+                count = 0;
+            }
+            BitString<lambda> Oracle(BitString<lambda> x) {
+                count = count + 1;
+                if (count == 1) {
+                    return k + x;
+                } else {
+                    BitString<lambda> r <- BitString<lambda>;
+                    return r + x;
+                }
+                count <-uniq[S] Int;
+            }
+        }""",
+            id="counter_resampled_via_uniq_in_target_method",
+        ),
     ],
 )
 def test_counter_guarded_rejects_unsound_cases(game: str) -> None:

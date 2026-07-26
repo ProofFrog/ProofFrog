@@ -1486,7 +1486,12 @@ def reassigns_or_rebinds(names: set[str], node: frog_ast.ASTNode) -> bool:
       pure set-difference surface form ``x <- T \\ S`` performs no insertion and
       is therefore not treated as a write;
     - a loop binder (``for (Int i = ...)`` / ``for (T e in ...)``) that rebinds
-      one of *names*, shadowing it.
+      one of *names*, shadowing it;
+    - a bare local re-declaration (``VariableDeclaration``: ``T x;`` with no
+      initializer) that rebinds one of *names*, shadowing the outer binding
+      (F-196: a typed ``T x = e;`` is an ``Assignment`` and already caught by
+      the l-value case above, but a no-initializer declaration was not, so a
+      structural substitution could still capture the inner binding).
 
     Conservative by design: any such occurrence anywhere in *node* -- including
     nested branches and loop bodies -- counts, because callers substitute
@@ -1507,6 +1512,8 @@ def reassigns_or_rebinds(names: set[str], node: frog_ast.ASTNode) -> bool:
         if isinstance(inner, frog_ast.NumericFor) and inner.name in names:
             return True
         if isinstance(inner, frog_ast.GenericFor) and inner.var_name in names:
+            return True
+        if isinstance(inner, frog_ast.VariableDeclaration) and inner.name in names:
             return True
         return False
 

@@ -818,6 +818,22 @@ class RedundantFieldCopyTransformer(BlockTransformer):
                         break
                 if field_accessed_between:
                     continue
+                # F-197: a control-flow exit (a `return`, possibly nested in
+                # an if/for) between the declaration and the field copy means
+                # the copy `f = v` is skipped on that early-return trace, so
+                # the original never writes the field there. Hoisting the draw
+                # into `f <- ...` at the declaration position writes the field
+                # unconditionally, changing its value on the early-return
+                # trace. Decline. (The between-scan above only saw data refs.)
+                control_exit_between = any(
+                    SearchVisitor(
+                        lambda n: isinstance(n, frog_ast.ReturnStatement)
+                    ).visit(block.statements[k])
+                    is not None
+                    for k in range(decl_index + 1, index)
+                )
+                if control_exit_between:
+                    continue
                 modified_statement = copy.deepcopy(decl_statement)
                 modified_statement.var = statement.var
                 modified_statement.the_type = None
@@ -1923,6 +1939,22 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                     if not stable:
                         break
                 if not stable:
+                    continue
+                # F-165: control-flow barrier. The field write at position i
+                # is hoisted to before j. If any statement in [j, i) can exit
+                # the method early (a `return`, possibly nested in an if/for),
+                # then on that early-return trace the ORIGINAL write at i never
+                # runs (control returned first) while the hoisted write does --
+                # so the field is assigned on a trace where it previously kept
+                # its prior value, observable by another oracle (A1_sep). Only
+                # hoist when control from j always reaches i.
+                if any(
+                    SearchVisitor(
+                        lambda n: isinstance(n, frog_ast.ReturnStatement)
+                    ).visit(block.statements[k])
+                    is not None
+                    for k in range(j, i)
+                ):
                     continue
                 # Hoist: move field assignment to before position j,
                 # replace the subexpression in position j with the field.

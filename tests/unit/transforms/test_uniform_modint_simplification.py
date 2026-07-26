@@ -137,3 +137,24 @@ def test_f292_matching_modulus_still_absorbed() -> None:
         """
     )
     assert "u + 2" not in result, f"matching-modulus uniform was not absorbed:\n{result}"
+
+
+def test_f293_type_parameterization_use_not_rewritten() -> None:
+    """F-293: the additive-use search descends into Type parameterizations, so a
+    `u + 3` inside a `ModInt<u + 3>` modulus position was found and rewritten to
+    `u`, editing the sampled type of `z` (changing Pr[z==0] from 1/(u+3) to 1/u).
+    A type parameter is not a value expression, so the absorption must decline."""
+    result = _apply(
+        """
+        Game G(Int q) {
+            Bool O() {
+                ModInt<q> z;
+                ModInt<q> u <- ModInt<q>;
+                z <- ModInt<u + 3>;
+                return z == 0;
+            }
+        }
+        """
+    )
+    assert "ModInt<u + 3>" in result, f"a type parameterization was rewritten:\n{result}"
+    assert "ModInt<u>" not in result, f"type edited to ModInt<u>:\n{result}"

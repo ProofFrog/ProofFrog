@@ -75,6 +75,34 @@ def _use_node_inside_loop(block: frog_ast.Block, use_node: frog_ast.ASTNode) -> 
     return SearchVisitor(_loop_contains).visit(block) is not None
 
 
+def _use_node_inside_type(block: frog_ast.Block, use_node: frog_ast.ASTNode) -> bool:
+    """True if *use_node* occurs inside a ``Type`` node's subtree within *block*.
+
+    The visitor descends into every attribute, including a ``Type``'s
+    parameterization expression, so a match like ``u + 3`` found for the
+    uniform-absorption rewrite may actually be a TYPE parameter (the modulus in
+    ``z <- ModInt<u + 3>``), not a value expression. Rewriting it edits the type
+    and changes the sampled variable's distribution (audit F-293), so the pass
+    must decline. *use_node* must be an object still present in *block* (identity
+    match).
+    """
+
+    def _type_contains(node: frog_ast.ASTNode) -> bool:
+        # A genuine type ANNOTATION is a ``Type`` that is not an ``Expression``
+        # (``Expression`` subclasses ``Type`` because an expression may name a
+        # type alias, so ``isinstance(_, Type)`` alone also matches every
+        # Variable/BinaryOperation). Only the annotation nodes (``ModIntType``,
+        # ``BitStringType``, ...) carry a value-expression parameterization that
+        # a match could wrongly land in.
+        return (
+            isinstance(node, frog_ast.Type)
+            and not isinstance(node, frog_ast.Expression)
+            and SearchVisitor(lambda n: n is use_node).visit(node) is not None
+        )
+
+    return SearchVisitor(_type_contains).visit(block) is not None
+
+
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
 # ---------------------------------------------------------------------------
@@ -175,6 +203,13 @@ class UniformXorSimplificationTransformer(BlockTransformer):
                 functools.partial(is_xor_with_uniform, var_name)
             ).visit(remaining_block)
             if xor_node is None:
+                continue
+
+            # F-293 (sibling sweep): the search descends into Type
+            # parameterizations, so a matched `u + c` could be a type parameter
+            # rather than a value expression. Rewriting it would edit a type;
+            # decline.
+            if _use_node_inside_type(remaining_block, xor_node):
                 continue
 
             # The "used exactly once" count above is textual.  If the single
@@ -336,6 +371,14 @@ class UniformModIntSimplificationTransformer(BlockTransformer):
                 functools.partial(is_additive_with_uniform, var_name)
             ).visit(remaining_block)
             if add_node is None:
+                continue
+
+            # F-293: the search descends into Type parameterizations, so
+            # `add_node` may be a `u + c` in a type modulus position
+            # (`z <- ModInt<u + 3>`). Rewriting it to `u` edits the TYPE and
+            # changes the sampled variable's distribution. A type parameter is
+            # not a value expression; decline.
+            if _use_node_inside_type(remaining_block, add_node):
                 continue
 
             # The "used exactly once" count above is textual.  If the single
@@ -1354,6 +1397,13 @@ class UniformGroupElemSimplificationTransformer(BlockTransformer):
                 functools.partial(is_multiplicative_with_uniform, var_name)
             ).visit(remaining_block)
             if mul_node is None:
+                continue
+
+            # F-293 (sibling sweep): the search descends into Type
+            # parameterizations, so a matched `u * c` could be a type parameter
+            # rather than a value expression. Rewriting it would edit a type;
+            # decline.
+            if _use_node_inside_type(remaining_block, mul_node):
                 continue
 
             # The "used exactly once" count above is textual.  If the single

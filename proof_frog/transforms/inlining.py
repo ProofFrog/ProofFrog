@@ -1437,6 +1437,9 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
 
             # Skip if the base variable is reassigned after its definition
             def _is_reassigned(name: str, node: frog_ast.ASTNode) -> bool:
+                # F-233: peel the l-value so an element write `v[0]=e` (state
+                # mutation) blocks the CSE; a bare-Variable check missed it and
+                # `return v` was left reading the pre-mutation value.
                 return (
                     isinstance(
                         node,
@@ -1446,8 +1449,7 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
                             frog_ast.UniqueSample,
                         ),
                     )
-                    and isinstance(node.var, frog_ast.Variable)
-                    and node.var.name == name
+                    and lvalue_base_name(node.var) == name
                 )
 
             remaining_after_def = frog_ast.Block(
@@ -1568,6 +1570,8 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
             # in block for scope-external case). Reassignment would
             # invalidate the hoist.
             def _is_reassigned_slice(name: str, node: frog_ast.ASTNode) -> bool:
+                # F-233: peel the l-value so an element/slice write to the
+                # slice's base blocks the slice CSE too.
                 return (
                     isinstance(
                         node,
@@ -1577,8 +1581,7 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
                             frog_ast.UniqueSample,
                         ),
                     )
-                    and isinstance(node.var, frog_ast.Variable)
-                    and node.var.name == name
+                    and lvalue_base_name(node.var) == name
                 )
 
             check_from = def_idx + 1 if def_idx >= 0 else 0
@@ -2345,27 +2348,12 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
                 ]
                 intermediate = frog_ast.Block(list(intermediate_stmts))
 
-                def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
-                    return (
-                        isinstance(
-                            node,
-                            (
-                                frog_ast.Sample,
-                                frog_ast.Assignment,
-                                frog_ast.UniqueSample,
-                            ),
-                        )
-                        and isinstance(node.var, frog_ast.Variable)
-                        and node.var.name == name
-                    )
-
-                if any(
-                    SearchVisitor(functools.partial(is_written_to, fv.name)).visit(
-                        intermediate
-                    )
-                    is not None
-                    for fv in free_vars
-                ):
+                # F-214: use the complete shared scanner so the interference
+                # window catches a nested element/slice/field write AND a
+                # `<-uniq[S]` insertion that grows S (ATK-3/ATK-3u) -- the
+                # private bare-Variable scan missed both. (The F-079 counter
+                # fix never reached this step-5 scan.)
+                if reassigns_or_rebinds({fv.name for fv in free_vars}, intermediate):
                     return None
 
         # 6. Perform the inlining — replace occurrences across methods.
@@ -3648,12 +3636,15 @@ class HoistDuplicateBranchCallTransformer(BlockTransformer):
 
     @staticmethod
     def _writes(name: str, node: frog_ast.ASTNode) -> bool:
+        # F-207: peel the l-value via `lvalue_base_name` so a nested element /
+        # slice / field / map write (`M[a][b]=v`, `M[k]<-T`) to *name* counts,
+        # not just a bare `name = ...`. Otherwise a hoisted call reads the
+        # pre-write value.
         return (
             isinstance(
                 node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
             )
-            and isinstance(node.var, frog_ast.Variable)
-            and node.var.name == name
+            and lvalue_base_name(node.var) == name
         )
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:

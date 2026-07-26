@@ -818,6 +818,16 @@ class CollapseAssignmentTransformer(BlockTransformer):
             if not isinstance(statement.var, frog_ast.Variable):
                 continue
 
+            # F-146: the FIRST statement is the one whose value the collapse
+            # DELETES (folding the later reassignment onto the declaration). A
+            # Sample (`x <- S`) is a side-effecting draw: sampling a
+            # possibly-empty domain is an observable termination event (ruling
+            # 7.A.5) and `sampled_from` may itself contain a non-deterministic
+            # call, so deleting the draw changes observable behaviour. Only a
+            # pure-valued Assignment initial is safe to collapse away.
+            if isinstance(statement, frog_ast.Sample):
+                continue
+
             # Skip if the statement's value has non-deterministic calls
             if isinstance(statement, frog_ast.Assignment) and has_nondeterministic_call(
                 statement.value, self._proof_namespace, self._proof_let_types

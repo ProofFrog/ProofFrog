@@ -179,3 +179,63 @@ def test_both_decls_with_later_reference_declines() -> None:
         nm.transform_name == "If To Boolean Assignment" and "capture" in nm.reason
         for nm in ctx.near_misses
     )
+
+
+def test_f085_noncanonical_boolean_payloads_compared_by_truth_value() -> None:
+    """F-085: the differing-literal guard compares branch bools by TRUTH VALUE,
+    not raw Python payload. A non-canonical ``Boolean(2)`` (truthy) vs
+    ``Boolean(True)`` both mean ``true``; the pass must NOT merge them into
+    ``x = c`` (a probability-changing rewrite). Only a future transform could
+    produce such a payload; the parser always builds genuine bools."""
+    from proof_frog.transforms.control_flow import IfToBooleanAssignmentTransformer
+
+    cond = frog_ast.BinaryOperation(
+        frog_ast.BinaryOperators.EQUALS, frog_ast.Variable("a"), frog_ast.Integer(1)
+    )
+    stmt = frog_ast.IfStatement(
+        [cond],
+        [
+            frog_ast.Block(
+                [frog_ast.Assignment(None, frog_ast.Variable("x"), frog_ast.Boolean(2))]
+            ),
+            frog_ast.Block(
+                [
+                    frog_ast.Assignment(
+                        None, frog_ast.Variable("x"), frog_ast.Boolean(True)
+                    )
+                ]
+            ),
+        ],
+    )
+    block = frog_ast.Block([stmt, frog_ast.ReturnStatement(frog_ast.Variable("x"))])
+    assert IfToBooleanAssignmentTransformer().transform(block) == block  # declined
+
+
+def test_f085_genuine_true_false_still_merges() -> None:
+    """Control for F-085: a genuine true/false pair still collapses to x = c."""
+    from proof_frog.transforms.control_flow import IfToBooleanAssignmentTransformer
+
+    cond = frog_ast.BinaryOperation(
+        frog_ast.BinaryOperators.EQUALS, frog_ast.Variable("a"), frog_ast.Integer(1)
+    )
+    stmt = frog_ast.IfStatement(
+        [cond],
+        [
+            frog_ast.Block(
+                [
+                    frog_ast.Assignment(
+                        None, frog_ast.Variable("x"), frog_ast.Boolean(True)
+                    )
+                ]
+            ),
+            frog_ast.Block(
+                [
+                    frog_ast.Assignment(
+                        None, frog_ast.Variable("x"), frog_ast.Boolean(False)
+                    )
+                ]
+            ),
+        ],
+    )
+    block = frog_ast.Block([stmt, frog_ast.ReturnStatement(frog_ast.Variable("x"))])
+    assert IfToBooleanAssignmentTransformer().transform(block) != block  # merged

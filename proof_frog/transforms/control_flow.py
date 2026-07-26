@@ -714,7 +714,14 @@ class IfToBooleanAssignmentTransformer(BlockTransformer):
                 and then_stmt.var.name == else_stmt.var.name
                 and isinstance(then_stmt.value, frog_ast.Boolean)
                 and isinstance(else_stmt.value, frog_ast.Boolean)
-                and then_stmt.value.bool != else_stmt.value.bool
+                # F-085: compare the branch literals by TRUTH VALUE, not by raw
+                # Python payload. A `!=` on the payloads fires on a non-canonical
+                # pair such as Boolean(2) vs Boolean(True) (2 != True), even
+                # though both mean `true`, then rewrites `x = c` -- a
+                # probability-changing merge where the sound result is the
+                # constant `x = true`. The parser only builds genuine bools, so
+                # this normalises a value only a future transform could produce.
+                and bool(then_stmt.value.bool) != bool(else_stmt.value.bool)
             ):
                 continue
             # RC4 binding-kind guard: both branches must be the same kind of

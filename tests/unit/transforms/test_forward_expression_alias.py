@@ -355,3 +355,28 @@ def test_f187_field_self_copy_dropped_no_recursion() -> None:
     out = str(ForwardExpressionAliasTransformer().transform(game))
     assert "F = F" not in out  # the no-op self-copy is gone
     assert "F = a" in out and "return F" in out
+
+
+def test_f188_declines_when_loop_binder_captures_field() -> None:
+    """F-188: a field assignment ``f = local`` propagates ``local -> f`` into
+    subsequent code. It must decline when a following ``for`` binder rebinds the
+    field name ``f`` and the loop body reads ``local`` -- retargeting that read
+    to ``f`` would capture the binder. (Compare test id ``binder j`` below,
+    which has no collision and DOES fire.)"""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int f;
+            Void Initialize() { f = 0; }
+            Int O(Int seed) {
+                Int local = seed;
+                f = local;
+                Int acc = 0;
+                for (Int f = 0 to 3) {
+                    acc = acc + local;
+                }
+                return acc;
+            }
+        }
+        """)
+    # Unchanged: the loop-binder rebind of `f` blocks retargeting `local -> f`.
+    assert ForwardExpressionAliasTransformer().transform(game) == game

@@ -231,3 +231,21 @@ def test_f181_plain_copy_still_eliminated() -> None:
     )
     out = str(RedundantCopyTransformer().transform(method))
     assert "Int b = a" not in out  # the copy is removed (b -> a)
+
+
+def test_f183_declines_when_loop_binder_captures_copy_source() -> None:
+    """F-183: a copy ``v = w`` must not be eliminated when a following ``for``
+    binder rebinds the copy source ``w`` and the loop body uses ``v`` --
+    substituting ``v -> w`` there would capture the binder's ``w``."""
+    method = frog_parser.parse_method("""
+        Int O(Int w) {
+            Int acc = 0;
+            Int v = w;
+            for (Int w = 0 to 3) {
+                acc = acc + v;
+            }
+            return acc;
+        }
+        """)
+    # Unchanged: the loop-binder rebind of `w` blocks the substitution.
+    assert RedundantCopyTransformer().transform(method) == method

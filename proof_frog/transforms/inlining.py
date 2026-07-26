@@ -166,11 +166,15 @@ def _stmt_mutates_var(node: frog_ast.ASTNode, name: str) -> bool:
     inserts the sampled value into its exclusion set ``S`` -- so when *name* is
     ``S`` (or a base of it), the draw grows it and counts as a write (RC2 uniq
     growth; ruling 6.6). The `\\`-set-minus form does NOT grow its set and is
-    excluded via ``surface_form``.
+    excluded via ``surface_form``. Also counts a ``for`` binder
+    (``NumericFor`` / ``GenericFor``) that rebinds *name*, shadowing it inside
+    the loop body (F-183/F-188): the interference scans substitute structurally
+    and are not scope-aware, so a binder capturing the name must block the
+    rewrite.
 
     This is the single write-detector for the inlining passes' interference /
     stability scans; using it keeps every scan complete on both blind spots at
-    once (audit A.1 element writes + A.2 uniq insertion).
+    once (audit A.1 element writes + A.2 uniq insertion + loop-binder capture).
     """
     if isinstance(
         node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
@@ -181,6 +185,10 @@ def _stmt_mutates_var(node: frog_ast.ASTNode, name: str) -> bool:
         and node.surface_form == "uniq"
         and name in referenced_variable_names(node.unique_set)
     ):
+        return True
+    if isinstance(node, frog_ast.NumericFor) and node.name == name:
+        return True
+    if isinstance(node, frog_ast.GenericFor) and node.var_name == name:
         return True
     return False
 

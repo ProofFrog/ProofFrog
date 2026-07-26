@@ -49,3 +49,16 @@ def test_set_minus_form_does_not_grow_its_set() -> None:
 
 def test_plain_read_not_a_write() -> None:
     assert not _stmt_mutates_var(_stmt("Int y = M[0];"), "M")
+
+
+def test_numeric_for_binder_detected() -> None:
+    # F-183/F-188: a `for (Int i = ...)` binder rebinds `i`, shadowing it in
+    # the loop body -- an interference scan must treat it as a write.
+    assert _stmt_mutates_var(_stmt("for (Int i = 0 to 3) { }"), "i")
+    assert not _stmt_mutates_var(_stmt("for (Int i = 0 to 3) { }"), "j")
+
+
+def test_generic_for_binder_detected() -> None:
+    # F-183/F-188: a `for (T e in S)` binder rebinds `e`.
+    assert _stmt_mutates_var(_stmt("for (Int e in S) { }"), "e")
+    assert not _stmt_mutates_var(_stmt("for (Int e in S) { }"), "S_unrelated")

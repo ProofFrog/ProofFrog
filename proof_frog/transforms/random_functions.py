@@ -507,9 +507,20 @@ class UniqueRFSimplification(TransformPass):
     name = "Unique RF Simplification"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        # F-023: the RF-to-uniform rewrite is sound only for a *sampled* random
+        # function (`H <- Function<...>` in Initialize -- a re-samplable ROM).
+        # A `Function` field bound by an ordinary assignment (or never bound: a
+        # known, adversary-computable standard-model function) is deterministic,
+        # and rewriting a unique-input evaluation of it to a fresh uniform draw
+        # is unsound. Restrict to genuinely-sampled fields, mirroring
+        # FreshInputRFToUniform's gate.
+        sampled_fields = _sampled_function_fields_in_init(game)
         rf_types: dict[str, frog_ast.FunctionType] = {}
         for rf_field in game.fields:
-            if isinstance(rf_field.type, frog_ast.FunctionType):
+            if (
+                isinstance(rf_field.type, frog_ast.FunctionType)
+                and rf_field.name in sampled_fields
+            ):
                 rf_types[rf_field.name] = rf_field.type
 
         if not rf_types:

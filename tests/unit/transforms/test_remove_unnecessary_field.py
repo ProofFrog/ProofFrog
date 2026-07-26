@@ -230,3 +230,30 @@ def test_f319_genuinely_unnecessary_field_still_removed() -> None:
     out = str(result)
     assert "Int U;" not in out, "a genuinely unnecessary field must still be removed"
     assert "Int M;" in out, "a necessary field must be kept"
+
+
+def test_f320_loop_carried_write_not_deleted() -> None:
+    """F-320: a loop-carried write whose reviving read is EARLIER in the body
+    text but executes in a LATER iteration (via the back-edge) must not be
+    deleted. For `for (...) { y = y + x; x = x + 1; }` a single reverse pass
+    marks `x = x + 1` dead before `y = y + x` makes `x` necessary; the liveness
+    fixpoint revives it, so the loop-carried increment survives."""
+    method = frog_parser.parse_method(
+        """
+        Int Sum(Int n) {
+            Int x = 0;
+            Int y = 0;
+            for (Int i = 0 to n) {
+                y = y + x;
+                x = x + 1;
+            }
+            return y;
+        }
+        """
+    )
+    result = dependencies.remove_unnecessary_statements(
+        [], method.block, outer_names=set()
+    )
+    out = str(result)
+    assert "x = x + 1" in out, "the loop-carried increment must not be deleted"
+    assert "y = y + x" in out

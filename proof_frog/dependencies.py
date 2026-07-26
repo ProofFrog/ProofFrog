@@ -280,6 +280,22 @@ def unnecessary_statement_info(
 
     necessary_vars = [frog_ast.Variable(field) for field in fields]
 
+    def _run_loop_body_to_fixpoint(body: frog_ast.Block) -> None:
+        # F-320: a loop body needs a liveness FIXPOINT, not a single reverse
+        # pass. A loop-carried write can be marked dead when its reviving read
+        # is earlier in the body TEXT but executes in a LATER iteration via the
+        # back-edge (`for (...) { y = y + x; x = x + 1; }` -- the single pass
+        # sees `x = x + 1` before `y = y + x` makes `x` necessary, so it deletes
+        # the increment and corrupts the loop-carried value). Re-run the body
+        # pass until necessary_vars stops growing; the set is monotone and
+        # bounded by the variable names, so this terminates.
+        nonlocal necessary_vars
+        while True:
+            before = {v.name for v in necessary_vars}
+            remove_helper(body)
+            if {v.name for v in necessary_vars} == before:
+                break
+
     def remove_helper(block: frog_ast.Block) -> None:
         for statement in block.statements:
             required_map.set(statement, False)
@@ -305,13 +321,13 @@ def unnecessary_statement_info(
                 required_map.set(statement, True)
             elif isinstance(statement, frog_ast.NumericFor):
                 necessary_vars += _vars_of(statement.start) + _vars_of(statement.end)
-                remove_helper(statement.block)
+                _run_loop_body_to_fixpoint(statement.block)
             elif isinstance(
                 statement,
                 frog_ast.GenericFor,
             ):
                 necessary_vars += _vars_of(statement.over)
-                remove_helper(statement.block)
+                _run_loop_body_to_fixpoint(statement.block)
             elif isinstance(statement, frog_ast.IfStatement):
                 for condition in statement.conditions:
                     necessary_vars += _vars_of(condition)

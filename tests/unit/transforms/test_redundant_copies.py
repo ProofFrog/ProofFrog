@@ -199,3 +199,35 @@ def test_redundant_copies(
     print("EXPECTED", expected_ast)
     print("TRANSFORMED", transformed_ast)
     assert expected_ast == transformed_ast
+
+
+def test_f181_sample_from_variable_not_a_copy() -> None:
+    """F-181: `v <- w` samples a uniform element from the set `w` (a genuine
+    draw, ruling 7.A.8), NOT a copy of `w`. RedundantCopy must not delete the
+    draw and substitute the whole set."""
+    method = frog_parser.parse_method(
+        """
+        Int f() {
+            Set<Int> w = {0, 1};
+            Int v <- w;
+            return v;
+        }
+        """
+    )
+    out = str(RedundantCopyTransformer().transform(method))
+    assert "Int v <- w" in out  # the draw is preserved, not deleted
+
+
+def test_f181_plain_copy_still_eliminated() -> None:
+    """Positive control: a plain typed alias `Int b = a;` is still eliminated."""
+    method = frog_parser.parse_method(
+        """
+        Int f() {
+            Int a = 1;
+            Int b = a;
+            return b;
+        }
+        """
+    )
+    out = str(RedundantCopyTransformer().transform(method))
+    assert "Int b = a" not in out  # the copy is removed (b -> a)

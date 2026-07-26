@@ -225,7 +225,15 @@ class RedundantCopyTransformer(BlockTransformer):
         block: frog_ast.Block,
     ) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
-            # Potentially, could be a redundant copy
+            # A redundant copy is a plain typed alias ``T v = w;``.
+            #
+            # F-181: a SAMPLE ``v <- w`` is NOT a copy -- it is a genuine
+            # uniform draw (ruling 7.A.8 / SEMANTICS 4.2: sampling from a set
+            # variable draws a uniform element). The old ``elif`` treated
+            # ``v <- w`` (with ``w`` assigned earlier) as a copy and deleted the
+            # draw, substituting the whole set ``w`` for the random element --
+            # erasing the randomness (advantage >= 1/2). Only the assignment
+            # form is a copy.
             if (
                 isinstance(statement, frog_ast.Assignment)
                 and statement.the_type is not None
@@ -234,21 +242,6 @@ class RedundantCopyTransformer(BlockTransformer):
             ):
                 copy_name = statement.var.name
                 original_name = statement.value.name
-            elif (
-                isinstance(statement, frog_ast.Sample)
-                and isinstance(statement.var, frog_ast.Variable)
-                and isinstance(statement.sampled_from, frog_ast.Variable)
-                and any(
-                    isinstance(
-                        s, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
-                    )
-                    and isinstance(s.var, frog_ast.Variable)
-                    and s.var.name == statement.sampled_from.name
-                    for s in block.statements[:index]
-                )
-            ):
-                copy_name = statement.var.name
-                original_name = statement.sampled_from.name
             else:
                 continue
 

@@ -666,3 +666,30 @@ def test_f077_resampled_rf_field_not_substituted_even_with_name_collision() -> N
         proof_namespace={}, proof_let_types=let_types
     ).transform(game)
     assert result == game, "re-sampled RF field must not be substituted"
+
+
+def test_f078_array_element_write_between_guard_and_use_declines() -> None:
+    """F-078: the array element-write spelling `if (x == F[0]) { F[0] = 99;
+    return F[0]; }` must not substitute `return F[0]` via the `x == F[0]` guard
+    alias -- the element write `F[0] = 99` changes F[0], so the aliased value is
+    stale. Closed by the F-075 complete `reassigns_or_rebinds` scan, which sees
+    the element write. (The Array spelling is typechecker-latent; the Map
+    spelling of the same hole is covered by the F-075 A3/A5 fixes.)"""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Array<Int, 2> F;
+            Int O(Int x) {
+                if (x == F[0]) {
+                    F[0] = 99;
+                    return F[0];
+                }
+                return 0;
+            }
+        }
+        """
+    )
+    result = IfConditionAliasSubstitutionTransformer(
+        proof_namespace={}, proof_let_types=NameTypeMap()
+    ).transform(game)
+    assert result == game, "an element write must stop the guard-alias substitution"

@@ -648,7 +648,7 @@ class ProofEngine:
                     self.max_calls = val.num
 
         self.get_method_lookup()
-        self._extract_subsets_pairs()
+        self._extract_subsets_pairs(proof_file)
 
     def prove(self, proof_file: frog_ast.ProofFile, proof_path: str = "") -> None:
         self.set_up_proof_context(proof_file)
@@ -1758,8 +1758,37 @@ class ProofEngine:
                 for method in rewritten.methods:
                     self.method_lookup[(name, method.signature.name)] = method
 
-    def _extract_subsets_pairs(self) -> None:
-        """Extract type constraint pairs from all schemes in the proof.
+    def _theorem_dependency_cone(self, proof_file: frog_ast.ProofFile) -> set[str]:
+        """Names of the let-bindings the proof body actually depends on.
+
+        Seeded from every name referenced in the theorem, the games
+        sequence (steps) and the helper games/reductions, then closed
+        transitively through let-value composition (so a component scheme
+        reached only as an argument of another instantiation is included).
+        A let-binding referenced nowhere but the ``let:`` block itself --
+        e.g. a decoy scheme instantiated solely to smuggle a ``requires``
+        equality into the global pool -- is excluded.
+        """
+        used: set[str] = set()
+        seeds: list[frog_ast.ASTNode] = [proof_file.theorem, *proof_file.steps]
+        seeds.extend(proof_file.helpers)
+        for seed in seeds:
+            used |= visitors.referenced_variable_names(seed)
+        lets_by_name = {let.name: let for let in proof_file.lets}
+        worklist = list(used)
+        while worklist:
+            name = worklist.pop()
+            let = lets_by_name.get(name)
+            if let is None or let.value is None:
+                continue
+            for ref in visitors.referenced_variable_names(let.value):
+                if ref not in used:
+                    used.add(ref)
+                    worklist.append(ref)
+        return used
+
+    def _extract_subsets_pairs(self, proof_file: frog_ast.ProofFile) -> None:
+        """Extract type constraint pairs from the schemes the proof uses.
 
         Both ``==`` and ``subsets`` constraints are collected.  They are
         safe for normalizing type annotations (widening is harmless).
@@ -1768,8 +1797,24 @@ class ProofEngine:
         A ⊊ B where replacing ``x <- A`` with ``x <- B`` would change
         the distribution.  The pair is tagged via ``equality_pairs`` so
         the normalizer can distinguish them.
+
+        F-333: a ``requires`` constraint is honored ONLY when its scheme is
+        in the theorem's dependency cone (see ``_theorem_dependency_cone``).
+        A scheme's ``requires A == B`` is a hypothesis of *that scheme's*
+        well-definedness -- legitimate because the scheme under test (and
+        the reductions/intermediate games composing it) quantify over
+        instantiations satisfying it. Harvesting from *every* let-bound
+        scheme into a single global pool let a never-composed decoy scheme
+        inject an equality license (e.g. ``Y == Z`` over two independent
+        opaque proof parameters) that then rewrote the sampling domain of an
+        UNRELATED theorem game -- silently narrowing an unconditional
+        theorem to the diagonal. Scoping to the cone rejects that hop while
+        leaving every scheme the theorem actually composes unaffected.
         """
-        for node in self.proof_namespace.values():
+        used_names = self._theorem_dependency_cone(proof_file)
+        for name, node in self.proof_namespace.items():
+            if name not in used_names:
+                continue
             if isinstance(node, frog_ast.Scheme):
                 for req in node.requirements:
                     if not isinstance(req, frog_ast.BinaryOperation):

@@ -27,7 +27,12 @@ from ..visitors import (
     reassigns_or_rebinds,
     lvalue_base_name,
 )
-from ._base import TransformPass, PipelineContext, NearMiss
+from ._base import (
+    TransformPass,
+    PipelineContext,
+    NearMiss,
+    has_nondeterministic_call,
+)
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
@@ -442,12 +447,26 @@ class SliceOfInlineConcatTransformer(Transformer):
         lhs_len = self._operand_length(lhs)
         rhs_len = self._operand_length(rhs)
 
+        # F-030: `(a || b)[..]` -> a (or b) DROPS the other operand. That is
+        # sound only when the dropped operand has no observable effect --
+        # evaluating a concatenation evaluates both operands, so dropping one
+        # that contains a non-deterministic call erases that call. Gate each
+        # rewrite on the DROPPED operand being pure. (Previously the pass relied
+        # entirely on the external expression-purity + inlining-hoisting
+        # invariant; this makes the guard local.)
+        def _pure(operand: frog_ast.Expression) -> bool:
+            namespace = self._ctx.proof_namespace if self._ctx is not None else {}
+            return not has_nondeterministic_call(
+                operand, namespace, self._proof_let_types
+            )
+
         # Case 1: slice covers exactly the lhs (start == 0, end == |lhs|).
         if (
             lhs_len is not None
             and isinstance(new_start, frog_ast.Integer)
             and new_start.num == 0
             and self._exprs_equal(new_end, lhs_len)
+            and _pure(rhs)
         ):
             return lhs
 
@@ -457,6 +476,7 @@ class SliceOfInlineConcatTransformer(Transformer):
             and rhs_len is not None
             and self._exprs_equal(new_start, lhs_len)
             and self._exprs_equal(new_end, self._add(lhs_len, rhs_len))
+            and _pure(lhs)
         ):
             return rhs
 

@@ -103,3 +103,37 @@ def test_loop_reuse_emits_near_miss() -> None:
         and "reused across" in nm.reason
         for nm in ctx.near_misses
     )
+
+
+def test_f292_modulus_mismatch_not_absorbed() -> None:
+    """F-292: `u <- ModInt<q_s>` is uniform over {0..q_s-1}, but `u + c` is
+    computed in the carrier `ModInt<q_t>`. When q_s != q_t (`ModInt<4> u <-
+    ModInt<2>; return u + 2;`) the support shifts from {0,1} to {2,3} -- disjoint
+    -- so absorbing `u + 2` to `u` is unsound and must be declined."""
+    result = _apply(
+        """
+        Game G() {
+            ModInt<4> O() {
+                ModInt<4> u <- ModInt<2>;
+                return u + 2;
+            }
+        }
+        """
+    )
+    assert "u + 2" in result, f"modulus-mismatch uniform was absorbed:\n{result}"
+
+
+def test_f292_matching_modulus_still_absorbed() -> None:
+    """F-292 positive control: when the sampled and carrier moduli match, the
+    absorption still fires (shift of a full-ring uniform is uniform)."""
+    result = _apply(
+        """
+        Game G() {
+            ModInt<4> O() {
+                ModInt<4> u <- ModInt<4>;
+                return u + 2;
+            }
+        }
+        """
+    )
+    assert "u + 2" not in result, f"matching-modulus uniform was not absorbed:\n{result}"

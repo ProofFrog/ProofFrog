@@ -253,6 +253,14 @@ class UniformModIntSimplificationTransformer(BlockTransformer):
                 and isinstance(statement.var, frog_ast.Variable)
                 and isinstance(statement.the_type, frog_ast.ModIntType)
                 and isinstance(statement.sampled_from, frog_ast.ModIntType)
+                # F-292: the absorption `u + c -> u` is sound only when `u` is
+                # uniform over the SAME modulus as the carrier the addition is
+                # computed in (the declared type). If the sampled modulus differs
+                # (`ModInt<4> u <- ModInt<2>`), `u` is uniform over {0..q_s-1}
+                # but `u + c` lands in {c..c+q_s-1} mod q_t -- a shifted,
+                # generally disjoint support -- so `u + c` is not distributed as
+                # `u`. Require the two moduli to match structurally.
+                and statement.the_type.modulus == statement.sampled_from.modulus
             ):
                 continue
 

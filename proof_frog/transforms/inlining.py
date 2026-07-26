@@ -36,6 +36,33 @@ from ._base import (
 )
 
 
+def _stmt_mutates_var(node: frog_ast.ASTNode, name: str) -> bool:
+    """True if statement *node* mutates the variable *name*.
+
+    Covers a direct/element/slice/field write (peeled via ``lvalue_base_name``,
+    so ``M[k]=v`` / ``X.f=v`` count) AND a ``<-uniq[S]`` draw that implicitly
+    inserts the sampled value into its exclusion set ``S`` -- so when *name* is
+    ``S`` (or a base of it), the draw grows it and counts as a write (RC2 uniq
+    growth; ruling 6.6). The `\\`-set-minus form does NOT grow its set and is
+    excluded via ``surface_form``.
+
+    This is the single write-detector for the inlining passes' interference /
+    stability scans; using it keeps every scan complete on both blind spots at
+    once (audit A.1 element writes + A.2 uniq insertion).
+    """
+    if isinstance(
+        node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+    ) and (lvalue_base_name(node.var) == name):
+        return True
+    if (
+        isinstance(node, frog_ast.UniqueSample)
+        and node.surface_form == "uniq"
+        and name in referenced_variable_names(node.unique_set)
+    ):
+        return True
+    return False
+
+
 class _VarCountVisitor(Visitor[int]):
     """Count occurrences of a variable name in an AST subtree."""
 
@@ -113,23 +140,9 @@ class RedundantCopyTransformer(BlockTransformer):
                 )
 
             def written_to(copy_name: str, node: frog_ast.ASTNode) -> bool:
-                # F-179: peel the l-value via `lvalue_base_name` so an
-                # element/slice/field write to the copy or original
-                # (`copy[0] = v`, `copy.f = v`) counts as a write. Gating on
-                # `isinstance(node.var, Variable)` missed these, so a copy
-                # mutated only through an element write was still substituted,
-                # leaving the transformed game reading post-mutation state.
-                return (
-                    isinstance(
-                        node,
-                        (
-                            frog_ast.Sample,
-                            frog_ast.Assignment,
-                            frog_ast.UniqueSample,
-                        ),
-                    )
-                    and lvalue_base_name(node.var) == copy_name
-                )
+                # F-179 element/slice/field write + F-180 `<-uniq[S]` growth of
+                # the copy source S: both via the shared `_stmt_mutates_var`.
+                return _stmt_mutates_var(node, copy_name)
 
             remaining_block = frog_ast.Block(
                 copy.deepcopy(block.statements[index + 1 :])
@@ -880,19 +893,9 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
                 )
 
                 def is_written_to_fv(name: str, node: frog_ast.ASTNode) -> bool:
-                    # F-185: peel the l-value (Path P had the element/slice/
-                    # field blind spot Path E already fixed).
-                    return (
-                        isinstance(
-                            node,
-                            (
-                                frog_ast.Sample,
-                                frog_ast.Assignment,
-                                frog_ast.UniqueSample,
-                            ),
-                        )
-                        and lvalue_base_name(node.var) == name
-                    )
+                    # F-185 element/slice/field write + F-186 `<-uniq[S]`
+                    # growth of the retargeted exclusion set: shared detector.
+                    return _stmt_mutates_var(node, name)
 
                 # Only propagate if the local is not reassigned after
                 if (
@@ -1153,22 +1156,9 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
                 continue
 
             def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
-                # F-152/F-153: peel the l-value so a tuple-element write
-                # (`v[k] = e`) counts as writing `v` -- otherwise the element
-                # write was invisible here (and miscounted as a use by
-                # `_classify_uses`), and the tuple literal was inlined into
-                # reads that should have seen the written value.
-                return (
-                    isinstance(
-                        node,
-                        (
-                            frog_ast.Sample,
-                            frog_ast.Assignment,
-                            frog_ast.UniqueSample,
-                        ),
-                    )
-                    and lvalue_base_name(node.var) == name
-                )
+                # F-152/F-153 tuple-element write (`v[k]=e`) + F-154 `<-uniq[S]`
+                # growth of a free-var set S: both via `_stmt_mutates_var`.
+                return _stmt_mutates_var(node, name)
 
             # v itself must not be reassigned later.
             if (
@@ -1826,18 +1816,10 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
 
             def _modifies_var(name: str, node: frog_ast.ASTNode) -> bool:
                 """Check if a statement modifies a variable, including nested
-                element / slice / field mutations (`v[i][j] = e`, `X.f = e`)
-                -- F-166: peel the full l-value via `lvalue_base_name`."""
-                if not isinstance(
-                    node,
-                    (
-                        frog_ast.Sample,
-                        frog_ast.Assignment,
-                        frog_ast.UniqueSample,
-                    ),
-                ):
-                    return False
-                return lvalue_base_name(node.var) == name
+                element / slice / field mutations (`v[i][j] = e`, `X.f = e`;
+                F-166) and `<-uniq[S]` growth of the exclusion set (F-167) --
+                via the shared `_stmt_mutates_var`."""
+                return _stmt_mutates_var(node, name)
 
             for j in range(i):
                 earlier = block.statements[j]
@@ -3675,16 +3657,10 @@ class HoistDuplicateBranchCallTransformer(BlockTransformer):
 
     @staticmethod
     def _writes(name: str, node: frog_ast.ASTNode) -> bool:
-        # F-207: peel the l-value via `lvalue_base_name` so a nested element /
-        # slice / field / map write (`M[a][b]=v`, `M[k]<-T`) to *name* counts,
-        # not just a bare `name = ...`. Otherwise a hoisted call reads the
-        # pre-write value.
-        return (
-            isinstance(
-                node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
-            )
-            and lvalue_base_name(node.var) == name
-        )
+        # F-207 nested element/slice/field/map write + F-208 `<-uniq[S]` growth
+        # of S: both via the shared `_stmt_mutates_var`. Otherwise a hoisted
+        # call reads the pre-write value.
+        return _stmt_mutates_var(node, name)
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         # Only consider deterministic calls that are the ENTIRE expression of
@@ -3969,6 +3945,10 @@ def _fields_assigned_in_block(block: frog_ast.Block, field_names: set[str]) -> s
             base = lvalue_base_name(stmt.var)
             if base is not None and base in field_names:
                 assigned.add(base)
+            # F-175: a `<-uniq[S]` draw implicitly inserts into its exclusion
+            # set S, so a set FIELD used as S is mutated every call.
+            if isinstance(stmt, frog_ast.UniqueSample) and stmt.surface_form == "uniq":
+                assigned |= referenced_variable_names(stmt.unique_set) & field_names
         if isinstance(stmt, frog_ast.IfStatement):
             for blk in stmt.blocks:
                 assigned |= _fields_assigned_in_block(blk, field_names)

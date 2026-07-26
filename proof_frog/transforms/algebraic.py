@@ -54,6 +54,26 @@ def _count_field_assigns(node: frog_ast.ASTNode, name: str) -> int:
     return count
 
 
+def _use_node_inside_loop(block: frog_ast.Block, use_node: frog_ast.ASTNode) -> bool:
+    """True if *use_node* occurs inside a loop body within *block*.
+
+    A "used exactly once" textual occurrence count is blind to loop
+    multiplicity: a single syntactic use inside a ``NumericFor``/``GenericFor``
+    body is dynamically evaluated once per iteration, so a uniform value
+    combined there is consumed against a fresh partner each iteration and the
+    uniform-absorption rewrite is unsound (audit F-132c / F-279 / F-288).
+
+    *use_node* must be an object still present in *block* (identity match).
+    """
+
+    def _loop_contains(node: frog_ast.ASTNode) -> bool:
+        return isinstance(node, (frog_ast.NumericFor, frog_ast.GenericFor)) and (
+            SearchVisitor(lambda n: n is use_node).visit(node) is not None
+        )
+
+    return SearchVisitor(_loop_contains).visit(block) is not None
+
+
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
 # ---------------------------------------------------------------------------
@@ -154,6 +174,33 @@ class UniformXorSimplificationTransformer(BlockTransformer):
                 functools.partial(is_xor_with_uniform, var_name)
             ).visit(remaining_block)
             if xor_node is None:
+                continue
+
+            # The "used exactly once" count above is textual.  If the single
+            # textual use sits inside a loop body while the sample is outside,
+            # the same uniform value is XORed against a fresh partner each
+            # iteration (`u <- BitString<n>; for(...) { acc = acc + u; }`),
+            # so the absorption is unsound (audit F-288).
+            if _use_node_inside_loop(remaining_block, xor_node):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Uniform XOR Simplification",
+                            reason=(
+                                f"XOR-with-uniform did not fire for '{var_name}': "
+                                f"its single use is inside a loop while the sample "
+                                f"is outside, so the value is XORed against a fresh "
+                                f"partner each iteration (not single-use)"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"Sample '{var_name}' inside the loop body if a "
+                                f"fresh uniform value is intended each iteration"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
                 continue
 
             # Replace the BinaryOperation with just the uniform variable
@@ -288,16 +335,7 @@ class UniformModIntSimplificationTransformer(BlockTransformer):
             # -- e.g. `t <- ModInt<q>; for (...) { acc = acc + t; }` over a
             # two-element range leaves acc = 2t (even-only support), not the
             # uniform t the absorption would produce.  Decline (audit F-132c).
-            def _loop_contains_use(
-                node: frog_ast.ASTNode, target: frog_ast.ASTNode = add_node
-            ) -> bool:
-                return isinstance(
-                    node, (frog_ast.NumericFor, frog_ast.GenericFor)
-                ) and (
-                    SearchVisitor(lambda n, t=target: n is t).visit(node) is not None
-                )
-
-            if SearchVisitor(_loop_contains_use).visit(remaining_block) is not None:
+            if _use_node_inside_loop(remaining_block, add_node):
                 if self.ctx is not None:
                     self.ctx.near_misses.append(
                         NearMiss(
@@ -1242,6 +1280,33 @@ class UniformGroupElemSimplificationTransformer(BlockTransformer):
                 functools.partial(is_multiplicative_with_uniform, var_name)
             ).visit(remaining_block)
             if mul_node is None:
+                continue
+
+            # The "used exactly once" count above is textual.  If the single
+            # textual use sits inside a loop body while the sample is outside,
+            # the same uniform value is multiplied by a fresh partner each
+            # iteration (`u <- GroupElem<G>; for(...) { M[i] = u * g^i; }`),
+            # so the absorption is unsound (audit F-279).
+            if _use_node_inside_loop(remaining_block, mul_node):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Uniform GroupElem Simplification",
+                            reason=(
+                                f"Uniform-GroupElem did not fire for '{var_name}': "
+                                f"its single use is inside a loop while the sample "
+                                f"is outside, so the value is combined with a fresh "
+                                f"partner each iteration (not single-use)"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"Sample '{var_name}' inside the loop body if a "
+                                f"fresh uniform value is intended each iteration"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
                 continue
 
             assert isinstance(mul_node, frog_ast.BinaryOperation)

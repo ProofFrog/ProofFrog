@@ -182,3 +182,39 @@ def test_uniform_xor_simplification(
     print("EXPECTED", expected_ast)
     print("TRANSFORMED", transformed_ast)
     assert expected_ast == transformed_ast
+
+
+def test_f288_declines_single_use_inside_loop() -> None:
+    """F-288: a single syntactic XOR-with-uniform use inside a loop is
+    dynamically evaluated per iteration, so the uniform is XORed against a
+    fresh partner each time -- absorbing the operand is unsound."""
+    method = frog_parser.parse_method(
+        """
+        BitString<lambda> f(Map<Int, BitString<lambda>> ms) {
+            BitString<lambda> u <- BitString<lambda>;
+            BitString<lambda> acc = 0^lambda;
+            for (Int i = 0 to 2) {
+                acc = acc + (u + ms[i]);
+            }
+            return acc;
+        }
+        """
+    )
+    out = UniformXorSimplificationTransformer().transform(method)
+    # `u + ms[i]` must NOT collapse to `u` inside the loop.
+    assert "u + ms[i]" in str(out)
+
+
+def test_f288_still_fires_single_use_no_loop() -> None:
+    """Positive control: the same shape without a loop still absorbs."""
+    method = frog_parser.parse_method(
+        """
+        BitString<lambda> f(BitString<lambda> m) {
+            BitString<lambda> u <- BitString<lambda>;
+            return u + m;
+        }
+        """
+    )
+    out = UniformXorSimplificationTransformer().transform(method)
+    assert "u + m" not in str(out)
+    assert "return u" in str(out)

@@ -2632,7 +2632,12 @@ def _is_groupelem_field(fld: frog_ast.Field) -> bool:
 
 
 def _free_var_names(expr: frog_ast.Expression) -> set[str]:
-    return {v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(expr))}
+    # F-168/F-227: use the FieldAccess-complete scanner so a read through a
+    # field/array/slice access (`M.keys`, `M[k]`, `X.f`) counts as a free
+    # reference to its base. `VariableCollectionVisitor` suppresses those
+    # bases, so a hoist/alias could move an expression while missing its
+    # dependency on (or a later write to) the accessed field.
+    return referenced_variable_names(expr)
 
 
 def _stmt_writes_var(stmt: frog_ast.Statement, name: str) -> bool:

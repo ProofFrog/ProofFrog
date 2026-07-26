@@ -324,8 +324,17 @@ class IfSplitBranchAssignmentTransformer(BlockTransformer):
         if (C) { return f(A); } else { return f(B); }
     """
 
-    def __init__(self, ctx: PipelineContext | None = None) -> None:
+    def __init__(
+        self,
+        ctx: PipelineContext | None = None,
+        field_names: set[str] | None = None,
+    ) -> None:
         self.ctx = ctx
+        # Game field names. The rewrite drops each branch's trailing `x = A`
+        # assignment (keeping only its value). For a field that store persists
+        # across oracle calls and is observable, so dropping it is unsound
+        # (F-159); the pass fires only for locals.
+        self._field_names: set[str] = field_names or set()
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -357,6 +366,12 @@ class IfSplitBranchAssignmentTransformer(BlockTransformer):
                 branch_values.append(last.value)
 
             if not all_match or var_name is None:
+                continue
+
+            # F-159: the rewrite drops each branch's trailing `var = value`
+            # store. If `var` is a game field, that store is observable across
+            # oracle calls, so dropping it changes behaviour -- decline.
+            if var_name in self._field_names:
                 continue
 
             # Must have subsequent statements
@@ -580,9 +595,15 @@ class CollapseAssignmentTransformer(BlockTransformer):
         self,
         proof_namespace: frog_ast.Namespace | None = None,
         proof_let_types: NameTypeMap | None = None,
+        field_names: set[str] | None = None,
     ) -> None:
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
         self._proof_let_types = proof_let_types
+        # Names of game fields (persist across oracle calls). A field's store
+        # is observable on any control-flow exit before it is overwritten, so
+        # collapsing two field stores across an intervening return is unsound
+        # (F-144). Locals are not observable across calls, so they are exempt.
+        self._field_names: set[str] = field_names or set()
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -629,6 +650,21 @@ class CollapseAssignmentTransformer(BlockTransformer):
                 # Only an untyped reassignment is a safe collapse target.
                 if later_statement.the_type is not None:
                     break
+                # F-144: if the collapse target is a game field and any
+                # intervening statement can exit the method (contains a
+                # return), the first store is live on that early-exit path
+                # (a later oracle call observes the field), so deleting it is
+                # unsound. Locals are not observable across calls -> exempt.
+                if statement.var.name in self._field_names:
+                    intervening = block.statements[index + 1 : index + later_index + 1]
+                    if any(
+                        SearchVisitor(
+                            lambda n: isinstance(n, frog_ast.ReturnStatement)
+                        ).visit(s)
+                        is not None
+                        for s in intervening
+                    ):
+                        break
                 later_rhs = (
                     later_statement.sampled_from
                     if isinstance(later_statement, frog_ast.Sample)
@@ -1250,7 +1286,9 @@ class IfSplitBranchAssignment(TransformPass):
     name = "If-Split Branch Assignment"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return IfSplitBranchAssignmentTransformer(ctx).transform(game)
+        return IfSplitBranchAssignmentTransformer(
+            ctx, field_names={f.name for f in game.fields}
+        ).transform(game)
 
 
 class InlineSingleUseVariable(TransformPass):
@@ -1267,6 +1305,7 @@ class CollapseAssignment(TransformPass):
         return CollapseAssignmentTransformer(
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
+            field_names={f.name for f in game.fields},
         ).transform(game)
 
 

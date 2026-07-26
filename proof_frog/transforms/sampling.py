@@ -33,6 +33,29 @@ from ._base import TransformPass, PipelineContext, NearMiss
 # ---------------------------------------------------------------------------
 
 
+def _concat_operands_in_order(
+    node: frog_ast.Expression,
+) -> list[frog_ast.Variable]:
+    """Flatten an ``||`` concatenation into its leaf operands, left-to-right,
+    preserving duplicates.
+
+    Unlike ``VariableCollectionVisitor`` (which deduplicates and is order-blind),
+    this returns the operands in the exact positional order they concatenate in,
+    with repeats kept -- required for SimplifySplice's positional offset mapping
+    to be sound (F-065). Callers guarantee every leaf is a ``Variable`` via an
+    ``is_all_concatenated`` check before calling.
+    """
+    if (
+        isinstance(node, frog_ast.BinaryOperation)
+        and node.operator is frog_ast.BinaryOperators.OR
+    ):
+        return _concat_operands_in_order(
+            node.left_expression
+        ) + _concat_operands_in_order(node.right_expression)
+    assert isinstance(node, frog_ast.Variable)
+    return [node]
+
+
 class SimplifySpliceTransformer(BlockTransformer):
     """Replaces slice accesses on a concatenated variable with the originals.
 
@@ -77,8 +100,15 @@ class SimplifySpliceTransformer(BlockTransformer):
             if not is_all_concatenated(statement.value):
                 continue
 
-            # Get variables all concatenated together
-            concatenated_var_names = VariableCollectionVisitor().visit(statement.value)
+            # Get variables all concatenated together, LEFT-TO-RIGHT and WITH
+            # DUPLICATES preserved. F-065: VariableCollectionVisitor
+            # deduplicates, so `z = a || a || b` collapsed to [a, b]; the
+            # positional offsets in Step 2 then mapped the slice at
+            # [len_a : len_a+len_b] (physically the SECOND copy of `a`) onto
+            # `b`, rewriting `z[len_a : 2*len_a]` to `b` -- a false equivalence
+            # when len_a == len_b. Preserving order + duplicates makes each
+            # positional slice map to the operand actually occupying that range.
+            concatenated_var_names = _concat_operands_in_order(statement.value)
 
             def find_declaration(variable: str, node: frog_ast.ASTNode) -> bool:
                 return (

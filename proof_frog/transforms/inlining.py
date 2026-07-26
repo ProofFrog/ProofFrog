@@ -2252,6 +2252,34 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
                 # Producer pinned this field; reject cross-method inline to
                 # avoid oscillation with the producer's re-fire.
                 return None
+            # F-216: cross-method inlining substitutes the field's definition
+            # into a use in ANOTHER method. That is sound only if the def runs
+            # before any oracle can observe the field -- i.e. the def is in
+            # Initialize (which runs once, before every oracle). If the def is
+            # in an oracle, the adversary can call the USING oracle first and
+            # observe the field's UNINITIALIZED value, which the inlined RHS
+            # would mask (ATK-4: `b = 5` in Store, `return b` in Get; a
+            # Get-before-Store call reads an undefined `b`, not 5).
+            if game.methods[assign_method_idx].signature.name != "Initialize":
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Single-Use Field",
+                            reason=(
+                                f"Cannot inline field '{field_name}' across "
+                                f"methods: its single definition is in "
+                                f"'{game.methods[assign_method_idx].signature.name}'"
+                                f", not Initialize, so another oracle could "
+                                f"observe it uninitialized before that method "
+                                f"runs"
+                            ),
+                            location=None,
+                            suggestion=None,
+                            variable=field_name,
+                            method=None,
+                        )
+                    )
+                return None
             if not is_pure:
                 if self.ctx is not None:
                     self.ctx.near_misses.append(

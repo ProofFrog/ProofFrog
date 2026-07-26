@@ -366,6 +366,9 @@ class IfSplitBranchAssignmentTransformer(BlockTransformer):
 
             # Variable must not be reassigned in subsequent statements
             def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
+                # F-161: peel the l-value so an element/slice/field write
+                # (`v[i] = e`) counts as a reassignment and blocks the branch
+                # substitution.
                 return (
                     isinstance(
                         node,
@@ -375,8 +378,7 @@ class IfSplitBranchAssignmentTransformer(BlockTransformer):
                             frog_ast.UniqueSample,
                         ),
                     )
-                    and isinstance(node.var, frog_ast.Variable)
-                    and node.var.name == name
+                    and lvalue_base_name(node.var) == name
                 )
 
             if (
@@ -1115,6 +1117,11 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
                 continue
 
             def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
+                # F-152/F-153: peel the l-value so a tuple-element write
+                # (`v[k] = e`) counts as writing `v` -- otherwise the element
+                # write was invisible here (and miscounted as a use by
+                # `_classify_uses`), and the tuple literal was inlined into
+                # reads that should have seen the written value.
                 return (
                     isinstance(
                         node,
@@ -1124,8 +1131,7 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
                             frog_ast.UniqueSample,
                         ),
                     )
-                    and isinstance(node.var, frog_ast.Variable)
-                    and node.var.name == name
+                    and lvalue_base_name(node.var) == name
                 )
 
             # v itself must not be reassigned later.

@@ -297,3 +297,40 @@ def test_forward_expression_alias_field(
 
     transformed_ast = ForwardExpressionAliasTransformer().transform(game_ast)
     assert expected_ast == transformed_ast
+
+
+def test_f184_self_referential_field_assign_not_aliased() -> None:
+    """F-184: `ctr = ctr + 1` -- the assigned field `ctr` is a free variable of
+    its own RHS, so `ctr == ctr + 1` does NOT hold afterward; a later
+    `ctr + 1` must not be aliased to `ctr`."""
+    game = frog_parser.parse_game(
+        """
+        Game G(Int lambda) {
+            Int ctr = 0;
+            Int Oracle() {
+                ctr = ctr + 1;
+                return ctr + 1;
+            }
+        }
+        """
+    )
+    out = str(ForwardExpressionAliasTransformer().transform(game))
+    assert "return ctr + 1" in out  # not aliased to `return ctr`
+
+
+def test_f184_non_self_referential_field_assign_still_aliases() -> None:
+    """Positive control: a field defined from an expression that does NOT
+    reference the field still aliases a later identical occurrence."""
+    game = frog_parser.parse_game(
+        """
+        Game G(Int a, Int b) {
+            Int s;
+            Int Oracle() {
+                s = a * b;
+                return (a * b) + s;
+            }
+        }
+        """
+    )
+    out = str(ForwardExpressionAliasTransformer().transform(game))
+    assert "a * b" not in out.split("return")[1]  # the return's a*b became s

@@ -1169,6 +1169,15 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
             var_name = statement.var.name
             expr = statement.value
 
+            # F-184: a self-referential definition `v = f(v)` (the assigned
+            # variable is a free variable of its own RHS) does NOT establish
+            # `v == f(v)` afterward -- the assignment changes `v`, so a later
+            # occurrence of `f(v)` reads the NEW `v`, not the value `v` now
+            # holds (`ctr = ctr + 1; return ctr + 1` must NOT alias to
+            # `return ctr`). Never alias such a definition.
+            if var_name in referenced_variable_names(expr):
+                continue
+
             # Only handle pure expressions (no non-deterministic function calls)
             if has_nondeterministic_call(
                 expr, self._proof_namespace, self._proof_let_types

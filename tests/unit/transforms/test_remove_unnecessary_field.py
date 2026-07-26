@@ -188,3 +188,45 @@ def test_unnecessary_field_visitor(
     transformed_ast = dependencies.remove_unnecessary_fields(game_ast)
     print("transformed AST", transformed_ast)
     assert expected_ast == transformed_ast
+
+
+def test_f319_field_read_only_in_index_position_is_kept() -> None:
+    """F-319: a field `F` read only in the index of a write to another (kept)
+    field, `M[F] = v`, is necessary -- dropping it while `M[F] = v` survives
+    emits a game with a dangling reference to the undeclared `F`. The game-wide
+    fixpoint must keep `F` (and its setter) so the output stays well-formed."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Map<Int, Int> M;
+            Int F;
+            Void Initialize() { F = 0; }
+            Void Store(Int v) { M[F] = v; }
+            Map<Int, Int> Get() { return M; }
+        }
+        """
+    )
+    result = dependencies.remove_unnecessary_fields(game)
+    out = str(result)
+    assert "Int F;" in out, "the index field F must be kept (no dangling reference)"
+    assert "F = 0" in out, "F's setter must be kept"
+    assert "M[F]" in out, "the kept write M[F]=v must still reference a declared F"
+
+
+def test_f319_genuinely_unnecessary_field_still_removed() -> None:
+    """F-319 positive control: a field that is neither returned nor read in a
+    kept write's index is still removed (the fixpoint does not over-keep)."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Int U;
+            Int M;
+            Void Initialize() { U = 5; M = 3; }
+            Int Get() { return M; }
+        }
+        """
+    )
+    result = dependencies.remove_unnecessary_fields(game)
+    out = str(result)
+    assert "Int U;" not in out, "a genuinely unnecessary field must still be removed"
+    assert "Int M;" in out, "a necessary field must be kept"

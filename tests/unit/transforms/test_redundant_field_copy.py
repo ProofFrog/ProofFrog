@@ -233,3 +233,25 @@ def test_redundant_field_copy(
 
     transformed_ast = RedundantFieldCopyTransformer().transform(game_ast)
     assert transformed_ast == expected_ast
+
+
+def test_f198_redeclaration_after_copy_declines() -> None:
+    """F-198: `v <- ...; f = v; v = v + v;` -- the field copy `f = v` must not
+    be eliminated. The redeclaration `v = v + v` comes AFTER the copy, so
+    `decl_index >= index`; the pass (via the F-199 ordering guard, plus the
+    use-scan) declines rather than substituting a differently-valued write."""
+    game = frog_parser.parse_game(
+        """
+        Game Real(Int n) {
+            BitString<n> f;
+            Void Initialize() {
+                BitString<n> v <- BitString<n>;
+                f = v;
+                BitString<n> v = v + v;
+            }
+            BitString<n> Get() { return f; }
+        }
+        """
+    )
+    out = str(RedundantFieldCopyTransformer().transform(game))
+    assert "f = v" in out  # copy preserved (not unsoundly eliminated)

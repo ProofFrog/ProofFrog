@@ -777,12 +777,29 @@ def _exponents_compatible(
     return False
 
 
-def _is_group_identity(expr: frog_ast.Expression) -> bool:
-    """Check if an expression is a group identity element (G.identity)."""
-    return (
+def _is_group_identity(
+    expr: frog_ast.Expression, type_map: Optional[NameTypeMap] = None
+) -> bool:
+    """Check if an expression is a group identity element (``G.identity``).
+
+    The object ``G`` must be typed ``Group`` in *type_map*. A bare name-match
+    on ``.identity`` (with no type check) would also cancel a non-group field
+    literally named ``identity`` -- e.g. an ``Int identity`` scheme field --
+    out of a product, which is unsound (audit F-285/F-286: ``x * E.identity``
+    where ``E`` is a scheme instance and ``identity`` an ``Int``). Without a
+    type_map the check is conservative and returns False, since the group
+    identity cannot be confirmed on the name alone.
+    """
+    if not (
         isinstance(expr, frog_ast.FieldAccess)
         and expr.name == "identity"
         and isinstance(expr.the_object, frog_ast.Variable)
+    ):
+        return False
+    if type_map is None:
+        return False
+    return isinstance(
+        _get_expression_type(expr.the_object, type_map), frog_ast.GroupType
     )
 
 
@@ -2603,15 +2620,15 @@ class GroupElemSimplificationTransformer(MethodScopedTypeMapMixin):
         # --- Multiplicative identity rules ---
         if op == frog_ast.BinaryOperators.MULTIPLY:
             # identity * g  -->  g
-            if _is_group_identity(left):
+            if _is_group_identity(left, self.type_map):
                 return right
             # g * identity  -->  g
-            if _is_group_identity(right):
+            if _is_group_identity(right, self.type_map):
                 return left
 
         if op == frog_ast.BinaryOperators.DIVIDE:
             # g / identity  -->  g
-            if _is_group_identity(right):
+            if _is_group_identity(right, self.type_map):
                 return left
 
         return transformed

@@ -220,3 +220,36 @@ def test_groupelem_identity_rules(method: str, expected: str) -> None:
     transformed = GroupElemSimplificationTransformer(tm).transform(method_ast)
 
     assert transformed == expected_ast
+
+
+def test_f285_non_group_identity_field_not_cancelled() -> None:
+    """F-285/F-286: `x * E.identity` where `E` is NOT a Group (e.g. a scheme
+    instance whose `identity` is a plain `Int` field) must not be cancelled --
+    the multiplicative-identity rule required a type/group check, not a bare
+    name-match on `.identity`."""
+    method = frog_parser.parse_method(
+        """
+        Int f(Int x) {
+            return x * E.identity;
+        }
+        """
+    )
+    # `E` is typed as a non-group (Int stands in for a scheme instance); `G`
+    # remains a genuine Group so the positive path is unaffected.
+    tm = {"E": frog_ast.IntType(), "x": frog_ast.IntType(), "G": frog_ast.GroupType()}
+    out = GroupElemSimplificationTransformer(tm).transform(method)
+    assert "x * E.identity" in str(out)  # not cancelled to x
+
+
+def test_f285_genuine_group_identity_still_cancelled() -> None:
+    """Positive control: `x * G.identity` with `G` typed Group still cancels."""
+    method = frog_parser.parse_method(
+        """
+        GroupElem<G> f(GroupElem<G> x) {
+            return x * G.identity;
+        }
+        """
+    )
+    tm = {"G": frog_ast.GroupType(), "x": frog_ast.GroupElemType(frog_ast.Variable("G"))}
+    out = GroupElemSimplificationTransformer(tm).transform(method)
+    assert "G.identity" not in str(out)  # cancelled -> return x

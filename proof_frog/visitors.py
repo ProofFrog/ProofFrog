@@ -1542,7 +1542,14 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
             return
 
         for index, statement in enumerate(block.statements):
-            if statement in self.paired_statements:
+            # F-299: match by IDENTITY, not structural equality. A `statement in
+            # self.paired_statements` test uses ASTNode.__eq__, so a DIFFERENT
+            # but identical-looking unpaired twin write in another oracle
+            # (`f2 = 1` with no matching `f1 = 1`) is wrongly treated as already
+            # paired and skipped from analysis, yielding a false "always equal".
+            # The visitor runs on the original game, so the genuinely-paired
+            # instances are identity-comparable here.
+            if any(statement is paired for paired in self.paired_statements):
                 continue
 
             if not isinstance(statement, (frog_ast.Sample, frog_ast.Assignment)):

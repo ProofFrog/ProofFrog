@@ -327,3 +327,45 @@ def test_f298_adjacent_writes_still_paired() -> None:
     )
     result = visitors.SameFieldVisitor(("f1", "f2")).visit(game)
     assert isinstance(result, list), "adjacent equal writes should still pair"
+
+
+def test_f299_structurally_identical_unpaired_twin_not_conflated() -> None:
+    """F-299: the paired-statement exemption must match by IDENTITY, not
+    structural equality. `MarkF2Only` writes `f2 = 1` with no matching `f1 = 1`,
+    so f1 and f2 are not always equal. Because that write is structurally
+    identical to `MarkBoth`'s already-paired `f2 = 1`, a structural `in` test
+    wrongly exempted it from analysis and reported the fields as mergeable. With
+    identity matching the unpaired twin is analyzed and the visitor declines."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Int f1;
+            Int f2;
+            Void Initialize() { f1 = 0; f2 = 0; }
+            Void MarkBoth() { f1 = 1; f2 = 1; }
+            Void MarkF2Only() { f2 = 1; }
+            Int Get() { return f2; }
+        }
+        """
+    )
+    result = visitors.SameFieldVisitor(("f1", "f2")).visit(game)
+    assert result is None, "an unpaired identical-looking twin write must decline the merge"
+
+
+def test_f299_genuinely_equal_fields_still_merge() -> None:
+    """F-299 positive control: when every write keeps the fields equal, they
+    still pair (identity matching does not over-decline legitimate merges)."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Int f1;
+            Int f2;
+            Void Initialize() { f1 = 0; f2 = 0; }
+            Void MarkA() { f1 = 1; f2 = 1; }
+            Void MarkB() { f1 = 2; f2 = 2; }
+            Int Get() { return f2; }
+        }
+        """
+    )
+    result = visitors.SameFieldVisitor(("f1", "f2")).visit(game)
+    assert isinstance(result, list), "genuinely-equal fields should still merge"

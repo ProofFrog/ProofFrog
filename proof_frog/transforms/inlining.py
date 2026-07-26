@@ -4732,8 +4732,19 @@ class HoistDeterministicCallToInitializeTransformer:
                     alias_assign_counts[name] = alias_assign_counts.get(name, 0) + 1
                     aliases[name] = stmt.value
             # Only use aliases for variables assigned exactly once.
+            # F-170: the loop above counts only TOP-LEVEL Assignment nodes, so
+            # it misses a re-binding nested in an if/for (`if (b) { x = k2; }`)
+            # or a top-level Sample (`x <- ...`). Such a name is coin-dependent,
+            # not a stable alias -- expanding `F(x)` to `F(<top-level RHS>)`
+            # would then match a hoisted `F(k)` unsoundly. Require the COMPLETE
+            # recursive write count (nested + samples, peeling l-values) to be
+            # exactly 1.
+            init_prefix = frog_ast.Block(list(new_stmts[:-1]))
             stable_aliases = {
-                n: v for n, v in aliases.items() if alias_assign_counts[n] == 1
+                n: v
+                for n, v in aliases.items()
+                if alias_assign_counts[n] == 1
+                and _count_assigns_recursive(init_prefix, n) == 1
             }
 
             def _expand(expr: frog_ast.ASTNode) -> frog_ast.ASTNode:

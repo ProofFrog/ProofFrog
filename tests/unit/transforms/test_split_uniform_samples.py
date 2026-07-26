@@ -406,3 +406,36 @@ def test_f032_constant_bounds_still_split() -> None:
     parsed = frog_parser.parse_method(method)
     transformed = SplitUniformSampleTransformer({}).transform(parsed)
     assert transformed != parsed, "constant-bound split should still fire"
+
+
+def test_f036_out_of_bounds_slice_declines() -> None:
+    """F-036: `z[4:8]` on a BitString<4> reads outside the sampled range -- an
+    undefined out-of-bounds read, NOT an independent uniform sub-sample. The
+    split must decline (else it fabricates a fresh uniform for undefined bits)."""
+    method = """
+        BitString<4> f() {
+            BitString<4> z <- BitString<4>;
+            return z[4 : 8];
+        }
+        """
+    transformed = SplitUniformSampleTransformer({}).transform(
+        frog_parser.parse_method(method)
+    )
+    assert "z[4 : 8]" in str(transformed)  # not split
+
+
+def test_f036_in_bounds_constant_slices_still_split() -> None:
+    """Positive control: fully in-bounds constant slices of a BitString<8> still
+    split into independent uniform pieces."""
+    method = """
+        Void f() {
+            BitString<8> z <- BitString<8>;
+            BitString<4> a = z[0 : 4];
+            BitString<4> b = z[4 : 8];
+        }
+        """
+    transformed = SplitUniformSampleTransformer({}).transform(
+        frog_parser.parse_method(method)
+    )
+    text = str(transformed)
+    assert "z[0 : 4]" not in text and "z[4 : 8]" not in text  # split

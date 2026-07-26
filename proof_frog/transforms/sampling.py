@@ -1240,9 +1240,51 @@ class SplitUniformSampleTransformer(BlockTransformer):
                 for expr in sb:
                     if hasattr(expr, "free_symbols"):
                         all_syms.update(expr.free_symbols)
+            # F-036: the sampled length bounds the slices; its symbols (e.g. a
+            # BitString<n> length) also need positive assumptions for the
+            # in-bounds check below.
+            if hasattr(sample_len, "free_symbols"):
+                all_syms.update(sample_len.free_symbols)
             pos_subs = {
                 s: Symbol(s.name, positive=True) for s in all_syms if not s.is_positive
             }
+
+            # F-036: a slice that reads OUTSIDE the sampled range
+            # ``[0, sample_len]`` (`z[4:8]` on BitString<4>) is an undefined
+            # out-of-bounds read (SEMANTICS partial-operation convention), NOT
+            # an independent uniform sub-sample -- splitting it would fabricate
+            # a fresh uniform for undefined bits. Decline only when a slice is
+            # PROVABLY out of bounds (`start < 0` or `end > sample_len`); an
+            # indeterminate symbolic bound is left to fire (a well-typed slice
+            # is in range), matching the pass's existing symbolic tolerance.
+            pos = self._pos
+            out_of_bounds = False
+            for start, end in unique_bounds:
+                start_oob = sympy_simplify(pos(start, pos_subs)).is_negative
+                end_oob = sympy_simplify(
+                    pos(sample_len, pos_subs) - pos(end, pos_subs)
+                ).is_negative
+                if start_oob or end_oob:
+                    out_of_bounds = True
+                    break
+            if out_of_bounds:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Split Uniform Samples",
+                            reason=(
+                                f"Sample '{var_name}' not split: a slice reads "
+                                f"outside the sampled range [0, {sample_len}] "
+                                f"(an undefined out-of-bounds read, not an "
+                                f"independent uniform sub-sample)"
+                            ),
+                            location=statement.origin,
+                            suggestion=None,
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
+                continue
 
             # Check unique slices are non-overlapping. Two slices [a,b) and
             # [c,d) don't overlap if b <= c or d <= a. Gaps are allowed

@@ -4975,6 +4975,30 @@ class SplitOpaqueTupleFieldTransformer:
                     )
                 return None
 
+        # F-189: an INITIALIZED tuple field must not silently become an
+        # undefined read. A tuple-literal initializer (`[1, 2]`) is decomposed
+        # into per-component initializers below; a non-decomposable initializer
+        # (an opaque call) cannot be split into components without duplicating
+        # it, so decline rather than drop the initializer (which would turn a
+        # readable initialized field into an undefined read -- attack init_drop).
+        if field.value is not None and not isinstance(field.value, frog_ast.Tuple):
+            if self._ctx is not None:
+                self._ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Split Opaque Tuple Field",
+                        reason=(
+                            f"Field '{field.name}' has a non-tuple-literal "
+                            f"initializer that cannot be decomposed into "
+                            f"per-index initializers; splitting would drop it"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=field.name,
+                        method=None,
+                    )
+                )
+            return None
+
         # 5. Build the rewritten game.
         assert isinstance(field.type, frog_ast.ProductType)
         component_types = field.type.types
@@ -4990,8 +5014,15 @@ class SplitOpaqueTupleFieldTransformer:
         for f in new_game.fields:
             if f.name == field.name:
                 for k in sorted(used_indices):
+                    # F-189: carry the k-th component of a tuple-literal
+                    # initializer so the split field keeps its initial value.
+                    init_k = (
+                        copy.deepcopy(field.value.values[k])
+                        if isinstance(field.value, frog_ast.Tuple)
+                        else None
+                    )
                     new_fields.append(
-                        frog_ast.Field(component_types[k], new_field_names[k], None)
+                        frog_ast.Field(component_types[k], new_field_names[k], init_k)
                     )
             else:
                 new_fields.append(f)

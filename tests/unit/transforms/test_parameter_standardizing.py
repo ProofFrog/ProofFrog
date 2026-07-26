@@ -165,3 +165,24 @@ def test_f306_standardizes_when_no_collision() -> None:
     out = str(result)
     assert "Int O(Int arg1)" in out
     assert "return arg1 + 1" in out
+
+
+def test_f307_declines_when_target_name_collides_with_field() -> None:
+    """F-307 (sibling of F-306): the canonical target names arg1..argN must also
+    be fresh w.r.t. game FIELDS. A field named `arg1` fuses with a parameter
+    renamed to `arg1` -- a field read `return c + arg1` would become
+    `return arg1 + arg1` (the field read captured by the parameter). The pass
+    must decline the rename, leaving the parameter name intact."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Int arg1;
+            Void Initialize() { arg1 = 5; }
+            Int O(Int c) { return c + arg1; }
+        }
+        """
+    )
+    result = _ParameterStandardizer().rename_game(game)
+    out = str(result)
+    assert "Int O(Int c)" in out, "collision with a field must decline the rename"
+    assert "return c + arg1" in out, "the field read must not fuse with the parameter"

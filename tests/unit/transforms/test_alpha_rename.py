@@ -98,3 +98,48 @@ def test_idempotent() -> None:
     once = _apply(src)
     twice = str(AlphaRename().apply(frog_parser.parse_game(once), _ctx()))
     assert once == twice
+
+
+def test_f237_underscore_prefixed_user_binder_is_renamed() -> None:
+    # A user local named `__x` must be renamed to a fresh `__aN__` name -- the
+    # old code skipped every `__`-prefixed binder, leaving the capture that
+    # AlphaRename exists to prevent (audit F-237/F-290/F-323). Only the
+    # engine's own `__aN__` names are exempt (for convergence).
+    out = _apply("""
+        Game G() {
+            Int __x;
+            Int O() {
+                Int __x = 5;
+                return __x;
+            }
+        }
+        """)
+    # The local `__x = 5` and its return are freshened; no `__x` binder/read
+    # survives in O to be captured.
+    assert "Int __a0__ = 5" in out
+    assert "return __a0__" in out
+
+
+def test_f238_f239_sampled_from_and_type_follow_shadowed_local() -> None:
+    # A local `n` shadows the field `n`; the local's own draw and type
+    # annotation reference `n`. After renaming the local to a fresh name, the
+    # exclusion set (already handled), the sampled_from domain type (F-238),
+    # and the `the_type` annotation (F-239) must ALL bind to the fresh name --
+    # not silently re-bind to the field `n`.
+    out = _apply("""
+        Game G(Int lambda) {
+            Int n;
+            Void Initialize() { n = 2; }
+            Bool O() {
+                Int n = 1;
+                BitString<n> x <- BitString<n> \\ {1^n};
+                return x == 0^n;
+            }
+        }
+        """)
+    # Grab O's body (after Initialize). The renamed local drives everything.
+    body = out.split("Bool O()", 1)[1]
+    # The local `n` is renamed; no bare `<n>` (field re-bind) remains in O.
+    assert "BitString<n>" not in body
+    # The type annotation, sampled_from, and exclusion all use the fresh name.
+    assert "BitString<__a" in body

@@ -22,6 +22,8 @@ from ..visitors import (
     NameTypeMap,
     VariableCollectionVisitor,
     build_game_type_map,
+    build_method_type_map,
+    MethodScopedTypeMapMixin,
 )
 from ._base import (
     TransformPass,
@@ -450,7 +452,7 @@ def _rebuild_add_chain(terms: list[frog_ast.Expression]) -> frog_ast.Expression:
     return result
 
 
-class XorCancellationTransformer(Transformer):
+class XorCancellationTransformer(MethodScopedTypeMapMixin):
     """Cancels pairs of identical terms in XOR (ADD on bitstrings) chains.
 
     Since XOR is self-inverse (a ^ a = 0) and associative/commutative,
@@ -572,7 +574,7 @@ class XorCancellationTransformer(Transformer):
         return None
 
 
-class XorIdentityTransformer(Transformer):
+class XorIdentityTransformer(MethodScopedTypeMapMixin):
     """Removes 0^n terms from XOR (ADD) chains, since x XOR 0 = x.
 
     Only fires when the ADD chain is in a bitstring context (not ModInt
@@ -716,7 +718,7 @@ def _get_group_var_from_type(
     return None
 
 
-class ModIntSimplificationTransformer(Transformer):
+class ModIntSimplificationTransformer(MethodScopedTypeMapMixin):
     """Applies algebraic identities for ModInt arithmetic.
 
     Requires a type map to determine when operands are ModInt.
@@ -1217,7 +1219,11 @@ class XorCancellation(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return XorCancellationTransformer(type_map, ctx).transform(game)
+        return (
+            XorCancellationTransformer(type_map, ctx)
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )
 
 
 class XorIdentity(TransformPass):
@@ -1225,7 +1231,11 @@ class XorIdentity(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return XorIdentityTransformer(type_map).transform(game)
+        return (
+            XorIdentityTransformer(type_map)
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )
 
 
 class ModIntSimplification(TransformPass):
@@ -1233,11 +1243,15 @@ class ModIntSimplification(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return ModIntSimplificationTransformer(
-            type_map,
-            proof_namespace=ctx.proof_namespace,
-            proof_let_types=ctx.proof_let_types,
-        ).transform(game)
+        return (
+            ModIntSimplificationTransformer(
+                type_map,
+                proof_namespace=ctx.proof_namespace,
+                proof_let_types=ctx.proof_let_types,
+            )
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )
 
 
 def _flatten_chain(
@@ -1860,7 +1874,7 @@ def _bitstring_length(
     return None
 
 
-class ConcatEqualityDecomposeTransformer(Transformer):
+class ConcatEqualityDecomposeTransformer(MethodScopedTypeMapMixin):
     """Rewrites ``x == (a1 || a2 || ... || ak)`` (or the mirror form)
     to ``x[0:n1] == a1 && x[n1:n1+n2] == a2 && ... && x[s:s+nk] == ak``,
     where ``ni`` is the statically-derivable BitString length of ``ai``.
@@ -1927,10 +1941,21 @@ class ConcatEqualityDecomposeTransformer(Transformer):
             bindings.pop(name, None)
         old = self.local_concat_bindings
         self.local_concat_bindings = bindings
+        # Scope the type map to THIS method (fields + this method's
+        # params/locals) so a sibling method's same-named binding cannot
+        # launder a wrong BitString length onto this method's operands
+        # (audit F-255). Mirrors MethodScopedTypeMapMixin.transform_method,
+        # which this override replaces.
+        saved_type_map = self.type_map
+        if self._scope_game is not None:
+            self.type_map = build_method_type_map(
+                self._scope_game, method, self._scope_let_types
+            )
         try:
             new_block = self.transform(method.block)
         finally:
             self.local_concat_bindings = old
+            self.type_map = saved_type_map
         if new_block is method.block:
             return method
         return frog_ast.Method(method.signature, new_block)
@@ -2133,7 +2158,11 @@ class ConcatEqualityDecompose(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return ConcatEqualityDecomposeTransformer(ctx, type_map).transform(game)
+        return (
+            ConcatEqualityDecomposeTransformer(ctx, type_map)
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2141,7 +2170,7 @@ class ConcatEqualityDecompose(TransformPass):
 # ---------------------------------------------------------------------------
 
 
-class TupleEqualityDecomposeTransformer(Transformer):
+class TupleEqualityDecomposeTransformer(MethodScopedTypeMapMixin):
     """Rewrites ``a != b`` between tuple-typed expressions to the
     component-wise disjunction ``a[0]!=b[0] || ... || a[k-1]!=b[k-1]``.
 
@@ -2218,7 +2247,11 @@ class TupleEqualityDecompose(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return TupleEqualityDecomposeTransformer(ctx, type_map).transform(game)
+        return (
+            TupleEqualityDecomposeTransformer(ctx, type_map)
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2226,7 +2259,7 @@ class TupleEqualityDecompose(TransformPass):
 # ---------------------------------------------------------------------------
 
 
-class GroupElemSimplificationTransformer(Transformer):
+class GroupElemSimplificationTransformer(MethodScopedTypeMapMixin):
     """Simplifies GroupElem expressions using group algebra identities.
 
     Rules:
@@ -2318,7 +2351,11 @@ class GroupElemSimplification(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return GroupElemSimplificationTransformer(type_map).transform(game)
+        return (
+            GroupElemSimplificationTransformer(type_map)
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )
 
 
 def _flatten_mul_div_chain(
@@ -2373,7 +2410,7 @@ def _is_groupelem_mul_div_chain(
     return isinstance(left_type, frog_ast.GroupElemType)
 
 
-class GroupElemCancellationTransformer(Transformer):
+class GroupElemCancellationTransformer(MethodScopedTypeMapMixin):
     """Cancels matching terms in GroupElem MULTIPLY/DIVIDE chains.
 
     In an abelian group, ``x * m / x`` simplifies to ``m`` when ``x``
@@ -2447,11 +2484,15 @@ class GroupElemCancellation(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return GroupElemCancellationTransformer(
-            type_map,
-            proof_namespace=ctx.proof_namespace,
-            proof_let_types=ctx.proof_let_types,
-        ).transform(game)
+        return (
+            GroupElemCancellationTransformer(
+                type_map,
+                proof_namespace=ctx.proof_namespace,
+                proof_let_types=ctx.proof_let_types,
+            )
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )
 
 
 def _get_exponent_base(
@@ -2466,7 +2507,7 @@ def _get_exponent_base(
     return None
 
 
-class GroupElemExponentCombinationTransformer(Transformer):
+class GroupElemExponentCombinationTransformer(MethodScopedTypeMapMixin):
     """Combines same-base exponentiations in GroupElem multiply/divide chains.
 
     ``g^a * g^b`` -> ``g^(a + b)``
@@ -2584,8 +2625,12 @@ class GroupElemExponentCombination(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return GroupElemExponentCombinationTransformer(
-            type_map,
-            proof_namespace=ctx.proof_namespace,
-            proof_let_types=ctx.proof_let_types,
-        ).transform(game)
+        return (
+            GroupElemExponentCombinationTransformer(
+                type_map,
+                proof_namespace=ctx.proof_namespace,
+                proof_let_types=ctx.proof_let_types,
+            )
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )

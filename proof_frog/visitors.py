@@ -1282,6 +1282,18 @@ def build_game_type_map(
 
     Collects types from fields, method parameters, assignments, and samples.
     Optionally merges with proof-level let types.
+
+    WARNING: this map is *game-wide and scope-blind*. Because
+    :meth:`NameTypeMap.set` is last-write-wins, a parameter or local named
+    ``x`` in one method silently overwrites a same-named binding of a
+    *different* type in a sibling method. A transform that looks up the type
+    of a bare name appearing inside a specific method body must NOT use this
+    map -- it would read a sibling method's type (audit
+    F-255/F-256/F-261/F-263/F-269/F-270/F-287/F-308). Use
+    :func:`build_method_type_map` (or the :class:`MethodScopedTypeMapMixin`)
+    for that. This function remains correct for callers that only need the
+    game's *fields* (module-global, one type each) or that genuinely want the
+    union of all declarations regardless of scope.
     """
     # Use a dummy stopping point that won't match any real node to collect everything
     dummy = frog_ast.Boolean(True)
@@ -1289,6 +1301,95 @@ def build_game_type_map(
     if proof_let_types is not None:
         type_map = type_map + proof_let_types
     return type_map
+
+
+def build_method_type_map(
+    game: frog_ast.Game,
+    method: frog_ast.Method,
+    proof_let_types: Optional[NameTypeMap] = None,
+) -> NameTypeMap:
+    """Build a NameTypeMap scoped to a single *method* of *game*.
+
+    Contains the game's fields (module-global) plus only *method*'s own
+    parameters and local declarations -- crucially NOT other methods'
+    params/locals. A method-local binding shadowing a field name wins within
+    the method. Optionally merges proof-level let types (which win last,
+    matching :func:`build_game_type_map`).
+
+    This is the sound, scope-correct replacement for
+    :func:`build_game_type_map` whenever a transform reasons about the type of
+    a *bare name* appearing inside a method body. The flat game-wide map
+    conflated same-named parameters across sibling methods, letting one
+    method's declaration launder a wrong type onto another's operand -- an
+    unsound rewrite (audit F-256/F-261/F-263/F-270/F-308) as well as a
+    completeness-corrupting one (F-255/F-269/F-287).
+    """
+    dummy = frog_ast.Boolean(True)
+    field_map = NameTypeMap()
+    for field in game.fields:
+        field_map.set(field.name, field.type)
+    method_map = GetTypeMapVisitor(dummy).visit(method)
+    # field_map + method_map: a method-local shadowing a field wins.
+    # + proof_let_types last, matching build_game_type_map's precedence.
+    result = field_map + method_map
+    if proof_let_types is not None:
+        result = result + proof_let_types
+    return result
+
+
+_MethodScopedT = TypeVar("_MethodScopedT", bound="MethodScopedTypeMapMixin")
+
+
+class MethodScopedTypeMapMixin(Transformer):
+    """Mixin for a Transformer that consults ``self.type_map`` for the types
+    of bare names inside method bodies.
+
+    It overrides ``transform_method`` to swap ``self.type_map`` to a map
+    scoped to that method (fields + only that method's params/locals + proof
+    lets, via :func:`build_method_type_map`) for the duration of that method's
+    traversal, then restore it. This removes the cross-method name-collision
+    hazard of the flat game-wide :func:`build_game_type_map` (audit
+    F-255/F-256/F-261/F-263/F-269/F-270/F-287/F-308).
+
+    A concrete transformer opts in by (1) inheriting this mixin, (2) storing
+    its working map in ``self.type_map``, and (3) calling
+    :meth:`scope_to_game` with the game + proof-let types before traversal.
+    If ``scope_to_game`` is never called (``_scope_game is None``), the mixin
+    is inert and the transformer keeps its original game-wide map -- a safe
+    fallback, never a silent behavior change.
+    """
+
+    _scope_game: Optional[frog_ast.Game] = None
+    _scope_let_types: Optional[NameTypeMap] = None
+
+    def scope_to_game(
+        self: _MethodScopedT,
+        game: frog_ast.Game,
+        proof_let_types: Optional[NameTypeMap],
+    ) -> _MethodScopedT:
+        """Record the game + proof-let types so ``transform_method`` can build
+        per-method scoped type maps. Returns ``self`` for call chaining."""
+        self._scope_game = game
+        self._scope_let_types = proof_let_types
+        return self
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.ASTNode:
+        if self._scope_game is None:
+            return self._transform_children(method)
+        # Swap ``self.type_map`` to the method-scoped map for this subtree.
+        # ``getattr``/``setattr`` are used so the mixin does not fix the
+        # declared type of the concrete transformer's ``type_map`` attribute
+        # (subclasses declare it themselves, some Optional, some required).
+        saved = getattr(self, "type_map", None)
+        setattr(
+            self,
+            "type_map",
+            build_method_type_map(self._scope_game, method, self._scope_let_types),
+        )
+        try:
+            return self._transform_children(method)
+        finally:
+            setattr(self, "type_map", saved)
 
 
 def assigns_variable(

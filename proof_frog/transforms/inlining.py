@@ -53,6 +53,33 @@ def _contains_potential_undefined_read(node: frog_ast.ASTNode) -> bool:
     )
 
 
+def _use_inside_loop(node: frog_ast.ASTNode, name: str) -> bool:
+    """True if *name* is referenced inside a for-loop body within *node*.
+
+    A single SYNTACTIC use of a variable inside a loop is DYNAMICALLY
+    evaluated once per iteration. Inlining a non-deterministic expression into
+    such a use multiplies its draw (one sample becomes q i.i.d. samples), so a
+    single-use inliner must decline when the (declaration-external) use sits
+    inside a loop and the inlined expression is non-deterministic (audit
+    F-148/F-156/F-162).
+    """
+    found = False
+
+    def _check(n: frog_ast.ASTNode) -> bool:
+        nonlocal found
+        if isinstance(n, (frog_ast.NumericFor, frog_ast.GenericFor)) and (
+            SearchVisitor(
+                lambda x: isinstance(x, frog_ast.Variable) and x.name == name
+            ).visit(n.block)
+            is not None
+        ):
+            found = True
+        return False
+
+    SearchVisitor(_check).visit(node)
+    return found
+
+
 def _stmt_mutates_var(node: frog_ast.ASTNode, name: str) -> bool:
     """True if statement *node* mutates the variable *name*.
 
@@ -277,6 +304,33 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
                     )
                 continue
 
+            # F-148: the single syntactic use may sit inside a loop the
+            # declaration is not in, so it is dynamically evaluated once per
+            # iteration. Inlining a NON-DETERMINISTIC expr there multiplies its
+            # draw (`c=E.Enc(k,m); for(...){L[i]=c}` -- all L equal -- becomes
+            # `for(...){L[i]=E.Enc(k,m)}` -- fresh each). Decline.
+            proof_ns = self.ctx.proof_namespace if self.ctx is not None else {}
+            proof_lets = self.ctx.proof_let_types if self.ctx is not None else None
+            if has_nondeterministic_call(
+                expr, proof_ns, proof_lets
+            ) and _use_inside_loop(remaining_block.statements[first_use_idx], var_name):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Single-Use Variable",
+                            reason=(
+                                f"Cannot inline '{var_name}': its single use is "
+                                f"inside a loop, so inlining the non-deterministic "
+                                f"expression would draw a fresh value per iteration"
+                            ),
+                            location=statement.origin,
+                            suggestion=None,
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
+                continue
+
             # Collect free variables in expr (complete read-set: sees variables
             # under FieldAccess such as `M` in `|M.keys|`) and check none are
             # mutated between the declaration and the single use site -- where a
@@ -448,6 +502,13 @@ class IfSplitBranchAssignmentTransformer(BlockTransformer):
                 counter = _VarCountVisitor(var_name)
                 counter.visit(frog_ast.Block(list(subsequent)))
                 if counter.result() > 1:
+                    continue
+                # F-162: a single SYNTACTIC use inside a loop is evaluated once
+                # per iteration, so substituting a non-deterministic branch
+                # value there multiplies its draw (`if(c){x=p.f(0)}...;
+                # for(i){M[i]=x}` -- all M equal -- becomes
+                # `if(c){for(i){M[i]=p.f(0)}}...` -- fresh each). Decline.
+                if _use_inside_loop(frog_ast.Block(list(subsequent)), var_name):
                     continue
 
             # Build new blocks: for each branch, replace trailing assignment
@@ -1240,12 +1301,20 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
                     )
                 continue
 
-            # Per-element purity check: dropped or duplicated elements must
-            # be free of non-deterministic calls.
+            # Per-element purity check: a non-deterministic element must be
+            # used exactly once AND that use must not be inside a loop. A
+            # dropped/duplicated element (count != 1) obviously changes the
+            # draw count; F-156: a SINGLE syntactic use inside a loop
+            # (`v = [P.Sample(), 0]; for(i){acc += v[0]}`) is dynamically
+            # evaluated once per iteration, so inlining `v[0] -> P.Sample()`
+            # into the loop draws a fresh value each time -- the count-1
+            # exemption conflated syntactic occurrence with dynamic eval count.
             purity_blocked = False
             for i, e_i in enumerate(tuple_values):
                 count_i = counts.get(i, 0)
-                if count_i != 1 and has_nondeterministic_call(
+                if (
+                    count_i != 1 or _use_inside_loop(remaining, var_name)
+                ) and has_nondeterministic_call(
                     e_i, self._proof_namespace, self._proof_let_types
                 ):
                     purity_blocked = True

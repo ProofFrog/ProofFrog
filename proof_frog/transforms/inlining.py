@@ -591,6 +591,20 @@ class IfSplitBranchAssignmentTransformer(BlockTransformer):
             ):
                 continue
 
+            # F-160: substitution moves each branch value's evaluation from the
+            # branch point to every use of `var_name` in the tail. If a FREE
+            # VARIABLE of any branch value is reassigned/rebound in the tail,
+            # the substituted value would read the mutated variable instead of
+            # its branch-time value (`x = y; y = y + 1; return x` -- x captured
+            # the OLD y). Decline when the tail could change a branch value.
+            value_free_vars: set[str] = set()
+            for v in branch_values:
+                value_free_vars |= referenced_variable_names(v)
+            if value_free_vars and reassigns_or_rebinds(
+                value_free_vars, frog_ast.Block(list(subsequent))
+            ):
+                continue
+
             # If any branch value contains a non-deterministic call,
             # the variable must be used at most once in subsequent code.
             # Otherwise substitution would duplicate the call, changing

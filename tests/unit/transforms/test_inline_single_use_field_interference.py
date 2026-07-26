@@ -71,3 +71,29 @@ def test_f214_still_inlines_without_interference() -> None:
     )
     assert "Int A;" not in after
     assert "return 5;" in after
+
+
+def test_f215_declines_write_inside_compound_last_use_statement() -> None:
+    # A = ctr; if (c) { ctr = 100; return A; } -- the free var `ctr` is written
+    # INSIDE the compound last-use statement, before the use of A within it. The
+    # step-5 scan slice `[def+1 : last_use]` excluded that statement, so the
+    # write escaped and inlining A -> ctr would read the post-write value (100).
+    # The field must survive (no inline).
+    after = _after(
+        """
+        Game G() {
+            Int ctr;
+            Int A;
+            Int O(Bool c) {
+                ctr = 0;
+                A = ctr;
+                if (c) {
+                    ctr = 100;
+                    return A;
+                }
+                return 0;
+            }
+        }
+        """
+    )
+    assert "Int A;" in after, "field must not inline past a write in its last-use statement"

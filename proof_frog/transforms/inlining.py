@@ -2729,8 +2729,17 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
                 free_vars = referenced_variable_names(assign_expr) - set(
                     self._proof_namespace
                 )
+                # F-215: include the LAST-USE statement in the scan. The slice
+                # `[assign+1 : last_use]` excluded it, so a write to a free var
+                # INSIDE a compound last-use statement -- executed before the
+                # field's use within that statement (`if (c) { ctr = 100;
+                # return A; }`) -- escaped, and inlining `A -> ctr` then read the
+                # post-write value. Scanning the whole last-use statement is
+                # conservatively sound: it may also flag a write that happens
+                # AFTER the use in that statement (where inlining would be safe),
+                # but that only costs a missed simplification, never soundness.
                 intermediate_stmts = game.methods[assign_method_idx].block.statements[
-                    assign_stmt_idx + 1 : last_use_idx
+                    assign_stmt_idx + 1 : last_use_idx + 1
                 ]
                 intermediate = frog_ast.Block(list(intermediate_stmts))
 

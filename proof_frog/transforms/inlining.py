@@ -1170,15 +1170,18 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
                 continue
 
             # No free variable of any e_i may be reassigned later.
+            # F-155: `referenced_variable_names` sees a variable read only via a
+            # FieldAccess (e.g. `M` in `|M.keys|`), so a later `M = N` write is
+            # detected -- VariableCollectionVisitor suppressed it, leaving the
+            # tuple literal inlined across the mutation.
             free_var_reassigned = False
             for e_i in tuple_values:
-                free_vars = VariableCollectionVisitor().visit(copy.deepcopy(e_i))
                 if any(
-                    SearchVisitor(functools.partial(is_written_to, fv.name)).visit(
+                    SearchVisitor(functools.partial(is_written_to, name)).visit(
                         remaining
                     )
                     is not None
-                    for fv in free_vars
+                    for name in referenced_variable_names(e_i)
                 ):
                     free_var_reassigned = True
                     break
@@ -1845,13 +1848,21 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                         break
                 if conflict:
                     continue
-                # Verify free variables of expr are all defined before j
-                free_vars = VariableCollectionVisitor().visit(copy.deepcopy(expr))
+                # Definedness uses the FieldAccess-SUPPRESSED read-set: a name
+                # reached only through a field/array access (`M` in `|M.keys|`)
+                # or a method call (`F` in `F.Eval(k)`) does not itself need a
+                # prior local definition -- it is a field or a let/scheme
+                # constant, always available. Requiring it to be assigned-before
+                # would wrongly decline every hoist of a scheme call.
+                defn_names = {
+                    v.name
+                    for v in VariableCollectionVisitor().visit(copy.deepcopy(expr))
+                }
                 all_defined = True
-                for fv in free_vars:
-                    if fv.name in self.fields:
+                for name in defn_names:
+                    if name in self.fields:
                         continue
-                    # Check that fv is assigned in some statement before j
+                    # Check that `name` is assigned in some statement before j
 
                     def assigns_var(name: str, node: frog_ast.ASTNode) -> bool:
                         return (
@@ -1870,9 +1881,9 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                     found_def = False
                     for k in range(j):
                         if (
-                            SearchVisitor(
-                                functools.partial(assigns_var, fv.name)
-                            ).visit(block.statements[k])
+                            SearchVisitor(functools.partial(assigns_var, name)).visit(
+                                block.statements[k]
+                            )
                             is not None
                         ):
                             found_def = True
@@ -1888,13 +1899,18 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                 # position i.  Field-type free variables must also be
                 # checked — a field modified between j and i would cause
                 # the hoisted expression to evaluate to a stale value.
+                # F-168: use the COMPLETE read-set (`referenced_variable_names`,
+                # NOT the FieldAccess-suppressing VariableCollectionVisitor) so
+                # a variable read only via a view -- `M` in `h ^ |M.keys|` -- is
+                # checked; otherwise a `M[7]=1` between j and i is missed and
+                # the hoisted value is stale.
                 stable = True
-                for fv in free_vars:
+                for name in referenced_variable_names(expr):
                     for k in range(j, i):
                         if (
-                            SearchVisitor(
-                                functools.partial(_modifies_var, fv.name)
-                            ).visit(block.statements[k])
+                            SearchVisitor(functools.partial(_modifies_var, name)).visit(
+                                block.statements[k]
+                            )
                             is not None
                         ):
                             stable = False
@@ -3494,10 +3510,12 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         between the first and last statement containing a call."""
         # Collect all free variable names from call arguments
         representative = call_group[0]
+        # F-204: use `referenced_variable_names` (not VariableCollectionVisitor,
+        # which suppresses variables under a FieldAccess), so an argument like
+        # `|M.keys|` contributes `M` and a later `M[w]=v` write is detected.
         arg_vars: set[str] = set()
         for arg in representative.args:
-            for fv in VariableCollectionVisitor().visit(copy.deepcopy(arg)):
-                arg_vars.add(fv.name)
+            arg_vars |= referenced_variable_names(arg)
         if not arg_vars:
             return True
 
@@ -3741,10 +3759,12 @@ class HoistDuplicateBranchCallTransformer(BlockTransformer):
     def _args_available(
         self, block: frog_ast.Block, rep: frog_ast.FuncCall, insert_index: int
     ) -> bool:
+        # F-209: `referenced_variable_names` sees variables under FieldAccess
+        # (e.g. `M` in a `|M.keys|` argument), so a `M = N` / `M[k]=v` between
+        # the call and the hoist point is no longer vacuously available.
         arg_vars: set[str] = set()
         for arg in rep.args:
-            for fv in VariableCollectionVisitor().visit(copy.deepcopy(arg)):
-                arg_vars.add(fv.name)
+            arg_vars |= referenced_variable_names(arg)
         for name in arg_vars:
             total_writes = 0
             for stmt in block.statements:

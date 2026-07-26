@@ -669,15 +669,59 @@ def _is_integer_literal(expr: frog_ast.Expression, value: int) -> bool:
     return isinstance(expr, frog_ast.Integer) and expr.num == value
 
 
+def _modulus_is_group_order(
+    modulus: frog_ast.Expression,
+    base: Optional[frog_ast.Expression],
+    type_map: Optional[NameTypeMap],
+) -> bool:
+    """True if *modulus* is provably a multiple of *base*'s group order.
+
+    The soundness condition for folding ModInt<M> group exponents
+    (``g^a * g^b -> g^(a+b)`` with the ADD taken mod M) is ``g^M ==
+    identity``, i.e. the group order divides M. The provable case checked
+    here is ``M`` syntactically equal to the base group's order --
+    ``GroupOrder(G)`` (the canonical/desugared form of ``G.order``) or the
+    ``FieldAccess(G, "order")`` surface form. Any other modulus (a bare
+    parameter, a smaller ``ModInt<2>``, an unrelated group's order) is not
+    provably order-dividing, so the fold is refused (audit F-272/F-273/F-283).
+    """
+    if base is None or type_map is None:
+        return False
+    base_type = _get_expression_type(base, type_map)
+    if not isinstance(base_type, frog_ast.GroupElemType):
+        return False
+    group = base_type.group
+    if isinstance(modulus, frog_ast.GroupOrder) and modulus.group == group:
+        return True
+    if (
+        isinstance(modulus, frog_ast.FieldAccess)
+        and modulus.name == "order"
+        and modulus.the_object == group
+    ):
+        return True
+    return False
+
+
 def _exponents_compatible(
     e1: frog_ast.Expression,
     e2: frog_ast.Expression,
     type_map: Optional[NameTypeMap],
+    base: Optional[frog_ast.Expression] = None,
 ) -> bool:
-    """Check that two exponents have compatible types for arithmetic.
+    """Check that two group exponents may be soundly combined arithmetically.
 
-    Returns True if both are ModInt (same modulus) or both are Int.
-    Also returns True if type information is unavailable (optimistic).
+    Both Int: sound (integer exponent arithmetic; no modular wrap).
+
+    Both ModInt: the fold reduces the combined exponent modulo the shared
+    modulus M, which matches the group law only when ``g^M == identity``.
+    So it requires (a) the SAME modulus on both -- two different moduli give
+    an ill-typed ADD the typechecker rejects (F-274) -- AND (b) that modulus
+    to be provably a multiple of *base*'s group order (F-272/F-273/F-283),
+    checked via :func:`_modulus_is_group_order`. Without *base* the modular
+    case cannot be shown sound and is refused.
+
+    Returns True when type information is unavailable (optimistic), matching
+    the historical contract for the untyped case.
     """
     if type_map is None:
         return True
@@ -686,7 +730,9 @@ def _exponents_compatible(
     if t1 is None or t2 is None:
         return True
     if isinstance(t1, frog_ast.ModIntType) and isinstance(t2, frog_ast.ModIntType):
-        return True
+        if t1.modulus != t2.modulus:
+            return False
+        return _modulus_is_group_order(t1.modulus, base, type_map)
     if isinstance(t1, frog_ast.IntType) and isinstance(t2, frog_ast.IntType):
         return True
     return False
@@ -2361,10 +2407,16 @@ class GroupElemSimplificationTransformer(MethodScopedTypeMapMixin):
         return isinstance(expr, frog_ast.GroupGenerator)
 
     def _exponents_multipliable(
-        self, e1: frog_ast.Expression, e2: frog_ast.Expression
+        self,
+        e1: frog_ast.Expression,
+        e2: frog_ast.Expression,
+        base: Optional[frog_ast.Expression] = None,
     ) -> bool:
-        """Check that e1 * e2 is well-typed (both ModInt or both Int)."""
-        return _exponents_compatible(e1, e2, self.type_map)
+        """Check that ``base ^ (e1 * e2)`` soundly folds ``(base^e1)^e2``.
+
+        Both Int, or both ModInt sharing a modulus that is the base group's
+        order (see :func:`_exponents_compatible`)."""
+        return _exponents_compatible(e1, e2, self.type_map, base)
 
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
@@ -2397,7 +2449,9 @@ class GroupElemSimplificationTransformer(MethodScopedTypeMapMixin):
             and isinstance(left, frog_ast.BinaryOperation)
             and left.operator == frog_ast.BinaryOperators.EXPONENTIATE
             and self._is_groupelem_expr(left.left_expression)
-            and self._exponents_multipliable(left.right_expression, right)
+            and self._exponents_multipliable(
+                left.right_expression, right, left.left_expression
+            )
         ):
             return frog_ast.BinaryOperation(
                 frog_ast.BinaryOperators.EXPONENTIATE,
@@ -2639,7 +2693,9 @@ class GroupElemExponentCombinationTransformer(MethodScopedTypeMapMixin):
                         if (
                             ex_pair is not None
                             and ex_pair[0] == base
-                            and _exponents_compatible(ex_pair[1], exp, self.type_map)
+                            and _exponents_compatible(
+                                ex_pair[1], exp, self.type_map, base
+                            )
                         ):
                             new_pos[i] = frog_ast.BinaryOperation(
                                 frog_ast.BinaryOperators.EXPONENTIATE,
@@ -2673,7 +2729,7 @@ class GroupElemExponentCombinationTransformer(MethodScopedTypeMapMixin):
                             pos_pair is not None
                             and pos_pair[0] == neg_base
                             and _exponents_compatible(
-                                pos_pair[1], neg_exp, self.type_map
+                                pos_pair[1], neg_exp, self.type_map, neg_base
                             )
                         ):
                             new_pos[i] = frog_ast.BinaryOperation(

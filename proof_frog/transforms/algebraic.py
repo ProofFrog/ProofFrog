@@ -1066,7 +1066,7 @@ class ReflexiveComparisonTransformer(Transformer):
         return transformed
 
 
-class BooleanIdentityTransformer(Transformer):
+class BooleanIdentityTransformer(MethodScopedTypeMapMixin):
     """Simplifies boolean AND/OR with literal true/false operands.
 
     OR rules (only when at least one operand is a Boolean literal,
@@ -1081,6 +1081,9 @@ class BooleanIdentityTransformer(Transformer):
       x && false / false && x -> false
     """
 
+    def __init__(self, type_map: Optional[NameTypeMap] = None) -> None:
+        self.type_map = type_map
+
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
     ) -> frog_ast.Expression:
@@ -1093,6 +1096,23 @@ class BooleanIdentityTransformer(Transformer):
         right = transformed.right_expression
 
         if transformed.operator == frog_ast.BinaryOperators.OR:
+            # F-278: `||` is overloaded (boolean OR vs BitString concatenation).
+            # The boolean identities are valid only for a boolean OR. A
+            # Boolean-literal operand implies boolean OR in a well-typed program,
+            # but a directly constructed ill-typed AST (`bs || true`, `bs` a
+            # BitString) would otherwise collapse to `Boolean(True)`, destroying
+            # the bitstring. Skip when either operand is a known BitString.
+            if self.type_map is not None and (
+                isinstance(
+                    _get_expression_type(left, self.type_map),
+                    frog_ast.BitStringType,
+                )
+                or isinstance(
+                    _get_expression_type(right, self.type_map),
+                    frog_ast.BitStringType,
+                )
+            ):
+                return transformed
             # Only simplify when at least one operand is a Boolean literal
             # (BitString concatenation uses || but never has Boolean literals)
             if isinstance(left, frog_ast.Boolean) and left.bool:
@@ -1480,7 +1500,12 @@ class BooleanIdentity(TransformPass):
     name = "Boolean Identity"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return BooleanIdentityTransformer().transform(game)
+        type_map = build_game_type_map(game, ctx.proof_let_types)
+        return (
+            BooleanIdentityTransformer(type_map)
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )
 
 
 class XorCancellation(TransformPass):

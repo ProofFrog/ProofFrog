@@ -942,6 +942,36 @@ class ReflexiveComparisonTransformer(Transformer):
     ) -> None:
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
         self._proof_let_types = proof_let_types
+        self._shadowed_names: set[str] = set()
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.ASTNode:
+        # F-267: collect the method's locally-bound names (parameters, typed
+        # local declarations, bare `Function<D,R> H;` declarations). A local
+        # binding of a proof-let `Function` name shadows the deterministic
+        # let-function, so `has_nondeterministic_call` must not treat a call to
+        # that name as the pure let-function within this method.
+        bound: set[str] = {p.name for p in method.signature.parameters}
+
+        def _collect(n: frog_ast.ASTNode) -> bool:
+            if isinstance(n, frog_ast.VariableDeclaration):
+                bound.add(n.name)
+            elif (
+                isinstance(
+                    n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+                )
+                and n.the_type is not None
+                and isinstance(n.var, frog_ast.Variable)
+            ):
+                bound.add(n.var.name)
+            return False
+
+        SearchVisitor(_collect).visit(method.block)
+        old = self._shadowed_names
+        self._shadowed_names = bound
+        try:
+            return self._transform_children(method)
+        finally:
+            self._shadowed_names = old
 
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
@@ -958,6 +988,7 @@ class ReflexiveComparisonTransformer(Transformer):
                 transformed.left_expression,
                 self._proof_namespace,
                 self._proof_let_types,
+                self._shadowed_names,
             )
         ):
             return frog_ast.Boolean(True)
@@ -968,6 +999,7 @@ class ReflexiveComparisonTransformer(Transformer):
                 transformed.left_expression,
                 self._proof_namespace,
                 self._proof_let_types,
+                self._shadowed_names,
             )
         ):
             return frog_ast.Boolean(False)

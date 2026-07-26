@@ -454,3 +454,50 @@ def test_xor_cancellation_skips_nondeterministic_pairs() -> None:
         "F.eval(x) + v + F.eval(x) should NOT cancel F.eval(x) terms when "
         "F.eval is non-deterministic"
     )
+
+
+def test_f267_shadowed_let_function_not_reflexive() -> None:
+    """F-267: a proof-let `Function<Int,Int> H` is deterministic, but a
+    method-LOCAL `Function<Int,Int> H;` (declared, unassigned) shadows it.
+    Calling the local is an undefined read, so `H(0) == H(0)` must NOT
+    simplify to `true` (the flat proof_let_types lookup misclassified it)."""
+    from proof_frog.visitors import NameTypeMap
+
+    let_types = NameTypeMap()
+    let_types.set(
+        "H", frog_ast.FunctionType(frog_ast.IntType(), frog_ast.IntType())
+    )
+    method = frog_parser.parse_method(
+        """
+        Bool Cmp() {
+            Function<Int, Int> H;
+            return H(0) == H(0);
+        }
+        """
+    )
+    out = ReflexiveComparisonTransformer(
+        proof_let_types=let_types
+    ).transform(method)
+    assert "H(0) == H(0)" in str(out)  # not simplified to true
+
+
+def test_f267_unshadowed_let_function_still_reflexive() -> None:
+    """Positive control: an unshadowed proof-let Function H is deterministic,
+    so `H(0) == H(0)` still simplifies to `true`."""
+    from proof_frog.visitors import NameTypeMap
+
+    let_types = NameTypeMap()
+    let_types.set(
+        "H", frog_ast.FunctionType(frog_ast.IntType(), frog_ast.IntType())
+    )
+    method = frog_parser.parse_method(
+        """
+        Bool Cmp() {
+            return H(0) == H(0);
+        }
+        """
+    )
+    out = ReflexiveComparisonTransformer(
+        proof_let_types=let_types
+    ).transform(method)
+    assert "H(0) == H(0)" not in str(out)  # simplified to true

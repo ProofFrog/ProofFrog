@@ -80,6 +80,84 @@ def _use_inside_loop(node: frog_ast.ASTNode, name: str) -> bool:
     return found
 
 
+def _binder_captures_free_var(
+    use_stmt: frog_ast.ASTNode, free_var_names: set[str], var_name: str
+) -> bool:
+    """True if inlining an expression into *use_stmt* would capture a free var.
+
+    A ``for`` binder inside *use_stmt* whose name is one of the inlined
+    expression's *free_var_names*, and whose body contains the use of
+    *var_name*, would rebind that free variable: after inlining, the free
+    variable reads the loop binder instead of its original binding (audit
+    F-150 -- `v = i + 1; for (Int i = ...) { ... v ... }`). AlphaRename leaves
+    loop binders in place, so this capture survives canonicalization.
+    """
+
+    def _check(node: frog_ast.ASTNode) -> bool:
+        if isinstance(node, frog_ast.NumericFor):
+            binder = node.name
+        elif isinstance(node, frog_ast.GenericFor):
+            binder = node.var_name
+        else:
+            return False
+        return binder in free_var_names and _use_inside_loop(node, var_name)
+
+    return SearchVisitor(_check).visit(use_stmt) is not None
+
+
+def _is_loop_binder(node: frog_ast.ASTNode, name: str) -> bool:
+    """True if *name* is bound by a ``for`` binder anywhere within *node*."""
+
+    def _check(n: frog_ast.ASTNode) -> bool:
+        return (isinstance(n, frog_ast.NumericFor) and n.name == name) or (
+            isinstance(n, frog_ast.GenericFor) and n.var_name == name
+        )
+
+    return SearchVisitor(_check).visit(node) is not None
+
+
+def _method_bound_names(method: frog_ast.Method) -> set[str]:
+    """The set of names *method* binds locally, i.e. introduces a NEW binding
+    for: signature parameters, typed local declarations / samples
+    (``T x = ...`` / ``T x <- ...``), and ``for`` binders.
+
+    A plain write to an existing name (``x = ...`` / ``M[k] <- ...`` with no
+    declared type) is NOT a binding -- it mutates the field/local already in
+    scope and does not create a capturing shadow. A name in this set, when it
+    occurs inside *method*, refers to the local binding rather than any
+    same-named game field/parameter, so a name-based mover that trusts
+    field/param membership must treat it as shadowed (audit RC4:
+    F-173/F-178/F-190/F-228)."""
+    names = {p.name for p in method.signature.parameters}
+
+    def _collect(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, frog_ast.NumericFor):
+            names.add(n.name)
+        elif isinstance(n, frog_ast.GenericFor):
+            names.add(n.var_name)
+        elif (
+            isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
+            and getattr(n, "the_type", None) is not None
+            and isinstance(n.var, frog_ast.Variable)
+        ):
+            names.add(n.var.name)
+        return False
+
+    SearchVisitor(_collect).visit(method.block)
+    return names
+
+
+def _name_shadowed_in_method(method: frog_ast.Method, name: str) -> bool:
+    """True if *method* introduces a local binding for *name* (parameter,
+    typed local declaration, or ``for`` binder) that shadows a same-named game
+    field. Name-based movers that splice a bare ``Variable(field)`` (or
+    rewrite ``field[k]``) must decline for such a method, else the spliced
+    reference is captured by the local binding (audit RC4:
+    F-178/F-190). A plain field write does not shadow -- see
+    :func:`_method_bound_names`."""
+    return name in _method_bound_names(method)
+
+
 def _stmt_mutates_var(node: frog_ast.ASTNode, name: str) -> bool:
     """True if statement *node* mutates the variable *name*.
 
@@ -363,6 +441,31 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
                                 f"not modified between the declaration and use "
                                 f"of '{var_name}'"
                             ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
+                continue
+
+            # F-150: the intermediate-block scan above stops before the use
+            # statement, so it misses a for-binder INSIDE the use statement
+            # that shadows a free variable of expr. Inlining under such a
+            # binder captures the free variable (it would read the loop binder
+            # instead of its outer binding). Decline.
+            if _binder_captures_free_var(
+                remaining_block.statements[first_use_idx], free_var_names, var_name
+            ):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Single-Use Variable",
+                            reason=(
+                                f"Cannot inline '{var_name}': a loop binder at the "
+                                f"use site shadows a free variable of the inlined "
+                                f"expression, which would capture it"
+                            ),
+                            location=statement.origin,
+                            suggestion=None,
                             variable=var_name,
                             method=None,
                         )
@@ -2302,6 +2405,19 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
         def uses_field(node: frog_ast.ASTNode) -> bool:
             return isinstance(node, frog_ast.Variable) and node.name == field_name
 
+        # F-228 (route 2): a method that locally binds `field_name` (parameter,
+        # typed local, or `for` binder) shadows the field, so an occurrence of
+        # the name there reads the LOCAL, not the field -- it is not a field use
+        # and must never be a substitution target (inlining the field value
+        # into `Chal(Int e) { h ^ e }` where `e` is the parameter freezes the
+        # per-call exponent to the Initialize-time field value). Exclude such
+        # methods from both the use count and the inlining.
+        shadowing_midxs = {
+            mi
+            for mi, m in enumerate(game.methods)
+            if _name_shadowed_in_method(m, field_name)
+        }
+
         total_uses = 0
         count_game = copy.deepcopy(game)
         # Don't count the definition itself — replace the LHS variable name
@@ -2311,6 +2427,20 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
         ]
         assert isinstance(count_def, frog_ast.Assignment)
         count_def.var = frog_ast.Variable("__placeholder__")
+        # Neutralize shadowed occurrences so they are not counted as field uses.
+        for mi in shadowing_midxs:
+            neu = count_game.methods[mi]
+            while True:
+                hit = SearchVisitor(uses_field).visit(neu.block)
+                if hit is None:
+                    break
+                neu = frog_ast.Method(
+                    neu.signature,
+                    ReplaceTransformer(
+                        hit, frog_ast.Variable(field_name + "__shadowed__")
+                    ).transform(neu.block),
+                )
+            count_game.methods[mi] = neu
 
         while True:
             found = SearchVisitor(uses_field).visit(count_game)
@@ -2583,6 +2713,8 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
         new_game = copy.deepcopy(game)
 
         for mi, method in enumerate(new_game.methods):
+            if mi in shadowing_midxs:
+                continue  # occurrences here are the shadowing local, not the field
             new_stmts = list(method.block.statements)
             for si, stmt in enumerate(new_stmts):
                 if mi == assign_method_idx and si <= assign_stmt_idx:
@@ -2986,11 +3118,18 @@ class HoistGroupExpToInitializeTransformer:
                 if hit is None:
                     continue
                 exp_x = hit.right_expression
-                # X must be stable: free vars all in fields or params.
+                # X must be stable: free vars all in fields or params, AND not
+                # locally shadowed in this method. F-228: a parameter or `for`
+                # binder of `method` reusing a field's name makes the per-call
+                # binding masquerade as the stable field, so the exponent is
+                # wrongly frozen to the Initialize-time field value. Treat any
+                # shadowed free var as unstable.
+                method_bound = _method_bound_names(method)
                 unstable = sorted(
                     n
                     for n in _free_var_names(exp_x)
-                    if n not in field_names and n not in param_names
+                    if (n not in field_names and n not in param_names)
+                    or n in method_bound
                 )
                 if unstable:
                     self.ctx.near_misses.append(
@@ -4010,6 +4149,14 @@ class HoistDuplicateBranchCallTransformer(BlockTransformer):
         arg_vars: set[str] = set()
         for arg in rep.args:
             arg_vars |= referenced_variable_names(arg)
+        # F-210: `self._writes` does not recognise a `for` binder, so an
+        # argument that is actually a loop variable (`F.enc(i)` inside
+        # `for (Int i ...)`) reads total_writes == 0 and looks like an outer
+        # constant -- letting the call hoist above the loop, out of the
+        # binder's scope. A loop binder rebinds the arg per iteration, so the
+        # call is not available for hoisting.
+        if any(_is_loop_binder(block, name) for name in arg_vars):
+            return False
         for name in arg_vars:
             total_writes = 0
             for stmt in block.statements:
@@ -4078,6 +4225,7 @@ def _is_stable_arg(  # pylint: disable=too-many-arguments, too-many-positional-a
     function_var_names: set[str] | None = None,
     proof_let_names: set[str] | None = None,
     local_alias_names: set[str] | None = None,
+    shadowed_names: set[str] | None = None,
 ) -> bool:
     """Return True if *expr* is stable across method invocations.
 
@@ -4098,6 +4246,11 @@ def _is_stable_arg(  # pylint: disable=too-many-arguments, too-many-positional-a
     each name in this set is bound exactly once (in the relevant method's top
     level) to an expression that is itself stable, so that the variable's value
     is invariant across the lifetime of the game state it depends on.
+
+    When *shadowed_names* is provided, a ``Variable`` whose name appears in it
+    is NEVER stable, even if it matches a field/parameter name: the target
+    method locally binds that name (parameter / local / ``for`` binder), so the
+    occurrence refers to the per-call binding, not the game field (audit F-173).
     """
     if isinstance(
         expr,
@@ -4119,14 +4272,22 @@ def _is_stable_arg(  # pylint: disable=too-many-arguments, too-many-positional-a
             function_var_names,
             proof_let_names,
             local_alias_names,
+            shadowed_names,
         )
 
     if isinstance(expr, frog_ast.Variable):
+        # A verified single-assignment local alias (the caller guarantees it is
+        # bound once to a stable expression) is stable and takes precedence: a
+        # shadowing per-call binding (loop binder / parameter) is never a
+        # verified alias, so this does not weaken the F-173 shadow check below.
+        if local_alias_names is not None and expr.name in local_alias_names:
+            return True
+        if shadowed_names is not None and expr.name in shadowed_names:
+            return False
         return (
             expr.name in field_names
             or expr.name in param_names
             or (proof_let_names is not None and expr.name in proof_let_names)
-            or (local_alias_names is not None and expr.name in local_alias_names)
         )
     if isinstance(expr, frog_ast.FieldAccess):
         return _recurse(expr.the_object)
@@ -4444,6 +4605,7 @@ class CrossMethodFieldAliasTransformer:
                         proof_namespace=self.proof_namespace,
                         proof_let_names=proof_let_names,
                         local_alias_names=set(init_aliases),
+                        shadowed_names=_method_bound_names(method),
                     )
                     for a in call.args
                 ):
@@ -4555,6 +4717,12 @@ class CrossMethodFieldAliasTransformer:
         del alias_call  # alias_call is referenced only via expanded_call now
         for midx, method in enumerate(game.methods):
             if midx == alias_midx:
+                continue
+            # F-178: the replacement splices `Variable(alias_field_name)` into
+            # this method. If the method locally binds that name (parameter,
+            # local, or `for` binder), the spliced variable is captured by the
+            # binding instead of referring to the field. Skip such a method.
+            if _name_shadowed_in_method(method, alias_field_name):
                 continue
             target_aliases = method_aliases[midx]
             collector = _DeterministicCallCollector(
@@ -4785,6 +4953,7 @@ class HoistDeterministicCallToInitializeTransformer:
                         proof_namespace=self.proof_namespace,
                         function_var_names=function_var_names,
                         proof_let_names=proof_let_names,
+                        shadowed_names=_method_bound_names(method),
                     )
                     for a in call.args
                 ):
@@ -4834,7 +5003,16 @@ class HoistDeterministicCallToInitializeTransformer:
         if candidate is None or candidate_return_type is None:
             return game
 
-        new_name = self._fresh_field_name(field_names)
+        # F-169: the fresh field name must avoid EVERY name in scope anywhere
+        # in the game, not just existing field names -- the hoisted field is
+        # spliced into oracle bodies, where a like-named oracle parameter (or
+        # local/binder) would capture it (`_hoisted_0` collides with a
+        # parameter `_hoisted_0`, collapsing a one-time-pad to a constant).
+        occupied_names = set(field_names) | set(param_names)
+        for occ_method in game.methods:
+            occupied_names |= {p.name for p in occ_method.signature.parameters}
+            occupied_names |= referenced_variable_names(occ_method.block)
+        new_name = self._fresh_field_name(occupied_names)
         new_game = copy.deepcopy(game)
         new_game.fields.append(frog_ast.Field(candidate_return_type, new_name, None))
         # Pin the newly introduced field so ``Inline Single-Use Field`` leaves
@@ -5033,6 +5211,13 @@ class SplitOpaqueTupleFieldTransformer:
     def _try_split_field(
         self, game: frog_ast.Game, field: frog_ast.Field
     ) -> frog_ast.Game | None:
+        # F-190: the split rewrites `field[k]` reads across all methods into
+        # new per-index fields, keyed purely on the name `field`. If any method
+        # locally binds that name (parameter / typed local / `for` binder), a
+        # shadowed `p[k]` read would be wrongly rewritten into a per-index
+        # field. Decline the split entirely when the name is shadowed anywhere.
+        if any(_name_shadowed_in_method(m, field.name) for m in game.methods):
+            return None
         # 1. Find every assignment to *field* across all methods. Reject if
         # any sits at non-top level (inside if/for) or if there is more than
         # one top-level assignment in total.

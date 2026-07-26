@@ -2331,6 +2331,13 @@ class ElseUnwrapTransformer(BlockTransformer):
                 continue
             if not statement.has_else_block():
                 continue
+            # F-123: has_else_block() only checks for a block surplus
+            # (len(blocks) > len(conditions)); it accepts a malformed
+            # IfStatement([C], [B0, B1, B2]) where blocks[1] is spliced as the
+            # else and blocks[2] would be silently dropped. A well-formed
+            # single-else if has exactly len(conditions)+1 blocks. Require it.
+            if len(statement.blocks) != len(statement.conditions) + 1:
+                continue
             # True branch must unconditionally return
             if not block_unconditionally_returns(statement.blocks[0]):
                 continue

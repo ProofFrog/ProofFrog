@@ -1925,7 +1925,15 @@ class IfFalseReturnToConjunctionTransformer(BlockTransformer):
                 continue
             trailing = block.statements[trailing_idx]
             assert isinstance(trailing, frog_ast.ReturnStatement)
-            if trailing.expression is None:
+            # F-117: ``trailing.expression is None`` is a Python None test for a
+            # bare ``return;``. It does NOT catch a FrogLang ``None`` literal
+            # (``frog_ast.NoneExpression``), which a well-typed ``T?`` method may
+            # return. Conjoining it (``!P && None``) is type-invalid and would
+            # canonicalize a well-typed game into a meaningless one, so decline
+            # -- the rewrite's soundness argument assumes a boolean trailing.
+            if trailing.expression is None or isinstance(
+                trailing.expression, frog_ast.NoneExpression
+            ):
                 continue
             # RC4 capture/movement guard: the negated guard ``!P`` is moved
             # from BEFORE the intervening declarations to AFTER them (into the

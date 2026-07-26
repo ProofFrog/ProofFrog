@@ -99,3 +99,42 @@ def test_f156_tuple_element_not_inlined_into_loop() -> None:
         """,
     )
     assert "[P.Sample(), 0]" in out  # tuple not inlined into the loop
+
+
+def test_f158_tuple_element_free_var_not_captured_by_loop_binder() -> None:
+    """F-158: a tuple element's free variable ``w`` rebound by a following
+    ``for`` binder must block inlining ``v[0] -> w`` into the loop body --
+    otherwise the substitution captures the binder. Closed by the shared
+    ``_stmt_mutates_var`` now treating for-binders as rebinds (F-183/F-188)."""
+    out = _apply(
+        InlineLocalTupleLiteral(),
+        """
+        Game G() {
+            Int O(Int w) {
+                Int acc = 0;
+                [Int, Int] v = [w, 0];
+                for (Int w = 0 to 2) { acc = acc + v[0]; }
+                return acc;
+            }
+        }
+        """,
+    )
+    assert "[w, 0]" in out  # tuple literal not inlined across the binder
+
+
+def test_f158_control_inlines_without_binder_collision() -> None:
+    """Control for F-158: with a non-colliding binder the inline fires."""
+    out = _apply(
+        InlineLocalTupleLiteral(),
+        """
+        Game G() {
+            Int O(Int w) {
+                Int acc = 0;
+                [Int, Int] v = [w, 0];
+                for (Int j = 0 to 2) { acc = acc + v[0]; }
+                return acc;
+            }
+        }
+        """,
+    )
+    assert "[w, 0]" not in out  # v[0] inlined to w

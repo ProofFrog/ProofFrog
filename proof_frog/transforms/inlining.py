@@ -4173,8 +4173,7 @@ class HoistDuplicateBranchCallTransformer(BlockTransformer):
             if return_type is None:
                 continue
 
-            var_name = f"__hoist_{self.counter}__"
-            self.counter += 1
+            var_name = self._fresh_hoist_name(block)
             new_block = block
             for call in group:
                 new_block = ReplaceTransformer(
@@ -4229,6 +4228,28 @@ class HoistDuplicateBranchCallTransformer(BlockTransformer):
                 return False  # assigned at/after the hoist point
         return True
 
+    def _fresh_hoist_name(self, block: frog_ast.Block) -> str:
+        # F-211(a): mint a name fresh w.r.t. every name already present in
+        # this block. The per-instance counter resets each pipeline iteration
+        # (a fresh transformer per ``apply``), so a ``__hoist_N__`` produced by
+        # an EARLIER iteration and preserved by InlineMultiUsePureExpression is
+        # still a live statement in the block; reusing the index would emit a
+        # second, differently-valued declaration of the same name -- a
+        # capture-unsafe clobber (RC4 fresh-naming discipline). Advance the
+        # counter past any collision before minting. (``apply`` additionally
+        # seeds the counter above the game-wide max so nested-block mints stay
+        # fresh w.r.t. survivors in enclosing scopes.)
+        existing = {
+            node.name
+            for node in _iter_matches(block, lambda n: isinstance(n, frog_ast.Variable))
+            if isinstance(node, frog_ast.Variable)
+        }
+        while f"__hoist_{self.counter}__" in existing:
+            self.counter += 1
+        name = f"__hoist_{self.counter}__"
+        self.counter += 1
+        return name
+
     def _return_type(self, call: frog_ast.FuncCall) -> frog_ast.Type | None:
         method = _lookup_primitive_method(call.func, self.proof_namespace)
         if method is not None:
@@ -4254,13 +4275,31 @@ def _iter_matches(
     return found
 
 
+def _max_hoist_index(node: frog_ast.ASTNode) -> int:
+    """Largest ``N`` among ``__hoist_N__`` variable names in *node*, else -1."""
+    max_idx = -1
+    for var in _iter_matches(node, lambda n: isinstance(n, frog_ast.Variable)):
+        assert isinstance(var, frog_ast.Variable)
+        name = var.name
+        if name.startswith("__hoist_") and name.endswith("__"):
+            middle = name[len("__hoist_") : -len("__")]
+            if middle.isdigit():
+                max_idx = max(max_idx, int(middle))
+    return max_idx
+
+
 class HoistDuplicateBranchCall(TransformPass):
     name = "Hoist Duplicate Branch Call"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return HoistDuplicateBranchCallTransformer(
+        transformer = HoistDuplicateBranchCallTransformer(
             proof_namespace=ctx.proof_namespace
-        ).transform(game)
+        )
+        # F-211(a): seed the counter above any ``__hoist_N__`` already in the
+        # game (produced by an earlier fixed-point iteration) so freshly minted
+        # names never clobber a surviving declaration in an enclosing scope.
+        transformer.counter = _max_hoist_index(game) + 1
+        return transformer.transform(game)
 
 
 # ---------------------------------------------------------------------------

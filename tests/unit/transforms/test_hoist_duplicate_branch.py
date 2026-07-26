@@ -107,3 +107,32 @@ def test_non_return_position_unchanged() -> None:
         """
     result = _apply(src, _det_namespace())
     assert result == frog_parser.parse_method(src)
+
+
+def test_f211_mints_fresh_name_over_preexisting_hoist_local() -> None:
+    """F-211(a): when a local named `__hoist_0__` already exists (e.g. minted
+    by an earlier fixed-point iteration and preserved downstream), the pass
+    must mint a FRESH name for the new group rather than emitting a second,
+    differently-valued `__hoist_0__` declaration (a capture-unsafe clobber)."""
+    method = _apply(
+        """
+        BitString<n> O(Bool b, Bool c, BitString<n> x, BitString<n> y) {
+            BitString<n> __hoist_0__ = G.evaluate(x);
+            if (b) { return G.evaluate(y); }
+            if (c) { return G.evaluate(y); }
+            return __hoist_0__;
+        }
+        """,
+        _det_namespace(),
+    )
+    decls = [
+        s
+        for s in method.block.statements
+        if isinstance(s, frog_ast.Assignment)
+        and isinstance(s.var, frog_ast.Variable)
+        and s.var.name == "__hoist_0__"
+    ]
+    # The pre-existing `__hoist_0__` is preserved exactly once; the new group
+    # is named `__hoist_1__`, so its value is not confused with `G.evaluate(x)`.
+    assert len(decls) == 1
+    assert "__hoist_1__" in str(method)

@@ -152,6 +152,40 @@ from proof_frog.transforms.inlining import RedundantCopyTransformer
             }
             """,
         ),
+        # F-179 positive: an array copy with no mutation still folds.
+        (
+            """
+            Int f(Array<Int, 2> w) {
+                Array<Int, 2> v = w;
+                return v[0];
+            }
+            """,
+            """
+            Int f(Array<Int, 2> w) {
+                return w[0];
+            }
+            """,
+        ),
+        # F-179 decline: an element write to the original (`w[0] = 2`, an
+        # ArrayAccess l-value) after the copy `v = w` must block the
+        # substitution -- otherwise `return v[0]` would read post-mutation
+        # state. The scan now peels the l-value via `lvalue_base_name`.
+        (
+            """
+            Int f(Array<Int, 2> w) {
+                Array<Int, 2> v = w;
+                w[0] = 2;
+                return v[0];
+            }
+            """,
+            """
+            Int f(Array<Int, 2> w) {
+                Array<Int, 2> v = w;
+                w[0] = 2;
+                return v[0];
+            }
+            """,
+        ),
     ],
 )
 def test_redundant_copies(

@@ -113,6 +113,12 @@ class RedundantCopyTransformer(BlockTransformer):
                 )
 
             def written_to(copy_name: str, node: frog_ast.ASTNode) -> bool:
+                # F-179: peel the l-value via `lvalue_base_name` so an
+                # element/slice/field write to the copy or original
+                # (`copy[0] = v`, `copy.f = v`) counts as a write. Gating on
+                # `isinstance(node.var, Variable)` missed these, so a copy
+                # mutated only through an element write was still substituted,
+                # leaving the transformed game reading post-mutation state.
                 return (
                     isinstance(
                         node,
@@ -122,8 +128,7 @@ class RedundantCopyTransformer(BlockTransformer):
                             frog_ast.UniqueSample,
                         ),
                     )
-                    and isinstance(node.var, frog_ast.Variable)
-                    and node.var.name == copy_name
+                    and lvalue_base_name(node.var) == copy_name
                 )
 
             remaining_block = frog_ast.Block(

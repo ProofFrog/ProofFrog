@@ -2034,6 +2034,14 @@ def _count_assigns_recursive(node: frog_ast.ASTNode, name: str) -> int:
     ``B`` -- otherwise a single-use-field stability check would treat a
     later-mutated free-variable field as stable and inline a stale snapshot
     across methods (audit F-079).
+
+    A ``<-uniq[S]`` draw also counts as an assignment to ``S``: it implicitly
+    inserts the drawn value into the exclusion set (``S = S union {x}``), so a
+    set field used as a uniq domain is mutated on every draw. Without this,
+    the single-use-field check treats such a set as stable and either inlines
+    a stale snapshot of it across methods (F-213) or eliminates it entirely,
+    rewriting ``<-uniq[S]`` to ``<-uniq[{}]`` and destroying distinctness
+    (F-212).
     """
     count = 0
 
@@ -2042,6 +2050,12 @@ def _count_assigns_recursive(node: frog_ast.ASTNode, name: str) -> int:
         if (
             isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
             and lvalue_base_name(n.var) == name
+        ):
+            count += 1
+        if (
+            isinstance(n, frog_ast.UniqueSample)
+            and n.surface_form == "uniq"
+            and name in referenced_variable_names(n.unique_set)
         ):
             count += 1
         return False

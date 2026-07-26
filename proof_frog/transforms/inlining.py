@@ -2427,6 +2427,17 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
         def uses_field(node: frog_ast.ASTNode) -> bool:
             return isinstance(node, frog_ast.Variable) and node.name == field_name
 
+        # F-219: a field used inside ANOTHER field's declared type (`q` in
+        # `Array<Int, q>`) is a type parameter -- genuine size/shape state --
+        # not a value use. The whole-game use count below WOULD count such an
+        # occurrence, but the replacement step rewrites only method bodies, so
+        # the field's defining assignment and declaration would be deleted while
+        # the dangling type reference survives (`Array<Int, q>` with `q` gone).
+        # Inlining a value into a type is never valid, so decline outright.
+        for fld in game.fields:
+            if SearchVisitor(uses_field).visit(fld.type) is not None:
+                return None
+
         # F-228 (route 2): a method that locally binds `field_name` (parameter,
         # typed local, or `for` binder) shadows the field, so an occurrence of
         # the name there reads the LOCAL, not the field -- it is not a field use

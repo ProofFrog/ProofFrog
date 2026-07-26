@@ -479,3 +479,65 @@ def test_guard_var_reassigned_to_challenge_not_simplified() -> None:
     }
     """
     assert not _fired(source)
+
+
+def test_f015_joint_guard_single_component_input_declines() -> None:
+    """F-015: a joint tuple guard `[a,b] == [cf1,cf2]` excludes only the exact
+    tuple. A single-component RF input `H(a)` can still hit the challenge
+    (`a == cf1` with `b != cf2`), so the Initialize `H(cf1)` must NOT be
+    replaced with a uniform sample."""
+    source = """
+    Game Test() {
+        Function<BitString<8>, BitString<16>> H;
+        BitString<8> cf1;
+        BitString<8> cf2;
+        BitString<16> field;
+        BitString<16> Initialize() {
+            H <- Function<BitString<8>, BitString<16>>;
+            cf1 = 1;
+            cf2 = 2;
+            field = H(cf1);
+            return field;
+        }
+        BitString<16> Query(BitString<8> a, BitString<8> b) {
+            if ([a, b] == [cf1, cf2]) {
+                return 0;
+            }
+            return H(a);
+        }
+    }
+    """
+    game = frog_parser.parse_game(source)
+    result = ChallengeExclusionRFToUniformTransformer().transform(game)
+    # Not fired: the Initialize field still holds H(cf1), not a fresh sample.
+    assert "field = H(cf1)" in str(result)
+
+
+def test_f015_joint_guard_full_tuple_input_still_fires() -> None:
+    """Positive control: when the RF input references BOTH guarded components
+    (`H(a || b)`), the joint guard genuinely excludes it and the transform
+    fires."""
+    source = """
+    Game Test() {
+        Function<BitString<16>, BitString<16>> H;
+        BitString<8> cf1;
+        BitString<8> cf2;
+        BitString<16> field;
+        BitString<16> Initialize() {
+            H <- Function<BitString<16>, BitString<16>>;
+            cf1 = 1;
+            cf2 = 2;
+            field = H(cf1 || cf2);
+            return field;
+        }
+        BitString<16> Query(BitString<8> a, BitString<8> b) {
+            if ([a, b] == [cf1, cf2]) {
+                return 0;
+            }
+            return H(a || b);
+        }
+    }
+    """
+    game = frog_parser.parse_game(source)
+    result = ChallengeExclusionRFToUniformTransformer().transform(game)
+    assert "field <- BitString<16>" in str(result)  # fired

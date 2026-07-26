@@ -28,6 +28,7 @@ from ..visitors import (
     Transformer,
     lvalue_base_name,
     reassigns_or_rebinds,
+    referenced_variable_names,
 )
 from ._base import (
     TransformPass,
@@ -1678,6 +1679,12 @@ class _GuardInfo:
     slice_param: str | None = None
     slice_start: frog_ast.Expression | None = None
     slice_end: frog_ast.Expression | None = None
+    # F-015: True when the guard is a JOINT tuple equality `[a,b] == [cf1,cf2]`
+    # (>1 component). Such a guard establishes only that the WHOLE tuple differs
+    # from the challenge -- NOT that any individual component does -- so it
+    # cannot individually exclude a single-component RF input (`H(a)` is still
+    # queryable at `a == cf1` when `b != cf2`).
+    is_joint_tuple_guard: bool = False
 
     @property
     def is_slice_guard(self) -> bool:
@@ -1740,11 +1747,19 @@ def _find_challenge_guard(
         # Extract LHS variable names (non-field variables constrained by guard)
         guard_lhs_vars = _extract_non_field_vars(lhs, field_names)
 
+        # F-015: a joint tuple equality whose LHS is a tuple of >1 component
+        # (`[a,b] == [cf1,cf2]`) excludes only the exact tuple, not any single
+        # component -- so a single-component RF input (`H(a)`) is NOT excluded.
+        # (A single-variable LHS `c == [cf1,cf2]` with `H(c)` is fine: the whole
+        # guarded value is the RF input.)
+        is_joint = isinstance(lhs, frog_ast.Tuple) and len(lhs.values) > 1
+
         if challenge_fields:
             return _GuardInfo(
                 challenge_fields=challenge_fields,
                 guard_lhs_vars=guard_lhs_vars,
                 guard_idx=idx,
+                is_joint_tuple_guard=is_joint,
             )
 
     return None
@@ -2392,6 +2407,20 @@ class ChallengeExclusionRFToUniformTransformer:
                     resolved_oracle_arg = _resolve_var_aliases(
                         call.args[0], oracle_aliases, oracle_stop
                     )
+
+                    # F-015: a joint tuple guard (`[a,b] == [cf1,cf2]`) only
+                    # establishes that the WHOLE tuple differs from the
+                    # challenge. For the RF input to differ whenever the tuple
+                    # differs, it must depend on EVERY guarded component -- e.g.
+                    # `RF(E(v1) || E(v2))` references both. A single-component
+                    # input (`H(a)`) can still hit the challenge (`a == cf1` with
+                    # `b != cf2`), so any guarded component missing from the RF
+                    # input means it is not excluded. Decline.
+                    if guard.is_joint_tuple_guard and not original_guard_vars.issubset(
+                        referenced_variable_names(resolved_oracle_arg)
+                    ):
+                        all_oracle_ok = False
+                        break
 
                     # For slice guards where the oracle RF arg IS the
                     # guarded parameter (e.g., RF(m) with guard on

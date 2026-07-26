@@ -842,6 +842,8 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
                 )
 
                 def is_written_to_fv(name: str, node: frog_ast.ASTNode) -> bool:
+                    # F-185: peel the l-value (Path P had the element/slice/
+                    # field blind spot Path E already fixed).
                     return (
                         isinstance(
                             node,
@@ -851,8 +853,7 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
                                 frog_ast.UniqueSample,
                             ),
                         )
-                        and isinstance(node.var, frog_ast.Variable)
-                        and node.var.name == name
+                        and lvalue_base_name(node.var) == name
                     )
 
                 # Only propagate if the local is not reassigned after
@@ -1776,8 +1777,9 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                 return SearchVisitor(matcher).visit(stmt)
 
             def _modifies_var(name: str, node: frog_ast.ASTNode) -> bool:
-                """Check if a statement modifies a variable, including
-                element mutations like v[i] = expr."""
+                """Check if a statement modifies a variable, including nested
+                element / slice / field mutations (`v[i][j] = e`, `X.f = e`)
+                -- F-166: peel the full l-value via `lvalue_base_name`."""
                 if not isinstance(
                     node,
                     (
@@ -1787,15 +1789,7 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                     ),
                 ):
                     return False
-                var = node.var
-                if isinstance(var, frog_ast.Variable) and var.name == name:
-                    return True
-                if isinstance(var, frog_ast.ArrayAccess) and isinstance(
-                    var.the_array, frog_ast.Variable
-                ):
-                    if var.the_array.name == name:
-                        return True
-                return False
+                return lvalue_base_name(node.var) == name
 
             for j in range(i):
                 earlier = block.statements[j]
@@ -3509,21 +3503,15 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
 
         # Check that no argument variable is reassigned or element-mutated
         def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
+            # F-203: peel the full l-value via `lvalue_base_name` so a nested
+            # element write (`M[a][b] = v`) between two deduplicated calls is
+            # seen -- the manual depth-1 ArrayAccess check missed it.
             if not isinstance(
                 node,
                 (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample),
             ):
                 return False
-            var = node.var
-            if isinstance(var, frog_ast.Variable) and var.name == name:
-                return True
-            # Element mutation: v[i] = expr, M[k] = expr
-            if isinstance(var, frog_ast.ArrayAccess) and isinstance(
-                var.the_array, frog_ast.Variable
-            ):
-                if var.the_array.name == name:
-                    return True
-            return False
+            return lvalue_base_name(node.var) == name
 
         # The intermediate region (between the first and last call's evaluation
         # points) excludes the call statements themselves. When the first
@@ -3933,17 +3921,13 @@ def _fields_assigned_in_block(block: frog_ast.Block, field_names: set[str]) -> s
         if isinstance(
             stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
         ):
-            var = stmt.var
-            # Direct variable assignment: k = expr, k <- Type
-            if isinstance(var, frog_ast.Variable) and var.name in field_names:
-                assigned.add(var.name)
-            # Element mutation: arr[i] = expr, M[k] = expr
-            if (
-                isinstance(var, frog_ast.ArrayAccess)
-                and isinstance(var.the_array, frog_ast.Variable)
-                and var.the_array.name in field_names
-            ):
-                assigned.add(var.the_array.name)
+            # F-172/F-176: peel the full l-value via `lvalue_base_name` so a
+            # nested element write (`M[a][b] = v`), a slice write, or a field
+            # write (`X.f = v`) is attributed to its base field -- the manual
+            # depth-1 ArrayAccess check missed all of these.
+            base = lvalue_base_name(stmt.var)
+            if base is not None and base in field_names:
+                assigned.add(base)
         if isinstance(stmt, frog_ast.IfStatement):
             for blk in stmt.blocks:
                 assigned |= _fields_assigned_in_block(blk, field_names)

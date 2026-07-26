@@ -4001,6 +4001,25 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
                 is not None
             ):
                 return False
+
+        # F-201: the first occurrence's OWN statement is excluded from the
+        # intermediate region, but when it writes an argument variable
+        # (`k = F.Eval(k);`) the write happens AFTER the first call is evaluated
+        # and BEFORE the second, so the two calls read different argument values
+        # (`F(k0)` vs `F(F(k0))`) and must not be merged. An IfStatement first
+        # statement carries the call in its CONDITION (evaluated before any
+        # branch write), and its branch writes are already folded into the
+        # intermediate region above; a plain assignment/sample/uniq is not, so
+        # scan it here.
+        if not isinstance(first_stmt, frog_ast.IfStatement):
+            for var_name in arg_vars:
+                if (
+                    SearchVisitor(functools.partial(is_written_to, var_name)).visit(
+                        first_stmt
+                    )
+                    is not None
+                ):
+                    return False
         return True
 
     def _report_nondet_near_misses(self, block: frog_ast.Block) -> None:

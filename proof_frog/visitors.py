@@ -1513,6 +1513,21 @@ def reassigns_or_rebinds(names: set[str], node: frog_ast.ASTNode) -> bool:
     return SearchVisitor(_mutates).visit(node) is not None
 
 
+def _statement_can_exit(statement: frog_ast.Statement) -> bool:
+    """True if *statement* can cause an early method exit (contains a return).
+
+    Used by SameFieldVisitor (F-298): a return between two paired field writes
+    means the second write is skippable on the early-exit path, so the fields
+    are not equal on every trace and must not be merged.
+    """
+    return (
+        SearchVisitor(lambda n: isinstance(n, frog_ast.ReturnStatement)).visit(
+            statement
+        )
+        is not None
+    )
+
+
 class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
     def __init__(self, field_name_pair: tuple[str, str]):
         self.field_name_pair = field_name_pair
@@ -1571,6 +1586,13 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
                         copy_paired = True
                         self.paired_statements.append(subsequent_statement)
                         break
+                    # F-298: an intervening statement that can exit the method
+                    # (contains a return) makes the pair write AFTER it
+                    # adversary-skippable -- on the early-exit path the first
+                    # field is written but the pair is not, so they are not equal
+                    # forever. Stop pairing across it.
+                    if _statement_can_exit(subsequent_statement):
+                        break
                     if (
                         SearchVisitor(
                             functools.partial(reads_pair_fc, pair_name)
@@ -1609,6 +1631,15 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
                     paired = True
                     self.paired_statements.append(subsequent_statement)
                     break
+
+                # F-298: an intervening statement that can exit the method
+                # (contains a return) makes the pair write after it
+                # adversary-skippable -- on the early-exit path the first field
+                # is written but the pair is not, so the two fields are not equal
+                # forever. Do not pair across it.
+                if _statement_can_exit(subsequent_statement):
+                    self.are_same = False
+                    return
 
                 if (
                     SearchVisitor(assigns_variable_partial).visit(subsequent_statement)

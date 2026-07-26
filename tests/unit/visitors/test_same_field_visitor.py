@@ -257,3 +257,73 @@ def test_same_field_visitor(game: str, pair: tuple[str, str], expected: bool) ->
         assert isinstance(are_the_same, list)
     else:
         assert are_the_same is None
+
+
+def test_f298_early_return_between_paired_writes_not_same() -> None:
+    """F-298: `f1 = 1; if (b) { return 0; } f2 = 1;` -- the two writes are
+    separated by an early return, so on the `Mark(true)` trace `f1` is written
+    but `f2` is not. The fields are NOT equal on every trace, so SameFieldVisitor
+    must report them as not-the-same (the pass must not merge them)."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Int f1;
+            Int f2;
+            Void Initialize() { f1 = 0; f2 = 0; }
+            Int Mark(Bool b) {
+                f1 = 1;
+                if (b) { return 0; }
+                f2 = 1;
+                return 1;
+            }
+            Int GetTwo() { return f2; }
+        }
+        """
+    )
+    result = visitors.SameFieldVisitor(("f1", "f2")).visit(game)
+    assert result is None, "writes separated by an early return must not be paired"
+
+
+def test_f298_copy_behind_early_return_not_same() -> None:
+    """F-298 copy path: `f1 = G.rand(); if (b) { return 0; } f2 = f1;` -- the
+    copy that would equate the fields is skippable via the early return, so they
+    are not equal on every trace."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Int f1;
+            Int f2;
+            Void Initialize() { f1 = 0; f2 = 0; }
+            Int Mark(Bool b) {
+                f1 = G.rand();
+                if (b) { return 0; }
+                f2 = f1;
+                return 1;
+            }
+            Int GetTwo() { return f2; }
+        }
+        """
+    )
+    result = visitors.SameFieldVisitor(("f1", "f2")).visit(game)
+    assert result is None, "a copy behind an early return must not be paired"
+
+
+def test_f298_adjacent_writes_still_paired() -> None:
+    """F-298 positive control: with no early return between them, the two equal
+    writes still pair (a return BEFORE both writes is fine -- both are skipped
+    together)."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Int f1;
+            Int f2;
+            Void Initialize() { f1 = 0; f2 = 0; }
+            Void Mark() {
+                f1 = 1;
+                f2 = 1;
+            }
+        }
+        """
+    )
+    result = visitors.SameFieldVisitor(("f1", "f2")).visit(game)
+    assert isinstance(result, list), "adjacent equal writes should still pair"

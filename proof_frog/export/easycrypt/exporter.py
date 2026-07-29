@@ -4797,6 +4797,46 @@ def export_proof_file(proof_path: str) -> str:
         # pylint: enable=protected-access
         return " /\\ ".join(conj)
 
+    def _keygen_decapskey_fields(game: frog_ast.Game | None) -> list[str]:
+        """The game's DECAPS-KEY state fields, in ``Initialize`` program order.
+
+        Read off the ``[ek, dk] = K.KeyGen()`` destructures: the KeyGen return is
+        ``[EncapsKey, DecapsKey]``, so a field assigned element 1 of a KeyGen temp
+        is a DecapsKey. A CT-binding game holds ONLY those (its EncapsKeys are
+        locals), so this returns the same list its declaration order gives and the
+        caller is unchanged; a PK-binding game also holds ``ek0``/``ek1`` for its
+        win term, and those must not be mistaken for seeds -- the lazy-RO coupling
+        applies the random oracle to them, and the RO's domain is the seed.
+        Returns ``[]`` off-shape, so the caller keeps its declaration-order list."""
+        if game is None:
+            return []
+        init = _find_init(game)
+        if init is None:
+            return []
+        field_names = {f.name for f in game.fields}
+        keygen_tmps: list[str] = []
+        out: list[str] = []
+        for stmt in init.block.statements:
+            if not isinstance(stmt, frog_ast.Assignment) or not isinstance(
+                stmt.var, frog_ast.Variable
+            ):
+                continue
+            value = stmt.value
+            if isinstance(value, frog_ast.FuncCall):
+                func = value.func
+                if isinstance(func, frog_ast.FieldAccess) and func.name == "KeyGen":
+                    keygen_tmps.append(stmt.var.name)
+            elif (
+                isinstance(value, frog_ast.ArrayAccess)
+                and isinstance(value.the_array, frog_ast.Variable)
+                and value.the_array.name in keygen_tmps
+                and isinstance(value.index, frog_ast.Integer)
+                and value.index.num == 1
+                and stmt.var.name in field_names
+            ):
+                out.append(stmt.var.name)
+        return out
+
     def _lazyro_derived_key_coupling(
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> str:
@@ -4874,14 +4914,25 @@ def export_proof_file(proof_path: str) -> str:
         # holder in ``live_state_holders``; the game's remaining seed fields are its
         # siblings on the same holder, in declaration order (matching the hash
         # order). Bail (admit) if the game does not expose one seed field per hash.
+        #
+        # Restrict to the fields the RO can actually be APPLIED to -- those whose
+        # type matches the hashed seed's. A CT-binding game holds only DecapsKeys,
+        # so every field qualifies and this is a no-op; a PK-binding game ALSO
+        # holds the EncapsKeys it compares (``ek0, ek1, dk0, dk1``), and taking
+        # them in bare declaration order made the coupling read ``RO[ek0]`` -- an
+        # EncapsKey where the RO's domain is the seed, which EC rejects outright
+        # ("this expression has type").
         game_ref0 = _live_state_ref(game_step)
         game_holder = game_ref0.rsplit(".", 1)[0]
         outer_gf = game_file_by_name.get(proof.theorem.name)
-        game_seed_fields = (
-            [f.name for f in outer_gf.games[0].fields]
+        all_game_fields = (
+            list(outer_gf.games[0].fields)
             if outer_gf is not None and outer_gf.games
             else []
         )
+        game_seed_fields = _keygen_decapskey_fields(
+            outer_gf.games[0] if outer_gf is not None and outer_gf.games else None
+        ) or [f.name for f in all_game_fields]
         if len(game_seed_fields) < len(hash_vars):
             return ""
         # Per-hash-var: its translated EC form and its ``RO[game seed field i]``.

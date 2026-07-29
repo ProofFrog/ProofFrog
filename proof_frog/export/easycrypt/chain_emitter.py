@@ -7255,12 +7255,15 @@ def _challenge_hop2_wrapper_route(  # pylint: disable=too-many-arguments,too-man
 
     def _tkey_field(prefix: list[ec_ast.EcStmt]) -> str | None:
         # T scalar = the key arg of the T-decaps call (group: ``exp(ct, dk_T)`` ->
-        # arg1; KEM: ``decaps(dk_T, ct)`` -> arg0).
+        # arg1; KEM: ``decaps(dk_T, ct)`` -> arg0). Matched MODULE-QUALIFIED: a
+        # two-KEM combiner's trans component decapsulates with the same method
+        # NAME as its PQ component (``decaps``), so an unqualified suffix match
+        # picks the PQ call and yields the PQ key.
         t_decaps = next(
             (
                 s
                 for s in prefix
-                if isinstance(s, ec_ast.Call) and s.callee.endswith(f".{t_method}")
+                if isinstance(s, ec_ast.Call) and s.callee == f"{t_module}.{t_method}"
             ),
             None,
         )
@@ -7270,6 +7273,9 @@ def _challenge_hop2_wrapper_route(  # pylint: disable=too-many-arguments,too-man
         return args[1] if shape.t_decaps_ct_first else args[0]
 
     t_method = _ev_method(shape.ev_decaps_t)
+    t_module = {c: m for m, c in clone_alias.items()}.get(
+        shape.ev_decaps_t.split(".", 1)[0], shape.ev_decaps_t.split(".", 1)[0]
+    )
     tkey_f = _tkey_field(l_prefix)
     r_tkey_f = _tkey_field(r_prefix)
     if tkey_f is None or r_tkey_f is None or tkey_f not in own_all or tkey_f == seed_f:

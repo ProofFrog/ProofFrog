@@ -1607,16 +1607,44 @@ def challenge_tactic_hop2_wrapper(  # pylint: disable=too-many-locals,too-many-s
     l_len = _atomic_len(spec.l_prefix)
     r_len = _atomic_len(spec.r_prefix)
 
+    # The T component's ENCAPS key in the KDF input. A nominal-group T recomputes
+    # it from the scalar (``ev_exp(ev_generator, dk_T)``); a KEM T stores it in a
+    # reduction FIELD and the encoder reads that field directly. Read which off the
+    # prefix: if the T encaps-key encoder's argument is a reduction field, the
+    # stored form applies -- otherwise (a local, i.e. the recomputed group element)
+    # keep the group form, so the nominal-group combiners are byte-identical.
+    _enc_ek_meth = spec.shape.ev_encek_t.rsplit(".ev_", 1)[-1]
+    _fld_names = set(spec.l_all_fields or []) | {seed_f, tkey_f, r_seed_f, r_tkey_f}
+
+    def _stored_ek(prefix: list[ec_ast.EcStmt]) -> str | None:
+        return next(
+            (
+                s.args.strip()
+                for s in prefix
+                if isinstance(s, ec_ast.Call)
+                and s.callee.endswith(f".{_enc_ek_meth}")
+                and s.args.strip() in _fld_names
+            ),
+            None,
+        )
+
+    stored_ek_f = _stored_ek(spec.r_prefix)
+    l_stored_ek_f = _stored_ek(spec.l_prefix)
+
     def _wbind(ct: str, sd_fld: str) -> tuple[str, str, str, str]:
         """RHS KDF-input bindings at ct over the seed field ``sd_fld``: seed-derived
-        PQ decaps key, T scalar, the recomputed group encaps key
-        (``ev_exp(ev_generator, dk_T)``), ct.  The INVARIANT uses R_KDF's stored key
-        ``dk_PQ_0`` (what the peel produces); the no-collision ELSE uses ``s_PQ_0``
-        (the common field ``=> />`` rewrites the goal to, via the stored-dk coupling).
+        PQ decaps key, T scalar, the T encaps key (the recomputed group element
+        ``ev_exp(ev_generator, dk_T)``, or the stored field for a KEM T), ct.  The
+        INVARIANT uses R_KDF's stored key ``dk_PQ_0`` (what the peel produces); the
+        no-collision ELSE uses ``s_PQ_0`` (the common field ``=> />`` rewrites the
+        goal to, via the stored-dk coupling).
         """
         pq_key = f"({inner_c}.ev_derivekeypair {spec.r_base}.{sd_fld}" "{2}).`2"
         t_key = f"{spec.r_base}.{r_tkey_f}" "{2}"
-        ek = f"({spec.shape.ev_decaps_t} ({t_clone}.ev_generator) {t_key})"
+        if stored_ek_f is not None:
+            ek = f"{spec.r_base}.{stored_ek_f}" "{2}"
+        else:
+            ek = f"({spec.shape.ev_decaps_t} ({t_clone}.ev_generator) {t_key})"
         return (pq_key, t_key, ek, f"{ct}" "{2}")
 
     kdf0_term = spec.shape.kdf_in(*_wbind(ct0, r_seed_f))
@@ -1685,8 +1713,11 @@ def challenge_tactic_hop2_wrapper(  # pylint: disable=too-many-locals,too-many-s
     ]
 
     # -- prefix functionalization subgoal (both sides, expanded flat state) ---
-    l_own = spec.l_own_fields
-    r_own = spec.r_own_fields
+    # A stored T encaps key is READ by the prefix, so it must be frozen by the
+    # peel's ``exists*`` like any other consumed field (the group T recomputes its
+    # encaps key from the already-frozen scalar, so it adds nothing there).
+    l_own = spec.l_own_fields + ([l_stored_ek_f] if l_stored_ek_f else [])
+    r_own = spec.r_own_fields + ([stored_ek_f] if stored_ek_f else [])
     l_fe = [f"lf{i}" for i in range(len(l_own))]
     r_fe = [f"rf{i}" for i in range(len(r_own))]
     l_ex = (

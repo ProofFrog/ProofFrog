@@ -3952,23 +3952,43 @@ def _synth_init_plain_reorder(  # pylint: disable=too-many-arguments,too-many-po
 def _is_reprogram_if(stmt: ec_ast.EcStmt) -> bool:
     """True if ``stmt`` is a lazy-RO *reprogramming* ``if`` (always-true).
 
-    Shape: ``if (<seed> = <s0>) { <r> <- concat_... y0_pq y0_t; } else { <r> <-
-    <h> <seed>; }`` -- an equality guard whose then-branch assigns a ``concat``
-    of the reprogrammed samples. This is the reprogramming that
+    Shape: ``if (<seed> = <s0>) { ... concat_... y0_pq y0_t ... } else { ... <h>
+    <seed> ... }`` -- an equality guard whose then-branch USES a ``concat`` of the
+    reprogrammed samples. This is the reprogramming that
     :func:`_call_sample_backbone` cannot see through (it buries the KEM/NG
     backbone). Excludes the flat-state early-return artifact ``if (! _r2) {...}``
     (negation guard, no ``concat`` then-branch) so only the genuine
     reprogramming ``if``s -- the ones EC's ``inline *`` reproduces from the
     challenger's ``hash`` -- are counted.
+
+    The reprogrammed value does not always surface as its own assignment: when
+    the canonicalizer sinks the seed-consuming computation INTO the branch, the
+    ``concat`` appears only as a sub-expression of a call argument
+    (``derivekeypair (slice (concat y0_pq y0_t) ...)``), and the branch may nest
+    further ``if``s. So the search is over every assignment RHS and call argument
+    in the branch, recursively.
     """
     if not isinstance(stmt, ec_ast.If):
         return False
     if "=" not in stmt.guard or stmt.guard.lstrip().startswith("!"):
         return False
-    return any(
-        isinstance(s, ec_ast.Assign) and s.rhs.startswith("concat")
-        for s in stmt.then_body
-    )
+    return _branch_uses_concat(stmt.then_body)
+
+
+def _branch_uses_concat(stmts: Sequence[ec_ast.EcStmt]) -> bool:
+    """True when some assignment RHS or call argument in ``stmts`` (descending
+    into nested ``if``s) references a ``concat_`` op."""
+    for stmt in stmts:
+        if isinstance(stmt, ec_ast.Assign) and "concat_" in stmt.rhs:
+            return True
+        if isinstance(stmt, ec_ast.Call) and "concat_" in stmt.args:
+            return True
+        if isinstance(stmt, ec_ast.If) and (
+            _branch_uses_concat(stmt.then_body)
+            or _branch_uses_concat(stmt.else_body or [])
+        ):
+            return True
+    return False
 
 
 def _count_reprogram_ifs(body: list[ec_ast.EcStmt]) -> int:
@@ -3996,21 +4016,27 @@ def _collapse_all_ifs(body: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt]:
 def _slice_concat_axioms(collapsed: list[ec_ast.EcStmt]) -> list[str]:
     """The ``slice_concat_left/right`` axiom names for the reprogramming concat.
 
-    The reprogramming then-branch assigns ``<r> <- concat_<MID>_to_<Z> a b``;
-    the exporter emits ``slice_concat_left_<MID>_<Z>`` / ``..._right_...`` (see
+    The reprogramming then-branch uses ``concat_<MID>_to_<Z> a b`` -- as its own
+    assignment RHS, or (when the canonicalizer sank the seed-consuming
+    computation into the branch) only as a sub-expression of a call argument.
+    The exporter emits ``slice_concat_left_<MID>_<Z>`` / ``..._right_...`` (see
     the binding-proof axiom preamble). Discharges the derived-seed argument
     equalities ``slice_pq (concat y0_pq y0_t) = y0_pq`` at the closing ``smt``.
     """
     axioms: list[str] = []
     for stmt in _exec_stmts(collapsed):
-        if not isinstance(stmt, ec_ast.Assign) or not stmt.rhs.startswith("concat"):
+        if isinstance(stmt, ec_ast.Assign):
+            text = stmt.rhs
+        elif isinstance(stmt, ec_ast.Call):
+            text = stmt.args
+        else:
             continue
-        op = stmt.rhs.split()[0]  # concat_<MID>_to_<Z>
-        if "_to_" not in op or not op.startswith("concat_"):
-            continue
-        mid, _, z = op[len("concat_") :].partition("_to_")
-        axioms.append(f"slice_concat_left_{mid}_{z}")
-        axioms.append(f"slice_concat_right_{mid}_{z}")
+        for op in re.findall(r"\bconcat_\w+", text):
+            if "_to_" not in op:
+                continue
+            mid, _, z = op[len("concat_") :].partition("_to_")
+            axioms.append(f"slice_concat_left_{mid}_{z}")
+            axioms.append(f"slice_concat_right_{mid}_{z}")
     # preserve order, drop duplicates
     seen: set[str] = set()
     unique: list[str] = []
@@ -4146,11 +4172,14 @@ def _front_swaps_stable(
 
 def _collapse_to_true(
     body: list[ec_ast.EcStmt],
-) -> tuple[list[ec_ast.EcStmt], list[str]] | None:
+) -> tuple[list[ec_ast.EcStmt], list[tuple[str, bool]]] | None:
     """Collapse every always-decidable ``if`` in ``body`` to its TRUE branch,
     returning ``(collapsed_stmts, rconds)`` where ``rconds`` is the ordered list
-    of ``"rcondt"``/``"rcondf"`` selectors for the genuine reprogramming ``if``s
-    only.
+    of ``("rcondt"|"rcondf", prefix_has_call)`` selectors for the genuine
+    reprogramming ``if``s only. ``prefix_has_call`` is True when an abstract
+    module call precedes the ``if`` on the taken path, so the caller knows the
+    ``rcond`` side condition needs a call peel before ``auto`` (``auto`` cannot
+    cross an abstract call).
 
     The two-seed reprogramming init nests reprogramming ``if``s whose always-true
     branch is NOT always the then-branch: ``if (seed_1 = s0) {concat y0} else {
@@ -4240,11 +4269,13 @@ def _collapse_to_true(
             return None
         return _resolve_bool(g)  # a bare bool var early-return guard
 
+    seen_call = [False]  # abstract calls emitted so far on the taken path
+
     def _walk(
         stmts: list[ec_ast.EcStmt],
-    ) -> tuple[list[ec_ast.EcStmt], list[str]] | None:
+    ) -> tuple[list[ec_ast.EcStmt], list[tuple[str, bool]]] | None:
         out: list[ec_ast.EcStmt] = []
-        rconds: list[str] = []
+        rconds: list[tuple[str, bool]] = []
         for stmt in stmts:
             if isinstance(stmt, ec_ast.Sample):
                 sample_vars.add(stmt.var)
@@ -4258,7 +4289,7 @@ def _collapse_to_true(
                     return None
                 g = stmt.guard.strip()
                 if "=" in g and "<>" not in g and not g.startswith("!"):
-                    rconds.append("rcondt" if truth else "rcondf")
+                    rconds.append(("rcondt" if truth else "rcondf", seen_call[0]))
                 branch = stmt.then_body if truth else (stmt.else_body or [])
                 sub = _walk(branch)
                 if sub is None:
@@ -4266,10 +4297,31 @@ def _collapse_to_true(
                 out.extend(sub[0])
                 rconds.extend(sub[1])
             else:
+                if isinstance(stmt, ec_ast.Call):
+                    seen_call[0] = True
                 out.append(stmt)
         return out, rconds
 
     return _walk(body)
+
+
+def _rcond_discharge(selector: str, prefix_has_call: bool) -> str:
+    """The tactic closing one reprogramming-``if`` rcond side condition.
+
+    ``rcondt`` guards are definitionally true (``auto``); ``rcondf`` guards are
+    ``seed_k <> s0`` from the exclusion sampling, discharged with
+    ``smt(supp_dexcepted)``. A reprogramming ``if`` for the SECOND component key
+    sits BEHIND the first component's abstract ``derivekeypair``, which ``auto``
+    cannot cross -- peel every intervening call count-independently. ``auto``
+    leads because the side goal is a ``forall &m, hoare[..]`` and ``wp``/``call``
+    cannot cross the binder; the guard is established by assignments the calls do
+    not touch, so ``(call (_: true); auto)*`` reaches it."""
+    body = "auto"
+    if prefix_has_call:
+        body += "; do? (call (_: true); auto)"
+    if selector == "rcondf":
+        body += "; smt(supp_dexcepted)"
+    return body
 
 
 def _synth_reprogram_lazy_init(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
@@ -4365,14 +4417,30 @@ def _synth_reprogram_lazy_init(  # pylint: disable=too-many-arguments,too-many-p
     axioms = _slice_concat_axioms(collapsed)
     tac = ["proc.", "inline *."]
     for side, rconds in ((if_side, rconds_if), (other_side, rconds_other)):
-        for rcond in rconds:
-            tac.append(f"{rcond}{{{side}}} ^if.")
-            # ``rcondt`` guards are definitionally true (``+ auto``); ``rcondf``
-            # guards are ``seed_k <> s0`` from the exclusion sampling, discharged
-            # with ``smt(supp_dexcepted)``.
+        if not rconds:
+            continue
+        selectors = {sel for sel, _ in rconds}
+        needs_peel = any(has_call for _, has_call in rconds)
+        if len(selectors) == 1:
+            # Count-INDEPENDENT collapse. The rcond list is read off the CANONICAL
+            # flat state, whose reprogramming-``if`` count can exceed the rendered
+            # module's: the canonicalizer inlines the hash result into each use
+            # site (three ``Hash(seed_0)`` occurrences where the EC module reuses
+            # one local twice). A fixed-length list then over-runs
+            # ("invalid split index: ^if"). When every selector agrees, repeat one
+            # collapse until no reprogramming ``if`` is left, which is right for
+            # any count. A wrong repetition cannot sneak through -- the discharge
+            # must close the side goal or the whole iteration reverts, leaving the
+            # ``if`` for the backbone peel to reject.
+            sel = rconds[0][0]
             tac.append(
-                "+ auto." if rcond == "rcondt" else "+ auto; smt(supp_dexcepted)."
+                f"do! ({sel}{{{side}}} ^if; "
+                f"first ({_rcond_discharge(sel, needs_peel)}))."
             )
+            continue
+        for rcond, prefix_has_call in rconds:
+            tac.append(f"{rcond}{{{side}}} ^if.")
+            tac.append(f"+ {_rcond_discharge(rcond, prefix_has_call)}.")
     tac += swaps
     tac += _backbone_peel(collapsed)
     tac.append("auto => />.")

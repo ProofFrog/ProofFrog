@@ -2027,6 +2027,15 @@ def export_proof_file(proof_path: str) -> str:
                     base.types
                 ):
                     return base.types[e.index.num]
+            if isinstance(e, frog_ast.Tuple):
+                # A tuple LITERAL ``(a, b, ...)``: the product of its components'
+                # types -- the dual of the projection case above. Canonicalization
+                # can leave an UNTYPED assignment of a repacked key tuple
+                # (``__a6__ <- (__a4__, f04)``), and the flat-state module's
+                # missing-declaration backfill types such a local by ``type_of`` on
+                # its RHS; without this the backfill silently skips it and EC
+                # rejects the module ("unknown module-level variable").
+                return frog_ast.ProductType([type_of(v) for v in e.values])
             if isinstance(e, frog_ast.Integer):
                 return frog_ast.IntType()
             if isinstance(e, frog_ast.BitStringLiteral):

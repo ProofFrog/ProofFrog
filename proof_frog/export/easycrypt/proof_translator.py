@@ -62,6 +62,10 @@ class LazyroInitSpec:
     seq_inv: str | None = None
     rs_lhs_arg: str | None = None
     rs_rhs_arg: str | None = None
+    # The MODULE whose deterministic method is functionalized: the nominal group
+    # for the CG/UG combiners (``NG.RandomScalar``), the trans KEM for the two-KEM
+    # ones (``KEM_T.DeriveKeyPair``). Its ``glob`` is what ``exists*`` freezes.
+    rs_mod: str = "NG"
     ng_det: str | None = None
     n_after_rs: int = 0
     n_before_rs: int = 0
@@ -709,8 +713,9 @@ def translate_inlining_hop_pr_lemma(  # pylint: disable=too-many-arguments,too-m
                     init_tac += ["wp.", "call (_: true)."]
                 init_tac += [
                     "wp.",
-                    f"exists* (glob NG){{{li.game_side}}}, ({li.rs_lhs_arg}), "
-                    f"(glob NG){{{li.red_side}}}, ({li.rs_rhs_arg}).",
+                    f"exists* (glob {li.rs_mod}){{{li.game_side}}}, "
+                    f"({li.rs_lhs_arg}), "
+                    f"(glob {li.rs_mod}){{{li.red_side}}}, ({li.rs_rhs_arg}).",
                     "elim* => gnl atl gnr atr.",
                     f"call{{{li.game_side}}} ({li.ng_det} gnl atl).",
                     f"call{{{li.red_side}}} ({li.ng_det} gnr atr).",

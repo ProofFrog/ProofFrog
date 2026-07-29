@@ -5048,10 +5048,37 @@ def export_proof_file(proof_path: str) -> str:
         )
         if gseed is None:
             return {}
+        # Which abstract call must be FUNCTIONALIZED: the one whose ``ev_`` form
+        # the hop's derived-key coupling names (``NG.RandomScalar`` for the
+        # nominal-group combiners, ``KEM_T.DeriveKeyPair`` for the two-KEM ones).
+        # Read off the coupling rather than matched by method name, so the route
+        # is not tied to one primitive's vocabulary. Its argument is the RO-derived
+        # SLICE, which is what makes the two sides' arguments equal.
+        derived_coupling = _lazyro_derived_key_coupling(step_a, step_b) or ""
+        clone_to_mod = {c: m for m, c in clone_alias_by_module.items()}
+        ev_targets = {
+            (clone_to_mod.get(cl, cl), meth)
+            for cl, meth in re.findall(r"(\w+)\.ev_(\w+)", derived_coupling)
+        }
+        if not ev_targets:
+            return {}
+        # CK/UK inline ``challenger.Hash(seed)`` straight into the slice; hoist it
+        # into a synthetic local so the slice's array is a Variable the expression
+        # translator can render (CG/UG already factor it out -> no-op there).
+        red_init = _hoist_inline_challenger_hashes(red_init)
+
+        def _is_target(n: frog_ast.ASTNode) -> bool:
+            return (
+                isinstance(n, frog_ast.FuncCall)
+                and isinstance(n.func, frog_ast.FieldAccess)
+                and isinstance(n.func.the_object, frog_ast.Variable)
+                and (n.func.the_object.name, n.func.name.lower()) in ev_targets
+                and bool(n.args)
+                and isinstance(n.args[0], frog_ast.Slice)
+            )
+
         rs_finder: visitors.SearchVisitor[frog_ast.FuncCall] = visitors.SearchVisitor(
-            lambda n: isinstance(n, frog_ast.FuncCall)
-            and isinstance(n.func, frog_ast.FieldAccess)
-            and n.func.name.lower() == "randomscalar"
+            _is_target
         )
         rs_call = rs_finder.visit(red_init.block)
         if (
@@ -5082,7 +5109,7 @@ def export_proof_file(proof_path: str) -> str:
             f"({honest_ref}{{{red_side_l}}} {rseed}{{{red_side_l}}})",
             slice_ec,
         )
-        order: list[str] = []
+        order: list[frog_ast.FuncCall] = []
 
         def _collect(n: frog_ast.ASTNode) -> bool:
             if (
@@ -5091,16 +5118,19 @@ def export_proof_file(proof_path: str) -> str:
                 and isinstance(n.func.the_object, frog_ast.Variable)
                 and n.func.the_object.name != "challenger"
             ):
-                order.append(n.func.name.lower())
+                order.append(n)
             return False
 
         visitors.SearchVisitor(_collect).visit(red_init.block)
-        if "randomscalar" not in order:
+        # Locate the target by IDENTITY, not by name: a two-KEM reduction derives
+        # BOTH component keypairs with the same method (``DeriveKeyPair``), so a
+        # name lookup would pick the wrong occurrence and mis-size the peel.
+        idx = next((i for i, c in enumerate(order) if c is rs_call), None)
+        if idx is None:
             return {}
-        idx = order.index("randomscalar")
         # pylint: enable=protected-access
         full = _live_state_coupling(step_a, step_b)
-        derived = _lazyro_derived_key_coupling(step_a, step_b)
+        derived = derived_coupling or None
         base = full.replace(f" /\\ {derived}", "") if derived else full
         return {
             "game_side": game_side,
@@ -5110,7 +5140,8 @@ def export_proof_file(proof_path: str) -> str:
             ),
             "rs_lhs_arg": lhs,
             "rs_rhs_arg": rhs,
-            "ng_det": f"{ng_mod}_randomscalar_det",
+            "rs_mod": ng_mod,
+            "ng_det": f"{ng_mod}_{rs_call.func.name.lower()}_det",
             "n_after_rs": len(order) - idx - 1,
             "n_before_rs": idx,
         }

@@ -227,3 +227,36 @@ def test_slice_of_inline_concat_declines_on_stale_length(game: str) -> None:
     game_ast = frog_parser.parse_game(game)
     transformed = SliceOfInlineConcatTransformer().transform_game(game_ast)
     assert transformed == game_ast, "pass must decline when the operand length is shadowed"
+
+
+def test_f030_side_effecting_dropped_operand_not_dropped() -> None:
+    """F-030: `(a || b)[0 : |a|] -> a` drops `b`. Evaluating a concatenation
+    evaluates both operands, so dropping one that contains a non-deterministic
+    call would erase that call's observable effect. The rewrite must decline
+    when the DROPPED operand is impure."""
+    from proof_frog import frog_parser
+    from proof_frog.transforms.sampling import SliceOfInlineConcatTransformer
+    from proof_frog.transforms._base import PipelineContext
+    from proof_frog.visitors import NameTypeMap
+
+    prim = frog_parser.parse_primitive_file(
+        "Primitive P(Int n) { BitString<n> g(); }"  # g is non-deterministic
+    )
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"F": prim},
+        subsets_pairs=[],
+    )
+    method = frog_parser.parse_method(
+        "BitString<n> O() { BitString<n> a <- BitString<n>; return (a || F.g())[0 : n]; }"
+    )
+    result = SliceOfInlineConcatTransformer(NameTypeMap(), ctx).transform(method)
+    assert "F.g()" in str(result), "an impure dropped operand must not be dropped"
+
+    # Positive control: two pure operands still simplify (drop is sound).
+    pure = frog_parser.parse_method(
+        "BitString<n> O() { BitString<n> a <- BitString<n>; BitString<n> b <- BitString<n>; return (a || b)[0 : n]; }"
+    )
+    pure_out = SliceOfInlineConcatTransformer(NameTypeMap(), ctx).transform(pure)
+    assert "return a;" in str(pure_out), "pure concat slice should still simplify to a"

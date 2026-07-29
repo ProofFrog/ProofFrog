@@ -22,6 +22,9 @@ from ..visitors import (
     NameTypeMap,
     VariableCollectionVisitor,
     build_game_type_map,
+    build_method_type_map,
+    MethodScopedTypeMapMixin,
+    reassigns_or_rebinds,
 )
 from ._base import (
     TransformPass,
@@ -50,6 +53,77 @@ def _count_field_assigns(node: frog_ast.ASTNode, name: str) -> int:
 
     SearchVisitor(_visit).visit(node)
     return count
+
+
+def _use_node_inside_loop(block: frog_ast.Block, use_node: frog_ast.ASTNode) -> bool:
+    """True if *use_node* occurs inside a loop body within *block*.
+
+    A "used exactly once" textual occurrence count is blind to loop
+    multiplicity: a single syntactic use inside a ``NumericFor``/``GenericFor``
+    body is dynamically evaluated once per iteration, so a uniform value
+    combined there is consumed against a fresh partner each iteration and the
+    uniform-absorption rewrite is unsound (audit F-132c / F-279 / F-288).
+
+    *use_node* must be an object still present in *block* (identity match).
+    """
+
+    def _loop_contains(node: frog_ast.ASTNode) -> bool:
+        return isinstance(node, (frog_ast.NumericFor, frog_ast.GenericFor)) and (
+            SearchVisitor(lambda n: n is use_node).visit(node) is not None
+        )
+
+    return SearchVisitor(_loop_contains).visit(block) is not None
+
+
+def _count_variable_uses(name: str, block: frog_ast.Block) -> int:
+    """Count occurrences of ``Variable(name)`` in *block*, one per AST POSITION.
+
+    F-281: the uniform-absorption passes previously counted uses by replacing one
+    occurrence at a time with an ``is``-identity ``ReplaceTransformer``. Two live
+    reads that happen to SHARE a single ``Variable`` object (e.g. produced by a
+    transform that did not deep-copy) were both replaced at once and tallied as
+    ONE use, so a value used twice looked single-use and was wrongly absorbed.
+    Visiting each position (a shared object at two slots is visited twice) counts
+    correctly. Capped at 2 -- callers only need exactly-once vs not.
+    """
+    count = 0
+
+    def _matches(node: frog_ast.ASTNode) -> bool:
+        nonlocal count
+        if isinstance(node, frog_ast.Variable) and node.name == name:
+            count += 1
+        return count > 1
+
+    SearchVisitor(_matches).visit(block)
+    return count
+
+
+def _use_node_inside_type(block: frog_ast.Block, use_node: frog_ast.ASTNode) -> bool:
+    """True if *use_node* occurs inside a ``Type`` node's subtree within *block*.
+
+    The visitor descends into every attribute, including a ``Type``'s
+    parameterization expression, so a match like ``u + 3`` found for the
+    uniform-absorption rewrite may actually be a TYPE parameter (the modulus in
+    ``z <- ModInt<u + 3>``), not a value expression. Rewriting it edits the type
+    and changes the sampled variable's distribution (audit F-293), so the pass
+    must decline. *use_node* must be an object still present in *block* (identity
+    match).
+    """
+
+    def _type_contains(node: frog_ast.ASTNode) -> bool:
+        # A genuine type ANNOTATION is a ``Type`` that is not an ``Expression``
+        # (``Expression`` subclasses ``Type`` because an expression may name a
+        # type alias, so ``isinstance(_, Type)`` alone also matches every
+        # Variable/BinaryOperation). Only the annotation nodes (``ModIntType``,
+        # ``BitStringType``, ...) carry a value-expression parameterization that
+        # a match could wrongly land in.
+        return (
+            isinstance(node, frog_ast.Type)
+            and not isinstance(node, frog_ast.Expression)
+            and SearchVisitor(lambda n: n is use_node).visit(node) is not None
+        )
+
+    return SearchVisitor(_type_contains).visit(block) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -93,23 +167,9 @@ class UniformXorSimplificationTransformer(BlockTransformer):
             )
 
             # Count uses of var_name — must be exactly 1
-            def uses_var(name: str, node: frog_ast.ASTNode) -> bool:
-                return isinstance(node, frog_ast.Variable) and node.name == name
-
-            total_uses = 0
-            count_block = copy.deepcopy(remaining_block)
-            while True:
-                found = SearchVisitor(functools.partial(uses_var, var_name)).visit(
-                    count_block
-                )
-                if found is None:
-                    break
-                total_uses += 1
-                if total_uses > 1:
-                    break
-                count_block = ReplaceTransformer(
-                    found, frog_ast.Variable(var_name + "__counted__")
-                ).transform(count_block)
+            # F-281: count by AST position (not is-identity replacement) so two
+            # live reads sharing one Variable object are not tallied as one.
+            total_uses = _count_variable_uses(var_name, remaining_block)
 
             if total_uses != 1:
                 if total_uses > 1 and self.ctx is not None:
@@ -152,6 +212,40 @@ class UniformXorSimplificationTransformer(BlockTransformer):
                 functools.partial(is_xor_with_uniform, var_name)
             ).visit(remaining_block)
             if xor_node is None:
+                continue
+
+            # F-293 (sibling sweep): the search descends into Type
+            # parameterizations, so a matched `u + c` could be a type parameter
+            # rather than a value expression. Rewriting it would edit a type;
+            # decline.
+            if _use_node_inside_type(remaining_block, xor_node):
+                continue
+
+            # The "used exactly once" count above is textual.  If the single
+            # textual use sits inside a loop body while the sample is outside,
+            # the same uniform value is XORed against a fresh partner each
+            # iteration (`u <- BitString<n>; for(...) { acc = acc + u; }`),
+            # so the absorption is unsound (audit F-288).
+            if _use_node_inside_loop(remaining_block, xor_node):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Uniform XOR Simplification",
+                            reason=(
+                                f"XOR-with-uniform did not fire for '{var_name}': "
+                                f"its single use is inside a loop while the sample "
+                                f"is outside, so the value is XORed against a fresh "
+                                f"partner each iteration (not single-use)"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"Sample '{var_name}' inside the loop body if a "
+                                f"fresh uniform value is intended each iteration"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
                 continue
 
             # Replace the BinaryOperation with just the uniform variable
@@ -203,6 +297,14 @@ class UniformModIntSimplificationTransformer(BlockTransformer):
                 and isinstance(statement.var, frog_ast.Variable)
                 and isinstance(statement.the_type, frog_ast.ModIntType)
                 and isinstance(statement.sampled_from, frog_ast.ModIntType)
+                # F-292: the absorption `u + c -> u` is sound only when `u` is
+                # uniform over the SAME modulus as the carrier the addition is
+                # computed in (the declared type). If the sampled modulus differs
+                # (`ModInt<4> u <- ModInt<2>`), `u` is uniform over {0..q_s-1}
+                # but `u + c` lands in {c..c+q_s-1} mod q_t -- a shifted,
+                # generally disjoint support -- so `u + c` is not distributed as
+                # `u`. Require the two moduli to match structurally.
+                and statement.the_type.modulus == statement.sampled_from.modulus
             ):
                 continue
 
@@ -213,23 +315,9 @@ class UniformModIntSimplificationTransformer(BlockTransformer):
             )
 
             # Count uses of var_name — must be exactly 1
-            def uses_var(name: str, node: frog_ast.ASTNode) -> bool:
-                return isinstance(node, frog_ast.Variable) and node.name == name
-
-            total_uses = 0
-            count_block = copy.deepcopy(remaining_block)
-            while True:
-                found = SearchVisitor(functools.partial(uses_var, var_name)).visit(
-                    count_block
-                )
-                if found is None:
-                    break
-                total_uses += 1
-                if total_uses > 1:
-                    break
-                count_block = ReplaceTransformer(
-                    found, frog_ast.Variable(var_name + "__counted__")
-                ).transform(count_block)
+            # F-281: count by AST position (not is-identity replacement) so two
+            # live reads sharing one Variable object are not tallied as one.
+            total_uses = _count_variable_uses(var_name, remaining_block)
 
             if total_uses != 1:
                 if total_uses > 1 and self.ctx is not None:
@@ -280,22 +368,21 @@ class UniformModIntSimplificationTransformer(BlockTransformer):
             if add_node is None:
                 continue
 
+            # F-293: the search descends into Type parameterizations, so
+            # `add_node` may be a `u + c` in a type modulus position
+            # (`z <- ModInt<u + 3>`). Rewriting it to `u` edits the TYPE and
+            # changes the sampled variable's distribution. A type parameter is
+            # not a value expression; decline.
+            if _use_node_inside_type(remaining_block, add_node):
+                continue
+
             # The "used exactly once" count above is textual.  If the single
             # textual use sits inside a loop body while the sample is outside
             # that loop, the same uniform value is consumed once PER ITERATION
             # -- e.g. `t <- ModInt<q>; for (...) { acc = acc + t; }` over a
             # two-element range leaves acc = 2t (even-only support), not the
             # uniform t the absorption would produce.  Decline (audit F-132c).
-            def _loop_contains_use(
-                node: frog_ast.ASTNode, target: frog_ast.ASTNode = add_node
-            ) -> bool:
-                return isinstance(
-                    node, (frog_ast.NumericFor, frog_ast.GenericFor)
-                ) and (
-                    SearchVisitor(lambda n, t=target: n is t).visit(node) is not None
-                )
-
-            if SearchVisitor(_loop_contains_use).visit(remaining_block) is not None:
+            if _use_node_inside_loop(remaining_block, add_node):
                 if self.ctx is not None:
                     self.ctx.near_misses.append(
                         NearMiss(
@@ -408,17 +495,26 @@ def _is_bitstring_add_chain(
     """
     if type_map is None:
         return True
+    # F-264: scan ALL terms rather than returning on the first evidence. A
+    # ModInt term in an ADD chain is DEFINITIVE evidence of ModInt addition
+    # (where `z + z` is `2z`, not `0`), so it must override any BitString
+    # evidence -- returning True on a leading `0^n` while a later term is
+    # `z: ModInt<q>` (`0^n + z + z`) would XOR-cancel `z + z` to `0`, an unsound
+    # rewrite. Returning True wrongly is the unsound direction (it enables the
+    # cancellation), so require BitString evidence AND the absence of any ModInt
+    # evidence.
     terms = _flatten_add_chain(expr)
+    has_bitstring_evidence = False
     for term in terms:
         if isinstance(term, frog_ast.BitStringLiteral):
-            return True
-        if isinstance(term, frog_ast.Variable):
+            has_bitstring_evidence = True
+        elif isinstance(term, frog_ast.Variable):
             var_type = type_map.get(term.name)
             if isinstance(var_type, frog_ast.ModIntType):
                 return False
             if isinstance(var_type, frog_ast.BitStringType):
-                return True
-    return False
+                has_bitstring_evidence = True
+    return has_bitstring_evidence
 
 
 def _flatten_add_chain(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
@@ -450,7 +546,7 @@ def _rebuild_add_chain(terms: list[frog_ast.Expression]) -> frog_ast.Expression:
     return result
 
 
-class XorCancellationTransformer(Transformer):
+class XorCancellationTransformer(MethodScopedTypeMapMixin):
     """Cancels pairs of identical terms in XOR (ADD on bitstrings) chains.
 
     Since XOR is self-inverse (a ^ a = 0) and associative/commutative,
@@ -572,7 +668,7 @@ class XorCancellationTransformer(Transformer):
         return None
 
 
-class XorIdentityTransformer(Transformer):
+class XorIdentityTransformer(MethodScopedTypeMapMixin):
     """Removes 0^n terms from XOR (ADD) chains, since x XOR 0 = x.
 
     Only fires when the ADD chain is in a bitstring context (not ModInt
@@ -667,15 +763,59 @@ def _is_integer_literal(expr: frog_ast.Expression, value: int) -> bool:
     return isinstance(expr, frog_ast.Integer) and expr.num == value
 
 
+def _modulus_is_group_order(
+    modulus: frog_ast.Expression,
+    base: Optional[frog_ast.Expression],
+    type_map: Optional[NameTypeMap],
+) -> bool:
+    """True if *modulus* is provably a multiple of *base*'s group order.
+
+    The soundness condition for folding ModInt<M> group exponents
+    (``g^a * g^b -> g^(a+b)`` with the ADD taken mod M) is ``g^M ==
+    identity``, i.e. the group order divides M. The provable case checked
+    here is ``M`` syntactically equal to the base group's order --
+    ``GroupOrder(G)`` (the canonical/desugared form of ``G.order``) or the
+    ``FieldAccess(G, "order")`` surface form. Any other modulus (a bare
+    parameter, a smaller ``ModInt<2>``, an unrelated group's order) is not
+    provably order-dividing, so the fold is refused (audit F-272/F-273/F-283).
+    """
+    if base is None or type_map is None:
+        return False
+    base_type = _get_expression_type(base, type_map)
+    if not isinstance(base_type, frog_ast.GroupElemType):
+        return False
+    group = base_type.group
+    if isinstance(modulus, frog_ast.GroupOrder) and modulus.group == group:
+        return True
+    if (
+        isinstance(modulus, frog_ast.FieldAccess)
+        and modulus.name == "order"
+        and modulus.the_object == group
+    ):
+        return True
+    return False
+
+
 def _exponents_compatible(
     e1: frog_ast.Expression,
     e2: frog_ast.Expression,
     type_map: Optional[NameTypeMap],
+    base: Optional[frog_ast.Expression] = None,
 ) -> bool:
-    """Check that two exponents have compatible types for arithmetic.
+    """Check that two group exponents may be soundly combined arithmetically.
 
-    Returns True if both are ModInt (same modulus) or both are Int.
-    Also returns True if type information is unavailable (optimistic).
+    Both Int: sound (integer exponent arithmetic; no modular wrap).
+
+    Both ModInt: the fold reduces the combined exponent modulo the shared
+    modulus M, which matches the group law only when ``g^M == identity``.
+    So it requires (a) the SAME modulus on both -- two different moduli give
+    an ill-typed ADD the typechecker rejects (F-274) -- AND (b) that modulus
+    to be provably a multiple of *base*'s group order (F-272/F-273/F-283),
+    checked via :func:`_modulus_is_group_order`. Without *base* the modular
+    case cannot be shown sound and is refused.
+
+    Returns True when type information is unavailable (optimistic), matching
+    the historical contract for the untyped case.
     """
     if type_map is None:
         return True
@@ -684,18 +824,37 @@ def _exponents_compatible(
     if t1 is None or t2 is None:
         return True
     if isinstance(t1, frog_ast.ModIntType) and isinstance(t2, frog_ast.ModIntType):
-        return True
+        if t1.modulus != t2.modulus:
+            return False
+        return _modulus_is_group_order(t1.modulus, base, type_map)
     if isinstance(t1, frog_ast.IntType) and isinstance(t2, frog_ast.IntType):
         return True
     return False
 
 
-def _is_group_identity(expr: frog_ast.Expression) -> bool:
-    """Check if an expression is a group identity element (G.identity)."""
-    return (
+def _is_group_identity(
+    expr: frog_ast.Expression, type_map: Optional[NameTypeMap] = None
+) -> bool:
+    """Check if an expression is a group identity element (``G.identity``).
+
+    The object ``G`` must be typed ``Group`` in *type_map*. A bare name-match
+    on ``.identity`` (with no type check) would also cancel a non-group field
+    literally named ``identity`` -- e.g. an ``Int identity`` scheme field --
+    out of a product, which is unsound (audit F-285/F-286: ``x * E.identity``
+    where ``E`` is a scheme instance and ``identity`` an ``Int``). Without a
+    type_map the check is conservative and returns False, since the group
+    identity cannot be confirmed on the name alone.
+    """
+    if not (
         isinstance(expr, frog_ast.FieldAccess)
         and expr.name == "identity"
         and isinstance(expr.the_object, frog_ast.Variable)
+    ):
+        return False
+    if type_map is None:
+        return False
+    return isinstance(
+        _get_expression_type(expr.the_object, type_map), frog_ast.GroupType
     )
 
 
@@ -716,7 +875,7 @@ def _get_group_var_from_type(
     return None
 
 
-class ModIntSimplificationTransformer(Transformer):
+class ModIntSimplificationTransformer(MethodScopedTypeMapMixin):
     """Applies algebraic identities for ModInt arithmetic.
 
     Requires a type map to determine when operands are ModInt.
@@ -838,6 +997,36 @@ class ReflexiveComparisonTransformer(Transformer):
     ) -> None:
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
         self._proof_let_types = proof_let_types
+        self._shadowed_names: set[str] = set()
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.ASTNode:
+        # F-267: collect the method's locally-bound names (parameters, typed
+        # local declarations, bare `Function<D,R> H;` declarations). A local
+        # binding of a proof-let `Function` name shadows the deterministic
+        # let-function, so `has_nondeterministic_call` must not treat a call to
+        # that name as the pure let-function within this method.
+        bound: set[str] = {p.name for p in method.signature.parameters}
+
+        def _collect(n: frog_ast.ASTNode) -> bool:
+            if isinstance(n, frog_ast.VariableDeclaration):
+                bound.add(n.name)
+            elif (
+                isinstance(
+                    n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+                )
+                and n.the_type is not None
+                and isinstance(n.var, frog_ast.Variable)
+            ):
+                bound.add(n.var.name)
+            return False
+
+        SearchVisitor(_collect).visit(method.block)
+        old = self._shadowed_names
+        self._shadowed_names = bound
+        try:
+            return self._transform_children(method)
+        finally:
+            self._shadowed_names = old
 
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
@@ -854,6 +1043,7 @@ class ReflexiveComparisonTransformer(Transformer):
                 transformed.left_expression,
                 self._proof_namespace,
                 self._proof_let_types,
+                self._shadowed_names,
             )
         ):
             return frog_ast.Boolean(True)
@@ -864,13 +1054,14 @@ class ReflexiveComparisonTransformer(Transformer):
                 transformed.left_expression,
                 self._proof_namespace,
                 self._proof_let_types,
+                self._shadowed_names,
             )
         ):
             return frog_ast.Boolean(False)
         return transformed
 
 
-class BooleanIdentityTransformer(Transformer):
+class BooleanIdentityTransformer(MethodScopedTypeMapMixin):
     """Simplifies boolean AND/OR with literal true/false operands.
 
     OR rules (only when at least one operand is a Boolean literal,
@@ -885,6 +1076,9 @@ class BooleanIdentityTransformer(Transformer):
       x && false / false && x -> false
     """
 
+    def __init__(self, type_map: Optional[NameTypeMap] = None) -> None:
+        self.type_map = type_map
+
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
     ) -> frog_ast.Expression:
@@ -897,6 +1091,23 @@ class BooleanIdentityTransformer(Transformer):
         right = transformed.right_expression
 
         if transformed.operator == frog_ast.BinaryOperators.OR:
+            # F-278: `||` is overloaded (boolean OR vs BitString concatenation).
+            # The boolean identities are valid only for a boolean OR. A
+            # Boolean-literal operand implies boolean OR in a well-typed program,
+            # but a directly constructed ill-typed AST (`bs || true`, `bs` a
+            # BitString) would otherwise collapse to `Boolean(True)`, destroying
+            # the bitstring. Skip when either operand is a known BitString.
+            if self.type_map is not None and (
+                isinstance(
+                    _get_expression_type(left, self.type_map),
+                    frog_ast.BitStringType,
+                )
+                or isinstance(
+                    _get_expression_type(right, self.type_map),
+                    frog_ast.BitStringType,
+                )
+            ):
+                return transformed
             # Only simplify when at least one operand is a Boolean literal
             # (BitString concatenation uses || but never has Boolean literals)
             if isinstance(left, frog_ast.Boolean) and left.bool:
@@ -1018,14 +1229,47 @@ class BooleanAbsorptionTransformer(Transformer):
                     and self._is_subset(disj_sets[i], disj_sets[j])
                     and self._is_subset(disj_sets[j], disj_sets[i])
                 ):
-                    keep[j] = False
+                    # Gap F (dual): dropping conjunct j removes its evaluation.
+                    # If it contains a non-deterministic call, i and j are
+                    # INDEPENDENT draws (i.i.d. per ruling 7.A.6) even when
+                    # structurally equal, so `f() && f()` is not `f()` and
+                    # `_is_subset` multiplicity-blindness (F-243) does not make
+                    # them equal. Only dedup deterministic duplicates (F-242).
+                    if not has_nondeterministic_call(
+                        conjuncts[j],
+                        self.ctx.proof_namespace,
+                        self.ctx.proof_let_types,
+                    ):
+                        keep[j] = False
+                    elif self.ctx is not None:
+                        self.ctx.near_misses.append(
+                            NearMiss(
+                                transform_name="Boolean Absorption",
+                                reason=(
+                                    "duplicate conjuncts not deduplicated: the "
+                                    "conjunct contains a non-deterministic call, "
+                                    "so the two copies are independent draws"
+                                ),
+                                location=None,
+                                suggestion=None,
+                                variable=None,
+                                method=None,
+                            )
+                        )
         if all(keep):
             return transformed
+        # F-245: keep the surviving conjuncts in SOURCE order. `&&` is
+        # left-to-right strict (SEMANTICS 3.4): a later conjunct may depend on
+        # an earlier one as a guard -- `x in M && M[x] == 0` evaluates `M[x]`
+        # only when `x in M`, so it never performs an absent-key read. Sorting
+        # by `node_sort_key` moved `M[x] == 0` ahead of its guard (`"EQUALS" <
+        # "IN"`), making the read unconditional and changing observable
+        # behaviour. (The previous rationale -- matching a form
+        # NormalizeCommutativeChains produces -- was mistaken: AND/OR are NOT in
+        # its commutative-op sets, so it never reorders a boolean chain. Source
+        # order is already the canonical form for a non-absorbed chain, so
+        # dropping absorbed conjuncts in place stays consistent with it.)
         kept_conjuncts = [c for c, k in zip(conjuncts, keep) if k]
-        # Sort by node_sort_key so the rebuilt chain is canonical and
-        # matches the form produced when no absorption was needed (where
-        # NormalizeCommutativeChains sorts the chain in a separate pass).
-        kept_conjuncts.sort(key=node_sort_key)
         if len(kept_conjuncts) == 1:
             return kept_conjuncts[0]
         result: frog_ast.Expression = kept_conjuncts[0]
@@ -1095,6 +1339,14 @@ class UniformGroupElemSimplificationTransformer(BlockTransformer):
                 and isinstance(statement.var, frog_ast.Variable)
                 and isinstance(statement.the_type, frog_ast.GroupElemType)
                 and isinstance(statement.sampled_from, frog_ast.GroupElemType)
+                # F-282: the absorption `u * c -> u` is sound only when `u` is
+                # uniform over the SAME group as the multiplication is carried
+                # out in (the declared type's group). If the sampled group
+                # differs (`GroupElem<G> u <- GroupElem<H>`), `u` is uniform over
+                # H but `u * g` lands in the coset `gH` -- a different support --
+                # so `u * g` is not distributed as `u`. Require the two groups to
+                # match structurally.
+                and statement.the_type.group == statement.sampled_from.group
             ):
                 continue
 
@@ -1104,23 +1356,9 @@ class UniformGroupElemSimplificationTransformer(BlockTransformer):
                 copy.deepcopy(list(block.statements[index + 1 :]))
             )
 
-            def uses_var(name: str, node: frog_ast.ASTNode) -> bool:
-                return isinstance(node, frog_ast.Variable) and node.name == name
-
-            total_uses = 0
-            count_block = copy.deepcopy(remaining_block)
-            while True:
-                found = SearchVisitor(functools.partial(uses_var, var_name)).visit(
-                    count_block
-                )
-                if found is None:
-                    break
-                total_uses += 1
-                if total_uses > 1:
-                    break
-                count_block = ReplaceTransformer(
-                    found, frog_ast.Variable(var_name + "__counted__")
-                ).transform(count_block)
+            # F-281: count by AST position (not is-identity replacement) so two
+            # live reads sharing one Variable object are not tallied as one.
+            total_uses = _count_variable_uses(var_name, remaining_block)
 
             if total_uses != 1:
                 if total_uses > 1 and self.ctx is not None:
@@ -1170,6 +1408,40 @@ class UniformGroupElemSimplificationTransformer(BlockTransformer):
             if mul_node is None:
                 continue
 
+            # F-293 (sibling sweep): the search descends into Type
+            # parameterizations, so a matched `u * c` could be a type parameter
+            # rather than a value expression. Rewriting it would edit a type;
+            # decline.
+            if _use_node_inside_type(remaining_block, mul_node):
+                continue
+
+            # The "used exactly once" count above is textual.  If the single
+            # textual use sits inside a loop body while the sample is outside,
+            # the same uniform value is multiplied by a fresh partner each
+            # iteration (`u <- GroupElem<G>; for(...) { M[i] = u * g^i; }`),
+            # so the absorption is unsound (audit F-279).
+            if _use_node_inside_loop(remaining_block, mul_node):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Uniform GroupElem Simplification",
+                            reason=(
+                                f"Uniform-GroupElem did not fire for '{var_name}': "
+                                f"its single use is inside a loop while the sample "
+                                f"is outside, so the value is combined with a fresh "
+                                f"partner each iteration (not single-use)"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"Sample '{var_name}' inside the loop body if a "
+                                f"fresh uniform value is intended each iteration"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
+                continue
+
             assert isinstance(mul_node, frog_ast.BinaryOperation)
             if (
                 isinstance(mul_node.left_expression, frog_ast.Variable)
@@ -1209,7 +1481,12 @@ class BooleanIdentity(TransformPass):
     name = "Boolean Identity"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return BooleanIdentityTransformer().transform(game)
+        type_map = build_game_type_map(game, ctx.proof_let_types)
+        return (
+            BooleanIdentityTransformer(type_map)
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )
 
 
 class XorCancellation(TransformPass):
@@ -1217,7 +1494,11 @@ class XorCancellation(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return XorCancellationTransformer(type_map, ctx).transform(game)
+        return (
+            XorCancellationTransformer(type_map, ctx)
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )
 
 
 class XorIdentity(TransformPass):
@@ -1225,7 +1506,11 @@ class XorIdentity(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return XorIdentityTransformer(type_map).transform(game)
+        return (
+            XorIdentityTransformer(type_map)
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )
 
 
 class ModIntSimplification(TransformPass):
@@ -1233,11 +1518,15 @@ class ModIntSimplification(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return ModIntSimplificationTransformer(
-            type_map,
-            proof_namespace=ctx.proof_namespace,
-            proof_let_types=ctx.proof_let_types,
-        ).transform(game)
+        return (
+            ModIntSimplificationTransformer(
+                type_map,
+                proof_namespace=ctx.proof_namespace,
+                proof_let_types=ctx.proof_let_types,
+            )
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )
 
 
 def _flatten_chain(
@@ -1286,6 +1575,14 @@ class NormalizeCommutativeChainsTransformer(Transformer):
     structurally smaller one is on the left.
     """
 
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace | None = None,
+        proof_let_types: NameTypeMap | None = None,
+    ) -> None:
+        self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
+        self._proof_let_types = proof_let_types
+
     def transform_binary_operation(
         self, expr: frog_ast.BinaryOperation
     ) -> frog_ast.Expression:
@@ -1295,6 +1592,18 @@ class NormalizeCommutativeChainsTransformer(Transformer):
             self.transform(expr.left_expression),
             self.transform(expr.right_expression),
         )
+
+        # F-260: reordering operands is sound only when it cannot change the
+        # order in which observable side effects fire. Operands that reduce to
+        # pure values commute freely, but a stateful call
+        # (`challenger.Inc() + challenger.Get()`) does not: swapping it past
+        # another call changes which side effect runs first, so two genuinely
+        # distinguishable expressions would canonicalize to the same form.
+        # Decline to reorder any chain containing a non-deterministic call.
+        if has_nondeterministic_call(
+            transformed, self._proof_namespace, self._proof_let_types
+        ):
+            return transformed
 
         # Commutative + associative: flatten and sort the full chain.
         if transformed.operator in _COMMUTATIVE_ASSOCIATIVE_OPS:
@@ -1326,7 +1635,10 @@ class NormalizeCommutativeChains(TransformPass):
     name = "Normalize Commutative Chains"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return NormalizeCommutativeChainsTransformer().transform(game)
+        return NormalizeCommutativeChainsTransformer(
+            proof_namespace=ctx.proof_namespace,
+            proof_let_types=ctx.proof_let_types,
+        ).transform(game)
 
 
 class FlattenConcatChainTransformer(Transformer):
@@ -1407,21 +1719,10 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         }
         # Gap D: drop bindings whose call args reference free variables
         # that may differ between the binding site and the comparison
-        # site. A free variable is "stable" iff it has at most one write
-        # in the method (parameters and write-once typed-locals qualify;
-        # fields written anywhere in the method do not).
-        param_names = {p.name for p in method.signature.parameters}
-        field_names = {f.name for f in self.game.fields}
-        stable_field_names = {
-            f for f in field_names if _count_field_assigns(method.block, f) == 0
-        }
-        # Top-level single-write typed-init locals are stable (write once,
-        # read many). A locally-rebound name is excluded.
-        all_locals, all_reassigned = _scan_top_level_single_writes(
-            method.block, value_predicate=lambda v: True
-        )
-        single_write_locals = set(all_locals.keys()) - all_reassigned
-        stable_names = param_names | stable_field_names | single_write_locals
+        # site. A free variable is "stable" iff its value is fixed across
+        # the method (params, fields unwritten in this method, write-once
+        # typed-locals -- nested-aware). See _stable_value_names.
+        stable_names = _stable_value_names(method, self.game)
         for name in list(funccall_bindings.keys()):
             call = funccall_bindings[name]
             free = {
@@ -1667,7 +1968,8 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         if init is None:
             return expr
         rhs: Optional[frog_ast.Expression] = None
-        for stmt in init.block.statements:
+        def_idx = -1
+        for idx, stmt in enumerate(init.block.statements):
             if (
                 isinstance(stmt, frog_ast.Assignment)
                 and stmt.the_type is None
@@ -1677,6 +1979,7 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
                 if rhs is not None:
                     return expr  # multiple top-level assignments
                 rhs = stmt.value
+                def_idx = idx
         if rhs is None:
             return expr
         # No assignment may exist anywhere else in the game.
@@ -1692,12 +1995,30 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         # Free vars in rhs must be cross-method visible.  Anything else
         # (Init-local declarations) cannot legally be referenced from the
         # site where this resolved expression will be substituted in.
-        visible = {f.name for f in self.game.fields} | {
-            p.name for p in self.game.parameters
-        }
+        field_names = {f.name for f in self.game.fields}
+        visible = field_names | {p.name for p in self.game.parameters}
         free = {v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(rhs))}
         if not free.issubset(visible):
             return expr
+        # F-248: the resolved RHS is substituted at an arbitrary comparison
+        # site (any oracle, any time), so each free variable must hold the
+        # SAME value it had at Init when the field was frozen. Params are
+        # immutable; a field free var is stable only if it is never written
+        # AFTER the field's defining assignment -- neither later in Init nor
+        # in any non-Init method. Otherwise `F == E.Enc(t)` would collapse to
+        # `t == t` even though `F` holds the stale Init-time `E.Enc(t)`.
+        for t in free & field_names:
+            if any(
+                reassigns_or_rebinds({t}, s)
+                for s in init.block.statements[def_idx + 1 :]
+            ):
+                return expr
+            if any(
+                _count_field_assigns(m.block, t) > 0
+                for m in self.game.methods
+                if m is not init
+            ):
+                return expr
         return rhs
 
     @staticmethod
@@ -1765,12 +2086,19 @@ def _scan_top_level_single_writes(
     ``GenericFor`` statements. (Loop iteration overwrites the variable,
     so any earlier binding cannot be relied on at later use sites.)
 
-    Bindings declared inside nested blocks (if/for bodies) are NOT
+    Bindings *declared* inside nested blocks (if/for bodies) are NOT
     collected: a declaration inside a nested scope is not visible
-    outside it. This is the AST-level analogue of FrogLang's surface
-    scoping rules.
+    outside it. But a *write* to a top-level-bound name that occurs
+    inside a nested block DOES invalidate the binding: the name is still
+    in scope there, so the nested write can change its value before a
+    later use at the top level. A scan that ignored nested writes would
+    treat a stale binding as write-once and substitute it incorrectly
+    (audit F-247 / F-251), so the nested-aware invalidation below is
+    mandatory for soundness -- it uses the node-kind-complete,
+    recursive :func:`reassigns_or_rebinds`.
     """
     bindings: dict[str, frog_ast.Expression] = {}
+    binding_stmt: dict[str, frog_ast.Statement] = {}
     reassigned: set[str] = set()
     for stmt in block.statements:
         if isinstance(stmt, frog_ast.Assignment) and isinstance(
@@ -1783,6 +2111,7 @@ def _scan_top_level_single_writes(
                     reassigned.add(name)
                 else:
                     bindings[name] = stmt.value
+                    binding_stmt[name] = stmt
             else:
                 if name in bindings:
                     reassigned.add(name)
@@ -1797,7 +2126,45 @@ def _scan_top_level_single_writes(
         elif isinstance(stmt, frog_ast.GenericFor):
             if stmt.var_name in bindings:
                 reassigned.add(stmt.var_name)
+    # Nested-aware invalidation: any write to a bound name anywhere OTHER
+    # than its single defining init statement -- including element/field
+    # writes and writes inside if/for bodies -- means the binding is not
+    # write-once and must not be relied upon at later use sites.
+    for name, def_stmt in binding_stmt.items():
+        if name in reassigned:
+            continue
+        for stmt in block.statements:
+            if stmt is def_stmt:
+                continue
+            if reassigns_or_rebinds({name}, stmt):
+                reassigned.add(name)
+                break
     return bindings, reassigned
+
+
+def _stable_value_names(method: frog_ast.Method, game: frog_ast.Game) -> set[str]:
+    """Names whose VALUE is fixed across *method*'s execution.
+
+    A name is value-stable if it is a method parameter (immutable), a game
+    field never written in this method (``_count_field_assigns == 0``), or a
+    top-level write-once typed-init local (nested-aware via
+    :func:`_scan_top_level_single_writes`).
+
+    Used to decide whether a local binding ``v = f(...free...)`` /
+    ``v = a || b`` may be substituted at a later comparison site: the
+    substitution re-evaluates the RHS there, so every free variable of the
+    RHS must hold the same value it did at the binding site (audit F-252,
+    and the Gap-D stability set of InjectiveEqualitySimplify / F-247).
+    """
+    param_names = {p.name for p in method.signature.parameters}
+    stable_field_names = {
+        f.name for f in game.fields if _count_field_assigns(method.block, f.name) == 0
+    }
+    all_locals, all_reassigned = _scan_top_level_single_writes(
+        method.block, value_predicate=lambda v: True
+    )
+    single_write_locals = set(all_locals.keys()) - all_reassigned
+    return param_names | stable_field_names | single_write_locals
 
 
 def _flatten_concat(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
@@ -1860,7 +2227,7 @@ def _bitstring_length(
     return None
 
 
-class ConcatEqualityDecomposeTransformer(Transformer):
+class ConcatEqualityDecomposeTransformer(MethodScopedTypeMapMixin):
     """Rewrites ``x == (a1 || a2 || ... || ak)`` (or the mirror form)
     to ``x[0:n1] == a1 && x[n1:n1+n2] == a2 && ... && x[s:s+nk] == ak``,
     where ``ni`` is the statically-derivable BitString length of ``ai``.
@@ -1925,12 +2292,39 @@ class ConcatEqualityDecomposeTransformer(Transformer):
         )
         for name in reassigned:
             bindings.pop(name, None)
+        # F-252: a concat binding `v = a || b` is substituted textually at
+        # the comparison site, re-evaluating its RHS there. Drop any binding
+        # whose RHS free variables are not all value-stable (a later write to
+        # `a` -- even at top level, or nested -- would make the substituted
+        # `a || b` read the mutated value, diverging from the frozen `v`).
+        if self._scope_game is not None:
+            stable_names = _stable_value_names(method, self._scope_game)
+            for name in list(bindings.keys()):
+                free = {
+                    v.name
+                    for v in VariableCollectionVisitor().visit(
+                        copy.deepcopy(bindings[name])
+                    )
+                }
+                if not free.issubset(stable_names):
+                    bindings.pop(name, None)
         old = self.local_concat_bindings
         self.local_concat_bindings = bindings
+        # Scope the type map to THIS method (fields + this method's
+        # params/locals) so a sibling method's same-named binding cannot
+        # launder a wrong BitString length onto this method's operands
+        # (audit F-255). Mirrors MethodScopedTypeMapMixin.transform_method,
+        # which this override replaces.
+        saved_type_map = self.type_map
+        if self._scope_game is not None:
+            self.type_map = build_method_type_map(
+                self._scope_game, method, self._scope_let_types
+            )
         try:
             new_block = self.transform(method.block)
         finally:
             self.local_concat_bindings = old
+            self.type_map = saved_type_map
         if new_block is method.block:
             return method
         return frog_ast.Method(method.signature, new_block)
@@ -1965,6 +2359,31 @@ class ConcatEqualityDecomposeTransformer(Transformer):
         elif is_concat(left):
             concat_expr, other = left, right
         else:
+            return transformed
+
+        # Gap A (other): `other` is sliced once per concat term below (a
+        # copy.deepcopy at each slice). If it contains a non-deterministic
+        # call, the k slices become k INDEPENDENT draws (i.i.d. per ruling
+        # 7.A.6) instead of k views of one value, so the decomposition is
+        # unsound. Decline (the resolved-binding RHS is already guarded in
+        # `_resolve_to_concat`; this guards the un-resolved `other`). (F-254)
+        if has_nondeterministic_call(
+            other, self.ctx.proof_namespace, self.ctx.proof_let_types
+        ):
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="Concat Equality Decompose",
+                    reason=(
+                        "the non-concat operand contains a non-deterministic "
+                        "call; slicing it per concat term would duplicate the "
+                        "call into independent draws"
+                    ),
+                    location=binary_operation.origin,
+                    suggestion=None,
+                    variable=None,
+                    method=None,
+                )
+            )
             return transformed
 
         terms = _flatten_concat(concat_expr)
@@ -2133,7 +2552,11 @@ class ConcatEqualityDecompose(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return ConcatEqualityDecomposeTransformer(ctx, type_map).transform(game)
+        return (
+            ConcatEqualityDecomposeTransformer(ctx, type_map)
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2141,7 +2564,7 @@ class ConcatEqualityDecompose(TransformPass):
 # ---------------------------------------------------------------------------
 
 
-class TupleEqualityDecomposeTransformer(Transformer):
+class TupleEqualityDecomposeTransformer(MethodScopedTypeMapMixin):
     """Rewrites ``a != b`` between tuple-typed expressions to the
     component-wise disjunction ``a[0]!=b[0] || ... || a[k-1]!=b[k-1]``.
 
@@ -2174,6 +2597,14 @@ class TupleEqualityDecomposeTransformer(Transformer):
             t = self.type_map.get(expr.name)
             if isinstance(t, frog_ast.ProductType):
                 return len(t.types)
+        # F-258: a call returning a product type has that product's arity (e.g.
+        # `F.Coin() : [Bool, Bool]`). Needed so `t != F.Coin()` cross-checks as
+        # a same-arity pair rather than declining; the F-257 purity gate still
+        # blocks a NON-deterministic such call from being projected per element.
+        if isinstance(expr, frog_ast.FuncCall):
+            m = _lookup_primitive_method(expr.func, self.ctx.proof_namespace)
+            if m is not None and isinstance(m.return_type, frog_ast.ProductType):
+                return len(m.return_type.types)
         return None
 
     def transform_binary_operation(
@@ -2189,11 +2620,50 @@ class TupleEqualityDecomposeTransformer(Transformer):
             return transformed
         left = transformed.left_expression
         right = transformed.right_expression
-        arity = self._product_arity(left)
-        if arity is None:
-            arity = self._product_arity(right)
-        if arity is None or arity < 1:
+        # F-258: BOTH operands must be products of the SAME arity. The old
+        # one-sided read (left's arity, falling back to right's) let a product
+        # be compared against a NON-product operand -- e.g. a `[Int,Int]?`
+        # variable holding `None`. Projecting `right[i]` then manufactured
+        # `None[i]`, an undefined read that corrupted an everywhere-defined
+        # game (`[1,2] != None` is just `true`) into an always-aborting one, so
+        # a VALID hop was wrongly REJECTED. Require both arities present and
+        # equal; a non-product / optional operand declines the decomposition.
+        left_arity = self._product_arity(left)
+        right_arity = self._product_arity(right)
+        if left_arity is None or right_arity is None or left_arity != right_arity:
             return transformed
+        arity = left_arity
+        if arity < 1:
+            return transformed
+        # Purity gate: `project` deep-copies a non-Tuple operand once per
+        # component (arity copies via ArrayAccess). A bare Variable is a
+        # deterministic re-read and a Tuple literal projects its distinct
+        # components, but any OTHER operand carrying a non-deterministic call
+        # (e.g. `Coin()` returning a tuple) would be evaluated `arity` times
+        # -- k INDEPENDENT draws (i.i.d. per ruling 7.A.6) instead of k views
+        # of one value. Decline. (F-257)
+        if arity >= 2:
+            for operand in (left, right):
+                if not isinstance(
+                    operand, (frog_ast.Tuple, frog_ast.Variable)
+                ) and has_nondeterministic_call(
+                    operand, self.ctx.proof_namespace, self.ctx.proof_let_types
+                ):
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Tuple Equality Decompose",
+                            reason=(
+                                "a tuple operand contains a non-deterministic "
+                                "call; projecting it per component would "
+                                "duplicate the call into independent draws"
+                            ),
+                            location=binary_operation.origin,
+                            suggestion=None,
+                            variable=None,
+                            method=None,
+                        )
+                    )
+                    return transformed
         # op is restricted to NOTEQUALS at the gate above; product
         # disequality decomposes via OR of per-component disequalities.
         combiner = frog_ast.BinaryOperators.OR
@@ -2218,7 +2688,11 @@ class TupleEqualityDecompose(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return TupleEqualityDecomposeTransformer(ctx, type_map).transform(game)
+        return (
+            TupleEqualityDecomposeTransformer(ctx, type_map)
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2226,7 +2700,7 @@ class TupleEqualityDecompose(TransformPass):
 # ---------------------------------------------------------------------------
 
 
-class GroupElemSimplificationTransformer(Transformer):
+class GroupElemSimplificationTransformer(MethodScopedTypeMapMixin):
     """Simplifies GroupElem expressions using group algebra identities.
 
     Rules:
@@ -2248,10 +2722,16 @@ class GroupElemSimplificationTransformer(Transformer):
         return isinstance(expr, frog_ast.GroupGenerator)
 
     def _exponents_multipliable(
-        self, e1: frog_ast.Expression, e2: frog_ast.Expression
+        self,
+        e1: frog_ast.Expression,
+        e2: frog_ast.Expression,
+        base: Optional[frog_ast.Expression] = None,
     ) -> bool:
-        """Check that e1 * e2 is well-typed (both ModInt or both Int)."""
-        return _exponents_compatible(e1, e2, self.type_map)
+        """Check that ``base ^ (e1 * e2)`` soundly folds ``(base^e1)^e2``.
+
+        Both Int, or both ModInt sharing a modulus that is the base group's
+        order (see :func:`_exponents_compatible`)."""
+        return _exponents_compatible(e1, e2, self.type_map, base)
 
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
@@ -2284,7 +2764,9 @@ class GroupElemSimplificationTransformer(Transformer):
             and isinstance(left, frog_ast.BinaryOperation)
             and left.operator == frog_ast.BinaryOperators.EXPONENTIATE
             and self._is_groupelem_expr(left.left_expression)
-            and self._exponents_multipliable(left.right_expression, right)
+            and self._exponents_multipliable(
+                left.right_expression, right, left.left_expression
+            )
         ):
             return frog_ast.BinaryOperation(
                 frog_ast.BinaryOperators.EXPONENTIATE,
@@ -2299,15 +2781,15 @@ class GroupElemSimplificationTransformer(Transformer):
         # --- Multiplicative identity rules ---
         if op == frog_ast.BinaryOperators.MULTIPLY:
             # identity * g  -->  g
-            if _is_group_identity(left):
+            if _is_group_identity(left, self.type_map):
                 return right
             # g * identity  -->  g
-            if _is_group_identity(right):
+            if _is_group_identity(right, self.type_map):
                 return left
 
         if op == frog_ast.BinaryOperators.DIVIDE:
             # g / identity  -->  g
-            if _is_group_identity(right):
+            if _is_group_identity(right, self.type_map):
                 return left
 
         return transformed
@@ -2318,7 +2800,11 @@ class GroupElemSimplification(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return GroupElemSimplificationTransformer(type_map).transform(game)
+        return (
+            GroupElemSimplificationTransformer(type_map)
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )
 
 
 def _flatten_mul_div_chain(
@@ -2373,7 +2859,7 @@ def _is_groupelem_mul_div_chain(
     return isinstance(left_type, frog_ast.GroupElemType)
 
 
-class GroupElemCancellationTransformer(Transformer):
+class GroupElemCancellationTransformer(MethodScopedTypeMapMixin):
     """Cancels matching terms in GroupElem MULTIPLY/DIVIDE chains.
 
     In an abelian group, ``x * m / x`` simplifies to ``m`` when ``x``
@@ -2447,11 +2933,15 @@ class GroupElemCancellation(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return GroupElemCancellationTransformer(
-            type_map,
-            proof_namespace=ctx.proof_namespace,
-            proof_let_types=ctx.proof_let_types,
-        ).transform(game)
+        return (
+            GroupElemCancellationTransformer(
+                type_map,
+                proof_namespace=ctx.proof_namespace,
+                proof_let_types=ctx.proof_let_types,
+            )
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )
 
 
 def _get_exponent_base(
@@ -2466,7 +2956,7 @@ def _get_exponent_base(
     return None
 
 
-class GroupElemExponentCombinationTransformer(Transformer):
+class GroupElemExponentCombinationTransformer(MethodScopedTypeMapMixin):
     """Combines same-base exponentiations in GroupElem multiply/divide chains.
 
     ``g^a * g^b`` -> ``g^(a + b)``
@@ -2518,7 +3008,9 @@ class GroupElemExponentCombinationTransformer(Transformer):
                         if (
                             ex_pair is not None
                             and ex_pair[0] == base
-                            and _exponents_compatible(ex_pair[1], exp, self.type_map)
+                            and _exponents_compatible(
+                                ex_pair[1], exp, self.type_map, base
+                            )
                         ):
                             new_pos[i] = frog_ast.BinaryOperation(
                                 frog_ast.BinaryOperators.EXPONENTIATE,
@@ -2552,7 +3044,7 @@ class GroupElemExponentCombinationTransformer(Transformer):
                             pos_pair is not None
                             and pos_pair[0] == neg_base
                             and _exponents_compatible(
-                                pos_pair[1], neg_exp, self.type_map
+                                pos_pair[1], neg_exp, self.type_map, neg_base
                             )
                         ):
                             new_pos[i] = frog_ast.BinaryOperation(
@@ -2584,8 +3076,12 @@ class GroupElemExponentCombination(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        return GroupElemExponentCombinationTransformer(
-            type_map,
-            proof_namespace=ctx.proof_namespace,
-            proof_let_types=ctx.proof_let_types,
-        ).transform(game)
+        return (
+            GroupElemExponentCombinationTransformer(
+                type_map,
+                proof_namespace=ctx.proof_namespace,
+                proof_let_types=ctx.proof_let_types,
+            )
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )

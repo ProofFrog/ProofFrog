@@ -535,3 +535,54 @@ class TestCrossMethodFieldAliasAliasAware:
         result = CrossMethodFieldAliasTransformer(proof_namespace=ns).transform(game)
         assert result == game
 
+
+def test_f174_declines_when_initialize_has_early_return() -> None:
+    # Initialize has an early return before the field assignment, so `stored`
+    # is undefined on the skip trace. CrossMethodFieldAlias must NOT alias
+    # Oracle's `GG.evaluate(k)` to the field (which would read undefined
+    # state on that trace). See audit F-174.
+    game = frog_parser.parse_game("""
+        Game Foo(G GG, Bool skip) {
+            BitString<n> k;
+            BitString<n> stored;
+            Int Initialize() {
+                if (skip) { return 0; }
+                stored = GG.evaluate(k);
+                return 1;
+            }
+            BitString<n> Oracle() {
+                return GG.evaluate(k);
+            }
+        }
+        """)
+    ns = _make_det_namespace()
+    ns["GG"] = ns["G"]
+    result = CrossMethodFieldAliasTransformer(proof_namespace=ns).transform(game)
+    oracle = result.methods[1]
+    ret = oracle.block.statements[0]
+    assert isinstance(ret, frog_ast.ReturnStatement)
+    # Declined: Oracle still returns the call, not the field `stored`.
+    assert isinstance(ret.expression, frog_ast.FuncCall)
+
+
+def test_f174_still_aliases_without_early_return() -> None:
+    # Positive control: no early return in Initialize -> the alias fires.
+    game = frog_parser.parse_game("""
+        Game Foo(G GG) {
+            BitString<n> k;
+            BitString<n> stored;
+            Void Initialize() {
+                stored = GG.evaluate(k);
+            }
+            BitString<n> Oracle() {
+                return GG.evaluate(k);
+            }
+        }
+        """)
+    ns = _make_det_namespace()
+    ns["GG"] = ns["G"]
+    result = CrossMethodFieldAliasTransformer(proof_namespace=ns).transform(game)
+    ret = result.methods[1].block.statements[0]
+    assert isinstance(ret, frog_ast.ReturnStatement)
+    assert isinstance(ret.expression, frog_ast.Variable)
+    assert ret.expression.name == "stored"

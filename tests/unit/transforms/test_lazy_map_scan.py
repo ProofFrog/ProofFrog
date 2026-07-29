@@ -729,3 +729,20 @@ def test_body_contains_unrelated_array_access_preserved() -> None:
         }
     """
     _apply_and_expect(game_src, expected_src)
+
+
+def test_f143_bare_references_whitelist_limited_to_indices_0_and_1() -> None:
+    """F-143: `_bare_references` must whitelist a `var[k]` access only for the
+    indices that `_TupleAccessSubstitution` actually rewrites (0 and 1). A
+    higher literal index like `var[2]` is never substituted, so allowing it
+    through the "bare reference" check would let it survive the rewrite as a
+    dangling reference to the deleted loop binder. `var[2]` must therefore count
+    as a bare reference (so the pass declines), while `var[0]`/`var[1]` do not."""
+    from proof_frog.transforms.map_iteration import _bare_references
+
+    assert _bare_references(frog_parser.parse_expression("e[0] + e[1]"), "e") is False
+    assert _bare_references(frog_parser.parse_expression("e[0]"), "e") is False
+    assert _bare_references(frog_parser.parse_expression("e[1]"), "e") is False
+    # An out-of-range index is not substituted -> counts as a bare reference.
+    assert _bare_references(frog_parser.parse_expression("e[2]"), "e") is True
+    assert _bare_references(frog_parser.parse_expression("e[0] + e[2]"), "e") is True

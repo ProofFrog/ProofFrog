@@ -454,3 +454,72 @@ def test_xor_cancellation_skips_nondeterministic_pairs() -> None:
         "F.eval(x) + v + F.eval(x) should NOT cancel F.eval(x) terms when "
         "F.eval is non-deterministic"
     )
+
+
+def test_f267_shadowed_let_function_not_reflexive() -> None:
+    """F-267: a proof-let `Function<Int,Int> H` is deterministic, but a
+    method-LOCAL `Function<Int,Int> H;` (declared, unassigned) shadows it.
+    Calling the local is an undefined read, so `H(0) == H(0)` must NOT
+    simplify to `true` (the flat proof_let_types lookup misclassified it)."""
+    from proof_frog.visitors import NameTypeMap
+
+    let_types = NameTypeMap()
+    let_types.set(
+        "H", frog_ast.FunctionType(frog_ast.IntType(), frog_ast.IntType())
+    )
+    method = frog_parser.parse_method(
+        """
+        Bool Cmp() {
+            Function<Int, Int> H;
+            return H(0) == H(0);
+        }
+        """
+    )
+    out = ReflexiveComparisonTransformer(
+        proof_let_types=let_types
+    ).transform(method)
+    assert "H(0) == H(0)" in str(out)  # not simplified to true
+
+
+def test_f267_unshadowed_let_function_still_reflexive() -> None:
+    """Positive control: an unshadowed proof-let Function H is deterministic,
+    so `H(0) == H(0)` still simplifies to `true`."""
+    from proof_frog.visitors import NameTypeMap
+
+    let_types = NameTypeMap()
+    let_types.set(
+        "H", frog_ast.FunctionType(frog_ast.IntType(), frog_ast.IntType())
+    )
+    method = frog_parser.parse_method(
+        """
+        Bool Cmp() {
+            return H(0) == H(0);
+        }
+        """
+    )
+    out = ReflexiveComparisonTransformer(
+        proof_let_types=let_types
+    ).transform(method)
+    assert "H(0) == H(0)" not in str(out)  # simplified to true
+
+
+def test_f264_modint_evidence_overrides_leading_bitstring_literal() -> None:
+    """F-264: `_is_bitstring_add_chain` must scan ALL terms, not return on the
+    first. A ModInt term in an ADD chain is definitive evidence of ModInt
+    addition (where `z + z` is `2z`, not `0`), so it overrides a leading
+    `BitStringLiteral`. `0^n + z + z` with `z: ModInt<q>` must be classified as
+    NOT a bitstring/XOR chain, or the pass would XOR-cancel `z + z` to 0."""
+    from proof_frog.transforms.algebraic import _is_bitstring_add_chain
+    from proof_frog.visitors import NameTypeMap
+
+    type_map = NameTypeMap()
+    type_map.set("z", frog_ast.ModIntType(frog_ast.Variable("q")))
+    # 0^n + z + z  (leading BitStringLiteral, later ModInt terms)
+    chain = frog_parser.parse_expression("0^n + z + z")
+    assert _is_bitstring_add_chain(chain, type_map) is False, (
+        "a ModInt term must override a leading BitStringLiteral"
+    )
+    # Control: a pure BitString chain with a leading literal still cancels.
+    type_map.set("x", frog_ast.BitStringType(frog_ast.Variable("n")))
+    bs_chain = frog_parser.parse_expression("0^n + x + x")
+    assert _is_bitstring_add_chain(bs_chain, type_map) is True

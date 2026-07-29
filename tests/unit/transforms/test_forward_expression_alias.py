@@ -297,3 +297,86 @@ def test_forward_expression_alias_field(
 
     transformed_ast = ForwardExpressionAliasTransformer().transform(game_ast)
     assert expected_ast == transformed_ast
+
+
+def test_f184_self_referential_field_assign_not_aliased() -> None:
+    """F-184: `ctr = ctr + 1` -- the assigned field `ctr` is a free variable of
+    its own RHS, so `ctr == ctr + 1` does NOT hold afterward; a later
+    `ctr + 1` must not be aliased to `ctr`."""
+    game = frog_parser.parse_game(
+        """
+        Game G(Int lambda) {
+            Int ctr = 0;
+            Int Oracle() {
+                ctr = ctr + 1;
+                return ctr + 1;
+            }
+        }
+        """
+    )
+    out = str(ForwardExpressionAliasTransformer().transform(game))
+    assert "return ctr + 1" in out  # not aliased to `return ctr`
+
+
+def test_f184_non_self_referential_field_assign_still_aliases() -> None:
+    """Positive control: a field defined from an expression that does NOT
+    reference the field still aliases a later identical occurrence."""
+    game = frog_parser.parse_game(
+        """
+        Game G(Int a, Int b) {
+            Int s;
+            Int Oracle() {
+                s = a * b;
+                return (a * b) + s;
+            }
+        }
+        """
+    )
+    out = str(ForwardExpressionAliasTransformer().transform(game))
+    assert "a * b" not in out.split("return")[1]  # the return's a*b became s
+
+
+def test_f187_field_self_copy_dropped_no_recursion() -> None:
+    """F-187: a field self-copy `F = F;` is a no-op that drove Path P into
+    unbounded recursion ("maximum recursion depth exceeded"). It is now dropped
+    (trivially sound -- F is unchanged) and the pass terminates."""
+    game = frog_parser.parse_game(
+        """
+        Game G(Int lambda) {
+            Int F;
+            Int Oracle(Int a) {
+                F = a;
+                F = F;
+                return F;
+            }
+        }
+        """
+    )
+    out = str(ForwardExpressionAliasTransformer().transform(game))
+    assert "F = F" not in out  # the no-op self-copy is gone
+    assert "F = a" in out and "return F" in out
+
+
+def test_f188_declines_when_loop_binder_captures_field() -> None:
+    """F-188: a field assignment ``f = local`` propagates ``local -> f`` into
+    subsequent code. It must decline when a following ``for`` binder rebinds the
+    field name ``f`` and the loop body reads ``local`` -- retargeting that read
+    to ``f`` would capture the binder. (Compare test id ``binder j`` below,
+    which has no collision and DOES fire.)"""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int f;
+            Void Initialize() { f = 0; }
+            Int O(Int seed) {
+                Int local = seed;
+                f = local;
+                Int acc = 0;
+                for (Int f = 0 to 3) {
+                    acc = acc + local;
+                }
+                return acc;
+            }
+        }
+        """)
+    # Unchanged: the loop-binder rebind of `f` blocks retargeting `local -> f`.
+    assert ForwardExpressionAliasTransformer().transform(game) == game

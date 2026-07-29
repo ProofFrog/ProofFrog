@@ -613,6 +613,63 @@ def test_counter_guarded_field_to_local(
         }""",
             id="counter_decremented_by_other_method",
         ),
+        # F-052: counter written a SECOND time in the target method via a
+        # <-uniq draw. The write-once monotonicity premise (the guarded branch
+        # fires at most once) is broken, but the old count-only-Assignment/Sample
+        # scan missed the UniqueSample write and counted exactly one increment.
+        # _count_assignments_recursive now counts UniqueSample too -> declines.
+        pytest.param(
+            """
+        Game Test() {
+            BitString<lambda> k;
+            Int count;
+            Set<Int> S;
+            Void Initialize() {
+                k <- BitString<lambda>;
+                count = 0;
+            }
+            BitString<lambda> Oracle(BitString<lambda> x) {
+                count = count + 1;
+                if (count == 1) {
+                    return k + x;
+                } else {
+                    BitString<lambda> r <- BitString<lambda>;
+                    return r + x;
+                }
+                count <-uniq[S] Int;
+            }
+        }""",
+            id="counter_resampled_via_uniq_in_target_method",
+        ),
+        # F-051: the field is drawn from a SET VARIABLE domain (k <- S), not a
+        # fixed type. Deep-copying that draw into the target oracle re-evaluates
+        # the domain under the oracle's scope, where S may be mutated between
+        # Initialize and the call. sampled_from is an Expression (a Variable),
+        # so the pass declines. (Reachable only via typechecker-rejected
+        # set-variable field samples; latent defense-in-depth.)
+        pytest.param(
+            """
+        Game Test() {
+            Set<BitString<lambda>> S;
+            BitString<lambda> k;
+            Int count;
+            Void Initialize() {
+                S = {};
+                k <- S;
+                count = 0;
+            }
+            BitString<lambda> Oracle(BitString<lambda> x) {
+                count = count + 1;
+                if (count == 1) {
+                    return k + x;
+                } else {
+                    BitString<lambda> r <- BitString<lambda>;
+                    return r + x;
+                }
+            }
+        }""",
+            id="field_drawn_from_set_variable_domain",
+        ),
     ],
 )
 def test_counter_guarded_rejects_unsound_cases(game: str) -> None:

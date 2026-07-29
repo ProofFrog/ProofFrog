@@ -122,3 +122,67 @@ def test_no_params_is_noop() -> None:
     )
     out = _ParameterStandardizer().rename_game(game)
     assert out == game
+
+
+def test_f306_declines_when_target_name_collides_with_loop_binder() -> None:
+    """F-306: the canonical target names arg1..argN must be fresh w.r.t. body
+    binders. A loop binder named `arg1` (which AlphaRename does not rename) would
+    capture a parameter renamed to `arg1`, so the parameter reference inside the
+    loop would resolve to the binder. The pass must decline the rename (leaving
+    the parameter name intact) rather than produce a capturing rename."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Int O(Int c) {
+                Int r = 0;
+                for (Int arg1 in {1, 2}) {
+                    r = r + c;
+                }
+                return r;
+            }
+        }
+        """
+    )
+    result = _ParameterStandardizer().rename_game(game)
+    out = str(result)
+    # The parameter must NOT have been renamed to `arg1` (which the loop binder
+    # would capture); it stays `c`.
+    assert "Int O(Int c)" in out, "collision with a loop binder must decline the rename"
+    assert "r = r + c" in out, "the parameter reference must not be captured"
+
+
+def test_f306_standardizes_when_no_collision() -> None:
+    """F-306 positive control: with no colliding body binder, the parameter is
+    still standardized to arg1."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Int O(Int c) { return c + 1; }
+        }
+        """
+    )
+    result = _ParameterStandardizer().rename_game(game)
+    out = str(result)
+    assert "Int O(Int arg1)" in out
+    assert "return arg1 + 1" in out
+
+
+def test_f307_declines_when_target_name_collides_with_field() -> None:
+    """F-307 (sibling of F-306): the canonical target names arg1..argN must also
+    be fresh w.r.t. game FIELDS. A field named `arg1` fuses with a parameter
+    renamed to `arg1` -- a field read `return c + arg1` would become
+    `return arg1 + arg1` (the field read captured by the parameter). The pass
+    must decline the rename, leaving the parameter name intact."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Int arg1;
+            Void Initialize() { arg1 = 5; }
+            Int O(Int c) { return c + arg1; }
+        }
+        """
+    )
+    result = _ParameterStandardizer().rename_game(game)
+    out = str(result)
+    assert "Int O(Int c)" in out, "collision with a field must decline the rename"
+    assert "return c + arg1" in out, "the field read must not fuse with the parameter"

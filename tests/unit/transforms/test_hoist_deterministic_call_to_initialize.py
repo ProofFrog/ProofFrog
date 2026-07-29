@@ -67,9 +67,7 @@ class TestHoistDeterministicCallToInitialize:
 
         # A new field of type BitString<n> must be added.
         assert len(result.fields) == len(game.fields) + 1
-        new_field_name = next(
-            f.name for f in result.fields if f.name not in {"seed"}
-        )
+        new_field_name = next(f.name for f in result.fields if f.name not in {"seed"})
 
         # Initialize should end with: <new_field> = GG.evaluate(seed);
         init = result.methods[0]
@@ -86,6 +84,42 @@ class TestHoistDeterministicCallToInitialize:
             assert isinstance(ret, frog_ast.ReturnStatement)
             assert isinstance(ret.expression, frog_ast.Variable)
             assert ret.expression.name == new_field_name
+
+    def test_nested_element_write_to_arg_field_blocks_hoist(self) -> None:
+        """F-172: a nested element write (`seed[0][1] = ...`) to the field
+        used as the deterministic call's argument must block the hoist.
+
+        `_fields_assigned_in_block` previously matched only a depth-1
+        ArrayAccess l-value, so a nested write was invisible and the pass
+        cached a stale snapshot in Initialize while an oracle kept mutating
+        the field. Peeling the full l-value via `lvalue_base_name` makes the
+        mutation visible, so the pass declines.
+        """
+        game = frog_parser.parse_game("""
+            Game Foo(G GG) {
+                Array<Array<BitString<n>, 2>, 2> seed;
+                Void Initialize() {
+                    seed <- Array<Array<BitString<n>, 2>, 2>;
+                }
+                BitString<n> Get1() {
+                    return GG.evaluate(seed);
+                }
+                BitString<n> Get2() {
+                    return GG.evaluate(seed);
+                }
+                BitString<n> Mutate() {
+                    seed[0][1] = 0^n;
+                    return 0^n;
+                }
+            }
+            """)
+        ns = _make_det_namespace()
+        ns["GG"] = ns["G"]
+        result = HoistDeterministicCallToInitializeTransformer(
+            proof_namespace=ns
+        ).transform(game)
+        # No cached field is added: the mutated argument makes hoisting unsound.
+        assert len(result.fields) == len(game.fields)
 
     def test_initialize_with_return_not_hoisted(self) -> None:
         """If Initialize contains any ReturnStatement, hoisting would be unsound.
@@ -113,9 +147,7 @@ class TestHoistDeterministicCallToInitialize:
         init = game.methods[0]
         assert init.signature.name == "Initialize"
         injected_return = frog_ast.ReturnStatement(frog_ast.Integer(0))
-        init.block = frog_ast.Block(
-            [injected_return, *list(init.block.statements)]
-        )
+        init.block = frog_ast.Block([injected_return, *list(init.block.statements)])
 
         ns = _make_det_namespace()
         ns["GG"] = ns["G"]
@@ -312,9 +344,7 @@ class TestHoistFunctionDRCalls:
 
         # Expect one new field of type BitString<16> (the range type of RF)
         assert len(result.fields) == len(game.fields) + 1
-        new_field = next(
-            f for f in result.fields if f.name not in {"seed", "RF"}
-        )
+        new_field = next(f for f in result.fields if f.name not in {"seed", "RF"})
         assert isinstance(new_field.type, frog_ast.BitStringType)
         # Oracles should read the new field, not call RF directly
         for oracle in result.methods[1:]:
@@ -668,9 +698,7 @@ class TestNestedDeterministicStableArgs:
         early_return_block = frog_ast.Block(
             [frog_ast.ReturnStatement(frog_ast.Integer(0))]
         )
-        if_stmt = frog_ast.IfStatement(
-            [frog_ast.Boolean(True)], [early_return_block]
-        )
+        if_stmt = frog_ast.IfStatement([frog_ast.Boolean(True)], [early_return_block])
         init.block = frog_ast.Block([if_stmt, *list(init.block.statements)])
         ns = _make_det_namespace()
         ns["GG"] = ns["G"]
@@ -711,9 +739,7 @@ class TestNestedDeterministicStableArgs:
             proof_namespace=ns
         ).transform(game)
         assert len(result.fields) == len(game.fields) + 1
-        new_field_name = next(
-            f.name for f in result.fields if f.name not in {"seed"}
-        )
+        new_field_name = next(f.name for f in result.fields if f.name not in {"seed"})
         init = result.methods[0]
         stmts = list(init.block.statements)
         ret = stmts[-1]
@@ -786,9 +812,7 @@ class TestNestedDeterministicStableArgs:
             proof_namespace=ns
         ).transform(game)
         assert len(result.fields) == len(game.fields) + 1
-        new_field_name = next(
-            f.name for f in result.fields if f.name not in {"pair"}
-        )
+        new_field_name = next(f.name for f in result.fields if f.name not in {"pair"})
         init = result.methods[0]
         stmts = list(init.block.statements)
         # The hoisted assignment should be the last statement (no terminal

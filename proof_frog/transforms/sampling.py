@@ -25,12 +25,41 @@ from ..visitors import (
     FrogToSympyVisitor,
     referenced_variable_names,
     reassigns_or_rebinds,
+    lvalue_base_name,
 )
-from ._base import TransformPass, PipelineContext, NearMiss
+from ._base import (
+    TransformPass,
+    PipelineContext,
+    NearMiss,
+    has_nondeterministic_call,
+)
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
 # ---------------------------------------------------------------------------
+
+
+def _concat_operands_in_order(
+    node: frog_ast.Expression,
+) -> list[frog_ast.Variable]:
+    """Flatten an ``||`` concatenation into its leaf operands, left-to-right,
+    preserving duplicates.
+
+    Unlike ``VariableCollectionVisitor`` (which deduplicates and is order-blind),
+    this returns the operands in the exact positional order they concatenate in,
+    with repeats kept -- required for SimplifySplice's positional offset mapping
+    to be sound (F-065). Callers guarantee every leaf is a ``Variable`` via an
+    ``is_all_concatenated`` check before calling.
+    """
+    if (
+        isinstance(node, frog_ast.BinaryOperation)
+        and node.operator is frog_ast.BinaryOperators.OR
+    ):
+        return _concat_operands_in_order(
+            node.left_expression
+        ) + _concat_operands_in_order(node.right_expression)
+    assert isinstance(node, frog_ast.Variable)
+    return [node]
 
 
 class SimplifySpliceTransformer(BlockTransformer):
@@ -77,8 +106,15 @@ class SimplifySpliceTransformer(BlockTransformer):
             if not is_all_concatenated(statement.value):
                 continue
 
-            # Get variables all concatenated together
-            concatenated_var_names = VariableCollectionVisitor().visit(statement.value)
+            # Get variables all concatenated together, LEFT-TO-RIGHT and WITH
+            # DUPLICATES preserved. F-065: VariableCollectionVisitor
+            # deduplicates, so `z = a || a || b` collapsed to [a, b]; the
+            # positional offsets in Step 2 then mapped the slice at
+            # [len_a : len_a+len_b] (physically the SECOND copy of `a`) onto
+            # `b`, rewriting `z[len_a : 2*len_a]` to `b` -- a false equivalence
+            # when len_a == len_b. Preserving order + duplicates makes each
+            # positional slice map to the operand actually occupying that range.
+            concatenated_var_names = _concat_operands_in_order(statement.value)
 
             def find_declaration(variable: str, node: frog_ast.ASTNode) -> bool:
                 return (
@@ -411,12 +447,26 @@ class SliceOfInlineConcatTransformer(Transformer):
         lhs_len = self._operand_length(lhs)
         rhs_len = self._operand_length(rhs)
 
+        # F-030: `(a || b)[..]` -> a (or b) DROPS the other operand. That is
+        # sound only when the dropped operand has no observable effect --
+        # evaluating a concatenation evaluates both operands, so dropping one
+        # that contains a non-deterministic call erases that call. Gate each
+        # rewrite on the DROPPED operand being pure. (Previously the pass relied
+        # entirely on the external expression-purity + inlining-hoisting
+        # invariant; this makes the guard local.)
+        def _pure(operand: frog_ast.Expression) -> bool:
+            namespace = self._ctx.proof_namespace if self._ctx is not None else {}
+            return not has_nondeterministic_call(
+                operand, namespace, self._proof_let_types
+            )
+
         # Case 1: slice covers exactly the lhs (start == 0, end == |lhs|).
         if (
             lhs_len is not None
             and isinstance(new_start, frog_ast.Integer)
             and new_start.num == 0
             and self._exprs_equal(new_end, lhs_len)
+            and _pure(rhs)
         ):
             return lhs
 
@@ -426,6 +476,7 @@ class SliceOfInlineConcatTransformer(Transformer):
             and rhs_len is not None
             and self._exprs_equal(new_start, lhs_len)
             and self._exprs_equal(new_end, self._add(lhs_len, rhs_len))
+            and _pure(lhs)
         ):
             return rhs
 
@@ -1045,6 +1096,34 @@ class SplitUniformSampleTransformer(BlockTransformer):
         return expr
 
     @staticmethod
+    def _nonneg_width_syms(
+        slice_bounds: list[tuple[Symbol | int, Symbol | int]],
+    ) -> set[str]:
+        """Names of symbols provably >= 0 from being (a positive multiple of) a
+        slice WIDTH.
+
+        A slice ``z[a:b]`` yields ``BitString<b - a>``, so ``b - a >= 0`` by
+        well-formedness. A symbol that is exactly a slice width (or a positive
+        integer multiple of one) is therefore nonnegative. This is the sound,
+        robust source of positivity for the disjointness test (F-033): a signed
+        offset like ``c`` in ``z[n+c : n+c+n]`` is never itself a width (that
+        slice's width is ``n``), so ``c`` is not assumed nonnegative and the
+        overlap at ``c = -n`` is caught. Using slice widths avoids traversing
+        declaration type annotations (which the AST visitors do not descend
+        into) and works uniformly for field-access lengths like ``H.lambda``.
+        """
+        names: set[str] = set()
+        for start, end in slice_bounds:
+            width = sympy_simplify(end - start)
+            if getattr(width, "is_Symbol", False):
+                names.add(width.name)  # type: ignore[union-attr]
+            elif getattr(width, "is_Mul", False):
+                coeff, rest = width.as_coeff_Mul()  # type: ignore[union-attr]
+                if coeff.is_positive and getattr(rest, "is_Symbol", False):
+                    names.add(rest.name)
+        return names
+
+    @staticmethod
     def _check_overlaps(
         slice_bounds: list[tuple[Symbol | int, Symbol | int]],
         pos_subs: dict[Symbol, Symbol],
@@ -1240,14 +1319,74 @@ class SplitUniformSampleTransformer(BlockTransformer):
                 for expr in sb:
                     if hasattr(expr, "free_symbols"):
                         all_syms.update(expr.free_symbols)
+            # F-036: the sampled length bounds the slices; its symbols (e.g. a
+            # BitString<n> length) also need positive assumptions for the
+            # in-bounds check below.
+            if hasattr(sample_len, "free_symbols"):
+                all_syms.update(sample_len.free_symbols)
             pos_subs = {
                 s: Symbol(s.name, positive=True) for s in all_syms if not s.is_positive
             }
 
+            # F-036: a slice that reads OUTSIDE the sampled range
+            # ``[0, sample_len]`` (`z[4:8]` on BitString<4>) is an undefined
+            # out-of-bounds read (SEMANTICS partial-operation convention), NOT
+            # an independent uniform sub-sample -- splitting it would fabricate
+            # a fresh uniform for undefined bits. Decline only when a slice is
+            # PROVABLY out of bounds (`start < 0` or `end > sample_len`); an
+            # indeterminate symbolic bound is left to fire (a well-typed slice
+            # is in range), matching the pass's existing symbolic tolerance.
+            pos = self._pos
+            out_of_bounds = False
+            for start, end in unique_bounds:
+                start_oob = sympy_simplify(pos(start, pos_subs)).is_negative
+                end_oob = sympy_simplify(
+                    pos(sample_len, pos_subs) - pos(end, pos_subs)
+                ).is_negative
+                if start_oob or end_oob:
+                    out_of_bounds = True
+                    break
+            if out_of_bounds:
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Split Uniform Samples",
+                            reason=(
+                                f"Sample '{var_name}' not split: a slice reads "
+                                f"outside the sampled range [0, {sample_len}] "
+                                f"(an undefined out-of-bounds read, not an "
+                                f"independent uniform sub-sample)"
+                            ),
+                            location=statement.origin,
+                            suggestion=None,
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
+                continue
+
             # Check unique slices are non-overlapping. Two slices [a,b) and
             # [c,d) don't overlap if b <= c or d <= a. Gaps are allowed
             # (unused portions are discarded).
-            overlaps = self._check_overlaps(unique_bounds, pos_subs)
+            #
+            # F-033: the disjointness gap must be provably nonnegative for ALL
+            # legal parameter values, and the sign facts well-formedness supplies
+            # are that each BitString LENGTH is >= 0 -- including every slice
+            # WIDTH (`z[a:b]` yields `BitString<b-a>`). A symbol that is (a
+            # positive multiple of) a slice width is therefore nonnegative; a
+            # symbol occurring only as an offset (e.g. `c` in `z[n+c:n+c+n]`,
+            # whose width is `n`) has unconstrained sign. Assuming every free
+            # symbol positive (as the OOB check does, where it is conservative)
+            # is UNSOUND here: for `z[0:n]` vs `z[n+c:n+c+n]` the gap `c` is
+            # declared >= 0, certifying the slices disjoint -- but at c = -n
+            # (legal: the sampled length n+n+c = n is nonnegative) both slices
+            # are `z[0:n]`, the same bits. Restrict the positivity assumption for
+            # the disjointness test to slice-width symbols.
+            nonneg_names = self._nonneg_width_syms(unique_bounds)
+            disjoint_pos_subs = {
+                s: repl for s, repl in pos_subs.items() if s.name in nonneg_names
+            }
+            overlaps = self._check_overlaps(unique_bounds, disjoint_pos_subs)
             if overlaps:
                 if self.ctx is not None:
                     self.ctx.near_misses.append(
@@ -1573,6 +1712,48 @@ def _method_binds_name(method: frog_ast.Method, name: str) -> bool:
     return found[0]
 
 
+def _count_name_references(node: frog_ast.ASTNode, name: str) -> int:
+    """Count occurrences of *name* as a variable reference in *node*.
+
+    Uses the same name-only predicate as ``_references_name`` so the count is
+    consistent with this pass's liveness checks."""
+    count = [0]
+
+    def _p(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, frog_ast.Variable) and n.name == name:
+            count[0] += 1
+        return False
+
+    SearchVisitor(_p).visit(node)
+    return count[0]
+
+
+def _count_name_declarations(node: frog_ast.ASTNode, name: str) -> int:
+    """Count local declarations that bind *name* in *node* (typed
+    sample/assignment/declaration, or a loop binder). Mirrors the
+    declaration-detection in ``_method_binds_name``."""
+    count = [0]
+
+    def _p(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, frog_ast.VariableDeclaration) and n.name == name:
+            count[0] += 1
+        elif (
+            isinstance(n, (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample))
+            and n.the_type is not None
+            and isinstance(n.var, frog_ast.Variable)
+            and n.var.name == name
+        ):
+            count[0] += 1
+        elif isinstance(n, frog_ast.NumericFor) and n.name == name:
+            count[0] += 1
+        elif isinstance(n, frog_ast.GenericFor) and n.var_name == name:
+            count[0] += 1
+        return False
+
+    SearchVisitor(_p).visit(node)
+    return count[0]
+
+
 def _name_shadowed_in_any_oracle(game: frog_ast.Game, name: str) -> bool:
     """True if any non-Initialize method binds *name* (see _method_binds_name)."""
     return any(
@@ -1886,28 +2067,43 @@ def _all_refs_in_counter_guarded_branches(
 
 
 def _is_written_in_recursive(node: frog_ast.ASTNode, name: str) -> bool:
-    """Check if a variable is assigned or sampled anywhere in the AST."""
+    """Check if *name* is written anywhere in the AST.
+
+    F-058: peel the full l-value via ``lvalue_base_name`` so an element / slice /
+    field write to the name (``M[k] = v``, ``M[k][j] = v``, ``obj.f = v``) counts,
+    and include ``UniqueSample`` writes -- the previous bare-``Variable`` +
+    ``Assignment``/``Sample`` check missed both, so a field mutated only via an
+    element write or a ``<-uniq`` draw looked unwritten.
+    """
 
     def check(n: frog_ast.ASTNode) -> bool:
         return (
-            isinstance(n, (frog_ast.Assignment, frog_ast.Sample))
-            and isinstance(n.var, frog_ast.Variable)
-            and n.var.name == name
+            isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
+            and lvalue_base_name(n.var) == name
         )
 
     return SearchVisitor(check).visit(node) is not None
 
 
 def _count_assignments_recursive(node: frog_ast.ASTNode, name: str) -> int:
-    """Count how many times *name* is assigned or sampled anywhere in the AST."""
+    """Count how many times *name* is written anywhere in the AST.
+
+    F-052: kept consistent with ``_is_written_in_recursive`` -- peel the full
+    l-value via ``lvalue_base_name`` (so an element / slice / field write like
+    ``ctr[i] = v`` counts) and include ``UniqueSample`` (``ctr <-uniq[E] Int``).
+    The previous bare-``Variable`` + ``Assignment``/``Sample`` check
+    undercounted, so a counter written a second time via a ``<-uniq`` draw or an
+    element write looked written exactly once and the ``!= 1`` guard passed --
+    letting the pass fire while the write-once monotonicity premise was broken.
+    Overcounting only declines (sound); it never fires the pass spuriously.
+    """
     count = 0
 
     def counter(n: frog_ast.ASTNode) -> bool:
         nonlocal count
         if (
-            isinstance(n, (frog_ast.Assignment, frog_ast.Sample))
-            and isinstance(n.var, frog_ast.Variable)
-            and n.var.name == name
+            isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
+            and lvalue_base_name(n.var) == name
         ):
             count += 1
         return False
@@ -2068,6 +2264,20 @@ def _counter_guarded_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
         if _name_shadowed_in_any_oracle(game, field.name):
             continue
 
+        # F-051: the field's init-sample domain is deep-copied verbatim into
+        # the target oracle. A genuine *type* domain (``BitString<n>``,
+        # ``ModInt<q>``, ...) is a fixed set, but an EXPRESSION domain -- e.g.
+        # sampling an element from a set variable ``k <- S`` -- re-evaluates
+        # under the oracle's scope, where ``S`` may be mutated or
+        # adversary-influenced between Initialize and the call, so relocating
+        # the draw changes its distribution. Decline. (``Expression`` subclasses
+        # ``Type`` in frog_ast, so the genuine-type test is ``Type and not
+        # Expression`` -- here, decline exactly when it IS an ``Expression``.
+        # Reachable only via typechecker-rejected set-variable field samples;
+        # latent defense-in-depth.)
+        if isinstance(init_sample.sampled_from, frog_ast.Expression):
+            continue
+
         # Step 2: Find which non-Initialize methods reference this field
         using_methods: list[str] = []
         for method in game.methods:
@@ -2182,6 +2392,60 @@ class SinkUniformSampleTransformer(BlockTransformer):
 
     def __init__(self, ctx: PipelineContext | None = None) -> None:
         self.ctx = ctx
+        self._current_method: frog_ast.Method | None = None
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        # Capture the enclosing method so the sink guard can tell whether a
+        # block-local sample variable escapes the block being transformed
+        # (F-042). Descend normally afterwards.
+        self._current_method = method
+        result = self._transform_children(method)
+        assert isinstance(result, frog_ast.Method)
+        return result
+
+    def _variable_escapes_block(self, block: frog_ast.Block, var_name: str) -> bool:
+        """Defense-in-depth scope guard (F-042).
+
+        A freshly *typed* sample (``Type x <- Type``) declares ``var_name`` with
+        block-local scope, so the within-block liveness analysis below is exact
+        for well-typed input -- per-block scoping (semantic_analysis) guarantees
+        ``var_name`` is never referenced outside ``block``. If the enclosing
+        method nonetheless references ``var_name`` outside ``block`` with no
+        governing outer declaration, the AST is out of scope (the typechecker
+        rejects it) and sinking would leave that outside use reading a variable
+        now defined on only one path. Decline. On well-typed input this never
+        fires (there are no such outside references), so it is pure
+        defense-in-depth against a malformed AST reaching the pass directly."""
+        method = self._current_method
+        if method is None:
+            return False
+        refs_in_method = _count_name_references(method.block, var_name)
+        refs_in_block = _count_name_references(block, var_name)
+        if refs_in_method <= refs_in_block:
+            return False  # no references outside this block -> safe to sink
+        # Outside references exist. They are safe only if a *separate* outer
+        # declaration governs them (legitimate shadowing); otherwise they would
+        # bind to this block-local declaration -> escape.
+        decls_in_method = _count_name_declarations(method.block, var_name)
+        decls_in_block = _count_name_declarations(block, var_name)
+        return decls_in_method <= decls_in_block
+
+    def _decline_scope_near_miss(self, var_name: str) -> None:
+        if self.ctx is not None:
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="Sink Uniform Sample",
+                    reason=(
+                        f"Sample '{var_name}' not sunk: the variable is "
+                        f"referenced outside the block it would be sunk within, "
+                        f"with no governing outer declaration (out of scope)"
+                    ),
+                    location=None,
+                    suggestion=None,
+                    variable=var_name,
+                    method=None,
+                )
+            )
 
     def _decline_near_miss(self, var_name: str) -> None:
         if self.ctx is not None:
@@ -2251,6 +2515,11 @@ class SinkUniformSampleTransformer(BlockTransformer):
             sample_stmt = stmt
 
             if len(using_branches) == 1 and not after_uses:
+                # F-042 scope guard: never sink a variable that escapes this
+                # block (only reachable via a malformed, out-of-scope AST).
+                if self._variable_escapes_block(block, var_name):
+                    self._decline_scope_near_miss(var_name)
+                    continue
                 # Sink into the one branch that uses the variable. The sample
                 # crosses the skipped intermediate statements [idx+1:next_idx];
                 # if any of them writes a name in the sample's sampled type, the
@@ -2274,6 +2543,11 @@ class SinkUniformSampleTransformer(BlockTransformer):
                 return self.transform_block(frog_ast.Block(new_stmts))
 
             if not using_branches and after_uses:
+                # F-042 scope guard: never sink a variable that escapes this
+                # block (only reachable via a malformed, out-of-scope AST).
+                if self._variable_escapes_block(block, var_name):
+                    self._decline_scope_near_miss(var_name)
+                    continue
                 # Sink past the if-stmt: the sample is used only after the
                 # if, and the if references nothing that involves the sample
                 # variable (checked: not in conditions, not in any branch).

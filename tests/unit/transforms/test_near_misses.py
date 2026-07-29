@@ -2196,6 +2196,31 @@ def test_sink_uniform_no_near_miss_when_clean() -> None:
     assert not any(nm.transform_name == "Sink Uniform Sample" for nm in ctx.near_misses)
 
 
+def test_sink_uniform_near_miss_on_scope_escape() -> None:
+    """F-042: SinkUniformSample reports a near-miss when the sample variable is
+    referenced outside the block it would be sunk within (out-of-scope AST)."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Bool O(Bool a, Bool b) {
+                if (a) {
+                    ModInt<2> x <- ModInt<2>;
+                    if (b) { ModInt<2> y = x; }
+                }
+                return x == 0;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = SinkUniformSample().apply(game, ctx)
+    assert result == game  # declined
+    assert any(
+        nm.transform_name == "Sink Uniform Sample"
+        and nm.variable == "x"
+        and "out of scope" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
 def test_merge_uniform_near_miss_on_domain_write() -> None:
     """RC5: MergeUniformSamples reports a near-miss when ``n`` is written
     between the two ``BitString<n>`` samples it would merge."""

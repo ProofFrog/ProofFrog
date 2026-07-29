@@ -594,3 +594,35 @@ def test_cross_method_inline_declines_on_element_mutated_free_var() -> None:
     """
     # A must NOT be inlined to B: the game is unchanged.
     _transform_and_compare(source, source)
+
+
+def test_f219_field_used_in_another_field_type_not_inlined() -> None:
+    """F-219: a field used only inside another field's declared TYPE (`q` in
+    `Array<Int, q>`) is a type parameter -- genuine array-size state -- not a
+    value use. The whole-game use scan counts it, but replacement rewrites only
+    method bodies, so inlining would delete `q`'s definition and declaration
+    while leaving a dangling `Array<Int, q>`. The pass must decline (the field
+    survives unchanged)."""
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Int q;
+            Array<Int, q> arr;
+            Void Initialize() {
+                q = 8;
+            }
+            Int Count() {
+                Int c = 0;
+                for (Int i in arr) {
+                    c = c + 1;
+                }
+                return c;
+            }
+        }
+        """
+    )
+    result = InlineSingleUseFieldTransformer().transform(game)
+    out = str(result)
+    assert "Int q;" in out, "field q's declaration must survive"
+    assert "q = 8" in out, "field q's defining assignment must survive"
+    assert "Array<Int, q>" in out, "the array type must not be left dangling"

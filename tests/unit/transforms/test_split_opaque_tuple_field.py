@@ -217,3 +217,31 @@ class TestSplitOpaqueTupleField:
         )
         result = SplitOpaqueTupleFieldTransformer().transform(game)
         assert result == game
+
+
+def test_f193_out_of_range_constant_index_no_crash() -> None:
+    """F-193: an out-of-range constant tuple index `pair[5]` on a 2-tuple field
+    (typechecker-shielded from source, but AST-reachable) must not crash the
+    pass at `component_types[k]` (IndexError). It declines instead."""
+    from proof_frog import frog_parser
+    from proof_frog.transforms.inlining import SplitOpaqueTupleField
+    from proof_frog.transforms._base import PipelineContext
+    from proof_frog.visitors import NameTypeMap
+
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            [Int, Int] pair;
+            Void Initialize() { pair = D.make(); }
+            Int Use() { return pair[5]; }
+        }
+        """
+    )
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    out = SplitOpaqueTupleField().apply(game, ctx)  # must not raise IndexError
+    assert "pair[5]" in str(out)  # declined (out-of-range index)

@@ -281,34 +281,75 @@ def _z3_residual_equivalence(
             ),
         )
 
-    # Walk if-conditions in lockstep.
-    found_ifs: list[frog_ast.IfStatement] = []
+    # Walk if-conditions and return statements in positional lockstep.
+    #
+    # SOUNDNESS (F-328/F-329): each game's statements are enumerated
+    # independently, excluding only nodes already yielded from THAT game
+    # and excluding them by object IDENTITY. An earlier version filtered
+    # both games' searches through a single shared list with structural
+    # `==` membership, so a game containing two structurally identical
+    # returns (or ifs) had its second occurrence skipped; the walk
+    # desynced, hit None, broke out, and fell through to valid=True with
+    # a genuinely differing pair never Z3-checked. Positional pairing is
+    # licensed by the neutralized-skeleton equality check above: the two
+    # games have structurally identical statement skeletons, so the i-th
+    # enumerated statement of each game occupies the same structural
+    # position. Any residual mismatch (count or condition arity) is a
+    # broken invariant and fails CLOSED.
+    def _enumerate_lockstep(
+        node_type: type[frog_ast.ASTNode],
+    ) -> Optional[list[tuple[frog_ast.ASTNode, frog_ast.ASTNode]]]:
+        """Enumerate all nodes of `node_type` from both games in visit
+        order, paired positionally. Returns None on a count mismatch."""
 
-    def search_for_if(
-        found_ifs: list[frog_ast.IfStatement], node: frog_ast.ASTNode
-    ) -> bool:
-        return isinstance(node, frog_ast.IfStatement) and node not in found_ifs
+        def collect(game: frog_ast.Game) -> list[frog_ast.ASTNode]:
+            found: list[frog_ast.ASTNode] = []
 
-    while True:
-        partial = functools.partial(search_for_if, found_ifs)
-        if_current = visitors.SearchVisitor[frog_ast.IfStatement](partial).visit(
-            current_game_ast
+            def search(node: frog_ast.ASTNode) -> bool:
+                return isinstance(node, node_type) and all(
+                    node is not seen for seen in found
+                )
+
+            while True:
+                match = visitors.SearchVisitor[frog_ast.ASTNode](search).visit(game)
+                if match is None:
+                    return found
+                found.append(match)
+
+        current_nodes = collect(current_game_ast)
+        next_nodes = collect(next_game_ast)
+        if len(current_nodes) != len(next_nodes):
+            return None
+        return list(zip(current_nodes, next_nodes))
+
+    if_pairs = _enumerate_lockstep(frog_ast.IfStatement)
+    if if_pairs is None:
+        return EquivalenceResult(
+            valid=False,
+            failure_detail=(
+                "Z3 residual walk: if-statement count mismatch despite "
+                "identical neutralized skeletons"
+            ),
         )
-        if_next = visitors.SearchVisitor[frog_ast.IfStatement](partial).visit(
-            next_game_ast
-        )
-        if if_current is None or if_next is None:
-            break
-        found_ifs.append(if_current)
-        found_ifs.append(if_next)
-        for i, condition in enumerate(if_current.conditions):
-            if condition == if_next.conditions[i]:
+    for if_current_node, if_next_node in if_pairs:
+        assert isinstance(if_current_node, frog_ast.IfStatement)
+        assert isinstance(if_next_node, frog_ast.IfStatement)
+        if len(if_current_node.conditions) != len(if_next_node.conditions):
+            return EquivalenceResult(
+                valid=False,
+                failure_detail=(
+                    "Z3 residual walk: if-condition arity mismatch despite "
+                    "identical neutralized skeletons"
+                ),
+            )
+        for i, condition in enumerate(if_current_node.conditions):
+            if condition == if_next_node.conditions[i]:
                 continue
             failure = _z3_check_expression_pair(
                 current_game_ast,
                 next_game_ast,
                 condition,
-                if_next.conditions[i],
+                if_next_node.conditions[i],
                 proof_let_types,
                 proof_namespace,
                 "if-condition",
@@ -316,33 +357,25 @@ def _z3_residual_equivalence(
             if failure is not None:
                 return failure
 
-    # Walk return statements in lockstep.
-    found_returns: list[frog_ast.ReturnStatement] = []
-
-    def search_for_return(
-        found_returns: list[frog_ast.ReturnStatement], node: frog_ast.ASTNode
-    ) -> bool:
-        return isinstance(node, frog_ast.ReturnStatement) and node not in found_returns
-
-    while True:
-        partial_r = functools.partial(search_for_return, found_returns)
-        ret_current = visitors.SearchVisitor[frog_ast.ReturnStatement](partial_r).visit(
-            current_game_ast
+    return_pairs = _enumerate_lockstep(frog_ast.ReturnStatement)
+    if return_pairs is None:
+        return EquivalenceResult(
+            valid=False,
+            failure_detail=(
+                "Z3 residual walk: return-statement count mismatch despite "
+                "identical neutralized skeletons"
+            ),
         )
-        ret_next = visitors.SearchVisitor[frog_ast.ReturnStatement](partial_r).visit(
-            next_game_ast
-        )
-        if ret_current is None or ret_next is None:
-            break
-        found_returns.append(ret_current)
-        found_returns.append(ret_next)
-        if ret_current.expression == ret_next.expression:
+    for ret_current_node, ret_next_node in return_pairs:
+        assert isinstance(ret_current_node, frog_ast.ReturnStatement)
+        assert isinstance(ret_next_node, frog_ast.ReturnStatement)
+        if ret_current_node.expression == ret_next_node.expression:
             continue
         failure = _z3_check_expression_pair(
             current_game_ast,
             next_game_ast,
-            ret_current.expression,
-            ret_next.expression,
+            ret_current_node.expression,
+            ret_next_node.expression,
             proof_let_types,
             proof_namespace,
             "return",
@@ -617,7 +650,7 @@ class ProofEngine:
                     self.max_calls = val.num
 
         self.get_method_lookup()
-        self._extract_subsets_pairs()
+        self._extract_subsets_pairs(proof_file)
 
     def prove(self, proof_file: frog_ast.ProofFile, proof_path: str = "") -> None:
         self.set_up_proof_context(proof_file)
@@ -1763,8 +1796,37 @@ class ProofEngine:
                 for method in rewritten.methods:
                     self.method_lookup[(name, method.signature.name)] = method
 
-    def _extract_subsets_pairs(self) -> None:
-        """Extract type constraint pairs from all schemes in the proof.
+    def _theorem_dependency_cone(self, proof_file: frog_ast.ProofFile) -> set[str]:
+        """Names of the let-bindings the proof body actually depends on.
+
+        Seeded from every name referenced in the theorem, the games
+        sequence (steps) and the helper games/reductions, then closed
+        transitively through let-value composition (so a component scheme
+        reached only as an argument of another instantiation is included).
+        A let-binding referenced nowhere but the ``let:`` block itself --
+        e.g. a decoy scheme instantiated solely to smuggle a ``requires``
+        equality into the global pool -- is excluded.
+        """
+        used: set[str] = set()
+        seeds: list[frog_ast.ASTNode] = [proof_file.theorem, *proof_file.steps]
+        seeds.extend(proof_file.helpers)
+        for seed in seeds:
+            used |= visitors.referenced_variable_names(seed)
+        lets_by_name = {let.name: let for let in proof_file.lets}
+        worklist = list(used)
+        while worklist:
+            name = worklist.pop()
+            let = lets_by_name.get(name)
+            if let is None or let.value is None:
+                continue
+            for ref in visitors.referenced_variable_names(let.value):
+                if ref not in used:
+                    used.add(ref)
+                    worklist.append(ref)
+        return used
+
+    def _extract_subsets_pairs(self, proof_file: frog_ast.ProofFile) -> None:
+        """Extract type constraint pairs from the schemes the proof uses.
 
         Both ``==`` and ``subsets`` constraints are collected.  They are
         safe for normalizing type annotations (widening is harmless).
@@ -1773,8 +1835,24 @@ class ProofEngine:
         A ⊊ B where replacing ``x <- A`` with ``x <- B`` would change
         the distribution.  The pair is tagged via ``equality_pairs`` so
         the normalizer can distinguish them.
+
+        F-333: a ``requires`` constraint is honored ONLY when its scheme is
+        in the theorem's dependency cone (see ``_theorem_dependency_cone``).
+        A scheme's ``requires A == B`` is a hypothesis of *that scheme's*
+        well-definedness -- legitimate because the scheme under test (and
+        the reductions/intermediate games composing it) quantify over
+        instantiations satisfying it. Harvesting from *every* let-bound
+        scheme into a single global pool let a never-composed decoy scheme
+        inject an equality license (e.g. ``Y == Z`` over two independent
+        opaque proof parameters) that then rewrote the sampling domain of an
+        UNRELATED theorem game -- silently narrowing an unconditional
+        theorem to the diagonal. Scoping to the cone rejects that hop while
+        leaving every scheme the theorem actually composes unaffected.
         """
-        for node in self.proof_namespace.values():
+        used_names = self._theorem_dependency_cone(proof_file)
+        for name, node in self.proof_namespace.items():
+            if name not in used_names:
+                continue
             if isinstance(node, frog_ast.Scheme):
                 for req in node.requirements:
                     if not isinstance(req, frog_ast.BinaryOperation):

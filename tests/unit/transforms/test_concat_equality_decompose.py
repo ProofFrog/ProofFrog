@@ -372,3 +372,63 @@ def test_slice_term_resolves_via_end_minus_start() -> None:
     }
     """
     assert _apply(source) == frog_parser.parse_game(expected)
+
+
+# --------------------------------------------------------------------------
+# Value-stability of resolved concat bindings (audit F-251 / F-252)
+# --------------------------------------------------------------------------
+
+
+def test_f251_nested_reassigned_binding_not_decomposed() -> None:
+    """A concat binding `v = a || b` reassigned inside an if-body is not
+    write-once; decomposing `v == w` against the stale RHS is unsound."""
+    game = _apply(
+        """
+        Game G() {
+            Bool O(BitString<1> a, BitString<1> b, BitString<1> c,
+                   BitString<1> d, BitString<2> w, Bool flip) {
+                BitString<2> v = a || b;
+                if (flip) {
+                    v = c || d;
+                }
+                return v == w;
+            }
+        }
+        """
+    )
+    assert "v == w" in str(game)  # not decomposed into w[0:1] == a && ...
+
+
+def test_f252_stale_rhs_free_var_not_decomposed() -> None:
+    """A concat binding `v = a || m1` whose free var `a` is later reassigned
+    must not be decomposed: the substituted `a || m1` would read the mutated
+    `a`, diverging from the frozen `v`."""
+    game = _apply(
+        """
+        Game G() {
+            Bool O(BitString<1> m0, BitString<1> m1, BitString<2> w) {
+                BitString<1> a = m0;
+                BitString<2> v = a || m1;
+                a = a + 1^1;
+                Bool z = a == m1;
+                return v == w && z;
+            }
+        }
+        """
+    )
+    assert "v == w" in str(game)  # not decomposed
+
+
+def test_f252_stable_rhs_free_var_still_decomposes() -> None:
+    """Positive control: `a` is never reassigned, so `v == w` decomposes."""
+    game = _apply(
+        """
+        Game G() {
+            Bool O(BitString<1> a, BitString<1> m1, BitString<2> w) {
+                BitString<2> v = a || m1;
+                return v == w;
+            }
+        }
+        """
+    )
+    assert "w[0 : 1] == a" in str(game)

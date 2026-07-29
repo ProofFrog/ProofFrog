@@ -781,10 +781,6 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         self.stack: list[Any] = []
         self.type_map = type_map
         self.variable_version_map = variable_version_map
-        self.bool_num = 0
-        self.expression_formula_map: list[
-            tuple[tuple[frog_ast.Expression, dict[str, int]], z3.AstRef]
-        ] = []
         # Opt-in: when True, FuncCall expressions and BinaryOperations whose
         # operand types Z3 cannot mix (e.g. `||` over BitString operands)
         # are modelled as memoized opaque Z3 constants instead of None.
@@ -863,14 +859,6 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
 
     def set_variable_version_map(self, version_map: dict[str, int]) -> None:
         self.variable_version_map = version_map
-
-    def _search_expression_formula_map(
-        self, potential: tuple[frog_ast.Expression, dict[str, int]]
-    ) -> Optional[z3.AstRef]:
-        for item in self.expression_formula_map:
-            if item[0] == potential:
-                return item[1]
-        return None
 
     def visit_variable(self, var: frog_ast.Variable) -> None:
         name = var.name
@@ -1024,17 +1012,26 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
             and operation.operator
             in set([frog_ast.BinaryOperators.IN, frog_ast.BinaryOperators.SUBSETS])
         ):
-            assert self.variable_version_map is not None
-            z3_bool = self._search_expression_formula_map(
-                (operation, self.variable_version_map)
-            )
-            if z3_bool is None:
-                z3_bool = z3.Bool(f"@@@unknown_boolean{self.bool_num}")
-                self.bool_num += 1
-                self.expression_formula_map.append(
-                    ((operation, copy.deepcopy(self.variable_version_map)), z3_bool)
-                )
-            self.stack.append(z3_bool)
+            # A set membership/subset test is a deterministic Bool that Z3
+            # cannot model natively, so intern the WHOLE operation as a
+            # memoized opaque Bool atom keyed on its full structural string
+            # (plus the SSA version map). Two structurally identical tests
+            # under the same versions share the atom -- so `(k in S) || !(k in
+            # S)` still resolves -- while distinct tests (`k in S` vs `k2 in
+            # S`) get distinct atoms.
+            #
+            # SOUNDNESS (F-330/F-331): the previous code asserted
+            # `variable_version_map is not None` (crashing the residual
+            # escape hatch, which builds the visitor with no version map --
+            # F-330) and named the atom `@@@unknown_boolean{counter}` from a
+            # PER-INSTANCE counter. `_z3_check_expression_pair` builds one
+            # visitor per game, so both counters started at 0 and `k in S`
+            # (game 1) collided with `k2 in S` (game 2) as the same atom -- a
+            # cross-instance false accept (F-331). Structural interning via
+            # `_intern_opaque` fixes both: it tolerates a None version map and
+            # its Z3 const name is the structural key, so cross-instance
+            # atoms match iff the expressions match.
+            self.stack.append(self._intern_opaque(operation, sort=z3.BoolSort()))
             return
 
         # Handle tuple equality/inequality
@@ -1140,6 +1137,21 @@ class AllConstantFieldAccesses(Visitor[bool]):
         if assignment.var.name != self.tuple_name:
             return
         if frog_ast.tuple_literal_values(assignment.value) is None:
+            self.all_constant = False
+
+    def visit_sample(self, sample: frog_ast.Sample) -> None:
+        self._decline_on_whole_var_write(sample.var)
+
+    def visit_unique_sample(self, sample: frog_ast.UniqueSample) -> None:
+        self._decline_on_whole_var_write(sample.var)
+
+    def _decline_on_whole_var_write(self, target: frog_ast.ASTNode) -> None:
+        # F-322: a whole-variable sample of the tuple (``v <- ...`` /
+        # ``v <-uniq[S] ...``) draws the aggregate atomically; ExpandTuple
+        # cannot split it into per-component draws (an element sample
+        # ``v[0] <- T`` keeps its ArrayAccess lvalue and is handled by
+        # ``visit_array_access``). Decline so the field/local is left intact.
+        if isinstance(target, frog_ast.Variable) and target.name == self.tuple_name:
             self.all_constant = False
 
 
@@ -1285,6 +1297,18 @@ def build_game_type_map(
 
     Collects types from fields, method parameters, assignments, and samples.
     Optionally merges with proof-level let types.
+
+    WARNING: this map is *game-wide and scope-blind*. Because
+    :meth:`NameTypeMap.set` is last-write-wins, a parameter or local named
+    ``x`` in one method silently overwrites a same-named binding of a
+    *different* type in a sibling method. A transform that looks up the type
+    of a bare name appearing inside a specific method body must NOT use this
+    map -- it would read a sibling method's type (audit
+    F-255/F-256/F-261/F-263/F-269/F-270/F-287/F-308). Use
+    :func:`build_method_type_map` (or the :class:`MethodScopedTypeMapMixin`)
+    for that. This function remains correct for callers that only need the
+    game's *fields* (module-global, one type each) or that genuinely want the
+    union of all declarations regardless of scope.
     """
     # Use a dummy stopping point that won't match any real node to collect everything
     dummy = frog_ast.Boolean(True)
@@ -1292,6 +1316,95 @@ def build_game_type_map(
     if proof_let_types is not None:
         type_map = type_map + proof_let_types
     return type_map
+
+
+def build_method_type_map(
+    game: frog_ast.Game,
+    method: frog_ast.Method,
+    proof_let_types: Optional[NameTypeMap] = None,
+) -> NameTypeMap:
+    """Build a NameTypeMap scoped to a single *method* of *game*.
+
+    Contains the game's fields (module-global) plus only *method*'s own
+    parameters and local declarations -- crucially NOT other methods'
+    params/locals. A method-local binding shadowing a field name wins within
+    the method. Optionally merges proof-level let types (which win last,
+    matching :func:`build_game_type_map`).
+
+    This is the sound, scope-correct replacement for
+    :func:`build_game_type_map` whenever a transform reasons about the type of
+    a *bare name* appearing inside a method body. The flat game-wide map
+    conflated same-named parameters across sibling methods, letting one
+    method's declaration launder a wrong type onto another's operand -- an
+    unsound rewrite (audit F-256/F-261/F-263/F-270/F-308) as well as a
+    completeness-corrupting one (F-255/F-269/F-287).
+    """
+    dummy = frog_ast.Boolean(True)
+    field_map = NameTypeMap()
+    for field in game.fields:
+        field_map.set(field.name, field.type)
+    method_map = GetTypeMapVisitor(dummy).visit(method)
+    # field_map + method_map: a method-local shadowing a field wins.
+    # + proof_let_types last, matching build_game_type_map's precedence.
+    result = field_map + method_map
+    if proof_let_types is not None:
+        result = result + proof_let_types
+    return result
+
+
+_MethodScopedT = TypeVar("_MethodScopedT", bound="MethodScopedTypeMapMixin")
+
+
+class MethodScopedTypeMapMixin(Transformer):
+    """Mixin for a Transformer that consults ``self.type_map`` for the types
+    of bare names inside method bodies.
+
+    It overrides ``transform_method`` to swap ``self.type_map`` to a map
+    scoped to that method (fields + only that method's params/locals + proof
+    lets, via :func:`build_method_type_map`) for the duration of that method's
+    traversal, then restore it. This removes the cross-method name-collision
+    hazard of the flat game-wide :func:`build_game_type_map` (audit
+    F-255/F-256/F-261/F-263/F-269/F-270/F-287/F-308).
+
+    A concrete transformer opts in by (1) inheriting this mixin, (2) storing
+    its working map in ``self.type_map``, and (3) calling
+    :meth:`scope_to_game` with the game + proof-let types before traversal.
+    If ``scope_to_game`` is never called (``_scope_game is None``), the mixin
+    is inert and the transformer keeps its original game-wide map -- a safe
+    fallback, never a silent behavior change.
+    """
+
+    _scope_game: Optional[frog_ast.Game] = None
+    _scope_let_types: Optional[NameTypeMap] = None
+
+    def scope_to_game(
+        self: _MethodScopedT,
+        game: frog_ast.Game,
+        proof_let_types: Optional[NameTypeMap],
+    ) -> _MethodScopedT:
+        """Record the game + proof-let types so ``transform_method`` can build
+        per-method scoped type maps. Returns ``self`` for call chaining."""
+        self._scope_game = game
+        self._scope_let_types = proof_let_types
+        return self
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.ASTNode:
+        if self._scope_game is None:
+            return self._transform_children(method)
+        # Swap ``self.type_map`` to the method-scoped map for this subtree.
+        # ``getattr``/``setattr`` are used so the mixin does not fix the
+        # declared type of the concrete transformer's ``type_map`` attribute
+        # (subclasses declare it themselves, some Optional, some required).
+        saved = getattr(self, "type_map", None)
+        setattr(
+            self,
+            "type_map",
+            build_method_type_map(self._scope_game, method, self._scope_let_types),
+        )
+        try:
+            return self._transform_children(method)
+        finally:
+            setattr(self, "type_map", saved)
 
 
 def assigns_variable(
@@ -1388,7 +1501,12 @@ def reassigns_or_rebinds(names: set[str], node: frog_ast.ASTNode) -> bool:
       pure set-difference surface form ``x <- T \\ S`` performs no insertion and
       is therefore not treated as a write;
     - a loop binder (``for (Int i = ...)`` / ``for (T e in ...)``) that rebinds
-      one of *names*, shadowing it.
+      one of *names*, shadowing it;
+    - a bare local re-declaration (``VariableDeclaration``: ``T x;`` with no
+      initializer) that rebinds one of *names*, shadowing the outer binding
+      (F-196: a typed ``T x = e;`` is an ``Assignment`` and already caught by
+      the l-value case above, but a no-initializer declaration was not, so a
+      structural substitution could still capture the inner binding).
 
     Conservative by design: any such occurrence anywhere in *node* -- including
     nested branches and loop bodies -- counts, because callers substitute
@@ -1410,9 +1528,26 @@ def reassigns_or_rebinds(names: set[str], node: frog_ast.ASTNode) -> bool:
             return True
         if isinstance(inner, frog_ast.GenericFor) and inner.var_name in names:
             return True
+        if isinstance(inner, frog_ast.VariableDeclaration) and inner.name in names:
+            return True
         return False
 
     return SearchVisitor(_mutates).visit(node) is not None
+
+
+def _statement_can_exit(statement: frog_ast.Statement) -> bool:
+    """True if *statement* can cause an early method exit (contains a return).
+
+    Used by SameFieldVisitor (F-298): a return between two paired field writes
+    means the second write is skippable on the early-exit path, so the fields
+    are not equal on every trace and must not be merged.
+    """
+    return (
+        SearchVisitor(lambda n: isinstance(n, frog_ast.ReturnStatement)).visit(
+            statement
+        )
+        is not None
+    )
 
 
 class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
@@ -1429,7 +1564,14 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
             return
 
         for index, statement in enumerate(block.statements):
-            if statement in self.paired_statements:
+            # F-299: match by IDENTITY, not structural equality. A `statement in
+            # self.paired_statements` test uses ASTNode.__eq__, so a DIFFERENT
+            # but identical-looking unpaired twin write in another oracle
+            # (`f2 = 1` with no matching `f1 = 1`) is wrongly treated as already
+            # paired and skipped from analysis, yielding a false "always equal".
+            # The visitor runs on the original game, so the genuinely-paired
+            # instances are identity-comparable here.
+            if any(statement is paired for paired in self.paired_statements):
                 continue
 
             if not isinstance(statement, (frog_ast.Sample, frog_ast.Assignment)):
@@ -1473,6 +1615,13 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
                         copy_paired = True
                         self.paired_statements.append(subsequent_statement)
                         break
+                    # F-298: an intervening statement that can exit the method
+                    # (contains a return) makes the pair write AFTER it
+                    # adversary-skippable -- on the early-exit path the first
+                    # field is written but the pair is not, so they are not equal
+                    # forever. Stop pairing across it.
+                    if _statement_can_exit(subsequent_statement):
+                        break
                     if (
                         SearchVisitor(
                             functools.partial(reads_pair_fc, pair_name)
@@ -1511,6 +1660,15 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
                     paired = True
                     self.paired_statements.append(subsequent_statement)
                     break
+
+                # F-298: an intervening statement that can exit the method
+                # (contains a return) makes the pair write after it
+                # adversary-skippable -- on the early-exit path the first field
+                # is written but the pair is not, so the two fields are not equal
+                # forever. Do not pair across it.
+                if _statement_can_exit(subsequent_statement):
+                    self.are_same = False
+                    return
 
                 if (
                     SearchVisitor(assigns_variable_partial).visit(subsequent_statement)

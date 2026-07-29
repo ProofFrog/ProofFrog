@@ -280,6 +280,22 @@ def unnecessary_statement_info(
 
     necessary_vars = [frog_ast.Variable(field) for field in fields]
 
+    def _run_loop_body_to_fixpoint(body: frog_ast.Block) -> None:
+        # F-320: a loop body needs a liveness FIXPOINT, not a single reverse
+        # pass. A loop-carried write can be marked dead when its reviving read
+        # is earlier in the body TEXT but executes in a LATER iteration via the
+        # back-edge (`for (...) { y = y + x; x = x + 1; }` -- the single pass
+        # sees `x = x + 1` before `y = y + x` makes `x` necessary, so it deletes
+        # the increment and corrupts the loop-carried value). Re-run the body
+        # pass until necessary_vars stops growing; the set is monotone and
+        # bounded by the variable names, so this terminates.
+        nonlocal necessary_vars
+        while True:
+            before = {v.name for v in necessary_vars}
+            remove_helper(body)
+            if {v.name for v in necessary_vars} == before:
+                break
+
     def remove_helper(block: frog_ast.Block) -> None:
         for statement in block.statements:
             required_map.set(statement, False)
@@ -305,13 +321,13 @@ def unnecessary_statement_info(
                 required_map.set(statement, True)
             elif isinstance(statement, frog_ast.NumericFor):
                 necessary_vars += _vars_of(statement.start) + _vars_of(statement.end)
-                remove_helper(statement.block)
+                _run_loop_body_to_fixpoint(statement.block)
             elif isinstance(
                 statement,
                 frog_ast.GenericFor,
             ):
                 necessary_vars += _vars_of(statement.over)
-                remove_helper(statement.block)
+                _run_loop_body_to_fixpoint(statement.block)
             elif isinstance(statement, frog_ast.IfStatement):
                 for condition in statement.conditions:
                     necessary_vars += _vars_of(condition)
@@ -421,21 +437,39 @@ def _collect_field_access_refs(game: frog_ast.Game) -> list[frog_ast.Variable]:
 
 
 def remove_unnecessary_fields(game: frog_ast.Game) -> frog_ast.Game:
-    necessary_vars = []
-    for method in game.methods:
-        # We pass an empty list of fields
-        # so that we can determine which fields are necessary based solely on return values
-        necessary_vars += unnecessary_statement_info([], method.block)[1]
-
-    # Also include fields referenced via FieldAccess (e.g. field1.domain in
-    # <-uniq expressions), which VariableCollectionVisitor skips.
-    necessary_vars += _collect_field_access_refs(game)
+    # F-319: field necessity must be computed GAME-WIDE, to a fixpoint. Seeding
+    # each method's `unnecessary_statement_info` with an EMPTY field list only
+    # discovers fields needed for that method's OWN returns. A field read solely
+    # in the index/key position of a write to ANOTHER field (`M[F] = v`) is
+    # necessary iff that write is kept, which depends on `M` being necessary --
+    # a cross-method dependency the single empty-seeded pass missed. It then
+    # dropped `F` (and its setter) while `M[F] = v` survived, emitting a game
+    # with a dangling reference to the undeclared `F`. Iterate: seed each pass
+    # with the fields known necessary so far (so writes to a necessary field are
+    # kept and their index/RHS fields harvested) until the necessary set is
+    # stable. The set grows monotonically and is bounded by the fields, so this
+    # terminates; a genuinely unnecessary field is still never harvested.
+    all_field_names = {field.name for field in game.fields}
+    field_access_field_names = {
+        var.name
+        for var in _collect_field_access_refs(game)
+        if var.name in all_field_names
+    }
+    necessary_field_names: set[str] = set(field_access_field_names)
+    while True:
+        harvested: set[str] = set(necessary_field_names)
+        seed = sorted(necessary_field_names)
+        for method in game.methods:
+            for var in unnecessary_statement_info(seed, method.block)[1]:
+                if var.name in all_field_names:
+                    harvested.add(var.name)
+        if harvested == necessary_field_names:
+            break
+        necessary_field_names = harvested
 
     new_game = copy.deepcopy(game)
     new_game.fields = [
-        field
-        for field in game.fields
-        if frog_ast.Variable(field.name) in necessary_vars
+        field for field in game.fields if field.name in necessary_field_names
     ]
     actually_necessary_field_names = [field.name for field in new_game.fields]
     # Names bound outside any method body: every field (a method local may

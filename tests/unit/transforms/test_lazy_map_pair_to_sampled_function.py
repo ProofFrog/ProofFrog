@@ -397,3 +397,34 @@ def test_declines_map_field_initializer() -> None:
         }
         """,
     )
+
+
+def test_f010_fresh_field_name_avoids_parameter_capture() -> None:
+    """F-010: the injected field name must be fresh w.r.t. EVERY name in the
+    game, not just field names. A collision with a method parameter would let
+    that parameter lexically capture the injected field (a reference to the field
+    inside the method resolving to the parameter). `_fresh_field_name` must
+    therefore avoid a parameter named `F`."""
+    from proof_frog.transforms.random_functions import _fresh_field_name
+
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Int M;
+            Int Oracle(Int F) { return F; }
+        }
+        """
+    )
+    name = _fresh_field_name(game, "F")
+    assert name != "F", "injected name must not collide with a parameter named F"
+
+    # No collision anywhere -> the base name is used unchanged.
+    clean = frog_parser.parse_game(
+        """
+        Game G() {
+            Int M;
+            Int Oracle(Int x) { return x; }
+        }
+        """
+    )
+    assert _fresh_field_name(clean, "F") == "F"

@@ -113,6 +113,7 @@ def has_nondeterministic_call(
     expr: frog_ast.Expression,
     proof_namespace: frog_ast.Namespace,
     proof_let_types: Optional[NameTypeMap] = None,
+    shadowed_names: Optional[set[str]] = None,
 ) -> bool:
     """Return True if *expr* contains a FuncCall to a non-deterministic method.
 
@@ -120,6 +121,15 @@ def has_nondeterministic_call(
     ``Function<D, R>`` variables are treated as pure for inlining and CSE
     purposes.  Any other FuncCall (including calls to scheme methods, game
     methods, or unannotated primitive methods) is considered non-deterministic.
+
+    *shadowed_names* (F-267): names that are locally bound (declared) in the
+    method whose expression this is. A proof-level ``let: Function<D,R> H;`` is
+    a known deterministic function, but a same-named METHOD-LOCAL declaration
+    ``Function<D,R> H;`` shadows it -- and an unassigned local Function is an
+    uninitialized value, so calling it is an observable undefined read, not the
+    deterministic let-function. When a callee name is in *shadowed_names* the
+    let-``Function`` classification is NOT applied (the call is treated as
+    potentially non-deterministic).
     """
     from ..visitors import SearchVisitor  # pylint: disable=import-outside-toplevel
 
@@ -130,8 +140,13 @@ def has_nondeterministic_call(
         m = _lookup_primitive_method(node.func, proof_namespace)
         if m is not None:
             return not m.deterministic
-        # Function<D, R> calls are always deterministic (same input → same output)
-        if proof_let_types is not None and isinstance(node.func, frog_ast.Variable):
+        # Function<D, R> calls are always deterministic (same input → same
+        # output) -- UNLESS the name is shadowed by a method-local binding.
+        if (
+            proof_let_types is not None
+            and isinstance(node.func, frog_ast.Variable)
+            and (shadowed_names is None or node.func.name not in shadowed_names)
+        ):
             var_type = proof_let_types.get(node.func.name)
             if isinstance(var_type, frog_ast.FunctionType):
                 return False

@@ -167,3 +167,45 @@ def test_bitstring_concat_not_simplified() -> None:
     parsed = frog_parser.parse_method(method)
     result = BooleanIdentityTransformer().transform(parsed)
     assert result == parsed
+
+
+def test_f278_bitstring_concat_operand_not_simplified() -> None:
+    """F-278: `||` is overloaded (boolean OR vs BitString concatenation). An
+    ill-typed AST `bs || true` with `bs: BitString<1>` must NOT be collapsed to
+    the Boolean literal `true` (which would destroy the bitstring). With a type
+    map, BooleanIdentity skips the OR-identity when an operand is a known
+    BitString. (A well-typed boolean OR with a Bool operand still simplifies.)"""
+    from proof_frog.transforms.algebraic import BooleanIdentity
+    from proof_frog.transforms._base import PipelineContext
+    from proof_frog.visitors import NameTypeMap
+
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            BitString<2> O(BitString<1> bs) {
+                return bs || true;
+            }
+        }
+        """
+    )
+    result = BooleanIdentity().apply(game, ctx)
+    assert result == game, "a BitString `||` operand must not trigger boolean-OR identity"
+
+    # Positive control: a genuine boolean OR still simplifies.
+    bool_game = frog_parser.parse_game(
+        """
+        Game G() {
+            Bool O(Bool x) {
+                return x || true;
+            }
+        }
+        """
+    )
+    bool_result = BooleanIdentity().apply(bool_game, ctx)
+    assert "true" in str(bool_result) and "x || true" not in str(bool_result)

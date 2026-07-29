@@ -443,3 +443,28 @@ def test_field_to_local_fires_when_domain_not_mutated() -> None:
         }
         """)
     assert _single_call_field_to_local(game) == expected
+
+
+def test_f058_is_written_detects_element_and_uniq_writes() -> None:
+    """F-058: the field-write guard `_is_written_in_recursive` must peel the full
+    l-value (so `M[k] = v`, `M[k][j] = v`, `obj.f = v` count as writes to the
+    base) and recognize `UniqueSample` writes. The previous bare-Variable +
+    Assignment/Sample check missed both, so a field mutated only via an element
+    write or a `<-uniq` draw looked unwritten."""
+    from proof_frog.transforms.sampling import _is_written_in_recursive
+
+    element = frog_parser.parse_method("Void f() { M[0] = 5; }")
+    assert _is_written_in_recursive(element.block, "M") is True
+
+    nested = frog_parser.parse_method("Void f() { M[0][1] = 5; }")
+    assert _is_written_in_recursive(nested.block, "M") is True
+
+    uniq = frog_parser.parse_method("Void f() { x <-uniq[S] BitString<4>; }")
+    assert _is_written_in_recursive(uniq.block, "x") is True
+
+    field = frog_parser.parse_method("Void f() { X.g = 5; }")
+    assert _is_written_in_recursive(field.block, "X") is True
+
+    # Unrelated write must not match.
+    other = frog_parser.parse_method("Void f() { y = 5; }")
+    assert _is_written_in_recursive(other.block, "M") is False

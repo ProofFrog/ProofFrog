@@ -104,7 +104,15 @@ class _TupleAccessSubstitution(Transformer):
 def _bare_references(expr: frog_ast.Expression, var_name: str) -> bool:
     """True iff *expr* contains a ``Variable(var_name)`` reference that is
     NOT the array-base of an ``ArrayAccess(Variable(var_name), Integer(k))``
-    for some literal integer ``k``.
+    for ``k in {0, 1}``.
+
+    F-143: only indices 0 and 1 are whitelisted, because those are the ONLY
+    indices ``_TupleAccessSubstitution`` rewrites. Whitelisting any literal
+    integer (e.g. ``e[2]``) let such an access pass this "bare reference" check
+    but survive the rewrite unsubstituted, leaving a dangling reference to the
+    deleted loop binder and changing the method's free variables. Restricting
+    the whitelist to {0, 1} makes any other index count as a bare reference, so
+    the pass declines rather than emit an ill-formed body.
     """
     allowed_ids: set[int] = set()
 
@@ -113,6 +121,7 @@ def _bare_references(expr: frog_ast.Expression, var_name: str) -> bool:
             isinstance(n, frog_ast.ArrayAccess)
             and _is_var(n.the_array, var_name)
             and isinstance(n.index, frog_ast.Integer)
+            and n.index.num in (0, 1)
         ):
             allowed_ids.add(id(n.the_array))
         return False

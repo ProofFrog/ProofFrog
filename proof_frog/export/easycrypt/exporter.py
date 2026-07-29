@@ -3850,36 +3850,23 @@ def export_proof_file(proof_path: str) -> str:
                 return [expr]
         return None
 
-    def _keygen_ek_seed_pairs(red: frog_ast.Reduction) -> list[tuple[str, str]]:
-        """``(ek_field, seed_field)`` pairs from each ``[ek, seed] =
-        hybrid.KeyGen()`` destructure in a self-keygen reduction's ``Initialize``.
+    def _keygen_ek_key_pairs(red: frog_ast.Reduction) -> list[tuple[str, str]]:
+        """``(ek_field, dk_field)`` pairs from each ``[ek, dk] = hybrid.KeyGen()``
+        destructure in a self-keygen reduction's ``Initialize``.
 
         Desugars to a temp assign (``_tup = hybrid.KeyGen()``) + two
-        ``ArrayAccess`` element assigns (``ek = _tup[0]; seed = _tup[1]``); the
+        ``ArrayAccess`` element assigns (``ek = _tup[0]; dk = _tup[1]``); the
         scheme ``KeyGen`` return is ``[EncapsKey, DecapsKey]`` so element 0 is the
-        EncapsKey, element 1 the seed. Only pairs where BOTH targets are declared
-        reduction FIELDS are returned AND the DecapsKey field is a ``BitString``
-        seed: the ek-derivation coupling functionalizes ``DeriveKeyPair(seed)`` =
-        ``G.evaluate(seed) -> slice -> ...``, which is only well-typed when the
-        held DecapsKey IS the seed (the *seedbased* combiners, whose ``KeyGen``
-        samples a seed and stores it as the DecapsKey). The *expanded* combiners
-        hold a packed component-key tuple as the DecapsKey and call the component
-        KeyGens directly (no seed, no ``DeriveKeyPair``), so ``G.evaluate`` cannot
-        apply -- yielding no pairs keeps their coupling free of the ill-typed
-        ``ev_evaluate <packed key>``. A reduction that discards the EncapsKey (CT
-        binding: ``ek`` is a local) also yields nothing -> byte-identical."""
+        EncapsKey, element 1 the DecapsKey. Only pairs where BOTH targets are
+        declared reduction FIELDS are returned -- a reduction that discards the
+        EncapsKey (CT binding: ``ek`` is a local) yields nothing."""
         init = _find_init(red)
         if init is None:
             return []
         field_names = {f.name for f in red.fields}
-        seed_field_types = {
-            f.name: f.type
-            for f in red.fields
-            if isinstance(f.type, frog_ast.BitStringType)
-        }
         keygen_tmps: list[str] = []  # ordered by Initialize statement order
         ek_of: dict[str, str] = {}
-        seed_of: dict[str, str] = {}
+        dk_of: dict[str, str] = {}
         for stmt in init.block.statements:
             if not isinstance(stmt, frog_ast.Assignment):
                 continue
@@ -3902,12 +3889,81 @@ def export_proof_file(proof_path: str) -> str:
                 if val.index.num == 0:
                     ek_of[val.the_array.name] = stmt.var.name
                 elif val.index.num == 1:
-                    seed_of[val.the_array.name] = stmt.var.name
-        return [
-            (ek_of[t], seed_of[t])
-            for t in keygen_tmps
-            if t in ek_of and t in seed_of and seed_of[t] in seed_field_types
-        ]
+                    dk_of[val.the_array.name] = stmt.var.name
+        return [(ek_of[t], dk_of[t]) for t in keygen_tmps if t in ek_of and t in dk_of]
+
+    def _keygen_ek_seed_pairs(red: frog_ast.Reduction) -> list[tuple[str, str]]:
+        """:func:`_keygen_ek_key_pairs` restricted to pairs whose held DecapsKey
+        is a ``BitString`` SEED.
+
+        The ek-derivation coupling for these functionalizes ``DeriveKeyPair(seed)``
+        = ``G.evaluate(seed) -> slice -> ...``, which is only well-typed when the
+        held DecapsKey IS the seed (the *seedbased* combiners, whose ``KeyGen``
+        samples a seed and stores it as the DecapsKey). The *expanded* combiners
+        hold a packed component-key tuple as the DecapsKey and call the component
+        KeyGens directly (no seed, no ``DeriveKeyPair``), so ``G.evaluate`` cannot
+        apply -- excluding them keeps their coupling free of the ill-typed
+        ``ev_evaluate <packed key>``; they take the projection path instead (see
+        :func:`_keygen_ek_packed_pairs`)."""
+        seed_fields = {
+            f.name for f in red.fields if isinstance(f.type, frog_ast.BitStringType)
+        }
+        return [p for p in _keygen_ek_key_pairs(red) if p[1] in seed_fields]
+
+    def _keygen_ek_packed_pairs(red: frog_ast.Reduction) -> list[tuple[str, str]]:
+        """:func:`_keygen_ek_key_pairs` restricted to pairs whose held DecapsKey
+        is NOT a ``BitString`` seed -- the complement of
+        :func:`_keygen_ek_seed_pairs`, i.e. the packed component-tuple DecapsKey
+        of the *expanded* combiners. Whether that packed key really exposes the
+        EncapsKey components is decided structurally by
+        :func:`_keygen_ek_dk_projection`."""
+        seed_fields = {
+            f.name for f in red.fields if isinstance(f.type, frog_ast.BitStringType)
+        }
+        return [p for p in _keygen_ek_key_pairs(red) if p[1] not in seed_fields]
+
+    def _keygen_ek_dk_projection(sch: frog_ast.Scheme) -> list[int] | None:
+        """The 1-based tuple projections locating a scheme ``KeyGen``'s EncapsKey
+        components inside the DecapsKey it returns alongside them.
+
+        An *expanded*-form combiner's ``KeyGen`` ends
+        ``return [[ek_a, ek_b], [dk_a, ek_a, dk_b, ek_b]];`` -- every EncapsKey
+        component is also a DecapsKey component, so the held EncapsKey is a pure
+        projection of the held DecapsKey (``ek = (dk.`2, dk.`4)``). Returns those
+        indices, or ``None`` when the return is not two tuples of plain variables
+        or some EncapsKey component is absent from the DecapsKey (the *seedbased*
+        form, whose DecapsKey is the raw seed)."""
+        keygen = next((m for m in sch.methods if m.signature.name == "KeyGen"), None)
+        if keygen is None:
+            return None
+        ret = next(
+            (
+                s
+                for s in reversed(keygen.block.statements)
+                if isinstance(s, frog_ast.ReturnStatement)
+            ),
+            None,
+        )
+        if ret is None or not isinstance(ret.expression, frog_ast.Tuple):
+            return None
+        elems = ret.expression.values
+        if len(elems) != 2:
+            return None
+        ek_t, dk_t = elems
+        if not isinstance(ek_t, frog_ast.Tuple) or not isinstance(dk_t, frog_ast.Tuple):
+            return None
+        if not all(isinstance(v, frog_ast.Variable) for v in ek_t.values):
+            return None
+        if not all(isinstance(v, frog_ast.Variable) for v in dk_t.values):
+            return None
+        dk_names = [v.name for v in dk_t.values if isinstance(v, frog_ast.Variable)]
+        proj: list[int] = []
+        for comp in ek_t.values:
+            assert isinstance(comp, frog_ast.Variable)
+            if comp.name not in dk_names:
+                return None
+            proj.append(dk_names.index(comp.name) + 1)
+        return proj or None
 
     def _local_field_tuples(
         init: frog_ast.Method, red_fields: set[str]
@@ -4366,6 +4422,26 @@ def export_proof_file(proof_path: str) -> str:
                     ev = bch.keygen_derived_ev(dk_proc, seed_ref, clone_alias_by_module)
                     if ev is not None:
                         conj.append(f"({ek_ref}, {seed_ref}) = {ev}")
+        # ek-PROJECTION coupling (expanded PK binding): the *expanded* combiners'
+        # ``KeyGen`` returns the EncapsKey components INSIDE the DecapsKey tuple,
+        # so the held EncapsKey is a projection of the held DecapsKey rather than
+        # a seed derivation. Same purpose as the branch above -- give the OPAQUE
+        # held ``R.ek`` a form linking it to the component keys the KDF input
+        # binds -- and equally SOUND, read straight off the scheme's own
+        # ``KeyGen`` return AST. Emitted in the seedbased branch's ``(ek, key)``
+        # pair shape so the challenge route's ``seq`` invariant restates it
+        # verbatim. Declines (``None``) for a seed DecapsKey -> byte-identical.
+        packed_pairs = _keygen_ek_packed_pairs(red)
+        if packed_pairs and scheme is not None:
+            ek_proj = _keygen_ek_dk_projection(scheme)
+            if ek_proj is not None:
+                for ek_f, key_f in packed_pairs:
+                    # pylint: disable=protected-access
+                    key_ref = f"{red_base}.{mt._ec_field_name(key_f)}{{{rs}}}"
+                    ek_ref = f"{red_base}.{mt._ec_field_name(ek_f)}{{{rs}}}"
+                    # pylint: enable=protected-access
+                    comps = ", ".join(f"{key_ref}.`{i}" for i in ek_proj)
+                    conj.append(f"({ek_ref}, {key_ref}) = (({comps}), {key_ref})")
         body = " /\\ ".join(conj)
         return f"{glob_invariant_conj} /\\ {body}" if glob_invariant_conj else body
 

@@ -4380,6 +4380,29 @@ def _synth_reprogram_lazy_init(  # pylint: disable=too-many-arguments,too-many-p
     return (tac, set(), SYNTH_PARAM)
 
 
+def _has_side_local_projection(coupling: str | None) -> bool:
+    """True when the threaded live-state coupling has a conjunct relating two
+    references in the SAME memory through a tuple PROJECTION, e.g. the expanded
+    combiners' KeyGen ek-projection ``(R.ek0{2}, R.dk0{2}) = ((R.dk0{2}.`3,
+    R.dk0{2}.`4), R.dk0{2})``.
+
+    ``sim`` only infers equalities BETWEEN the two memories, so such a conjunct
+    makes ``proc; inline *; sim`` fail outright ("cannot infer the set of
+    equalities"); the init backbone peel must run instead, where ``wp`` collects
+    the assignments that make the projection a tautology. Cross-memory conjuncts
+    (``Game.ek0{1} = R.ek0{2}``) and projection-free same-memory seams
+    (``R.s_PQ_0{1} = Chal.dk0{1}``) both answer False, so every init that closes
+    today keeps its tactic."""
+    if not coupling:
+        return False
+    for part in coupling.split(" /\\ "):
+        if "=" not in part or ".`" not in part:
+            continue
+        if len(set(re.findall(r"\{([12])\}", part))) == 1:
+            return True
+    return False
+
+
 def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -4392,6 +4415,7 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
     init_repacks: bool = False,
     init_decomposition: bool = False,
     require_equal_bodies: bool = False,
+    side_local_coupling: bool = False,
 ) -> tuple[list[str], set[tuple[str, str]], str] | None:
     """Closing tactic for an init-oracle equiv whose two endpoints have
     identical canonical bodies.
@@ -4480,7 +4504,7 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
         return False
 
     if [k for k, _ in l_bb] == [k for k, _ in r_bb]:
-        if not _has_det_call(l_bb):
+        if not _has_det_call(l_bb) and not side_local_coupling:
             if (
                 (init_repacks or init_decomposition)
                 and not _same_det_structure(l_body, r_body)
@@ -5071,6 +5095,7 @@ def _emit_one_oracle_chain(
             init_repacks=init_repacks,
             init_decomposition=init_decomposition,
             require_equal_bodies=not last_states_match,
+            side_local_coupling=_has_side_local_projection(full_coupling),
         )
         if peel is not None:
             tactic, pres, rung = peel
@@ -7008,22 +7033,15 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
     if distinct_grp and not all(f in red_field_set for f in distinct_grp[0]):
         # pylint: disable=protected-access
         if ff_is_ek_guard:
-            # PK: split off the DecapsKey game fields (fed to ``G.evaluate`` -->
-            # appear as Call args) from the dead EncapsKey fields, and the seeds
+            # PK: split off the DecapsKey game fields (whose value feeds the
+            # challenge computation) from the dead EncapsKey fields, and the seeds
             # from the guard ek fields. Only the DecapsKey/seed derivation is
             # functionalized; the ek fields are dead (both sides return false).
-            game_call_args = " ".join(
-                s.args for s in game_proc.body if isinstance(s, ec_ast.Call)
+            game_fields, game_ek_fields = _split_key_vs_win_fields(
+                game_proc, list(right_state0.fields)
             )
-            game_fields = [
-                f
-                for f in right_state0.fields
-                if re.search(r"\b" + re.escape(f.name) + r"\b", game_call_args)
-            ]
             game_ek_refs = [
-                f"{game_base}.{mt._ec_field_name(f.name)}"
-                for f in right_state0.fields
-                if f not in game_fields
+                f"{game_base}.{mt._ec_field_name(f.name)}" for f in game_ek_fields
             ]
             red_own = [f for f in left_state0.fields if f.name not in ff_guard_ops]
         else:
@@ -7812,20 +7830,14 @@ def _challenge_single_r_route(  # pylint: disable=too-many-arguments,too-many-po
     guard_ek_refs: list[str] = []
     game_ek_refs: list[str] = []
     if is_ek_guard:
-        # PK binding: split the game fields into DecapsKey fields (fed to
-        # ``G.evaluate`` -- appear as Call args) and EncapsKey fields (the win
-        # term, return-only), and the reduction fields into seeds (the rest) and
+        # PK binding: split the game fields into DecapsKey fields (whose value
+        # feeds the challenge computation) and EncapsKey fields (the win term,
+        # return-only), and the reduction fields into seeds (the rest) and
         # ek fields (the guard operands). The val-lemma functionalizes only the
         # DecapsKey/seed derivation; the ek fields drive the case-split + win term.
-        call_arg_txt = " ".join(
-            s.args for s in game_proc.body if isinstance(s, ec_ast.Call)
+        game_seed_fields, game_ek_fields = _split_key_vs_win_fields(
+            game_proc, game_fields
         )
-        game_seed_fields = [
-            f
-            for f in game_fields
-            if re.search(r"\b" + re.escape(f.name) + r"\b", call_arg_txt)
-        ]
-        game_ek_fields = [f for f in game_fields if f not in game_seed_fields]
         red_seed_fields = [f for f in red_fields if f.name not in guard_ops]
         if (
             len(game_seed_fields) != len(red_seed_fields)
@@ -7886,6 +7898,48 @@ def _annot_eq_guard(guard: str, side: str) -> str:
     if len(parts) != 2:
         return f"({guard}){side}"
     return f"{parts[0].strip()}{side} = {parts[1].strip()}{side}"
+
+
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
+
+
+def _call_fed_names(body: Sequence[ec_ast.EcStmt]) -> set[str]:
+    """The names whose value FLOWS INTO an abstract call argument, by backward
+    data-flow closure over the straight-line body: seed the set with every call
+    argument's identifiers, then repeatedly pull in the identifiers of any
+    assignment whose target is already in the set."""
+    fed: set[str] = set()
+    for stmt in body:
+        if isinstance(stmt, ec_ast.Call):
+            fed.update(_IDENT_RE.findall(stmt.args))
+    assigns = [s for s in body if isinstance(s, ec_ast.Assign)]
+    changed = True
+    while changed:
+        changed = False
+        for stmt in assigns:
+            if stmt.var in fed:
+                new = set(_IDENT_RE.findall(stmt.rhs)) - fed
+                if new:
+                    fed |= new
+                    changed = True
+    return fed
+
+
+def _split_key_vs_win_fields(
+    game_proc: ec_ast.Proc, game_fields: list[frog_ast.Field]
+) -> tuple[list[frog_ast.Field], list[frog_ast.Field]]:
+    """Split a binding game's state fields into the DECAPS-KEY fields (whose
+    value is consumed by the challenge computation) and the win-term ENCAPS-KEY
+    fields (read only by the returned boolean).
+
+    Data-flow, not naming: a key field feeds an abstract call, directly (the
+    *seedbased* combiners hand the held seed to ``G.evaluate``) or through
+    component projections (the *expanded* combiners project the held key tuple
+    into locals first). The win-term EncapsKey fields feed no call at all --
+    they only appear in the returned ``ek0 <> ek1`` conjunct."""
+    fed = _call_fed_names(game_proc.body)
+    keys = [f for f in game_fields if f.name in fed]
+    return keys, [f for f in game_fields if f not in keys]
 
 
 def _kdf_groups(prefix: Sequence[ec_ast.EcStmt]) -> list[list[ec_ast.Call]]:

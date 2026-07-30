@@ -69,6 +69,16 @@ class LazyroInitSpec:
     ng_det: str | None = None
     n_after_rs: int = 0
     n_before_rs: int = 0
+    # TWO-KEYPAIR derived-coupling init (PK / two-keypair DIFFKEY): the game
+    # INTERLEAVES per-keypair derivations while the reduction BATCHES per-op, so
+    # neither the single-``rs`` functionalization nor the ordered
+    # ``call (_: true)`` peel applies. The exporter computes the ENTIRE
+    # init-tail tactic block (sample hoists + seq coupling + dead-RO drop +
+    # post-sample ``exists*`` freeze + one-sided det peels of BOTH tails + the
+    # bounded ladder closer) and the translator splices it verbatim. ``None``
+    # => the single-keypair branches above run (byte-identical). Validated on
+    # both compilers: ``ec_templates/two_keypair_lazyro_pr_init.ec``.
+    init_tac_override: list[str] | None = None
 
 
 @dataclass
@@ -690,7 +700,9 @@ def translate_inlining_hop_pr_lemma(  # pylint: disable=too-many-arguments,too-m
             # the post-init goal has an unprovable ``(glob A){1} = (glob A){2}``
             # leaf. ``={glob A}`` holds from ``byequiv_pre`` and the init never
             # touches ``glob A``, so threading it through the split is sound.
-            if li.seq_inv is not None:
+            if li.init_tac_override is not None:
+                init_tac = ["inline *.", *li.init_tac_override]
+            elif li.seq_inv is not None:
                 # DERIVED-COUPLING init (the hop's coupling carries the lazy-RO
                 # derived key relation): couple BOTH samples up front (``seq 2 2``
                 # -> RO + seed), drop the dead RO copy, ``sp`` to substitute the

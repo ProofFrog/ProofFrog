@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, cast
 
 from . import binding_challenge as bch
+from .challenge_common import paren as cc_paren
 from . import canonical_form
 from . import ec_ast
 from . import expr_translator
@@ -5303,6 +5304,296 @@ def export_proof_file(proof_path: str) -> str:
         # pylint: enable=protected-access
         return " /\\ ".join(conj)
 
+    def _lazyro_two_keypair_init_tac(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+        lazy_hop: tuple[str, str, str, str, str],
+        red_step: frog_ast.Step,
+        game_step: frog_ast.Step,
+        chal_init: frog_ast.Method,
+        dfun_ll: str,
+    ) -> list[str] | None:
+        """The COMPLETE init-tail tactic for a TWO-KEYPAIR lazy-RO Honest
+        pr-lemma (PK / two-keypair DIFFKEY hop_0/12), or ``None`` off-shape.
+
+        The game INTERLEAVES per-keypair derivations while the reduction
+        BATCHES per-op; every derivation call is an abstract module call, so
+        EC ``swap`` cannot reorder them and the ordered ``call (_: true)``
+        peel mispairs ("NG.randomscalar and NG.exp should be equal"). Route
+        (validated on BOTH compilers,
+        ``ec_templates/two_keypair_lazyro_pr_init.ec``): hoist the game's
+        buried second keygen seed to the front (all-``@ 0`` sample hoists --
+        legal: hop_0's seeds are INDEPENDENT draws, no exclusion; portable:
+        numeric ``@ 0`` means top on both ECs); sink the reduction's dead
+        shared-RO sample; ``seq (n+1) (n+1)`` couples [RO~hh, seed_i~s_i]
+        positionally; drop the dead RO (``rnd{rs}`` + losslessness); then
+        ``exists*``-freeze the POST-SAMPLE memory -- which dissolves the old
+        "freeze binds initial memory" obstruction -- and peel every
+        deterministic call ONE-SIDEDLY (order-independent), closing with the
+        bounded ladder ``24db0e2`` validated at 44 levels.
+
+        Peel sources: game side = the theorem scheme's ``derivekeypair``
+        preprocessed for the ROM instantiation
+        (:func:`_lazyro_preprocess_derivekeypair`), run once per keypair with
+        the seed bound to its frozen name; reduction side = the RENDERED
+        reduction module's ``initialize`` with challenger calls rewritten to
+        frozen-name assigns and wrapper callees inlined one level. Both give
+        ordered call lists via ``bch.model_from_proc``. Gated on the
+        challenger returning >= 2 seeds, so single-keypair proofs keep the
+        existing branches byte-identically."""
+        game_side, red_side_l, chal_base, chal_field, ro_ref = lazy_hop
+        rret = _return_elems(chal_init)
+        if rret is None or len(rret) < 2:
+            return None
+        if not all(isinstance(v, frog_ast.Variable) for v in rret):
+            return None
+        n_kp = len(rret)
+        assert red_step.reduction is not None
+        # -- the game's keygen-seed inline names: the scheme keygen's sampled
+        # seed, first inline instance bare, later instances dedup-suffixed
+        # ``<name><k-1>`` (EC inline convention, confirmed on the real goal).
+        scheme_name = pt.module_base_name(
+            pt.last_module_arg(resolver.resolve(game_step).module_expr)
+        )
+        scheme_def = schemes_by_name.get(scheme_name)
+        if scheme_def is None:
+            return None
+        keygen = next(
+            (m for m in scheme_def.methods if m.signature.name.lower() == "keygen"),
+            None,
+        )
+        if keygen is None:
+            return None
+        gseed_base = next(
+            (
+                s.var.name
+                for s in keygen.block.statements
+                if isinstance(s, frog_ast.Sample)
+                and isinstance(s.var, frog_ast.Variable)
+            ),
+            None,
+        )
+        if gseed_base is None:
+            return None
+        gseeds = [gseed_base if i == 0 else f"{gseed_base}{i - 1}" for i in range(n_kp)]
+        rseeds = [cast(frog_ast.Variable, v).name for v in rret]
+        # -- game-side peel model: the preprocessed scheme derivekeypair, one
+        # run per keypair with the seed bound to its frozen elim name.
+        dkp = (
+            next((pr for pr in ec_scheme.procs if pr.name == "derivekeypair"), None)
+            if ec_scheme is not None
+            else None
+        )
+        pre_dkp = _lazyro_preprocess_derivekeypair(dkp) if dkp is not None else None
+        if pre_dkp is None or len(pre_dkp.params) != 1:
+            return None
+        gmodels = []
+        for i in range(n_kp):
+            m = bch.model_from_proc(
+                pre_dkp,
+                {pre_dkp.params[0].name: f"gsd{i}"},
+                clone_alias_by_module,
+            )
+            if m is None:
+                return None
+            gmodels.append(m)
+        # -- reduction-side peel model: the rendered reduction module's init,
+        # challenger calls rewritten to frozen-name assigns, wrapper callees
+        # inlined one level.
+        red_name = red_step.reduction.name
+        red_mod = next(
+            (
+                d
+                for d in ec_reductions
+                if isinstance(d, ec_ast.Module) and d.name == red_name
+            ),
+            None,
+        )
+        if red_mod is None:
+            return None
+        red_proc = next((pr for pr in red_mod.procs if pr.name == "initialize"), None)
+        if red_proc is None:
+            return None
+        chal_param = red_mod.params[-1].name if red_mod.params else None
+
+        def _rn_tok(s: str, mapping: dict[str, str]) -> str:
+            for k in sorted(mapping, key=len, reverse=True):
+                s = re.sub(rf"\b{re.escape(k)}\b", mapping[k], s)
+            return s
+
+        rbody: list[ec_ast.EcStmt] = []
+        fresh = 0
+        for stmt in red_proc.body:
+            if isinstance(stmt, (ec_ast.Sample, ec_ast.If)):
+                return None
+            if not isinstance(stmt, ec_ast.Call):
+                rbody.append(stmt)
+                continue
+            mod, dot, meth = stmt.callee.partition(".")
+            if not dot:
+                return None
+            if mod == chal_param:
+                if meth == "initialize":
+                    tup = ", ".join(f"rsd{i}" for i in range(n_kp))
+                    rbody.append(ec_ast.Assign(stmt.var, f"({tup})"))
+                    continue
+                if meth == "hash":
+                    rbody.append(ec_ast.Assign(stmt.var, f"(hoh {stmt.args.strip()})"))
+                    continue
+                return None
+            wrapper = foreign_concrete_modules.get(mod)
+            if wrapper is None:
+                rbody.append(stmt)
+                continue
+            wproc = next((pr for pr in wrapper.procs if pr.name == meth), None)
+            wlet = next((l for l in proof.lets if l.name == mod), None)
+            if (
+                wproc is None
+                or len(wproc.params) != 1
+                or wlet is None
+                or not isinstance(wlet.value, frog_ast.FuncCall)
+            ):
+                return None
+            wargs = [
+                a.name for a in wlet.value.args if isinstance(a, frog_ast.Variable)
+            ]
+            if len(wargs) != len(wrapper.params):
+                return None
+            sub: dict[str, str] = dict(zip((pp.name for pp in wrapper.params), wargs))
+            sub[wproc.params[0].name] = stmt.args.strip()
+            pfx = f"_tw{fresh}_"
+            fresh += 1
+            ret_expr: str | None = None
+            for ws in wproc.body:
+                if isinstance(ws, ec_ast.VarDecl):
+                    continue
+                if isinstance(ws, ec_ast.Return):
+                    ret_expr = _rn_tok(ws.expr, sub)
+                    break
+                if isinstance(ws, ec_ast.Assign):
+                    rhs = _rn_tok(ws.rhs, sub)
+                    sub[ws.var] = pfx + ws.var
+                    rbody.append(ec_ast.Assign(pfx + ws.var, rhs))
+                elif isinstance(ws, ec_ast.Call):
+                    wm, wd, wmeth = ws.callee.partition(".")
+                    if not wd:
+                        return None
+                    args = _rn_tok(ws.args, sub)
+                    callee_mod = sub.get(wm, wm)
+                    sub[ws.var] = pfx + ws.var
+                    rbody.append(
+                        ec_ast.Call(pfx + ws.var, f"{callee_mod}.{wmeth}", args)
+                    )
+                else:
+                    return None
+            if ret_expr is None:
+                return None
+            rbody.append(ec_ast.Assign(stmt.var, ret_expr))
+        rmodel = bch.model_from_proc(
+            ec_ast.Proc(
+                "initialize", [], red_proc.return_type, rbody + [ec_ast.Return("tt")]
+            ),
+            {},
+            clone_alias_by_module,
+        )
+        if rmodel is None or not rmodel.calls:
+            return None
+        # -- freeze list + elim names (post-sample memory, both sides)
+        g_mods: list[str] = []
+        for m in gmodels:
+            for gm in m.glob_modules:
+                if gm not in g_mods:
+                    g_mods.append(gm)
+        r_mods = list(rmodel.glob_modules)
+        honest_ref = f"{chal_base}.{chal_field}"
+        exs = (
+            [f"(glob {m}){{{game_side}}}" for m in g_mods]
+            + [f"{ro_ref}{{{game_side}}}"]
+            + [f"{gs}{{{game_side}}}" for gs in gseeds]
+            + [f"(glob {m}){{{red_side_l}}}" for m in r_mods]
+            + [f"{honest_ref}{{{red_side_l}}}"]
+            + [f"{rs}{{{red_side_l}}}" for rs in rseeds]
+        )
+        g_glob_elim = {m: f"zgg{i}" for i, m in enumerate(g_mods)}
+        r_glob_elim = {m: f"zgr{i}" for i, m in enumerate(r_mods)}
+        elims = (
+            [g_glob_elim[m] for m in g_mods]
+            + ["roh"]
+            + [f"gsd{i}" for i in range(n_kp)]
+            + [r_glob_elim[m] for m in r_mods]
+            + ["hoh"]
+            + [f"rsd{i}" for i in range(n_kp)]
+        )
+
+        def _peel(calls: list[Any], side: str, glob_elim: dict[str, str]) -> list[str]:
+            lines: list[str] = []
+            for c in reversed(calls):
+                args = "".join(f" {cc_paren(a)}" for a in c.arg_values)
+                lines.append(
+                    f"call{{{side}}} ({c.module}_{c.method}_det "
+                    f"{glob_elim[c.module]}{args})."
+                )
+                lines.append("wp.")
+            return lines
+
+        gpeel: list[str] = []
+        for m in reversed(gmodels):
+            gpeel += _peel(m.calls, game_side, g_glob_elim)
+        rpeel = _peel(rmodel.calls, red_side_l, r_glob_elim)
+        n_levels = sum(len(m.calls) for m in gmodels) + len(rmodel.calls)
+        gpeel = [ln.replace("__ROH__", "roh") for ln in gpeel]
+        rpeel = [ln.replace("__ROH__", "roh") for ln in rpeel]
+        # -- the seq coupling invariant: globs + RO couple + seed couples ONLY
+        # (field couplings are NOT provable at sample time; they are
+        # established by the final wp/ladder from the derivations).
+        seed_conj = " /\\ ".join(
+            f"{g}{{{game_side}}} = {r}{{{red_side_l}}}" for g, r in zip(gseeds, rseeds)
+        )
+        # ``={glob <RO holder>}`` is UNPROVABLE at the seq point: the game
+        # side's RO was just sampled while the reduction side's copy is the
+        # DEAD sample still below the boundary (probe evidence: the prefix
+        # bullet leaves ``hL = RO_G_RO.h{2}``). Strip it -- the same reason
+        # ``_live_state_coupling`` strips it from lazyro-hop couplings; the
+        # cross-side ``RO{gs} = Honest.h{rs}`` conjunct is the real coupling.
+        inv_globs = glob_invariant_conj
+        for _ro_m in ro_holder_modules:
+            inv_globs = inv_globs.replace(f" /\\ ={{glob {_ro_m}}}", "").replace(
+                f"={{glob {_ro_m}}} /\\ ", ""
+            )
+        inv = (
+            "={glob A}"
+            + (f" /\\ {inv_globs}" if inv_globs else "")
+            + f" /\\ {ro_ref}{{{game_side}}} = {honest_ref}{{{red_side_l}}}"
+            + f" /\\ {seed_conj}"
+        )
+        n_samp = n_kp + 1
+        dead_seq = "0 1" if red_side_l == "2" else "1 0"
+        ladder = (
+            "(   (split; [ by smt() | move => ? ? ? [-> ->] ])"
+            " || (split; [ by smt() | move => ? ? ? [-> ?] ])"
+            " || (split; [ by smt() | move => ? ? ? [? ->] ])"
+            " || (split; [ by smt() | move => ? ? ? [? ?] ])"
+            " || (move => ? ? [-> ->])"
+            " || (move => ? ? [-> ?])"
+            " || (move => ? ? [? ->])"
+            " || (move => ? ? [? ?]))"
+        )
+        return [
+            *([f"swap{{{game_side}}} ^ <${{{n_samp}}} @ 0."] * n_samp),
+            f"swap{{{red_side_l}}} 1 {n_samp}.",
+            f"seq {n_samp} {n_samp} : ({inv}).",
+            "+ " + "rnd; " * n_samp + "skip => />.",
+            f"seq {dead_seq} : ({inv}).",
+            f"+ rnd{{{red_side_l}}}; auto => />; smt({dfun_ll}).",
+            f"exists* {', '.join(exs)};",
+            f"elim* => {' '.join(elims)}.",
+            "wp.",
+            *gpeel,
+            *rpeel,
+            "skip; move => &1 &2 H.",
+            f"do {n_levels}! (simplify; {ladder}).",
+            "simplify.",
+            "smt().",
+        ]
+
     def _lazyro_derived_init_fields(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         step_a: frog_ast.Step,
         step_b: frog_ast.Step,
@@ -6057,14 +6348,28 @@ def export_proof_file(proof_path: str) -> str:
 
                 visitors.SearchVisitor(_count_call).visit(red_init.block)
                 n_calls = _n[0]
-                derived_kw = _lazyro_derived_init_fields(
-                    step_a, step_b, lazy_hop, red, red_init, chal_init
+                # Two-keypair lazy-RO hop (PK / two-keypair DIFFKEY): the
+                # game interleaves per-keypair derivations while the reduction
+                # batches per-op, so neither single-keypair branch closes.
+                # Compute the whole init tail here; ``None`` off-shape keeps
+                # the single-keypair paths byte-identical.
+                game_step_l = step_a if step_a.reduction is None else step_b
+                override = _lazyro_two_keypair_init_tac(
+                    lazy_hop, red_step, game_step_l, chal_init, f"{dfun}_ll"
+                )
+                derived_kw = (
+                    {}
+                    if override is not None
+                    else _lazyro_derived_init_fields(
+                        step_a, step_b, lazy_hop, red, red_init, chal_init
+                    )
                 )
                 lazyro = pt.LazyroInitSpec(
                     swap_below=swap_below,
                     n_calls=n_calls,
                     dfun_ll=f"{dfun}_ll",
                     red_side=red_side,
+                    init_tac_override=override,
                     **derived_kw,
                 )
         return pt.MultiOraclePrSpec(

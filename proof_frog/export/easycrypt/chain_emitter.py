@@ -6568,15 +6568,72 @@ def _wrapper_challenge_route(  # pylint: disable=too-many-arguments,too-many-pos
     red_base = _ref_base(right_wrapper_expr)
     game_flds = [f.name for f in left_state0.fields]
     red_own = [f.name for f in right_state0.fields if "@" not in f.name]
-    chal_fld = next((f.name for f in right_state0.fields if "@" in f.name), None)
-    if chal_fld is None:
+    # ALL inner-challenger key fields, field order (a two-keypair DIFFKEY
+    # challenger holds ``challenger@dk0`` AND ``challenger@dk1``).
+    chal_keys = [f.name.split("@", 1)[1] for f in right_state0.fields if "@" in f.name]
+    if not chal_keys:
         return None
     game_extra = [g for g in game_flds if g not in red_own]
     red_extra = [r for r in red_own if r not in game_flds]
-    if len(game_extra) != 1 or len(red_extra) != 1:
+    # ORDINAL k-th pairing (both lists derive from field declaration order =
+    # keypair order): the k-th leftover game PQ key couples to the k-th
+    # leftover reduction PQ seed. The old single-pair gate declined every
+    # two-keypair proof; the k=1 case is byte-identical. EC-gated (the
+    # couplings are proven, not assumed).
+    if not game_extra or len(game_extra) != len(red_extra):
         return None
     pair = {g: g for g in game_flds if g in red_own}
-    pair[game_extra[0]] = red_extra[0]  # game PQ key -> reduction PQ seed
+    for _gk, _rk in zip(game_extra, red_extra):
+        pair[_gk] = _rk  # game PQ key -> reduction PQ seed
+    # Challenger-field pairing. A CT-binding inner challenger holds only its
+    # decaps keys (one per keypair -> ordinal zip with the leftover seeds); a
+    # PK-binding challenger ALSO holds the encaps keys, which couple to SHARED
+    # reduction fields (held by both game and reduction). The dkp-consumed
+    # keys are found by TYPE against the leftover seeds (wrapper dk = seed
+    # space); the rest pair type-ordinally against shared fields.
+    chal_fields = [f for f in right_state0.fields if "@" in f.name]
+    if len(chal_keys) == len(red_extra):
+        chal_pair = dict(zip(chal_keys, red_extra))
+        key_chals = chal_keys
+    else:
+        red_field_by_name = {f.name: f for f in right_state0.fields}
+        chal_pair = {}
+        key_chals = []
+        for rk in red_extra:
+            rty = red_field_by_name[rk].type
+            cf = next(
+                (
+                    c
+                    for c in chal_fields
+                    if c.name.split("@", 1)[1] not in chal_pair and c.type == rty
+                ),
+                None,
+            )
+            if cf is None:
+                return None
+            ck = cf.name.split("@", 1)[1]
+            chal_pair[ck] = rk
+            key_chals.append(ck)
+        shared_used: set[str] = set()
+        for cf in chal_fields:
+            ck = cf.name.split("@", 1)[1]
+            if ck in chal_pair:
+                continue
+            rf = next(
+                (
+                    f
+                    for f in right_state0.fields
+                    if "@" not in f.name
+                    and f.name in game_flds
+                    and f.name not in shared_used
+                    and f.type == cf.type
+                ),
+                None,
+            )
+            if rf is None:
+                return None
+            shared_used.add(rf.name)
+            chal_pair[ck] = rf.name
     game_fields = _game_free_fields(game_proc, game_flds)
     if not game_fields:
         return None
@@ -6589,12 +6646,9 @@ def _wrapper_challenge_route(  # pylint: disable=too-many-arguments,too-many-pos
         for g in game_flds
         if g not in game_fields
     ]
-    chal_key = chal_fld.split("@", 1)[1]  # ``challenger@dk0`` -> ``dk0``
     challenger_coupling = [
-        f"{red_base}.{pair[game_extra[0]]}"
-        "{2}"
-        f" = {challenger_ref}.{chal_key}"
-        "{2}"
+        f"{red_base}.{chal_pair[ck]}" "{2}" f" = {challenger_ref}.{ck}" "{2}"
+        for ck in chal_keys
     ]
     comps = modules.types.concat_components(  # pylint: disable=protected-access
         shape.concat_ops[-1]
@@ -6615,7 +6669,7 @@ def _wrapper_challenge_route(  # pylint: disable=too-many-arguments,too-many-pos
         challenger_coupling=challenger_coupling,
         extra_glob_sync_mods=[],
         challenger_ref=challenger_ref,
-        challenger_key_fields=[chal_key],
+        challenger_key_fields=key_chals,
         pq_module=pq_module,
         inj_axiom=inj_axiom,
         h_module=h_module,
@@ -7201,6 +7255,148 @@ def _challenge_falsefalse_route(  # pylint: disable=too-many-arguments,too-many-
     return ([_res_tag(SYNTH_PARAM), *body[1:]], scheme_name)
 
 
+def _hop2_pk_wrapper_dispatch(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
+    lred: ec_ast.Proc,
+    rred: ec_ast.Proc,
+    lif: ec_ast.If,
+    left_wrapper_expr: str,
+    right_wrapper_expr: str,
+    l_then_calls: list[ec_ast.Call],
+    clone_alias: dict[str, str],
+    shape: bch.ConcatShape,
+    inner: str,
+    own_all: list[str],
+    l_prefix: list[ec_ast.EcStmt],
+    r_prefix: list[ec_ast.EcStmt],
+    wrapper_expr: str,
+    l_challenger_ref: str,
+    chal_flds: list[str],
+    h_module: str,
+    glob_mods: list[str],
+    sync_mods: list[str],
+) -> tuple[list[str], tuple[str, str] | None, str] | None:
+    """PK (encaps-key) two-keypair wrapper both-case-split: derive the
+    :class:`bch.Hop2Spec` datums (two seeds, two T scalars, the challenger's
+    dkp-consumed vs encaps-key fields, the packed ``ek`` locals) and dispatch to
+    :func:`bch.challenge_tactic_hop2_pk_wrapper`. Declines (-> honest admit)
+    when any datum can't be read structurally."""
+    rif = next((s for s in rred.body if isinstance(s, ec_ast.If)), None)
+    if rif is None or "&&" not in str(lif.guard):
+        return None
+    l_dkps = [
+        s
+        for s in lred.body
+        if isinstance(s, ec_ast.Call) and s.callee == f"{inner}.derivekeypair"
+    ]
+    r_dkps = [
+        s
+        for s in rred.body
+        if isinstance(s, ec_ast.Call) and s.callee == f"{inner}.derivekeypair"
+    ]
+    if len(l_dkps) != 2 or len(r_dkps) != 2 or len(chal_flds) != 4:
+        return None
+    l_seeds = [_split_top_args(s.args)[0] for s in l_dkps]
+    r_dk_flds = [_split_top_args(s.args)[0] for s in r_dkps]
+    if any(f not in own_all for f in l_seeds):
+        return None
+    t_method = _ev_method(shape.ev_decaps_t)
+    t_module = {c: m for m, c in clone_alias.items()}.get(
+        shape.ev_decaps_t.split(".", 1)[0], shape.ev_decaps_t.split(".", 1)[0]
+    )
+
+    def _tkeys(prefix: list[ec_ast.EcStmt]) -> list[str]:
+        out = []
+        for s in prefix:
+            if isinstance(s, ec_ast.Call) and s.callee == f"{t_module}.{t_method}":
+                args = _split_top_args(s.args)
+                out.append(args[1] if shape.t_decaps_ct_first else args[0])
+        return out
+
+    l_tkeys = _tkeys(l_prefix)
+    r_tkeys = _tkeys(r_prefix)
+    if len(l_tkeys) != 2 or len(r_tkeys) != 2:
+        return None
+    # Challenger dkp-consumed keys: the inlined then-body reads them through
+    # flat locals named by the "@"->"_" rename of the challenger field.
+    then_dkps = [c for c in l_then_calls if c.callee.endswith(".derivekeypair")]
+    if len(then_dkps) != 2:
+        return None
+    by_flat = {f.replace("@", "_"): f for f in chal_flds}
+    cks: list[str] = []
+    for c in then_dkps:
+        f = by_flat.get(_split_top_args(c.args)[0])
+        if f is None:
+            return None
+        cks.append(f.split("@", 1)[1])
+    ek_cks = [f.split("@", 1)[1] for f in chal_flds if f.split("@", 1)[1] not in cks]
+    if len(ek_cks) != 2:
+        return None
+    # The packed ``ek`` locals the RIGHT guard compares, and their field pairs.
+    guard_ops = [o.strip() for o in str(rif.guard).split(" = ")]
+    if len(guard_ops) != 2:
+        return None
+
+    def _pack_groups(prefix: list[ec_ast.EcStmt]) -> list[list[str]] | None:
+        groups: list[list[str]] = []
+        for op in guard_ops:
+            asg = next(
+                (s for s in prefix if isinstance(s, ec_ast.Assign) and s.var == op),
+                None,
+            )
+            if asg is None:
+                return None
+            m = re.fullmatch(r"\((\w+), *(\w+)\)", str(asg.rhs).strip())
+            if m is None:
+                return None
+            groups.append([m.group(1), m.group(2)])
+        return groups
+
+    l_ekg = _pack_groups(l_prefix)
+    r_ekg = _pack_groups(r_prefix)
+    if l_ekg is None or r_ekg is None:
+        return None
+    clone_to_mod = {c: m for m, c in clone_alias.items()}
+    eek_clone = shape.ev_encek_t.split(".", 1)[0]
+    ekt_module = clone_to_mod.get(eek_clone, inner)
+    eek_method = _ev_method(shape.ev_encek_t)
+    spec = bch.Hop2Spec(
+        ct_params=[p.name for p in lred.params],
+        sync_mods=sync_mods,
+        l_base=_ref_base(left_wrapper_expr),
+        r_base=_ref_base(right_wrapper_expr),
+        l_prefix=l_prefix,
+        r_prefix=r_prefix,
+        glob_mods=glob_mods,
+        l_component_fields=[l_seeds + l_tkeys],
+        r_component_fields=[r_dk_flds + r_tkeys],
+        clone_alias=clone_alias,
+        shape=shape,
+        pq_module=inner,
+        h_module=h_module,
+        l_challenger_ref=l_challenger_ref,
+        l_challenger_key_fields=cks,
+        ect_inj_axiom=f"{ekt_module}_{eek_method}_inj",
+        ct_key_idx=[0, 1],
+        win_is_ek=True,
+        l_ek_component_fields=l_ekg,
+        r_ek_component_fields=r_ekg,
+        l_challenger_ek_fields=ek_cks,
+        l_guard=str(lif.guard),
+        r_guard=str(rif.guard),
+        wrapper_expr=wrapper_expr,
+        inner_pq_module=inner,
+        l_own_fields=l_seeds + l_tkeys,
+        r_own_fields=r_dk_flds + r_tkeys,
+        l_all_fields=own_all,
+        ro_ref=f"{clone_alias.get('Hybrid', 'Hybrid')}.RO_G_RO.h",
+        l_red_proc=lred,
+    )
+    body = bch.challenge_tactic_hop2_pk_wrapper(spec)
+    if body is None:
+        return None
+    return ([_res_tag(SYNTH_PARAM), *body[1:]], (ekt_module, eek_method), "")
+
+
 def _challenge_hop2_wrapper_route(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-return-statements
     lred: ec_ast.Proc,
     rred: ec_ast.Proc,
@@ -7236,18 +7432,18 @@ def _challenge_hop2_wrapper_route(  # pylint: disable=too-many-arguments,too-man
     if shape is None:
         return None
     own_all = [f.name for f in left_state0.fields if "@" not in f.name]
-    dkp = next(
-        (
-            s
-            for s in l_prefix
-            if isinstance(s, ec_ast.Call) and s.callee == f"{inner}.derivekeypair"
-        ),
-        None,
-    )
-    if dkp is None:
+    l_dkps = [
+        s
+        for s in l_prefix
+        if isinstance(s, ec_ast.Call) and s.callee == f"{inner}.derivekeypair"
+    ]
+    if not l_dkps:
         return None
-    seed_f = _split_top_args(dkp.args)[0]
-    if seed_f not in own_all:
+    # DISTINCT seeds, first-appearance order: SAMEKEY decapsulates BOTH cts
+    # through the one keypair (two dkp calls, one seed).
+    l_seed_fs = list(dict.fromkeys(_split_top_args(s.args)[0] for s in l_dkps))
+    seed_f = l_seed_fs[0]
+    if any(f not in own_all for f in l_seed_fs):
         return None
     # STORED-DERIVED-KEY: R_KDF re-derives through the wrapper from a stored derived
     # key ``dk_PQ_0 = derivekeypair(s_PQ_0).`2`` (= ``s_PQ_0`` since the concrete
@@ -7256,52 +7452,54 @@ def _challenge_hop2_wrapper_route(  # pylint: disable=too-many-arguments,too-man
     # ``exporter._wrapper_stored_dk_coupling`` carries the ``dk_PQ_0{2}=s_PQ_0{2}``
     # invariant into the hop pre, so the tactic uses R_KDF's OWN field names for the
     # RHS peel + kdf-input terms and the couplings discharge ``kdf_in_0{1}=kdf_in_0{2}``.
-    r_dkp = next(
-        (
-            s
-            for s in rred.body
-            if isinstance(s, ec_ast.Call) and s.callee == f"{inner}.derivekeypair"
-        ),
-        None,
-    )
-    if r_dkp is None:
+    r_dkps = [
+        s
+        for s in rred.body
+        if isinstance(s, ec_ast.Call) and s.callee == f"{inner}.derivekeypair"
+    ]
+    r_seed_fs = list(dict.fromkeys(_split_top_args(s.args)[0] for s in r_dkps))
+    if len(r_seed_fs) != len(l_seed_fs):
         return None
-    r_seed_f = _split_top_args(r_dkp.args)[0]
+    r_seed_f = r_seed_fs[0]
 
-    def _tkey_field(prefix: list[ec_ast.EcStmt]) -> str | None:
-        # T scalar = the key arg of the T-decaps call (group: ``exp(ct, dk_T)`` ->
-        # arg1; KEM: ``decaps(dk_T, ct)`` -> arg0). Matched MODULE-QUALIFIED: a
-        # two-KEM combiner's trans component decapsulates with the same method
-        # NAME as its PQ component (``decaps``), so an unqualified suffix match
-        # picks the PQ call and yields the PQ key.
-        t_decaps = next(
-            (
-                s
-                for s in prefix
-                if isinstance(s, ec_ast.Call) and s.callee == f"{t_module}.{t_method}"
-            ),
-            None,
-        )
-        if t_decaps is None:
-            return None
-        args = _split_top_args(t_decaps.args)
-        return args[1] if shape.t_decaps_ct_first else args[0]
+    def _tkey_fields(prefix: list[ec_ast.EcStmt]) -> list[str]:
+        # T scalars = the key args of the T-decaps calls (group: ``exp(ct, dk_T)``
+        # -> arg1; KEM: ``decaps(dk_T, ct)`` -> arg0), one per keypair, program
+        # order. Matched MODULE-QUALIFIED: a two-KEM combiner's trans component
+        # decapsulates with the same method NAME as its PQ component
+        # (``decaps``), so an unqualified suffix match picks the PQ call and
+        # yields the PQ key.
+        out: list[str] = []
+        for s in prefix:
+            if isinstance(s, ec_ast.Call) and s.callee == f"{t_module}.{t_method}":
+                args = _split_top_args(s.args)
+                a = args[1] if shape.t_decaps_ct_first else args[0]
+                if a not in out:
+                    out.append(a)
+        return out
 
     t_method = _ev_method(shape.ev_decaps_t)
     t_module = {c: m for m, c in clone_alias.items()}.get(
         shape.ev_decaps_t.split(".", 1)[0], shape.ev_decaps_t.split(".", 1)[0]
     )
-    tkey_f = _tkey_field(l_prefix)
-    r_tkey_f = _tkey_field(r_prefix)
-    if tkey_f is None or r_tkey_f is None or tkey_f not in own_all or tkey_f == seed_f:
+    l_tkey_fs = _tkey_fields(l_prefix)
+    r_tkey_fs = _tkey_fields(r_prefix)
+    if (
+        len(l_tkey_fs) != len(l_seed_fs)
+        or len(r_tkey_fs) != len(l_seed_fs)
+        or any(f not in own_all for f in l_tkey_fs)
+        or set(l_tkey_fs) & set(l_seed_fs)
+    ):
         return None
+    tkey_f = l_tkey_fs[0]
+    r_tkey_f = r_tkey_fs[0]
     l_args = _top_level_args(left_wrapper_expr)
     if not l_args:
         return None
     wrapper_expr = l_args[0]  # SeededKEMWrapper(KEM_PQ_inner)
     l_challenger_ref = _ref_base(l_args[-1])
     chal_flds = [f.name for f in left_state0.fields if "@" in f.name]
-    if len(chal_flds) != 1:
+    if not chal_flds:
         return None
     ck = chal_flds[0].split("@", 1)[1]
     h_module = next(
@@ -7316,6 +7514,46 @@ def _challenge_hop2_wrapper_route(  # pylint: disable=too-many-arguments,too-man
         return None
     glob_mods = _callee_mods(l_prefix, clone_alias)
     sync_mods = list(dict.fromkeys(glob_mods + [h_module]))
+    if len(chal_flds) > len(l_seed_fs):
+        # More challenger fields than keypairs: the challenger ALSO holds the
+        # encaps keys -- the PK (encaps-key) two-keypair sub-shape, its own
+        # 4-leaf tactic. The CT path below is byte-identical.
+        return _hop2_pk_wrapper_dispatch(
+            lred,
+            rred,
+            lif,
+            left_wrapper_expr,
+            right_wrapper_expr,
+            l_then_calls,
+            clone_alias,
+            shape,
+            inner,
+            own_all,
+            l_prefix,
+            r_prefix,
+            wrapper_expr,
+            l_challenger_ref,
+            chal_flds,
+            h_module,
+            glob_mods,
+            sync_mods,
+        )
+    cks = [ck]
+    if len(chal_flds) > 1:
+        # DIFFKEY: one challenger key per keypair, ordered by the inlined
+        # then-body's dkp consumption (flat local = "@"->"_" field rename).
+        if len(chal_flds) != len(l_seed_fs):
+            return None
+        then_dkps = [c for c in l_then_calls if c.callee.endswith(".derivekeypair")]
+        if len(then_dkps) != len(chal_flds):
+            return None
+        by_flat = {f.replace("@", "_"): f for f in chal_flds}
+        cks = []
+        for c in then_dkps:
+            f = by_flat.get(_split_top_args(c.args)[0])
+            if f is None:
+                return None
+            cks.append(f.split("@", 1)[1])
     clone_to_mod = {c: m for m, c in clone_alias.items()}
     t_clone = shape.ev_encct_t.split(".", 1)[0]
     t_module = clone_to_mod.get(t_clone, inner)
@@ -7335,13 +7573,13 @@ def _challenge_hop2_wrapper_route(  # pylint: disable=too-many-arguments,too-man
         pq_module=inner,
         h_module=h_module,
         l_challenger_ref=l_challenger_ref,
-        l_challenger_key_fields=[ck],
+        l_challenger_key_fields=cks,
         ect_inj_axiom=f"{t_module}_{ect_method}_inj",
-        ct_key_idx=[0, 0],
+        ct_key_idx=[0, 0] if len(cks) == 1 else [0, 1],
         wrapper_expr=wrapper_expr,
         inner_pq_module=inner,
-        l_own_fields=[seed_f, tkey_f],
-        r_own_fields=[r_seed_f, r_tkey_f],
+        l_own_fields=l_seed_fs + l_tkey_fs,
+        r_own_fields=r_seed_fs + r_tkey_fs,
         l_all_fields=own_all,
         ro_ref=f"{clone_alias.get('Hybrid', 'Hybrid')}.RO_G_RO.h",
         l_red_proc=lred,

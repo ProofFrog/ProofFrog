@@ -4685,21 +4685,37 @@ def export_proof_file(proof_path: str) -> str:
             # its equality). Including it only where live keeps the ek coupling on
             # the ``Breakable`` side (where ``Challenge`` reads ek) and out of the
             # ``Unbreakable`` side.
+            #
+            # GAME-ENDPOINT ONLY: in a reduction<->reduction hop (the two-keypair
+            # binding ``R_KDF ~ R_KG_R`` KDF hops), ``other_step.challenger`` is
+            # the OTHER reduction's assumption game, and pairing the two
+            # challengers' same-named SOURCE fields emits references the
+            # materialized EC challenger modules do not hold
+            # (``KDFCollisionResistance_Unbreakable.ek0`` /
+            # ``KeyGenEquiv_FromKeyGen.ek0`` -- "unknown variable"). The
+            # forwarded seam only makes sense when the other endpoint IS the
+            # theorem game whose live field the reduction forwards.
             # pylint: disable=protected-access
-            other_game = engine._get_game_ast(other_step.challenger, None)
+            other_game = (
+                engine._get_game_ast(other_step.challenger, None)
+                if other_step.reduction is None
+                else None
+            )
             chal_game = engine._get_game_ast(red_step.challenger, None)
             # pylint: enable=protected-access
             held = set(fields)
             chal_fields = {f.name for f in chal_game.fields}
-            for fld in (f.name for f in other_game.fields):
-                if fld in held or fld not in chal_fields:
-                    continue
-                if not _field_read_post_init(other_game, fld):
-                    continue
-                ec_f = mt._ec_field_name(fld)  # pylint: disable=protected-access
-                conj.append(
-                    f"{other_base}.{ec_f}{{{other_side}}} = {chal_base}.{ec_f}{{{red_side}}}"
-                )
+            if other_game is not None:
+                for fld in (f.name for f in other_game.fields):
+                    if fld in held or fld not in chal_fields:
+                        continue
+                    if not _field_read_post_init(other_game, fld):
+                        continue
+                    ec_f = mt._ec_field_name(fld)  # pylint: disable=protected-access
+                    conj.append(
+                        f"{other_base}.{ec_f}{{{other_side}}} = "
+                        f"{chal_base}.{ec_f}{{{red_side}}}"
+                    )
             body = " /\\ ".join(conj)
             # A reduction<->reduction hop can leave ``conj`` empty: neither the
             # other reduction nor the challenger holds any of the reduction's
@@ -4715,6 +4731,36 @@ def export_proof_file(proof_path: str) -> str:
         multi = _self_keygen_multikey_coupling(step_a, step_b)
         if multi is not None:
             return multi
+
+        # A reduction endpoint that neither holds nor renames the live field
+        # resolves its ``_live_state_ref`` to ``<Chal>.<field>``; when the
+        # challenger game does not DECLARE that field either, the ref names no
+        # module variable (EC "unknown variable ..." -- the reduction<->
+        # reduction KDF hops, whose challengers are the field-less
+        # KDFCollisionResistance / KeyGenEquiv oracles).
+        # ``_packed_decomposition_coupling`` diverts the one-game version of
+        # this (``fallback_to_stateless_chal``), but a red<->red hop has no
+        # game endpoint to divert on. Drop the field conjunct -- the wrapper
+        # couplings above already carry the cross-side state correspondence --
+        # keeping the abstract-scheme glob equality. A challenger that DOES
+        # declare the field (GHP18's MultiChal ``pk``) keeps its valid,
+        # load-bearing conjunct byte-identically.
+        def _invalid_live_ref(step: frog_ast.Step) -> bool:
+            if step.reduction is None:
+                return False
+            # pylint: disable=protected-access
+            chal_ast = engine._get_game_ast(step.challenger, None)
+            # pylint: enable=protected-access
+            lf = _live_state_field_name()
+            return (
+                chal_ast is not None
+                and all(f.name != lf for f in chal_ast.fields)
+                and not _reduction_holds_field(step.reduction.name, lf)
+                and _reduction_renamed_live_field(step.reduction.name, lf) is None
+            )
+
+        if _invalid_live_ref(step_a) or _invalid_live_ref(step_b):
+            return glob_invariant_conj
         field = pt.live_state_coupling(_live_state_ref(step_a), _live_state_ref(step_b))
         # Prefix the abstract-scheme glob equality so ``sim`` can relate the
         # post-init oracles' abstract calls (``K.encaps`` / ``F.evaluate``)
@@ -5474,14 +5520,21 @@ def export_proof_file(proof_path: str) -> str:
             if not isinstance(cond, frog_ast.BinaryOperation):
                 return None
             ops = [cond.left_expression, cond.right_expression]
-            guard = next(
-                (
-                    o
-                    for o in ops
-                    if not (isinstance(o, frog_ast.Variable) and o.name == pname)
-                ),
-                None,
-            )
+            # A reprogramming guard compares the method's own INPUT against the
+            # stored seed (``if (x == s0)``): require exactly one operand to be
+            # the parameter, the other is the seed field. Without this, any
+            # ``if (a == b) return c || d`` false-positives -- the KDF-collision
+            # game's collision test made ``_reprogram_field_coupling`` pair the
+            # two challengers' SOURCE fields (``KDFCollisionResistance_
+            # Unbreakable.ek0 = KeyGenEquiv_FromKeyGen.ek0``), references the
+            # materialized EC modules don't hold ("unknown variable", the CG PK
+            # hop_8 wall).
+            is_param = [
+                isinstance(o, frog_ast.Variable) and o.name == pname for o in ops
+            ]
+            if pname is None or sum(is_param) != 1:
+                return None
+            guard = ops[is_param.index(False)]
             ret = iff.blocks[0].statements[0]
             if not isinstance(ret, frog_ast.ReturnStatement) or not isinstance(
                 ret.expression, frog_ast.BinaryOperation

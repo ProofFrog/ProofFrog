@@ -3483,6 +3483,38 @@ def export_proof_file(proof_path: str) -> str:
         )
         return search.visit(init.block) is not None
 
+    def _reduction_init_queries_challenger(reduction_name: str) -> bool:
+        """True when the named reduction's ``Initialize`` calls ANY method of its
+        composed challenger (``challenger.<m>(..)``) -- the QUERY-delegate shape
+        (the HON_BIND ``R_PRG``/``R_KG_PQ`` family: ``challenger.Query()`` /
+        ``challenger.Generate()`` feeds a self-derivation into the reduction's
+        own fields). Distinct from :func:`_reduction_init_delegates` (a strict
+        ``Initialize`` delegate); a self-keygen reduction that never touches the
+        challenger in ``Initialize`` answers False."""
+        helper = next(
+            (
+                h
+                for h in proof.helpers
+                if isinstance(h, frog_ast.Reduction) and h.name == reduction_name
+            ),
+            None,
+        )
+        if helper is None:
+            return False
+        init = next(
+            (m for m in helper.methods if m.signature.name.lower() == "initialize"),
+            None,
+        )
+        if init is None:
+            return False
+        search: visitors.SearchVisitor[frog_ast.FuncCall] = visitors.SearchVisitor(
+            lambda n: isinstance(n, frog_ast.FuncCall)
+            and isinstance(n.func, frog_ast.FieldAccess)
+            and isinstance(n.func.the_object, frog_ast.Variable)
+            and n.func.the_object.name == "challenger"
+        )
+        return search.visit(init.block) is not None
+
     def _reduction_renamed_live_field(reduction_name: str, field: str) -> str | None:
         """The reduction's OWN field holding the game's live state under a
         different name -- a self-keygen reduction that generates the theorem
@@ -4463,6 +4495,53 @@ def export_proof_file(proof_path: str) -> str:
         body = " /\\ ".join(conj)
         return f"{glob_invariant_conj} /\\ {body}" if glob_invariant_conj else body
 
+    def _query_delegate_pair_coupling(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> str | None:
+        """Same-named field equalities for a red<->red hop where BOTH reductions
+        are QUERY-delegates (their ``Initialize`` consumes a challenger oracle --
+        ``challenger.Query()``/``.Generate()`` -- and derives every stored field
+        itself, never calling ``challenger.Initialize``): the HON_BIND
+        ``R_PRG ~ R_KG_PQ`` pairs. The composite (wall-7) path correctly declines
+        there (nothing repacks a challenger Initialize result), leaving glob-only
+        couplings -- unprovable per-oracle lemmas. Both sides hold the SAME
+        logical derived material under the SAME field names, so the coupling is
+        the pairwise field equality set. Pure string construction: no
+        ``live_state_holders`` side effects (a first attempt that widened
+        ``_composite_reduction_step``'s gate cascaded into the module-restriction
+        lists of 15+ exports). ``None`` off-shape -- every other proof is
+        byte-identical."""
+        if step_a.reduction is None or step_b.reduction is None:
+            return None
+        names = (step_a.reduction.name, step_b.reduction.name)
+        if any(
+            _reduction_init_delegates(n) or not _reduction_init_queries_challenger(n)
+            for n in names
+        ):
+            return None
+        helpers_by = {
+            h.name: h for h in proof.helpers if isinstance(h, frog_ast.Reduction)
+        }
+        ha, hb = helpers_by.get(names[0]), helpers_by.get(names[1])
+        if ha is None or hb is None or not ha.fields or not hb.fields:
+            return None
+        b_types = {f.name: f.type for f in hb.fields}
+        shared = [
+            f.name for f in ha.fields if f.name in b_types and b_types[f.name] == f.type
+        ]
+        if not shared or len(shared) != len(ha.fields) or len(shared) != len(hb.fields):
+            return None
+        base_a = pt.module_base_name(resolver.resolve(step_a).module_expr)
+        base_b = pt.module_base_name(resolver.resolve(step_b).module_expr)
+        globs = " /\\ ".join(f"={{glob {m}}}" for m in declared_module_names)
+        # pylint: disable=protected-access
+        fields = " /\\ ".join(
+            f"{base_a}.{mt._ec_field_name(f)}{{1}} = {base_b}.{mt._ec_field_name(f)}{{2}}"
+            for f in shared
+        )
+        # pylint: enable=protected-access
+        return f"{globs} /\\ {fields}" if globs else fields
+
     def _live_state_coupling_base(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
         # CFRG concrete-framework decomposition coupling: when a reduction
         # endpoint repacks its component fields into the theorem game's packed
@@ -4480,6 +4559,9 @@ def export_proof_file(proof_path: str) -> str:
         packed_coupling = _packed_decomposition_coupling(step_a, step_b)
         if packed_coupling is not None:
             return packed_coupling
+        query_coupling = _query_delegate_pair_coupling(step_a, step_b)
+        if query_coupling is not None:
+            return query_coupling
 
         # Wall-7 composite coupling: when one side is a field-holding delegating
         # reduction, the single live-field equality cannot bridge the two

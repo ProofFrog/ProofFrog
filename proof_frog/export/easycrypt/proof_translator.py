@@ -861,6 +861,7 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     right_ro_sim_ok: bool = False,
     consume_pk_peel_count: int = 0,
     consume_pk_peel_events: list[str] | None = None,
+    consume_pk_events_cover_ro: bool = False,
     consume_pk_reduction_glob: str | None = None,
     consume_pk_scheme_glob: str | None = None,
     consume_pk_left_challenger_glob: str | None = None,
@@ -1036,11 +1037,16 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
             # own backbone -- the game RO and the challenger keygen's internal seed --
             # so peel 2 extra ``rnd``s and a trailing ``wp`` clears the leading
             # pk-unpack assigns before ``skip``.
-            peel_tail = (
-                f"{peel} wp; rnd; wp; rnd; wp; skip => /#"
-                if ro_align
-                else f"{peel} skip => /#"
-            )
+            # ``consume_pk_events_cover_ro``: the exporter passed STRUCTURAL
+            # challenger events (the shared-RO sample + each wrapper keygen's
+            # real [sample; call] shape), so the historical two-``rnd``
+            # compensation -- sized for ONE keygen -- would double-count.
+            if ro_align and consume_pk_events_cover_ro:
+                peel_tail = f"{peel} wp; skip => /#"
+            elif ro_align:
+                peel_tail = f"{peel} wp; rnd; wp; rnd; wp; skip => /#"
+            else:
+                peel_tail = f"{peel} skip => /#"
             branches = [oracle_tac] * n_oracles + [peel_tail]
             selector = " | ".join(branches)
             call_close = f"wp; call (_: {inv}); [ {selector} ]"

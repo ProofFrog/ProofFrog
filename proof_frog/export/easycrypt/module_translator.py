@@ -213,6 +213,7 @@ def consumed_pk_peel_events(
     challenger_init_call_count: int,
     challenger_oracle_type: str,
     method_return_types: dict[tuple[str, str], frog_ast.Type],
+    challenger_events: list[str] | None = None,
 ) -> list[str]:
     """The consume-pk backbone-peel events, in PEEL (tail-to-front) order.
 
@@ -240,11 +241,25 @@ def consumed_pk_peel_events(
                 stmt.value
             ):
                 continue  # the leaked pk -- its keygens are the challenger's own
-            if isinstance(stmt, frog_ast.Sample):
+            if isinstance(stmt, (frog_ast.Sample, frog_ast.UniqueSample)):
+                # ``UniqueSample`` (the exclusion draw) renders as a ``<$`` too;
+                # missing it left the DIFFKEY consume-pk peel one event short
+                # ("invalid last instruction" at the hop_5-class bridge).
                 own.append("sample")
             elif _statement_module_call(stmt) is not None:
                 own.append("call")
-    backbone = ["call"] * challenger_init_call_count + own
+    # ``challenger_events`` overrides the flat per-keygen "call" model: a
+    # CONCRETIZED wrapper challenger's keygens inline to [sample; call] each
+    # (seed draw + inner derivekeypair), and a ROM proof's shared-RO sample
+    # leads the block -- the flat model mis-shaped the peel for the CFRG
+    # two-keypair binding hops ("invalid last instruction" at the hop_5-class
+    # bridge). ``None`` keeps the old model byte-identically.
+    chal = (
+        challenger_events
+        if challenger_events is not None
+        else ["call"] * challenger_init_call_count
+    )
+    backbone = chal + own
     return list(reversed(backbone))
 
 
@@ -1439,6 +1454,13 @@ class ModuleTranslator:
                 st.rhs = _qualify_reads(st.rhs)
             elif isinstance(st, ec_ast.Call):
                 st.args = _qualify_reads(st.args)
+            elif isinstance(st, ec_ast.Sample):
+                # A sample DISTRIBUTION can read an own field too -- the DIFFKEY
+                # exclusion draw ``seed_1 <$ dbs_lambda \ pred1 seed_0`` reads
+                # the just-sampled ``seed_0`` field; unqualified it names an
+                # UNINITIALIZED local, making the bridge's rnd coupling
+                # unprovable ("cannot prove goal" at the hop_5-class closer).
+                st.distr = _qualify_reads(st.distr)
         return translated.var_decls, translated.stmts
 
     def translate_game_wrapper(  # pylint: disable=too-many-arguments,too-many-positional-arguments

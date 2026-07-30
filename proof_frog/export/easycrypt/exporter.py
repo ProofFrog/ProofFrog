@@ -503,7 +503,15 @@ def _ro_dead_drop_spec(
     )
     if init is None:
         return None
-    n_samples = sum(1 for s in init.block.statements if isinstance(s, frog_ast.Sample))
+    # ``UniqueSample`` (the exclusion draw ``s1 <- BitString \\ {s0}``) renders
+    # as a ``<$`` too -- the TwoSeeded assumption games carry one; missing it
+    # left the ``seq`` prefix one short of ``y1_t`` and its (unprovable-early)
+    # coupling ("cannot prove goal" at the hop_1_pr bridge bullet).
+    n_samples = sum(
+        1
+        for s in init.block.statements
+        if isinstance(s, (frog_ast.Sample, frog_ast.UniqueSample))
+    )
     coupled = [
         (f.name[0].lower() + f.name[1:] if f.name[:1].isupper() else f.name)
         for f in repro_game.fields
@@ -6290,6 +6298,49 @@ def export_proof_file(proof_path: str) -> str:
     assumption_names_by_hop: dict[int, str] = {}
     assumption_clone_by_hop: dict[int, str] = {}
 
+    def _consume_pk_challenger_events(
+        scheme_expr: str, gf: frog_ast.GameFile
+    ) -> list[str] | None:
+        """Structural challenger-init event list for the consume-pk peel, or
+        ``None`` (=> the flat per-keygen "call" model, byte-identical).
+
+        Only a CONCRETIZED-WRAPPER challenger scheme diverges from the flat
+        model: its keygens inline to their real [sample; call] shape (the
+        seedbased wrapper draws a seed then calls the inner ``derivekeypair``),
+        and a ROM proof's shared-RO sample leads the block (both byequiv sides
+        hold it up front after the emitted ``swap{2} ^ <${1} @ 0`` hoist)."""
+        sch_base = pt.module_base_name(scheme_expr)
+        wrap_mod = next(
+            (m for m in foreign_concrete_modules.values() if m.name == sch_base),
+            None,
+        )
+        if wrap_mod is None:
+            return None
+        kg = next((pr for pr in wrap_mod.procs if pr.name == "keygen"), None)
+        if kg is None:
+            return None
+        kg_events: list[str] = []
+        for st in kg.body:
+            if isinstance(st, ec_ast.Sample):
+                kg_events.append("sample")
+            elif isinstance(st, ec_ast.Call):
+                _m, _d, _meth = st.callee.partition(".")
+                if not _d:
+                    sub = next(
+                        (pr for pr in wrap_mod.procs if pr.name == st.callee), None
+                    )
+                    for ss in sub.body if sub is not None else []:
+                        if isinstance(ss, ec_ast.Sample):
+                            kg_events.append("sample")
+                        elif isinstance(ss, ec_ast.Call):
+                            kg_events.append("call")
+                else:
+                    kg_events.append("call")
+        if not kg_events:
+            return None
+        n_kg = mt.init_module_call_count(gf.games[0])
+        return (["sample"] if ro_holder_modules else []) + kg_events * n_kg
+
     def _pr_multi_oracle_for(
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> pt.MultiOraclePrSpec | None:
@@ -6328,7 +6379,8 @@ def export_proof_file(proof_path: str) -> str:
             dfun = next((d for _m, d in top_types.function_value_modules()), None)
             if chal_init is not None and red_init is not None and dfun is not None:
                 swap_below = sum(
-                    isinstance(s, frog_ast.Sample) for s in chal_init.block.statements
+                    isinstance(s, (frog_ast.Sample, frog_ast.UniqueSample))
+                    for s in chal_init.block.statements
                 )
                 # Count EVERY abstract-scheme call (nested included -- ``inline *``
                 # hoists a nested ``NG.Generator()`` inside ``NG.Exp(...)`` into its
@@ -6555,6 +6607,11 @@ def export_proof_file(proof_path: str) -> str:
                 if _spec is not None and _spec.lazy_glob not in hop_restrictions:
                     hop_restrictions.append(_spec.lazy_glob)
                     repro_chal_globs.add(_spec.lazy_glob)
+            _chal_events = (
+                _consume_pk_challenger_events(assumption_scheme_expr, gf_a)
+                if consume_pk_bridge and reduction_helper is not None
+                else None
+            )
             ec_pr_lemmas.append(
                 pt.translate_assumption_hop_pr_lemma(
                     hop_index=i,
@@ -6593,10 +6650,12 @@ def export_proof_file(proof_path: str) -> str:
                             # its challenger, so its oracle is ``{gf_a_id}_Oracle``.
                             f"{gf_a_id}_Oracle",
                             method_return_types,
+                            challenger_events=_chal_events,
                         )
                         if consume_pk_bridge and reduction_helper is not None
                         else None
                     ),
+                    consume_pk_events_cover_ro=_chal_events is not None,
                     consume_pk_reduction_glob=_ec_ident(reduction_name),
                     consume_pk_scheme_glob=pt.module_base_name(assumption_scheme_expr),
                     consume_pk_left_challenger_glob=f"{hop_clone}.{gf_a_id}_{left_side}",

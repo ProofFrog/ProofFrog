@@ -4876,6 +4876,7 @@ def emit_multi_oracle_chain_for_hop(
     is_lazyro_honest: bool = False,
     drop_globs: frozenset[str] = frozenset(),
     both_reductions: bool = False,
+    init_tac_override: list[str] | None = None,
 ) -> MultiOracleHopChainInfo:
     """Emit the per-oracle per-transform chains for one multi-oracle hop.
 
@@ -5005,6 +5006,7 @@ def emit_multi_oracle_chain_for_hop(
             inj_acc=inj_methods,
             decaps_val_acc=decaps_val_schemes,
             aux_lemma_acc=aux_lemma_lines,
+            init_tac_override=init_tac_override,
             use_canonical_fields=use_canonical,
             glob_info_by_base=glob_info_by_base,
             stateless_wrapper_bases=stateless_wrapper_bases,
@@ -5055,6 +5057,7 @@ def _emit_one_oracle_chain(
     inj_acc: set[tuple[str, str]] | None = None,
     decaps_val_acc: set[str] | None = None,
     aux_lemma_acc: list[str] | None = None,
+    init_tac_override: list[str] | None = None,
     use_canonical_fields: bool = False,
     glob_info_by_base: (
         dict[str, tuple[tuple[tuple[str, str], ...], frozenset[str]]] | None
@@ -5106,6 +5109,15 @@ def _emit_one_oracle_chain(
     # ``_pres`` drop for a dead ``F.evaluate``); fully name-independent, no
     # ``inline``-name prediction.
     if is_init:
+        if init_tac_override is not None:
+            # Exporter-computed whole-init tactic (the two-KEM reprogram-equiv
+            # hop, built off the RENDERED modules -- flat-state positions/names
+            # provably diverge there). Validated by hand on both toolchains.
+            return (
+                [],
+                [_res_tag(SYNTH_PARAM), "proc.", *init_tac_override, "qed."],
+                set(),
+            )
         proj_l = _project_to_method(left_states[-1], oracle_name)
         proj_r = _project_to_method(right_states[-1], oracle_name)
         last_states_match = (
@@ -5364,6 +5376,7 @@ def _emit_one_oracle_chain(
             method_return_types,
             flat_params,
             clone_alias or {},
+            ladder_closer=init_tac_override is not None,
         )
         if ro_route is not None:
             return [], ro_route, set()
@@ -7775,6 +7788,18 @@ def _challenge_lazyro_route(  # pylint: disable=too-many-arguments,too-many-posi
     ]
 
 
+_RE_LADDER = (
+    "(   (split; [ by smt() | move => ? ? ? [-> ->] ])"
+    " || (split; [ by smt() | move => ? ? ? [-> ?] ])"
+    " || (split; [ by smt() | move => ? ? ? [? ->] ])"
+    " || (split; [ by smt() | move => ? ? ? [? ?] ])"
+    " || (move => ? ? [-> ->])"
+    " || (move => ? ? [-> ?])"
+    " || (move => ? ? [? ->])"
+    " || (move => ? ? [? ?]))"
+)
+
+
 def _challenge_reorder_route(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -7786,6 +7811,7 @@ def _challenge_reorder_route(  # pylint: disable=too-many-arguments,too-many-pos
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     flat_params: list[ec_ast.ModuleParam],
     clone_alias: dict[str, str],
+    ladder_closer: bool = False,
 ) -> list[str] | None:
     """Both-expanded coupled-key challenge with a deterministic decaps REORDER (the
     two-KEM KeyGenEquiv reprogramming hop ``R_LazyRO_L ~ R_KG_L``): both reductions
@@ -7876,6 +7902,19 @@ def _challenge_reorder_route(  # pylint: disable=too-many-arguments,too-many-pos
         bch._peel_stmts(rbody, renv, dict(zip(rmods, rge)), "{2}")
     )
     # pylint: enable=protected-access
+    if ladder_closer:
+        # The two-KEM reprogram hop's functionalized bodies nest too deep for
+        # ``do ! congr`` (validated: the CK_seedbased hand tactics) -- close
+        # with the bounded leveled ladder sized to the one-sided peel count.
+        n_lv = sum(1 for ln in (*lpeel, *rpeel) if ln.startswith("call"))
+        closing = [
+            "skip; move => &1 &2 H.",
+            f"do {n_lv}! (simplify; {_RE_LADDER}).",
+            "simplify.",
+            "smt().",
+        ]
+    else:
+        closing = [_functionalized_challenge_closer(lbody, rbody)]
     return [
         _res_tag(SYNTH_PARAM),
         "proc.",
@@ -7885,7 +7924,7 @@ def _challenge_reorder_route(  # pylint: disable=too-many-arguments,too-many-pos
         *lpeel,
         *rpeel,
         "wp.",
-        _functionalized_challenge_closer(lbody, rbody),
+        *closing,
         "qed.",
     ]
 

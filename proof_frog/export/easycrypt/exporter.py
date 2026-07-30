@@ -5602,6 +5602,463 @@ def export_proof_file(proof_path: str) -> str:
             "smt().",
         ]
 
+    def _reprogram_equiv_emit(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+        mat_side: str,
+        kg_side: str,
+        mat_ref: str,
+        kg_red_ref: str,
+        mat_init: ec_ast.Proc,
+        kg_init: ec_ast.Proc,
+        seed_flds: list[str],
+        y_pairs: list[tuple[str, str]],
+        concat_op: str,
+        chal_locals: list[str],
+        lams: tuple[str, str],
+        t_seeds: list[str],
+    ) -> list[str] | None:
+        """Emit the validated reprogram-equiv init tactic (see
+        :func:`_reprogram_equiv_init_tac`) from the derived datums."""
+        n_kp = len(seed_flds)
+        lam0, lam1 = lams
+        # -- hash sites + peel model from the RENDERED mat reduction init ----
+        chal_param = None
+        var_pos: dict[str, int] = {}
+        site_idx: list[int] = []
+        rbody: list[ec_ast.EcStmt] = []
+        hash_of: dict[str, int] = {}
+        for st in mat_init.body:
+            if isinstance(st, (ec_ast.Sample, ec_ast.If)):
+                return None
+            if isinstance(st, ec_ast.Assign):
+                m = re.match(r"^(\w+)\.`(\d+)$", st.rhs.strip())
+                if m is not None and m.group(1) in hash_of and hash_of[m.group(1)] < 0:
+                    # seed destructure off the challenger-init tuple
+                    var_pos[st.var] = int(m.group(2)) - 1
+                rbody.append(st)
+                continue
+            if not isinstance(st, ec_ast.Call):
+                rbody.append(st)
+                continue
+            mod, dot, meth = st.callee.partition(".")
+            if not dot:
+                return None
+            if chal_param is None and meth in ("initialize", "hash"):
+                chal_param = mod
+            if mod == chal_param:
+                if meth == "initialize":
+                    hash_of[st.var] = -1  # marks the seed tuple
+                    rbody.append(ec_ast.Assign(st.var, "(__SEEDS__)"))
+                    continue
+                if meth == "hash":
+                    k = var_pos.get(st.args.strip())
+                    if k is None or not 0 <= k < n_kp:
+                        return None
+                    site_idx.append(k)
+                    rbody.append(ec_ast.Assign(st.var, f"({concat_op} zy{k}p zy{k}t)"))
+                    continue
+                return None
+            wrapper = foreign_concrete_modules.get(mod)
+            if wrapper is None:
+                rbody.append(st)
+                continue
+            wproc = next((pr for pr in wrapper.procs if pr.name == meth), None)
+            wlet = next((l for l in proof.lets if l.name == mod), None)
+            if (
+                wproc is None
+                or len(wproc.params) != 1
+                or wlet is None
+                or not isinstance(wlet.value, frog_ast.FuncCall)
+            ):
+                return None
+            wargs = [
+                a.name for a in wlet.value.args if isinstance(a, frog_ast.Variable)
+            ]
+            if len(wargs) != len(wrapper.params):
+                return None
+            sub: dict[str, str] = dict(zip((pp.name for pp in wrapper.params), wargs))
+            sub[wproc.params[0].name] = st.args.strip()
+
+            def _rn_tok(s: str, mapping: dict[str, str]) -> str:
+                for kk in sorted(mapping, key=len, reverse=True):
+                    s = re.sub(rf"\b{re.escape(kk)}\b", mapping[kk], s)
+                return s
+
+            pfx = f"_rw{len(rbody)}_"
+            ret_expr: str | None = None
+            for ws in wproc.body:
+                if isinstance(ws, ec_ast.VarDecl):
+                    continue
+                if isinstance(ws, ec_ast.Return):
+                    ret_expr = _rn_tok(ws.expr, sub)
+                    break
+                if isinstance(ws, ec_ast.Assign):
+                    rhs = _rn_tok(ws.rhs, sub)
+                    sub[ws.var] = pfx + ws.var
+                    rbody.append(ec_ast.Assign(pfx + ws.var, rhs))
+                elif isinstance(ws, ec_ast.Call):
+                    wm, wd, wmeth = ws.callee.partition(".")
+                    if not wd:
+                        return None
+                    args = _rn_tok(ws.args, sub)
+                    callee_mod = sub.get(wm, wm)
+                    sub[ws.var] = pfx + ws.var
+                    rbody.append(
+                        ec_ast.Call(pfx + ws.var, f"{callee_mod}.{wmeth}", args)
+                    )
+                else:
+                    return None
+            if ret_expr is None:
+                return None
+            rbody.append(ec_ast.Assign(st.var, ret_expr))
+        if len(site_idx) != 2 * n_kp or chal_param is None:
+            return None
+        mmodel = bch.model_from_proc(
+            ec_ast.Proc("initialize", [], mat_init.return_type, rbody),
+            {},
+            clone_alias_by_module,
+        )
+        if mmodel is None or len(mmodel.calls) != 2 * n_kp:
+            return None
+        # KG-side calls: the challenger's per-keypair wrapper keygens expose the
+        # inner PQ derivekeypair at the frozen chal-local seeds; the reduction's
+        # own T derivekeypairs at the frozen t-seed fields. Read the T callee
+        # off the rendered kg init; the inner PQ module off the mat model.
+        t_callee = next(
+            (
+                st.callee
+                for st in kg_init.body
+                if isinstance(st, ec_ast.Call) and st.callee.endswith(".derivekeypair")
+            ),
+            None,
+        )
+        pq_callee = next(
+            (
+                f"{c.module}.{c.method}"
+                for c in mmodel.calls
+                if c.method == "derivekeypair"
+                and t_callee is not None
+                and c.module != t_callee.split(".", 1)[0]
+            ),
+            None,
+        )
+        if t_callee is None or pq_callee is None:
+            return None
+        t_mod = t_callee.split(".", 1)[0]
+        pq_mod = pq_callee.split(".", 1)[0]
+        # a GROUP-T proof has no T derivekeypair (the CG shape closes via the
+        # existing reprogram route): require BOTH modules distinct
+        if t_mod == pq_mod:
+            return None
+        # -- rcond selectors --------------------------------------------------
+        tac: list[str] = ["inline *."]
+        first = True
+        for k in site_idx:
+            for sel in ["rcondf"] * k + ["rcondt"]:
+                tac.append(f"{sel}{{{mat_side}}} ^if.")
+                if first:
+                    tac.append("+ auto.")
+                    first = False
+                elif sel == "rcondf":
+                    tac.append(
+                        "+ auto; do? (call (_: true); auto); smt(supp_dexcepted)."
+                    )
+                else:
+                    tac.append("+ auto; do? (call (_: true); auto).")
+        # -- sample hoists (KG side) -----------------------------------------
+        # EC order: challenger-inline locals first, then the reduction's own;
+        # target = the Mat sample order [lam0, lam1, (chal_k, t_k)*].
+        cur = chal_locals + [lam0, lam1] + t_seeds
+        target = [lam0, lam1] + [
+            v for k in range(n_kp) for v in (chal_locals[k], t_seeds[k])
+        ]
+        order = [cur.index(v) for v in target]
+        pos = list(range(len(cur)))
+
+        def _hoist(orig: int, dest: int) -> str | None:
+            occ = pos.index(orig)
+            if occ == dest:
+                return None
+            pos.insert(dest, pos.pop(occ))
+            at = "^ <${2}" if dest == 1 else "0"
+            return f"swap{{{kg_side}}} ^ <${{{occ + 1}}} @ {at}."
+
+        lam1_orig = cur.index(lam1)
+        placed: set[int] = set()
+        for p in reversed(range(len(order))):
+            if p in placed:
+                continue
+            want = order[p]
+            if want == lam1_orig:
+                if p == 0 or order[p - 1] != cur.index(lam0):
+                    return None
+                for sw in (_hoist(order[p - 1], 0), _hoist(want, 1)):
+                    if sw is not None:
+                        tac.append(sw)
+                placed.add(p - 1)
+            else:
+                sw = _hoist(want, 0)
+                if sw is not None:
+                    tac.append(sw)
+        # -- seq + invariant --------------------------------------------------
+        n_s = 2 + 2 * n_kp
+        seq_counts = f"{n_s + 1} {n_s}" if mat_side == "1" else f"{n_s} {n_s + 1}"
+        ro_ref = next(iter(top_types.ro_by_arrow_type().values()), None)
+        if ro_ref is None:
+            return None
+        ro_holder = ro_ref.rsplit(".", 1)[0]
+        globs = " /\\ ".join(
+            [f"={{glob {m}}}" for m in declared_module_names]
+            + [f"={{glob {ro_holder}}}"]
+        )
+        pair_map = (
+            list(zip([lam0, lam1], seed_flds))
+            + [(chal_locals[k], y_pairs[k][0]) for k in range(n_kp)]
+            + [(t_seeds[k], y_pairs[k][1]) for k in range(n_kp)]
+        )
+        kg_field_names = {s.var for s in kg_init.body if isinstance(s, ec_ast.Sample)}
+
+        def _kg_ref(v: str) -> str:
+            return f"{kg_red_ref}.{v}" if v in kg_field_names else v
+
+        couples = " /\\ ".join(
+            f"{mat_ref}.{mf}{{{mat_side}}} = {_kg_ref(kv)}{{{kg_side}}}"
+            for kv, mf in pair_map
+        )
+        inv = (
+            f"{globs}"
+            f" /\\ {mat_ref}.h{{{mat_side}}} = {ro_ref}{{{mat_side}}}"
+            f" /\\ {couples}"
+            f" /\\ {mat_ref}.{seed_flds[0]}{{{mat_side}}} <> "
+            f"{mat_ref}.{seed_flds[1]}{{{mat_side}}}"
+        )
+        tac.append(f"seq {seq_counts} : ({inv}).")
+        tac.append("+ " + "rnd. " * n_s + "auto => />; smt(supp_dexcepted).")
+        # -- freeze + one-sided det peels -------------------------------------
+        y_flat = [y for pr_ in y_pairs for y in pr_]
+        exs = (
+            [f"(glob {pq_mod}){{{mat_side}}}", f"(glob {t_mod}){{{mat_side}}}"]
+            + [f"(glob {pq_mod}){{{kg_side}}}", f"(glob {t_mod}){{{kg_side}}}"]
+            + [f"{mat_ref}.{y}{{{mat_side}}}" for y in y_flat]
+            + [f"{c}{{{kg_side}}}" for c in chal_locals]
+            + [f"{kg_red_ref}.{ts}{{{kg_side}}}" for ts in t_seeds]
+        )
+        y_elims = [e for k in range(n_kp) for e in (f"zy{k}p", f"zy{k}t")]
+        elims = (
+            ["gpqm", "gtm", "gpqo", "gto"]
+            + y_elims
+            + [f"zs{k}" for k in range(n_kp)]
+            + [f"zt{k}" for k in range(n_kp)]
+        )
+        tac.append(f"exists* {', '.join(exs)};")
+        tac.append(f"elim* => {' '.join(elims)}.")
+        tac.append("wp.")
+        glob_elim = {pq_mod: "gpqm", t_mod: "gtm"}
+        for c in reversed(mmodel.calls):
+            args = "".join(f" {cc_paren(a)}" for a in c.arg_values)
+            tac.append(
+                f"call{{{mat_side}}} ({c.module}_{c.method}_det "
+                f"{glob_elim[c.module]}{args})."
+            )
+            tac.append("wp.")
+        for k in reversed(range(n_kp)):
+            tac.append(f"call{{{kg_side}}} ({t_mod}_derivekeypair_det gto zt{k}).")
+            tac.append("wp.")
+        for k in reversed(range(n_kp)):
+            tac.append(f"call{{{kg_side}}} ({pq_mod}_derivekeypair_det gpqo zs{k}).")
+            tac.append("wp.")
+        n_lv = 4 * n_kp
+        mid = concat_op[len("concat_") : concat_op.index("_to_")]
+        zed = concat_op[concat_op.index("_to_") + len("_to_") :]
+        ladder = (
+            "(   (split; [ by smt() | move => ? ? ? [-> ->] ])"
+            " || (split; [ by smt() | move => ? ? ? [-> ?] ])"
+            " || (split; [ by smt() | move => ? ? ? [? ->] ])"
+            " || (split; [ by smt() | move => ? ? ? [? ?] ])"
+            " || (move => ? ? [-> ->])"
+            " || (move => ? ? [-> ?])"
+            " || (move => ? ? [? ->])"
+            " || (move => ? ? [? ?]))"
+        )
+        tac += [
+            "skip; move => &1 &2 H.",
+            f"do {n_lv}! (simplify; {ladder}).",
+            "simplify.",
+            f"smt(slice_concat_left_{mid}_{zed} slice_concat_right_{mid}_{zed}).",
+        ]
+        return tac
+
+    def _reprogram_equiv_init_tac(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+        step_a: frog_ast.Step,
+        step_b: frog_ast.Step,
+    ) -> list[str] | None:
+        """The COMPLETE init tactic for the TWO-KEM reprogram-equiv hop
+        (CK-class hop_2/hop_10: ``R_LazyRO ~ R_KG``), or ``None`` off-shape.
+
+        The Mat side reprograms the RO inside always-decidable ``if`` chains and
+        interleaves per-keypair PQ/T derivations; the KeyGen side batches
+        per-module -- the call orders differ ([PQ,T,PQ,T] vs [PQ,PQ,T,T]) so no
+        two-sided peel aligns, and the flat-state view's if-count/positions
+        diverge from the EC ``inline *`` body (measured: 9 vs 6 decidable ifs).
+        This builder works off the RENDERED modules only. Validated by hand on
+        both toolchains (CK_DK3.ec / CK_PK2.ec, 2026-07-30): exact rcond
+        selectors ([f]*i_k + [t] per hash site, seed indices from the rendered
+        destructure), anchored sample hoists, positional ``seq`` coupling +
+        the exclusion disequality, exists* freeze, 8 ONE-SIDED det peels (the
+        order mismatch dissolves), bounded ladder + slice_concat smt."""
+        if step_a.reduction is None or step_b.reduction is None:
+            return None
+        sides = []
+        for st, side in ((step_a, "1"), (step_b, "2")):
+            base = pt.module_base_name(
+                pt.last_module_arg(resolver.resolve(st).module_expr)
+            )
+            sides.append((st, side, base))
+        mats = [s for s in sides if s[2].endswith("_Mat")]
+        if len(mats) != 1:
+            return None
+        mat_step, mat_side, mat_name = mats[0]
+        kg_step, kg_side, _ = next(s for s in sides if s[2] != mat_name)
+
+        # -- rendered reduction inits ---------------------------------------
+        def _red_init(st: frog_ast.Step) -> ec_ast.Proc | None:
+            assert st.reduction is not None
+            mod = next(
+                (
+                    d
+                    for d in ec_reductions
+                    if isinstance(d, ec_ast.Module) and d.name == st.reduction.name
+                ),
+                None,
+            )
+            if mod is None:
+                return None
+            return next((pr for pr in mod.procs if pr.name == "initialize"), None)
+
+        mat_init = _red_init(mat_step)
+        kg_init = _red_init(kg_step)
+        if mat_init is None or kg_init is None:
+            return None
+        # -- the rendered Mat module: reprogram field names + concat op -----
+        mat_mod = next(
+            (
+                d
+                for d in mat_challenger_decls
+                if isinstance(d, ec_ast.Module) and d.name == mat_name
+            ),
+            None,
+        )
+        if mat_mod is None:
+            return None
+        hash_proc = next((pr for pr in mat_mod.procs if pr.name == "hash"), None)
+        init_proc = next((pr for pr in mat_mod.procs if pr.name == "initialize"), None)
+        if hash_proc is None or init_proc is None:
+            return None
+        # per-keypair reprogram branches: guard fields (seed order) + concat args
+        seed_flds: list[str] = []
+        y_pairs: list[tuple[str, str]] = []
+        concat_op: str | None = None
+
+        def _walk_hash(stmts: list[ec_ast.EcStmt]) -> None:
+            nonlocal concat_op
+            for s in stmts:
+                if not isinstance(s, ec_ast.If):
+                    continue
+                mg = re.match(r"^\s*\S+\s*=\s*(\S+)\s*$", s.guard)
+                then_assign = next(
+                    (
+                        a
+                        for a in s.then_body
+                        if isinstance(a, ec_ast.Assign)
+                        and a.rhs.strip().startswith("concat_")
+                    ),
+                    None,
+                )
+                if mg is not None and then_assign is not None:
+                    toks = then_assign.rhs.strip().split()
+                    if len(toks) == 3:
+                        concat_op = toks[0]
+                        seed_flds.append(mg.group(1))
+                        y_pairs.append((toks[1], toks[2]))
+                _walk_hash(s.else_body or [])
+
+        _walk_hash(hash_proc.body)
+        n_kp = len(seed_flds)
+        if n_kp < 2 or concat_op is None or len(y_pairs) != n_kp:
+            return None
+        # Mat's rendered init: the RO-materialization assign + the real samples
+        mat_samps = [s.var for s in init_proc.body if isinstance(s, ec_ast.Sample)]
+        mat_assigns = sum(1 for s in init_proc.body if isinstance(s, ec_ast.Assign))
+        n_samp = len(mat_samps)
+        if n_samp != 2 + 2 * n_kp or mat_assigns < 1:
+            return None
+        # field name -> its position among the Mat samples; require the guard
+        # seeds and concat y's to BE the sampled fields
+        if set(seed_flds + [y for p in y_pairs for y in p]) != set(mat_samps):
+            return None
+        mat_ref = mat_name
+        # -- the KG side: challenger-inline sample locals + own samples -----
+        kg_chal = engine._get_game_ast(  # pylint: disable=protected-access
+            kg_step.challenger, None
+        )
+        if kg_chal is None:
+            return None
+        chal_svars: list[str] = []
+        for m in kg_chal.methods:
+            for s in m.block.statements:
+                if isinstance(s, (frog_ast.Sample, frog_ast.UniqueSample)) and (
+                    isinstance(s.var, frog_ast.Variable)
+                ):
+                    chal_svars.append(s.var.name)
+        if len(set(chal_svars)) != 1:
+            return None
+        cbase = chal_svars[0]
+        chal_locals = [cbase if i == 0 else f"{cbase}{i - 1}" for i in range(n_kp)]
+        kg_samp_stmts = [s for s in kg_init.body if isinstance(s, ec_ast.Sample)]
+        if len(kg_samp_stmts) != 2 + n_kp:
+            return None
+        # the exclusion pair: the sample whose distr names another sample var
+        kg_svars = [s.var for s in kg_samp_stmts]
+        excl = next(
+            (
+                (i, s)
+                for i, s in enumerate(kg_samp_stmts)
+                if any(
+                    re.search(rf"\b{re.escape(v)}\b", s.distr)
+                    for v in kg_svars
+                    if v != s.var
+                )
+            ),
+            None,
+        )
+        if excl is None or excl[0] < 1:
+            return None
+        lam1_i = excl[0]
+        lam0 = next(
+            v
+            for v in kg_svars
+            if v != kg_samp_stmts[lam1_i].var
+            and re.search(rf"\b{re.escape(v)}\b", kg_samp_stmts[lam1_i].distr)
+        )
+        lam1 = kg_samp_stmts[lam1_i].var
+        t_seeds = [v for v in kg_svars if v not in (lam0, lam1)]
+        if len(t_seeds) != n_kp or kg_step.reduction is None:
+            return None
+        kg_red_ref = kg_step.reduction.name
+        return _reprogram_equiv_emit(
+            mat_side,
+            kg_side,
+            mat_ref,
+            kg_red_ref,
+            mat_init,
+            kg_init,
+            seed_flds,
+            y_pairs,
+            concat_op,
+            chal_locals,
+            (lam0, lam1),
+            t_seeds,
+        )
+
     def _lazyro_derived_init_fields(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         step_a: frog_ast.Step,
         step_b: frog_ast.Step,
@@ -6074,6 +6531,10 @@ def export_proof_file(proof_path: str) -> str:
             # relates cross-module component globals ``sim`` cannot infer). None
             # -> no decomposition coupling -> byte-identical.
             init_decomposition = _decomposition_coupling(step_a, step_b) is not None
+            # Two-KEM reprogram-equiv hop (CK-class hop_2/hop_10): the whole
+            # init tactic is computed here off the RENDERED modules; the same
+            # flag switches the challenge closer to the bounded ladder.
+            reprogram_override = _reprogram_equiv_init_tac(step_a, step_b)
 
             info = emit_multi_oracle_chain_for_hop(
                 hop_index=_i,
@@ -6115,6 +6576,7 @@ def export_proof_file(proof_path: str) -> str:
                 both_reductions=(
                     step_a.reduction is not None and step_b.reduction is not None
                 ),
+                init_tac_override=reprogram_override,
             )
             chain_extra_decls.extend(info.extra_decls)
             pres_method_requests.update(info.pres_methods)

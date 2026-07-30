@@ -14,6 +14,7 @@ from typing import Any, Callable, cast
 
 from . import binding_challenge as bch
 from .challenge_common import paren as cc_paren
+from .challenge_common import split_top_args as cc_split_args
 from . import canonical_form
 from . import ec_ast
 from . import expr_translator
@@ -4495,6 +4496,209 @@ def export_proof_file(proof_path: str) -> str:
         body = " /\\ ".join(conj)
         return f"{glob_invariant_conj} /\\ {body}" if glob_invariant_conj else body
 
+    def _prg_query_game_coupling(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> str | None:
+        """Derivation-chain coupling for a HON_BIND hop relating the plain
+        theorem game to a PRG QUERY-delegate reduction (``R_PRG``): the game's
+        decaps key IS the seedbased master seed (the scheme's KeyGen returns
+        ``this.DeriveKeyPair(seed)`` whose decaps position is the seed param),
+        while the reduction stores the DERIVED material its challenger's
+        RO-backed PRG expansion produced. Couple each reduction field to its
+        ev-derivation over the shared RO applied to the game's seed
+        (``R.pq_keys_0{2} = KEM_PQ_c.ev_derivekeypair (slice_pq (RO.h{1}
+        Game.dk0{1}))`` ...), read off the RENDERED reduction init with the
+        challenger query substituted -- TRUE under the init lemma's seed
+        rnd-coupling (the challenger's Real query is the same RO expansion of a
+        coupled fresh seed). Pure string construction (no live_state_holders
+        side effects). ``None`` off-shape -- every other proof byte-identical."""
+        if step_a.reduction is None and step_b.reduction is not None:
+            game_step, red_step, gs, rs = step_a, step_b, "1", "2"
+        elif step_b.reduction is None and step_a.reduction is not None:
+            game_step, red_step, gs, rs = step_b, step_a, "2", "1"
+        else:
+            return None
+        assert red_step.reduction is not None
+        rname = red_step.reduction.name
+        if _reduction_init_delegates(rname) or not _reduction_init_queries_challenger(
+            rname
+        ):
+            return None
+        red = _get_reduction(rname)
+        # pylint: disable=protected-access
+        game = engine._get_game_ast(game_step.challenger, None)
+        # pylint: enable=protected-access
+        if red is None or game is None or not red.fields:
+            return None
+        # The theorem game must be the seedbased shape: scheme KeyGen returns
+        # ``this.DeriveKeyPair(seed)`` (a call on a sampled seed), and the game
+        # holds [ek0, dk0] with dk0 = the seed (DeriveKeyPair's decaps-position
+        # return element is the seed parameter).
+        scheme_name = pt.module_base_name(
+            pt.last_module_arg(resolver.resolve(game_step).module_expr)
+        )
+        scheme_def = schemes_by_name.get(scheme_name)
+        if scheme_def is None:
+            return None
+        keygen = next(
+            (m for m in scheme_def.methods if m.signature.name.lower() == "keygen"),
+            None,
+        )
+        dkp = next(
+            (
+                m
+                for m in scheme_def.methods
+                if m.signature.name.lower() == "derivekeypair"
+            ),
+            None,
+        )
+        if keygen is None or dkp is None or len(dkp.signature.parameters) != 1:
+            return None
+        kg_ret = _return_elems(keygen)
+        if (
+            kg_ret is None
+            or len(kg_ret) != 1
+            or not isinstance(kg_ret[0], frog_ast.FuncCall)
+            or not isinstance(kg_ret[0].func, frog_ast.FieldAccess)
+            or kg_ret[0].func.name.lower() != "derivekeypair"
+        ):
+            return None
+        dkp_ret = _return_elems(dkp)
+        seed_param = dkp.signature.parameters[0].name
+        if (
+            dkp_ret is None
+            or len(dkp_ret) != 2
+            or not isinstance(dkp_ret[1], frog_ast.Variable)
+            or dkp_ret[1].name != seed_param
+        ):
+            return None
+        # game field holding the seed = the decaps-position keygen projection:
+        # the game init destructures keygen's pair into [ek0, dk0] -- the second
+        # field is the seed. Identify it as the game field whose type resolves
+        # to a BitString (the seed space); require exactly one.
+        seed_flds = [
+            f
+            for f in game.fields
+            if isinstance(
+                (
+                    top_types.resolve(f.type)
+                    if not isinstance(f.type, frog_ast.BitStringType)
+                    else f.type
+                ),
+                frog_ast.BitStringType,
+            )
+        ]
+        if len(seed_flds) != 1:
+            return None
+        # pylint: disable=protected-access
+        seed_ref = (
+            f"{pt.module_base_name(resolver.resolve(game_step).module_expr)}"
+            f".{mt._ec_field_name(seed_flds[0].name)}{{{gs}}}"
+        )
+        # pylint: enable=protected-access
+        # The expansion value the challenger's query returns, at the coupled
+        # seed: an RO-materialized PRG applies the shared RO; an ABSTRACT PRG
+        # (the HON proofs' `={glob G}` shape) functionalizes to its ev op, with
+        # the method name read off the challenger game's query body.
+        ro_map = top_types.ro_by_arrow_type()
+        if ro_map:
+            q_val = f"({next(iter(ro_map.values()))}{{{gs}}} {seed_ref})"
+        else:
+            chal_expr = pt.last_module_arg(resolver.resolve(red_step).module_expr)
+            prg_mod = pt.module_base_name(pt.last_module_arg(chal_expr))
+            prg_alias = clone_alias_by_module.get(prg_mod)
+            # pylint: disable=protected-access
+            chal_ast = engine._get_game_ast(red_step.challenger, None)
+            # pylint: enable=protected-access
+            if prg_alias is None or chal_ast is None:
+                return None
+            # The challenger's query body holds exactly ONE PRG call (the game
+            # side's parameters list is empty -- params live on the game file --
+            # so match any FieldAccess call and require it unique by method).
+            calls: list[frog_ast.FuncCall] = []
+
+            def _collect(n: frog_ast.ASTNode) -> bool:
+                if (
+                    isinstance(n, frog_ast.FuncCall)
+                    and isinstance(n.func, frog_ast.FieldAccess)
+                    and isinstance(n.func.the_object, frog_ast.Variable)
+                ):
+                    calls.append(n)
+                return False
+
+            for m in chal_ast.methods:
+                visitors.SearchVisitor(_collect).visit(m.block)
+            meths = {cast(frog_ast.FieldAccess, c.func).name.lower() for c in calls}
+            if len(meths) != 1:
+                return None
+            q_val = f"({prg_alias}.ev_{meths.pop()} {seed_ref})"
+        # Walk the RENDERED reduction init: challenger query -> the RO applied
+        # to the game seed; assigns substitute; calls to abstract modules
+        # functionalize to their ev form. Field targets become conjuncts.
+        red_mod = next(
+            (
+                d
+                for d in ec_reductions
+                if isinstance(d, ec_ast.Module) and d.name == rname
+            ),
+            None,
+        )
+        red_init = (
+            next((pr for pr in red_mod.procs if pr.name == "initialize"), None)
+            if red_mod is not None
+            else None
+        )
+        if red_init is None:
+            return None
+        field_names = {f.name for f in red.fields}
+        red_base = pt.module_base_name(resolver.resolve(red_step).module_expr)
+        env: dict[str, str] = {}
+        conj: list[str] = []
+
+        def _sub_tokens(s: str) -> str:
+            for k in sorted(env, key=len, reverse=True):
+                s = re.sub(rf"\b{re.escape(k)}\b", env[k], s)
+            return s
+
+        chal_param = (
+            red_mod.params[-1].name if red_mod is not None and red_mod.params else None
+        )
+        for st in red_init.body:
+            if isinstance(st, (ec_ast.VarDecl, ec_ast.Return)):
+                continue
+            if isinstance(st, ec_ast.Sample):
+                return None  # off-shape (the PRG reduction derives, not samples)
+            if isinstance(st, ec_ast.Assign):
+                val = _sub_tokens(st.rhs)
+            elif isinstance(st, ec_ast.Call):
+                mod, dot, meth = st.callee.partition(".")
+                if not dot:
+                    return None
+                if mod == chal_param:
+                    val = q_val
+                else:
+                    alias = clone_alias_by_module.get(mod)
+                    if alias is None:
+                        return None
+                    args = (
+                        " ".join(f"({_sub_tokens(a)})" for a in cc_split_args(st.args))
+                        if st.args.strip()
+                        else ""
+                    )
+                    val = f"({alias}.ev_{meth}{(' ' + args) if args else ''})"
+            else:
+                return None
+            env[st.var] = val
+            if st.var in field_names:
+                # pylint: disable=protected-access
+                conj.append(f"{red_base}.{mt._ec_field_name(st.var)}{{{rs}}} = {val}")
+                # pylint: enable=protected-access
+        if not conj or len(conj) != len(field_names):
+            return None
+        globs = " /\\ ".join(f"={{glob {m}}}" for m in declared_module_names)
+        body = " /\\ ".join(conj)
+        return f"{globs} /\\ {body}" if globs else body
+
     def _query_delegate_pair_coupling(
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> str | None:
@@ -4562,6 +4766,9 @@ def export_proof_file(proof_path: str) -> str:
         query_coupling = _query_delegate_pair_coupling(step_a, step_b)
         if query_coupling is not None:
             return query_coupling
+        prg_coupling = _prg_query_game_coupling(step_a, step_b)
+        if prg_coupling is not None:
+            return prg_coupling
 
         # Wall-7 composite coupling: when one side is a field-holding delegating
         # reduction, the single live-field equality cannot bridge the two

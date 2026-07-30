@@ -4484,12 +4484,14 @@ def export_proof_file(proof_path: str) -> str:
         def _ec_ty(t: frog_ast.Type) -> str:
             return top_types.translate_type(t).text
 
-        def _field_or_component_ref(
+        def _field_or_component_ref(  # pylint: disable=too-many-arguments
             target_ty: str,
             mod_fields: list[frog_ast.Field],
             base: str,
             side: str,
             prefer: str,
+            *,
+            occurrence: int = 0,
         ) -> str | None:
             # PACKED<->component matching: relate ``target_ty`` (the OTHER
             # endpoint's field EC type) to a field of ``mod_fields`` -- direct
@@ -4501,30 +4503,39 @@ def export_proof_file(proof_path: str) -> str:
             # not a coincidentally same-typed ``kem_ct_T``. Same-name same-type ->
             # ``base.f`` verbatim (byte-identical for the plain-game composite
             # proofs).
+            #
+            # ``occurrence`` allocates ORDINALLY among same-typed candidates: the
+            # k-th caller-side field of a given type takes the k-th matching
+            # field/component here (both in declaration order). First-match-only
+            # (the old behavior, = ``occurrence 0``) paired a two-keypair game's
+            # BOTH reduction eks to ``ek0`` -- a duplicated, unestablishable
+            # coupling that made the PK/DIFFKEY ``hop_0_challenge`` goal false
+            # (the wall parked as "smt scale" 2026-07-29). Out-of-range ->
+            # ``None`` (the field stays uncoupled) rather than a wrong reuse.
             # pylint: disable=protected-access
-            def _match(f: frog_ast.Field) -> str | None:
+            def _matches(f: frog_ast.Field) -> list[str]:
+                out: list[str] = []
                 if _ec_ty(f.type) == target_ty:
-                    return f"{base}.{mt._ec_field_name(f.name)}{{{side}}}"
+                    out.append(f"{base}.{mt._ec_field_name(f.name)}{{{side}}}")
                 if isinstance(f.type, frog_ast.ProductType):
                     for i, comp in enumerate(f.type.types):
                         if _ec_ty(comp) == target_ty:
-                            return (
+                            out.append(
                                 f"{base}.{mt._ec_field_name(f.name)}.`{i + 1}{{{side}}}"
                             )
-                return None
+                return out
 
             # pylint: enable=protected-access
             pref = next((f for f in mod_fields if f.name == prefer), None)
             if pref is not None:
-                hit = _match(pref)
-                if hit is not None:
-                    return hit
+                pref_hits = _matches(pref)
+                if pref_hits:
+                    return pref_hits[0]
+            candidates: list[str] = []
             for other in mod_fields:
                 if other.name != prefer:
-                    hit = _match(other)
-                    if hit is not None:
-                        return hit
-            return None
+                    candidates.extend(_matches(other))
+            return candidates[occurrence] if occurrence < len(candidates) else None
 
         for red_step, other_step, red_side, other_side in (
             (step_a, step_b, "1", "2"),
@@ -4588,18 +4599,28 @@ def export_proof_file(proof_path: str) -> str:
                 {f.name: f.type for f in red_ast.fields} if red_ast is not None else {}
             )
             conj: list[str] = []
+            # Ordinal slots: the k-th reduction field of a given EC type takes
+            # the k-th same-typed game field/component (see
+            # ``_field_or_component_ref``); counted in ``fields`` order (the
+            # reduction's field declaration order -- derivation order for the
+            # CFRG reductions, keypair 0 before keypair 1).
+            seen_ty: dict[str, int] = {}
             for fld in fields:
                 ec_f = mt._ec_field_name(fld)  # pylint: disable=protected-access
                 red_ty = red_type_by_name.get(fld)
                 if other_game_ast is not None and red_ty is not None:
                     # Game endpoint: it may hold the reduction's field PACKED under
                     # a different name; match by type/component.
+                    ty_key = _ec_ty(red_ty)
+                    occ = seen_ty.get(ty_key, 0)
+                    seen_ty[ty_key] = occ + 1
                     other_ref = _field_or_component_ref(
-                        _ec_ty(red_ty),
+                        ty_key,
                         list(other_game_ast.fields),
                         other_base,
                         other_side,
                         fld,
+                        occurrence=occ,
                     )
                     if other_ref is None:
                         continue
@@ -4610,6 +4631,7 @@ def export_proof_file(proof_path: str) -> str:
                         continue
                     other_ref = f"{other_base}.{ec_f}{{{other_side}}}"
                 conj.append(f"{other_ref} = {red_base}.{ec_f}{{{red_side}}}")
+            seen_chal_ty: dict[str, int] = {}
             for fld in fields:
                 if chal_field_names is not None and fld not in chal_field_names:
                     continue
@@ -4624,14 +4646,19 @@ def export_proof_file(proof_path: str) -> str:
                 )
                 # The reduction may hold the field PACKED (``ctStar:(ct_PQ,ct_T)``)
                 # while the challenger holds the COMPONENT (``ct_T``); match the
-                # reduction side by the challenger field's type.
+                # reduction side by the challenger field's type. Ordinal slots as
+                # in the game-endpoint loop above.
                 if chal_ty is not None and red_ast is not None:
+                    ty_key = _ec_ty(chal_ty)
+                    occ = seen_chal_ty.get(ty_key, 0)
+                    seen_chal_ty[ty_key] = occ + 1
                     red_ref = _field_or_component_ref(
-                        _ec_ty(chal_ty),
+                        ty_key,
                         list(red_ast.fields),
                         red_base,
                         red_side,
                         fld,
+                        occurrence=occ,
                     )
                     if red_ref is None:
                         continue
@@ -4836,6 +4863,136 @@ def export_proof_file(proof_path: str) -> str:
             ):
                 out.append(stmt.var.name)
         return out
+
+    def _game_keygen_field_pairs(
+        game: frog_ast.Game | None,
+    ) -> list[tuple[str, str]]:
+        """``(ek_field, dk_field)`` per ``[ek, dk] = K.KeyGen()`` destructure of
+        the game's ``Initialize``, in program order, keeping only destructures
+        whose BOTH elements land in state fields. A CT-binding game stores only
+        the decaps key (its EncapsKey is a local) -> no pair -> callers that
+        gate on pairs leave it byte-identical."""
+        if game is None:
+            return []
+        init = _find_init(game)
+        if init is None:
+            return []
+        field_names = {f.name for f in game.fields}
+        tmp_ek: dict[str, str] = {}
+        tmp_dk: dict[str, str] = {}
+        order: list[str] = []
+        for stmt in init.block.statements:
+            if not isinstance(stmt, frog_ast.Assignment) or not isinstance(
+                stmt.var, frog_ast.Variable
+            ):
+                continue
+            value = stmt.value
+            if isinstance(value, frog_ast.FuncCall):
+                func = value.func
+                if isinstance(func, frog_ast.FieldAccess) and func.name == "KeyGen":
+                    order.append(stmt.var.name)
+            elif (
+                isinstance(value, frog_ast.ArrayAccess)
+                and isinstance(value.the_array, frog_ast.Variable)
+                and value.the_array.name in order
+                and isinstance(value.index, frog_ast.Integer)
+                and value.index.num in (0, 1)
+                and stmt.var.name in field_names
+            ):
+                dst = tmp_ek if value.index.num == 0 else tmp_dk
+                dst[value.the_array.name] = stmt.var.name
+        return [(tmp_ek[t], tmp_dk[t]) for t in order if t in tmp_ek and t in tmp_dk]
+
+    def _lazyro_preprocess_derivekeypair(dkp: ec_ast.Proc) -> ec_ast.Proc | None:
+        """The theorem scheme's ``derivekeypair`` EC proc rewritten so
+        :func:`bch.keygen_derived_ev` can render it in the ROM instantiation.
+
+        Three rewrites, each structural: (a) the seed-EXPANSION call (its single
+        arg is the proc's seed parameter; in a ROM proof that callee is a
+        concrete RO-PRG module with no ``ev_`` clone) becomes a pure assign of
+        the placeholder application ``(__ROH__ <seed>)`` -- the caller
+        substitutes the real ``RO.h{s}`` reference; (b) every other callee is
+        renamed to its applied let-name so ``clone_alias`` resolves it; (c) a
+        callee whose let names a CONCRETIZED WRAPPER scheme
+        (``foreign_concrete_modules``) is inlined ONE level -- the wrapper's own
+        concrete EC body is walked with its module params bound to the
+        instance's args and its locals freshened -- so the render names the
+        INNER module's ``ev_`` ops, the forms the pr-init's fully-inlined game
+        actually establishes. ``None`` on any non-linear shape."""
+        if ec_scheme is None or len(dkp.params) != 1:
+            return None
+        seed_param = dkp.params[0].name
+        param_to_arg = dict(
+            zip((p.name for p in ec_scheme.params), scheme_applied_args)
+        )
+
+        def _rn(s: str, mapping: dict[str, str]) -> str:
+            for k in sorted(mapping, key=len, reverse=True):
+                s = re.sub(rf"\b{re.escape(k)}\b", mapping[k], s)
+            return s
+
+        out: list[ec_ast.EcStmt] = []
+        fresh = 0
+        for stmt in dkp.body:
+            if isinstance(stmt, (ec_ast.Sample, ec_ast.If)):
+                return None
+            if not isinstance(stmt, ec_ast.Call):
+                out.append(stmt)
+                continue
+            mod, dot, meth = stmt.callee.partition(".")
+            if not dot:
+                return None
+            let = param_to_arg.get(mod, mod)
+            if stmt.args.strip() == seed_param:
+                out.append(ec_ast.Assign(stmt.var, f"(__ROH__ {seed_param})"))
+                continue
+            wrapper = foreign_concrete_modules.get(let)
+            if wrapper is None:
+                out.append(ec_ast.Call(stmt.var, f"{let}.{meth}", stmt.args))
+                continue
+            wproc = next((p for p in wrapper.procs if p.name == meth), None)
+            wlet = next((l for l in proof.lets if l.name == let), None)
+            if (
+                wproc is None
+                or len(wproc.params) != 1
+                or wlet is None
+                or not isinstance(wlet.value, frog_ast.FuncCall)
+            ):
+                return None
+            wargs = [
+                a.name for a in wlet.value.args if isinstance(a, frog_ast.Variable)
+            ]
+            if len(wargs) != len(wrapper.params):
+                return None
+            sub: dict[str, str] = dict(zip((p.name for p in wrapper.params), wargs))
+            sub[wproc.params[0].name] = stmt.args.strip()
+            pfx = f"_w{fresh}_"
+            fresh += 1
+            ret_expr: str | None = None
+            for ws in wproc.body:
+                if isinstance(ws, ec_ast.VarDecl):
+                    continue
+                if isinstance(ws, ec_ast.Return):
+                    ret_expr = _rn(ws.expr, sub)
+                    break
+                if isinstance(ws, ec_ast.Assign):
+                    rhs = _rn(ws.rhs, sub)
+                    sub[ws.var] = pfx + ws.var
+                    out.append(ec_ast.Assign(pfx + ws.var, rhs))
+                elif isinstance(ws, ec_ast.Call):
+                    wm, wd, wmeth = ws.callee.partition(".")
+                    if not wd:
+                        return None
+                    args = _rn(ws.args, sub)
+                    callee_mod = sub.get(wm, wm)
+                    sub[ws.var] = pfx + ws.var
+                    out.append(ec_ast.Call(pfx + ws.var, f"{callee_mod}.{wmeth}", args))
+                else:
+                    return None
+            if ret_expr is None:
+                return None
+            out.append(ec_ast.Assign(stmt.var, ret_expr))
+        return ec_ast.Proc(dkp.name, dkp.params, dkp.return_type, out)
 
     def _lazyro_derived_key_coupling(
         step_a: frog_ast.Step, step_b: frog_ast.Step
@@ -5051,6 +5208,52 @@ def export_proof_file(proof_path: str) -> str:
                     f"({mod}_c.ev_derivekeypair ({_render_slice(sl)}))"
                     f".`{v.index.num + 1}"
                 )
+        # Game-side ek-DERIVATION invariant (two-keypair PK binding): the
+        # reduction ENCODES its stored encaps-key components while the game
+        # RE-DERIVES them in-challenge from ``RO[dk_i]``, so ``={res}`` needs
+        # the game's own ``(ek_i, dk_i) = DeriveKeyPair_ev(RO[dk_i])`` linking
+        # its STORED ``ek_i`` to the derived form -- without it the challenge
+        # residual compares ``ev_encode <stored>`` against ``ev_encode
+        # <derived>`` and is unprovable. Read off the theorem scheme's own
+        # ``derivekeypair`` (:func:`_lazyro_preprocess_derivekeypair`), seeded
+        # with ``RO[game dk_i]``; pairs come from the game's own ``[ek, dk] =
+        # KeyGen()`` destructures, so keypair order is the game's own. Gated on
+        # >= 2 pairs (the two-keypair wall class), so every single-keypair
+        # lazy-RO proof stays byte-identical. Established at the pr-init like
+        # every other conjunct here (EC-GATED: wrong text -> reject). Validated
+        # on ``tests/integration/ec_templates/two_keypair_lazyro_challenge.ec``.
+        ek_pairs = _game_keygen_field_pairs(
+            outer_gf.games[0] if outer_gf is not None and outer_gf.games else None
+        )
+        if len(ek_pairs) >= 2:
+            dkp = (
+                next((p for p in ec_scheme.procs if p.name == "derivekeypair"), None)
+                if ec_scheme is not None
+                else None
+            )
+            pre_proc = (
+                _lazyro_preprocess_derivekeypair(dkp) if dkp is not None else None
+            )
+            ek_conj: list[str] = []
+            if pre_proc is not None:
+                for ek_f, dk_f in ek_pairs:
+                    seed_ref = (
+                        f"{game_holder}.{mt._ec_field_name(dk_f)}"  # pylint: disable=protected-access
+                        f"{{{game_side}}}"
+                    )
+                    ev = bch.keygen_derived_ev(
+                        pre_proc, seed_ref, clone_alias_by_module
+                    )
+                    if ev is None:
+                        ek_conj = []
+                        break
+                    ev = ev.replace("__ROH__", f"{ro_ref}{{{game_side}}}")
+                    ek_ref = (
+                        f"{game_holder}.{mt._ec_field_name(ek_f)}"  # pylint: disable=protected-access
+                        f"{{{game_side}}}"
+                    )
+                    ek_conj.append(f"({ek_ref}, {seed_ref}) = {ev}")
+            conj.extend(ek_conj)
         # pylint: enable=protected-access
         return " /\\ ".join(conj)
 

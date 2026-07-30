@@ -4148,7 +4148,22 @@ def _front_swaps_stable(
         if occ == dest:
             return None
         cur.insert(dest, cur.pop(occ))
-        return f"swap{{{side}}} ^ <${{{occ + 1}}} @ {dest}."
+        # ``dest`` is a SAMPLE slot; only 0 (front) and 1 (right below the
+        # just-hoisted dependency) are ever requested. Slot 0 is ``@ 0`` (top
+        # of code, same meaning on every EC). Slot 1 must be the SAMPLE-ANCHORED
+        # destination ``@ ^ <${2}`` ("at the current 2nd sample" = right below
+        # the dependency just hoisted to the front): the two EasyCrypt builds in
+        # the toolchain disagree on numeric destinations -- the release
+        # (r2026.03, the dashboard's compiler) reads ``@ n`` as a 1-indexed
+        # LANDING POSITION (``@ 1`` = the very top, crossing the dependency:
+        # "statements not independent ... writes seed_0"), while the
+        # easycrypt-mcp fork reads it as a 0-indexed gap (``@ 1`` correct,
+        # ``@ 2`` one slot too low, and ``@ > 0`` is fork-only grammar). The
+        # anchored form parses on both and lands identically (at/before the 2nd
+        # sample coincide for an upward move). Validated on both compilers via
+        # ``.ec-tmp/probe/swap_excl*.ec``.
+        at = "^ <${2}" if dest == 1 else str(dest)
+        return f"swap{{{side}}} ^ <${{{occ + 1}}} @ {at}."
 
     swaps: list[str] = []
     placed: set[int] = set()
@@ -7465,6 +7480,45 @@ def _challenge_lazyro_route(  # pylint: disable=too-many-arguments,too-many-posi
     # as two args. Rewrite ``<ro_ref> <arg>`` -> ``(roh <arg>)`` (the exists*-bound
     # ``roh`` + its single seed-field argument, parenthesized).
     gpeel = [re.sub(rf"{re.escape(ro_ref)}\s+(\w+)", r"(roh \1)", ln) for ln in gpeel]
+    # TWO-KEYPAIR closer: with >= 2 distinct game seeds feeding the RO
+    # (PK / two-keypair DIFFKEY), the flat ``skip => /#`` faces a ~40-level
+    # nest of one-sided det-call finishers over 16 ``let``s and dies (and the
+    # two-KEM ``congr`` form never applies). Peel it LEVELED instead: exactly
+    # one ``simplify`` + split/intro per emitted one-sided ``call`` (the level
+    # count IS the peel-call count), each leaf ``by smt()`` local, preferring
+    # ``->`` substitution and degrading to hypothesis intro when a pinned
+    # binder has no later occurrence ("nothing to rewrite" -- the wrapper
+    # keypair tuple), then one flat ``smt()`` for the res-equality residual.
+    # The bound is EXACT: an unbounded ``do ?`` overruns into the residual
+    # conjunction, where ``split`` applies and its ``by smt()`` hard-fails.
+    # Single-seed (SAMEKEY) keeps the existing closers byte-identically.
+    # Validated on ``tests/integration/ec_templates/two_keypair_lazyro_challenge.ec``.
+    ro_seeds = {
+        m
+        for s in _exec_stmts(gbody)
+        if isinstance(s, ec_ast.Assign)
+        for m in re.findall(rf"{re.escape(ro_ref)}\s+(\w+)", s.rhs)
+    }
+    n_levels = sum(1 for ln in [*gpeel, *rpeel] if ln.lstrip().startswith("call{"))
+    if len(ro_seeds) >= 2 and n_levels > 0:
+        ladder = (
+            "(   (split; [ by smt() | move => ? ? ? [-> ->] ])"
+            " || (split; [ by smt() | move => ? ? ? [-> ?] ])"
+            " || (split; [ by smt() | move => ? ? ? [? ->] ])"
+            " || (split; [ by smt() | move => ? ? ? [? ?] ])"
+            " || (move => ? ? [-> ->])"
+            " || (move => ? ? [-> ?])"
+            " || (move => ? ? [? ->])"
+            " || (move => ? ? [? ?]))"
+        )
+        closing = [
+            "skip; move => &1 &2 H.",
+            f"do {n_levels}! (simplify; {ladder}).",
+            "simplify.",
+            "smt().",
+        ]
+    else:
+        closing = [_functionalized_challenge_closer(gbody, rbody)]
     # pylint: enable=protected-access
     return [
         _res_tag(SYNTH_PARAM),
@@ -7478,7 +7532,7 @@ def _challenge_lazyro_route(  # pylint: disable=too-many-arguments,too-many-posi
         # decaps introduces (``dk <- dk_PQ_0; ct <- ct0.`1``) that ``inline *``
         # exposes but the flat-state peel (VarDecl-filtered) doesn't wp away.
         "wp.",
-        _functionalized_challenge_closer(gbody, rbody),
+        *closing,
         "qed.",
     ]
 

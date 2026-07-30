@@ -1850,6 +1850,7 @@ def _make_field_aware_coupling(
     ro_by_arrow: dict[str, str] | None = None,
     ro_challenger_by_base: dict[str, list[tuple[str, str]]] | None = None,
     lazyro_cross: tuple[str, str, frozenset[str]] | None = None,
+    type_sig_by_base: dict[str, tuple[str, ...]] | None = None,
 ) -> CouplingFn:
     """Build a coupling closure that is field-aware for cardinality-differing states.
 
@@ -1896,6 +1897,7 @@ def _make_field_aware_coupling(
     ginfo = glob_info_by_base or {}
     ro_arrow = ro_by_arrow or {}
     ro_challenger = ro_challenger_by_base or {}
+    type_sigs = type_sig_by_base or {}
     composite = set(qualified)
 
     def role(f: str) -> str:
@@ -1952,6 +1954,13 @@ def _make_field_aware_coupling(
             same_glob = False
         else:
             same_glob = fl is not None and fr is not None and len(fl) == len(fr)
+            if same_glob and type_sigs:
+                sl, sr = type_sigs.get(lb), type_sigs.get(rb)
+                if sl is not None and sr is not None and sl != sr:
+                    # same cardinality but a RENAMED+REORDERED field block: the
+                    # glob tuples' type sequences differ, so the whole-glob
+                    # equality is ill-typed -- take the field-wise coupling.
+                    same_glob = False
         if fl is None or fr is None or (same_glob and not is_composite):
             return _glob_coupling(left_ref, right_ref)
         setr = set(fr)
@@ -5402,6 +5411,19 @@ def _emit_one_oracle_chain(
         _ref_base(mod_ref(name)): _ec_module_fields(game)
         for name, game in norm_by_name.items()
     }
+    # Per-state EC field-type SEQUENCE (declaration order = glob order). At
+    # equal field count the whole-glob shortcut is sound only when the two
+    # sequences match: a same-cardinality RENAME+REORDER step (the HON micro
+    # wall: [dk, scalar, elem] vs field1..3 = [elem, dk, scalar]) makes the
+    # tuple equality ill-typed. Sequences equal -> shortcut unchanged (every
+    # clean proof's whole-glob coupling type-checked in EC, so this is
+    # byte-identity-safe by construction); differing -> field-wise coupling.
+    type_sig_by_base = {
+        _ref_base(mod_ref(name)): tuple(
+            modules.types.translate_type(f.type).text for f in game.fields
+        )
+        for name, game in norm_by_name.items()
+    }
     # Each flat state here is emitted with a canonical ``f<NN>`` var block
     # (``emit_state_vars`` -> :func:`_canonical_field_renames`), so a field's
     # DECLARED module var differs from its stable ``_ec_field_name``. Map the
@@ -5565,6 +5587,7 @@ def _emit_one_oracle_chain(
         ro_by_arrow,
         ro_challenger_by_base,
         lazyro_cross,
+        type_sig_by_base=type_sig_by_base,
     )
 
     # Composite-wrapper bridge tactic (wall 7). When the hop has a composite

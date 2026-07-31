@@ -5904,6 +5904,26 @@ def _emit_one_oracle_chain(
             "proc; inline *; auto => /#.",
             "qed.",
         ]
+    elif all_states_pure:
+        # ARGUMENT-PURE oracle (non-ROM): every flat state's body is a pure
+        # function of the arguments, and a flat state IS the inlined wrapper --
+        # so ``inline *`` reduces both wrapper bodies to those pure bodies and
+        # ``auto`` discharges the return, leaving every field coupling as a frame
+        # condition for ``/#``. This bypasses the wrapper<->flat bridge
+        # transitivity entirely, which is the right move here rather than making
+        # its whole-glob leg specs compose with a field-wise outer precondition:
+        # the bridge exists to transport state correspondences, and this oracle
+        # touches no state. Unlike the ROM shortcuts above we do NOT read the
+        # flat state as a proxy for the wrapper body -- ``inline *`` runs first,
+        # so a wrapper that DELEGATES the oracle to its challenger is handled
+        # too. EC-gated: if a wrapper body holds a call ``inline *`` cannot
+        # unfold (an abstract module), ``auto`` leaves the goal open and the file
+        # is rejected.
+        outer_body = [
+            "(* Argument-pure oracle: inline the wrappers, close directly. *)",
+            "proc; inline *; auto => /#.",
+            "qed.",
+        ]
     else:
         outer_body = [
             "(* Per-transform: bridge wrappers to flat states, chain through. *)",

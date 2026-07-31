@@ -501,11 +501,13 @@ def test_render_coupling_chain_body_walks_left_bridge_right() -> None:
 
 
 def test_emit_multi_oracle_chain_full_shape() -> None:
+    # STATE-READING challenge: the argument-pure bypass must not fire, so the
+    # post-init oracle really goes through the per-transform chain.
     types = tc.TypeCollector(aliases={})
     info = emit_multi_oracle_chain_for_hop(
         hop_index=0,
-        left_game=_two_oracle_game("GL"),
-        right_game=_two_oracle_game("GR"),
+        left_game=_two_oracle_game("GL", stateful_challenge=True),
+        right_game=_two_oracle_game("GR", stateful_challenge=True),
         left_apps=[],
         right_apps=[],
         oracles=[("initialize", True), ("challenge", False)],

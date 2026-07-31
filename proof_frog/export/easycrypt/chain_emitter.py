@@ -27,6 +27,10 @@ from ...transforms._base import TransformApplication
 from ...visitors import SearchVisitor, VariableCollectionVisitor
 from . import binding_challenge as bch
 from . import ec_ast
+from .challenge_common import paren as cc_paren
+from .challenge_common import split_top_args as cc_split_top_args
+from .challenge_common import subst as cc_subst
+from .challenge_common import walk_env as cc_walk_env
 from . import module_translator as mt
 from . import single_r_challenge as srb
 from . import type_collector as tc
@@ -5674,6 +5678,25 @@ def _emit_one_oracle_chain(
             return [], [_res_tag(rung), *tactic, "qed."], pres
 
     def _admit_fallback() -> tuple[list[str], list[str], set[tuple[str, str]]]:
+        # Derivation-chain post-init peel, consulted ONLY here -- i.e. only where
+        # this oracle would otherwise emit an honest admit. That placement is the
+        # byte-identity guarantee: an oracle any existing route closes can never
+        # reach it.
+        if not is_init and full_coupling and "ev_" in full_coupling:
+            deriv = _synth_derivation_oracle_peel(
+                modules,
+                oracle_name,
+                left_states[0],
+                right_states[0],
+                left_wrapper_expr,
+                right_wrapper_expr,
+                external_module_types,
+                method_return_types,
+                det_methods,
+                clone_alias or {},
+            )
+            if deriv is not None:
+                return [], [_res_tag(SYNTH_PARAM), *deriv, "qed."], set()
         # Straight-line binding Challenge FALLBACK (only when the micro chain
         # would admit -- so a clean oracle the chain closes never reaches it,
         # keeping it byte-identical). Both endpoints are reductions with an
@@ -6021,6 +6044,137 @@ def _oracle_is_stateless(game: frog_ast.Game, oracle_name: str) -> bool:
         is not None
     )
     return not has_call and not has_field
+
+
+def _synth_derivation_oracle_peel(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    left_wrapper_expr: str,
+    right_wrapper_expr: str,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    det_methods: dict[str, set[str]],
+    clone_alias: dict[str, str],
+) -> list[str] | None:
+    """Whole-oracle tactic for a POST-INIT oracle under a derivation-chain
+    coupling, or ``None`` off-shape.
+
+    The HON_BIND ``hop_0``/``hop_12`` ``decaps0`` shape: the theorem game's
+    decaps key IS the seedbased master seed, so its oracle RE-DERIVES all its
+    material from that seed on every call, while the query-delegate reduction
+    reads what it stored at ``Initialize``. The two bodies therefore run
+    different call sequences over differently-owned state, related only through
+    the hop's ``ev_`` derivation coupling -- which ``sim`` and the positional
+    peels cannot use.
+
+    Both sides here are fully DETERMINISTIC (no sample), so no sample coupling
+    is needed: freeze every read state (each side's own fields, qualified to the
+    WRAPPER module the lemma is about) plus the oracle's arguments, then peel
+    each tail one-sided back-to-front with the ``<M>_<m>_det`` phoare axioms,
+    which replaces each call by its ``ev_`` value over frozen terms. Nothing is
+    coupled two-sidedly, so the two call sequences need not correspond at all --
+    the final ``skip => />`` discharges ``={res}`` from the coupling.
+
+    Unlike the init peel this needs NO inline-name prediction: every frozen term
+    is a module field or a proc parameter, both named in the lemma statement.
+    Validated: ``ec_templates/hon_prg_init_derivation.ec``
+    (``hop_decaps0_derivation_chain``), both toolchains.
+    """
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+    lmod = _flat_state_module(
+        modules, "DP_L", lproj, external_module_types, method_return_types, []
+    )
+    rmod = _flat_state_module(
+        modules, "DP_R", rproj, external_module_types, method_return_types, []
+    )
+    if not lmod.procs or not rmod.procs:
+        return None
+    sides: list[tuple[ec_ast.Proc, frog_ast.Game, str, str]] = [
+        (lmod.procs[0], left_state0, _ref_base(left_wrapper_expr), "1"),
+        (rmod.procs[0], right_state0, _ref_base(right_wrapper_expr), "2"),
+    ]
+    # A ``challenger@``-prefixed flat field is owned by an inner challenger the
+    # wrapper keeps as a separate module, so it cannot be qualified to the
+    # wrapper base -- decline rather than emit a nonexistent variable.
+    if any("@" in f.name for st in (left_state0, right_state0) for f in st.fields):
+        return None
+    frozen: list[str] = []  # exists* terms, in binder order
+    binders: list[str] = []
+    peels: list[tuple[dict[str, str], Sequence[ec_ast.EcStmt], str]] = []
+    glob_of: dict[str, str] = {}
+    for proc, state, base, side in sides:
+        env: dict[str, str] = {}
+        for fld in state.fields:
+            # pylint: disable-next=protected-access
+            ec_name = mt._ec_field_name(fld.name)
+            binder = f"fv{len(binders)}"
+            frozen.append(f"{base}.{ec_name}" "{" f"{side}" "}")
+            binders.append(binder)
+            env[ec_name] = binder
+        for prm in proc.params:
+            binder = f"av{len(binders)}"
+            frozen.append(f"{prm.name}" "{" f"{side}" "}")
+            binders.append(binder)
+            env[prm.name] = binder
+        stmts = [s for s in proc.body if not isinstance(s, ec_ast.VarDecl)]
+        if any(isinstance(s, (ec_ast.Sample, ec_ast.If)) for s in stmts):
+            return None  # not a linear deterministic body
+        for stmt in stmts:
+            if not isinstance(stmt, ec_ast.Call):
+                continue
+            mod, dot, meth = stmt.callee.partition(".")
+            if not dot or meth not in det_methods.get(mod, set()):
+                return None  # a probabilistic call has no ``_det`` axiom
+            if mod not in clone_alias:
+                return None  # no ``ev_`` namespace for this callee
+            if mod not in glob_of:
+                glob_of[mod] = f"g_{mod}"
+        # Every intermediate local must carry its FUNCTIONAL value, or a peel
+        # would pass a program variable as a proof-term argument ("unknown
+        # variable"). Seed the forward walk with the frozen fields/params.
+        env = cc_walk_env(stmts, env, clone_alias)
+        peels.append((env, stmts, side))
+    if not glob_of:
+        return None
+    # Glob binders come first so a peel's ``<M>_<m>_det g_<M>`` is in scope.
+    frozen = [f"(glob {m})" "{1}" for m in glob_of] + frozen
+    binders = list(glob_of.values()) + binders
+    # ``inline *`` first: the lemma relates the WRAPPERS, whose bodies still hold
+    # the un-inlined concrete-scheme call the flat state already expanded.
+    lines = [
+        "proc.",
+        "inline *.",
+        f"exists* {', '.join(frozen)}.",
+        f"elim* => {' '.join(binders)}.",
+    ]
+    for penv, pstmts, pside in peels:
+        # ``wp.`` before EVERY call, not only between assignment runs: the peel is
+        # derived from the FLAT state, but the lemma runs over the EC-``inline *``
+        # body, which interposes tuple-unpack assigns the flat state does not
+        # reproduce. Keying the ``wp``s on the flat assign runs therefore lands a
+        # ``call`` on an assignment ("invalid last instruction"); an extra ``wp``
+        # is a no-op when there is nothing deterministic to consume, so emitting
+        # one unconditionally is position-robust.
+        for pstmt in reversed(list(pstmts)):
+            if not isinstance(pstmt, ec_ast.Call):
+                continue
+            module, _, method = pstmt.callee.partition(".")
+            args = [cc_paren(cc_subst(a, penv)) for a in cc_split_top_args(pstmt.args)]
+            applied = "".join(f" {a}" for a in args)
+            lines.append("wp.")
+            lines.append(
+                f"call{{{pside}}} ({module}_{method}_det {glob_of[module]}{applied})."
+            )
+    # Leading deterministic assigns (``ct_T <- ct.`2``) survive both peels --
+    # clear them before ``skip``, else the instruction list is not empty.
+    lines.append("wp.")
+    lines.append("skip => />.")
+    return lines
 
 
 def _oracle_is_pure_of_args(game: frog_ast.Game, oracle_name: str) -> bool:

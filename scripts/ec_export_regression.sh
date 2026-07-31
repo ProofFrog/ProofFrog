@@ -46,12 +46,26 @@ NEW_DIR="$WORK/worktree"
 LIST="$WORK/export_list-$BSHA.txt"
 mkdir -p "$WORK"
 
+# Per-export wall-clock cap. macOS ships no coreutils `timeout`; use whatever
+# is available (gtimeout, the repo's .ec-tmp/bin shim) and fall back to running
+# UNCAPPED rather than failing every export -- a missing `timeout` used to make
+# every export "FAIL", yielding an empty baseline and a silent, meaningless
+# "no export changed" verdict.
+if command -v timeout >/dev/null 2>&1; then TIMEOUT="timeout 120"
+elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT="gtimeout 120"
+elif [ -x "$REPO/.ec-tmp/bin/timeout" ]; then TIMEOUT="$REPO/.ec-tmp/bin/timeout 120"
+else
+  echo ">> WARNING: no 'timeout' available -- exports run uncapped" >&2
+  TIMEOUT=""
+fi
+export TIMEOUT
+
 # One proof export; reads OUT, PY from the environment. macOS xargs -I has a
 # tiny per-command buffer, so keep the xargs command short (exported function).
 _ec_export_one() {
   local p="$1" rel
   rel="${p//\//__}"
-  if PROOFFROG_SEQUENTIAL=1 timeout 120 \
+  if PROOFFROG_SEQUENTIAL=1 $TIMEOUT \
        "$PY" -m proof_frog export "$p" -o "$OUT/$rel.ec" >/dev/null 2>&1 \
      && [ -f "$OUT/$rel.ec" ]; then
     echo "OK $(shasum "$OUT/$rel.ec" | cut -d' ' -f1) $p"
@@ -90,6 +104,14 @@ if [[ ! -s "$LIST" || ! -s "$BASE_DIR/_results.txt" ]]; then
   fi
   awk '$1=="OK"{print $3}' "$BASE_DIR/_results.txt" > "$LIST"
   echo ">> $(wc -l < "$LIST") proofs export at baseline (cached for SHA $BSHA)" >&2
+  # An empty baseline means the sweep itself broke (missing interpreter, bad
+  # stash, no `timeout`); diffing against it would report a FALSE "nothing
+  # changed". Refuse to cache it.
+  if [[ ! -s "$LIST" ]]; then
+    rm -f "$LIST" "$BASE_DIR/_results.txt"
+    echo "!! baseline sweep exported 0 proofs -- aborting (cache not written)." >&2
+    exit 1
+  fi
 fi
 
 # 2. Export the same set from the working tree (the change under test).

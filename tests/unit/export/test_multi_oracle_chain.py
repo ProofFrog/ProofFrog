@@ -34,16 +34,24 @@ def _bs() -> frog_ast.BitStringType:
     return frog_ast.BitStringType(parameterization=frog_ast.Variable("lambda"))
 
 
-def _two_oracle_game(name: str) -> frog_ast.Game:
-    """A two-oracle stateful game: ``Initialize`` + ``Challenge(m0)``, field ``sk``."""
+def _two_oracle_game(name: str, stateful_challenge: bool = False) -> frog_ast.Game:
+    """A two-oracle stateful game: ``Initialize`` + ``Challenge(m0)``, field ``sk``.
+
+    ``Challenge`` returns its argument by default -- a PURE function of its
+    arguments, which the chain emitter deliberately collapses to a single
+    endpoint lemma (no micros, no canon bridge). Pass ``stateful_challenge`` for
+    a body that also reads the field ``sk``, the realistic post-init oracle
+    shape, when a test needs the per-transform chain machinery to be exercised.
+    """
     field = frog_ast.Field(_bs(), "sk", None)
     init = frog_ast.Method(
         frog_ast.MethodSignature("Initialize", _bs(), []),
         frog_ast.Block([frog_ast.ReturnStatement(frog_ast.Variable("sk"))]),
     )
+    chal_ret = frog_ast.Variable("sk" if stateful_challenge else "m0")
     chal = frog_ast.Method(
         frog_ast.MethodSignature("Challenge", _bs(), [frog_ast.Parameter(_bs(), "m0")]),
-        frog_ast.Block([frog_ast.ReturnStatement(frog_ast.Variable("m0"))]),
+        frog_ast.Block([frog_ast.ReturnStatement(chal_ret)]),
     )
     return frog_ast.Game((name, [], [field], [init, chal]))
 
@@ -241,6 +249,113 @@ def test_oracle_step_tactic_identity_is_coupling_preserving_sim() -> None:
     assert tac == (["proc; sim."], set())
 
 
+# --- pure-of-args chain collapse -------------------------------------------
+
+
+def _const_challenge_game(name: str, n_fields: int) -> frog_ast.Game:
+    """A game whose ``Challenge`` returns a constant (pure in its arguments),
+    with ``n_fields`` unrelated fields so successive states differ in glob
+    cardinality -- the shape whose per-state transitivity used to be emitted."""
+    fields = [frog_ast.Field(_bs(), f"f{i}", None) for i in range(n_fields)]
+    init = frog_ast.Method(
+        frog_ast.MethodSignature("Initialize", _bs(), []),
+        frog_ast.Block([frog_ast.ReturnStatement(frog_ast.Variable("f0"))]),
+    )
+    chal = frog_ast.Method(
+        frog_ast.MethodSignature("Challenge", _bs(), [frog_ast.Parameter(_bs(), "m0")]),
+        frog_ast.Block([frog_ast.ReturnStatement(frog_ast.Boolean(False))]),
+    )
+    return frog_ast.Game((name, [], fields, [init, chal]))
+
+
+def test_emit_one_oracle_chain_pure_oracle_collapses_whole_chain() -> None:
+    # An oracle that is a PURE function of its arguments in EVERY chain state (a
+    # binding ``Unbreakable.Challenge`` ``return false``) needs no per-transform
+    # transitivity: the states differ only in fields it never reads. The chain
+    # collapses to one endpoint lemma -- no micros, no canon bridge -- which is
+    # what dissolves the mixed whole-glob/field-wise composition wall.
+    left = [_const_challenge_game("L", n) for n in (3, 4, 3)]
+    right = [_const_challenge_game("R", 3)]
+    chunks, _outer, _pres = _emit_one_oracle_chain(
+        hop_index=10,
+        oracle_name="challenge",
+        is_init=False,
+        eq_args="={m0}",
+        left_mods=["Step_10L_state_0", "Step_10L_state_1", "Step_10L_state_2"],
+        right_mods=["Step_10R_state_0"],
+        left_states=left,
+        right_states=right,
+        left_apps=[
+            TransformApplication(
+                iteration=0,
+                transform_name="Synthetic",
+                game_before=left[i],
+                game_after=left[i + 1],
+            )
+            for i in range(2)
+        ],
+        right_apps=[],
+        mod_ref=lambda n: n,
+        left_wrapper_expr="GL(E)",
+        right_wrapper_expr="GR(E)",
+        bridge_tactic="proc; inline *; sp; wp; sim",
+        external_module_types={},
+        method_return_types={},
+        modules=_modules(),
+        flat_params=[],
+        det_methods={},
+    )
+    text = "\n".join(chunks)
+    assert "micro_10_challenge" not in text
+    assert "canon_bridge_10_challenge" not in text
+    assert "transitivity" not in text
+    assert "proc; auto => /#." in text
+
+
+def test_emit_one_oracle_chain_sampling_oracle_keeps_its_chain() -> None:
+    # Same shape, but the oracle SAMPLES: ``auto`` cannot discharge a (even dead)
+    # ``<$``, so the collapse must decline and the per-transform chain stay.
+    left = [_const_challenge_game("L", n) for n in (3, 4)]
+    for g in left:
+        g.methods[1].block.statements.insert(
+            0,
+            frog_ast.Sample(
+                frog_ast.Variable("MessageSpace"),
+                frog_ast.Variable("dead"),
+                frog_ast.Variable("MessageSpace"),
+            ),
+        )
+    chunks, _outer, _pres = _emit_one_oracle_chain(
+        hop_index=10,
+        oracle_name="challenge",
+        is_init=False,
+        eq_args="={m0}",
+        left_mods=["Step_10L_state_0", "Step_10L_state_1"],
+        right_mods=["Step_10R_state_0"],
+        left_states=left,
+        right_states=[_const_challenge_game("R", 3)],
+        left_apps=[
+            TransformApplication(
+                iteration=0,
+                transform_name="Synthetic",
+                game_before=left[0],
+                game_after=left[1],
+            )
+        ],
+        right_apps=[],
+        mod_ref=lambda n: n,
+        left_wrapper_expr="GL(E)",
+        right_wrapper_expr="GR(E)",
+        bridge_tactic="proc; inline *; sp; wp; sim",
+        external_module_types={},
+        method_return_types={},
+        modules=_modules(),
+        flat_params=[],
+        det_methods={},
+    )
+    assert "proc; auto => /#." not in "\n".join(chunks)
+
+
 # --- per-oracle chain assembly --------------------------------------------
 
 
@@ -328,7 +443,9 @@ def test_emit_one_oracle_chain_init_inline_equiv_gated_on_body_equality() -> Non
 
 
 def test_emit_one_oracle_chain_post_init_carries_args() -> None:
-    g = _two_oracle_game("G")
+    # A STATE-READING challenge: the pure-of-args collapse must not fire, so the
+    # per-transform chain artifacts (canon bridge + arg-carrying specs) appear.
+    g = _two_oracle_game("G", stateful_challenge=True)
     chunks, _outer, _pres = _emit_one_oracle_chain(
         hop_index=0,
         oracle_name="challenge",
@@ -337,7 +454,7 @@ def test_emit_one_oracle_chain_post_init_carries_args() -> None:
         left_mods=["Step_0L_state_0"],
         right_mods=["Step_0R_state_0"],
         left_states=[g],
-        right_states=[_two_oracle_game("G")],
+        right_states=[_two_oracle_game("G", stateful_challenge=True)],
         left_apps=[],
         right_apps=[],
         mod_ref=lambda n: n,

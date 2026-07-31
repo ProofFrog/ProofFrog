@@ -5624,12 +5624,33 @@ def _emit_one_oracle_chain(
     # canon-bridge lemma are never referenced -- skip emitting them (they would
     # otherwise still have to compile, and their own ``sim``-based tactics fail
     # on the cross-name field couplings a stateless oracle's endpoints carry).
-    stateless_oracle = (
+    # WHOLE-CHAIN purity (non-ROM route). The ROM gate above reads only the two
+    # ENDPOINT states, which is safe there because a ROM ``hash`` is stateless by
+    # construction in every state. Off the ROM path the same collapse needs a
+    # strictly stronger structural test: in EVERY flat state of the chain the
+    # oracle must be a PURE function of its arguments -- no field touched, no
+    # module called, and no sampling. Then every intermediate body reduces to its
+    # return expression under ``wp``, the transitivity has nothing to compose,
+    # and the chain collapses to the endpoint lemma. This dissolves the
+    # chain-composition wall for a constant-return oracle (a binding
+    # ``Unbreakable.Challenge`` ``return false``, whose 30+ intermediate states
+    # differ only in fields the oracle never reads) instead of threading a
+    # coupling through it. The no-sampling clause is load-bearing: a body with
+    # even a DEAD ``<$`` is not closable by ``auto`` (it needs a one-sided ``rnd``
+    # plus losslessness), so such an oracle must keep its chain. Purely
+    # structural -- no proof/game names -- and EC-gated: the collapsed
+    # ``proc; auto => /#`` either closes the endpoint lemma or the file is
+    # rejected.
+    all_states_pure = not is_init and all(
+        _oracle_is_pure_of_args(g, oracle_name) for g in (*left_states, *right_states)
+    )
+    rom_stateless_oracle = (
         use_canonical
         and not is_init
         and _oracle_is_stateless(left_states[0], oracle_name)
         and _oracle_is_stateless(right_states[0], oracle_name)
     )
+    stateless_oracle = all_states_pure or rom_stateless_oracle
 
     # Reprogramming HashG whole-oracle route: both endpoints reprogram the shared
     # RO in an ``if (x == <seed>) return <a> || <b>`` branch. The per-transform
@@ -5844,13 +5865,20 @@ def _emit_one_oracle_chain(
     both_wrappers_direct_ro = _oracle_is_direct_ro(
         left_states[0], oracle_name
     ) and _oracle_is_direct_ro(right_states[0], oracle_name)
-    if stateless_oracle and both_wrappers_direct_ro:
+    # Both outer-body shortcuts read the FLAT states as a proxy for the wrapper
+    # bodies, which is faithful only on the ROM path (a direct-RO wrapper inlines
+    # to a direct-RO flat state). A non-ROM constant-return oracle inlines to a
+    # ``return false`` flat state from a wrapper that DELEGATES to its challenger,
+    # so the proxy would wrongly claim identical wrapper bodies -- keep those
+    # chains on the generic wrapper<->flat bridge and collapse only the chain
+    # lemma itself.
+    if rom_stateless_oracle and both_wrappers_direct_ro:
         outer_body = [
             "(* Stateless RO oracle: identical wrapper bodies, RO-coupled. *)",
             "proc; auto => /#.",
             "qed.",
         ]
-    elif stateless_oracle and (
+    elif rom_stateless_oracle and (
         _ref_base(left_wrapper_expr) in (stateless_wrapper_bases or set())
         or _ref_base(right_wrapper_expr) in (stateless_wrapper_bases or set())
     ):
@@ -5973,6 +6001,47 @@ def _oracle_is_stateless(game: frog_ast.Game, oracle_name: str) -> bool:
         is not None
     )
     return not has_call and not has_field
+
+
+def _oracle_is_pure_of_args(game: frog_ast.Game, oracle_name: str) -> bool:
+    """True if ``oracle_name``'s body is a PURE function of its arguments in
+    ``game``: no module field touched, no module call, and no sampling.
+
+    Strictly stronger than :func:`_oracle_is_stateless`, which permits sampling
+    (harmless on the ROM path, where the collapse it gates only ever sees a
+    ``return H(m)`` body). Off that path the extra clause is load-bearing: a body
+    carrying even a DEAD ``<$`` is not closable by ``auto`` -- it needs a
+    one-sided ``rnd`` and a losslessness fact -- so the chain-collapse route must
+    decline there and let the oracle keep its per-transform chain. Unlike
+    :func:`_oracle_is_stateless` a ``Function``-typed (materialized-RO) field
+    read also counts as state here: this predicate is used off the ROM path,
+    where no such materialization is in play."""
+    method = next(
+        (m for m in game.methods if m.signature.name.lower() == oracle_name), None
+    )
+    if method is None:
+        return False
+    field_names = {f.name for f in game.fields}
+    has_call = (
+        SearchVisitor[frog_ast.FuncCall](
+            lambda n: isinstance(n, frog_ast.FuncCall)
+            and isinstance(n.func, frog_ast.FieldAccess)
+        ).visit(method.block)
+        is not None
+    )
+    has_field = (
+        SearchVisitor[frog_ast.Variable](
+            lambda n: isinstance(n, frog_ast.Variable) and n.name in field_names
+        ).visit(method.block)
+        is not None
+    )
+    has_sample = (
+        SearchVisitor[frog_ast.Statement](
+            lambda n: isinstance(n, (frog_ast.Sample, frog_ast.UniqueSample))
+        ).visit(method.block)
+        is not None
+    )
+    return not has_call and not has_field and not has_sample
 
 
 def _precond_witness(

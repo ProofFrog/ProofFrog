@@ -4590,11 +4590,9 @@ def export_proof_file(proof_path: str) -> str:
         ]
         if len(seed_flds) != 1:
             return None
+        seed_holder = pt.module_base_name(resolver.resolve(game_step).module_expr)
         # pylint: disable=protected-access
-        seed_ref = (
-            f"{pt.module_base_name(resolver.resolve(game_step).module_expr)}"
-            f".{mt._ec_field_name(seed_flds[0].name)}{{{gs}}}"
-        )
+        seed_ref = f"{seed_holder}.{mt._ec_field_name(seed_flds[0].name)}{{{gs}}}"
         # pylint: enable=protected-access
         # The expansion value the challenger's query returns, at the coupled
         # seed: an RO-materialized PRG applies the shared RO; an ABSTRACT PRG
@@ -4695,6 +4693,16 @@ def export_proof_file(proof_path: str) -> str:
                 # pylint: enable=protected-access
         if not conj or len(conj) != len(field_names):
             return None
+        # The emitted conjuncts read the GAME challenger's seed field
+        # (``<Game>.dk0{1}``) inside a post that must survive each abstract
+        # scheme call the init peel steps over. EC refuses ``call (_: true)``
+        # under such a post unless the abstract module is declared write-disjoint
+        # from that challenger ("module KEM_PQ can write <Game>.dk0"), so the
+        # holder has to reach the ``declare module`` restriction lists. Register
+        # ONLY the two bases this coupling actually names, and only once it
+        # fires -- the earlier attempt that widened ``_composite_reduction_step``
+        # to get the same effect cascaded into 15+ exports' restriction lists.
+        live_state_holders.update({seed_holder, red_base})
         globs = " /\\ ".join(f"={{glob {m}}}" for m in declared_module_names)
         body = " /\\ ".join(conj)
         return f"{globs} /\\ {body}" if globs else body

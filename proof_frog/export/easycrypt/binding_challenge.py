@@ -133,6 +133,25 @@ def keygen_derived_ev(
 # ---------------------------------------------------------------------------
 
 
+def _fq(spec: object, base: str, name: str) -> str:
+    """Qualify a component-field NAME to the module that actually holds it.
+
+    Every challenge-route spec renders its component fields as
+    ``<reduction>.<field>``, which is right only for a field the REDUCTION
+    MODULE declares. In the HON_BIND layer a reduction can keep the PQ decaps
+    key inside its INNER CHALLENGER instead, where the flat state names it
+    ``challenger@dk0`` -> ``challenger_dk0``; the wrapper lemma keeps that
+    challenger as a separate module, so the same rendering would name a variable
+    that does not exist and EC would reject the whole file.
+
+    ``spec.field_ref`` maps such a flat name to the complete ``<module>.<field>``
+    ref; anything absent from it qualifies to ``base`` exactly as before, so an
+    empty map is byte-identical.
+    """
+    ref: dict[str, str] = getattr(spec, "field_ref", None) or {}
+    return ref.get(name, f"{base}.{name}")
+
+
 def _glob_var(module: str) -> str:
     """Deterministic per-module glob binder name (``KEM_PQ`` -> ``g_KEM_PQ``)."""
     return f"g_{module}"
@@ -1366,6 +1385,11 @@ class Hop2Spec:
     # re-decapsulates through the wrapper). All empty/None for the bare shape ->
     # ``challenge_tactic_hop2`` unchanged (byte-identical). ----------------------
     wrapper_expr: str = ""  # e.g. "SeededKEMWrapper(KEM_PQ_inner)"
+    # Component fields NOT held by the reduction module itself: flat name ->
+    # the complete ``<module>.<field>`` ref of whoever does hold it (see
+    # :func:`_fq`). Empty for every reduction that holds all its own fields, so
+    # those specs render byte-identically.
+    field_ref: dict[str, str] = field(default_factory=dict)
     inner_pq_module: str = ""  # inner KEM module, e.g. "KEM_PQ_inner"
     kdf_col_lemma: str = "kdf_col_ss"  # aux lemma (concat_eq => decaps_eq)
     l_own_fields: list[str] = field(
@@ -1431,15 +1455,15 @@ def challenge_tactic_hop2(spec: Hop2Spec) -> list[str] | None:
     rg0 = spec.r_component_fields[i0]
     rg1 = spec.r_component_fields[i1]
     kdf0_term = spec.shape.kdf_in(
-        _s2(f"{spec.r_base}.{rg0[0]}"),
-        _s2(f"{spec.r_base}.{rg0[1]}"),
-        _s2(f"{spec.r_base}.{rg0[2]}"),
+        _s2(f"{_fq(spec, spec.r_base, rg0[0])}"),
+        _s2(f"{_fq(spec, spec.r_base, rg0[1])}"),
+        _s2(f"{_fq(spec, spec.r_base, rg0[2])}"),
         _s2(ct0),
     )
     kdf1_term = spec.shape.kdf_in(
-        _s2(f"{spec.r_base}.{rg1[0]}"),
-        _s2(f"{spec.r_base}.{rg1[1]}"),
-        _s2(f"{spec.r_base}.{rg1[2]}"),
+        _s2(f"{_fq(spec, spec.r_base, rg1[0])}"),
+        _s2(f"{_fq(spec, spec.r_base, rg1[1])}"),
+        _s2(f"{_fq(spec, spec.r_base, rg1[2])}"),
         _s2(ct1),
     )
     inv_terms = (
@@ -1450,11 +1474,11 @@ def challenge_tactic_hop2(spec: Hop2Spec) -> list[str] | None:
         ]
         + [f"(glob {m})" "{1}" f" = (glob {m})" "{2}" for m in spec.sync_mods]
         + [
-            f"{spec.l_base}.{lg[0]}" "{1}" f" = {lchal}.{ck}" "{1}"
+            f"{_fq(spec, spec.l_base, lg[0])}" "{1}" f" = {lchal}.{ck}" "{1}"
             for lg, ck in zip(spec.l_component_fields, spec.l_challenger_key_fields)
         ]
         + [
-            f"{spec.l_base}.{f}" "{1}" f" = {spec.r_base}.{f}" "{2}"
+            f"{_fq(spec, spec.l_base, f)}" "{1}" f" = {_fq(spec, spec.r_base, f)}" "{2}"
             for grp in spec.l_component_fields
             for f in grp
         ]
@@ -1469,9 +1493,17 @@ def challenge_tactic_hop2(spec: Hop2Spec) -> list[str] | None:
     # -- prefix functionalization subgoal ------------------------------------
     l_ex = (
         [f"(glob {m})" "{1}" for m in gm]
-        + [f"{spec.l_base}.{f}" "{1}" for grp in spec.l_component_fields for f in grp]
+        + [
+            f"{_fq(spec, spec.l_base, f)}" "{1}"
+            for grp in spec.l_component_fields
+            for f in grp
+        ]
         + [f"{c}" "{1}" for c in spec.ct_params]
-        + [f"{spec.r_base}.{f}" "{2}" for grp in spec.r_component_fields for f in grp]
+        + [
+            f"{_fq(spec, spec.r_base, f)}" "{2}"
+            for grp in spec.r_component_fields
+            for f in grp
+        ]
     )
     l_elim = gge + l_fe + ["lc0", "lc1"] + r_fe
     l_env = _blk_env(
@@ -1567,15 +1599,15 @@ def challenge_tactic_hop2(spec: Hop2Spec) -> list[str] | None:
     rg1b = spec.r_component_fields[i1]
     b2 = "{2}"
     bind0 = (
-        f"{spec.r_base}.{rg0b[0]}{b2}",
-        f"{spec.r_base}.{rg0b[1]}{b2}",
-        f"{spec.r_base}.{rg0b[2]}{b2}",
+        f"{_fq(spec, spec.r_base, rg0b[0])}{b2}",
+        f"{_fq(spec, spec.r_base, rg0b[1])}{b2}",
+        f"{_fq(spec, spec.r_base, rg0b[2])}{b2}",
         f"{ct0}{b2}",
     )
     bind1 = (
-        f"{spec.r_base}.{rg1b[0]}{b2}",
-        f"{spec.r_base}.{rg1b[1]}{b2}",
-        f"{spec.r_base}.{rg1b[2]}{b2}",
+        f"{_fq(spec, spec.r_base, rg1b[0])}{b2}",
+        f"{_fq(spec, spec.r_base, rg1b[1])}{b2}",
+        f"{_fq(spec, spec.r_base, rg1b[2])}{b2}",
         f"{ct1}{b2}",
     )
     kdf0 = spec.shape.kdf_in(*bind0)
@@ -1705,10 +1737,12 @@ def challenge_tactic_hop2_wrapper(  # pylint: disable=too-many-locals,too-many-s
         ``s_PQ_0`` (the common field ``=> />`` rewrites the goal to, via the
         stored-dk coupling).
         """
-        pq_key = f"({inner_c}.ev_derivekeypair {spec.r_base}.{sd_fld}" "{2}).`2"
-        t_key = f"{spec.r_base}.{r_tkeys[k]}" "{2}"
+        pq_key = (
+            f"({inner_c}.ev_derivekeypair {_fq(spec, spec.r_base, sd_fld)}" "{2}).`2"
+        )
+        t_key = f"{_fq(spec, spec.r_base, r_tkeys[k])}" "{2}"
         if stored_ek_f is not None:
-            ek = f"{spec.r_base}.{r_stored_eks[k]}" "{2}"
+            ek = f"{_fq(spec, spec.r_base, r_stored_eks[k])}" "{2}"
         else:
             ek = f"({spec.shape.ev_decaps_t} ({t_clone}.ev_generator) {t_key})"
         return (pq_key, t_key, ek, f"{ct}" "{2}")
@@ -1729,12 +1763,16 @@ def challenge_tactic_hop2_wrapper(  # pylint: disable=too-many-locals,too-many-s
     # seed (the ``derivekeypair(seed).`2 = seed`` invariant).
     all_flds = spec.l_all_fields or [seed_f, tkey_f]
     pq_couplings = [
-        f"{spec.l_base}.{f}" "{1}" f" = {spec.r_base}.{f}" "{2}" for f in all_flds
+        f"{_fq(spec, spec.l_base, f)}" "{1}" f" = {_fq(spec, spec.r_base, f)}" "{2}"
+        for f in all_flds
     ]
     for _rs, _ls in zip(r_seeds, l_seeds):
         if _rs != _ls:
             pq_couplings.append(
-                f"{spec.r_base}.{_rs}" "{2}" f" = {spec.r_base}.{_ls}" "{2}"
+                f"{_fq(spec, spec.r_base, _rs)}"
+                "{2}"
+                f" = {_fq(spec, spec.r_base, _ls)}"
+                "{2}"
             )
     if spec.ro_ref:
         pq_couplings.append(f"{spec.ro_ref}" "{1}" f" = {spec.ro_ref}" "{2}")
@@ -1766,7 +1804,7 @@ def challenge_tactic_hop2_wrapper(  # pylint: disable=too-many-locals,too-many-s
         + ["kdf_in_0{1} = kdf_in_0{2}", "kdf_in_1{1} = kdf_in_1{2}"]
         + [f"(glob {m})" "{1}" f" = (glob {m})" "{2}" for m in spec.sync_mods]
         + [
-            f"{spec.l_base}.{_ls}" "{1}" f" = {lchal}.{_ck}" "{1}"
+            f"{_fq(spec, spec.l_base, _ls)}" "{1}" f" = {lchal}.{_ck}" "{1}"
             for _ls, _ck in zip(l_seeds, cks)
         ]
         + lead_couplings
@@ -1793,9 +1831,9 @@ def challenge_tactic_hop2_wrapper(  # pylint: disable=too-many-locals,too-many-s
     r_fe = [f"rf{i}" for i in range(len(r_own))]
     l_ex = (
         [f"(glob {m})" "{1}" for m in gm]
-        + [f"{spec.l_base}.{f}" "{1}" for f in l_own]
+        + [f"{_fq(spec, spec.l_base, f)}" "{1}" for f in l_own]
         + [f"{c}" "{1}" for c in spec.ct_params]
-        + [f"{spec.r_base}.{f}" "{2}" for f in r_own]
+        + [f"{_fq(spec, spec.r_base, f)}" "{2}" for f in r_own]
     )
     l_elim = gge + l_fe + ["lc0", "lc1"] + r_fe
     l_env = _blk_env(
@@ -2048,9 +2086,9 @@ def challenge_tactic_hop2_pk_wrapper(  # pylint: disable=too-many-locals,too-man
         tkey = spec.r_own_fields[2 + k]
         ek = spec.r_ek_component_fields[k][1]
         return (
-            f"({inner_c}.ev_derivekeypair {spec.r_base}.{pq_key_f}{side}).`2",
-            f"{spec.r_base}.{tkey}{side}",
-            f"{spec.r_base}.{ek}{side}",
+            f"({inner_c}.ev_derivekeypair {_fq(spec, spec.r_base, pq_key_f)}{side}).`2",
+            f"{_fq(spec, spec.r_base, tkey)}{side}",
+            f"{_fq(spec, spec.r_base, ek)}{side}",
             f"{ct}{side}",
         )
 
@@ -2060,12 +2098,16 @@ def challenge_tactic_hop2_pk_wrapper(  # pylint: disable=too-many-locals,too-man
     # -- invariant --------------------------------------------------------------
     all_flds = spec.l_all_fields
     pq_couplings = [
-        f"{spec.l_base}.{f}" "{1}" f" = {spec.r_base}.{f}" "{2}" for f in all_flds
+        f"{_fq(spec, spec.l_base, f)}" "{1}" f" = {_fq(spec, spec.r_base, f)}" "{2}"
+        for f in all_flds
     ]
     for sd, dk in zip(l_seeds, r_dks):
         if sd != dk:
             pq_couplings.append(
-                f"{spec.r_base}.{dk}" "{2}" f" = {spec.r_base}.{sd}" "{2}"
+                f"{_fq(spec, spec.r_base, dk)}"
+                "{2}"
+                f" = {_fq(spec, spec.r_base, sd)}"
+                "{2}"
             )
     if spec.ro_ref:
         pq_couplings.append(f"{spec.ro_ref}" "{1}" f" = {spec.ro_ref}" "{2}")
@@ -2097,13 +2139,13 @@ def challenge_tactic_hop2_pk_wrapper(  # pylint: disable=too-many-locals,too-man
         + ["kdf_in_0{1} = kdf_in_0{2}", "kdf_in_1{1} = kdf_in_1{2}"]
         + [f"(glob {m})" "{1}" f" = (glob {m})" "{2}" for m in spec.sync_mods]
         + [
-            f"{spec.l_base}.{l_seeds[0]}" "{1}" f" = {lchal}.{ck0}" "{1}",
-            f"{spec.l_base}.{l_seeds[1]}" "{1}" f" = {lchal}.{ck1}" "{1}",
-            f"{spec.l_base}.{spec.l_ek_component_fields[0][0]}"
+            f"{_fq(spec, spec.l_base, l_seeds[0])}" "{1}" f" = {lchal}.{ck0}" "{1}",
+            f"{_fq(spec, spec.l_base, l_seeds[1])}" "{1}" f" = {lchal}.{ck1}" "{1}",
+            f"{_fq(spec, spec.l_base, spec.l_ek_component_fields[0][0])}"
             "{1}"
             f" = {lchal}.{ek_ck0}"
             "{1}",
-            f"{spec.l_base}.{spec.l_ek_component_fields[1][0]}"
+            f"{_fq(spec, spec.l_base, spec.l_ek_component_fields[1][0])}"
             "{1}"
             f" = {lchal}.{ek_ck1}"
             "{1}",
@@ -2125,9 +2167,9 @@ def challenge_tactic_hop2_pk_wrapper(  # pylint: disable=too-many-locals,too-man
     r_fe = [f"rf{i}" for i in range(len(r_own))]
     l_ex = (
         [f"(glob {m})" "{1}" for m in gm]
-        + [f"{spec.l_base}.{f}" "{1}" for f in l_own]
+        + [f"{_fq(spec, spec.l_base, f)}" "{1}" for f in l_own]
         + [f"{c}" "{1}" for c in spec.ct_params]
-        + [f"{spec.r_base}.{f}" "{2}" for f in r_own]
+        + [f"{_fq(spec, spec.r_base, f)}" "{2}" for f in r_own]
     )
     l_elim = gge + l_fe + ["lc0", "lc1"] + r_fe
     l_env = _blk_env(
@@ -2190,7 +2232,7 @@ def challenge_tactic_hop2_pk_wrapper(  # pylint: disable=too-many-locals,too-man
         next_dot = m.end(1) < len(m.string) and m.string[m.end(1)] == "."
         if name in l_locals or prev_dot or next_dot:
             return name + "{1}"
-        return f"{spec.l_base}.{name}" + "{1}"
+        return f"{_fq(spec, spec.l_base, name)}" + "{1}"
 
     k_guard = re.sub(r"\b([a-zA-Z_]\w*)\b", _annot_l, spec.l_guard).replace("&&", "/\\")
     e_guard = _annot_guard(spec.r_guard, "{2}")
@@ -2261,8 +2303,8 @@ def challenge_tactic_hop2_pk_wrapper(  # pylint: disable=too-many-locals,too-man
     bind1 = _wbind(ct1, l_seeds[1], 1, "{1}")
     kdf0 = spec.shape.kdf_in(*bind0)
     kdf1 = spec.shape.kdf_in(*bind1)
-    ek_t0 = f"{spec.r_base}.{spec.r_ek_component_fields[0][1]}" "{1}"
-    ek_t1 = f"{spec.r_base}.{spec.r_ek_component_fields[1][1]}" "{1}"
+    ek_t0 = f"{_fq(spec, spec.r_base, spec.r_ek_component_fields[0][1])}" "{1}"
+    ek_t1 = f"{_fq(spec, spec.r_base, spec.r_ek_component_fields[1][1])}" "{1}"
     eek = slice_peel_to_eek(spec.shape, bind0, bind1)
     lines += [
         "  skip => />.",
@@ -2306,15 +2348,15 @@ def challenge_tactic_hop2_pk(spec: Hop2Spec) -> list[str] | None:
 
     rg0, rg1 = spec.r_component_fields
     kdf0_term = spec.shape.kdf_in(
-        _s2(f"{spec.r_base}.{rg0[0]}"),
-        _s2(f"{spec.r_base}.{rg0[1]}"),
-        _s2(f"{spec.r_base}.{rg0[2]}"),
+        _s2(f"{_fq(spec, spec.r_base, rg0[0])}"),
+        _s2(f"{_fq(spec, spec.r_base, rg0[1])}"),
+        _s2(f"{_fq(spec, spec.r_base, rg0[2])}"),
         _s2(ct0),
     )
     kdf1_term = spec.shape.kdf_in(
-        _s2(f"{spec.r_base}.{rg1[0]}"),
-        _s2(f"{spec.r_base}.{rg1[1]}"),
-        _s2(f"{spec.r_base}.{rg1[2]}"),
+        _s2(f"{_fq(spec, spec.r_base, rg1[0])}"),
+        _s2(f"{_fq(spec, spec.r_base, rg1[1])}"),
+        _s2(f"{_fq(spec, spec.r_base, rg1[2])}"),
         _s2(ct1),
     )
     le0, le1 = spec.l_ek_component_fields
@@ -2335,27 +2377,36 @@ def challenge_tactic_hop2_pk(spec: Hop2Spec) -> list[str] | None:
         + ["kdf_in_0{1} = kdf_in_0{2}", "kdf_in_1{1} = kdf_in_1{2}"]
         + [f"(glob {m})" "{1}" f" = (glob {m})" "{2}" for m in spec.sync_mods]
         + [
-            f"{spec.l_base}.{lg0[0]}" "{1}" f" = {lchal}.{ck0}" "{1}",
-            f"{spec.l_base}.{lg1[0]}" "{1}" f" = {lchal}.{ck1}" "{1}",
+            f"{_fq(spec, spec.l_base, lg0[0])}" "{1}" f" = {lchal}.{ck0}" "{1}",
+            f"{_fq(spec, spec.l_base, lg1[0])}" "{1}" f" = {lchal}.{ck1}" "{1}",
         ]
         + [
-            f"{spec.l_base}.{le0[0]}"
+            f"{_fq(spec, spec.l_base, le0[0])}"
             "{1}"
             f" = {lchal}.{spec.l_challenger_ek_fields[0]}"
             "{1}",
-            f"{spec.l_base}.{le1[0]}"
+            f"{_fq(spec, spec.l_base, le1[0])}"
             "{1}"
             f" = {lchal}.{spec.l_challenger_ek_fields[1]}"
             "{1}",
         ]
         + [
-            f"{spec.l_base}.{lf}" "{1}" f" = {spec.r_base}.{rf}" "{2}"
+            f"{_fq(spec, spec.l_base, lf)}"
+            "{1}"
+            f" = {_fq(spec, spec.r_base, rf)}"
+            "{2}"
             for lf, rf in zip(l_all_fields, r_all_fields)
         ]
         + ["kdf_in_0" "{2}" f" = {kdf0_term}", "kdf_in_1" "{2}" f" = {kdf1_term}"]
         + [
-            f"ek0" "{2}" f" = ({spec.r_base}.{re0[0]}, {spec.r_base}.{re0[1]})" "{2}",
-            f"ek1" "{2}" f" = ({spec.r_base}.{re1[0]}, {spec.r_base}.{re1[1]})" "{2}",
+            f"ek0"
+            "{2}"
+            f" = ({_fq(spec, spec.r_base, re0[0])}, {_fq(spec, spec.r_base, re0[1])})"
+            "{2}",
+            f"ek1"
+            "{2}"
+            f" = ({_fq(spec, spec.r_base, re1[0])}, {_fq(spec, spec.r_base, re1[1])})"
+            "{2}",
         ]
     )
     inv = " /\\ ".join(inv_terms)
@@ -2364,9 +2415,17 @@ def challenge_tactic_hop2_pk(spec: Hop2Spec) -> list[str] | None:
     # -- prefix functionalization subgoal ------------------------------------
     l_ex = (
         [f"(glob {m})" "{1}" for m in gm]
-        + [f"{spec.l_base}.{f}" "{1}" for grp in spec.l_component_fields for f in grp]
+        + [
+            f"{_fq(spec, spec.l_base, f)}" "{1}"
+            for grp in spec.l_component_fields
+            for f in grp
+        ]
         + [f"{c}" "{1}" for c in spec.ct_params]
-        + [f"{spec.r_base}.{f}" "{2}" for grp in spec.r_component_fields for f in grp]
+        + [
+            f"{_fq(spec, spec.r_base, f)}" "{2}"
+            for grp in spec.r_component_fields
+            for f in grp
+        ]
     )
     l_elim = gge + l_fe + ["lc0", "lc1"] + r_fe
     l_env = _blk_env(

@@ -8300,20 +8300,54 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
     # Every component field is rendered as ``<reduction>.<field>`` -- valid only
     # for a field the REDUCTION MODULE declares. A ``challenger@X`` field of the
     # flat state belongs to the INNER CHALLENGER, which the wrapper lemma keeps
-    # as a separate module, so such a name would emit ``<red>.challenger_X`` --
-    # a variable that does not exist, and EC rejects the whole FILE rather than
-    # just this lemma. Decline instead, so the oracle falls to an honest admit
-    # (MAP principle 2). Fires only where the KDF group reads a key the
-    # reduction does not hold (the HON hop_6 shape: ``R_PQ_Bind`` keeps the PQ
-    # decaps key inside its binding challenger); every LEAK cell's groups are
-    # the reduction's own fields, so they are byte-identical.
-    chal_flat_names = {
-        f.name.replace("@", "_")
-        for st in (left_state0, right_state0)
-        for f in st.fields
-        if "@" in f.name
-    }
-    if any(f in chal_flat_names for grp in l_grp + r_grp for f in grp):
+    # as a separate module, so rendering it that way would name a variable that
+    # does not exist and EC would reject the whole FILE. Map each such field to
+    # the challenger ref that actually holds it instead (``Hop2Spec.field_ref``,
+    # consumed by ``binding_challenge._fq``). Fires only where a KDF group reads
+    # a key the reduction does not hold (the HON hops: ``R_PQ_Bind`` keeps the
+    # PQ decaps key inside its binding challenger); every LEAK cell's groups are
+    # the reduction's own fields, so the map is empty and they stay
+    # byte-identical.
+    field_ref: dict[str, str] = {}
+    owning_sides = 0
+    for st, wexpr in (
+        (left_state0, left_wrapper_expr),
+        (right_state0, right_wrapper_expr),
+    ):
+        chal_flds = [f for f in st.fields if "@" in f.name]
+        if not chal_flds:
+            continue
+        owning_sides += 1
+        wargs = _top_level_args(wexpr)
+        if not wargs:
+            return None
+        chal_ref = _ref_base(wargs[-1])
+        for fld in chal_flds:
+            own = fld.name.split("@", 1)[1]
+            # pylint: disable-next=protected-access
+            own_ec = mt._ec_field_name(own)
+            field_ref[fld.name.replace("@", "_")] = f"{chal_ref}.{own_ec}"
+    # A flat name is keyed WITHOUT a side, so two sides both holding
+    # challenger-owned fields would be ambiguous -- decline there.
+    if owning_sides > 1:
+        return None
+    # NOT YET: a challenger-owned key also means the reduction DELEGATES the
+    # decaps call to that challenger (module encapsulation leaves it no other
+    # way to use the key), so the wrapper body holds ``Challenger.decaps0(ct)``
+    # where the flat state -- which this route's peel is derived from -- shows
+    # the inlined ``KEM_PQ.decaps(challenger_dk0, ct)``. The peel's
+    # ``<M>_<m>_det`` term then does not apply to the goal's call. Closing this
+    # needs the route to inline the delegated challenger method before peeling;
+    # until then, decline so the oracle falls to an honest admit (MAP principle
+    # 2) rather than emitting a tactic that cannot close and takes the whole
+    # FILE down with it. The ``field_ref`` map above is still built and passed:
+    # it is the correct qualification and is what that extension will need.
+    # NARROW: only a challenger-owned name that a KDF GROUP actually renders is
+    # a problem. The *expanded* LEAK cells carry ``challenger@`` fields too, but
+    # never inside a group -- gating on the mere presence of such a field
+    # (rather than on its use) changed all six of them, which the export
+    # regression caught.
+    if any(f in field_ref for grp in l_grp + r_grp for f in grp):
         return None
     # SAMEKEY collapses each side's two identical groups to one (both ciphertexts
     # under one key); DIFFKEY keeps both. Both sides share the site map.
@@ -8397,6 +8431,7 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
             h_module=h_module,
             l_challenger_ref=l_challenger_ref,
             l_challenger_key_fields=chal_fields,
+            field_ref=field_ref,
             ect_inj_axiom="",
             win_is_ek=True,
             l_ek_component_fields=l_ek,
@@ -8426,6 +8461,7 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
         h_module=h_module,
         l_challenger_ref=l_challenger_ref,
         l_challenger_key_fields=chal_fields,
+        field_ref=field_ref,
         ect_inj_axiom=f"{t_module}_{_ev_method(shape.ev_encct_t)}_inj",
         ct_key_idx=ct_key_idx,
     )

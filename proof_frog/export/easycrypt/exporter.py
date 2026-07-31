@@ -4958,26 +4958,33 @@ def export_proof_file(proof_path: str) -> str:
     def _query_delegate_pair_coupling(
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> str | None:
-        """Same-named field equalities for a red<->red hop where BOTH reductions
-        are QUERY-delegates (their ``Initialize`` consumes a challenger oracle --
-        ``challenger.Query()``/``.Generate()`` -- and derives every stored field
-        itself, never calling ``challenger.Initialize``): the HON_BIND
-        ``R_PRG ~ R_KG_PQ`` pairs. The composite (wall-7) path correctly declines
-        there (nothing repacks a challenger Initialize result), leaving glob-only
-        couplings -- unprovable per-oracle lemmas. Both sides hold the SAME
-        logical derived material under the SAME field names, so the coupling is
-        the pairwise field equality set. Pure string construction: no
+        """Same-named field equalities for a red<->red hop where NEITHER
+        reduction delegates its ``Initialize`` to a challenger: each derives every
+        stored field itself, whether from a challenger ORACLE
+        (``challenger.Query()``/``.Generate()`` -- the HON_BIND ``R_PRG ~
+        R_KG_PQ`` pairs) or straight from the scheme (``R_KDF``'s
+        ``KEM_PQ.keygen()``). The composite (wall-7) path correctly declines
+        there -- nothing repacks a challenger ``Initialize`` result -- leaving
+        glob-ONLY couplings, i.e. per-oracle lemmas that are unprovable as
+        stated because the two sides' ``decaps`` calls read differently-owned
+        keys with nothing relating them.
+
+        Both sides hold the SAME logical derived material under the SAME field
+        names and types, so the coupling is the pairwise field equality set. The
+        conjuncts are PROVEN, not assumed: the hop's own ``initialize`` lemma has
+        to establish them, and EC rejects the file if it cannot.
+
+        The gate is "neither side delegates ``Initialize``" rather than "both
+        sides query a challenger": requiring a challenger query excluded the
+        self-keygen side of the HON ``R_KDF ~ R_KG_PQ_R`` hop, whose fields are
+        identically named and typed all the same. Pure string construction, no
         ``live_state_holders`` side effects (a first attempt that widened
-        ``_composite_reduction_step``'s gate cascaded into the module-restriction
-        lists of 15+ exports). ``None`` off-shape -- every other proof is
-        byte-identical."""
+        ``_composite_reduction_step``'s gate instead cascaded into the
+        module-restriction lists of 15+ exports). ``None`` off-shape."""
         if step_a.reduction is None or step_b.reduction is None:
             return None
         names = (step_a.reduction.name, step_b.reduction.name)
-        if any(
-            _reduction_init_delegates(n) or not _reduction_init_queries_challenger(n)
-            for n in names
-        ):
+        if any(_reduction_init_delegates(n) for n in names):
             return None
         helpers_by = {
             h.name: h for h in proof.helpers if isinstance(h, frog_ast.Reduction)

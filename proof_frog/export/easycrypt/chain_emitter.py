@@ -7122,6 +7122,15 @@ def _challenge_barefalse_route(  # pylint: disable=too-many-arguments,too-many-p
     if not wrapper_args:
         return None
     wrapper_expr = wrapper_args[0]
+    # The tactic ``inline{1} <wrapper>.decaps <wrapper>.encodesharedsecret`` needs
+    # a CONCRETE scheme module; the intended shape is a functor APPLICATION
+    # (``SeededKEMWrapper(KEM_PQ_inner)``). A reduction whose first functor
+    # argument is a bare name passes the abstract ``declare module`` itself, and
+    # EC rejects the whole FILE with "abstract function `<M>.decaps' cannot be
+    # inlined" rather than just this lemma. Decline so the oracle falls to an
+    # honest admit (MAP principle 2); every wrapper-carrying cell is unchanged.
+    if "(" not in wrapper_expr:
+        return None
     # Seq invariant = the lemma post minus ``={res}``: the ``={glob M}`` equalities
     # (one per abstract flat param -- preserved because the dead calls are
     # glob-preserving ``_det``) plus the inter-reduction live-state coupling
@@ -8113,6 +8122,24 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
         f for f in (_group_fields(g, pq_module) for g in r_groups) if f is not None
     ]
     if len(l_grp) != 2 or len(r_grp) != 2:
+        return None
+    # Every component field is rendered as ``<reduction>.<field>`` -- valid only
+    # for a field the REDUCTION MODULE declares. A ``challenger@X`` field of the
+    # flat state belongs to the INNER CHALLENGER, which the wrapper lemma keeps
+    # as a separate module, so such a name would emit ``<red>.challenger_X`` --
+    # a variable that does not exist, and EC rejects the whole FILE rather than
+    # just this lemma. Decline instead, so the oracle falls to an honest admit
+    # (MAP principle 2). Fires only where the KDF group reads a key the
+    # reduction does not hold (the HON hop_6 shape: ``R_PQ_Bind`` keeps the PQ
+    # decaps key inside its binding challenger); every LEAK cell's groups are
+    # the reduction's own fields, so they are byte-identical.
+    chal_flat_names = {
+        f.name.replace("@", "_")
+        for st in (left_state0, right_state0)
+        for f in st.fields
+        if "@" in f.name
+    }
+    if any(f in chal_flat_names for grp in l_grp + r_grp for f in grp):
         return None
     # SAMEKEY collapses each side's two identical groups to one (both ciphertexts
     # under one key); DIFFKEY keeps both. Both sides share the site map.

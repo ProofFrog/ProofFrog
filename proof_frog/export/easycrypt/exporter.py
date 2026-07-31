@@ -4707,6 +4707,254 @@ def export_proof_file(proof_path: str) -> str:
         body = " /\\ ".join(conj)
         return f"{globs} /\\ {body}" if globs else body
 
+    def _prg_query_init_tac(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> list[str] | None:
+        """The COMPLETE init tactic for a PRG QUERY-delegate hop (the HON_BIND
+        ``game ~ R_PRG`` hop_0/hop_12 ``initialize``), or ``None`` off-shape.
+
+        The generic init backbone peel proves ``={res}`` with ``call (_: true)``
+        per abstract call, which learns NOTHING about what those calls returned
+        -- so the derivation-chain postcondition
+        :func:`_prg_query_game_coupling` emits (each reduction field = the
+        ``ev_`` form over the game's seed) is unprovable and the closing
+        ``skip => /#`` fails.
+
+        Both sides run the SAME shape: ONE leading sample, then a linear tail of
+        deterministic abstract calls. So: split the sample off with ``seq 1 1``
+        and couple it with ``rnd``; freeze the post-sample memory (each callee's
+        glob + the coupled seed) with ``exists*``; then peel BOTH tails
+        ONE-SIDED back-to-front with the ``<M>_<m>_det`` phoare axioms, each
+        applied to its arguments' ``ev_`` values over the frozen seed. After the
+        ``seq`` nothing is coupled two-sidedly, so the two sides' call
+        interleaving is irrelevant. Validated on both toolchains by
+        ``ec_templates/hon_prg_init_derivation.ec`` and, on the real goal, by a
+        hand-spliced ``CG_seedbased_HON_BIND_K_CT_SAMEKEY`` compile.
+
+        The ``seq`` invariant names the two EC-inlined sample locals. EC's
+        ``inline`` keeps the target proc's own locals and suffixes each COLLIDING
+        inlined local with the smallest fresh integer, in inline order; both
+        seeds here are first-and-only occurrences of their source names, so each
+        is its bare source name (the game's from the scheme ``KeyGen``'s sampled
+        var, the reduction's from the challenger ``Query``'s). A collision on
+        either name declines rather than guessing.
+        """
+        if step_a.reduction is None and step_b.reduction is not None:
+            game_step, red_step, gs, rs = step_a, step_b, "1", "2"
+        elif step_b.reduction is None and step_a.reduction is not None:
+            game_step, red_step, gs, rs = step_b, step_a, "2", "1"
+        else:
+            return None
+        # Shape gate: reuse the coupling builder -- it fires exactly on this hop
+        # class, and its ``ev_`` conjuncts are what the tactic has to prove.
+        coupling = _prg_query_game_coupling(step_a, step_b)
+        if coupling is None or "ev_" not in coupling:
+            return None
+        assert red_step.reduction is not None
+        rname = red_step.reduction.name
+        red_mod = next(
+            (
+                d
+                for d in ec_reductions
+                if isinstance(d, ec_ast.Module) and d.name == rname
+            ),
+            None,
+        )
+        red_init = (
+            next((pr for pr in red_mod.procs if pr.name == "initialize"), None)
+            if red_mod is not None
+            else None
+        )
+        dkp_proc = (
+            next((pr for pr in ec_scheme.procs if pr.name == "derivekeypair"), None)
+            if ec_scheme is not None
+            else None
+        )
+        kg_proc = (
+            next((pr for pr in ec_scheme.procs if pr.name == "keygen"), None)
+            if ec_scheme is not None
+            else None
+        )
+        if red_mod is None or red_init is None or dkp_proc is None or kg_proc is None:
+            return None
+        if len(dkp_proc.params) != 1:
+            return None
+        # -- the two EC-inlined sample names ---------------------------------
+        game_seed = next(
+            (s.var for s in kg_proc.body if isinstance(s, ec_ast.Sample)), None
+        )
+        # pylint: disable=protected-access
+        chal_ast = engine._get_game_ast(red_step.challenger, None)
+        # pylint: enable=protected-access
+        if game_seed is None or chal_ast is None:
+            return None
+        red_seeds = [
+            st.var.name
+            for m in chal_ast.methods
+            for st in m.block.statements
+            if isinstance(st, frog_ast.Sample) and isinstance(st.var, frog_ast.Variable)
+        ]
+        if len(red_seeds) != 1:
+            return None
+        red_seed = red_seeds[0]
+        # EC suffixes an inlined local only when its name COLLIDES with one
+        # already in scope; a formal PARAMETER is substituted, not renamed (the
+        # game seed keeps its bare name even though ``derivekeypair``'s own
+        # parameter shares it -- confirmed on the real goal). So the collision
+        # test is against the DECLARED locals inlined alongside each seed;
+        # decline rather than predict a suffix when one clashes.
+        if any(
+            isinstance(d, ec_ast.VarDecl) and d.name == game_seed for d in dkp_proc.body
+        ) or any(
+            isinstance(d, ec_ast.VarDecl) and d.name == red_seed for d in red_init.body
+        ):
+            return None
+        # -- the PRG the challenger's query delegates to ----------------------
+        chal_expr = pt.last_module_arg(resolver.resolve(red_step).module_expr)
+        prg_mod = pt.module_base_name(pt.last_module_arg(chal_expr))
+        chal_calls: list[frog_ast.FuncCall] = []
+
+        def _collect_chal_call(n: frog_ast.ASTNode) -> bool:
+            if isinstance(n, frog_ast.FuncCall) and isinstance(
+                n.func, frog_ast.FieldAccess
+            ):
+                chal_calls.append(n)
+            return False
+
+        for m in chal_ast.methods:
+            visitors.SearchVisitor(_collect_chal_call).visit(m.block)
+        prg_meths = {
+            cast(frog_ast.FieldAccess, c.func).name.lower() for c in chal_calls
+        }
+        if len(prg_meths) != 1 or prg_mod not in det_methods_by_module:
+            return None
+        prg_meth = prg_meths.pop()
+        chal_param = red_mod.params[-1].name if red_mod.params else None
+
+        # -- formal-param -> declared-instance maps ---------------------------
+        # A rendered scheme/reduction proc calls its own FORMAL parameter names
+        # (``CG_seedbased(K, NG, G, H, L)`` calls ``K.derivekeypair``), but the
+        # ``<M>_<m>_det`` axioms and the ``glob`` binders name the DECLARED
+        # instances. Map one to the other off each side's applied module
+        # expression, positionally.
+        def _split_top_args(expr: str) -> list[str]:
+            inner = expr[expr.index("(") + 1 : expr.rindex(")")] if "(" in expr else ""
+            args, depth, cur = [], 0, ""
+            for ch in inner:
+                if ch == "," and depth == 0:
+                    args.append(cur.strip())
+                    cur = ""
+                    continue
+                depth += (ch == "(") - (ch == ")")
+                cur += ch
+            if cur.strip():
+                args.append(cur.strip())
+            return args
+
+        def _param_map(mod: ec_ast.Module, applied_expr: str) -> dict[str, str] | None:
+            args = [pt.module_base_name(a) for a in _split_top_args(applied_expr)]
+            if len(args) < len(mod.params):
+                return None
+            return {p.name: a for p, a in zip(mod.params, args)}
+
+        game_scheme_expr = pt.last_module_arg(resolver.resolve(game_step).module_expr)
+        gmap = _param_map(ec_scheme, game_scheme_expr) if ec_scheme else None
+        rmap = _param_map(red_mod, resolver.resolve(red_step).module_expr)
+        if gmap is None or rmap is None:
+            return None
+
+        # -- peel builder ------------------------------------------------------
+        called: list[str] = []
+
+        def _subst_env(text: str, env: dict[str, str]) -> str:
+            """Substitute each known local by its functional value (longest name
+            first, whole-identifier match only)."""
+            for k in sorted(env, key=len, reverse=True):
+                text = re.sub(rf"\b{re.escape(k)}\b", env[k], text)
+            return text
+
+        def _peel(
+            body: list[ec_ast.EcStmt],
+            env0: dict[str, str],
+            side: str,
+            pmap: dict[str, str],
+        ) -> list[str] | None:
+            """Reverse-walk ``body`` emitting one ``call{side} (<M>_<m>_det ...)``
+            per call and one ``wp.`` per contiguous assignment run."""
+            env = dict(env0)
+            events: list[tuple[str, ...]] = []
+            for st in body:
+                if isinstance(st, (ec_ast.VarDecl, ec_ast.Return)):
+                    continue
+                if isinstance(st, ec_ast.Assign):
+                    env[st.var] = _subst_env(st.rhs, env)
+                    events.append(("assign",))
+                    continue
+                if not isinstance(st, ec_ast.Call):
+                    return None
+                mod, dot, meth = st.callee.partition(".")
+                if not dot:
+                    return None
+                if mod == chal_param:
+                    mod, meth, argvals = prg_mod, prg_meth, ["sv"]
+                else:
+                    mod = pmap.get(mod, mod)
+                    argvals = [
+                        _subst_env(a, env)
+                        for a in (cc_split_args(st.args) if st.args.strip() else [])
+                    ]
+                if meth not in det_methods_by_module.get(mod, set()):
+                    return None  # a probabilistic call has no ``_det`` axiom
+                alias = clone_alias_by_module.get(mod)
+                if alias is None:
+                    return None
+                if mod not in called:
+                    called.append(mod)
+                applied = "".join(f" ({v})" for v in argvals)
+                events.append(("call", f"{mod}_{meth}_det g_{mod}{applied}"))
+                env[st.var] = (
+                    f"({alias}.ev_{meth}" f"{''.join(f' ({v})' for v in argvals)})"
+                    if argvals
+                    else f"({alias}.ev_{meth})"
+                )
+            lines: list[str] = []
+            pending = False
+            for ev in reversed(events):
+                if ev[0] == "assign":
+                    pending = True
+                    continue
+                if pending:
+                    lines.append("wp.")
+                    pending = False
+                lines.append(f"call{{{side}}} ({ev[1]}).")
+            if pending:
+                lines.append("wp.")
+            return lines
+
+        game_peel = _peel(
+            list(dkp_proc.body), {dkp_proc.params[0].name: "sv"}, gs, gmap
+        )
+        red_peel = _peel(list(red_init.body), {}, rs, rmap)
+        if game_peel is None or red_peel is None or not called:
+            return None
+        globs = " /\\ ".join(f"={{glob {m}}}" for m in declared_module_names)
+        seq_inv = (
+            f"{globs} /\\ " if globs else ""
+        ) + f"{game_seed}{{{gs}}} = {red_seed}{{{rs}}}"
+        frozen = ", ".join(f"(glob {m}){{{gs}}}" for m in called)
+        binders = " ".join(f"g_{m}" for m in called)
+        return [
+            "inline *.",
+            f"seq 1 1 : ({seq_inv}).",
+            "+ rnd; skip => />.",
+            f"exists* {frozen}, {game_seed}{{{gs}}}.",
+            f"elim* => {binders} sv.",
+            "wp.",
+            *game_peel,
+            *red_peel,
+            "skip => />.",
+        ]
+
     def _query_delegate_pair_coupling(
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> str | None:
@@ -6832,6 +7080,13 @@ def export_proof_file(proof_path: str) -> str:
             # init tactic is computed here off the RENDERED modules; the same
             # flag switches the challenge closer to the bounded ladder.
             reprogram_override = _reprogram_equiv_init_tac(step_a, step_b)
+            # PRG query-delegate hop (HON_BIND hop_0/hop_12 ``initialize``): the
+            # derivation-chain post needs the calls FUNCTIONALIZED, which the
+            # generic ``call (_: true)`` peel cannot do. Tried only where the
+            # reprogram builder declines; ``None`` off-shape, so every other init
+            # is byte-identical.
+            if reprogram_override is None:
+                reprogram_override = _prg_query_init_tac(step_a, step_b)
 
             info = emit_multi_oracle_chain_for_hop(
                 hop_index=_i,

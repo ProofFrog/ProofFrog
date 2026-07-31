@@ -78,6 +78,30 @@ module Game (G : PRG, K : KEM, N : NGrp) = {
     dk0 <- s;
     return ek0;
   }
+
+  (* The post-init oracle: the GAME re-derives everything from its stored master
+   * seed on every call (its decaps key IS the seed), where the reduction reads
+   * the material it stored at init.  Fully deterministic on both sides -- no
+   * sample, so no `seq`/`rnd`: freeze both states up front and peel. *)
+  proc decaps0 (c : elemt) : elemt = {
+    var full : fullt;
+    var spq : pqt;
+    var st : tt;
+    var kp : ekt * dkt;
+    var dkT : scalart;
+    var gen : elemt;
+    var ekT : elemt;
+    var r : elemt;
+    full <@ G.evaluate(dk0);
+    spq <- slice_pq full;
+    st <- slice_t full;
+    kp <@ K.derivekeypair(spq);
+    dkT <@ N.randomscalar(st);
+    gen <@ N.generator();
+    ekT <@ N.exp(gen, dkT);
+    r <@ N.exp(c, dkT);
+    return r;
+  }
 }.
 
 module Red (G : PRG, K : KEM, N : NGrp) = {
@@ -100,6 +124,12 @@ module Red (G : PRG, K : KEM, N : NGrp) = {
     gen <@ N.generator();
     ek_T_0 <@ N.exp(gen, dk_T_0);
     return (pq_keys_0.`1, ek_T_0);
+  }
+
+  proc decaps0 (c : elemt) : elemt = {
+    var r : elemt;
+    r <@ N.exp(c, dk_T_0);
+    return r;
   }
 }.
 
@@ -163,6 +193,37 @@ proof.
   call{2} (K_derivekeypair_det gK (slice_pq (ev_evaluate sv))).
   wp.
   call{2} (G_evaluate_det gG sv).
+  skip => />.
+qed.
+
+
+(* --- the POST-INIT oracle under the same derivation-chain coupling --------- *)
+
+lemma hop_decaps0_derivation_chain :
+  equiv [ Game(G, K, N).decaps0 ~ Red(G, K, N).decaps0 :
+          ={c} /\ ={glob G, glob K, glob N}
+          /\ Red.pq_keys_0{2} = ev_derivekeypair (slice_pq (ev_evaluate Game.dk0{1}))
+          /\ Red.dk_T_0{2} = ev_randomscalar (slice_t (ev_evaluate Game.dk0{1}))
+          /\ Red.ek_T_0{2} = ev_exp ev_generator (ev_randomscalar (slice_t (ev_evaluate Game.dk0{1})))
+          ==> ={res} /\ ={glob G, glob K, glob N}
+              /\ Red.pq_keys_0{2} = ev_derivekeypair (slice_pq (ev_evaluate Game.dk0{1}))
+              /\ Red.dk_T_0{2} = ev_randomscalar (slice_t (ev_evaluate Game.dk0{1}))
+              /\ Red.ek_T_0{2} = ev_exp ev_generator (ev_randomscalar (slice_t (ev_evaluate Game.dk0{1}))) ].
+proof.
+  proc.
+  (* No sample anywhere: freeze BOTH sides' read state and the argument up
+   * front, then peel each tail one-sided with the `_det` axioms. *)
+  exists* (glob G){1}, (glob K){1}, (glob N){1}, Game.dk0{1}, c{1}, Red.dk_T_0{2}.
+  elim* => gG gK gN dv cv rdt.
+  call{2} (N_exp_det gN cv rdt).
+  wp.
+  call{1} (N_exp_det gN cv (ev_randomscalar (slice_t (ev_evaluate dv)))).
+  call{1} (N_exp_det gN ev_generator (ev_randomscalar (slice_t (ev_evaluate dv)))).
+  call{1} (N_generator_det gN).
+  call{1} (N_randomscalar_det gN (slice_t (ev_evaluate dv))).
+  call{1} (K_derivekeypair_det gK (slice_pq (ev_evaluate dv))).
+  wp.
+  call{1} (G_evaluate_det gG dv).
   skip => />.
 qed.
 

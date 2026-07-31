@@ -6935,6 +6935,92 @@ def export_proof_file(proof_path: str) -> str:
         )
         # pylint: enable=protected-access
 
+    def _stored_pair_vs_chal_field_coupling(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> str:
+        """Cross-seam conjuncts for a MIXED delegate pair: one reduction STORES a
+        packed key it obtained from a challenger ORACLE, the other DELEGATES its
+        ``Initialize`` to a challenger that stores the corresponding component
+        itself. Empty string off-shape.
+
+        The HON_BIND ``hop_4``/``hop_8`` class: ``R_KG_PQ_L`` does
+        ``pq_keys_0 <@ Challenger.generate()`` and holds the whole ``(ek, dk)``
+        pair, while ``R_PQ_Bind`` does ``ek_PQ_0 <@ Challenger.initialize()`` and
+        holds NO PQ field -- its inner binding challenger holds ``dk0``. Neither
+        existing builder bridges that seam: ``_query_delegate_pair_coupling``
+        needs BOTH sides to be query-delegates with equal field sets, and the
+        wall-7 composite path needs the field-holding side to delegate
+        ``Initialize``. The result was a coupling carrying only the same-named
+        ``dk_T_0``/``ek_T_0``, which leaves the per-oracle lemmas UNPROVABLE as
+        stated: both ``decaps0`` bodies differ exactly by
+        ``KEM_PQ.decaps(pq_keys_0.`2, ..)`` vs the challenger's
+        ``decaps0(..)`` = ``KEM_PQ.decaps(<Chal>.dk0, ..)``, so the two calls'
+        arguments cannot be equated.
+
+        Emit ``<stored>.<field>{s}.`k = <Chal>.<f>{t}`` for each challenger field
+        that a UNIQUE component of the stored packed field type-matches. Sound by
+        construction: both sides' PQ keypair comes from the hop's own challenger,
+        which is what the assumption hop's ``pr`` lemma relates.
+        """
+        if step_a.reduction is None or step_b.reduction is None:
+            return ""
+        helpers_by = {
+            h.name: h for h in proof.helpers if isinstance(h, frog_ast.Reduction)
+        }
+        for stored_step, deleg_step, ss, ts in (
+            (step_a, step_b, "1", "2"),
+            (step_b, step_a, "2", "1"),
+        ):
+            assert (
+                stored_step.reduction is not None and deleg_step.reduction is not None
+            )
+            # The delegating side: holds fields AND delegates Initialize.
+            comp = _composite_reduction_step(deleg_step)
+            if comp is None:
+                continue  # try the mirrored orientation
+            _deleg_base, chal_base, _own = comp
+            # ... and its challenger must itself DECLARE state.
+            # pylint: disable=protected-access
+            chal_ast = engine._get_game_ast(deleg_step.challenger, None)
+            # pylint: enable=protected-access
+            if chal_ast is None or not chal_ast.fields:
+                continue
+            # The storing side must NOT delegate (else the composite path owns
+            # this hop) and must hold a PRODUCT-typed field.
+            if _reduction_init_delegates(stored_step.reduction.name):
+                continue
+            stored_red = helpers_by.get(stored_step.reduction.name)
+            if stored_red is None:
+                continue
+            stored_base = pt.module_base_name(resolver.resolve(stored_step).module_expr)
+            conj: list[str] = []
+            for cf in chal_ast.fields:
+                ctext = top_types.translate_type(cf.type).text
+                hits: list[str] = []
+                for sf in stored_red.fields:
+                    st_ty = top_types.resolve(sf.type)
+                    if not isinstance(st_ty, frog_ast.ProductType):
+                        continue
+                    for k, comp_ty in enumerate(st_ty.types):
+                        if top_types.translate_type(comp_ty).text == ctext:
+                            # pylint: disable=protected-access
+                            hits.append(
+                                f"{stored_base}.{mt._ec_field_name(sf.name)}"
+                                f"{{{ss}}}.`{k + 1}"
+                            )
+                            # pylint: enable=protected-access
+                if len(hits) != 1:
+                    continue
+                # pylint: disable=protected-access
+                conj.append(
+                    f"{hits[0]} = {chal_base}.{mt._ec_field_name(cf.name)}{{{ts}}}"
+                )
+                # pylint: enable=protected-access
+            if conj:
+                live_state_holders.add(chal_base)
+                return " /\\ ".join(conj)
+        return ""
+
     def _live_state_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
         base = _live_state_coupling_base(step_a, step_b)
         extra = _ro_challenger_materialization(step_a, step_b)
@@ -6971,6 +7057,11 @@ def export_proof_file(proof_path: str) -> str:
         wchal = _wrapper_challenger_coupling(step_a, step_b)
         if wchal:
             coupled = f"{coupled} /\\ {wchal}"
+        # MIXED delegate pair (HON_BIND hop_4/hop_8 class): the storing side's
+        # packed key component <-> the delegating side's challenger field.
+        spc = _stored_pair_vs_chal_field_coupling(step_a, step_b)
+        if spc:
+            coupled = f"{coupled} /\\ {spc}"
         # Seedbased self-keygen reduction (R_KDF): couple its wrapper-derived stored
         # decaps key to the seed it was derived from (``dk_PQ_0 = s_PQ_0``, since the
         # concrete wrapper's derivekeypair returns the seed). Empty off-shape.

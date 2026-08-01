@@ -4496,6 +4496,74 @@ def export_proof_file(proof_path: str) -> str:
         body = " /\\ ".join(conj)
         return f"{glob_invariant_conj} /\\ {body}" if glob_invariant_conj else body
 
+    def _dkp_ret_elems(  # pylint: disable=too-many-return-statements
+        game_step: frog_ast.Step, seed_ref: str
+    ) -> list[str] | None:
+        """The rendered ``derivekeypair``'s return, symbolically evaluated at
+        ``seed_ref`` and split into its top-level tuple elements; ``None`` if the
+        proc is not a linear chain of ev-able calls ending in a tuple return."""
+        dkp_proc = (
+            next((pr for pr in ec_scheme.procs if pr.name == "derivekeypair"), None)
+            if ec_scheme is not None
+            else None
+        )
+        if dkp_proc is None or len(dkp_proc.params) != 1:
+            return None
+        game_scheme_expr = pt.last_module_arg(resolver.resolve(game_step).module_expr)
+        inner = (
+            game_scheme_expr[
+                game_scheme_expr.index("(") + 1 : game_scheme_expr.rindex(")")
+            ]
+            if "(" in game_scheme_expr
+            else ""
+        )
+        args = [pt.module_base_name(a) for a in cc_split_args(inner)] if inner else []
+        if not args:
+            return None
+        pmap = (
+            {p.name: a for p, a in zip(ec_scheme.params, args)}
+            if ec_scheme is not None
+            else {}
+        )
+
+        def _ret_elems(seed_ref_inner: str) -> list[str] | None:
+            env: dict[str, str] = {dkp_proc.params[0].name: seed_ref_inner}
+
+            def _sub(text: str) -> str:
+                for k in sorted(env, key=len, reverse=True):
+                    text = re.sub(rf"\b{re.escape(k)}\b", env[k], text)
+                return text
+
+            for st in dkp_proc.body:
+                if isinstance(st, ec_ast.VarDecl):
+                    continue
+                if isinstance(st, ec_ast.Return):
+                    ret = _sub(st.expr).strip()
+                    while ret.startswith("(") and ret.endswith(")"):
+                        stripped = ret[1:-1]
+                        if len(cc_split_args(stripped)) > 1:
+                            return [e.strip() for e in cc_split_args(stripped)]
+                        ret = stripped.strip()
+                    return None
+                if isinstance(st, ec_ast.Assign):
+                    env[st.var] = f"({_sub(st.rhs)})"
+                    continue
+                if not isinstance(st, ec_ast.Call):
+                    return None
+                mod, dot, meth = st.callee.partition(".")
+                alias = clone_alias_by_module.get(pmap.get(mod, mod)) if dot else None
+                if alias is None:
+                    return None
+                applied = (
+                    " ".join(f"({_sub(a)})" for a in cc_split_args(st.args))
+                    if st.args.strip()
+                    else ""
+                )
+                env[st.var] = f"({alias}.ev_{meth}{(' ' + applied) if applied else ''})"
+            return None
+
+        return _ret_elems(seed_ref)
+
     def _game_derived_field_conjuncts(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
         game: frog_ast.Game,
         game_step: frog_ast.Step,
@@ -4585,60 +4653,6 @@ def export_proof_file(proof_path: str) -> str:
         )
         if seed_idx is None:
             return []
-        # -- symbolic evaluation of the rendered ``derivekeypair`` -------------
-        game_scheme_expr = pt.last_module_arg(resolver.resolve(game_step).module_expr)
-        inner = (
-            game_scheme_expr[
-                game_scheme_expr.index("(") + 1 : game_scheme_expr.rindex(")")
-            ]
-            if "(" in game_scheme_expr
-            else ""
-        )
-        args = [pt.module_base_name(a) for a in cc_split_args(inner)] if inner else []
-        if len(args) < len(dkp_proc.params) and not args:
-            return []
-        pmap = (
-            {p.name: a for p, a in zip(ec_scheme.params, args)}
-            if ec_scheme is not None
-            else {}
-        )
-
-        def _ret_elems(seed_ref: str) -> list[str] | None:
-            env: dict[str, str] = {dkp_proc.params[0].name: seed_ref}
-
-            def _sub(text: str) -> str:
-                for k in sorted(env, key=len, reverse=True):
-                    text = re.sub(rf"\b{re.escape(k)}\b", env[k], text)
-                return text
-
-            for st in dkp_proc.body:
-                if isinstance(st, ec_ast.VarDecl):
-                    continue
-                if isinstance(st, ec_ast.Return):
-                    ret = _sub(st.expr).strip()
-                    while ret.startswith("(") and ret.endswith(")"):
-                        stripped = ret[1:-1]
-                        if len(cc_split_args(stripped)) > 1:
-                            return [e.strip() for e in cc_split_args(stripped)]
-                        ret = stripped.strip()
-                    return None
-                if isinstance(st, ec_ast.Assign):
-                    env[st.var] = f"({_sub(st.rhs)})"
-                    continue
-                if not isinstance(st, ec_ast.Call):
-                    return None
-                mod, dot, meth = st.callee.partition(".")
-                alias = clone_alias_by_module.get(pmap.get(mod, mod)) if dot else None
-                if alias is None:
-                    return None
-                applied = (
-                    " ".join(f"({_sub(a)})" for a in cc_split_args(st.args))
-                    if st.args.strip()
-                    else ""
-                )
-                env[st.var] = f"({alias}.ev_{meth}{(' ' + applied) if applied else ''})"
-            return None
-
         # pylint: disable=protected-access
         out: list[str] = []
         for ordinal, idx, fname in sorted(projections):
@@ -4654,7 +4668,9 @@ def export_proof_file(proof_path: str) -> str:
             )
             if seed_name is None:
                 return []
-            elems = _ret_elems(f"{seed_holder}.{mt._ec_field_name(seed_name)}{{{gs}}}")
+            elems = _dkp_ret_elems(
+                game_step, f"{seed_holder}.{mt._ec_field_name(seed_name)}{{{gs}}}"
+            )
             if elems is None or idx >= len(elems):
                 return []
             out.append(
@@ -4955,6 +4971,42 @@ def export_proof_file(proof_path: str) -> str:
         coupling = _prg_query_game_coupling(step_a, step_b)
         if coupling is None or "ev_" not in coupling:
             return None
+        # -- the coupling, partitioned per keypair ----------------------------
+        # Each `seq`'s invariant is the PREFIX of the final post covering the
+        # keypairs established so far. A conjunct belongs to keypair k iff it
+        # mentions the k-th game seed ref -- true of both the reduction's stored
+        # fields and the game's own derived public half, since every one of them
+        # is stated as an ev-form over that seed.
+        seed_holder_name = pt.module_base_name(resolver.resolve(game_step).module_expr)
+        # pylint: disable=protected-access
+        game_ast_for_seeds = engine._get_game_ast(game_step.challenger, None)
+        # pylint: enable=protected-access
+        if game_ast_for_seeds is None:
+            return None
+        # pylint: disable=protected-access
+        seed_refs_init = [
+            f"{seed_holder_name}.{mt._ec_field_name(f.name)}{{{gs}}}"
+            for f in game_ast_for_seeds.fields
+            if isinstance(
+                (
+                    top_types.resolve(f.type)
+                    if not isinstance(f.type, frog_ast.BitStringType)
+                    else f.type
+                ),
+                frog_ast.BitStringType,
+            )
+        ]
+        # pylint: enable=protected-access
+        coupling_groups: list[list[str]] = [[] for _ in seed_refs_init]
+        for conj_part in coupling.split(" /\\ "):
+            if conj_part.startswith("={"):
+                continue
+            owners = [k for k, r in enumerate(seed_refs_init) if r in conj_part]
+            if len(owners) != 1:
+                return None  # a conjunct spanning keypairs has no segment
+            coupling_groups[owners[0]].append(conj_part)
+        if not seed_refs_init or any(not g for g in coupling_groups):
+            return None
         assert red_step.reduction is not None
         rname = red_step.reduction.name
         red_mod = next(
@@ -5035,25 +5087,121 @@ def export_proof_file(proof_path: str) -> str:
             return None
         prg_meth = prg_meths.pop()
         chal_param = red_mod.params[-1].name if red_mod.params else None
-        # SINGLE-KEYPAIR ONLY. This tactic couples ONE leading sample
-        # (`seq 1 1` + `rnd`) and peels a tail derived from ONE frozen seed. A
-        # two-keypair reduction queries its challenger once PER KEYPAIR, and the
-        # emitted peel would reuse the same frozen seed for both -- EC rejects it
-        # ("invalid last instruction"). The gate used to be implicit, inherited
-        # from `_prg_query_game_coupling` requiring exactly one game seed field;
-        # now that the coupling is ordinal over n keypairs, this tactic needs its
-        # own. Declining leaves hop_0/hop_12 `initialize` an honest admit on the
-        # two-keypair cells while their POST-INIT oracles still benefit from the
-        # generalized coupling.
-        if (
-            sum(
-                1
-                for st in red_init.body
-                if isinstance(st, ec_ast.Call)
+        # -- per-keypair SEGMENTATION of both UN-inlined bodies ---------------
+        # The lemma relates the two WRAPPERS, whose bodies the exporter rendered
+        # itself, so every statement index here is exact -- unlike the
+        # post-``inline *`` body, which would have to model EC's expansion. The
+        # game wrapper runs `keygen; <field projections>` per keypair and the
+        # reduction `query; <derivations>` per keypair, so ONE `seq` per keypair
+        # cuts each side at its own boundary and leaves a subgoal that is exactly
+        # the single-keypair shape (one sample per side). Inside one segment each
+        # inlined local is a first-and-only occurrence again, so the two sample
+        # names are their bare source names -- the collision the n=1 gate above
+        # declines on cannot arise. Design tripwire (EC exit 0, 0 admits):
+        # ``tests/integration/ec_templates/hon_prg_init_nseed.ec``.
+        game_mod = next(
+            (
+                d
+                for d in theory_game_decls
+                if isinstance(d, ec_ast.Module)
+                and d.name == seed_holder_name.rpartition(".")[2]
+            ),
+            None,
+        )
+        game_init = (
+            next((pr for pr in game_mod.procs if pr.name == "initialize"), None)
+            if game_mod is not None
+            else None
+        )
+        if game_init is None:
+            return None
+
+        def _segments(
+            body: list[ec_ast.EcStmt], boundary: Callable[[ec_ast.EcStmt], bool]
+        ) -> list[list[ec_ast.EcStmt]] | None:
+            """Split ``body`` into one group per boundary statement, dropping a
+            trailing ``return``. ``None`` unless the body STARTS at a boundary
+            and holds nothing after the last group but that return."""
+            stmts: list[ec_ast.EcStmt] = [
+                st for st in body if not isinstance(st, ec_ast.VarDecl)
+            ]
+            if stmts and isinstance(stmts[-1], ec_ast.Return):
+                stmts = stmts[:-1]
+            if any(isinstance(st, (ec_ast.Return, ec_ast.If)) for st in stmts):
+                return None
+            cuts = [i for i, st in enumerate(stmts) if boundary(st)]
+            if not cuts or cuts[0] != 0:
+                return None
+            return [stmts[a:b] for a, b in zip(cuts, cuts[1:] + [len(stmts)])]
+
+        def _is_keygen_call(st: ec_ast.EcStmt) -> bool:
+            return (
+                isinstance(st, ec_ast.Call)
+                and st.callee.partition(".")[2] == kg_proc.name
+            )
+
+        def _is_query_call(st: ec_ast.EcStmt) -> bool:
+            return (
+                isinstance(st, ec_ast.Call)
                 and st.callee.partition(".")[0] == chal_param
             )
-            != 1
-        ):
+
+        # A game LOCAL assigned inside a segment but READ after it (the CT
+        # binding games return their encaps key straight from a local, never
+        # storing it) has no coupling conjunct naming it, so a `seq` that cuts it
+        # off leaves `={res}` unprovable -- measured on CG_CT_DIFFKEY. Carry such
+        # locals in that segment's invariant, valued by the same symbolic
+        # `derivekeypair` evaluation the game-derived conjuncts use.
+        def _carried_locals(
+            segs: list[list[ec_ast.EcStmt]], body: list[ec_ast.EcStmt]
+        ) -> list[list[str]] | None:
+            decls = {d.name for d in body if isinstance(d, ec_ast.VarDecl)}
+            tail_text = [
+                str(getattr(st, "rhs", "")) + str(getattr(st, "expr", ""))
+                for st in body
+                if isinstance(st, ec_ast.Return)
+            ]
+            vals: dict[str, str] = {}
+            out: list[list[str]] = []
+            for k, seg in enumerate(segs):
+                carried: list[str] = []
+                for st in seg:
+                    if isinstance(st, ec_ast.Call):
+                        elems = _dkp_ret_elems(game_step, seed_refs_init[k])
+                        if elems is None:
+                            return None
+                        vals[st.var] = "(" + ", ".join(elems) + ")"
+                        continue
+                    if not isinstance(st, ec_ast.Assign):
+                        return None
+                    proj = re.match(r"^\s*([A-Za-z_]\w*)\.`(\d+)\s*$", st.rhs)
+                    if proj is None or proj.group(1) not in vals:
+                        return None
+                    src = vals[proj.group(1)].strip()
+                    parts = (
+                        cc_split_args(src[1:-1])
+                        if src.startswith("(") and src.endswith(")")
+                        else []
+                    )
+                    pos = int(proj.group(2))
+                    if pos > len(parts):
+                        return None
+                    vals[st.var] = parts[pos - 1].strip()
+                    if st.var in decls and any(
+                        re.search(rf"\b{re.escape(st.var)}\b", t) for t in tail_text
+                    ):
+                        carried.append(f"{st.var}{{{gs}}} = {vals[st.var]}")
+                out.append(carried)
+            return out
+
+        game_segs = _segments(list(game_init.body), _is_keygen_call)
+        red_segs = _segments(list(red_init.body), _is_query_call)
+        if game_segs is None or red_segs is None:
+            return None
+        if len(game_segs) != len(red_segs) or len(game_segs) != len(coupling_groups):
+            return None
+        carried_by_seg = _carried_locals(game_segs, list(game_init.body))
+        if carried_by_seg is None:
             return None
 
         # -- formal-param -> declared-instance maps ---------------------------
@@ -5159,26 +5307,55 @@ def export_proof_file(proof_path: str) -> str:
         game_peel = _peel(
             list(dkp_proc.body), {dkp_proc.params[0].name: "sv"}, gs, gmap
         )
-        red_peel = _peel(list(red_init.body), {}, rs, rmap)
-        if game_peel is None or red_peel is None or not called:
+        red_peels = [_peel(list(seg), {}, rs, rmap) for seg in red_segs]
+        if game_peel is None or any(rp is None for rp in red_peels) or not called:
             return None
         globs = " /\\ ".join(f"={{glob {m}}}" for m in declared_module_names)
-        seq_inv = (
-            f"{globs} /\\ " if globs else ""
-        ) + f"{game_seed}{{{gs}}} = {red_seed}{{{rs}}}"
         frozen = ", ".join(f"(glob {m}){{{gs}}}" for m in called)
         binders = " ".join(f"g_{m}" for m in called)
-        return [
-            "inline *.",
-            f"seq 1 1 : ({seq_inv}).",
-            "+ rnd; skip => />.",
-            f"exists* {frozen}, {game_seed}{{{gs}}}.",
-            f"elim* => {binders} sv.",
-            "wp.",
-            *game_peel,
-            *red_peel,
-            "skip => />.",
-        ]
+        lines: list[str] = []
+        # Only the keypairs BEFORE the last get their own ``seq``: the final one
+        # stays in the main goal so the closing ``skip => />`` still sees the
+        # whole tail. A game whose encaps key is a proc LOCAL rather than a field
+        # (the CT binding games return it directly) has no coupling conjunct
+        # naming it, so a ``seq`` that cut it off would leave ``={res}``
+        # unprovable -- measured on CG_CT_SAMEKEY. With one keypair there is no
+        # ``seq`` at all and the emission is exactly what it was before.
+        for k, red_peel in enumerate(red_peels):
+            assert red_peel is not None
+            last = k == len(red_peels) - 1
+            done = [c for grp in coupling_groups[:k] for c in grp] + [
+                c for grp in carried_by_seg[:k] for c in grp
+            ]
+            inner_inv = " /\\ ".join(
+                ([globs] if globs else [])
+                + done
+                + [f"{game_seed}{{{gs}}} = {red_seed}{{{rs}}}"]
+            )
+            if not last:
+                outer_inv = " /\\ ".join(
+                    ([globs] if globs else [])
+                    + done
+                    + coupling_groups[k]
+                    + carried_by_seg[k]
+                )
+                a_cnt, b_cnt = len(game_segs[k]), len(red_segs[k])
+                if gs != "1":
+                    a_cnt, b_cnt = b_cnt, a_cnt
+                lines += [f"seq {a_cnt} {b_cnt} : ({outer_inv}).", "+ inline *."]
+            else:
+                lines.append("inline *.")
+            lines += [
+                f"seq 1 1 : ({inner_inv}).",
+                f"{'-' if not last else '+'} rnd; skip => />.",
+                f"exists* {frozen}, {game_seed}{{{gs}}}.",
+                f"elim* => {binders} sv.",
+                "wp.",
+                *game_peel,
+                *red_peel,
+                "skip => />.",
+            ]
+        return lines
 
     def _query_delegate_pair_coupling(
         step_a: frog_ast.Step, step_b: frog_ast.Step

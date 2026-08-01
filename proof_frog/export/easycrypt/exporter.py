@@ -5868,12 +5868,6 @@ def export_proof_file(proof_path: str) -> str:
         the cells this currently fires for, that lemma still admits, so until it
         closes the conjunct is ASSUMED. Flagged in the plan as such."""
         if len(rest_a) != len(rest_b) or not rest_a:
-            print(
-                "DBGX len",
-                [f.name for f in rest_a],
-                [f.name for f in rest_b],
-                flush=True,
-            )
             return None
         red_mods: list[ec_ast.Module] = []
         for st in (step_a, step_b):
@@ -5943,14 +5937,6 @@ def export_proof_file(proof_path: str) -> str:
             return env
 
         vals_a, vals_b = _init_values(red_mods[0]), _init_values(red_mods[1])
-        print(
-            "DBGX vals",
-            [f.name for f in rest_a],
-            [f.name for f in rest_b],
-            vals_a,
-            vals_b,
-            flush=True,
-        )
         if vals_a is None or vals_b is None:
             return None
 
@@ -5996,13 +5982,6 @@ def export_proof_file(proof_path: str) -> str:
             # pylint: disable=protected-access
             chal = engine._get_game_ast(step.challenger, None)
             # pylint: enable=protected-access
-            print(
-                "DBGC",
-                meth,
-                chal is None,
-                [m.signature.name for m in chal.methods] if chal else None,
-                flush=True,
-            )
             if chal is None:
                 return None
             meth_ast = next(
@@ -6019,7 +5998,6 @@ def export_proof_file(proof_path: str) -> str:
                 or not isinstance(stmts[1], frog_ast.ReturnStatement)
             ):
                 return None
-            print("DBGC2", [(type(x).__name__, str(x)[:80]) for x in stmts], flush=True)
             call = stmts[1].expression
             if (
                 not isinstance(call, frog_ast.FuncCall)

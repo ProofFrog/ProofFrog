@@ -5202,6 +5202,211 @@ def export_proof_file(proof_path: str) -> str:
                 out[lproc.name] = tac
         return out or None
 
+    def _keygenequiv_init_tac(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> list[str] | None:
+        """Whole-init tactic for a KeyGenEquiv hop (CK hop_4 / hop_14), or
+        ``None`` off-shape.
+
+        Both reductions build the same n keypairs but INTERLEAVE differently:
+        one alternates ``challenger.Generate(); sample; derivekeypair; <projections>``
+        per keypair, the other runs all its own keygens first and then all its
+        challenger generates. The hop's post carries the cross-stage conjunct
+        ``t_keys_k{2} = ev_derivekeypair (seed_T_k{1})``, so closing this lemma is
+        what turns that coupling from ASSUMED into EC-checked.
+
+        Recipe validated at real statement counts by
+        ``ec_templates/keygenequiv_init_swap.ec``: align with ``swap`` (EC allows
+        it -- the two abstract probabilistic calls write disjoint globs), then one
+        ``seq`` per keypair on the UN-INLINED bodies with ``inline *`` INSIDE each
+        bullet, so every inlined local keeps its bare source name.
+        """
+        mods: list[ec_ast.Module] = []
+        for st in (step_a, step_b):
+            if st.reduction is None:
+                return None
+            mod = next(
+                (
+                    d
+                    for d in ec_reductions
+                    if isinstance(d, ec_ast.Module) and d.name == st.reduction.name
+                ),
+                None,
+            )
+            if mod is None:
+                return None
+            mods.append(mod)
+        if len(mods) != 2:
+            return None
+
+        def _init_exec(mod: ec_ast.Module) -> list[ec_ast.EcStmt] | None:
+            proc = next((p for p in mod.procs if p.name == "initialize"), None)
+            if proc is None:
+                return None
+            return [
+                st
+                for st in proc.body
+                if not isinstance(st, (ec_ast.VarDecl, ec_ast.Return))
+            ]
+
+        execs = [_init_exec(m) for m in mods]
+        if execs[0] is None or execs[1] is None:
+            return None
+        chal_of = [m.params[-1].name if m.params else None for m in mods]
+
+        def _is_chal(st: ec_ast.EcStmt, chal: str | None) -> bool:
+            return (
+                isinstance(st, ec_ast.Call)
+                and chal is not None
+                and st.callee.partition(".")[0] == chal
+            )
+
+        # -- which side ALTERNATES and which side GROUPS ----------------------
+        def _alt_segments(
+            body: list[ec_ast.EcStmt], chal: str | None
+        ) -> list[list[ec_ast.EcStmt]] | None:
+            """``[chal-call, sample, det-call, assign*]`` repeated, else None."""
+            cuts = [i for i, st in enumerate(body) if _is_chal(st, chal)]
+            if len(cuts) < 2 or cuts[0] != 0:
+                return None
+            segs = [body[a:b] for a, b in zip(cuts, cuts[1:] + [len(body)])]
+            for seg in segs:
+                if len(seg) < 3 or not isinstance(seg[1], ec_ast.Sample):
+                    return None
+                if not isinstance(seg[2], ec_ast.Call) or _is_chal(seg[2], chal):
+                    return None
+                if any(not isinstance(x, ec_ast.Assign) for x in seg[3:]):
+                    return None
+            return segs
+
+        def _grouped(body: list[ec_ast.EcStmt], chal: str | None) -> int | None:
+            """``n`` non-challenger calls then ``n`` challenger calls, else None."""
+            if not body or any(not isinstance(st, ec_ast.Call) for st in body):
+                return None
+            flags = [_is_chal(st, chal) for st in body]
+            if len(body) % 2 or any(flags[: len(body) // 2]):
+                return None
+            if not all(flags[len(body) // 2 :]):
+                return None
+            return len(body) // 2
+
+        alt_side = None
+        for idx in (0, 1):
+            other = 1 - idx
+            segs = _alt_segments(execs[idx] or [], chal_of[idx])
+            n_grp = _grouped(execs[other] or [], chal_of[other])
+            if segs is not None and n_grp is not None and n_grp == len(segs):
+                alt_side = (idx, segs, n_grp)
+                break
+        if alt_side is None:
+            return None
+        ai, segs, n = alt_side
+        if n != 2:
+            # The interleaving `swap` sequence below is derived for TWO keypairs,
+            # which is what every CFRG cell has. Decline rather than emit an
+            # untested swap chain for n > 2.
+            return None
+        am, bm = ("1", "2") if ai == 0 else ("2", "1")
+        alt_expr = resolver.resolve(step_a if ai == 0 else step_b).module_expr
+        a_base = pt.module_base_name(alt_expr)
+        # -- the pieces the tactic names ---------------------------------------
+        coupling = _query_delegate_pair_coupling(step_a, step_b)
+        if coupling is None:
+            return None
+        conj = [c for c in coupling.split(" /\\ ") if not c.startswith("={")]
+        if len(conj) != 2 * n:
+            return None
+        # The pair coupling emits shared fields in declaration order, then the
+        # cross-stage ones in declaration order, so conjunct i belongs to keypair
+        # ``i % n`` -- declaration order IS keypair order.
+        by_kp: list[list[str]] = [[] for _ in range(n)]
+        for i, c in enumerate(conj):
+            by_kp[i % n].append(c)
+        globs = " /\\ ".join(f"={{glob {m}}}" for m in declared_module_names)
+
+        # side A's det call -> its ``_det`` axiom and ``ev_`` op
+        alt_mod = mods[ai]
+        alt_inner = (
+            alt_expr[alt_expr.index("(") + 1 : alt_expr.rindex(")")]
+            if "(" in alt_expr
+            else ""
+        )
+        pmap_a = {
+            p.name: pt.module_base_name(a)
+            for p, a in zip(alt_mod.params, cc_split_args(alt_inner))
+        }
+        det_stmt = segs[0][2]
+        assert isinstance(det_stmt, ec_ast.Call)
+        det_mod_raw, _, det_meth = det_stmt.callee.partition(".")
+        det_mod = pmap_a.get(det_mod_raw, det_mod_raw)
+        det_alias = clone_alias_by_module.get(det_mod)
+        if det_alias is None or det_meth not in det_methods_by_module.get(
+            det_mod, set()
+        ):
+            return None
+
+        # side B's challenger samples internally; its local keeps its bare source
+        # name because ``inline *`` runs INSIDE each segment bullet.
+        # pylint: disable=protected-access
+        chal_ast = engine._get_game_ast(
+            (step_b if ai == 0 else step_a).challenger, None
+        )
+        # pylint: enable=protected-access
+        if chal_ast is None:
+            return None
+        chal_sample = next(
+            (
+                st.var.name
+                for m in chal_ast.methods
+                for st in m.block.statements
+                if isinstance(st, frog_ast.Sample)
+                and isinstance(st.var, frog_ast.Variable)
+            ),
+            None,
+        )
+        if chal_sample is None:
+            return None
+
+        a_base = pt.module_base_name(
+            resolver.resolve(step_a if ai == 0 else step_b).module_expr
+        )
+        # pylint: disable=protected-access
+        lines = ["proc.", f"swap{{{bm}}} 2 1."]
+        done: list[str] = []
+        for k, seg in enumerate(segs):
+            sample_stmt = seg[1]
+            assert isinstance(sample_stmt, ec_ast.Sample)
+            seed_ref = f"{a_base}.{mt._ec_field_name(sample_stmt.var)}{{{am}}}"
+            ev = f"({det_alias}.ev_{det_meth} ({seed_ref}))"
+            det_res = det_stmt.var if k == 0 else seg[2].var  # type: ignore[union-attr]
+            carried = [f"{det_res}{{{am}}} = {ev}"]
+            for proj in seg[3:]:
+                assert isinstance(proj, ec_ast.Assign)
+                carried.append(f"{proj.var}{{{am}}} = ({ev}{proj.rhs[len(det_res):]})")
+            kp_conj = by_kp[k]
+            inv = " /\\ ".join([globs] + done + kp_conj + carried)
+            inv_kg = " /\\ ".join([globs] + done + [kp_conj[0]])
+            inv_sm = inv_kg + f" /\\ {seed_ref} = {chal_sample}{{{bm}}}"
+            a_cnt, b_cnt = (len(seg), 2) if am == "1" else (2, len(seg))
+            lines += [
+                f"seq {a_cnt} {b_cnt} : ({inv}).",
+                "+ inline *.",
+                f"seq {2 if am == '1' else 1} {1 if am == '1' else 2} : ({inv_kg}).",
+                "- wp; call (_: true); skip => />.",
+                f"seq 1 1 : ({inv_sm}).",
+                "- rnd; skip => />.",
+                f"exists* (glob {det_mod}){{{am}}}, {seed_ref}.",
+                "elim* => gT sv.",
+                "wp.",
+                f"call{{{bm}}} ({det_mod}_{det_meth}_det gT sv).",
+                f"call{{{am}}} ({det_mod}_{det_meth}_det gT sv).",
+                "skip => />.",
+            ]
+            done += kp_conj + carried
+        # pylint: enable=protected-access
+        lines.append("skip => />.")
+        return lines[1:]  # the caller prepends ``proc.``
+
     def _prg_query_init_tac(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> list[str] | None:
@@ -8129,6 +8334,8 @@ def export_proof_file(proof_path: str) -> str:
             # is byte-identical.
             if reprogram_override is None:
                 reprogram_override = _prg_query_init_tac(step_a, step_b)
+            if reprogram_override is None:
+                reprogram_override = _keygenequiv_init_tac(step_a, step_b)
 
             info = emit_multi_oracle_chain_for_hop(
                 hop_index=_i,

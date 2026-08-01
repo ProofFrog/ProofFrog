@@ -33,6 +33,15 @@ op ev_derivekeypair : seedt -> tkt * tst.
 module type KEMP = { proc keygen () : pkt * skt }.
 module type KEMT = { proc derivekeypair (s : seedt) : tkt * tst }.
 
+(* the KeyGenEquiv FromKeyGen challenger the LEFT side delegates to *)
+module ChalK (P : KEMP) = {
+  proc generate () : pkt * skt = {
+    var r : pkt * skt;
+    r <@ P.keygen();
+    return r;
+  }
+}.
+
 (* the KeyGenEquiv FromDeriveKeyPair challenger the right side delegates to *)
 module Chal (T : KEMT) = {
   proc generate () : tkt * tst = {
@@ -50,13 +59,19 @@ module RedL (P : KEMP, T : KEMT) = {
 
   proc initialize () : (pkt * tkt) * (pkt * tkt) = {
     var t0, t1 : tkt * tst;
-    pq_keys_0 <@ P.keygen();
+    var ek0, ek1 : tkt;
+    var dk0, dk1 : tst;
+    pq_keys_0 <@ ChalK(P).generate();
     seed_T_0 <$ dseed;
     t0 <@ T.derivekeypair(seed_T_0);
-    pq_keys_1 <@ P.keygen();
+    ek0 <- t0.`1;
+    dk0 <- t0.`2;
+    pq_keys_1 <@ ChalK(P).generate();
     seed_T_1 <$ dseed;
     t1 <@ T.derivekeypair(seed_T_1);
-    return ((pq_keys_0.`1, t0.`1), (pq_keys_1.`1, t1.`1));
+    ek1 <- t1.`1;
+    dk1 <- t1.`2;
+    return ((pq_keys_0.`1, ek0), (pq_keys_1.`1, ek1));
   }
 }.
 
@@ -103,16 +118,22 @@ proof.
      the bare `s` every time and no collision suffix has to be predicted. With a
      single top-level `inline *` the second segment's local becomes `s0` and the
      invariant silently names the wrong variable. *)
-  seq 3 2 : (={glob P, glob T}
+  seq 5 2 : (={glob P, glob T}
              /\ RedL.pq_keys_0{1} = RedR.pq_keys_0{2}
              /\ RedR.t_keys_0{2} = ev_derivekeypair RedL.seed_T_0{1}
              (* side 1's derivekeypair result is a LOCAL read at the return, so
                 the segment must carry its value too -- same carried-local rule
                 the n-keypair init needed. *)
-             /\ t0{1} = ev_derivekeypair RedL.seed_T_0{1}).
+             /\ t0{1} = ev_derivekeypair RedL.seed_T_0{1}
+             (* the PROJECTION local is read at the return too: every side-1
+                local surviving the segment must be carried, not just the call
+                result. *)
+             /\ ek0{1} = (ev_derivekeypair RedL.seed_T_0{1}).`1).
   + inline *.
-    seq 1 1 : (={glob P, glob T} /\ RedL.pq_keys_0{1} = RedR.pq_keys_0{2}).
-    - call (_: true); skip => />.
+    (* side 1's challenger inlines to [keygen; assign], so the keygen segment is
+       2 statements there and 1 on side 2. *)
+    seq 2 1 : (={glob P, glob T} /\ RedL.pq_keys_0{1} = RedR.pq_keys_0{2}).
+    - wp; call (_: true); skip => />.
     seq 1 1 : (={glob P, glob T} /\ RedL.pq_keys_0{1} = RedR.pq_keys_0{2}
                /\ RedL.seed_T_0{1} = s{2}).
     - rnd; skip => />.
@@ -123,24 +144,28 @@ proof.
     call{1} (T_derivekeypair_det gT sv).
     skip => />.
   (* 3. keypair 1: same shape, invariant carries keypair 0's conjuncts. *)
-  seq 3 2 : (={glob P, glob T}
+  seq 5 2 : (={glob P, glob T}
              /\ RedL.pq_keys_0{1} = RedR.pq_keys_0{2}
              /\ RedR.t_keys_0{2} = ev_derivekeypair RedL.seed_T_0{1}
              /\ t0{1} = ev_derivekeypair RedL.seed_T_0{1}
              /\ RedL.pq_keys_1{1} = RedR.pq_keys_1{2}
              /\ RedR.t_keys_1{2} = ev_derivekeypair RedL.seed_T_1{1}
-             /\ t1{1} = ev_derivekeypair RedL.seed_T_1{1}).
+             /\ t1{1} = ev_derivekeypair RedL.seed_T_1{1}
+             /\ ek0{1} = (ev_derivekeypair RedL.seed_T_0{1}).`1
+             /\ ek1{1} = (ev_derivekeypair RedL.seed_T_1{1}).`1).
   + inline *.
-    seq 1 1 : (={glob P, glob T}
+    seq 2 1 : (={glob P, glob T}
                /\ RedL.pq_keys_0{1} = RedR.pq_keys_0{2}
                /\ RedR.t_keys_0{2} = ev_derivekeypair RedL.seed_T_0{1}
                /\ t0{1} = ev_derivekeypair RedL.seed_T_0{1}
+               /\ ek0{1} = (ev_derivekeypair RedL.seed_T_0{1}).`1
                /\ RedL.pq_keys_1{1} = RedR.pq_keys_1{2}).
-    - call (_: true); skip => />.
+    - wp; call (_: true); skip => />.
     seq 1 1 : (={glob P, glob T}
                /\ RedL.pq_keys_0{1} = RedR.pq_keys_0{2}
                /\ RedR.t_keys_0{2} = ev_derivekeypair RedL.seed_T_0{1}
                /\ t0{1} = ev_derivekeypair RedL.seed_T_0{1}
+               /\ ek0{1} = (ev_derivekeypair RedL.seed_T_0{1}).`1
                /\ RedL.pq_keys_1{1} = RedR.pq_keys_1{2}
                /\ RedL.seed_T_1{1} = s{2}).
     - rnd; skip => />.

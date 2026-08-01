@@ -5407,6 +5407,454 @@ def export_proof_file(proof_path: str) -> str:
         lines.append("skip => />.")
         return lines[1:]  # the caller prepends ``proc.``
 
+    def _split_seed_shape(execs: list[list[Any]], chal_of: list[str | None]) -> (
+        tuple[
+            int,
+            int,
+            list[ec_ast.Sample],
+            list[list[ec_ast.EcStmt]],
+            list[list[ec_ast.EcStmt]],
+        ]
+        | None
+    ):
+        """Classify a hop as GROUPED-seed side vs SPLIT-seed side.
+
+        Returns ``(grouped_index, n, samples, grouped_blocks, split_blocks)``.
+
+        The grouped side runs ``n`` challenger calls, then ``n`` own samples,
+        then ``n`` blocks of ``[det call, projection*]``. The split side runs
+        ``n`` blocks of ``[challenger query, slice, slice, call, call]`` -- one
+        full seed per keypair, cut into the two halves the other side sampled
+        independently.
+        """
+
+        def _is_chal(st: ec_ast.EcStmt, chal: str | None) -> bool:
+            return (
+                isinstance(st, ec_ast.Call)
+                and chal is not None
+                and st.callee.partition(".")[0] == chal
+            )
+
+        def _grouped(
+            body: list[ec_ast.EcStmt], chal: str | None
+        ) -> tuple[int, list[ec_ast.Sample], list[list[ec_ast.EcStmt]]] | None:
+            n = 0
+            while n < len(body) and _is_chal(body[n], chal):
+                n += 1
+            if n < 1 or len(body) < 2 * n:
+                return None
+            samples = body[n : 2 * n]
+            if any(not isinstance(st, ec_ast.Sample) for st in samples):
+                return None
+            rest = body[2 * n :]
+            cuts = [i for i, st in enumerate(rest) if isinstance(st, ec_ast.Call)]
+            if len(cuts) != n or not cuts or cuts[0] != 0:
+                return None
+            blocks = [rest[a:b] for a, b in zip(cuts, cuts[1:] + [len(rest)])]
+            for blk in blocks:
+                if _is_chal(blk[0], chal):
+                    return None
+                if any(not isinstance(x, ec_ast.Assign) for x in blk[1:]):
+                    return None
+            return n, [cast(ec_ast.Sample, s) for s in samples], blocks
+
+        def _split(
+            body: list[ec_ast.EcStmt], chal: str | None
+        ) -> list[list[ec_ast.EcStmt]] | None:
+            cuts = [i for i, st in enumerate(body) if _is_chal(st, chal)]
+            if not cuts or cuts[0] != 0:
+                return None
+            blocks = [body[a:b] for a, b in zip(cuts, cuts[1:] + [len(body)])]
+            for blk in blocks:
+                if len(blk) != 5:
+                    return None
+                if not isinstance(blk[1], ec_ast.Assign) or not isinstance(
+                    blk[2], ec_ast.Assign
+                ):
+                    return None
+                if not isinstance(blk[3], ec_ast.Call) or not isinstance(
+                    blk[4], ec_ast.Call
+                ):
+                    return None
+                if _is_chal(blk[3], chal) or _is_chal(blk[4], chal):
+                    return None
+            return blocks
+
+        for gi in (0, 1):
+            grp = _grouped(execs[gi], chal_of[gi])
+            spl = _split(execs[1 - gi], chal_of[1 - gi])
+            if grp is not None and spl is not None and len(spl) == grp[0]:
+                return gi, grp[0], grp[1], grp[2], spl
+        return None
+
+    def _regroup_swaps(
+        n: int, blocks: list[list[ec_ast.EcStmt]], mem: str
+    ) -> list[str]:
+        """``swap`` sequence regrouping the grouped side per keypair.
+
+        The body is ``[chal]*n ++ [sample]*n ++ block_0 ++ ... ++ block_{n-1}``
+        and the target is ``[chal_k, sample_k, *block_k]`` for each ``k``. Each
+        emitted move lifts keypair ``k``'s material past keypair ``j>k``'s,
+        which is independent of it, so every move is one EC accepts. Indices are
+        exact because this is the UN-INLINED body the exporter rendered itself.
+        """
+        target: list[int] = []
+        off = 2 * n
+        starts: list[int] = []
+        for blk in blocks:
+            starts.append(off)
+            off += len(blk)
+        for k in range(n):
+            target.append(k + 1)
+            target.append(n + k + 1)
+            target.extend(starts[k] + j + 1 for j in range(len(blocks[k])))
+        cur = list(range(1, off + 1))
+        out: list[str] = []
+        for tgt, orig in enumerate(target, start=1):
+            pos = cur.index(orig) + 1
+            if pos != tgt:
+                out.append(f"swap{{{mem}}} {pos} -{pos - tgt}.")
+                cur.insert(tgt - 1, cur.pop(pos - 1))
+        return out
+
+    def _split_seed_init_tac(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> list[str] | None:
+        """Whole-init tactic for a SPLIT-SEED hop (the CFRG HON_BIND hop_14
+        ``initialize``), or ``None`` off-shape.
+
+        The two reductions do not merely interleave differently -- they have
+        different RANDOMNESS STRUCTURE. One draws each keypair's two seeds
+        INDEPENDENTLY (the pq seed inside its ``KeyGenEquiv`` challenger's
+        ``generate``, the t seed itself); the other draws ONE full seed per
+        keypair from a PRG query challenger and SLICES it into the two halves.
+        Coupling them is exactly the split-uniform law
+        ``d_full = dlet d_pq (fun a => dmap d_t (fun b => concat a b))``.
+
+        That law is not emitted for a type the source only ever slices, so this
+        route ASKS for it via :meth:`TypeCollector.request_virtual_concat`. A
+        request is not an assertion: both soundness gates still run at emission
+        time (prefix/suffix order read from the recorded slice OFFSETS, and a
+        symbolic length-sum check that FAILS CLOSED), and decline silently if
+        they do not hold. Any proof whose admits fall because of this is
+        CLEAN-PENDING-AXIOM-REVIEW, never clean -- see PROVISIONAL-AXIOMS.
+
+        Recipe validated at the real statement counts, with the real
+        offset-carrying slice ops, by
+        ``ec_templates/prg_vs_keygen_init_segmented.ec``: regroup the grouped
+        side per keypair on the UN-INLINED body, one ``seq`` per keypair with
+        ``inline *`` INSIDE the bullet (so no inline collision suffix is ever
+        predicted), then per keypair couple the samples, peel the pq
+        derivekeypair two-sided, and peel the t derivekeypair ONE-SIDED with its
+        ``_det`` axiom so the post learns the VALUE.
+        """
+        mods: list[ec_ast.Module] = []
+        for st in (step_a, step_b):
+            if st.reduction is None:
+                return None
+            mod = next(
+                (
+                    d
+                    for d in ec_reductions
+                    if isinstance(d, ec_ast.Module) and d.name == st.reduction.name
+                ),
+                None,
+            )
+            if mod is None:
+                return None
+            mods.append(mod)
+
+        def _init_proc(mod: ec_ast.Module) -> ec_ast.Proc | None:
+            return next((p for p in mod.procs if p.name == "initialize"), None)
+
+        procs = [_init_proc(m) for m in mods]
+        if procs[0] is None or procs[1] is None:
+            return None
+        execs = [
+            [st for st in p.body if not isinstance(st, (ec_ast.VarDecl, ec_ast.Return))]
+            for p in procs
+            if p is not None
+        ]
+        chal_of = [m.params[-1].name if m.params else None for m in mods]
+        shape = _split_seed_shape(execs, chal_of)
+        if shape is None:
+            return None
+        gi, n, samples, blocks_g, blocks_s = shape
+        if n not in (1, 2):
+            # Only n = 1 (the CT_SAMEKEY cells) and n = 2 (every other CFRG
+            # cell) are VALIDATED by the tripwire. The regrouping swap chain is
+            # derived generally, but "it should generalize" is not validation --
+            # decline rather than emit an untested chain.
+            return None
+        if gi != 0:
+            # The `rnd` bijection's argument order and the resulting obligation
+            # order are validated with the GROUPED side as side 1. Mirroring
+            # them is a separate, unvalidated shape -- decline.
+            return None
+        gm, sm = "1", "2"
+        g_step, s_step = step_a, step_b
+        g_base = pt.module_base_name(resolver.resolve(g_step).module_expr)
+
+        # -- both challengers must have the shape whose INLINED LENGTH the
+        #    per-segment indices below assume ------------------------------
+        # pylint: disable=protected-access
+        g_chal = engine._get_game_ast(g_step.challenger, None)
+        s_chal = engine._get_game_ast(s_step.challenger, None)
+        # pylint: enable=protected-access
+        if g_chal is None or s_chal is None:
+            return None
+
+        def _chal_method(
+            chal: frog_ast.Game, call: ec_ast.EcStmt
+        ) -> list[frog_ast.Statement] | None:
+            if not isinstance(call, ec_ast.Call):
+                return None
+            meth = call.callee.partition(".")[2]
+            m = next(
+                (x for x in chal.methods if x.signature.name.lower() == meth.lower()),
+                None,
+            )
+            return list(m.block.statements) if m is not None else None
+
+        g_stmts = _chal_method(g_chal, execs[gi][0])
+        s_stmts = _chal_method(s_chal, blocks_s[0][0])
+        if g_stmts is None or s_stmts is None:
+            return None
+        # grouped challenger: `sample; return <one call on it>` -> EC renders
+        # [Sample, Call, Return], so an inlined copy is THREE statements and the
+        # keypair's own seed sample lands at index 4.
+        if (
+            len(g_stmts) != 2
+            or not isinstance(g_stmts[0], frog_ast.Sample)
+            or not isinstance(g_stmts[0].var, frog_ast.Variable)
+            or not isinstance(g_stmts[1], frog_ast.ReturnStatement)
+        ):
+            return None
+        g_call = g_stmts[1].expression
+        if (
+            not isinstance(g_call, frog_ast.FuncCall)
+            or len(g_call.args) != 1
+            or not isinstance(g_call.args[0], frog_ast.Variable)
+            or g_call.args[0].name != g_stmts[0].var.name
+        ):
+            return None
+        chal_sample = g_stmts[0].var.name
+        # split challenger: `sample; return it` -> EC renders [Sample, Return],
+        # so an inlined copy is TWO statements and the segment's split side has
+        # sample + result-assign + the two slice assigns = 4 before its calls.
+        if (
+            len(s_stmts) != 2
+            or not isinstance(s_stmts[0], frog_ast.Sample)
+            or not isinstance(s_stmts[0].var, frog_ast.Variable)
+            or not isinstance(s_stmts[1], frog_ast.ReturnStatement)
+            or not isinstance(s_stmts[1].expression, frog_ast.Variable)
+            or s_stmts[1].expression.name != s_stmts[0].var.name
+        ):
+            return None
+
+        # -- the deterministic (t) derivekeypair and its ev/det names ---------
+        det_stmt = blocks_g[0][0]
+        if not isinstance(det_stmt, ec_ast.Call):
+            return None
+        det_mod_raw, _, det_meth = det_stmt.callee.partition(".")
+        g_expr = resolver.resolve(g_step).module_expr
+        g_inner = (
+            g_expr[g_expr.index("(") + 1 : g_expr.rindex(")")] if "(" in g_expr else ""
+        )
+        pmap = {
+            p.name: pt.module_base_name(a)
+            for p, a in zip(mods[gi].params, cc_split_args(g_inner))
+        }
+        det_mod = pmap.get(det_mod_raw, det_mod_raw)
+        det_alias = clone_alias_by_module.get(det_mod)
+        if det_alias is None or det_meth not in det_methods_by_module.get(
+            det_mod, set()
+        ):
+            return None
+        # The regrouping swaps move this call past the OTHER keypair's
+        # challenger call; that is only independent if the challenger drives a
+        # different module. Decline instead of emitting a swap EC rejects.
+        if pt.module_base_name(pt.last_module_arg(pt.last_module_arg(g_expr))) == (
+            det_mod
+        ):
+            return None
+
+        # -- the split side's per-keypair slice locals, by ROLE ---------------
+        s_proc = procs[1 - gi]
+        if s_proc is None:
+            return None
+        s_decl = {d.name: d.type for d in s_proc.body if isinstance(d, ec_ast.VarDecl)}
+        s_expr = resolver.resolve(s_step).module_expr
+        s_inner = (
+            s_expr[s_expr.index("(") + 1 : s_expr.rindex(")")] if "(" in s_expr else ""
+        )
+        s_pmap = {
+            p.name: pt.module_base_name(a)
+            for p, a in zip(mods[1 - gi].params, cc_split_args(s_inner))
+        }
+        pq_local: list[str] = []
+        t_local: list[str] = []
+        full_ty: set[str] = set()
+        left_ty: set[str] = set()
+        right_ty: set[str] = set()
+        for blk in blocks_s:
+            chal_call, asn_a, asn_b, call_x, call_y = blk
+            if (
+                not isinstance(chal_call, ec_ast.Call)
+                or not isinstance(asn_a, ec_ast.Assign)
+                or not isinstance(asn_b, ec_ast.Assign)
+                or not isinstance(call_x, ec_ast.Call)
+                or not isinstance(call_y, ec_ast.Call)
+            ):
+                return None
+            t_calls = [
+                c
+                for c in (call_x, call_y)
+                if s_pmap.get(c.callee.partition(".")[0], c.callee.partition(".")[0])
+                == det_mod
+            ]
+            if len(t_calls) != 1:
+                return None
+            t_call = t_calls[0]
+            pq_call = call_y if t_call is call_x else call_x
+            by_var = {asn_a.var: asn_a, asn_b.var: asn_b}
+            if t_call.args not in by_var or pq_call.args not in by_var:
+                return None
+            # The emitted split axiom orders the halves by their recorded
+            # OFFSETS: the prefix is the slice starting at 0. The `rndsem` fold
+            # produces `dlet d_<first sampled> (dmap d_<second> ...)`, and the
+            # grouped side samples its challenger's pq seed FIRST -- so the pq
+            # half must be the PREFIX or the two forms will not match.
+            if by_var[pq_call.args].rhs.split()[2:3] != ["0"]:
+                return None
+            pq_local.append(pq_call.args)
+            t_local.append(t_call.args)
+            full_ty.add(s_decl[chal_call.var].text if chal_call.var in s_decl else "")
+            left_ty.add(s_decl[pq_call.args].text if pq_call.args in s_decl else "")
+            right_ty.add(s_decl[t_call.args].text if t_call.args in s_decl else "")
+        if len(full_ty) != 1 or len(left_ty) != 1 or len(right_ty) != 1:
+            return None
+        src_name, left_name, right_name = (
+            full_ty.pop(),
+            left_ty.pop(),
+            right_ty.pop(),
+        )
+        if not src_name or not left_name or not right_name:
+            return None
+        len_l = top_types.bs_length_for(left_name)
+        len_r = top_types.bs_length_for(right_name)
+        if len_l is None or len_r is None:
+            return None
+
+        # -- the hop's post, partitioned per keypair --------------------------
+        coupling = _live_state_coupling(step_a, step_b)
+        globs = " /\\ ".join(
+            c for c in coupling.split(" /\\ ") if c.startswith("={glob ")
+        )
+        conj = [c for c in coupling.split(" /\\ ") if not c.startswith("={")]
+        if not globs or len(conj) != 2 * n:
+            return None
+        by_kp: list[list[str]] = [[] for _ in range(n)]
+        for i, c in enumerate(conj):
+            by_kp[i % n].append(c)
+        # conjunct order is <shared fields> then <cross-stage ev-forms>, so each
+        # keypair's pair is (shared, ev). Check that, rather than assume it.
+        if any("ev_" in kp[0] or "ev_" not in kp[1] for kp in by_kp):
+            return None
+
+        # Demand-driven: only now, with the whole shape confirmed, ask for the
+        # split/round-trip laws over the full seed type.
+        top_types.request_virtual_concat(src_name)
+
+        # pylint: disable=protected-access
+        concat_op = tc._concat_op_name(left_name, right_name, src_name)
+        slice_l = tc._slice_op_name(src_name, left_name)
+        slice_r = tc._slice_op_name(src_name, right_name)
+        len_l_p = tc._paren_int(len_l)
+        # pylint: enable=protected-access
+        len_sum = f"({len_l} + {len_r})"
+        ax_left = f"slice_concat_left_{left_name}_{right_name}_{src_name}"
+        ax_right = f"slice_concat_right_{left_name}_{right_name}_{src_name}"
+        ax_id = f"concat_slices_id_{left_name}_{right_name}_{src_name}"
+        ax_dlet = f"d{src_name}_split_dlet_{left_name}_{right_name}"
+        ax_hint = f"{ax_left} {ax_right} {ax_id}"
+
+        def _couple_lines(inv: str) -> list[str]:
+            """The split-uniform coupling, verbatim from the tripwire."""
+            return [
+                f"seq {2 if gm == '1' else 4} {4 if gm == '1' else 2} : ({inv}).",
+                "- wp.",
+                f"rndsem*{{{gm}}} 0.",
+                f"rnd (fun (p : {left_name} * {right_name}) =>"
+                f" {concat_op} p.`1 p.`2)",
+                f"    (fun (sf : {src_name}) => ({slice_l} sf 0 {len_l_p},"
+                f" {slice_r} sf {len_l_p} {len_sum})).",
+                "skip => />.",
+                f"rewrite {ax_dlet}.",
+                "split.",
+                f"* move => sf hsf; rewrite {ax_id} //.",
+                "move => _; split.",
+                "* move => sf hsf.",
+                "  rewrite !dlet1E; congr; apply fun_ext => a /=.",
+                "  rewrite !dmap1E /(\\o) /pred1 /=.",
+                "  congr; apply mu_eq => b /=.",
+                f"  by rewrite eqboolP; smt({ax_hint}).",
+                "move => _ p hp.",
+                f"have h1 : p.`1 \\in d{left_name} by smt(supp_dlet supp_dmap).",
+                f"have h2 : p.`2 \\in d{right_name} by smt(supp_dlet supp_dmap).",
+                "split.",
+                "* rewrite supp_dlet; exists p.`1; rewrite h1 /=.",
+                "  by rewrite supp_dmap; exists p.`2; rewrite h2.",
+                f"move => _; smt({ax_left} {ax_right}).",
+            ]
+
+        # pylint: disable=protected-access
+        lines: list[str] = list(_regroup_swaps(n, blocks_g, gm))
+        done: list[str] = []
+        for k in range(n):
+            seed_ref = f"{g_base}.{mt._ec_field_name(samples[k].var)}{{{gm}}}"
+            ev = f"({det_alias}.ev_{det_meth} ({seed_ref}))"
+            det_res = cast(ec_ast.Call, blocks_g[k][0]).var
+            carried = [f"{det_res}{{{gm}}} = {ev}"]
+            for proj in blocks_g[k][1:]:
+                assert isinstance(proj, ec_ast.Assign)
+                carried.append(f"{proj.var}{{{gm}}} = ({ev}{proj.rhs[len(det_res):]})")
+            kp = by_kp[k]
+            inv_seg = " /\\ ".join([globs] + done + kp + carried)
+            inv_smp = " /\\ ".join(
+                [globs]
+                + done
+                + [
+                    f"{chal_sample}{{{gm}}} = {pq_local[k]}{{{sm}}}",
+                    f"{seed_ref} = {t_local[k]}{{{sm}}}",
+                ]
+            )
+            inv_pq = " /\\ ".join(
+                [globs] + done + [f"{seed_ref} = {t_local[k]}{{{sm}}}", kp[0]]
+            )
+            g_cnt = 2 + len(blocks_g[k])
+            lines += [
+                f"seq {g_cnt if gm == '1' else 5} {5 if gm == '1' else g_cnt} :"
+                f" ({inv_seg}).",
+                "+ inline *.",
+                # one `generate` inlined here (3 statements), so the keypair's
+                # own seed sample is at 4 and one swap makes the pair adjacent.
+                f"swap{{{gm}}} 4 -2.",
+                *_couple_lines(inv_smp),
+                f"seq {2 if gm == '1' else 1} {1 if gm == '1' else 2} : ({inv_pq}).",
+                "- wp; call (_: true); skip => />.",
+                f"exists* (glob {det_mod}){{{gm}}}, {seed_ref}.",
+                "elim* => gT sv.",
+                "wp.",
+                f"call{{{sm}}} ({det_mod}_{det_meth}_det gT sv).",
+                f"call{{{gm}}} ({det_mod}_{det_meth}_det gT sv).",
+                "skip => />.",
+            ]
+            done += kp + carried
+        # pylint: enable=protected-access
+        lines.append("skip => />.")
+        return lines
+
     def _prg_query_init_tac(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> list[str] | None:
@@ -8314,6 +8762,11 @@ def export_proof_file(proof_path: str) -> str:
                 reprogram_override = _prg_query_init_tac(step_a, step_b)
             if reprogram_override is None:
                 reprogram_override = _keygenequiv_init_tac(step_a, step_b)
+            # Split-seed hop (HON_BIND hop_14 ``initialize``): one side samples
+            # each keypair's two seeds independently, the other slices one full
+            # seed. ``None`` off-shape, so every other init is byte-identical.
+            if reprogram_override is None:
+                reprogram_override = _split_seed_init_tac(step_a, step_b)
 
             info = emit_multi_oracle_chain_for_hop(
                 hop_index=_i,

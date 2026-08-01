@@ -138,10 +138,87 @@ module RedPRG (P : KEMP, T : KEMT, Challenger : PRGO) = {
   }
 }.
 
+(* --- the ONE-KEYPAIR variant (the CT_SAMEKEY cells) ------------------------
+   Same shape with n = 1: the regrouping swaps vanish (keypair 0's material is
+   already contiguous) and there is a single segment. Validated separately
+   because "n = 1 is just the degenerate case" is an assumption, and a tactic
+   that runs but does not close is worse than an honest admit. *)
+
+module RedKG1 (P : KEMP, T : KEMT, Challenger : KGE) = {
+  var pq_keys_0 : pkt * skt
+  var seed_T_0 : ts
+
+  proc initialize () : pkt * tkt = {
+    var _tup : tkt * tst;
+    var ek_T : tkt;
+    var dk_T : tst;
+    pq_keys_0 <@ Challenger.generate();
+    seed_T_0 <$ dts;
+    _tup <@ T.derivekeypair(seed_T_0);
+    ek_T <- _tup.`1;
+    dk_T <- _tup.`2;
+    return (pq_keys_0.`1, ek_T);
+  }
+}.
+
+module RedPRG1 (P : KEMP, T : KEMT, Challenger : PRGO) = {
+  var pq_keys_0 : pkt * skt
+  var t_keys_0 : tkt * tst
+
+  proc initialize () : pkt * tkt = {
+    var seed_full_0 : fulls;
+    var seed_PQ_0 : pqs;
+    var seed_T_0 : ts;
+    seed_full_0 <@ Challenger.query();
+    seed_PQ_0 <- slice_l seed_full_0 0 nl;
+    seed_T_0 <- slice_r seed_full_0 nl (nl + nr);
+    pq_keys_0 <@ P.derivekeypair(seed_PQ_0);
+    t_keys_0 <@ T.derivekeypair(seed_T_0);
+    return (pq_keys_0.`1, t_keys_0.`1);
+  }
+}.
+
+(* --- the MIRRORED, ALREADY-PER-KEYPAIR variant (the hop_2 cells) -----------
+   Two further differences from hop_14, both real and both measured in the
+   export:
+     * the split side is side 1, not side 2;
+     * the grouped side is ALREADY per-keypair -- [Generate, sample, dkp, proj,
+       proj] repeated -- so there is nothing to regroup and the swap chain is
+       empty.
+   The mirror is handled by `symmetry.`, which swaps the sides AND the memory
+   tags in pre/post, so the whole validated body applies verbatim underneath
+   with the grouped side as {1}. That is the point of validating it here: it
+   means the emitter needs no mirrored bijection and no mirrored closer. *)
+
+module RedKG2 (P : KEMP, T : KEMT, Challenger : KGE) = {
+  var pq_keys_0, pq_keys_1 : pkt * skt
+  var seed_T_0, seed_T_1 : ts
+
+  proc initialize () : (pkt * tkt) * (pkt * tkt) = {
+    var _tup : tkt * tst;
+    var ek_T : tkt;
+    var dk_T : tst;
+    var _tup_0 : tkt * tst;
+    var ek_T2 : tkt;
+    var dk_unused : tst;
+    pq_keys_0 <@ Challenger.generate();
+    seed_T_0 <$ dts;
+    _tup <@ T.derivekeypair(seed_T_0);
+    ek_T <- _tup.`1;
+    dk_T <- _tup.`2;
+    pq_keys_1 <@ Challenger.generate();
+    seed_T_1 <$ dts;
+    _tup_0 <@ T.derivekeypair(seed_T_1);
+    ek_T2 <- _tup_0.`1;
+    dk_unused <- _tup_0.`2;
+    return ((pq_keys_0.`1, ek_T), (pq_keys_1.`1, ek_T2));
+  }
+}.
+
 section Main.
 
-declare module P <: KEMP {-RedKG, -RedPRG}.
-declare module T <: KEMT {-RedKG, -RedPRG, -P}.
+declare module P <: KEMP {-RedKG, -RedPRG, -RedKG1, -RedPRG1, -RedKG2}.
+declare module T <: KEMT {-RedKG, -RedPRG, -RedKG1, -RedPRG1, -RedKG2, -P}.
 
 declare axiom T_derivekeypair_det (g : (glob T)) (a0 : ts) :
   phoare[ T.derivekeypair : (glob T) = g /\ s = a0
@@ -271,6 +348,180 @@ proof.
                /\ RedKG.pq_keys_1{1} = RedPRG.pq_keys_1{2}).
     - wp; call (_: true); skip => />.
     exists* (glob T){1}, RedKG.seed_T_1{1}.
+    elim* => gT sv.
+    wp.
+    call{2} (T_derivekeypair_det gT sv).
+    call{1} (T_derivekeypair_det gT sv).
+    skip => />.
+  skip => />.
+qed.
+
+(* n = 1: no regrouping swaps, one segment. *)
+lemma prg_vs_keygen_init_segmented_n1 :
+  equiv [ RedKG1(P, T, KeyGenEquiv_FromDeriveKeyPair(P)).initialize
+          ~ RedPRG1(P, T, PRGSec_Random).initialize :
+          ={glob P, glob T}
+          ==> ={res} /\ ={glob P, glob T}
+              /\ RedKG1.pq_keys_0{1} = RedPRG1.pq_keys_0{2}
+              /\ RedPRG1.t_keys_0{2} = ev_dkp_t RedKG1.seed_T_0{1} ].
+proof.
+  proc.
+  seq 5 5 : (={glob P, glob T}
+             /\ RedKG1.pq_keys_0{1} = RedPRG1.pq_keys_0{2}
+             /\ RedPRG1.t_keys_0{2} = ev_dkp_t RedKG1.seed_T_0{1}
+             /\ _tup{1} = ev_dkp_t RedKG1.seed_T_0{1}
+             /\ ek_T{1} = (ev_dkp_t RedKG1.seed_T_0{1}).`1
+             /\ dk_T{1} = (ev_dkp_t RedKG1.seed_T_0{1}).`2).
+  + inline *.
+    swap{1} 4 -2.
+    seq 2 4 : (={glob P, glob T}
+               /\ seed{1} = seed_PQ_0{2}
+               /\ RedKG1.seed_T_0{1} = seed_T_0{2}).
+    - wp.
+      rndsem*{1} 0.
+      rnd (fun (p : pqs * ts) => concat p.`1 p.`2)
+          (fun (sf : fulls) => (slice_l sf 0 nl, slice_r sf nl (nl + nr))).
+      skip => />.
+      rewrite dfulls_split_dlet.
+      split.
+      * move => sf hsf; rewrite concat_slices_id //.
+      move => _; split.
+      * move => sf hsf.
+        rewrite !dlet1E; congr; apply fun_ext => a /=.
+        rewrite !dmap1E /(\o) /pred1 /=.
+        congr; apply mu_eq => b /=.
+        by rewrite eqboolP;
+           smt(slice_concat_left slice_concat_right concat_slices_id).
+      move => _ p hp.
+      have h1 : p.`1 \in dpqs by smt(supp_dlet supp_dmap).
+      have h2 : p.`2 \in dts by smt(supp_dlet supp_dmap).
+      split.
+      * rewrite supp_dlet; exists p.`1; rewrite h1 /=.
+        by rewrite supp_dmap; exists p.`2; rewrite h2.
+      move => _; smt(slice_concat_left slice_concat_right).
+    seq 2 1 : (={glob P, glob T}
+               /\ RedKG1.seed_T_0{1} = seed_T_0{2}
+               /\ RedKG1.pq_keys_0{1} = RedPRG1.pq_keys_0{2}).
+    - wp; call (_: true); skip => />.
+    exists* (glob T){1}, RedKG1.seed_T_0{1}.
+    elim* => gT sv.
+    wp.
+    call{2} (T_derivekeypair_det gT sv).
+    call{1} (T_derivekeypair_det gT sv).
+    skip => />.
+  skip => />.
+qed.
+
+(* mirrored orientation + already-per-keypair grouped side: `symmetry.` first,
+   then the identical body with zero regrouping swaps. *)
+lemma prg_vs_keygen_init_mirrored :
+  equiv [ RedPRG(P, T, PRGSec_Random).initialize
+          ~ RedKG2(P, T, KeyGenEquiv_FromDeriveKeyPair(P)).initialize :
+          ={glob P, glob T}
+          ==> ={res} /\ ={glob P, glob T}
+              /\ RedKG2.pq_keys_0{2} = RedPRG.pq_keys_0{1}
+              /\ RedKG2.pq_keys_1{2} = RedPRG.pq_keys_1{1}
+              /\ RedPRG.t_keys_0{1} = ev_dkp_t RedKG2.seed_T_0{2}
+              /\ RedPRG.t_keys_1{1} = ev_dkp_t RedKG2.seed_T_1{2} ].
+proof.
+  symmetry.
+  proc.
+  seq 5 5 : (={glob P, glob T}
+             /\ RedKG2.pq_keys_0{1} = RedPRG.pq_keys_0{2}
+             /\ RedPRG.t_keys_0{2} = ev_dkp_t RedKG2.seed_T_0{1}
+             /\ _tup{1} = ev_dkp_t RedKG2.seed_T_0{1}
+             /\ ek_T{1} = (ev_dkp_t RedKG2.seed_T_0{1}).`1
+             /\ dk_T{1} = (ev_dkp_t RedKG2.seed_T_0{1}).`2).
+  + inline *.
+    swap{1} 4 -2.
+    seq 2 4 : (={glob P, glob T}
+               /\ seed{1} = seed_PQ_0{2}
+               /\ RedKG2.seed_T_0{1} = seed_T_0{2}).
+    - wp.
+      rndsem*{1} 0.
+      rnd (fun (p : pqs * ts) => concat p.`1 p.`2)
+          (fun (sf : fulls) => (slice_l sf 0 nl, slice_r sf nl (nl + nr))).
+      skip => />.
+      rewrite dfulls_split_dlet.
+      split.
+      * move => sf hsf; rewrite concat_slices_id //.
+      move => _; split.
+      * move => sf hsf.
+        rewrite !dlet1E; congr; apply fun_ext => a /=.
+        rewrite !dmap1E /(\o) /pred1 /=.
+        congr; apply mu_eq => b /=.
+        by rewrite eqboolP;
+           smt(slice_concat_left slice_concat_right concat_slices_id).
+      move => _ p hp.
+      have h1 : p.`1 \in dpqs by smt(supp_dlet supp_dmap).
+      have h2 : p.`2 \in dts by smt(supp_dlet supp_dmap).
+      split.
+      * rewrite supp_dlet; exists p.`1; rewrite h1 /=.
+        by rewrite supp_dmap; exists p.`2; rewrite h2.
+      move => _; smt(slice_concat_left slice_concat_right).
+    seq 2 1 : (={glob P, glob T}
+               /\ RedKG2.seed_T_0{1} = seed_T_0{2}
+               /\ RedKG2.pq_keys_0{1} = RedPRG.pq_keys_0{2}).
+    - wp; call (_: true); skip => />.
+    exists* (glob T){1}, RedKG2.seed_T_0{1}.
+    elim* => gT sv.
+    wp.
+    call{2} (T_derivekeypair_det gT sv).
+    call{1} (T_derivekeypair_det gT sv).
+    skip => />.
+  seq 5 5 : (={glob P, glob T}
+             /\ RedKG2.pq_keys_0{1} = RedPRG.pq_keys_0{2}
+             /\ RedPRG.t_keys_0{2} = ev_dkp_t RedKG2.seed_T_0{1}
+             /\ _tup{1} = ev_dkp_t RedKG2.seed_T_0{1}
+             /\ ek_T{1} = (ev_dkp_t RedKG2.seed_T_0{1}).`1
+             /\ dk_T{1} = (ev_dkp_t RedKG2.seed_T_0{1}).`2
+             /\ RedKG2.pq_keys_1{1} = RedPRG.pq_keys_1{2}
+             /\ RedPRG.t_keys_1{2} = ev_dkp_t RedKG2.seed_T_1{1}
+             /\ _tup_0{1} = ev_dkp_t RedKG2.seed_T_1{1}
+             /\ ek_T2{1} = (ev_dkp_t RedKG2.seed_T_1{1}).`1
+             /\ dk_unused{1} = (ev_dkp_t RedKG2.seed_T_1{1}).`2).
+  + inline *.
+    swap{1} 4 -2.
+    seq 2 4 : (={glob P, glob T}
+               /\ RedKG2.pq_keys_0{1} = RedPRG.pq_keys_0{2}
+               /\ RedPRG.t_keys_0{2} = ev_dkp_t RedKG2.seed_T_0{1}
+               /\ _tup{1} = ev_dkp_t RedKG2.seed_T_0{1}
+               /\ ek_T{1} = (ev_dkp_t RedKG2.seed_T_0{1}).`1
+               /\ dk_T{1} = (ev_dkp_t RedKG2.seed_T_0{1}).`2
+               /\ seed{1} = seed_PQ_1{2}
+               /\ RedKG2.seed_T_1{1} = seed_T_1{2}).
+    - wp.
+      rndsem*{1} 0.
+      rnd (fun (p : pqs * ts) => concat p.`1 p.`2)
+          (fun (sf : fulls) => (slice_l sf 0 nl, slice_r sf nl (nl + nr))).
+      skip => />.
+      rewrite dfulls_split_dlet.
+      split.
+      * move => sf hsf; rewrite concat_slices_id //.
+      move => _; split.
+      * move => sf hsf.
+        rewrite !dlet1E; congr; apply fun_ext => a /=.
+        rewrite !dmap1E /(\o) /pred1 /=.
+        congr; apply mu_eq => b /=.
+        by rewrite eqboolP;
+           smt(slice_concat_left slice_concat_right concat_slices_id).
+      move => _ p hp.
+      have h1 : p.`1 \in dpqs by smt(supp_dlet supp_dmap).
+      have h2 : p.`2 \in dts by smt(supp_dlet supp_dmap).
+      split.
+      * rewrite supp_dlet; exists p.`1; rewrite h1 /=.
+        by rewrite supp_dmap; exists p.`2; rewrite h2.
+      move => _; smt(slice_concat_left slice_concat_right).
+    seq 2 1 : (={glob P, glob T}
+               /\ RedKG2.pq_keys_0{1} = RedPRG.pq_keys_0{2}
+               /\ RedPRG.t_keys_0{2} = ev_dkp_t RedKG2.seed_T_0{1}
+               /\ _tup{1} = ev_dkp_t RedKG2.seed_T_0{1}
+               /\ ek_T{1} = (ev_dkp_t RedKG2.seed_T_0{1}).`1
+               /\ dk_T{1} = (ev_dkp_t RedKG2.seed_T_0{1}).`2
+               /\ RedKG2.seed_T_1{1} = seed_T_1{2}
+               /\ RedKG2.pq_keys_1{1} = RedPRG.pq_keys_1{2}).
+    - wp; call (_: true); skip => />.
+    exists* (glob T){1}, RedKG2.seed_T_1{1}.
     elim* => gT sv.
     wp.
     call{2} (T_derivekeypair_det gT sv).

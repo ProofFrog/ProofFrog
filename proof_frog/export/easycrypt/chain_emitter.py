@@ -5746,6 +5746,7 @@ def _emit_one_oracle_chain(
                 method_return_types,
                 det_methods,
                 clone_alias or {},
+                full_coupling,
             )
             if deriv is not None:
                 return [], [_res_tag(SYNTH_PARAM), *deriv, "qed."], set()
@@ -6109,6 +6110,7 @@ def _synth_derivation_oracle_peel(  # pylint: disable=too-many-arguments,too-man
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     det_methods: dict[str, set[str]],
     clone_alias: dict[str, str],
+    full_coupling: str,
 ) -> list[str] | None:
     """Whole-oracle tactic for a POST-INIT oracle under a derivation-chain
     coupling, or ``None`` off-shape.
@@ -6159,20 +6161,88 @@ def _synth_derivation_oracle_peel(  # pylint: disable=too-many-arguments,too-man
     binders: list[str] = []
     peels: list[tuple[dict[str, str], Sequence[ec_ast.EcStmt], str]] = []
     glob_of: dict[str, str] = {}
+    # A field whose EV-FORM the coupling already states is substituted by that
+    # form rather than frozen. Freezing it makes every `call` obligation the peel
+    # generates mention the LIVE field (the peel introduces those AFTER `exists*`
+    # runs, so `exists*` cannot generalize them), leaving the closer to relate
+    # field to binder through the precondition across ~15 nested `forall`s --
+    # which neither `=> />` nor `=> /#` manages at real goal size. Read off the
+    # actual goal print of `CG_HON_PK6.ec:58871`. With the ev-form substituted
+    # instead, BOTH sides' obligations are the same ev-terms and match
+    # syntactically.
+    ev_of: dict[tuple[str, str], str] = {}
+    for part in (full_coupling or "").split(" /\\ "):
+        lhs, sep, rhs = part.partition("=")
+        if not sep or ".`" in lhs or "ev_" not in rhs:
+            continue
+        m = re.match(r"\s*([A-Za-z_][\w.]*\.\w+)\{([12])\}\s*$", lhs)
+        if m is not None:
+            ev_of[(m.group(2), m.group(1))] = rhs.strip()
+    # A memory-marked reference inside an ev-form has to become the binder that
+    # froze it, since a tactic argument is a proof term and cannot name a program
+    # variable. Sides are walked memory-1 first, so a coupling written the usual
+    # way (reduction field stated as an ev-form over the game's seed) resolves.
+    frozen_of: dict[str, str] = {}
+
+    def _as_proof_term(text: str) -> str | None:
+        out = text
+        for ref, mem in set(re.findall(r"([A-Za-z_][\w.]*)\{([12])\}", text)):
+            binder = frozen_of.get(f"{ref}{{{mem}}}")
+            if binder is None:
+                return None
+            out = out.replace(f"{ref}{{{mem}}}", binder)
+        return None if "{" in out else out
+
+    # PASS 1 -- freeze every field the coupling does NOT give an ev-form for,
+    # plus both sides' arguments. Freezing first means a later ev-form (which
+    # names the OTHER side's seed field) always finds its binder, whatever order
+    # the fields are declared in.
+    ev_fields: list[tuple[str, str, str]] = []  # (side, ec_name, ev text)
     for proc, state, base, side in sides:
-        env: dict[str, str] = {}
         for fld in state.fields:
             # pylint: disable-next=protected-access
             ec_name = mt._ec_field_name(fld.name)
+            ev = ev_of.get((side, f"{base}.{ec_name}"))
+            if ev is not None:
+                ev_fields.append((side, ec_name, ev))
+                continue
             binder = f"fv{len(binders)}"
-            frozen.append(f"{base}.{ec_name}" "{" f"{side}" "}")
+            ref = f"{base}.{ec_name}" "{" f"{side}" "}"
+            frozen.append(ref)
+            frozen_of[ref] = binder
             binders.append(binder)
-            env[ec_name] = binder
         for prm in proc.params:
             binder = f"av{len(binders)}"
-            frozen.append(f"{prm.name}" "{" f"{side}" "}")
+            ref = f"{prm.name}" "{" f"{side}" "}"
+            frozen.append(ref)
+            frozen_of[ref] = binder
             binders.append(binder)
-            env[prm.name] = binder
+    # PASS 2 -- resolve each ev-form against those binders; an unresolvable one
+    # falls back to being frozen itself, which is exactly the pre-ev behaviour.
+    ev_env: dict[tuple[str, str], str] = {}
+    for side, ec_name, ev in ev_fields:
+        base = next(b for _p, _s, b, sd in sides if sd == side)
+        as_term = _as_proof_term(ev)
+        if as_term is not None:
+            ev_env[(side, ec_name)] = f"({as_term})"
+            continue
+        binder = f"fv{len(binders)}"
+        ref = f"{base}.{ec_name}" "{" f"{side}" "}"
+        frozen.append(ref)
+        frozen_of[ref] = binder
+        binders.append(binder)
+        ev_env[(side, ec_name)] = binder
+    for proc, state, base, side in sides:
+        env = {}
+        for fld in state.fields:
+            # pylint: disable-next=protected-access
+            ec_name = mt._ec_field_name(fld.name)
+            env[ec_name] = ev_env.get(
+                (side, ec_name),
+                frozen_of.get(f"{base}.{ec_name}" "{" f"{side}" "}", ec_name),
+            )
+        for prm in proc.params:
+            env[prm.name] = frozen_of[f"{prm.name}" "{" f"{side}" "}"]
         stmts = [s for s in proc.body if not isinstance(s, ec_ast.VarDecl)]
         if any(isinstance(s, (ec_ast.Sample, ec_ast.If)) for s in stmts):
             return None  # not a linear deterministic body

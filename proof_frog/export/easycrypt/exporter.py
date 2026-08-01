@@ -4496,6 +4496,173 @@ def export_proof_file(proof_path: str) -> str:
         body = " /\\ ".join(conj)
         return f"{glob_invariant_conj} /\\ {body}" if glob_invariant_conj else body
 
+    def _game_derived_field_conjuncts(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
+        game: frog_ast.Game,
+        game_step: frog_ast.Step,
+        seed_holder: str,
+        seed_flds: list[frog_ast.Field],
+        gs: str,
+    ) -> list[str]:
+        """``<Game>.<pub_k>{gs} = <ev-form over the k-th seed>`` for every game
+        field that is a NON-SEED projection of the same ``KeyGen`` its seed came
+        from; ``[]`` when the shape does not hold.
+
+        Read structurally off the game's own ``Initialize``: the parser expands
+        ``[ek, dk] = K.KeyGen()`` into ``t = K.KeyGen(); ek = t[0]; dk = t[1]``,
+        so the k-th ``KeyGen`` call's projections name the k-th keypair's fields.
+        The seed sits at the projection index :func:`_prg_query_game_coupling`
+        already validated (``DeriveKeyPair``'s seed-returning position); every
+        OTHER projection is derived, and its value is the same-index element of
+        the rendered ``derivekeypair`` evaluated symbolically at the seed.
+
+        Returning ``[]`` rather than declining the whole coupling keeps every
+        game without this shape exactly as it was."""
+        init = next(
+            (m for m in game.methods if m.signature.name.lower() == "initialize"), None
+        )
+        dkp_proc = (
+            next((pr for pr in ec_scheme.procs if pr.name == "derivekeypair"), None)
+            if ec_scheme is not None
+            else None
+        )
+        if init is None or dkp_proc is None or len(dkp_proc.params) != 1:
+            return []
+        field_names = {f.name for f in game.fields}
+        # The game AST here is fully INLINED: ``KeyGen`` is gone and each keypair
+        # surfaces as ``t = [<derived pair>, <sampled seed>]; ek = t[0]; dk =
+        # t[1]``. So the k-th keypair is the k-th such tuple local, and the SEED
+        # position is the element that is exactly a sampled variable -- every
+        # other element is derived material whose value is the same-index element
+        # of ``derivekeypair`` at that seed.
+        sampled = {
+            st.var.name
+            for st in init.block.statements
+            if isinstance(st, frog_ast.Sample) and isinstance(st.var, frog_ast.Variable)
+        }
+        tuple_seed_idx: dict[str, int] = {}
+        projections: list[tuple[int, int, str]] = []  # (keypair ordinal, index, field)
+        for st in init.block.statements:
+            if not isinstance(st, frog_ast.Assignment) or not isinstance(
+                st.var, frog_ast.Variable
+            ):
+                continue
+            val = st.value
+            if isinstance(val, frog_ast.Tuple):
+                idx = next(
+                    (
+                        i
+                        for i, e in enumerate(val.values)
+                        if isinstance(e, frog_ast.Variable) and e.name in sampled
+                    ),
+                    None,
+                )
+                if idx is not None:
+                    tuple_seed_idx[st.var.name] = idx
+            elif (
+                isinstance(val, frog_ast.ArrayAccess)
+                and isinstance(val.the_array, frog_ast.Variable)
+                and val.the_array.name in tuple_seed_idx
+                and isinstance(val.index, frog_ast.Integer)
+                and st.var.name in field_names
+            ):
+                projections.append(
+                    (
+                        list(tuple_seed_idx).index(val.the_array.name),
+                        val.index.num,
+                        st.var.name,
+                    )
+                )
+        if not projections:
+            return []
+        seed_idxs = set(tuple_seed_idx.values())
+        seed_order = [f.name for f in seed_flds]
+        seed_idx = (
+            next(iter(seed_idxs))
+            if len(seed_idxs) == 1
+            and [f for k, j, f in sorted(projections) if j == next(iter(seed_idxs))]
+            == seed_order
+            else None
+        )
+        if seed_idx is None:
+            return []
+        # -- symbolic evaluation of the rendered ``derivekeypair`` -------------
+        game_scheme_expr = pt.last_module_arg(resolver.resolve(game_step).module_expr)
+        inner = (
+            game_scheme_expr[
+                game_scheme_expr.index("(") + 1 : game_scheme_expr.rindex(")")
+            ]
+            if "(" in game_scheme_expr
+            else ""
+        )
+        args = [pt.module_base_name(a) for a in cc_split_args(inner)] if inner else []
+        if len(args) < len(dkp_proc.params) and not args:
+            return []
+        pmap = (
+            {p.name: a for p, a in zip(ec_scheme.params, args)}
+            if ec_scheme is not None
+            else {}
+        )
+
+        def _ret_elems(seed_ref: str) -> list[str] | None:
+            env: dict[str, str] = {dkp_proc.params[0].name: seed_ref}
+
+            def _sub(text: str) -> str:
+                for k in sorted(env, key=len, reverse=True):
+                    text = re.sub(rf"\b{re.escape(k)}\b", env[k], text)
+                return text
+
+            for st in dkp_proc.body:
+                if isinstance(st, ec_ast.VarDecl):
+                    continue
+                if isinstance(st, ec_ast.Return):
+                    ret = _sub(st.expr).strip()
+                    while ret.startswith("(") and ret.endswith(")"):
+                        stripped = ret[1:-1]
+                        if len(cc_split_args(stripped)) > 1:
+                            return [e.strip() for e in cc_split_args(stripped)]
+                        ret = stripped.strip()
+                    return None
+                if isinstance(st, ec_ast.Assign):
+                    env[st.var] = f"({_sub(st.rhs)})"
+                    continue
+                if not isinstance(st, ec_ast.Call):
+                    return None
+                mod, dot, meth = st.callee.partition(".")
+                alias = clone_alias_by_module.get(pmap.get(mod, mod)) if dot else None
+                if alias is None:
+                    return None
+                applied = (
+                    " ".join(f"({_sub(a)})" for a in cc_split_args(st.args))
+                    if st.args.strip()
+                    else ""
+                )
+                env[st.var] = f"({alias}.ev_{meth}{(' ' + applied) if applied else ''})"
+            return None
+
+        # pylint: disable=protected-access
+        out: list[str] = []
+        for ordinal, idx, fname in sorted(projections):
+            if idx == seed_idx:
+                continue
+            seed_name = next(
+                (
+                    f
+                    for k, j, f in sorted(projections)
+                    if k == ordinal and j == seed_idx
+                ),
+                None,
+            )
+            if seed_name is None:
+                return []
+            elems = _ret_elems(f"{seed_holder}.{mt._ec_field_name(seed_name)}{{{gs}}}")
+            if elems is None or idx >= len(elems):
+                return []
+            out.append(
+                f"{seed_holder}.{mt._ec_field_name(fname)}{{{gs}}} = {elems[idx]}"
+            )
+        # pylint: enable=protected-access
+        return out
+
     def _prg_query_game_coupling(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> str | None:
@@ -4590,28 +4757,14 @@ def export_proof_file(proof_path: str) -> str:
         ]
         if not seed_flds:
             return None
-        # PARKED AT n=1 (2026-07-31). The ordinal machinery below is general and
-        # WORKS -- enabling it drops admits hard (CG PK/DIFFKEY 13 -> 7, CK
-        # PK/DIFFKEY 23 -> 17) because the post-init derivation peel then fires.
-        # But it also puts an `ev_` derivation post on hops whose TACTICS are
-        # still single-keypair, and each newly-reachable one must be
-        # n-generalized before the cell compiles again. Measured, in the order
-        # they surfaced on CG_seedbased_HON_BIND_K_PK:
-        #   1. `_prg_query_init_tac` -- couples ONE leading sample and reuses one
-        #      frozen seed for both keypairs ("invalid last instruction").
-        #      NOW GATED to a single challenger query (that gate is correct and
-        #      stays).
-        #   2. the GENERIC init backbone peel -- `call (_: true)` cannot prove an
-        #      ev-derivation post ("cannot prove goal (strict)"). NOW honest-gated
-        #      by `ev_derivation_post` (also correct, also stays).
-        #   3. `_synth_derivation_oracle_peel` on the two-keypair `challenge`
-        #      ("cannot save an incomplete proof") -- STILL OPEN, and the reason
-        #      this is parked rather than landed.
-        # Re-enabling = delete this guard and n-generalize (3). Until then the
-        # four two-keypair cells keep their EC-ACCEPTED status (⚠13/⚠13/⚠23/⚠23),
-        # which beats rejected-with-fewer-admits (MAP principle 2).
-        if len(seed_flds) != 1:
-            return None
+        # n KEYPAIRS (unparked 2026-07-31). The ordinal machinery below pairs
+        # the k-th ``Challenger.query()`` with the k-th game seed field. The two
+        # tactics it newly reaches were generalized with it: the post-init
+        # derivation peel now substitutes each coupled field by its ev-FORM
+        # instead of freezing it (so both sides' obligations are the same terms),
+        # and ``_prg_query_init_tac`` stays gated to a single challenger query --
+        # a two-keypair ``initialize`` is an honest admit until its n-sample
+        # coupling is built.
         seed_holder = pt.module_base_name(resolver.resolve(game_step).module_expr)
         # ORDINAL, declaration order: the k-th ``Challenger.query()`` in the
         # reduction's init derives the k-th keypair, so it expands the k-th game
@@ -4731,6 +4884,20 @@ def export_proof_file(proof_path: str) -> str:
             return None
         if n_queries != len(q_vals):
             return None  # a seed the reduction never expands -> off-shape
+        # -- the GAME's OWN derived fields ------------------------------------
+        # A binding game holds not just the seed but the PUBLIC half of each
+        # keypair (``ek0``/``ek1``), and a post-init oracle that reads them
+        # (``Challenge``: ``ek0 != ek1``) needs them related to the reduction's
+        # RECOMPUTED packed encaps keys. Without this the derivation peel leaves
+        # exactly ``(ss_eq && ek0 <> ek1) = (ss_eq && !(pk = pk' /\ ekT = ekT'))``
+        # with ``ek0``/``ek1`` opaque -- measured on the real goal
+        # (``EV1.ec:58872``). Each such field IS derivable: it is the non-seed
+        # projection of the same ``DeriveKeyPair`` the seed came from, so state it
+        # in ev-form over the seed. TRUE and PROVEN, not assumed -- the hop's own
+        # ``initialize`` lemma has to establish it or EC rejects the file.
+        conj += _game_derived_field_conjuncts(
+            game, game_step, seed_holder, seed_flds, gs
+        )
         # The emitted conjuncts read the GAME challenger's seed field
         # (``<Game>.dk0{1}``) inside a post that must survive each abstract
         # scheme call the init peel steps over. EC refuses ``call (_: true)``

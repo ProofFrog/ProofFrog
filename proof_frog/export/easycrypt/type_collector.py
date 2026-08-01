@@ -145,6 +145,10 @@ class TypeCollector:
         # which is exactly what "prefer the weakest statement that suffices"
         # rules out.
         self._virtual_concat_requests: set[str] = set()
+        # Triples that were SYNTHESIZED rather than seen as a real concat. Only
+        # these get the extra dlet-form split axiom, so a real concat pair's
+        # TCB is untouched.
+        self._virtual_concat_triples: set[tuple[str, str, str]] = set()
         self._slice_op_set: set[tuple[str, str]] = set()
         # Abstract concatenation operators:
         # ``concat_<a>_<b>_to_<r> : <a> -> <b> -> <r>``.
@@ -1094,6 +1098,7 @@ class TypeCollector:
             if (left_name, right_name, src_name) in self._concat_op_set:
                 continue  # a real triple already covers it
             self.register_concat(left_name, right_name, src_name)
+            self._virtual_concat_triples.add((left_name, right_name, src_name))
 
         # ``rnd`` with a slice/concat bijection. Skipped when the bit
         # lengths aren't known (e.g. unparameterized ``BitString`` types).
@@ -1141,6 +1146,23 @@ class TypeCollector:
                     f" {concat_op} p.`1 p.`2)",
                 )
             )
+            if (left_name, right_name, result_name) in self._virtual_concat_triples:
+                # The ``\`*\``-form above does NOT serve a `rndsem`-folded goal:
+                # `rndsem*{i} 0` produces `dlet dL (fun a => dmap dS (fun b =>
+                # (a, b)))` and `dprod_dlet` will not bridge the two in the
+                # support obligation (measured). Emit the DLET form as well --
+                # the same treatment the 3-way concat3 block already gives, for
+                # the same reason. Validated end-to-end by
+                # ``ec_templates/split_uniform_couple.ec``.
+                decls.append(
+                    ec_ast.Axiom(
+                        f"{distr_res}_split_dlet_{left_name}_{right_name}",
+                        f"{distr_res} =\n"
+                        f"  dlet {distr_l} (fun (v1 : {left_name}) =>\n"
+                        f"     dmap {distr_r} (fun (v2 : {right_name}) =>"
+                        f" {concat_op} v1 v2))",
+                    )
+                )
         # 3-way concat round-trip and distribution-split axioms for
         # partial-split applications. The dlet-form distribution-split
         # axiom matches the shape produced by EC's ``rndsem*{i} 0`` when

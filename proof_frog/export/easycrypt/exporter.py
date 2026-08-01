@@ -5663,6 +5663,12 @@ def export_proof_file(proof_path: str) -> str:
         the cells this currently fires for, that lemma still admits, so until it
         closes the conjunct is ASSUMED. Flagged in the plan as such."""
         if len(rest_a) != len(rest_b) or not rest_a:
+            print(
+                "DBGX len",
+                [f.name for f in rest_a],
+                [f.name for f in rest_b],
+                flush=True,
+            )
             return None
         red_mods: list[ec_ast.Module] = []
         for st in (step_a, step_b):
@@ -5700,7 +5706,7 @@ def export_proof_file(proof_path: str) -> str:
                 if isinstance(st, (ec_ast.VarDecl, ec_ast.Return)):
                     continue
                 if isinstance(st, ec_ast.Sample):
-                    env[st.var] = f"@atom:{st.var}"
+                    env[st.var] = f"@sample:{st.var}"
                     continue
                 if isinstance(st, ec_ast.Assign):
                     env[st.var] = f"({_sub(st.rhs)})"
@@ -5711,11 +5717,16 @@ def export_proof_file(proof_path: str) -> str:
                 if not dot:
                     return None
                 if mod_name == chal:
-                    env[st.var] = f"@atom:{st.var}"
+                    env[st.var] = f"@chal:{meth}"
                     continue
                 alias = clone_alias_by_module.get(mod_name)
                 if alias is None:
                     return None
+                if meth not in det_methods_by_module.get(mod_name, set()):
+                    # A PROBABILISTIC call has no ``ev_`` value; marking it as one
+                    # would let a bogus derivation reach a conjunct.
+                    env[st.var] = f"@prob:{st.var}"
+                    continue
                 args = (
                     [_sub(a) for a in cc_split_args(st.args)] if st.args.strip() else []
                 )
@@ -5727,6 +5738,14 @@ def export_proof_file(proof_path: str) -> str:
             return env
 
         vals_a, vals_b = _init_values(red_mods[0]), _init_values(red_mods[1])
+        print(
+            "DBGX vals",
+            [f.name for f in rest_a],
+            [f.name for f in rest_b],
+            vals_a,
+            vals_b,
+            flush=True,
+        )
         if vals_a is None or vals_b is None:
             return None
 
@@ -5744,7 +5763,7 @@ def export_proof_file(proof_path: str) -> str:
             out: list[str] = []
             for fd, fan in zip(derived, anchors):
                 vd, van = dvals.get(fd.name), avals.get(fan.name)
-                if vd is None or van is None or not van.startswith("@atom:"):
+                if vd is None or van is None or not van.startswith("@"):
                     return None  # the anchor side must be an undecomposed atom
                 m = re.fullmatch(r"\((\S+\.ev_\w+) \((.+)\)\)", vd.strip())
                 if m is None or "@atom:" in m.group(1):
@@ -5759,8 +5778,101 @@ def export_proof_file(proof_path: str) -> str:
         # ev-application. The CK chain alternates -- hop_2/hop_12 derive on the
         # left, hop_4/hop_14 on the right -- so fixing one orientation would
         # silently decline half the class.
-        return _emit(rest_a, rest_b, vals_a, vals_b, base_a, base_b, "1", "2") or _emit(
-            rest_b, rest_a, vals_b, vals_a, base_b, base_a, "2", "1"
+        # When NEITHER side holds an ev-application (both are undecomposed
+        # atoms), the relation comes from the CHALLENGER's own body instead.
+        def _chal_derivation_op(  # pylint: disable=too-many-return-statements
+            step: frog_ast.Step, meth: str
+        ) -> str | None:
+            """``<clone>.ev_<m>`` when ``step``'s challenger answers ``meth`` by
+            sampling a seed and returning ONE call on it -- the KeyGenEquiv
+            ``FromDeriveKeyPair`` shape. Read off the challenger game's own AST;
+            NEVER inferred from the two field types, since several ops can share
+            a signature and a wrong pick is a wrong-but-well-typed coupling."""
+            # pylint: disable=protected-access
+            chal = engine._get_game_ast(step.challenger, None)
+            # pylint: enable=protected-access
+            print(
+                "DBGC",
+                meth,
+                chal is None,
+                [m.signature.name for m in chal.methods] if chal else None,
+                flush=True,
+            )
+            if chal is None:
+                return None
+            meth_ast = next(
+                (x for x in chal.methods if x.signature.name.lower() == meth.lower()),
+                None,
+            )
+            if meth_ast is None:
+                return None
+            stmts = list(meth_ast.block.statements)
+            if (
+                len(stmts) != 2
+                or not isinstance(stmts[0], frog_ast.Sample)
+                or not isinstance(stmts[0].var, frog_ast.Variable)
+                or not isinstance(stmts[1], frog_ast.ReturnStatement)
+            ):
+                return None
+            print("DBGC2", [(type(x).__name__, str(x)[:80]) for x in stmts], flush=True)
+            call = stmts[1].expression
+            if (
+                not isinstance(call, frog_ast.FuncCall)
+                or not isinstance(call.func, frog_ast.FieldAccess)
+                or len(call.args) != 1
+                or not isinstance(call.args[0], frog_ast.Variable)
+                or call.args[0].name != stmts[0].var.name
+            ):
+                return None
+            # The challenger AST is already INSTANTIATED, so the call names the
+            # declared module directly (``KEM_T.DeriveKeyPair``) -- no need to
+            # walk the reduction's module expression to recover it.
+            obj = call.func.the_object
+            if not isinstance(obj, frog_ast.Variable):
+                return None
+            alias = clone_alias_by_module.get(obj.name)
+            if alias is None or call.func.name.lower() not in det_methods_by_module.get(
+                obj.name, set()
+            ):
+                return None  # a probabilistic derivation has no ``ev_`` value
+            return f"{alias}.ev_{call.func.name.lower()}"
+
+        def _emit_both_anchor(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+            fields_c: list[frog_ast.Field],
+            fields_s: list[frog_ast.Field],
+            vals_c: dict[str, str],
+            vals_s: dict[str, str],
+            step_c: frog_ast.Step,
+            base_c: str,
+            base_s: str,
+            mem_c: str,
+            mem_s: str,
+        ) -> list[str] | None:
+            out: list[str] = []
+            for fc, fs in zip(fields_c, fields_s):
+                vc, vs = vals_c.get(fc.name), vals_s.get(fs.name)
+                if vc is None or vs is None:
+                    return None
+                if not vc.startswith("@chal:") or not vs.startswith("@sample:"):
+                    return None
+                op = _chal_derivation_op(step_c, vc[len("@chal:") :])
+                if op is None:
+                    return None
+                out.append(
+                    f"{base_c}.{mt._ec_field_name(fc.name)}{{{mem_c}}} = "
+                    f"({op} ({base_s}.{mt._ec_field_name(fs.name)}{{{mem_s}}}))"
+                )
+            return out
+
+        return (
+            _emit(rest_a, rest_b, vals_a, vals_b, base_a, base_b, "1", "2")
+            or _emit(rest_b, rest_a, vals_b, vals_a, base_b, base_a, "2", "1")
+            or _emit_both_anchor(
+                rest_a, rest_b, vals_a, vals_b, step_a, base_a, base_b, "1", "2"
+            )
+            or _emit_both_anchor(
+                rest_b, rest_a, vals_b, vals_a, step_b, base_b, base_a, "2", "1"
+            )
         )
         # pylint: enable=protected-access
 

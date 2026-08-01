@@ -5279,6 +5279,37 @@ def export_proof_file(proof_path: str) -> str:
                     return None
             return segs
 
+        def _alt_batched(
+            body: list[ec_ast.EcStmt], chal: str | None
+        ) -> tuple[list[list[ec_ast.EcStmt]], list[list[ec_ast.EcStmt]]] | None:
+            """The BATCHED presentation of the same side (hop_12).
+
+            ``[chal]*n ++ [sample]*n ++ n blocks of (det call, assign*)``. Same
+            operation multiset as :func:`_alt_segments`, just grouped by KIND
+            instead of by keypair, so it needs regrouping before each segment is
+            the validated shape. Returns ``(segments, blocks)``; ``blocks`` is
+            what the regrouping swap chain is computed from.
+            """
+            n = 0
+            while n < len(body) and _is_chal(body[n], chal):
+                n += 1
+            if n < 1 or len(body) < 2 * n:
+                return None
+            samples = body[n : 2 * n]
+            if any(not isinstance(st, ec_ast.Sample) for st in samples):
+                return None
+            rest = body[2 * n :]
+            cuts = [i for i, st in enumerate(rest) if isinstance(st, ec_ast.Call)]
+            if len(cuts) != n or not cuts or cuts[0] != 0:
+                return None
+            blocks = [rest[a:b] for a, b in zip(cuts, cuts[1:] + [len(rest)])]
+            for blk in blocks:
+                if _is_chal(blk[0], chal):
+                    return None
+                if any(not isinstance(x, ec_ast.Assign) for x in blk[1:]):
+                    return None
+            return [[body[k], samples[k], *blocks[k]] for k in range(n)], blocks
+
         def _grouped(body: list[ec_ast.EcStmt], chal: str | None) -> int | None:
             """``n`` non-challenger calls then ``n`` challenger calls, else None."""
             if not body or any(not isinstance(st, ec_ast.Call) for st in body):
@@ -5290,17 +5321,26 @@ def export_proof_file(proof_path: str) -> str:
                 return None
             return len(body) // 2
 
-        alt_side = None
+        alt_side: (
+            tuple[int, list[list[ec_ast.EcStmt]], int, list[list[ec_ast.EcStmt]] | None]
+            | None
+        ) = None
         for idx in (0, 1):
             other = 1 - idx
-            segs = _alt_segments(execs[idx] or [], chal_of[idx])
             n_grp = _grouped(execs[other] or [], chal_of[other])
-            if segs is not None and n_grp is not None and n_grp == len(segs):
-                alt_side = (idx, segs, n_grp)
+            if n_grp is None:
+                continue
+            segs = _alt_segments(execs[idx] or [], chal_of[idx])
+            if segs is not None and n_grp == len(segs):
+                alt_side = (idx, segs, n_grp, None)
+                break
+            batched = _alt_batched(execs[idx] or [], chal_of[idx])
+            if batched is not None and n_grp == len(batched[0]):
+                alt_side = (idx, batched[0], n_grp, batched[1])
                 break
         if alt_side is None:
             return None
-        ai, segs, n = alt_side
+        ai, segs, n, alt_blocks = alt_side
         if n not in (1, 2):
             # Only n = 1 and n = 2 are tripwire-validated
             # (``ec_templates/keygenequiv_init_swap.ec`` carries both). Decline
@@ -5375,6 +5415,11 @@ def export_proof_file(proof_path: str) -> str:
         # swap has nothing to do -- and would be out of range on the grouped
         # side's two-statement body. Validated by ``keygenequiv_init_n1``.
         lines = ["proc."] + ([f"swap{{{bm}}} 2 1."] if n == 2 else [])
+        if alt_blocks is not None:
+            # The alternating side is BATCHED (hop_12): regroup it per keypair
+            # first, with the same chain the split-seed route computes for the
+            # identical layout. Validated by ``keygenequiv_init_batched``.
+            lines += _regroup_swaps(n, alt_blocks, am)
         done: list[str] = []
         for k, seg in enumerate(segs):
             sample_stmt = seg[1]

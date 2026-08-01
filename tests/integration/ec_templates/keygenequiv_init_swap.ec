@@ -123,10 +123,43 @@ module RedR1 (P : KEMP, T : KEMT) = {
   }
 }.
 
+(* --- the BATCHED variant (hop_12) -----------------------------------------
+   Same operation multiset as the n = 2 lemma, but the derivekeypair side runs
+   BOTH challenger generates first, then both seeds, then both derivekeypairs
+   with their projections -- it is batched, not alternating. So on top of the
+   `swap` that aligns the grouped side, the batched side must first be regrouped
+   per keypair; after that every segment is exactly the validated shape.
+   This is the last open `initialize` shape on the CK HON cells. *)
+
+module RedL2 (P : KEMP, T : KEMT) = {
+  var pq_keys_0, pq_keys_1 : pkt * skt
+  var seed_T_0, seed_T_1 : seedt
+
+  proc initialize () : (pkt * tkt) * (pkt * tkt) = {
+    var t0 : tkt * tst;
+    var ek0 : tkt;
+    var dk0 : tst;
+    var t1 : tkt * tst;
+    var ek1 : tkt;
+    var dk1 : tst;
+    pq_keys_0 <@ ChalK(P).generate();
+    pq_keys_1 <@ ChalK(P).generate();
+    seed_T_0 <$ dseed;
+    seed_T_1 <$ dseed;
+    t0 <@ T.derivekeypair(seed_T_0);
+    ek0 <- t0.`1;
+    dk0 <- t0.`2;
+    t1 <@ T.derivekeypair(seed_T_1);
+    ek1 <- t1.`1;
+    dk1 <- t1.`2;
+    return ((pq_keys_0.`1, ek0), (pq_keys_1.`1, ek1));
+  }
+}.
+
 section Main.
 
-declare module P <: KEMP {-RedL, -RedR, -RedL1, -RedR1}.
-declare module T <: KEMT {-RedL, -RedR, -RedL1, -RedR1, -P}.
+declare module P <: KEMP {-RedL, -RedR, -RedL1, -RedR1, -RedL2}.
+declare module T <: KEMT {-RedL, -RedR, -RedL1, -RedR1, -RedL2, -P}.
 
 declare axiom T_derivekeypair_det (g : (glob T)) (a0 : seedt) :
   phoare[ T.derivekeypair : (glob T) = g /\ s = a0
@@ -239,6 +272,85 @@ proof.
     wp.
     call{2} (T_derivekeypair_det gT sv).
     call{1} (T_derivekeypair_det gT sv).
+    skip => />.
+  skip => />.
+qed.
+
+(* the BATCHED alternating side: regroup it per keypair first. *)
+lemma keygenequiv_init_batched :
+  equiv [ RedR(P, T).initialize ~ RedL2(P, T).initialize :
+          ={glob P, glob T}
+          ==> ={res} /\ ={glob P, glob T}
+              /\ RedR.pq_keys_0{1} = RedL2.pq_keys_0{2}
+              /\ RedR.pq_keys_1{1} = RedL2.pq_keys_1{2}
+              /\ RedR.t_keys_0{1} = ev_derivekeypair RedL2.seed_T_0{2}
+              /\ RedR.t_keys_1{1} = ev_derivekeypair RedL2.seed_T_1{2} ].
+proof.
+  proc.
+  (* align the GROUPED side, exactly as the n = 2 lemma does *)
+  swap{1} 2 1.
+  (* regroup the BATCHED side per keypair:
+       1 g0  2 g1  3 s0  4 s1  5 dkp0  6 ek0  7 dk0  8 dkp1  9 ek1  10 dk1
+     and keypair 0's material is 1,3,5,6,7 -- the same four moves the split-seed
+     route computes for the identical batched layout. *)
+  swap{2} 3 -1.
+  swap{2} 5 -2.
+  swap{2} 6 -2.
+  swap{2} 7 -2.
+  seq 2 5 : (={glob P, glob T}
+             /\ RedR.pq_keys_0{1} = RedL2.pq_keys_0{2}
+             /\ RedR.t_keys_0{1} = ev_derivekeypair RedL2.seed_T_0{2}
+             /\ t0{2} = ev_derivekeypair RedL2.seed_T_0{2}
+             /\ ek0{2} = (ev_derivekeypair RedL2.seed_T_0{2}).`1
+             /\ dk0{2} = (ev_derivekeypair RedL2.seed_T_0{2}).`2).
+  + inline *.
+    seq 1 2 : (={glob P, glob T}
+             /\ RedR.pq_keys_0{1} = RedL2.pq_keys_0{2}).
+    - wp; call (_: true); skip => />.
+    seq 1 1 : (={glob P, glob T}
+             /\ RedR.pq_keys_0{1} = RedL2.pq_keys_0{2}
+             /\ s{1} = RedL2.seed_T_0{2}).
+    - rnd; skip => />.
+    exists* (glob T){2}, RedL2.seed_T_0{2}.
+    elim* => gT sv.
+    wp.
+    call{1} (T_derivekeypair_det gT sv).
+    call{2} (T_derivekeypair_det gT sv).
+    skip => />.
+  seq 2 5 : (={glob P, glob T}
+             /\ RedR.pq_keys_0{1} = RedL2.pq_keys_0{2}
+             /\ RedR.t_keys_0{1} = ev_derivekeypair RedL2.seed_T_0{2}
+             /\ t0{2} = ev_derivekeypair RedL2.seed_T_0{2}
+             /\ ek0{2} = (ev_derivekeypair RedL2.seed_T_0{2}).`1
+             /\ dk0{2} = (ev_derivekeypair RedL2.seed_T_0{2}).`2
+             /\ RedR.pq_keys_1{1} = RedL2.pq_keys_1{2}
+             /\ RedR.t_keys_1{1} = ev_derivekeypair RedL2.seed_T_1{2}
+             /\ t1{2} = ev_derivekeypair RedL2.seed_T_1{2}
+             /\ ek1{2} = (ev_derivekeypair RedL2.seed_T_1{2}).`1
+             /\ dk1{2} = (ev_derivekeypair RedL2.seed_T_1{2}).`2).
+  + inline *.
+    seq 1 2 : (={glob P, glob T}
+             /\ RedR.pq_keys_0{1} = RedL2.pq_keys_0{2}
+             /\ RedR.t_keys_0{1} = ev_derivekeypair RedL2.seed_T_0{2}
+             /\ t0{2} = ev_derivekeypair RedL2.seed_T_0{2}
+             /\ ek0{2} = (ev_derivekeypair RedL2.seed_T_0{2}).`1
+             /\ dk0{2} = (ev_derivekeypair RedL2.seed_T_0{2}).`2
+             /\ RedR.pq_keys_1{1} = RedL2.pq_keys_1{2}).
+    - wp; call (_: true); skip => />.
+    seq 1 1 : (={glob P, glob T}
+             /\ RedR.pq_keys_0{1} = RedL2.pq_keys_0{2}
+             /\ RedR.t_keys_0{1} = ev_derivekeypair RedL2.seed_T_0{2}
+             /\ t0{2} = ev_derivekeypair RedL2.seed_T_0{2}
+             /\ ek0{2} = (ev_derivekeypair RedL2.seed_T_0{2}).`1
+             /\ dk0{2} = (ev_derivekeypair RedL2.seed_T_0{2}).`2
+             /\ RedR.pq_keys_1{1} = RedL2.pq_keys_1{2}
+             /\ s{1} = RedL2.seed_T_1{2}).
+    - rnd; skip => />.
+    exists* (glob T){2}, RedL2.seed_T_1{2}.
+    elim* => gT sv.
+    wp.
+    call{1} (T_derivekeypair_det gT sv).
+    call{2} (T_derivekeypair_det gT sv).
     skip => />.
   skip => />.
 qed.

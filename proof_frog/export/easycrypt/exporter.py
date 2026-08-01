@@ -7569,6 +7569,27 @@ def export_proof_file(proof_path: str) -> str:
         for _helper in proof.helpers:
             if isinstance(_helper, frog_ast.Game) and _helper.fields:
                 live_state_holders.add(_helper.name)
+        # The THEOREM GAME's challenger holds live state too (a binding game's
+        # ``ek0``/``dk0``...), and every per-oracle lemma about it needs the
+        # abstract scheme modules write-separated from it -- otherwise EC rejects
+        # even a glob-only lemma with "module <K> can write <Game>.<field>",
+        # because it cannot know the abstract call leaves the game's own state
+        # alone between the assignment and the return. Some couplings already
+        # register it as a side effect of NAMING it (the PRG derivation chain
+        # does); this covers the hops whose coupling is glob-only, where nothing
+        # names it and the restriction was simply missing. Gated on
+        # ``live_state_holders`` being non-empty (a multi-oracle proof) and on
+        # the challenger actually declaring fields, so single-oracle and
+        # stateless-challenger proofs are unaffected.
+        for _st in proof.steps:
+            if not isinstance(_st, frog_ast.Step) or _st.reduction is not None:
+                continue
+            # pylint: disable-next=protected-access
+            _chal_ast = engine._get_game_ast(_st.challenger, None)
+            if _chal_ast is not None and _chal_ast.fields:
+                live_state_holders.add(
+                    pt.module_base_name(resolver.resolve(_st).module_expr)
+                )
     live_state_modules = sorted(live_state_holders)
     # ROM Lazy-side dead-drop: the reprogramming challenger's cross-named fields
     # ride the ``call (_: inv)`` invariant, so the adversary must be write-separated

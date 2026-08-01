@@ -1041,22 +1041,15 @@ class TypeCollector:
                     f"{xor_op} a ({xor_op} b c) = {xor_op} ({xor_op} a b) c",
                 )
             )
-        for src_name, dst_name in self._slice_ops:
-            op = _slice_op_name(src_name, dst_name)
-            decls.append(ec_ast.OpDecl(op, f"{src_name} -> int -> int -> {dst_name}"))
-        for left_name, right_name, result_name in self._concat_ops:
-            op = _concat_op_name(left_name, right_name, result_name)
-            decls.append(
-                ec_ast.OpDecl(op, f"{left_name} -> {right_name} -> {result_name}")
-            )
-        # Round-trip and distribution-split axioms for each registered
-        # concat triple. These let the Split/Merge Uniform Samples
-        # parametric synthesizers close their per-transform micros via
-        # VIRTUAL concat triples: a type that is SLICED into exactly two
-        # complementary pieces but never CONCATENATED gets no triple above, so
-        # none of the round-trip / split axioms is emitted -- which is what
-        # blocks every split-uniform-sample hop whose seed pair is only ever
-        # taken apart. Synthesize the triple from the slice OFFSETS.
+        # VIRTUAL concat triples, synthesized from the slice OFFSETS. A type
+        # that is SLICED into exactly two complementary pieces but never
+        # CONCATENATED registers no triple, so none of the round-trip / split
+        # axioms below is emitted -- which is what blocks every
+        # split-uniform-sample hop whose seed pair is only ever taken apart.
+        #
+        # This runs BEFORE the op-declaration loops below: ``register_concat``
+        # appends to ``_concat_ops``, and a triple synthesized after those loops
+        # would have its axioms emitted with no ``op`` declaring the concat.
         #
         # Two gates keep this sound, and both are load-bearing:
         #   * the argument order comes from the recorded offsets (prefix starts
@@ -1100,8 +1093,20 @@ class TypeCollector:
             self.register_concat(left_name, right_name, src_name)
             self._virtual_concat_triples.add((left_name, right_name, src_name))
 
-        # ``rnd`` with a slice/concat bijection. Skipped when the bit
-        # lengths aren't known (e.g. unparameterized ``BitString`` types).
+        for src_name, dst_name in self._slice_ops:
+            op = _slice_op_name(src_name, dst_name)
+            decls.append(ec_ast.OpDecl(op, f"{src_name} -> int -> int -> {dst_name}"))
+        for left_name, right_name, result_name in self._concat_ops:
+            op = _concat_op_name(left_name, right_name, result_name)
+            decls.append(
+                ec_ast.OpDecl(op, f"{left_name} -> {right_name} -> {result_name}")
+            )
+
+        # Round-trip and distribution-split axioms for every concat triple,
+        # real or synthesized above. They are what lets the Split/Merge Uniform
+        # Samples synthesizers close a micro with an ``rnd`` slice/concat
+        # bijection. Skipped when the bit lengths aren't known (e.g.
+        # unparameterized ``BitString`` types).
         for left_name, right_name, result_name in self._concat_ops:
             len_l = self._bs_lengths.get(left_name)
             len_r = self._bs_lengths.get(right_name)

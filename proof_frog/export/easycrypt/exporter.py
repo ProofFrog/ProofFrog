@@ -7001,26 +7001,39 @@ def export_proof_file(proof_path: str) -> str:
                 continue
             stored_base = pt.module_base_name(resolver.resolve(stored_step).module_expr)
             conj: list[str] = []
+            # ORDINAL same-type pairing, both sides in DECLARATION order: the
+            # k-th challenger field of an EC type takes the k-th same-typed
+            # component of the stored packed fields. A single keypair has one
+            # candidate each and pairs as before; a TWO-keypair binding game
+            # (PK/DIFFKEY) holds ek0/ek1/dk0/dk1 against pq_keys_0/pq_keys_1, so
+            # every type has two candidates and a uniqueness test would decline
+            # exactly where the coupling is needed. Same ordinal-slot discipline
+            # as ``_field_or_component_ref``.
+            comps_by_type: dict[str, list[str]] = {}
+            for sf in stored_red.fields:
+                st_ty = top_types.resolve(sf.type)
+                if not isinstance(st_ty, frog_ast.ProductType):
+                    continue
+                for k, comp_ty in enumerate(st_ty.types):
+                    # pylint: disable=protected-access
+                    comps_by_type.setdefault(
+                        top_types.translate_type(comp_ty).text, []
+                    ).append(
+                        f"{stored_base}.{mt._ec_field_name(sf.name)}"
+                        f"{{{ss}}}.`{k + 1}"
+                    )
+                    # pylint: enable=protected-access
+            used: dict[str, int] = {}
             for cf in chal_ast.fields:
                 ctext = top_types.translate_type(cf.type).text
-                hits: list[str] = []
-                for sf in stored_red.fields:
-                    st_ty = top_types.resolve(sf.type)
-                    if not isinstance(st_ty, frog_ast.ProductType):
-                        continue
-                    for k, comp_ty in enumerate(st_ty.types):
-                        if top_types.translate_type(comp_ty).text == ctext:
-                            # pylint: disable=protected-access
-                            hits.append(
-                                f"{stored_base}.{mt._ec_field_name(sf.name)}"
-                                f"{{{ss}}}.`{k + 1}"
-                            )
-                            # pylint: enable=protected-access
-                if len(hits) != 1:
-                    continue
+                slot = used.get(ctext, 0)
+                cands = comps_by_type.get(ctext, [])
+                if slot >= len(cands):
+                    continue  # challenger holds more of this type than we store
+                used[ctext] = slot + 1
                 # pylint: disable=protected-access
                 conj.append(
-                    f"{hits[0]} = {chal_base}.{mt._ec_field_name(cf.name)}{{{ts}}}"
+                    f"{cands[slot]} = {chal_base}.{mt._ec_field_name(cf.name)}{{{ts}}}"
                 )
                 # pylint: enable=protected-access
             if conj:

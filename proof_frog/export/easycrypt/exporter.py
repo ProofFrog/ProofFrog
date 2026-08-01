@@ -5729,21 +5729,40 @@ def export_proof_file(proof_path: str) -> str:
         vals_a, vals_b = _init_values(red_mods[0]), _init_values(red_mods[1])
         if vals_a is None or vals_b is None:
             return None
+
         # pylint: disable=protected-access
-        out: list[str] = []
-        for fa, fb in zip(rest_a, rest_b):
-            va, vb = vals_a.get(fa.name), vals_b.get(fb.name)
-            if va is None or vb is None or not vb.startswith("@atom:"):
-                return None  # side B must be the ANCHOR (an undecomposed atom)
-            m = re.fullmatch(r"\((\S+\.ev_\w+) \((.+)\)\)", va.strip())
-            if m is None or "@atom:" in m.group(1):
-                return None  # side A must be one ev-application of one argument
-            out.append(
-                f"{base_a}.{mt._ec_field_name(fa.name)}{{1}} = "
-                f"({m.group(1)} ({base_b}.{mt._ec_field_name(fb.name)}{{2}}))"
-            )
+        def _emit(
+            derived: list[frog_ast.Field],
+            anchors: list[frog_ast.Field],
+            dvals: dict[str, str],
+            avals: dict[str, str],
+            dbase: str,
+            abase: str,
+            dmem: str,
+            amem: str,
+        ) -> list[str] | None:
+            out: list[str] = []
+            for fd, fan in zip(derived, anchors):
+                vd, van = dvals.get(fd.name), avals.get(fan.name)
+                if vd is None or van is None or not van.startswith("@atom:"):
+                    return None  # the anchor side must be an undecomposed atom
+                m = re.fullmatch(r"\((\S+\.ev_\w+) \((.+)\)\)", vd.strip())
+                if m is None or "@atom:" in m.group(1):
+                    return None  # the derived side must be ONE ev-application
+                out.append(
+                    f"{dbase}.{mt._ec_field_name(fd.name)}{{{dmem}}} = "
+                    f"({m.group(1)} ({abase}.{mt._ec_field_name(fan.name)}{{{amem}}}))"
+                )
+            return out
+
+        # Either orientation: the derived side is whichever one holds the
+        # ev-application. The CK chain alternates -- hop_2/hop_12 derive on the
+        # left, hop_4/hop_14 on the right -- so fixing one orientation would
+        # silently decline half the class.
+        return _emit(rest_a, rest_b, vals_a, vals_b, base_a, base_b, "1", "2") or _emit(
+            rest_b, rest_a, vals_b, vals_a, base_b, base_a, "2", "1"
+        )
         # pylint: enable=protected-access
-        return out
 
     def _query_delegate_pair_coupling(
         step_a: frog_ast.Step, step_b: frog_ast.Step

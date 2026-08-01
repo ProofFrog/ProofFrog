@@ -4940,6 +4940,7 @@ def emit_multi_oracle_chain_for_hop(
     drop_globs: frozenset[str] = frozenset(),
     both_reductions: bool = False,
     init_tac_override: list[str] | None = None,
+    oracle_tac_override: dict[str, list[str]] | None = None,
 ) -> MultiOracleHopChainInfo:
     """Emit the per-oracle per-transform chains for one multi-oracle hop.
 
@@ -5070,6 +5071,7 @@ def emit_multi_oracle_chain_for_hop(
             decaps_val_acc=decaps_val_schemes,
             aux_lemma_acc=aux_lemma_lines,
             init_tac_override=init_tac_override,
+            oracle_tac_override=oracle_tac_override,
             use_canonical_fields=use_canonical,
             glob_info_by_base=glob_info_by_base,
             stateless_wrapper_bases=stateless_wrapper_bases,
@@ -5121,6 +5123,7 @@ def _emit_one_oracle_chain(
     decaps_val_acc: set[str] | None = None,
     aux_lemma_acc: list[str] | None = None,
     init_tac_override: list[str] | None = None,
+    oracle_tac_override: dict[str, list[str]] | None = None,
     use_canonical_fields: bool = False,
     glob_info_by_base: (
         dict[str, tuple[tuple[tuple[str, str], ...], frozenset[str]]] | None
@@ -5329,6 +5332,24 @@ def _emit_one_oracle_chain(
             # deterministic method): the peel does not apply. Emit a targeted,
             # honest admit rather than a silently-failing ``sim``.
             return [], _init_backbone_admit(hop_index, oracle_name), set()
+
+    # Exporter-computed whole-oracle tactic, keyed by oracle name. Used where the
+    # tactic needs the RENDERED WRAPPER bodies: EC's ``seq``/``rcondt`` indices
+    # count wrapper statements, and the flat states cannot supply them once the
+    # engine has inlined a challenger oracle into the body (each inlined call
+    # collapses to one flat statement but expands to three under EC's ``inline``).
+    # Same rationale as ``init_tac_override``, one level finer.
+    if not is_init and oracle_tac_override and oracle_name in oracle_tac_override:
+        return (
+            [],
+            [
+                _res_tag(SYNTH_PARAM),
+                "proc.",
+                *oracle_tac_override[oracle_name],
+                "qed.",
+            ],
+            set(),
+        )
 
     # CFRG binding challenge case-split: the reduction's ``Challenge`` forwards a
     # KDF-input collision to an inner KEM binding challenger and otherwise

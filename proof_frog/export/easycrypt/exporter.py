@@ -4928,6 +4928,249 @@ def export_proof_file(proof_path: str) -> str:
         body = " /\\ ".join(conj)
         return f"{globs} /\\ {body}" if globs else body
 
+    def _twin_challenge_one_oracle(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+        step_a: frog_ast.Step,
+        step_b: frog_ast.Step,
+        lproc: ec_ast.Proc,
+        rproc: ec_ast.Proc,
+    ) -> list[str] | None:
+        """One oracle's twin-prefix case-split tactic, or ``None`` off-shape."""
+
+        def _exec(proc: ec_ast.Proc) -> list[ec_ast.EcStmt]:
+            return [
+                st
+                for st in proc.body
+                if not isinstance(st, (ec_ast.VarDecl, ec_ast.Return))
+            ]
+
+        lst, rst = _exec(lproc), _exec(rproc)
+        l_ifs = [st for st in lst if isinstance(st, ec_ast.If)]
+        r_ifs = [st for st in rst if isinstance(st, ec_ast.If)]
+        # Exactly one side case-splits, and its ``if`` is the LAST statement
+        # (the collision forward); the other side is straight-line.
+        if len(l_ifs) + len(r_ifs) != 1:
+            return None
+        if l_ifs:
+            plain_stmts, split_stmts, ps, iss = rst, lst, "2", "1"
+        else:
+            plain_stmts, split_stmts, ps, iss = lst, rst, "1", "2"
+        if not isinstance(split_stmts[-1], ec_ast.If):
+            return None
+        split_if = split_stmts[-1]
+        assert isinstance(split_if, ec_ast.If)
+        prefix_split = split_stmts[:-1]
+        prefix_plain = plain_stmts[: len(prefix_split)]
+        if len(prefix_plain) != len(prefix_split) or not prefix_plain:
+            return None
+        # TWIN check: index-wise same statement KIND. A ``Call`` may differ in
+        # callee (that is the delegation), an ``Assign`` may differ in RHS (the
+        # encaps-key repack) -- both reconciled by the hop's coupling.
+        for a, b in zip(prefix_plain, prefix_split):
+            if isinstance(a, ec_ast.Call) != isinstance(b, ec_ast.Call):
+                return None
+            if not isinstance(a, (ec_ast.Call, ec_ast.Assign)):
+                return None
+
+        # -- formal-param -> declared-instance maps, per side -----------------
+        def _pmap(mod: ec_ast.Module, applied: str) -> dict[str, str]:
+            inner = (
+                applied[applied.index("(") + 1 : applied.rindex(")")]
+                if "(" in applied
+                else ""
+            )
+            args = (
+                [pt.module_base_name(a) for a in cc_split_args(inner)] if inner else []
+            )
+            return {p.name: a for p, a in zip(mod.params, args)}
+
+        plain_step = step_a if ps == "1" else step_b
+        split_step = step_b if ps == "1" else step_a
+        assert plain_step.reduction is not None and split_step.reduction is not None
+        plain_mod = next(
+            (
+                d
+                for d in ec_reductions
+                if isinstance(d, ec_ast.Module) and d.name == plain_step.reduction.name
+            ),
+            None,
+        )
+        if plain_mod is None:
+            return None
+        plain_expr = resolver.resolve(plain_step).module_expr
+        pmap = _pmap(plain_mod, plain_expr)
+        plain_base = pt.module_base_name(plain_expr)
+        split_base = pt.module_base_name(resolver.resolve(split_step).module_expr)
+
+        # -- ev-form environments, built from the PLAIN side only --------------
+        # TWO of them: the seq invariant must name PROGRAM variables, while a
+        # ``call`` argument is a proof term and must name the ``exists*`` binder.
+        # Same walk, different seeds.
+        def _walk(
+            seed: dict[str, str],
+        ) -> tuple[dict[str, str], list[str], dict[str, str]] | None:
+            env = dict(seed)
+            globs: dict[str, str] = {}
+            terms: list[str] = []  # per prefix index; "" for assigns
+
+            def _sub(text: str) -> str:
+                if not env:
+                    return text
+                pat = "|".join(re.escape(k) for k in sorted(env, key=len, reverse=True))
+                return re.sub(rf"\b({pat})\b", lambda m: env[m.group(1)], text)
+
+            for st in prefix_plain:
+                if isinstance(st, ec_ast.Assign):
+                    env[st.var] = f"({_sub(st.rhs)})"
+                    terms.append("")
+                    continue
+                assert isinstance(st, ec_ast.Call)
+                mod, dot, meth = st.callee.partition(".")
+                mod = pmap.get(mod, mod)
+                if not dot or meth not in det_methods_by_module.get(mod, set()):
+                    return None  # a probabilistic call has no ``_det`` axiom
+                alias = clone_alias_by_module.get(mod)
+                if alias is None:
+                    return None
+                args = (
+                    [_sub(a) for a in cc_split_args(st.args)] if st.args.strip() else []
+                )
+                globs.setdefault(mod, f"g_{mod}")
+                applied = "".join(f" ({a})" for a in args)
+                terms.append(f"{mod}_{meth}_det {globs[mod]}{applied}")
+                env[st.var] = (
+                    f"({alias}.ev_{meth}" + "".join(f" ({a})" for a in args) + ")"
+                    if args
+                    else f"({alias}.ev_{meth})"
+                )
+            return env, terms, globs
+
+        # pylint: disable=protected-access
+        prog_seed = {
+            f.name: f"{plain_base}.{f.name}" "{" f"{ps}" "}"
+            for f in plain_mod.module_vars
+        }
+        # pylint: enable=protected-access
+        prog_seed.update({p.name: f"{p.name}" "{" f"{ps}" "}" for p in lproc.params})
+        # pylint: disable=protected-access
+        term_seed = {f.name: f"fv_{f.name}" for f in plain_mod.module_vars}
+        # pylint: enable=protected-access
+        term_seed.update({p.name: f"av_{p.name}" for p in lproc.params})
+        prog_walk = _walk(prog_seed)
+        term_walk = _walk(term_seed)
+        if prog_walk is None or term_walk is None:
+            return None
+        env = prog_walk[0]
+        call_terms, glob_of = term_walk[1], term_walk[2]
+        if not glob_of:
+            return None
+
+        def _peel_side(side: str) -> list[str]:
+            lines: list[str] = []
+            for term in reversed(call_terms):
+                if not term:
+                    continue
+                lines.append("wp.")
+                lines.append(f"call{{{side}}} ({term}).")
+            return lines
+
+        # -- the seq invariant: every prefix local, in ev-form, on BOTH sides ---
+        # Same ev text for the two memories: that IS the twin property, and the
+        # hop's coupling is what makes it true.
+        locals_l = {d.name for d in lproc.body if isinstance(d, ec_ast.VarDecl)}
+        locals_r = {d.name for d in rproc.body if isinstance(d, ec_ast.VarDecl)}
+        carried = [
+            st.var
+            for st in prefix_plain
+            if isinstance(st, (ec_ast.Assign, ec_ast.Call))
+            and st.var in locals_l
+            and st.var in locals_r
+        ]
+        globs = " /\\ ".join(f"={{glob {m}}}" for m in declared_module_names)
+        params_eq = (
+            "={" + ", ".join(p.name for p in lproc.params) + "}" if lproc.params else ""
+        )
+        inv_parts = [g for g in (globs, params_eq) if g] + [
+            f"{v}" "{" f"{sd}" "}" f" = {env[v]}" for v in carried for sd in ("1", "2")
+        ]
+        frozen = (
+            [f"(glob {m})" "{" f"{ps}" "}" for m in glob_of]
+            # pylint: disable-next=protected-access
+            + [f"{plain_base}.{f.name}" "{" f"{ps}" "}" for f in plain_mod.module_vars]
+            + [f"{p.name}" "{" f"{ps}" "}" for p in lproc.params]
+        )
+        binders = (
+            list(glob_of.values())
+            # pylint: disable-next=protected-access
+            + [f"fv_{f.name}" for f in plain_mod.module_vars]
+            + [f"av_{p.name}" for p in lproc.params]
+        )
+        del split_base, split_if, iss
+        return [
+            f"seq {len(prefix_plain)} {len(prefix_split)} : ({' /\\ '.join(inv_parts)}).",
+            "+ inline *.",
+            f"exists* {', '.join(frozen)}.",
+            f"elim* => {' '.join(binders)}.",
+            *_peel_side(ps),
+            *_peel_side("2" if ps == "1" else "1"),
+            "wp; skip => />.",
+            "admit.",
+        ]
+
+    def _twin_challenge_oracle_tacs(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> dict[str, list[str]] | None:
+        """Whole-oracle tactics for a TWIN-PREFIX binding ``Challenge``
+        case-split between two reductions, keyed by oracle name; ``None``
+        off-shape.
+
+        Shape: both endpoints run the same expanded KDF backbone, but one
+        delegates part of it to an inner binding challenger and forwards a
+        KDF-input collision to that challenger's own ``Challenge``. The two
+        rendered bodies are statement-wise TWINS up to the ``if``.
+
+        Built here rather than in the chain emitter because EC's ``seq`` and
+        ``rcondt``/``rcondf`` count RENDERED WRAPPER statements, and the flat
+        states cannot supply those indices once the engine has inlined a
+        challenger oracle (one flat statement, three under EC's ``inline``).
+
+        The inner challenger's rendered module is never consulted: the ev-form
+        environment is built from the PLAIN side's prefix and asserted for BOTH
+        sides -- that IS the twin property, and the hop's coupling is what
+        justifies it. A challenger-delegated call is peeled with the det axiom of
+        the callee the plain side uses at that index, its key argument supplied as
+        the plain side's coupled term; EC discharges the resulting equality from
+        the coupling. Validated shape:
+        ``ec_templates/binding_challenge_twin_casesplit.ec``.
+        """
+        if step_a.reduction is None or step_b.reduction is None:
+            return None
+        mods: list[ec_ast.Module] = []
+        for st in (step_a, step_b):
+            assert st.reduction is not None
+            mod = next(
+                (
+                    d
+                    for d in ec_reductions
+                    if isinstance(d, ec_ast.Module) and d.name == st.reduction.name
+                ),
+                None,
+            )
+            if mod is None:
+                return None
+            mods.append(mod)
+        if len(mods) != 2:
+            return None
+        lmod, rmod = mods[0], mods[1]
+        out: dict[str, list[str]] = {}
+        for lproc in lmod.procs:
+            rproc = next((p for p in rmod.procs if p.name == lproc.name), None)
+            if rproc is None or lproc.name == "initialize":
+                continue
+            tac = _twin_challenge_one_oracle(step_a, step_b, lproc, rproc)
+            if tac is not None:
+                out[lproc.name] = tac
+        return out or None
+
     def _prg_query_init_tac(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> list[str] | None:
@@ -7642,6 +7885,7 @@ def export_proof_file(proof_path: str) -> str:
                     step_a.reduction is not None and step_b.reduction is not None
                 ),
                 init_tac_override=reprogram_override,
+                oracle_tac_override=_twin_challenge_oracle_tacs(step_a, step_b),
             )
             chain_extra_decls.extend(info.extra_decls)
             pres_method_requests.update(info.pres_methods)

@@ -5340,16 +5340,13 @@ def _emit_one_oracle_chain(
     # collapses to one flat statement but expands to three under EC's ``inline``).
     # Same rationale as ``init_tac_override``, one level finer.
     if not is_init and oracle_tac_override and oracle_name in oracle_tac_override:
-        return (
-            [],
-            [
-                _res_tag(SYNTH_PARAM),
-                "proc.",
-                *oracle_tac_override[oracle_name],
-                "qed.",
-            ],
-            set(),
-        )
+        body = oracle_tac_override[oracle_name]
+        # A partial override -- one that carries the derivation as far as it is
+        # proven and leaves the rest open -- is a GUIDED ADMIT, not synth-param.
+        # Tagging it synth-param would inflate the ladder tally for a body that
+        # still admits.
+        rung = ADMIT_GUIDED if any(t.strip() == "admit." for t in body) else SYNTH_PARAM
+        return ([], [_res_tag(rung), "proc.", *body, "qed."], set())
 
     # CFRG binding challenge case-split: the reduction's ``Challenge`` forwards a
     # KDF-input collision to an inner KEM binding challenger and otherwise

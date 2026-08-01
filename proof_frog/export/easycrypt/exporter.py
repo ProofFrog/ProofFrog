@@ -5104,6 +5104,26 @@ def export_proof_file(proof_path: str) -> str:
             + [f"fv_{f.name}" for f in plain_mod.module_vars]
             + [f"av_{p.name}" for p in lproc.params]
         )
+        # -- the case split: DERIVED AND MEASURED, not yet emitted -------------
+        # The branches were built and run against the real goal of
+        # CG_seedbased_HON_BIND_K_PK: `case` on the `if` guard (its locals
+        # qualified to the splitting memory), `rcondt`/`rcondf` at index 1, the
+        # plain side's KDF evaluations functionalized with their `_det` axioms,
+        # and the splitting side's then-branch peeled with the SAME delegated
+        # decaps terms the prefix used (a prefix call is delegated exactly where
+        # the two sides' callees differ -- both reductions name a `Challenger`
+        # formal, so the param map cannot distinguish them). All of that fires:
+        # the rconds discharge, the peels apply, and each branch reduces to a
+        # single leaf. Neither leaf closes yet:
+        #   - COLLISION leaf: needs the KDF-input concat peeled to its components
+        #     (`slice_concat_left_*` + the encoding-injectivity axioms) to get
+        #     `ss_PQ_0 = ss_PQ_1` and `ek_T_0 = ek_T_1` out of the guard. This
+        #     channel returns a tactic only -- it has no `inj_acc` / aux-lemma
+        #     hook to REQUEST those, which is the next piece of plumbing.
+        #   - ELSE leaf: not closed by `do ! (wp; call (_: true)); wp; skip => /#`.
+        # Emitting a tactic that provably fails would turn an EC-accepted proof
+        # into an EC-rejected one, so the split is left open here.
+        os_ = "2" if ps == "1" else "1"
         del split_base, split_if, iss
         return [
             f"seq {len(prefix_plain)} {len(prefix_split)} : ({' /\\ '.join(inv_parts)}).",
@@ -5111,8 +5131,19 @@ def export_proof_file(proof_path: str) -> str:
             f"exists* {', '.join(frozen)}.",
             f"elim* => {' '.join(binders)}.",
             *_peel_side(ps),
-            *_peel_side("2" if ps == "1" else "1"),
+            *_peel_side(os_),
             "wp; skip => />.",
+            # The case-split branches are DERIVED and structurally correct (the
+            # `rcondt`/`rcondf` fire, the peels apply, the goals reduce to their
+            # leaves) but neither leaf closes yet, so they are left open here
+            # rather than emitted as a tactic that provably fails:
+            #   - the COLLISION leaf needs the KDF-input concat peeled to its
+            #     components -- `slice_concat_left_*` plus the encoding-injectivity
+            #     axioms -- and this override channel cannot yet REQUEST those
+            #     (it returns a tactic only, no `inj_acc` / aux-lemma hook);
+            #   - the ELSE leaf is not closed by `do ! (wp; call (_: true)); wp;
+            #     skip => /#` alone.
+            # Both were measured on the real goal of CG_seedbased_HON_BIND_K_PK.
             "admit.",
         ]
 

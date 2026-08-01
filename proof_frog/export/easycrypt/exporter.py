@@ -4588,11 +4588,42 @@ def export_proof_file(proof_path: str) -> str:
                 frog_ast.BitStringType,
             )
         ]
+        if not seed_flds:
+            return None
+        # PARKED AT n=1 (2026-07-31). The ordinal machinery below is general and
+        # WORKS -- enabling it drops admits hard (CG PK/DIFFKEY 13 -> 7, CK
+        # PK/DIFFKEY 23 -> 17) because the post-init derivation peel then fires.
+        # But it also puts an `ev_` derivation post on hops whose TACTICS are
+        # still single-keypair, and each newly-reachable one must be
+        # n-generalized before the cell compiles again. Measured, in the order
+        # they surfaced on CG_seedbased_HON_BIND_K_PK:
+        #   1. `_prg_query_init_tac` -- couples ONE leading sample and reuses one
+        #      frozen seed for both keypairs ("invalid last instruction").
+        #      NOW GATED to a single challenger query (that gate is correct and
+        #      stays).
+        #   2. the GENERIC init backbone peel -- `call (_: true)` cannot prove an
+        #      ev-derivation post ("cannot prove goal (strict)"). NOW honest-gated
+        #      by `ev_derivation_post` (also correct, also stays).
+        #   3. `_synth_derivation_oracle_peel` on the two-keypair `challenge`
+        #      ("cannot save an incomplete proof") -- STILL OPEN, and the reason
+        #      this is parked rather than landed.
+        # Re-enabling = delete this guard and n-generalize (3). Until then the
+        # four two-keypair cells keep their EC-ACCEPTED status (⚠13/⚠13/⚠23/⚠23),
+        # which beats rejected-with-fewer-admits (MAP principle 2).
         if len(seed_flds) != 1:
             return None
         seed_holder = pt.module_base_name(resolver.resolve(game_step).module_expr)
+        # ORDINAL, declaration order: the k-th ``Challenger.query()`` in the
+        # reduction's init derives the k-th keypair, so it expands the k-th game
+        # seed field. A single-keypair game has one of each and behaves exactly
+        # as before; a TWO-keypair binding game (PK / CT_DIFFKEY) holds dk0/dk1
+        # and its reduction queries twice, which the old ``exactly one seed``
+        # gate rejected outright -- leaving those hops a glob-only coupling and
+        # every post-init oracle on them an admit.
         # pylint: disable=protected-access
-        seed_ref = f"{seed_holder}.{mt._ec_field_name(seed_flds[0].name)}{{{gs}}}"
+        seed_refs = [
+            f"{seed_holder}.{mt._ec_field_name(f.name)}{{{gs}}}" for f in seed_flds
+        ]
         # pylint: enable=protected-access
         # The expansion value the challenger's query returns, at the coupled
         # seed: an RO-materialized PRG applies the shared RO; an ABSTRACT PRG
@@ -4600,7 +4631,7 @@ def export_proof_file(proof_path: str) -> str:
         # the method name read off the challenger game's query body.
         ro_map = top_types.ro_by_arrow_type()
         if ro_map:
-            q_val = f"({next(iter(ro_map.values()))}{{{gs}}} {seed_ref})"
+            q_vals = [f"({next(iter(ro_map.values()))}{{{gs}}} {r})" for r in seed_refs]
         else:
             chal_expr = pt.last_module_arg(resolver.resolve(red_step).module_expr)
             prg_mod = pt.module_base_name(pt.last_module_arg(chal_expr))
@@ -4629,7 +4660,8 @@ def export_proof_file(proof_path: str) -> str:
             meths = {cast(frog_ast.FieldAccess, c.func).name.lower() for c in calls}
             if len(meths) != 1:
                 return None
-            q_val = f"({prg_alias}.ev_{meths.pop()} {seed_ref})"
+            q_meth = meths.pop()
+            q_vals = [f"({prg_alias}.ev_{q_meth} {r})" for r in seed_refs]
         # Walk the RENDERED reduction init: challenger query -> the RO applied
         # to the game seed; assigns substitute; calls to abstract modules
         # functionalize to their ev form. Field targets become conjuncts.
@@ -4652,6 +4684,7 @@ def export_proof_file(proof_path: str) -> str:
         red_base = pt.module_base_name(resolver.resolve(red_step).module_expr)
         env: dict[str, str] = {}
         conj: list[str] = []
+        n_queries = 0
 
         def _sub_tokens(s: str) -> str:
             for k in sorted(env, key=len, reverse=True):
@@ -4673,7 +4706,10 @@ def export_proof_file(proof_path: str) -> str:
                 if not dot:
                     return None
                 if mod == chal_param:
-                    val = q_val
+                    if n_queries >= len(q_vals):
+                        return None  # more queries than the game holds seeds
+                    val = q_vals[n_queries]
+                    n_queries += 1
                 else:
                     alias = clone_alias_by_module.get(mod)
                     if alias is None:
@@ -4693,6 +4729,8 @@ def export_proof_file(proof_path: str) -> str:
                 # pylint: enable=protected-access
         if not conj or len(conj) != len(field_names):
             return None
+        if n_queries != len(q_vals):
+            return None  # a seed the reduction never expands -> off-shape
         # The emitted conjuncts read the GAME challenger's seed field
         # (``<Game>.dk0{1}``) inside a post that must survive each abstract
         # scheme call the init peel steps over. EC refuses ``call (_: true)``
@@ -4830,6 +4868,26 @@ def export_proof_file(proof_path: str) -> str:
             return None
         prg_meth = prg_meths.pop()
         chal_param = red_mod.params[-1].name if red_mod.params else None
+        # SINGLE-KEYPAIR ONLY. This tactic couples ONE leading sample
+        # (`seq 1 1` + `rnd`) and peels a tail derived from ONE frozen seed. A
+        # two-keypair reduction queries its challenger once PER KEYPAIR, and the
+        # emitted peel would reuse the same frozen seed for both -- EC rejects it
+        # ("invalid last instruction"). The gate used to be implicit, inherited
+        # from `_prg_query_game_coupling` requiring exactly one game seed field;
+        # now that the coupling is ordinal over n keypairs, this tactic needs its
+        # own. Declining leaves hop_0/hop_12 `initialize` an honest admit on the
+        # two-keypair cells while their POST-INIT oracles still benefit from the
+        # generalized coupling.
+        if (
+            sum(
+                1
+                for st in red_init.body
+                if isinstance(st, ec_ast.Call)
+                and st.callee.partition(".")[0] == chal_param
+            )
+            != 1
+        ):
+            return None
 
         # -- formal-param -> declared-instance maps ---------------------------
         # A rendered scheme/reduction proc calls its own FORMAL parameter names

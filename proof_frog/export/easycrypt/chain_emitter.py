@@ -4546,6 +4546,7 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
     require_equal_bodies: bool = False,
     side_local_coupling: bool = False,
     cross_seam_coupling: bool = False,
+    ev_derivation_post: bool = False,
 ) -> tuple[list[str], set[tuple[str, str]], str] | None:
     """Closing tactic for an init-oracle equiv whose two endpoints have
     identical canonical bodies.
@@ -4734,6 +4735,17 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
         # admit rather than a failing tactic (MAP principle 2). Matching callees
         # keep the historical peel (byte-identical).
         if [c for k, c in l_bb if k == "call"] != [c for k, c in r_bb if k == "call"]:
+            return None
+        if ev_derivation_post:
+            # The post states each reduction field as an ``ev_`` DERIVATION over
+            # the game's seed. This peel couples the abstract calls with
+            # ``call (_: true)``, which says nothing about what they RETURNED, so
+            # it provably cannot establish those conjuncts -- it would emit a
+            # tactic that runs and leaves the goal open, taking the whole FILE
+            # down. Decline to an honest admit (MAP principle 2); the dedicated
+            # derivation peel handles the shapes it covers, and this is the
+            # residue it declines (a two-keypair init, whose sample coupling it
+            # does not model).
             return None
         tac = ["proc.", "inline *.", *_backbone_peel(l_body)]
         if _leads_with_det(l_body) or _leads_with_det(r_body):
@@ -5243,6 +5255,7 @@ def _emit_one_oracle_chain(
             require_equal_bodies=not last_states_match,
             side_local_coupling=_has_side_local_projection(full_coupling),
             cross_seam_coupling=_has_cross_seam_projection(full_coupling),
+            ev_derivation_post=bool(full_coupling and "ev_" in full_coupling),
         )
         if peel is not None:
             tactic, pres, rung = peel

@@ -8331,23 +8331,38 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
     # challenger-owned fields would be ambiguous -- decline there.
     if owning_sides > 1:
         return None
-    # NOT YET: a challenger-owned key also means the reduction DELEGATES the
-    # decaps call to that challenger (module encapsulation leaves it no other
-    # way to use the key), so the wrapper body holds ``Challenger.decaps0(ct)``
-    # where the flat state -- which this route's peel is derived from -- shows
-    # the inlined ``KEM_PQ.decaps(challenger_dk0, ct)``. The peel's
-    # ``<M>_<m>_det`` term then does not apply to the goal's call. Closing this
-    # needs the route to inline the delegated challenger method before peeling;
-    # until then, decline so the oracle falls to an honest admit (MAP principle
-    # 2) rather than emitting a tactic that cannot close and takes the whole
-    # FILE down with it. The ``field_ref`` map above is still built and passed:
-    # it is the correct qualification and is what that extension will need.
-    # NARROW: only a challenger-owned name that a KDF GROUP actually renders is
-    # a problem. The *expanded* LEAK cells carry ``challenger@`` fields too, but
-    # never inside a group -- gating on the mere presence of such a field
-    # (rather than on its use) changed all six of them, which the export
-    # regression caught.
-    if any(f in field_ref for grp in l_grp + r_grp for f in grp):
+    # A challenger-owned key also means the reduction DELEGATES its decaps to
+    # that challenger (module encapsulation leaves it no other way to use the
+    # key), so the WRAPPER body holds ``Challenger.decaps0(ct)`` where the flat
+    # state -- which this route's peel is derived from -- shows the inlined
+    # ``KEM_PQ.decaps(challenger_dk0, ct)``, and the peel's ``<M>_<m>_det`` term
+    # does not apply to the goal's call. Unfold the concrete challenger on that
+    # side first (``inline{side} *``; abstract callees are left alone) so the
+    # two views agree.
+    #
+    # Keyed on a challenger-owned name appearing in a KDF GROUP, not on the mere
+    # presence of such a field: the *expanded* LEAK cells carry ``challenger@``
+    # fields too but never inside a group, and gating on presence changed all
+    # six of those CLEAN cells (caught by the export regression).
+    prefix_inline: list[str] = []
+    if any(f in field_ref for grp in l_grp for f in grp):
+        prefix_inline.append("inline{1} *.")
+    if any(f in field_ref for grp in r_grp for f in grp):
+        prefix_inline.append("inline{2} *.")
+    # PARKED (2026-07-31): with `field_ref` + `prefix_inline` + the position-
+    # robust peel the route gets three mismatches deep into the goal but still
+    # does not close -- the frontier moved 29035 ("the given proof-term proves
+    # ... does not apply", fixed by the qualification) -> 29036 ("invalid last
+    # instruction", fixed by the inline) -> 29060 ("unknown memory: &2" at the
+    # post-prefix `case (ct0{2} = ct1{2})`, i.e. the prefix bullet now closes a
+    # differently-shaped goal). Diagnosing that needs a goal print, which the
+    # ~29k-line export cannot give interactively (cli_open times out), so the
+    # next attempt has to start from a goal-mirror TRIPWIRE of this exact
+    # delegating shape. Until then decline, so the oracle keeps its honest
+    # admit: a tactic that cannot close takes the whole FILE down, an admit does
+    # not (MAP principle 2). All the machinery above is validated and stays --
+    # it is what the next attempt needs.
+    if prefix_inline:
         return None
     # SAMEKEY collapses each side's two identical groups to one (both ciphertexts
     # under one key); DIFFKEY keeps both. Both sides share the site map.
@@ -8432,6 +8447,7 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
             l_challenger_ref=l_challenger_ref,
             l_challenger_key_fields=chal_fields,
             field_ref=field_ref,
+            prefix_inline=prefix_inline,
             ect_inj_axiom="",
             win_is_ek=True,
             l_ek_component_fields=l_ek,
@@ -8462,6 +8478,7 @@ def _challenge_hop2_route(  # pylint: disable=too-many-arguments,too-many-positi
         l_challenger_ref=l_challenger_ref,
         l_challenger_key_fields=chal_fields,
         field_ref=field_ref,
+        prefix_inline=prefix_inline,
         ect_inj_axiom=f"{t_module}_{_ev_method(shape.ev_encct_t)}_inj",
         ct_key_idx=ct_key_idx,
     )

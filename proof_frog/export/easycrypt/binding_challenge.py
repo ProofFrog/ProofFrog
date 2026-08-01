@@ -539,6 +539,7 @@ def challenge_tactic(spec: ChallengeHopSpec) -> list[str] | None:
     peel_stmts = _drop_leading_assigns(prefix)
     lines += [
         "  + sp.",
+        *[f"    {ln}" for ln in getattr(spec, "prefix_inline", [])],
         f"    exists* {', '.join(red_ex)};",
         f"    elim* => {' '.join(rge + field_elim + ['c0', 'c1'])}.",
         *[f"    {ln}" for ln in _peel_stmts(peel_stmts, blk_env, glob_of_blk, "{2}")],
@@ -1234,6 +1235,7 @@ def challenge_tactic_hop4(spec: Hop4Spec) -> list[str] | None:
     peel = _peel_stmts(_drop_leading_assigns(prefix), blk_env, glob_of, "{1}")
     lines += [
         "  + sp.",
+        *[f"    {ln}" for ln in getattr(spec, "prefix_inline", [])],
         f"    exists* {', '.join(game_ex)};",
         f"    elim* => {' '.join(elim)}.",
         f"    call{{2}} ({spec.val_lemma_name} {gargs} {dkey[spec.ct_key_idx[1]]} C1).",
@@ -1385,6 +1387,15 @@ class Hop2Spec:
     # re-decapsulates through the wrapper). All empty/None for the bare shape ->
     # ``challenge_tactic_hop2`` unchanged (byte-identical). ----------------------
     wrapper_expr: str = ""  # e.g. "SeededKEMWrapper(KEM_PQ_inner)"
+    # Emitted right after the prefix ``sp.`` on the side whose reduction
+    # DELEGATES its decaps to an inner challenger: the peel is derived from the
+    # flat state (challenger already inlined) while the wrapper body still holds
+    # ``Challenger.decaps0(ct)``, so the peel's ``_det`` term would not apply.
+    # ``inline{side} *`` unfolds the concrete challenger and aligns the two
+    # views (abstract callees are left alone by ``inline *`` -- an EXPLICIT
+    # ``inline <abstract>.<m>`` is what EC rejects). Empty for every
+    # non-delegating reduction, so those specs are byte-identical.
+    prefix_inline: list[str] = field(default_factory=list)
     # Component fields NOT held by the reduction module itself: flat name ->
     # the complete ``<module>.<field>`` ref of whoever does hold it (see
     # :func:`_fq`). Empty for every reduction that holds all its own fields, so
@@ -1526,8 +1537,18 @@ def challenge_tactic_hop2(spec: Hop2Spec) -> list[str] | None:
     )
     l_peel = _peel_stmts(_drop_leading_assigns(spec.l_prefix), l_env, glob_of, "{1}")
     r_peel = _peel_stmts(_drop_leading_assigns(spec.r_prefix), r_env, glob_of, "{2}")
+    # A side whose challenger was unfolded by ``prefix_inline`` carries assigns
+    # the flat-state prefix (this peel's source) does not have, so the peel's
+    # run-keyed ``wp``s land a ``call`` on an assignment. An extra ``wp`` is a
+    # no-op, so make the placement position-robust there. Untouched when nothing
+    # was inlined -> byte-identical for every non-delegating reduction.
+    if any(ln.startswith("inline{1}") for ln in getattr(spec, "prefix_inline", [])):
+        l_peel = _wp_before_calls(l_peel)
+    if any(ln.startswith("inline{2}") for ln in getattr(spec, "prefix_inline", [])):
+        r_peel = _wp_before_calls(r_peel)
     lines += [
         "  + sp.",
+        *[f"    {ln}" for ln in getattr(spec, "prefix_inline", [])],
         f"    exists* {', '.join(l_ex)};",
         f"    elim* => {' '.join(l_elim)}.",
         *[f"    {ln}" for ln in r_peel],
@@ -2448,8 +2469,18 @@ def challenge_tactic_hop2_pk(spec: Hop2Spec) -> list[str] | None:
     )
     l_peel = _peel_stmts(_drop_leading_assigns(spec.l_prefix), l_env, glob_of, "{1}")
     r_peel = _peel_stmts(_drop_leading_assigns(spec.r_prefix), r_env, glob_of, "{2}")
+    # A side whose challenger was unfolded by ``prefix_inline`` carries assigns
+    # the flat-state prefix (this peel's source) does not have, so the peel's
+    # run-keyed ``wp``s land a ``call`` on an assignment. An extra ``wp`` is a
+    # no-op, so make the placement position-robust there. Untouched when nothing
+    # was inlined -> byte-identical for every non-delegating reduction.
+    if any(ln.startswith("inline{1}") for ln in getattr(spec, "prefix_inline", [])):
+        l_peel = _wp_before_calls(l_peel)
+    if any(ln.startswith("inline{2}") for ln in getattr(spec, "prefix_inline", [])):
+        r_peel = _wp_before_calls(r_peel)
     lines += [
         "  + sp.",
+        *[f"    {ln}" for ln in getattr(spec, "prefix_inline", [])],
         f"    exists* {', '.join(l_ex)};",
         f"    elim* => {' '.join(l_elim)}.",
         *[f"    {ln}" for ln in r_peel],

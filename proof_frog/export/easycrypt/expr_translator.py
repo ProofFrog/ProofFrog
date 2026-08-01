@@ -397,7 +397,6 @@ class ExpressionTranslator:
             frog_ast.BinaryOperators.SUBTRACT, expr.end, expr.start
         )
         dst_ec = self._types.translate_type(frog_ast.BitStringType(dst_len))
-        op = self._types.register_slice(src_ec.text, dst_ec.text)
         src_str = self.translate(expr.the_array)
         # Canonicalize the int arguments via sympy so that
         # arithmetically-equivalent variants (``2 * lambda`` vs
@@ -413,6 +412,9 @@ class ExpressionTranslator:
         end_resolved = self._resolve_aliases(expr.end)
         start = _canonical_int_str(start_resolved) or self.translate(start_resolved)
         end = _canonical_int_str(end_resolved) or self.translate(end_resolved)
+        # Register AFTER canonicalizing, so the recorded span is the same text
+        # the emitted axioms will compare against.
+        op = self._types.register_slice(src_ec.text, dst_ec.text, (start, end))
         return f"{op} {_paren(src_str)} {_paren(start)} {_paren(end)}"
 
     def _resolve_aliases(self, expr: frog_ast.Expression) -> frog_ast.Expression:

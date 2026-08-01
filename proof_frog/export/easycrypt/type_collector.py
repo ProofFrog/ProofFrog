@@ -133,6 +133,18 @@ class TypeCollector:
         # Registered on demand from the expression translator.
         # Order-preserving, deduped by (src, dst).
         self._slice_ops: list[tuple[str, str]] = []
+        # (src, dst) -> the canonical (start, end) offset pairs seen at the call
+        # sites. Needed to tell a PREFIX slice from a SUFFIX one: a virtual
+        # concat triple's argument order must come from the OFFSETS, never from
+        # the type names (guessing from names is a wrong-but-well-typed axiom).
+        self._slice_spans: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        # Sources for which a VIRTUAL concat triple has been REQUESTED. The
+        # synthesis is demand-driven on purpose: blanket synthesis fired on every
+        # sliced-in-two type in the corpus and would have added four axioms to 22
+        # already-clean proofs that never use them -- TCB growth for no benefit,
+        # which is exactly what "prefer the weakest statement that suffices"
+        # rules out.
+        self._virtual_concat_requests: set[str] = set()
         self._slice_op_set: set[tuple[str, str]] = set()
         # Abstract concatenation operators:
         # ``concat_<a>_<b>_to_<r> : <a> -> <b> -> <r>``.
@@ -715,7 +727,12 @@ class TypeCollector:
             return value
         return None
 
-    def register_slice(self, src_name: str, dst_name: str) -> str:
+    def register_slice(
+        self,
+        src_name: str,
+        dst_name: str,
+        span: tuple[str, str] | None = None,
+    ) -> str:
         """Register a slicing op ``src -> int -> int -> dst`` and return its name.
 
         The op extracts a sub-bitstring; the start/end indices are
@@ -728,7 +745,21 @@ class TypeCollector:
         if key not in self._slice_op_set:
             self._slice_op_set.add(key)
             self._slice_ops.append(key)
+        if span is not None:
+            seen = self._slice_spans.setdefault(key, [])
+            if span not in seen:
+                seen.append(span)
         return _slice_op_name(src_name, dst_name)
+
+    def request_virtual_concat(self, src_name: str) -> None:
+        """Ask for a synthesized concat triple over ``src_name``'s two slices.
+
+        Call this from a route that NEEDS the split/round-trip laws for a type
+        the source only ever slices. The triple is still subject to both
+        soundness gates at emission time (complementary offsets, and a symbolic
+        length-sum check), so a request is a request, not an assertion.
+        """
+        self._virtual_concat_requests.add(src_name)
 
     def register_concat(self, left_name: str, right_name: str, result_name: str) -> str:
         """Register a concat op ``left -> right -> result`` and return its name.
@@ -1017,6 +1048,53 @@ class TypeCollector:
         # Round-trip and distribution-split axioms for each registered
         # concat triple. These let the Split/Merge Uniform Samples
         # parametric synthesizers close their per-transform micros via
+        # VIRTUAL concat triples: a type that is SLICED into exactly two
+        # complementary pieces but never CONCATENATED gets no triple above, so
+        # none of the round-trip / split axioms is emitted -- which is what
+        # blocks every split-uniform-sample hop whose seed pair is only ever
+        # taken apart. Synthesize the triple from the slice OFFSETS.
+        #
+        # Two gates keep this sound, and both are load-bearing:
+        #   * the argument order comes from the recorded offsets (prefix starts
+        #     at 0, suffix starts where the prefix ends), NEVER from the type
+        #     names -- a wrong order is a wrong-but-well-typed axiom;
+        #   * the lengths must SUM to the result's length. The real-concat loop
+        #     below only checks the lengths are KNOWN, because a genuine concat
+        #     op guarantees the sum; a virtual triple has no such guarantee, so
+        #     without this check the emitted axioms would simply be false.
+        for src_name in sorted(self._virtual_concat_requests):
+            dsts = [d for s, d in self._slice_ops if s == src_name]
+            if len(dsts) != 2:
+                continue
+            len_src = self._bs_lengths.get(src_name)
+            if len_src is None:
+                continue
+            spans = [self._slice_spans.get((src_name, d), []) for d in dsts]
+            if any(len(sp) != 1 for sp in spans):
+                continue  # ambiguous or unrecorded offsets -- decline
+            pairs = [(d, sp[0]) for d, sp in zip(dsts, spans)]
+            pre_pairs = [p for p in pairs if _sym_eq(p[1][0], "0")]
+            suf_pairs = [p for p in pairs if not _sym_eq(p[1][0], "0")]
+            if len(pre_pairs) != 1 or len(suf_pairs) != 1:
+                continue
+            left_name, (_, pre_end) = pre_pairs[0]
+            right_name, (suf_start, suf_end) = suf_pairs[0]
+            len_l = self._bs_lengths.get(left_name)
+            len_r = self._bs_lengths.get(right_name)
+            if len_l is None or len_r is None:
+                continue
+            # adjacency: the suffix starts exactly where the prefix ends
+            if not _sym_eq(pre_end, len_l) or not _sym_eq(suf_start, len_l):
+                continue
+            # THE LENGTH-SUM GATE
+            if not _sym_eq(suf_end, len_src) or not _sym_eq(
+                f"({len_l}) + ({len_r})", len_src
+            ):
+                continue
+            if (left_name, right_name, src_name) in self._concat_op_set:
+                continue  # a real triple already covers it
+            self.register_concat(left_name, right_name, src_name)
+
         # ``rnd`` with a slice/concat bijection. Skipped when the bit
         # lengths aren't known (e.g. unparameterized ``BitString`` types).
         for left_name, right_name, result_name in self._concat_ops:
@@ -1203,6 +1281,25 @@ def _substitute_aliases(
             _substitute_aliases(expr.expression, aliases, strip_prefixes, _visited),
         )
     return expr
+
+
+def _sym_eq(a: str, b: str) -> bool:
+    """True when two already-canonical length/offset STRINGS denote the same
+    integer. Used only by the virtual-concat-triple gate, where getting this
+    wrong would emit a false axiom, so it fails CLOSED: anything sympy cannot
+    parse falls back to exact string equality rather than an optimistic guess.
+    """
+    if a == b:
+        return True
+    # pylint: disable=import-outside-toplevel
+    try:
+        from sympy import simplify, sympify
+    except ImportError:
+        return False
+    try:
+        return bool(simplify(sympify(a) - sympify(b)) == 0)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return False
 
 
 def _canonical_arith_str(expr: frog_ast.Expression) -> str:

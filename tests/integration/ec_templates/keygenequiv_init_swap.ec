@@ -88,10 +88,45 @@ module RedR (P : KEMP, T : KEMT) = {
   }
 }.
 
+(* --- the ONE-KEYPAIR variant (the CT_SAMEKEY cells) ------------------------
+   With n = 1 the two interleavings are ALREADY aligned, so the `swap{2} 2 1`
+   that aligns them at n = 2 has nothing to do -- and would be out of range on a
+   two-statement body. Everything else is the validated per-keypair shape.
+   Validated here so the n = 1 gate can be relaxed on evidence rather than on
+   "it should degenerate cleanly". *)
+
+module RedL1 (P : KEMP, T : KEMT) = {
+  var pq_keys_0 : pkt * skt
+  var seed_T_0 : seedt
+
+  proc initialize () : pkt * tkt = {
+    var t0 : tkt * tst;
+    var ek0 : tkt;
+    var dk0 : tst;
+    pq_keys_0 <@ ChalK(P).generate();
+    seed_T_0 <$ dseed;
+    t0 <@ T.derivekeypair(seed_T_0);
+    ek0 <- t0.`1;
+    dk0 <- t0.`2;
+    return (pq_keys_0.`1, ek0);
+  }
+}.
+
+module RedR1 (P : KEMP, T : KEMT) = {
+  var pq_keys_0 : pkt * skt
+  var t_keys_0 : tkt * tst
+
+  proc initialize () : pkt * tkt = {
+    pq_keys_0 <@ P.keygen();
+    t_keys_0 <@ Chal(T).generate();
+    return (pq_keys_0.`1, t_keys_0.`1);
+  }
+}.
+
 section Main.
 
-declare module P <: KEMP {-RedL, -RedR}.
-declare module T <: KEMT {-RedL, -RedR, -P}.
+declare module P <: KEMP {-RedL, -RedR, -RedL1, -RedR1}.
+declare module T <: KEMT {-RedL, -RedR, -RedL1, -RedR1, -P}.
 
 declare axiom T_derivekeypair_det (g : (glob T)) (a0 : seedt) :
   phoare[ T.derivekeypair : (glob T) = g /\ s = a0
@@ -170,6 +205,36 @@ proof.
                /\ RedL.seed_T_1{1} = s{2}).
     - rnd; skip => />.
     exists* (glob T){1}, RedL.seed_T_1{1}.
+    elim* => gT sv.
+    wp.
+    call{2} (T_derivekeypair_det gT sv).
+    call{1} (T_derivekeypair_det gT sv).
+    skip => />.
+  skip => />.
+qed.
+
+(* n = 1: no alignment swap, one segment. *)
+lemma keygenequiv_init_n1 :
+  equiv [ RedL1(P, T).initialize ~ RedR1(P, T).initialize :
+          ={glob P, glob T}
+          ==> ={res} /\ ={glob P, glob T}
+              /\ RedL1.pq_keys_0{1} = RedR1.pq_keys_0{2}
+              /\ RedR1.t_keys_0{2} = ev_derivekeypair RedL1.seed_T_0{1} ].
+proof.
+  proc.
+  seq 5 2 : (={glob P, glob T}
+             /\ RedL1.pq_keys_0{1} = RedR1.pq_keys_0{2}
+             /\ RedR1.t_keys_0{2} = ev_derivekeypair RedL1.seed_T_0{1}
+             /\ t0{1} = ev_derivekeypair RedL1.seed_T_0{1}
+             /\ ek0{1} = (ev_derivekeypair RedL1.seed_T_0{1}).`1
+             /\ dk0{1} = (ev_derivekeypair RedL1.seed_T_0{1}).`2).
+  + inline *.
+    seq 2 1 : (={glob P, glob T} /\ RedL1.pq_keys_0{1} = RedR1.pq_keys_0{2}).
+    - wp; call (_: true); skip => />.
+    seq 1 1 : (={glob P, glob T} /\ RedL1.pq_keys_0{1} = RedR1.pq_keys_0{2}
+               /\ RedL1.seed_T_0{1} = s{2}).
+    - rnd; skip => />.
+    exists* (glob T){1}, RedL1.seed_T_0{1}.
     elim* => gT sv.
     wp.
     call{2} (T_derivekeypair_det gT sv).

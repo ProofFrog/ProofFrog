@@ -5631,6 +5631,120 @@ def export_proof_file(proof_path: str) -> str:
             ]
         return lines
 
+    def _cross_stage_field_coupling(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-arguments,too-many-positional-arguments
+        step_a: frog_ast.Step,
+        step_b: frog_ast.Step,
+        rest_a: list[frog_ast.Field],
+        rest_b: list[frog_ast.Field],
+        base_a: str,
+        base_b: str,
+    ) -> list[str] | None:
+        """Conjuncts for two reductions holding the SAME logical material at
+        DIFFERENT derivation stages; ``None`` off-shape.
+
+        The CK HON ``R_PRG_L ~ R_KG_PQ_L`` decaps hops: one side stores the
+        derived T keypair (``t_keys_k``), the other the seed it derives from
+        (``seed_T_k``). Same-name/same-type fields couple by equality (the caller
+        does that); these do not, so the per-oracle lemmas were left with a
+        glob-only coupling and were unprovable as stated -- the two sides' decaps
+        read differently-owned keys with nothing relating them.
+
+        Shape required, checked structurally: the two unshared lists have equal
+        length; each side-A field's rendered ``initialize`` value is a SINGLE
+        ev-application of one argument; each side-B field is an ANCHOR (its value
+        is a bare atom -- a sample, or a single challenger call). Pair the two
+        lists ORDINALLY (declaration order on both sides) and restate side A's
+        field as its ev-application over the paired side-B field.
+
+        SOUNDNESS: the conjunct is true exactly when side A's argument and side
+        B's field carry the same value, which is what the hop's own assumption
+        provides (a PRG-random slice against a fresh uniform sample). It is
+        PROVEN by the hop's ``initialize`` lemma or EC rejects the file -- but on
+        the cells this currently fires for, that lemma still admits, so until it
+        closes the conjunct is ASSUMED. Flagged in the plan as such."""
+        if len(rest_a) != len(rest_b) or not rest_a:
+            return None
+        red_mods: list[ec_ast.Module] = []
+        for st in (step_a, step_b):
+            if st.reduction is None:
+                return None
+            mod = next(
+                (
+                    d
+                    for d in ec_reductions
+                    if isinstance(d, ec_ast.Module) and d.name == st.reduction.name
+                ),
+                None,
+            )
+            if mod is None:
+                return None
+            red_mods.append(mod)
+
+        def _init_values(mod: ec_ast.Module) -> dict[str, str] | None:
+            """Each field's functional value off the RENDERED ``initialize``:
+            calls functionalize to their ``ev_`` form, assigns substitute, and a
+            sample or challenger call stays an opaque atom named for its var."""
+            proc = next((p for p in mod.procs if p.name == "initialize"), None)
+            if proc is None:
+                return None
+            env: dict[str, str] = {}
+
+            def _sub(text: str) -> str:
+                if not env:
+                    return text
+                pat = "|".join(re.escape(k) for k in sorted(env, key=len, reverse=True))
+                return re.sub(rf"\b({pat})\b", lambda m: env[m.group(1)], text)
+
+            chal = mod.params[-1].name if mod.params else None
+            for st in proc.body:
+                if isinstance(st, (ec_ast.VarDecl, ec_ast.Return)):
+                    continue
+                if isinstance(st, ec_ast.Sample):
+                    env[st.var] = f"@atom:{st.var}"
+                    continue
+                if isinstance(st, ec_ast.Assign):
+                    env[st.var] = f"({_sub(st.rhs)})"
+                    continue
+                if not isinstance(st, ec_ast.Call):
+                    return None
+                mod_name, dot, meth = st.callee.partition(".")
+                if not dot:
+                    return None
+                if mod_name == chal:
+                    env[st.var] = f"@atom:{st.var}"
+                    continue
+                alias = clone_alias_by_module.get(mod_name)
+                if alias is None:
+                    return None
+                args = (
+                    [_sub(a) for a in cc_split_args(st.args)] if st.args.strip() else []
+                )
+                env[st.var] = (
+                    f"({alias}.ev_{meth}" + "".join(f" ({a})" for a in args) + ")"
+                    if args
+                    else f"({alias}.ev_{meth})"
+                )
+            return env
+
+        vals_a, vals_b = _init_values(red_mods[0]), _init_values(red_mods[1])
+        if vals_a is None or vals_b is None:
+            return None
+        # pylint: disable=protected-access
+        out: list[str] = []
+        for fa, fb in zip(rest_a, rest_b):
+            va, vb = vals_a.get(fa.name), vals_b.get(fb.name)
+            if va is None or vb is None or not vb.startswith("@atom:"):
+                return None  # side B must be the ANCHOR (an undecomposed atom)
+            m = re.fullmatch(r"\((\S+\.ev_\w+) \((.+)\)\)", va.strip())
+            if m is None or "@atom:" in m.group(1):
+                return None  # side A must be one ev-application of one argument
+            out.append(
+                f"{base_a}.{mt._ec_field_name(fa.name)}{{1}} = "
+                f"({m.group(1)} ({base_b}.{mt._ec_field_name(fb.name)}{{2}}))"
+            )
+        # pylint: enable=protected-access
+        return out
+
     def _query_delegate_pair_coupling(
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> str | None:
@@ -5672,17 +5786,27 @@ def export_proof_file(proof_path: str) -> str:
         shared = [
             f.name for f in ha.fields if f.name in b_types and b_types[f.name] == f.type
         ]
-        if not shared or len(shared) != len(ha.fields) or len(shared) != len(hb.fields):
+        if not shared:
             return None
         base_a = pt.module_base_name(resolver.resolve(step_a).module_expr)
         base_b = pt.module_base_name(resolver.resolve(step_b).module_expr)
         globs = " /\\ ".join(f"={{glob {m}}}" for m in declared_module_names)
         # pylint: disable=protected-access
-        fields = " /\\ ".join(
+        conj = [
             f"{base_a}.{mt._ec_field_name(f)}{{1}} = {base_b}.{mt._ec_field_name(f)}{{2}}"
             for f in shared
-        )
+        ]
         # pylint: enable=protected-access
+        rest_a = [f for f in ha.fields if f.name not in shared]
+        rest_b = [f for f in hb.fields if f.name not in shared]
+        if rest_a or rest_b:
+            cross = _cross_stage_field_coupling(
+                step_a, step_b, rest_a, rest_b, base_a, base_b
+            )
+            if cross is None:
+                return None
+            conj += cross
+        fields = " /\\ ".join(conj)
         return f"{globs} /\\ {fields}" if globs else fields
 
     def _live_state_coupling_base(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:

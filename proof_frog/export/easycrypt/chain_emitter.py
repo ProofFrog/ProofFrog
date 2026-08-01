@@ -4499,6 +4499,39 @@ def _has_side_local_projection(coupling: str | None) -> bool:
     return False
 
 
+def _has_cross_seam_projection(coupling: str | None) -> bool:
+    """True when the coupling relates a tuple PROJECTION of one module's field to
+    a DIFFERENT module's field across the two memories, e.g. the stored-pair
+    cross-seam conjunct ``R.pq_keys_0{1}.`2 = <Chal>.dk0{2}``.
+
+    ``sim`` relates globals BY NAME within matching state, so it can neither
+    project a packed field nor cross a module boundary: an init carrying such a
+    conjunct fails "cannot infer the set of equalities" even when the two
+    backbones match exactly. The backbone peel must run instead, where ``wp``
+    collects the assignments that make the projection a tautology.
+
+    Same-memory conjuncts are :func:`_has_side_local_projection`'s business;
+    cross-memory conjuncts WITHOUT a projection, and projections relating the
+    SAME module base on both sides, answer False -- so every init that closes
+    today keeps its tactic."""
+    if not coupling:
+        return False
+    for part in coupling.split(" /\\ "):
+        if "=" not in part or ".`" not in part:
+            continue
+        if len(set(re.findall(r"\{([12])\}", part))) != 2:
+            continue
+        lhs, _, rhs = part.partition("=")
+        bases = [
+            m.group(1)
+            for m in (re.match(r"\s*([A-Za-z_][\w.]*)\.", side) for side in (lhs, rhs))
+            if m is not None
+        ]
+        if len(bases) == 2 and bases[0] != bases[1]:
+            return True
+    return False
+
+
 def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -4512,6 +4545,7 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
     init_decomposition: bool = False,
     require_equal_bodies: bool = False,
     side_local_coupling: bool = False,
+    cross_seam_coupling: bool = False,
 ) -> tuple[list[str], set[tuple[str, str]], str] | None:
     """Closing tactic for an init-oracle equiv whose two endpoints have
     identical canonical bodies.
@@ -4600,7 +4634,11 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
         return False
 
     if [k for k, _ in l_bb] == [k for k, _ in r_bb]:
-        if not _has_det_call(l_bb) and not side_local_coupling:
+        if (
+            not _has_det_call(l_bb)
+            and not side_local_coupling
+            and not cross_seam_coupling
+        ):
             if (
                 (init_repacks or init_decomposition)
                 and not _same_det_structure(l_body, r_body)
@@ -5204,6 +5242,7 @@ def _emit_one_oracle_chain(
             init_decomposition=init_decomposition,
             require_equal_bodies=not last_states_match,
             side_local_coupling=_has_side_local_projection(full_coupling),
+            cross_seam_coupling=_has_cross_seam_projection(full_coupling),
         )
         if peel is not None:
             tactic, pres, rung = peel

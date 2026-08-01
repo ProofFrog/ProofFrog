@@ -5267,7 +5267,7 @@ def export_proof_file(proof_path: str) -> str:
         ) -> list[list[ec_ast.EcStmt]] | None:
             """``[chal-call, sample, det-call, assign*]`` repeated, else None."""
             cuts = [i for i, st in enumerate(body) if _is_chal(st, chal)]
-            if len(cuts) < 2 or cuts[0] != 0:
+            if not cuts or cuts[0] != 0:
                 return None
             segs = [body[a:b] for a, b in zip(cuts, cuts[1:] + [len(body)])]
             for seg in segs:
@@ -5301,10 +5301,10 @@ def export_proof_file(proof_path: str) -> str:
         if alt_side is None:
             return None
         ai, segs, n = alt_side
-        if n != 2:
-            # The interleaving `swap` sequence below is derived for TWO keypairs,
-            # which is what every CFRG cell has. Decline rather than emit an
-            # untested swap chain for n > 2.
+        if n not in (1, 2):
+            # Only n = 1 and n = 2 are tripwire-validated
+            # (``ec_templates/keygenequiv_init_swap.ec`` carries both). Decline
+            # rather than emit an untested interleaving for n > 2.
             return None
         am, bm = ("1", "2") if ai == 0 else ("2", "1")
         alt_expr = resolver.resolve(step_a if ai == 0 else step_b).module_expr
@@ -5371,7 +5371,10 @@ def export_proof_file(proof_path: str) -> str:
             resolver.resolve(step_a if ai == 0 else step_b).module_expr
         )
         # pylint: disable=protected-access
-        lines = ["proc.", f"swap{{{bm}}} 2 1."]
+        # At n = 1 the two interleavings are ALREADY aligned, so the alignment
+        # swap has nothing to do -- and would be out of range on the grouped
+        # side's two-statement body. Validated by ``keygenequiv_init_n1``.
+        lines = ["proc."] + ([f"swap{{{bm}}} 2 1."] if n == 2 else [])
         done: list[str] = []
         for k, seg in enumerate(segs):
             sample_stmt = seg[1]
@@ -5414,12 +5417,16 @@ def export_proof_file(proof_path: str) -> str:
             list[ec_ast.Sample],
             list[list[ec_ast.EcStmt]],
             list[list[ec_ast.EcStmt]],
+            bool,
         ]
         | None
     ):
         """Classify a hop as GROUPED-seed side vs SPLIT-seed side.
 
-        Returns ``(grouped_index, n, samples, grouped_blocks, split_blocks)``.
+        Returns
+        ``(grouped_index, n, samples, grouped_blocks, split_blocks, batched)``,
+        where ``batched`` says the grouped side runs all its challenger calls
+        first (so it needs regrouping) rather than being per-keypair already.
 
         The grouped side runs ``n`` challenger calls, then ``n`` own samples,
         then ``n`` blocks of ``[det call, projection*]``. The split side runs
@@ -5434,6 +5441,33 @@ def export_proof_file(proof_path: str) -> str:
                 and chal is not None
                 and st.callee.partition(".")[0] == chal
             )
+
+        def _grouped_interleaved(
+            body: list[ec_ast.EcStmt], chal: str | None
+        ) -> tuple[int, list[ec_ast.Sample], list[list[ec_ast.EcStmt]]] | None:
+            """``[chal call, sample, det call, projection*]`` repeated.
+
+            The hop_2 layout: the grouped side is ALREADY per-keypair, so there
+            is nothing to regroup and the swap chain comes out empty. For n = 1
+            this coincides with the batched layout, which is harmless -- both
+            produce the same segments and no swaps.
+            """
+            cuts = [i for i, st in enumerate(body) if _is_chal(st, chal)]
+            if not cuts or cuts[0] != 0:
+                return None
+            segs = [body[a:b] for a, b in zip(cuts, cuts[1:] + [len(body)])]
+            samples: list[ec_ast.Sample] = []
+            blocks: list[list[ec_ast.EcStmt]] = []
+            for seg in segs:
+                if len(seg) < 3 or not isinstance(seg[1], ec_ast.Sample):
+                    return None
+                if not isinstance(seg[2], ec_ast.Call) or _is_chal(seg[2], chal):
+                    return None
+                if any(not isinstance(x, ec_ast.Assign) for x in seg[3:]):
+                    return None
+                samples.append(seg[1])
+                blocks.append(seg[2:])
+            return len(segs), samples, blocks
 
         def _grouped(
             body: list[ec_ast.EcStmt], chal: str | None
@@ -5481,10 +5515,15 @@ def export_proof_file(proof_path: str) -> str:
             return blocks
 
         for gi in (0, 1):
-            grp = _grouped(execs[gi], chal_of[gi])
             spl = _split(execs[1 - gi], chal_of[1 - gi])
-            if grp is not None and spl is not None and len(spl) == grp[0]:
-                return gi, grp[0], grp[1], grp[2], spl
+            if spl is None:
+                continue
+            grp = _grouped(execs[gi], chal_of[gi])
+            if grp is not None and len(spl) == grp[0]:
+                return gi, grp[0], grp[1], grp[2], spl, True
+            grp = _grouped_interleaved(execs[gi], chal_of[gi])
+            if grp is not None and len(spl) == grp[0]:
+                return gi, grp[0], grp[1], grp[2], spl, False
         return None
 
     def _regroup_swaps(
@@ -5579,20 +5618,22 @@ def export_proof_file(proof_path: str) -> str:
         shape = _split_seed_shape(execs, chal_of)
         if shape is None:
             return None
-        gi, n, samples, blocks_g, blocks_s = shape
+        gi, n, samples, blocks_g, blocks_s, batched = shape
         if n not in (1, 2):
             # Only n = 1 (the CT_SAMEKEY cells) and n = 2 (every other CFRG
             # cell) are VALIDATED by the tripwire. The regrouping swap chain is
             # derived generally, but "it should generalize" is not validation --
             # decline rather than emit an untested chain.
             return None
-        if gi != 0:
-            # The `rnd` bijection's argument order and the resulting obligation
-            # order are validated with the GROUPED side as side 1. Mirroring
-            # them is a separate, unvalidated shape -- decline.
-            return None
+        # The whole body below is written with the GROUPED side as {1}, which is
+        # the only orientation the bijection and closer are validated for. When
+        # the hop presents them the other way round (hop_2), `symmetry` swaps the
+        # sides AND the memory tags in pre/post, so the identical body applies
+        # underneath -- no mirrored bijection, no mirrored closer. It must come
+        # AFTER `proc.`, which the chain emitter hardcodes ahead of this body.
+        mirrored = gi != 0
         gm, sm = "1", "2"
-        g_step, s_step = step_a, step_b
+        g_step, s_step = (step_b, step_a) if mirrored else (step_a, step_b)
         g_base = pt.module_base_name(resolver.resolve(g_step).module_expr)
 
         # -- both challengers must have the shape whose INLINED LENGTH the
@@ -5754,6 +5795,13 @@ def export_proof_file(proof_path: str) -> str:
         conj = [c for c in coupling.split(" /\\ ") if not c.startswith("={")]
         if not globs or len(conj) != 2 * n:
             return None
+        if mirrored:
+            # The coupling is stated with step_a as {1}; under `symmetry` the
+            # grouped side becomes {1}, so every conjunct's memory tags flip.
+            conj = [
+                c.replace("{1}", "\x00").replace("{2}", "{1}").replace("\x00", "{2}")
+                for c in conj
+            ]
         by_kp: list[list[str]] = [[] for _ in range(n)]
         for i, c in enumerate(conj):
             by_kp[i % n].append(c)
@@ -5809,7 +5857,9 @@ def export_proof_file(proof_path: str) -> str:
             ]
 
         # pylint: disable=protected-access
-        lines: list[str] = list(_regroup_swaps(n, blocks_g, gm))
+        lines: list[str] = ["symmetry."] if mirrored else []
+        if batched:
+            lines += _regroup_swaps(n, blocks_g, gm)
         done: list[str] = []
         for k in range(n):
             seed_ref = f"{g_base}.{mt._ec_field_name(samples[k].var)}{{{gm}}}"

@@ -424,8 +424,11 @@ lemma prg_vs_keygen_init_mirrored :
               /\ RedPRG.t_keys_0{1} = ev_dkp_t RedKG2.seed_T_0{2}
               /\ RedPRG.t_keys_1{1} = ev_dkp_t RedKG2.seed_T_1{2} ].
 proof.
-  symmetry.
+  (* NOTE the order: the chain emitter hardcodes `proc.` as the first line of
+     every whole-oracle body, so an emitted tactic can only reach `symmetry`
+     AFTER `proc`. Validated in that order here for exactly that reason. *)
   proc.
+  symmetry.
   seq 5 5 : (={glob P, glob T}
              /\ RedKG2.pq_keys_0{1} = RedPRG.pq_keys_0{2}
              /\ RedPRG.t_keys_0{2} = ev_dkp_t RedKG2.seed_T_0{1}

@@ -2133,6 +2133,7 @@ def export_proof_file(proof_path: str) -> str:
     }
 
     theory_game_decls: list[ec_ast.EcTopDecl] = []
+    foreign_game_decls: list[ec_ast.EcTopDecl] = []
     oracle_type_by_game_file: dict[str, str] = {}
     module_name_by_concrete_game: dict[tuple[str, str], str] = {}
     adv_type_by_game_file: dict[str, str] = {}
@@ -2356,19 +2357,23 @@ def export_proof_file(proof_path: str) -> str:
             for side in gf.games:
                 mod_name = f"{gf_id}_{side.name}"
                 fp_modname_by_cg[(gf.name, side.name)] = mod_name
-                fp_decls.append(
-                    fp_theory_modules.translate_game(
-                        side,
-                        mod_name,
-                        fp.name,
-                        implements=oracle_type_name,
-                        emitted_param_type=scheme_type_name,
-                        emit_state_vars=(
-                            oracle_model_by_game_file[gf.name].is_multi_oracle
-                            or (bool(side.fields) and len(side.methods) > 1)
-                        ),
-                    )
+                fp_game_mod = fp_theory_modules.translate_game(
+                    side,
+                    mod_name,
+                    fp.name,
+                    implements=oracle_type_name,
+                    emitted_param_type=scheme_type_name,
+                    emit_state_vars=(
+                        oracle_model_by_game_file[gf.name].is_multi_oracle
+                        or (bool(side.fields) and len(side.methods) > 1)
+                    ),
                 )
+                fp_decls.append(fp_game_mod)
+                # Also visible to the challenge-tactic routes, which look a
+                # forwarded challenger's own proc up by module name: a reduction
+                # can forward to a game of a FOREIGN primitive (the KDF-collision
+                # challenger), whose modules never reach ``theory_game_decls``.
+                foreign_game_decls.append(fp_game_mod)
             adv = fp_theory_modules.translate_adversary_type(
                 gf,
                 oracle_type_name,
@@ -5029,7 +5034,7 @@ def export_proof_file(proof_path: str) -> str:
         chal_mod = next(
             (
                 d
-                for d in theory_game_decls
+                for d in theory_game_decls + foreign_game_decls
                 if isinstance(d, ec_ast.Module)
                 and d.name == chal_qual.rpartition(".")[2]
             ),
@@ -5169,6 +5174,162 @@ def export_proof_file(proof_path: str) -> str:
             "  smt().",
         ]
 
+    def _chal_proc_of(
+        step: frog_ast.Step, meth: str
+    ) -> tuple[str, ec_ast.Proc, dict[str, str]] | None:
+        """``(<qualified challenger module expr>, <its proc>, <its param map>)``
+        for the inner challenger a reduction step forwards to.
+
+        The param map is the CHALLENGER's own, not the reduction's: a game module
+        calls its own formal scheme parameter (``K.decaps``), which the
+        reduction's map does not mention."""
+        expr = pt.last_module_arg(resolver.resolve(step).module_expr)
+        base = pt.module_base_name(expr).rpartition(".")[2]
+        mod = next(
+            (
+                d
+                for d in theory_game_decls + foreign_game_decls
+                if isinstance(d, ec_ast.Module) and d.name == base
+            ),
+            None,
+        )
+        if mod is None:
+            return None
+        proc = next((p for p in mod.procs if p.name == meth), None)
+        return None if proc is None else (expr, proc, _module_pmap(mod, expr))
+
+    def _twin_both_split_tail(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements,too-many-arguments,too-many-positional-arguments
+        split_step: frog_ast.Step,
+        plain_step: frog_ast.Step,
+        split_if: ec_ast.If,
+        plain_tail: list[ec_ast.EcStmt],
+        split_pmap: dict[str, str],
+        ps: str,
+        os_: str,
+        guard_at_os: str,
+    ) -> list[str] | None:
+        """The 2x2 tail: BOTH sides case-split, on DIFFERENT guards.
+
+        The last binding hop pits ``R o <Bind>_Unbreakable`` (splitting on the
+        KDF-input collision; its forward returns a constant after dead decaps)
+        against ``R' o KDFCollisionResistance_Breakable`` (splitting on the
+        encaps-key collision; its forward recomputes the KDF outputs). Both
+        sides denote ``H k0 = H k1 /\\ ek0 <> ek1 /\\ k0 <> k1``, but neither
+        says so syntactically, so four leaves are needed.
+
+        Every leaf is a one-sided ``_det`` peel of whichever calls survive it;
+        the two constants meet by ``=> />``, the mixed leaves by ``/#`` from the
+        seq invariant's couplings. ``None`` off-shape.
+        """
+        # -- the splitting side: forward in the THEN branch, recompute in ELSE --
+        then_exec = [
+            s
+            for s in split_if.then_body
+            if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+        ]
+        if len(then_exec) != 1 or not isinstance(then_exec[0], ec_ast.Call):
+            return None
+        s_call = then_exec[0]
+        s_chal = _chal_proc_of(split_step, s_call.callee.rpartition(".")[2])
+        if s_chal is None:
+            return None
+        s_expr, s_proc, s_cpmap = s_chal
+        s_args = cc_split_args(s_call.args) if s_call.args.strip() else []
+        if len(s_args) != len(s_proc.params):
+            return None
+        s_qual = pt.module_base_name(s_expr)
+        # pylint: disable-next=protected-access
+        s_mod_fields = {
+            f.name: f"{s_qual}.{f.name}"
+            for d in theory_game_decls + foreign_game_decls
+            if isinstance(d, ec_ast.Module) and d.name == s_qual.rpartition(".")[2]
+            for f in d.module_vars
+        }
+        g1 = _calls_freeze_peel(
+            list(s_proc.body),
+            s_cpmap,
+            os_,
+            {p.name: a for p, a in zip(s_proc.params, s_args)},
+            s_mod_fields,
+            "sq",
+        )
+        # -- the plain side: assigns then an ``if`` (constant / forward) --------
+        p_if = next((s for s in plain_tail if isinstance(s, ec_ast.If)), None)
+        if p_if is None or any(
+            not isinstance(s, (ec_ast.Assign, ec_ast.If)) for s in plain_tail
+        ):
+            return None
+        p_calls = [
+            s
+            for b in (p_if.then_body, p_if.else_body)
+            for s in b
+            if isinstance(s, ec_ast.Call)
+        ]
+        if len(p_calls) != 1:
+            return None
+        p_chal = _chal_proc_of(plain_step, p_calls[0].callee.rpartition(".")[2])
+        if p_chal is None:
+            return None
+        p_expr, p_proc, p_cpmap = p_chal
+        p_args = cc_split_args(p_calls[0].args) if p_calls[0].args.strip() else []
+        if len(p_args) != len(p_proc.params):
+            return None
+        g2 = _calls_freeze_peel(
+            list(p_proc.body),
+            p_cpmap,
+            ps,
+            {p.name: a for p, a in zip(p_proc.params, p_args)},
+            {},
+            "pq",
+        )
+        # -- the splitting side's ELSE branch (its own recomputation) ----------
+        g3 = _calls_freeze_peel(list(split_if.else_body), split_pmap, os_, {}, {}, "eq")
+        if g1 is None or g2 is None or g3 is None:
+            return None
+        s_inline = f"inline{{{os_}}} {s_expr}.{s_call.callee.rpartition('.')[2]}."
+        p_inline = f"inline{{{ps}}} {p_expr}.{p_calls[0].callee.rpartition('.')[2]}."
+        return [
+            # ``sp`` BEFORE the case, so BOTH branches get the plain side's
+            # leading encaps-key packing consumed (after the case it would apply
+            # to the first goal only).
+            "sp.",
+            f"case ({guard_at_os}).",
+            # A: the KDF inputs collide -> the splitting side forwards, and its
+            # challenger yields the constant. The plain side's own split decides
+            # nothing (its forward's ``k0 <> k1`` conjunct is false here), so
+            # both of ITS branches must be shown constant too.
+            f"+ rcondt{{{os_}}} 1; first by auto.",
+            f"  {s_inline}",
+            f"  {p_inline}",
+            f"  if{{{ps}}}.",
+            f"  + exists* {', '.join(g1[0])}.",
+            f"    elim* => {' '.join(g1[1])}.",
+            "    wp.",
+            *[f"    {ln}" for ln in g1[2]],
+            "    wp; skip => />.",
+            f"  exists* {', '.join(g1[0] + g2[0])}.",
+            f"  elim* => {' '.join(g1[1] + g2[1])}.",
+            "  wp.",
+            *[f"  {ln}" for ln in g1[2]],
+            *[f"  {ln}" for ln in g2[2]],
+            "  wp; skip => /#.",
+            # B: no KDF collision -> the splitting side recomputes. Now the
+            # PLAIN side's split decides: equal encaps keys give the constant on
+            # both sides (through the hop's coupling), unequal ones give the same
+            # recomputation twice, which couples two-sided.
+            f"rcondf{{{os_}}} 1; first by auto.",
+            f"{p_inline}",
+            f"if{{{ps}}}.",
+            "+ wp.",
+            f"  exists* {', '.join(g3[0])}.",
+            f"  elim* => {' '.join(g3[1])}.",
+            *[f"  {ln}" for ln in g3[2]],
+            "  wp; skip => /#.",
+            "wp.",
+            "do ! (wp; call (_: true)).",
+            "wp; skip => /#.",
+        ]
+
     def _twin_challenge_one_oracle(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
         step_a: frog_ast.Step,
         step_b: frog_ast.Step,
@@ -5187,30 +5348,49 @@ def export_proof_file(proof_path: str) -> str:
         lst, rst = _exec(lproc), _exec(rproc)
         l_ifs = [st for st in lst if isinstance(st, ec_ast.If)]
         r_ifs = [st for st in rst if isinstance(st, ec_ast.If)]
-        # Exactly one side case-splits, and its ``if`` is the LAST statement
-        # (the collision forward); the other side is straight-line.
-        if len(l_ifs) + len(r_ifs) != 1:
+        # At most one ``if`` per side, and the SPLIT side's is its LAST statement
+        # (the collision forward). The other side may itself case-split further
+        # on (the last hop of a binding chain has BOTH sides splitting, on
+        # different guards); its ``if`` then lands in the tail, past the twin
+        # prefix, which is where the tail builder deals with it.
+        if len(l_ifs) > 1 or len(r_ifs) > 1 or not (l_ifs or r_ifs):
             return None
-        if l_ifs:
+
+        def _twin_prefix(
+            plain: list[ec_ast.EcStmt], split: list[ec_ast.EcStmt]
+        ) -> bool:
+            """Is ``split``'s trailing ``if`` the case split, with a twin prefix?
+
+            TWIN check: index-wise same statement KIND. A ``Call`` may differ in
+            callee (that is the delegation), an ``Assign`` may differ in RHS (the
+            encaps-key repack) -- both reconciled by the hop's coupling.
+            """
+            if not split or not isinstance(split[-1], ec_ast.If):
+                return False
+            pre_s, pre_p = split[:-1], plain[: len(split) - 1]
+            if len(pre_p) != len(pre_s) or not pre_p:
+                return False
+            for a, b in zip(pre_p, pre_s):
+                if isinstance(a, ec_ast.Call) != isinstance(b, ec_ast.Call):
+                    return False
+                if not isinstance(a, (ec_ast.Call, ec_ast.Assign)):
+                    return False
+            return True
+
+        # Orientation is DERIVED, not assumed: when both sides split, only the
+        # one whose ``if`` closes a twin prefix qualifies (the other's prefix is
+        # longer by the statements it packs before its own ``if``, so the
+        # index-wise check runs off the end of this one).
+        if _twin_prefix(rst, lst):
             plain_stmts, split_stmts, ps, iss = rst, lst, "2", "1"
-        else:
+        elif _twin_prefix(lst, rst):
             plain_stmts, split_stmts, ps, iss = lst, rst, "1", "2"
-        if not isinstance(split_stmts[-1], ec_ast.If):
+        else:
             return None
         split_if = split_stmts[-1]
         assert isinstance(split_if, ec_ast.If)
         prefix_split = split_stmts[:-1]
         prefix_plain = plain_stmts[: len(prefix_split)]
-        if len(prefix_plain) != len(prefix_split) or not prefix_plain:
-            return None
-        # TWIN check: index-wise same statement KIND. A ``Call`` may differ in
-        # callee (that is the delegation), an ``Assign`` may differ in RHS (the
-        # encaps-key repack) -- both reconciled by the hop's coupling.
-        for a, b in zip(prefix_plain, prefix_split):
-            if isinstance(a, ec_ast.Call) != isinstance(b, ec_ast.Call):
-                return None
-            if not isinstance(a, (ec_ast.Call, ec_ast.Assign)):
-                return None
 
         # -- formal-param -> declared-instance maps, per side -----------------
         _pmap = _module_pmap
@@ -5392,6 +5572,29 @@ def export_proof_file(proof_path: str) -> str:
             ),
             split_if.guard,
         )
+        both = (
+            None
+            if collision is not None
+            else _twin_both_split_tail(
+                split_step,
+                plain_step,
+                split_if,
+                plain_stmts[len(prefix_split) :],
+                _module_pmap(
+                    next(
+                        d
+                        for d in ec_reductions
+                        if isinstance(d, ec_ast.Module)
+                        and split_step.reduction is not None
+                        and d.name == split_step.reduction.name
+                    ),
+                    resolver.resolve(split_step).module_expr,
+                ),
+                ps,
+                os_,
+                guard_at_os,
+            )
+        )
         tail: list[str] = (
             [
                 f"case ({guard_at_os}).",
@@ -5401,12 +5604,16 @@ def export_proof_file(proof_path: str) -> str:
                 "wp; skip => /#.",
             ]
             if collision is not None
-            else [
-                # The collision branch could not be built from the ASTs (the
-                # forwarded call, the challenger's own tail, or the KDF concat
-                # nesting did not match). Stay honest rather than guess.
-                "admit.",
-            ]
+            else (
+                list(both)
+                if both is not None
+                else [
+                    # Neither tail shape could be built from the ASTs (the
+                    # forwarded call, a challenger's own tail, or the KDF concat
+                    # nesting did not match). Stay honest rather than guess.
+                    "admit.",
+                ]
+            )
         )
         return [
             f"seq {len(prefix_plain)} {len(prefix_split)} : ({' /\\ '.join(inv_parts)}).",
@@ -5418,6 +5625,64 @@ def export_proof_file(proof_path: str) -> str:
             "wp; skip => />.",
             *tail,
         ]
+
+    def _calls_freeze_peel(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
+        stmts: list[ec_ast.EcStmt],
+        pmap: dict[str, str],
+        side: str,
+        param_sub: dict[str, str],
+        qualify: dict[str, str],
+        tag: str,
+    ) -> tuple[list[str], list[str], list[str]] | None:
+        """``(frozen, binders, peel lines)`` for peeling a deterministic call
+        list ONE-SIDED with the callees' ``<M>_<m>_det`` axioms.
+
+        ``param_sub`` rewrites a callee proc's FORMAL parameter names into the
+        call-site expressions (needed when the statements come from an inlined
+        challenger); ``qualify`` maps a bare identifier to the EC reference that
+        names it at ``side`` (a challenger field needs its module prefix).
+        ``None`` if any statement is not a deterministic call.
+        """
+        calls: list[tuple[str, str, list[str]]] = []
+        mods: list[str] = []
+        frees: list[str] = []
+        ident = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+        for st in stmts:
+            if isinstance(st, (ec_ast.VarDecl, ec_ast.Return, ec_ast.Assign)):
+                continue
+            if not isinstance(st, ec_ast.Call):
+                return None
+            mod, dot, meth = st.callee.partition(".")
+            mod = pmap.get(mod, mod)
+            if not dot or meth not in det_methods_by_module.get(mod, set()):
+                return None
+            if mod not in mods:
+                mods.append(mod)
+            args = [
+                cc_subst(a, param_sub)
+                for a in (cc_split_args(st.args) if st.args.strip() else [])
+            ]
+            for arg in args:
+                for name in ident.findall(arg):
+                    if name not in frees:
+                        frees.append(name)
+            calls.append((mod, meth, args))
+        if not calls:
+            return None
+        gb = {m: f"{tag}g{i}" for i, m in enumerate(mods)}
+        vb = {n: f"{tag}v{i}" for i, n in enumerate(frees)}
+        frozen = [f"(glob {m})" "{" f"{side}" "}" for m in mods] + [
+            f"{qualify.get(n, n)}" "{" f"{side}" "}" for n in frees
+        ]
+        binders = [gb[m] for m in mods] + [vb[n] for n in frees]
+        peel: list[str] = []
+        for mod, meth, args in reversed(calls):
+            peel.append(
+                f"call{{{side}}} ({mod}_{meth}_det {gb[mod]}"
+                + "".join(f" ({cc_subst(a, vb)})" for a in args)
+                + ")."
+            )
+        return frozen, binders, peel
 
     def _dead_branch_inlines(
         branch_if: ec_ast.If,

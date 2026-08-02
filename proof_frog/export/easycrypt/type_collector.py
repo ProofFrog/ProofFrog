@@ -145,6 +145,13 @@ class TypeCollector:
         # which is exactly what "prefer the weakest statement that suffices"
         # rules out.
         self._virtual_concat_requests: set[str] = set()
+        # Concat ops (by emitted op name) for which the ``_injL``/``_injR``
+        # component-injectivity LEMMAS have been requested. They are derived
+        # from the ``slice_concat_left``/``_right`` round-trip axioms below --
+        # lemmas, not axioms, so requesting them does not grow the TCB. Still
+        # demand-driven, to keep every export that has no use for them
+        # byte-identical.
+        self._concat_inj_requests: set[str] = set()
         # Triples that were SYNTHESIZED rather than seen as a real concat. Only
         # these get the extra dlet-form split axiom, so a real concat pair's
         # TCB is untouched.
@@ -765,6 +772,20 @@ class TypeCollector:
         """
         self._virtual_concat_requests.add(src_name)
 
+    def request_concat_inj(self, op_name: str) -> None:
+        """Ask for the ``<op>_injL`` / ``<op>_injR`` component-injectivity
+        lemmas of a registered concat op.
+
+        They are PROVED from the op's own ``slice_concat_left``/``_right``
+        round-trip axioms (see :meth:`emit`), so they add nothing to the trusted
+        base -- unlike the axioms themselves. A route asks for them when it must
+        invert a concat *without naming the components*: applied with ``_``
+        placeholders they read the components off the hypothesis, which is the
+        only form that survives EC's ``=> />`` normalisation of a two-memory
+        goal.
+        """
+        self._concat_inj_requests.add(op_name)
+
     def register_concat(self, left_name: str, right_name: str, result_name: str) -> str:
         """Register a concat op ``left -> right -> result`` and return its name.
 
@@ -1151,6 +1172,33 @@ class TypeCollector:
                     f" {concat_op} p.`1 p.`2)",
                 )
             )
+            if concat_op in self._concat_inj_requests:
+                # Component injectivity, DERIVED from the two round-trip axioms
+                # just emitted (no new assumption). Stated with named binders so
+                # a caller can apply it with four ``_``s and let unification
+                # recover the components from the hypothesis.
+                for side, slice_ax, concl in (
+                    (
+                        "L",
+                        f"slice_concat_left_{left_name}_{right_name}_{result_name}",
+                        "a",
+                    ),
+                    (
+                        "R",
+                        f"slice_concat_right_{left_name}_{right_name}_{result_name}",
+                        "b",
+                    ),
+                ):
+                    decls.append(
+                        f"lemma {concat_op}_inj{side}"
+                        f" (a a2 : {left_name}) (b b2 : {right_name}) :\n"
+                        f"  {concat_op} a b = {concat_op} a2 b2 =>"
+                        f" {concl} = {concl}2.\n"
+                        "proof.\n"
+                        "  move => h.\n"
+                        f"  by rewrite -({slice_ax} a b) -({slice_ax} a2 b2) h.\n"
+                        "qed."
+                    )
             if (left_name, right_name, result_name) in self._virtual_concat_triples:
                 # The ``\`*\``-form above does NOT serve a `rndsem`-folded goal:
                 # `rndsem*{i} 0` produces `dlet dL (fun a => dmap dS (fun b =>

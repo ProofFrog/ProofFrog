@@ -141,3 +141,103 @@ def kdf_freeze_and_evaluate(
         f"{indent}call{side} ({h_module}_evaluate_det {glob_name} {in1}).",
         f"{indent}call{side} ({h_module}_evaluate_det {glob_name} {in0}).",
     ]
+
+
+def split_app(text: str) -> tuple[str, list[str]] | None:
+    """Split a rendered prefix application into ``(head, args)``.
+
+    ``"(f (g a) b)"`` -> ``("f", ["(g a)", "b"])``; ``"x"`` -> ``("x", [])``.
+    Returns ``None`` for anything that is not a head-then-arguments term
+    (an infix expression, a projection, a parenthesised tuple, ...), which is
+    the signal to treat the term as an opaque leaf.
+    """
+    t = text.strip()
+    while t.startswith("(") and t.endswith(")"):
+        depth = 0
+        for i, ch in enumerate(t):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and i != len(t) - 1:
+                    return None  # not a single parenthesised term
+        t = t[1:-1].strip()
+    parts: list[str] = []
+    depth = 0
+    cur = ""
+    for ch in t:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        if ch == " " and depth == 0:
+            if cur:
+                parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    if cur:
+        parts.append(cur)
+    if not parts:
+        return None
+    head = parts[0]
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", head):
+        return None
+    return head, parts[1:]
+
+
+def concat_collision_peel(
+    term: str,
+    inj_of_ev: dict[str, tuple[str, str]],
+    hyp: str = "h",
+) -> tuple[list[str], set[str], set[tuple[str, str]]]:
+    """Peel a nested-``concat_*`` term down to its leaves, TERM-FREE.
+
+    ``term`` is one side's rendered KDF-input value; only its *structure* is
+    read, never its text. Each internal ``concat_<L>_<R>_to_<Res>`` node emits
+
+    ``have h<k> := <op>_injL _ _ _ _ <parent-hyp>.``
+
+    (and the ``_injR`` twin), whose four ``_``s let EC unify the component terms
+    off the parent hypothesis. That is what makes this usable after
+    ``skip => />``, which normalises the goal to a MIX of memory annotations no
+    statically-built term text can match -- the failure mode that defeated every
+    term-based peel here.
+
+    A leaf ``<alias>.ev_<method> <arg>`` whose method is declared ``injective``
+    additionally emits ``have h<k> := <M>_<m>_inj _ _ <hyp>.``, stripping the
+    encoding.
+
+    Returns ``(lines, concat_ops_used, inj_methods_requested)``. The ops need
+    their ``_injL``/``_injR`` lemmas emitted (``TypeCollector.request_concat_inj``)
+    and the methods their ``_inj`` axioms (``inj_method_requests``).
+    """
+    lines: list[str] = []
+    ops: set[str] = set()
+    injs: set[tuple[str, str]] = set()
+    counter = [0]
+
+    def fresh() -> str:
+        counter[0] += 1
+        return f"hcp{counter[0]}"
+
+    def walk(node: str, parent: str) -> None:
+        split = split_app(node)
+        if split is None:
+            return
+        head, args = split
+        if head.startswith("concat_") and len(args) == 2:
+            ops.add(head)
+            left, right = fresh(), fresh()
+            lines.append(f"have {left} := {head}_injL _ _ _ _ {parent}.")
+            lines.append(f"have {right} := {head}_injR _ _ _ _ {parent}.")
+            walk(args[0], left)
+            walk(args[1], right)
+            return
+        if len(args) == 1 and head in inj_of_ev:
+            module, method = inj_of_ev[head]
+            injs.add((module, method))
+            lines.append(f"have {fresh()} := {module}_{method}_inj _ _ {parent}.")
+
+    walk(term, hyp)
+    return lines, ops, injs

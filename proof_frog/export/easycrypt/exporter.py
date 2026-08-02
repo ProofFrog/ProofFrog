@@ -13,8 +13,10 @@ from dataclasses import dataclass
 from typing import Any, Callable, cast
 
 from . import binding_challenge as bch
+from .challenge_common import concat_collision_peel as cc_concat_peel
 from .challenge_common import paren as cc_paren
 from .challenge_common import split_top_args as cc_split_args
+from .challenge_common import subst as cc_subst
 from . import canonical_form
 from . import ec_ast
 from . import expr_translator
@@ -1531,6 +1533,22 @@ def export_proof_file(proof_path: str) -> str:
     clone_alias_by_module: dict[str, str] = {
         _inst.let_name: _inst.clone_alias for _inst in instances
     }
+    # ``<clone>.ev_<m>`` -> ``(<declared module>, <m>)`` for every method the
+    # primitive declares ``injective``. Lets a route recognise an ENCODING leaf
+    # by its head op and request the licensed ``<M>_<m>_inj`` axiom, without
+    # naming any method. (A non-deterministic method has no ``ev_<m>``, so the
+    # map is intersected with the deterministic set.)
+    inj_ev_ops: dict[str, tuple[str, str]] = {}
+    for _inst in instances:
+        _prim = primitives_by_name.get(_inst.primitive_name)
+        if _prim is None:
+            continue
+        for _m in _prim.methods:
+            if _m.injective and _m.deterministic:
+                inj_ev_ops[f"{_inst.clone_alias}.ev_{_m.name.lower()}"] = (
+                    _inst.let_name,
+                    _m.name.lower(),
+                )
 
     # Each game file's primitive is the type name of its first parameter
     # (e.g. ``Game Real(SymEnc E)`` → ``"SymEnc"``). Game files associated
@@ -4184,13 +4202,22 @@ def export_proof_file(proof_path: str) -> str:
             # repacked SEED (via ``derivekeypair``), so its collision branch needs
             # ``seed = challenger.dk0`` to unify with the inlined challenger. The
             # atomic (expanded) reduction lacks the Function param and decapsulates
-            # with the challenger's key DIRECTLY, so it needs no coupling -> skip
-            # (keeps every non-seedbased proof byte-identical).
-            if not any(
-                isinstance(p.type, frog_ast.FunctionType) for p in red.parameters
-            ):
-                continue
+            # with the challenger's key DIRECTLY, so it needs no coupling.
+            #
+            # The ``Function<>`` param was a PROXY for "seedbased wrapper", and it
+            # is the wrong test: measured on CK_seedbased_HON_BIND_K_PK, NO
+            # reduction there carries one, yet ``R_PQ_Bind`` repacks the
+            # challenger's ``initialize`` result into differently-named fields
+            # exactly as the LEAK cells' does -- so the HON hops silently lost a
+            # conjunct that is both needed and true. Gate instead on the condition
+            # that actually makes the conjunct meaningful AND derivable: a
+            # challenger-source map with a genuine RENAME.
+            # ``_challenger_source_map`` reads that repacking off the reduction's
+            # own ``Initialize``, so every emitted conjunct stays structurally
+            # derived rather than guessed.
             src = _challenger_source_map(red, chal_ast)
+            if not any(rf != cf for rf, cf in src.items()):
+                continue
             module_expr = resolver.resolve(step).module_expr
             red_base = pt.module_base_name(module_expr)
             chal_base = pt.module_base_name(pt.last_module_arg(module_expr))
@@ -4928,6 +4955,189 @@ def export_proof_file(proof_path: str) -> str:
         body = " /\\ ".join(conj)
         return f"{globs} /\\ {body}" if globs else body
 
+    def _module_pmap(mod: ec_ast.Module, applied: str) -> dict[str, str]:
+        """Map a module's FORMAL parameter names to the instances it is applied
+        to (``R(KEM_PQ, KEM_T, ...)`` -> ``{K: KEM_PQ, ...}``). A rendered proc
+        body calls its formal parameter, so this is what turns a callee into the
+        declared module whose ``_det`` axiom discharges it."""
+        inner = (
+            applied[applied.index("(") + 1 : applied.rindex(")")]
+            if "(" in applied
+            else ""
+        )
+        args = [pt.module_base_name(a) for a in cc_split_args(inner)] if inner else []
+        return {p.name: a for p, a in zip(mod.params, args)}
+
+    def _twin_collision_branch(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements,too-many-arguments,too-many-positional-arguments
+        split_step: frog_ast.Step,
+        lproc: ec_ast.Proc,
+        split_if: ec_ast.If,
+        plain_tail: list[ec_ast.EcStmt],
+        plain_pmap: dict[str, str],
+        env: dict[str, str],
+        ps: str,
+        os_: str,
+    ) -> list[str] | None:
+        """The twin case-split's COLLISION branch, or ``None`` off-shape.
+
+        Shape: the splitting side forwards the collision to its inner binding
+        challenger with a single un-inlined functor call, while the plain side
+        recomputes the game boolean from deterministic calls. The branch
+        ``inline{os}``s that call (``inline *`` does NOT reach a functor
+        application), functionalises BOTH sides' deterministic tails with their
+        ``_det`` axioms, and then reduces the two win conditions to each other
+        by inverting the KDF-input concat -- term-free, see
+        :func:`challenge_common.concat_collision_peel`.
+
+        Everything is read off the ASTs: the challenger's own rendered proc
+        supplies the calls to peel, its module application supplies the
+        formal->instance map, and the concat NESTING supplies the peel depth.
+        """
+        then_exec = [
+            s
+            for s in split_if.then_body
+            if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+        ]
+        if len(then_exec) != 1 or not isinstance(then_exec[0], ec_ast.Call):
+            return None
+        chal_call = then_exec[0]
+        chal_expr = pt.last_module_arg(resolver.resolve(split_step).module_expr)
+        chal_qual = pt.module_base_name(chal_expr)
+        chal_mod = next(
+            (
+                d
+                for d in theory_game_decls
+                if isinstance(d, ec_ast.Module)
+                and d.name == chal_qual.rpartition(".")[2]
+            ),
+            None,
+        )
+        if chal_mod is None:
+            return None
+        cproc = next(
+            (
+                p
+                for p in chal_mod.procs
+                if p.name == chal_call.callee.rpartition(".")[2]
+            ),
+            None,
+        )
+        if cproc is None:
+            return None
+        cpmap = _module_pmap(chal_mod, chal_expr)
+        cargs = cc_split_args(chal_call.args) if chal_call.args.strip() else []
+        if len(cargs) != len(cproc.params):
+            return None
+        param_sub = {p.name: a for p, a in zip(cproc.params, cargs)}
+        # pylint: disable-next=protected-access
+        field_names = {f.name for f in chal_mod.module_vars}
+        wrapper_params = {p.name for p in lproc.params}
+        ident = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+        def _peelable(
+            stmts: list[ec_ast.EcStmt], pmap: dict[str, str], resolve_args: bool
+        ) -> tuple[list[tuple[str, str, list[str]]], list[str], list[str]] | None:
+            """``(calls, glob modules, free arg terms)`` for a deterministic tail."""
+            calls: list[tuple[str, str, list[str]]] = []
+            mods: list[str] = []
+            frees: list[str] = []
+            for st in stmts:
+                if isinstance(st, (ec_ast.VarDecl, ec_ast.Return, ec_ast.Assign)):
+                    continue  # declarations, and assigns absorbed by ``sp``/``wp``
+                if not isinstance(st, ec_ast.Call):
+                    return None
+                mod, dot, meth = st.callee.partition(".")
+                mod = pmap.get(mod, mod)
+                if not dot or meth not in det_methods_by_module.get(mod, set()):
+                    return None
+                if mod not in mods:
+                    mods.append(mod)
+                args = cc_split_args(st.args) if st.args.strip() else []
+                out_args: list[str] = []
+                for arg in args:
+                    term = cc_subst(arg, param_sub) if resolve_args else arg
+                    for name in ident.findall(term):
+                        if resolve_args and name not in field_names | wrapper_params:
+                            return None
+                        if name not in frees:
+                            frees.append(name)
+                    out_args.append(term)
+                calls.append((mod, meth, out_args))
+            return calls, mods, frees
+
+        chal_side = _peelable(list(cproc.body), cpmap, True)
+        plain_side = _peelable(plain_tail, plain_pmap, False)
+        if chal_side is None or plain_side is None or not chal_side[0]:
+            return None
+        c_calls, c_mods, c_frees = chal_side
+        p_calls, p_mods, _p_free = plain_side
+        # The plain side's call ARGUMENTS are frozen whole (they are the KDF
+        # inputs -- locals whose value the seq invariant already pins), not by
+        # identifier, so a compound argument still freezes.
+        p_args: list[str] = []
+        for _m, _me, args in p_calls:
+            for arg in args:
+                if arg not in p_args:
+                    p_args.append(arg)
+
+        cg = {m: f"cgv{i}" for i, m in enumerate(c_mods)}
+        cf = {n: f"cfv{i}" for i, n in enumerate(c_frees)}
+        pg = {m: f"pgv{i}" for i, m in enumerate(p_mods)}
+        pa = {a: f"pav{i}" for i, a in enumerate(p_args)}
+        frozen = (
+            [f"(glob {m})" "{" f"{os_}" "}" for m in c_mods]
+            + [
+                (
+                    f"{chal_qual}.{n}" "{" f"{os_}" "}"
+                    if n in field_names
+                    else f"{n}" "{" f"{os_}" "}"
+                )
+                for n in c_frees
+            ]
+            + [f"(glob {m})" "{" f"{ps}" "}" for m in p_mods]
+            + [f"{a}" "{" f"{ps}" "}" for a in p_args]
+        )
+        binders = (
+            [cg[m] for m in c_mods]
+            + [cf[n] for n in c_frees]
+            + [pg[m] for m in p_mods]
+            + [pa[a] for a in p_args]
+        )
+        # -- the term-free concat peel + encoding injectivity -----------------
+        guard = split_if.guard
+        g0, sep, _g1 = guard.partition(" = ")
+        if not sep or g0.strip() not in env:
+            return None
+        peel, concat_ops, inj_methods = cc_concat_peel(env[g0.strip()], inj_ev_ops)
+        if not peel or not concat_ops:
+            return None
+        for op in sorted(concat_ops):
+            top_types.request_concat_inj(op)
+        inj_method_requests.update(inj_methods)
+        return [
+            f"+ rcondt{{{os_}}} 1; first by auto.",
+            f"  inline{{{os_}}} 1.",
+            "  sp.",
+            f"  exists* {', '.join(frozen)}.",
+            f"  elim* => {' '.join(binders)}.",
+            "  wp.",
+            *[
+                f"  call{{{ps}}} ({m}_{me}_det {pg[m]}"
+                + "".join(f" {pa[a]}" for a in args)
+                + ")."
+                for m, me, args in reversed(p_calls)
+            ],
+            *[
+                f"  call{{{os_}}} ({m}_{me}_det {cg[m]}"
+                + "".join(f" {cc_subst(a, cf)}" for a in args)
+                + ")."
+                for m, me, args in reversed(c_calls)
+            ],
+            "  skip => />. move => &1 &2 h.",
+            *[f"  {ln}" for ln in peel],
+            "  smt().",
+        ]
+
     def _twin_challenge_one_oracle(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
         step_a: frog_ast.Step,
         step_b: frog_ast.Step,
@@ -4972,16 +5182,7 @@ def export_proof_file(proof_path: str) -> str:
                 return None
 
         # -- formal-param -> declared-instance maps, per side -----------------
-        def _pmap(mod: ec_ast.Module, applied: str) -> dict[str, str]:
-            inner = (
-                applied[applied.index("(") + 1 : applied.rindex(")")]
-                if "(" in applied
-                else ""
-            )
-            args = (
-                [pt.module_base_name(a) for a in cc_split_args(inner)] if inner else []
-            )
-            return {p.name: a for p, a in zip(mod.params, args)}
+        _pmap = _module_pmap
 
         plain_step = step_a if ps == "1" else step_b
         split_step = step_b if ps == "1" else step_a
@@ -5089,9 +5290,26 @@ def export_proof_file(proof_path: str) -> str:
         params_eq = (
             "={" + ", ".join(p.name for p in lproc.params) + "}" if lproc.params else ""
         )
-        inv_parts = [g for g in (globs, params_eq) if g] + [
-            f"{v}" "{" f"{sd}" "}" f" = {env[v]}" for v in carried for sd in ("1", "2")
+        # The hop's OWN couplings must ride through the `seq` too. Measured on the
+        # real else leaf: its post demands `pq_keys_0{1}.`1 = <PQchal>.ek0{2}` and
+        # the splitting side's `ek_PQ_0{2}` to agree with it, and NOTHING in the
+        # post-prefix program establishes either -- so without them that branch is
+        # unprovable. They hold on entry and the prefix writes none of those
+        # fields, so carrying them is free.
+        hop_coupling = [
+            c
+            for c in _live_state_coupling(step_a, step_b).split(" /\\ ")
+            if not c.startswith("={")
         ]
+        inv_parts = (
+            [g for g in (globs, params_eq) if g]
+            + [
+                f"{v}" "{" f"{sd}" "}" f" = {env[v]}"
+                for v in carried
+                for sd in ("1", "2")
+            ]
+            + hop_coupling
+        )
         frozen = (
             [f"(glob {m})" "{" f"{ps}" "}" for m in glob_of]
             # pylint: disable-next=protected-access
@@ -5104,27 +5322,52 @@ def export_proof_file(proof_path: str) -> str:
             + [f"fv_{f.name}" for f in plain_mod.module_vars]
             + [f"av_{p.name}" for p in lproc.params]
         )
-        # -- the case split: DERIVED AND MEASURED, not yet emitted -------------
-        # The branches were built and run against the real goal of
-        # CG_seedbased_HON_BIND_K_PK: `case` on the `if` guard (its locals
-        # qualified to the splitting memory), `rcondt`/`rcondf` at index 1, the
-        # plain side's KDF evaluations functionalized with their `_det` axioms,
-        # and the splitting side's then-branch peeled with the SAME delegated
-        # decaps terms the prefix used (a prefix call is delegated exactly where
-        # the two sides' callees differ -- both reductions name a `Challenger`
-        # formal, so the param map cannot distinguish them). All of that fires:
-        # the rconds discharge, the peels apply, and each branch reduces to a
-        # single leaf. Neither leaf closes yet:
-        #   - COLLISION leaf: needs the KDF-input concat peeled to its components
-        #     (`slice_concat_left_*` + the encoding-injectivity axioms) to get
-        #     `ss_PQ_0 = ss_PQ_1` and `ek_T_0 = ek_T_1` out of the guard. This
-        #     channel returns a tactic only -- it has no `inj_acc` / aux-lemma
-        #     hook to REQUEST those, which is the next piece of plumbing.
-        #   - ELSE leaf: not closed by `do ! (wp; call (_: true)); wp; skip => /#`.
-        # Emitting a tactic that provably fails would turn an EC-accepted proof
-        # into an EC-rejected one, so the split is left open here.
+        # -- the case split ----------------------------------------------------
+        # ``case`` on the splitting side's own ``if`` guard, then:
+        #   * COLLISION branch -- ``_twin_collision_branch`` (``inline{os} 1`` the
+        #     forwarded challenger, functionalise both tails, invert the KDF
+        #     concat term-free);
+        #   * ELSE branch -- both sides run the same recomputation, so the plain
+        #     two-sided call peel closes it from the seq invariant's couplings.
+        # If the collision branch is off-shape the whole split is left open: a
+        # tactic that provably fails turns an EC-ACCEPTED proof into a rejected
+        # one, which is strictly worse than a tagged admit.
         os_ = "2" if ps == "1" else "1"
-        del split_base, split_if, iss
+        del split_base, iss
+        collision = _twin_collision_branch(
+            split_step,
+            lproc,
+            split_if,
+            plain_stmts[len(prefix_split) :],
+            pmap,
+            env,
+            ps,
+            os_,
+        )
+        guard_lhs, _, guard_rhs = split_if.guard.partition(" = ")
+        tail: list[str] = (
+            [
+                f"case ({guard_lhs.strip()}"
+                "{"
+                f"{os_}"
+                "}"
+                f" = {guard_rhs.strip()}"
+                "{"
+                f"{os_}"
+                "}).",
+                *collision,
+                f"rcondf{{{os_}}} 1; first by move => &m; skip.",
+                "do ! (wp; call (_: true)).",
+                "wp; skip => /#.",
+            ]
+            if collision is not None
+            else [
+                # The collision branch could not be built from the ASTs (the
+                # forwarded call, the challenger's own tail, or the KDF concat
+                # nesting did not match). Stay honest rather than guess.
+                "admit.",
+            ]
+        )
         return [
             f"seq {len(prefix_plain)} {len(prefix_split)} : ({' /\\ '.join(inv_parts)}).",
             "+ inline *.",
@@ -5133,18 +5376,7 @@ def export_proof_file(proof_path: str) -> str:
             *_peel_side(ps),
             *_peel_side(os_),
             "wp; skip => />.",
-            # The case-split branches are DERIVED and structurally correct (the
-            # `rcondt`/`rcondf` fire, the peels apply, the goals reduce to their
-            # leaves) but neither leaf closes yet, so they are left open here
-            # rather than emitted as a tactic that provably fails:
-            #   - the COLLISION leaf needs the KDF-input concat peeled to its
-            #     components -- `slice_concat_left_*` plus the encoding-injectivity
-            #     axioms -- and this override channel cannot yet REQUEST those
-            #     (it returns a tactic only, no `inj_acc` / aux-lemma hook);
-            #   - the ELSE leaf is not closed by `do ! (wp; call (_: true)); wp;
-            #     skip => /#` alone.
-            # Both were measured on the real goal of CG_seedbased_HON_BIND_K_PK.
-            "admit.",
+            *tail,
         ]
 
     def _twin_challenge_oracle_tacs(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
@@ -8733,7 +8965,18 @@ def export_proof_file(proof_path: str) -> str:
         # composite seam couples by name and misses the rename. Empty off-shape.
         wchal = _wrapper_challenger_coupling(step_a, step_b)
         if wchal:
-            coupled = f"{coupled} /\\ {wchal}"
+            # DEDUP against what is already stated. Widening this builder's gate
+            # (it used to key on a ``Function<>`` param, a proxy no HON reduction
+            # satisfies) makes it fire on reductions whose repack the composite
+            # seam ALREADY couples by name, and a repeated conjunct changes the
+            # emitted bytes of proofs that are clean today. Scoped to this
+            # builder on purpose: other pairs of builders also overlap, but
+            # those duplicates predate this change and normalising them would
+            # churn six clean exports for a cosmetic gain.
+            have = set(coupled.split(" /\\ "))
+            fresh = [c for c in wchal.split(" /\\ ") if c not in have]
+            if fresh:
+                coupled = f"{coupled} /\\ " + " /\\ ".join(fresh)
         # MIXED delegate pair (HON_BIND hop_4/hop_8 class): the storing side's
         # packed key component <-> the delegating side's challenger field.
         spc = _stored_pair_vs_chal_field_coupling(step_a, step_b)

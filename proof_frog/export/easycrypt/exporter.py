@@ -5419,6 +5419,170 @@ def export_proof_file(proof_path: str) -> str:
             *tail,
         ]
 
+    def _dead_branch_inlines(
+        branch_if: ec_ast.If,
+        chal_expr: str,
+        pmap: dict[str, str],
+        side: str,
+    ) -> list[str] | None:
+        """The ``inline{side}`` lines needed to make an ``if`` whose branches are
+        constant-or-forwarded-call crossable by ``wp``; ``None`` if some branch
+        does real work.
+
+        ``inline *`` does NOT reach a functor application, so the forwarded
+        challenger has to be named explicitly.
+        """
+        chal_base = pt.module_base_name(chal_expr)
+        lines: list[str] = []
+        for branch in (branch_if.then_body, branch_if.else_body):
+            for inner in branch:
+                if isinstance(inner, ec_ast.Assign):
+                    continue
+                if not isinstance(inner, ec_ast.Call):
+                    return None
+                callee_base = inner.callee.partition(".")[0]
+                if (
+                    pt.module_base_name(inner.callee) != chal_base
+                    and not inner.callee.startswith(f"{chal_base}.")
+                    and pmap.get(callee_base) is None
+                ):
+                    return None
+                line = (
+                    f"inline{{{side}}} {chal_expr}.{inner.callee.rpartition('.')[2]}."
+                )
+                if line not in lines:
+                    lines.append(line)
+        return lines
+
+    def _dead_side_oracle_tac(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+        step_a: frog_ast.Step,
+        step_b: frog_ast.Step,
+        lproc: ec_ast.Proc,
+        rproc: ec_ast.Proc,
+    ) -> list[str] | None:
+        """One oracle where the two sides agree because BOTH are constant, but
+        only one of them says so syntactically; ``None`` off-shape.
+
+        The last hop of a binding chain relates a reduction whose oracle has
+        already collapsed to ``return <const>;`` against one that still runs the
+        whole deterministic KDF computation and an ``if`` whose branches BOTH
+        yield that same constant (one directly, one by forwarding to an
+        Unbreakable challenger that returns it). ``sim`` cannot relate them --
+        one side has abstract calls the other does not -- and it is not a
+        reorder, so the whole oracle used to fall to a guided admit.
+
+        The route: inline the forwarded challenger (``inline{i} <expr>.<proc>``;
+        ``inline *`` does not reach a functor application), which turns the
+        ``if`` into pure assignments that ``wp`` can cross, then drop the live
+        side's deterministic calls ONE-SIDED with their glob-preserving
+        ``<M>_<m>_det`` axioms, back to front.
+        """
+        if step_a.reduction is None or step_b.reduction is None:
+            return None
+
+        def _exec(proc: ec_ast.Proc) -> list[ec_ast.EcStmt]:
+            return [
+                st
+                for st in proc.body
+                if not isinstance(st, (ec_ast.VarDecl, ec_ast.Return))
+            ]
+
+        lst, rst = _exec(lproc), _exec(rproc)
+        # Exactly one side is already the bare constant.
+        if bool(lst) == bool(rst):
+            return None
+        live_proc, live_step, ls = (lproc, step_a, "1") if lst else (rproc, step_b, "2")
+        live = lst or rst
+        live_mod = next(
+            (
+                d
+                for d in ec_reductions
+                if isinstance(d, ec_ast.Module)
+                and live_step.reduction is not None
+                and d.name == live_step.reduction.name
+            ),
+            None,
+        )
+        if live_mod is None:
+            return None
+        live_expr = resolver.resolve(live_step).module_expr
+        pmap = _module_pmap(live_mod, live_expr)
+        live_base = pt.module_base_name(live_expr)
+        chal_expr = pt.last_module_arg(live_expr)
+
+        # -- ev-form environment over the live body, and the calls to peel -----
+        env: dict[str, str] = {f.name: f"fdv_{f.name}" for f in live_mod.module_vars}
+        env.update({p.name: f"adv_{p.name}" for p in live_proc.params})
+        calls: list[tuple[str, str, list[str]]] = []
+        glob_of: dict[str, str] = {}
+        inlines: list[str] = []
+        for st in live:
+            if isinstance(st, ec_ast.Assign):
+                env[st.var] = f"({cc_subst(st.rhs, env)})"
+                continue
+            if isinstance(st, ec_ast.If):
+                # Every branch must yield a CONSTANT, reached either directly or
+                # through a forwarded challenger call. A branch that computes
+                # anything else is a different shape -- decline.
+                branch_inline = _dead_branch_inlines(st, chal_expr, pmap, ls)
+                if branch_inline is None:
+                    return None
+                for line in branch_inline:
+                    if line not in inlines:
+                        inlines.append(line)
+                continue
+            if not isinstance(st, ec_ast.Call):
+                return None
+            mod, dot, meth = st.callee.partition(".")
+            mod = pmap.get(mod, mod)
+            if not dot or meth not in det_methods_by_module.get(mod, set()):
+                return None
+            alias = clone_alias_by_module.get(mod)
+            if alias is None:
+                return None
+            args = (
+                [cc_subst(a, env) for a in cc_split_args(st.args)]
+                if st.args.strip()
+                else []
+            )
+            glob_of.setdefault(mod, f"gdv{len(glob_of)}")
+            calls.append((mod, meth, args))
+            env[st.var] = (
+                f"({alias}.ev_{meth}" + "".join(f" ({a})" for a in args) + ")"
+                if args
+                else f"({alias}.ev_{meth})"
+            )
+        if not calls or not inlines:
+            return None
+
+        frozen = (
+            [f"(glob {m})" "{" f"{ls}" "}" for m in glob_of]
+            # pylint: disable-next=protected-access
+            + [f"{live_base}.{f.name}" "{" f"{ls}" "}" for f in live_mod.module_vars]
+            + [f"{p.name}" "{" f"{ls}" "}" for p in live_proc.params]
+        )
+        binders = (
+            list(glob_of.values())
+            # pylint: disable-next=protected-access
+            + [f"fdv_{f.name}" for f in live_mod.module_vars]
+            + [f"adv_{p.name}" for p in live_proc.params]
+        )
+        peel: list[str] = []
+        for mod, meth, args in reversed(calls):
+            peel.append("wp.")
+            peel.append(
+                f"call{{{ls}}} ({mod}_{meth}_det {glob_of[mod]}"
+                + "".join(f" ({a})" for a in args)
+                + ")."
+            )
+        return [
+            *inlines,
+            f"exists* {', '.join(frozen)}.",
+            f"elim* => {' '.join(binders)}.",
+            *peel,
+            "wp; skip => />.",
+        ]
+
     def _twin_challenge_oracle_tacs(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> dict[str, list[str]] | None:
@@ -5470,6 +5634,8 @@ def export_proof_file(proof_path: str) -> str:
             if rproc is None or lproc.name == "initialize":
                 continue
             tac = _twin_challenge_one_oracle(step_a, step_b, lproc, rproc)
+            if tac is None:
+                tac = _dead_side_oracle_tac(step_a, step_b, lproc, rproc)
             if tac is not None:
                 out[lproc.name] = tac
         return out or None

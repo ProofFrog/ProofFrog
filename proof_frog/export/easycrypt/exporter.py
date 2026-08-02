@@ -4955,6 +4955,29 @@ def export_proof_file(proof_path: str) -> str:
         body = " /\\ ".join(conj)
         return f"{globs} /\\ {body}" if globs else body
 
+    def _split_conjuncts(guard: str) -> list[str]:
+        """Split an EC boolean guard on its TOP-LEVEL ``&&`` (paren-aware)."""
+        out: list[str] = []
+        depth = 0
+        cur = ""
+        i = 0
+        while i < len(guard):
+            ch = guard[i]
+            if ch in "([":
+                depth += 1
+            elif ch in ")]":
+                depth -= 1
+            if depth == 0 and guard.startswith("&&", i):
+                out.append(cur.strip())
+                cur = ""
+                i += 2
+                continue
+            cur += ch
+            i += 1
+        if cur.strip():
+            out.append(cur.strip())
+        return out
+
     def _module_pmap(mod: ec_ast.Module, applied: str) -> dict[str, str]:
         """Map a module's FORMAL parameter names to the instances it is applied
         to (``R(KEM_PQ, KEM_T, ...)`` -> ``{K: KEM_PQ, ...}``). A rendered proc
@@ -5104,11 +5127,19 @@ def export_proof_file(proof_path: str) -> str:
             + [pa[a] for a in p_args]
         )
         # -- the term-free concat peel + encoding injectivity -----------------
-        guard = split_if.guard
-        g0, sep, _g1 = guard.partition(" = ")
-        if not sep or g0.strip() not in env:
+        # The guard may be a CONJUNCTION (the CT binding reductions forward only
+        # when the KDF inputs collide AND the PQ ciphertexts differ). Peel the
+        # conjunct that is a KDF-input equality; the others are side conditions
+        # the leaf's ``smt`` gets from the same hypothesis.
+        collision_eq = None
+        for conjunct in _split_conjuncts(split_if.guard):
+            lhs, sep, rhs = conjunct.strip().strip("()").partition(" = ")
+            if sep and lhs.strip() in env and rhs.strip() in env:
+                collision_eq = lhs.strip()
+                break
+        if collision_eq is None:
             return None
-        peel, concat_ops, inj_methods = cc_concat_peel(env[g0.strip()], inj_ev_ops)
+        peel, concat_ops, inj_methods = cc_concat_peel(env[collision_eq], inj_ev_ops)
         if not peel or not concat_ops:
             return None
         for op in sorted(concat_ops):
@@ -5344,17 +5375,26 @@ def export_proof_file(proof_path: str) -> str:
             ps,
             os_,
         )
-        guard_lhs, _, guard_rhs = split_if.guard.partition(" = ")
+        # ``case`` on the splitting side's own guard, with EVERY name it reads
+        # qualified to that memory. Qualifying just the two sides of a plain
+        # ``a = b`` is not enough: the CT reductions guard on a CONJUNCTION that
+        # also mentions the proc's parameters (``ct0.`1 <> ct1.`1``).
+        split_proc = lproc if ps == "2" else rproc
+        split_names = {
+            d.name for d in split_proc.body if isinstance(d, ec_ast.VarDecl)
+        } | {p.name for p in split_proc.params}
+        guard_at_os = re.sub(
+            r"\b[A-Za-z_][A-Za-z0-9_]*\b",
+            lambda m: (
+                m.group(0) + "{" + os_ + "}"
+                if m.group(0) in split_names
+                else m.group(0)
+            ),
+            split_if.guard,
+        )
         tail: list[str] = (
             [
-                f"case ({guard_lhs.strip()}"
-                "{"
-                f"{os_}"
-                "}"
-                f" = {guard_rhs.strip()}"
-                "{"
-                f"{os_}"
-                "}).",
+                f"case ({guard_at_os}).",
                 *collision,
                 f"rcondf{{{os_}}} 1; first by move => &m; skip.",
                 "do ! (wp; call (_: true)).",

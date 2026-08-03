@@ -44,8 +44,13 @@ clone BitWord as WAB with op n <- na + nb proof gt0_n by smt(gt0_na gt0_nb).
 op concat (a : WA.word) (b : WB.word) : WAB.word =
   WAB.mkword (WA.ofword a ++ WB.ofword b).
 
-op sliceL (s : WAB.word) : WA.word = WA.mkword (take na (WAB.ofword s)).
-op sliceR (s : WAB.word) : WB.word = WB.mkword (drop na (WAB.ofword s)).
+(* The exporter's slice takes EXPLICIT (i, j) indices, not a fixed split, so
+   the proofs must also normalise `j - i`. Matching that signature here is the
+   point: a fixed-split tripwire would not have exercised it. *)
+op slice_ab_a (s : WAB.word) (i j : int) : WA.word =
+  WA.mkword (take (j - i) (drop i (WAB.ofword s))).
+op slice_ab_b (s : WAB.word) (i j : int) : WB.word =
+  WB.mkword (take (j - i) (drop i (WAB.ofword s))).
 
 (* the concatenation really does have the summed width -- the side condition
    every `mkword` below discharges *)
@@ -53,31 +58,43 @@ lemma size_cat_ab (a : WA.word) (b : WB.word) :
   size (WA.ofword a ++ WB.ofword b) = na + nb.
 proof. by rewrite size_cat WA.size_word WB.size_word. qed.
 
-(* --- the three round-trip laws, as LEMMAS ------------------------------- *)
+(* --- the three round-trip laws, at the EXPORTER'S signature ------------- *)
 
 lemma slice_concat_left (a : WA.word) (b : WB.word) :
-  sliceL (concat a b) = a.
+  slice_ab_a (concat a b) 0 na = a.
 proof.
-rewrite /sliceL /concat (WAB.ofwordK _ (size_cat_ab a b)).
+rewrite /slice_ab_a /concat (WAB.ofwordK _ (size_cat_ab a b)) drop0.
+have ->: na - 0 = na by smt().
 have <- := WA.size_word a.
 by rewrite take_size_cat // WA.mkwordK.
 qed.
 
 lemma slice_concat_right (a : WA.word) (b : WB.word) :
-  sliceR (concat a b) = b.
+  slice_ab_b (concat a b) na (na + nb) = b.
 proof.
-rewrite /sliceR /concat (WAB.ofwordK _ (size_cat_ab a b)).
+rewrite /slice_ab_b /concat (WAB.ofwordK _ (size_cat_ab a b)).
+have ->: na + nb - na = nb by smt().
 have <- := WA.size_word a.
-by rewrite drop_size_cat // WB.mkwordK.
+rewrite drop_size_cat //.
+have <- := WB.size_word b.
+by rewrite take_size WB.mkwordK.
 qed.
 
 lemma concat_slices_id (s : WAB.word) :
-  concat (sliceL s) (sliceR s) = s.
+  concat (slice_ab_a s 0 na) (slice_ab_b s na (na + nb)) = s.
 proof.
 have hs : size (WAB.ofword s) = na + nb by exact WAB.size_word.
+rewrite /concat /slice_ab_a /slice_ab_b drop0.
+have ->: na - 0 = na by smt().
+have ->: na + nb - na = nb by smt().
 have h1 : size (take na (WAB.ofword s)) = na by rewrite size_take; smt(gt0_na gt0_nb).
-have h2 : size (drop na (WAB.ofword s)) = nb by rewrite size_drop; smt(gt0_na gt0_nb).
-rewrite /concat /sliceL /sliceR (WA.ofwordK _ h1) (WB.ofwordK _ h2).
+have hd : size (drop na (WAB.ofword s)) = nb by rewrite size_drop; smt(gt0_na gt0_nb).
+(* the trailing `take` must go BEFORE `ofwordK`, or its size side-condition is
+   about the wrong term and the rewrite finds nothing *)
+have ht : take nb (drop na (WAB.ofword s)) = drop na (WAB.ofword s)
+  by rewrite take_oversize // hd.
+have h2 : size (take nb (drop na (WAB.ofword s))) = nb by rewrite ht hd.
+rewrite (WA.ofwordK _ h1) (WB.ofwordK _ h2) ht.
 by rewrite cat_take_drop WAB.mkwordK.
 qed.
 

@@ -40,6 +40,26 @@ class OpDecl:
 
 
 @dataclass
+class ProvedLemma:
+    """``lemma <name> : <formula>.`` followed by a proof script.
+
+    A plain (non-equiv) lemma carrying its own proof, for facts the exporter
+    can DERIVE rather than axiomatize -- the slice/concat round-trip laws over
+    ``BitWord`` clones, whose derivation is validated by
+    ``ec_templates/bitword_slice_concat.ec``. Replacing an axiom with one of
+    these removes trusted base without removing a fact, so unlike a deletion it
+    needs no quarantine.
+
+    Distinct from :class:`Lemma`, which renders an ``equiv`` judgment and
+    cannot state an ordinary formula.
+    """
+
+    name: str
+    formula: str
+    body: list[str]
+
+
+@dataclass
 class Axiom:
     """``axiom <name> [(<module_args>)] [<memory_args>] : <formula>.``
 
@@ -321,6 +341,7 @@ class Section:
 EcTopDecl = Union[
     TypeDecl,
     OpDecl,
+    ProvedLemma,
     Axiom,
     ModuleType,
     Module,
@@ -372,6 +393,12 @@ def _render_decl(decl: EcTopDecl) -> list[str]:
         return [f"type {decl.name}."]
     if isinstance(decl, OpDecl):
         return [f"op {decl.name} : {decl.signature}."]
+    if isinstance(decl, ProvedLemma):
+        out = [f"lemma {decl.name} :", f"  {decl.formula}."]
+        out.append("proof.")
+        out.extend(decl.body)
+        out.append("qed.")
+        return out
     if isinstance(decl, Axiom):
         if decl.declare:
             return [f"declare axiom {decl.name} {decl.formula}."]

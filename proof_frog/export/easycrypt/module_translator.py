@@ -253,6 +253,31 @@ def reduction_repacks_challenger_init(reduction: frog_ast.Reduction) -> bool:
     )
 
 
+def rendered_init_events(module: ec_ast.Module) -> list[str]:
+    """Backbone events of a RENDERED game module's ``initialize``.
+
+    ``init_backbone_events`` reads TOP-LEVEL FrogLang statements, which
+    undercounts whenever the game returns a call-bearing expression: an
+    ``Initialize`` whose body is ``x <$; y <$; return (G^x, G^y);`` shows two
+    statements, but the EC render hoists ``NG.generator()`` and both ``NG.exp``
+    into their own statements, so ``inline *`` presents FIVE events to peel.
+    Reading the rendered module instead is the same discipline the reorder
+    synthesizers already follow (validate against rendered bodies, not raw
+    ASTs) -- and a mis-sized challenger block shifts every later rung, which EC
+    reports as "invalid last instruction".
+    """
+    proc = next((p for p in module.procs if p.name == "initialize"), None)
+    if proc is None:
+        return []
+    events: list[str] = []
+    for stmt in proc.body:
+        if isinstance(stmt, ec_ast.Sample):
+            events.append("sample")
+        elif isinstance(stmt, ec_ast.Call):
+            events.append("call")
+    return events
+
+
 def consumed_pk_peel_events(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     reduction: frog_ast.Reduction,
     challenger_init_call_count: int,

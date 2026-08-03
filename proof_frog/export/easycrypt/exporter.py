@@ -2150,6 +2150,11 @@ def export_proof_file(proof_path: str) -> str:
     # ``instances_by_let_name`` is built). Used to give a MULTI-primitive game's
     # params their own per-clone types.
     inst_by_name = {inst.let_name: inst for inst in instances}
+    # Backbone events of each rendered assumption-game ``initialize``, keyed
+    # by (game-file, side). Read off the RENDERED module because a game whose
+    # ``Initialize`` returns a call-bearing expression hoists those calls into
+    # their own statements -- the FrogLang AST undercounts them.
+    rendered_init_events_by_game: dict[tuple[str, str], list[str]] = {}
     for gf in primary_game_files:
         gf_id = _ec_ident(gf.name)
         oracle_type_name = f"{gf_id}_Oracle"
@@ -2182,21 +2187,24 @@ def export_proof_file(proof_path: str) -> str:
         for side in gf.games:
             mod_name = f"{gf_id}_{side.name}"
             module_name_by_concrete_game[(gf.name, side.name)] = mod_name
-            theory_game_decls.append(
-                theory_modules.translate_game(
-                    side,
-                    mod_name,
-                    primitive.name,
-                    implements=oracle_type_name,
-                    emitted_param_type=scheme_type_name,
-                    emit_state_vars=(
-                        oracle_model_by_game_file[gf.name].is_multi_oracle
-                        or (bool(side.fields) and len(side.methods) > 1)
-                    ),
-                    param_module_types=gf_param_mod_types,
-                    param_primitive_types=gf_param_prim_types,
-                )
+            _side_mod = theory_modules.translate_game(
+                side,
+                mod_name,
+                primitive.name,
+                implements=oracle_type_name,
+                emitted_param_type=scheme_type_name,
+                emit_state_vars=(
+                    oracle_model_by_game_file[gf.name].is_multi_oracle
+                    or (bool(side.fields) and len(side.methods) > 1)
+                ),
+                param_module_types=gf_param_mod_types,
+                param_primitive_types=gf_param_prim_types,
             )
+            if isinstance(_side_mod, ec_ast.Module):
+                rendered_init_events_by_game[(gf.name, side.name)] = (
+                    mt.rendered_init_events(_side_mod)
+                )
+            theory_game_decls.append(_side_mod)
             # WALL 3o STEP B: for a reprogramming-Lazy game, emit a TOP-LEVEL
             # materialized copy via top_modules (concrete types + ``h <-
             # <primary>.RO_G_RO.h`` via ro_ref_for_dfun). The challenger is
@@ -2378,6 +2386,10 @@ def export_proof_file(proof_path: str) -> str:
                     ),
                 )
                 fp_decls.append(fp_game_mod)
+                if isinstance(fp_game_mod, ec_ast.Module):
+                    rendered_init_events_by_game[(gf.name, side.name)] = (
+                        mt.rendered_init_events(fp_game_mod)
+                    )
                 # Also visible to the challenge-tactic routes, which look a
                 # forwarded challenger's own proc up by module name: a reduction
                 # can forward to a game of a FOREIGN primitive (the KDF-collision
@@ -10115,7 +10127,7 @@ def export_proof_file(proof_path: str) -> str:
     assumption_clone_by_hop: dict[int, str] = {}
 
     def _consume_pk_challenger_events(
-        scheme_expr: str, game: frog_ast.Game
+        scheme_expr: str, game: frog_ast.Game, gf_name: str
     ) -> list[str] | None:
         """Structural challenger-init event list for the consume-pk peel, or
         ``None`` (=> the flat per-keygen "call" model, byte-identical).
@@ -10144,7 +10156,14 @@ def export_proof_file(proof_path: str) -> str:
             # seeds, then two ``randomscalar`` calls) leaves the ladder short,
             # which EC reports as "left instruction list is not empty" at 99%
             # of the file.
-            own = mt.init_backbone_events(game)
+            # RENDERED events first: a game whose ``Initialize`` returns a
+            # call-bearing expression (``return (G^x, G^y);``) hoists those
+            # calls into their own statements, which the FrogLang AST does not
+            # show. Sizing the challenger block from the AST left the SDH_SS
+            # bridges' rungs mis-aligned ("invalid last instruction").
+            own = rendered_init_events_by_game.get(
+                (gf_name, game.name)
+            ) or mt.init_backbone_events(game)
             if not own:
                 return None
             return (["sample"] if ro_holder_modules else []) + own
@@ -10385,26 +10404,33 @@ def export_proof_file(proof_path: str) -> str:
             _gf_a_has_reprogram = any(
                 _reprogramming_lazy_ro_field(g) is not None for g in gf_a.games
             )
-            left_ro_sim_ok = (
-                _init_lifted
-                and _gf_a_has_reprogram
-                and (
-                    _reprogramming_lazy_ro_field(
-                        next(g for g in gf_a.games if g.name == left_side)
-                    )
-                    is None
+            # The "sim shape" is the side of a reprogramming assumption whose
+            # own game holds the whole-Function RO field (so the RO is
+            # materializable rather than lazily tabulated). Under the LIFTED
+            # wrapper shape that side closes with RO-align + plain ``sim``
+            # (validated cont-91). Under the NON-lifted shape it has no
+            # validated close at all: the peel runs to the end but the final
+            # `/#` cannot discharge the residual, because the lazy side samples
+            # a single stand-in (`yStar <$`) where the theorem side carries a
+            # whole function, and relating them IS the hop's real content, not
+            # plumbing. Honest-gate it: a tagged admit beats a tactic that
+            # rejects the whole file (cont-40).
+            _sim_shape_l = _gf_a_has_reprogram and (
+                _reprogramming_lazy_ro_field(
+                    next(g for g in gf_a.games if g.name == left_side)
                 )
+                is None
             )
-            right_ro_sim_ok = (
-                _init_lifted
-                and _gf_a_has_reprogram
-                and (
-                    _reprogramming_lazy_ro_field(
-                        next(g for g in gf_a.games if g.name == right_side)
-                    )
-                    is None
+            _sim_shape_r = _gf_a_has_reprogram and (
+                _reprogramming_lazy_ro_field(
+                    next(g for g in gf_a.games if g.name == right_side)
                 )
+                is None
             )
+            left_ro_sim_ok = _init_lifted and _sim_shape_l
+            right_ro_sim_ok = _init_lifted and _sim_shape_r
+            left_bridge_admit = (not _init_lifted) and _sim_shape_l
+            right_bridge_admit = (not _init_lifted) and _sim_shape_r
             # Consume-pk bridge: when the reduction's Initialize forwards+repacks
             # the challenger's Initialize (holding the leaked decaps keys in its
             # own fields), ``R_Adv.distinguish`` consumes the leaked ``pk``
@@ -10508,19 +10534,23 @@ def export_proof_file(proof_path: str) -> str:
                 _gl = next((g for g in gf_a.games if g.name == left_side), None)
                 _gr = next((g for g in gf_a.games if g.name != left_side), None)
                 if _gl is not None:
-                    _chal_inline_l = mt.init_backbone_events(_gl)
+                    _chal_inline_l = rendered_init_events_by_game.get(
+                        (gf_a.name, _gl.name)
+                    ) or mt.init_backbone_events(_gl)
                 if _gr is not None:
-                    _chal_inline_r = mt.init_backbone_events(_gr)
+                    _chal_inline_r = rendered_init_events_by_game.get(
+                        (gf_a.name, _gr.name)
+                    ) or mt.init_backbone_events(_gr)
             elif consume_pk_bridge and reduction_helper is not None:
                 _g_l = next((g for g in gf_a.games if g.name == left_side), None)
                 _g_r = next((g for g in gf_a.games if g.name != left_side), None)
                 if _g_l is not None:
                     _chal_events_l = _consume_pk_challenger_events(
-                        assumption_scheme_expr, _g_l
+                        assumption_scheme_expr, _g_l, gf_a.name
                     )
                 if _g_r is not None:
                     _chal_events_r = _consume_pk_challenger_events(
-                        assumption_scheme_expr, _g_r
+                        assumption_scheme_expr, _g_r, gf_a.name
                     )
             ec_pr_lemmas.append(
                 pt.translate_assumption_hop_pr_lemma(
@@ -10608,6 +10638,8 @@ def export_proof_file(proof_path: str) -> str:
                     # (no RO holder) keep the working bridge byte-identical.
                     ro_bridge_admit=bool(ro_holder_modules),
                     left_ro_sim_ok=left_ro_sim_ok,
+                    left_bridge_admit=left_bridge_admit,
+                    right_bridge_admit=right_bridge_admit,
                     right_ro_sim_ok=right_ro_sim_ok,
                     ro_dead_drop_left=ro_dead_drop_left,
                     ro_dead_drop_right=ro_dead_drop_right,

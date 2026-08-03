@@ -857,6 +857,8 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     multi_oracle: MultiOraclePrSpec | None = None,
     adv_state_restrictions: list[str] | None = None,
     assumption_adv_pos: int = 2,
+    left_bridge_admit: bool = False,
+    right_bridge_admit: bool = False,
     consume_pk_bridge: bool = False,
     left_ro_sim_ok: bool = False,
     right_ro_sim_ok: bool = False,
@@ -1169,11 +1171,23 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                 f" proc; inline{{2}} {assumption_adv_pos}; swap{{2}} ^ <${{1}} @ 0; inline *; sim."
             )
 
+            nonlifted_admit = (
+                "  by admit."
+                "  (* ROM: NON-lifted assumption bridge, lazily-tabulated side."
+                " The peel aligns but the residual couples a single stand-in"
+                " sample against a whole random function -- the hop's real"
+                " content, not plumbing. TO CLOSE: an RO-coupling argument"
+                " (eager/lazy equivalence), derived on a goal-mirror tripwire"
+                " (`ec_print_goals` is unavailable for this class: the fork"
+                " rejects the emitted `swap ... @ 0`). *)"
+            )
+
             def _ro_repro_close(
                 challenger_glob: str | None,
                 dead_drop: "RoDeadDropSpec | None",
                 sim_ok: bool,
                 peel_events: list[str] | None = None,
+                admit_side: bool = False,
             ) -> str:
                 # Per side: the Honest (sim-closeable) side flips by hop.
                 #   sim_ok            -> RO-align + sim (validated cont-91).
@@ -1183,6 +1197,8 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                 #     NON-reprogramming challenger. Same repack shape as the non-ROM
                 #     Generic reductions with the shared-RO hoist prepended and 2
                 #     extra peel rnds (game RO + keygen seed) -- cont-104.
+                if admit_side:
+                    return nonlifted_admit
                 if sim_ok:
                     return ro_sim
                 if dead_drop is not None:
@@ -1204,13 +1220,17 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
             )
             if consume_pk_bridge:
                 bridge_close_l = _ro_repro_close(
-                    consume_pk_left_challenger_glob, ro_dead_drop_left, left_ro_sim_ok
+                    consume_pk_left_challenger_glob,
+                    ro_dead_drop_left,
+                    left_ro_sim_ok,
+                    admit_side=left_bridge_admit,
                 )
                 bridge_close_r = _ro_repro_close(
                     consume_pk_right_challenger_glob,
                     ro_dead_drop_right,
                     right_ro_sim_ok,
                     peel_events=consume_pk_peel_events_right,
+                    admit_side=right_bridge_admit,
                 )
             elif ro_forward_shape:
                 bridge_close_l = forward_close

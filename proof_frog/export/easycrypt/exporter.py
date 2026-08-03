@@ -6193,7 +6193,13 @@ def export_proof_file(proof_path: str) -> str:
         def _grouped_interleaved(
             body: list[ec_ast.EcStmt], chal: str | None
         ) -> tuple[int, list[ec_ast.Sample], list[list[ec_ast.EcStmt]]] | None:
-            """``[chal call, sample, det call, projection*]`` repeated.
+            """``[chal call, sample, <derivation>]`` repeated.
+
+            The derivation is either ``[det call, projection*]`` (the CK shape,
+            whose result the post states in ``ev_`` form) or a run of abstract
+            calls (the CG shape, whose derivation chain also runs verbatim on
+            the split side). Which one it is decides the segment closer; both
+            are classified here.
 
             The hop_2 layout: the grouped side is ALREADY per-keypair, so there
             is nothing to regroup and the swap chain comes out empty. For n = 1
@@ -6211,7 +6217,12 @@ def export_proof_file(proof_path: str) -> str:
                     return None
                 if not isinstance(seg[2], ec_ast.Call) or _is_chal(seg[2], chal):
                     return None
-                if any(not isinstance(x, ec_ast.Assign) for x in seg[3:]):
+                tail = seg[3:]
+                proj_tail = all(isinstance(x, ec_ast.Assign) for x in tail)
+                call_tail = all(
+                    isinstance(x, ec_ast.Call) and not _is_chal(x, chal) for x in tail
+                )
+                if not proj_tail and not call_tail:
                     return None
                 samples.append(seg[1])
                 blocks.append(seg[2:])
@@ -6248,17 +6259,15 @@ def export_proof_file(proof_path: str) -> str:
                 return None
             blocks = [body[a:b] for a, b in zip(cuts, cuts[1:] + [len(body)])]
             for blk in blocks:
-                if len(blk) != 5:
+                if len(blk) < 5:
                     return None
                 if not isinstance(blk[1], ec_ast.Assign) or not isinstance(
                     blk[2], ec_ast.Assign
                 ):
                     return None
-                if not isinstance(blk[3], ec_ast.Call) or not isinstance(
-                    blk[4], ec_ast.Call
+                if any(
+                    not isinstance(x, ec_ast.Call) or _is_chal(x, chal) for x in blk[3:]
                 ):
-                    return None
-                if _is_chal(blk[3], chal) or _is_chal(blk[4], chal):
                     return None
             return blocks
 
@@ -6367,6 +6376,23 @@ def export_proof_file(proof_path: str) -> str:
         if shape is None:
             return None
         gi, n, samples, blocks_g, blocks_s, batched = shape
+
+        # COMMON-TAIL variant: the grouped side's whole derivation chain runs
+        # verbatim on the split side too, right after that side's own pq call.
+        # Then nothing needs functionalizing -- once the seeds are coupled the
+        # chain couples TWO-SIDED with `call (_: true)`. Validated by
+        # ``ec_templates/prg_vs_keygen_init_common_tail.ec``. Restricted to the
+        # already-per-keypair layout: the batched+common-tail combination has no
+        # tripwire, so it declines rather than emitting an unvalidated chain.
+        def _callee(st: ec_ast.EcStmt) -> str | None:
+            return st.callee if isinstance(st, ec_ast.Call) else None
+
+        common_tail = not batched and all(
+            len(bs) == 4 + len(bg)
+            and all(_callee(x) is not None for x in bg)
+            and [_callee(x) for x in bg] == [_callee(x) for x in bs[4:]]
+            for bg, bs in zip(blocks_g, blocks_s)
+        )
         if n not in (1, 2):
             # Only n = 1 (the CT_SAMEKEY cells) and n = 2 (every other CFRG
             # cell) are VALIDATED by the tripwire. The regrouping swap chain is
@@ -6456,16 +6482,19 @@ def export_proof_file(proof_path: str) -> str:
         }
         det_mod = pmap.get(det_mod_raw, det_mod_raw)
         det_alias = clone_alias_by_module.get(det_mod)
-        if det_alias is None or det_meth not in det_methods_by_module.get(
-            det_mod, set()
+        if not common_tail and (
+            det_alias is None
+            or det_meth not in det_methods_by_module.get(det_mod, set())
         ):
+            # The common-tail closer never functionalizes, so it needs neither
+            # the ``ev_`` alias nor a determinism licence for the chain.
             return None
         # The regrouping swaps move this call past the OTHER keypair's
         # challenger call; that is only independent if the challenger drives a
         # different module. Decline instead of emitting a swap EC rejects.
-        if pt.module_base_name(pt.last_module_arg(pt.last_module_arg(g_expr))) == (
-            det_mod
-        ):
+        if not common_tail and pt.module_base_name(
+            pt.last_module_arg(pt.last_module_arg(g_expr))
+        ) == (det_mod):
             return None
 
         # -- the split side's per-keypair slice locals, by ROLE ---------------
@@ -6487,28 +6516,44 @@ def export_proof_file(proof_path: str) -> str:
         left_ty: set[str] = set()
         right_ty: set[str] = set()
         for blk in blocks_s:
-            chal_call, asn_a, asn_b, call_x, call_y = blk
+            chal_call, asn_a, asn_b = blk[0], blk[1], blk[2]
             if (
                 not isinstance(chal_call, ec_ast.Call)
                 or not isinstance(asn_a, ec_ast.Assign)
                 or not isinstance(asn_b, ec_ast.Assign)
-                or not isinstance(call_x, ec_ast.Call)
-                or not isinstance(call_y, ec_ast.Call)
+                or any(not isinstance(x, ec_ast.Call) for x in blk[3:])
             ):
                 return None
-            t_calls = [
-                c
-                for c in (call_x, call_y)
-                if s_pmap.get(c.callee.partition(".")[0], c.callee.partition(".")[0])
-                == det_mod
-            ]
-            if len(t_calls) != 1:
-                return None
-            t_call = t_calls[0]
-            pq_call = call_y if t_call is call_x else call_x
             by_var = {asn_a.var: asn_a, asn_b.var: asn_b}
-            if t_call.args not in by_var or pq_call.args not in by_var:
-                return None
+            if common_tail:
+                # The pq call is the one the tail does NOT contain: it is the
+                # single statement between the slices and the shared chain.
+                pq_call = cast(ec_ast.Call, blk[3])
+                if pq_call.args not in by_var:
+                    return None
+                t_args = [v for v in by_var if v != pq_call.args]
+                if len(t_args) != 1:
+                    return None
+                t_arg = t_args[0]
+            else:
+                call_x, call_y = cast(ec_ast.Call, blk[3]), cast(ec_ast.Call, blk[4])
+                if len(blk) != 5:
+                    return None
+                t_calls = [
+                    c
+                    for c in (call_x, call_y)
+                    if s_pmap.get(
+                        c.callee.partition(".")[0], c.callee.partition(".")[0]
+                    )
+                    == det_mod
+                ]
+                if len(t_calls) != 1:
+                    return None
+                t_call = t_calls[0]
+                pq_call = call_y if t_call is call_x else call_x
+                if t_call.args not in by_var or pq_call.args not in by_var:
+                    return None
+                t_arg = t_call.args
             # The emitted split axiom orders the halves by their recorded
             # OFFSETS: the prefix is the slice starting at 0. The `rndsem` fold
             # produces `dlet d_<first sampled> (dmap d_<second> ...)`, and the
@@ -6517,10 +6562,10 @@ def export_proof_file(proof_path: str) -> str:
             if by_var[pq_call.args].rhs.split()[2:3] != ["0"]:
                 return None
             pq_local.append(pq_call.args)
-            t_local.append(t_call.args)
+            t_local.append(t_arg)
             full_ty.add(s_decl[chal_call.var].text if chal_call.var in s_decl else "")
             left_ty.add(s_decl[pq_call.args].text if pq_call.args in s_decl else "")
-            right_ty.add(s_decl[t_call.args].text if t_call.args in s_decl else "")
+            right_ty.add(s_decl[t_arg].text if t_arg in s_decl else "")
         if len(full_ty) != 1 or len(left_ty) != 1 or len(right_ty) != 1:
             return None
         src_name, left_name, right_name = (
@@ -6541,7 +6586,14 @@ def export_proof_file(proof_path: str) -> str:
             c for c in coupling.split(" /\\ ") if c.startswith("={glob ")
         )
         conj = [c for c in coupling.split(" /\\ ") if not c.startswith("={")]
-        if not globs or len(conj) != 2 * n:
+        if not globs:
+            return None
+        if common_tail:
+            # Nothing is functionalized, so an ``ev_`` conjunct would be
+            # unprovable by the two-sided peel -- decline rather than emit it.
+            if len(conj) < n or len(conj) % n != 0 or any("ev_" in c for c in conj):
+                return None
+        elif len(conj) != 2 * n:
             return None
         if mirrored:
             # The coupling is stated with step_a as {1}; under `symmetry` the
@@ -6553,10 +6605,29 @@ def export_proof_file(proof_path: str) -> str:
         by_kp: list[list[str]] = [[] for _ in range(n)]
         for i, c in enumerate(conj):
             by_kp[i % n].append(c)
-        # conjunct order is <shared fields> then <cross-stage ev-forms>, so each
-        # keypair's pair is (shared, ev). Check that, rather than assume it.
-        if any("ev_" in kp[0] or "ev_" not in kp[1] for kp in by_kp):
-            return None
+        if not common_tail:
+            # conjunct order is <shared fields> then <cross-stage ev-forms>, so
+            # each keypair's pair is (shared, ev). Check that, don't assume it.
+            if any("ev_" in kp[0] or "ev_" not in kp[1] for kp in by_kp):
+                return None
+        # The common-tail closer establishes the pq coupling on its own before
+        # the chain peel, so it must know WHICH conjunct that is -- located by
+        # the grouped side's own challenger-call result var, never by name.
+        g_chal_vars = [
+            st.var
+            for st in execs[gi]
+            if isinstance(st, ec_ast.Call)
+            and st.callee.partition(".")[0] == chal_of[gi]
+        ]
+        pq_conj: list[str] = []
+        if common_tail:
+            if len(g_chal_vars) != n:
+                return None
+            for k in range(n):
+                hits = [c for c in by_kp[k] if f".{g_chal_vars[k]}{{" in c]
+                if len(hits) != 1:
+                    return None
+                pq_conj.append(hits[0])
 
         # Demand-driven: only now, with the whole shape confirmed, ask for the
         # split/round-trip laws over the full seed type.
@@ -6608,16 +6679,31 @@ def export_proof_file(proof_path: str) -> str:
         lines: list[str] = ["symmetry."] if mirrored else []
         if batched:
             lines += _regroup_swaps(n, blocks_g, gm)
+        g_proc = procs[gi]
+        if g_proc is None:
+            return None
+        g_locals = {d.name for d in g_proc.body if isinstance(d, ec_ast.VarDecl)}
         done: list[str] = []
         for k in range(n):
-            seed_ref = f"{g_base}.{mt._ec_field_name(samples[k].var)}{{{gm}}}"
-            ev = f"({det_alias}.ev_{det_meth} ({seed_ref}))"
-            det_res = cast(ec_ast.Call, blocks_g[k][0]).var
-            carried = [f"{det_res}{{{gm}}} = {ev}"]
-            for proj in blocks_g[k][1:]:
-                assert isinstance(proj, ec_ast.Assign)
-                carried.append(f"{proj.var}{{{gm}}} = ({ev}{proj.rhs[len(det_res):]})")
+            # The grouped side's t seed is a module field on the CK shape (the
+            # post names it) and a proc local on the common-tail shape; read
+            # which from the rendered proc rather than assuming either.
+            seed_ref = (
+                f"{samples[k].var}{{{gm}}}"
+                if samples[k].var in g_locals
+                else f"{g_base}.{mt._ec_field_name(samples[k].var)}{{{gm}}}"
+            )
             kp = by_kp[k]
+            carried: list[str] = []
+            if not common_tail:
+                ev = f"({det_alias}.ev_{det_meth} ({seed_ref}))"
+                det_res = cast(ec_ast.Call, blocks_g[k][0]).var
+                carried = [f"{det_res}{{{gm}}} = {ev}"]
+                for proj in blocks_g[k][1:]:
+                    assert isinstance(proj, ec_ast.Assign)
+                    carried.append(
+                        f"{proj.var}{{{gm}}} = ({ev}{proj.rhs[len(det_res):]})"
+                    )
             inv_seg = " /\\ ".join([globs] + done + kp + carried)
             inv_smp = " /\\ ".join(
                 [globs]
@@ -6628,25 +6714,37 @@ def export_proof_file(proof_path: str) -> str:
                 ]
             )
             inv_pq = " /\\ ".join(
-                [globs] + done + [f"{seed_ref} = {t_local[k]}{{{sm}}}", kp[0]]
+                [globs]
+                + done
+                + [
+                    f"{seed_ref} = {t_local[k]}{{{sm}}}",
+                    pq_conj[k] if common_tail else kp[0],
+                ]
             )
             g_cnt = 2 + len(blocks_g[k])
+            if common_tail:
+                # after the pq peel both sides hold the SAME chain -- couple it
+                # back-to-front, two-sided, with no determinism hypothesis
+                closer = ["wp; call (_: true)." for _ in blocks_g[k]] + ["skip => />."]
+            else:
+                closer = [
+                    f"exists* (glob {det_mod}){{{gm}}}, {seed_ref}.",
+                    "elim* => gT sv.",
+                    "wp.",
+                    f"call{{{sm}}} ({det_mod}_{det_meth}_det gT sv).",
+                    f"call{{{gm}}} ({det_mod}_{det_meth}_det gT sv).",
+                    "skip => />.",
+                ]
             lines += [
-                f"seq {g_cnt if gm == '1' else 5} {5 if gm == '1' else g_cnt} :"
-                f" ({inv_seg}).",
+                f"seq {g_cnt} {len(blocks_s[k])} : ({inv_seg}).",
                 "+ inline *.",
                 # one `generate` inlined here (3 statements), so the keypair's
                 # own seed sample is at 4 and one swap makes the pair adjacent.
                 f"swap{{{gm}}} 4 -2.",
                 *_couple_lines(inv_smp),
-                f"seq {2 if gm == '1' else 1} {1 if gm == '1' else 2} : ({inv_pq}).",
+                f"seq 2 1 : ({inv_pq}).",
                 "- wp; call (_: true); skip => />.",
-                f"exists* (glob {det_mod}){{{gm}}}, {seed_ref}.",
-                "elim* => gT sv.",
-                "wp.",
-                f"call{{{sm}}} ({det_mod}_{det_meth}_det gT sv).",
-                f"call{{{gm}}} ({det_mod}_{det_meth}_det gT sv).",
-                "skip => />.",
+                *closer,
             ]
             done += kp + carried
         # pylint: enable=protected-access

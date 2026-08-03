@@ -96,9 +96,68 @@ module R (K : SCHEME, C : CHAL) = {
   }
 }.
 
+(* --- the REAL decaps shape -------------------------------------------------
+ * The CFRG `decaps` is richer than `G`/`R` above in two ways that matter:
+ *   - an OUTER challenge guard `c = ctStar` present on BOTH sides, so the
+ *     case split is nested inside an else-branch rather than at the top;
+ *   - a shared DETERMINISTIC tail after the branch (the KDF `H.evaluate`),
+ *     so the branch result flows into a further call before the return.
+ * Both are exactly the things a tripwire can accidentally omit.
+ *)
+
+module type KDF = {
+  proc eval (s : ss_t) : ss_t
+}.
+
+op ev_eval : ss_t -> ss_t.
+
+module G2 (K : SCHEME, HH : KDF) = {
+  var dk : dk_t
+  var ctStar : ct_t
+
+  proc decaps (c : ct_t) : ss_t option = {
+    var r : ss_t option;
+    var s : ss_t;
+    var h : ss_t;
+    if (c = ctStar) {
+      r <- None;
+    } else {
+      s <@ K.decaps(dk, c);
+      h <@ HH.eval(s);
+      r <- Some h;
+    }
+    return r;
+  }
+}.
+
+module R2 (K : SCHEME, HH : KDF, C : CHAL) = {
+  var corr : ek_t * dk_t * ct_t * ss_t * ss_t
+  var ctStar : ct_t
+
+  proc decaps (c : ct_t) : ss_t option = {
+    var r : ss_t option;
+    var s : ss_t;
+    var h : ss_t;
+    if (c = ctStar) {
+      r <- None;
+    } else {
+      if (c = corr.`3) {
+        s <- corr.`5;             (* stored: NO call *)
+      } else {
+        s <@ K.decaps(corr.`2, c);
+      }
+      h <@ HH.eval(s);
+      r <- Some h;
+    }
+    return r;
+  }
+}.
+
 section Main.
 
-declare module K <: SCHEME {-G, -R}.
+declare module K <: SCHEME {-G, -R, -G2, -R2}.
+
+declare module HD <: KDF {-G, -R, -G2, -R2, -K}.
 
 declare axiom K_decaps_det (g : (glob K)) (a : dk_t) (b : ct_t) :
   phoare[ K.decaps :
@@ -175,6 +234,40 @@ case (c{2} = R.corr{2}.`3).
   auto => />.
   (* residual: ev_decaps R.corr.`2 R.corr.`3 = R.corr.`5 -- unprovable here *)
   admit.
+rcondf{2} 1; first by auto.
+by call (_: true); auto.
+qed.
+
+(* --- 4. the REAL shape: outer guard + shared deterministic tail ----------
+   Same invariant, but the case split is nested and its result feeds a further
+   call. The extra work over `decaps_consumes` is only structural: `rcondf`
+   BOTH sides on the outer guard (it is shared), then the same one-sided det
+   drop inside, then the shared tail couples with a plain `call (_: true)`.
+   `s{1} = s{2}` must reach that tail, which is exactly what the invariant
+   buys -- so the tail is coupled, not re-proved. *)
+lemma decaps_real_shape :
+  equiv [ G2(K, HD).decaps ~ R2(K, HD, ChalFromDecaps(K)).decaps :
+          ={c} /\ ={glob K, glob HD} /\ G2.ctStar{1} = R2.ctStar{2} /\
+          G2.dk{1} = R2.corr{2}.`2 /\
+          R2.corr{2}.`5 = ev_decaps R2.corr{2}.`2 R2.corr{2}.`3 ==>
+          ={res} /\ ={glob K, glob HD} ].
+proof.
+proc.
+case (c{1} = G2.ctStar{1}).
++ rcondt{1} 1; first by auto.
+  rcondt{2} 1; first by auto.
+  by auto.
+rcondf{1} 1; first by auto.
+rcondf{2} 1; first by auto.
+(* the shared deterministic tail couples once `s` agrees *)
+wp.
+call (_: true).
+(* now the one-sided branch: same invariant as `decaps_consumes` *)
+case (c{2} = R2.corr{2}.`3).
++ rcondt{2} 1; first by auto.
+  exists* (glob K){1}, G2.dk{1}, c{1}; elim* => g a b.
+  call{1} (K_decaps_det g a b).
+  by auto => /#.
 rcondf{2} 1; first by auto.
 by call (_: true); auto.
 qed.

@@ -9719,6 +9719,147 @@ def export_proof_file(proof_path: str) -> str:
                 return " /\\ ".join(conj)
         return ""
 
+    def _tuple_component_relations(
+        proc: ec_ast.Proc, fld: str, alias: str, dets: set[str]
+    ) -> list[str]:
+        """Intra-tuple relations a challenger's own body establishes.
+
+        Reads the RETURNED tuple of ``proc`` and relates its components to each
+        other, two ways: a component that repeats an earlier one, and a
+        component produced by a DETERMINISTIC call whose arguments are
+        themselves components (rendered in ``ev_`` form). Both are structural
+        facts about how the challenger built its own result -- not assumptions.
+        """
+        ret = next(
+            (s for s in reversed(proc.body) if isinstance(s, ec_ast.Return)), None
+        )
+        if ret is None:
+            return []
+        expr = ret.expr.strip()
+        if not (expr.startswith("(") and expr.endswith(")")):
+            return []
+        comps = [c.strip() for c in cc_split_args(expr[1:-1])]
+        if len(comps) < 2:
+            return []
+        idx_of: dict[str, int] = {}
+        for k, c in enumerate(comps):
+            idx_of.setdefault(c, k + 1)
+        out: list[str] = []
+        for k, c in enumerate(comps):
+            first = idx_of.get(c)
+            if first is not None and first < k + 1:
+                out.append(f"{fld}.`{k + 1} = {fld}.`{first}")
+        for st in proc.body:
+            if not isinstance(st, ec_ast.Call) or not st.var:
+                continue
+            slot = idx_of.get(st.var)
+            if slot is None:
+                continue
+            _m, dot, meth = st.callee.partition(".")
+            if not dot or meth not in dets:
+                continue
+            refs: list[str] = []
+            ok = True
+            for a in cc_split_args(st.args) if st.args.strip() else []:
+                pos = idx_of.get(a.strip())
+                if pos is None:
+                    ok = False
+                    break
+                refs.append(f"({fld}.`{pos})")
+            if not ok:
+                continue
+            applied = (" " + " ".join(refs)) if refs else ""
+            out.append(f"{fld}.`{slot} = {alias}.ev_{meth}{applied}")
+        return out
+
+    def _stored_tuple_invariants(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
+        """ONE-SIDED invariant conjuncts for a reduction that STORES a
+        challenger oracle's returned tuple in a field. Empty off-shape.
+
+        Every other coupling builder emits CROSS-SIDE equalities. The IND-CCA
+        correctness reductions need something none of them can express: a
+        property of one side alone. ``R_Correct_*`` stores
+        ``corr <@ Challenger.compute()`` and its ``decaps`` case-splits, using
+        the stored ``corr.`5`` instead of calling ``decaps`` on the
+        already-encapsulated ciphertext. Relating that to the game side needs
+        ``corr.`5 = ev_decaps corr.`2 corr.`3`` -- not a relation between the
+        two sides at all, so the hop's precondition never carried it and no
+        decaps tactic could close.
+
+        The fact is STRUCTURAL, not the correctness assumption:
+        ``KEMCorrectnessWithDK_FromDecaps.compute`` literally computes its 5th
+        component as ``K.decaps`` of its 2nd and 3rd, and ``_FromEncaps``
+        returns the encaps shared secret in both slots. Correctness is the claim
+        that those two challengers differ negligibly, and that epsilon rides on
+        the assumption hop BETWEEN them -- not inside either hop. So no axiom.
+
+        Validated end to end on ``ec_templates/one_sided_tuple_invariant.ec``:
+        the init equiv can establish these conjuncts, the oracle equiv can
+        consume them to close the case split, and without them the branch is
+        not provable.
+        """
+        conj: list[str] = []
+        for step, side in ((step_a, "1"), (step_b, "2")):
+            if step.reduction is None:
+                continue
+            red_mod = next(
+                (
+                    d
+                    for d in ec_reductions
+                    if isinstance(d, ec_ast.Module) and d.name == step.reduction.name
+                ),
+                None,
+            )
+            if red_mod is None:
+                continue
+            init = next((p for p in red_mod.procs if p.name == "initialize"), None)
+            if init is None:
+                continue
+            resolved = resolver.resolve(step).module_expr
+            chal_expr = pt.last_module_arg(resolved)
+            chal_base = pt.module_base_name(chal_expr).rpartition(".")[2]
+            chal_mod = next(
+                (
+                    d
+                    for lst in (theory_game_decls, foreign_game_decls)
+                    for d in lst
+                    if isinstance(d, ec_ast.Module) and d.name == chal_base
+                ),
+                None,
+            )
+            if chal_mod is None:
+                continue
+            # the challenger's single scheme argument names the instance whose
+            # clone alias carries the ``ev_`` ops and whose determinism map says
+            # which methods HAVE one
+            inner = (
+                chal_expr[chal_expr.find("(") + 1 : chal_expr.rfind(")")]
+                if "(" in chal_expr
+                else ""
+            )
+            args = [a.strip() for a in cc_split_args(inner) if a.strip()]
+            if len(args) != 1:
+                continue
+            alias = clone_alias_by_module.get(args[0])
+            if alias is None:
+                continue
+            dets = det_methods_by_module.get(args[0], set())
+            red_base = pt.module_base_name(resolved)
+            for st in init.body:
+                if not isinstance(st, ec_ast.Call) or not st.var:
+                    continue
+                _m, dot, meth = st.callee.partition(".")
+                if not dot:
+                    continue
+                proc = next((p for p in chal_mod.procs if p.name == meth), None)
+                if proc is None:
+                    continue
+                # pylint: disable=protected-access
+                fld = f"{red_base}.{mt._ec_field_name(st.var)}{{{side}}}"
+                # pylint: enable=protected-access
+                conj.extend(_tuple_component_relations(proc, fld, alias, dets))
+        return " /\\ ".join(conj)
+
     def _live_state_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
         base = _live_state_coupling_base(step_a, step_b)
         extra = _ro_challenger_materialization(step_a, step_b)
@@ -9790,6 +9931,14 @@ def export_proof_file(proof_path: str) -> str:
         # provable (the init couples the reductions' stored fields but not the
         # ``_Mat`` challenger's reprogram fields). Empty off-shape -> byte-identical.
         reprog = _reprogram_field_coupling(step_a, step_b)
+        # ONE-SIDED invariants last: intra-tuple relations a challenger's own
+        # body establishes about a tuple the reduction stores. Every conjunct
+        # above is a CROSS-SIDE equality; this is the only builder that states
+        # a property of one side alone, which is what a case-splitting oracle
+        # needs (see ``_stored_tuple_invariants``). Empty off-shape.
+        tup = _stored_tuple_invariants(step_a, step_b)
+        if tup:
+            coupled = f"{coupled} /\\ {tup}"
         return f"{coupled} /\\ {reprog}" if reprog else coupled
 
     # Per-hop memo of the multi-oracle chain emission. ``translate_hops``

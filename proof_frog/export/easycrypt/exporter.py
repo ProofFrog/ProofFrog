@@ -2236,6 +2236,14 @@ def export_proof_file(proof_path: str) -> str:
 
     theory_assumption_decls: list[ec_ast.EcTopDecl] = []
     assumption_wrapper_names: dict[tuple[str, str], str] = {}
+    # 1-based index of the adversary `distinguish` call in each assumption
+    # game wrapper's `main`, for the `inline{2} <pos>` in the hop_<i>_pr
+    # bridges.  `translate_theory_game_wrapper` emits the wrapper's
+    # `Initialize` call ONLY when the game is Initialize-lifted, so a game
+    # whose `Initialize` takes parameters (the ROM
+    # `LazyROTwoViewsExcludedProgrammed`, whose `Initialize` is an ordinary
+    # oracle) has `distinguish` as its FIRST statement, not its second.
+    assumption_adv_pos_by_gf: dict[str, int] = {}
     for gf in primary_game_files:
         if gf.name not in assumed_gf_names:
             continue
@@ -2244,6 +2252,7 @@ def export_proof_file(proof_path: str) -> str:
         gf_multi_oracle = theory_modules.multi_oracle_spec(
             gf, oracle_model_by_game_file[gf.name]
         )
+        assumption_adv_pos_by_gf[gf.name] = 1 if gf_multi_oracle is None else 2
         for side in gf.games:
             wrapper_name = f"Game_{gf_id}_{side.name}"
             assumption_wrapper_names[(gf.name, side.name)] = wrapper_name
@@ -2395,6 +2404,7 @@ def export_proof_file(proof_path: str) -> str:
             gf_multi_oracle = fp_theory_modules.multi_oracle_spec(
                 gf, oracle_model_by_game_file[gf.name]
             )
+            assumption_adv_pos_by_gf[gf.name] = 1 if gf_multi_oracle is None else 2
             for side in gf.games:
                 wrapper_name = f"Game_{gf_id}_{side.name}"
                 fp_wrapper_names[(gf.name, side.name)] = wrapper_name
@@ -10360,20 +10370,40 @@ def export_proof_file(proof_path: str) -> str:
             # deferred). A non-lazy-RO assumption (a binding/KeyGenEquiv challenger) does
             # NOT close with plain sim (its repack is richer), so gate on the file having
             # a reprogramming sibling. The sim-closeable side flips by hop.
+            # Is the assumption game Initialize-LIFTED (a no-arg ``Initialize``
+            # the wrapper's ``main`` runs before the adversary)?  When it is not
+            # -- ``Initialize`` takes parameters and stays an ordinary oracle --
+            # two things change: the challenger contributes NO events at the
+            # FRONT of the bridge backbone (its ``Initialize`` is invoked from
+            # inside the reduction instead, so its events are spliced in at that
+            # position), and the RO-align + plain ``sim`` close does not apply
+            # (it was validated only for the lifted shape, where both sides run
+            # the challenger init up front).
+            _init_lifted = (
+                assumption_adv_pos_by_gf.get(assumption_game_file_name, 2) > 1
+            )
             _gf_a_has_reprogram = any(
                 _reprogramming_lazy_ro_field(g) is not None for g in gf_a.games
             )
-            left_ro_sim_ok = _gf_a_has_reprogram and (
-                _reprogramming_lazy_ro_field(
-                    next(g for g in gf_a.games if g.name == left_side)
+            left_ro_sim_ok = (
+                _init_lifted
+                and _gf_a_has_reprogram
+                and (
+                    _reprogramming_lazy_ro_field(
+                        next(g for g in gf_a.games if g.name == left_side)
+                    )
+                    is None
                 )
-                is None
             )
-            right_ro_sim_ok = _gf_a_has_reprogram and (
-                _reprogramming_lazy_ro_field(
-                    next(g for g in gf_a.games if g.name == right_side)
+            right_ro_sim_ok = (
+                _init_lifted
+                and _gf_a_has_reprogram
+                and (
+                    _reprogramming_lazy_ro_field(
+                        next(g for g in gf_a.games if g.name == right_side)
+                    )
+                    is None
                 )
-                is None
             )
             # Consume-pk bridge: when the reduction's Initialize forwards+repacks
             # the challenger's Initialize (holding the leaked decaps keys in its
@@ -10424,7 +10454,17 @@ def export_proof_file(proof_path: str) -> str:
                         _red_init.block
                     )
                 _peel_ct = _peel_n[0]
-                if not left_ro_sim_ok:
+                # ONLY when the materialized copy was actually emitted. The
+                # ``_Mat`` name is built from the game name, but the copy is
+                # emitted only for a reprogramming-Lazy side of a PRIMARY game
+                # file; an ROM helper assumption living in a secondary clone
+                # (``P_c.LazyROTwoViewsExcludedProgrammed_Honest``) never gets
+                # one, and naming it anyway emits an unknown-variable reference
+                # that rejects the WHOLE file. Declining leaves the plain
+                # consume-pk close, which is at worst a visible tactic failure.
+                if not left_ro_sim_ok and (gf_a.name, left_side) in (
+                    reprogramming_lazy_games
+                ):
                     ro_dead_drop_left = _ro_dead_drop_spec(
                         next(g for g in gf_a.games if g.name == left_side),
                         mat_glob=f"{gf_a_id}_{left_side}_Mat",
@@ -10432,7 +10472,9 @@ def export_proof_file(proof_path: str) -> str:
                         dfun_ll=_dfun_ll,
                         peel_count=_peel_ct,
                     )
-                if not right_ro_sim_ok:
+                if not right_ro_sim_ok and (gf_a.name, right_side) in (
+                    reprogramming_lazy_games
+                ):
                     ro_dead_drop_right = _ro_dead_drop_spec(
                         next(g for g in gf_a.games if g.name == right_side),
                         mat_glob=f"{gf_a_id}_{right_side}_Mat",
@@ -10456,7 +10498,20 @@ def export_proof_file(proof_path: str) -> str:
             # a ladder sized from one side is wrong for the other.
             _chal_events_l: list[str] | None = None
             _chal_events_r: list[str] | None = None
-            if consume_pk_bridge and reduction_helper is not None:
+            # Events the challenger's own ``Initialize`` contributes where the
+            # reduction calls it (non-lifted assumption games only).
+            _chal_inline_l: list[str] | None = None
+            _chal_inline_r: list[str] | None = None
+            if consume_pk_bridge and reduction_helper is not None and not _init_lifted:
+                _chal_events_l = ["sample"] if ro_holder_modules else []
+                _chal_events_r = list(_chal_events_l)
+                _gl = next((g for g in gf_a.games if g.name == left_side), None)
+                _gr = next((g for g in gf_a.games if g.name != left_side), None)
+                if _gl is not None:
+                    _chal_inline_l = mt.init_backbone_events(_gl)
+                if _gr is not None:
+                    _chal_inline_r = mt.init_backbone_events(_gr)
+            elif consume_pk_bridge and reduction_helper is not None:
                 _g_l = next((g for g in gf_a.games if g.name == left_side), None)
                 _g_r = next((g for g in gf_a.games if g.name != left_side), None)
                 if _g_l is not None:
@@ -10487,6 +10542,9 @@ def export_proof_file(proof_path: str) -> str:
                     or None,
                     multi_oracle=_pr_multi_oracle_for(step_a, step_b),
                     adv_state_restrictions=sorted(hop_restrictions) or None,
+                    assumption_adv_pos=assumption_adv_pos_by_gf.get(
+                        assumption_game_file_name, 2
+                    ),
                     consume_pk_bridge=consume_pk_bridge,
                     # Peel the FULL init backbone: the challenger's own init
                     # calls PLUS the reduction's own backbone (CFRG ``R_PQ_Bind``'s
@@ -10504,6 +10562,7 @@ def export_proof_file(proof_path: str) -> str:
                             f"{gf_a_id}_Oracle",
                             method_return_types,
                             challenger_events=_chal_events_r,
+                            challenger_inline_events=_chal_inline_r,
                         )
                         if consume_pk_bridge and reduction_helper is not None
                         else None
@@ -10521,6 +10580,7 @@ def export_proof_file(proof_path: str) -> str:
                             f"{gf_a_id}_Oracle",
                             method_return_types,
                             challenger_events=_chal_events_l,
+                            challenger_inline_events=_chal_inline_l,
                         )
                         if consume_pk_bridge and reduction_helper is not None
                         else None

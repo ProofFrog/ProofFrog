@@ -253,12 +253,13 @@ def reduction_repacks_challenger_init(reduction: frog_ast.Reduction) -> bool:
     )
 
 
-def consumed_pk_peel_events(
+def consumed_pk_peel_events(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     reduction: frog_ast.Reduction,
     challenger_init_call_count: int,
     challenger_oracle_type: str,
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     challenger_events: list[str] | None = None,
+    challenger_inline_events: list[str] | None = None,
 ) -> list[str]:
     """The consume-pk backbone-peel events, in PEEL (tail-to-front) order.
 
@@ -285,7 +286,17 @@ def consumed_pk_peel_events(
             if isinstance(stmt, frog_ast.Assignment) and _is_challenger_init_call(
                 stmt.value
             ):
-                continue  # the leaked pk -- its keygens are the challenger's own
+                # The leaked pk: normally the challenger's ``Initialize`` ran
+                # BEFORE the reduction (it is the assumption wrapper's first
+                # statement), so its events live in ``chal`` and the call itself
+                # contributes nothing here. But when the assumption game is not
+                # Initialize-lifted, its ``Initialize`` is an ordinary oracle
+                # invoked from INSIDE the reduction -- ``inline *`` unfolds it
+                # right here, so its events belong at THIS position, not at the
+                # front.
+                if challenger_inline_events is not None:
+                    own.extend(challenger_inline_events)
+                continue
             if isinstance(stmt, (frog_ast.Sample, frog_ast.UniqueSample)):
                 # ``UniqueSample`` (the exclusion draw) renders as a ``<$`` too;
                 # missing it left the DIFFKEY consume-pk peel one event short

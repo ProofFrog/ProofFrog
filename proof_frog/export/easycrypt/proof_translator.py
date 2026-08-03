@@ -856,6 +856,7 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     wrapper_extra_args: list[str] | None = None,
     multi_oracle: MultiOraclePrSpec | None = None,
     adv_state_restrictions: list[str] | None = None,
+    assumption_adv_pos: int = 2,
     consume_pk_bridge: bool = False,
     left_ro_sim_ok: bool = False,
     right_ro_sim_ok: bool = False,
@@ -1070,7 +1071,7 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                 # reprogramming ``if``; its ``HashG`` reads the shared RO directly,
                 # same on both sides -> plain ``proc; sim``).
                 open_tac = (
-                    "proc; inline{2} 2; swap{2} ^ <${1} @ 0; inline *;"
+                    f"proc; inline{{2}} {assumption_adv_pos}; swap{{2}} ^ <${{1}} @ 0; inline *;"
                     if ro_align
                     else "proc; inline *;"
                 )
@@ -1115,7 +1116,7 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                 [
                     ".",
                     f"  {byq}.",
-                    "  proc; inline{2} 2; swap{2} ^ <${1} @ 0; inline *.",
+                    f"  proc; inline{{2}} {assumption_adv_pos}; swap{{2}} ^ <${{1}} @ 0; inline *.",
                     f"  seq {n_split} {n_split} : ({seq_inv}).",
                     f"  + {drop_branch}.",
                     "  rcondt{1} ^if; first by auto.",
@@ -1165,7 +1166,7 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
             # sim-closeable side flips by hop, so choose PER SIDE.
             ro_sim = (
                 f"  by byequiv (_: {multi_oracle.byequiv_pre} ==> ={{res}}) => //;"
-                " proc; inline{2} 2; swap{2} ^ <${1} @ 0; inline *; sim."
+                f" proc; inline{{2}} {assumption_adv_pos}; swap{{2}} ^ <${{1}} @ 0; inline *; sim."
             )
 
             def _ro_repro_close(

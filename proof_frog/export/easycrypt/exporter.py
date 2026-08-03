@@ -2827,6 +2827,14 @@ def export_proof_file(proof_path: str) -> str:
                 param_renames=renames,
                 param_module_types=per_param_mod_types or None,
                 param_primitive_types=per_param_prim_types or None,
+                # A reduction may open with a bare ``challenger.Initialize();``
+                # whose Void result is discarded. Without this the statement
+                # raises and the WHOLE method silently degrades to
+                # ``return witness;`` -- an empty body EC accepts as a module
+                # but which no hop lemma over it can ever prove. Only methods
+                # containing such a statement change; every other reduction is
+                # byte-identical.
+                allow_void_call=True,
             )
         )
         if helper.methods:

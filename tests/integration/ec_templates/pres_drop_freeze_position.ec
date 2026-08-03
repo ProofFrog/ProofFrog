@@ -51,9 +51,42 @@ module Game (S : SCHEME) = {
   }
 }.
 
+module type NG = {
+  proc rs (s : key) : key
+  proc enc (k : key) : dig
+}.
+
+module RedP (S : SCHEME, N : NG) = {
+  var k : key
+  var d : key
+  proc initialize () : key = {
+    var s : key;
+    s <$ dkey;
+    k <@ S.keygen();
+    d <$ dkey;
+    return d;
+  }
+}.
+
+module GameP (S : SCHEME, N : NG) = {
+  var k : key
+  var d : key
+  proc initialize () : key = {
+    var s : key;
+    var dead0 : key;
+    var dead1 : dig;
+    s <$ dkey;
+    k <@ S.keygen();
+    dead0 <@ N.rs(k);          (* DEAD: nothing below reads dead0/dead1 *)
+    dead1 <@ N.enc(dead0);
+    d <$ dkey;
+    return d;
+  }
+}.
+
 section Main.
 
-declare module S <: SCHEME {-Red, -Game}.
+declare module S <: SCHEME {-Red, -Game, -RedP, -GameP}.
 
 declare axiom S_encode_pres (g : (glob S)) :
   phoare[ S.encode : (glob S) = g ==> (glob S) = g ] = 1%r.
@@ -91,6 +124,53 @@ seq 1 1 : (={glob S} /\ Red.k{1} = Game.k{2}).
 + call (_: true); skip => />.
 exists* (glob S){1}; elim* => gf.
 call{1} (S_encode_pres gf).
+skip => />.
+qed.
+
+
+(* --- the REAL shape: shared prefix, one-sided DEAD tail, shared suffix ------
+ * The CFRG IND-CCA `initialize` hops look like
+ *     side 1:  s <$ d ; <shared calls> ;                    ss <$ d
+ *     side 2:  s <$ d ; <shared calls> ; <DEAD KDF chain> ; ss <$ d
+ * where the dead chain's result is overwritten by the final sample. The
+ * exporter peels back-to-front and drops the dead chain one-sided with
+ * `_pres`, which puts the freeze at the top of the procedure and leaves the
+ * SHARED PREFIX owing "glob unchanged since entry" -- false, because the
+ * shared calls are stateful.
+ *
+ * The fix generalises cleanly, and the reason it does is worth stating: for a
+ * DEAD-call drop the hop's own postcondition is established by the prefix
+ * alone (that is what dead means), so the `seq` invariant the split needs is
+ * already computed -- it is the hop's coupling. No new invariant synthesis.
+ *)
+
+
+
+
+declare module N <: NG {-Red, -Game, -RedP, -GameP, -S}.
+
+declare axiom N_rs_pres (g : (glob N)) :
+  phoare[ N.rs : (glob N) = g ==> (glob N) = g ] = 1%r.
+declare axiom N_enc_pres (g : (glob N)) :
+  phoare[ N.enc : (glob N) = g ==> (glob N) = g ] = 1%r.
+
+lemma pres_drop_real_shape :
+  equiv [ RedP(S, N).initialize ~ GameP(S, N).initialize :
+          ={glob S, glob N} ==>
+          ={res} /\ ={glob S, glob N} /\ RedP.k{1} = GameP.k{2} ].
+proof.
+proc.
+(* split the SHARED prefix off first -- invariant is the hop's own coupling,
+   which the prefix already establishes because the dropped tail is dead *)
+seq 2 2 : (={glob S, glob N} /\ RedP.k{1} = GameP.k{2}).
++ call (_: true); rnd; skip => />.
+(* peel the SHARED suffix first (it is the last instruction on both sides),
+   then drop the dead tail. The judgment now starts at the split point, so the
+   freeze binds the glob just before the dead calls -- which is the whole fix. *)
+rnd.
+exists* (glob N){2}; elim* => gn.
+call{2} (N_enc_pres gn).
+call{2} (N_rs_pres gn).
 skip => />.
 qed.
 

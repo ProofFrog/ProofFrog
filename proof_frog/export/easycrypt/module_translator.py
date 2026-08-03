@@ -60,8 +60,14 @@ def _is_pure_forward_init(method: frog_ast.Method) -> bool:
     )
 
 
-def _is_challenger_init_call(expr: frog_ast.Expression) -> bool:
-    """True iff ``expr`` is a call ``challenger.Initialize(...)``."""
+def _is_challenger_init_call(expr: frog_ast.ASTNode) -> bool:
+    """True iff ``expr`` is a call ``challenger.Initialize(...)``.
+
+    Accepts an ``ASTNode`` rather than an ``Expression`` because a bare
+    ``challenger.Initialize();`` appears in a body as a STATEMENT that happens
+    to be a ``FuncCall`` -- the Void-returning shape -- and callers need the
+    same test for both positions.
+    """
     return (
         isinstance(expr, frog_ast.FuncCall)
         and isinstance(expr.func, frog_ast.FieldAccess)
@@ -118,6 +124,34 @@ def _count_module_calls(node: frog_ast.ASTNode) -> int:
 
     visitors.SearchVisitor(_tally).visit(node)
     return count
+
+
+def init_backbone_events(game: frog_ast.Game) -> list[str]:
+    """``game``'s ``Initialize`` backbone as ``"call"``/``"sample"`` events.
+
+    Program order, top level only -- exactly what an ``inline *``d copy of that
+    method contributes to a byequiv backbone, and therefore what a peel over it
+    must consume.
+
+    This exists because counting CALLS is not enough. Two games of the same
+    assumption can differ by a single ``<$``: ``KEM_INDCCA.Real`` ends its
+    ``Initialize`` after ``keygen; encaps`` while ``KEM_INDCCA.Random`` draws a
+    fresh shared secret. A peel sized on one and applied to the other is one
+    event short, which EasyCrypt reports as "invalid last instruction" at the
+    very end of the file.
+    """
+    init = next(
+        (m for m in game.methods if m.signature.name.lower() == "initialize"), None
+    )
+    if init is None:
+        return []
+    events: list[str] = []
+    for stmt in init.block.statements:
+        if isinstance(stmt, (frog_ast.Sample, frog_ast.UniqueSample)):
+            events.append("sample")
+        elif _statement_module_call(stmt) is not None:
+            events.append("call")
+    return events
 
 
 def method_module_call_count(game: frog_ast.Game, method: str) -> int:
@@ -1224,6 +1258,50 @@ class ModuleTranslator:
 
         if outer_multi_oracle is None:
             distinguish_args = ""
+        elif inner_multi_oracle is not None and (
+            inner_multi_oracle.init_return_type.text == "unit"
+        ):
+            # A lifted Initialize returning ``unit`` (KDF-PRF: its init only
+            # samples the key into a field) threads NO result, and
+            # ``translate_adversary_type`` already emits ``distinguish()`` with
+            # no parameter for exactly this case. Emitting ``pk : unit`` here
+            # made ``R_Adv`` fail to ascribe to that type, which EC rejects at
+            # the USE site as "invalid module application" -- a whole-file
+            # rejection with no hint that a parameter list is the cause.
+            #
+            # The body still cannot simply re-run ``R(...).initialize()``: that
+            # method opens with ``challenger.Initialize();``, which the
+            # assumption game's ``main`` has ALREADY run, and which the
+            # post-init-only oracle restriction forbids the adversary to call at
+            # all -- the same "invalid module application", now from the
+            # restriction rather than the signature. So render the reduction's
+            # own Initialize inline with that statement DROPPED.
+            init_method = _reduction_init_method(reduction)
+            if init_method is not None and any(
+                _is_challenger_init_call(s) for s in init_method.block.statements
+            ):
+                outer_init_local = f"{INIT_RESULT_NAME}0"
+                body.append(
+                    ec_ast.VarDecl(
+                        name=outer_init_local,
+                        type=self._translate_param_type(
+                            init_method.signature.return_type
+                        ),
+                    )
+                )
+                consumed_decls, consumed_stmts = self._render_consumed_pk_init(
+                    reduction,
+                    pk_param_name=INIT_RESULT_NAME,
+                    pk0_local_name=outer_init_local,
+                    challenger_oracle_type=inner_oracle_type_name,
+                    method_return_types=method_return_types or {},
+                    reduction_arg_exprs=reduction_arg_exprs,
+                )
+                body.extend(consumed_decls)
+                body.extend(consumed_stmts)
+                distinguish_args = outer_init_local
+            else:
+                distinguish_args = reinit(outer_multi_oracle)
         elif inner_multi_oracle is not None:
             # Inner game is multi-oracle: its Initialize was lifted into the
             # wrapper's ``main()``, which threads the inner-init result into
@@ -1380,6 +1458,14 @@ class ModuleTranslator:
                         stmt.the_type, stmt.var, frog_ast.Variable(pk_param_name)
                     )
                 )
+            elif _is_challenger_init_call(stmt):
+                # A BARE ``challenger.Initialize();`` -- the Void-returning shape
+                # (KDF-PRF style, whose init only seeds the challenger's own
+                # field). There is no result to substitute, and the assumption
+                # game's ``main`` has ALREADY run it, so the statement is simply
+                # dropped. Re-running it here is what makes ``R_Adv`` violate the
+                # post-init-only oracle restriction.
+                continue
             else:
                 new_stmts.append(stmt)
         assert ret_expr is not None

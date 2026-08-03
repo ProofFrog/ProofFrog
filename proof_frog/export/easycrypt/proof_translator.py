@@ -861,6 +861,7 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
     right_ro_sim_ok: bool = False,
     consume_pk_peel_count: int = 0,
     consume_pk_peel_events: list[str] | None = None,
+    consume_pk_peel_events_right: list[str] | None = None,
     consume_pk_events_cover_ro: bool = False,
     consume_pk_reduction_glob: str | None = None,
     consume_pk_scheme_glob: str | None = None,
@@ -938,6 +939,7 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
             challenger_glob: str | None,
             dead_drop: "RoDeadDropSpec | None" = None,
             ro_align: bool = False,
+            peel_events: list[str] | None = None,
         ) -> str:
             # Consume-pk reduction (repacking Initialize): after ``inline *``
             # the two sides run the same challenger-init backbone but differ in
@@ -1007,6 +1009,16 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                 # challenger init + hash, so the residual holds only the reduction's
                 # OWN abstract calls -- peel exactly those.
                 peel = " ".join(["wp; call (_: true);"] * dead_drop.peel_count)
+            elif peel_events is not None:
+                # This side's OWN backbone. The two assumption games can differ
+                # by a single event -- `KEM_INDCCA.Random` draws a fresh shared
+                # secret its `.Real` sibling does not -- and a peel sized on the
+                # other side is exactly one short, which EasyCrypt reports as
+                # "invalid last instruction" at the end of the file.
+                peel = " ".join(
+                    "wp; rnd;" if ev == "sample" else "wp; call (_: true);"
+                    for ev in peel_events
+                )
             elif consume_pk_peel_events is not None:
                 # Event-aware peel: ``rnd`` a sample, ``call (_: true)`` an
                 # abstract call, in tail-to-front order. Sizes to the reduction's
@@ -1160,6 +1172,7 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                 challenger_glob: str | None,
                 dead_drop: "RoDeadDropSpec | None",
                 sim_ok: bool,
+                peel_events: list[str] | None = None,
             ) -> str:
                 # Per side: the Honest (sim-closeable) side flips by hop.
                 #   sim_ok            -> RO-align + sim (validated cont-91).
@@ -1173,7 +1186,9 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                     return ro_sim
                 if dead_drop is not None:
                     return _consume_pk_bridge_close(challenger_glob, dead_drop)
-                return _consume_pk_bridge_close(challenger_glob, ro_align=True)
+                return _consume_pk_bridge_close(
+                    challenger_glob, ro_align=True, peel_events=peel_events
+                )
 
             # Re-init-forward shape (STATELESS assumption challenger): the wrapper
             # ``main`` is a single ``b <@ A(chal).distinguish()`` and the reduction
@@ -1194,6 +1209,7 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                     consume_pk_right_challenger_glob,
                     ro_dead_drop_right,
                     right_ro_sim_ok,
+                    peel_events=consume_pk_peel_events_right,
                 )
             elif ro_forward_shape:
                 bridge_close_l = forward_close
@@ -1203,7 +1219,10 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
                 bridge_close_r = admit
         elif consume_pk_bridge:
             bridge_close_l = _consume_pk_bridge_close(consume_pk_left_challenger_glob)
-            bridge_close_r = _consume_pk_bridge_close(consume_pk_right_challenger_glob)
+            bridge_close_r = _consume_pk_bridge_close(
+                consume_pk_right_challenger_glob,
+                peel_events=consume_pk_peel_events_right,
+            )
         else:
             shared = (
                 f"  by byequiv (_: {multi_oracle.byequiv_pre} ==> ={{res}}) => //; "

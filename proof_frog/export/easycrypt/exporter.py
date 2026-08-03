@@ -10465,6 +10465,27 @@ def export_proof_file(proof_path: str) -> str:
                     # ``KEM_T.keygen`` calls and/or NominalGroup seed samples).
                     # Event-aware so a seed ``<$`` peels with ``rnd``; empty own
                     # backbone (Generic) reduces to the challenger-only peel.
+                    # The two byequiv bridges peel DIFFERENT backbones when the
+                    # assumption's two games differ in their own ``Initialize``
+                    # -- ``KEM_INDCCA.Random`` draws a fresh shared secret that
+                    # ``.Real`` does not. Size each side from its own game.
+                    consume_pk_peel_events_right=(
+                        mt.consumed_pk_peel_events(
+                            reduction_helper,
+                            mt.init_module_call_count(gf_a.games[0]),
+                            f"{gf_a_id}_Oracle",
+                            method_return_types,
+                            challenger_events=(
+                                _chal_events
+                                if _chal_events is not None
+                                else mt.init_backbone_events(
+                                    next(g for g in gf_a.games if g.name != left_side)
+                                )
+                            ),
+                        )
+                        if consume_pk_bridge and reduction_helper is not None
+                        else None
+                    ),
                     consume_pk_peel_events=(
                         mt.consumed_pk_peel_events(
                             reduction_helper,
@@ -10477,7 +10498,13 @@ def export_proof_file(proof_path: str) -> str:
                             # its challenger, so its oracle is ``{gf_a_id}_Oracle``.
                             f"{gf_a_id}_Oracle",
                             method_return_types,
-                            challenger_events=_chal_events,
+                            challenger_events=(
+                                _chal_events
+                                if _chal_events is not None
+                                else mt.init_backbone_events(
+                                    next(g for g in gf_a.games if g.name == left_side)
+                                )
+                            ),
                         )
                         if consume_pk_bridge and reduction_helper is not None
                         else None

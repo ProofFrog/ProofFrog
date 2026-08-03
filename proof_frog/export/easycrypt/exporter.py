@@ -6304,7 +6304,17 @@ def export_proof_file(proof_path: str) -> str:
             target.append(k + 1)
             target.append(n + k + 1)
             target.extend(starts[k] + j + 1 for j in range(len(blocks[k])))
-        cur = list(range(1, off + 1))
+        return _bubble_swaps(target, off, mem)
+
+    def _bubble_swaps(target: list[int], total: int, mem: str) -> list[str]:
+        """``swap{mem}`` sequence realising ``target`` as a statement order.
+
+        ``target`` lists the 1-based ORIGINAL positions in the order they should
+        end up. Each emitted move lifts one statement earlier past statements
+        not yet placed, so a caller that only reorders mutually independent
+        material gets moves EC accepts.
+        """
+        cur = list(range(1, total + 1))
         out: list[str] = []
         for tgt, orig in enumerate(target, start=1):
             pos = cur.index(orig) + 1
@@ -6750,6 +6760,186 @@ def export_proof_file(proof_path: str) -> str:
         # pylint: enable=protected-access
         lines.append("skip => />.")
         return lines
+
+    def _batched_align_init_tac(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> list[str] | None:
+        """Whole-init tactic for two reductions that build the same keypairs
+        with the same BACKBONE but a different LAYOUT, or ``None`` off-shape.
+
+        The CFRG HON_BIND hop_4 / hop_8 ``initialize`` shape. Each side runs, per
+        keypair, one pq-key source and then a ``<$`` seed plus an identical run
+        of abstract calls; what differs is only whether the n pq sources are
+        BATCHED up front or INTERLEAVED with the per-keypair blocks. The pq
+        source may itself be a challenger call -- a ``KeyGenEquiv`` whose
+        ``Generate`` is a bare ``return K.KeyGen();`` (one backbone call), or a
+        binding challenger whose ``Initialize`` runs all n keygens itself (n
+        backbone calls) -- so after ``inline *`` both sides run exactly the same
+        abstract-call/sample sequence.
+
+        Hence no coupling law and no determinism hypothesis: batch the
+        interleaved side with one ``swap`` per keypair on the UN-INLINED body,
+        ``inline *``, then peel the common backbone back-to-front. There is no
+        ``seq`` and no invariant, so no inlined local is ever named and EC's
+        collision suffixes are irrelevant.
+
+        The route fires ONLY when a side is actually interleaved: when both are
+        already batched the generic init peel handles the hop, and preempting it
+        would churn a working export. Validated at the real statement counts by
+        ``ec_templates/regrouped_common_init.ec`` (both the plain and the
+        binding-challenger variants, n = 2 and n = 1).
+        """
+        mods: list[ec_ast.Module] = []
+        for st in (step_a, step_b):
+            if st.reduction is None:
+                return None
+            mod = next(
+                (
+                    d
+                    for d in ec_reductions
+                    if isinstance(d, ec_ast.Module) and d.name == st.reduction.name
+                ),
+                None,
+            )
+            if mod is None:
+                return None
+            mods.append(mod)
+        execs: list[list[ec_ast.EcStmt]] = []
+        for m in mods:
+            proc = next((p for p in m.procs if p.name == "initialize"), None)
+            if proc is None:
+                return None
+            execs.append(
+                [
+                    st
+                    for st in proc.body
+                    if not isinstance(st, (ec_ast.VarDecl, ec_ast.Return))
+                ]
+            )
+        chal_of = [m.params[-1].name if m.params else None for m in mods]
+
+        def _parse(
+            body: list[ec_ast.EcStmt],
+        ) -> tuple[int, list[ec_ast.EcStmt], int, bool] | None:
+            """``(n, pq_part, tail_len, interleaved)`` for one side.
+
+            Cut at the ``<$`` samples: what precedes the first one is the pq
+            material, and each sample opens a block. A BATCHED side's blocks all
+            have the same length; an INTERLEAVED side's non-final blocks carry
+            exactly one extra trailing statement -- the next keypair's pq call.
+            """
+            sample_ix = [
+                i for i, st in enumerate(body) if isinstance(st, ec_ast.Sample)
+            ]
+            if not sample_ix:
+                return None
+            n_kp = len(sample_ix)
+            pre = body[: sample_ix[0]]
+            rests = [
+                body[a + 1 : b] for a, b in zip(sample_ix, sample_ix[1:] + [len(body)])
+            ]
+            t_len = len(rests[-1])
+            if t_len < 1:
+                return None
+            if all(len(r) == t_len for r in rests):
+                pq_part, interleaved = pre, False
+            elif (
+                n_kp > 1
+                and all(len(r) == t_len + 1 for r in rests[:-1])
+                and all(isinstance(r[-1], ec_ast.Call) for r in rests[:-1])
+                and len(pre) == 1
+                and isinstance(pre[0], ec_ast.Call)
+            ):
+                pq_part = [pre[0]] + [r[-1] for r in rests[:-1]]
+                interleaved = True
+            else:
+                return None
+            if any(
+                not isinstance(x, ec_ast.Call) for r in rests for x in r[:t_len]
+            ) or any(not isinstance(x, (ec_ast.Call, ec_ast.Assign)) for x in pq_part):
+                return None
+            return n_kp, pq_part, t_len, interleaved
+
+        parsed = [_parse(e) for e in execs]
+        if parsed[0] is None or parsed[1] is None:
+            return None
+        n, _, tail_len, _ = parsed[0]
+        if parsed[1][0] != n or parsed[1][2] != tail_len:
+            return None
+        if n not in (1, 2):
+            # only n = 1 and n = 2 are tripwire-validated; the swap chain is
+            # derived generally but "it should generalize" is not validation
+            return None
+        if not parsed[0][3] and not parsed[1][3]:
+            # both already batched -- the generic init peel owns this hop
+            return None
+        # the two per-keypair chains must be the same calls in the same order
+        for k in range(n):
+            a_tail = _tail_of(execs[0], parsed[0], k)
+            b_tail = _tail_of(execs[1], parsed[1], k)
+            if [c.callee for c in a_tail] != [c.callee for c in b_tail]:
+                return None
+
+        # -- both sides must contribute the SAME number of pq backbone calls --
+        def _pq_backbone(side: int) -> int | None:
+            total = 0
+            for st in cast(list[ec_ast.EcStmt], parsed[side][1]):  # type: ignore[index]
+                if isinstance(st, ec_ast.Assign):
+                    continue
+                assert isinstance(st, ec_ast.Call)
+                mod_name, _, meth = st.callee.partition(".")
+                if mod_name != chal_of[side]:
+                    total += 1
+                    continue
+                # pylint: disable=protected-access
+                chal = engine._get_game_ast(
+                    (step_a if side == 0 else step_b).challenger, None
+                )
+                # pylint: enable=protected-access
+                if chal is None:
+                    return None
+                cnt = mt.method_module_call_count(chal, meth)
+                if cnt < 1:
+                    return None
+                total += cnt
+            return total
+
+        if _pq_backbone(0) != n or _pq_backbone(1) != n:
+            return None
+        # An ``ev_`` conjunct needs a functionalizing closer; this peel proves
+        # only ``={res}`` per call, so decline rather than emit a tactic that
+        # runs without closing.
+        coupling = _live_state_coupling(step_a, step_b)
+        if "ev_" in coupling:
+            return None
+
+        lines: list[str] = []
+        for side in (0, 1):
+            if not parsed[side][3]:  # type: ignore[index]
+                continue
+            seg = tail_len + 2
+            target = [k * seg + 1 for k in range(n)] + [
+                k * seg + 2 + j for k in range(n) for j in range(seg - 1)
+            ]
+            lines += _bubble_swaps(target, n * seg, str(side + 1))
+        lines.append("inline *.")
+        for _ in range(n):
+            lines += ["wp; call (_: true)."] * tail_len
+            lines.append("rnd.")
+        lines += ["wp; call (_: true)."] * n
+        lines.append("skip => />.")
+        return lines
+
+    def _tail_of(
+        body: list[ec_ast.EcStmt],
+        parsed: tuple[int, list[ec_ast.EcStmt], int, bool],
+        k: int,
+    ) -> list[ec_ast.Call]:
+        """Keypair ``k``'s chain of abstract calls, from a ``_parse`` result."""
+        _, _, t_len, _ = parsed
+        sample_ix = [i for i, st in enumerate(body) if isinstance(st, ec_ast.Sample)]
+        start = sample_ix[k] + 1
+        return [cast(ec_ast.Call, st) for st in body[start : start + t_len]]
 
     def _prg_query_init_tac(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
         step_a: frog_ast.Step, step_b: frog_ast.Step
@@ -9674,6 +9864,12 @@ def export_proof_file(proof_path: str) -> str:
             # seed. ``None`` off-shape, so every other init is byte-identical.
             if reprogram_override is None:
                 reprogram_override = _split_seed_init_tac(step_a, step_b)
+            # Same-backbone / different-LAYOUT hop (HON_BIND hop_4 / hop_8
+            # ``initialize``): batch the interleaved side, then peel. ``None``
+            # off-shape, and it declines outright when both sides are already
+            # batched, so every other init is byte-identical.
+            if reprogram_override is None:
+                reprogram_override = _batched_align_init_tac(step_a, step_b)
 
             info = emit_multi_oracle_chain_for_hop(
                 hop_index=_i,

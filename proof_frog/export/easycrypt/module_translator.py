@@ -120,6 +120,24 @@ def _count_module_calls(node: frog_ast.ASTNode) -> int:
     return count
 
 
+def method_module_call_count(game: frog_ast.Game, method: str) -> int:
+    """Number of top-level module calls in ``game``'s ``method``.
+
+    This is how many statements a call to that method contributes to the
+    abstract-call BACKBONE once EasyCrypt inlines it, so a tactic that peels a
+    backbone can size itself without predicting any inlined name. Zero if the
+    game has no such method.
+    """
+    m = next(
+        (x for x in game.methods if x.signature.name.lower() == method.lower()), None
+    )
+    if m is None:
+        return 0
+    return sum(
+        1 for stmt in m.block.statements if _statement_module_call(stmt) is not None
+    )
+
+
 def init_module_call_count(game: frog_ast.Game) -> int:
     """Number of top-level module calls in ``game``'s ``Initialize`` method.
 
@@ -129,14 +147,7 @@ def init_module_call_count(game: frog_ast.Game) -> int:
     challenger's ``Initialize``, whose body holds these calls). Zero if the game
     has no ``Initialize``.
     """
-    init = next(
-        (m for m in game.methods if m.signature.name.lower() == "initialize"), None
-    )
-    if init is None:
-        return 0
-    return sum(
-        1 for stmt in init.block.statements if _statement_module_call(stmt) is not None
-    )
+    return method_module_call_count(game, "initialize")
 
 
 def reduction_repacks_challenger_init(reduction: frog_ast.Reduction) -> bool:

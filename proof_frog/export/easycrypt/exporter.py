@@ -10105,7 +10105,7 @@ def export_proof_file(proof_path: str) -> str:
     assumption_clone_by_hop: dict[int, str] = {}
 
     def _consume_pk_challenger_events(
-        scheme_expr: str, gf: frog_ast.GameFile
+        scheme_expr: str, game: frog_ast.Game
     ) -> list[str] | None:
         """Structural challenger-init event list for the consume-pk peel, or
         ``None`` (=> the flat per-keygen "call" model, byte-identical).
@@ -10120,11 +10120,25 @@ def export_proof_file(proof_path: str) -> str:
             (m for m in foreign_concrete_modules.values() if m.name == sch_base),
             None,
         )
-        if wrap_mod is None:
-            return None
-        kg = next((pr for pr in wrap_mod.procs if pr.name == "keygen"), None)
+        kg = (
+            next((pr for pr in wrap_mod.procs if pr.name == "keygen"), None)
+            if wrap_mod is not None
+            else None
+        )
         if kg is None:
-            return None
+            # No concretized keygen wrapper: the challenger is a plain game
+            # whose own ``Initialize`` IS the block the peel must consume, so
+            # read it directly rather than falling back to the flat per-keygen
+            # "call" model. That model assumes exactly one keygen seed; a
+            # challenger drawing its own samples (``RandomScalarDist``: two
+            # seeds, then two ``randomscalar`` calls) leaves the ladder short,
+            # which EC reports as "left instruction list is not empty" at 99%
+            # of the file.
+            own = mt.init_backbone_events(game)
+            if not own:
+                return None
+            return (["sample"] if ro_holder_modules else []) + own
+        assert wrap_mod is not None  # kg is None above unless wrap_mod exists
         kg_events: list[str] = []
         for st in kg.body:
             if isinstance(st, ec_ast.Sample):
@@ -10144,7 +10158,7 @@ def export_proof_file(proof_path: str) -> str:
                     kg_events.append("call")
         if not kg_events:
             return None
-        n_kg = mt.init_module_call_count(gf.games[0])
+        n_kg = mt.init_module_call_count(game)
         return (["sample"] if ro_holder_modules else []) + kg_events * n_kg
 
     def _pr_multi_oracle_for(
@@ -10434,11 +10448,25 @@ def export_proof_file(proof_path: str) -> str:
                 if _spec is not None and _spec.lazy_glob not in hop_restrictions:
                     hop_restrictions.append(_spec.lazy_glob)
                     repro_chal_globs.add(_spec.lazy_glob)
-            _chal_events = (
-                _consume_pk_challenger_events(assumption_scheme_expr, gf_a)
-                if consume_pk_bridge and reduction_helper is not None
-                else None
-            )
+
+            # Challenger-init events PER SIDE, not per assumption: the two
+            # games of one assumption can have different ``Initialize``
+            # backbones (``RandomScalarDist`` derives its scalars from seeds on
+            # the Honest side and samples them directly on the Random side), so
+            # a ladder sized from one side is wrong for the other.
+            _chal_events_l: list[str] | None = None
+            _chal_events_r: list[str] | None = None
+            if consume_pk_bridge and reduction_helper is not None:
+                _g_l = next((g for g in gf_a.games if g.name == left_side), None)
+                _g_r = next((g for g in gf_a.games if g.name != left_side), None)
+                if _g_l is not None:
+                    _chal_events_l = _consume_pk_challenger_events(
+                        assumption_scheme_expr, _g_l
+                    )
+                if _g_r is not None:
+                    _chal_events_r = _consume_pk_challenger_events(
+                        assumption_scheme_expr, _g_r
+                    )
             ec_pr_lemmas.append(
                 pt.translate_assumption_hop_pr_lemma(
                     hop_index=i,
@@ -10475,13 +10503,7 @@ def export_proof_file(proof_path: str) -> str:
                             mt.init_module_call_count(gf_a.games[0]),
                             f"{gf_a_id}_Oracle",
                             method_return_types,
-                            challenger_events=(
-                                _chal_events
-                                if _chal_events is not None
-                                else mt.init_backbone_events(
-                                    next(g for g in gf_a.games if g.name != left_side)
-                                )
-                            ),
+                            challenger_events=_chal_events_r,
                         )
                         if consume_pk_bridge and reduction_helper is not None
                         else None
@@ -10498,18 +10520,21 @@ def export_proof_file(proof_path: str) -> str:
                             # its challenger, so its oracle is ``{gf_a_id}_Oracle``.
                             f"{gf_a_id}_Oracle",
                             method_return_types,
-                            challenger_events=(
-                                _chal_events
-                                if _chal_events is not None
-                                else mt.init_backbone_events(
-                                    next(g for g in gf_a.games if g.name == left_side)
-                                )
-                            ),
+                            challenger_events=_chal_events_l,
                         )
                         if consume_pk_bridge and reduction_helper is not None
                         else None
                     ),
-                    consume_pk_events_cover_ro=_chal_events is not None,
+                    # True whenever the peel events are STRUCTURAL -- either
+                    # from the concretized-wrapper builder or from the per-side
+                    # fallback that reads each assumption game's own
+                    # ``Initialize`` backbone. Both already account for every
+                    # front sample, so the historical fixed two-``rnd``
+                    # compensation would double-count them. Leaving this False
+                    # while the fallback supplied structural events is what made
+                    # the cycle-104 attempt overshoot ("invalid last
+                    # instruction") after its count had been corrected.
+                    consume_pk_events_cover_ro=True,
                     consume_pk_reduction_glob=_ec_ident(reduction_name),
                     consume_pk_scheme_glob=pt.module_base_name(assumption_scheme_expr),
                     consume_pk_left_challenger_glob=f"{hop_clone}.{gf_a_id}_{left_side}",

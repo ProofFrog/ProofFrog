@@ -68,6 +68,11 @@ class TypeCollector:
         self._abstract_bitstring_names: set[str] = set()
         self._names: list[str] = []  # ordered, unique
         self._seen: set[str] = set()
+        # Bitstring types whose XOR op a translated expression actually used.
+        # Emission of the op + its three laws is gated on this: see
+        # ``request_xor``. Ordered by first use so the emitted text is
+        # deterministic (never iterate the set).
+        self._xor_used: list[str] = []
         # Standalone ``ModInt<q>`` clone aliases (e.g. ``ModInt_q``), each
         # emitting one ``clone ZModP.ZModRing as <alias> with op p <- <q>``.
         # The EC type is ``<alias>.zmod``; ring ops + uniform distr come from
@@ -772,6 +777,19 @@ class TypeCollector:
         """
         self._virtual_concat_requests.add(src_name)
 
+    def request_xor(self, ec_type: ec_ast.EcType) -> None:
+        """Record that a translated expression renders a XOR over ``ec_type``.
+
+        :meth:`emit` produces the ``xor_<t>`` op and its involution /
+        commutativity / associativity axioms only for types recorded here. The
+        translator must call this wherever it calls :func:`xor_name_for`, or
+        the emitted file will reference an op it never declares -- which EC
+        rejects loudly, so a missed call cannot pass silently.
+        """
+        name = ec_type.text
+        if name not in self._xor_used:
+            self._xor_used.append(name)
+
     def request_concat_inj(self, op_name: str) -> None:
         """Ask for the ``<op>_injL`` / ``<op>_injR`` component-injectivity
         lemmas of a registered concat op.
@@ -1031,7 +1049,16 @@ class TypeCollector:
                 )
         for name in self._names:
             decls.append(ec_ast.OpDecl(_zero_name(name), name))
-        for name in self._names:
+        # DEMAND-DRIVEN (2026-08-03). The XOR op and its three laws used to be
+        # emitted for EVERY registered bitstring type. Measured on
+        # ``CK_seedbased_HON_BIND_K_PK``: all 48 of them were unreferenced, and
+        # deleting them still compiled -- the CFRG sources contain no `^` at
+        # all. Emitting an unused axiom does not change what a proof proves, but
+        # it inflates the surface an axiom audit has to work through (they were
+        # 48 of that export's 175 declarations), so the emitted set should be
+        # the real one. Gated on an actual rendered use; a proof that does XOR
+        # (ModOTP, DoubleOTP) is unaffected.
+        for name in self._xor_used:
             xor_op = _xor_name(name)
             decls.append(ec_ast.OpDecl(xor_op, f"{name} -> {name} -> {name}"))
             decls.append(
@@ -1554,7 +1581,11 @@ def _paren_int(s: str) -> str:
 
 
 def xor_name_for(ec_type: ec_ast.EcType) -> str:
-    """Exposed for the expression translator to find the xor op name."""
+    """Exposed for the expression translator to find the xor op name.
+
+    Callers that are RENDERING a xor must also call
+    :meth:`TypeCollector.request_xor`, or the op will not be emitted.
+    """
     return _xor_name(ec_type.text)
 
 

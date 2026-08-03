@@ -238,6 +238,7 @@ class ExpressionTranslator:
             if isinstance(lhs_type, frog_ast.BitStringType):
                 ec_type = self._types.translate_type(lhs_type)
                 xor = tc.xor_name_for(ec_type)
+                self._types.request_xor(ec_type)
                 left = self.translate(expr.left_expression)
                 right = self.translate(expr.right_expression)
                 return f"{xor} {_paren(left)} {_paren(right)}"

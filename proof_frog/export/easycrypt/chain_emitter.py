@@ -5263,6 +5263,25 @@ def _emit_one_oracle_chain(
         if peel is not None:
             tactic, pres, rung = peel
             return [], [_res_tag(rung), *tactic, "qed."], pres
+        # Bundled-delegate reorder: the two endpoints run the SAME abstract
+        # calls but one gets a block of them from a delegate ``Challenger``
+        # (``keygen; encaps`` back to back) while the other splits them around
+        # its own sampling chain. The backbone peel declines because the
+        # backbones are not equal; this route makes them equal with one
+        # ``swap`` and then peels. ``None`` off-shape, so every other init is
+        # byte-identical.
+        reorder = _synth_bundled_delegate_reorder(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            ev_post=bool(full_coupling and "ev_" in full_coupling),
+            coupling=full_coupling or "",
+        )
+        if reorder is not None:
+            return [], [_res_tag(SYNTH_PARAM), *reorder, "qed."], set()
         # ek-twin fallback when the last states diverge. The ek-derivation twin
         # route (tried above only when ``last_states_match``) builds its
         # transitivity entirely off the FIRST flat states -- the raw-wrapper
@@ -9346,6 +9365,373 @@ def _ec_full_perm_swaps(
         swaps.append(f"swap{{1}} {src + 1} {target - src}.")
         cur.insert(target, cur.pop(src))
     return swaps
+
+
+_LOSSLESS_DISTR_FAMILIES = ("dbs_", "dfun_")
+
+
+def _synth_bundled_delegate_reorder(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    ev_post: bool = False,
+    coupling: str = "",
+) -> list[str] | None:
+    """Closing tactic for a BUNDLED-DELEGATE vs EXPLICIT init hop, or ``None``.
+
+    The CFRG `_PQ` IND-CCA shape at five instantiations (hops 2, 3, 10, 12, 13
+    of ``CG_expanded_INDCCA_PQ`` and its siblings). One endpoint gets a block of
+    abstract calls from a delegate ``Challenger.initialize()`` / ``.compute()``
+    -- which runs ``keygen; encaps`` back to back -- while the other runs those
+    same calls itself, split around its own sampling chain. So the two bodies
+    are a PERMUTATION, not an alignment, and ``_synth_init_backbone_peel``
+    declines (unequal backbones; its own reorder path bails outright once a
+    backbone contains a sample).
+
+    This works entirely off the FIRST FLAT STATES, which already have the
+    delegate inlined -- they ARE the post-``inline *`` bodies, name for name and
+    position for position -- so nothing has to model how many statements the
+    challenger contributes:
+
+    1. read both backbones; decline unless the CALL sequences are a non-trivial
+       permutation of each other;
+    2. try to reorder each side's calls into the other's order
+       (:func:`_bundled_reorder_swaps`), each call travelling with its feeding
+       and unpacking assignments;
+    3. require the reordered backbones to align modulo one-sided SAMPLES
+       (:func:`_sample_drop_alignment`) -- the delegates draw a shared secret /
+       PRF key the other side has no counterpart for -- AND require every
+       dropped sample to be DEAD for the goal (:func:`_bd_sample_dead`),
+       without which the DP silently proposes dropping a merely-REORDERED draw
+       on both sides and the emitted tactic runs without closing;
+    4. peel tail-first: ``wp`` then ``call (_: true)`` or ``rnd`` per matched
+       event, ``rnd{i}`` per one-sided sample.
+
+    A one-sided ``rnd{i}`` leaves ``is_lossless d``, so the close is
+    ``skip`` + ``smt`` naming each dropped distribution's ``_ll``; with no drops
+    it is the plain ``skip => /#``. Declines when a dropped distribution is
+    outside the families for which the exporter always emits an ``_ll``, and
+    when the coupling carries an ``ev_`` derivation conjunct (this peel proves
+    ``={res}`` per call, not a functional characterization) -- an honest admit
+    beats a tactic that runs without closing.
+    """
+    if ev_post:
+        return None
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+    lmod = _flat_state_module(
+        modules, "Init_bd_L", lproj, external_module_types, method_return_types, []
+    )
+    rmod = _flat_state_module(
+        modules, "Init_bd_R", rproj, external_module_types, method_return_types, []
+    )
+    if not lmod.procs or not rmod.procs:
+        return None
+
+    def _body(mod: ec_ast.Module) -> tuple[list[ec_ast.EcStmt], str]:
+        # EC numbers the statements a ``proc.`` exposes; the trailing ``return``
+        # is folded into the postcondition and is NOT one of them -- but its
+        # expression is what the goal OBSERVES, so keep it for the liveness gate.
+        body = _exec_stmts(mod.procs[0].body)
+        ret = next((s.expr for s in body if isinstance(s, ec_ast.Return)), "")
+        return [s for s in body if not isinstance(s, ec_ast.Return)], ret
+
+    (l_exec, l_ret), (r_exec, r_ret) = _body(lmod), _body(rmod)
+    l_bb, r_bb = _bd_events(l_exec), _bd_events(r_exec)
+    l_callees = [c for k, c in l_bb if k == "call"]
+    r_callees = [c for k, c in r_bb if k == "call"]
+    if l_callees == r_callees or sorted(l_callees) != sorted(r_callees):
+        # Same call order (the plain peel's business) or not a permutation at
+        # all (a one-sided call -- a different route's shape).
+        return None
+    for side, stmts, target in ((1, l_exec, r_callees), (2, r_exec, l_callees)):
+        got = _bundled_reorder_swaps(stmts, target, side)
+        if got is None:
+            continue
+        swaps, moved = got
+        moved_bb = _bd_events(moved)
+        new_l, new_r = (moved_bb, r_bb) if side == 1 else (l_bb, moved_bb)
+        ops = _sample_drop_alignment(new_l, new_r)
+        if ops is None:
+            continue
+        l_events = [s for s in (moved if side == 1 else l_exec) if _is_bb_stmt(s)]
+        r_events = [s for s in (r_exec if side == 1 else moved) if _is_bb_stmt(s)]
+        dropped: list[ec_ast.Sample] = []
+        peel: list[str] = []
+        for kind, i, j in reversed(ops):
+            peel.append("wp.")
+            if kind == "match":
+                peel.append("call (_: true)." if new_l[i][0] == "call" else "rnd.")
+                continue
+            side_stmts, ret = (
+                (moved if side == 1 else l_exec, l_ret)
+                if kind == "dropL"
+                else (r_exec if side == 1 else moved, r_ret)
+            )
+            events = l_events if kind == "dropL" else r_events
+            stmt = events[i if kind == "dropL" else j]
+            if not isinstance(stmt, ec_ast.Sample):
+                return None
+            if not _bd_sample_dead(side_stmts, side_stmts.index(stmt), ret, coupling):
+                return None
+            dropped.append(stmt)
+            peel.append("rnd{1}." if kind == "dropL" else "rnd{2}.")
+        if not dropped:
+            return ["proc.", "inline *.", *swaps, *peel, "skip => /#."]
+        distrs = sorted({s.distr for s in dropped})
+        if not all(d.startswith(_LOSSLESS_DISTR_FAMILIES) for d in distrs):
+            return None
+        lls = " ".join(f"{d}_ll" for d in distrs)
+        return ["proc.", "inline *.", *swaps, *peel, "skip.", f"smt({lls})."]
+    return None
+
+
+def _bd_sample_dead(
+    stmts: list[ec_ast.EcStmt], pos: int, ret: str, coupling: str
+) -> bool:
+    """Whether the sample at ``stmts[pos]`` cannot influence anything the hop's
+    goal observes -- its ``return`` expression or its coupling.
+
+    THIS IS THE SOUNDNESS GATE OF THE ONE-SIDED ``rnd{i}`` DROP, and it exists
+    because distribution and position do not distinguish the two cases:
+
+    * a genuinely DEAD draw the other side simply does not make (the KDF
+      challenger's PRF key, the KEM challenger's overwritten shared secret) --
+      dropping it one-sidedly is right;
+    * the SAME draw, merely REORDERED across some calls. A monotone alignment
+      cannot match it, so the min-drops DP proposes dropping it on BOTH sides;
+      that runs, but leaves a residual demanding two independent draws be equal.
+      Measured on ``CK_expanded_INDCCA_T`` ``hop_9_initialize``: EC rejects it
+      three different closers deep, because the goal is false, not hard.
+
+    Forward-taint the sampled variable through every later statement that reads
+    it, then require the taint to touch neither the return expression nor the
+    coupling text. Textual and therefore conservative: a name that merely looks
+    like a tainted one declines the route, which costs an admit, never a wrong
+    tactic.
+
+    Taint is tracked PER TUPLE COMPONENT, and that precision is load-bearing
+    rather than an optimization. The delegates repack their whole result into
+    one tuple (``_tup <- (ek, ssStar, ctStar)``) and the reduction then projects
+    every component out of it, so whole-variable taint marks a dead shared
+    secret as reaching the encapsulation key and declines every genuine case.
+    """
+    seed = stmts[pos]
+    if not isinstance(seed, ec_ast.Sample):
+        return False
+    tainted = {seed.var}
+    # ``var -> tainted 1-based component indices`` for a tuple-literal assign.
+    parts: dict[str, set[int]] = {}
+
+    def _reads(stmt: ec_ast.EcStmt) -> set[str]:
+        return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", _stmt_text(stmt)))
+
+    for stmt in stmts[pos + 1 :]:
+        if not isinstance(stmt, (ec_ast.Assign, ec_ast.Sample, ec_ast.Call)):
+            continue
+        if isinstance(stmt, ec_ast.Assign):
+            lit = _top_level_tuple_parts(stmt.rhs)
+            if lit is not None:
+                hit = {
+                    k
+                    for k, part in enumerate(lit, start=1)
+                    if set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", part)) & tainted
+                    or any(
+                        idx in parts.get(name, set())
+                        for name, idx in _projections(part)
+                    )
+                }
+                if hit:
+                    parts[stmt.var] = hit
+                continue
+            proj = _projections(stmt.rhs)
+            if proj and not (_reads(stmt) - {stmt.var} - {n for n, _ in proj}):
+                if any(idx in parts.get(name, set()) for name, idx in proj):
+                    tainted.add(stmt.var)
+                if not _reads(stmt) & tainted:
+                    continue
+        if _reads(stmt) & tainted:
+            tainted.add(stmt.var)
+    observed = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", f"{ret} {coupling}"))
+    if tainted & observed:
+        return False
+    # A tuple variable that is itself observed leaks every tainted component.
+    return not any(idxs for name, idxs in parts.items() if name in observed)
+
+
+def _top_level_tuple_parts(rhs: str) -> list[str] | None:
+    """The components of a top-level tuple literal ``(a, b, c)``, else ``None``."""
+    text = rhs.strip()
+    if not (text.startswith("(") and text.endswith(")")):
+        return None
+    # ``_top_level_args`` takes the WHOLE parenthesized expression and finds its
+    # own outermost parens -- handing it the already-stripped inner text makes
+    # it return ``[]``.
+    parts = _top_level_args(text)
+    return parts if len(parts) > 1 else None
+
+
+def _projections(expr: str) -> list[tuple[str, int]]:
+    """``(base, 1-based index)`` for each ``t.`k`` projection in ``expr``."""
+    return [
+        (m.group(1), int(m.group(2)))
+        for m in re.finditer(r"([A-Za-z_][A-Za-z0-9_]*)\.`([0-9]+)", expr)
+    ]
+
+
+def _bd_events(stmts: list[ec_ast.EcStmt]) -> list[tuple[str, str]]:
+    """The backbone of ``stmts`` as CROSS-SIDE comparable events: a call by its
+    callee, a sample by its DISTRIBUTION.
+
+    :func:`_call_sample_backbone` tags a sample by its bound VARIABLE, which is
+    a within-side signal (it detects a sample reorder on one side). Across two
+    sides the same draw carries different local names, so matching on the
+    variable never succeeds -- but matching on the bare kind is WRONG in the
+    other direction: it happily pairs a seed draw with a shared-secret draw,
+    emitting an `rnd` whose distribution-equality side condition is false. The
+    distribution is the right granularity.
+    """
+    out: list[tuple[str, str]] = []
+    for stmt in stmts:
+        if isinstance(stmt, ec_ast.Call):
+            out.append(("call", stmt.callee))
+        elif isinstance(stmt, ec_ast.Sample):
+            out.append(("sample", stmt.distr))
+    return out
+
+
+def _is_bb_stmt(stmt: ec_ast.EcStmt) -> bool:
+    """Whether ``stmt`` contributes a :func:`_bd_events` event."""
+    return isinstance(stmt, (ec_ast.Call, ec_ast.Sample))
+
+
+def _stmt_travel_block(
+    stmts: list[ec_ast.EcStmt], pos: int, local_vars: set[str]
+) -> tuple[int, int]:
+    """The contiguous block that must travel with the call at ``stmts[pos]``.
+
+    Extends BACKWARDS over immediately-preceding assignments whose written
+    variable the block reads (they define the call's arguments -- moving the
+    call alone would leave it reading an undefined local) and FORWARDS over
+    immediately-following assignments that read what the block writes (they
+    unpack its tuple result). Anything else -- a sample, another call -- stops
+    the extension.
+    """
+    start = pos
+    while start > 0 and isinstance(stmts[start - 1], ec_ast.Assign):
+        written = _ec_stmt_rw(stmts[start - 1], local_vars)[1]
+        if any(written & _ec_stmt_rw(s, local_vars)[0] for s in stmts[start : pos + 1]):
+            start -= 1
+        else:
+            break
+    end = pos
+    while end + 1 < len(stmts) and isinstance(stmts[end + 1], ec_ast.Assign):
+        reads = _ec_stmt_rw(stmts[end + 1], local_vars)[0]
+        if any(reads & _ec_stmt_rw(s, local_vars)[1] for s in stmts[pos : end + 1]):
+            end += 1
+        else:
+            break
+    return start, end
+
+
+def _bundled_reorder_swaps(
+    stmts: list[ec_ast.EcStmt], target_callees: list[str], side: int
+) -> tuple[list[str], list[ec_ast.EcStmt]] | None:
+    """``swap{side} [a..b] d`` tactics putting ``stmts``' abstract calls into
+    ``target_callees`` order, each call travelling with its feeding and
+    unpacking assignments (:func:`_stmt_travel_block`).
+
+    A selection sort that only ever moves a block UP, to sit immediately after
+    the previously-placed target call -- so every crossed statement is one the
+    block does not yet depend on. Each move is additionally ``_ec_indep``
+    -validated against every crossed statement, so a data conflict or a
+    same-module call declines the route (``None``) rather than emitting a swap
+    EasyCrypt will reject. Returns the swaps and the reordered statements.
+
+    EC accepts a swap that commutes two ABSTRACT module calls as long as the
+    modules are mutually restricted, which the exporter's ``declare module``
+    chain already emits; ``_ec_indep``'s same-module test is what keeps the two
+    calls of ONE module in order. Tripwire:
+    ``ec_templates/bundled_delegate_encaps_reorder.ec``.
+    """
+    local = _ec_local_vars(stmts)
+    cur = list(stmts)
+    swaps: list[str] = []
+    for slot, want in enumerate(target_callees):
+        calls = [(i, s.callee) for i, s in enumerate(cur) if isinstance(s, ec_ast.Call)]
+        if len(calls) != len(target_callees):
+            return None
+        if calls[slot][1] == want:
+            continue
+        src = next((i for i, c in calls[slot + 1 :] if c == want), None)
+        if src is None:
+            return None
+        b_0, b_1 = _stmt_travel_block(cur, src, local)
+        ins = 0 if slot == 0 else calls[slot - 1][0] + 1
+        if ins > b_0:
+            return None
+        block, crossed = cur[b_0 : b_1 + 1], cur[ins:b_0]
+        if not all(_ec_indep(m, x, local) for m in block for x in crossed):
+            return None
+        swaps.append(f"swap{{{side}}} [{b_0 + 1}..{b_1 + 1}] {ins - b_0}.")
+        del cur[b_0 : b_1 + 1]
+        cur[ins:ins] = block
+    return swaps, cur
+
+
+def _sample_drop_alignment(
+    l_bb: list[tuple[str, str]], r_bb: list[tuple[str, str]]
+) -> list[tuple[str, int, int]] | None:
+    """Align two backbones allowing only whole SAMPLES to be dropped one-sidedly.
+
+    Returns the ordered op list (``match`` / ``dropL`` / ``dropR``) using the
+    fewest drops, or ``None`` when no such alignment exists -- notably when a
+    CALL is one-sided, which needs a glob-preservation drop this route does not
+    do. A dropped sample becomes a one-sided ``rnd{i}``, which EC discharges
+    from the distribution's losslessness; that is sound whether or not the draw
+    is really dead, because a LIVE one leaves a residual EC then refuses to
+    close (a visible reject, never a false accept).
+    """
+    l_k, r_k = l_bb, r_bb
+    n, m = len(l_k), len(r_k)
+    inf = n + m + 1
+    dp = [[inf] * (m + 1) for _ in range(n + 1)]
+    dp[n][m] = 0
+    for i in range(n, -1, -1):
+        for j in range(m, -1, -1):
+            if i == n and j == m:
+                continue
+            best = inf
+            if i < n and j < m and l_k[i] == r_k[j]:
+                best = min(best, dp[i + 1][j + 1])
+            if i < n and l_k[i][0] == "sample":
+                best = min(best, 1 + dp[i + 1][j])
+            if j < m and r_k[j][0] == "sample":
+                best = min(best, 1 + dp[i][j + 1])
+            dp[i][j] = best
+    if dp[0][0] >= inf:
+        return None
+    ops: list[tuple[str, int, int]] = []
+    i = j = 0
+    while i < n or j < m:
+        if i < n and j < m and l_k[i] == r_k[j] and dp[i][j] == dp[i + 1][j + 1]:
+            ops.append(("match", i, j))
+            i += 1
+            j += 1
+        elif i < n and l_k[i][0] == "sample" and dp[i][j] == 1 + dp[i + 1][j]:
+            ops.append(("dropL", i, -1))
+            i += 1
+        elif j < m and r_k[j][0] == "sample" and dp[i][j] == 1 + dp[i][j + 1]:
+            ops.append(("dropR", -1, j))
+            j += 1
+        else:  # pragma: no cover -- unreachable once dp says an alignment exists
+            return None
+    return ops
 
 
 def _align_call_order_swaps(

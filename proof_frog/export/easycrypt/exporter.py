@@ -11119,16 +11119,27 @@ def export_proof_file(proof_path: str) -> str:
             # distributions -- ``is_funiform``/``is_lossless`` are ill-typed on them.
             if concrete_distr.startswith(("concat_", "slice_")):
                 continue
-            for suffix, predicate in (
-                ("funi", "is_funiform"),
-                ("ll", "is_lossless"),
+            for suffix, predicate, source_suffix in (
+                ("funi", "is_funiform", "fu"),
+                ("ll", "is_lossless", "ll"),
             ):
                 axiom_name = f"{inst.let_name}_{concrete_distr}_{suffix}"
                 if axiom_name in seen_axiom_names:
                     continue
                 seen_axiom_names.add(axiom_name)
+                # DERIVED, not assumed. These are verbatim restatements, under a
+                # clone-local name, of facts the distribution already carries --
+                # ``<distr>_fu`` / ``<distr>_ll`` are emitted for every
+                # distribution that can reach here (bitstring, abstract-carrier,
+                # random-function). Restating them as axioms doubled the count a
+                # reviewer has to work through for nothing. ``exact`` works
+                # whichever standing the source has, so this is unconditional.
                 clone_axioms.append(
-                    ec_ast.Axiom(axiom_name, f"{predicate} {concrete_distr}")
+                    ec_ast.ProvedLemma(
+                        axiom_name,
+                        f"{predicate} {concrete_distr}",
+                        [f"  exact {concrete_distr}_{source_suffix}."],
+                    )
                 )
 
     # Process ``requires`` clauses to discover type equalities. A clause

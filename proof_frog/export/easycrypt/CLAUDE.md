@@ -38,6 +38,49 @@ Key modules:
   schemes whose calls are actually reordered. Single declared module only so
   far. Design + extensions:
   `extras/docs/plans/in-progress/2026-06-01-scheme-statelessness-foundation.md`.
+- **BitWord bitstring foundation** (in `type_collector.emit` + `_derived_concat_laws`
+  / `_derived_split_law` / `_derived_concat3_laws`): a `BitString<w>` with a KNOWN
+  width emits as `clone BitWord as BW_bs_<w> with op n <- <w> proof gt0_n by
+  smt(...)` + `type bs_<w> = BW_bs_<w>.word` — a genuine sized bool-list subtype,
+  not an abstract type. Slice/concat/concat3 ops are then DEFINED through the
+  `ofword`/`mkword` bridge and `dbs_<w>` is DEFINED as `BW_bs_<w>.DWord.dunifin`,
+  which turns the whole bitstring family from AXIOMS into proved lemmas: the three
+  2-way round-trip laws, both 2-way distribution splits, the `dbs_*_ll/_fu/_full`
+  trio, and all five 3-way `concat3` facts. Statement text is byte-identical to the
+  axioms it replaces, so existing `smt(...)` hints and `have h := ...` references
+  keep resolving. Measured on `CG_seedbased_HON_BIND_K_PK`: emitted top-level
+  axioms **128 -> 17**. Load-bearing details, each earned by a failure:
+  - **`op [smt_opaque]` is mandatory, not cosmetic.** Defining a previously
+    uninterpreted op is a conservative change ONLY if the definition is withheld
+    from `smt`; otherwise every existing `smt` call over a nested `concat` unfolds
+    into `mkword`/`ofword`/`++` and blows its budget ("cannot prove goal (strict)"
+    in the binding challenge case-split). `smt_opaque` withholds the definitional
+    axiom while leaving delta-reduction intact, so `rewrite /<op>` still unfolds it
+    for the derivation proofs. `opaque` (no tag prefix) would block that reduction
+    too — do not use it here.
+  - **Gates, all failing CLOSED.** A width must be known; a type aliased to an
+    abstract carrier keeps the carrier's type; and every type of a concat triple
+    whose component widths do NOT sum to the result's is excluded wholesale,
+    because a defined concat would make that triple's round-trip laws FALSE. Such
+    a triple keeps the uninterpreted-op + axiom form, which is satisfiable.
+  - **Positivity is the whole residue.** Each clone owes `gt0_n : 0 < <width>`.
+    A concatenation width is a nonnegative-coefficient sum of atoms, so it is
+    DISCHARGED from per-atom `gt0_<atom>` axioms; a width that SUBTRACTS (the
+    partial split's gap, `prg_stretch - kem_t_nseed`) gets its own
+    `gt0_bs_<w>`. Never leave the obligation undischarged: an undischarged clone
+    axiom is real but INVISIBLE in the file text, so the axiom audit cannot see it.
+  - **EC's `++` is LEFT-associative**, so an emitted `A ++ B ++ C` is
+    `(A ++ B) ++ C`; the 3-way `p1`/`p2`/identity proofs need `-catA` first. A
+    right-nested reading fails with "nothing to rewrite", which reads like a
+    missing lemma rather than an associativity mistake.
+  - **One `rewrite /op` reaches every occurrence.** When a triple's components
+    share a type they share a slice op, so naming it twice is "nothing to rewrite".
+  - Tripwires: `ec_templates/bitword_slice_concat.ec` (round-trip),
+    `bitword_uniform_split.ec` (distribution family + splits),
+    `bitword_concat3.ec` (3-way), `bitword_split_couple.ec` (the CONSUMER shape —
+    with the distribution defined, EC discharges the split coupling's support
+    obligation itself, so the emitted tail is `(<witness>) || smt(<laws>)` and both
+    branches are pinned).
 - **ModInt additive-group foundation** (in `type_collector` +
   `expr_translator` + `parametric_tactics.uniform_modint_tactic` +
   `exporter.type_of` FieldAccess): **migrated to EC stdlib clones (2026-06-29)**,

@@ -1649,7 +1649,23 @@ def challenge_tactic_hop2(spec: Hop2Spec) -> list[str] | None:
         f".`2 = {ct1}"
         "{2}"
         f".`2 by apply ({spec.ect_inj_axiom} _ _ hect).",
-        "    smt().",
+        # The ciphertext pair equality, derived rather than left to ``smt``.
+        # ``hg`` is the negated case guard; rewriting the KDF-input equality
+        # ``h`` into it collapses that conjunct, leaving the PQ-component
+        # equality. Then surjective pairing closes it. ``smt`` USED to find
+        # this on its own, but it needs pair eta over a context carrying the
+        # 4-deep concat terms, and that stopped working the moment the
+        # bitstring types became concrete (``BitWord`` clones) -- with the
+        # goal reduced to three small hypotheses it STILL fails, so this is
+        # not a budget problem and the explicit route is the honest one.
+        # The clears matter: they take the giant hypotheses out of the task.
+        "    move: hg; rewrite h /= => hct1.",
+        "    move: h hc3 hc2 hect => _ _ _ _.",
+        f"    by rewrite (pairS {ct0}"
+        "{2}"
+        f") (pairS {ct1}"
+        "{2}"
+        ") /fst /snd hct1 hct2.",
         "  smt().",
         "  qed.",
     ]
@@ -2001,7 +2017,23 @@ def challenge_tactic_hop2_wrapper(  # pylint: disable=too-many-locals,too-many-s
         f".`2 = {ct1}"
         "{2}"
         f".`2 by apply ({spec.ect_inj_axiom} _ _ hect).",
-        "    smt().",
+        # The ciphertext pair equality, derived rather than left to ``smt``.
+        # ``hg`` is the negated case guard; rewriting the KDF-input equality
+        # ``h`` into it collapses that conjunct, leaving the PQ-component
+        # equality. Then surjective pairing closes it. ``smt`` USED to find
+        # this on its own, but it needs pair eta over a context carrying the
+        # 4-deep concat terms, and that stopped working the moment the
+        # bitstring types became concrete (``BitWord`` clones) -- with the
+        # goal reduced to three small hypotheses it STILL fails, so this is
+        # not a budget problem and the explicit route is the honest one.
+        # The clears matter: they take the giant hypotheses out of the task.
+        "    move: hg; rewrite h /= => hct1.",
+        "    move: h hc3 hc2 hect => _ _ _ _.",
+        f"    by rewrite (pairS {ct0}"
+        "{2}"
+        f") (pairS {ct1}"
+        "{2}"
+        ") /fst /snd hct1 hct2.",
         "  smt().",
         "  qed.",
     ]

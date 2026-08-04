@@ -2887,3 +2887,48 @@ def test_export_group_only_typechecks_in_easycrypt(tmp_path: Path) -> None:
             f"stderr:\n{result.stderr}\n"
             f"stdout:\n{result.stdout[-2000:]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# BitWord bitstring foundation — DERIVATION tripwires
+# ---------------------------------------------------------------------------
+
+BITWORD_TEMPLATES = (
+    "bitword_slice_concat.ec",
+    "bitword_uniform_split.ec",
+    "bitword_concat3.ec",
+    "bitword_split_couple.ec",
+)
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+@pytest.mark.parametrize("template", BITWORD_TEMPLATES)
+def test_bitword_derivation_templates_compile(tmp_path: Path, template: str) -> None:
+    """The bitstring math the exporter DERIVES rather than assumes.
+
+    Each template proves, at symbolic widths and at the exporter's own explicit
+    ``slice (s, i, j)`` signature, the facts that used to be emitted as axioms:
+    ``bitword_slice_concat`` the 2-way round-trip laws (plus the XOR family),
+    ``bitword_uniform_split`` the ``dbs_*_ll/_fu/_full`` family and both 2-way
+    distribution-split laws, ``bitword_concat3`` all five 3-way facts. If one
+    stops compiling, the corresponding emitter route is emitting a proof script
+    EasyCrypt no longer accepts -- which shows up as a rejected export across
+    every proof with a concat triple, so catch it here instead.
+    """
+    ec_file = tmp_path / template
+    ec_file.write_text((EC_TEMPLATES / template).read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected {template}.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )

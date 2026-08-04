@@ -41,15 +41,15 @@ clone BitWord as WB  with op n <- nb      proof gt0_n by exact gt0_nb.
 clone BitWord as WAB with op n <- na + nb proof gt0_n by smt(gt0_na gt0_nb).
 
 (* the exporter's `concat` / `slice`, defined through the list bridge *)
-op concat (a : WA.word) (b : WB.word) : WAB.word =
+op [smt_opaque] concat (a : WA.word) (b : WB.word) : WAB.word =
   WAB.mkword (WA.ofword a ++ WB.ofword b).
 
 (* The exporter's slice takes EXPLICIT (i, j) indices, not a fixed split, so
    the proofs must also normalise `j - i`. Matching that signature here is the
    point: a fixed-split tripwire would not have exercised it. *)
-op slice_ab_a (s : WAB.word) (i j : int) : WA.word =
+op [smt_opaque] slice_ab_a (s : WAB.word) (i j : int) : WA.word =
   WA.mkword (take (j - i) (drop i (WAB.ofword s))).
-op slice_ab_b (s : WAB.word) (i j : int) : WB.word =
+op [smt_opaque] slice_ab_b (s : WAB.word) (i j : int) : WB.word =
   WB.mkword (take (j - i) (drop i (WAB.ofword s))).
 
 (* the concatenation really does have the summed width -- the side condition

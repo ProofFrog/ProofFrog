@@ -1331,6 +1331,9 @@ def _export_group_only(  # pylint: disable=too-many-locals
     # exclusion draw (``x <- T \ {..}``). Required only when one was emitted, so
     # exclusion-free exports stay byte-identical.
     dexcepted_requires = ["Dexcepted"] if top_types.needs_dexcepted else []
+    bitword_imports, bitword_abstract = _bitword_requires(
+        top_types.needs_bitword, stdlib_requires
+    )
     ec_file = ec_ast.EcFile(
         requires=[
             "AllCore",
@@ -1339,10 +1342,29 @@ def _export_group_only(  # pylint: disable=too-many-locals
             "DMap",
             *stdlib_requires,
             *dexcepted_requires,
+            *bitword_imports,
         ],
         decls=decls,
+        abstract_requires=bitword_abstract,
     )
     return ec_ast.pretty_print(ec_file)
+
+
+def _bitword_requires(
+    needs_bitword: bool, stdlib_requires: list[str]
+) -> tuple[list[str], list[str]]:
+    """``(extra imports, abstract requires)`` for the ``BitWord`` foundation.
+
+    ``BitWord`` is required ABSTRACTLY: importing it would bring its ``n`` and
+    ``word`` to top level, where they collide. ``List`` is imported because the
+    derived round-trip proofs are ordinary list lemmas (``take_size_cat``,
+    ``drop_size_cat``, ``cat_take_drop``); it is skipped when the stdlib
+    group/ModInt preamble already imports it.
+    """
+    if not needs_bitword:
+        return [], []
+    imports = [] if "List" in stdlib_requires else ["List"]
+    return imports, ["BitWord"]
 
 
 # pylint: disable=too-many-locals,too-many-statements,too-many-branches
@@ -6710,8 +6732,18 @@ def export_proof_file(proof_path: str) -> str:
                 f"have h1 : p.`1 \\in d{left_name} by smt(supp_dlet supp_dmap).",
                 f"have h2 : p.`2 \\in d{right_name} by smt(supp_dlet supp_dmap).",
                 "split.",
-                "* rewrite supp_dlet; exists p.`1; rewrite h1 /=.",
-                "  by rewrite supp_dmap; exists p.`2; rewrite h2.",
+                # Two shapes, one emission. Over ABSTRACT bitstrings the first
+                # `rnd` obligation is the support side condition, discharged by
+                # the explicit dlet/dmap witnesses. Over BITWORD-backed ones the
+                # distribution is `DWord.dunifin` and EC has already discharged
+                # support by the time we get here, leaving the round-trip
+                # equality -- where the witness `rewrite` is "nothing to
+                # rewrite". `||` takes whichever applies; both are validated
+                # (`ec_templates/split_uniform_couple.ec` and
+                # `ec_templates/bitword_split_couple.ec`).
+                "* by (rewrite supp_dlet; exists p.`1; rewrite h1 /=;",
+                "      rewrite supp_dmap; exists p.`2; rewrite h2)",
+                f"     || smt({ax_left} {ax_right}).",
                 f"move => _; smt({ax_left} {ax_right}).",
             ]
 
@@ -11593,6 +11625,9 @@ def export_proof_file(proof_path: str) -> str:
         or any(fs.theory_types.needs_dexcepted for fs in foreign_scopes.values())
     )
     dexcepted_requires = ["Dexcepted"] if needs_dexcepted else []
+    bitword_imports, bitword_abstract = _bitword_requires(
+        top_types.needs_bitword, stdlib_requires
+    )
     ec_file = ec_ast.EcFile(
         # ``DProd`` / ``DMap`` provide the dprod/dmap lemmas
         # (``dmap_dprodE``, ``dmap1E``, ``dmap_id``, ``supp_dprod``,
@@ -11606,7 +11641,9 @@ def export_proof_file(proof_path: str) -> str:
             *stdlib_requires,
             *map_requires,
             *dexcepted_requires,
+            *bitword_imports,
         ],
         decls=decls,
+        abstract_requires=bitword_abstract,
     )
     return ec_ast.pretty_print(ec_file)

@@ -8,6 +8,8 @@ identifier.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
+from typing import Any
 
 from . import ec_ast
 from ... import frog_ast
@@ -54,6 +56,13 @@ class TypeCollector:
         # ``require import Dexcepted``. Conditional -> non-exclusion proofs stay
         # byte-identical.
         self.needs_dexcepted: bool = False
+        # Set by :meth:`emit` when it emits at least one ``BitWord`` clone, so
+        # the preamble adds ``require BitWord.`` (abstract -- importing it would
+        # bring its ``n``/``word`` to top level and collide) and ``List`` to the
+        # import line (the derived round-trip proofs are list lemmas).
+        # Conditional -> exports with no word-backed bitstring stay
+        # byte-identical.
+        self.needs_bitword: bool = False
         # ``theory_mode``: when True, every distinct bitstring type seen
         # is registered as an abstract type inside the primitive's
         # abstract theory rather than as a top-level concrete type. Each
@@ -953,9 +962,533 @@ class TypeCollector:
         """
         return list(self._abstract_bitstrings)
 
+    def _synthesize_virtual_concat_triples(self) -> None:
+        """Register VIRTUAL concat triples, synthesized from the slice OFFSETS.
+
+        A type that is SLICED into exactly two complementary pieces but never
+        CONCATENATED registers no triple, so none of :meth:`emit`'s round-trip
+        / split facts would be emitted -- which is what blocks every
+        split-uniform-sample hop whose seed pair is only ever taken apart.
+
+        This runs at the TOP of :meth:`emit`, before any declaration is
+        produced: ``register_concat`` appends to ``_concat_ops``, and a triple
+        synthesized after the op-declaration loops would have its facts emitted
+        with no ``op`` declaring the concat. It also has to precede
+        :meth:`_word_backed_names`, which inspects every triple.
+
+        Two gates keep this sound, and both are load-bearing:
+
+        * the argument order comes from the recorded offsets (prefix starts at
+          0, suffix starts where the prefix ends), NEVER from the type names --
+          a wrong order is a wrong-but-well-typed axiom;
+        * the lengths must SUM to the result's length. The real-concat loop in
+          :meth:`emit` only checks the lengths are KNOWN, because a genuine
+          concat op guarantees the sum; a virtual triple has no such guarantee,
+          so without this check the emitted facts would simply be false.
+        """
+        for src_name in sorted(self._virtual_concat_requests):
+            dsts = [d for s, d in self._slice_ops if s == src_name]
+            if len(dsts) != 2:
+                continue
+            len_src = self._bs_lengths.get(src_name)
+            if len_src is None:
+                continue
+            spans = [self._slice_spans.get((src_name, d), []) for d in dsts]
+            if any(len(sp) != 1 for sp in spans):
+                continue  # ambiguous or unrecorded offsets -- decline
+            pairs = [(d, sp[0]) for d, sp in zip(dsts, spans)]
+            pre_pairs = [p for p in pairs if _sym_eq(p[1][0], "0")]
+            suf_pairs = [p for p in pairs if not _sym_eq(p[1][0], "0")]
+            if len(pre_pairs) != 1 or len(suf_pairs) != 1:
+                continue
+            left_name, (_, pre_end) = pre_pairs[0]
+            right_name, (suf_start, suf_end) = suf_pairs[0]
+            len_l = self._bs_lengths.get(left_name)
+            len_r = self._bs_lengths.get(right_name)
+            if len_l is None or len_r is None:
+                continue
+            # adjacency: the suffix starts exactly where the prefix ends
+            if not _sym_eq(pre_end, len_l) or not _sym_eq(suf_start, len_l):
+                continue
+            # THE LENGTH-SUM GATE
+            if not _sym_eq(suf_end, len_src) or not _sym_eq(
+                f"({len_l}) + ({len_r})", len_src
+            ):
+                continue
+            if (left_name, right_name, src_name) in self._concat_op_set:
+                continue  # a real triple already covers it
+            self.register_concat(left_name, right_name, src_name)
+            self._virtual_concat_triples.add((left_name, right_name, src_name))
+
+    def _word_backed_names(self) -> set[str]:
+        """Bitstring type names representable as an EC ``BitWord`` clone.
+
+        A ``bs_<n>`` backed by ``clone BitWord as BW_bs_<n> with op n <- <n>``
+        is a genuine sized bool-list subtype, so its slice/concat ops can be
+        DEFINED through the ``ofword``/``mkword`` bridge and the round-trip
+        laws PROVED instead of axiomatized (see
+        ``ec_templates/bitword_slice_concat.ec``). That trades three assumed
+        laws per concat triple for the clone's single ``gt0_n : 0 < <len>``
+        well-formedness side condition -- the same kind of assumption as the
+        accepted ``ge2_p``.
+
+        A type qualifies when its bit length is KNOWN (the clone must bind
+        ``n``) and it is not already aliased to an abstract carrier set (a
+        ``requires X subsets BitString<n>`` unification must keep the
+        carrier's own type).
+
+        Every type of a concat triple whose component lengths do NOT sum to
+        the result's length is excluded wholesale: a defined concat would make
+        that triple's round-trip laws FALSE, and a false *lemma* is caught by
+        EC while a false *axiom* is not -- but the honest outcome is to leave
+        such a triple on today's uninterpreted-op + axiom form, which is
+        satisfiable. The same exclusion covers 3-way concats, whose facts stay
+        axioms in this pass.
+        """
+        eligible = {
+            name
+            for name in self._names
+            if name in self._bs_lengths and name not in self._type_alias_defs
+        }
+        for left, right, result in self._concat_ops:
+            if not self._lengths_sum(result, [left, right]):
+                eligible -= {left, right, result}
+        for left, right, gap, result in self._concat3_ops:
+            if not self._lengths_sum(result, [left, right, gap]):
+                eligible -= {left, right, gap, result}
+        # Every eligible type is backed, whether or not it takes part in a
+        # triple: a word-backed type's uniform distribution is
+        # ``<clone>.DWord.dunifin``, so its ``_ll`` / ``_fu`` / ``_full`` trio
+        # is derived too. That pays for the clone's positivity residue on its
+        # own -- three assumed facts removed per type, and the positivity is
+        # per ATOM, so most types add no new assumption at all.
+        return eligible
+
+    def _lengths_sum(self, result: str, parts: list[str]) -> bool:
+        """True when every part's length is known and they sum to ``result``'s.
+
+        Fails CLOSED (an unknown length is not a sum), so a type whose width
+        the exporter never learned never becomes word-backed.
+        """
+        len_res = self._bs_lengths.get(result)
+        if len_res is None:
+            return False
+        part_lens = [self._bs_lengths.get(p) for p in parts]
+        if any(p is None for p in part_lens):
+            return False
+        summed = " + ".join(f"({p})" for p in part_lens)
+        return _sym_eq(summed, len_res)
+
+    def _positivity_for(self, name: str) -> dict[str, str]:
+        """``{axiom name: statement}`` establishing ``0 < <name>``'s width.
+
+        A concatenation width is a nonnegative-coefficient sum of atoms, so its
+        atoms' positivity suffices and is SHARED across every width using them.
+        A width that subtracts (a partial split's gap piece) gets its own
+        assumption, stated at the width -- see :func:`_width_needs_own_axiom`.
+        """
+        length = self._bs_lengths[name]
+        if _width_needs_own_axiom(length):
+            return {_gt0_type_name(name): f"0 < {length}"}
+        return {_gt0_name(a): f"0 < {a}" for a in _length_atoms(length)}
+
+    def _positivity_axioms(self, word: set[str]) -> list[tuple[str, str]]:
+        """Every positivity assumption the word-backed types need, deduped."""
+        out: dict[str, str] = {}
+        for name in sorted(word):
+            out.update(self._positivity_for(name))
+        return sorted(out.items())
+
+    def _positivity_hints(self, names: Iterable[str]) -> str:
+        """``smt`` hint list establishing positivity of every named width."""
+        out: dict[str, str] = {}
+        for name in names:
+            out.update(self._positivity_for(name))
+        return " ".join(sorted(out))
+
+    def _gt0_tactic(self, name: str) -> str:
+        """Tactic discharging a clone's ``gt0_n`` obligation for ``name``."""
+        hints = self._positivity_hints([name])
+        return f"smt({hints})" if hints else "smt()"
+
+    def _derived_concat_laws(
+        self,
+        left_name: str,
+        right_name: str,
+        result_name: str,
+        statements: list[tuple[str, str]],
+    ) -> list[ec_ast.EcTopDecl]:
+        """The three round-trip laws of a word-backed triple, as PROVED lemmas.
+
+        ``statements`` carries the (name, formula) pairs in left/right/id order,
+        byte-identical to the axioms this replaces, so every ``smt(...)`` hint
+        and ``have h := ...`` reference elsewhere in the export still resolves.
+
+        Scripts transcribed from ``ec_templates/bitword_slice_concat.ec``,
+        which validates them at this exact ``slice (s, i, j)`` signature. Two
+        traps that file records and these scripts encode: the index arithmetic
+        (``j - i`` leaves ``n - 0`` / ``nl + nr - nl``, which EC does not
+        normalise) needs a ``have ->`` per law, and in the identity law the
+        trailing ``take`` must be discharged BEFORE ``ofwordK`` or the size side
+        condition is about the wrong term. The ``size_size_cat`` bridge is
+        stated at the RESULT clone's own width, not at ``nl + nr``: the two are
+        equal but not syntactically so (widths are sympy-canonical), and
+        ``ofwordK`` matches syntactically.
+        """
+        c_l = _word_clone_name(left_name)
+        c_r = _word_clone_name(right_name)
+        c_res = _word_clone_name(result_name)
+        len_l = self._bs_lengths[left_name]
+        len_r = self._bs_lengths[right_name]
+        len_res = self._bs_lengths[result_name]
+        len_l_p = _paren_int(len_l)
+        len_r_p = _paren_int(len_r)
+        len_sum = f"({len_l} + {len_r})"
+        slice_l = _slice_op_name(result_name, left_name)
+        slice_r = _slice_op_name(result_name, right_name)
+        concat_op = _concat_op_name(left_name, right_name, result_name)
+        hints = self._positivity_hints([left_name, right_name, result_name])
+        smt_pos = f"smt({hints})" if hints else "smt()"
+        size_lemma = f"size_cat_{left_name}_{right_name}_{result_name}"
+        unfold_slices = " ".join(dict.fromkeys([f"/{slice_l}", f"/{slice_r}"]))
+        (left_law, left_stmt), (right_law, right_stmt), (id_law, id_stmt) = statements
+        return [
+            ec_ast.ProvedLemma(
+                size_lemma,
+                f"forall (a : {left_name}) (b : {right_name}),\n"
+                f"  size ({c_l}.ofword a ++ {c_r}.ofword b) = {len_res}",
+                [
+                    "  move => a b.",
+                    f"  rewrite size_cat {c_l}.size_word {c_r}.size_word.",
+                    "  by smt().",
+                ],
+            ),
+            ec_ast.ProvedLemma(
+                left_law,
+                left_stmt,
+                [
+                    "  move => a b.",
+                    f"  rewrite /{slice_l} /{concat_op}"
+                    f" ({c_res}.ofwordK _ ({size_lemma} a b)) drop0.",
+                    f"  have ->: {len_l_p} - 0 = {len_l_p} by smt().",
+                    f"  by rewrite (take_size_cat _ _ _ ({c_l}.size_word a))"
+                    f" {c_l}.mkwordK.",
+                ],
+            ),
+            ec_ast.ProvedLemma(
+                right_law,
+                right_stmt,
+                [
+                    "  move => a b.",
+                    f"  rewrite /{slice_r} /{concat_op}"
+                    f" ({c_res}.ofwordK _ ({size_lemma} a b)).",
+                    f"  have ->: {len_sum} - {len_l_p} = {len_r_p} by smt().",
+                    f"  rewrite (drop_size_cat _ _ _ ({c_l}.size_word a)).",
+                    f"  have hb : size ({c_r}.ofword b) = {len_r_p}"
+                    f" by exact {c_r}.size_word.",
+                    f"  by rewrite -hb take_size {c_r}.mkwordK.",
+                ],
+            ),
+            ec_ast.ProvedLemma(
+                id_law,
+                id_stmt,
+                [
+                    "  move => s.",
+                    f"  have hs : size ({c_res}.ofword s) = {len_res}"
+                    f" by exact {c_res}.size_word.",
+                    # ONE `rewrite /op` unfolds every occurrence, so when the
+                    # two components share a type -- and therefore share a
+                    # slice op -- naming it twice is "nothing to rewrite".
+                    f"  rewrite /{concat_op} {unfold_slices} drop0.",
+                    f"  have ->: {len_l_p} - 0 = {len_l_p} by smt().",
+                    f"  have ->: {len_sum} - {len_l_p} = {len_r_p} by smt().",
+                    f"  have h1 : size (take {len_l_p} ({c_res}.ofword s))"
+                    f" = {len_l_p}",
+                    f"    by rewrite size_take; {smt_pos}.",
+                    f"  have hd : size (drop {len_l_p} ({c_res}.ofword s))"
+                    f" = {len_r_p}",
+                    f"    by rewrite size_drop; {smt_pos}.",
+                    f"  have ht : take {len_r_p} (drop {len_l_p}"
+                    f" ({c_res}.ofword s))",
+                    f"          = drop {len_l_p} ({c_res}.ofword s)",
+                    "    by rewrite take_oversize // hd.",
+                    f"  have h2 : size (take {len_r_p} (drop {len_l_p}"
+                    f" ({c_res}.ofword s))) = {len_r_p}",
+                    "    by rewrite ht hd.",
+                    f"  rewrite ({c_l}.ofwordK _ h1) ({c_r}.ofwordK _ h2) ht.",
+                    f"  by rewrite cat_take_drop {c_res}.mkwordK.",
+                ],
+            ),
+        ]
+
+    def _derived_split_law(
+        self,
+        triple: tuple[str, str, str],
+        law_name: str,
+        formula: str,
+    ) -> ec_ast.ProvedLemma:
+        """The uniform-distribution split of a word-backed triple, PROVED.
+
+        Both sides are lossless and funiform over a finite type, so
+        ``eq_funi_ll`` settles the equality outright; the mapped product is
+        full because ``concat`` is surjective (the identity round-trip law) and
+        uniform because it is injective (the two projection laws). So this law
+        needs no assumption beyond the ones the round-trip lemmas already
+        discharge. Validated in ``ec_templates/bitword_uniform_split.ec``.
+        """
+        left_name, right_name, result_name = triple
+        distr_l = f"d{left_name}"
+        distr_r = f"d{right_name}"
+        suffix = f"{left_name}_{right_name}_{result_name}"
+        left_law = f"slice_concat_left_{suffix}"
+        right_law = f"slice_concat_right_{suffix}"
+        id_law = f"concat_slices_id_{suffix}"
+        len_l_p = _paren_int(self._bs_lengths[left_name])
+        len_sum = f"({self._bs_lengths[left_name]} + {self._bs_lengths[right_name]})"
+        slice_l = _slice_op_name(result_name, left_name)
+        slice_r = _slice_op_name(result_name, right_name)
+        return ec_ast.ProvedLemma(
+            law_name,
+            formula,
+            [
+                "  apply: eq_funi_ll.",
+                f"  + exact d{result_name}_fu.",
+                f"  + exact d{result_name}_ll.",
+                "  + apply: is_full_funiform.",
+                "    + apply: dmap_fu_in => w.",
+                f"      exists ({slice_l} w 0 {len_l_p},"
+                f" {slice_r} w {len_l_p} {len_sum}).",
+                "      rewrite supp_dprod /=; split.",
+                f"      + by split; [exact {distr_l}_full | exact {distr_r}_full].",
+                f"      by rewrite {id_law}.",
+                "    apply: dmap_uni_in_inj.",
+                "    + move => [x1 y1] [x2 y2] _ _ /= heq.",
+                f"      have hx : x1 = x2 by rewrite -({left_law} x1 y1)"
+                f" -({left_law} x2 y2) heq.",
+                f"      have hy : y1 = y2 by rewrite -({right_law} x1 y1)"
+                f" -({right_law} x2 y2) heq.",
+                "      by rewrite hx hy.",
+                "    by apply: dprod_uni; apply: funi_uni;"
+                f" [exact {distr_l}_fu | exact {distr_r}_fu].",
+                "  apply: dmap_ll; rewrite dprod_ll.",
+                f"  by split; [exact {distr_l}_ll | exact {distr_r}_ll].",
+            ],
+        )
+
+    def _derived_concat3_laws(
+        self,
+        parts: tuple[str, str, str],
+        result_name: str,
+        statements: list[tuple[str, str]],
+        split: tuple[str, str],
+    ) -> list[ec_ast.EcTopDecl]:
+        """The four round-trip laws + the split of a word-backed 3-way triple.
+
+        Scripts transcribed from ``ec_templates/bitword_concat3.ec``. The trap
+        that file exists to record: **EC's ``++`` is LEFT-associative**, so the
+        emitted ``A ++ B ++ C`` is ``(A ++ B) ++ C`` and the first component is
+        NOT the head of the cat -- p1 and p2 must ``-catA`` before
+        ``take_size_cat``/``drop_size_cat``, while p3 uses the left-nested head
+        directly. A right-nested reading fails with "nothing to rewrite", which
+        reads like a missing lemma rather than an associativity mistake.
+        """
+        left_name, right_name, gap_name = parts
+        c_l, c_r, c_g = (_word_clone_name(n) for n in parts)
+        c_res = _word_clone_name(result_name)
+        len_l = self._bs_lengths[left_name]
+        len_r = self._bs_lengths[right_name]
+        len_g = self._bs_lengths[gap_name]
+        len_res = self._bs_lengths[result_name]
+        len_l_p = _paren_int(len_l)
+        len_g_p = _paren_int(len_g)
+        len_lr = f"({len_l} + {len_r})"
+        len_res_p = _paren_int(len_res)
+        slice_l = _slice_op_name(result_name, left_name)
+        slice_r = _slice_op_name(result_name, right_name)
+        slice_g = _slice_op_name(result_name, gap_name)
+        concat3_op = _concat3_op_name(left_name, right_name, gap_name, result_name)
+        hints = self._positivity_hints([*parts, result_name])
+        smt_pos = f"smt({hints})" if hints else "smt()"
+        prefix = f"{left_name}_{right_name}_{gap_name}_{result_name}"
+        size3 = f"size_cat3_{prefix}"
+        size_lr = f"size_cat3_lr_{prefix}"
+        ofw = f"{c_res}.ofword s"
+        # One `rewrite /op` reaches every occurrence, so a shared slice op must
+        # be named once (the corpus's only 3-way triple has all three
+        # components at the same type, hence the same slice op three times).
+        unfold_slices = " ".join(
+            dict.fromkeys([f"/{slice_l}", f"/{slice_r}", f"/{slice_g}"])
+        )
+        (p1, p1_stmt), (p2, p2_stmt), (p3, p3_stmt), (idl, id_stmt) = statements
+        split_name, split_stmt = split
+        return [
+            ec_ast.ProvedLemma(
+                size3,
+                f"forall (a : {left_name}) (b : {right_name}) (c : {gap_name}),\n"
+                f"  size ({c_l}.ofword a ++ {c_r}.ofword b ++ {c_g}.ofword c)"
+                f" = {len_res}",
+                [
+                    "  move => a b c.",
+                    f"  rewrite !size_cat {c_l}.size_word {c_r}.size_word"
+                    f" {c_g}.size_word.",
+                    "  by smt().",
+                ],
+            ),
+            ec_ast.ProvedLemma(
+                size_lr,
+                f"forall (a : {left_name}) (b : {right_name}),\n"
+                f"  size ({c_l}.ofword a ++ {c_r}.ofword b) = {len_l} + {len_r}",
+                [
+                    "  move => a b.",
+                    f"  by rewrite size_cat {c_l}.size_word {c_r}.size_word.",
+                ],
+            ),
+            ec_ast.ProvedLemma(
+                p1,
+                p1_stmt,
+                [
+                    "  move => a b c.",
+                    f"  rewrite /{slice_l} /{concat3_op}"
+                    f" ({c_res}.ofwordK _ ({size3} a b c)) drop0.",
+                    f"  have ->: {len_l_p} - 0 = {len_l_p} by smt().",
+                    f"  by rewrite -catA (take_size_cat _ _ _ ({c_l}.size_word a))"
+                    f" {c_l}.mkwordK.",
+                ],
+            ),
+            ec_ast.ProvedLemma(
+                p2,
+                p2_stmt,
+                [
+                    "  move => a b c.",
+                    f"  rewrite /{slice_r} /{concat3_op}"
+                    f" ({c_res}.ofwordK _ ({size3} a b c)).",
+                    f"  have ->: {len_lr} - {len_l_p} = {_paren_int(len_r)} by smt().",
+                    f"  rewrite -catA (drop_size_cat _ _ _ ({c_l}.size_word a)).",
+                    f"  by rewrite (take_size_cat _ _ _ ({c_r}.size_word b))"
+                    f" {c_r}.mkwordK.",
+                ],
+            ),
+            ec_ast.ProvedLemma(
+                p3,
+                p3_stmt,
+                [
+                    "  move => a b c.",
+                    f"  rewrite /{slice_g} /{concat3_op}"
+                    f" ({c_res}.ofwordK _ ({size3} a b c)).",
+                    f"  have ->: {len_res_p} - {len_lr} = {len_g_p} by smt().",
+                    f"  rewrite (drop_size_cat _ _ _ ({size_lr} a b)).",
+                    f"  have hc : size ({c_g}.ofword c) = {len_g_p}"
+                    f" by exact {c_g}.size_word.",
+                    f"  by rewrite -hc take_size {c_g}.mkwordK.",
+                ],
+            ),
+            ec_ast.ProvedLemma(
+                idl,
+                id_stmt,
+                [
+                    "  move => s.",
+                    f"  have hs : size ({ofw}) = {len_res}"
+                    f" by exact {c_res}.size_word.",
+                    f"  rewrite /{concat3_op} {unfold_slices} drop0.",
+                    f"  have ->: {len_l_p} - 0 = {len_l_p} by smt().",
+                    f"  have ->: {len_lr} - {len_l_p} = {_paren_int(len_r)} by smt().",
+                    f"  have ->: {len_res_p} - {len_lr} = {len_g_p} by smt().",
+                    f"  have h1 : size (take {len_l_p} ({ofw})) = {len_l_p}",
+                    f"    by rewrite size_take; {smt_pos}.",
+                    f"  have h2 : size (take {_paren_int(len_r)}"
+                    f" (drop {len_l_p} ({ofw}))) = {_paren_int(len_r)}",
+                    f"    by rewrite size_take ?size_drop; {smt_pos}.",
+                    f"  have hd3 : size (drop {len_lr} ({ofw})) = {len_g_p}",
+                    f"    by rewrite size_drop; {smt_pos}.",
+                    f"  have ht3 : take {len_g_p} (drop {len_lr} ({ofw}))",
+                    f"           = drop {len_lr} ({ofw})",
+                    "    by rewrite take_oversize // hd3.",
+                    f"  have h3 : size (take {len_g_p} (drop {len_lr} ({ofw})))"
+                    f" = {len_g_p}",
+                    "    by rewrite ht3 hd3.",
+                    f"  rewrite ({c_l}.ofwordK _ h1) ({c_r}.ofwordK _ h2)"
+                    f" ({c_g}.ofwordK _ h3) ht3 -catA.",
+                    f"  have ->: drop {len_lr} ({ofw})",
+                    f"         = drop {_paren_int(len_r)} (drop {len_l_p} ({ofw}))",
+                    f"    by rewrite drop_drop; {smt_pos}.",
+                    f"  by rewrite cat_take_drop cat_take_drop {c_res}.mkwordK.",
+                ],
+            ),
+            ec_ast.ProvedLemma(
+                split_name,
+                split_stmt,
+                self._concat3_split_script(parts, result_name),
+            ),
+        ]
+
+    def _concat3_split_script(
+        self, parts: tuple[str, str, str], result_name: str
+    ) -> list[str]:
+        """Proof of the nested-``dlet`` 3-way distribution split.
+
+        Routed through the right-nested product ``dL `*` (dR `*` dG)``, whose
+        equality with the target is ``eq_funi_ll`` exactly as in the 2-way case,
+        and then unfolded into the nested ``dlet`` by two rounds of
+        ``dprod_dlet`` / ``dmap_dlet`` / ``dmap_comp``.
+        """
+        left_name, right_name, gap_name = parts
+        d_l, d_r, d_g = (f"d{n}" for n in parts)
+        d_res = f"d{result_name}"
+        prefix = f"{left_name}_{right_name}_{gap_name}_{result_name}"
+        len_l_p = _paren_int(self._bs_lengths[left_name])
+        len_lr = f"({self._bs_lengths[left_name]} + {self._bs_lengths[right_name]})"
+        len_res_p = _paren_int(self._bs_lengths[result_name])
+        slice_l = _slice_op_name(result_name, left_name)
+        slice_r = _slice_op_name(result_name, right_name)
+        slice_g = _slice_op_name(result_name, gap_name)
+        concat3_op = _concat3_op_name(left_name, right_name, gap_name, result_name)
+        pair_type = f"{left_name} * ({right_name} * {gap_name})"
+        return [
+            f"  have hprod : {d_res} =",
+            f"    dmap ({d_l} `*` ({d_r} `*` {d_g}))",
+            f"         (fun (p : {pair_type}) =>"
+            f" {concat3_op} p.`1 p.`2.`1 p.`2.`2).",
+            "  + apply: eq_funi_ll.",
+            f"    + exact {d_res}_fu.",
+            f"    + exact {d_res}_ll.",
+            "    + apply: is_full_funiform.",
+            "      + apply: dmap_fu_in => w.",
+            f"        exists ({slice_l} w 0 {len_l_p},",
+            f"                ({slice_r} w {len_l_p} {len_lr},",
+            f"                 {slice_g} w {len_lr} {len_res_p})).",
+            "        rewrite !supp_dprod /=; split.",
+            f"        + by split; [exact {d_l}_full",
+            f"                    | split; [exact {d_r}_full | exact {d_g}_full]].",
+            f"        by rewrite concat3_slices_id_{prefix}.",
+            "      apply: dmap_uni_in_inj.",
+            "      + move => [x1 [y1 z1]] [x2 [y2 z2]] _ _ /= heq.",
+            f"        have hx : x1 = x2 by rewrite -(slice_concat3_p1_{prefix}"
+            " x1 y1 z1)",
+            f"          -(slice_concat3_p1_{prefix} x2 y2 z2) heq.",
+            f"        have hy : y1 = y2 by rewrite -(slice_concat3_p2_{prefix}"
+            " x1 y1 z1)",
+            f"          -(slice_concat3_p2_{prefix} x2 y2 z2) heq.",
+            f"        have hz : z1 = z2 by rewrite -(slice_concat3_p3_{prefix}"
+            " x1 y1 z1)",
+            f"          -(slice_concat3_p3_{prefix} x2 y2 z2) heq.",
+            "        by rewrite hx hy hz.",
+            f"      apply: dprod_uni; first by apply: funi_uni; exact {d_l}_fu.",
+            f"      by apply: dprod_uni; apply: funi_uni;"
+            f" [exact {d_r}_fu | exact {d_g}_fu].",
+            f"    apply: dmap_ll; rewrite dprod_ll; split; first exact {d_l}_ll.",
+            f"    by rewrite dprod_ll; split; [exact {d_r}_ll | exact {d_g}_ll].",
+            "  rewrite hprod dprod_dlet dmap_dlet /=.",
+            "  apply eq_dlet => // a.",
+            "  rewrite dmap_comp /(\\o) /= dprod_dlet dmap_dlet /=.",
+            "  apply eq_dlet => // b.",
+            "  by rewrite dmap_comp /(\\o) /=.",
+        ]
+
     def emit(self) -> list[ec_ast.EcTopDecl]:
         """Produce top-level EC declarations for every registered type."""
         decls: list[ec_ast.EcTopDecl] = []
+        self._synthesize_virtual_concat_triples()
+        word = self._word_backed_names()
         # GroupElem<G>: a clone of EC stdlib ``CyclicGroup`` (group laws
         # derived, not axiomatized) plus its exponent ring. A proof that
         # declared ``requires <G>.order is prime;`` gets the ``PowZMod``
@@ -1003,10 +1536,61 @@ class TypeCollector:
             decls.append(ec_ast.Axiom(f"{distr}_ll", f"is_lossless {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
             decls.append(ec_ast.Axiom(f"{distr}_full", f"is_full {distr}"))
+        # Positivity of every atomic bit-length appearing in a word-backed
+        # type's width. Each ``BitWord`` clone owes ``gt0_n : 0 < <width>``;
+        # discharging it from these makes the assumption TEXTUALLY VISIBLE (an
+        # undischarged clone obligation is a real axiom that never appears in
+        # the file, so the axiom audit cannot see it). Emitted once per atom,
+        # in sorted order, before the first clone that needs it.
+        for _ax_name, _ax_stmt in self._positivity_axioms(word):
+            decls.append(ec_ast.Axiom(_ax_name, _ax_stmt))
         for name in self._names:
             suffix = name.removeprefix("bs")
             distr = f"dbs{suffix}"
             alias_def = self._type_alias_defs.get(name)
+            if name in word:
+                # A sized bool-list subtype, not an abstract type: this is what
+                # makes the slice/concat round-trip laws below PROVABLE.
+                length = self._bs_lengths[name]
+                decls.append(
+                    ec_ast.Clone(
+                        "BitWord",
+                        _word_clone_name(name),
+                        op_bindings=[("n", length)],
+                        proof_clauses=[("gt0_n", self._gt0_tactic(name))],
+                    )
+                )
+                decls.append(
+                    ec_ast.TypeDecl(name, definition=f"{_word_clone_name(name)}.word")
+                )
+                self.needs_bitword = True
+                # The uniform distribution comes with the clone
+                # (``Word.eca`` clones ``MFinite``), so all three facts are
+                # LEMMAS. Names are unchanged, so every ``smt(dbs_*_fu ...)``
+                # hint the tactic synthesizers emit still resolves. Validated in
+                # ``ec_templates/bitword_uniform_split.ec``.
+                dword = f"{_word_clone_name(name)}.DWord"
+                decls.append(
+                    ec_ast.OpDecl(
+                        distr,
+                        f"{name} distr",
+                        definition=f"{dword}.dunifin",
+                        tags=["smt_opaque"],
+                    )
+                )
+                for suffix_name, prop, stdlib in (
+                    ("ll", "is_lossless", "dunifin_ll"),
+                    ("fu", "is_funiform", "dunifin_funi"),
+                    ("full", "is_full", "dunifin_fu"),
+                ):
+                    decls.append(
+                        ec_ast.ProvedLemma(
+                            f"{distr}_{suffix_name}",
+                            f"{prop} {distr}",
+                            [f"  exact {dword}.{stdlib}."],
+                        )
+                    )
+                continue
             if alias_def is not None:
                 decls.append(ec_ast.TypeDecl(name, definition=alias_def))
             else:
@@ -1089,66 +1673,51 @@ class TypeCollector:
                     f"{xor_op} a ({xor_op} b c) = {xor_op} ({xor_op} a b) c",
                 )
             )
-        # VIRTUAL concat triples, synthesized from the slice OFFSETS. A type
-        # that is SLICED into exactly two complementary pieces but never
-        # CONCATENATED registers no triple, so none of the round-trip / split
-        # axioms below is emitted -- which is what blocks every
-        # split-uniform-sample hop whose seed pair is only ever taken apart.
-        #
-        # This runs BEFORE the op-declaration loops below: ``register_concat``
-        # appends to ``_concat_ops``, and a triple synthesized after those loops
-        # would have its axioms emitted with no ``op`` declaring the concat.
-        #
-        # Two gates keep this sound, and both are load-bearing:
-        #   * the argument order comes from the recorded offsets (prefix starts
-        #     at 0, suffix starts where the prefix ends), NEVER from the type
-        #     names -- a wrong order is a wrong-but-well-typed axiom;
-        #   * the lengths must SUM to the result's length. The real-concat loop
-        #     below only checks the lengths are KNOWN, because a genuine concat
-        #     op guarantees the sum; a virtual triple has no such guarantee, so
-        #     without this check the emitted axioms would simply be false.
-        for src_name in sorted(self._virtual_concat_requests):
-            dsts = [d for s, d in self._slice_ops if s == src_name]
-            if len(dsts) != 2:
-                continue
-            len_src = self._bs_lengths.get(src_name)
-            if len_src is None:
-                continue
-            spans = [self._slice_spans.get((src_name, d), []) for d in dsts]
-            if any(len(sp) != 1 for sp in spans):
-                continue  # ambiguous or unrecorded offsets -- decline
-            pairs = [(d, sp[0]) for d, sp in zip(dsts, spans)]
-            pre_pairs = [p for p in pairs if _sym_eq(p[1][0], "0")]
-            suf_pairs = [p for p in pairs if not _sym_eq(p[1][0], "0")]
-            if len(pre_pairs) != 1 or len(suf_pairs) != 1:
-                continue
-            left_name, (_, pre_end) = pre_pairs[0]
-            right_name, (suf_start, suf_end) = suf_pairs[0]
-            len_l = self._bs_lengths.get(left_name)
-            len_r = self._bs_lengths.get(right_name)
-            if len_l is None or len_r is None:
-                continue
-            # adjacency: the suffix starts exactly where the prefix ends
-            if not _sym_eq(pre_end, len_l) or not _sym_eq(suf_start, len_l):
-                continue
-            # THE LENGTH-SUM GATE
-            if not _sym_eq(suf_end, len_src) or not _sym_eq(
-                f"({len_l}) + ({len_r})", len_src
-            ):
-                continue
-            if (left_name, right_name, src_name) in self._concat_op_set:
-                continue  # a real triple already covers it
-            self.register_concat(left_name, right_name, src_name)
-            self._virtual_concat_triples.add((left_name, right_name, src_name))
-
+        # Slice / concat ops. Over word-backed types they are DEFINED through
+        # the ``ofword``/``mkword`` list bridge, which is what turns their
+        # round-trip laws below from axioms into lemmas; over any other type
+        # they stay uninterpreted, exactly as before.
         for src_name, dst_name in self._slice_ops:
             op = _slice_op_name(src_name, dst_name)
-            decls.append(ec_ast.OpDecl(op, f"{src_name} -> int -> int -> {dst_name}"))
+            signature = f"{src_name} -> int -> int -> {dst_name}"
+            if src_name in word and dst_name in word:
+                src_w = _word_clone_name(src_name)
+                dst_w = _word_clone_name(dst_name)
+                decls.append(
+                    ec_ast.OpDecl(
+                        op,
+                        signature,
+                        definition=(
+                            f"fun (s : {src_name}) (i j : int) =>\n"
+                            f"    {dst_w}.mkword (take (j - i) "
+                            f"(drop i ({src_w}.ofword s)))"
+                        ),
+                        tags=["smt_opaque"],
+                    )
+                )
+            else:
+                decls.append(ec_ast.OpDecl(op, signature))
         for left_name, right_name, result_name in self._concat_ops:
             op = _concat_op_name(left_name, right_name, result_name)
-            decls.append(
-                ec_ast.OpDecl(op, f"{left_name} -> {right_name} -> {result_name}")
-            )
+            signature = f"{left_name} -> {right_name} -> {result_name}"
+            if {left_name, right_name, result_name} <= word:
+                left_w = _word_clone_name(left_name)
+                right_w = _word_clone_name(right_name)
+                result_w = _word_clone_name(result_name)
+                decls.append(
+                    ec_ast.OpDecl(
+                        op,
+                        signature,
+                        definition=(
+                            f"fun (a : {left_name}) (b : {right_name}) =>\n"
+                            f"    {result_w}.mkword "
+                            f"({left_w}.ofword a ++ {right_w}.ofword b)"
+                        ),
+                        tags=["smt_opaque"],
+                    )
+                )
+            else:
+                decls.append(ec_ast.OpDecl(op, signature))
 
         # Round-trip and distribution-split axioms for every concat triple,
         # real or synthesized above. They are what lets the Split/Merge Uniform
@@ -1165,40 +1734,61 @@ class TypeCollector:
             slice_r = _slice_op_name(result_name, right_name)
             len_l_p = _paren_int(len_l)
             len_sum = f"({len_l} + {len_r})"
-            decls.append(
-                ec_ast.Axiom(
-                    f"slice_concat_left_{left_name}_{right_name}_{result_name}",
+            suffix = f"{left_name}_{right_name}_{result_name}"
+            statements = [
+                (
+                    f"slice_concat_left_{suffix}",
                     f"forall (a : {left_name}) (b : {right_name}),\n"
                     f"  {slice_l} ({concat_op} a b) 0 {len_l_p} = a",
-                )
-            )
-            decls.append(
-                ec_ast.Axiom(
-                    f"slice_concat_right_{left_name}_{right_name}_{result_name}",
+                ),
+                (
+                    f"slice_concat_right_{suffix}",
                     f"forall (a : {left_name}) (b : {right_name}),\n"
                     f"  {slice_r} ({concat_op} a b) {len_l_p} {len_sum} = b",
-                )
-            )
-            decls.append(
-                ec_ast.Axiom(
-                    f"concat_slices_id_{left_name}_{right_name}_{result_name}",
+                ),
+                (
+                    f"concat_slices_id_{suffix}",
                     f"forall (s : {result_name}),\n"
                     f"  {concat_op} ({slice_l} s 0 {len_l_p})"
                     f" ({slice_r} s {len_l_p} {len_sum}) = s",
+                ),
+            ]
+            if {left_name, right_name, result_name} <= word:
+                # DERIVED, not assumed. The statements are byte-identical to
+                # the axioms they replace, so every existing ``smt(...)`` hint
+                # and ``have h := ...`` reference still resolves; only their
+                # standing changes -- from three trusted facts per triple to
+                # three checked ones. Scripts transcribed from the validated
+                # ``ec_templates/bitword_slice_concat.ec`` at the exporter's
+                # own explicit-``(s, i, j)`` slice signature.
+                decls.extend(
+                    self._derived_concat_laws(
+                        left_name, right_name, result_name, statements
+                    )
                 )
-            )
+            else:
+                for law_name, formula in statements:
+                    decls.append(ec_ast.Axiom(law_name, formula))
             distr_l = f"d{left_name}"
             distr_r = f"d{right_name}"
             distr_res = f"d{result_name}"
-            decls.append(
-                ec_ast.Axiom(
-                    f"{distr_res}_split_{left_name}_{right_name}",
-                    f"{distr_res} =\n"
-                    f"  dmap ({distr_l} `*` {distr_r})\n"
-                    f"       (fun (p : {left_name} * {right_name}) =>"
-                    f" {concat_op} p.`1 p.`2)",
-                )
+            split_name = f"{distr_res}_split_{left_name}_{right_name}"
+            split_stmt = (
+                f"{distr_res} =\n"
+                f"  dmap ({distr_l} `*` {distr_r})\n"
+                f"       (fun (p : {left_name} * {right_name}) =>"
+                f" {concat_op} p.`1 p.`2)"
             )
+            if {left_name, right_name, result_name} <= word:
+                decls.append(
+                    self._derived_split_law(
+                        (left_name, right_name, result_name),
+                        split_name,
+                        split_stmt,
+                    )
+                )
+            else:
+                decls.append(ec_ast.Axiom(split_name, split_stmt))
             if concat_op in self._concat_inj_requests:
                 # Component injectivity, DERIVED from the two round-trip axioms
                 # just emitted (no new assumption). Stated with named binders so
@@ -1234,15 +1824,29 @@ class TypeCollector:
                 # the same treatment the 3-way concat3 block already gives, for
                 # the same reason. Validated end-to-end by
                 # ``ec_templates/split_uniform_couple.ec``.
-                decls.append(
-                    ec_ast.Axiom(
-                        f"{distr_res}_split_dlet_{left_name}_{right_name}",
-                        f"{distr_res} =\n"
-                        f"  dlet {distr_l} (fun (v1 : {left_name}) =>\n"
-                        f"     dmap {distr_r} (fun (v2 : {right_name}) =>"
-                        f" {concat_op} v1 v2))",
-                    )
+                dlet_name = f"{distr_res}_split_dlet_{left_name}_{right_name}"
+                dlet_stmt = (
+                    f"{distr_res} =\n"
+                    f"  dlet {distr_l} (fun (v1 : {left_name}) =>\n"
+                    f"     dmap {distr_r} (fun (v2 : {right_name}) =>"
+                    f" {concat_op} v1 v2))"
                 )
+                if {left_name, right_name, result_name} <= word:
+                    # Derived from the ``\`*\``-form just proved, by turning the
+                    # product into a ``dlet`` and fusing the two ``dmap``s.
+                    decls.append(
+                        ec_ast.ProvedLemma(
+                            dlet_name,
+                            dlet_stmt,
+                            [
+                                f"  rewrite {split_name} dprod_dlet dmap_dlet /=.",
+                                "  apply eq_dlet => // a.",
+                                "  by rewrite dmap_comp.",
+                            ],
+                        )
+                    )
+                else:
+                    decls.append(ec_ast.Axiom(dlet_name, dlet_stmt))
         # 3-way concat round-trip and distribution-split axioms for
         # partial-split applications. The dlet-form distribution-split
         # axiom matches the shape produced by EC's ``rndsem*{i} 0`` when
@@ -1261,55 +1865,73 @@ class TypeCollector:
             len_lr = f"({len_l} + {len_r})"
             len_res = _paren_int(self._bs_lengths.get(result_name, ""))
             axiom_prefix = f"{left_name}_{right_name}_{gap_name}_{result_name}"
-            decls.append(
-                ec_ast.OpDecl(
-                    concat3_op,
-                    f"{left_name} -> {right_name} -> {gap_name} -> {result_name}",
+            parts = (left_name, right_name, gap_name)
+            derived3 = {left_name, right_name, gap_name, result_name} <= word
+            signature3 = f"{left_name} -> {right_name} -> {gap_name} -> {result_name}"
+            if derived3:
+                c_l, c_r, c_g, c_res = (
+                    _word_clone_name(n) for n in (*parts, result_name)
                 )
-            )
-            decls.append(
-                ec_ast.Axiom(
+                decls.append(
+                    ec_ast.OpDecl(
+                        concat3_op,
+                        signature3,
+                        definition=(
+                            f"fun (a : {left_name}) (b : {right_name})"
+                            f" (c : {gap_name}) =>\n"
+                            f"    {c_res}.mkword ({c_l}.ofword a"
+                            f" ++ {c_r}.ofword b ++ {c_g}.ofword c)"
+                        ),
+                        tags=["smt_opaque"],
+                    )
+                )
+            else:
+                decls.append(ec_ast.OpDecl(concat3_op, signature3))
+            statements3 = [
+                (
                     f"slice_concat3_p1_{axiom_prefix}",
                     f"forall (a : {left_name}) (b : {right_name}) (c : {gap_name}),\n"
                     f"  {slice_l} ({concat3_op} a b c) 0 {len_l_p} = a",
-                )
-            )
-            decls.append(
-                ec_ast.Axiom(
+                ),
+                (
                     f"slice_concat3_p2_{axiom_prefix}",
                     f"forall (a : {left_name}) (b : {right_name}) (c : {gap_name}),\n"
                     f"  {slice_r} ({concat3_op} a b c) {len_l_p} {len_lr} = b",
-                )
-            )
-            decls.append(
-                ec_ast.Axiom(
+                ),
+                (
                     f"slice_concat3_p3_{axiom_prefix}",
                     f"forall (a : {left_name}) (b : {right_name}) (c : {gap_name}),\n"
                     f"  {slice_g} ({concat3_op} a b c) {len_lr} {len_res} = c",
-                )
-            )
-            decls.append(
-                ec_ast.Axiom(
+                ),
+                (
                     f"concat3_slices_id_{axiom_prefix}",
                     f"forall (s : {result_name}),\n"
                     f"  {concat3_op} ({slice_l} s 0 {len_l_p})"
                     f" ({slice_r} s {len_l_p} {len_lr})"
                     f" ({slice_g} s {len_lr} {len_res}) = s",
-                )
-            )
+                ),
+            ]
             distr_l = f"d{left_name}"
             distr_r = f"d{right_name}"
             distr_g = f"d{gap_name}"
             distr_res = f"d{result_name}"
-            decls.append(
-                ec_ast.Axiom(
-                    f"{distr_res}_split3_{left_name}_{right_name}_{gap_name}",
-                    f"{distr_res} =\n"
-                    f"  dlet {distr_l} (fun (v1 : {left_name}) =>\n"
-                    f"     dlet {distr_r} (fun (v2 : {right_name}) =>\n"
-                    f"        dmap {distr_g} ({concat3_op} v1 v2)))",
-                )
+            split3_name = f"{distr_res}_split3_{left_name}_{right_name}_{gap_name}"
+            split3_stmt = (
+                f"{distr_res} =\n"
+                f"  dlet {distr_l} (fun (v1 : {left_name}) =>\n"
+                f"     dlet {distr_r} (fun (v2 : {right_name}) =>\n"
+                f"        dmap {distr_g} ({concat3_op} v1 v2)))"
             )
+            if derived3:
+                decls.extend(
+                    self._derived_concat3_laws(
+                        parts, result_name, statements3, (split3_name, split3_stmt)
+                    )
+                )
+            else:
+                for law_name, formula in statements3:
+                    decls.append(ec_ast.Axiom(law_name, formula))
+                decls.append(ec_ast.Axiom(split3_name, split3_stmt))
         return decls
 
 
@@ -1393,13 +2015,15 @@ def _sym_eq(a: str, b: str) -> bool:
     """
     if a == b:
         return True
+    parsed = _sympy_parse([a, b])
+    if parsed is None:
+        return False
     # pylint: disable=import-outside-toplevel
     try:
-        from sympy import simplify, sympify
-    except ImportError:
-        return False
-    try:
-        return bool(simplify(sympify(a) - sympify(b)) == 0)
+        from sympy import simplify
+
+        (ea, eb), _ = parsed
+        return bool(simplify(ea - eb) == 0)
     except Exception:  # pylint: disable=broad-exception-caught
         return False
 
@@ -1464,6 +2088,96 @@ def _xor_name(bs_name: str) -> str:
 def _zero_name(bs_name: str) -> str:
     suffix = bs_name.removeprefix("bs")
     return f"zero{suffix}"
+
+
+def _word_clone_name(bs_name: str) -> str:
+    """Alias of the ``BitWord`` clone backing a bitstring type."""
+    return f"BW_{bs_name}"
+
+
+def _gt0_name(atom: str) -> str:
+    """Name of the positivity axiom for an atomic bit-length symbol."""
+    return f"gt0_{_sanitize(atom)}"
+
+
+def _gt0_type_name(bs_name: str) -> str:
+    """Name of the positivity axiom for a whole (non-additive) width.
+
+    Keyed on the TYPE, not the width text: two different widths can sanitize to
+    the same identifier (``a - b`` and ``a + b`` both give ``a_b``), while type
+    names are already one-per-width.
+    """
+    return f"gt0_{bs_name}"
+
+
+_IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+
+
+def _sympy_parse(exprs: list[str]) -> tuple[list[Any], dict[str, str]] | None:
+    """Parse canonical length/offset strings with sympy under a SHARED renaming.
+
+    Widths can name FrogLang ``let``s that are Python keywords -- ``lambda`` is
+    the common one -- and ``sympify`` rejects those outright, so every gate
+    built on sympy silently failed CLOSED for them. Renaming identifiers to
+    opaque tokens first keeps the arithmetic exact and sidesteps the parser; the
+    mapping is shared across the batch so two expressions stay comparable.
+
+    Returns ``None`` if anything is unparseable, so callers still fail closed.
+    """
+    # pylint: disable=import-outside-toplevel
+    try:
+        from sympy import sympify
+    except ImportError:
+        return None
+    mapping: dict[str, str] = {}
+
+    def _rename(match: re.Match[str]) -> str:
+        name = match.group(0)
+        if name not in mapping:
+            mapping[name] = f"pfsym{len(mapping)}"
+        return mapping[name]
+
+    try:
+        parsed = [sympify(_IDENT_RE.sub(_rename, e)) for e in exprs]
+    except Exception:  # pylint: disable=broad-exception-caught
+        return None
+    return parsed, {token: name for name, token in mapping.items()}
+
+
+def _length_atoms(length: str) -> list[str]:
+    """Atomic symbols of a canonical bit-length expression, sorted.
+
+    Empty for a pure literal. Falls back to a conservative identifier scan when
+    sympy cannot parse the expression, so a width still yields usable positivity
+    hints rather than none.
+    """
+    parsed = _sympy_parse([length])
+    if parsed is None:
+        return sorted(set(_IDENT_RE.findall(length)))
+    exprs, back = parsed
+    return sorted(back[str(s)] for s in exprs[0].free_symbols)
+
+
+def _width_needs_own_axiom(length: str) -> bool:
+    """True when atom positivity does NOT imply ``0 < length``.
+
+    A width built by CONCATENATION is a nonnegative-coefficient sum of atoms, so
+    positivity of the atoms gives positivity of the width. A width built by
+    SUBTRACTION is not -- the gap piece of a marginal partial split is
+    ``prg_stretch - kem_t_nseed``, and no amount of atom positivity settles that
+    -- so such a width needs its own assumption, stated at the width. Fails
+    CLOSED (an unparseable width gets its own axiom), because the failure mode
+    on the other side is a clone whose ``gt0_n`` obligation ``smt`` cannot
+    close, which EasyCrypt reports as a bare "No active proof".
+    """
+    parsed = _sympy_parse([length])
+    if parsed is None:
+        return True
+    try:
+        coeffs = parsed[0][0].as_coefficients_dict()
+    except Exception:  # pylint: disable=broad-exception-caught
+        return True
+    return any(c < 0 for c in coeffs.values())
 
 
 def _ring_theory(exp_type: str) -> str:

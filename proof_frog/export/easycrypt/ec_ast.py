@@ -33,18 +33,27 @@ class TypeDecl:
 
 @dataclass
 class OpDecl:
-    """``op <name> : <signature>.``, or ``op <name> : <sig> = <definition>.``
+    """``op [<tags>] <name> : <signature>.``, or ``... : <sig> = <definition>.``
 
     With ``definition`` set the op is DEFINED rather than left uninterpreted.
     That is what lets a fact about it be proved instead of axiomatized: an
     uninterpreted ``concat`` admits no reasoning, whereas one defined through
     the ``BitWord`` ``ofword``/``mkword`` bridge makes the round-trip laws
     ordinary list lemmas (see ``ec_templates/bitword_slice_concat.ec``).
+
+    ``tags`` are EasyCrypt op tags. The one that matters here is
+    ``smt_opaque``: it withholds the definitional axiom from ``smt`` while
+    leaving delta-reduction (``rewrite /<op>``) intact. That combination is
+    what makes defining a previously-uninterpreted op a CONSERVATIVE change --
+    the derivation proofs unfold the definition explicitly, and every existing
+    ``smt`` call sees exactly the uninterpreted op it saw before, instead of a
+    nest of ``mkword``/``ofword``/``++`` that blows its budget.
     """
 
     name: str
     signature: str
     definition: str | None = None
+    tags: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -305,12 +314,20 @@ class AbstractTheory:
 
 @dataclass
 class Clone:
-    """``clone <source_theory> as <alias> [with <bindings>].``"""
+    """``clone <source_theory> as <alias> [with <bindings>] [proof <clauses>].``
+
+    ``proof_clauses`` are ``(axiom_name, tactic)`` pairs discharging the cloned
+    theory's proof obligations, e.g. ``("gt0_n", "smt(gt0_lambda)")`` for a
+    ``BitWord`` clone. An obligation left undischarged stays an axiom of the
+    clone -- true, but INVISIBLE in the emitted file, which is why the axiom
+    audit wants it discharged against an explicit top-level assumption instead.
+    """
 
     source_theory: str
     alias: str
     type_bindings: list[tuple[str, str]] = field(default_factory=list)
     op_bindings: list[tuple[str, str]] = field(default_factory=list)
+    proof_clauses: list[tuple[str, str]] = field(default_factory=list)
 
 
 def qualified(clone_alias: str, local_name: str) -> str:
@@ -407,9 +424,13 @@ def _render_decl(decl: EcTopDecl) -> list[str]:
             return [f"type {decl.name} = {decl.definition}."]
         return [f"type {decl.name}."]
     if isinstance(decl, OpDecl):
+        head = f"op [{' '.join(decl.tags)}] " if decl.tags else "op "
         if decl.definition is not None:
-            return [f"op {decl.name} : {decl.signature} =", f"  {decl.definition}."]
-        return [f"op {decl.name} : {decl.signature}."]
+            return [
+                f"{head}{decl.name} : {decl.signature} =",
+                f"  {decl.definition}.",
+            ]
+        return [f"{head}{decl.name} : {decl.signature}."]
     if isinstance(decl, ProvedLemma):
         out = [f"lemma {decl.name} :", f"  {decl.formula}."]
         out.append("proof.")
@@ -495,12 +516,21 @@ def _render_clone(clone: Clone) -> list[str]:
         bindings.append(f"type {name} <- {concrete}")
     for name, concrete in clone.op_bindings:
         bindings.append(f"op {name} <- {concrete}")
+    proofs = [f"{name} by {tactic}" for name, tactic in clone.proof_clauses]
     if not bindings:
-        return [f"clone {clone.source_theory} as {clone.alias}."]
-    out = [f"clone {clone.source_theory} as {clone.alias} with"]
-    for i, binding in enumerate(bindings):
-        terminator = "." if i == len(bindings) - 1 else ","
-        out.append(f"  {binding}{terminator}")
+        if not proofs:
+            return [f"clone {clone.source_theory} as {clone.alias}."]
+        out = [f"clone {clone.source_theory} as {clone.alias}"]
+    else:
+        out = [f"clone {clone.source_theory} as {clone.alias} with"]
+        for i, binding in enumerate(bindings):
+            last = i == len(bindings) - 1
+            terminator = "" if last and proofs else ("." if last else ",")
+            out.append(f"  {binding}{terminator}")
+    for i, clause in enumerate(proofs):
+        keyword = "  proof" if i == 0 else "       "
+        terminator = "." if i == len(proofs) - 1 else ","
+        out.append(f"{keyword} {clause}{terminator}")
     return out
 
 

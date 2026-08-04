@@ -9460,6 +9460,24 @@ def _synth_bundled_delegate_reorder(  # pylint: disable=too-many-arguments,too-m
         return [s for s in body if not isinstance(s, ec_ast.Return)], ret
 
     (l_exec, l_ret), (r_exec, r_ret) = _body(lmod), _body(rmod)
+    return _bundled_reorder_core(l_exec, l_ret, r_exec, r_ret, coupling)
+
+
+def _bundled_reorder_core(  # pylint: disable=too-many-locals,too-many-return-statements
+    l_exec: list[ec_ast.EcStmt],
+    l_ret: str,
+    r_exec: list[ec_ast.EcStmt],
+    r_ret: str,
+    coupling: str,
+) -> list[str] | None:
+    """The bundled-delegate reorder tactic for two already-rendered bodies.
+
+    Split out of :func:`_synth_bundled_delegate_reorder` so a caller that has to
+    SYNTHESIZE one of the bodies -- the decaps-free-twin transitivity, whose
+    first leg relates the game to the reduction at a twin the exporter renders
+    but no flat state exists for -- can reuse it verbatim instead of
+    reimplementing the swap/align/peel.
+    """
     l_bb, r_bb = _bd_events(l_exec), _bd_events(r_exec)
     l_callees = [c for k, c in l_bb if k == "call"]
     r_callees = [c for k, c in r_bb if k == "call"]

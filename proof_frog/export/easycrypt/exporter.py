@@ -11006,7 +11006,20 @@ def export_proof_file(proof_path: str) -> str:
         # when no matching concrete RO dfun exists -- non-ROM proofs stay
         # byte-identical.
         tb_map = dict(type_bindings_)
+        # Every dfun the TOP LEVEL declares is a candidate, not only those with a
+        # registered RO-holder module. The holder-only gate missed the common
+        # case where the random function is a scheme PARAMETER sampled inside
+        # the theory (the KDF ``H`` of the CFRG combiners): the concrete
+        # ``dfun_<D>_to_<C>`` op exists, but no holder module does, so the two
+        # ops stayed distinct and every ``rnd`` coupling them was left with a
+        # ``mu1 d1 = mu1 d2`` + support obligation for ``smt`` to grind through.
+        # That obligation is what makes the init peel's closing ``skip => /#``
+        # load-sensitive (goal-probed, cycle 122). Binding removes it rather
+        # than discharging it, and is sound for the same reason the holder case
+        # is: both ops ARE the uniform distribution on the same arrow type, and
+        # the domain/codomain still have to match after concretization.
         known_dfuns = {dfn for _, dfn in top_types.function_value_modules()}
+        known_dfuns |= {name for name, _, _ in top_types.function_distrs_seen()}
         for dfun_name, d_t, c_t in src_theory_types.function_distrs_seen():
             concrete_dfun = f"dfun_{tb_map.get(d_t, d_t)}_to_{tb_map.get(c_t, c_t)}"
             if concrete_dfun in known_dfuns and concrete_dfun != dfun_name:

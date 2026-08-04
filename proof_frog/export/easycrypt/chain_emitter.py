@@ -20,7 +20,7 @@ import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, cast
 
 from ... import frog_ast
 from ...transforms._base import TransformApplication
@@ -5482,6 +5482,24 @@ def _emit_one_oracle_chain(
         )
         if ro_route is not None:
             return [], ro_route, set()
+        # Same-shape post-init oracle: the two bodies have IDENTICAL statement
+        # structure and differ only in the field REFERENCES the hop's coupling
+        # equates (the reduction reads its packed ``corr.`k`` where the game
+        # reads a separate field). ``sim`` matches globals by NAME so it cannot
+        # relate them; the structural peel walks the shared shape instead.
+        # Declines to ``None`` off-shape, so every other oracle is
+        # byte-identical.
+        shape = _synth_structural_if_peel(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            full_coupling,
+        )
+        if shape is not None:
+            return [], shape, set()
 
     # Field-aware coupling: identical-state hops keep the whole-glob equality
     # (byte-identical for clean proofs); a hop whose two sides differ in glob
@@ -9489,6 +9507,252 @@ def _synth_bundled_delegate_reorder(  # pylint: disable=too-many-arguments,too-m
         lls = " ".join(f"{d}_ll" for d in distrs)
         return ["proc.", "inline *.", *swaps, *peel, "skip.", f"smt({lls})."]
     return None
+
+
+def _same_shape(a: list[ec_ast.EcStmt], b: list[ec_ast.EcStmt]) -> bool:
+    """Whether two bodies have IDENTICAL statement STRUCTURE -- same kinds in the
+    same order, same callee per call, same if-nesting -- differing only in the
+    EXPRESSIONS statements carry.
+
+    This is what makes the structural peel applicable and ``sim`` not: ``sim``
+    relates globals by name, so a body reading ``R.corr.`3`` cannot be matched
+    against one reading ``G.kem_ct`` however the coupling relates them, while a
+    peel walks the shared skeleton and hands each differing expression to the
+    closing ``smt`` with the coupling in scope.
+    """
+    a_e, b_e = _exec_stmts(a), _exec_stmts(b)
+    if len(a_e) != len(b_e):
+        return False
+    for x, y in zip(a_e, b_e):
+        if type(x) is not type(y):  # pylint: disable=unidiomatic-typecheck
+            return False
+        if isinstance(x, ec_ast.Call) and x.callee != cast(ec_ast.Call, y).callee:
+            return False
+        if isinstance(x, ec_ast.Sample) and x.distr != cast(ec_ast.Sample, y).distr:
+            return False
+        if isinstance(x, ec_ast.If):
+            y_if = cast(ec_ast.If, y)
+            if not _same_shape(x.then_body, y_if.then_body) or not _same_shape(
+                x.else_body, y_if.else_body
+            ):
+                return False
+    return True
+
+
+def _straight_peel(body: list[ec_ast.EcStmt]) -> list[str]:
+    """Tail-first ``wp``/couple peel for a branch-free run of statements.
+
+    Each round's leading ``wp`` absorbs the deterministic assignments below the
+    coupled statement, so a trailing assignment needs no separate step -- but a
+    run with NO call or sample has no ``wp`` at all, and ``skip`` would then hit
+    a non-empty statement list. Those close with ``auto``.
+    """
+    tac: list[str] = []
+    for stmt in reversed(_exec_stmts(body)):
+        if isinstance(stmt, ec_ast.Call):
+            tac.append("wp; call (_: true).")
+        elif isinstance(stmt, ec_ast.Sample):
+            tac.append("wp; rnd.")
+    if not tac:
+        return ["auto."]
+    # The TRAILING ``wp`` is not decoration. Each round's ``wp`` runs BEFORE its
+    # coupling, so it absorbs the assignments BELOW that statement -- but an
+    # assignment ABOVE the first call (``ct_PQ <- ct.`1``, present in the
+    # two-KEM combiners' `decaps` and absent in the one-KEM ones) is left
+    # standing, and ``skip`` then fails with "left instruction list is not
+    # empty". Measured on CK/UK `_expanded_INDCCA_PQ`/`_T` while CG/UG passed.
+    tac.append("wp; skip => /#.")
+    return tac
+
+
+def _shape_peel(
+    l_body: list[ec_ast.EcStmt], r_body: list[ec_ast.EcStmt]
+) -> list[str] | None:
+    """The peel for two same-shape bodies, recursing through ``if``s.
+
+    A leading branch-free run before an ``if`` is split off with ``seq``, whose
+    invariant is ``#pre`` plus equality of the locals the branch actually reads
+    -- the only names emitted, and they are the module's OWN rendered locals
+    (this route never inlines, so EC never renames them). The ``if`` guards are
+    handed to ``smt`` with the coupling in scope, which is exactly where the
+    packed-vs-separate field equalities do their work.
+    """
+    l_e, r_e = _exec_stmts(l_body), _exec_stmts(r_body)
+    idx = next((i for i, s in enumerate(l_e) if isinstance(s, ec_ast.If)), None)
+    if idx is None:
+        return _straight_peel(l_e)
+    if any(isinstance(s, ec_ast.If) for s in l_e[idx + 1 :]):
+        # A second branch after the first is a shape this route has not been
+        # validated on; decline rather than emit a peel that may not close.
+        return None
+    l_if, r_if = cast(ec_ast.If, l_e[idx]), cast(ec_ast.If, r_e[idx])
+    then_tac = _shape_peel(l_if.then_body, r_if.then_body)
+    else_tac = _shape_peel(l_if.else_body, r_if.else_body)
+    if then_tac is None or else_tac is None:
+        return None
+    inner = ["if; 1: smt().", *then_tac, *else_tac]
+    if idx == 0:
+        return inner
+    prefix = l_e[:idx]
+    bound = {
+        s.var
+        for s in prefix
+        if isinstance(s, (ec_ast.Assign, ec_ast.Sample, ec_ast.Call))
+    }
+    live = sorted(_branch_reads(l_if) & bound)
+    inv = "#pre" + (f" /\\ ={{{', '.join(live)}}}" if live else "")
+    return [f"seq {idx} {idx} : ({inv}).", *_straight_peel(prefix), *inner]
+
+
+def _branch_reads(node: ec_ast.If) -> set[str]:
+    """Every identifier the guard or either branch of ``node`` mentions."""
+    out = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", node.guard))
+    for stmt in _exec_stmts(node.then_body) + _exec_stmts(node.else_body):
+        if isinstance(stmt, ec_ast.If):
+            out |= _branch_reads(stmt)
+            continue
+        out |= set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", _stmt_text(stmt)))
+    return out
+
+
+def _shape_stmt_text(stmt: ec_ast.EcStmt) -> str:
+    """``_stmt_text`` extended through ``if`` guards and branches, so a scan for
+    packed-field projections sees the ones inside a branch."""
+    if isinstance(stmt, ec_ast.If):
+        inner = _exec_stmts(stmt.then_body) + _exec_stmts(stmt.else_body)
+        return " ".join([stmt.guard] + [_shape_stmt_text(s) for s in inner])
+    return _stmt_text(stmt)
+
+
+def _differing_tokens(
+    l_body: list[ec_ast.EcStmt], r_body: list[ec_ast.EcStmt]
+) -> set[str]:
+    """Identifiers appearing in one body's statement but not its counterpart.
+
+    Walks the two SAME-SHAPE bodies in lockstep (guards and both branches of an
+    ``if`` included) and returns the symmetric difference of each statement
+    pair's tokens -- i.e. exactly the references the closing ``smt`` must bridge
+    from the coupling, which is also what the arrow-typed-field gate inspects.
+    """
+    out: set[str] = set()
+    for x, y in zip(_exec_stmts(l_body), _exec_stmts(r_body)):
+        if isinstance(x, ec_ast.If) and isinstance(y, ec_ast.If):
+            gx = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", x.guard))
+            gy = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", y.guard))
+            out |= gx ^ gy
+            out |= _differing_tokens(x.then_body, y.then_body)
+            out |= _differing_tokens(x.else_body, y.else_body)
+            continue
+        tx = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", _stmt_text(x)))
+        ty = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", _stmt_text(y)))
+        out |= tx ^ ty
+    return out
+
+
+def _synth_structural_if_peel(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    coupling: str | None,
+) -> list[str] | None:
+    """Whole-hop tactic for a post-init oracle whose two bodies are the SAME
+    SHAPE and differ only in coupled field references, or ``None``.
+
+    The CFRG `_PQ` `decaps` hops: ``R_Correct_Real.decaps`` and
+    ``GameCaseSplitReal.decaps`` are statement-for-statement identical except
+    that one reads ``corr.`2``/``corr.`3``/``corr.`5`` where the other reads
+    ``pq_keys.`2``/``kem_ct``/``ss_PQ``. Those equalities are exactly what the
+    hop's coupling now carries (see the reduction-packed direction of
+    ``_packed_decomposition_coupling``), so the goal is provable -- but ``sim``
+    cannot use them, because it matches globals by NAME.
+
+    Requires the two bodies to be identical in shape AND actually different
+    (an identical pair is ``sim``'s business and stays byte-identical), and a
+    non-empty coupling (with nothing to relate the differing references the
+    closing ``smt`` has no premise). Tripwire:
+    ``ec_templates/decaps_packed_coupling.ec``.
+    """
+    if not coupling:
+        return None
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+    # ``emit_state_vars=True`` because the gate below inspects the FIELD TYPES:
+    # without it the module carries no ``var`` declarations and the arrow-typed
+    # check silently passes everything.
+    lmod = _flat_state_module(
+        modules,
+        "Shape_L",
+        lproj,
+        external_module_types,
+        method_return_types,
+        [],
+        emit_state_vars=True,
+    )
+    rmod = _flat_state_module(
+        modules,
+        "Shape_R",
+        rproj,
+        external_module_types,
+        method_return_types,
+        [],
+        emit_state_vars=True,
+    )
+    if not lmod.procs or not rmod.procs:
+        return None
+    l_body, r_body = lmod.procs[0].body, rmod.procs[0].body
+    if l_body == r_body or not _same_shape(l_body, r_body):
+        return None
+    # BRANCHING bodies only -- the route exists for the case a straight peel
+    # cannot express, and a branch-free pair is already handled downstream by
+    # the generic per-oracle chain. Without this the route PREEMPTS that chain's
+    # working ``inline *; do ! (wp; call (_: true)); wp`` on the binding proofs'
+    # oracles, churning admit-free exports for nothing.
+    if not any(isinstance(s, ec_ast.If) for s in _exec_stmts(l_body)):
+        return None
+    # A differing reference to an ARROW-typed field is a whole random FUNCTION,
+    # not a value: relating ``challenger_RF rest`` to ``v_RF rest`` is the
+    # KDF-PRF hop's real content, and this peel is not a proof of it. EC agreed
+    # loudly -- on `CG_expanded_INDCCA_PQ` ``hop_7_decaps`` the peel drove it
+    # into an internal ``EqObsInError`` anomaly. Those hops are a
+    # same-body-RENAMED-FIELD pair and belong to the ``sim_field_rename`` class.
+    fn_fields = {
+        v.name
+        for v in list(lmod.module_vars) + list(rmod.module_vars)
+        if "->" in v.type.text
+    }
+    diff = _differing_tokens(l_body, r_body)
+    if diff & fn_fields:
+        return None
+    # THE SHAPE THIS ROUTE IS FOR: one side reaches a value through a PROJECTION
+    # of a packed field (``corr.`3``) where the other names a separate field.
+    # That is what ``sim`` cannot relate however the coupling equates them, and
+    # it is what the peel buys. A difference that is merely which FIELDS the two
+    # sides hold (the binding proofs' ``hashg``: ``dk_PQ_0``/``s_PQ_0`` present
+    # on both sides, no projection anywhere) is already closed downstream by
+    # ``inline *; if; auto``, and preempting that churns admit-free exports.
+    projected = {
+        m.group(1)
+        for body in (l_body, r_body)
+        for stmt in _exec_stmts(body)
+        for m in re.finditer(
+            r"([A-Za-z_][A-Za-z0-9_]*)\.`[0-9]+", _shape_stmt_text(stmt)
+        )
+    }
+    field_names = {v.name for v in list(lmod.module_vars) + list(rmod.module_vars)}
+    if not diff & projected & field_names:
+        return None
+    peel = _shape_peel(
+        [s for s in l_body if not isinstance(s, ec_ast.Return)],
+        [s for s in r_body if not isinstance(s, ec_ast.Return)],
+    )
+    if peel is None:
+        return None
+    return [_res_tag(SYNTH_PARAM), "proc.", *peel, "qed."]
 
 
 def _bd_sample_dead(

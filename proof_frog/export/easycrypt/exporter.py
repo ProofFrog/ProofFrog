@@ -3788,6 +3788,40 @@ def export_proof_file(proof_path: str) -> str:
                     if ckey not in red_source_by_type:
                         red_source_by_type[ckey] = f"{red_base}.{ec_f}.`{i + 1}{{{rs}}}"
 
+        def _arity(t: frog_ast.Type) -> int:
+            return len(t.types) if isinstance(t, frog_ast.ProductType) else 1
+
+        # WHICH SIDE DOES THE PACKING? This route was written for the GAME
+        # holding a packed key and the reduction holding it decomposed, and the
+        # component matching below runs ONLY in the opposite direction -- a
+        # reduction holding one wide tuple (the correctness challenger's
+        # ``corr``, arity 5) against a game holding the pieces separately
+        # (``pq_keys``/``kem_ct``/``ss_PQ``, arity <= 2). Comparing the widest
+        # field on each side is what tells the two apart, and gating on it keeps
+        # every packed-GAME proof -- the whole binding layer -- byte-identical.
+        # Without the gate 36 exports changed, 15 of them admit-free.
+        red_packed = max(
+            (_arity(f.type) for f in red.fields if f.name not in game_field_names),
+            default=0,
+        ) > max((_arity(f.type) for f in game.fields), default=0)
+
+        def _consume_red_source(ty: frog_ast.Type, emitted: list[str]) -> str | None:
+            """A reduction source of EC type ``ty`` not already paired, else
+            ``None``.
+
+            Pairing the same source with two game fields would be a coupling the
+            establishing hop cannot prove (two distinct fields cannot both equal
+            one component), so a source already used is skipped rather than
+            reused. Checked against what has actually been emitted, so the
+            existing derivation path's pairings count too.
+            """
+            if not red_packed:
+                return None
+            src = red_source_by_type.get(top_types.translate_type(ty).text)
+            if src is None or any(src in c for c in emitted):
+                return None
+            return src
+
         conj: list[str] = []
         has_derived = False
         for gf in game.fields:
@@ -3802,6 +3836,22 @@ def export_proof_file(proof_path: str) -> str:
             # component is recomputed) is read from the concrete scheme's
             # ``KeyGen`` -- located by name from the game's module expression.
             if not isinstance(gf.type, frog_ast.ProductType):
+                # SCALAR game field the reduction holds INSIDE a packed field.
+                # The CFRG `_PQ` correctness-reduction hops: the reduction keeps
+                # its challenger's whole 5-tuple in one ``corr`` field while the
+                # game holds ``kem_ct``/``ss_PQ`` separately. Dropping these left
+                # the ``decaps`` lemma UNPROVABLE -- its two bodies differ in
+                # exactly those references, and no tactic can bridge an equality
+                # the precondition does not carry.
+                #
+                # ``red_source_by_type`` is already built component-wise, and
+                # first-declaration-wins is what makes the choice right here: the
+                # 5-tuple's two same-typed shared secrets are the ENCAPS result
+                # (``.`4``) and the DECAPS result (``.`5``), and the game's
+                # ``ss_PQ`` is the encaps one.
+                src = _consume_red_source(gf.type, conj)
+                if src is not None:
+                    conj.append(f"{game_base}.{ec_gf}{{{gs}}} = {src}")
                 continue
             comp_types = gf.type.types
             n = len(comp_types)
@@ -3837,6 +3887,16 @@ def export_proof_file(proof_path: str) -> str:
                 None,
             )
             if scheme is None:
+                # No concrete scheme whose ``KeyGen`` returns a tuple of this
+                # arity, so no derivation structure to read -- but the reduction
+                # may still hold each component inside a packed field
+                # (``GameCaseSplitReal.pq_keys`` against
+                # ``R_Correct_Real.corr.`1``/``.`2``). Couple the components it
+                # does hold; a component with no unpaired source is left alone.
+                for i, ct in enumerate(comp_types):
+                    src = _consume_red_source(ct, conj)
+                    if src is not None:
+                        conj.append(f"{game_base}.{ec_gf}.`{i + 1}{{{gs}}} = {src}")
                 continue
             keygen = next(
                 m for m in scheme.methods if m.signature.name.lower() == "keygen"

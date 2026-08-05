@@ -1,0 +1,61 @@
+NOTES -- why the `_T` (ROM) IND-CCA cells have little or no automation.
+Measured in c254 on `CG_expanded_INDCCA_T` (18 admits, `admit-guided x18`, ZERO
+`synth-param` -- the only IND-CCA cell with no synthesized resolution at all).
+Documentation only; no exporter change.
+
+THE QUESTION
+============
+`CG_expanded_INDCCA_T` and `UG_expanded_INDCCA_T` are the two cells the dashboard
+shows with NO synth-param at all. A cell with zero automation usually means a
+route is declining on a technicality. Is that what is happening here?
+
+THE ANSWER: NO. IT IS CONTENT, NOT A DECLINING GATE.
+====================================================
+Its 18 admits are 8 `initialize` + 8 `decaps` + 2 `hash` -- i.e. EVERY hop. A
+compact per-oracle dump (same_shape, delegate fields, total call count, top-level
+`if` count) over all 8 post-init `decaps` pairs:
+
+    same  ldeleg                                    rdeleg                       lcalls rcalls
+    False challenger_{HT,QT,mStar,qStar,st,yStar}    challenger_{ZStar,x}            7     5
+    False challenger_{RF,qStar,st}                   challenger_{ctStar,dk,ssStar}   7     8
+    False challenger_{ctStar,dk,ssStar}              challenger_{RF,qStar,st}        8     7
+    False challenger_{ctStar}                        --                              7     9
+    False challenger_{x}                             challenger_{HT,QT,qStar,st}     5     7
+    False --                                         challenger_{ctStar}             9     7
+    False --                                         --                              7     9
+    False --                                         --                              9     7
+
+**Every single pair differs in CALL COUNT.** Not one is the "same body under a
+field rename" shape (`_synth_sim_field_rename`) or the "forwarding with dead
+guards" shape (`_synth_forwarded_oracle_peel`, whose surviving paths match in
+count once the guards go). A differing call count means an abstract call was
+ADDED or REMOVED, which is a change in what the game does -- the ROM chain
+substituting lazy for eager sampling, materializing a table, or reprogramming a
+point. No peel can bridge that; it needs the hop's actual argument.
+
+The 2 admitted `hash` oracles are the starkest case:
+
+    False challenger_{HT,QT,mStar,qStar,st,yStar}    challenger_{ZStar,x}   0 calls   4 calls
+    False challenger_{x}                             challenger_{HT,...}    4 calls   0 calls
+
+One side's `hash` makes FOUR calls and the other makes NONE -- the RO
+materialization step itself. (The other five `hash` oracles in this proof are
+already closed; they are call-free and identical on both sides.)
+
+WHAT THIS MEANS FOR THE FRONTIER
+================================
+The `_T` cells hold 160 of the 260 remaining IND-CCA admits (18+25+14+21 for
+CG/CG/UG/UG plus 13+17+24+28 for UK/CK/UK/CK). c252's route did close 2 admits in
+each of CK/UK_expanded_T and CK/UK_seedbased_T, so SOME `_T` hops are plumbing --
+the claim here is narrower and is what was measured: **in
+`CG_expanded_INDCCA_T`, no post-init oracle pair is a plumbing shape.** Its zero
+automation is the honest answer, not a gap to close.
+
+So the `_T` family is not a place where more peel routes pay. It needs the ROM
+arguments themselves: eager/lazy RO equivalence, table materialization,
+reprogramming-at-a-point. The exporter already has `PROM`/`FunRO` foundations and
+a `_lazyro_derived_key_coupling`, so the pieces exist -- but each `_T` hop is a
+distinct cryptographic step, not an instance of one shape.
+
+DO NOT, on the strength of a zero-automation cell, go looking for a technicality.
+Dump the call counts first: this cell took one instrumented export to settle.

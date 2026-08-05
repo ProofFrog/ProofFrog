@@ -1735,13 +1735,96 @@ class TypeCollector:
         # name-independent (the domain bitstring stays abstract). Emitted
         # after the bitstring ``type`` declarations above so the arrow
         # type's domain/codomain are in scope.
+        muf_alias: dict[str, str] = {}
         for dom, codom in self._function_types:
             distr = _function_distr_name(dom, codom)
             arrow = f"{dom} -> {codom}"
-            decls.append(ec_ast.OpDecl(distr, f"({arrow}) distr"))
-            decls.append(ec_ast.Axiom(f"{distr}_ll", f"is_lossless {distr}"))
-            decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
-            decls.append(ec_ast.Axiom(f"{distr}_full", f"is_full {distr}"))
+            if dom not in word or codom not in word:
+                # Not both BitWord-backed: no FinType for the domain and no
+                # derived uniform distribution for the codomain, so the op stays
+                # uninterpreted with its three assumed facts. Byte-identical.
+                decls.append(ec_ast.OpDecl(distr, f"({arrow}) distr"))
+                decls.append(ec_ast.Axiom(f"{distr}_ll", f"is_lossless {distr}"))
+                decls.append(ec_ast.Axiom(f"{distr}_fu", f"is_funiform {distr}"))
+                decls.append(ec_ast.Axiom(f"{distr}_full", f"is_full {distr}"))
+                continue
+            bw_dom = _word_clone_name(dom)
+            alias = muf_alias.get(dom, "")
+            if not alias:
+                alias = f"MUF_{dom}"
+                muf_alias[dom] = alias
+                # ``FinType.enum_spec`` is ``count (pred1 x) enum = 1`` --
+                # membership AND uniqueness -- so the clone's ``enumP`` alone is
+                # too weak; ``count_uniq_mem`` turns the count into
+                # ``b2i (x \in words)``. Realized as a NESTED parameter
+                # (``op FinT.enum <- ...``): a standalone ``FinType`` clone would
+                # SUBSTITUTE the operator away, leaving nothing for
+                # ``theory FinT <- ...`` to bind.
+                decls.append(
+                    ec_ast.Clone(
+                        "MUniFinFun",
+                        alias,
+                        type_bindings=[("t", dom)],
+                        op_bindings=[("FinT.enum", f"{bw_dom}.words")],
+                        proof_clauses=[
+                            (
+                                # PARENTHESIZED: a clone's inline ``proof X by
+                                # <tac>`` takes a SINGLE tactic, so a bare
+                                # ``;``-chain terminates the declaration and EC
+                                # reports a parse error at the semicolon.
+                                "FinT.enum_spec",
+                                "(move=> x; rewrite count_uniq_mem"
+                                f" 1:{bw_dom}.enum_uniq {bw_dom}.enumP)",
+                            )
+                        ],
+                    )
+                )
+            dcod = f"d{codom}"
+            decls.append(
+                ec_ast.OpDecl(
+                    distr,
+                    f"({arrow}) distr",
+                    definition=f"{alias}.dfun (fun _ => {dcod})",
+                    tags=["smt_opaque"],
+                )
+            )
+            # All three former axioms, now DERIVED. ``smt_opaque`` keeps the
+            # definition away from ``smt``, so every existing
+            # ``smt({distr}_ll ...)`` hint sees the same opaque op it saw before;
+            # the proofs below unfold it explicitly. NAMING TRAP: EasyCrypt's
+            # ``dfun_fu`` proves is_FULL, while the exporter's ``d<X>_fu`` states
+            # is_FUNIFORM.
+            decls.append(
+                ec_ast.ProvedLemma(
+                    f"{distr}_ll",
+                    f"is_lossless {distr}",
+                    [
+                        f"  by rewrite /{distr}; apply/{alias}.dfun_ll => x;"
+                        f" exact {dcod}_ll."
+                    ],
+                )
+            )
+            decls.append(
+                ec_ast.ProvedLemma(
+                    f"{distr}_fu",
+                    f"is_funiform {distr}",
+                    [
+                        f"  rewrite /{distr}; apply/{alias}.dfun_funi.",
+                        f"  - by move=> x; apply/funi_uni/{dcod}_fu.",
+                        f"  by move=> x; exact {dcod}_full.",
+                    ],
+                )
+            )
+            decls.append(
+                ec_ast.ProvedLemma(
+                    f"{distr}_full",
+                    f"is_full {distr}",
+                    [
+                        f"  by rewrite /{distr}; apply/{alias}.dfun_fu => x;"
+                        f" exact {dcod}_full."
+                    ],
+                )
+            )
         # Emit the RO holder module ONLY when this collector owns it (empty
         # prefix). A prefixed collector references the theorem-primitive theory
         # clone's single holder (``Hybrid_c.RO_H``) instead of declaring a

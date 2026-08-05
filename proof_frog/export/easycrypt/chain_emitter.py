@@ -1860,6 +1860,7 @@ def _make_field_aware_coupling(
     ro_challenger_by_base: dict[str, list[tuple[str, str]]] | None = None,
     lazyro_cross: tuple[str, str, frozenset[str]] | None = None,
     type_sig_by_base: dict[str, tuple[str, ...]] | None = None,
+    outer_globs: frozenset[str] | None = None,
 ) -> CouplingFn:
     """Build a coupling closure that is field-aware for cardinality-differing states.
 
@@ -2085,18 +2086,44 @@ def _make_field_aware_coupling(
         # (honest gating -- blocked, never a false accept).
         if not fields_conj:
             return _glob_coupling(left_ref, right_ref)
-        # ``={glob P}`` only for params BOTH states actually use. A param absent
-        # from a state's ``(glob)`` (its methods never called) but named in a
-        # coupling conjunct binds a middle-memory existential over an abstract
-        # module glob that ``smt`` cannot witness -- the transitivity precondition
-        # composition then fails "cannot prove goal (strict)". With signatures
-        # available (ROM) intersect the two used-param sets; otherwise keep all
-        # ``glob_params`` (binding / correctness stay byte-identical). A wrapper is
-        # registered (in ``_emit_one_oracle_chain``) with its FLAT state's used-param
-        # set, so a flat<->wrapper leg intersects to the SAME set as the chain leg --
-        # the transitivity postcondition composition agrees on the param set.
-        if ginfo and li is not None and ri is not None:
-            gparams = [p for p in glob_params if p in (li[1] & ri[1])]
+        # ``={glob P}`` for EVERY declared param, used by these two states or not.
+        #
+        # This used to intersect the two states' used-param sets when signatures
+        # were available (ROM), on the reasoning that a param absent from a
+        # state's ``(glob)`` binds a middle-memory existential ``smt`` cannot
+        # witness. That reasoning had the diagnosis right and the fix backwards.
+        # The OUTER hop lemma coupled every declared module, so a narrowed chain
+        # coupling could not discharge the transitivity's post-implication: it had
+        # to produce ``={glob G}`` from two intermediate specs that never mentioned
+        # ``G``. Underivable, and the resulting bare ``smt()`` failure looked
+        # exactly like the one the narrowing was meant to cure.
+        #
+        # The existential IS witnessable -- the witness list is parsed back out of
+        # these very conjuncts and sorted (see the ``functor_globs`` comment), so
+        # widening here widens the witnesses in the same order. The historical
+        # "mistypes the first slot" symptom was a witness the coupling never named,
+        # not an unwitnessable one. Verified end to end: `hop_8_hash` of
+        # `CG_seedbased_INDCCA_T` -- the entire ROM wall -- closes admit-free with
+        # the param set widened at the specs, the witnesses, and the chain lemma
+        # together.
+        # Match the OUTER hop lemma's glob set exactly. Both a wider and a
+        # narrower set are provably wrong, and each failure mode was measured:
+        #   too NARROW -- the transitivity's post-implication must produce a
+        #     ``={glob P}`` the intermediate specs never mention (underivable by
+        #     any tactic; `CG_seedbased_INDCCA_T` `hop_8_hash`);
+        #   too WIDE -- the pre-implication binds a middle-memory existential
+        #     over a param the outer coupling never constrains, and `smt` cannot
+        #     witness it (`CG_expanded_INDCCA_T` `hop_4_hash`, which passes at
+        #     the narrower set and fails at the wider one).
+        # The outer set is `live_abstract_modules + ro_holder_modules`; the two
+        # CFRG `_T` families genuinely differ in it, which is why no fixed rule
+        # -- intersection of used params, or all params -- can serve both.
+        # Confined to the path that has per-state signatures (ROM), which is
+        # where the mismatch arises and where the old intersection lived; every
+        # binding / correctness proof keeps all ``glob_params`` and so stays
+        # byte-identical.
+        if ginfo and li is not None and ri is not None and outer_globs:
+            gparams = [p for p in glob_params if p in outer_globs]
         else:
             gparams = glob_params
         # LAZY-RO Honest hop: ``={glob RO_G_RO}`` (i.e. ``RO_G_RO.h{1}=RO_G_RO.h{2}``)
@@ -5067,6 +5094,7 @@ def emit_multi_oracle_chain_for_hop(
     both_reductions: bool = False,
     init_tac_override: list[str] | None = None,
     oracle_tac_override: dict[str, list[str]] | None = None,
+    outer_globs: frozenset[str] | None = None,
 ) -> MultiOracleHopChainInfo:
     """Emit the per-oracle per-transform chains for one multi-oracle hop.
 
@@ -5208,6 +5236,7 @@ def emit_multi_oracle_chain_for_hop(
             is_lazyro_honest=is_lazyro_honest,
             drop_globs=drop_globs,
             both_reductions=both_reductions,
+            outer_globs=outer_globs,
         )
         chunks.extend(oracle_chunks)
         tactic_body_by_oracle[oracle_name] = outer_body
@@ -5266,6 +5295,7 @@ def _emit_one_oracle_chain(
     is_lazyro_honest: bool = False,
     drop_globs: frozenset[str] = frozenset(),
     both_reductions: bool = False,
+    outer_globs: frozenset[str] | None = None,
 ) -> tuple[list[str], list[str], set[tuple[str, str]]]:
     """Emit one oracle's chain artifacts + outer tactic body.
 
@@ -5857,6 +5887,7 @@ def _emit_one_oracle_chain(
         ro_challenger_by_base,
         lazyro_cross,
         type_sig_by_base=type_sig_by_base,
+        outer_globs=outer_globs,
     )
 
     # Composite-wrapper bridge tactic (wall 7). When the hop has a composite

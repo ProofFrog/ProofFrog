@@ -10258,6 +10258,10 @@ def export_proof_file(proof_path: str) -> str:
                 ),
                 init_tac_override=reprogram_override,
                 oracle_tac_override=_twin_challenge_oracle_tacs(step_a, step_b),
+                # The OUTER hop lemma's glob set (see ``glob_invariant_conj``).
+                # The chain coupling must match it exactly -- see the gparams
+                # comment in ``_make_field_aware_coupling``.
+                outer_globs=frozenset(live_abstract_modules + ro_holder_modules),
             )
             chain_extra_decls.extend(info.extra_decls)
             pres_method_requests.update(info.pres_methods)

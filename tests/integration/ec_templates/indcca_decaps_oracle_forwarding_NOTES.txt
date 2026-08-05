@@ -141,3 +141,32 @@ STILL OPEN, worth its own measured cycle
 `seq ^if ^if` would let the existing `_shape_peel` drop its numeric `seq idx idx`
 and with it the `_delegate_flat_names` index gate -- but it must be confirmed on
 full exports, and it touches 11 exports currently validated EXIT 0.
+
+WHAT THE ROUTE DOES NOT COVER -- measured in c253 on `CG_expanded_INDCCA_PQ`
+============================================================================
+Its remaining 7 admits are `initialize` 0/7/15 and `decaps` 0/5/10/15. Every one
+of the four open `decaps` hops declines at the SAME gate --
+"exactly one side carries delegate (`<obj>@<f>`) fields" -- but for two DIFFERENT
+structural reasons, so they are two separate fronts, not one:
+
+ 1. **REDUCTION-to-REDUCTION forwarding** (`decaps` 5 and 10):
+        L = challenger@ctStar, challenger@dk, ctStar, ek_PQ, kem_ct, seed_T, ss_PQ
+        R = challenger@k,      ctStar, kem_ct, pq_keys, seed_T
+    BOTH endpoints are delegating reductions, each forwarding to a DIFFERENT
+    challenger (KEM-IND-CCA one side, KDF-PRF the other). There is no game body to
+    drive the peel from, and dead guards can appear on BOTH sides.
+    Plausible extension, not attempted: emit a guard loop per side
+    (`do ? (rcondf{1} ^if; ...)` and `do ? (rcondf{2} ^if; ...)`) at each leaf and
+    drive from either body. Open questions: which body drives, and whether the
+    numeric `seq idx idx` still has prefix agreement across two reductions.
+
+ 2. **NEITHER side materializes a delegate** (`decaps` 0 and 15):
+        L = corr, ctStar, seed_T          (correctness reduction, packed `corr`)
+        R = ctStar, dk                    (theorem game, packed `dk`)
+    Both sides are PACKED and the reduction's challenger is stateless, so no
+    `@` field exists to key on. This is the already-parked "expanded `_PQ` hops
+    0/15 packed-key dependence" front (projection folding REFUTED there), now
+    confirmed to cover the `decaps` counterparts too.
+
+Neither class is a variant of the landed route's shape; each needs its own gate
+and its own validation sweep.

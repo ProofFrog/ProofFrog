@@ -33,6 +33,16 @@
 (*  3. `dmap1E_can` + `DWord.dunifin_funi` -> the distribution is *)
 (*     carried to itself.                                         *)
 (*                                                               *)
+(* SECOND TRAP, found only when this derivation was run against  *)
+(* the REAL export: `size_map` must be given its function        *)
+(* EXPLICITLY. `BW.words` is itself defined through a `map`, so a *)
+(* bare `rewrite size_map` fires inside THAT definition (leaving  *)
+(* `size (BW.Enum.wordn n) <= size (map ev_enc BW.words)`) rather *)
+(* than on the goal's own map. Here a following bare `smt()`      *)
+(* happened to recover; in the real export, where the same        *)
+(* derivation sits inside a section over a `declare axiom`, it    *)
+(* did not -- the file failed with "cannot prove goal (strict)".  *)
+(*                                                               *)
 (* NAMING TRAP that cost two rounds: `Word.eca` does              *)
 (* `clone include FinType ... rename [op] "enum" as "words"`, so  *)
 (* the OP is `BW.words` while the LEMMAS keep `BW.enumP` /        *)
@@ -67,7 +77,7 @@ have huniq : uniq (map ev_enc BW.words).
 have hsub : forall z, z \in map ev_enc BW.words => z \in BW.words.
 + by move=> z _; apply BW.enumP.
 have hsize : size BW.words <= size (map ev_enc BW.words).
-+ rewrite size_map; smt().
++ by rewrite (size_map ev_enc).
 have [hmem _] := leq_size_perm (map ev_enc BW.words) BW.words
                    huniq hsub hsize.
 have : y \in map ev_enc BW.words by rewrite hmem; apply BW.enumP.

@@ -1,0 +1,111 @@
+(* ============================================================ *)
+(* IND-CCA `initialize` hop_5: THE KDF-KEY SUBSTITUTION.          *)
+(*   -- the tactic VALIDATED ON THE REAL HOP, kept verbatim.      *)
+(*                                                               *)
+(* This file is NOT a self-contained tripwire. It is the proof    *)
+(* script that closed `hop_5_initialize` of the real exported     *)
+(* `CG_expanded_INDCCA_PQ`, release EasyCrypt EXIT 0 and          *)
+(* admit-free, rebuilt by `.ec-tmp/build_c139_probe.py`. It is    *)
+(* recorded here because the EMISSION that would generate it is   *)
+(* parked (see below), and a validated script that nothing yet    *)
+(* generates is exactly the thing a successor would otherwise     *)
+(* have to rediscover.                                            *)
+(*                                                               *)
+(* WHAT THE HOP IS. One endpoint derives the KDF key by ENCODING  *)
+(* the challenger's random shared secret; the other draws that    *)
+(* key directly. Three things have to line up at once:            *)
+(*  1. a REORDER -- one side draws the key before its key         *)
+(*     generation, the other after its encapsulation (so unlike   *)
+(*     the bundled-delegate reorder, a SAMPLE has to move, not    *)
+(*     just a call);                                              *)
+(*  2. a one-sided `deterministic injective` encoding call,       *)
+(*     dropped by its `_det` axiom once its result is             *)
+(*     characterized;                                             *)
+(*  3. two KDF inputs built from the SAME five leaves under       *)
+(*     DIFFERENT bracketings -- closed by `concat_regroup5`.      *)
+(*                                                               *)
+(* THE CONTENT is the `rnd ev_encodesharedsecret _bij_g` step:    *)
+(* the two draws agree because an injective ENDO-map on a finite  *)
+(* type is bijective, so encoding a uniform shared secret is      *)
+(* uniform. That bijectivity is DERIVED from the licensed `_inj`  *)
+(* axiom (see bitword_injective_bijective.ec), never assumed --   *)
+(* the export adds NO new trusted base for this hop.              *)
+(*                                                               *)
+(* WHY THE EMISSION IS PARKED. Every STRUCTURAL fact the route    *)
+(* needs is readable off the first flat states -- which side      *)
+(* carries the extra call, the swap sequence, the seq split       *)
+(* points, the leaf correspondence. The NAMES are not. A          *)
+(* challenger-inlined field is `challenger_<f>` in the flat state *)
+(* but `<ChalMod>.<f>` after `inline *`; a reduction field is     *)
+(* bare in the flat state but `<Red>.<f>` after. This script      *)
+(* needs three such names (`RB.ss_PQ`,                            *)
+(* `H_c.KDFPRFSec_Real.k`, `KEM_PQ_c.KEM_INDCCA_Random.ctStar`),  *)
+(* and no flat state carries them. Unblocking it means resolving  *)
+(* `step.reduction` / `step.challenger` to their field sets in    *)
+(* the exporter -- where those ASTs live -- and threading a       *)
+(* flat->real name map into the route.                            *)
+(*                                                               *)
+(* LADDER NOTE: the prefix peel ends `wp.` then `skip => /#.`     *)
+(* The trailing `wp` is load-bearing -- a peel round's `wp` runs  *)
+(* BEFORE its coupling, so it never absorbs an assignment sitting *)
+(* ABOVE the run's first call.                                    *)
+(* ============================================================ *)
+
+(* The lemma this closes, in the exported file:
+
+  lemma hop_5_initialize :
+    equiv [ RB(KEM_PQ, NG, G, H, L, CG_expanded(KEM_PQ, NG, G, H, L),
+                KEM_PQ_c.KEM_INDCCA_Random(KEM_PQ)).initialize
+          ~ RD(KEM_PQ, NG, G, H, L, CG_expanded(KEM_PQ, NG, G, H, L),
+                H_c.KDFPRFSec_Real(H)).initialize :
+            ={glob KEM_PQ} /\ ={glob NG} /\ ={glob G} /\ ={glob H} /\ ={glob L}
+            ==> ... ].
+  proof.
+*)
+
+    (* resolution: synth-param *)
+    have [essg [hgf hfg]] := ess_bij.
+    proc.
+    inline *.
+    swap{1} 7 -6.
+    swap{2} [7..10] -4.
+    seq 21 16 : (={glob KEM_PQ, glob NG, glob G, glob H, glob L}
+                 /\ H_c.KDFPRFSec_Real.k{2}
+                    = KEM_PQ_c.ev_encodesharedsecret RB.ss_PQ{1}
+                 /\ ss_T{1} = ss_T{2} /\ ct_T{1} = ct_T{2} /\ ek_T{1} = ek_T{2}
+                 /\ RB.ek_PQ{1} = ek_PQ{2}
+                 /\ RB.kem_ct{1} = RD.kem_ct{2}
+                 /\ RB.seed_T{1} = RD.seed_T{2}
+                 /\ RB.kem_ct{1} = KEM_PQ_c.KEM_INDCCA_Random.ctStar{1}).
+    + call (_: true).
+      call (_: true).
+      call (_: true).
+      call (_: true).
+      call (_: true).
+      rnd.
+      call (_: true).
+      call (_: true).
+      call (_: true).
+      rnd.
+      wp.
+      call (_: true).
+      wp.
+      call (_: true).
+      rnd KEM_PQ_c.ev_encodesharedsecret essg.
+      skip => /#.
+    seq 1 0 : (={glob KEM_PQ, glob NG, glob G, glob H, glob L}
+               /\ _r3{1} = H_c.KDFPRFSec_Real.k{2}
+               /\ ss_T{1} = ss_T{2} /\ ct_T{1} = ct_T{2} /\ ek_T{1} = ek_T{2}
+               /\ RB.ek_PQ{1} = ek_PQ{2}
+               /\ RB.kem_ct{1} = RD.kem_ct{2}
+               /\ RB.seed_T{1} = RD.seed_T{2}
+               /\ RB.kem_ct{1} = KEM_PQ_c.KEM_INDCCA_Random.ctStar{1}).
+    + exists* (glob KEM_PQ){1}, RB.ss_PQ{1}; elim* => gk a0.
+      call{1} (KEM_PQ_encodesharedsecret_det gk a0); skip => /#.
+    wp.
+    call (_: true).
+    wp.
+    call (_: true).
+    call (_: true).
+    call (_: true).
+    skip => /> *; exact kdf_regroup5.

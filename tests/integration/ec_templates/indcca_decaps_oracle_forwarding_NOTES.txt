@@ -155,10 +155,40 @@ structural reasons, so they are two separate fronts, not one:
     BOTH endpoints are delegating reductions, each forwarding to a DIFFERENT
     challenger (KEM-IND-CCA one side, KDF-PRF the other). There is no game body to
     drive the peel from, and dead guards can appear on BOTH sides.
-    Plausible extension, not attempted: emit a guard loop per side
-    (`do ? (rcondf{1} ^if; ...)` and `do ? (rcondf{2} ^if; ...)`) at each leaf and
-    drive from either body. Open questions: which body drives, and whether the
-    numeric `seq idx idx` still has prefix agreement across two reductions.
+    **c254 CORRECTION -- "a guard loop per side" is NECESSARY BUT NOWHERE NEAR
+    SUFFICIENT, and these hops are not plumbing at all.** Dumping the callees
+    (not just the statement kinds) shows the `ct_PQ = kem_ct` CHALLENGE branch
+    differs by a whole abstract call:
+
+      LEFT  (RB, KEM-IND-CCA):  KEM_PQ.encodesharedsecret, NG.encode,
+                                NG.generator, NG.exp, NG.encode, L.get,
+                                H.evaluate          -- 7 calls
+      RIGHT (RD, KDF-PRF):      NG.encode, NG.generator, NG.exp, NG.encode,
+                                L.get, H.evaluate   -- 6 calls
+
+    The inner-ELSE paths DO match at 8 calls each once the dead guards are
+    eliminated, so the forwarding machinery is right there. The challenge branch
+    is the problem: the extra `KEM_PQ.encodesharedsecret` is where the encoded PQ
+    shared secret leaves the KDF input, which is REAL CRYPTOGRAPHIC CONTENT of
+    the hop, not plumbing. So these belong with `hop_7` (the PRF-random hop), not
+    with `hop_3`/`hop_12`.
+
+    AND the coupling is missing its premise entirely -- for this hop it is only
+        RD.seed_T{2} = RB.seed_T{1} /\ RD.kem_ct{2} = RB.kem_ct{1} /\
+        RD.ctStar{2} = RB.ctStar{1} /\ RB.ctStar.`1{1} = <Chal>.ctStar{1} /\
+        RB.kem_ct{1} = <Chal>.ctStar{1}
+    with NO relation between the LEFT's challenger key and the RIGHT's packed
+    `pq_keys`, and none between the two sides' encoded shared secrets.
+
+    So closing these needs THREE things, not one: (i) the deleg gate relaxed to
+    both-sides-delegate with a per-side guard loop; (ii) a NEW cross-side coupling
+    conjunct (challenger field on one side vs packed component on the other --
+    `_forwarded_chal_key_coupling` handles only game-vs-reduction and returns ""
+    when both endpoints are reductions); (iii) a one-sided treatment of the extra
+    DETERMINISTIC call. (iii) is plausibly tractable with the existing
+    `exists*` + `call{i} (<M>_<m>_det ...)` machinery, which is exactly what the
+    landed `_synth_kdf_key_substitution` route already does elsewhere -- but it
+    is a build, not a gate relaxation.
 
  2. **NEITHER side materializes a delegate** (`decaps` 0 and 15):
         L = corr, ctStar, seed_T          (correctness reduction, packed `corr`)

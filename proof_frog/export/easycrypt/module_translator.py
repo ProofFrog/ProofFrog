@@ -1958,6 +1958,7 @@ class ModuleTranslator:
             # the current phase only aims for declaration-level
             # EC acceptance.
             body = [ec_ast.Return(expr="witness")]
+        _initialize_conditional_result(body)
         return ec_ast.Proc(
             name=sig.name.lower(),
             params=ec_params,
@@ -1967,6 +1968,60 @@ class ModuleTranslator:
 
     def _translate_param_type(self, t: frog_ast.Type) -> ec_ast.EcType:
         return self._types.translate_type(t)
+
+
+def _definitely_assigns(stmts: Sequence[ec_ast.EcStmt], var: str) -> bool:
+    """Whether every path through ``stmts`` writes ``var``.
+
+    An ``if`` counts only when BOTH arms write it; a ``while`` never counts,
+    because the loop may run zero times. Deliberately the same conservative
+    criterion EasyCrypt's own analysis uses -- the point is to agree with it,
+    not to be cleverer.
+    """
+    for stmt in stmts:
+        if isinstance(stmt, (ec_ast.Assign, ec_ast.Call, ec_ast.Sample)):
+            if stmt.var == var:
+                return True
+        elif isinstance(stmt, ec_ast.If):
+            if (
+                stmt.else_body
+                and _definitely_assigns(stmt.then_body, var)
+                and _definitely_assigns(stmt.else_body, var)
+            ):
+                return True
+    return False
+
+
+def _initialize_conditional_result(body: list[ec_ast.EcStmt]) -> None:
+    """Seed the returned local with ``witness`` when it is not definitely
+    assigned, in place.
+
+    A method whose result accumulator is written only inside a loop body (the
+    CFRG `decaps` shape: the match is recorded in a `while`, and the fallback
+    after it) IS total -- the post-loop `if (!found)` covers the zero-iteration
+    case -- but EasyCrypt's definite-assignment analysis cannot see that. It
+    therefore treats the accumulator as live-in, and `sim` on a SELF-equiv of
+    that procedure demands `_r0{1} = _r0{2}` in its residue: underivable at
+    entry, so the branch never closes and no closer can rescue it. Seeding the
+    variable removes the demand and is semantically neutral, since every path
+    overwrites it before the `return`.
+
+    Gated on the definite-assignment check, so a straight-line method -- which
+    is nearly all of them -- is untouched and its export byte-identical.
+    """
+    ret = next((s for s in body if isinstance(s, ec_ast.Return)), None)
+    if ret is None:
+        return
+    var = ret.expr.strip()
+    if not var.isidentifier():
+        return  # a computed return expression has no accumulator to seed
+    decls = [s for s in body if isinstance(s, ec_ast.VarDecl)]
+    if not any(d.name == var for d in decls):
+        return  # not a local of this proc (a field or param needs no seeding)
+    exec_stmts = [s for s in body if not isinstance(s, ec_ast.VarDecl)]
+    if _definitely_assigns(exec_stmts, var):
+        return
+    body.insert(len(decls), ec_ast.Assign(var=var, rhs="witness"))
 
 
 def _ec_field_name(name: str) -> str:

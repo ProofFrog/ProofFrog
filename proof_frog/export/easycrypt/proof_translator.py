@@ -266,6 +266,29 @@ def live_state_coupling(left_field_ref: str, right_field_ref: str) -> str:
     return f"{left_field_ref}" "{1}" f" = {right_field_ref}" "{2}"
 
 
+def _merge_byequiv_pre(byequiv_pre: str, inv: str) -> str:
+    """``byequiv_pre`` widened with every ``glob`` the call invariant names.
+
+    Returns ``byequiv_pre`` unchanged when either side is not a plain
+    ``={glob X, glob Y}`` list, so any shape this cannot parse stays
+    byte-identical.
+    """
+    if not (byequiv_pre.startswith("={") and byequiv_pre.endswith("}")):
+        return byequiv_pre
+    inv_head = inv.split(" /\\ ")[0].strip()
+    if not (inv_head.startswith("={") and inv_head.endswith("}")):
+        return byequiv_pre
+    have = [x.strip() for x in byequiv_pre[2:-1].split(",")]
+    extra = [
+        x.strip()
+        for x in inv_head[2:-1].split(",")
+        if x.strip().startswith("glob ") and x.strip() not in have
+    ]
+    if not extra:
+        return byequiv_pre
+    return "={" + ", ".join(have + extra) + "}"
+
+
 class StepResolver:
     """Resolve a FrogLang proof step to its EC module expression.
 
@@ -1065,7 +1088,17 @@ def translate_assumption_hop_pr_lemma(  # pylint: disable=too-many-arguments,too
             branches = [oracle_tac] * n_oracles + [peel_tail]
             selector = " | ".join(branches)
             call_close = f"wp; call (_: {inv}); [ {selector} ]"
-            byq = f"byequiv (_: {multi_oracle.byequiv_pre} ==> ={{res}}) => //"
+            # The byequiv precondition must carry the SAME module globs as the
+            # `call` invariant it has to establish. `byequiv_pre` is built once
+            # for the proof (`={glob A, <scheme modules>}`) and omits the
+            # REDUCTION's own state -- and nothing in `main` initialises that
+            # state, so its two copies are unrelated and the invariant's
+            # `={glob <Red>}` conjunct is underivable. Both `Pr[]` are taken at
+            # the SAME `&m`, so widening the precondition is free.
+            byq = (
+                f"byequiv (_: {_merge_byequiv_pre(multi_oracle.byequiv_pre, inv)}"
+                " ==> ={res}) => //"
+            )
             if dead_drop is None:
                 # ``ro_align`` (ROM binding consume-pk, R_PQ_Bind): hoist the shared
                 # RO to the front (``inline{2} 2; swap{2} ^ <${1} @ 0``) before the

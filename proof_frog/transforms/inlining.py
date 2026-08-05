@@ -1648,7 +1648,7 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
         self._proof_let_types = proof_let_types
 
-    def _record_unreachable_occurrences(
+    def _record_unreachable_occurrences(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         block: frog_ast.Block,
         target: str,

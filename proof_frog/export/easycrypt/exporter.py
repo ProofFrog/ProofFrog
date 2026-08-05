@@ -429,6 +429,67 @@ def _section_header(label: str) -> str:
     return f"(* ===== {label} ===== *)"
 
 
+def _endo_bijectivity_lemmas(
+    module_name: str, method: str, bs_name: str, clone_prefix: str
+) -> str:
+    """``<M>_<m>_surj`` + ``<M>_<m>_bij``, DERIVED from the ``_inj`` axiom.
+
+    A ``deterministic injective`` method whose argument and result share one
+    BitWord-backed type is an injective ENDO-map on a FINITE type, so it is
+    surjective by pigeonhole and hence bijective -- which is what lets a hop
+    couple ``ev_<m>(x)`` for a uniform ``x`` with a directly-drawn uniform
+    value. Injectivity alone gives uniformity only on the IMAGE; finiteness of
+    the shared carrier is what closes the gap, and it comes from the clone's own
+    ``FinType``, adding nothing to the trusted base.
+
+    NAMING TRAP: ``Word.eca`` does ``clone include FinType ... rename [op]
+    "enum" as "words"``, so the OP is ``<BW>.words`` while the LEMMAS keep
+    ``<BW>.enumP`` / ``<BW>.enum_uniq``. The rename is ops-only.
+
+    The ``size_map`` rewrite must be given its function EXPLICITLY: ``words`` is
+    itself defined through a ``map``, so a bare ``rewrite size_map`` fires
+    inside that definition instead of on the goal's own map.
+
+    Validated in ``ec_templates/bitword_injective_bijective.ec``.
+    """
+    ev = f"{clone_prefix}.ev_{method}"
+    bw = f"BW_{bs_name}"
+    inj = f"{module_name}_{method}_inj"
+    surj = f"{module_name}_{method}_surj"
+    return "\n".join(
+        [
+            f"  local lemma {surj} (y : {bs_name}) : exists x, {ev} x = y.",
+            "  proof.",
+            f"  have huniq : uniq (map {ev} {bw}.words).",
+            f"  + apply/map_inj_in_uniq; last exact {bw}.enum_uniq.",
+            f"    by move=> p q _ _; apply {inj}.",
+            f"  have hsub : forall z, z \\in map {ev} {bw}.words"
+            f" => z \\in {bw}.words.",
+            f"  + by move=> z _; apply {bw}.enumP.",
+            f"  have hsize : size {bw}.words <= size (map {ev} {bw}.words).",
+            f"  + by rewrite (size_map {ev}).",
+            f"  have [hmem _] := leq_size_perm (map {ev} {bw}.words)"
+            f" {bw}.words huniq hsub hsize.",
+            f"  have : y \\in map {ev} {bw}.words"
+            f" by rewrite hmem; apply {bw}.enumP.",
+            "  by move/mapP => [x [_ hx]]; exists x; rewrite hx.",
+            "  qed.",
+            "",
+            f"  local lemma {module_name}_{method}_bij : bijective {ev}.",
+            "  proof.",
+            f"  pose g := fun y => choiceb (fun x => {ev} x = y) witness.",
+            "  exists g; split.",
+            "  + move=> x; rewrite /g.",
+            f"    have := choicebP (fun z => {ev} z = {ev} x) witness _.",
+            "    + by exists x.",
+            f"    by apply {inj}.",
+            "  move=> y; rewrite /g.",
+            f"  by apply (choicebP (fun z => {ev} z = y) witness); apply {surj}.",
+            "  qed.",
+        ]
+    )
+
+
 def _reprogramming_lazy_ro_field(game: frog_ast.Game) -> str | None:
     """Return the reprogramming RO Function-field name if ``game`` is a lazy-RO
     *reprogramming* game, else ``None``.
@@ -1560,6 +1621,7 @@ def export_proof_file(proof_path: str) -> str:
     # by its head op and request the licensed ``<M>_<m>_inj`` axiom, without
     # naming any method. (A non-deterministic method has no ``ev_<m>``, so the
     # map is intersected with the deterministic set.)
+    inj_methods_by_module: dict[str, set[str]] = {}
     inj_ev_ops: dict[str, tuple[str, str]] = {}
     for _inst in instances:
         _prim = primitives_by_name.get(_inst.primitive_name)
@@ -1570,6 +1632,9 @@ def export_proof_file(proof_path: str) -> str:
                 inj_ev_ops[f"{_inst.clone_alias}.ev_{_m.name.lower()}"] = (
                     _inst.let_name,
                     _m.name.lower(),
+                )
+                inj_methods_by_module.setdefault(_inst.let_name, set()).add(
+                    _m.name.lower()
                 )
 
     # Each game file's primitive is the type name of its first parameter
@@ -3041,6 +3106,14 @@ def export_proof_file(proof_path: str) -> str:
     # into ``a = b``). The exporter emits one ``<M>_<m>_inj`` axiom per pair in
     # section scope. Empty for proofs with no such tactic, so they are untouched.
     inj_method_requests: set[tuple[str, str]] = set()
+    # (declared module, EC method, bitstring type, clone alias) for a
+    # ``deterministic injective`` UNARY method whose argument and result share a
+    # BitWord-backed type -- an injective ENDO-map, hence bijective, hence
+    # carrying that type's uniform distribution to itself. The exporter DERIVES
+    # the bijectivity from the ``_inj`` axiom above (a request here implies the
+    # ``_inj`` request), so this grows no trusted base. Empty for proofs with no
+    # such tactic, so they are untouched.
+    bij_method_requests: set[tuple[str, str, str, str]] = set()
     # Concrete scheme names whose ``<Scheme>_decaps_val`` functional-value phoare
     # lemma the binding challenge case-split tactic references; the exporter
     # synthesizes each from the scheme's translated ``decaps`` proc. Empty for
@@ -10158,6 +10231,7 @@ def export_proof_file(proof_path: str) -> str:
                 method_return_types=method_return_types,
                 flat_module_params=flat_module_params,
                 det_methods=det_methods_by_module,
+                inj_methods_by_module=inj_methods_by_module,
                 init_reduction_repacks=init_reduction_repacks,
                 init_decomposition=init_decomposition,
                 init_coupling=_decomposition_coupling(step_a, step_b),
@@ -10188,6 +10262,8 @@ def export_proof_file(proof_path: str) -> str:
             chain_extra_decls.extend(info.extra_decls)
             pres_method_requests.update(info.pres_methods)
             inj_method_requests.update(info.inj_methods)
+            bij_method_requests.update(info.bij_methods)
+            inj_method_requests.update((m, x) for m, x, _bs, _a in info.bij_methods)
             decaps_val_requests.update(info.decaps_val_schemes)
             if info.aux_lemmas and not aux_lemma_lines:
                 aux_lemma_lines.extend(info.aux_lemmas)
@@ -11575,6 +11651,18 @@ def export_proof_file(proof_path: str) -> str:
             *(
                 mt.ModuleTranslator.pres_axiom(mod, meth)
                 for mod, meth in sorted(pres_method_requests)
+            ),
+        ]
+    # Bijectivity of an injective ENDO-map on a BitWord-backed type, DERIVED
+    # (not axiomatized) from the ``_inj`` axiom just emitted plus the type's own
+    # finiteness. Sits here because it consumes a ``declare axiom`` and so must
+    # be section-local, after that axiom and before the hop lemmas that use it.
+    if bij_method_requests:
+        det_axiom_decls += [
+            _section_header("Injective endo-map bijectivity (derived)"),
+            *(
+                _endo_bijectivity_lemmas(mod, meth, bs_name, alias)
+                for mod, meth, bs_name, alias in sorted(bij_method_requests)
             ),
         ]
     if declare_modules and live_state_modules:

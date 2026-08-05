@@ -1571,6 +1571,11 @@ class MultiOracleHopChainInfo:
     # (module, method) joint-injectivity axioms the challenge case-split route
     # requests (mirrors ``pres_methods``); consumed by ``inj_method_requests``.
     inj_methods: set[tuple[str, str]] = field(default_factory=set)
+    # (module, method, bitstring type, clone alias) for an injective ENDO-map
+    # whose BIJECTIVITY the KDF-key-substitution route needs. Implies the
+    # matching ``inj_methods`` entry; consumed by ``bij_method_requests``, which
+    # DERIVES the bijectivity rather than assuming it.
+    bij_methods: set[tuple[str, str, str, str]] = field(default_factory=set)
     # Concrete scheme names whose ``<Scheme>_decaps_val`` phoare lemma the
     # challenge route references; the exporter synthesizes them into section
     # scope from the scheme's translated ``decaps`` proc.
@@ -4929,6 +4934,7 @@ def emit_multi_oracle_chain_for_hop(
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     flat_module_params: list[ec_ast.ModuleParam] | None = None,
     det_methods: dict[str, set[str]] | None = None,
+    inj_methods_by_module: dict[str, set[str]] | None = None,
     init_reduction_repacks: bool = False,
     init_decomposition: bool = False,
     clone_alias: dict[str, str] | None = None,
@@ -5038,6 +5044,7 @@ def emit_multi_oracle_chain_for_hop(
     tactic_body_by_oracle: dict[str, list[str]] = {}
     pres_methods: set[tuple[str, str]] = set()
     inj_methods: set[tuple[str, str]] = set()
+    bij_methods: set[tuple[str, str, str, str]] = set()
     decaps_val_schemes: set[str] = set()
     aux_lemma_lines: list[str] = []
     for oracle_name, is_init in oracles:
@@ -5068,6 +5075,9 @@ def emit_multi_oracle_chain_for_hop(
             full_coupling=full_coupling,
             clone_alias=clone_alias or {},
             inj_acc=inj_methods,
+            bij_acc=bij_methods,
+            types=types,
+            inj_methods_by_module=inj_methods_by_module or {},
             decaps_val_acc=decaps_val_schemes,
             aux_lemma_acc=aux_lemma_lines,
             init_tac_override=init_tac_override,
@@ -5088,6 +5098,7 @@ def emit_multi_oracle_chain_for_hop(
         tactic_body_by_oracle=tactic_body_by_oracle,
         pres_methods=pres_methods,
         inj_methods=inj_methods,
+        bij_methods=bij_methods,
         decaps_val_schemes=decaps_val_schemes,
         aux_lemmas=aux_lemma_lines,
     )
@@ -5120,6 +5131,9 @@ def _emit_one_oracle_chain(
     full_coupling: str | None = None,
     clone_alias: dict[str, str] | None = None,
     inj_acc: set[tuple[str, str]] | None = None,
+    bij_acc: set[tuple[str, str, str, str]] | None = None,
+    types: tc.TypeCollector | None = None,
+    inj_methods_by_module: dict[str, set[str]] | None = None,
     decaps_val_acc: set[str] | None = None,
     aux_lemma_acc: list[str] | None = None,
     init_tac_override: list[str] | None = None,
@@ -5282,6 +5296,30 @@ def _emit_one_oracle_chain(
         )
         if reorder is not None:
             return [], [_res_tag(SYNTH_PARAM), *reorder, "qed."], set()
+        # KDF-key substitution: the reorder above declines because the two sides
+        # do NOT run the same calls -- one carries an extra `deterministic
+        # injective` encoding whose result is the other's directly-drawn key. It
+        # is the ESTABLISHING hop of the IND-CCA `initialize` front, so it also
+        # has to relate two differently-bracketed KDF inputs. ``None`` off-shape,
+        # so every other init stays byte-identical.
+        substitution = _synth_kdf_key_substitution(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            flat_params,
+            det_methods,
+            inj_methods_by_module or {},
+            clone_alias or {},
+            types,
+            bij_acc,
+            left_wrapper_expr,
+            right_wrapper_expr,
+        )
+        if substitution is not None:
+            return [], [_res_tag(SYNTH_PARAM), *substitution, "qed."], set()
         # ek-twin fallback when the last states diverge. The ek-derivation twin
         # route (tried above only when ``last_states_match``) builds its
         # transitivity entirely off the FIRST flat states -- the raw-wrapper
@@ -9388,6 +9426,551 @@ def _ec_full_perm_swaps(
 _LOSSLESS_DISTR_FAMILIES = ("dbs_", "dfun_")
 
 
+def _app_head(expr: str) -> tuple[str, str]:
+    """``(head token, rest)`` of a function application, else ``(expr, "")``."""
+    stripped = expr.strip()
+    match = re.match(r"([A-Za-z_][\w.]*)\s+(.*)", stripped, re.S)
+    return (match.group(1), match.group(2)) if match else (stripped, "")
+
+
+def _strip_outer_parens(expr: str) -> str:
+    """``expr`` with one balanced enclosing paren pair removed, if any."""
+    stripped = expr.strip()
+    while stripped.startswith("(") and stripped.endswith(")"):
+        depth = 0
+        for pos, char in enumerate(stripped):
+            depth += (char == "(") - (char == ")")
+            if depth == 0 and pos != len(stripped) - 1:
+                return stripped
+        stripped = stripped[1:-1].strip()
+    return stripped
+
+
+def _app_args(rest: str) -> list[str]:
+    """Split an application's argument text at TOP-LEVEL whitespace."""
+    args: list[str] = []
+    depth = 0
+    cur = ""
+    for char in rest:
+        depth += (char == "(") - (char == ")")
+        if char.isspace() and depth == 0:
+            if cur:
+                args.append(cur)
+                cur = ""
+            continue
+        cur += char
+    if cur:
+        args.append(cur)
+    return args
+
+
+def _concat_chain(expr: str, op_names: set[str]) -> tuple[list[str], list[str]] | None:
+    """``(ops, leaves)`` for a LEFT-NESTED concat chain, innermost op first.
+
+    ``c3 (c2 (c1 a b) c) d`` -> ``(["c1","c2","c3"], ["a","b","c","d"])``.
+    ``None`` when the expression is not such a chain -- a leaf, a different
+    head, or an arity that is not two.
+    """
+    ops: list[str] = []
+    leaves: list[str] = []
+    cur = _strip_outer_parens(expr)
+    for _ in range(32):
+        head, rest = _app_head(cur)
+        if head not in op_names:
+            return None
+        args = _app_args(rest)
+        if len(args) != 2:
+            return None
+        ops.insert(0, head)
+        leaves.insert(0, _strip_outer_parens(args[1]))
+        inner = _strip_outer_parens(args[0])
+        if _app_head(inner)[0] in op_names:
+            cur = inner
+            continue
+        leaves.insert(0, inner)
+        return ops, leaves
+    return None
+
+
+# The delegate object a FrogLang ``Reduction`` body composes against is always
+# spelled ``challenger`` -- it is bound by the language, not declared by the
+# proof (``proof_engine`` and ``semantic_analysis`` both hard-code the name), so
+# the canonicalizer's ``challenger_<f>`` flat-state fields are a LANGUAGE
+# constant rather than a proof-, game-, or file-specific name.
+_DELEGATE_PREFIX = "challenger_"
+
+
+def _module_head(expr: str) -> str:
+    """The module name of an applied module expression: ``R(a, b)`` -> ``R``."""
+    return expr.split("(", 1)[0].strip()
+
+
+def _wrapper_delegate(expr: str) -> str:
+    """The module name of a wrapper's LAST argument -- its inner challenger.
+
+    ``RB(KEM_PQ, ..., KEM_PQ_c.KEM_INDCCA_Random(KEM_PQ))`` ->
+    ``KEM_PQ_c.KEM_INDCCA_Random``. Empty when the expression takes no
+    arguments.
+    """
+    head, _, rest = expr.partition("(")
+    if not rest or not head:
+        return ""
+    depth = 0
+    args: list[str] = []
+    cur = ""
+    for char in rest[:-1] if rest.endswith(")") else rest:
+        if char == "," and depth == 0:
+            args.append(cur)
+            cur = ""
+            continue
+        depth += (char == "(") - (char == ")")
+        cur += char
+    if cur:
+        args.append(cur)
+    return _module_head(args[-1]) if args else ""
+
+
+def _flat_name_map(
+    state: frog_ast.Game, red_base: str, chal_base: str
+) -> tuple[dict[str, str], str]:
+    """``rendered flat field -> post-`inline *` name``, plus the delegate tag.
+
+    The canonicalizer flattens a reduction's own state and its inlined
+    delegate's into ONE field list, marking the delegate's ``<obj>@<f>`` (the
+    same ``@`` convention the composite-reduction routes read); the EC renderer
+    turns that into ``<obj>_<f>``. EasyCrypt, in contrast, keeps the two
+    qualified by their owning MODULE. The flat states therefore give the
+    structure but never the names, and this is the bridge:
+    ``challenger@k`` -> ``<Chal>.k``, ``ss_PQ`` -> ``<Red>.ss_PQ``.
+
+    Also returns the delegate object's name, which is what marks a delegate
+    LOCAL -- EasyCrypt renames those outright, so no correspondence for them is
+    recoverable and the caller must drop any conjunct that would need one.
+    """
+    out: dict[str, str] = {}
+    delegate = ""
+    for fld in state.fields:
+        raw = fld.name
+        rendered = _lower_initial(raw.replace("@", "_"))
+        if "@" in raw:
+            owner, own = raw.split("@", 1)
+            delegate = owner
+            out[rendered] = f"{chal_base}.{_lower_initial(own)}"
+        else:
+            out[rendered] = f"{red_base}.{rendered}"
+    return out, delegate
+
+
+def _lower_initial(name: str) -> str:
+    """EC module globals are lowercase-initial (``RF`` -> ``rF``), matching
+    ``module_translator``'s own field rename."""
+    return name[0].lower() + name[1:] if name[:1].isupper() else name
+
+
+def _real_name(var: str, name_map: dict[str, str], delegate: str) -> str | None:
+    """The post-``inline *`` name of a flat-state variable, or ``None``.
+
+    A flat FIELD resolves through :func:`_flat_name_map`. A flat LOCAL keeps its
+    name -- unless it came from the inlined delegate, which EasyCrypt renames,
+    in which case there is nothing to return and the caller must drop the
+    conjunct rather than guess.
+    """
+    if var in name_map:
+        return name_map[var]
+    return None if delegate and var.startswith(f"{delegate}_") else var
+
+
+def _synth_kdf_key_substitution(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    det_methods: dict[str, set[str]],
+    inj_methods_by_module: dict[str, set[str]],
+    clone_alias: dict[str, str],
+    types: tc.TypeCollector | None,
+    bij_acc: set[tuple[str, str, str, str]] | None,
+    left_wrapper_expr: str = "",
+    right_wrapper_expr: str = "",
+) -> list[str] | None:
+    """Closing tactic for a KDF-KEY-SUBSTITUTION init hop, or ``None``.
+
+    The IND-CCA ``initialize`` shape where one endpoint derives the KDF key by
+    ENCODING a challenger-drawn shared secret and the other draws that key
+    directly. Its three components, all of which have to line up at once:
+
+    1. a REORDER -- the two sides run the same abstract calls, but one draws the
+       key before its key generation and the other after its encapsulation
+       (:func:`_event_align_swaps`, which unlike the bundled-delegate reorder
+       must move a SAMPLE as well as a call);
+    2. a one-sided ``deterministic injective`` ENCODING call, dropped with its
+       ``_det`` axiom once its result has been characterized;
+    3. the two KDF inputs built from the same leaves under DIFFERENT bracketings
+       -- the encoding side nests everything to the left, the other prepends its
+       key to a separately-built ``rest`` -- closed by the requested N-piece
+       regrouping law.
+
+    The cryptographic content is (2)+(3)'s coupling: the two draws agree because
+    an injective ENDO-map on a finite type is bijective, so encoding a uniform
+    shared secret is uniform. That bijectivity is DERIVED from the licensed
+    ``_inj`` axiom (``bij_acc``), not assumed.
+
+    Everything is read off the FIRST FLAT STATES, which already have the
+    delegate inlined -- they ARE the post-``inline *`` bodies, statement for
+    statement -- and every correspondence (which local pairs with which, which
+    state variables hold equal values) is derived by RESOLVING assignments back
+    to backbone events (:func:`_assign_env`), never by matching names.
+
+    Declines to ``None`` off-shape, so every other init stays byte-identical.
+    """
+    if types is None or bij_acc is None:
+        return None
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+    lmod = _flat_state_module(
+        modules, "Init_ks_L", lproj, external_module_types, method_return_types, []
+    )
+    rmod = _flat_state_module(
+        modules, "Init_ks_R", rproj, external_module_types, method_return_types, []
+    )
+    if not lmod.procs or not rmod.procs:
+        return None
+
+    def _body(mod: ec_ast.Module) -> tuple[list[ec_ast.EcStmt], str]:
+        body = _exec_stmts(mod.procs[0].body)
+        ret = next((s.expr for s in body if isinstance(s, ec_ast.Return)), "")
+        return [s for s in body if not isinstance(s, ec_ast.Return)], ret
+
+    (l_exec, l_ret), (r_exec, r_ret) = _body(lmod), _body(rmod)
+
+    # --- (1) which side carries the extra encoding call ----------------------
+    l_calls = Counter(s.callee for s in l_exec if isinstance(s, ec_ast.Call))
+    r_calls = Counter(s.callee for s in r_exec if isinstance(s, ec_ast.Call))
+    extra_l, extra_r = l_calls - r_calls, r_calls - l_calls
+    if sum(extra_l.values()) == 1 and not extra_r:
+        enc_side, oth_side = 1, 2
+    elif sum(extra_r.values()) == 1 and not extra_l:
+        enc_side, oth_side = 2, 1
+    else:
+        return None
+    enc_exec, oth_exec = (l_exec, r_exec) if enc_side == 1 else (r_exec, l_exec)
+    enc_ret, oth_ret = (l_ret, r_ret) if enc_side == 1 else (r_ret, l_ret)
+    callee = next(iter((extra_l or extra_r).elements()))
+    enc_calls = [
+        s for s in enc_exec if isinstance(s, ec_ast.Call) and s.callee == callee
+    ]
+    if len(enc_calls) != 1:
+        return None
+    enc_call = enc_calls[0]
+    if "." not in callee:
+        return None
+    mod_name, meth = callee.rsplit(".", 1)
+    if meth not in det_methods.get(mod_name, set()):
+        return None
+    if meth not in inj_methods_by_module.get(mod_name, set()):
+        return None
+    if len(_app_args(enc_call.args.replace(",", " "))) != 1:
+        return None  # the endo-map argument must be the method's ONLY one
+    alias = clone_alias.get(mod_name)
+    if alias is None:
+        return None
+
+    # --- (2) align the two backbones ----------------------------------------
+    enc_ev, oth_ev = _bd_events(enc_exec), _bd_events(oth_exec)
+    enc_stmt_ev = [s for s in enc_exec if _is_bb_stmt(s)]
+    pos = enc_stmt_ev.index(enc_call)
+    enc_ev_noe = enc_ev[:pos] + enc_ev[pos + 1 :]
+    if sorted(enc_ev_noe) != sorted(oth_ev):
+        return None
+    swaps: list[str] = []
+    if enc_ev_noe != oth_ev:
+        got = _event_align_swaps(oth_exec, enc_ev_noe, oth_side)
+        if got is not None:
+            swaps, oth_exec = got
+        else:
+            got = _event_align_swaps(
+                enc_exec, oth_ev[:pos] + [enc_ev[pos]] + oth_ev[pos:], enc_side
+            )
+            if got is None:
+                return None
+            swaps, enc_exec = got
+        enc_ev, oth_ev = _bd_events(enc_exec), _bd_events(oth_exec)
+        enc_stmt_ev = [s for s in enc_exec if _is_bb_stmt(s)]
+        pos = enc_stmt_ev.index(enc_call)
+        if enc_ev[:pos] + enc_ev[pos + 1 :] != oth_ev:
+            return None
+    oth_stmt_ev = [s for s in oth_exec if _is_bb_stmt(s)]
+
+    # --- (3) the coupled draw: the encoding's argument IS a sampled value ----
+    env_e, env_o = _assign_env(enc_exec), _assign_env(oth_exec)
+    arg_src = _resolve_expr(enc_call.args, env_e)
+    coupled = next(
+        (
+            j
+            for j, s in enumerate(enc_stmt_ev)
+            if isinstance(s, ec_ast.Sample) and s.var == arg_src
+        ),
+        None,
+    )
+    if coupled is None or coupled >= pos:
+        return None
+    sample_e = enc_stmt_ev[coupled]
+    sample_o = oth_stmt_ev[coupled]
+    if not isinstance(sample_e, ec_ast.Sample) or not isinstance(
+        sample_o, ec_ast.Sample
+    ):
+        return None
+    if sample_o.distr != sample_e.distr:
+        return None
+
+    # --- (4) the two KDF inputs, and the regrouping law that relates them ----
+    op_names = types.concat_op_names()
+    kdf_e, kdf_o = enc_stmt_ev[-1], oth_stmt_ev[-1]
+    if not isinstance(kdf_e, ec_ast.Call) or not isinstance(kdf_o, ec_ast.Call):
+        return None
+    chain_e = _concat_chain(_resolve_expr(kdf_e.args, env_e), op_names)
+    whole_o = _resolve_expr(kdf_o.args, env_o)
+    head_o, rest_o = _app_head(whole_o)
+    if chain_e is None or head_o not in op_names:
+        return None
+    pre_args = _app_args(rest_o)
+    if len(pre_args) != 2 or _strip_outer_parens(pre_args[0]) != sample_o.var:
+        return None
+    chain_o = _concat_chain(_strip_outer_parens(pre_args[1]), op_names)
+    left_ops, left_leaves = chain_e
+    if chain_o is None or left_leaves[0] != enc_call.var:
+        return None
+    # Compare the two leaf lists by the EVENT that produced each leaf, not by
+    # name: the same encode/get call is `_r4` on one side and `_r3` on the
+    # other, and the encoding call the encoding side carries shifts every event
+    # index after it, so the enc-side slots are numbered with it removed.
+    slot_e = {
+        s.var: j
+        for j, s in enumerate(enc_stmt_ev[:pos] + enc_stmt_ev[pos + 1 :])
+        if isinstance(s, (ec_ast.Call, ec_ast.Sample))
+    }
+    slot_o = {
+        s.var: j
+        for j, s in enumerate(oth_stmt_ev)
+        if isinstance(s, (ec_ast.Call, ec_ast.Sample))
+    }
+    if [slot_e.get(v, v) for v in left_leaves[1:]] != [
+        slot_o.get(v, v) for v in chain_o[1]
+    ]:
+        return None
+    regroup = types.probe_concat_regroup(tuple(left_ops), head_o)
+    if regroup is None:
+        return None
+    bs_name = next(
+        (left for op, left, _r, _res in types.concat_ops_seen() if op == left_ops[0]),
+        None,
+    )
+    if bs_name is None:
+        return None
+    # Both REQUESTS are deferred to the end of the route: a gate below can still
+    # decline, and a lemma emitted for a hop that then admits is dead weight in
+    # every export that reaches this shape without closing.
+
+    def _register() -> None:
+        types.request_concat_regroup(tuple(left_ops), head_o)
+        bij_acc.add((mod_name, meth, bs_name, alias))
+
+    # --- (5) the post-``inline *`` names -------------------------------------
+    # Structure came off the flat states; NAMES cannot. The canonicalizer
+    # flattens the reduction's own state and its inlined delegate's into one
+    # field list, while EasyCrypt keeps them qualified by owning module. Resolve
+    # each flat variable to what EasyCrypt will call it, and DROP any conjunct
+    # whose variable is a delegate-inlined local -- EasyCrypt renames those and
+    # no correspondence is recoverable.
+    if pos == 0:
+        return None  # nothing to couple before the encoding call
+    enc_wrap, oth_wrap = (
+        (left_wrapper_expr, right_wrapper_expr)
+        if enc_side == 1
+        else (right_wrapper_expr, left_wrapper_expr)
+    )
+    enc_state, oth_state = (
+        (left_state0, right_state0) if enc_side == 1 else (right_state0, left_state0)
+    )
+    bases = (
+        _module_head(enc_wrap),
+        _wrapper_delegate(enc_wrap),
+        _module_head(oth_wrap),
+        _wrapper_delegate(oth_wrap),
+    )
+    if not all(bases):
+        return None
+    map_e, deleg_e = _flat_name_map(enc_state, bases[0], bases[1])
+    map_o, deleg_o = _flat_name_map(oth_state, bases[2], bases[3])
+    if not deleg_e or not deleg_o:
+        # The delegate object's name is recoverable only from an ``@``-marked
+        # FIELD. Without one, a delegate-inlined LOCAL is indistinguishable from
+        # a reduction local, and the route would name a variable EasyCrypt has
+        # renamed -- so decline rather than emit a tactic that cannot resolve.
+        return None
+    fields_e, fields_o = set(map_e), set(map_o)
+
+    def _enc_name(var: str) -> str | None:
+        return _real_name(var, map_e, deleg_e)
+
+    def _oth_name(var: str) -> str | None:
+        return _real_name(var, map_o, deleg_o)
+
+    # --- (6) the tactic ------------------------------------------------------
+    ev_op = f"{alias}.ev_{meth}"
+    globs = ", ".join(f"glob {p.name}" for p in flat_params)
+    cut_e = enc_exec.index(enc_call)
+    cut_o = oth_exec.index(oth_stmt_ev[pos - 1]) + 1
+    tail_e, tail_o = enc_exec[cut_e + 1 :], oth_exec[cut_o:]
+    live_e = _kdf_live_vars(tail_e, enc_ret)
+    live_o = _kdf_live_vars(tail_o, oth_ret)
+    canon_e = _kdf_canonical(enc_exec[:cut_e], enc_stmt_ev[:pos])
+    canon_o = _kdf_canonical(oth_exec[:cut_o], oth_stmt_ev[:pos])
+    # The coupled draw is a delegate local on at least one side, so state the
+    # coupling over a NAMEABLE variable holding the same value at the cut.
+    key_e = _kdf_holder(canon_e, f"#{coupled}", _enc_name)
+    key_o = _kdf_holder(canon_o, f"#{coupled}", _oth_name)
+    enc_arg = _enc_name(enc_call.args.strip())
+    enc_res = _enc_name(enc_call.var)
+    if key_e is None or key_o is None or enc_arg is None or enc_res is None:
+        return None
+    conj = [f"={{{globs}}}", f"{key_o}{{{oth_side}}} = {ev_op} {key_e}{{{enc_side}}}"]
+    # The coupled draw is the ONE value the two sides do not hold in common --
+    # they hold it up to the encoding. Pairing it as an equality here would
+    # state something false, and the peel would then fail to establish it.
+    coupled_slot = f"#{coupled}"
+    for var_e, val in sorted(canon_e.items()):
+        if val == coupled_slot:
+            continue
+        name_e = _enc_name(var_e)
+        if name_e is None or not (var_e in live_e or var_e in fields_e):
+            continue
+        for var_o in sorted(k for k, v in canon_o.items() if v == val):
+            name_o = _oth_name(var_o)
+            if name_o is not None and (var_o in live_o or var_o in fields_o):
+                conj.append(f"{name_e}{{{enc_side}}} = {name_o}{{{oth_side}}}")
+                break
+    for var_a, val in sorted(canon_e.items()):
+        if val == coupled_slot or var_a not in fields_e or _enc_name(var_a) is None:
+            continue
+        for var_b in sorted(
+            k
+            for k, v in canon_e.items()
+            if v == val and k > var_a and k in fields_e and _enc_name(k) is not None
+        ):
+            conj.append(
+                f"{_enc_name(var_a)}{{{enc_side}}} = {_enc_name(var_b)}{{{enc_side}}}"
+            )
+    pred = "\n                 /\\ ".join(dict.fromkeys(conj))
+    seq_l, seq_r = (cut_e, cut_o) if enc_side == 1 else (cut_o, cut_e)
+    drop_l, drop_r = (1, 0) if enc_side == 1 else (0, 1)
+    tail_peel: list[str] = []
+    for stmt in reversed([s for s in tail_e if _is_bb_stmt(s)]):
+        tail_peel.append("wp.")
+        tail_peel.append("call (_: true)." if isinstance(stmt, ec_ast.Call) else "rnd.")
+    peel: list[str] = []
+    for j in range(pos - 1, -1, -1):
+        peel.append("  wp.")
+        if j == coupled:
+            peel.append(f"  rnd {ev_op} _bij_g.")
+        elif isinstance(enc_stmt_ev[j], ec_ast.Call):
+            peel.append("  call (_: true).")
+        else:
+            peel.append("  rnd.")
+    _register()
+    return [
+        f"have [_bij_g [_bij_can _bij_inv]] := {mod_name}_{meth}_bij.",
+        "proc.",
+        "inline *.",
+        *swaps,
+        f"seq {seq_l} {seq_r} : ({pred}).",
+        *peel,
+        "  wp.",
+        "  skip => /#.",
+        f"seq {drop_l} {drop_r} : ({pred}",
+        f"                 /\\ {enc_res}{{{enc_side}}} = {key_o}{{{oth_side}}}).",
+        f"+ exists* (glob {mod_name}){{{enc_side}}}, {enc_arg}{{{enc_side}}};"
+        " elim* => _g0 _a0.",
+        f"  call{{{enc_side}}} ({mod_name}_{meth}_det _g0 _a0); skip => /#.",
+        *tail_peel,
+        "skip => /> *.",
+        f"exact {regroup}.",
+    ]
+
+
+def _kdf_holder(
+    canon: dict[str, str], slot: str, real: Callable[[str], str | None]
+) -> str | None:
+    """A NAMEABLE variable holding the value produced by backbone event ``slot``.
+
+    The coupled draw itself is a delegate-inlined local on at least one side --
+    EasyCrypt renames those -- but the value it produced is also held by a
+    reduction field or a reduction local, which survive ``inline *`` under a
+    name the exporter can compute. Deterministic: candidates are scanned in
+    sorted order, so the emitted coupling never depends on dict ordering.
+    """
+    for var in sorted(k for k, v in canon.items() if v == slot):
+        name = real(var)
+        if name is not None:
+            return name
+    return None
+
+
+def _kdf_live_vars(tail: list[ec_ast.EcStmt], ret: str) -> set[str]:
+    """Variables the tail statements or the return expression READ.
+
+    These are the ones a mid-body coupling has to carry across the ``seq``; a
+    variable neither side looks at again needs no conjunct.
+    """
+    out: set[str] = set(_IDENT_TOKENS.findall(ret))
+    for stmt in tail:
+        if isinstance(stmt, ec_ast.Assign):
+            out |= set(_IDENT_TOKENS.findall(stmt.rhs))
+        elif isinstance(stmt, ec_ast.Call):
+            out |= set(_IDENT_TOKENS.findall(stmt.args))
+    return out
+
+
+def _kdf_canonical(
+    prefix: list[ec_ast.EcStmt], events: list[ec_ast.EcStmt]
+) -> dict[str, str]:
+    """``var -> value`` over a CROSS-SIDE vocabulary, for the hop's prefix.
+
+    Each variable is resolved back to the backbone events that produced it
+    (:func:`_assign_env`), then every event result is replaced by its POSITION
+    in the backbone. Two variables -- on the same side or on opposite sides --
+    hold the same value exactly when their canonical strings match, which is how
+    the coupling is built without matching any name.
+    """
+    env = _assign_env(prefix)
+    slots = {
+        s.var: f"#{j}"
+        for j, s in enumerate(events)
+        if isinstance(s, (ec_ast.Call, ec_ast.Sample))
+    }
+    for stmt in prefix:
+        if isinstance(stmt, (ec_ast.Call, ec_ast.Sample)):
+            env.setdefault(stmt.var, stmt.var)
+    out: dict[str, str] = {}
+    for var, val in env.items():
+        out[var] = _IDENT_TOKENS.sub(lambda m: slots.get(m.group(0), m.group(0)), val)
+    for var, slot in slots.items():
+        out[var] = slot
+    return out
+
+
+# A qualified identifier. The dot must be FOLLOWED by a word character: an EC
+# tuple projection is ``t.`k``, so a pattern ending in ``[\w.]*`` swallows the
+# dot and turns ``_tup.`2`` into a lookup of ``_tup.`` -- which silently misses,
+# leaving the projection unresolved and every downstream correspondence blind.
+_IDENT_TOKENS = re.compile(r"[A-Za-z_]\w*(?:\.\w+)*")
+
+
 def _synth_bundled_delegate_reorder(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -11307,6 +11890,135 @@ def _same_det_structure(
     return [_reorder_sig(s) for s in _exec_stmts(left_body)] == [
         _reorder_sig(s) for s in _exec_stmts(right_body)
     ]
+
+
+def _paren_if_applied(text: str) -> str:
+    """Parenthesize ``text`` if it is a top-level APPLICATION, else leave it.
+
+    Substituting a variable whose value is ``f a b`` into an argument position
+    would otherwise splice three arguments where one was written -- the outer
+    application then parses with the wrong arity and every structural read of it
+    fails for a reason that looks nothing like the cause.
+    """
+    stripped = text.strip()
+    return f"({stripped})" if len(_app_args(stripped)) > 1 else stripped
+
+
+def _fold_tuple_projections(expr: str) -> str:
+    """``(a, b, c).`2`` -> ``b``, wherever it occurs in ``expr``.
+
+    :func:`_projections` only recognises a BARE identifier base, which is the
+    right granularity for reading a flat state's plumbing but not for resolving
+    it: substituting a tuple-valued variable into ``t.`2`` produces a
+    PARENTHESIZED base, and leaving that unfolded strands the resolution one
+    step short of the backbone event it is meant to reach.
+    """
+    out = expr
+    for _ in range(32):
+        hit = re.search(r"\)\.`([0-9]+)", out)
+        if hit is None:
+            return out
+        close = hit.start()
+        depth = 0
+        open_at = -1
+        for pos in range(close, -1, -1):
+            depth += (out[pos] == ")") - (out[pos] == "(")
+            if depth == 0:
+                open_at = pos
+                break
+        if open_at < 0:
+            return out
+        parts = _top_level_tuple_parts(out[open_at : close + 1])
+        idx = int(hit.group(1))
+        if parts is None or not 1 <= idx <= len(parts):
+            return out
+        out = out[:open_at] + parts[idx - 1].strip() + out[hit.end() :]
+    return out
+
+
+def _resolve_expr(expr: str, env: dict[str, str]) -> str:
+    """``expr`` with every assigned local replaced by its defining expression and
+    every top-level tuple projection folded.
+
+    Used to decide two structural questions name-independently: whether a
+    one-sided call's argument IS a particular sampled value (it resolves to that
+    sample's variable), and which pairs of state variables hold the same value
+    (their resolutions coincide). Both would otherwise need the exporter to
+    recognise a variable by name.
+
+    Bounded: substitution stops after a fixed number of rounds, so a cyclic
+    ``env`` (which cannot arise from straight-line code, but must not hang the
+    exporter if it did) falls out rather than looping.
+    """
+    cur = expr.strip()
+    for _ in range(32):
+        nxt = _IDENT_TOKENS.sub(
+            lambda m: _paren_if_applied(env.get(m.group(0), m.group(0))), cur
+        )
+        folded = _fold_tuple_projections(nxt)
+        if folded == cur:
+            return cur
+        cur = folded
+    return cur
+
+
+def _assign_env(stmts: list[ec_ast.EcStmt]) -> dict[str, str]:
+    """``var -> resolved defining expression`` for the assignments in ``stmts``.
+
+    Calls and samples are the LEAVES: their result variables are left
+    unresolved, so every resolution bottoms out at a backbone event -- which is
+    exactly the cross-side-comparable vocabulary.
+    """
+    env: dict[str, str] = {}
+    for stmt in stmts:
+        if isinstance(stmt, ec_ast.Assign):
+            env[stmt.var] = _resolve_expr(stmt.rhs, env)
+        elif isinstance(stmt, (ec_ast.Call, ec_ast.Sample)):
+            env.pop(stmt.var, None)
+    return env
+
+
+def _event_align_swaps(
+    stmts: list[ec_ast.EcStmt], target: list[tuple[str, str]], side: int
+) -> tuple[list[str], list[ec_ast.EcStmt]] | None:
+    """``swap{side}`` tactics putting ``stmts``' whole BACKBONE -- calls *and*
+    samples -- into ``target`` order, or ``None``.
+
+    :func:`_bundled_reorder_swaps` sorts calls only, which is enough when the
+    two sides differ by a call reorder; the KDF-key substitution needs a SAMPLE
+    to move as well (one side draws the key before its key generation, the other
+    after its encapsulation), so the selection sort runs over
+    :func:`_bd_events`. Same discipline: blocks only ever move UP, each travels
+    with its feeding/unpacking assignments, and every crossed statement is
+    ``_ec_indep``-validated -- so a data conflict declines rather than emitting a
+    swap EasyCrypt will reject.
+    """
+    local = _ec_local_vars(stmts)
+    cur = list(stmts)
+    swaps: list[str] = []
+    for slot, want in enumerate(target):
+        events = [(i, s) for i, s in enumerate(cur) if _is_bb_stmt(s)]
+        if len(events) != len(target):
+            return None
+        if _bd_events([events[slot][1]])[0] == want:
+            continue
+        src = next(
+            (i for i, s in events[slot + 1 :] if _bd_events([s])[0] == want), None
+        )
+        if src is None:
+            return None
+        b_0, b_1 = _stmt_travel_block(cur, src, local)
+        ins = 0 if slot == 0 else events[slot - 1][0] + 1
+        if ins > b_0:
+            return None
+        block, crossed = cur[b_0 : b_1 + 1], cur[ins:b_0]
+        if not all(_ec_indep(m, x, local) for m in block for x in crossed):
+            return None
+        if crossed:
+            span = f"{b_0 + 1}" if b_0 == b_1 else f"[{b_0 + 1}..{b_1 + 1}]"
+            swaps.append(f"swap{{{side}}} {span} -{b_0 - ins}.")
+        cur = cur[:ins] + block + crossed + cur[b_1 + 1 :]
+    return swaps, cur
 
 
 def _backbone_peel(body: list[ec_ast.EcStmt]) -> list[str]:

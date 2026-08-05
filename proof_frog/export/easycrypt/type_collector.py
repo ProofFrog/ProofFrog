@@ -14,6 +14,9 @@ from typing import Any
 from . import ec_ast
 from ... import frog_ast
 
+_Triple = tuple[str, str, str]
+"""A registered concat: ``(left, right, result)`` bitstring type names."""
+
 
 class TypeCollector:
     """Accumulates bitstring types seen during translation.
@@ -166,6 +169,12 @@ class TypeCollector:
         # demand-driven, to keep every export that has no use for them
         # byte-identical.
         self._concat_inj_requests: set[str] = set()
+        # Requested N-piece REGROUPING laws, keyed on the two op chains that
+        # bracket the same leaves differently. Like the ``_inj`` lemmas these
+        # are PROVED (from the ``BitWord`` ofword/mkword bridge plus list
+        # associativity), so requesting one does not grow the TCB; demand-driven
+        # so every export with no regrouping stays byte-identical.
+        self._concat_regroup_requests: set[tuple[tuple[str, ...], str]] = set()
         # Triples that were SYNTHESIZED rather than seen as a real concat. Only
         # these get the extra dlet-form split axiom, so a real concat pair's
         # TCB is untouched.
@@ -812,6 +821,125 @@ class TypeCollector:
         goal.
         """
         self._concat_inj_requests.add(op_name)
+
+    def request_concat_regroup(
+        self, left_ops: tuple[str, ...], pre_op: str
+    ) -> str | None:
+        """Ask for the N-piece concat REGROUPING law, returning its lemma name.
+
+        The law relates the two ways the same leaves get bracketed when one side
+        builds the whole buffer left-nested and the other prepends a head to a
+        separately-built ``rest``::
+
+            L4 (L3 (L2 (L1 p0 p1) p2) p3) p4 = Pre p0 (R3 (R2 (R1 p1 p2) p3) p4)
+
+        It is PROVED -- unfold the ops, discharge each ``ofwordK`` side
+        condition from ``size_cat`` + ``size_word``, then list associativity --
+        so requesting it adds nothing to the trusted base. Validated at five
+        pieces in ``ec_templates/bitword_concat_regroup5.ec``.
+
+        Only ``left_ops`` and ``pre_op`` are given: the leaves, and hence the
+        right-hand chain, are RECOVERED from the registered concat triples. That
+        matters because the exporter's bitstring type names are SORTED, so a
+        caller cannot spell the intermediate names of the right chain from the
+        leaf order alone.
+
+        Returns ``None`` when the shape does not resolve -- an unregistered op,
+        a chain whose links do not compose, or a missing right-hand op. The
+        caller must then decline its route rather than emit a tactic naming a
+        lemma that will not exist.
+        """
+        resolved = self._resolve_regroup(left_ops, pre_op)
+        if resolved is None:
+            return None
+        self._concat_regroup_requests.add((left_ops, pre_op))
+        return resolved[0]
+
+    def probe_concat_regroup(
+        self, left_ops: tuple[str, ...], pre_op: str
+    ) -> str | None:
+        """The lemma name :meth:`request_concat_regroup` would return, WITHOUT
+        registering it.
+
+        A route has to know the name early (to decide whether its shape resolves
+        at all) but must only commit to emitting the lemma once every later gate
+        has passed -- otherwise a hop that resolves here and admits later leaves
+        a lemma nothing references.
+        """
+        resolved = self._resolve_regroup(left_ops, pre_op)
+        return resolved[0] if resolved is not None else None
+
+    def _resolve_regroup(
+        self, left_ops: tuple[str, ...], pre_op: str
+    ) -> tuple[str, list[str], list[_Triple], list[_Triple], _Triple] | None:
+        """Recover ``(name, leaves, left, right, pre)`` for a regrouping request."""
+        if len(left_ops) < 2:
+            return None
+        by_name = {
+            _concat_op_name(left, right, result): (left, right, result)
+            for left, right, result in self._concat_ops
+        }
+        if pre_op not in by_name or any(op not in by_name for op in left_ops):
+            return None
+        left = [by_name[op] for op in left_ops]
+        if any(left[i][0] != left[i - 1][2] for i in range(1, len(left))):
+            return None
+        leaves = [left[0][0], left[0][1]] + [t[1] for t in left[1:]]
+        pre = by_name[pre_op]
+        if pre[0] != leaves[0] or pre[2] != left[-1][2]:
+            return None
+        by_pair = {(l, r): res for l, r, res in self._concat_ops}
+        right: list[_Triple] = []
+        cursor = leaves[1]
+        for leaf in leaves[2:]:
+            result = by_pair.get((cursor, leaf))
+            if result is None:
+                return None
+            right.append((cursor, leaf, result))
+            cursor = result
+        if cursor != pre[1]:
+            return None
+        name = f"concat_regroup{len(leaves)}_{pre_op.removeprefix('concat_')}"
+        return name, leaves, left, right, pre
+
+    def _regroup_lemma(
+        self, left_ops: tuple[str, ...], pre_op: str
+    ) -> ec_ast.ProvedLemma | None:
+        """Build the requested regrouping law. See :meth:`request_concat_regroup`."""
+        resolved = self._resolve_regroup(left_ops, pre_op)
+        if resolved is None:
+            return None
+        name, leaves, left, right, _pre = resolved
+        right_ops = [_concat_op_name(*t) for t in right]
+        # One binder per leaf, in buffer order. They ride on the NAME because the
+        # ``ProvedLemma`` renderer supplies the ``:`` itself -- putting them in
+        # the formula would emit ``lemma f : (p0 : t) : ...``.
+        binders = " ".join(f"(p{i} : {leaf})" for i, leaf in enumerate(leaves))
+        lhs = f"{left_ops[0]} p0 p1"
+        for i, op in enumerate(left_ops[1:], start=2):
+            lhs = f"{op} ({lhs}) p{i}"
+        rest = f"{right_ops[0]} p1 p2"
+        for i, op in enumerate(right_ops[1:], start=3):
+            rest = f"{op} ({rest}) p{i}"
+        formula = f"{lhs}\n  = {pre_op} p0 ({rest})"
+        unfolds = " ".join(f"/{op}" for op in (*left_ops, pre_op, *right_ops))
+        body = [f"  rewrite {unfolds} /=."]
+        # One ``ofwordK`` per intermediate word that is CONSUMED by an enclosing
+        # ``ofword``: every left link but the outermost (whose ``mkword`` is the
+        # whole left-hand side), and every right link (the head-prepend wraps
+        # them all).
+        steps = [(t[2], leaves[: i + 2]) for i, t in enumerate(left[:-1])]
+        steps += [(t[2], leaves[1 : i + 3]) for i, t in enumerate(right)]
+        for result, parts in steps:
+            cats = " ".join(["1:size_cat"] * (len(parts) - 1))
+            sizes = " ".join(
+                f"1:!{_word_clone_name(part)}.size_word" for part in _uniq(parts)
+            )
+            body.append(
+                f"  rewrite {_word_clone_name(result)}.ofwordK" f" {cats} {sizes} 1:/#."
+            )
+        body.append("  by rewrite !catA.")
+        return ec_ast.ProvedLemma(f"{name} {binders}", formula, body)
 
     def register_concat(self, left_name: str, right_name: str, result_name: str) -> str:
         """Register a concat op ``left -> right -> result`` and return its name.
@@ -1932,6 +2060,12 @@ class TypeCollector:
                 for law_name, formula in statements3:
                     decls.append(ec_ast.Axiom(law_name, formula))
                 decls.append(ec_ast.Axiom(split3_name, split3_stmt))
+        # Regrouping laws last: each one names ops from several registrations,
+        # so it can only be stated once every concat op above has been declared.
+        for left_ops, pre_op in sorted(self._concat_regroup_requests):
+            regroup = self._regroup_lemma(left_ops, pre_op)
+            if regroup is not None:
+                decls.append(regroup)
         return decls
 
 
@@ -2272,6 +2406,18 @@ def _slice_op_name(src_name: str, dst_name: str) -> str:
 def _concat_op_name(left_name: str, right_name: str, result_name: str) -> str:
     """Name for an abstract concat op."""
     return f"concat_{left_name}_{right_name}_to_{result_name}"
+
+
+def _uniq(names: list[str]) -> list[str]:
+    """First-occurrence-order de-duplication. Built from an ORDERED source so the
+    emitted rewrite sequence is stable across runs (never iterate a set)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
 
 
 def _concat3_op_name(

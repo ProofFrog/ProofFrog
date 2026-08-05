@@ -79,15 +79,36 @@ pairing each with the pair's signature gives, over its 12 evaluations:
     DECLINED because the bodies ARE same-shape (the other peels own them)
       13 vs 14, 14 vs 13, 0 vs 13, 13 vs 0                (x6)
 
-**The near-miss is worth exactly one careful look, and it was NOT attempted
-here:** a pair with EQUAL call counts and one-sided delegation -- the landed
-route's own shape -- rejected because the reduction does not split where the game
-does. `_if_prefixes_agree` is a SAFETY gate earned by a measured regression (it
-prevents a mis-split whose following `call` fails, i.e. a BLOCKED export where an
-admit was honest), so relaxing it needs its own full sweep, not a late edit.
-Expected payoff is small: 1-2 admits in this cell plus whatever the sibling
-`_T` cells share.
+**c255 RETRACTION: THERE IS NO 13-vs-13 NEAR-MISS. The table above is wrong,
+and `_if_prefixes_agree` is declining CORRECTLY on every one of these.**
 
-So the frontier statement is per-cell, not per-family: `CG`/`UG_expanded_T` are
-content-bound; `CK`/`UK_expanded_T` still hold a couple of plumbing hops behind a
-safety gate.
+The "13 vs 13, one-sided delegation" row was an artifact of the c254
+instrumentation itself. The signature was stashed in a module global at function
+entry and read back at each decline site; when an earlier guard returned first,
+that global still held the PREVIOUS hop's signature, so a decline got labelled
+with someone else's call counts.
+
+Re-measured c255 by printing inside `_if_prefixes_agree` with the totals computed
+in the same expression (no global). All SIX failing calls in
+`CK_expanded_INDCCA_T`:
+
+    leafcalls g=5  r=6   tot g=13 r=14     (x2 orientations)
+    splitidx  gi=0 ri=1  tot g=13 r=14     game=[If], red=[Assign,If,If]   (x2)
+    splitidx  gi=0 ri=None tot g=13 r=0    game=[If,Return], red=[Return]  (x2)
+
+**Not one pair has equal totals.** Two are 13-vs-14 -- an abstract call added, so
+content. Two more are 13-vs-14 with the reduction ALSO carrying a leading
+assignment and an extra top-level branch. The last two have an EMPTY reduction
+body (`Return` only), a degenerate oracle needing a dead-oracle argument, not a
+peel.
+
+So `CK_expanded_INDCCA_T` is content-bound too, and the frontier statement is
+uniform after all: **the `_T` cells' remaining admits are content.** The 2 admits
+c252 closed here were the only plumbing this cell had.
+
+METHOD LESSON, the third instance of one pattern in this run: **do not attach
+context to a log line through mutable state.** A stale worktree `.ec` produced a
+phantom admit regression (c251), a truncated body dump produced a phantom
+"differs only by a witness seed" (c251), and now a stale global produced a
+phantom near-miss (c254). Compute and print the discriminating quantity in the
+SAME expression as the thing it describes.

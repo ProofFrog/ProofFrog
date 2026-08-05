@@ -114,7 +114,63 @@ assignment ABOVE the first call is left standing otherwise, and `skip` then
 fails with "left instruction list is not empty" (the same trap
 `_straight_peel` already documents).
 
-STATUS AFTER c251: THE COUPLING HALF IS BUILT; THE ROUTE IS BLOCKED ON A
+STATUS AFTER c251: BOTH HALVES BUILT AND MEASURED END TO END. NOT LANDABLE AS
+WRITTEN -- it fixes the `_PQ` family and BREAKS ten other exports.
+==============================================================================
+Both halves exist in `stash@{0}`, labelled BROKEN-DO-NOT-LAND:
+`_forwarded_chal_key_coupling` (exporter.py, a builder appended in
+`_live_state_coupling` beside `wchal`/`spc`/`wdk`) and
+`_synth_forwarded_oracle_peel` + `_left_driven_peel` + `_if_prefixes_agree`
+(chain_emitter.py). `make lint` exit 0, mypy clean, all targeted tests pass.
+
+MEASURED, 20 changed exports, every one compiled in release EC:
+
+  EXIT 0 -- the whole `_PQ` family, 16 admits closed
+    CG_expanded_INDCCA_PQ    9 -> 7      UG_expanded_INDCCA_PQ    9 -> 7
+    CK_expanded_INDCCA_PQ   11 -> 9      UK_expanded_INDCCA_PQ   11 -> 9
+    CG_seedbased_INDCCA_PQ  16 -> 14     CK_seedbased_INDCCA_PQ  22 -> 20
+    UK_seedbased_INDCCA_PQ  22 -> 20
+
+  EXIT 1 -- REGRESSIONS this change causes
+    CG_expanded_INDCCA_T    18 -> 16     CK_expanded_INDCCA_T    19 -> 13
+    UK_expanded_INDCCA_T    15 -> 11     KEMPRF_INDCCA            4 -> 2
+    GHP18_INDCCA_First      17 -> 13     GHP18_INDCCA_Second     17 -> 13
+    GHP18_INDCPA_First       4 -> 4      GHP18_INDCPA_Second      4 -> 4
+    LCK_INDCCA               4 -> 2      CK_INDCCA_PostQuantum   17 -> 13
+    CK_INDCCA_PreQuantum    21 -> 15  (already blocked at baseline -- NOT a
+                                       regression, same pre-existing `pk` error)
+    CK_seedbased_INDCCA_T / UK_seedbased_INDCCA_T -- not compiled
+
+TWO DISTINCT DEFECTS, and they must be fixed separately:
+
+ 1. **THE COUPLING'S TYPE MATCH IS UNSOUND.** `GHP18_INDCPA_First/Second` closed
+    NO admits and had NO route fire -- only the coupling text changed -- and they
+    fail with `no matching operator, named '=', for the following parameters'
+    type`. So the builder emitted an ILL-TYPED equality. It pairs a packed game
+    component with a challenger field when
+    `top_types.translate_type(...).text` matches, and equal rendered text does
+    NOT imply EC will compare the two (alias vs carrier, and a projection's type
+    need not be the declared component type). Fix: compare RESOLVED types
+    structurally, and/or require the game field's own declared component type.
+    EC catches it, so this is a broken export rather than a false theorem -- but
+    "blocked" is worse than an admit.
+
+ 2. **THE ROUTE'S TACTIC DOES NOT CLOSE ON THE `_T` / StarHunters / KEMPRF
+    SHAPES.** Those fail `cannot prove goal (strict)`, i.e. the peel runs and
+    leaves a goal. The gate (`delegate fields on exactly one side`, `not
+    same_shape`, `_if_prefixes_agree`) admits them but the tactic is only right
+    for the `_PQ` shape. Needs a tighter structural gate, diagnosed per family.
+
+SO THE NEXT CYCLE'S JOB is not to write the route -- it exists and works where
+it is right -- but to NARROW it, structurally and not by name, to the shape it
+proves, and to fix the coupling's type test. The 16 `_PQ` admits are the prize
+and they are already demonstrated.
+
+SUPERSEDED BELOW: the earlier claim that a flat-state fidelity gap blocked the
+route. It did not -- the route works; see the `_PQ` column. Kept for the
+measurements it records.
+
+OLD SECTION (superseded): THE COUPLING HALF IS BUILT; THE ROUTE IS BLOCKED ON A
 FLAT-STATE FIDELITY GAP
 =======================================================================
 The coupling half (step 1) is written, gated, and measured -- it lives in

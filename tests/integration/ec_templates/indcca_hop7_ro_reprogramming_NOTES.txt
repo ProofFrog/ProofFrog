@@ -1,0 +1,100 @@
+NOTES -- `hop_7_initialize` (and its `decaps` partner): the KDF-PRF challenge
+substitution. Measured c256 on `CG_expanded_INDCCA_PQ`. Documentation only.
+
+THIS IS AN EXPORTER BUILD, NOT A FrogLang CHANGE. Earlier cycles recorded it as
+BLOCKED-ON-DOUGLAS needing the intermediate game to retain its KDF input. That was
+wrong; see "the point is derivable" below.
+
+WHAT THE HOP SAYS
+=================
+    RD(..., H_c.KDFPRFSec_Random(H)).initialize  ~  GameFreshSS(...).initialize
+
+LEFT   `KDFPRFSec_Random` draws `rF <$ dfun_...` and `lookup rest = rF rest`, so
+       the reduction's challenge shared secret is `ss = rF(rest*)`.
+RIGHT  `GameFreshSS.Initialize` draws `RF <$ dfun_...` AND an INDEPENDENT
+       `ss <- BitString<H.Nout>`.
+
+It is sound because `GameFreshSS.Decaps` returns `None` on `ct == ctStar`, so the
+adversary can never observe the random function at the challenge point `rest*`.
+
+THE EMITTED POST IS PROVABLY UNACHIEVABLE -- not merely hard
+===========================================================
+    ={res} /\ GameFreshSS.rF{2} = H_c.KDFPRFSec_Random.rF{1}
+
+Take any coupling satisfying it. `={res}` forces `ss{2} = ss{1}`, and on the left
+`ss{1} = rF{1} rest*`, and full function equality gives `rF{1} = RF{2}`. So in the
+joint, `ss{2} = RF{2} rest*` -- a deterministic function of `RF{2}`. But the RIGHT
+marginal must be the program's, where `ss{2}` is drawn INDEPENDENTLY of `RF{2}`.
+For a non-degenerate output distribution that is a contradiction. **No tactic can
+close this lemma; the statement has to change.**
+
+THE REPAIR, AND WHY THE POINT IS DERIVABLE
+==========================================
+Weaken the function conjunct from equality to "equal except at the challenge
+point", pinned by reprogramming:
+
+    ={res} /\ H_c.KDFPRFSec_Random.rF{1} = GameFreshSS.rF{2}.[rest* <- ss]
+
+The earlier park claimed `rest*` is inexpressible on the right because
+`GameFreshSS.Initialize` computes no KDF input. The premise is true and the
+conclusion is false: **`rest*` is a deterministic function of fields
+`GameFreshSS` ALREADY STORES.** From its own `Decaps` challenge branch,
+
+    rest = dec_ss_T || NG.Encode(ct_T) || NG.Encode(NG.Exp(NG.Generator(), dk_T))
+                    || L.get()
+    dk_T = NG.RandomScalar(seed_T)        seed_T  IS a field
+    ct_T = ct[1], and at the challenge point ct = ctStar, so ct_T* = ctStar[1]
+                                            ctStar IS a field
+    dec_ss_T = NG.ElementToSharedSecret(NG.Exp(ct_T, dk_T))
+
+Every operation there is DETERMINISTIC and already emitted in `ev_` form -- this
+proof's coupling already writes `NG_c.ev_exp (NG_c.ev_generator) (...)` for
+`dk.`3`, and `NG.randomscalar` has both `NG_c.ev_randomscalar` and
+`axiom NG_randomscalar_det`. So the reprogramming point is writable over stored
+state with NO change to the game.
+
+THE EASYCRYPT INGREDIENT IS A LEMMA, NOT AN AXIOM
+=================================================
+`MUniFinFun` (EC `theories/distributions/Distr.ec:2552`):
+
+    dlet (dfun d) (fun f => dmap (d x0) (fun y => f.[x0 <- y]))
+      = weight (d x0) \cdot dfun d
+
+Drawing the whole function and then REPROGRAMMING ONE POINT with a fresh draw is
+distributed as `dfun d` again (the weight is 1 for a lossless `d`). That is exactly
+the coupling the hop needs, and c250 already derived this family from
+`MUniFinFun`, so no new axiom is involved. Companions if useful:
+`dfunE_dlet_fix1`, `dlet_dfun_fupdate_ll`, `dfun1E_fix1`.
+
+Tactic direction: `rnd` the left's single `dfun` draw against the right's TWO
+draws (`RF`, then `ss`), coupled by the bijection `f |-> f.[rest* <- ss]`.
+
+THE CONSUMER COST, AND IT MATTERS MORE THAN THE REPAIR
+======================================================
+`hop_7_decaps` and `hop_15_decaps` were closed in c250 (`_synth_sim_field_rename`)
+USING the strong premise `rF{2} = rF{1}` in their precondition. Since that premise
+is unachievable, **those lemmas are valid in isolation but cannot be assembled into
+the chain** -- the `pr` lemma needs `initialize` to establish what `decaps`
+assumes. This is precisely the ORDERING RULE: closing the consumer first looked
+like progress and proved nothing.
+
+So weakening the coupling has a price. Under the weaker premise the `decaps` hops
+need the UNREACHABILITY argument: the two functions differ only at `rest*`, and
+`Decaps` returns `None` on `ct == ctStar`, so no reachable query hits `rest*`. That
+is real content -- it needs the guard to imply `rest <> rest*`, which follows from
+injectivity of the concat and `ct <> ctStar`, i.e. an `_inj`-family fact on the
+KDF-input concat.
+
+**Net: hop 7 is two coupled builds, not one.** Do them together, or the chain does
+not close either way.
+
+BUILD ORDER
+===========
+ 1. Emit the reprogramming coupling (`rF{1} = rF{2}.[rest* <- ss]`) with `rest*`
+    rendered in `ev_` form from `ctStar`/`seed_T`.
+ 2. Prove `initialize` with the `dlet_dfun_update` bijection.
+ 3. Re-prove `decaps` under the weaker premise, discharging `rest <> rest*` from
+    the `ct <> ctStar` guard plus concat injectivity. EXPECT the c250 route to stop
+    firing here -- its leaf `wp; sim` relies on the strong equality.
+ 4. Whole-chain check: the `hop_7_pr` lemma must assemble. That is the only
+    evidence that step 3 did its job.

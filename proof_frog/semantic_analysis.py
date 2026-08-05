@@ -1894,6 +1894,18 @@ class CheckTypeVisitor(VariableTypeVisitor):
         my_type = self.get_type(variable.name)
         self.ast_type_map.set(variable, my_type)
 
+    def leave_bool_type(self, bool_type: frog_ast.BoolType) -> None:
+        self.ast_type_map.set(bool_type, bool_type)
+
+    def leave_int_type(self, int_type: frog_ast.IntType) -> None:
+        self.ast_type_map.set(int_type, int_type)
+
+    def leave_optional_type(self, optional_type: frog_ast.OptionalType) -> None:
+        # T? is only a type when T is: this rejects Set? and Group? the same
+        # way bare Set and Group are rejected (both are kinds, not types).
+        self.get_type_from_ast(optional_type.the_type)
+        self.ast_type_map.set(optional_type, optional_type)
+
     def leave_bit_string_type(self, bit_string_type: frog_ast.BitStringType) -> None:
         if bit_string_type.parameterization is not None:
             parameterized_type = self.get_type_from_ast(
@@ -2426,6 +2438,31 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 f"{_truncate_expr(assignment.value)} has type {found_type}, expected {expected_type}",
             )
 
+    def _check_samplable(
+        self, location: frog_ast.ASTNode, sampled_from: PossibleType
+    ) -> None:
+        """Reject sampling domains that carry no uniform distribution.
+
+        Bool, BitString<n>, ModInt<q> and friends are finite, so a uniform
+        draw is well defined. Int is unbounded, and an optional type has no
+        natural weight for None, so neither admits one. Applies to both
+        sampling forms ('<-' and '<-uniq[S]' / '<- T \\ E').
+        """
+        resolved = self._resolve_type_alias(sampled_from)
+        if isinstance(resolved, frog_ast.IntType):
+            self.print_error(
+                location,
+                "Cannot sample from Int: uniform sampling requires a finite type",
+                hint="use a bounded type such as BitString<n> or ModInt<q>",
+            )
+        if isinstance(resolved, frog_ast.OptionalType):
+            self.print_error(
+                location,
+                f"Cannot sample from optional type {resolved}:"
+                " uniform sampling requires a finite type",
+                hint=f"sample from {resolved.the_type} instead",
+            )
+
     def leave_sample(self, sample: frog_ast.Sample) -> None:
         super().leave_sample(sample)
         if not isinstance(sample.sampled_from, frog_ast.Type):
@@ -2441,6 +2478,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             else self.get_type_from_ast(sample.var)
         )
         found_type = self.get_type_from_ast(sample.sampled_from)
+        self._check_samplable(sample, found_type)
         if not self.check_types(expected_type, found_type):
             self.print_error(
                 sample,
@@ -2449,6 +2487,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
 
     def leave_unique_sample(self, unique_sample: frog_ast.UniqueSample) -> None:
         super().leave_unique_sample(unique_sample)
+        self._check_samplable(unique_sample, unique_sample.sampled_from)
         # Check that unique_set has type Set<D> and sampled_from has type D
         set_type = self.get_type_from_ast(unique_sample.unique_set)
         if not isinstance(set_type, frog_ast.SetType):

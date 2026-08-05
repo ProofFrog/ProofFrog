@@ -151,6 +151,7 @@ The essentials for writing correct FrogLang:
 - `Type x <-uniq[S] Type;` — sample uniformly from `Type \ S` (rejection sampling)
 - `M[k] <- Type;` — sample into a map entry
 - `Function<D, R> H <- Function<D, R>;` — sample a random function (ROM)
+- A sampling domain must be finite: `Bool`, `BitString<n>`, `ModInt<q>`, `Set` members etc. are samplable, but `Int` (unbounded) and optional types `T?` (no weight for `None`) are rejected on both sampling forms
 
 **Non-determinism default:** Scheme method calls (e.g., `F.evaluate(k, x)`) are **non-deterministic by default** — each invocation may return a different result even with the same arguments.
 

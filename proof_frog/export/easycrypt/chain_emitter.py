@@ -4816,7 +4816,7 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
     else:
         long_bb, long_body, short_body, side = r_bb, r_body, l_body, 2
     short_bb = r_bb if side == 1 else l_bb
-    drops = _dead_call_drop_tags(long_bb, short_bb, det_methods)
+    drops = _dead_call_drop_tags(long_bb, short_bb, det_methods, long_body)
     if drops is None:
         return None
     tac = ["proc.", "inline *."]
@@ -4844,19 +4844,133 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
     return (tac, pres, SYNTH_PARAM)
 
 
+def _stmt_operand(stmt: ec_ast.EcStmt) -> str:
+    """The rendered expression a statement READS, or ``""``."""
+    if isinstance(stmt, ec_ast.Call):
+        return stmt.args
+    if isinstance(stmt, ec_ast.Assign):
+        return stmt.rhs
+    if isinstance(stmt, ec_ast.Return):
+        return stmt.expr
+    return ""
+
+
+def _read_tokens(expr: str) -> set[str]:
+    """The variables ``expr`` reads, keeping a projection ``v.`k`` WHOLE.
+
+    Reading one component of a tuple is not reading the tuple: keeping the
+    projection as its own token is what lets :func:`_live_out` stay
+    component-accurate.
+    """
+    out: set[str] = set()
+    rest = expr
+    for match in re.finditer(r"([A-Za-z_]\w*(?:\.\w+)*)\.`(\d+)", expr):
+        out.add(f"{match.group(1)}.`{match.group(2)}")
+        rest = rest.replace(match.group(0), " ")
+    out |= set(_IDENT_TOKENS.findall(rest))
+    return out
+
+
+def _live_out(body: list[ec_ast.EcStmt]) -> list[set[str]]:
+    """Backward liveness over variables AND tuple components: ``out[i]`` holds
+    what is live after ``body[i]``.
+
+    Whole-variable liveness is too coarse here, and this is the second time that
+    has bitten on this project (the bundled-delegate sample-drop gate needed the
+    same per-component treatment). The PRF-random init hop packs the droppable
+    ``F.evaluate``'s result into a tuple whose OTHER component is genuinely live,
+    so a whole-variable walk marks the result live, declines the hop, and turns a
+    working peel into an admit. A live ``t.`2`` therefore revives only the second
+    component of ``t``'s defining tuple literal.
+    """
+    live: set[str] = set()
+    out: list[set[str]] = [set() for _ in body]
+    for i in range(len(body) - 1, -1, -1):
+        out[i] = set(live)
+        stmt = body[i]
+        written = getattr(stmt, "var", None)
+        parts = (
+            _top_level_tuple_parts(_stmt_operand(stmt))
+            if isinstance(stmt, ec_ast.Assign)
+            else None
+        )
+        wanted: set[str] | None = None
+        if written:
+            wanted = {
+                tok for tok in live if tok == written or tok.startswith(f"{written}.`")
+            }
+            live -= wanted
+        if isinstance(stmt, ec_ast.Assign) and not wanted:
+            # A PURE assignment whose target is dead is itself dead: it can be
+            # deleted, so its reads must not keep anything alive. (Only for
+            # assignments -- a call or sample has glob effects and stays.)
+            continue
+        if parts is not None and written and wanted is not None:
+            if written in wanted:
+                for part in parts:
+                    live |= _read_tokens(part)
+            else:
+                for tok in wanted:
+                    idx = int(tok.rsplit(".`", 1)[1])
+                    if 1 <= idx <= len(parts):
+                        live |= _read_tokens(parts[idx - 1])
+        else:
+            live |= _read_tokens(_stmt_operand(stmt))
+    return out
+
+
+def _drop_result_dead(
+    body: list[ec_ast.EcStmt], events: list[ec_ast.EcStmt], index: int
+) -> bool:
+    """True when the result of ``events[index]``'s call is DEAD at that point.
+
+    Per-call, unlike the whole-body :func:`_all_calls_dead`: an init peel legally
+    couples live calls and only needs the DROPPED ones to be dead. Determinism
+    alone licenses the ``_pres`` axiom, which preserves the GLOB and says nothing
+    about the result -- so dropping a call whose result is still live leaves that
+    result universally quantified in the goal and the closing ``/#`` cannot
+    discharge it. That is a tactic which RUNS WITHOUT CLOSING, the worst rung on
+    the ladder because no ``admit`` marks it, and it is what kept
+    `CG_seedbased_INDCCA_PQ` / `UG_seedbased_INDCCA_PQ` EC-rejected.
+    """
+    stmt = events[index] if index < len(events) else None
+    if not isinstance(stmt, ec_ast.Call) or not stmt.var:
+        return True  # a result-less call is trivially dead
+    live = _live_out(body)[body.index(stmt)]
+    return not any(tok == stmt.var or tok.startswith(f"{stmt.var}.`") for tok in live)
+
+
 def _dead_call_drop_tags(
     long_bb: list[tuple[str, str | None]],
     short_bb: list[tuple[str, str | None]],
     det_methods: dict[str, set[str]],
+    long_body: list[ec_ast.EcStmt] | None = None,
 ) -> list[bool] | None:
     """Tag each event of ``long_bb`` as a drop (extra) or shared, matching
     ``short_bb`` as a subsequence.
 
     Two events match if both are samples, or both are calls with the same
-    callee. An unmatched ``long_bb`` event is a drop; it is only accepted if it
-    is a call to a *deterministic* method (present in ``det_methods``), so the
-    glob-preserving one-sided ``_pres`` drop is sound. Returns ``None`` if the
-    subsequence match fails or a gap event is not a droppable deterministic call.
+    callee. An unmatched ``long_bb`` event is a drop, accepted only when it is a
+    call to a *deterministic* method (present in ``det_methods``) whose RESULT IS
+    DEAD. Returns ``None`` if the subsequence match fails or any gap event fails
+    either condition.
+
+    THE LIVENESS CONDITION IS LOAD-BEARING and was missing here for a long time,
+    while the post-init caller enforced it separately with
+    :func:`_all_calls_dead`. Determinism alone licenses the ``_pres`` axiom,
+    which preserves the GLOB -- it says nothing about the call's result. Drop a
+    call whose result is still read and that result stays universally quantified
+    in the goal, so the peel runs to completion and the closing ``/#`` cannot
+    discharge it: a tactic that runs without closing, which is the worst
+    outcome on this ladder because no ``admit`` marks it. That is exactly what
+    kept `CG_seedbased_INDCCA_PQ` / `UG_seedbased_INDCCA_PQ` EC-rejected at
+    `hop_23_initialize`, where the dropped `NG.exp` feeds the returned
+    `ctStar`. The check lives HERE rather than at the call sites so a future
+    caller cannot forget it.
+
+    ``long_body`` is optional only so the post-init caller -- which already
+    applies the stricter whole-body :func:`_all_calls_dead` -- keeps its
+    existing behaviour byte-identically; every new caller should pass it.
     """
 
     def _match(a: tuple[str, str | None], b: tuple[str, str | None]) -> bool:
@@ -4876,6 +4990,12 @@ def _dead_call_drop_tags(
             return None
         mod, _, meth = callee.partition(".")
         if meth not in det_methods.get(mod, set()):
+            return None
+        if long_body is not None and not _drop_result_dead(
+            long_body,
+            [s for s in long_body if isinstance(s, (ec_ast.Call, ec_ast.Sample))],
+            i,
+        ):
             return None
         tags[i] = True
         i -= 1

@@ -59,3 +59,35 @@ distinct cryptographic step, not an instance of one shape.
 
 DO NOT, on the strength of a zero-automation cell, go looking for a technicality.
 Dump the call counts first: this cell took one instrumented export to settle.
+
+BUT THE `_T` CELLS THAT DO HAVE AUTOMATION ARE DIFFERENT -- c254 measured
+`CK_expanded_INDCCA_T` too (17 admits, `synth-param x15`)
+==========================================================================
+Unlike `CG_expanded_INDCCA_T`, this cell's post-init `decaps` pairs are NOT all
+content. Labelling every `return None` in `_synth_forwarded_oracle_peel` and
+pairing each with the pair's signature gives, over its 12 evaluations:
+
+    FIRED (2 hops, the 2 admits c252 closed here)
+      14 vs 14 calls, exactly one side delegates
+
+    DECLINED at `_if_prefixes_agree`            <-- THE NEAR-MISS
+      13 vs 13 calls, exactly one side delegates          (x2 orientations)
+
+    DECLINED at the both-sides / neither-side delegate gate
+      14 vs  8 calls, neither side delegates              (x2)
+
+    DECLINED because the bodies ARE same-shape (the other peels own them)
+      13 vs 14, 14 vs 13, 0 vs 13, 13 vs 0                (x6)
+
+**The near-miss is worth exactly one careful look, and it was NOT attempted
+here:** a pair with EQUAL call counts and one-sided delegation -- the landed
+route's own shape -- rejected because the reduction does not split where the game
+does. `_if_prefixes_agree` is a SAFETY gate earned by a measured regression (it
+prevents a mis-split whose following `call` fails, i.e. a BLOCKED export where an
+admit was honest), so relaxing it needs its own full sweep, not a late edit.
+Expected payoff is small: 1-2 admits in this cell plus whatever the sibling
+`_T` cells share.
+
+So the frontier statement is per-cell, not per-family: `CG`/`UG_expanded_T` are
+content-bound; `CK`/`UK_expanded_T` still hold a couple of plumbing hops behind a
+safety gate.

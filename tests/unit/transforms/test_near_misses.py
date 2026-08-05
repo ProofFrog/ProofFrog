@@ -244,7 +244,7 @@ def test_extract_slice_near_miss_shadowed_redeclaration():
     ]
     assert len(misses) == 1
     assert misses[0].variable == "m"
-    assert "slice" in misses[0].reason
+    assert "m[0 : K]" in misses[0].reason
 
 
 # ---------------------------------------------------------------------------

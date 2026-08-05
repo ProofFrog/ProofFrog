@@ -21,3 +21,6 @@ vscode-extension/*.vsix
 # Emacs
 *~
 emacs/*.elc
+
+# EasyCrypt dashboard compile scratch (regenerated; never a source artifact)
+.dashboard-ec-tmp/

@@ -9884,6 +9884,108 @@ def export_proof_file(proof_path: str) -> str:
                 return " /\\ ".join(conj)
         return ""
 
+    def _forwarded_chal_key_coupling(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> str:
+        """Cross-seam conjuncts for a plain GAME holding a packed key against a
+        reduction that FORWARDS the corresponding oracle to its challenger rather
+        than storing that component at all. Empty string off-shape.
+
+        The IND-CCA `_PQ` ``decaps`` hops (3/10/12): ``GameCaseSplitReal``
+        decapsulates locally with ``pq_keys.`2``, while ``RB`` holds only
+        ``ek_PQ`` and forwards to ``KEM_INDCCA_Real.decaps``. So the game's
+        DECAPSULATION key has no counterpart anywhere in the reduction -- only the
+        challenger's ``dk`` equals it -- and every existing builder misses it:
+        ``_packed_decomposition_coupling`` returns ``None`` here (it fires only on
+        an ev-DERIVED component or a STATELESS challenger, and this challenger is
+        stateful), and ``_stored_pair_vs_chal_field_coupling`` needs BOTH sides to
+        be reductions.
+
+        THE CONSEQUENCE IS WORTH STATING, because a green cell hides it: the
+        establishing ``initialize`` hop COMPILES with the narrower coupling, and
+        only its own ``decaps`` hop -- whose two bodies differ in exactly that
+        reference -- is left unprovable. A coupling can be too WEAK as well as too
+        strong, and only the consumer reveals the former.
+
+        Sound by construction: both keys come from the one ``KeyGen`` the hop's
+        own ``initialize`` runs. VERIFIED in both directions on
+        `CG_expanded_INDCCA_PQ` before this was written -- with the conjunct
+        added, ``hop_3_decaps`` closes AND ``hop_3_initialize`` still closes with
+        its existing tactic completely unchanged (see
+        ``ec_templates/PARKED_indcca_decaps_oracle_forwarding.ec.txt``).
+
+        Deliberately narrow, so it fails CLOSED (costing an admit) rather than
+        emitting a false conjunct: the component type must identify EXACTLY ONE
+        challenger field, and the reduction must hold NOTHING of that type
+        (neither a whole field nor a component), which is what makes the
+        challenger the only candidate.
+        """
+        if step_a.reduction is None and step_b.reduction is not None:
+            game_step, red_step, gs, rs = step_a, step_b, "1", "2"
+        elif step_b.reduction is None and step_a.reduction is not None:
+            game_step, red_step, gs, rs = step_b, step_a, "2", "1"
+        else:
+            return ""
+        assert red_step.reduction is not None
+        red = _get_reduction(red_step.reduction.name)
+        # pylint: disable=protected-access
+        game = engine._get_game_ast(game_step.challenger, None)
+        chal_ast = engine._get_game_ast(red_step.challenger, None)
+        # pylint: enable=protected-access
+        if red is None or game is None or chal_ast is None or not chal_ast.fields:
+            return ""
+        # The reduction must actually DELEGATE to that challenger; a reduction
+        # that merely names one it never initialises is not forwarding anything.
+        if not _reduction_init_delegates(red_step.reduction.name):
+            return ""
+        chal_base = pt.module_base_name(
+            pt.last_module_arg(resolver.resolve(red_step).module_expr)
+        )
+        game_base = pt.module_base_name(resolver.resolve(game_step).module_expr)
+
+        # Every EC type the REDUCTION holds, whole field or tuple component. A
+        # type present here is one an existing builder can already reach, so it
+        # is left alone.
+        red_types: set[str] = set()
+        for rf in red.fields:
+            rty = top_types.resolve(rf.type)
+            red_types.add(top_types.translate_type(rty).text)
+            if isinstance(rty, frog_ast.ProductType):
+                for cty in rty.types:
+                    red_types.add(top_types.translate_type(cty).text)
+
+        chal_by_type: dict[str, list[frog_ast.Field]] = {}
+        for cf in chal_ast.fields:
+            chal_by_type.setdefault(
+                top_types.translate_type(top_types.resolve(cf.type)).text, []
+            ).append(cf)
+
+        conj: list[str] = []
+        for gf in game.fields:
+            gty = top_types.resolve(gf.type)
+            if not isinstance(gty, frog_ast.ProductType):
+                continue
+            for k, cty in enumerate(gty.types):
+                key = top_types.translate_type(cty).text
+                if key in red_types:
+                    continue
+                cands = chal_by_type.get(key, [])
+                if len(cands) != 1:
+                    continue
+                # pylint: disable=protected-access
+                conj.append(
+                    f"{game_base}.{mt._ec_field_name(gf.name)}.`{k + 1}{{{gs}}} = "
+                    f"{chal_base}.{mt._ec_field_name(cands[0].name)}{{{rs}}}"
+                )
+                # pylint: enable=protected-access
+        # NOTE: deliberately NOT ``live_state_holders.add(chal_base)``. Doing so
+        # is a SIDE EFFECT on module emission, not just on this string, and it
+        # gave ``KEMPRF_INDCCA``/``LCK_INDCCA`` a duplicated ``var pk`` -- a
+        # failure in a module DECLARATION, nowhere near a tactic. Where this
+        # conjunct is genuinely usable the challenger is already a holder, put
+        # there by the neighbouring seam conjuncts that reference it.
+        return " /\\ ".join(conj)
+
     def _tuple_component_relations(
         proc: ec_ast.Proc, fld: str, alias: str, dets: set[str]
     ) -> list[str]:
@@ -10077,6 +10179,17 @@ def export_proof_file(proof_path: str) -> str:
         spc = _stored_pair_vs_chal_field_coupling(step_a, step_b)
         if spc:
             coupled = f"{coupled} /\\ {spc}"
+        # Plain GAME vs FORWARDING reduction (IND-CCA `_PQ` decaps hops): the
+        # game's packed decapsulation key <-> the challenger's, for a component
+        # the reduction never stores because it forwards the oracle instead.
+        # Deduped against what is already stated, for the same reason ``wchal``
+        # is: a repeated conjunct changes the bytes of proofs clean today.
+        fck = _forwarded_chal_key_coupling(step_a, step_b)
+        if fck:
+            have = set(coupled.split(" /\\ "))
+            fresh = [c for c in fck.split(" /\\ ") if c not in have]
+            if fresh:
+                coupled = f"{coupled} /\\ " + " /\\ ".join(fresh)
         # Seedbased self-keygen reduction (R_KDF): couple its wrapper-derived stored
         # decaps key to the seed it was derived from (``dk_PQ_0 = s_PQ_0``, since the
         # concrete wrapper's derivekeypair returns the seed). Empty off-shape.

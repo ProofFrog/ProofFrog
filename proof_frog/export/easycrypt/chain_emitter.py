@@ -5703,6 +5703,20 @@ def _emit_one_oracle_chain(
         )
         if renamed is not None:
             return [], renamed, set()
+        # Plain GAME vs a reduction FORWARDING this oracle to its challenger:
+        # not same-shape (the inlined challenger adds dead guards), so driven by
+        # the game's if-tree alone with pattern positions.
+        fwd = _synth_forwarded_oracle_peel(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            full_coupling,
+        )
+        if fwd is not None:
+            return [], fwd, set()
 
     # Field-aware coupling: identical-state hops keep the whole-glob equality
     # (byte-identical for clean proofs); a hop whose two sides differ in glob
@@ -10354,6 +10368,162 @@ def _sim_leaf(body: list[ec_ast.EcStmt]) -> list[str]:
     return ["wp; sim."]
 
 
+def _guard_loop(chal_side: str) -> str:
+    """Eliminate however many DEAD guards ``inline *`` exposed on ``chal_side``.
+
+    A reduction that FORWARDS an oracle to its challenger gains, once inlined,
+    the challenger's own refusal test (``ct = ctStar``, false under the enclosing
+    branch) and the reduction's option handling (a literal ``if (false)``).
+    Neither exists on the game side.
+
+    Written as a ZERO-or-more loop over a code-position PATTERN, which is what
+    makes it safe to emit at every leaf: ``do ?`` is a no-op where there are no
+    dead guards, ``^if`` needs no index, and a guard that is NOT provably false
+    fails the side goal and stops the loop rather than being wrongly discarded.
+    So this never has to know how many guards there are -- which matters,
+    because the flat states do not model them faithfully (the flat body carries
+    three ``if``s where the rendered module has two).
+    """
+    return f"do ? (rcondf{{{chal_side}}} ^if; first by move=> &m; auto => /#)."
+
+
+def _loop_leaf(body: list[ec_ast.EcStmt], chal_side: str) -> list[str]:
+    """Leaf finisher for the FORWARDING peel: dead-guard loop, then couple.
+
+    Uses the ``do !`` call loop rather than ``_straight_peel``'s one line per
+    call so the two sides need not hold the same NUMBER of calls -- after the
+    guard loop they do here, but the loop form does not depend on it. A leaf
+    carrying a sample falls back to ``_straight_peel``, which knows to ``rnd``.
+    """
+    stmts = _exec_stmts(body)
+    if not any(isinstance(s, (ec_ast.Call, ec_ast.Sample)) for s in stmts):
+        # No coupled statement, so no dead guard can be in the way either: this
+        # is the ``ct = ctStar -> None`` branch, identical on both sides. Emitting
+        # the guard loop here is what the validated script does NOT do, and the
+        # probe that said it was harmless turned out to be unfaithful (see
+        # ``_synth_forwarded_oracle_peel``), so match the script exactly.
+        return ["auto."]
+    if any(isinstance(s, ec_ast.Sample) for s in stmts):
+        return [_guard_loop(chal_side), *_straight_peel(stmts)]
+    return [
+        _guard_loop(chal_side),
+        "do ! (wp; call (_: true)).",
+        "wp; skip => /#.",
+    ]
+
+
+def _drop_witness_seeds(stmts: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt]:
+    """``stmts`` without its leading ``<var> <- witness`` seeds."""
+    i = 0
+    while (
+        i < len(stmts)
+        and isinstance(stmts[i], ec_ast.Assign)
+        and cast(ec_ast.Assign, stmts[i]).rhs.strip() == "witness"
+    ):
+        i += 1
+    return stmts[i:]
+
+
+def _if_prefixes_agree(
+    game_body: list[ec_ast.EcStmt], red_body: list[ec_ast.EcStmt]
+) -> bool:
+    """Whether the REDUCTION side splits where the GAME side does, at the same
+    index, everywhere the game splits.
+
+    This is what licenses the forwarding peel's NUMERIC ``seq idx idx``. It is
+    deliberately ASYMMETRIC, because the route exists precisely for bodies that
+    differ: once the game reaches a leaf, the reduction may have any number of
+    extra ``if``s there (the inlined challenger's dead guards) and that is fine
+    -- the leaf's guard loop eliminates them and its length-independent closers
+    do not care. What must line up is only the run of statements BEFORE each
+    branch the peel actually splits on.
+
+    A symmetric version of this check declines every real case: the reduction's
+    else-branch always has the extra guards.
+    """
+    # Drop leading ``<var> <- witness`` SEEDS first. ``_initialize_conditional_
+    # result`` adds one where EC cannot see that an oracle assigns its result on
+    # every path, and it lands in the FLAT state on one side only -- the rendered
+    # module does not carry it (the validated script's ``if`` applies straight
+    # after ``inline *``). Counting it would offset every index below by one.
+    g_e = _drop_witness_seeds(_exec_stmts(game_body))
+    r_e = _drop_witness_seeds(_exec_stmts(red_body))
+    gi = next((i for i, s in enumerate(g_e) if isinstance(s, ec_ast.If)), None)
+    if gi is None:
+        # GAME LEAF. The leaf closes with ``do ! (wp; call (_: true)); wp; skip
+        # => /#``, which couples the two sides' calls PAIRWISE -- so if the
+        # reduction's matching leaf is branch-free (hence faithfully modelled
+        # here) it must hold the SAME NUMBER of calls. MEASURED: a
+        # `CK_expanded_INDCCA_T` `decaps` leaf has 4 calls against the
+        # reduction's 5, the loop cannot align them, and the trailing
+        # ``skip => /#`` fails -- a BLOCKED export where an admit was honest.
+        #
+        # Only checked when the reduction leaf has NO ``if``: where it does, the
+        # flat state is not a faithful model (it carries dead guards the rendered
+        # module lacks) and the guard loop handles it, so a count taken there
+        # would be meaningless.
+        if not any(isinstance(s, ec_ast.If) for s in r_e):
+            g_calls = sum(1 for s in g_e if isinstance(s, ec_ast.Call))
+            r_calls = sum(1 for s in r_e if isinstance(s, ec_ast.Call))
+            if g_calls != r_calls:
+                return False
+        return True
+    ri = next((i for i, s in enumerate(r_e) if isinstance(s, ec_ast.If)), None)
+    if ri != gi:
+        return False
+    g_if, r_if = cast(ec_ast.If, g_e[gi]), cast(ec_ast.If, r_e[gi])
+    return _if_prefixes_agree(g_if.then_body, r_if.then_body) and _if_prefixes_agree(
+        g_if.else_body, r_if.else_body
+    )
+
+
+def _left_driven_peel(
+    game_body: list[ec_ast.EcStmt], chal_side: str
+) -> list[str] | None:
+    """The forwarding peel, driven ENTIRELY by the GAME body's ``if``-tree.
+
+    Deliberately never inspects the reduction's body. The reduction side differs
+    from the game by dead guards that ``inline *`` exposes, and the flat state
+    mis-models them, so anything counted there would be wrong; instead every
+    position is a PATTERN (``seq ^if ^if``, ``rcondf{i} ^if``) and the dead
+    guards are eliminated by a loop that lets EasyCrypt decide how many there
+    are. Validated end to end in ``ec_templates/
+    PARKED_indcca_decaps_oracle_forwarding.ec.txt``.
+    """
+    l_e = _exec_stmts(game_body)
+    idx = next((i for i, s in enumerate(l_e) if isinstance(s, ec_ast.If)), None)
+    if idx is None:
+        return _loop_leaf(l_e, chal_side)
+    if any(isinstance(s, ec_ast.If) for s in l_e[idx + 1 :]):
+        # A second branch after the first is a shape this route has not been
+        # validated on; decline rather than emit a peel that may not close.
+        return None
+    l_if = cast(ec_ast.If, l_e[idx])
+    then_tac = _left_driven_peel(l_if.then_body, chal_side)
+    else_tac = _left_driven_peel(l_if.else_body, chal_side)
+    if then_tac is None or else_tac is None:
+        return None
+    inner = ["if; 1: smt().", *then_tac, *else_tac]
+    if idx == 0:
+        return inner
+    prefix = l_e[:idx]
+    bound = {
+        s.var
+        for s in prefix
+        if isinstance(s, (ec_ast.Assign, ec_ast.Sample, ec_ast.Call))
+    }
+    live = sorted(_branch_reads(l_if) & bound)
+    inv = "#pre" + (f" /\\ ={{{', '.join(live)}}}" if live else "")
+    # NUMERIC ``seq idx idx``, not the ``seq ^if ^if`` pattern. The pattern form
+    # compiled on every cut-down probe and then FAILED in the real export ("invalid
+    # last instruction" on the ``call`` right after it): it resolves to a different
+    # split point there, leaving the branch itself in the first part. The
+    # game-side index is what the hand-validated script used, and the two sides'
+    # prefixes agree at this point -- ``_synth_forwarded_oracle_peel`` checks that
+    # rather than assuming it.
+    return [f"seq {idx} {idx} : ({inv}).", *_straight_peel(prefix), *inner]
+
+
 def _shape_peel(
     l_body: list[ec_ast.EcStmt],
     r_body: list[ec_ast.EcStmt],
@@ -10682,6 +10852,129 @@ def _synth_sim_field_rename(  # pylint: disable=too-many-arguments,too-many-posi
         sim_leaves=True,
         forbid=_delegate_flat_names(left_state0, right_state0),
     )
+    if peel is None:
+        return None
+    return [_res_tag(SYNTH_PARAM), "proc.", "inline *.", *peel, "qed."]
+
+
+def _synth_forwarded_oracle_peel(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-return-statements
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    coupling: str | None,
+) -> list[str] | None:
+    """Whole-hop tactic for a plain GAME against a reduction that FORWARDS this
+    oracle to its challenger, or ``None``.
+
+    The IND-CCA `_PQ` ``decaps`` hops: ``GameCaseSplitReal`` decapsulates locally
+    with ``pq_keys.`2`` while ``RB`` forwards to ``KEM_INDCCA_Real.decaps``. Once
+    inlined the reduction side carries two guards the game has not -- the
+    challenger's own refusal test and the reduction's ``None`` handling -- so the
+    bodies are NOT same-shape and both existing peel routes decline.
+
+    Driven ENTIRELY by the game body's ``if``-tree, with every position a PATTERN
+    and the dead guards eliminated by a zero-or-more loop. That is what makes it
+    immune to the FLAT-STATE FIDELITY GAP: the flat reduction body carries THREE
+    ``if``s where the rendered module has two, so anything counted off it would be
+    wrong.
+
+    Gated to the forwarding shape, and the gate is what keeps a failure to an
+    ADMIT rather than a BLOCKED export:
+
+    * exactly one plain game endpoint and one reduction endpoint;
+    * the reduction's flat state holds DELEGATE-owned (``<obj>@<f>``) fields and
+      the game's holds none -- the structural signature of forwarding;
+    * the two bodies are NOT same-shape, so every hop the existing peels already
+      close keeps its current tactic byte-identically;
+    * a non-empty coupling, since the guards' ``smt`` and the leaves' ``skip
+      => /#`` have no premise without one (for `decaps` that premise is the
+      forwarded-key conjunct ``_forwarded_chal_key_coupling`` supplies).
+    """
+    if not coupling:
+        return None
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+    l_deleg = _delegate_flat_names(left_state0)
+    r_deleg = _delegate_flat_names(right_state0)
+    # Exactly one side forwards. ``chal_side`` is the EC memory the dead guards
+    # live in, and the game side is what drives the peel.
+    if bool(l_deleg) == bool(r_deleg):
+        return None
+    # The FORWARDING side is the one whose flat state carries delegate fields;
+    # ``chal_side`` is the EC memory its dead guards live in, and the GAME side
+    # drives the peel. The game is not always the lemma's left.
+    if l_deleg:
+        game_proj, red_proj, chal_side = rproj, lproj, "1"
+    else:
+        game_proj, red_proj, chal_side = lproj, rproj, "2"
+    # ``emit_state_vars=True`` because the enabling-coupling gate below inspects
+    # FIELD TYPES; without it the module carries no ``var`` declarations at all and
+    # the gate silently declines everything (measured: it declined the validated
+    # `_PQ` case too). Same reason ``_shape_pair`` passes it.
+    gmod = _flat_state_module(
+        modules,
+        "Fwd_G",
+        game_proj,
+        external_module_types,
+        method_return_types,
+        [],
+        emit_state_vars=True,
+    )
+    rdmod = _flat_state_module(
+        modules,
+        "Fwd_R",
+        red_proj,
+        external_module_types,
+        method_return_types,
+        [],
+        emit_state_vars=True,
+    )
+    if not gmod.procs or not rdmod.procs:
+        return None
+    if _same_shape(gmod.procs[0].body, rdmod.procs[0].body):
+        return None  # the existing same-shape peels own this hop
+    # The peel's ``seq`` is a NUMERIC index taken from the game side, so the
+    # reduction must split where the game does. Decline on any mismatch, which
+    # costs an admit instead of a mis-split the following ``call`` would fail on.
+    if not _if_prefixes_agree(gmod.procs[0].body, rdmod.procs[0].body):
+        return None
+    # THE ROUTE MUST ONLY FIRE WHERE ITS ENABLING COUPLING EXISTS. The leaves close
+    # with ``skip => /#``, and on a forwarded oracle that ``smt`` needs the game's
+    # packed key component equated to the challenger field the reduction reaches it
+    # through -- the conjunct ``_forwarded_chal_key_coupling`` supplies. Without it
+    # the peel RUNS AND LEAVES A GOAL, i.e. a BLOCKED export where an admit would
+    # have been honest. MEASURED: dropping this gate fired the route on six
+    # `CK_expanded_INDCCA_T` decaps hops, only some of which have the conjunct, and
+    # broke three exports that compiled before.
+    #
+    # Tested on the COUPLING TEXT, not re-derived from the flat states. Re-deriving
+    # the builder's condition looked cleaner but does NOT discriminate: the flat
+    # types intersect on the `_T` hops too, while the builder declined them for a
+    # different reason (the reduction holds that type elsewhere). Only the emitted
+    # text says whether the premise is actually there.
+    #
+    # The signature of the forwarded-key conjunct is a CROSS-SIDE equality whose
+    # left side is a tuple PROJECTION: ``G.pq_keys.`2{1} = <Chal>.dk{2}``. The
+    # same-side variant (``RB.ctStar.`1{2} = <Chal>.ctStar{2}``, from a different
+    # builder) is not it and must not count.
+    if not any(
+        m.group(1) != m.group(3)
+        for m in re.finditer(
+            r"\.`[0-9]+\{([12])\} = ([A-Za-z_0-9.]+)\{([12])\}", coupling
+        )
+    ):
+        return None
+    game_body: list[ec_ast.EcStmt] = _drop_witness_seeds(
+        [s for s in gmod.procs[0].body if not isinstance(s, ec_ast.Return)]
+    )
+    if not any(isinstance(s, ec_ast.If) for s in _exec_stmts(game_body)):
+        return None
+    peel = _left_driven_peel(game_body, chal_side)
     if peel is None:
         return None
     return [_res_tag(SYNTH_PARAM), "proc.", "inline *.", *peel, "qed."]

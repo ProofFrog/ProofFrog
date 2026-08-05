@@ -20,7 +20,7 @@ import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Callable, cast
+from typing import Callable, NamedTuple, cast
 
 from ... import frog_ast
 from ...transforms._base import TransformApplication
@@ -5688,6 +5688,21 @@ def _emit_one_oracle_chain(
         )
         if shape is not None:
             return [], shape, set()
+        # Same body under a field RENAME (including the arrow-typed random
+        # function the peel above declines): ``inline *`` then the same if-tree
+        # walk with ``wp; sim`` leaves, which tolerate the statement-count skew
+        # inlining a delegate call introduces.
+        renamed = _synth_sim_field_rename(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            full_coupling,
+        )
+        if renamed is not None:
+            return [], renamed, set()
 
     # Field-aware coupling: identical-state hops keep the whole-glob equality
     # (byte-identical for clean proofs); a hop whose two sides differ in glob
@@ -10317,35 +10332,71 @@ def _straight_peel(body: list[ec_ast.EcStmt]) -> list[str]:
     return tac
 
 
+def _sim_leaf(body: list[ec_ast.EcStmt]) -> list[str]:
+    """Leaf finisher for the RENAMED-FIELD peel: ``wp; sim``.
+
+    Unlike ``_straight_peel``'s per-call ladder this tolerates the two sides
+    holding DIFFERENT NUMBERS of deterministic assignments, which is exactly
+    what ``inline *`` creates when one side reaches a value through a delegate
+    call the other has folded into an expression (the KDF-PRF hops:
+    ``rest0 <- rest; _r13 <- rF rest0; _r7 <- Some _r13`` against a lone
+    ``_r7 <- Some (rF rest)``). ``wp`` absorbs both runs whatever their length,
+    leaving the two lock-step abstract calls for ``sim``; and ``sim`` DOES relate
+    differently-owned globals -- ``Mpv2.of_form`` accepts any ``pv{1} = pv{2}``
+    pair -- so the coupling's ``G.seed_T{2} = R.seed_T{1}`` is usable by it.
+
+    A branch with no call or sample has nothing for ``sim`` to align and its
+    post is no longer an equality set once ``wp`` has run (``sim`` then fails
+    with "cannot infer the set of equalities"); those close with ``auto``.
+    """
+    if not any(isinstance(s, (ec_ast.Call, ec_ast.Sample)) for s in _exec_stmts(body)):
+        return ["auto."]
+    return ["wp; sim."]
+
+
 def _shape_peel(
-    l_body: list[ec_ast.EcStmt], r_body: list[ec_ast.EcStmt]
+    l_body: list[ec_ast.EcStmt],
+    r_body: list[ec_ast.EcStmt],
+    *,
+    sim_leaves: bool = False,
+    forbid: frozenset[str] = frozenset(),
 ) -> list[str] | None:
     """The peel for two same-shape bodies, recursing through ``if``s.
 
     A leading branch-free run before an ``if`` is split off with ``seq``, whose
     invariant is ``#pre`` plus equality of the locals the branch actually reads
-    -- the only names emitted, and they are the module's OWN rendered locals
-    (this route never inlines, so EC never renames them). The ``if`` guards are
-    handed to ``smt`` with the coupling in scope, which is exactly where the
-    packed-vs-separate field equalities do their work.
+    -- the only names emitted, and they are the module's OWN rendered locals.
+
+    ``sim_leaves`` swaps the branch-free finisher from ``_straight_peel``'s
+    per-call ladder to ``_sim_leaf``; ``forbid`` names identifiers that must not
+    appear in a ``seq`` prefix. Both exist for the renamed-field variant, which
+    prefixes the peel with ``inline *`` -- see ``_synth_sim_field_rename`` for
+    why ``forbid`` is what keeps the ``seq`` INDICES honest. Callers that pass
+    neither get the historical behaviour verbatim.
     """
     l_e, r_e = _exec_stmts(l_body), _exec_stmts(r_body)
     idx = next((i for i, s in enumerate(l_e) if isinstance(s, ec_ast.If)), None)
     if idx is None:
-        return _straight_peel(l_e)
+        return _sim_leaf(l_e) if sim_leaves else _straight_peel(l_e)
     if any(isinstance(s, ec_ast.If) for s in l_e[idx + 1 :]):
         # A second branch after the first is a shape this route has not been
         # validated on; decline rather than emit a peel that may not close.
         return None
     l_if, r_if = cast(ec_ast.If, l_e[idx]), cast(ec_ast.If, r_e[idx])
-    then_tac = _shape_peel(l_if.then_body, r_if.then_body)
-    else_tac = _shape_peel(l_if.else_body, r_if.else_body)
+    kw = {"sim_leaves": sim_leaves, "forbid": forbid}
+    then_tac = _shape_peel(l_if.then_body, r_if.then_body, **kw)  # type: ignore[arg-type]
+    else_tac = _shape_peel(l_if.else_body, r_if.else_body, **kw)  # type: ignore[arg-type]
     if then_tac is None or else_tac is None:
         return None
     inner = ["if; 1: smt().", *then_tac, *else_tac]
     if idx == 0:
         return inner
     prefix = l_e[:idx]
+    if forbid and any(
+        forbid & set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", _shape_stmt_text(s)))
+        for s in prefix + r_e[:idx]
+    ):
+        return None
     bound = {
         s.var
         for s in prefix
@@ -10401,6 +10452,90 @@ def _differing_tokens(
     return out
 
 
+class _ShapePair(NamedTuple):
+    """The two rendered same-shape bodies of one oracle, plus what the routes
+    over them gate on."""
+
+    l_body: list[ec_ast.EcStmt]
+    r_body: list[ec_ast.EcStmt]
+    diff: set[str]
+    fn_fields: set[str]
+    field_names: set[str]
+
+
+def _shape_pair(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+) -> _ShapePair | None:
+    """Render both sides' flat state for ``oracle_name`` and check the shared
+    preconditions of the two same-shape peel routes, or ``None``.
+
+    Requires the two bodies to be identical in shape AND actually different (an
+    identical pair is ``sim``'s business and stays byte-identical) and to
+    BRANCH -- the peels exist for what a straight peel cannot express, and a
+    branch-free pair is already handled downstream by the generic per-oracle
+    chain. Without the branching check the routes PREEMPT that chain's working
+    ``inline *; do ! (wp; call (_: true)); wp`` on the binding proofs' oracles,
+    churning admit-free exports for nothing.
+    """
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+    # ``emit_state_vars=True`` because the gates inspect the FIELD TYPES:
+    # without it the module carries no ``var`` declarations and the arrow-typed
+    # check silently passes everything.
+    lmod = _flat_state_module(
+        modules,
+        "Shape_L",
+        lproj,
+        external_module_types,
+        method_return_types,
+        [],
+        emit_state_vars=True,
+    )
+    rmod = _flat_state_module(
+        modules,
+        "Shape_R",
+        rproj,
+        external_module_types,
+        method_return_types,
+        [],
+        emit_state_vars=True,
+    )
+    if not lmod.procs or not rmod.procs:
+        return None
+    l_body, r_body = lmod.procs[0].body, rmod.procs[0].body
+    if l_body == r_body or not _same_shape(l_body, r_body):
+        return None
+    if not any(isinstance(s, ec_ast.If) for s in _exec_stmts(l_body)):
+        return None
+    allvars = list(lmod.module_vars) + list(rmod.module_vars)
+    return _ShapePair(
+        l_body=l_body,
+        r_body=r_body,
+        diff=_differing_tokens(l_body, r_body),
+        fn_fields={v.name for v in allvars if "->" in v.type.text},
+        field_names={v.name for v in allvars},
+    )
+
+
+def _delegate_flat_names(*states: frog_ast.Game) -> frozenset[str]:
+    """Flat-state names of the fields owned by an INLINED DELEGATE.
+
+    The canonicalizer flattens a reduction's own state and its inlined
+    delegate's into one field list, marking the delegate's ``<obj>@<f>``; the
+    module renderer turns that into ``<obj>_<f>``.
+    """
+    return frozenset(
+        f.name.replace("@", "_") for st in states for f in st.fields if "@" in f.name
+    )
+
+
 def _synth_structural_if_peel(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -10429,56 +10564,27 @@ def _synth_structural_if_peel(  # pylint: disable=too-many-arguments,too-many-po
     """
     if not coupling:
         return None
-    lproj = _project_to_method(left_state0, oracle_name)
-    rproj = _project_to_method(right_state0, oracle_name)
-    if lproj is None or rproj is None:
-        return None
-    # ``emit_state_vars=True`` because the gate below inspects the FIELD TYPES:
-    # without it the module carries no ``var`` declarations and the arrow-typed
-    # check silently passes everything.
-    lmod = _flat_state_module(
+    pair = _shape_pair(
         modules,
-        "Shape_L",
-        lproj,
+        oracle_name,
+        left_state0,
+        right_state0,
         external_module_types,
         method_return_types,
-        [],
-        emit_state_vars=True,
     )
-    rmod = _flat_state_module(
-        modules,
-        "Shape_R",
-        rproj,
-        external_module_types,
-        method_return_types,
-        [],
-        emit_state_vars=True,
-    )
-    if not lmod.procs or not rmod.procs:
+    if pair is None:
         return None
-    l_body, r_body = lmod.procs[0].body, rmod.procs[0].body
-    if l_body == r_body or not _same_shape(l_body, r_body):
-        return None
-    # BRANCHING bodies only -- the route exists for the case a straight peel
-    # cannot express, and a branch-free pair is already handled downstream by
-    # the generic per-oracle chain. Without this the route PREEMPTS that chain's
-    # working ``inline *; do ! (wp; call (_: true)); wp`` on the binding proofs'
-    # oracles, churning admit-free exports for nothing.
-    if not any(isinstance(s, ec_ast.If) for s in _exec_stmts(l_body)):
-        return None
+    l_body, r_body, diff = pair.l_body, pair.r_body, pair.diff
     # A differing reference to an ARROW-typed field is a whole random FUNCTION,
     # not a value: relating ``challenger_RF rest`` to ``v_RF rest`` is the
     # KDF-PRF hop's real content, and this peel is not a proof of it. EC agreed
     # loudly -- on `CG_expanded_INDCCA_PQ` ``hop_7_decaps`` the peel drove it
-    # into an internal ``EqObsInError`` anomaly. Those hops are a
-    # same-body-RENAMED-FIELD pair and belong to the ``sim_field_rename`` class.
-    fn_fields = {
-        v.name
-        for v in list(lmod.module_vars) + list(rmod.module_vars)
-        if "->" in v.type.text
-    }
-    diff = _differing_tokens(l_body, r_body)
-    if diff & fn_fields:
+    # into an internal ``EqObsInError`` anomaly (an UNHANDLED exception, not a
+    # soundness guard: ``s_eqobs_in`` cannot equate ``Some _r13`` with
+    # ``Some (rF rest)`` and ``t_eqobs_inS`` does not catch its own failure).
+    # Those hops are a same-body-RENAMED-FIELD pair; ``_synth_sim_field_rename``
+    # is their route.
+    if diff & pair.fn_fields:
         return None
     # THE SHAPE THIS ROUTE IS FOR: one side reaches a value through a PROJECTION
     # of a packed field (``corr.`3``) where the other names a separate field.
@@ -10495,8 +10601,7 @@ def _synth_structural_if_peel(  # pylint: disable=too-many-arguments,too-many-po
             r"([A-Za-z_][A-Za-z0-9_]*)\.`[0-9]+", _shape_stmt_text(stmt)
         )
     }
-    field_names = {v.name for v in list(lmod.module_vars) + list(rmod.module_vars)}
-    if not diff & projected & field_names:
+    if not diff & projected & pair.field_names:
         return None
     peel = _shape_peel(
         [s for s in l_body if not isinstance(s, ec_ast.Return)],
@@ -10505,6 +10610,81 @@ def _synth_structural_if_peel(  # pylint: disable=too-many-arguments,too-many-po
     if peel is None:
         return None
     return [_res_tag(SYNTH_PARAM), "proc.", *peel, "qed."]
+
+
+def _synth_sim_field_rename(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    coupling: str | None,
+) -> list[str] | None:
+    """Whole-hop tactic for a post-init oracle that is the SAME BODY under a
+    field RENAME -- including an arrow-typed (random-function) field -- or
+    ``None``.
+
+    This is the class ``_synth_structural_if_peel`` hands off: the KDF-PRF hops
+    where a reduction reads ``H_c.KDFPRFSec_Random.rF`` and the game reads
+    ``GameFreshSS.rF``, every other statement identical. Two facts make it
+    closable where the packed-projection peel is not:
+
+    * ``sim`` DOES relate differently-owned globals. It matches by name only
+      when it has to INFER the equality set; ``Mpv2.of_form``/``needed_eq``
+      accept any ``pv{1} = pv{2}`` pair, so the hop's own coupling and post --
+      already written ``G.seed_T{2} = R.seed_T{1}`` -- drive it directly.
+    * what ``sim`` cannot do is equate two expressions of different SHAPE, and
+      the one such pair here is created by ``inline *`` expanding the
+      reduction's delegate call (``_r13 <@ chal.lookup(rest)``) into
+      ``rest0 <- rest; _r13 <- rF rest0`` where the game has already folded it
+      to ``Some (rF rest)``. Both runs are pure assignments, so a leading ``wp``
+      absorbs them whatever their length -- hence ``_sim_leaf``'s ``wp; sim``.
+
+    THE ``forbid`` GATE IS WHAT KEEPS THE ``seq`` INDICES HONEST. The peel is
+    computed on the FLAT states, where that delegate call is already folded to
+    one assignment, but the tactic runs against the REAL modules after
+    ``inline *``, where it is two or more. The counts therefore agree only
+    where no folded delegate statement precedes the branch being split, so a
+    ``seq`` prefix mentioning any delegate-owned field declines the route.
+    (Calls that survive ``inline *`` are calls to ABSTRACT declared modules,
+    which have no body to inline and so cannot shift an index.)
+
+    Requires a non-empty coupling, for the same reason the sibling route does:
+    with nothing relating the differing references the guards' ``smt`` has no
+    premise. Tripwires: ``ec_templates/sim_field_rename_delegate.ec`` (this
+    route end to end) and the older ``ec_templates/sim_field_rename.ec``, which
+    already pinned that ``sim`` crosses a plain field rename.
+    """
+    if not coupling:
+        return None
+    pair = _shape_pair(
+        modules,
+        oracle_name,
+        left_state0,
+        right_state0,
+        external_module_types,
+        method_return_types,
+    )
+    if pair is None:
+        return None
+    # THE SHAPE THIS ROUTE IS FOR, and the one the sibling peel declines.
+    if not pair.diff & pair.fn_fields:
+        return None
+    # Every differing reference must be a FIELD the coupling can relate. A
+    # difference in anything else (a local, an operator, a literal) is a real
+    # body difference this route does not prove.
+    if not pair.diff <= pair.field_names:
+        return None
+    peel = _shape_peel(
+        [s for s in pair.l_body if not isinstance(s, ec_ast.Return)],
+        [s for s in pair.r_body if not isinstance(s, ec_ast.Return)],
+        sim_leaves=True,
+        forbid=_delegate_flat_names(left_state0, right_state0),
+    )
+    if peel is None:
+        return None
+    return [_res_tag(SYNTH_PARAM), "proc.", "inline *.", *peel, "qed."]
 
 
 def _bd_sample_dead(

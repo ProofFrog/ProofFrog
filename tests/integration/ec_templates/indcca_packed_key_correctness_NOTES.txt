@@ -1,0 +1,97 @@
+NOTES -- the packed-key correctness-reduction hops (`_PQ` hops 0 and 15).
+Measured c255 on `CG_expanded_INDCCA_PQ` `hop_0_decaps`. Documentation only; no
+exporter change. THE LARGEST REMAINING CLASS: 2 oracles x 2 hops x 8 `_PQ` cells.
+
+WHY THIS SUPERSEDES THE OLD "PROJECTION FOLDING REFUTED" PARK
+=============================================================
+The front was parked long ago as "packed-key dependence; projection folding
+REFUTED". That said what does NOT work; it never said what the two bodies actually
+are. They are not a projection-folding problem at all.
+
+THE TWO BODIES (flat states, callees shown -- not statement kinds, and not a text
+prefix; both of those granularities have misled in this run)
+==================================================================
+LEFT -- the theorem game `Hybrid_c.KEM_INDCCA_Real`, fields {ctStar, dk}:
+
+    if (ct = ctStar) { A }
+    else {
+      A A A A A                       <- reads the PACKED key: dk.`1, dk.`2, dk.`3
+      C KEM_PQ.decaps
+      C NG.exp
+      C NG.elementtosharedsecret
+      C KEM_PQ.encodesharedsecret
+      C NG.encode
+      C NG.encode
+      C L.get
+      A
+      C H.evaluate
+      A
+    }                                  -- 9 calls, NO inner branch
+
+RIGHT -- the correctness reduction `R_Correct_Real`, fields {corr, ctStar, seed_T}:
+
+    if (ct = ctStar) { A }
+    else {
+      C NG.randomscalar                <- RE-DERIVES the T scalar from seed_T
+      A A
+      C NG.exp
+      C NG.elementtosharedsecret
+      if (ct_PQ = corr.`3) {           <- AN INNER CASE-SPLIT THE GAME LACKS
+        C KEM_PQ.encodesharedsecret, C NG.encode, C NG.generator, C NG.exp,
+        C NG.encode, C L.get, A, C H.evaluate, A          -- 8 calls
+      } else {
+        C KEM_PQ.decaps, C KEM_PQ.encodesharedsecret, C NG.encode,
+        C NG.generator, C NG.exp, C NG.encode, C L.get, A, C H.evaluate, A
+      }                                                   -- 9 calls
+    }
+
+So there are TWO distinct differences, and neither is plumbing:
+
+ 1. **The reduction SPLITS on whether the queried PQ ciphertext is the challenge
+    one** (`ct_PQ = corr.`3`) and the game does not. Closing this needs the split
+    introduced on the game side -- `case (ct_PQ = ...)` -- with the challenge
+    branch discharged from the correctness invariant the coupling already carries
+    (`corr.`5 = ev_decaps corr.`2 corr.`3`), which is exactly what makes the
+    reduction's two branches agree with the game's single one.
+ 2. **The game reads the packed T scalar `dk.`2` where the reduction re-derives it
+    from its seed** via `NG.randomscalar(seed_T)`, and it also calls
+    `NG.generator` the game does not.
+
+WHAT IS ALREADY IN THE COUPLING, AND THE ONE CONJUNCT THAT IS MISSING
+====================================================================
+Emitted today for this hop:
+
+    Hybrid_c.KEM_INDCCA_Real.dk.`1{1} = R_Correct_Real.corr.`2{2}
+    Hybrid_c.KEM_INDCCA_Real.dk.`3{1} = NG_c.ev_exp (NG_c.ev_generator)
+                                        (Hybrid_c.KEM_INDCCA_Real.dk.`2{1})
+    Hybrid_c.KEM_INDCCA_Real.ctStar{1} = R_Correct_Real.ctStar{2}
+    R_Correct_Real.corr{2}.`5 = KEM_PQ_c.ev_decaps (corr{2}.`2) (corr{2}.`3)
+
+**Nothing relates `dk.`2{1}` to `seed_T{2}`.** That is the missing premise, and it
+is the reason difference (2) cannot be discharged: the game's scalar and the
+reduction's seed are unconnected in the precondition.
+
+**AND IT IS EXPRESSIBLE -- MEASURED, NOT ASSUMED.** `NG.randomscalar` is
+DETERMINISTIC in this export: both `axiom NG_randomscalar_det` and
+`NG_c.ev_randomscalar` are emitted. So the needed conjunct is
+
+    Hybrid_c.KEM_INDCCA_Real.dk.`2{1} = NG_c.ev_randomscalar (R_Correct_Real.seed_T{2})
+
+in exactly the `ev_`-functional style the coupling already uses for `dk.`3`. The
+exporter also already has `_lazyro_derived_key_coupling`, which computes
+derived-key relations of this shape for the LazyRO hops -- so the machinery to
+build it exists.
+
+THE BUILD, IN ORDER (none of it attempted)
+==========================================
+ 1. Emit the `dk.`2{1} = ev_randomscalar seed_T{2}` conjunct. **Check BOTH
+    directions**: it must be establishable by `hop_0_initialize`, which is itself
+    still admitted -- so unlike c252, here the establishing side is NOT already
+    green and must be closed too, or the conjunct is unusable.
+ 2. A route that introduces the reduction's case-split on the game side and
+    discharges the challenge branch from the `corr.`5 = ev_decaps ...` invariant.
+ 3. Functionalize `NG.randomscalar` (and the extra `NG.generator`) via their
+    `_det` axioms so the two branches' call sequences line up for a peel.
+
+Expect this to be a MULTI-CYCLE build, and expect the gates to come from compiles
+rather than from reasoning -- every gate the c252 route needed did.

@@ -9912,7 +9912,7 @@ def export_proof_file(proof_path: str) -> str:
         `CG_expanded_INDCCA_PQ` before this was written -- with the conjunct
         added, ``hop_3_decaps`` closes AND ``hop_3_initialize`` still closes with
         its existing tactic completely unchanged (see
-        ``ec_templates/PARKED_indcca_decaps_oracle_forwarding.ec.txt``).
+        ``ec_templates/indcca_decaps_oracle_forwarding_NOTES.txt``).
 
         Deliberately narrow, so it fails CLOSED (costing an admit) rather than
         emitting a false conjunct: the component type must identify EXACTLY ONE

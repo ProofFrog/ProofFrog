@@ -10488,7 +10488,7 @@ def _left_driven_peel(
     position is a PATTERN (``seq ^if ^if``, ``rcondf{i} ^if``) and the dead
     guards are eliminated by a loop that lets EasyCrypt decide how many there
     are. Validated end to end in ``ec_templates/
-    PARKED_indcca_decaps_oracle_forwarding.ec.txt``.
+    indcca_decaps_oracle_forwarding_NOTES.txt``.
     """
     l_e = _exec_stmts(game_body)
     idx = next((i for i, s in enumerate(l_e) if isinstance(s, ec_ast.If)), None)

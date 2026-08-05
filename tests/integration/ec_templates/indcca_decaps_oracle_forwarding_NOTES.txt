@@ -1,0 +1,143 @@
+NOTES -- the IND-CCA forwarded-`decaps` route. LANDED in c252 (`5fa7922`).
+Parked through c250-c251; this file keeps the measurements that got it there and
+the two claims from c251 that later measurement REFUTED.
+
+WHAT THE ROUTE IS
+=================
+The `decaps` hops where the game decapsulates LOCALLY with its packed
+`pq_keys.`2` while the reduction FORWARDS to its challenger's decaps oracle:
+
+    left :  dec_ss_PQ     <@ KEM_PQ.decaps(GameCaseSplitReal.pq_keys.`2, ct_PQ)
+    right:  dec_ss_PQ_opt <@ KEM_PQ_c.KEM_INDCCA_Real(KEM_PQ).decaps(ct_PQ)
+
+Two pieces:
+  * `_forwarded_chal_key_coupling` (exporter.py) -- appended in
+    `_live_state_coupling` beside `wchal`/`spc`/`wdk`, supplying
+    `G.pq_keys.`2{1} = <Chal>.dk{2}`.
+  * `_synth_forwarded_oracle_peel` / `_left_driven_peel` (chain_emitter.py).
+
+THE DEFECT IT FIXES, WHICH A GREEN CELL HIDES
+=============================================
+`hop_3_initialize` was CLOSED at `synth-param` while the coupling it establishes
+carried only the ENCAPSULATION key. Its own `decaps` hop needs the DECAPSULATION
+key, so the establishing side compiled green and only the consumer revealed what
+was missing. **A coupling can be too WEAK as well as too strong** (the too-strong
+case is the still-parked `hop_7_initialize`). When widening one, re-verify the
+establishing hop still closes -- here it did, with its tactic unchanged.
+
+THE EMITTED SCRIPT (validated on the FULL export, not just a probe)
+===================================================================
+  proc.
+  inline *.
+  if; 1: smt().
+  auto.                                   (* leaf with no call/sample *)
+  seq 5 5 : (#pre /\ ={ct_PQ, ct_T, dec_ss_T, dk_T}).
+  wp; call (_: true).                     (* _straight_peel of the prefix *)
+  wp; call (_: true).
+  wp; call (_: true).
+  wp; skip => /#.
+  if; 1: smt().
+  do ? (rcondf{2} ^if; first by move=> &m; auto => /#).
+  do ! (wp; call (_: true)).
+  wp; skip => /#.
+  do ? (rcondf{2} ^if; first by move=> &m; auto => /#).
+  do ! (wp; call (_: true)).
+  wp; skip => /#.
+  qed.
+
+The reduction side carries TWO dead guards once inlined -- the challenger's own
+`ct = ctStar` refusal test (false under the enclosing branch, and its premise is a
+THREE-STEP chain through the coupling, so a bare `auto` does not close it) and a
+literal `if (false)` where the reduction handles the oracle's `None`.
+
+EC PATTERN POSITIONS, all four validated
+========================================
+  rcondf{i} ^if        -- "first `if` on side i"; no index needed
+  do ! (rcondf ...)    -- one loop replaces both eliminations
+  do ? (...)           -- NO-OP at zero iterations, so safe to emit at EVERY leaf
+  seq ^if ^if : (...)  -- splits before each side's first `if`
+
+`do ?` is what the landed route uses. **`seq ^if ^if` is NOT used** -- see the
+probe-fidelity trap below.
+
+MEASURED RESULT (13 changed exports, every one compiled)
+========================================================
+  CG_expanded_INDCCA_PQ    9 -> 7     UG_expanded_INDCCA_PQ    9 -> 7
+  CK_expanded_INDCCA_PQ   11 -> 9     UK_expanded_INDCCA_PQ   11 -> 9
+  CG_seedbased_INDCCA_PQ  16 -> 14    CK_seedbased_INDCCA_PQ  22 -> 20
+  UK_seedbased_INDCCA_PQ  22 -> 20    CK_expanded_INDCCA_T    19 -> 17
+  UK_expanded_INDCCA_T    15 -> 13    CK_seedbased_INDCCA_T   30 -> 28
+  UK_seedbased_INDCCA_T   26 -> 24
+All eleven EXIT 0, axiom delta +0/-0. NO new green -- lowest cell is 7 admits.
+`GHP18_INDCPA_First`/`Second` also change (coupling text only) and stay EXIT 1 on
+a PRE-EXISTING error; see the limitation below.
+
+THREE GATES, EACH EARNED BY A MEASURED REGRESSION
+=================================================
+Two earlier versions broke exports that had compiled. None of these was reasoned
+in advance; each came from a compile.
+
+ 1. **No `live_state_holders.add(chal_base)`.** That is a side effect on module
+    EMISSION, not just on the returned string, and it gave
+    `KEMPRF_INDCCA`/`LCK_INDCCA` a duplicated `var pk` -- a failure in a module
+    DECLARATION, nowhere near a tactic. Where the conjunct is genuinely usable the
+    challenger is already a holder via the neighbouring seam conjuncts.
+ 2. **The route fires only where its enabling coupling is present**, tested on the
+    coupling TEXT (a CROSS-SIDE equality whose left side is a tuple projection).
+    Re-deriving the builder's condition from the flat states looked cleaner and
+    does NOT discriminate: the flat types intersect on the `_T` hops too, where
+    the builder declined for a different reason. Only the emitted text says
+    whether the premise is there.
+ 3. **Equal call counts at a game leaf whose reduction counterpart is
+    branch-free.** The leaf's `do ! (wp; call (_: true))` couples calls PAIRWISE,
+    so 4 calls against the reduction's 5 cannot align and the trailing
+    `skip => /#` fails. Checked ONLY where the reduction leaf has no `if`, since
+    the flat state is not faithful there.
+
+TWO CLAIMS c251 PUBLISHED THAT MEASUREMENT LATER REFUTED
+========================================================
+Both came from reading EXIT=1 as "my fault" without compiling the baseline -- the
+rule that had already been applied to StarHunters PreQuantum and not to the rest.
+
+ * "TEN REGRESSIONS." The true number was THREE
+   (`CG`/`CK`/`UK_expanded_INDCCA_T`). Seven of the ten fail IDENTICALLY at
+   baseline, same line and column: `KEMPRF_INDCCA` and `LCK_INDCCA`
+   (`duplicated local/parameters name: 'pk'`), `GHP18_INDCPA_First`/`Second`
+   (`no matching operator '='`), `GHP18_INDCCA_First`/`Second` and
+   `CK_INDCCA_PostQuantum` (`cannot prove goal (strict)`). **So the corpus holds
+   at least eight already-blocked non-CFRG exports** -- the CFRG band is still
+   empty, but the stale full `dashboard.md` does not show these.
+ * "THE COUPLING'S TYPE MATCH IS UNSOUND." WITHDRAWN. It rested on
+   `GHP18_INDCPA` failing with an ill-typed `=`, which is PRE-EXISTING at the
+   identical line and column. A `_renders_as_tuple` guard was written for it and
+   reverted as speculative -- it fixed a non-problem.
+   REMAINING HONEST LIMITATION: the coupling still fires on `GHP18_INDCPA`
+   (text-only, no route, no admit change) and those exports stay blocked on that
+   earlier error, so whether the conjunct it adds THERE is well-typed is not
+   verifiable while EasyCrypt stops before reaching it.
+
+TRAPS THIS ROUTE COST, worth keeping
+====================================
+ * **`build_hop_probe.py` is NOT faithful for `inline *`-dependent tactics.** The
+   cut changes which modules are visible, so `inline *` inlines differently:
+   `seq ^if ^if` compiled on EVERY probe and then failed in the real export
+   ("invalid last instruction" on the `call` after it) because the pattern
+   resolved to a different split point. Derive on a probe; CONFIRM ON THE FULL
+   EXPORT.
+ * **A truncated body dump is a prefix, not a summary.** The game and reduction
+   bodies share a long identical prefix, so a dump cut at 300 chars showed them as
+   identical and invited "these differ only by the leading `<ret> <- witness`
+   seed". They do not. Print statement KINDS per branch, or the predicate itself.
+ * **The flat states are not the rendered module.** They FOLD a delegate call (one
+   statement fewer), CARRY branches the module lacks (three `if`s where the module
+   has two), and add a `<ret> <- witness` seed on one side only.
+ * **Read the function before editing it.** The first coupling fix went into
+   `_packed_decomposition_coupling` on the strength of its docstring; that
+   function returns `None` for this hop, so the edit was dead code. The real
+   emitter is the builder chain in `_live_state_coupling`.
+
+STILL OPEN, worth its own measured cycle
+========================================
+`seq ^if ^if` would let the existing `_shape_peel` drop its numeric `seq idx idx`
+and with it the `_delegate_flat_names` index gate -- but it must be confirmed on
+full exports, and it touches 11 exports currently validated EXIT 0.

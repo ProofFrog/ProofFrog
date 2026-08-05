@@ -143,15 +143,66 @@ route that counts dead guards off the flat state emits the wrong number of
 there the flat state FOLDED a delegate call (one statement fewer), here it
 carries an extra BRANCH the real module does not have.
 
-Two ways forward, neither attempted:
-  (a) emit `do ! (rcondf{2} ^if; first by move=> &m; auto => /#).` and let EC
-      decide how many dead guards there are -- the pattern form makes this
-      expressible, and a guard that is not provably false stops the loop
-      cleanly. Needs care about what the peel then faces if a LIVE `if` remains.
-  (b) derive the route from the REAL rendered modules rather than the flat
-      states. `module_translator` already renders them for the lemma; the peel
-      routes just happen to read `_flat_state_module` instead. This is the
-      principled fix and is an architectural change, not a tactic tweak.
+THE GAP IS NOW MOOT -- EVERY INDEX CAN BE A PATTERN (all four validated in c251)
+===============================================================================
+The blocker above assumed the route must COUNT things in the right body. It does
+not. EasyCrypt accepts code-position PATTERNS wherever it accepts an index, and
+four separate probes confirm the whole script can be written without a single
+computed position:
+
+  1. `rcondf{2} ^if`  -- "the first `if` on side 2". Replaces both computed
+     indices.                                   (`.ec-tmp/c251_pat.ec`, EXIT 0)
+  2. `do ! (rcondf{2} ^if; first by move=> &m; auto => /#).` -- ONE loop
+     replaces both eliminations; EC decides how many dead guards there are, and
+     a guard that is not provably false stops the loop cleanly.
+                                             (`.ec-tmp/c251_doloop.ec`, EXIT 0)
+  3. The `do ?` (zero-or-more) form is HARMLESS where there are no dead guards
+     at all, so it can be emitted at EVERY leaf unconditionally -- verified on
+     the then-branch leaf, which has none.  (`.ec-tmp/c251_doq.ec`, EXIT 0)
+  4. `seq ^if ^if : (...)` -- splits before each side's first `if`, so the
+     prefix lengths need not match or be known.
+                                             (`.ec-tmp/c251_seqpat.ec`, EXIT 0)
+
+Consequence: the route is driven ENTIRELY BY THE LEFT (game) BODY'S if-tree and
+never inspects the right's structure, so the flat-state fidelity gap cannot
+mis-size anything. `_same_shape` is not required either.
+
+THE FULLY POSITION-INDEPENDENT SCRIPT (validated, `.ec-tmp/c251_seqpat.ec`):
+
+  proc.
+  inline *.
+  if; 1: smt().
+  auto.                                   (* leaf with no call/sample *)
+  seq ^if ^if : (#pre /\ ={ct_PQ, ct_T, dec_ss_T, dk_T}).
+  wp; call (_: true).                     (* _straight_peel of the prefix *)
+  wp; call (_: true).
+  wp; call (_: true).
+  wp; skip => /#.
+  if; 1: smt().
+  do ? (rcondf{2} ^if; first by move=> &m; auto => /#).
+  do ! (wp; call (_: true)).
+  wp; skip => /#.
+  do ? (rcondf{2} ^if; first by move=> &m; auto => /#).
+  do ! (wp; call (_: true)).
+  wp; skip => /#.
+  qed.
+
+SO THE IMPLEMENTATION IS NOW MECHANICAL: `_shape_peel` with (i) `seq ^if ^if`
+instead of `seq idx idx`, (ii) a `do ? (rcondf{2} ^if; ...)` prefix at every
+leaf, (iii) leaves closing with `do ! (wp; call (_: true)); wp; skip => /#` (or
+`auto` when call-free), and (iv) the left body alone as the driver. What still
+needs judgement is the GATE -- with `_same_shape` no longer required, something
+must stop the route firing on genuinely different bodies, where the peel would
+fail and leave the export BLOCKED (worse than an admit). Suggested structural
+gate: the reduction-side flat state has delegate-owned (`@`-marked) fields and
+the game side has none, the coupling is non-empty and contains a `.`k`
+projection, and the two bodies are NOT same-shape (so the existing peels keep
+the cases they already close).
+
+A SEPARATE PRIZE, worth its own measured cycle: `seq ^if ^if` would let the
+EXISTING `_shape_peel` drop its numeric `seq idx idx` and with it the whole
+`_delegate_flat_names` index gate that `_synth_sim_field_rename` needs. That
+touches 11 exports currently validated EXIT 0, so it must not be bundled.
 
 A THIRD MISREAD TO AVOID (cost c251 a wasted change): the flat bodies share a
 long identical PREFIX, so a body dump truncated to a fixed width shows them as

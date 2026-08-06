@@ -217,6 +217,32 @@ runs EasyCrypt inside the `ghcr.io/easycrypt/ec-test-box:release`
 Docker image. Exit 0 = type-check success; parse/type errors print to
 stderr with a `[critical] [/work/<name>: line N (col-col)] ...` prefix.
 
+**Wall-clock budget.** The compile is bounded by `EC_TIMEOUT` seconds
+(default 1800); on expiry the container is killed and the script exits
+**124**, so a timeout is distinguishable from a proof failure. Set
+`EC_TIMEOUT=0` to disable. The bound exists because a wedged compile
+once ran for 15 hours: nothing bounded it, and killing the *client* does
+not stop the container (`docker run` without a name leaves an orphan
+holding a CPU). The script now names its container and kills it from a
+trap as well. Note the trap cannot fire on SIGKILL, so a caller that
+enforces its own deadline with `subprocess.run(timeout=...)` — which
+sends SIGKILL — must keep `EC_TIMEOUT` *shorter* than its own timeout or
+it will still leak a container. The trigger for that incident was
+oversubscription (four EasyCrypt containers plus a test suite on one
+box); limit CONCURRENCY rather than raising the budget.
+
+**`.eco` caching — read this before trusting a fast "exit 0".**
+EasyCrypt writes `<file>.eco` beside the source and SKIPS recompilation
+when it is current: a re-run of a byte-identical file returns exit 0 in
+~5s having verified nothing, where the real compile takes ~40s. Measured:
+the cache is keyed on CONTENT, not mtime — `touch`ing the `.ec` does not
+invalidate it, but an in-place EDIT does (EC re-verifies and rejects a
+corrupted tactic). So this is not a fake-green risk for a verdict about
+the bytes you just wrote; it *is* a trap for timing and for "I re-ran it
+and it passed". If you need to prove a compile really happened, delete
+the `.eco`, or compile under a fresh filename, and sanity-check the
+elapsed time.
+
 **Sandbox gotcha (Claude Code).** The default sandbox blocks the Docker
 socket, so any `bash scripts/easycrypt.sh ...` call must be run with
 `dangerouslyDisableSandbox: true`. When the sandbox is disabled,

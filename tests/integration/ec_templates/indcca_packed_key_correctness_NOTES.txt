@@ -1,6 +1,7 @@
 NOTES -- the packed-key correctness-reduction hops (`_PQ` hops 0 and 15).
-Measured c255 on `CG_expanded_INDCCA_PQ` `hop_0_decaps`. Documentation only; no
-exporter change. THE LARGEST REMAINING CLASS: 2 oracles x 2 hops x 8 `_PQ` cells.
+Measured c255 on `CG_expanded_INDCCA_PQ` `hop_0_decaps`; the c257 section at the
+bottom records what has since been BUILT. THE LARGEST REMAINING CLASS: 2 oracles
+x 2 hops x 8 `_PQ` cells.
 
 WHY THIS SUPERSEDES THE OLD "PROJECTION FOLDING REFUTED" PARK
 =============================================================
@@ -95,3 +96,103 @@ THE BUILD, IN ORDER (none of it attempted)
 
 Expect this to be a MULTI-CYCLE build, and expect the gates to come from compiles
 rather than from reasoning -- every gate the c252 route needed did.
+
+UPDATE c257 -- hop_0_initialize IS CLOSED ON THE FOUR `_expanded_PQ` CELLS
+=========================================================================
+`_synth_delegate_correctness_init` (chain_emitter.py) closes it as `synth-param`.
+Validated: `scripts/easycrypt.sh` EXIT 0 on all four changed exports
+(CG/UG_expanded_INDCCA_PQ 7 -> 6 admits, CK/UK 9 -> 8).
+
+Shape it exploits, and why the older routes declined:
+ - The reduction's `KEMCorrectnessWithDK` challenger runs `keygen; encaps; decaps`
+   bundled, the game runs `keygen; <T-derivation>; encaps`. So the two are a
+   PERMUTATION *plus* a one-sided `KEM_PQ.decaps` whose result is LIVE (it is
+   `corr.`5`). `_synth_bundled_delegate_reorder` drops only DEAD samples and
+   declines outright on an `ev_` post; `_synth_init_backbone_peel`'s `_pres` drop
+   FORGETS the result, so it cannot state the `ev_decaps` conjunct.
+ - The route is `RawGame ~ FGd ~ FRd ~ RawRed` transitivity over emitted flat
+   twins. The middle leg runs on the twins (no `inline *`), so their local names
+   are the ones EC sees -- no inline-name prediction anywhere. The two raw-wrapper
+   legs are the ordinary `proc; inline *; <backbone peel>; auto`.
+ - The extra `decaps` is dropped one-sidedly via `KEM_PQ_decaps_det`, and THAT IS
+   WHAT STATES the coupling's `corr.`5 = ev_decaps corr.`2 corr.`3`. Dropping and
+   proving are the same step.
+
+TWO MEASURED FACTS, both of which cost a cycle each and neither of which was
+guessable:
+ 1. The flat twin MUST be built with `no_shadow_fields=True`. A reduction whose
+    `Initialize` writes its OWN field (`seed_T`) otherwise gets a proc-local of
+    the same name declared alongside the module var; the local SHADOWS the field,
+    the field is never written, and every `FRd_0.seed_T` in the invariant and in
+    the outer leg's post is unprovable. EC reported this as a failing `skip => /#`
+    on the innocent-looking `rnd` step -- the goal probe is what showed the right
+    program sampling a LOCAL `seed_T`.
+ 2. `_event_align_swaps` ALREADY EXISTED (the KDF-key-substitution route's). A
+    second definition of the same name earlier in the file is DEAD -- Python keeps
+    the later one -- so the new route declined silently with no decline tag firing.
+    Grep for the name before adding a helper.
+
+THE SEEDBASED CELLS NEEDED ONE GATE RELAXED, AND THEY ALSO GIVE THE MIRROR HOP
+=============================================================================
+Measured, not guessed: on the four `_seedbased_PQ` cells the correctness hops are
+numbered 4 and 19 (not 0 and 15), and their coupling is MUCH thinner -- globs plus
+the single `corr.`5 = ev_decaps corr.`2 corr.`3` conjunct, with NOTHING about the
+game's fields. So `_coupling_base_for(..., game_flds, 1)` returns None and the
+route's original gate declined.
+
+That gate was too strong. A coupling that says nothing about the game's fields
+needs no game-side field equalities in the transitivity's first post: everything
+the final post asserts is about the reduction, so `q1` = globs + `res{1}=res{2}`
+composes fine. `red_base` stays mandatory -- `q4` is what carries the flat twin's
+fields back to the real reduction module.
+
+With `game_base` optional, BOTH correctness hops fire on every `_seedbased_PQ`
+cell (-2 admits each), and the mirrored one (hop 19, game on side 2) goes through
+the `symmetry.` path. The same relaxation also picked up the second correctness
+hop on `CK/UK_seedbased_INDCCA_T`.
+
+STILL OPEN in this class:
+ - `hop_15_initialize` on the four `_expanded` cells: a genuinely different shape.
+   There the game side (`KEM_INDCCA_Random`) runs its whole KDF chain DEAD
+   (`ss_unused`) and then samples `ssStar <$` fresh, while the reduction has no
+   KDF chain at all. So it needs a dead-call drop on the GAME side as well as the
+   extra-`decaps` drop on the reduction side -- two one-sided drops in opposite
+   directions, which the current `_extra_det_target` refuses (it allows extras on
+   ONE side only).
+ - Both `decaps` halves: unchanged from the analysis above. The missing premise
+   `dk.`2{1} = ev_randomscalar seed_T{2}` is now cheap to ESTABLISH -- the init
+   route already proves exactly that equation on both sides inside its middle
+   leg -- so the remaining work is the game-side case-split introduction.
+
+THE BOTH-SIDED-EXTRAS EXTENSION (designed c257, not yet built)
+=============================================================
+`hop_15_initialize` on the `_expanded` cells needs extras on BOTH sides, which
+`_extra_det_target` currently refuses. Measured shapes (flat bodies, events only):
+
+  LEFT  = reduction `R_Correct_Ideal`, 12 events:
+      keygen, encaps, DECAPS, S(nseed), rs, gen, exp, S(nseed), rs, gen, exp,
+      S(kdf_nout)
+  RIGHT = game `KEM_INDCCA_Random`, 18 events:
+      keygen, S(nseed), rs, gen, exp, encaps, S(nseed), rs, gen, exp, EXP, ETS,
+      ESS, ENC, ENC, GET, EVAL, S(kdf_nout)
+
+So the delegate side has ONE live-det extra (`decaps`) and the game side has SEVEN
+extras -- its whole KDF chain -- every one of them DEAD, because the game samples
+`ssStar <$ dbs_kdf_nout` fresh and discards the encapsulated `ss` (`ss_unused`).
+
+The build, and it reuses machinery that already exists:
+ - `_live_out` is COMPONENT-precise (a live `t.`2` revives only the 2nd component
+   of `t`'s defining tuple literal), so `_drop_result_dead` correctly reports the
+   whole KDF chain dead even though its results pass through `_tup_0 <- (ss, ct)`
+   whose OTHER component is live. Do not write a fresh liveness pass.
+ - Delegate-side extra -> `call{2} (M_m_det ...)` as now (result LIVE, and the
+   drop is what states the coupling's `ev_` fact).
+ - Game-side extra -> `exists* (glob M){1}; elim* => g. call{1} (M_m_pres g).`,
+   gated on `_drop_result_dead`, and the `(M, m)` pair RETURNED in the route's
+   third tuple element (it is already a `pres_methods` slot -- the route just
+   returns `set()` today).
+ - `_extra_det_target` becomes: match positionally into `common`; the delegate's
+   alignment target is `common` in the GAME's order with delegate extras
+   re-inserted (unchanged); the WALK is driven by an ordered op list built from
+   the game's own event order -- `dropL` for a dead game extra, `match`, then any
+   delegate extras attached after that common event as `dropR`.

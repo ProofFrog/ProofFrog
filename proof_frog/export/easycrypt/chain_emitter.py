@@ -3353,6 +3353,468 @@ def _synth_init_ek_twin(  # pylint: disable=too-many-arguments,too-many-position
     return extra, outer, set()
 
 
+def _ev_sig(stmt: ec_ast.EcStmt) -> tuple[str, str]:
+    """The cross-side comparable event signature of one backbone statement.
+
+    Same granularity as :func:`_bd_events` -- a call by its callee, a sample by
+    its distribution -- but per-statement, so a selection sort can compare a
+    statement against a target slot without rebuilding the whole list.
+    """
+    if isinstance(stmt, ec_ast.Call):
+        return ("call", stmt.callee)
+    return ("sample", cast(ec_ast.Sample, stmt).distr)
+
+
+def _extra_det_target(
+    keep_events: list[tuple[str, str]],
+    extra_events: list[tuple[str, str]],
+    det_pred: Callable[[str, str], bool],
+) -> tuple[list[tuple[str, str]], set[int]] | None:
+    """Interleave ``extra_events`` into ``keep_events``' order, or ``None``.
+
+    ``extra_events`` is the extra side's OWN event list; ``keep_events`` is the
+    other side's. Occurrences of the same signature are matched positionally
+    (the k-th ``NG.exp`` on one side is the k-th on the other), so an event whose
+    signature occurs more often on the extra side is an EXTRA. Every extra must
+    be a DETERMINISTIC call -- that is what makes it droppable one-sidedly by its
+    ``_det`` axiom (a probabilistic extra would need a distribution argument this
+    route does not have).
+
+    Returns the target event order for the extra side (the other side's order,
+    with each extra re-inserted directly after the matched event it currently
+    follows) plus the set of target indices that are extras. ``None`` when the
+    other side has an event the extra side lacks, when an extra is not a
+    droppable det call, or when there is no extra at all (that is the plain
+    bundled-reorder route's shape, not this one).
+    """
+    occ: dict[tuple[str, str], list[int]] = {}
+    for k, ev in enumerate(keep_events):
+        occ.setdefault(ev, []).append(k)
+    seen: dict[tuple[str, str], int] = {}
+    extras_at: dict[int, list[tuple[str, str]]] = {}
+    n_extra = 0
+    n_matched = 0
+    # Walk the extra side, classifying each event as matched (its positional
+    # occurrence exists on the other side) or extra. An extra is placed after
+    # the KEEP-side position of the matched event it currently follows -- not
+    # after the count of matched events seen, which is a different index
+    # whenever the two orders differ (and they always do here, or there would
+    # be nothing to align).
+    last = -1
+    for ev in extra_events:
+        idx = seen.get(ev, 0)
+        seen[ev] = idx + 1
+        where = occ.get(ev, [])
+        if idx < len(where):
+            last = where[idx]
+            n_matched += 1
+            continue
+        parts = ev[1].partition(".")
+        if ev[0] != "call" or not parts[1] or not det_pred(parts[0], parts[2]):
+            return None
+        if last < 0:
+            # An extra before every matched event: the selection sort places
+            # blocks after an already-placed event, so it cannot express this.
+            return None
+        extras_at.setdefault(last, []).append(ev)
+        n_extra += 1
+    if n_extra == 0 or n_matched != len(keep_events):
+        return None
+    target: list[tuple[str, str]] = []
+    extra_idx: set[int] = set()
+    for k, ev in enumerate(keep_events):
+        target.append(ev)
+        for x in extras_at.get(k, []):
+            extra_idx.add(len(target))
+            target.append(x)
+    return target, extra_idx
+
+
+def _delegate_mid_peel(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-branches,too-many-statements,too-many-return-statements
+    l_exec: list[ec_ast.EcStmt],
+    r_exec: list[ec_ast.EcStmt],
+    mods: tuple[str, str],
+    fields: tuple[set[str], set[str]],
+    glob_names: list[str],
+    det_pred: Callable[[str, str], bool],
+    clone_alias: dict[str, str],
+    extra_side: int,
+) -> list[str] | None:
+    """The FLAT ``FG_calls ~ FR_calls`` middle leg for a bundled-delegate init
+    whose delegate runs an EXTRA deterministic call the other side lacks.
+
+    Applied to concrete flat-state modules (``proc.`` -- no ``inline *``), so the
+    local names are exactly what EC sees; the raw-wrapper legs never need an
+    inline-name prediction.
+
+    Shape: align the extra side's events to the other's (:func:`_event_align_swaps`
+    over a target from :func:`_extra_det_target`), then walk FORWARD with ``seq``
+    only as far as the last extra -- functionalizing every deterministic call on
+    both sides through its ``_det`` axiom and dropping each extra one-sidedly
+    through the same axiom, which is what STATES the ``ev_`` conjunct the hop's
+    coupling asserts about it -- and finish the aligned remainder with the plain
+    tail-first ``(wp; couple)*`` ladder. Stopping the forward walk at the last
+    extra is what keeps the running invariant small: the tail carries no ``ev_``
+    fact, so its statements never enter the accumulated conjunction.
+
+    ``None`` off-shape (unalignable, an unknown clone alias, a non-assignment
+    non-event statement), so the caller emits an honest admit."""
+    l_mod, r_mod = mods
+    l_flds, r_flds = fields
+    l_events = [_ev_sig(s) for s in l_exec if _is_bb_stmt(s)]
+    r_events = [_ev_sig(s) for s in r_exec if _is_bb_stmt(s)]
+    if extra_side == 2:
+        got = _extra_det_target(l_events, r_events, det_pred)
+    else:
+        got = _extra_det_target(r_events, l_events, det_pred)
+    if got is None:
+        return None
+    target, extra_idx = got
+    aligned = _event_align_swaps(
+        r_exec if extra_side == 2 else l_exec, target, extra_side
+    )
+    if aligned is None:
+        return None
+    swaps, moved = aligned
+    if extra_side == 2:
+        r_exec = moved
+    else:
+        l_exec = moved
+
+    l_names = {v for s in l_exec if (v := _stmt_var(s))} - l_flds
+    r_names = {v for s in r_exec if (v := _stmt_var(s))} - r_flds
+
+    def _ref(var: str, side: int) -> str:
+        flds = l_flds if side == 1 else r_flds
+        mod = l_mod if side == 1 else r_mod
+        return f"{mod}.{var}{{{side}}}" if var in flds else f"{var}{{{side}}}"
+
+    def _tag(expr: str, side: int) -> str:
+        """``expr`` with every identifier it BINDS on ``side`` memory-tagged.
+
+        A field is qualified by its flat module; a local is bare. An identifier
+        the side does not bind (an operator name, a clone-qualified ``ev_``) is
+        left alone -- it means the same thing in both memories.
+        """
+        names = (l_names | l_flds) if side == 1 else (r_names | r_flds)
+
+        def _one(m: re.Match[str]) -> str:
+            tok = m.group(0)
+            return _ref(tok, side) if tok in names else tok
+
+        return re.sub(r"[A-Za-z_]\w*", _one, expr)
+
+    conj: list[str] = ["={" + ", ".join(f"glob {m}" for m in glob_names) + "}"]
+
+    def _inv() -> str:
+        return " /\\ ".join(conj)
+
+    def _pr(e: str) -> str:
+        e = e.strip()
+        return e if e.startswith("(") and e.endswith(")") else f"({e})"
+
+    def _det_block(stmt: ec_ast.Call, side: int, ctr: int) -> list[str] | None:
+        parts = _callee_parts(stmt.callee)
+        if parts is None or parts[0] not in clone_alias:
+            return None
+        mod, meth = parts
+        cargs = _split_top_args(stmt.args)
+        applied = "".join(f" {_pr(_tag(a, side))}" for a in cargs)
+        conj.append(
+            f"{_ref(stmt.var or '_', side)} = ({clone_alias[mod]}.ev_{meth}{applied})"
+        )
+        bs = [f"g{ctr}_{side}"] + [f"a{ctr}_{side}_{k}" for k in range(len(cargs))]
+        cap = ", ".join(
+            [f"(glob {mod}){{{side}}}"] + [f"{_pr(_tag(a, side))}" for a in cargs]
+        )
+        return [
+            f"exists* {cap}; elim* => {' '.join(bs)}.",
+            f"call{{{side}}} ({mod}_{meth}_det {' '.join(bs)}).",
+        ]
+
+    tac: list[str] = ["proc.", *swaps]
+    li = ri = 0
+    ctr = 0
+    n_extra_left = len(extra_idx)
+    ev_i = 0
+    while n_extra_left > 0:
+        if li >= len(l_exec) and ri >= len(r_exec):
+            return None
+        l_at = l_exec[li] if li < len(l_exec) else None
+        r_at = r_exec[ri] if ri < len(r_exec) else None
+        if isinstance(l_at, ec_ast.Assign) or isinstance(r_at, ec_ast.Assign):
+            a = b = 0
+            while li + a < len(l_exec) and isinstance(l_exec[li + a], ec_ast.Assign):
+                st = cast(ec_ast.Assign, l_exec[li + a])
+                conj.append(f"{_ref(st.var, 1)} = {_tag(st.rhs, 1)}")
+                a += 1
+            while ri + b < len(r_exec) and isinstance(r_exec[ri + b], ec_ast.Assign):
+                st = cast(ec_ast.Assign, r_exec[ri + b])
+                conj.append(f"{_ref(st.var, 2)} = {_tag(st.rhs, 2)}")
+                b += 1
+            tac.append(f"seq {a} {b} : ({_inv()}).")
+            tac.append("+ wp; skip => /#.")
+            li += a
+            ri += b
+            continue
+        if not isinstance(l_at, (ec_ast.Call, ec_ast.Sample)) or not isinstance(
+            r_at, (ec_ast.Call, ec_ast.Sample)
+        ):
+            return None
+        if ev_i in extra_idx:
+            # One-sided deterministic call: drop it through its ``_det`` axiom,
+            # which is also what states the coupling's ``ev_`` fact about it.
+            extra = r_at if extra_side == 2 else l_at
+            if not isinstance(extra, ec_ast.Call):
+                return None
+            blk = _det_block(extra, extra_side, ctr)
+            if blk is None:
+                return None
+            ctr += 1
+            n_extra_left -= 1
+            ev_i += 1
+            tac.append(
+                f"seq {0 if extra_side == 2 else 1} "
+                f"{1 if extra_side == 2 else 0} : ({_inv()})."
+            )
+            tac.append("+ " + " ".join(blk) + " skip => /#.")
+            if extra_side == 2:
+                ri += 1
+            else:
+                li += 1
+            continue
+        if isinstance(l_at, ec_ast.Sample):
+            conj.append(
+                f"{_ref(l_at.var, 1)} = {_ref(cast(ec_ast.Sample, r_at).var, 2)}"
+            )
+            tac.append(f"seq 1 1 : ({_inv()}).")
+            tac.append("+ rnd; skip => /#.")
+        else:
+            l_call, r_call = l_at, cast(ec_ast.Call, r_at)
+            parts = _callee_parts(l_call.callee)
+            if parts is not None and det_pred(*parts):
+                b1 = _det_block(l_call, 1, ctr)
+                b2 = _det_block(r_call, 2, ctr)
+                if b1 is None or b2 is None:
+                    return None
+                ctr += 1
+                tac.append(f"seq 1 1 : ({_inv()}).")
+                tac.append("+ " + " ".join(b1 + b2) + " skip => /#.")
+            else:
+                conj.append(
+                    f"{_ref(l_call.var or '_', 1)} = {_ref(r_call.var or '_', 2)}"
+                )
+                tac.append(f"seq 1 1 : ({_inv()}).")
+                tac.append("+ call (_: true); skip => /#.")
+        li += 1
+        ri += 1
+        ev_i += 1
+    # Aligned remainder: the plain tail-first ladder. Both sides hold the same
+    # events from here on, so the peel is sized off either.
+    tail = [s for s in l_exec[li:] if _is_bb_stmt(s)]
+    if len(tail) != len([s for s in r_exec[ri:] if _is_bb_stmt(s)]):
+        return None
+    for stmt in reversed(tail):
+        tac.append("wp.")
+        tac.append("call (_: true)." if isinstance(stmt, ec_ast.Call) else "rnd.")
+    tac.append("wp.")
+    tac.append("skip => /#.")
+    return tac
+
+
+def _stmt_var(stmt: ec_ast.EcStmt) -> str:
+    """The variable a statement binds, or ``""`` for one that binds none."""
+    if isinstance(stmt, (ec_ast.Call, ec_ast.Sample, ec_ast.Assign)):
+        return stmt.var or ""
+    return ""
+
+
+def _coupling_base_for(coupling: str, flds: list[str], side: int) -> str | None:
+    """The module base a coupling names on ``side``, read off one of its FIELDS.
+
+    Structural, not name-keyed: the field names come from the rendered flat
+    state, and the base is whatever qualifier the coupling attaches to one of
+    them. Returns ``None`` when no field of that side appears in the coupling.
+    """
+    for f in flds:
+        m = re.search(
+            rf"([A-Za-z_][\w.]*)\.{re.escape(f)}(?:\.`\d+)*\{{{side}\}}", coupling
+        )
+        if m is not None:
+            return m.group(1)
+    return None
+
+
+def _synth_delegate_correctness_init(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    det_methods: dict[str, set[str]],
+    clone_alias: dict[str, str],
+    full_coupling: str,
+    hop_index: int = 0,
+) -> tuple[list[str], list[str], set[tuple[str, str]]] | None:
+    """``RawGame ~ FGd ~ FRd ~ RawReduction`` transitivity for an init hop whose
+    reduction delegates a BUNDLED block to a challenger that runs one EXTRA
+    deterministic call, and whose coupling therefore asserts an ``ev_``
+    characterization of that call's result.
+
+    The IND-CCA `_PQ` correctness-reduction shape (``hop_0_initialize`` of
+    ``CG_expanded_INDCCA_PQ`` and its `_PQ` siblings): the game runs
+    ``keygen; <T-derivation>; encaps`` while the reduction's
+    ``KEMCorrectnessWithDK`` challenger runs ``keygen; encaps; decaps`` back to
+    back and the reduction then re-derives its own T scalar. So the two bodies
+    are a permutation PLUS a one-sided ``decaps`` whose result is LIVE (it is the
+    correctness tuple's ``.`5``) -- which is why the plain bundled-delegate
+    reorder declines (it drops only DEAD samples) and why the backbone peel's
+    ``_pres`` drop does not apply (``_pres`` forgets the result).
+
+    Everything the coupling asserts functionally is proved on the FLAT twins,
+    whose local names the exporter controls; the two raw-wrapper legs are the
+    ordinary name-independent backbone peel. ``None`` off-shape -- so every
+    other init stays byte-identical and the caller emits its honest admit."""
+    if "ev_" not in full_coupling or not clone_alias:
+        return None
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+    fg_name, fr_name = f"FGd_{hop_index}", f"FRd_{hop_index}"
+
+    def _det_pred(mod: str, meth: str) -> bool:
+        return meth in det_methods.get(mod, set())
+
+    def _build(proj: frog_ast.Game, name: str) -> ec_ast.Module:
+        # ``no_shadow_fields``: a reduction whose ``Initialize`` writes a field
+        # of its own (the correctness reduction's ``seed_T``) otherwise gets a
+        # LOCAL of the same name declared alongside the module var, and the local
+        # shadows it -- the field is then never written, so both the middle leg's
+        # ``<mod>.<f>`` invariant and the outer leg's field coupling are
+        # unprovable (measured: EC rejected the ``rnd`` step's ``skip => /#``).
+        return _flat_state_module(
+            modules,
+            name,
+            proj,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            emit_state_vars=True,
+            no_shadow_fields=True,
+        )
+
+    l_probe, r_probe = _build(lproj, "L_probe"), _build(rproj, "R_probe")
+    if not l_probe.procs or not r_probe.procs:
+        return None
+
+    def _exec_of(mod: ec_ast.Module) -> list[ec_ast.EcStmt]:
+        return [
+            s
+            for s in _exec_stmts(mod.procs[0].body)
+            if not isinstance(s, ec_ast.Return)
+        ]
+
+    l_ev = Counter(_ev_sig(s) for s in _exec_of(l_probe) if _is_bb_stmt(s))
+    r_ev = Counter(_ev_sig(s) for s in _exec_of(r_probe) if _is_bb_stmt(s))
+    # Exactly ONE side may carry extra events -- that side is the delegating
+    # reduction, and it is normalised to side 2 below (``symmetry.`` when it is
+    # the left one), so the middle leg always drops on side 2.
+    if not (r_ev - l_ev) or (l_ev - r_ev):
+        if not (l_ev - r_ev) or (r_ev - l_ev):
+            return None
+        game_is_left = False
+    else:
+        game_is_left = True
+    game_proj, red_proj = (lproj, rproj) if game_is_left else (rproj, lproj)
+    fgmod, frmod = _build(game_proj, fg_name), _build(red_proj, fr_name)
+    if not fgmod.procs or not frmod.procs:
+        return None
+    game_body, red_body = _exec_of(fgmod), _exec_of(frmod)
+    game_flds = [v.name for v in fgmod.module_vars]
+    red_flds = [v.name for v in frmod.module_vars]
+    glob_names = [p.name for p in flat_params]
+    if not glob_names:
+        return None
+
+    def _flip_sides(s: str) -> str:
+        return s.replace("{1}", "\x00").replace("{2}", "{1}").replace("\x00", "{2}")
+
+    coupling = full_coupling if game_is_left else _flip_sides(full_coupling)
+    conj = [p.strip() for p in coupling.split(" /\\ ")]
+    globs = " /\\ ".join(p for p in conj if p.startswith("={glob"))
+    body = " /\\ ".join(p for p in conj if not p.startswith("={glob"))
+    game_base = _coupling_base_for(coupling, game_flds, 1)
+    red_base = _coupling_base_for(coupling, red_flds, 2)
+    # ``game_base`` may legitimately be absent: a coupling that says nothing
+    # about the GAME's fields (the seedbased `_PQ` hops carry only the
+    # challenger's ``ev_decaps`` invariant) needs no game-side field equalities
+    # in ``q1`` -- the transitivity still composes, because everything the final
+    # post asserts is about the reduction. ``red_base`` is not optional the same
+    # way: ``q4`` is what carries the flat twin's fields back to the real module.
+    if not globs or not body or red_base is None:
+        return None
+    mid = _delegate_mid_peel(
+        game_body,
+        red_body,
+        (fg_name, fr_name),
+        (set(game_flds), set(red_flds)),
+        glob_names,
+        _det_pred,
+        clone_alias,
+        2,
+    )
+    if mid is None:
+        return None
+    args = ", ".join(glob_names)
+    res_eq = "res{1} = res{2}"
+    q1_eqs = (
+        [f"{game_base}.{f}{{1}} = {fg_name}.{f}{{2}}" for f in game_flds]
+        if game_base is not None
+        else []
+    )
+    q1 = " /\\ ".join([globs, *q1_eqs, res_eq])
+    body_fg = body if game_base is None else body.replace(game_base, fg_name)
+    q2 = f"{body_fg} /\\ {globs} /\\ {res_eq}"
+    q3 = f"{body_fg.replace(red_base, fr_name)} /\\ {globs} /\\ {res_eq}"
+    q4 = (
+        f"{globs} /\\ "
+        + " /\\ ".join(f"{fr_name}.{f}{{1}} = {red_base}.{f}{{2}}" for f in red_flds)
+        + f" /\\ {res_eq}"
+    )
+
+    def _outer_leg(b: list[ec_ast.EcStmt]) -> list[str]:
+        leg = ["proc.", "inline *.", *_backbone_peel(b)]
+        if _leads_with_det(b):
+            leg.append("wp.")
+        leg.append("auto.")
+        return leg
+
+    outer = [
+        _res_tag(SYNTH_PARAM),
+        *([] if game_is_left else ["symmetry."]),
+        f"transitivity {fg_name}({args}).{oracle_name} "
+        f"({globs} ==> {q1}) ({globs} ==> {q2}).",
+        "smt().",
+        "smt().",
+        *_outer_leg(game_body),
+        f"transitivity {fr_name}({args}).{oracle_name} "
+        f"({globs} ==> {q3}) ({globs} ==> {q4}).",
+        "smt().",
+        "smt().",
+        *mid,
+        *_outer_leg(red_body),
+        "qed.",
+    ]
+    extra = [
+        "\n".join(_render_module_decl(fgmod)),
+        "\n".join(_render_module_decl(frmod)),
+    ]
+    return extra, outer, set()
+
+
 def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -5538,6 +6000,29 @@ def _emit_one_oracle_chain(
             # Backbones cannot be aligned (an extra call that is not a droppable
             # deterministic method): the peel does not apply. Emit a targeted,
             # honest admit rather than a silently-failing ``sim``.
+            # Bundled delegate that runs an EXTRA deterministic call whose
+            # result is LIVE (the correctness challenger's ``decaps``, stored as
+            # the tuple's ``.`5``): the reorder above drops only DEAD samples and
+            # the backbone peel's ``_pres`` drop forgets the result, so both
+            # decline. Route through flat twins and drop the extra through its
+            # ``_det`` axiom, which is what states the coupling's ``ev_`` fact
+            # about it. ``None`` off-shape -> the honest admit below.
+            if full_coupling is not None and clone_alias:
+                deleg = _synth_delegate_correctness_init(
+                    modules,
+                    oracle_name,
+                    left_states[0],
+                    right_states[0],
+                    external_module_types,
+                    method_return_types,
+                    flat_params,
+                    det_methods,
+                    clone_alias,
+                    full_coupling,
+                    hop_index=hop_index,
+                )
+                if deleg is not None:
+                    return deleg
             return [], _init_backbone_admit(hop_index, oracle_name), set()
 
     # Exporter-computed whole-oracle tactic, keyed by oracle name. Used where the

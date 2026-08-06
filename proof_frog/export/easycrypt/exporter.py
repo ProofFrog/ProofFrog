@@ -10127,6 +10127,108 @@ def export_proof_file(proof_path: str) -> str:
                 conj.extend(_tuple_component_relations(proc, fld, alias, dets))
         return " /\\ ".join(conj)
 
+    def _packed_scalar_seed_coupling(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> str:
+        """``<game>.<packed>.`k{gs} = <M>_c.ev_<m> (<red>.<seed>{rs})`` when the
+        GAME stores a packed key whose k-th component the scheme DERIVES with a
+        deterministic ``<M>.<m>(<seed>)``, and the REDUCTION stores that seed
+        instead of the derived value. ``""`` off-shape.
+
+        The IND-CCA `_PQ` correctness hops. The game reads its packed decaps key
+        while the reduction RE-DERIVES the same scalar from the seed it kept, so
+        without this conjunct the two are simply unrelated in the precondition --
+        the coupling is too WEAK, and (as with the forwarded-key conjunct) only
+        the consuming ``decaps`` hop reveals it: the ``initialize`` hop compiles
+        happily without it.
+
+        Sound by construction: both values come from the ONE seed the hop's own
+        ``initialize`` samples, and ``<M>.<m>`` is declared deterministic, which
+        is what licenses naming its result functionally as ``ev_<m>``. The
+        establishing side is already proved -- the delegate-correctness init route
+        derives exactly this equation on both sides inside its middle leg -- so
+        this conjunct is consumed only where it is also established.
+
+        Deliberately narrow, failing CLOSED rather than emitting a false
+        conjunct: the reduction must sample the seed into a FIELD and feed it
+        DIRECTLY to a deterministic method of a cloned module, and the game's
+        packed field must have EXACTLY ONE component of that method's result
+        type.
+        """
+        if step_a.reduction is None and step_b.reduction is not None:
+            game_step, red_step, gs, rs = step_a, step_b, "1", "2"
+        elif step_b.reduction is None and step_a.reduction is not None:
+            game_step, red_step, gs, rs = step_b, step_a, "2", "1"
+        else:
+            return ""
+        assert red_step.reduction is not None
+        red = _get_reduction(red_step.reduction.name)
+        # pylint: disable=protected-access
+        game = engine._get_game_ast(game_step.challenger, None)
+        # pylint: enable=protected-access
+        if red is None or game is None:
+            return ""
+        init = _find_init(red)
+        if init is None:
+            return ""
+        red_fields = {f.name for f in red.fields}
+        # The reduction's seed field: sampled into a field of its own, then fed
+        # DIRECTLY to a deterministic method of a cloned module.
+        found: list[tuple[str, str, str, frog_ast.Type]] = []
+        sampled: set[str] = set()
+        for stmt in init.block.statements:
+            if isinstance(stmt, frog_ast.Sample) and isinstance(
+                stmt.var, frog_ast.Variable
+            ):
+                if stmt.var.name in red_fields:
+                    sampled.add(stmt.var.name)
+                continue
+            if not isinstance(stmt, frog_ast.Assignment):
+                continue
+            val = stmt.value
+            if (
+                not isinstance(val, frog_ast.FuncCall)
+                or not isinstance(val.func, frog_ast.FieldAccess)
+                or not isinstance(val.func.the_object, frog_ast.Variable)
+                or len(val.args) != 1
+                or not isinstance(val.args[0], frog_ast.Variable)
+                or val.args[0].name not in sampled
+            ):
+                continue
+            # ``det_methods_by_module`` is keyed on the LOWERCASED method name
+            # (and so is the emitted ``ev_<m>`` op), while the FrogLang AST keeps
+            # the declared casing -- ``NG.RandomScalar`` vs ``ev_randomscalar``.
+            mod, meth = val.func.the_object.name, val.func.name.lower()
+            if meth not in det_methods_by_module.get(mod, set()):
+                continue
+            if mod not in clone_alias_by_module or stmt.the_type is None:
+                continue
+            # The DECLARED type of the binding is the method's result type, and
+            # it is right here -- no lookup table, no key-convention guess.
+            found.append((val.args[0].name, mod, meth, stmt.the_type))
+        if len(found) != 1:
+            return ""
+        seed_field, mod, meth, res_ty = found[0]
+        alias = clone_alias_by_module[mod]
+        want = top_types.translate_type(top_types.resolve(res_ty)).text
+        hits: list[tuple[str, int]] = []
+        for gf in game.fields:
+            gty = top_types.resolve(gf.type)
+            if not isinstance(gty, frog_ast.ProductType):
+                continue
+            for i, cty in enumerate(gty.types):
+                if top_types.translate_type(cty).text == want:
+                    hits.append((gf.name, i + 1))
+        if len(hits) != 1:
+            return ""
+        fld, idx = hits[0]
+        game_base = pt.module_base_name(resolver.resolve(game_step).module_expr)
+        red_base = pt.module_base_name(resolver.resolve(red_step).module_expr)
+        return (
+            f"{game_base}.{fld}.`{idx}{{{gs}}} = "
+            f"{alias}.ev_{meth} ({red_base}.{seed_field}{{{rs}}})"
+        )
+
     def _live_state_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
         base = _live_state_coupling_base(step_a, step_b)
         extra = _ro_challenger_materialization(step_a, step_b)
@@ -10201,6 +10303,15 @@ def export_proof_file(proof_path: str) -> str:
         # ``dk_T_0 = ev_randomscalar(slice(RO[dk0]))``) -- the derived relation the
         # LazyRO challenge peel needs (the reduction discards its seed). Empty
         # off-shape -> byte-identical.
+        # Packed key vs stored SEED (IND-CCA `_PQ` correctness hops): the game
+        # reads the derived scalar, the reduction re-derives it from the seed it
+        # kept. Deduped like the builders above, since a repeated conjunct would
+        # change the bytes of proofs that are clean today.
+        pss = _packed_scalar_seed_coupling(step_a, step_b)
+        if pss:
+            have = set(coupled.split(" /\\ "))
+            if pss not in have:
+                coupled = f"{coupled} /\\ {pss}"
         lzk = _lazyro_derived_key_coupling(step_a, step_b)
         if lzk:
             coupled = f"{coupled} /\\ {lzk}"

@@ -3365,52 +3365,86 @@ def _ev_sig(stmt: ec_ast.EcStmt) -> tuple[str, str]:
     return ("sample", cast(ec_ast.Sample, stmt).distr)
 
 
-def _extra_det_target(
+def _extra_det_target(  # pylint: disable=too-many-locals,too-many-branches
     keep_events: list[tuple[str, str]],
     extra_events: list[tuple[str, str]],
     det_pred: Callable[[str, str], bool],
-) -> tuple[list[tuple[str, str]], set[int]] | None:
-    """Interleave ``extra_events`` into ``keep_events``' order, or ``None``.
+    keep_droppable: Callable[[list[int]], bool] | None = None,
+) -> tuple[list[tuple[str, str]], list[str]] | None:
+    """Interleave two event lists that may EACH carry one-sided extras.
 
-    ``extra_events`` is the extra side's OWN event list; ``keep_events`` is the
-    other side's. Occurrences of the same signature are matched positionally
-    (the k-th ``NG.exp`` on one side is the k-th on the other), so an event whose
-    signature occurs more often on the extra side is an EXTRA. Every extra must
-    be a DETERMINISTIC call -- that is what makes it droppable one-sidedly by its
-    ``_det`` axiom (a probabilistic extra would need a distribution argument this
-    route does not have).
+    Occurrences of the same signature are matched positionally (the k-th
+    ``NG.exp`` on one side is the k-th on the other) up to the common count;
+    anything past that is an extra on its own side. The two extra kinds are NOT
+    symmetric, and the asymmetry is the whole point:
 
-    Returns the target event order for the extra side (the other side's order,
-    with each extra re-inserted directly after the matched event it currently
-    follows) plus the set of target indices that are extras. ``None`` when the
-    other side has an event the extra side lacks, when an extra is not a
-    droppable det call, or when there is no extra at all (that is the plain
-    bundled-reorder route's shape, not this one).
+    * an ``extra_events``-side extra (the delegating reduction's) is dropped by
+      its ``_det`` axiom, which pins the RESULT -- so its result may be live, and
+      indeed the correctness challenger's ``decaps`` result IS the coupling's
+      ``.`5``;
+    * a ``keep_events``-side extra (the game's) is dropped by its ``_pres``
+      axiom, which preserves the GLOB and says nothing about the result -- so it
+      must be a deterministic call whose result is DEAD. Deadness is decided for
+      the whole keep-side extra SET at once (``keep_droppable`` takes the list of
+      candidate indices), because these extras form a CHAIN -- each feeds the
+      next -- so no member is dead while the others are still present. Without
+      that oracle, keep-side extras are refused rather than dropped on trust.
+
+    Returns the target event order for the extra side (the keep side's order
+    restricted to the COMMON events, with each extra re-inserted directly after
+    the matched event it currently follows) and an execution-order op plan of
+    ``match`` / ``dropL`` / ``dropR``. ``None`` when an extra is not droppable,
+    when a keep-side extra precedes every matched event, or when there is no
+    extra at all (that is the plain bundled-reorder route's shape, not this one).
     """
-    occ: dict[tuple[str, str], list[int]] = {}
+
+    def _det_call(ev: tuple[str, str]) -> bool:
+        mod, dot, meth = ev[1].partition(".")
+        return ev[0] == "call" and bool(dot) and det_pred(mod, meth)
+
+    # COMMON occurrences: for each signature, the first min(#keep, #extra) of
+    # them on each side. Anything past that is an extra on its own side.
+    n_keep, n_extra_side = Counter(keep_events), Counter(extra_events)
+    common_n = {
+        sig: min(n_keep[sig], n_extra_side[sig]) for sig in n_keep | n_extra_side
+    }
+    keep_common: dict[tuple[str, str], list[int]] = {}
+    keep_drop: list[int] = []
+    seen_k: Counter[tuple[str, str]] = Counter()
     for k, ev in enumerate(keep_events):
-        occ.setdefault(ev, []).append(k)
-    seen: dict[tuple[str, str], int] = {}
+        if seen_k[ev] < common_n.get(ev, 0):
+            keep_common.setdefault(ev, []).append(k)
+        else:
+            # A keep-side extra is dropped ONE-SIDEDLY by its glob-preservation
+            # axiom, which says nothing about the result -- so it must be a
+            # deterministic call whose result is DEAD once the WHOLE extra set is
+            # gone. Deadness is decided for the set, not per call: these form a
+            # CHAIN (each feeds the next), so no member is dead on its own.
+            if not _det_call(ev):
+                return None
+            keep_drop.append(k)
+        seen_k[ev] += 1
+    if keep_drop and (keep_droppable is None or not keep_droppable(keep_drop)):
+        return None
+
+    seen_e: Counter[tuple[str, str]] = Counter()
     extras_at: dict[int, list[tuple[str, str]]] = {}
     n_extra = 0
-    n_matched = 0
     # Walk the extra side, classifying each event as matched (its positional
-    # occurrence exists on the other side) or extra. An extra is placed after
-    # the KEEP-side position of the matched event it currently follows -- not
-    # after the count of matched events seen, which is a different index
-    # whenever the two orders differ (and they always do here, or there would
-    # be nothing to align).
+    # occurrence is a COMMON one) or extra. An extra is placed after the
+    # KEEP-side position of the matched event it currently follows -- not after
+    # the count of matched events seen, which is a different index whenever the
+    # two orders differ (and they always do here, or there would be nothing to
+    # align).
     last = -1
     for ev in extra_events:
-        idx = seen.get(ev, 0)
-        seen[ev] = idx + 1
-        where = occ.get(ev, [])
+        idx = seen_e[ev]
+        seen_e[ev] += 1
+        where = keep_common.get(ev, [])
         if idx < len(where):
             last = where[idx]
-            n_matched += 1
             continue
-        parts = ev[1].partition(".")
-        if ev[0] != "call" or not parts[1] or not det_pred(parts[0], parts[2]):
+        if not _det_call(ev):
             return None
         if last < 0:
             # An extra before every matched event: the selection sort places
@@ -3418,16 +3452,26 @@ def _extra_det_target(
             return None
         extras_at.setdefault(last, []).append(ev)
         n_extra += 1
-    if n_extra == 0 or n_matched != len(keep_events):
+    if n_extra == 0 and not keep_drop:
         return None
+    # The delegate's alignment target holds only the COMMON keep events (it has
+    # no counterpart for a keep-side drop), with its own extras re-inserted.
     target: list[tuple[str, str]] = []
-    extra_idx: set[int] = set()
     for k, ev in enumerate(keep_events):
+        if k in set(keep_drop):
+            continue
         target.append(ev)
-        for x in extras_at.get(k, []):
-            extra_idx.add(len(target))
-            target.append(x)
-    return target, extra_idx
+        target.extend(extras_at.get(k, []))
+    # Execution-order op plan, driven by the keep side's own order.
+    ops: list[str] = []
+    drop_set = set(keep_drop)
+    for k, _ev in enumerate(keep_events):
+        if k in drop_set:
+            ops.append("dropL")
+            continue
+        ops.append("match")
+        ops.extend(["dropR"] * len(extras_at.get(k, [])))
+    return target, ops
 
 
 def _delegate_mid_peel(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-branches,too-many-statements,too-many-return-statements
@@ -3438,48 +3482,50 @@ def _delegate_mid_peel(  # pylint: disable=too-many-arguments,too-many-positiona
     glob_names: list[str],
     det_pred: Callable[[str, str], bool],
     clone_alias: dict[str, str],
-    extra_side: int,
-) -> list[str] | None:
-    """The FLAT ``FG_calls ~ FR_calls`` middle leg for a bundled-delegate init
-    whose delegate runs an EXTRA deterministic call the other side lacks.
+    game_droppable: Callable[[list[int]], bool] | None = None,
+) -> tuple[list[str], set[tuple[str, str]]] | None:
+    """The FLAT ``FGd ~ FRd`` middle leg for a bundled-delegate init hop.
+
+    Side 1 is always the GAME and side 2 the delegating REDUCTION -- the caller
+    normalises that (with ``symmetry.`` when the reduction is on the left), so
+    this walks one orientation only.
 
     Applied to concrete flat-state modules (``proc.`` -- no ``inline *``), so the
     local names are exactly what EC sees; the raw-wrapper legs never need an
     inline-name prediction.
 
-    Shape: align the extra side's events to the other's (:func:`_event_align_swaps`
+    Shape: align the reduction's events to the game's (:func:`_event_align_swaps`
     over a target from :func:`_extra_det_target`), then walk FORWARD with ``seq``
-    only as far as the last extra -- functionalizing every deterministic call on
-    both sides through its ``_det`` axiom and dropping each extra one-sidedly
-    through the same axiom, which is what STATES the ``ev_`` conjunct the hop's
-    coupling asserts about it -- and finish the aligned remainder with the plain
-    tail-first ``(wp; couple)*`` ladder. Stopping the forward walk at the last
-    extra is what keeps the running invariant small: the tail carries no ``ev_``
-    fact, so its statements never enter the accumulated conjunction.
+    only as far as the last one-sided drop -- functionalizing every deterministic
+    call on both sides through its ``_det`` axiom -- and finish the aligned
+    remainder with the plain tail-first ``(wp; couple)*`` ladder. Stopping the
+    forward walk at the last drop is what keeps the running invariant small: the
+    tail carries no ``ev_`` fact, so its statements never enter the accumulated
+    conjunction.
 
-    ``None`` off-shape (unalignable, an unknown clone alias, a non-assignment
-    non-event statement), so the caller emits an honest admit."""
+    The two drop kinds differ, and the difference is load-bearing. A REDUCTION
+    extra goes through its ``_det`` axiom, which pins the result -- so dropping
+    it is also what STATES the ``ev_`` conjunct the coupling asserts about it. A
+    GAME extra goes through its ``_pres`` axiom, which preserves the glob and
+    says NOTHING about the result, so it is admissible only when that result is
+    dead; ``game_droppable`` is the caller's liveness oracle and the returned set
+    names the ``_pres`` axioms the tactic uses.
+
+    Returns ``(tactic, pres_requests)``, or ``None`` off-shape (unalignable, an
+    unknown clone alias, a non-assignment non-event statement) so the caller
+    emits an honest admit."""
     l_mod, r_mod = mods
     l_flds, r_flds = fields
     l_events = [_ev_sig(s) for s in l_exec if _is_bb_stmt(s)]
     r_events = [_ev_sig(s) for s in r_exec if _is_bb_stmt(s)]
-    if extra_side == 2:
-        got = _extra_det_target(l_events, r_events, det_pred)
-    else:
-        got = _extra_det_target(r_events, l_events, det_pred)
+    got = _extra_det_target(l_events, r_events, det_pred, game_droppable)
     if got is None:
         return None
-    target, extra_idx = got
-    aligned = _event_align_swaps(
-        r_exec if extra_side == 2 else l_exec, target, extra_side
-    )
+    target, ops = got
+    aligned = _event_align_swaps(r_exec, target, 2)
     if aligned is None:
         return None
-    swaps, moved = aligned
-    if extra_side == 2:
-        r_exec = moved
-    else:
-        l_exec = moved
+    swaps, r_exec = aligned
 
     l_names = {v for s in l_exec if (v := _stmt_var(s))} - l_flds
     r_names = {v for s in r_exec if (v := _stmt_var(s))} - r_flds
@@ -3532,13 +3578,27 @@ def _delegate_mid_peel(  # pylint: disable=too-many-arguments,too-many-positiona
             f"call{{{side}}} ({mod}_{meth}_det {' '.join(bs)}).",
         ]
 
+    pres: set[tuple[str, str]] = set()
+
+    def _pres_block(stmt: ec_ast.Call, ctr: int) -> list[str] | None:
+        """One-sided GAME drop through the glob-preservation axiom."""
+        parts = _callee_parts(stmt.callee)
+        if parts is None:
+            return None
+        mod, meth = parts
+        pres.add((mod, meth))
+        return [
+            f"exists* (glob {mod})" "{1}" f"; elim* => p{ctr}.",
+            f"call{{1}} ({mod}_{meth}_pres p{ctr}).",
+        ]
+
     tac: list[str] = ["proc.", *swaps]
     li = ri = 0
     ctr = 0
-    n_extra_left = len(extra_idx)
-    ev_i = 0
-    while n_extra_left > 0:
-        if li >= len(l_exec) and ri >= len(r_exec):
+    op_i = 0
+    n_drops_left = sum(1 for o in ops if o != "match")
+    while n_drops_left > 0:
+        if op_i >= len(ops):
             return None
         l_at = l_exec[li] if li < len(l_exec) else None
         r_at = r_exec[ri] if ri < len(r_exec) else None
@@ -3557,32 +3617,42 @@ def _delegate_mid_peel(  # pylint: disable=too-many-arguments,too-many-positiona
             li += a
             ri += b
             continue
+        op = ops[op_i]
+        if op == "dropR":
+            # Reduction-side extra: the ``_det`` drop, which also states the
+            # coupling's ``ev_`` fact about the dropped call's result.
+            if not isinstance(r_at, ec_ast.Call):
+                return None
+            blk = _det_block(r_at, 2, ctr)
+            if blk is None:
+                return None
+            ctr += 1
+            n_drops_left -= 1
+            op_i += 1
+            ri += 1
+            tac.append(f"seq 0 1 : ({_inv()}).")
+            tac.append("+ " + " ".join(blk) + " skip => /#.")
+            continue
+        if op == "dropL":
+            # Game-side extra: DEAD result (checked by the caller's oracle), so
+            # the glob-preserving ``_pres`` drop is what applies.
+            if not isinstance(l_at, ec_ast.Call):
+                return None
+            blk = _pres_block(l_at, ctr)
+            if blk is None:
+                return None
+            ctr += 1
+            n_drops_left -= 1
+            op_i += 1
+            li += 1
+            tac.append(f"seq 1 0 : ({_inv()}).")
+            tac.append("+ " + " ".join(blk) + " skip => /#.")
+            continue
         if not isinstance(l_at, (ec_ast.Call, ec_ast.Sample)) or not isinstance(
             r_at, (ec_ast.Call, ec_ast.Sample)
         ):
             return None
-        if ev_i in extra_idx:
-            # One-sided deterministic call: drop it through its ``_det`` axiom,
-            # which is also what states the coupling's ``ev_`` fact about it.
-            extra = r_at if extra_side == 2 else l_at
-            if not isinstance(extra, ec_ast.Call):
-                return None
-            blk = _det_block(extra, extra_side, ctr)
-            if blk is None:
-                return None
-            ctr += 1
-            n_extra_left -= 1
-            ev_i += 1
-            tac.append(
-                f"seq {0 if extra_side == 2 else 1} "
-                f"{1 if extra_side == 2 else 0} : ({_inv()})."
-            )
-            tac.append("+ " + " ".join(blk) + " skip => /#.")
-            if extra_side == 2:
-                ri += 1
-            else:
-                li += 1
-            continue
+        op_i += 1
         if isinstance(l_at, ec_ast.Sample):
             conj.append(
                 f"{_ref(l_at.var, 1)} = {_ref(cast(ec_ast.Sample, r_at).var, 2)}"
@@ -3608,7 +3678,6 @@ def _delegate_mid_peel(  # pylint: disable=too-many-arguments,too-many-positiona
                 tac.append("+ call (_: true); skip => /#.")
         li += 1
         ri += 1
-        ev_i += 1
     # Aligned remainder: the plain tail-first ladder. Both sides hold the same
     # events from here on, so the peel is sized off either.
     tail = [s for s in l_exec[li:] if _is_bb_stmt(s)]
@@ -3619,7 +3688,7 @@ def _delegate_mid_peel(  # pylint: disable=too-many-arguments,too-many-positiona
         tac.append("call (_: true)." if isinstance(stmt, ec_ast.Call) else "rnd.")
     tac.append("wp.")
     tac.append("skip => /#.")
-    return tac
+    return tac, pres
 
 
 def _stmt_var(stmt: ec_ast.EcStmt) -> str:
@@ -3643,6 +3712,33 @@ def _coupling_base_for(coupling: str, flds: list[str], side: int) -> str | None:
         if m is not None:
             return m.group(1)
     return None
+
+
+def _all_extras_dead(
+    mod: ec_ast.Module,
+    own: Counter[tuple[str, str]],
+    other: Counter[tuple[str, str]],
+    droppable: Callable[[list[int]], bool],
+) -> bool:
+    """Whether every event ``mod`` has in EXCESS of ``other`` is droppable.
+
+    The orientation test for a hop with extras on both sides: the GAME's extras
+    are its dead KDF chain (droppable through ``_pres``), the REDUCTION's is the
+    challenger's ``decaps``, whose result the coupling asserts about. Deciding it
+    by LIVENESS rather than by name keeps the choice structural.
+    """
+    body = [
+        t for t in _exec_stmts(mod.procs[0].body) if not isinstance(t, ec_ast.Return)
+    ]
+    events = [_ev_sig(t) for t in body if _is_bb_stmt(t)]
+    common = {sig: min(own[sig], other[sig]) for sig in own}
+    seen: Counter[tuple[str, str]] = Counter()
+    extras: list[int] = []
+    for k, ev in enumerate(events):
+        if seen[ev] >= common.get(ev, 0):
+            extras.append(k)
+        seen[ev] += 1
+    return bool(extras) and droppable(extras)
 
 
 def _synth_delegate_correctness_init(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
@@ -3717,17 +3813,73 @@ def _synth_delegate_correctness_init(  # pylint: disable=too-many-arguments,too-
             if not isinstance(s, ec_ast.Return)
         ]
 
+    def _droppable_oracle(mod: ec_ast.Module) -> Callable[[list[int]], bool]:
+        """``ks -> are ALL those backbone events droppable TOGETHER?``
+
+        Set-level on purpose, and it does not hand-roll the analysis. Two traps
+        made a naive check wrong, and both were measured on the game side of
+        `hop_15_initialize`, whose whole KDF chain is dead:
+
+        * :func:`_live_out` is per-statement and a dead CALL still keeps its
+          arguments live (the call executes; only a pure assignment can be
+          deleted). So in a chain where each call feeds the next, exactly ONE
+          member tests dead in isolation and every upstream member looks live.
+        * Non-event statements between them -- the `kdf_in <- concat(...)`
+          plumbing -- are not dropped by the tactic, yet are themselves dead once
+          the chain goes, so they must not be counted as live readers.
+
+        Both dissolve by asking the question on the REDUCED body: delete the
+        candidate calls, then let :func:`_live_out` (which already elides dead
+        pure assignments, and is component-precise about `v.`k`) report what is
+        live at the top. A candidate is droppable exactly when its result is not
+        live there -- i.e. nothing surviving still needs it. A call whose result
+        is a module FIELD is refused outright: a field is observable in the post,
+        so it is never dead.
+        """
+        body = list(_exec_stmts(mod.procs[0].body))
+        events = [t for t in body if _is_bb_stmt(t)]
+        flds = {v.name for v in mod.module_vars}
+
+        def _ok(ks: list[int]) -> bool:
+            if not ks or any(k >= len(events) for k in ks):
+                return False
+            dropped = {id(events[k]) for k in ks}
+            gone = {v for k in ks if (v := _stmt_var(events[k]))}
+            if len(gone) != len(ks) or gone & flds:
+                return False
+            reduced: list[ec_ast.EcStmt] = [ec_ast.Assign("__pf_seed", "0")]
+            reduced += [t for t in body if id(t) not in dropped]
+            if flds:
+                reduced.append(ec_ast.Return("(" + ", ".join(sorted(flds)) + ")"))
+            live_at_top = _live_out(reduced)[0]
+            return not any(
+                t == v or t.startswith(f"{v}.`") for v in gone for t in live_at_top
+            )
+
+        return _ok
+
     l_ev = Counter(_ev_sig(s) for s in _exec_of(l_probe) if _is_bb_stmt(s))
     r_ev = Counter(_ev_sig(s) for s in _exec_of(r_probe) if _is_bb_stmt(s))
-    # Exactly ONE side may carry extra events -- that side is the delegating
-    # reduction, and it is normalised to side 2 below (``symmetry.`` when it is
-    # the left one), so the middle leg always drops on side 2.
-    if not (r_ev - l_ev) or (l_ev - r_ev):
-        if not (l_ev - r_ev) or (r_ev - l_ev):
-            return None
+    l_extra, r_extra = l_ev - r_ev, r_ev - l_ev
+    if not l_extra and not r_extra:
+        return None
+    # Orientation. Side 2 is always the delegating REDUCTION (``symmetry.``
+    # flips it in below), and the two sides' extras are told apart by LIVENESS,
+    # not by name: the reduction's extra is the challenger's ``decaps``, whose
+    # result IS the coupling's correctness component, while the game's extras
+    # are its dead KDF chain. With extras on ONE side only, that side is the
+    # reduction -- which is exactly the c257 behaviour, so those twelve exports
+    # stay byte-identical.
+    if not l_extra:
+        game_is_left = True
+    elif not r_extra:
         game_is_left = False
     else:
-        game_is_left = True
+        l_dead = _all_extras_dead(l_probe, l_ev, r_ev, _droppable_oracle(l_probe))
+        r_dead = _all_extras_dead(r_probe, r_ev, l_ev, _droppable_oracle(r_probe))
+        if l_dead == r_dead:
+            return None
+        game_is_left = l_dead
     game_proj, red_proj = (lproj, rproj) if game_is_left else (rproj, lproj)
     fgmod, frmod = _build(game_proj, fg_name), _build(red_proj, fr_name)
     if not fgmod.procs or not frmod.procs:
@@ -3756,7 +3908,7 @@ def _synth_delegate_correctness_init(  # pylint: disable=too-many-arguments,too-
     # way: ``q4`` is what carries the flat twin's fields back to the real module.
     if not globs or not body or red_base is None:
         return None
-    mid = _delegate_mid_peel(
+    got_mid = _delegate_mid_peel(
         game_body,
         red_body,
         (fg_name, fr_name),
@@ -3764,10 +3916,11 @@ def _synth_delegate_correctness_init(  # pylint: disable=too-many-arguments,too-
         glob_names,
         _det_pred,
         clone_alias,
-        2,
+        _droppable_oracle(fgmod),
     )
-    if mid is None:
+    if got_mid is None:
         return None
+    mid, pres = got_mid
     args = ", ".join(glob_names)
     res_eq = "res{1} = res{2}"
     q1_eqs = (
@@ -3812,7 +3965,7 @@ def _synth_delegate_correctness_init(  # pylint: disable=too-many-arguments,too-
         "\n".join(_render_module_decl(fgmod)),
         "\n".join(_render_module_decl(frmod)),
     ]
-    return extra, outer, set()
+    return extra, outer, pres
 
 
 def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements

@@ -1714,16 +1714,18 @@ class ProofEngine:
             # Ensure independent methods list before mutation
             game = copy.copy(game)
             game.methods = list(game.methods)
+            # Capture-aware (F-337): a name-keyed substitution would also rewrite
+            # a same-named TYPE (``Variable`` is both Expression and Type), so a
+            # challenger field ``KA`` typed by a ``let:``-bound set ``KA`` would
+            # have its type prefixed too.
+            field_prefix = {
+                field.name: get_challenger_field_name(field.name)
+                for field in game.fields
+            }
             for index, method in enumerate(game.methods):
-                ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-                for field in game.fields:
-                    ast_map.set(
-                        frog_ast.Variable(field.name),
-                        frog_ast.Variable(get_challenger_field_name(field.name)),
-                    )
-                game.methods[index] = visitors.SubstitutionTransformer(
-                    ast_map
-                ).transform(method)
+                game.methods[index] = visitors.rename_value_references(
+                    method, field_prefix
+                )
             lookup.update(get_challenger_method_lookup(game))
             game = self.apply_reduction(game, reduction_ast)
 

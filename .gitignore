@@ -16,3 +16,7 @@ emacs/*.elc
 vscode-extension/node_modules/
 vscode-extension/out/
 vscode-extension/*.vsix
+
+# EasyCrypt working
+.ec-tmp
+*.eco

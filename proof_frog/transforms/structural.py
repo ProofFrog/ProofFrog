@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import functools
+from typing import cast
 
 from .. import frog_ast
 from .. import visitors
@@ -102,21 +103,28 @@ def remove_duplicate_fields(game: frog_ast.Game) -> frog_ast.Game:
                     (field.name, other_field.name)
                 ).visit(game)
                 if duplicated_statements is not None:
+                    # Capture-aware (F-337): ``Variable`` is both Expression and
+                    # Type, so a name-keyed substitution would also retype every
+                    # position naming a set/alias called ``other_field.name``.
+                    # And minting ``field.name`` where it already names an
+                    # in-scope type would fuse the two -- decline the merge then
+                    # (canonicalisation, so declining is always sound).
+                    if field.name in visitors.type_position_names(game):
+                        continue
                     new_game = copy.deepcopy(game)
                     new_game.fields = [
                         the_field
                         for the_field in game.fields
                         if the_field.name != other_field.name
                     ]
-                    ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-                    ast_map.set(
-                        frog_ast.Variable(other_field.name),
-                        frog_ast.Variable(field.name),
-                    )
-                    return visitors.SubstitutionTransformer(ast_map).transform(
-                        RemoveStatementTransformer(duplicated_statements).transform(
-                            new_game
-                        )
+                    return cast(
+                        frog_ast.Game,
+                        visitors.rename_value_references(
+                            RemoveStatementTransformer(duplicated_statements).transform(
+                                new_game
+                            ),
+                            {other_field.name: field.name},
+                        ),
                     )
     return game
 

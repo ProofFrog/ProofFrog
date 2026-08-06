@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import heapq
 import functools
+from typing import cast
 
 from .. import frog_ast
 from .. import dependencies
@@ -23,8 +24,9 @@ from ..visitors import (
     BlockTransformer,
     SearchVisitor,
     ReplaceTransformer,
-    SubstitutionTransformer,
-    FieldOrderingVisitor,
+    rename_value_references,
+    type_position_names,
+    walk_children,
 )
 from ._base import TransformPass, PipelineContext
 from ._ordering import node_sort_key
@@ -284,8 +286,23 @@ class _ParameterStandardizer:
 
 
 # ---------------------------------------------------------------------------
-# Helper function
+# Capture-aware field renaming (F-337 / issue #252)
 # ---------------------------------------------------------------------------
+#
+# Field renaming used to run a name-keyed ``SubstitutionTransformer`` over the
+# whole game.  Because ``frog_ast.Variable`` is declared
+# ``class Variable(Expression, Type)`` (frog_ast.py L426), that substitution
+# could not distinguish "the field named ``KA``" from "the TYPE named ``KA``"
+# (a ``let:``-bound ``Set``), and rewrote both -- so a game whose field ``KA``
+# was typed by a same-named set canonicalised to ``field1 field1``, losing the
+# type, while a game whose field was named ``k`` kept it (``KA field1``).  That
+# is a false REJECT on its own (issue #252), but it is also a false ACCEPT: it
+# let a game sampling from set ``KA`` canonicalise to the same form as a game
+# sampling from a *different* set the proof happened to name ``field1``.
+#
+# The rename now goes through ``visitors.rename_value_references``, which skips
+# type positions, plus a decline guard on minting a name that is already an
+# in-scope type name.
 
 
 def _apply_field_rename(game: frog_ast.Game, rename: dict[str, str]) -> frog_ast.Game:
@@ -294,28 +311,32 @@ def _apply_field_rename(game: frog_ast.Game, rename: dict[str, str]) -> frog_ast
     Using a single substitution would corrupt the AST when two field
     names swap (e.g. ``field9 → field10`` and ``field10 → field9``); the
     temp pass disambiguates.
+
+    The rewrite is TYPE-POSITION AWARE (see ``visitors.TYPE_SLOTS``): only occurrences
+    that can denote the field's *value* are renamed.  Additionally, if a target
+    name would collide with a type/set name that is in scope in this game, the
+    rename is DECLINED outright -- standardization is only canonicalization, so
+    declining costs power but can never conflate two distinct games.
     """
     if not rename:
+        return game
+    protected = type_position_names(game)
+    if protected & set(rename.values()):
+        # Minting `fieldN` here would fuse the field with a same-named type.
         return game
     temp_map: dict[str, str] = {
         old: f"__field_temp_{i}__" for i, old in enumerate(rename)
     }
     rev_temp: dict[str, str] = {temp_map[old]: rename[old] for old in rename}
 
-    ast_map_temp = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-    for old, tmp in temp_map.items():
-        ast_map_temp.set(frog_ast.Variable(old), frog_ast.Variable(tmp))
-    new_game = SubstitutionTransformer(ast_map_temp).transform(game)
+    new_game = cast(frog_ast.Game, rename_value_references(game, temp_map))
     new_game = copy.copy(new_game)
     new_game.fields = [copy.copy(f) for f in new_game.fields]
     for field in new_game.fields:
         if field.name in temp_map:
             field.name = temp_map[field.name]
 
-    ast_map_final = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-    for tmp, final in rev_temp.items():
-        ast_map_final.set(frog_ast.Variable(tmp), frog_ast.Variable(final))
-    new_game = SubstitutionTransformer(ast_map_final).transform(new_game)
+    new_game = cast(frog_ast.Game, rename_value_references(new_game, rev_temp))
     new_game = copy.copy(new_game)
     new_game.fields = [copy.copy(f) for f in new_game.fields]
     for field in new_game.fields:
@@ -323,6 +344,57 @@ def _apply_field_rename(game: frog_ast.Game, rename: dict[str, str]) -> frog_ast
             field.name = rev_temp[field.name]
     new_game.fields.sort(key=lambda element: element.name)
     return new_game
+
+
+def _field_order_rename_map(game: frog_ast.Game) -> dict[str, str]:
+    """Canonical ``fieldN`` names in first-read order across oracle methods.
+
+    Mirrors ``visitors.FieldOrderingVisitor`` but skips TYPE positions: a field
+    named ``KA`` whose declared type is a same-named set must not be counted as
+    "read" by its own type annotation (same ``Variable``-is-both-roles hazard as
+    ``rename_value_references``, and it would otherwise perturb the numbering).
+    """
+    fields: list[str] = []
+    rename_map: dict[str, str] = {}
+    counter = 0
+    in_initialize = False
+
+    def walk(node: object, in_type: bool) -> None:
+        nonlocal counter, in_initialize
+        if isinstance(node, frog_ast.Variable):
+            if (
+                not in_type
+                and node.name in fields
+                and node.name not in rename_map
+                and not in_initialize
+            ):
+                counter += 1
+                rename_map[node.name] = f"field{counter}"
+            return
+        if isinstance(node, (list, tuple)):
+            for item in node:
+                walk(item, in_type)
+            return
+        if not isinstance(node, frog_ast.ASTNode):
+            return
+        if isinstance(node, frog_ast.Field):
+            fields.append(node.name)
+        elif isinstance(node, frog_ast.MethodSignature):
+            if node.name == "Initialize":
+                in_initialize = True
+        for _, child, child_in_type in walk_children(node, in_type, escape=True):
+            walk(child, child_in_type)
+        if isinstance(node, frog_ast.Method):
+            in_initialize = False
+
+    walk(game, False)
+    # Fields used only in Initialize (or not at all) are numbered last, in
+    # declaration order.
+    for field_name in fields:
+        if field_name not in rename_map:
+            counter += 1
+            rename_map[field_name] = f"field{counter}"
+    return rename_map
 
 
 def _phase3_lex_min_within_type(game: frog_ast.Game) -> frog_ast.Game:
@@ -411,7 +483,7 @@ def standardize_field_names(game: frog_ast.Game) -> frog_ast.Game:
     Three-phase pass:
 
     1. Rename fields to ``fieldN`` based on first-read order in oracle
-       methods (via :class:`FieldOrderingVisitor`).
+       methods (via :func:`_field_order_rename_map`).
     2. Regroup the resulting fields by type so that fields of the same
        type receive consecutive numbers regardless of how oracle
        predicates end up sorting them.  Preserves Phase-1 relative
@@ -422,18 +494,8 @@ def standardize_field_names(game: frog_ast.Game) -> frog_ast.Game:
        positions are filled in opposite orders converge to the same
        field assignment.
     """
-    field_rename_map = FieldOrderingVisitor().visit(game)
-    ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-    for field_name, normalized_name in field_rename_map.items():
-        ast_map.set(frog_ast.Variable(field_name), frog_ast.Variable(normalized_name))
-
-    new_game = SubstitutionTransformer(ast_map).transform(game)
-    # Ensure independent copies before mutation — transform may share objects
-    new_game = copy.copy(new_game)
-    new_game.fields = [copy.copy(f) for f in new_game.fields]
-    for field in new_game.fields:
-        field.name = field_rename_map[field.name]
-    new_game.fields.sort(key=lambda element: element.name)
+    field_rename_map = _field_order_rename_map(game)
+    new_game = _apply_field_rename(game, field_rename_map)
 
     # Phase 2: group by type, preserving relative order within each group.
     # This re-numbers fields so that two semantically equivalent games whose

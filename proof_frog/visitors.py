@@ -319,6 +319,141 @@ class SubstitutionTransformer(Transformer):
             return None
 
 
+# ---------------------------------------------------------------------------
+# Capture-aware renaming of value references (F-337 / issue #252)
+# ---------------------------------------------------------------------------
+
+# ``frog_ast.Variable`` is declared ``class Variable(Expression, Type)``: ONE
+# node class models both "a reference to a value" and "the name of a
+# user-defined type" (a ``let:``-bound ``Set``, a scheme's ``Set Key = ...``
+# alias, a group name).  A rename driven by a plain name-keyed
+# ``SubstitutionTransformer`` therefore cannot tell the two apart and rewrites
+# both, which silently retypes the game.
+#
+# ``TYPE_SLOTS`` records which attribute of which node holds a TYPE rather than
+# a value expression.  A ``Variable`` reached through one of these slots names a
+# type and must be left alone by a value rename.  Attributes NOT listed for a
+# node stay in expression context -- in particular
+# ``BitStringType.parameterization`` / ``ModIntType.modulus`` /
+# ``ArrayType.count`` are length/size *expressions* that may legitimately
+# reference a renamed value.
+TYPE_SLOTS: dict[type, tuple[str, ...]] = {
+    # Declaration sites: the declared type of a field, parameter or local.
+    frog_ast.Field: ("type",),
+    frog_ast.Parameter: ("type",),
+    frog_ast.VariableDeclaration: ("type",),
+    frog_ast.MethodSignature: ("return_type",),
+    frog_ast.GenericFor: ("var_type",),
+    frog_ast.Assignment: ("the_type",),
+    # ``x <- T`` / ``x <-uniq[S] T``: ``sampled_from`` is the sampling DOMAIN, a
+    # type.  ``UniqueSample.unique_set`` is deliberately absent -- it is a real
+    # mutable-set lvalue that may well be a field and must keep being renamed.
+    frog_ast.Sample: ("the_type", "sampled_from"),
+    frog_ast.UniqueSample: ("the_type", "sampled_from"),
+    # Type constructors: their type arguments stay in type context.
+    frog_ast.ArrayType: ("element_type",),
+    frog_ast.MapType: ("key_type", "value_type"),
+    frog_ast.SetType: ("parameterization",),
+    frog_ast.ProductType: ("types",),
+    frog_ast.FunctionType: ("domain_type", "range_type"),
+    frog_ast.OptionalType: ("the_type",),
+    frog_ast.GroupType: ("group",),
+    frog_ast.GroupElemType: ("group",),
+}
+
+# Slots that ESCAPE type context back into expression context: a parameterized
+# type's length/size/modulus argument is an ordinary ``Int`` expression, and may
+# legitimately name the value being renamed (``BitString<n>`` where ``n`` is a
+# field).  Every other slot inherits its parent's context, so e.g. the
+# ``the_object`` of a ``FieldAccess`` stays a type name in ``E.Key`` but stays a
+# value in ``M.keys``.
+EXPRESSION_ESCAPE_SLOTS: dict[type, tuple[str, ...]] = {
+    frog_ast.BitStringType: ("parameterization",),
+    frog_ast.ModIntType: ("modulus",),
+    frog_ast.ArrayType: ("count",),
+}
+
+
+def walk_children(
+    node: frog_ast.ASTNode, in_type: bool, escape: bool = False
+) -> list[tuple[str, Any, bool]]:
+    """Yield ``(attr_name, value, child_in_type)`` for *node*'s children.
+
+    ``in_type`` is inherited: once inside a type, stay inside it.  When *escape*
+    is set, ``EXPRESSION_ESCAPE_SLOTS`` drops back into expression context --
+    used by the renamer, but deliberately NOT by ``type_position_names``, which
+    over-approximates the protected set so that a name occurring anywhere under
+    a type (including a length expression) is never minted into.
+    """
+    type_slots = TYPE_SLOTS.get(type(node), ())
+    escape_slots = EXPRESSION_ESCAPE_SLOTS.get(type(node), ()) if escape else ()
+    return [
+        (
+            attr,
+            getattr(node, attr),
+            False if attr in escape_slots else (in_type or attr in type_slots),
+        )
+        for attr in vars(node)
+    ]
+
+
+def type_position_names(node: Any, in_type: bool = False) -> set[str]:
+    """Every ``Variable`` name occurring in a TYPE position within *node*.
+
+    A rename must not mint one of these names: a target that coincides with an
+    in-scope type/set name would fuse the renamed value with that type.
+    """
+    if isinstance(node, frog_ast.Variable):
+        return {node.name} if in_type else set()
+    if isinstance(node, (list, tuple)):
+        names: set[str] = set()
+        for item in node:
+            names |= type_position_names(item, in_type)
+        return names
+    if not isinstance(node, frog_ast.ASTNode):
+        return set()
+    names = set()
+    for _, child, child_in_type in walk_children(node, in_type):
+        names |= type_position_names(child, child_in_type)
+    return names
+
+
+def rename_value_references(
+    node: Any, rename: dict[str, str], in_type: bool = False
+) -> Any:
+    """Copy-on-write rewrite of ``Variable`` references, skipping type positions.
+
+    The capture-aware replacement for a ``SubstitutionTransformer`` keyed on
+    bare ``frog_ast.Variable(name)`` nodes when the intent is to rename a
+    *value* (a field, a local): only occurrences that can denote the value are
+    rewritten, so a same-named type/set alias survives untouched.
+    """
+    if isinstance(node, frog_ast.Variable):
+        if in_type or node.name not in rename:
+            return node
+        return frog_ast.Variable(rename[node.name])
+    if isinstance(node, list):
+        new_items = [rename_value_references(item, rename, in_type) for item in node]
+        if all(new is old for new, old in zip(new_items, node)):
+            return node
+        return new_items
+    if not isinstance(node, frog_ast.ASTNode):
+        return node
+    changed = False
+    new_attrs: dict[str, Any] = {}
+    for attr, child, child_in_type in walk_children(node, in_type, escape=True):
+        new_child = rename_value_references(child, rename, child_in_type)
+        new_attrs[attr] = new_child
+        if new_child is not child:
+            changed = True
+    if not changed:
+        return node
+    node_copy = copy.copy(node)
+    for attr, new_child in new_attrs.items():
+        setattr(node_copy, attr, new_child)
+    return node_copy
+
+
 class InstantiationTransformer(Transformer):
     def __init__(self, namespace: frog_ast.Namespace) -> None:
         self.namespace = dict(namespace)

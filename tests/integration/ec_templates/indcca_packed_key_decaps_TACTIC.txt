@@ -1,0 +1,89 @@
+VALIDATED TACTIC -- IND-CCA packed-key correctness `decaps` hop (c258).
+Derived on `CG_expanded_INDCCA_PQ` `hop_0_decaps`; the probe compiles EXIT 0 with
+ZERO admits under RELEASE EasyCrypt. NOT YET EMITTED BY THE EXPORTER -- this file
+is the target a synthesizer must reproduce, and the record that the front is
+solvable.
+
+IT ASSUMES ONE PREMISE THE COUPLING DOES NOT YET CARRY:
+
+    Hybrid_c.KEM_INDCCA_Real.dk.`2{1} = NG_c.ev_randomscalar (R_Correct_Real.seed_T{2})
+
+added to BOTH the pre and the post. That premise is establishable -- the landed
+`_synth_delegate_correctness_init` already proves exactly this equation on both
+sides inside its middle leg -- so the ordering rule is satisfied: build the
+conjunct into the coupling, re-verify the (green) init hop still establishes it,
+and only then wire this consumer.
+
+WHAT IT DOES, and why each piece is needed:
+ - `if; 1: smt(). auto.` -- the shared challenge-ciphertext guard.
+ - functionalize the reduction's `NG.randomscalar(seed_T)` so its `dk_T{2}` meets
+   the game's packed `dk.`2{1}` through the new premise.
+ - `seq 7 2` peels both sides' projection assignments.
+ - `swap{1} 1 2` moves the game's `KEM_PQ.decaps` DOWN past its `NG.exp` /
+   `elementtosharedsecret`, which is what aligns it with the reduction, whose
+   decaps happens inside the branch.
+ - `case (ct_PQ{2} = corr.`3{2})` INTRODUCES on the game side the split the
+   reduction has and the game lacks, then `rcondt{2}` / `rcondf{2}` select it.
+   * THEN: the game's `decaps` is dropped by `KEM_PQ_decaps_det`, giving
+     `ss_PQ{1} = ev_decaps dk_PQ{1} ct_PQ{1}`; with `dk_PQ{1} = corr.`2{2}` and
+     `ct_PQ = corr.`3`, the coupling's `corr.`5 = ev_decaps corr.`2 corr.`3`
+     makes that EQUAL to the `corr.`5` the reduction uses instead of decapsulating.
+     This is the whole content of the hop.
+   * ELSE: both decapsulate, so a plain `call (_: true)` couples them.
+ - In BOTH branches the reduction runs an extra `NG.generator; NG.exp` where the
+   game reads the stored `dk.`3`; both are dropped by their `_det` axioms and meet
+   the coupling's `dk.`3 = ev_exp ev_generator dk.`2`.
+
+TRAP, and it decides the shape: the two det drops must be SEPARATE `seq 0 1`
+steps, generator first. `exists*` freezes at the CURRENT judgment's initial
+memory, so a single `seq 0 2` cannot name the generator's result -- it is not
+assigned yet at the point the binder is taken.
+
+proc.
+inline *.
+if; 1: smt().
+auto.
+seq 0 1 : (#pre /\ dk_T{2} = NG_c.ev_randomscalar (R_Correct_Real.seed_T{2})).
++ exists* (glob NG){2}, (R_Correct_Real.seed_T{2}); elim* => g0 a0.
+  call{2} (NG_randomscalar_det g0 a0); skip => /#.
+seq 7 2 : (#pre /\ dk_PQ{1} = Hybrid_c.KEM_INDCCA_Real.dk{1}.`1 /\ dk_T{1} = Hybrid_c.KEM_INDCCA_Real.dk{1}.`2 /\ ek_T{1} = Hybrid_c.KEM_INDCCA_Real.dk{1}.`3 /\ ct_PQ{1} = ct{1}.`1 /\ ct_T{1} = ct{1}.`2 /\ ct_PQ{2} = ct{2}.`1 /\ ct_T{2} = ct{2}.`2).
++ wp; skip => /#.
+swap{1} 1 2.
+seq 2 2 : (#pre /\ ss_T{1} = dec_ss_T{2}).
++ wp; call (_: true); wp; call (_: true); skip => /#.
+case (ct_PQ{2} = R_Correct_Real.corr{2}.`3).
++ rcondt{2} 1; first by auto.
+  seq 1 0 : (#pre /\ ss_PQ{1} = KEM_PQ_c.ev_decaps (dk_PQ{1}) (ct_PQ{1})).
+  + exists* (glob KEM_PQ){1}, (dk_PQ{1}), (ct_PQ{1}); elim* => g1 b0 b1.
+    call{1} (KEM_PQ_decaps_det g1 b0 b1); skip => /#.
+  seq 1 1 : (#pre /\ _r00{1} = _r8{2}).
+  + call (_: true); skip => /#.
+  seq 1 1 : (#pre /\ _r10{1} = _r9{2}).
+  + call (_: true); skip => /#.
+  seq 0 1 : (#pre /\ _r10{2} = NG_c.ev_generator).
+  + exists* (glob NG){2}; elim* => g2.
+    call{2} (NG_generator_det g2); skip => /#.
+  seq 0 1 : (#pre /\ _r11{2} = NG_c.ev_exp (NG_c.ev_generator) (dk_T{2})).
+  + exists* (glob NG){2}, (_r10{2}), (dk_T{2}); elim* => g3 c0 c1.
+    call{2} (NG_exp_det g3 c0 c1); skip => /#.
+  wp; call (_: true).
+  wp; call (_: true).
+  wp; call (_: true).
+  wp; skip => /#.
+rcondf{2} 1; first by auto.
+seq 1 1 : (#pre /\ ss_PQ{1} = dec_ss_PQ{2}).
++ call (_: true); skip => /#.
+seq 1 1 : (#pre /\ _r00{1} = _r1{2}).
++ call (_: true); skip => /#.
+seq 1 1 : (#pre /\ _r10{1} = _r2{2}).
++ call (_: true); skip => /#.
+seq 0 1 : (#pre /\ _r3{2} = NG_c.ev_generator).
++ exists* (glob NG){2}; elim* => g4.
+  call{2} (NG_generator_det g4); skip => /#.
+seq 0 1 : (#pre /\ _r4{2} = NG_c.ev_exp (NG_c.ev_generator) (dk_T{2})).
++ exists* (glob NG){2}, (_r3{2}), (dk_T{2}); elim* => g5 d0 d1.
+  call{2} (NG_exp_det g5 d0 d1); skip => /#.
+wp; call (_: true).
+wp; call (_: true).
+wp; call (_: true).
+wp; skip => /#.

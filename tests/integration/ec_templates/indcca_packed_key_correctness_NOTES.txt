@@ -159,10 +159,15 @@ STILL OPEN in this class:
    extra-`decaps` drop on the reduction side -- two one-sided drops in opposite
    directions, which the current `_extra_det_target` refuses (it allows extras on
    ONE side only).
- - Both `decaps` halves: unchanged from the analysis above. The missing premise
-   `dk.`2{1} = ev_randomscalar seed_T{2}` is now cheap to ESTABLISH -- the init
-   route already proves exactly that equation on both sides inside its middle
-   leg -- so the remaining work is the game-side case-split introduction.
+ - Both `decaps` halves: THE TACTIC IS NOW DERIVED AND VALIDATED (c258) --
+   `indcca_packed_key_decaps_TACTIC.txt`, probe compiles EXIT 0 with ZERO admits
+   under release EasyCrypt. It needs the premise
+   `dk.`2{1} = ev_randomscalar seed_T{2}` in the coupling, which the landed init
+   route already proves internally, so the ordering rule is satisfiable. What
+   remains is EMISSION: a synthesizer that reproduces that tactic, plus the
+   coupling builder for the premise. Do those in ONE increment -- the conjunct
+   alone changes every touched export's text for zero admit gain, and perturbs
+   `smt` in the already-green init hops for nothing.
 
 THE BOTH-SIDED-EXTRAS EXTENSION (designed c257, not yet built)
 =============================================================

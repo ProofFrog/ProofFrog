@@ -1589,11 +1589,12 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
     """Extract repeated ``var[constant]`` accesses and slice expressions.
 
     **Tuple phase.** When ``v[i]`` (variable + integer index) appears
-    2+ times in a block and ``v`` is declared with a product (tuple)
-    type, inserts ``Ti __cse_v_i__ = v[i];`` right after ``v``'s
-    assignment and replaces every occurrence with the new variable.
-    Also fires when ``v`` is a ``GenericFor`` loop binder, inserting the
-    extraction at the top of the loop body. This symmetrises games whose
+    2+ times *after ``v``'s definition* in a block and ``v`` is declared
+    with a product (tuple) type, inserts ``Ti __cse_v_i__ = v[i];`` right
+    after ``v``'s assignment and replaces every occurrence with the new
+    variable. Also fires when ``v`` is a ``GenericFor`` loop binder,
+    inserting the extraction at the top of the loop body. This
+    symmetrises games whose
     loop body source writes ``m = e[0]`` explicitly against games whose
     loop body obtains the same accesses via inlining a helper method.
 
@@ -1604,7 +1605,8 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
     parameter).
 
     **Slice phase.** When a ``v[A:B]`` slice expression (variable base,
-    syntactically-equal bounds) appears 2+ times in a block, inserts
+    syntactically-equal bounds) appears 2+ times *after ``v``'s
+    definition* in a block, inserts
     ``BitString<B - A> __cse_slice_v_N__ = v[A:B];`` at the definition
     point (after ``v``'s block-local assignment, or at position 0 for
     method parameters / fields / enclosing-scope bases) and replaces
@@ -1616,19 +1618,71 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
     ``k2enc`` in multiple branches) against games whose scan-loop body
     obtains the same slice via inlining a helper + concat-equality
     decomposition.
+
+    **Why both phases count only post-definition occurrences.** The
+    replacement step rewrites only the statements following the base's
+    definition, so an occurrence at or before it -- e.g. inside an
+    earlier branch block that redeclares the same name, which is a
+    *different* variable -- can never be replaced. Counting such an
+    occurrence makes the hoist fire without reducing the count: the
+    inserted extraction itself contains a fresh ``v[i]`` / ``v[A:B]``,
+    which pairs with the unreachable occurrence and re-fires the hoist
+    on the next pass, recursing until the interpreter's recursion
+    limit. Restricting the count to the region replacement reaches can
+    only ever *decline* a hoist -- and it cannot change the outcome of
+    any run that previously terminated, since every configuration it
+    declines is exactly one that used to diverge.
     """
 
     def __init__(
         self,
         proof_namespace: frog_ast.Namespace | None = None,
         proof_let_types: NameTypeMap | None = None,
+        ctx: PipelineContext | None = None,
     ) -> None:
         super().__init__()
+        self.ctx = ctx
         # Loop-binder types visible from the enclosing ``GenericFor``.
         # Extraction for these is inserted at position 0 of the loop body.
         self._scope_types: dict[str, frog_ast.Type] = {}
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
         self._proof_let_types = proof_let_types
+
+    def _record_unreachable_occurrences(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        block: frog_ast.Block,
+        target: str,
+        var_name: str,
+        def_idx: int,
+        total: int,
+        reachable: int,
+    ) -> None:
+        """Report a hoist declined because too few occurrences of ``target``
+        follow ``var_name``'s definition, so the rest are unreachable to the
+        replacement step (see the class docstring).
+
+        ``def_idx >= 0`` holds at every call site: a scope-external base has
+        ``def_idx == -1``, and then every occurrence index exceeds it, so
+        ``reachable == total >= 2`` and the decline cannot trigger. The guard
+        below is kept regardless -- a negative index would silently resolve to
+        the *last* statement of the block and report a misleading location if
+        that invariant is ever broken.
+        """
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Extract Repeated Tuple Access",
+                reason=(
+                    f"Cannot extract {target}: appears {total} times but only"
+                    f" {reachable} after the definition of '{var_name}'"
+                ),
+                location=(block.statements[def_idx].origin if def_idx >= 0 else None),
+                suggestion=None,
+                variable=var_name,
+                method=None,
+            )
+        )
 
     def transform_generic_for(self, gf: frog_ast.GenericFor) -> frog_ast.GenericFor:
         new_over = self.transform(gf.over)
@@ -1698,6 +1752,10 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
         var_types: dict[str, frog_ast.Type] = dict(self._scope_types)
         # Sentinel -1 = scope-external (insert at top of this block).
         var_def_idx: dict[str, int] = {name: -1 for name in var_types}
+        # NOTE: this loop keeps the LAST block-local declaration of a name,
+        # whereas the slice phase below stops at the FIRST. Each phase is
+        # self-consistent -- the same index drives both the occurrence count
+        # and the insertion point -- but the two are not interchangeable.
         for idx, stmt in enumerate(block.statements):
             if (
                 isinstance(stmt, frog_ast.Assignment)
@@ -1707,25 +1765,29 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
                 var_types[stmt.var.name] = stmt.the_type
                 var_def_idx[stmt.var.name] = idx
 
-        # Count occurrences of each (var_name, index) ArrayAccess pattern
-        access_counts: dict[tuple[str, int], int] = {}
-        for stmt in block.statements:
+        # Count occurrences of each (var_name, index) ArrayAccess pattern,
+        # tracking the statement index of each so that only those after the
+        # base's definition count toward the threshold (class docstring:
+        # "Why both phases count only post-definition occurrences").
+        access_stmt_idxs: dict[tuple[str, int], list[int]] = {}
+        for stmt_idx, stmt in enumerate(block.statements):
 
-            def counter(node: frog_ast.ASTNode) -> bool:
+            def counter(node: frog_ast.ASTNode, stmt_idx: int = stmt_idx) -> bool:
                 if (
                     isinstance(node, frog_ast.ArrayAccess)
                     and isinstance(node.the_array, frog_ast.Variable)
                     and isinstance(node.index, frog_ast.Integer)
                 ):
                     key = (node.the_array.name, node.index.num)
-                    access_counts[key] = access_counts.get(key, 0) + 1
+                    access_stmt_idxs.setdefault(key, []).append(stmt_idx)
                 return False
 
             SearchVisitor(counter).visit(stmt)
 
-        # Find first pattern with 2+ uses whose base var has a product type
-        for (var_name, idx_val), count in access_counts.items():
-            if count < 2:
+        # Find first pattern with 2+ replaceable uses whose base var has a
+        # product type
+        for (var_name, idx_val), occurrence_idxs in access_stmt_idxs.items():
+            if len(occurrence_idxs) < 2:
                 continue
             if var_name not in var_types:
                 continue
@@ -1733,6 +1795,18 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
             if not isinstance(base_type, frog_ast.ProductType):
                 continue
             if idx_val < 0 or idx_val >= len(base_type.types):
+                continue
+
+            count = sum(1 for i in occurrence_idxs if i > var_def_idx[var_name])
+            if count < 2:
+                self._record_unreachable_occurrences(
+                    block,
+                    f"'{var_name}[{idx_val}]'",
+                    var_name,
+                    var_def_idx[var_name],
+                    len(occurrence_idxs),
+                    count,
+                )
                 continue
 
             # Skip if the base variable is reassigned after its definition
@@ -1818,30 +1892,34 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
         # Unlike the tuple path, method parameters are eligible as
         # bases (SimplifyTuple only folds ArrayAccess, not Slice, so
         # hoisting a slice of a param doesn't interact).
-        slice_occurrences: list[frog_ast.Slice] = []
-        for stmt in block.statements:
+        # As in the tuple phase, track the statement index of each occurrence
+        # so that only post-definition ones count toward the threshold.
+        slice_occurrences: list[tuple[int, frog_ast.Slice]] = []
+        for stmt_idx, stmt in enumerate(block.statements):
 
-            def slice_collector(node: frog_ast.ASTNode) -> bool:
+            def slice_collector(
+                node: frog_ast.ASTNode, stmt_idx: int = stmt_idx
+            ) -> bool:
                 if isinstance(node, frog_ast.Slice) and isinstance(
                     node.the_array, frog_ast.Variable
                 ):
-                    slice_occurrences.append(node)
+                    slice_occurrences.append((stmt_idx, node))
                 return False
 
             SearchVisitor(slice_collector).visit(stmt)
 
         # Group by structural equality.
-        slice_groups: list[tuple[frog_ast.Slice, int]] = []
-        for sl in slice_occurrences:
-            for idx, (rep, cnt) in enumerate(slice_groups):
+        slice_groups: list[tuple[frog_ast.Slice, list[int]]] = []
+        for stmt_idx, sl in slice_occurrences:
+            for idx, (rep, idxs) in enumerate(slice_groups):
                 if sl == rep:
-                    slice_groups[idx] = (rep, cnt + 1)
+                    idxs.append(stmt_idx)
                     break
             else:
-                slice_groups.append((sl, 1))
+                slice_groups.append((sl, [stmt_idx]))
 
-        for rep_slice, count in slice_groups:
-            if count < 2:
+        for rep_slice, occurrence_idxs in slice_groups:
+            if len(occurrence_idxs) < 2:
                 continue
             # F-235: the slice BOUNDS must be deterministic. A non-deterministic
             # call in a bound (`v[I.Cut():j]`) means two structurally-equal
@@ -1875,6 +1953,20 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
                 ):
                     def_idx = idx
                     break
+
+            # Only occurrences the replacement step can actually reach may
+            # count toward the 2+ threshold.
+            count = sum(1 for i in occurrence_idxs if i > def_idx)
+            if count < 2:
+                self._record_unreachable_occurrences(
+                    block,
+                    f"the slice '{rep_slice}'",
+                    var_name,
+                    def_idx,
+                    len(occurrence_idxs),
+                    count,
+                )
+                continue
 
             # Skip if any of the slice's free variables -- the base AND the
             # bound expressions' variables -- is reassigned or rebound after
@@ -1953,6 +2045,7 @@ class ExtractRepeatedTupleAccess(TransformPass):
         return ExtractRepeatedTupleAccessTransformer(
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
+            ctx=ctx,
         ).transform(game)
 
 

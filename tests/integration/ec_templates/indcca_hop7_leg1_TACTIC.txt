@@ -1,0 +1,215 @@
+DERIVED TACTIC -- IND-CCA `hop_7` LEG 1: `RD ~ Mid7`, the BIJECTIVE coupling,
+plus the pin-point-parametrised helper lemmas the leg needs. Derived on the real
+`CG_expanded_INDCCA_PQ` export. EXIT 0, ZERO admits. NOT YET EMITTED.
+
+This is the tripwire's `leg_l_mid` transferred to the real bodies. The tripwire
+proves its helpers with the pin point a global `op`; here the pin is a RUNTIME
+value, so every helper takes it as a PARAMETER and the proof reaches it with
+`exists* rest{2}`. `exists*` substitutes into the PROGRAM, not just the pre, so
+the folded distributions come out over `pt0` and the `rnd` obligations land in
+exactly the tripwire's shape -- the whole closing block transferred verbatim on
+the first try.
+
+TWO THINGS THE REAL BODIES ADD OVER THE TRIPWIRE:
+
+ * The pin point must be shown to CONTAIN the challenge ciphertext. That is
+   `rp7_proj_concat`, three applications of the round-trip slice laws the exporter
+   already emits -- so the separation costs NO NEW AXIOM (see
+   `concat_injective.ec`), and in particular does NOT need `NG_encode_inj`.
+ * Getting `_r3 = ev_encode ct_T` into the invariant needs the `NG.encode` call
+   FUNCTIONALISED mid-ladder, by the two-sided `_det` idiom the exporter already
+   emits elsewhere: `exists*` each side's `(glob NG)` and argument, then
+   `call{1}`/`call{2}` the `_det` phoare.
+
+-- helper lemmas ----------------------------------------------------------
+  (* ---- hop_7 reprogramming helpers.  The tripwire proves these with the pin
+     point a global op; here the pin is a RUNTIME value, so every one takes it
+     as a parameter.  All derived from MUniFinFun -- no axiom. ---- *)
+
+  lemma rp7_fupd2 (x0 : bs_2_ng_nelem_ng_nss_nlabel)
+                  (f : bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) (a b : bs_kdf_nout) :
+    f.[x0 <- a].[x0 <- b] = f.[x0 <- b].
+  proof. by apply fun_ext => z; rewrite !fupdateE; case: (x0 = z). qed.
+
+  lemma rp7_fupd_id (x0 : bs_2_ng_nelem_ng_nss_nlabel)
+                    (f : bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) :
+    f.[x0 <- f x0] = f.
+  proof. by apply fun_ext => z; rewrite fupdateE; case: (x0 = z) => [->|]. qed.
+
+  lemma rp7_pin_supp (x0 : bs_2_ng_nelem_ng_nss_nlabel) (v : bs_kdf_nout)
+                     (g : bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) :
+    g \in MUF_bs_2_ng_nelem_ng_nss_nlabel.dfun
+            (fun (_ : bs_2_ng_nelem_ng_nss_nlabel) => dbs_kdf_nout).[x0 <- dunit v] =>
+    g x0 = v.
+  proof.
+  by move/MUF_bs_2_ng_nelem_ng_nss_nlabel.dfun_supp => /(_ x0); rewrite fupdate_eq supp_dunit.
+  qed.
+
+  lemma rp7_pinR_supp (x0 : bs_2_ng_nelem_ng_nss_nlabel) (v : bs_kdf_nout)
+                      (p : (bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) * bs_kdf_nout) :
+    p \in dlet (MUF_bs_2_ng_nelem_ng_nss_nlabel.dfun
+                  (fun (_ : bs_2_ng_nelem_ng_nss_nlabel) => dbs_kdf_nout).[x0 <- dunit v])
+               (fun (g : bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) =>
+                  dmap dbs_kdf_nout (fun (y : bs_kdf_nout) => (g, y))) =>
+    p.`1 x0 = v.
+  proof.
+  by move/supp_dlet => [g] [hg] /supp_dmap [y] [_ ->] /=; exact (rp7_pin_supp x0 v g hg).
+  qed.
+
+  lemma rp7_fold_eq_pin (x0 : bs_2_ng_nelem_ng_nss_nlabel) (v : bs_kdf_nout) :
+      dmap (dlet (MUF_bs_2_ng_nelem_ng_nss_nlabel.dfun
+                    (fun (_ : bs_2_ng_nelem_ng_nss_nlabel) => dbs_kdf_nout).[x0 <- dunit v])
+                 (fun (g : bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) =>
+                    dmap dbs_kdf_nout (fun (y : bs_kdf_nout) => (g, y))))
+           (fun (p : (bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) * bs_kdf_nout) =>
+              (p.`1.[x0 <- p.`2], p.`2))
+    = dmap dfun_bs_2_ng_nelem_ng_nss_nlabel_to_bs_kdf_nout
+           (fun (f : bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) => (f, f x0)).
+  proof.
+  have -> :
+      dmap (dlet (MUF_bs_2_ng_nelem_ng_nss_nlabel.dfun
+                    (fun (_ : bs_2_ng_nelem_ng_nss_nlabel) => dbs_kdf_nout).[x0 <- dunit v])
+                 (fun (g : bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) =>
+                    dmap dbs_kdf_nout (fun (y : bs_kdf_nout) => (g, y))))
+           (fun (p : (bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) * bs_kdf_nout) =>
+              (p.`1.[x0 <- p.`2], p.`2))
+    = dmap (dlet (MUF_bs_2_ng_nelem_ng_nss_nlabel.dfun
+                    (fun (_ : bs_2_ng_nelem_ng_nss_nlabel) => dbs_kdf_nout).[x0 <- dunit v])
+                 (fun (g : bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) =>
+                    dmap dbs_kdf_nout (fun (y : bs_kdf_nout) => g.[x0 <- y])))
+           (fun (f : bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) => (f, f x0)).
+  + rewrite !dmap_dlet; apply eq_dlet => // g; rewrite !dmap_comp /(\o) /=;
+    apply eq_dmap => y /=; rewrite fupdate_eq //.
+  congr; rewrite /dfun_bs_2_ng_nelem_ng_nss_nlabel_to_bs_kdf_nout
+    (MUF_bs_2_ng_nelem_ng_nss_nlabel.dlet_dfun_fupdate_ll
+       (fun (_ : bs_2_ng_nelem_ng_nss_nlabel) => dbs_kdf_nout) x0 v) //.
+  qed.
+
+  lemma rp7_dfn_at (f : bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout)
+                   (z : bs_2_ng_nelem_ng_nss_nlabel) :
+    f \in dfun_bs_2_ng_nelem_ng_nss_nlabel_to_bs_kdf_nout => f z \in dbs_kdf_nout.
+  proof.
+  by rewrite /dfun_bs_2_ng_nelem_ng_nss_nlabel_to_bs_kdf_nout
+     => /MUF_bs_2_ng_nelem_ng_nss_nlabel.dfun_supp /(_ z).
+  qed.
+
+  lemma rp7_dL_supp (x0 : bs_2_ng_nelem_ng_nss_nlabel)
+                    (p : (bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) * bs_kdf_nout) :
+    p \in dmap dfun_bs_2_ng_nelem_ng_nss_nlabel_to_bs_kdf_nout
+               (fun (f : bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) => (f, f x0)) =>
+    p.`1 \in dfun_bs_2_ng_nelem_ng_nss_nlabel_to_bs_kdf_nout /\ p.`2 = p.`1 x0.
+  proof. by move/supp_dmap => [f] [hf ->]. qed.
+
+  lemma rp7_pinD_mem (x0 : bs_2_ng_nelem_ng_nss_nlabel) (v : bs_kdf_nout)
+                     (f : bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) (y : bs_kdf_nout) :
+    f \in dfun_bs_2_ng_nelem_ng_nss_nlabel_to_bs_kdf_nout => y \in dbs_kdf_nout =>
+    (f.[x0 <- v], y) \in
+      dlet (MUF_bs_2_ng_nelem_ng_nss_nlabel.dfun
+              (fun (_ : bs_2_ng_nelem_ng_nss_nlabel) => dbs_kdf_nout).[x0 <- dunit v])
+           (fun (g : bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) =>
+              dmap dbs_kdf_nout (fun (w : bs_kdf_nout) => (g, w))).
+  proof.
+  move=> hf hy; apply/supp_dlet; exists (f.[x0 <- v]); split.
+  + apply/MUF_bs_2_ng_nelem_ng_nss_nlabel.dfun_supp => z; rewrite !fupdateE;
+    case: (x0 = z) => [_|_].
+    + exact supp_dunit.
+    by move: hf; rewrite /dfun_bs_2_ng_nelem_ng_nss_nlabel_to_bs_kdf_nout
+       => /MUF_bs_2_ng_nelem_ng_nss_nlabel.dfun_supp /(_ z).
+  by apply/supp_dmap; exists y.
+  qed.
+
+  (* The challenge KDF input's ct_T COMPONENT, recovered by the round-trip slice
+     laws the exporter already emits.  This is what makes "p is off the challenge
+     point" a statement about the ciphertext rather than about the whole input. *)
+  lemma rp7_proj_concat (a : bs_ng_nss) (b : bs_ng_nelem) (c : bs_ng_nelem) (d : bs_nlabel) :
+    slice_bs_ng_nelem_ng_nss_to_bs_ng_nelem
+      (slice_bs_2_ng_nelem_ng_nss_to_bs_ng_nelem_ng_nss
+         (slice_bs_2_ng_nelem_ng_nss_nlabel_to_bs_2_ng_nelem_ng_nss
+            (concat_bs_2_ng_nelem_ng_nss_bs_nlabel_to_bs_2_ng_nelem_ng_nss_nlabel
+               (concat_bs_ng_nelem_ng_nss_bs_ng_nelem_to_bs_2_ng_nelem_ng_nss
+                  (concat_bs_ng_nss_bs_ng_nelem_to_bs_ng_nelem_ng_nss a b) c) d)
+            0 (2*ng_nelem + ng_nss)) 0 (ng_nelem + ng_nss)) ng_nss (ng_nss + ng_nelem) = b.
+  proof.
+  by rewrite slice_concat_left_bs_2_ng_nelem_ng_nss_bs_nlabel_bs_2_ng_nelem_ng_nss_nlabel
+             slice_concat_left_bs_ng_nelem_ng_nss_bs_ng_nelem_bs_2_ng_nelem_ng_nss
+             slice_concat_right_bs_ng_nss_bs_ng_nelem_bs_ng_nelem_ng_nss.
+  qed.
+
+-- the leg ----------------------------------------------------------------
+    proc.
+    inline{1} *.
+    swap{1} 1 20.
+    seq 20 19 : (={glob KEM_PQ, glob NG, glob G, glob H, glob L}
+                 /\ Mid7.pq_keys{2} = RD.pq_keys{1}
+                 /\ Mid7.seed_T{2} = RD.seed_T{1}
+                 /\ Mid7.kem_ct{2} = RD.kem_ct{1}
+                 /\ ={ek_PQ, ek_T, ct_T}
+                 /\ rest0{1} = rest{2}
+                 /\ slice_bs_ng_nelem_ng_nss_to_bs_ng_nelem
+                      (slice_bs_2_ng_nelem_ng_nss_to_bs_ng_nelem_ng_nss
+                         (slice_bs_2_ng_nelem_ng_nss_nlabel_to_bs_2_ng_nelem_ng_nss rest{2} 0
+                            (2*ng_nelem + ng_nss)) 0 (ng_nelem + ng_nss)) ng_nss
+                      (ng_nss + ng_nelem) = NG_c.ev_encode ct_T{2}).
+    + seq 16 16 : (={glob KEM_PQ, glob NG, glob G, glob H, glob L}
+                   /\ Mid7.pq_keys{2} = RD.pq_keys{1}
+                   /\ Mid7.seed_T{2} = RD.seed_T{1}
+                   /\ Mid7.kem_ct{2} = RD.kem_ct{1}
+                   /\ ={ek_PQ, ek_T, ct_T, ss_T, _r3}
+                   /\ _r3{2} = NG_c.ev_encode ct_T{2}).
+      + seq 15 15 : (={glob KEM_PQ, glob NG, glob G, glob H, glob L}
+                     /\ Mid7.pq_keys{2} = RD.pq_keys{1}
+                     /\ Mid7.seed_T{2} = RD.seed_T{1}
+                     /\ Mid7.kem_ct{2} = RD.kem_ct{1}
+                     /\ ={ek_PQ, ek_T, ct_T, ss_T}).
+        + wp; call (_: true).
+          wp; call (_: true).
+          wp; call (_: true).
+          wp; call (_: true).
+          wp; call (_: true).
+          wp; rnd.
+          wp; call (_: true).
+          wp; call (_: true).
+          wp; call (_: true).
+          wp; call (_: true).
+          wp; rnd.
+          wp; call (_: true).
+          skip => /#.
+        exists* (glob NG){1}, (ct_T{1}); elim* => g1 a1.
+        call{1} (NG_encode_det g1 a1).
+        exists* (glob NG){2}, (ct_T{2}); elim* => g2 a2.
+        call{2} (NG_encode_det g2 a2).
+        skip => /#.
+      wp; call (_: true).
+      wp; call (_: true).
+      skip => />; smt(rp7_proj_concat).
+    (* Mid7's surplus pin VALUE goes one-sided; the tail no longer needs it. *)
+    seq 0 1 : (#pre); first by rnd{2}; skip => />; smt(dbs_kdf_nout_ll).
+    exists* rest{2}, (v{2}); elim* => pt0 v0.
+    seq 2 2 : (#pre /\ ={ss} /\ H_c.KDFPRFSec_Random.rF{1} = Mid7.rF{2}.[pt0 <- ss{2}]).
+    + rndsem*{1} 0; rndsem*{2} 0.
+      rnd (fun (p : (bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) * bs_kdf_nout) => (p.`1.[pt0 <- v0], p.`2))
+          (fun (p : (bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) * bs_kdf_nout) => (p.`1.[pt0 <- p.`2], p.`2)).
+      skip => /> &2 _.
+      split; [ | move=> _; split; [ | move=> _ ] ].
+      + move=> r hr; rewrite rp7_fupd2 -(rp7_pinR_supp pt0 v0 r hr) rp7_fupd_id; smt().
+      + move=> [f y] hr /=.
+        have hcol : f.[pt0 <- y].[pt0 <- v0] = f
+          by rewrite rp7_fupd2 -(rp7_pinR_supp pt0 v0 (f, y) hr) rp7_fupd_id.
+        rewrite -(rp7_fold_eq_pin pt0 v0).
+        rewrite (in_dmap1E_can _ _ (fun (p : (bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) * bs_kdf_nout) => (p.`1.[pt0 <- v0], p.`2))) /=.
+        + by rewrite !rp7_fupd2.
+        + move=> [g w] hy /= [hy1 hy2].
+          have e1 : g = g.[pt0 <- w].[pt0 <- v0]
+            by rewrite rp7_fupd2 -(rp7_pinR_supp pt0 v0 (g, w) hy) rp7_fupd_id.
+          by rewrite hcol; smt().
+        by rewrite hcol.
+      move=> l hl; case: (rp7_dL_supp pt0 l hl) => h1 h2.
+      split; [ by apply rp7_pinD_mem => //; rewrite h2; exact (rp7_dfn_at l.`1 pt0 h1) | move=> _ ].
+      split; [ by rewrite rp7_fupd2 h2 rp7_fupd_id; smt() | move=> _ ].
+      by rewrite rp7_fupd2 h2 rp7_fupd_id.
+    (* The pin point CONTAINS the challenge ct_T, so "p is off the challenge
+       ciphertext" implies "p is not the pin point", and the reprogramming is
+       invisible at p. *)
+    wp; skip => /> &2 hproj p hp.
+    have hne : pt0 <> p by apply/negP => h; move: hp; rewrite -h hproj.
+    by rewrite fupdate_neq.

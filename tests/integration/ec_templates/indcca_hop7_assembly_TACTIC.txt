@@ -1,0 +1,66 @@
+DERIVED TACTIC -- IND-CCA `hop_7_initialize`, assembled from its two legs by
+transitivity through `Mid7`; and the measurement that its MIRROR `hop_8` needs
+none of this. Derived on the real `CG_expanded_INDCCA_PQ` export. EXIT 0.
+
+`transitivity` generates FOUR goals, and goals 3 and 4 are literally the two leg
+statements -- so the cut is exactly right and `exact leg1_hop7` / `exact leg2_hop7`
+close them. Goal 1 is NOT `exists &m`: EasyCrypt asks for one witness PER abstract
+module glob (five here), so `exists &2` is "not a valid formula" and the fix is to
+supply the five globs by name.
+
+THE MIRROR IS NOT SYMMETRIC, and this is the measurement that matters:
+
+  `hop_7` is  RD ~ GameFreshSS   -- RD READS its random function at the challenge
+                                    KDF input; GameFreshSS draws the shared secret
+                                    FRESH. Full function equality is therefore
+                                    UNESTABLISHABLE (it would force an independent
+                                    draw to equal a function of another draw), and
+                                    that is why the coupling has to weaken to the
+                                    disequality-guarded agreement, and why the
+                                    reprogramming argument exists at all.
+
+  `hop_8` is  GameFreshSS ~ RE   -- and RE draws the shared secret FRESH TOO. The
+                                    two programs are IDENTICAL up to RE hiding its
+                                    function draw inside the challenger's
+                                    `initialize`. Full function equality HOLDS, the
+                                    stock ladder already proves it, and all four of
+                                    `hop_8`'s lemmas are closed in the pristine
+                                    export.
+
+So the emission must weaken ONE side of the mirror, not both. Weakening `hop_8`
+compiles -- its consumers were re-derived against the weaker premise and the whole
+export still exits 0 -- but it is pure loss: it discards a stronger, already-proved
+coupling and forces `hop_8`'s three consumers to be re-derived for nothing.
+`indcca_hop8_decaps_TACTIC.txt` is that discarded branch, kept as evidence.
+
+-- assembly ---------------------------------------------------------------
+    transitivity Mid7(KEM_PQ, NG, G, H, L).initialize
+      (={glob KEM_PQ} /\ ={glob NG} /\ ={glob G} /\ ={glob H} /\ ={glob L} ==> ={res} /\ ={glob KEM_PQ} /\ ={glob NG} /\ ={glob G} /\ ={glob H} /\ ={glob L} /\ Mid7.pq_keys{2} = RD.pq_keys{1} /\ Mid7.seed_T{2} = RD.seed_T{1} /\ Mid7.kem_ct{2} = RD.kem_ct{1} /\ Mid7.ctStar{2} = RD.ctStar{1} /\ Mid7.ctStar{2}.`1 = Mid7.kem_ct{2} /\ (forall (p : bs_2_ng_nelem_ng_nss_nlabel), slice_bs_ng_nelem_ng_nss_to_bs_ng_nelem (slice_bs_2_ng_nelem_ng_nss_to_bs_ng_nelem_ng_nss (slice_bs_2_ng_nelem_ng_nss_nlabel_to_bs_2_ng_nelem_ng_nss p 0 (2*ng_nelem + ng_nss)) 0 (ng_nelem + ng_nss)) ng_nss (ng_nss + ng_nelem) <> NG_c.ev_encode (Mid7.ctStar{2}.`2) => H_c.KDFPRFSec_Random.rF{1} p = Mid7.rF{2} p))
+      (={glob KEM_PQ} /\ ={glob NG} /\ ={glob G} /\ ={glob H} /\ ={glob L} ==> ={res} /\ ={glob KEM_PQ} /\ ={glob NG} /\ ={glob G} /\ ={glob H} /\ ={glob L} /\ GameFreshSS.pq_keys{2} = Mid7.pq_keys{1} /\ GameFreshSS.seed_T{2} = Mid7.seed_T{1} /\ GameFreshSS.kem_ct{2} = Mid7.kem_ct{1} /\ GameFreshSS.ctStar{2} = Mid7.ctStar{1} /\ GameFreshSS.rF{2} = Mid7.rF{1}).
+    + move=> &1 &2 h.
+      exists (glob G){1} (glob H){1} (glob KEM_PQ){1} (glob L){1} (glob NG){1}.
+      smt().
+    + move=> &1 &m &2; smt().
+    + exact leg1_hop7.
+    exact leg2_hop7.
+
+-- hop_8_initialize, for contrast (this is close to what is ALREADY emitted) --
+    (* RE and GameFreshSS are the SAME program -- RE only hides its random-function
+       draw inside the challenger's `initialize`.  So this side of the mirror needs
+       no twin: the ladder establishes FULL function equality, which implies the
+       hop's disequality-guarded agreement outright. *)
+    proc.
+    inline{2} *.
+    wp; rnd.
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; rnd.
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; rnd.
+    wp; call (_: true).
+    wp; rnd.
+    skip => /#.

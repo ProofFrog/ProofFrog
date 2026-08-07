@@ -149,3 +149,50 @@ argument, and the regroup lemma name (`types.probe_concat_regroup`).
 
 Note the emitted coupling writes `RD.pq_keys{2}.`2` where the tactic above writes
 `RD.pq_keys.`2{2}`; both are valid EC and mean the same thing.
+
+*** PARKED c262 -- THE TWO PREMISES INTERACT, AND THE DERIVED TACTIC WAS
+*** VALIDATED AGAINST A COUPLING THAT LACKED ONE OF THEM. ***
+
+The route IS built and it FIRES: `_synth_kdf_substitution_decaps` closes
+`hop_5_decaps` AND `hop_10_decaps` on `CG_expanded_INDCCA_PQ`, taking it from 3
+admits to 1 (only `hop_7_initialize` left). It is NOT landed, because the
+challenge branch's closer no longer discharges its goal, and the export EasyCrypt
+then REJECTS -- worse than the admit it replaces. Stashed as
+`stash@{0}` ("c262: _synth_kdf_substitution_decaps route"), also kept as
+`.ec-tmp/c262_route.patch`.
+
+THE FINDING, and it is the useful part. Premise (2) -- the
+`pq_keys.`2 = <Chal>.dk` conjunct that the NON-CHALLENGE branch needs -- is what
+breaks the CHALLENGE branch. That branch must now RE-ESTABLISH it in its post,
+and the derived tactic's ending cannot. This is not an artifact of emission: the
+HAND-VALIDATED tactic in this file, spliced verbatim against the current
+coupling, fails at exactly the same step. The tactic above was validated when the
+coupling carried premise (1) only.
+
+FAST REPRODUCER, ~55s per iteration instead of ~90s for the full export:
+`.ec-tmp/s262.ec` (a `build_hop_probe` cut of the real export carrying the
+emitted tactic; `.ec-tmp/u262.ec` is the same cut carrying the hand tactic).
+
+SIX ATTEMPTS, all measured, none of which works:
+  1. `skip => /> *. exact <regroup>.`      -- "the given proof-term proves: ...
+     it does not apply to the goal": the residue is no longer just the
+     regrouping equality.
+  2. `skip => /> *. smt(<regroup>).`       -- "cannot prove goal (strict)".
+  3. `skip => /> *. rewrite <regroup>. smt().` -- the REWRITE SUCCEEDS and only
+     the `smt` fails, so the bracketing is handled and the residue is the
+     coupling conjuncts.
+  4. Blaming the sibling conjunct `RD.ctStar{2}.`1 = <Chal>.ctStar{1}` that
+     `_both_delegate_stored_key_coupling` also emits: REFUTED -- deleting it from
+     the lemma statement changes nothing.
+  5. Blaming the emission: REFUTED -- the hand tactic fails identically.
+  6. `skip => />.` without the clearing `*` -- "nothing to rewrite": the `*` is
+     doing simplification the regroup lemma's match depends on, so it cannot
+     simply be dropped.
+
+WHERE TO GO NEXT. Stop trying to fix the CLOSER and change the branch's shape:
+carry the coupling conjuncts through the challenge branch EXPLICITLY, the way
+`_synth_correctness_decaps_casesplit` does, with a `seq ... : (#pre /\ <kdf
+equality>)` that names the two KDF results and is discharged by
+`rewrite <regroup>` on its own, leaving the branch to end on a plain
+`wp; skip => /#` that has the conjuncts in `#pre`. That turns one closer that
+must do two unrelated jobs into two steps that each do one.

@@ -1,0 +1,84 @@
+VALIDATED TACTIC -- IND-CCA KDF-PRF substitution `decaps` hop (c261).
+Derived on `CG_expanded_INDCCA_PQ` `hop_5_decaps` (`RB ~ RD`). The probe compiles
+EXIT 0 with ZERO admits under RELEASE EasyCrypt, and a NEGATIVE CONTROL (flipping
+the second `rcondf{1}` to `rcondt{1}`) is rejected. NOT YET EMITTED -- this file
+is the target a synthesizer must reproduce.
+
+IT ASSUMES TWO PREMISES THE COUPLING DOES NOT YET CARRY:
+
+    H_c.KDFPRFSec_Real.k{2} = KEM_PQ_c.ev_encodesharedsecret (RB.ss_PQ{1})
+    RD.pq_keys.`2{2}        = KEM_PQ_c.KEM_INDCCA_Random.dk{1}
+
+added to BOTH the pre and the post. Both are ESTABLISHED by `hop_5_initialize`,
+which is already GREEN on `CG`/`UG_expanded_INDCCA_PQ`, so the ordering rule is
+satisfiable exactly as it was for the packed-key front: land the conjuncts, verify
+the green init hop still establishes them, and only then wire this consumer.
+
+TRAP, and it cost one compile: the CHALLENGER's field is NOT a field of the
+reduction in the RENDERED module. The flat state calls it `challenger_k` (its
+`@`-mangled form), but `RD` is a functor applied to `H_c.KDFPRFSec_Real(H)`,
+whose own `k` is what the coupling must name -- `RD.challenger_k` is "unknown
+variable or constant". Same on the other side for `KEM_INDCCA_Random.dk`.
+
+WHAT IT DOES, and why each piece is needed:
+ - The shared prefix (`randomscalar`, the two projections, `exp`,
+   `elementtosharedsecret`) is a plain `seq 5 5` peel. The two `randomscalar`
+   arguments are DIFFERENT fields (`RB.seed_T` / `RD.seed_T`) related only by the
+   coupling, which is why `call (_: true)` + `/#` is used and not `sim`.
+ - `if; 1: smt()` on the challenge-ciphertext guard: `ct_PQ = kem_ct` on both
+   sides, over fields the coupling equates.
+ - CHALLENGE branch. The left carries ONE extra call: it ENCODES the challenger's
+   shared secret where the right substitutes the KDF-PRF challenger's key
+   directly. Dropping that call through `KEM_PQ_encodesharedsecret_det` names its
+   result `ev_encodesharedsecret (RB.ss_PQ{1})`, which the first premise makes
+   equal to `k{2}`. What is left is the SAME KDF input under two bracketings --
+   left-nested vs key-prepended -- closed by the N-piece regrouping law the
+   exporter already emits for `hop_5_initialize`
+   (`types.request_concat_regroup`); `skip => /> *. exact <regroup>.` is the same
+   ending `_synth_kdf_key_substitution` uses.
+ - NON-CHALLENGE branch. The left carries the inlined `KEM_INDCCA_Random.decaps`
+   and its two DEAD guards; the right decapsulates directly. The challenger's
+   refusal `ct0 = KEM_INDCCA_Random.ctStar` is false here -- the coupling already
+   carries `RB.kem_ct = KEM_INDCCA_Random.ctStar` and the branch guard gives
+   `ct_PQ <> kem_ct` -- and `if (false)` is false outright, so both go by
+   `rcondf{1}`. `oget (Some x)` then collapses under `/#`, and the second premise
+   lines up the two `KEM_PQ.decaps` key arguments.
+
+NAMES: this runs on the RAW wrappers, so `_r00`/`_r10`/`ct0` are EC's
+inline-renamed forms of the inlined challenger's `_r0`/`_r1`/`ct`
+(`EcMemory.bindall_fresh` appends the smallest fresh index). For EMISSION prefer
+the flat-twin interposition `_synth_correctness_decaps_casesplit` uses, which
+removes that dependence entirely.
+
+proc.
+inline *.
+if; 1: smt().
+auto.
+seq 5 5 : (#pre /\ dk_T{1} = dk_T{2} /\ ct_PQ{1} = ct_PQ{2} /\ ct_T{1} = ct_T{2} /\ dec_ss_T{1} = dec_ss_T{2}).
++ wp; call (_: true); wp; call (_: true); wp; call (_: true); skip => /#.
+if; 1: smt().
++ seq 1 0 : (#pre /\ _r8{1} = KEM_PQ_c.ev_encodesharedsecret (RB.ss_PQ{1})).
+  + exists* (glob KEM_PQ){1}, (RB.ss_PQ{1}); elim* => _g0 _a0.
+    call{1} (KEM_PQ_encodesharedsecret_det _g0 _a0); skip => /#.
+  wp; call (_: true).
+  wp; call (_: true).
+  wp; call (_: true).
+  wp; call (_: true).
+  wp; call (_: true).
+  wp; call (_: true).
+  skip => /> *.
+  exact concat_regroup5_bs_kem_pq_nss_bs_2_ng_nelem_ng_nss_nlabel_to_bs_kem_pq_nss_2_ng_nelem_ng_nss_nlabel.
+sp 1 0.
+rcondf{1} 1; first by auto => /#.
+seq 2 1 : (#pre /\ _r00{1} = Some (dec_ss_PQ{2})).
++ wp; call (_: true); skip => /#.
+sp 1 0.
+rcondf{1} 1; first by auto.
+wp; call (_: true).
+wp; call (_: true).
+wp; call (_: true).
+wp; call (_: true).
+wp; call (_: true).
+wp; call (_: true).
+wp; call (_: true).
+wp; skip => /#.

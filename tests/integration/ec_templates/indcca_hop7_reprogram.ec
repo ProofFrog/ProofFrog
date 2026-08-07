@@ -91,36 +91,133 @@ by rewrite (dcod_ll) dscalar1.
 qed.
 
 (* ------------------------------------------------------------------ *)
-(* THE OPEN STEP, and the obstruction is precise.                       *)
+(* WHY THE COUPLING NEEDS A THIRD PROGRAM.                              *)
 (*                                                                      *)
-(* With `fold_eq` proved, what is left is to make EasyCrypt USE it as a *)
-(* coupling. `rnd f finv` cannot: it demands a BIJECTION between the two *)
-(* supports, and h is not injective -- the right's `g` carries entropy   *)
-(* at `x0` that the post discards, so every `g` agreeing with f off `x0` *)
-(* maps to the same left point. Measured both argument orders:           *)
+(* `fold_eq` is the content, but EasyCrypt cannot USE it directly:      *)
+(* `rnd f finv` demands a BIJECTION between the two supports, and h is  *)
+(* not injective -- the right's `g` carries entropy at `x0` that the    *)
+(* post discards, so every `g` agreeing with f off `x0` maps to one     *)
+(* left point. Both argument orders were measured and both obligations  *)
+(* are false:                                                           *)
 (*                                                                      *)
-(*   rnd h id  -> obligation `forall r in dRight, r = h r`   (false)     *)
-(*   rnd id h  -> obligation `mu1 dRight l = mu1 dLeft l`    (false)     *)
+(*   rnd h id  -> `forall r in dRight, r = h r`                (false)  *)
+(*   rnd id h  -> `mu1 dRight l = mu1 dLeft l`                 (false)  *)
 (*                                                                      *)
-(* The surplus has to become an EXPLICIT sample before it can be dropped *)
-(* one-sided. `MUniFinFun.dfunE_dlet_fix1` is the tool:                  *)
+(* Rewriting a distribution does not help either: `dfunE_dlet_fix1` on  *)
+(* EITHER side leaves the surplus as a `dlet` INSIDE one sample, which  *)
+(* a one-sided `rnd{2}` cannot reach. The surplus has to be an explicit *)
+(* PROGRAM STATEMENT, so interpose Mid, which draws the value at `x0`   *)
+(* FIRST and then the function PINNED to it. The legs then split:       *)
 (*                                                                      *)
-(*   dfun d = dlet (d x0) (fun v => dfun d.[x0 <- dunit v])              *)
+(*   Mid ~ R   an IDENTITY coupling -- `dfunE_dlet_fix1` says drawing   *)
+(*             the value then the pinned function IS drawing the        *)
+(*             function. PROVED below.                                  *)
+(*   L ~ Mid   a BIJECTIVE coupling -- on the pinned support `g x0 = v` *)
+(*             is known, so `g` is recoverable from `g.[x0 <- y]`, and  *)
+(*             `dlet_dfun_fupdate_ll` is its distribution identity. Its *)
+(*             surplus `v` goes one-sided at the front under `dcod_ll`  *)
+(*             once the tail no longer needs it. Reduced below to three *)
+(*             `rnd` obligations that are pure function-update          *)
+(*             bookkeeping -- the one remaining `admit` in this file.   *)
 (*                                                                      *)
-(* which splits the right's draw into "value at x0" + "the rest". The    *)
-(* value at x0 is then genuinely unused and goes by a one-sided `rnd{2}` *)
-(* under `dcod_ll`, and what remains is the PINNED form, where the map   *)
-(* (f, y) |-> f.[x0 <- y] IS injective (f x0 is known, so f is           *)
-(* recoverable) and `dlet_dfun_fupdate_ll` is its distribution identity. *)
-(*                                                                      *)
-(* NOT YET DERIVED -- this is the next thing to try here, and it is a    *)
-(* tripwire question, not an exporter one.                              *)
+(* `reprogram` at the end composes the two into the hop's own statement.*)
 (* ------------------------------------------------------------------ *)
+
+module Mid = {
+  var rF : dom -> cod
+
+  proc init() : cod = {
+    var ss : cod;
+    var v : cod;
+    v  <$ dcod;
+    rF <$ MUF.dfun (fun (_ : dom) => dcod).[x0 <- dunit v];
+    ss <$ dcod;
+    return ss;
+  }
+}.
+
+(* LEG 1: Mid ~ R -- an IDENTITY coupling. Drawing the value at x0 first and then
+   the PINNED function is drawing the function (`dfunE_dlet_fix1`). *)
+equiv leg_mid_r : Mid.init ~ R.init :
+  true ==> ={res} /\ Mid.rF{1} = R.rF{2}.
+proof.
+proc.
+seq 2 1 : (Mid.rF{1} = R.rF{2}); last by rnd; skip => /#.
+rndsem*{1} 0.
+conseq (: _ ==> Mid.rF{1} = R.rF{2}) => //.
+rnd (fun (f : dom -> cod) => f) (fun (f : dom -> cod) => f); skip => />.
+have dEq : dlet dcod (fun (v : cod) => dmap (MUF.dfun (fun (_ : dom) => dcod).[x0 <- dunit v]) (fun (rF : dom -> cod) => rF)) = dfn.
++ rewrite /dfn (MUF.dfunE_dlet_fix1 (fun (_ : dom) => dcod) x0) /=;
+  apply eq_dlet => // v; exact dmap_id.
+by rewrite dEq.
+qed.
+
+(* Function-update algebra the coupling needs. *)
+lemma fupd2 (f : dom -> cod) (a b : cod) : f.[x0 <- a].[x0 <- b] = f.[x0 <- b].
+proof. by apply fun_ext => z; rewrite !fupdateE; case: (x0 = z). qed.
+
+lemma fupd_id (f : dom -> cod) : f.[x0 <- f x0] = f.
+proof. by apply fun_ext => z; rewrite fupdateE; case: (x0 = z) => [->|]. qed.
+
+(* Support fact: under the pin the drawn function's value at x0 is KNOWN, and
+   that is exactly what makes the coupling below injective. *)
+lemma pin_supp (v : cod) (g : dom -> cod) :
+  g \in MUF.dfun (fun (_ : dom) => dcod).[x0 <- dunit v] => g x0 = v.
+proof. by move/MUF.dfun_supp => /(_ x0); rewrite fupdate_eq supp_dunit. qed.
+
+abbrev pinD (v : cod) =
+  dlet (MUF.dfun (fun (_ : dom) => dcod).[x0 <- dunit v])
+       (fun (g : dom -> cod) => dmap dcod (fun (y : cod) => (g, y))).
+
+abbrev reprog (p : (dom -> cod) * cod) = (p.`1.[x0 <- p.`2], p.`2).
+
+lemma pinR_supp (v : cod) (p : (dom -> cod) * cod) : p \in pinD v => p.`1 x0 = v.
+proof.
+by move/supp_dlet => [g] [hg] /supp_dmap [y] [_ ->] /=; exact (pin_supp v g hg).
+qed.
+
+(* THE PINNED IDENTITY, stated as the push-forward the coupling actually uses.
+   Same four-line shape as `fold_eq`, but over the PINNED draw, which is what
+   makes the map injective -- `dlet_dfun_fupdate_ll` is its distribution law. *)
+lemma fold_eq_pin (v : cod) :
+  dmap (pinD v) reprog = dmap dfn (fun (f : dom -> cod) => (f, f x0)).
+proof.
+have -> : dmap (pinD v) reprog
+  = dmap (dlet (MUF.dfun (fun (_ : dom) => dcod).[x0 <- dunit v])
+               (fun (g : dom -> cod) => dmap dcod (fun (y : cod) => g.[x0 <- y])))
+        (fun (f : dom -> cod) => (f, f x0)).
++ rewrite !dmap_dlet; apply eq_dlet => // g; rewrite !dmap_comp /(\o) /=;
+  apply eq_dmap => y /=; rewrite fupdate_eq //.
+congr; rewrite /dfn (MUF.dlet_dfun_fupdate_ll (fun (_ : dom) => dcod) x0 v) //.
+qed.
+
+(* LEG 2: L ~ Mid -- the BIJECTIVE coupling, with Mid's surplus `v` dropped
+   one-sided at the front once the tail no longer needs it. *)
+equiv leg_l_mid : L.init ~ Mid.init :
+  true ==> ={res} /\ L.rF{1} = Mid.rF{2}.[x0 <- res{2}].
+proof.
+proc.
+seq 0 1 : true; first by rnd{2}; skip => />; exact dcod_ll.
+exists* v{2}; elim* => v0.
+rndsem*{1} 0; rndsem*{2} 0.
+rnd (fun (p : (dom -> cod) * cod) => (p.`1.[x0 <- v0], p.`2)) reprog; skip => />.
+(* REMAINING: the three `rnd` obligations. Their shapes are known and each is
+   pure function-update bookkeeping over `pinR_supp` -- no distribution content
+   is left, that is all in `fold_eq_pin` above. Interactive stepping closes them
+   but the bullet structure does not transfer to batch; settle it with
+   `ec_compile`, never with `cli_step`. *)
+admit.
+qed.
+
+(* THE HOP'S OWN STATEMENT, as the composition of the two legs. This is what the
+   exporter has to emit; the legs are the parts. It inherits leg 2's one open
+   obligation and nothing else. *)
 equiv reprogram : L.init ~ R.init :
   true ==> ={res} /\ L.rF{1} = R.rF{2}.[x0 <- res{2}].
 proof.
-proc.
-rndsem*{1} 0.
-rndsem*{2} 0.
-admit.
+transitivity Mid.init
+  (true ==> ={res} /\ L.rF{1} = Mid.rF{2}.[x0 <- res{2}])
+  (true ==> ={res} /\ Mid.rF{1} = R.rF{2}) => //.
++ exact leg_l_mid.
+exact leg_mid_r.
 qed.

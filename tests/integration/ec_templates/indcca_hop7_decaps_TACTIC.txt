@@ -1,0 +1,73 @@
+DERIVED TACTIC -- IND-CCA `hop_7_decaps` under the WEAKENED (projection) coupling.
+Derived on `CG_expanded_INDCCA_PQ` against a `build_hop_probe` cut of the real
+export with the weakened conjunct written in at all four sites and
+`hop_7_initialize` admitted. Compiles EXIT 0 with ZERO admits; two negative
+controls rejected (neutering `NG_encode_inj`; dropping one slice rewrite).
+NOT YET EMITTED -- this file is the target a synthesizer must reproduce.
+
+THE COUPLING IT CONSUMES, and it is TWO conjuncts, not one:
+
+    GameFreshSS.ctStar{2}.`1 = GameFreshSS.kem_ct{2}
+    forall p, <proj p> <> NG_c.ev_encode (GameFreshSS.ctStar{2}.`2)
+              => H_c.KDFPRFSec_Random.rF{1} p = GameFreshSS.rF{2} p
+
+where `<proj p>` is the slice chain reading the `Encode(ct_T)` slot back out.
+The tuple invariant is the one a `_stored_tuple_invariants`-style builder emits
+(the game's own `Initialize` sets `ctStar = (kem_ct, ct_T)`), and WITHOUT it the
+guard argument does not go through: the branch gives `ct_PQ = kem_ct`, and only
+`ctStar.`1 = kem_ct` turns that plus `ct <> ctStar` into `ct.`2 <> ctStar.`2`.
+
+FOUR THINGS THE DERIVATION MEASURED, each of which cost a compile:
+
+ 1. `sim` fails in BOTH branches once the coupling carries a `forall` -- "cannot
+    infer the set of equalities". The else branch, which does not touch the
+    random function at all, still has to be peeled explicitly (eight calls).
+ 2. Only ONE call needs functionalizing (`NG.encode(ct_T)`, one drop per side).
+    The earlier plan said eight, because its post named the whole KDF input; the
+    projection form leaves `rest` opaque.
+ 3. `wp; skip => />` CLEARS the branch facts. `ct_T = ct.`2` and the branch guard
+    have to be carried in the `seq` invariants or the closing argument has
+    nothing to work with -- hence the two extra conjuncts in the `seq 5 5`.
+ 4. The disequality is best carried as its own conjunct in the `seq 1 1`
+    (`ct_T{2} <> GameFreshSS.ctStar{2}.`2`), proved there by `smt` from the guard
+    facts, rather than re-derived after `/>`.
+
+    (* resolution: synth-param *)
+    proc.
+    inline *.
+    if; 1: smt().
+    auto.
+    seq 5 5 : (#pre /\ ={ct_PQ, ct_T, dec_ss_T, dk_T}
+               /\ ct_PQ{1} = ct{1}.`1 /\ ct_T{1} = ct{1}.`2).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; skip => /#.
+    if; 1: smt().
+    seq 1 1 : (#pre /\ ={_r8} /\ _r8{1} = NG_c.ev_encode ct_T{1}
+               /\ ct_T{2} <> GameFreshSS.ctStar{2}.`2).
+    + exists* (glob NG){1}, ct_T{1}; elim* => g1 a1.
+      call{1} (NG_encode_det g1 a1).
+      exists* (glob NG){2}, ct_T{2}; elim* => g2 a2.
+      call{2} (NG_encode_det g2 a2).
+      skip => /#.
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; skip => />.
+    move=> &1 &2 hagree hne hct1 hne2 r1 r2.
+    apply hagree.
+    rewrite slice_concat_left_bs_2_ng_nelem_ng_nss_bs_nlabel_bs_2_ng_nelem_ng_nss_nlabel.
+    rewrite slice_concat_left_bs_ng_nelem_ng_nss_bs_ng_nelem_bs_2_ng_nelem_ng_nss.
+    rewrite slice_concat_right_bs_ng_nss_bs_ng_nelem_bs_ng_nelem_ng_nss.
+    by apply/negP => h; move: hne2; rewrite (NG_encode_inj _ _ h).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; skip => /#.

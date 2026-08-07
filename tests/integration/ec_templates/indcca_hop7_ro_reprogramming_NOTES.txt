@@ -343,3 +343,37 @@ FULL SPECIFICATION OF THE BUILD, all three parts now validated in the small:
   (d) SIMULTANEOUSLY re-state `hop_7_decaps` / `hop_15_decaps` to consume the new
       conjunct. They are closed today against `rF{2} = rF{1}`, which the repaired
       hop will not produce, so the ordering rule forbids landing (a)-(c) alone.
+
+*** UPDATE c276: THE CONSUMER COST IS NOW MEASURED, NOT PREDICTED. ***
+
+The weakened coupling was written into a copy of the real export at all FOUR sites
+it occurs (`hop_7_initialize`'s post, `hop_7_decaps`'s pre AND post -- that lemma
+carries it twice -- and `hop_7_pr`'s invariant), `hop_7_initialize` admitted, and
+`hop_7_decaps` compiled with its CURRENT tactic against a `build_hop_probe` cut.
+
+RESULT: it fails, at the first `wp; sim.`, with "cannot infer the set of
+equalities". So the consumer really does have to be re-derived -- this is no longer
+an inference from the ordering rule, it is a compile.
+
+(And the first attempt at this probe was the `build_hop_probe` trap: with no tactic
+file the target lemma's body becomes `admit.`, so its EXIT 0 said only that the CUT
+was sound. Always pass the tactic file.)
+
+WHAT THE CONSUMER NEEDS. In the challenge-PQ branch (`ct <> ctStar /\ ct_PQ =
+kem_ct`) both sides compute the same `rest` from five deterministic calls
+(`NG.encode`, `NG.generator`, `NG.exp`, `NG.encode`, `L.get`) and then apply their
+OWN random function to it. `sim` used to close this from the whole-function
+equality; under the weakened conjunct it must instead instantiate
+
+    forall ct0, ct0 <> ctStar => rF{1} (kdfin ct0) = rF{2} (kdfin ct0)
+
+at the proc's own `ct`. That requires `rest{i}` to be in the conjunct's `ev_` form,
+i.e. the five calls FUNCTIONALIZED on both sides through their `_det` axioms --
+ten one-sided drops, each needing its own `seq` because `exists*` freezes at the
+current judgment's initial memory. Mechanical, and the same machinery
+`_synth_delegate_correctness_init` already uses for its forward `seq` walk.
+
+SO THE LANDING IS ONE ROUTE WITH A SHARED FUNCTIONALIZER, not two. Both the
+establishing hop (to name the challenge KDF input as a witness) and the consumer
+(to match the conjunct) need exactly the same five-call functionalization; writing
+it once and using it on both sides is the shape to build.

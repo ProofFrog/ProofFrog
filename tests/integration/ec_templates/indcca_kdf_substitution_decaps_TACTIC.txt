@@ -111,13 +111,41 @@ Both premises are now carried by the hop's coupling AND proved by the (green)
         `_stored_pair_vs_chal_field_coupling` declines because it requires the
         STORING side not to delegate, and here BOTH sides do.
 
-WHAT REMAINS is emission of the consumer, and the one thing to know before
-starting it: THE NON-CHALLENGE BRANCH'S `sp`/`rcondf` INDICES CANNOT COME OFF THE
-FLAT STATES. The flat body renders the inlined challenger as
-`_r15 <- false; if (ct_PQ = challenger_ctStar) {..}`, while the RENDERED module
-has `dec_ss_PQ_opt <@ Challenger.decaps(ct_PQ); if (false) {..}` -- a different
-statement count and a different guard. That is the flat-state fidelity gap, so
-this route belongs on the `oracle_tac_override` path (computed in exporter.py off
-the rendered modules), not on the flat-state path the correctness `decaps` route
-uses. Note also that the emitted coupling writes `RD.pq_keys{2}.`2` where the
-tactic above writes `RD.pq_keys.`2{2}`; both are valid EC and mean the same thing.
+WHAT REMAINS is emission of the consumer, and c262 removed the obstacle that
+looked like the hard part. The non-challenge branch above is written with
+`sp 1 0` / `rcondf{1} 1` / `seq 2 1` -- numeric indices into the INLINED
+CHALLENGER's body, which the flat state does NOT faithfully model (it renders
+`_r15 <- false; if (ct_PQ = challenger_ctStar) {..}` where the rendered module has
+`dec_ss_PQ_opt <@ Challenger.decaps(ct_PQ); if (false) {..}`: different statement
+count, different guards, and three `if`s against two). That would have forced the
+route onto the `oracle_tac_override` path.
+
+IT DOES NOT. This NAME-FREE AND COUNT-FREE replacement for the whole
+non-challenge branch compiles EXIT 0, and deleting its first line is REJECTED
+("invalid last instruction"), so it is load-bearing rather than a no-op:
+
+    do ? (rcondf{1} ^if; first by auto => /#).
+    wp; call (_: true).      (* x8 -- one per call, both sides aligned *)
+    ...
+    wp; skip => /#.
+
+Three facts make it work, and each was measured:
+ * `rcondf{i} ^if` works with an ABSTRACT CALL still in the prefix. The second
+   dead guard is the literal `false`, so the hoare-side obligation is trivial and
+   `auto` never has to step over the call. That is what removes the need to peel
+   the challenger's `decaps` first, which is what forced the numeric `seq 2 1`.
+ * with both guards gone the two branches hold the SAME EIGHT CALLS IN THE SAME
+   ORDER, so a plain backward ladder covers them all -- including the two
+   `decaps` -- and no intermediate result ever has to be NAMED. That is what
+   removes `_r00`/`_r10`/`ct0`, the EC-inline-renamed names.
+ * `do ?` makes the number of dead guards structural instead of counted, so the
+   flat state's disagreement about how many `if`s there are stops mattering.
+
+So the route can be driven off the FLAT STATES, like
+`_synth_correctness_decaps_casesplit`, and needs no `oracle_tac_override`. The
+remaining hop-specific data are all flat-state readable: the shared-prefix length,
+the one-sided `encodesharedsecret` and its `_det` axiom, the field holding its
+argument, and the regroup lemma name (`types.probe_concat_regroup`).
+
+Note the emitted coupling writes `RD.pq_keys{2}.`2` where the tactic above writes
+`RD.pq_keys.`2{2}`; both are valid EC and mean the same thing.

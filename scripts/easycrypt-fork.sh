@@ -11,10 +11,30 @@
 #
 # Build the image first:
 #   (cd scripts/easycrypt-mcp && docker build --platform linux/amd64 -t easycrypt-fork:local .)
+#
+# ORPHAN CONTAINERS -- why the deadline lives INSIDE the container.
+# Every caller of this script kills only the CLIENT: the MCP server's compile
+# tools use `subprocess.run(..., timeout=)` and its REPL tools use
+# `pexpect.spawn(..., timeout=)` / `.kill(9)`, and both send SIGKILL. Killing
+# `docker run` does not stop the container, and `--rm` only reaps a container
+# that EXITS -- so a still-searching EasyCrypt keeps a core at 100% forever. That
+# is exactly how four containers accumulated for 12-46 hours, stealing four cores
+# from an unattended run. A host-side trap (which is what scripts/easycrypt.sh
+# uses) cannot help here, because a trap cannot fire on SIGKILL. So the budget is
+# enforced by `timeout` INSIDE the container, which survives losing its client.
+# Exit 124 on expiry, the same convention scripts/easycrypt.sh uses, so a timeout
+# is never misread as a proof failure. EC_FORK_TIMEOUT=0 disables it.
+#
+# The container is also NAMED and LABELLED, so any stray is identifiable and
+# `docker ps --filter label=ec-fork` sweeps them.
 
 set -euo pipefail
 
 EC_IMAGE="${EC_IMAGE:-easycrypt-fork:local}"
+# Generous by default: this is a backstop against a WEDGED container, not a
+# per-call budget. Callers that know their own deadline should pass a tighter one
+# (the MCP server's compile tools default to 120s).
+EC_FORK_TIMEOUT="${EC_FORK_TIMEOUT:-1800}"
 
 if [ $# -eq 0 ]; then
     echo "Usage: $0 <subcommand> [args...]" >&2
@@ -46,7 +66,11 @@ for arg in "$@"; do
     fi
 done
 
-DOCKER_OPTS=(--rm --platform linux/amd64)
+# Unique, and identifiable in `docker ps` if one ever does escape.
+CONTAINER="ecfork-$$-$(date +%s)-$SUBCMD"
+CONTAINER="$(printf '%s' "$CONTAINER" | tr -c 'A-Za-z0-9_.-' '_')"
+
+DOCKER_OPTS=(--rm --name "$CONTAINER" --label ec-fork=1 --platform linux/amd64)
 
 # cli mode needs stdin to stay open for the REPL (pexpect drives it).
 if [ "$SUBCMD" = "cli" ]; then
@@ -58,4 +82,8 @@ if [ -n "$MOUNT_DIR" ]; then
 fi
 
 exec docker run "${DOCKER_OPTS[@]}" "$EC_IMAGE" \
-    bash -c 'eval $(opam env) && exec easycrypt "$@"' -- "$SUBCMD" ${NEW_ARGS[@]+"${NEW_ARGS[@]}"}
+    bash -c 'eval $(opam env) || exit 1
+             t="$1"; shift
+             if [ "$t" = 0 ]; then exec easycrypt "$@"; fi
+             exec timeout -k 5 "$t" easycrypt "$@"' \
+    -- "$EC_FORK_TIMEOUT" "$SUBCMD" ${NEW_ARGS[@]+"${NEW_ARGS[@]}"}

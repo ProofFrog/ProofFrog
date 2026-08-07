@@ -321,3 +321,84 @@ proof.
 move=> hagree hc; apply hagree; rewrite proj_mk.
 by apply/negP => h; move: hc; rewrite (enc_inj c ctStar h).
 qed.
+
+(* ------------------------------------------------------------------ *)
+(* THE PIN POINT AS A PROGRAM VALUE.                                    *)
+(*                                                                      *)
+(* Above, `x0` is a constant op. In the real hop it is the challenge    *)
+(* KDF input, COMPUTED by the left's prefix -- which is why `Mid` has to *)
+(* compute it too, and why `GameFreshSS`, which never computes it, needs *)
+(* the added calls dropped one-sided. This section checks the only part  *)
+(* of that which the constant model does not exercise: that the argument *)
+(* survives when the pin is a program variable whose projection is `enc` *)
+(* of a STORED field.                                                    *)
+(* ------------------------------------------------------------------ *)
+op dctxt : ctxt distr.
+axiom dctxt_ll : is_lossless dctxt.
+
+module L2 = {
+  var rF  : dom -> cod
+  var ctT : ctxt
+
+  proc init() : cod = {
+    var ss : cod; var pt : dom;
+    ctT <$ dctxt;
+    pt  <- mk ssT (enc ctT);
+    rF  <$ dfn;
+    ss  <- rF pt;
+    return ss;
+  }
+}.
+
+module Mid2 = {
+  var rF  : dom -> cod
+  var ctT : ctxt
+
+  proc init() : cod = {
+    var ss : cod; var pt : dom; var v : cod;
+    ctT <$ dctxt;
+    pt  <- mk ssT (enc ctT);
+    v   <$ dcod;
+    rF  <$ MUF.dfun (fun (_ : dom) => dcod).[pt <- dunit v];
+    ss  <$ dcod;
+    return ss;
+  }
+}.
+
+module R2 = {
+  var rF  : dom -> cod
+  var ctT : ctxt
+
+  proc init() : cod = {
+    var ss : cod;
+    ctT <$ dctxt;
+    rF  <$ dfn;
+    ss  <$ dcod;
+    return ss;
+  }
+}.
+
+(* Mid2 ~ R2: the identity coupling, with Mid2's extra `pt` computation and its
+   pin-value draw dropped one-sided. Sound for ANY pin point -- which is exactly
+   why the added computation cannot disturb this leg. *)
+equiv leg2_mid_r : Mid2.init ~ R2.init :
+  true ==> ={res} /\ Mid2.rF{1} = R2.rF{2} /\ Mid2.ctT{1} = R2.ctT{2}.
+proof.
+proc.
+(* The pin-value draw must stay WITH the function draw: `rndsem*` folds them
+   into `dlet dcod (fun v => dfun d.[pt <- dunit v])`, which IS `dfun d`. Split
+   `v` off first and the fold sees a function pinned at ONE value, which is a
+   different distribution -- measured, and it is the whole trap of this leg. *)
+seq 2 1 : (Mid2.ctT{1} = R2.ctT{2} /\ pt{1} = mk ssT (enc Mid2.ctT{1})).
++ wp; rnd; skip => />.
+seq 2 1 : (#pre /\ Mid2.rF{1} = R2.rF{2}); last by rnd; skip => /#.
+exists* pt{1}; elim* => pt0.
+rndsem*{1} 0.
+conseq (: _ ==> Mid2.rF{1} = R2.rF{2}) => //.
+rnd (fun (f : dom -> cod) => f) (fun (f : dom -> cod) => f); skip => />.
+move=> &2.
+have dEq : dlet dcod (fun (v : cod) => dmap (MUF.dfun (fun (_ : dom) => dcod).[mk ssT (enc R2.ctT{2}) <- dunit v]) (fun (rF : dom -> cod) => rF)) = dfn.
++ rewrite /dfn (MUF.dfunE_dlet_fix1 (fun (_ : dom) => dcod) (mk ssT (enc R2.ctT{2}))) /=;
+  apply eq_dlet => // v; exact dmap_id.
+by rewrite dEq.
+qed.

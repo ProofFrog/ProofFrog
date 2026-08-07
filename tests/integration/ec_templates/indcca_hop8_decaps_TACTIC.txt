@@ -1,0 +1,62 @@
+DERIVED TACTIC -- IND-CCA `hop_8_decaps`, the MIRROR of `hop_7_decaps`, under the
+weakened (projection) coupling. Derived on `CG_expanded_INDCCA_PQ` against a
+`build_hop_probe` cut with BOTH orientations of the conjunct weakened and both
+`initialize` hops admitted. Compiles EXIT 0 with ZERO admits. NOT YET EMITTED.
+
+THE POINT OF THIS FILE: the mirror's tactic is CHARACTER-FOR-CHARACTER the same as
+`hop_7_decaps`'s except for ONE conjunct --
+
+    hop_7 (GameFreshSS on the RIGHT):  ct_T{2} <> GameFreshSS.ctStar{2}.`2
+    hop_8 (GameFreshSS on the LEFT):   ct_T{1} <> GameFreshSS.ctStar{1}.`2
+
+so the route is ORIENTATION-PARAMETRIC IN EXACTLY ONE PLACE, and a synthesizer
+that reads which side holds the game gets both hops from one body. Everything
+else -- the `seq 5 5` carrying `ct_PQ = ct.`1` / `ct_T = ct.`2`, the single
+`NG.encode` functionalization on each side, the four-call ladder, the three slice
+rewrites, the `NG_encode_inj` close, and the eight-call else ladder -- is shared.
+
+The coupling it consumes is the mirror pair:
+
+    GameFreshSS.ctStar{1}.`1 = GameFreshSS.kem_ct{1}
+    forall p, <proj p> <> NG_c.ev_encode (GameFreshSS.ctStar{1}.`2)
+              => GameFreshSS.rF{1} p = H_c.KDFPRFSec_Random.rF{2} p
+
+    (* resolution: synth-param *)
+    proc.
+    inline *.
+    if; 1: smt().
+    auto.
+    seq 5 5 : (#pre /\ ={ct_PQ, ct_T, dec_ss_T, dk_T}
+               /\ ct_PQ{1} = ct{1}.`1 /\ ct_T{1} = ct{1}.`2).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; skip => /#.
+    if; 1: smt().
+    seq 1 1 : (#pre /\ ={_r8} /\ _r8{1} = NG_c.ev_encode ct_T{1}
+               /\ ct_T{1} <> GameFreshSS.ctStar{1}.`2).
+    + exists* (glob NG){1}, ct_T{1}; elim* => g1 a1.
+      call{1} (NG_encode_det g1 a1).
+      exists* (glob NG){2}, ct_T{2}; elim* => g2 a2.
+      call{2} (NG_encode_det g2 a2).
+      skip => /#.
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; skip => />.
+    move=> &1 &2 hagree hne hct1 hne2 r1 r2.
+    apply hagree.
+    rewrite slice_concat_left_bs_2_ng_nelem_ng_nss_bs_nlabel_bs_2_ng_nelem_ng_nss_nlabel.
+    rewrite slice_concat_left_bs_ng_nelem_ng_nss_bs_ng_nelem_bs_2_ng_nelem_ng_nss.
+    rewrite slice_concat_right_bs_ng_nss_bs_ng_nelem_bs_ng_nelem_ng_nss.
+    by apply/negP => h; move: hne2; rewrite (NG_encode_inj _ _ h).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; skip => /#.

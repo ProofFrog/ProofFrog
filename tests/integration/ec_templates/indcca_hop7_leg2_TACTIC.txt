@@ -1,0 +1,70 @@
+DERIVED TACTIC -- IND-CCA `hop_7` LEG 2: `Mid7 ~ GameFreshSS`, the IDENTITY
+coupling. Derived on the real `CG_expanded_INDCCA_PQ` export (a `build_hop_probe`
+cut, ~15s per iteration) with the weakened coupling in place. EXIT 0, ZERO admits.
+NOT YET EMITTED.
+
+`Mid7` is GameFreshSS with the random-function draw moved to the tail and PINNED
+at the challenge KDF input. Since it must COMPUTE that input and GameFreshSS never
+does, it carries five extra deterministic calls; those drop one-sided through
+their `_pres` axioms, and the pinned-then-reprogrammed draw is `dfun` again by
+`dfunE_dlet_fix1` -- for ANY pin point, which is exactly why the added computation
+cannot disturb this leg.
+
+THREE THINGS THE DERIVATION MEASURED:
+ * `Mid7` must be added to EVERY `declare module` restriction list (22 of them in
+   this export), or EC reports "The module NG can write Mid7.kem_ct". The emission
+   owes that for any twin it introduces.
+ * The five `_pres` drops need SEPARATE `seq 1 0` steps -- `exists*` freezes at the
+   current judgment's initial memory, so they cannot be chained.
+ * The `v` draw and the `rF` draw are a UNIT (`seq 2 1`, not `seq 1 1`): `rndsem*`
+   folds the pair into `dlet d (fun v => dfun D.[rest <- dunit v])`, which IS
+   `dfun D`. Splitting them leaves a function pinned at ONE value.
+
+There is no memory binder after the `rnd`; `move=> &2` is "nothing to introduce".
+
+    proc.
+    swap{2} 1 13.
+    seq 13 13 : (={glob KEM_PQ, glob NG, glob G, glob H, glob L}
+                 /\ Mid7.pq_keys{1} = GameFreshSS.pq_keys{2}
+                 /\ Mid7.seed_T{1} = GameFreshSS.seed_T{2}
+                 /\ Mid7.kem_ct{1} = GameFreshSS.kem_ct{2}
+                 /\ ={ek_PQ, ek_T, ct_T}).
+    + wp; call (_: true).
+      wp; call (_: true).
+      wp; call (_: true).
+      wp; rnd.
+      wp; call (_: true).
+      wp; call (_: true).
+      wp; call (_: true).
+      wp; call (_: true).
+      wp; rnd.
+      wp; call (_: true).
+      skip => /#.
+    (* Mid7's five extra deterministic calls drop one-sided: `_pres` says each
+       preserves its module's glob, and their RESULTS only feed the pin point,
+       which the distribution does not depend on. Separate `seq`s because
+       `exists*` freezes at the current judgment's initial memory. *)
+    seq 1 0 : (#pre).
+    + exists* (glob NG){1}; elim* => g; call{1} (NG_exp_pres g); skip => /#.
+    seq 1 0 : (#pre).
+    + exists* (glob NG){1}; elim* => g; call{1} (NG_elementtosharedsecret_pres g); skip => /#.
+    seq 1 0 : (#pre).
+    + exists* (glob NG){1}; elim* => g; call{1} (NG_encode_pres g); skip => /#.
+    seq 1 0 : (#pre).
+    + exists* (glob NG){1}; elim* => g; call{1} (NG_encode_pres g); skip => /#.
+    seq 1 0 : (#pre).
+    + exists* (glob L){1}; elim* => g; call{1} (L_get_pres g); skip => /#.
+    seq 1 0 : (#pre).
+    + wp; skip => /#.
+    (* The pinned draw against the plain one. `v` and `rF` are a UNIT -- `rndsem*`
+       folds them into `dlet d (fun v => dfun D.[rest <- dunit v])`, which IS
+       `dfun D` by `dfunE_dlet_fix1`, for ANY pin point. *)
+    exists* rest{1}; elim* => pt0.
+    seq 2 1 : (#pre /\ Mid7.rF{1} = GameFreshSS.rF{2}); last by wp; rnd; skip => /#.
+    rndsem*{1} 0.
+    conseq (: _ ==> Mid7.rF{1} = GameFreshSS.rF{2}) => //.
+    rnd (fun (f : bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) => f) (fun (f : bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) => f); skip => />.
+    have dEq : dlet dbs_kdf_nout (fun (v : bs_kdf_nout) => dmap (MUF_bs_2_ng_nelem_ng_nss_nlabel.dfun (fun (_ : bs_2_ng_nelem_ng_nss_nlabel) => dbs_kdf_nout).[pt0 <- dunit v]) (fun (rF : bs_2_ng_nelem_ng_nss_nlabel -> bs_kdf_nout) => rF)) = dfun_bs_2_ng_nelem_ng_nss_nlabel_to_bs_kdf_nout.
+    + rewrite /dfun_bs_2_ng_nelem_ng_nss_nlabel_to_bs_kdf_nout (MUF_bs_2_ng_nelem_ng_nss_nlabel.dfunE_dlet_fix1 (fun (_ : bs_2_ng_nelem_ng_nss_nlabel) => dbs_kdf_nout) pt0) /=;
+      apply eq_dlet => // v; exact dmap_id.
+    by rewrite dEq.

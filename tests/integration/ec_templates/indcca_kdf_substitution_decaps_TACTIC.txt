@@ -297,3 +297,62 @@ contain a conjunct whose right-hand side is `<alias>.ev_<meth> <encoded field>`
 -- exactly the conjunct `_kdf_substitution_key_coupling` emits. Where that
 coupling declines, so does the consumer, and the hop keeps its honest admit
 instead of turning a ⚠ cell into a ⛔ one.
+
+*** THE MIRROR IS CLOSED TOO (c266-c270). The sub-wall above is LANDED. ***
+
+`_synth_dead_key_bijection_init` did not need to be a new route. The bundled
+delegate reorder ALREADY aligns the mirror hop's two backbones; all it was
+missing was the choice to COUPLE its two one-sided dead draws instead of
+dropping them. So the change is an option on that route (`_DeadDrawBij`,
+`_couple_dead_draws`), not a route of its own.
+
+DERIVED FIRST, on a `build_hop_probe` cut of the real export, then emitted. The
+target tactic is one extra swap and one changed step:
+
+    have [_bij_g [_bij_can _bij_inv]] := KEM_PQ_encodesharedsecret_bij.
+    proc.
+    inline *.
+    swap{1} [7..10] -4.            (* the reorder the route already emitted *)
+    swap{1} 1 3.                   (* NEW: bring the two draws to one position *)
+    ... the same 12-step ladder ...
+    rnd _bij_g KEM_PQ_c.ev_encodesharedsecret.   (* NEW: at the coupled draw *)
+    ...
+    skip => /#.
+
+THE ORIENTATION IS THE OPPOSITE OF `hop_5`'s AND THAT IS NOT COSMETIC. `rnd f
+finv` maps LEFT to RIGHT. At `hop_5` the encoding side is the left, so `f` is
+`ev_<m>` and `finv` is the inverse; at the mirror the encoding side is the RIGHT,
+so the two are swapped and the post arrives as `ss{2} = _bij_g k{1}`, which the
+closing `skip => /#` turns into `k{1} = ev(ss{2})` through the cancel facts the
+`have` destructuring already put in scope. `_synth_kdf_key_substitution` emits
+`rnd <ev> _bij_g` UNCONDITIONALLY and would be wrong if it ever fired with the
+encoding on the right; it has not, and that is worth knowing.
+
+FOUR MEASURED MISSTEPS, each caught by a compile and each worth keeping:
+ 1. `build_hop_probe` with NO tactic file writes `admit.` for the target lemma,
+    so its EXIT 0 proves the CUT is sound and NOTHING about the tactic. It also
+    drops `KEM_PQ_encodesharedsecret_bij` (the lemma is not named in the equiv
+    statement), so the probe needs that lemma and its `_surj` helper spliced back
+    in before it can carry the real tactic.
+ 2. The coupled branch was first guarded by `if side == 1`. The reorder can be
+    applied to EITHER side -- CK emits `swap{2}` -- and on those cells the guard
+    silently fell through to the drop path, which then declined because the
+    coupling now names the draw. `hop_10_initialize` regressed from closed to
+    admitted; the alignment swap always moves the LEFT draw whichever side was
+    reordered, so the guard was simply wrong.
+ 3. The field-to-field extras were first paired by `_kdf_canonical`, which labels
+    an event by its backbone POSITION. That is only cross-side meaningful once
+    the backbones are ALIGNED, and this hop's are exactly the ones that are not
+    -- so it paired a ciphertext with a decapsulation key and EasyCrypt rejected
+    the conjunct with "no matching operator `='". `_event_labelled_canonical`
+    labels by callee/distribution plus OCCURRENCE INDEX instead, which is
+    well-defined whenever the two call multisets agree -- the route's own gate.
+ 4. The route's "is my premise in the coupling" check was an exact string test,
+    but the exporter dedups conjuncts MODULO ORIENTATION and keeps whichever
+    builder emitted one first. A flipped duplicate read as absent and the route
+    declined. Both checks are unordered now.
+
+RESULT: `hop_10_initialize` keeps closing and `hop_10_decaps` closes, on all four
+CG/UG `_PQ` cells. `CG`/`UG_expanded_INDCCA_PQ` are down to ONE admit --
+`hop_7_initialize`, the reprogramming -- and `CG`/`UG_seedbased_INDCCA_PQ` to ten.
+CK/UK are unchanged: their `hop_10_decaps` has a different shape gate.

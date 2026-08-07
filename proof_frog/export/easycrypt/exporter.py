@@ -10325,6 +10325,13 @@ def export_proof_file(proof_path: str) -> str:
             f"{alias}.ev_{meth} ({red_base}.{seed_field}{{{rs}}})"
         )
 
+    def _unordered_pair(conjunct: str) -> frozenset[str]:
+        """A conjunct's two sides as an unordered pair, for ORIENTATION-blind
+        dedup: the coupling builders below restate correspondences another
+        builder may already have emitted the other way round, and a flipped
+        duplicate is pure noise in every lemma statement of the hop."""
+        return frozenset(p.strip() for p in conjunct.split(" = "))
+
     kdf_subst_conj_memo: dict[tuple[str, str], list[str]] = {}
 
     def _kdf_substitution_key_coupling(
@@ -10384,6 +10391,58 @@ def export_proof_file(proof_path: str) -> str:
             clone_alias_by_module,
         )
         kdf_subst_conj_memo[memo_key] = got
+        return got
+
+    dead_draw_conj_memo: dict[tuple[str, str], list[str]] = {}
+
+    def _dead_draw_bijection_coupling(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> list[str]:
+        """The MIRROR of `_kdf_substitution_key_coupling`: the same conjunct for
+        a hop whose two draws are both DEAD in ``initialize``. ``""`` off-shape.
+
+        By the mirror hop the challenge KDF output has been replaced by a fresh
+        sample, so ``initialize`` no longer carries the encoding that pairs the
+        two draws -- it holds only two one-sided draws of one distribution, which
+        the bundled-delegate reorder aligns by DROPPING each. Sound, and exactly
+        what loses the correspondence the hop's ``decaps`` counterpart needs. The
+        route couples them instead once this conjunct asks it to; which of the
+        two draws is the encoded one is read off the consuming oracle, since any
+        bijection would make some coupling provable and only the consumer
+        distinguishes the right one.
+        """
+        if step_a.reduction is None or step_b.reduction is None:
+            return []
+        model = resolver.oracle_model_for(step_a)
+        if model is None or model.init_name is None:
+            return []
+        lwrap = resolver.resolve(step_a).module_expr
+        rwrap = resolver.resolve(step_b).module_expr
+        memo_key = (lwrap, rwrap)
+        if memo_key in dead_draw_conj_memo:
+            return dead_draw_conj_memo[memo_key]
+        # pylint: disable=protected-access
+        left_ast = engine._get_game_ast(step_a.challenger, step_a.reduction)
+        right_ast = engine._get_game_ast(step_b.challenger, step_b.reduction)
+        # pylint: enable=protected-access
+        # pylint: disable=import-outside-toplevel
+        from .chain_emitter import dead_draw_bijection_conjunct
+
+        got = dead_draw_bijection_conjunct(
+            model.init_name,
+            left_ast,
+            right_ast,
+            lwrap,
+            rwrap,
+            top_types,
+            type_of_factory,
+            {inst.let_name: inst.primitive_name for inst in instances},
+            method_return_types,
+            det_methods_by_module,
+            inj_methods_by_module,
+            clone_alias_by_module,
+        )
+        dead_draw_conj_memo[memo_key] = got
         return got
 
     def _live_state_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
@@ -10461,17 +10520,26 @@ def export_proof_file(proof_path: str) -> str:
         # noise in every lemma statement of the hop.
         ksc = _kdf_substitution_key_coupling(step_a, step_b)
         if ksc:
-
-            def _unordered(conjunct: str) -> frozenset[str]:
-                return frozenset(p.strip() for p in conjunct.split(" = "))
-
             seen_pairs: set[frozenset[str]] = {
-                _unordered(c) for c in coupled.split(" /\\ ")
+                _unordered_pair(c) for c in coupled.split(" /\\ ")
             }
             for cand in ksc:
-                if _unordered(cand) in seen_pairs:
+                if _unordered_pair(cand) in seen_pairs:
                     continue
-                seen_pairs.add(_unordered(cand))
+                seen_pairs.add(_unordered_pair(cand))
+                coupled = f"{coupled} /\\ {cand}"
+        # The MIRROR of the seam above: the same key correspondence for a hop
+        # whose two draws are both dead in ``initialize``. Only fires where that
+        # builder declined (the encoding is no longer in the init body), so the
+        # two never both add a conjunct to one hop. Empty off-shape.
+        elif ddb := _dead_draw_bijection_coupling(step_a, step_b):
+            seen_dd: set[frozenset[str]] = {
+                _unordered_pair(c) for c in coupled.split(" /\\ ")
+            }
+            for cand in ddb:
+                if _unordered_pair(cand) in seen_dd:
+                    continue
+                seen_dd.add(_unordered_pair(cand))
                 coupled = f"{coupled} /\\ {cand}"
         # Plain GAME vs FORWARDING reduction (IND-CCA `_PQ` decaps hops): the
         # game's packed decapsulation key <-> the challenger's, for a component

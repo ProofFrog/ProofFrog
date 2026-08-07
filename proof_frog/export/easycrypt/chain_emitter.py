@@ -6050,6 +6050,39 @@ def _emit_one_oracle_chain(
         # backbones are not equal; this route makes them equal with one
         # ``swap`` and then peels. ``None`` off-shape, so every other init is
         # byte-identical.
+        # Its two one-sided dead draws are COUPLED rather than dropped where a
+        # declared injective endo-map relates them (the mirror of the KDF-key
+        # substitution hop -- see ``_DeadDrawBij``). ``None`` off-shape, and the
+        # coupled path additionally needs the conjunct to be in the coupling, so
+        # every hop the exporter does not state it for keeps the old drop-peel
+        # byte-identical.
+        dd_bij = _dead_draw_bij_spec(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            det_methods,
+            inj_methods_by_module or {},
+            clone_alias or {},
+            types,
+            left_wrapper_expr,
+            right_wrapper_expr,
+        )
+        # ORIENTATION-BLIND, because the exporter's own dedup is: a
+        # correspondence another builder already emitted the other way round is
+        # kept in ITS orientation, and an exact-string check would then read the
+        # conjunct as absent and decline a route whose premise is in fact stated.
+        if dd_bij is not None and not (
+            full_coupling
+            and all(
+                _unordered_conj(c)
+                in {_unordered_conj(x) for x in full_coupling.split(" /\\ ")}
+                for c in dd_bij.conjuncts
+            )
+        ):
+            dd_bij = None
         reorder = _synth_bundled_delegate_reorder(
             modules,
             oracle_name,
@@ -6059,8 +6092,18 @@ def _emit_one_oracle_chain(
             method_return_types,
             ev_post=bool(full_coupling and "ev_" in full_coupling),
             coupling=full_coupling or "",
+            bij=dd_bij,
         )
         if reorder is not None:
+            if dd_bij is not None and reorder[0].startswith("have "):
+                bij_methods_out = (
+                    dd_bij.mod_name,
+                    dd_bij.meth,
+                    dd_bij.bs_name,
+                    dd_bij.alias,
+                )
+                if bij_acc is not None:
+                    bij_acc.add(bij_methods_out)
             return [], [_res_tag(SYNTH_PARAM), *reorder, "qed."], set()
         # KDF-key substitution: the reorder above declines because the two sides
         # do NOT run the same calls -- one carries an extra `deterministic
@@ -10196,6 +10239,22 @@ def _exec_stmts(body: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt]:
     return [s for s in body if not isinstance(s, ec_ast.VarDecl)]
 
 
+def _flatten_stmts(body: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt]:
+    """Every statement in ``body``, descending into both arms of each ``If``.
+
+    For gates that ask "does this oracle contain such a call anywhere", where a
+    branch-local occurrence counts as much as a top-level one -- a case-splitting
+    ``decaps`` puts its encoding call inside the challenge branch.
+    """
+    out: list[ec_ast.EcStmt] = []
+    for stmt in _exec_stmts(body):
+        out.append(stmt)
+        if isinstance(stmt, ec_ast.If):
+            out.extend(_flatten_stmts(stmt.then_body))
+            out.extend(_flatten_stmts(stmt.else_body))
+    return out
+
+
 def _ec_sig(stmt: ec_ast.EcStmt) -> tuple[str, ...]:
     if isinstance(stmt, ec_ast.Call):
         return ("call", stmt.callee)
@@ -10299,6 +10358,13 @@ def _ws(expr: str) -> str:
     emitted, by the tactic builder and the coupling builder respectively.
     """
     return " ".join(expr.replace("(", " ").replace(")", " ").split())
+
+
+def _unordered_conj(conjunct: str) -> frozenset[str]:
+    """A conjunct's two sides as an unordered pair, whitespace- and
+    paren-normalized -- for comparing what a route DERIVES against what the
+    coupling STATES, which may carry the same fact the other way round."""
+    return frozenset(_ws(p) for p in conjunct.split(" = "))
 
 
 def _strip_outer_parens(expr: str) -> str:
@@ -10934,6 +11000,50 @@ def kdf_substitution_key_conjunct(  # pylint: disable=too-many-arguments,too-man
     return acc
 
 
+def dead_draw_bijection_conjunct(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    oracle_name: str,
+    left_game: frog_ast.Game,
+    right_game: frog_ast.Game,
+    left_wrapper_expr: str,
+    right_wrapper_expr: str,
+    types: tc.TypeCollector,
+    type_of_factory: Callable[
+        [dict[str, frog_ast.Type], dict[str, str]],
+        Callable[[frog_ast.Expression], frog_ast.Type],
+    ],
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    det_methods: dict[str, set[str]] | None = None,
+    inj_methods_by_module: dict[str, set[str]] | None = None,
+    clone_alias: dict[str, str] | None = None,
+) -> list[str]:
+    """The state-level conjuncts of a hop whose two dead draws a bijection can
+    pair; ``[]`` off-shape.
+
+    The MIRROR of :func:`kdf_substitution_key_conjunct`, and it exists for the
+    same reason: the establishing ``initialize`` route can prove this
+    correspondence but only if the hop's coupling asks for it, and the coupling
+    is built before any tactic runs. Here the dependency runs the other way too
+    -- the route DROPS the two draws unless the conjunct is stated, because
+    dropping them closes the hop just as well and is what it did before.
+    """
+    spec = _dead_draw_bij_spec(
+        mt.ModuleTranslator(types, type_of_factory),
+        oracle_name,
+        left_game,
+        right_game,
+        external_module_types,
+        method_return_types,
+        det_methods or {},
+        inj_methods_by_module or {},
+        clone_alias or {},
+        types,
+        left_wrapper_expr,
+        right_wrapper_expr,
+    )
+    return list(spec.conjuncts) if spec is not None else []
+
+
 def _kdf_holder(
     canon: dict[str, str], slot: str, real: Callable[[str], str | None]
 ) -> str | None:
@@ -11002,6 +11112,304 @@ def _kdf_canonical(
 _IDENT_TOKENS = re.compile(r"[A-Za-z_]\w*(?:\.\w+)*")
 
 
+@dataclass(frozen=True)
+class _DeadDrawBij:
+    """How to COUPLE two one-sided dead draws instead of dropping them.
+
+    The mirror of the KDF-key-substitution `initialize` hop. There, the encoding
+    call still sits in ``initialize`` and :func:`_synth_kdf_key_substitution`
+    pairs the two draws through it. By the mirror hop the challenge KDF output
+    has been replaced by a fresh sample, so ``initialize`` no longer contains the
+    encoding and holds only two ONE-SIDED draws of the same distribution -- which
+    the bundled-delegate reorder aligns by dropping each one-sidedly. That is
+    sound (the hop's own post never mentions them) and it is exactly what
+    destroys the correspondence the hop's ``decaps`` counterpart needs, because
+    the two values are related by the encoding, not equal.
+
+    ``enc_side`` is the side whose draw is the ENCODED one -- read off a
+    POST-INIT oracle, where that side passes its field to the ``deterministic
+    injective`` method and the other side uses its own field raw. Deriving it
+    from the consumer is what makes the choice correct rather than merely
+    provable: ANY bijection would make some coupling provable (the ``rnd`` map
+    can be chosen to match), so the compiler cannot catch a wrong one -- only the
+    oracle that consumes it can.
+    """
+
+    enc_side: int
+    mod_name: str
+    meth: str
+    bs_name: str
+    alias: str
+    distr: str
+    conjunct: str
+    # Field-to-field correspondences the same peel proves alongside the coupled
+    # draw. The KDF input of a two-component combiner carries more than the key
+    # -- an ENCAPSULATION key on the UG cells -- and the consuming oracle needs
+    # every one of them, not only the one the bijection relates.
+    extra: tuple[str, ...] = ()
+
+    @property
+    def conjuncts(self) -> tuple[str, ...]:
+        return (self.conjunct,) + self.extra
+
+    @property
+    def ev_op(self) -> str:
+        return f"{self.alias}.ev_{self.meth}"
+
+
+def _event_labelled_canonical(
+    prefix: list[ec_ast.EcStmt], events: list[ec_ast.EcStmt]
+) -> dict[str, str]:
+    """``var -> value`` over a vocabulary that is comparable across two
+    UNALIGNED backbones: each event result is replaced by its callee (or
+    distribution) plus its OCCURRENCE INDEX among events of that identity.
+
+    :func:`_kdf_canonical` labels by backbone POSITION, which is only
+    cross-side meaningful once the two backbones have been aligned. The hop this
+    serves is precisely one where they have NOT been -- one endpoint draws its
+    key before its key generation and the other after its encapsulation -- so a
+    positional label pairs a ciphertext with a decapsulation key. MEASURED: it
+    did, and EasyCrypt rejected the resulting conjunct as ill-typed.
+
+    The occurrence label is sound here because the route's own precondition is
+    that the two sides run the same CALL MULTISET: the k-th ``KEM_PQ.keygen``
+    on one side is the k-th on the other, whatever order they run in.
+    """
+    env = _assign_env(prefix)
+    seen: Counter[str] = Counter()
+    slots: dict[str, str] = {}
+    for stmt in events:
+        if isinstance(stmt, ec_ast.Call):
+            key = f"call:{stmt.callee}"
+        elif isinstance(stmt, ec_ast.Sample):
+            key = f"sample:{stmt.distr}"
+        else:
+            continue
+        slots[stmt.var] = f"#{key}#{seen[key]}"
+        seen[key] += 1
+    for stmt in prefix:
+        if isinstance(stmt, (ec_ast.Call, ec_ast.Sample)):
+            env.setdefault(stmt.var, stmt.var)
+    out: dict[str, str] = {}
+    for var, val in env.items():
+        out[var] = _IDENT_TOKENS.sub(lambda m: slots.get(m.group(0), m.group(0)), val)
+    for var, slot in slots.items():
+        out[var] = slot
+    return out
+
+
+def _sample_holding_fields(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    modules: mt.ModuleTranslator,
+    name: str,
+    state: frog_ast.Game,
+    init_oracle: str,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    wrapper_expr: str,
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]] | None:
+    """``({field -> distribution it was drawn from}, {field -> EC name},
+    {variable -> canonical value})`` for this side's ``initialize``.
+
+    Correspondence is by the backbone EVENT that produced the value
+    (:func:`_kdf_canonical`), never by name: the draw lands in a delegate-inlined
+    LOCAL and is copied into the reduction's own field under a different name.
+    The canonical map is returned too, because the same vocabulary is what pairs
+    the two sides' remaining FIELDS -- a mirror hop's consumer needs those as
+    much as it needs the coupled draw.
+    """
+    proj = _project_to_method(state, init_oracle)
+    if proj is None:
+        return None
+    mod = _flat_state_module(
+        modules, name, proj, external_module_types, method_return_types, []
+    )
+    if not mod.procs:
+        return None
+    body: list[ec_ast.EcStmt] = [
+        s for s in _exec_stmts(mod.procs[0].body) if not isinstance(s, ec_ast.Return)
+    ]
+    events: list[ec_ast.EcStmt] = [s for s in body if _is_bb_stmt(s)]
+    canon = _event_labelled_canonical(body, events)
+    nmap, deleg = _flat_name_map(
+        state, _module_head(wrapper_expr), _wrapper_delegate(wrapper_expr)
+    )
+    if not deleg:
+        return None
+    holders: dict[str, str] = {}
+    for stmt in events:
+        if not isinstance(stmt, ec_ast.Sample):
+            continue
+        slot = canon.get(stmt.var)
+        if slot is None:
+            continue
+        for fld in sorted(nmap):
+            if canon.get(fld) == slot:
+                holders[fld] = stmt.distr
+    return holders, nmap, canon
+
+
+def _dead_draw_bij_spec(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches
+    modules: mt.ModuleTranslator,
+    init_oracle: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    det_methods: dict[str, set[str]],
+    inj_methods_by_module: dict[str, set[str]],
+    clone_alias: dict[str, str],
+    types: tc.TypeCollector | None,
+    left_wrapper_expr: str,
+    right_wrapper_expr: str,
+) -> _DeadDrawBij | None:
+    """The bijection pairing this hop's two one-sided dead draws, or ``None``.
+
+    Read off a POST-INIT oracle, which is the only place that says which of the
+    two draws is the ENCODED one: exactly one side passes a field holding its own
+    ``initialize`` draw to a ``deterministic injective`` single-argument method,
+    and the other side uses its corresponding field raw. Requiring that call to
+    be UNIQUE across both sides is what keeps the route off a body that merely
+    happens to encode something else -- the sibling hop's `decaps` also calls the
+    same method, on a decapsulated secret rather than on a stored draw.
+
+    Every remaining gate fails CLOSED: the method must be an ENDO-map whose
+    result type is the very type the two draws are sampled from (checked through
+    the type's own registered distribution, not by name surgery on ``d<t>``), and
+    both sides must hold their draw in a nameable FIELD.
+    """
+    if types is None:
+        return None
+    sides = []
+    for nm, state, wrap in (
+        ("Bij_L", left_state0, left_wrapper_expr),
+        ("Bij_R", right_state0, right_wrapper_expr),
+    ):
+        got = _sample_holding_fields(
+            modules,
+            nm,
+            state,
+            init_oracle,
+            external_module_types,
+            method_return_types,
+            wrap,
+        )
+        if got is None:
+            return None
+        sides.append(got)
+    hits: list[tuple[int, str, str, str, str]] = []
+    for idx, (state, wrap) in enumerate(
+        ((left_state0, left_wrapper_expr), (right_state0, right_wrapper_expr))
+    ):
+        holders, _nmap, _canon = sides[idx]
+        for meth_node in state.methods:
+            oracle = meth_node.signature.name.lower()
+            if oracle == init_oracle:
+                continue
+            proj = _project_to_method(state, oracle)
+            if proj is None:
+                continue
+            mod = _flat_state_module(
+                modules,
+                f"Bij_{idx}_{oracle}",
+                proj,
+                external_module_types,
+                method_return_types,
+                [],
+            )
+            if not mod.procs:
+                continue
+            decl_ty = {
+                d.name: d.type.text
+                for d in mod.procs[0].body
+                if isinstance(d, ec_ast.VarDecl)
+            }
+            for stmt in _flatten_stmts(mod.procs[0].body):
+                if not isinstance(stmt, ec_ast.Call) or "." not in stmt.callee:
+                    continue
+                mod_name, meth = stmt.callee.rsplit(".", 1)
+                if meth not in det_methods.get(mod_name, set()):
+                    continue
+                if meth not in inj_methods_by_module.get(mod_name, set()):
+                    continue
+                args = _split_top_args(stmt.args)
+                if len(args) != 1:
+                    continue
+                arg = args[0].strip()
+                res_ty = decl_ty.get(stmt.var)
+                if arg in holders and res_ty is not None:
+                    hits.append((idx + 1, mod_name, meth, arg, res_ty))
+    if len(set(hits)) != 1:
+        return None
+    enc_side, mod_name, meth, enc_field, bs_name = hits[0]
+    alias = clone_alias.get(mod_name)
+    if alias is None:
+        return None
+    enc_holders, enc_map, enc_canon = sides[enc_side - 1]
+    oth_holders, oth_map, oth_canon = sides[2 - enc_side]
+    distr = enc_holders.get(enc_field)
+    # The result type must be the very type the two draws are sampled from. This
+    # is a CHECK against the exporter's own ``bs_<w>`` / ``dbs_<w>`` naming, not
+    # a derivation from it: a method that is injective but not an ENDO-map on the
+    # sampled type has no bijectivity lemma, and the route must decline rather
+    # than name one that will not exist.
+    if distr is None or distr != f"d{bs_name}":
+        return None
+    oth_cands = sorted(f for f, d in oth_holders.items() if d == distr)
+    if len(oth_cands) != 1:
+        return None
+    oth_side = 3 - enc_side
+    conjunct = (
+        f"{oth_map[oth_cands[0]]}{{{oth_side}}} = "
+        f"{alias}.ev_{meth} {enc_map[enc_field]}{{{enc_side}}}"
+    )
+    # The remaining FIELD-to-FIELD correspondences, paired by canonical value --
+    # whole, or a field against a COMPONENT of the other side's bundled one
+    # (a reduction that runs its own key generation keeps the whole ``(ek, dk)``
+    # pair in one field where the delegating side keeps only what its challenger
+    # stored). MEASURED on the UG cells: their consumer needs the encapsulation
+    # correspondence exactly as much as it needs the coupled draw, and without it
+    # the residual goal is a CONJUNCTION -- which surfaces as "nothing to
+    # rewrite" rather than as a failure to close.
+    extra: list[str] = []
+    drawn = set(enc_holders) | {enc_field}
+    for f_e, val in sorted(enc_canon.items()):
+        if f_e not in enc_map or f_e in drawn:
+            continue
+        hit = next(
+            (k for k in sorted(oth_canon) if oth_canon[k] == val and k in oth_map),
+            None,
+        )
+        if hit is not None:
+            extra.append(f"{enc_map[f_e]}{{{enc_side}}} = {oth_map[hit]}{{{oth_side}}}")
+            continue
+        pm = re.fullmatch(r"(.*?)((?:\.`\d+)+)", val)
+        if pm is None:
+            continue
+        head = next(
+            (
+                k
+                for k in sorted(oth_canon)
+                if oth_canon[k] == pm.group(1) and k in oth_map
+            ),
+            None,
+        )
+        if head is not None:
+            extra.append(
+                f"{enc_map[f_e]}{{{enc_side}}} = "
+                f"{oth_map[head]}{{{oth_side}}}{pm.group(2)}"
+            )
+    return _DeadDrawBij(
+        extra=tuple(dict.fromkeys(extra)),
+        enc_side=enc_side,
+        mod_name=mod_name,
+        meth=meth,
+        bs_name=bs_name,
+        alias=alias,
+        distr=distr,
+        conjunct=conjunct,
+    )
+
+
 def _synth_bundled_delegate_reorder(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -11011,6 +11419,7 @@ def _synth_bundled_delegate_reorder(  # pylint: disable=too-many-arguments,too-m
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     ev_post: bool = False,
     coupling: str = "",
+    bij: _DeadDrawBij | None = None,
 ) -> list[str] | None:
     """Closing tactic for a BUNDLED-DELEGATE vs EXPLICIT init hop, or ``None``.
 
@@ -11050,7 +11459,17 @@ def _synth_bundled_delegate_reorder(  # pylint: disable=too-many-arguments,too-m
     ``={res}`` per call, not a functional characterization) -- an honest admit
     beats a tactic that runs without closing.
     """
-    if ev_post:
+    # An ``ev_`` conjunct in the coupling normally means an honest decline: the
+    # drop-and-peel proves ``={res}`` per call, never a functional
+    # characterization. The one exception is the conjunct THIS route establishes
+    # when it couples its two dead draws -- checked by identity, not by the mere
+    # presence of ``ev_``, so any other derivation conjunct still declines.
+    if ev_post and not (
+        bij is not None
+        and all(
+            _ws(c) == _ws(bij.conjunct) for c in coupling.split(" /\\ ") if "ev_" in c
+        )
+    ):
         return None
     lproj = _project_to_method(left_state0, oracle_name)
     rproj = _project_to_method(right_state0, oracle_name)
@@ -11074,15 +11493,65 @@ def _synth_bundled_delegate_reorder(  # pylint: disable=too-many-arguments,too-m
         return [s for s in body if not isinstance(s, ec_ast.Return)], ret
 
     (l_exec, l_ret), (r_exec, r_ret) = _body(lmod), _body(rmod)
-    return _bundled_reorder_core(l_exec, l_ret, r_exec, r_ret, coupling)
+    return _bundled_reorder_core(l_exec, l_ret, r_exec, r_ret, coupling, bij)
 
 
-def _bundled_reorder_core(  # pylint: disable=too-many-locals,too-many-return-statements
+def _couple_dead_draws(
+    lb: list[ec_ast.EcStmt],
+    l_bb: list[tuple[str, str]],
+    r_bb: list[tuple[str, str]],
+    ops: list[tuple[str, int, int]],
+    distr: str,
+) -> tuple[str, list[tuple[str, int, int]], int, list[ec_ast.EcStmt]] | None:
+    """``(swap tactic, all-match ops, coupled ops index, moved left body)`` when
+    the alignment's two one-sided drops are the SAME-distribution draws a
+    bijection can pair, or ``None``.
+
+    The two draws sit at different points in the two programs -- one endpoint's
+    challenger draws its key before its key generation, the other's after its
+    encapsulation -- and EC's ``rnd`` couples the two sides' LAST statements, so
+    they have to be brought to the same aligned position first. A sample is
+    data-independent of everything it crosses here (nothing between reads a value
+    that has not been drawn, and nothing else writes its variable), so the move
+    is an ordinary ``swap`` and EC validates the independence itself.
+
+    Only the case where the LEFT draw moves DOWN is emitted; every other
+    arrangement declines, so the route falls back to the one-sided drops it did
+    before rather than guessing a swap direction.
+    """
+    drops = [(k, i, j) for k, i, j in ops if k != "match"]
+    if len(drops) != 2 or {k for k, _, _ in drops} != {"dropL", "dropR"}:
+        return None
+    il = next(i for k, i, _ in drops if k == "dropL")
+    jr = next(j for k, _, j in drops if k == "dropR")
+    if l_bb[il] != ("sample", distr) or r_bb[jr] != ("sample", distr):
+        return None
+    l_events = [s for s in lb if _is_bb_stmt(s)]
+    sample = l_events[il]
+    rest = l_events[:il] + l_events[il + 1 :]
+    if jr == 0 or jr > len(rest):
+        return None
+    anchor = rest[jr - 1]
+    si, ai = lb.index(sample), lb.index(anchor)
+    if si >= ai:
+        return None
+    moved = lb[:si] + lb[si + 1 : ai + 1] + [sample] + lb[ai + 1 :]
+    new_ops = _sample_drop_alignment(_bd_events(moved), r_bb)
+    if new_ops is None or any(k != "match" for k, _, _ in new_ops):
+        return None
+    coupled = next((n for n, (_k, _i, j) in enumerate(new_ops) if j == jr), None)
+    if coupled is None:
+        return None
+    return f"swap{{1}} {si + 1} {ai - si}.", new_ops, coupled, moved
+
+
+def _bundled_reorder_core(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
     l_exec: list[ec_ast.EcStmt],
     l_ret: str,
     r_exec: list[ec_ast.EcStmt],
     r_ret: str,
     coupling: str,
+    bij: _DeadDrawBij | None = None,
 ) -> list[str] | None:
     """The bundled-delegate reorder tactic for two already-rendered bodies.
 
@@ -11109,6 +11578,44 @@ def _bundled_reorder_core(  # pylint: disable=too-many-locals,too-many-return-st
         ops = _sample_drop_alignment(new_l, new_r)
         if ops is None:
             continue
+        # COUPLE the two dead draws rather than dropping them, when a bijection
+        # relates them. The drops are sound but lossy: the hop's own post never
+        # mentions the draws, so it closes either way, while its ``decaps``
+        # counterpart needs the correspondence and cannot recover it afterwards.
+        if bij is not None:
+            got2 = _couple_dead_draws(
+                moved if side == 1 else l_exec, new_l, new_r, ops, bij.distr
+            )
+            if got2 is not None:
+                align, c_ops, coupled, c_left = got2
+                c_bb = _bd_events(c_left)
+                f, finv = (
+                    (bij.ev_op, "_bij_g")
+                    if bij.enc_side == 1
+                    else ("_bij_g", bij.ev_op)
+                )
+                c_peel: list[str] = []
+                for n, (_k, i, _j) in reversed(list(enumerate(c_ops))):
+                    c_peel.append("wp.")
+                    if n == coupled:
+                        c_peel.append(f"rnd {f} {finv}.")
+                    else:
+                        c_peel.append(
+                            "call (_: true)." if c_bb[i][0] == "call" else "rnd."
+                        )
+                # The reorder may have been applied to EITHER side; the
+                # alignment swap always moves the LEFT draw, and the body it is
+                # computed against is the left one whichever side was reordered.
+                return [
+                    f"have [_bij_g [_bij_can _bij_inv]] := "
+                    f"{bij.mod_name}_{bij.meth}_bij.",
+                    "proc.",
+                    "inline *.",
+                    *swaps,
+                    align,
+                    *c_peel,
+                    "skip => /#.",
+                ]
         l_events = [s for s in (moved if side == 1 else l_exec) if _is_bb_stmt(s)]
         r_events = [s for s in (r_exec if side == 1 else moved) if _is_bb_stmt(s)]
         dropped: list[ec_ast.Sample] = []

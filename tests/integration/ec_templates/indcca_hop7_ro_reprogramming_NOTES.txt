@@ -281,3 +281,26 @@ establishing hop will not produce.
 NEXT MEASUREMENT BEFORE BUILDING: extend the tripwire with a `Decaps` pair and the
 reachable-agreement post, and prove it there. That validates (c) -- the only part
 not yet exercised -- at ~5s per iteration instead of ~90s per export.
+
+*** UPDATE c275: THE SEPARATION COSTS NO NEW AXIOM. MEASURED. ***
+
+Part (c) needs "two KDF inputs differing in one component are different". Measured
+on the real export of `CG_expanded_INDCCA_PQ`: there is NO concat-injectivity fact
+in it (`grep` finds zero), and no `NG_encode_inj` either -- the exporter emits an
+`_inj` axiom only when a route REQUESTS one. But it DOES emit, for every concat
+triple, the round-trip pair (10 of each in that export):
+
+    slice_concat_left  : slice_L (concat a b) 0 n     = a
+    slice_concat_right : slice_R (concat a b) n (n+m) = b
+
+and those give injectivity outright -- apply a slice to both sides of the
+hypothesis. `tests/integration/ec_templates/concat_injective.ec` proves it, EXIT 0,
+with a negative control (neutering `slice_concat_right`) rejected. It also proves
+`concat_neq_right`, the ASYMMETRIC form the separation actually uses: differing in
+the RIGHT component suffices and the left components are never related -- which is
+the whole point, since in the real hop the left component is the Diffie-Hellman
+value nothing relates across the two sides.
+
+So the emission needs: this derived lemma family (no axiom), plus `Encode`'s `_inj`
+(licensed, already adjudicated, just needs requesting). `concat_slices_id` is not
+needed at all.

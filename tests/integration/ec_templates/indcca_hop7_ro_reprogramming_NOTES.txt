@@ -162,3 +162,36 @@ THE CONSUMER COST IS UNCHANGED and still gates the chain: `hop_7_decaps` /
 `hop_15_decaps` are closed today against the strong premise `rF{2} = rF{1}`, which
 the repaired `initialize` will not establish. They need re-proving under the weak
 one with the unreachability argument. Do both or the chain does not close.
+
+THE ROUTE, WORKED OUT ONE STEP FURTHER (still not derived, but no longer vague).
+The surplus entropy cannot be removed by rewriting a distribution -- it has to
+become a separate PROGRAM STATEMENT before a one-sided `rnd{2}` can drop it. Both
+attempts to avoid that failed for the same reason and are worth not repeating:
+
+  * rewriting the RIGHT's folded distribution with `dfunE_dlet_fix1` leaves the
+    surplus as a `dlet` INSIDE one sample, which `rnd{2}` cannot reach;
+  * rewriting the LEFT's instead, and commuting the right's two independent draws
+    so both sides are `dlet dcod (fun v => ...)`, leaves the same non-injective
+    map per `v` -- the right's `g` is still unpinned.
+
+So interpose a THIRD program, and the legs split cleanly:
+
+    Mid:  v  <$ dcod;
+          rF <$ dfun d.[x0 <- dunit v];
+          ss <$ dcod;
+
+  Mid ~ R   is an IDENTITY coupling: fold both with `rndsem*`, and the two
+            distributions are equal by `dfunE_dlet_fix1` (that lemma is exactly
+            "drawing the value at x0 first, then the pinned function, is drawing
+            the function"). `rnd` with the identity bijection.
+
+  L ~ Mid   is a BIJECTIVE coupling, which is the whole point of pinning: with
+            `v` in scope, `(g, y) |-> g.[x0 <- y]` is injective on the pinned
+            support (`g x0 = v` is known, so `g` is recoverable by resetting
+            `x0` to `v`), and `dlet_dfun_fupdate_ll` is its distribution
+            identity. Couple the TAIL first -- `v` is a program variable and may
+            be read -- and finish with a one-sided `rnd{2}` for the `v` draw
+            under `dcod_ll`, which is sound because the post no longer mentions
+            it.
+
+Derive that in the tripwire, not in the export.

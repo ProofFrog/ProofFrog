@@ -377,3 +377,44 @@ SO THE LANDING IS ONE ROUTE WITH A SHARED FUNCTIONALIZER, not two. Both the
 establishing hop (to name the challenge KDF input as a witness) and the consumer
 (to match the conjunct) need exactly the same five-call functionalization; writing
 it once and using it on both sides is the shape to build.
+
+*** UPDATE c276b: THE CONSUMER'S EXACT SHAPE, read off the goal. ***
+
+Printed the real goal at the failing `wp; sim.` (probe `.ec-tmp/w7r.ec`, the
+weakened coupling written in at all four sites, `hop_7_initialize` admitted). The
+challenge-PQ branch is, on both sides:
+
+    _r8  <@ NG.encode(ct_T)          _r9  <@ NG.generator()
+    _r10 <@ NG.exp(_r9, dk_T)        _r11 <@ NG.encode(_r10)
+    _r12 <@ L.get()
+    rest <- concat3( dec_ss_T, _r8, _r11, _r12 )
+    (left)  _r13 <- H_c.KDFPRFSec_Random.rF rest      (right) _r7 <- Some (GameFreshSS.rF rest)
+
+and the shared prefix peeled before it is
+
+    dk_T <@ NG.randomscalar(seed_T);  ct_PQ <- ct.`1;  ct_T <- ct.`2;
+    _r0  <@ NG.exp(ct_T, dk_T);       dec_ss_T <@ NG.elementtosharedsecret(_r0)
+
+SO THE COUNT IS EIGHT DETERMINISTIC CALLS, NOT FIVE. The branch's five are not
+enough: `dec_ss_T` sits in `rest`'s first slot and arrives from the shared prefix
+as an OPAQUE equal value (the current `seq 5 5` peels it with `call (_: true)`),
+while the coupling names it `ev_elementtosharedsecret (ev_exp ct0.`2
+(ev_randomscalar seed_T))`. So the prefix's three calls have to be functionalized
+too, or the two forms never meet. Eight calls, both sides, sixteen one-sided
+`_det` drops, each in its own `seq` because `exists*` freezes at the current
+judgment's initial memory.
+
+All the axioms exist and their shapes are confirmed:
+    NG_encode_det (g) (a0)        NG_generator_det (g)
+    NG_exp_det (g) (a0) (a1)      NG_randomscalar_det (g) (a0)
+    NG_elementtosharedsecret_det (g) (a0)    L_get_det (g)
+
+AFTER THAT the close is instantiating the coupling's `forall ct0` at `ct{2}`; the
+guard `ct{1} <> RD.ctStar{1}` plus `GameFreshSS.ctStar{2} = RD.ctStar{1}` and
+`ct{1} = ct{2}` supplies its hypothesis directly, with no injectivity needed on
+THIS side -- the separation lives entirely in the establishing hop.
+
+NOTE the asymmetry this reveals: `Encode` injectivity and the derived concat
+injectivity are needed only by `hop_7_initialize` (to prove the agreement), not by
+`hop_7_decaps` (which merely consumes it). That is a smaller obligation than the
+earlier notes implied.

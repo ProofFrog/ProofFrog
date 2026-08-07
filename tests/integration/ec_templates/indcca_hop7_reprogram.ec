@@ -36,9 +36,23 @@ op [smt_opaque] dfn : (dom -> cod) distr = MUF.dfun (fun _ => dcod).
 lemma dfn_ll : is_lossless dfn.
 proof. by rewrite /dfn; apply/MUF.dfun_ll => x; exact dcod_ll. qed.
 
-(* The challenge point. In the real hop it is a deterministic expression over
-   fields both sides store, so it is a CONSTANT of the two programs either way. *)
-op x0 : dom.
+(* The challenge point. In the real hop it is the challenge KDF input, and it is
+   NOT expressible over stored state -- its first component needs a Diffie-Hellman
+   fact the NominalGroup primitive deliberately withholds. What matters, and what
+   is modelled here, is its SHAPE: a builder `mk` (the KDF-input concat) applied to
+   a first component nothing relates and a second component that IS the challenge
+   ciphertext. `mk_inj` is concat injectivity plus `Encode`'s declared
+   `deterministic injective`. *)
+type ctxt.
+
+op ctStar : ctxt.
+op ssT    : cod.            (* the DH-derived component -- deliberately unrelated *)
+op decss  : ctxt -> cod.    (* what Decaps computes in that slot *)
+op mk     : cod -> ctxt -> dom.
+
+axiom mk_inj (a b : cod) (c d : ctxt) : mk a c = mk b d => a = b /\ c = d.
+
+op [smt_opaque] x0 : dom = mk ssT ctStar.
 
 module L = {
   var rF : dom -> cod
@@ -250,4 +264,40 @@ transitivity Mid.init
   (true ==> ={res} /\ Mid.rF{1} = R.rF{2}) => //.
 + exact leg_l_mid.
 exact leg_mid_r.
+qed.
+
+(* ------------------------------------------------------------------ *)
+(* PART (c): what the CONSUMER actually gets.                           *)
+(*                                                                      *)
+(* The reprogramming point is not expressible over stored state, so it   *)
+(* must not appear in the hop's post. It does not need to: it is an      *)
+(* internal WITNESS, and what the post carries is the consequence        *)
+(* `Decaps` needs -- that the two random functions agree at every input  *)
+(* `Decaps` can query. `Decaps` queries only at `mk (decss c) c` for     *)
+(* `c <> ctStar`, and `mk_inj` separates every such input from `x0`      *)
+(* through its SECOND component alone. The first components (`ssT`       *)
+(* against `decss c`) are never related -- which is exactly why no       *)
+(* Diffie-Hellman fact is needed.                                       *)
+(* ------------------------------------------------------------------ *)
+lemma agree_off (f : dom -> cod) (y : cod) (c : ctxt) :
+  c <> ctStar => f.[x0 <- y] (mk (decss c) c) = f (mk (decss c) c).
+proof.
+move=> hc.
+have hne : x0 <> mk (decss c) c.
++ rewrite /x0; apply/negP => h.
+  have [_ hh] := mk_inj ssT (decss c) ctStar c h.
+  by move: hc; rewrite hh.
+by rewrite fupdate_neq.
+qed.
+
+(* The hop's post as the consumer will consume it. Derived from `reprogram`,
+   so it inherits its proof and adds only the separation. *)
+equiv reprogram_agree : L.init ~ R.init :
+  true ==>
+     ={res}
+  /\ forall (c : ctxt), c <> ctStar =>
+       L.rF{1} (mk (decss c) c) = R.rF{2} (mk (decss c) c).
+proof.
+conseq reprogram => />.
+by move=> result_R rF_R c hc; apply agree_off.
 qed.

@@ -6376,6 +6376,24 @@ def _emit_one_oracle_chain(
         )
         if cdc is not None:
             return cdc
+        # KDF-PRF substitution at a POST-INIT oracle: the consuming half of what
+        # `_synth_kdf_key_substitution` closes for `initialize`. ``None``
+        # off-shape, so every other oracle stays byte-identical.
+        ksd = _synth_kdf_substitution_decaps(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            flat_params,
+            det_methods,
+            clone_alias,
+            types,
+            full_coupling,
+        )
+        if ksd is not None:
+            return [], ksd, set()
 
     # Field-aware coupling: identical-state hops keep the whole-glob equality
     # (byte-identical for clean proofs); a hop whose two sides differ in glob
@@ -10272,6 +10290,17 @@ def _app_head(expr: str) -> tuple[str, str]:
     return (match.group(1), match.group(2)) if match else (stripped, "")
 
 
+def _ws(expr: str) -> str:
+    """``expr`` with parentheses dropped and whitespace runs collapsed.
+
+    For comparing an EC term a route BUILDS against the same term as it appears
+    in a coupling STRING, where the two differ only in whether the argument of a
+    prefix application is parenthesized (``ev_m (X)`` vs ``ev_m X``) -- both are
+    emitted, by the tactic builder and the coupling builder respectively.
+    """
+    return " ".join(expr.replace("(", " ").replace(")", " ").split())
+
+
 def _strip_outer_parens(expr: str) -> str:
     """``expr`` with one balanced enclosing paren pair removed, if any."""
     stripped = expr.strip()
@@ -10434,6 +10463,7 @@ def _synth_kdf_key_substitution(  # pylint: disable=too-many-arguments,too-many-
     bij_acc: set[tuple[str, str, str, str]] | None,
     left_wrapper_expr: str = "",
     right_wrapper_expr: str = "",
+    key_conj_out: list[str] | None = None,
 ) -> list[str] | None:
     """Closing tactic for a KDF-KEY-SUBSTITUTION init hop, or ``None``.
 
@@ -10464,6 +10494,14 @@ def _synth_kdf_key_substitution(  # pylint: disable=too-many-arguments,too-many-
     to backbone events (:func:`_assign_env`), never by matching names.
 
     Declines to ``None`` off-shape, so every other init stays byte-identical.
+
+    ``key_conj_out`` switches the route to PROBE mode: the substitution conjunct
+    (see :func:`kdf_substitution_key_conjunct`) is appended to it and the route
+    returns ``None`` without registering its lemma requests or building a
+    tactic. The hop's COUPLING has to state that conjunct -- the consuming
+    ``decaps`` lemma needs it and only this derivation knows the two variables --
+    but the coupling is computed before any tactic, so it cannot be recovered
+    from the emitted body.
     """
     if types is None or bij_acc is None:
         return None
@@ -10727,6 +10765,69 @@ def _synth_kdf_key_substitution(  # pylint: disable=too-many-arguments,too-many-
                 f"{name_e}{{{enc_side}}} = "
                 f"{_oth_name(comp[0])}{{{oth_side}}}{comp[1]}"
             )
+    # STATE-LEVEL correspondences: the same pairing restricted to variables that
+    # are FIELDS on BOTH sides. These are the facts that survive the oracle's
+    # return, so they are the ones the hop's COUPLING can state and a later
+    # oracle can consume; the loop above prefers whichever variable holds the
+    # value first, which is often a LOCAL (``RB.ek_PQ{1} = ek_PQ{2}``) and is
+    # therefore unusable outside this lemma.
+    #
+    # They are appended to ``conj`` as well, not only reported: without the field
+    # form in the ``seq`` invariant the tail peel loses the local's relation to
+    # the field it was projected from, and the post cannot be re-derived.
+    # MEASURED on the UG cells, whose KDF input carries an ENCAPSULATION key the
+    # CG one does not -- their `decaps` challenge branch needs
+    # ``RB.ek_PQ{1} = RD.pq_keys{2}.`1`` and got "nothing to rewrite" without it,
+    # because the residual goal was a CONJUNCTION rather than the regrouping
+    # equality.
+    field_names_e, field_names_o = set(map_e.values()), set(map_o.values())
+    state_conj: list[str] = []
+    if key_e in field_names_e and key_o in field_names_o:
+        state_conj.append(conj[1])
+    for var_e, val in sorted(canon_e.items()):
+        if val == coupled_slot or var_e not in fields_e:
+            continue
+        name_e = _enc_name(var_e)
+        if name_e is None:
+            continue
+        hit = next(
+            (
+                k
+                for k in sorted(canon_o)
+                if canon_o[k] == val and k in fields_o and _oth_name(k) is not None
+            ),
+            None,
+        )
+        if hit is not None:
+            state_conj.append(
+                f"{name_e}{{{enc_side}}} = {_oth_name(hit)}{{{oth_side}}}"
+            )
+            continue
+        m = re.fullmatch(r"(.*?)((?:\.`\d+)+)", val)
+        if m is None:
+            continue
+        head = next(
+            (
+                k
+                for k in sorted(canon_o)
+                if canon_o[k] == m.group(1)
+                and k in fields_o
+                and _oth_name(k) is not None
+            ),
+            None,
+        )
+        if head is not None:
+            state_conj.append(
+                f"{name_e}{{{enc_side}}} = "
+                f"{_oth_name(head)}{{{oth_side}}}{m.group(2)}"
+            )
+    conj.extend(c for c in state_conj if c not in conj)
+    if key_conj_out is not None:
+        # PROBE mode: the coupling builder wants the state-level conjuncts only.
+        # Return before ``_register()`` so a probe on a hop this route would not
+        # ultimately close leaves no orphan lemma request behind.
+        key_conj_out.extend(dict.fromkeys(state_conj))
+        return None
     for var_a, val in sorted(canon_e.items()):
         if val == coupled_slot or var_a not in fields_e or _enc_name(var_a) is None:
             continue
@@ -10773,6 +10874,64 @@ def _synth_kdf_key_substitution(  # pylint: disable=too-many-arguments,too-many-
         "skip => /> *.",
         f"exact {regroup}.",
     ]
+
+
+def kdf_substitution_key_conjunct(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    oracle_name: str,
+    left_game: frog_ast.Game,
+    right_game: frog_ast.Game,
+    left_wrapper_expr: str,
+    right_wrapper_expr: str,
+    types: tc.TypeCollector,
+    type_of_factory: Callable[
+        [dict[str, frog_ast.Type], dict[str, str]],
+        Callable[[frog_ast.Expression], frog_ast.Type],
+    ],
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_module_params: list[ec_ast.ModuleParam] | None = None,
+    det_methods: dict[str, set[str]] | None = None,
+    inj_methods_by_module: dict[str, set[str]] | None = None,
+    clone_alias: dict[str, str] | None = None,
+) -> list[str]:
+    """The KDF-SUBSTITUTION conjuncts for this hop's coupling; ``[]`` off-shape.
+
+    The STATE-level facts the hop's ``initialize`` route proves: the key
+    substitution itself (``<other>.<key>{i} = <M>_c.ev_<enc> <field>{j}`` -- the
+    one value the two endpoints do not share outright, since they hold it up to
+    the deterministic injective ENCODING one of them applies) plus every
+    field-to-field correspondence, including a field paired to a COMPONENT of the
+    other side's bundled one. :func:`_synth_kdf_key_substitution` derives and
+    PROVES all of them, but the coupling is built before any tactic runs, so it
+    is recomputed here through the same derivation rather than restated by a
+    second one that could drift.
+
+    MEASURED CONSEQUENCE, and it is why this exists: without these conjuncts the
+    establishing ``initialize`` hop is happily green -- it proves the facts
+    INTERNALLY and then drops them -- while the consuming ``decaps`` hop's
+    challenge branch is left with exactly them, under a concat congruence, and
+    nothing to discharge them with. A coupling can be too WEAK as well as too
+    strong, and only the consumer reveals the former.
+    """
+    acc: list[str] = []
+    _synth_kdf_key_substitution(
+        mt.ModuleTranslator(types, type_of_factory),
+        oracle_name,
+        left_game,
+        right_game,
+        external_module_types,
+        method_return_types,
+        list(flat_module_params) if flat_module_params else [],
+        det_methods or {},
+        inj_methods_by_module or {},
+        clone_alias or {},
+        types,
+        set(),
+        left_wrapper_expr,
+        right_wrapper_expr,
+        key_conj_out=acc,
+    )
+    return acc
 
 
 def _kdf_holder(
@@ -11688,7 +11847,9 @@ def _guarded_oracle_body(proc: ec_ast.Proc) -> _GuardedBody | None:
     """``(guard, else-branch)`` for a proc whose whole executable body is ONE
     ``if`` with an event-free then-branch (the challenge-ciphertext refusal), or
     ``None`` for any other shape."""
-    stmts = [s for s in _exec_stmts(proc.body) if not isinstance(s, ec_ast.Return)]
+    stmts = _drop_witness_seeds(
+        [s for s in _exec_stmts(proc.body) if not isinstance(s, ec_ast.Return)]
+    )
     if len(stmts) != 1 or not isinstance(stmts[0], ec_ast.If):
         return None
     node = stmts[0]
@@ -12101,6 +12262,271 @@ def _synth_correctness_decaps_casesplit(  # pylint: disable=too-many-arguments,t
         "qed.",
     ]
     return ["\n".join(_render_module_decl(fgmod))], outer, set()
+
+
+def _first_inner_if(body: list[ec_ast.EcStmt]) -> int | None:
+    """Index of the first top-level ``If`` in ``body``, or ``None``."""
+    for i, s in enumerate(body):
+        if isinstance(s, ec_ast.If):
+            return i
+    return None
+
+
+def _synth_kdf_substitution_decaps(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    det_methods: dict[str, set[str]],
+    clone_alias: dict[str, str],
+    types: tc.TypeCollector | None,
+    full_coupling: str | None,
+) -> list[str] | None:
+    """Whole-oracle tactic for a KDF-KEY-SUBSTITUTION post-init oracle, or
+    ``None`` off-shape.
+
+    The CONSUMING half of what :func:`_synth_kdf_key_substitution` closes for
+    ``initialize`` (IND-CCA `hop_5_decaps` / `hop_10_decaps`). Both sides
+    case-split on the challenge ciphertext. In the CHALLENGE branch one side
+    ENCODES the shared secret its KEM challenger drew and folds the result into a
+    left-nested KDF input, while the other substitutes the KDF-PRF challenger's
+    key into a differently-bracketed one; dropping that one-sided encoding
+    through its ``_det`` axiom turns the difference into the SAME N-piece
+    regrouping law the init route already requests. In the NON-CHALLENGE branch
+    the encoding side carries its KEM challenger's dead refusal guards, which the
+    coupling falsifies, and both sides then run the same calls.
+
+    NAME-FREE AND COUNT-FREE where it matters. The dead guards go by
+    ``do ? (rcondf{i} ^if; first by auto => /#)`` -- ``do ?`` because the flat
+    state does NOT model the inlined challenger's guard structure faithfully
+    (three ``if``s where the rendered module has two), and a PATTERN position
+    because `rcondf` works with an abstract call still in the prefix once the
+    guard is the literal ``false``. With the guards gone both branches hold the
+    same calls in the same order, so one backward ladder covers them and no
+    intermediate result is ever named -- which is what keeps EC's ``inline``
+    renaming out of the tactic.
+
+    Its two premises are ESTABLISHED before it consumes them: the coupled draw by
+    :func:`_synth_kdf_key_substitution` itself, and the challenger-keygen
+    correspondence by that route's component-match pairing plus
+    ``_both_delegate_stored_key_coupling``. Declines to ``None`` off-shape."""
+    if types is None or not full_coupling or not clone_alias:
+        return None
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+
+    def _build(proj: frog_ast.Game, name: str) -> ec_ast.Module:
+        return _flat_state_module(
+            modules,
+            name,
+            proj,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            emit_state_vars=True,
+            no_shadow_fields=True,
+        )
+
+    lmod, rmod = _build(lproj, "Ks_L"), _build(rproj, "Ks_R")
+    if not lmod.procs or not rmod.procs:
+        return None
+    shapes = [_guarded_oracle_body(m.procs[0]) for m in (lmod, rmod)]
+    if shapes[0] is None or shapes[1] is None:
+        return None
+    cuts = [_first_inner_if(s.body) for s in shapes]  # type: ignore[union-attr]
+    if cuts[0] is None or cuts[1] is None:
+        return None
+    conj_all = [p.strip() for p in full_coupling.split(" /\\ ")]
+    params = [p.name for p in lmod.procs[0].params]
+    if not params or [p.name for p in rmod.procs[0].params] != params:
+        return None
+    fields = [{v.name for v in m.module_vars} for m in (lmod, rmod)]
+
+    bases = [
+        _coupling_base_for(full_coupling, sorted(fields[i]), i + 1) for i in (0, 1)
+    ]
+    if bases[0] is None or bases[1] is None:
+        return None
+
+    # Both refusal guards, and both challenge-ciphertext guards, must test a
+    # FIELD the coupling equates across the two sides -- that is what makes each
+    # two-sided ``if``'s condition goal provable, and it is checked structurally
+    # rather than by name. The other operand is left free: it is the proc
+    # parameter at the outer guard and a projection LOCAL at the inner one.
+    def _guard_ok(gl: str, gr: str) -> bool:
+        def _field(g: str, flds: set[str]) -> str | None:
+            lhs, eq, rhs = g.partition(" = ")
+            if not eq:
+                return None
+            hits = [x for x in (lhs.strip(), rhs.strip()) if x in flds]
+            return hits[0] if len(hits) == 1 else None
+
+        fl, fr = _field(gl, fields[0]), _field(gr, fields[1])
+        if fl is None or fr is None:
+            return False
+        return (
+            f"{bases[1]}.{fr}{{2}} = {bases[0]}.{fl}{{1}}" in conj_all
+            or f"{bases[0]}.{fl}{{1}} = {bases[1]}.{fr}{{2}}" in conj_all
+        )
+
+    if not _guard_ok(shapes[0].guard, shapes[1].guard):  # type: ignore[union-attr]
+        return None
+    ifs = [
+        cast(ec_ast.If, shapes[i].body[cuts[i]])  # type: ignore[union-attr,index]
+        for i in (0, 1)
+    ]
+    if not _guard_ok(ifs[0].guard, ifs[1].guard):
+        return None
+
+    # --- shared prefix -------------------------------------------------------
+    pre = [shapes[i].body[: cuts[i]] for i in (0, 1)]  # type: ignore[union-attr,index]
+    ev = [[s for s in p if _is_bb_stmt(s)] for p in pre]
+    if any(not isinstance(s, ec_ast.Call) for s in ev[0] + ev[1]) or not ev[0]:
+        return None
+    if [s.callee for s in ev[0] if isinstance(s, ec_ast.Call)] != [
+        s.callee for s in ev[1] if isinstance(s, ec_ast.Call)
+    ]:
+        return None
+    # EVERY value the prefix binds is carried, not just the call results: the
+    # challenge-ciphertext guard tests a PROJECTION local, so without its
+    # equality the inner two-sided ``if``'s condition goal is unprovable
+    # (measured -- the route's first emission failed exactly there).
+    if len(pre[0]) != len(pre[1]) or any(
+        type(a) is not type(b) for a, b in zip(pre[0], pre[1])
+    ):
+        return None
+    bound = [
+        (a, b)
+        for a, b in zip(pre[0], pre[1])
+        if isinstance(a, (ec_ast.Call, ec_ast.Assign))
+    ]
+    if not bound:
+        return None
+    pre_conj = " /\\ ".join(
+        f"{a.var}{{1}} = {b.var}{{2}}"
+        for a, b in bound
+        if isinstance(a, (ec_ast.Call, ec_ast.Assign))
+        and isinstance(b, (ec_ast.Call, ec_ast.Assign))
+    )
+    tac: list[str] = [
+        "inline *.",
+        "if; 1: smt().",
+        "auto.",
+        f"seq {len(pre[0])} {len(pre[1])} : (#pre /\\ {pre_conj}).",
+        "+ " + " ".join(["wp; call (_: true);"] * len(ev[0])) + " skip => /#.",
+        "if; 1: smt().",
+    ]
+
+    # --- challenge branch: the one-sided encoding, then the regrouping law ----
+    thens = [list(ifs[i].then_body) for i in (0, 1)]
+    elses = [list(ifs[i].else_body) for i in (0, 1)]
+    if not elses[0] or not elses[1]:
+        return None
+    t_ev = [[s for s in t if _is_bb_stmt(s)] for t in thens]
+    if any(not isinstance(s, ec_ast.Call) for s in t_ev[0] + t_ev[1]):
+        return None
+    t_callees = [[cast(ec_ast.Call, s).callee for s in e] for e in t_ev]
+    ops = _callee_align(t_callees[0], t_callees[1])
+    if ops is None or ops.count("dropL") + ops.count("dropR") != 1:
+        return None
+    enc_side = 1 if "dropL" in ops else 2
+    drop_at = ops.index("dropL" if enc_side == 1 else "dropR")
+    if drop_at != 0:
+        return None  # the encoding leads its branch; anything else is off-shape
+    enc_call = cast(ec_ast.Call, t_ev[enc_side - 1][0])
+    parts = _callee_parts(enc_call.callee)
+    if parts is None or parts[0] not in clone_alias:
+        return None
+    enc_mod, enc_meth = parts
+    if enc_meth not in det_methods.get(enc_mod, set()):
+        return None
+    enc_args = _split_top_args(enc_call.args)
+    if len(enc_args) != 1:
+        return None
+    enc_fields = fields[enc_side - 1]
+    arg = enc_args[0].strip()
+    if arg not in enc_fields:
+        return None  # the encoded value must be a FIELD, else it is unnameable
+    enc_base = _coupling_base_for(full_coupling, sorted(enc_fields), enc_side)
+    if enc_base is None:
+        return None
+    arg_ref = f"{enc_base}.{arg}{{{enc_side}}}"
+    # ENABLING-COUPLING GATE, and it is the difference between closing this hop
+    # and turning a warn cell into a blocked one. The challenge branch ends on
+    # the regrouping law, whose two sides agree only once the coupling relates
+    # the two KDF KEYS -- the encoded field here against the other side's
+    # challenger key. Without that conjunct the branch's residue IS that equality
+    # under a concat congruence: the `rewrite` below still fires and the closing
+    # `smt` cannot discharge what is left, so the tactic RUNS WITHOUT CLOSING and
+    # EasyCrypt rejects the whole export. Measured both ways on
+    # `CG_expanded_INDCCA_PQ` `hop_5_decaps`.
+    #
+    # The conjunct comes from `_kdf_substitution_key_coupling`, which re-runs the
+    # establishing `initialize` route's own derivation. Checking for it here also
+    # keeps this route off the MIRROR hop, where that route legitimately declines
+    # (by then the challenge KDF output is a fresh sample, so `initialize` no
+    # longer carries the encoding and cannot pair the two draws) -- that hop
+    # keeps its honest admit until an establishing route exists for it.
+    want = _ws(f"{clone_alias[enc_mod]}.ev_{enc_meth} {arg_ref}")
+    if not any(want in _ws(c) for c in conj_all):
+        return None
+    binders = "_g0 _a0"
+    n_tail = len(t_ev[enc_side - 1]) - 1
+    if n_tail != len(t_ev[2 - enc_side]):
+        return None
+
+    # The regrouping law relating the two KDF inputs. Read off the LAST call's
+    # argument on each side, resolved back through the branch's assignments.
+    op_names = types.concat_op_names()
+    envs = [_assign_env(thens[i]) for i in (0, 1)]
+    kdf = [cast(ec_ast.Call, t_ev[i][-1]) for i in (0, 1)]
+    chain_e = _concat_chain(
+        _resolve_expr(kdf[enc_side - 1].args, envs[enc_side - 1]), op_names
+    )
+    head_o, _rest_o = _app_head(
+        _resolve_expr(kdf[2 - enc_side].args, envs[2 - enc_side])
+    )
+    if chain_e is None or head_o not in op_names:
+        return None
+    regroup = types.probe_concat_regroup(tuple(chain_e[0]), head_o)
+    if regroup is None:
+        return None
+    types.request_concat_regroup(tuple(chain_e[0]), head_o)
+    tac += [
+        f"+ seq {1 if enc_side == 1 else 0} {1 if enc_side == 2 else 0} : "
+        f"(#pre /\\ {enc_call.var}{{{enc_side}}} = "
+        f"{clone_alias[enc_mod]}.ev_{enc_meth} ({arg_ref})).",
+        f"  + exists* (glob {enc_mod}){{{enc_side}}}, ({arg_ref}); "
+        f"elim* => {binders}.",
+        f"    call{{{enc_side}}} ({enc_mod}_{enc_meth}_det {binders}); skip => /#.",
+        *["  wp; call (_: true)." for _ in range(n_tail)],
+        "  skip => /> *.",
+        # NOT `exact`: the hop's post carries the whole coupling, so the residue
+        # is the regrouping equality AND every conjunct the branch preserves.
+        # `rewrite` turns the one into a reflexivity and leaves the rest to smt.
+        f"  rewrite {regroup}.",
+        "  smt().",
+    ]
+
+    # --- non-challenge branch: the dead guards, then one aligned ladder -------
+    dead = [any(isinstance(s, ec_ast.If) for s in e) for e in elses]
+    if dead[0] == dead[1]:
+        return None
+    dead_side = 1 if dead[0] else 2
+    lin = [s for s in elses[2 - dead_side] if _is_bb_stmt(s)]
+    if not lin or any(not isinstance(s, ec_ast.Call) for s in lin):
+        return None
+    tac += [
+        f"do ? (rcondf{{{dead_side}}} ^if; first by auto => /#).",
+        *["wp; call (_: true)." for _ in lin],
+        "wp; skip => /#.",
+    ]
+    return [_res_tag(SYNTH_PARAM), "proc.", *tac, "qed."]
 
 
 def _bd_sample_dead(

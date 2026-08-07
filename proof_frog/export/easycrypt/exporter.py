@@ -10325,6 +10325,67 @@ def export_proof_file(proof_path: str) -> str:
             f"{alias}.ev_{meth} ({red_base}.{seed_field}{{{rs}}})"
         )
 
+    kdf_subst_conj_memo: dict[tuple[str, str], list[str]] = {}
+
+    def _kdf_substitution_key_coupling(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> list[str]:
+        """The state-level conjuncts of a KDF-KEY SUBSTITUTION hop; ``[]``
+        off-shape.
+
+        The IND-CCA `hop_5` / `hop_10` seam: one endpoint DRAWS the KDF key
+        directly into its challenger's field, the other draws a shared secret and
+        ENCODES it with a ``deterministic injective`` method. The
+        ``initialize`` hop's own route (``_synth_kdf_key_substitution``) already
+        derives that correspondence and every field-to-field one alongside it, so
+        this builder re-runs that derivation in probe mode rather than restating
+        it -- which keeps the conjuncts and the tactic that proves them in one
+        place instead of two that can drift.
+
+        WHY THE COUPLING NEEDS THEM, measured on the four `_PQ` cells: the
+        ``initialize`` hop proves them INTERNALLY (they are conjuncts of its
+        ``seq`` invariant) and then drops them, so the consuming ``decaps``
+        challenge branch is left holding exactly those equalities under a concat
+        congruence. On CG that residue is the key substitution alone; on UG,
+        whose KDF input also carries an encapsulation key, it is the encapsulation
+        correspondence too. Adding them closes the hop; removing them again
+        reproduces the residue verbatim.
+        """
+        if step_a.reduction is None or step_b.reduction is None:
+            return []
+        model = resolver.oracle_model_for(step_a)
+        if model is None or model.init_name is None:
+            return []
+        lwrap = resolver.resolve(step_a).module_expr
+        rwrap = resolver.resolve(step_b).module_expr
+        memo_key = (lwrap, rwrap)
+        if memo_key in kdf_subst_conj_memo:
+            return kdf_subst_conj_memo[memo_key]
+        # pylint: disable=protected-access
+        left_ast = engine._get_game_ast(step_a.challenger, step_a.reduction)
+        right_ast = engine._get_game_ast(step_b.challenger, step_b.reduction)
+        # pylint: enable=protected-access
+        # pylint: disable=import-outside-toplevel
+        from .chain_emitter import kdf_substitution_key_conjunct
+
+        got = kdf_substitution_key_conjunct(
+            model.init_name,
+            left_ast,
+            right_ast,
+            lwrap,
+            rwrap,
+            top_types,
+            type_of_factory,
+            {inst.let_name: inst.primitive_name for inst in instances},
+            method_return_types,
+            list(declared_instance_params) if declared_instance_params else None,
+            det_methods_by_module,
+            inj_methods_by_module,
+            clone_alias_by_module,
+        )
+        kdf_subst_conj_memo[memo_key] = got
+        return got
+
     def _live_state_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
         base = _live_state_coupling_base(step_a, step_b)
         extra = _ro_challenger_materialization(step_a, step_b)
@@ -10387,6 +10448,31 @@ def export_proof_file(proof_path: str) -> str:
             fresh = [c for c in bdk.split(" /\\ ") if c not in have]
             if fresh:
                 coupled = f"{coupled} /\\ " + " /\\ ".join(fresh)
+        # SAME seam, the rest of it: the two sides' KDF KEYS (which agree only up
+        # to the deterministic injective encoding one of them applies) and the
+        # field-to-field correspondences alongside them. Derived by the
+        # ``initialize`` route itself (probe mode) so the conjuncts and the tactic
+        # that proves them cannot drift apart. Empty off-shape.
+        #
+        # Deduped MODULO ORIENTATION, unlike the builders above: this one restates
+        # correspondences another builder may already have emitted the other way
+        # round (``RD.pq_keys{2}.`2 = <Chal>.dk{1}`` against
+        # ``<Chal>.dk{1} = RD.pq_keys{2}.`2``), and a flipped duplicate is pure
+        # noise in every lemma statement of the hop.
+        ksc = _kdf_substitution_key_coupling(step_a, step_b)
+        if ksc:
+
+            def _unordered(conjunct: str) -> frozenset[str]:
+                return frozenset(p.strip() for p in conjunct.split(" = "))
+
+            seen_pairs: set[frozenset[str]] = {
+                _unordered(c) for c in coupled.split(" /\\ ")
+            }
+            for cand in ksc:
+                if _unordered(cand) in seen_pairs:
+                    continue
+                seen_pairs.add(_unordered(cand))
+                coupled = f"{coupled} /\\ {cand}"
         # Plain GAME vs FORWARDING reduction (IND-CCA `_PQ` decaps hops): the
         # game's packed decapsulation key <-> the challenger's, for a component
         # the reduction never stores because it forwards the oracle instead.

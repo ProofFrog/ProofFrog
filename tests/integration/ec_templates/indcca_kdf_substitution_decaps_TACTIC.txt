@@ -196,3 +196,104 @@ equality>)` that names the two KDF results and is discharged by
 `rewrite <regroup>` on its own, leaving the branch to end on a plain
 `wp; skip => /#` that has the conjuncts in `#pre`. That turns one closer that
 must do two unrelated jobs into two steps that each do one.
+
+*** UNPARKED c263 -- THE c262 DIAGNOSIS ABOVE IS REFUTED BY MEASUREMENT. ***
+
+The two premises do NOT interact. **Premise (1) was never in the coupling at
+all** -- not before `_both_delegate_stored_key_coupling` landed and not after.
+Checked directly in four consecutive exports of `CG_expanded_INDCCA_PQ`
+(`.ec-tmp/{c260,f260,h261,j261}_CG_expanded_INDCCA_PQ.ec`): every one of them
+states the same eleven conjuncts, `j261` adds premise (2) and `RD.ctStar{2}.`1`,
+and NONE of the four mentions `H_c.KDFPRFSec_Real.k` anywhere in a hop
+precondition. The c261c/c261d note "premise (1) was already established --
+nothing to do" was about `hop_5_initialize` being ABLE to prove it (measured by
+strengthening that hop's post), not about the coupling carrying it. The derived
+tactic at the top of this file was validated against a HAND-EDITED lemma
+statement that had premise (1) spliced in.
+
+THE GOAL PROBE SETTLED IT IN ONE CALL, where six tactic attempts had not.
+`ec_print_goals` at the line after the challenge branch's `skip => /> *` prints a
+context with NO hypotheses beyond the branch guard and the goal
+
+    concat_..._to_... (KEM_PQ_c.ev_encodesharedsecret RB.ss_PQ{1}) X
+  = concat_..._to_... H_c.KDFPRFSec_Real.k{2}                      X
+
+for a common X -- i.e. EXACTLY premise (1) under a concat congruence. Attempt 3's
+"the rewrite succeeds and only the smt fails" is that goal after the regrouping
+law has already fired: what is left needs the premise and nothing else.
+
+NEGATIVE CONTROL, both directions, same toolchain (MCP `ec_compile`):
+  * `.ec-tmp/v263.ec` = `s262.ec` with premise (1) added to the lemma's pre AND
+    post and the closer restored to `exact <regroup>` -> **OK**.
+  * `.ec-tmp/s262.ec` unchanged (no premise (1)) -> **FAILED**, and the residual
+    goal it prints is the congruence above, verbatim.
+
+THE FIX IS A COUPLING CONJUNCT, NOT A TACTIC. `_synth_kdf_key_substitution`
+already DERIVES the equality -- it is `conj[1]`, the second conjunct of its own
+`seq` invariant -- proves it, and then drops it on the floor, because the hop's
+post is the coupling and the coupling never had it. So the route now runs in
+PROBE mode (`key_conj_out`) from a new exporter coupling builder
+(`_kdf_substitution_key_coupling`), which keeps the conjunct and the tactic that
+proves it in one derivation instead of two.
+
+WITH THE CONJUNCT IN THE COUPLING the establishing side is still green: a full
+`scripts/easycrypt.sh` run on the re-export is EXIT 0 with the SAME 3 admits and
+the same 17 `synth-param` tags, and the only three changed lines in the whole
+2.4 MB file are `hop_5_initialize`'s post, `hop_5_decaps`'s pre+post, and the
+`hop_5` pr-lemma's `call (_: ...)` invariant. Ordering rule satisfied in both
+directions BEFORE the consumer is emitted.
+
+LESSON, and it generalises past this hop: when a consumer's premise is "already
+established", check whether it is established IN THE COUPLING or merely
+PROVABLE. A hop that proves a fact internally and drops it looks identical from
+the establishing side and is invisible until the consumer asks for it.
+
+*** THE MIRROR HOP (`hop_10_decaps`) IS A SEPARATE, MEASURED SUB-WALL. ***
+
+`hop_5` and `hop_10` are mirror images -- at `hop_10` the KDF-PRF challenger sits
+on the LEFT (`RE`, using `challenger_k` directly, key-prepended) and the KEM
+challenger on the RIGHT (`RC`, ENCODING `ss_PQ` and left-nesting) -- so the
+`decaps` route's shape gate is satisfied there too. But `hop_10`'s COUPLING
+carries no key relation at all, and unlike `hop_5` this is not an oversight: its
+`initialize` CANNOT establish one as currently emitted.
+
+WHY, read off the two flat states' `initialize` backbones. At `hop_5` the
+challenge KDF output is still computed in `initialize`, so the encoding call is
+present there and `_synth_kdf_key_substitution` can pair the two draws through
+it. By `hop_10` that output has been replaced by a fresh random `ss` (hops 6-9),
+so `initialize` no longer contains the encoding -- it contains only two
+one-sided draws of the SAME distribution:
+
+    Step_10L_state_0.initialize:  challenger_k                  <$ dbs_kem_pq_nss
+    Step_10R_state_0.initialize:  challenger_Initialize_ssStar0 <$ dbs_kem_pq_nss
+
+`_bd_events` tags a sample by its bound VARIABLE, so those two never match, and
+`_synth_bundled_delegate_reorder` aligns the backbones by DROPPING each one-sided
+(`swap{1} [7..10] -4` then `rnd{2}` ... `rnd{1}` ... `smt(dbs_kem_pq_nss_ll)`).
+That is sound -- the hop's post never mentions either variable -- and it is why
+`hop_10_initialize` is green today. It is also exactly what destroys the
+information `hop_10_decaps` needs: the drop throws away the only chance to couple
+the two draws.
+
+SO THE MIRROR NEEDS AN ESTABLISHING-SIDE BUILD FIRST, not a consumer tweak.
+Shape of the route (`_synth_dead_key_bijection_init`, not yet written):
+ * gate: after the same reorder alignment, EXACTLY ONE one-sided sample on EACH
+   side, SAME distribution, at the SAME aligned position;
+ * the bijection is named by the CONSUMER, not guessed -- the post-init oracle
+   where one side applies a `deterministic injective` single-argument method to
+   the field holding its draw while the other uses the field holding the other
+   draw in the corresponding KDF slot. Deriving it from the consumer is what
+   makes the choice correct by construction: any bijection would make the
+   conjunct PROVABLE (pick the `rnd` map to match), so the compiler cannot catch
+   a wrong guess -- only the consumer can;
+ * tactic: replace the two one-sided `rnd{i}` with the coupled
+   `rnd <alias>.ev_<meth> _bij_g` the `hop_5` route already emits;
+ * the conjunct then reaches the coupling through the same probe hook.
+
+UNTIL THAT LANDS, the `decaps` route must DECLINE on the mirror rather than fire
+and fail. Its enabling-coupling gate is the same shape as the ones
+`_synth_correctness_decaps_casesplit` carries: require the hop's coupling text to
+contain a conjunct whose right-hand side is `<alias>.ev_<meth> <encoded field>`
+-- exactly the conjunct `_kdf_substitution_key_coupling` emits. Where that
+coupling declines, so does the consumer, and the hop keeps its honest admit
+instead of turning a ⚠ cell into a ⛔ one.

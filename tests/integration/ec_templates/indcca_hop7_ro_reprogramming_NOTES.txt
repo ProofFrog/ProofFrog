@@ -519,3 +519,38 @@ the encoding on the right).
 REACH: the same shape is present on all four CG/UG `_PQ` cells -- hop_7/hop_8 on
 the `_expanded` pair, hop_11/hop_12 on the `_seedbased` pair. Four cells x two
 hops x three lemmas.
+
+*** UPDATE c278: THE `pr` ASSEMBLY THREADS THE QUANTIFIED INVARIANT -- but it emits
+*** TWO EXTRA SIDE GOALS the current tactic does not cover. ***
+
+The first whole-file compile of the weakened export failed at `call
+hop_7_initialize` with "call: invalid goal shape", which reads like the assembly
+rejecting the new invariant. It is not. The goal probe shows what actually
+happens: with a `forall`-carrying invariant, `call (_: I)` for the abstract
+adversary emits THREE goals rather than one --
+
+   1. forall &1 &2, I => I                              (trivial)
+   2. forall &1 &2, I => forall <result/glob vars>, I' => I'   (trivial)
+   3. the remaining `initialize` equiv
+
+-- and the emitted tactic has a single `+ conseq hop_<n>_decaps.` bullet, so
+`call hop_<n>_initialize` landed on goal 2, an implication rather than an equiv.
+With a quantifier-free invariant EC discharges 1 and 2 itself, which is why the
+old shape needed only one bullet.
+
+FIX, and it is two lines per `pr` lemma:
+
+    call (_: <invariant>).
+    + conseq hop_<n>_decaps.
+    + by [].
+    + by [].
+    call hop_<n>_initialize.
+    auto.
+
+Verified on the `goal_probe` cut (EXIT 0). So the emission owes the `pr` lemmas
+two extra bullets whenever the coupling it emits contains a quantifier -- a
+generic fact about this assembly, not something specific to hop_7.
+
+LESSON worth keeping: "invalid goal shape" from `call` frequently means the goal
+COUNT changed upstream, not that the named lemma is wrong. Count the goals before
+blaming the lemma.

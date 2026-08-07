@@ -554,3 +554,29 @@ generic fact about this assembly, not something specific to hop_7.
 LESSON worth keeping: "invalid goal shape" from `call` frequently means the goal
 COUNT changed upstream, not that the named lemma is wrong. Count the goals before
 blaming the lemma.
+
+*** UPDATE c278b: THE WHOLE WEAKENED EXPORT COMPILES, WITH EXACTLY THE TWO
+*** ESTABLISHING HOPS ADMITTED. THE PLAN IS VALIDATED END TO END. ***
+
+`.ec-tmp/z7.ec` -- the real `CG_expanded_INDCCA_PQ` export with BOTH orientations
+of the conjunct weakened, both derived consumer tactics spliced in, and the two
+`pr` lemmas given their extra bullets -- compiles EXIT 0 under release EasyCrypt
+with exactly TWO `admit.`s: `hop_7_initialize` and `hop_8_initialize`.
+
+So everything except the establishing halves is validated against the real proof,
+not a tripwire: both consumers, both `pr` assemblies, and the whole surrounding
+chain still threading the weakened coupling.
+
+A CONSTRAINT THIS MAKES PRECISE, and it is the ordering rule with a number on it.
+`hop_8_initialize` is CLOSED today (`synth-param`) -- `CG_expanded_INDCCA_PQ`'s
+single admit is `hop_7_initialize` alone. Under the weakened coupling it becomes
+admitted, because its current tactic proves the full-function equality that the
+weakening removes. So the landing must close BOTH establishing hops:
+
+    land nothing            -> 1 admit  (today)
+    land the weakening only -> 2 admits (a REGRESSION)
+    land both establishing  -> 0 admits (GREEN)
+
+There is no partial credit here, and a half-landing is strictly worse than not
+landing. That is exactly what the ordering rule warns about, now with the cost
+measured rather than argued.

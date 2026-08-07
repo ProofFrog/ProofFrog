@@ -18,6 +18,7 @@ from .challenge_common import paren as cc_paren
 from .challenge_common import split_top_args as cc_split_args
 from .challenge_common import subst as cc_subst
 from . import canonical_form
+from . import chain_emitter as ce
 from . import ec_ast
 from . import expr_translator
 from . import module_translator as mt
@@ -10445,6 +10446,52 @@ def export_proof_file(proof_path: str) -> str:
         dead_draw_conj_memo[memo_key] = got
         return got
 
+    ro_reprog_memo: dict[tuple[str, str], "ce.RoReprogramCoupling | None"] = {}
+
+    def _ro_reprogram_coupling(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> "ce.RoReprogramCoupling | None":
+        """This hop's RO-REPROGRAMMING coupling, or ``None`` off-shape.
+
+        One endpoint's ``initialize`` returns its random function READ at the
+        challenge KDF input; the other returns an independent draw. ``={res}``
+        already ties those two values, so asking for full function equality on
+        top of it is not merely hard but UNSATISFIABLE, and the hop admits.
+
+        Derived by the ``initialize`` route's own shape detector (see
+        :func:`chain_emitter.ro_reprogram_conjunct`), so the conjuncts and the
+        tactic that proves them stay in one place rather than in two that can
+        drift. ``None`` for the MIRROR hop, where both endpoints draw fresh and
+        full equality does hold -- that one must keep its stronger coupling.
+        """
+        model = resolver.oracle_model_for(step_a)
+        if model is None or model.init_name is None:
+            return None
+        lwrap = resolver.resolve(step_a).module_expr
+        rwrap = resolver.resolve(step_b).module_expr
+        memo_key = (lwrap, rwrap)
+        if memo_key in ro_reprog_memo:
+            return ro_reprog_memo[memo_key]
+        # pylint: disable=protected-access
+        left_ast = engine._get_game_ast(step_a.challenger, step_a.reduction)
+        right_ast = engine._get_game_ast(step_b.challenger, step_b.reduction)
+        # pylint: enable=protected-access
+        got = ce.ro_reprogram_conjunct(
+            model.init_name,
+            left_ast,
+            right_ast,
+            lwrap,
+            rwrap,
+            top_types,
+            type_of_factory,
+            {inst.let_name: inst.primitive_name for inst in instances},
+            method_return_types,
+            det_methods_by_module,
+            clone_alias_by_module,
+        )
+        ro_reprog_memo[memo_key] = got
+        return got
+
     def _live_state_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
         base = _live_state_coupling_base(step_a, step_b)
         extra = _ro_challenger_materialization(step_a, step_b)
@@ -10588,6 +10635,36 @@ def export_proof_file(proof_path: str) -> str:
         tup = _stored_tuple_invariants(step_a, step_b)
         if tup:
             coupled = f"{coupled} /\\ {tup}"
+        # RO REPROGRAMMING: one endpoint READS its random function at the
+        # challenge KDF input while the other DRAWS that value fresh. Since
+        # ``={res}`` already ties those two values, asking for full function
+        # equality on top of it is UNSATISFIABLE and the hop admits -- so drop it
+        # and state agreement OFF the challenge point, plus the stored challenge
+        # ciphertext component the consuming ``decaps`` hop compares against.
+        # ``None`` off-shape, and in particular for the MIRROR hop, where both
+        # sides draw fresh and the stock ladder already proves the stronger fact.
+        rr = _ro_reprogram_coupling(step_a, step_b)
+        if rr is not None:
+            parts = coupled.split(" /\\ ")
+            other = next(
+                (
+                    (c, next(iter(_unordered_pair(c) - {rr.reader_ref})))
+                    for c in parts
+                    if rr.reader_ref in _unordered_pair(c)
+                    and len(_unordered_pair(c)) == 2
+                ),
+                None,
+            )
+            if other is not None:
+                kept = [c for c in parts if c != other[0]]
+                coupled = " /\\ ".join(
+                    kept
+                    + [
+                        f.replace("{rf}", other[1])
+                        for f in rr.add_fmt
+                        if f.replace("{rf}", other[1]) not in kept
+                    ]
+                )
         return f"{coupled} /\\ {reprog}" if reprog else coupled
 
     # Per-hop memo of the multi-oracle chain emission. ``translate_hops``
@@ -10753,6 +10830,12 @@ def export_proof_file(proof_path: str) -> str:
             bij_method_requests.update(info.bij_methods)
             inj_method_requests.update((m, x) for m, x, _bs, _a in info.bij_methods)
             decaps_val_requests.update(info.decaps_val_schemes)
+            # A module the chain INTERPOSES that holds state of its own (a
+            # reprogramming twin) is a live state holder like any other: relate
+            # an abstract call in an equiv that mentions it, and without
+            # write-separation EC concludes "module <NG> can write
+            # <Twin>.<field>". Empty for every chain that interposes none.
+            live_state_holders.update(info.state_modules)
             if info.aux_lemmas and not aux_lemma_lines:
                 aux_lemma_lines.extend(info.aux_lemmas)
             multi_oracle_hop_cache[_i] = info.tactic_body_by_oracle

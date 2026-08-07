@@ -795,11 +795,21 @@ def translate_inlining_hop_pr_lemma(  # pylint: disable=too-many-arguments,too-m
                 f"call hop_{hop_index}_{multi_oracle.init_oracle}.",
                 "auto.",
             ]
+        # A QUANTIFIED invariant costs two extra goals. ``call (_: I)`` reads I
+        # as an equality set when it can, and one goal per oracle is all it
+        # then asks for; once I carries a ``forall`` it cannot, and asks for the
+        # invariant's two side conditions besides. Both are trivial, but
+        # omitting them is "call: invalid goal shape" at the NEXT step -- which
+        # reads as a rejection of the named lemma and is not one.
+        quantified = (
+            ["+ by [].", "+ by []."] if "forall (" in multi_oracle.coupling else []
+        )
         body = [
             f"byequiv (_: {multi_oracle.byequiv_pre} ==> ={{res}}) => //.",
             "proc.",
             f"call (_: {multi_oracle.coupling}).",
             *[f"+ conseq hop_{hop_index}_{m}." for m in multi_oracle.post_init_oracles],
+            *quantified,
             *init_tac,
             "qed.",
         ]

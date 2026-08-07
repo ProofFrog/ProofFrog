@@ -491,3 +491,31 @@ copy of either side. Sized against the real bodies:
 
 So the emission is: a `Mid` twin (prefix + pinned draw), two swaps, the two legs
 already proved in the tripwire, one `_det` drop, and the two coupling conjuncts.
+
+*** UPDATE c277c: IT IS FOUR LEMMAS, NOT TWO -- hop_8 IS THE MIRROR AND CARRIES
+*** THE SAME CONJUNCT IN THE OPPOSITE ORIENTATION. ***
+
+Measured, and it nearly slipped past: the whole-function conjunct occurs EIGHT
+times in `CG_expanded_INDCCA_PQ`, in TWO spellings of four each --
+
+    GameFreshSS.rF{2} = H_c.KDFPRFSec_Random.rF{1}     (hop_7: RD ~ GameFreshSS)
+    GameFreshSS.rF{1} = H_c.KDFPRFSec_Random.rF{2}     (hop_8: GameFreshSS ~ RE)
+
+`hop_8` is `GameFreshSS ~ RE(...KDFPRFSec_Random)`, the mirror of `hop_7`, with
+`GameFreshSS` on the LEFT. The c276 probe replaced only the first spelling, so it
+weakened `hop_7`'s four sites and left `hop_8`'s four intact -- which is why that
+probe compiled at all. A landing that weakens only `hop_7` would leave `hop_8`
+asserting the unachievable equality, i.e. it would not be a landing.
+
+SO THE LANDING IS SIX LEMMAS: `hop_7_initialize` / `hop_7_decaps` / `hop_7_pr` and
+`hop_8_initialize` / `hop_8_decaps` / `hop_8_pr`. The `pr` lemmas take the coupling
+as their `proc (...)` invariant, so they follow automatically once the per-oracle
+lemmas agree, but the ORIENTATION differs between the two hops and the emitted
+conjunct has to follow the hop's own sides -- exactly the orientation trap the
+mirror dead-draw route hit earlier this run (`rnd f finv` maps LEFT to RIGHT, and
+`_synth_kdf_key_substitution` would emit the wrong direction if it ever fired with
+the encoding on the right).
+
+REACH: the same shape is present on all four CG/UG `_PQ` cells -- hop_7/hop_8 on
+the `_expanded` pair, hop_11/hop_12 on the `_seedbased` pair. Four cells x two
+hops x three lemmas.

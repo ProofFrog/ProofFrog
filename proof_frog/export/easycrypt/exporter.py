@@ -9884,6 +9884,102 @@ def export_proof_file(proof_path: str) -> str:
                 return " /\\ ".join(conj)
         return ""
 
+    def _both_delegate_stored_key_coupling(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> str:
+        """Cross-seam conjunct when BOTH sides delegate ``Initialize`` and only
+        one of them stores the shared keypair itself. Empty string off-shape.
+
+        The IND-CCA KDF-PRF hops (`hop_5`/`hop_10` of the `_PQ` cells): ``RB``
+        delegates to a KEM challenger that holds the PQ decapsulation key, while
+        ``RD`` delegates to the KDF-PRF challenger (for its key) and runs its OWN
+        ``KeyGen``, keeping the whole ``(ek, dk)`` pair in one field. Both keys
+        come from the one ``KeyGen`` the hop relates, but neither existing builder
+        reaches the seam: ``_stored_pair_vs_chal_field_coupling`` requires the
+        STORING side not to delegate, and this one does.
+
+        MEASURED CONSEQUENCE, and it is why this exists: without the conjunct the
+        establishing ``initialize`` hop compiles happily, and only its own
+        ``decaps`` hop is left unprovable -- the two bodies differ in exactly that
+        reference (``KEM_PQ.decaps(pq_keys.`2, ..)`` against the challenger's
+        ``KEM_PQ.decaps(<Chal>.dk, ..)``). A coupling can be too WEAK as well as
+        too strong, and only the consumer reveals the former.
+
+        Deliberately narrow, failing CLOSED rather than emitting a false
+        conjunct: the challenger field's type must match EXACTLY ONE component
+        across the storing side's product fields, and the STORING side's own
+        challenger must hold nothing of that type -- which is what makes the
+        other side's challenger the only candidate.
+        """
+        if step_a.reduction is None or step_b.reduction is None:
+            return ""
+        helpers_by = {
+            h.name: h for h in proof.helpers if isinstance(h, frog_ast.Reduction)
+        }
+        for stored_step, deleg_step, ss, ts in (
+            (step_a, step_b, "1", "2"),
+            (step_b, step_a, "2", "1"),
+        ):
+            assert (
+                stored_step.reduction is not None and deleg_step.reduction is not None
+            )
+            # BOTH delegate -- that is this builder's whole reason to exist, and
+            # it is what keeps it off every hop the existing pair already owns.
+            if not _reduction_init_delegates(stored_step.reduction.name):
+                continue
+            if not _reduction_init_delegates(deleg_step.reduction.name):
+                continue
+            comp = _composite_reduction_step(deleg_step)
+            if comp is None:
+                continue
+            _deleg_base, chal_base, _own = comp
+            # pylint: disable=protected-access
+            chal_ast = engine._get_game_ast(deleg_step.challenger, None)
+            own_chal_ast = engine._get_game_ast(stored_step.challenger, None)
+            # pylint: enable=protected-access
+            if chal_ast is None or not chal_ast.fields:
+                continue
+            stored_red = helpers_by.get(stored_step.reduction.name)
+            if stored_red is None:
+                continue
+            stored_base = pt.module_base_name(resolver.resolve(stored_step).module_expr)
+            comps_by_type: dict[str, list[str]] = {}
+            for sf in stored_red.fields:
+                st_ty = top_types.resolve(sf.type)
+                if not isinstance(st_ty, frog_ast.ProductType):
+                    continue
+                for k, comp_ty in enumerate(st_ty.types):
+                    # pylint: disable=protected-access
+                    comps_by_type.setdefault(
+                        top_types.translate_type(comp_ty).text, []
+                    ).append(
+                        f"{stored_base}.{mt._ec_field_name(sf.name)}"
+                        f"{{{ss}}}.`{k + 1}"
+                    )
+                    # pylint: enable=protected-access
+            # Types the STORING side's own challenger already holds are reachable
+            # through that seam instead; leaving them alone keeps this builder off
+            # correspondences another one states.
+            own_chal_types = {
+                top_types.translate_type(f.type).text
+                for f in (own_chal_ast.fields if own_chal_ast else [])
+            }
+            conj: list[str] = []
+            for cf in chal_ast.fields:
+                ctext = top_types.translate_type(cf.type).text
+                cands = comps_by_type.get(ctext, [])
+                if len(cands) != 1 or ctext in own_chal_types:
+                    continue
+                # pylint: disable=protected-access
+                conj.append(
+                    f"{cands[0]} = {chal_base}.{mt._ec_field_name(cf.name)}{{{ts}}}"
+                )
+                # pylint: enable=protected-access
+            if conj:
+                live_state_holders.add(chal_base)
+                return " /\\ ".join(conj)
+        return ""
+
     def _forwarded_chal_key_coupling(
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> str:
@@ -10281,6 +10377,16 @@ def export_proof_file(proof_path: str) -> str:
         spc = _stored_pair_vs_chal_field_coupling(step_a, step_b)
         if spc:
             coupled = f"{coupled} /\\ {spc}"
+        # BOTH-delegate pair (IND-CCA KDF-PRF hop_5/hop_10): same seam, but the
+        # storing side delegates too, so the builder above declines. Deduped like
+        # the others -- a repeated conjunct changes the bytes of proofs clean
+        # today.
+        bdk = _both_delegate_stored_key_coupling(step_a, step_b)
+        if bdk:
+            have = set(coupled.split(" /\\ "))
+            fresh = [c for c in bdk.split(" /\\ ") if c not in have]
+            if fresh:
+                coupled = f"{coupled} /\\ " + " /\\ ".join(fresh)
         # Plain GAME vs FORWARDING reduction (IND-CCA `_PQ` decaps hops): the
         # game's packed decapsulation key <-> the challenger's, for a component
         # the reduction never stores because it forwards the oracle instead.

@@ -4,26 +4,18 @@ EXIT 0 with ZERO admits under RELEASE EasyCrypt, and a NEGATIVE CONTROL (flippin
 the second `rcondf{1}` to `rcondt{1}`) is rejected. NOT YET EMITTED -- this file
 is the target a synthesizer must reproduce.
 
-IT ASSUMES TWO PREMISES THE COUPLING DOES NOT YET CARRY:
+IT NEEDS TWO PREMISES, and as of c261c/c261d BOTH ARE CARRIED BY THE COUPLING AND
+PROVED BY THE (green) `hop_5_initialize` -- see the UPDATE at the end of this file
+for the two changes that took, and what is left:
 
     (1) H_c.KDFPRFSec_Real.k{2} = KEM_PQ_c.ev_encodesharedsecret (RB.ss_PQ{1})
-    (2) RD.pq_keys.`2{2}        = KEM_PQ_c.KEM_INDCCA_Random.dk{1}
+    (2) RD.pq_keys{2}.`2        = KEM_PQ_c.KEM_INDCCA_Random.dk{1}
 
-added to BOTH the pre and the post.
-
-*** MEASURED c261 -- THE ORDERING RULE BLOCKS (2), AND THIS IS THE POINT OF THE
-*** RULE: THE CONSUMER IS NOT WIREABLE YET.
-Each premise was tested SEPARATELY by strengthening `hop_5_initialize`'s post and
-re-running its own (green) emitted tactic:
-
-  * (1) IS ESTABLISHED. `.ec-tmp/c261_h5i_A.ec` EXIT 0 -- the substitution route
-    already couples the two uniform draws through the encoding's bijectivity, so
-    the equation is exactly what its middle `seq` carries.
-  * (2) IS NOT ESTABLISHED. `.ec-tmp/c261_h5i_B.ec` EXIT 1, "cannot prove goal
-    (strict)". `KEM_INDCCA_Random.dk` is the INLINED CHALLENGER's field on side 1
-    and `RD.pq_keys` is the reduction's own on side 2; both come from the same
-    abstract `KEM_PQ.keygen()`, but the route's invariant never names the
-    challenger's field, so the correspondence is gone by the end of the peel.
+*** THE ORDERING RULE DID ITS JOB HERE, so keep the measurement. ***
+Before either change, each premise was tested SEPARATELY by strengthening
+`hop_5_initialize`'s post and re-running its own emitted tactic: (1) came back
+EXIT 0 and (2) came back EXIT 1, "cannot prove goal (strict)". Testing them
+together would only have said "something fails".
 
 Three closers were tried on the strengthened post before the split test isolated
 the cause, and the third is the informative one:
@@ -33,12 +25,6 @@ the cause, and the third is the informative one:
   `rewrite <regroup>. smt().` -- the REWRITE SUCCEEDS and the following `smt()`
                                fails, which is what showed the residue is the new
                                conjuncts and not the bracketing.
-
-So the enabling work is NOT just a coupling builder: `_synth_kdf_key_substitution`
-must first be strengthened to thread the challenger-keygen correspondence
-(`<Challenger>.dk{enc} = <red>.<own keypair field>.`k{oth}`) through its `pred`.
-Build that FIRST, re-verify the init hop, and only then wire this consumer --
-which is exactly the order the packed-key front used.
 
 TRAP, and it cost one compile: the CHALLENGER's field is NOT a field of the
 reduction in the RENDERED module. The flat state calls it `challenger_k` (its
@@ -108,3 +94,30 @@ wp; call (_: true).
 wp; call (_: true).
 wp; call (_: true).
 wp; skip => /#.
+
+*** UPDATE c261c/c261d: THE ESTABLISHING SIDE IS COMPLETE. ***
+Both premises are now carried by the hop's coupling AND proved by the (green)
+`hop_5_initialize`, verified by a full compile of `CG_expanded_INDCCA_PQ`:
+
+  * premise (1) was already established -- nothing to do;
+  * premise (2) needed TWO changes, one per layer:
+      - `_synth_kdf_key_substitution` paired variables by WHOLE canonical value,
+        so `#0.`2` (the challenger's key) never matched `#0` (the reduction's
+        whole keypair). `_component_of` adds the component fallback, and the peel
+        then PROVES `KEM_PQ_c.KEM_INDCCA_Random.dk{1} = RD.pq_keys{2}.`2`
+        (well-typed negative control fails inside the peel).
+      - the hop COUPLING did not carry it into the lemma post.
+        `_both_delegate_stored_key_coupling` (exporter.py) emits it; the existing
+        `_stored_pair_vs_chal_field_coupling` declines because it requires the
+        STORING side not to delegate, and here BOTH sides do.
+
+WHAT REMAINS is emission of the consumer, and the one thing to know before
+starting it: THE NON-CHALLENGE BRANCH'S `sp`/`rcondf` INDICES CANNOT COME OFF THE
+FLAT STATES. The flat body renders the inlined challenger as
+`_r15 <- false; if (ct_PQ = challenger_ctStar) {..}`, while the RENDERED module
+has `dec_ss_PQ_opt <@ Challenger.decaps(ct_PQ); if (false) {..}` -- a different
+statement count and a different guard. That is the flat-state fidelity gap, so
+this route belongs on the `oracle_tac_override` path (computed in exporter.py off
+the rendered modules), not on the flat-state path the correctness `decaps` route
+uses. Note also that the emitted coupling writes `RD.pq_keys{2}.`2` where the
+tactic above writes `RD.pq_keys.`2{2}`; both are valid EC and mean the same thing.

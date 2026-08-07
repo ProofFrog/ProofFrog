@@ -37,6 +37,7 @@ from proof_frog.transforms.random_functions import (
     LocalFunctionFieldToLet,
 )
 from proof_frog.transforms.structural import UniformBijectionElimination
+from proof_frog.transforms.tuples import ExpandTuple, SplitBareTupleDeclarations
 from proof_frog.transforms.map_iteration import LazyMapScan
 from proof_frog.visitors import NameTypeMap
 
@@ -2353,3 +2354,57 @@ def test_single_call_field_to_local_near_miss_on_domain_write() -> None:
         nm.transform_name == "Single Call Field To Local" and nm.variable == "x"
         for nm in ctx.near_misses
     )
+
+
+def test_expand_tuples_near_miss_f321_swap_reassignment():
+    """Expand Tuples reports a near-miss when a whole-variable tuple
+    reassignment reads the variable in its own RHS (F-321): sequential
+    component assignments would overwrite components the RHS still needs."""
+    game = _make_game(
+        "[Int, Int] v = [1, 2];\n"
+        "        v = [v[1], v[0]];\n"
+        "        return m;"
+    )
+    ctx = _make_ctx()
+    result = ExpandTuple().apply(game, ctx)
+
+    assert result == game  # transform should NOT have fired
+    matching = [nm for nm in ctx.near_misses if nm.variable == "v"]
+    assert matching
+    nm = matching[0]
+    assert nm.transform_name == "Expand Tuples"
+    assert "right-hand side" in nm.reason
+    assert nm.method == "Encrypt"
+
+
+def test_split_bare_tuple_declarations_near_miss_non_constant_index():
+    """Split Bare Tuple Declarations reports a near-miss when a bare
+    product-typed local is accessed at a non-constant index."""
+    game = _make_game(
+        "[Int, Int] v;\n"
+        "        v = [1, 2];\n"
+        "        Int i = 0;\n"
+        "        Int x = v[i];\n"
+        "        return m;"
+    )
+    ctx = _make_ctx()
+    SplitBareTupleDeclarations().apply(game, ctx)
+
+    matching = [nm for nm in ctx.near_misses if nm.variable == "v"]
+    assert matching
+    nm = matching[0]
+    assert nm.transform_name == "Split Bare Tuple Declarations"
+    assert "constant" in nm.reason
+    assert nm.method == "Encrypt"
+
+
+def test_split_bare_tuple_declarations_no_near_miss_when_it_fires():
+    """No near-miss when the bare declaration splits cleanly."""
+    game = _make_game(
+        "[Int, Int] v;\n"
+        "        v = [1, 2];\n"
+        "        return m;"
+    )
+    ctx = _make_ctx()
+    SplitBareTupleDeclarations().apply(game, ctx)
+    assert not [nm for nm in ctx.near_misses if nm.variable == "v"]

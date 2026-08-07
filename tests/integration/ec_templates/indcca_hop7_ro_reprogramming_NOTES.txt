@@ -459,3 +459,35 @@ step, stated and proved in the small. Negative controls, both rejected: neuterin
 
 REVISED EMISSION COST: two one-sided `_det` drops (one `NG.encode` per side per
 lemma) instead of sixteen, plus the derived slice round-trip and `Encode`'s `_inj`.
+
+*** UPDATE c277b: THE CONSUMER IS DERIVED; THE ESTABLISHING SIDE'S SHAPE, SIZED. ***
+
+CONSUMER: DONE. `indcca_hop7_decaps_TACTIC.txt` -- EXIT 0, zero admits, two
+negative controls rejected, derived against the real export. It consumes TWO
+coupling conjuncts: the projection agreement and the tuple invariant
+`ctStar.`1 = kem_ct` (without which the guard argument does not close).
+
+ESTABLISHING SIDE: the tripwire's argument transfers, but the `Mid` twin is not a
+copy of either side. Sized against the real bodies:
+
+  * BOTH sides draw their function FIRST (statement 1) and use it LAST -- L at
+    `ss <- challenger_RF rest` (statement 21 of 22), R at nothing (it draws `ss`
+    independently at 15 of 16). Since nothing between reads the drawn function,
+    both draws SWAP DOWN to the tail, and after that the two tails are exactly the
+    tripwire's shape: `rF <$ dfun; ss <- rF rest` against `rF <$ dfun; ss <$ d`.
+  * THE PIN POINT IS A PROGRAM VALUE, not a constant. In the tripwire `x0` is an
+    abstract op; here it is `rest`, computed by the left's prefix. So `Mid` has to
+    COMPUTE `rest` in order to pin at it -- and `GameFreshSS` does not compute it
+    at all (that is the whole content of the hop). `Mid` is therefore a twin that
+    ADDS the six deterministic calls building `rest`, pins the function draw at
+    it, and is related to `R` by dropping those calls one-sided through their
+    `_pres` axioms. That drop is sound precisely because `dfunE_dlet_fix1` holds
+    for ANY pin point -- the distribution of the pinned-then-reprogrammed draw does
+    not depend on where the pin is, which is why the added computation cannot
+    change `Mid ~ R`.
+  * The establishing side also needs ONE functionalized call, `NG.encode(ct_T)`,
+    to know `proj rest = ev_encode ct_T*` -- the same single drop the consumer
+    needs, which is the shared functionalizer.
+
+So the emission is: a `Mid` twin (prefix + pinned draw), two swaps, the two legs
+already proved in the tripwire, one `_det` drop, and the two coupling conjuncts.

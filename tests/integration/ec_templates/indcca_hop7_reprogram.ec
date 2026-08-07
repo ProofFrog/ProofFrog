@@ -116,11 +116,12 @@ qed.
 (*             is known, so `g` is recoverable from `g.[x0 <- y]`, and  *)
 (*             `dlet_dfun_fupdate_ll` is its distribution identity. Its *)
 (*             surplus `v` goes one-sided at the front under `dcod_ll`  *)
-(*             once the tail no longer needs it. Reduced below to three *)
-(*             `rnd` obligations that are pure function-update          *)
-(*             bookkeeping -- the one remaining `admit` in this file.   *)
+(*             once the tail no longer needs it. Its three `rnd`        *)
+(*             obligations are pure function-update bookkeeping, all    *)
+(*             discharged. PROVED below.                                *)
 (*                                                                      *)
-(* `reprogram` at the end composes the two into the hop's own statement.*)
+(* `reprogram` at the end composes the two into the hop's own statement,*)
+(* and this file is ADMIT-FREE: the whole argument is proved, no axiom.  *)
 (* ------------------------------------------------------------------ *)
 
 module Mid = {
@@ -191,6 +192,24 @@ have -> : dmap (pinD v) reprog
 congr; rewrite /dfn (MUF.dlet_dfun_fupdate_ll (fun (_ : dom) => dcod) x0 v) //.
 qed.
 
+lemma dfn_at (f : dom -> cod) (z : dom) : f \in dfn => f z \in dcod.
+proof. by rewrite /dfn => /MUF.dfun_supp /(_ z). qed.
+
+lemma dL_supp (p : (dom -> cod) * cod) :
+  p \in dmap dfn (fun (f : dom -> cod) => (f, f x0)) =>
+  p.`1 \in dfn /\ p.`2 = p.`1 x0.
+proof. by move/supp_dmap => [f] [hf ->]. qed.
+
+lemma pinD_mem (v : cod) (f : dom -> cod) (y : cod) :
+  f \in dfn => y \in dcod => (f.[x0 <- v], y) \in pinD v.
+proof.
+move=> hf hy; apply/supp_dlet; exists (f.[x0 <- v]); split.
++ apply/MUF.dfun_supp => z; rewrite !fupdateE; case: (x0 = z) => [_|_].
+  + exact supp_dunit.
+  by move: hf; rewrite /dfn => /MUF.dfun_supp /(_ z).
+by apply/supp_dmap; exists y.
+qed.
+
 (* LEG 2: L ~ Mid -- the BIJECTIVE coupling, with Mid's surplus `v` dropped
    one-sided at the front once the tail no longer needs it. *)
 equiv leg_l_mid : L.init ~ Mid.init :
@@ -201,12 +220,23 @@ seq 0 1 : true; first by rnd{2}; skip => />; exact dcod_ll.
 exists* v{2}; elim* => v0.
 rndsem*{1} 0; rndsem*{2} 0.
 rnd (fun (p : (dom -> cod) * cod) => (p.`1.[x0 <- v0], p.`2)) reprog; skip => />.
-(* REMAINING: the three `rnd` obligations. Their shapes are known and each is
-   pure function-update bookkeeping over `pinR_supp` -- no distribution content
-   is left, that is all in `fold_eq_pin` above. Interactive stepping closes them
-   but the bullet structure does not transfer to batch; settle it with
-   `ec_compile`, never with `cli_step`. *)
-admit.
+split; [ | move=> _; split; [ | move=> _ ] ].
++ by move=> r hr; rewrite fupd2 -(pinR_supp v0 r hr) fupd_id; smt().
++ move=> [f y] hr /=.
+  have hcol : f.[x0 <- y].[x0 <- v0] = f
+    by rewrite fupd2 -(pinR_supp v0 (f, y) hr) fupd_id.
+  rewrite -(fold_eq_pin v0).
+  rewrite (in_dmap1E_can _ _ (fun (p : (dom -> cod) * cod) => (p.`1.[x0 <- v0], p.`2))) /=.
+  + by rewrite !fupd2.
+  + move=> [g w] hy /= [hy1 hy2].
+    have e1 : g = g.[x0 <- w].[x0 <- v0]
+      by rewrite fupd2 -(pinR_supp v0 (g, w) hy) fupd_id.
+    by rewrite hcol; smt().
+  by rewrite hcol.
+move=> l hl; case: (dL_supp l hl) => h1 h2.
+split; [ by apply pinD_mem => //; rewrite h2; exact (dfn_at l.`1 x0 h1) | move=> _ ].
+split; [ by rewrite fupd2 h2 fupd_id; smt() | move=> _ ].
+by rewrite fupd2 h2 fupd_id.
 qed.
 
 (* THE HOP'S OWN STATEMENT, as the composition of the two legs. This is what the

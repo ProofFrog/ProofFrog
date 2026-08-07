@@ -10683,17 +10683,50 @@ def _synth_kdf_key_substitution(  # pylint: disable=too-many-arguments,too-many-
     # they hold it up to the encoding. Pairing it as an equality here would
     # state something false, and the peel would then fail to establish it.
     coupled_slot = f"#{coupled}"
+
+    def _component_of(val: str) -> tuple[str, str] | None:
+        """``(other-side variable, projection suffix)`` when ``val`` is a
+        COMPONENT of some other-side variable's value, or ``None``.
+
+        The two sides need not store a bundled result the same way: a reduction
+        that runs its own key generation keeps the whole ``(ek, dk)`` pair in one
+        field, while the one that delegates keeps only the key its inlined
+        challenger stored. Canonically those are ``#k`` and ``#k.`2`` -- never
+        equal as whole strings -- so a whole-variable pairing silently loses the
+        correspondence. MEASURED: that loss is exactly why the (green)
+        `hop_5_initialize` could not establish the decapsulation-key premise its
+        `decaps` counterpart consumes.
+        """
+        m = re.fullmatch(r"(.*?)((?:\.`\d+)+)", val)
+        if m is None:
+            return None
+        head, proj = m.group(1), m.group(2)
+        for cand in sorted(k for k, v in canon_o.items() if v == head):
+            if (cand in live_o or cand in fields_o) and _oth_name(cand) is not None:
+                return cand, proj
+        return None
+
     for var_e, val in sorted(canon_e.items()):
         if val == coupled_slot:
             continue
         name_e = _enc_name(var_e)
         if name_e is None or not (var_e in live_e or var_e in fields_e):
             continue
+        paired = False
         for var_o in sorted(k for k, v in canon_o.items() if v == val):
             name_o = _oth_name(var_o)
             if name_o is not None and (var_o in live_o or var_o in fields_o):
                 conj.append(f"{name_e}{{{enc_side}}} = {name_o}{{{oth_side}}}")
+                paired = True
                 break
+        if paired:
+            continue
+        comp = _component_of(val)
+        if comp is not None:
+            conj.append(
+                f"{name_e}{{{enc_side}}} = "
+                f"{_oth_name(comp[0])}{{{oth_side}}}{comp[1]}"
+            )
     for var_a, val in sorted(canon_e.items()):
         if val == coupled_slot or var_a not in fields_e or _enc_name(var_a) is None:
             continue

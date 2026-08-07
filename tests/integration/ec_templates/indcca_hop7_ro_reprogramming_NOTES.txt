@@ -195,3 +195,39 @@ So interpose a THIRD program, and the legs split cleanly:
             it.
 
 Derive that in the tripwire, not in the export.
+
+*** UPDATE c273: THE ARGUMENT IS ASSEMBLED END-TO-END; ONE BOOKKEEPING GOAL LEFT.
+
+`tests/integration/ec_templates/indcca_hop7_reprogram.ec` now compiles EXIT 0 with
+ONE `admit`, and `reprogram` -- the hop's own statement -- is PROVED from two legs
+by transitivity through a third program. What is proved:
+
+    fold_eq        the unpinned push-forward (from `dlet_dfun_update`)
+    fold_eq_pin    the PINNED push-forward   (from `dlet_dfun_fupdate_ll`)
+    fupd2, fupd_id, pin_supp, pinR_supp
+    leg_mid_r      Mid ~ R, an IDENTITY coupling, COMPLETE
+    reprogram      L ~ R, by transitivity through Mid, COMPLETE modulo leg 2
+
+WHY A THIRD PROGRAM IS NEEDED, which is the part that was not obvious: `fold_eq`
+alone cannot be USED, because `rnd f finv` demands a support bijection and the
+coupling is not injective. Rewriting a distribution does not rescue it either --
+`dfunE_dlet_fix1` on EITHER side leaves the surplus as a `dlet` INSIDE one sample,
+where a one-sided `rnd{2}` cannot reach it. The surplus must be an explicit
+PROGRAM STATEMENT, hence `Mid`, which draws the value at the challenge point FIRST
+and then the function PINNED to it. Pinning is what buys injectivity: on the
+pinned support `g x0 = v` is known, so `g` is recoverable from `g.[x0 <- y]`.
+
+WHAT IS OPEN: leg 2's three `rnd` obligations. They carry NO distribution content
+-- all of that is in `fold_eq_pin` -- and are function-update collapses over
+`pinR_supp`. Branch 1 is discharged (`by rewrite fupd2 -(pinR_supp v0 r hr)
+fupd_id /#`). Branch 2, the local-injectivity side condition of `in_dmap1E_can`,
+is where three spellings failed, all at the `-(pinR_supp v0 y hy)` rewrite: the
+preceding `fupd2` collapses the very subterm the `-h1` and `-(pinR_supp)` rewrites
+want, so the ORDER is wrong, not the ingredients.
+
+THE MISTAKE TO NOT REPEAT: those three spellings were guessed against a compile
+instead of read off the goal, and the compiler's line/column was misattributed to
+branch 3 for two rounds. PRINT THE GOAL AT THE FAILING BRANCH FIRST. And note
+`cli_step` said "No open goals" for the very tactic `ec_compile` rejects -- the
+third time this run that the interactive driver was optimistic; its bullet
+structure does not transfer to batch either.

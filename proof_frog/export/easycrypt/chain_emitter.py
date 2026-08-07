@@ -5188,6 +5188,15 @@ def _has_cross_seam_projection(coupling: str | None) -> bool:
     return False
 
 
+def _rename_stmts(body: list[ec_ast.EcStmt], name: str) -> list[str]:
+    """``body`` rendered with every occurrence of ``name`` replaced by a fixed
+    token, so two bodies differing only in that identifier compare equal."""
+    return [
+        re.sub(rf"\b{re.escape(name)}\b", "#F#", _stmt_text(st))
+        for st in _exec_stmts(body)
+    ]
+
+
 def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -5290,11 +5299,37 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
                 return True
         return False
 
+    def _arrow_name(body: list[ec_ast.EcStmt]) -> str | None:
+        return next(
+            (
+                st.var
+                for st in _exec_stmts(body)
+                if isinstance(st, ec_ast.Sample) and st.distr.startswith("dfun_")
+            ),
+            None,
+        )
+
+    def _arrow_rename_only() -> bool:
+        """True when the two bodies are the SAME program up to the name of the
+        random-function field.
+
+        ``sim`` matches globals by NAME, so it cannot relate a game's ``rF`` to a
+        challenger's -- it reports "cannot infer the set of equalities" and, worse,
+        a run that leaves the goal open. The bodies being otherwise identical is
+        exactly the case the explicit peel handles, so take it. The two-KEM
+        IND-CCA cells reach this on their mirror hop, where both endpoints draw
+        the shared secret fresh and only the field's owner differs."""
+        ln, rn = _arrow_name(l_body), _arrow_name(r_body)
+        if ln is None or rn is None or ln == rn:
+            return False
+        return _rename_stmts(l_body, ln) == _rename_stmts(r_body, rn)
+
     if [k for k, _ in l_bb] == [k for k, _ in r_bb]:
         if (
             not _has_det_call(l_bb)
             and not side_local_coupling
             and not cross_seam_coupling
+            and not _arrow_rename_only()
         ):
             if (
                 (init_repacks or init_decomposition)

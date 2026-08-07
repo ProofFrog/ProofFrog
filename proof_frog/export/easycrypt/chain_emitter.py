@@ -16,6 +16,7 @@ translator can consume the canonical AST.
 from __future__ import annotations
 
 import copy
+import itertools
 import re
 from collections import Counter
 from collections.abc import Sequence
@@ -6355,6 +6356,26 @@ def _emit_one_oracle_chain(
         )
         if fwd is not None:
             return [], fwd, set()
+        # Packed-key correctness ``decaps``: the reduction case-splits on the
+        # challenge ciphertext and reuses its stored ``corr.`5`` where the game
+        # decapsulates. The consuming half of the front whose ``initialize`` side
+        # is already green -- ``None`` off-shape, so every other oracle stays
+        # byte-identical.
+        cdc = _synth_correctness_decaps_casesplit(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            flat_params,
+            det_methods,
+            clone_alias,
+            full_coupling,
+            hop_index=hop_index,
+        )
+        if cdc is not None:
+            return cdc
 
     # Field-aware coupling: identical-state hops keep the whole-glob equality
     # (byte-identical for clean proofs); a hop whose two sides differ in glob
@@ -11616,6 +11637,437 @@ def _synth_forwarded_oracle_peel(  # pylint: disable=too-many-arguments,too-many
     if peel is None:
         return None
     return [_res_tag(SYNTH_PARAM), "proc.", "inline *.", *peel, "qed."]
+
+
+def _flip_coupling_sides(text: str) -> str:
+    """``text`` with every ``{1}``/``{2}`` memory tag exchanged."""
+    return text.replace("{1}", "\x00").replace("{2}", "{1}").replace("\x00", "{2}")
+
+
+class _GuardedBody(NamedTuple):
+    """A ``decaps``-shaped oracle body: one top-level refusal guard, one branch."""
+
+    guard: str
+    body: list[ec_ast.EcStmt]
+
+
+def _guarded_oracle_body(proc: ec_ast.Proc) -> _GuardedBody | None:
+    """``(guard, else-branch)`` for a proc whose whole executable body is ONE
+    ``if`` with an event-free then-branch (the challenge-ciphertext refusal), or
+    ``None`` for any other shape."""
+    stmts = [s for s in _exec_stmts(proc.body) if not isinstance(s, ec_ast.Return)]
+    if len(stmts) != 1 or not isinstance(stmts[0], ec_ast.If):
+        return None
+    node = stmts[0]
+    if not node.else_body or any(_is_bb_stmt(s) for s in node.then_body):
+        return None
+    return _GuardedBody(node.guard, list(node.else_body))
+
+
+def _split_inner_casesplit(
+    body: list[ec_ast.EcStmt],
+) -> tuple[list[ec_ast.EcStmt], str, list[ec_ast.EcStmt], list[ec_ast.EcStmt]] | None:
+    """``(prefix, inner guard, then, else)`` for a branch body that ENDS in one
+    ``if`` and holds no other, or ``None``."""
+    ifs = [i for i, s in enumerate(body) if isinstance(s, ec_ast.If)]
+    if len(ifs) != 1 or ifs[0] != len(body) - 1:
+        return None
+    node = cast(ec_ast.If, body[-1])
+    if not node.else_body:
+        return None
+    for branch in (node.then_body, node.else_body):
+        if any(isinstance(s, (ec_ast.If, ec_ast.Sample)) for s in branch):
+            return None
+    return body[:-1], node.guard, list(node.then_body), list(node.else_body)
+
+
+def _callee_align(left: list[str], right: list[str]) -> list[str] | None:
+    """Greedy op plan (``match`` / ``dropL`` / ``dropR``) over two callee
+    sequences, or ``None`` when a head can be justified on neither side or on
+    BOTH.
+
+    Deliberately refuses the ambiguous case rather than picking: two readings of
+    the same divergence produce two different tactics, and only one of them is
+    the hop's actual content. Refusing costs an admit."""
+    ops: list[str] = []
+    i = j = 0
+    while i < len(left) and j < len(right):
+        if left[i] == right[j]:
+            ops.append("match")
+            i += 1
+            j += 1
+            continue
+        skip_r = left[i] in right[j:]
+        skip_l = right[j] in left[i:]
+        if skip_r == skip_l:
+            return None
+        if skip_r:
+            ops.append("dropR")
+            j += 1
+        else:
+            ops.append("dropL")
+            i += 1
+    ops += ["dropL"] * (len(left) - i) + ["dropR"] * (len(right) - j)
+    return ops
+
+
+def _synth_correctness_decaps_casesplit(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    det_methods: dict[str, set[str]],
+    clone_alias: dict[str, str],
+    full_coupling: str | None,
+    hop_index: int = 0,
+) -> tuple[list[str], list[str], set[tuple[str, str]]] | None:
+    """``RawGame ~ FGdc ~ RawReduction`` for a packed-key correctness ``decaps``
+    hop: the reduction CASE-SPLITS on the challenge ciphertext and reuses its
+    stored correctness tuple where the game decapsulates. ``None`` off-shape.
+
+    The consuming half of the packed-key correctness front (`hop_0_decaps` /
+    `hop_15_decaps` of the IND-CCA `_PQ` cells). The game runs its scheme's
+    ``decaps`` straight through; the reduction re-derives the T scalar from the
+    seed it stored, then splits: on the CHALLENGE PQ ciphertext it takes the
+    challenger's stored ``corr.`5`` instead of decapsulating, and otherwise it
+    decapsulates with ``corr.`2``. Introducing that split on the GAME side and
+    discharging the challenge branch is the whole content of the hop, and it is
+    exactly where the hop's two ``ev_`` conjuncts are consumed:
+    ``corr.`5 = ev_decaps corr.`2 corr.`3`` (the challenger's correctness) and
+    ``<game>.<packed>.`k = ev_randomscalar <red>.<seed>`` (the packed-scalar
+    coupling). Both are ESTABLISHED by this hop's already-green ``initialize``
+    lemma, so the ordering rule is satisfied: the consumer is emitted only where
+    the establishing side is proved.
+
+    A GAME-side flat twin carries the leg, and it is what makes the route
+    name-independent: the tactic must name the local holding each intermediate,
+    and on the raw wrapper those come out of EC's ``inline`` renaming (the
+    scheme's ``_r0`` becomes ``_r00`` when the game oracle already binds one).
+    Against the twin every name is the exporter's own. The twin leg is the
+    ordinary backbone peel; the reduction leg is the content.
+
+    Returns ``(extra_decls, outer_body, pres)`` -- ``pres`` is always empty, since
+    every one-sided drop here goes through a ``_det`` axiom (which PINS the
+    result, and the result is live on both sides) rather than a ``_pres`` one."""
+    if not full_coupling or "ev_" not in full_coupling or not clone_alias:
+        return None
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+
+    def _build(proj: frog_ast.Game, name: str) -> ec_ast.Module:
+        return _flat_state_module(
+            modules,
+            name,
+            proj,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            emit_state_vars=True,
+            no_shadow_fields=True,
+        )
+
+    fg_name = f"FGdc_{hop_index}"
+    lmod, rmod = _build(lproj, "L_probe"), _build(rproj, "R_probe")
+    if not lmod.procs or not rmod.procs:
+        return None
+    shapes = [_guarded_oracle_body(m.procs[0]) for m in (lmod, rmod)]
+    if shapes[0] is None or shapes[1] is None:
+        return None
+    splits = [_split_inner_casesplit(s.body) for s in shapes]  # type: ignore[union-attr]
+    # Exactly one side case-splits: that side is the REDUCTION, the other the
+    # game. Decided by SHAPE, never by which module the hop calls a reduction.
+    if (splits[0] is None) == (splits[1] is None):
+        return None
+    game_is_left = splits[0] is None
+    gmod, rdmod = (lmod, rmod) if game_is_left else (rmod, lmod)
+    gshape = shapes[0] if game_is_left else shapes[1]
+    rshape = shapes[1] if game_is_left else shapes[0]
+    assert gshape is not None and rshape is not None
+    split = splits[1] if game_is_left else splits[0]
+    assert split is not None
+    r_pre, inner_guard, r_then, r_else = split
+    if any(isinstance(s, (ec_ast.If, ec_ast.Sample)) for s in gshape.body):
+        return None
+
+    coupling = full_coupling if game_is_left else _flip_coupling_sides(full_coupling)
+    conj = [p.strip() for p in coupling.split(" /\\ ")]
+    globs = " /\\ ".join(p for p in conj if p.startswith("={glob"))
+    body_conj = " /\\ ".join(p for p in conj if not p.startswith("={glob"))
+    game_flds = [v.name for v in gmod.module_vars]
+    red_flds = [v.name for v in rdmod.module_vars]
+    game_base = _coupling_base_for(coupling, game_flds, 1)
+    red_base = _coupling_base_for(coupling, red_flds, 2)
+    if not globs or not body_conj or game_base is None or red_base is None:
+        return None
+    params = [p.name for p in gmod.procs[0].params]
+    if not params or [p.name for p in rdmod.procs[0].params] != params:
+        return None
+
+    # Both refusal guards must be ``<param> = <field>`` over fields the coupling
+    # equates -- that is what makes the two-sided ``if``'s condition goal
+    # provable, and it is checked structurally rather than by matching names.
+    def _guard_field(guard: str, flds: list[str]) -> str | None:
+        lhs, eq, rhs = guard.partition(" = ")
+        if not eq:
+            return None
+        for a, b in ((lhs.strip(), rhs.strip()), (rhs.strip(), lhs.strip())):
+            if a in params and b in flds:
+                return b
+        return None
+
+    gfld = _guard_field(gshape.guard, game_flds)
+    rfld = _guard_field(rshape.guard, red_flds)
+    if gfld is None or rfld is None:
+        return None
+    if f"{game_base}.{gfld}{{1}} = {red_base}.{rfld}{{2}}" not in conj:
+        return None
+
+    g_names = {v for s in gshape.body if (v := _stmt_var(s))}
+    r_names = {v for s in r_pre + r_then + r_else if (v := _stmt_var(s))}
+
+    def _ref(var: str, side: int) -> str:
+        # Side 1 of the middle leg is the flat TWIN, not the raw game module --
+        # naming the raw one here would state the invariant about a module the
+        # judgment does not mention.
+        flds, base = (game_flds, fg_name) if side == 1 else (red_flds, red_base)
+        return f"{base}.{var}{{{side}}}" if var in flds else f"{var}{{{side}}}"
+
+    def _tag(expr: str, side: int) -> str:
+        bound = (g_names | set(game_flds)) if side == 1 else (r_names | set(red_flds))
+        bound = bound | set(params)
+        return re.sub(
+            r"[A-Za-z_]\w*",
+            lambda m: _ref(m.group(0), side) if m.group(0) in bound else m.group(0),
+            expr,
+        )
+
+    # ``ev_``-known locals: once a call is functionalized, later ``ev_``
+    # applications name its VALUE rather than the variable, so the accumulated
+    # conjunction stays in the coupling's own vocabulary (``ev_exp ev_generator
+    # dk`` is what the hop asserts about the packed key, not ``ev_exp _r10 dk``).
+    ev_of: dict[str, str] = {}
+    tac: list[str] = []
+    ctr = 0
+
+    def _pr(text: str) -> str:
+        text = text.strip()
+        return text if text.startswith("(") and text.endswith(")") else f"({text})"
+
+    def _det_step(stmt: ec_ast.Call, side: int, ga: int, gb: int) -> bool:
+        """One-sided ``_det`` drop as a forward ``seq``; ``False`` if not det."""
+        nonlocal ctr
+        parts = _callee_parts(stmt.callee)
+        if parts is None or parts[0] not in clone_alias:
+            return False
+        mod, meth = parts
+        if meth not in det_methods.get(mod, set()):
+            return False
+        args = [_pr(_tag(a, side)) for a in _split_top_args(stmt.args)]
+        shown = [ev_of.get(a, a) for a in args]
+        target = _ref(stmt.var or "_", side)
+        ev_expr = f"{clone_alias[mod]}.ev_{meth}" + "".join(f" {a}" for a in shown)
+        ev_of[_pr(target)] = _pr(ev_expr)
+        binders = [f"g{ctr}"] + [f"a{ctr}_{k}" for k in range(len(args))]
+        cap = ", ".join([f"(glob {mod}){{{side}}}", *args])
+        tac.append(f"seq {ga} {gb} : (#pre /\\ {target} = {ev_expr}).")
+        tac.append(
+            f"+ exists* {cap}; elim* => {' '.join(binders)}. "
+            f"call{{{side}}} ({mod}_{meth}_det {' '.join(binders)}); skip => /#."
+        )
+        ctr += 1
+        return True
+
+    # --- prefix: the reduction's leading det re-derivation, then projections ---
+    #
+    # THE ROUTE MUST ONLY FIRE WHERE ITS ENABLING COUPLING EXISTS. Every leg here
+    # closes with ``skip => /#``, and each of the two one-sided drops needs a
+    # DIFFERENT conjunct to be provable:
+    #
+    # * the reduction's leading re-derivation (``NG.randomscalar seed_T``) needs
+    #   the packed-scalar conjunct that equates it to the game's packed
+    #   component -- without it the two sides' T scalars are simply unrelated;
+    # * the game's extra decapsulation needs the challenger's correctness
+    #   conjunct (``corr.`5 = ev_decaps corr.`2 corr.`3``), which is what makes
+    #   the functionalized result equal to the value the reduction reuses.
+    #
+    # Absent either, the peel RUNS AND LEAVES A GOAL -- i.e. a BLOCKED export
+    # where an honest admit was available. Tested on the coupling TEXT, the same
+    # way the forwarded-oracle peel tests for its own premise: only the emitted
+    # text says whether the conjunct is actually there.
+    r_lead = list(itertools.takewhile(lambda s: isinstance(s, ec_ast.Call), r_pre))
+    r_rest = r_pre[len(r_lead) :]
+    for stmt in r_lead:
+        call = cast(ec_ast.Call, stmt)
+        parts = _callee_parts(call.callee)
+        if parts is None or parts[0] not in clone_alias:
+            return None
+        want = f"{clone_alias[parts[0]]}.ev_{parts[1]} (" + ", ".join(
+            _tag(a, 2) for a in _split_top_args(call.args)
+        )
+        if want not in body_conj:
+            return None
+        if not _det_step(call, 2, 0, 1):
+            return None
+    g_proj = list(
+        itertools.takewhile(lambda s: isinstance(s, ec_ast.Assign), gshape.body)
+    )
+    r_proj = list(itertools.takewhile(lambda s: isinstance(s, ec_ast.Assign), r_rest))
+    if not g_proj or not r_proj:
+        return None
+    proj_conj = [
+        f"{_ref(st.var, side)} = {_tag(st.rhs, side)}"
+        for side, run in ((1, g_proj), (2, r_proj))
+        for st in map(lambda s: cast(ec_ast.Assign, s), run)
+    ]
+    tac.append(
+        f"seq {len(g_proj)} {len(r_proj)} : (#pre /\\ " + " /\\ ".join(proj_conj) + ")."
+    )
+    tac.append("+ wp; skip => /#.")
+
+    # --- the shared prefix, and the ONE game-side call that must cross it ---
+    g_calls = gshape.body[len(g_proj) :]
+    r_shared = r_rest[len(r_proj) :]
+    if not all(isinstance(s, ec_ast.Call) for s in r_shared) or not r_shared:
+        return None
+    n_shared = len(r_shared)
+    if len(g_calls) <= n_shared or not all(
+        isinstance(s, ec_ast.Call) for s in g_calls[: n_shared + 1]
+    ):
+        return None
+    extra = cast(ec_ast.Call, g_calls[0])
+    if [cast(ec_ast.Call, s).callee for s in g_calls[1 : n_shared + 1]] != [
+        cast(ec_ast.Call, s).callee for s in r_shared
+    ]:
+        return None
+    tac.append(f"swap{{1}} 1 {n_shared}.")
+    g_last = cast(ec_ast.Call, g_calls[n_shared])
+    r_last = cast(ec_ast.Call, r_shared[-1])
+    tac.append(
+        f"seq {n_shared} {n_shared} : (#pre /\\ "
+        f"{_ref(g_last.var or '_', 1)} = {_ref(r_last.var or '_', 2)})."
+    )
+    tac.append("+ " + " ".join(["wp; call (_: true);"] * n_shared) + " skip => /#.")
+
+    # --- the case split the game lacks and the reduction has ---
+    g_branch: list[ec_ast.EcStmt] = [extra, *g_calls[n_shared + 1 :]]
+
+    def _branch(r_body: list[ec_ast.EcStmt]) -> list[str] | None:
+        """The walk for one branch of the reduction's split, or ``None`` when it
+        cannot be aligned. Emitted into a private list so the challenge branch can
+        be indented under its bullet."""
+        saved, base = dict(ev_of), len(tac)
+        ops = _callee_align(
+            [cast(ec_ast.Call, s).callee for s in g_branch if _is_bb_stmt(s)],
+            [cast(ec_ast.Call, s).callee for s in r_body if _is_bb_stmt(s)],
+        )
+        if not ops:
+            return None
+        # Forward only as far as the LAST one-sided drop; a drop-free branch is
+        # all tail, so it takes the backward ladder alone.
+        drops = [k for k, o in enumerate(ops) if o != "match"]
+        li = ri = 0
+        for op in ops[: drops[-1] + 1 if drops else 0]:
+            l_at = g_branch[li] if li < len(g_branch) else None
+            r_at = r_body[ri] if ri < len(r_body) else None
+            if op == "match":
+                if not isinstance(l_at, ec_ast.Call) or not isinstance(
+                    r_at, ec_ast.Call
+                ):
+                    return None
+                tac.append(
+                    f"seq 1 1 : (#pre /\\ {_ref(l_at.var or '_', 1)} = "
+                    f"{_ref(r_at.var or '_', 2)})."
+                )
+                tac.append("+ call (_: true); skip => /#.")
+                li += 1
+                ri += 1
+            elif op == "dropL":
+                # The GAME-side drop only pays off where the coupling states an
+                # ``ev_`` fact about that method: functionalizing the call is
+                # what makes its result equal to the value the reduction reuses
+                # INSTEAD of calling it, and nothing else can supply that.
+                if not isinstance(l_at, ec_ast.Call):
+                    return None
+                lp = _callee_parts(l_at.callee)
+                if lp is None or lp[0] not in clone_alias:
+                    return None
+                if f"{clone_alias[lp[0]]}.ev_{lp[1]} (" not in body_conj:
+                    return None
+                if not _det_step(l_at, 1, 1, 0):
+                    return None
+                li += 1
+            else:
+                if not isinstance(r_at, ec_ast.Call) or not _det_step(r_at, 2, 0, 1):
+                    return None
+                ri += 1
+        tail = [s for s in g_branch[li:] if _is_bb_stmt(s)]
+        if len(tail) != len([s for s in r_body[ri:] if _is_bb_stmt(s)]):
+            return None
+        for _ in tail:
+            tac.append("wp; call (_: true).")
+        tac.append("wp; skip => /#.")
+        out, tac[base:] = tac[base:], []
+        ev_of.clear()
+        ev_of.update(saved)
+        return out
+
+    tac.append(f"case ({_tag(inner_guard, 2)}).")
+    then_tac = _branch(r_then)
+    if then_tac is None:
+        return None
+    tac.append("+ rcondt{2} 1; first by auto.")
+    tac += ["  " + t for t in then_tac]
+    tac.append("rcondf{2} 1; first by auto.")
+    else_tac = _branch(r_else)
+    if else_tac is None:
+        return None
+    tac += else_tac
+
+    # --- the transitivity through the game-side flat twin ---
+    fgmod = _build(lproj if game_is_left else rproj, fg_name)
+    if not fgmod.procs:
+        return None
+    args = ", ".join(p.name for p in flat_params)
+    eq_params = " /\\ ".join(f"={{{p}}}" for p in params)
+    twin_eq = " /\\ ".join(
+        f"{game_base}.{f}{{1}} = {fg_name}.{f}{{2}}" for f in game_flds
+    )
+    # The proc PARAMETERS are in scope in a pre and NOT in a post (only ``res``
+    # and the globals are), so ``eq_params`` belongs to the pre alone.
+    q1 = f"{globs} /\\ {twin_eq} /\\ res{{1}} = res{{2}}"
+    p1 = f"{eq_params} /\\ {globs} /\\ {twin_eq}"
+    body_fg = body_conj.replace(game_base, fg_name)
+    q2 = f"{globs} /\\ {body_fg} /\\ res{{1}} = res{{2}}"
+    p2 = f"{eq_params} /\\ {globs} /\\ {body_fg}"
+    leg1 = [
+        "proc.",
+        "inline *.",
+        "if; 1: smt().",
+        "auto.",
+        *_backbone_peel(gshape.body),
+        "wp.",
+        "skip => /#.",
+    ]
+    outer = [
+        _res_tag(SYNTH_PARAM),
+        *([] if game_is_left else ["symmetry."]),
+        f"transitivity {fg_name}({args}).{oracle_name} "
+        f"({p1} ==> {q1}) ({p2} ==> {q2}).",
+        "smt().",
+        "smt().",
+        *leg1,
+        "proc.",
+        "if; 1: smt().",
+        "auto.",
+        *tac,
+        "qed.",
+    ]
+    return ["\n".join(_render_module_decl(fgmod))], outer, set()
 
 
 def _bd_sample_dead(

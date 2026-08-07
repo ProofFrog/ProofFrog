@@ -1,18 +1,34 @@
 VALIDATED TACTIC -- IND-CCA packed-key correctness `decaps` hop (c258).
 Derived on `CG_expanded_INDCCA_PQ` `hop_0_decaps`; the probe compiles EXIT 0 with
-ZERO admits under RELEASE EasyCrypt. NOT YET EMITTED BY THE EXPORTER -- this file
-is the target a synthesizer must reproduce, and the record that the front is
-solvable.
+ZERO admits under RELEASE EasyCrypt.
 
-IT ASSUMES ONE PREMISE THE COUPLING DOES NOT YET CARRY:
+*** SUPERSEDED AS A TARGET (c260): THE ROUTE IS EMITTED. ***
+`chain_emitter._synth_correctness_decaps_casesplit` now synthesizes it, and the
+emitted form differs from this file in ONE structural way that is worth keeping:
+it does NOT run on the raw wrapper. The tactic below names `_r00{1}`/`_r10{1}`,
+which are EC's INLINE-RENAMED forms of the scheme's `_r0`/`_r1` (the game oracle
+already binds locals of those names, and `EcMemory.bindall_fresh` appends the
+smallest fresh index). Predicting those is exactly the name-dependence the
+project is trying to eliminate, so the emitted route instead interposes a
+GAME-SIDE FLAT TWIN:
+
+    RawGame.decaps ~ FGdc_<hop>.decaps ~ RawReduction.decaps
+
+The twin leg is the ordinary backbone peel (`proc; inline *; if; 1: smt(); auto;
+(wp; call (_: true))*; wp; skip => /#`), which names nothing; the reduction leg
+is the content below, with every side-1 name read off the twin the exporter
+itself emitted. The reduction needs no twin -- its `decaps` calls only abstract
+modules, so `inline *` leaves it unchanged and its flat body IS its rendered one.
+
+THE PREMISE this file said the coupling did not yet carry is now carried:
 
     Hybrid_c.KEM_INDCCA_Real.dk.`2{1} = NG_c.ev_randomscalar (R_Correct_Real.seed_T{2})
 
-added to BOTH the pre and the post. That premise is establishable -- the landed
-`_synth_delegate_correctness_init` already proves exactly this equation on both
-sides inside its middle leg -- so the ordering rule is satisfied: build the
-conjunct into the coupling, re-verify the (green) init hop still establishes it,
-and only then wire this consumer.
+landed in `339c3f1` as `_packed_scalar_seed_coupling`, and the (green)
+`initialize` hop was re-verified to still ESTABLISH it before this consumer was
+wired -- the ordering rule, satisfied in that order.
+
+The rest of the file stands as the derivation record.
 
 WHAT IT DOES, and why each piece is needed:
  - `if; 1: smt(). auto.` -- the shared challenge-ciphertext guard.

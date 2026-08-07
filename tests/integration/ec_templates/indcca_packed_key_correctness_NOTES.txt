@@ -159,15 +159,29 @@ STILL OPEN in this class:
    extra-`decaps` drop on the reduction side -- two one-sided drops in opposite
    directions, which the current `_extra_det_target` refuses (it allows extras on
    ONE side only).
- - Both `decaps` halves: THE TACTIC IS NOW DERIVED AND VALIDATED (c258) --
-   `indcca_packed_key_decaps_TACTIC.txt`, probe compiles EXIT 0 with ZERO admits
-   under release EasyCrypt. It needs the premise
-   `dk.`2{1} = ev_randomscalar seed_T{2}` in the coupling, which the landed init
-   route already proves internally, so the ordering rule is satisfiable. What
-   remains is EMISSION: a synthesizer that reproduces that tactic, plus the
-   coupling builder for the premise. Do those in ONE increment -- the conjunct
-   alone changes every touched export's text for zero admit gain, and perturbs
-   `smt` in the already-green init hops for nothing.
+ - Both `decaps` halves: **DONE on the four `_expanded_PQ` cells (c260)** --
+   `chain_emitter._synth_correctness_decaps_casesplit`. Measured 7 -> 5 admits on
+   `CK`/`UK_expanded_INDCCA_PQ` and 5 -> 3 on `CG`/`UG_expanded_INDCCA_PQ`, all
+   four `scripts/easycrypt.sh` EXIT 0, and a NEGATIVE CONTROL (one character in
+   the emitted `swap{1} 1 2` offset) rejected on the real export. Emission notes
+   are in `indcca_packed_key_decaps_TACTIC.txt`; the one structural departure
+   from the derived tactic is that the emitted route interposes a GAME-SIDE FLAT
+   TWIN rather than running on the raw wrapper, which is what removes the
+   dependence on EC's `inline` renaming.
+ - **`decaps` on the four `_seedbased_PQ` cells: A DIFFERENT WALL, not a gate
+   width.** Measured on `CG_seedbased_INDCCA_PQ`: the reduction's `decaps` is
+   byte-for-byte the same shape as the `_expanded` one, but the GAME's is not --
+   `CG_seedbased.decaps` re-derives EVERYTHING from its stored seed before
+   decapsulating:
+       G.evaluate(dk); slice; slice; K.derivekeypair; NG.randomscalar;
+       NG.generator; NG.exp;  then  K.decaps; NG.exp; ...
+   So (a) the game has FIVE extra calls ahead of the shared prefix where the
+   `_expanded` game has one, and (b) there is no packed key at all, hence no
+   packed-scalar conjunct to consume -- the relation the hop needs is the
+   PRG-EXPANSION one (`slice (ev_evaluate dk) = seed_PQ` / `= seed_T`), which is
+   a different piece of content. Widening `_synth_correctness_decaps_casesplit`'s
+   one-extra-call gate would NOT reach these; they need the expansion coupling
+   first, exactly as the `_expanded` cells needed the packed-scalar one.
 
 THE BOTH-SIDED-EXTRAS EXTENSION (designed c257, not yet built)
 =============================================================

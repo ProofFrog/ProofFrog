@@ -551,6 +551,38 @@ Key modules:
   shape), so every other proof is byte-identical. Verified: `CK_expanded_LEAK_BIND_K_CT` `hop_0_challenge`
   fires `synth-param` and ec_compiles OK (hop_2/hop_4 still admit). Tripwire:
   `ec_templates/binding_challenge_2kem_packed.ec`.
+- **Correctness-`decaps` case-split synthesizer** (`chain_emitter.
+  _synth_correctness_decaps_casesplit`, last route in the non-init oracle chain):
+  the CONSUMING half of the packed-key correctness front (IND-CCA `_PQ`
+  `hop_0_decaps` / `hop_15_decaps`). The game runs its scheme's `decaps` straight
+  through; the correctness reduction re-derives the T scalar from its stored seed
+  and then CASE-SPLITS on the challenge PQ ciphertext, reusing the challenger's
+  stored `corr.`5` instead of decapsulating. The route introduces that split on
+  the game side (`case` + `rcondt{2}`/`rcondf{2}`) and, in the challenge branch,
+  drops the game's `decaps` through its `_det` axiom — the coupling's
+  `corr.`5 = ev_decaps corr.`2 corr.`3` then makes the two equal, which IS the
+  content of the hop.
+  - **A GAME-SIDE FLAT TWIN carries the leg** (`RawGame ~ FGdc_<hop> ~ RawRed`),
+    and that is what makes the route name-independent. The tactic must NAME the
+    local holding each intermediate; on the raw wrapper those come out of EC's
+    inline renaming (`EcMemory.bindall_fresh` appends the smallest fresh index, so
+    the scheme's `_r0` becomes `_r00` because the game oracle already binds one).
+    Against the twin every name is the exporter's own. The reduction needs no
+    twin: its `decaps` calls only abstract modules, so `inline *` leaves it
+    unchanged. The twin leg is the ordinary backbone peel and names nothing.
+  - **Proc PARAMETERS are in scope in a pre and NOT in a post**, so the
+    transitivity's `={ct}` belongs to `P1`/`P2` only — putting it in `Q1` is
+    "unknown variable or constant: `ct'".
+  - **ENABLING-COUPLING GATES, one per drop kind.** The reduction's leading
+    re-derivation needs the packed-scalar conjunct (`<game>.<packed>.`k =
+    ev_<m> <red>.<seed>`) and the game's extra decapsulation needs an `ev_` fact
+    about ITS method; both are checked on the coupling TEXT. Without them the
+    peel runs and leaves a goal — a BLOCKED export where an honest admit was
+    available (the same failure `_synth_forwarded_oracle_peel` guards against).
+  - **Alignment is greedy over CALLEES** (`_callee_align`), forward with `seq`
+    only as far as the last one-sided drop and backward-laddered after; the
+    ambiguous divergence (both heads justifiable) is REFUSED rather than guessed.
+  - Derivation record: `ec_templates/indcca_packed_key_decaps_TACTIC.txt`.
 - `proof_translator.py`, `module_translator.py`, `expr_translator.py`,
   `stmt_translator.py`, `type_collector.py`, `scheme_instances.py`,
   `ec_ast.py` — FrogLang→EC translation primitives.

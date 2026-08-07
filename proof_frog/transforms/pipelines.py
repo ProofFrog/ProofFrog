@@ -106,6 +106,7 @@ from .tuples import (
     SimplifyTuple,
     CollapseSingleIndexTuple,
     NormalizeProductLiteral,
+    SplitBareTupleDeclarations,
 )
 from .standardization import (
     VariableStandardize,
@@ -119,6 +120,11 @@ from .standardization import (
 CORE_PIPELINE: list[TransformPass] = [
     AlphaRename(),
     NormalizeProductLiteral(),
+    # Must run before Topological Sorting (which prunes bare declarations)
+    # and Collapse Assignment (which folds their assignments into use
+    # sites): once either fires, the split-declaration tuple spelling can
+    # no longer be normalized to the decl-with-initializer route (#255).
+    SplitBareTupleDeclarations(),
     SingleCallFieldToLocal(),
     CounterGuardedFieldToLocal(),
     SymbolicComputation(),

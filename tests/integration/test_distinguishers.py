@@ -1103,3 +1103,45 @@ def test_modint_loop_reused_uniform_not_absorbed() -> None:
         }
         """)
     assert not _engine_with().check_equivalent(twice, once).valid
+
+
+def test_f321_tuple_swap_reassignment_not_sequentialized() -> None:
+    """F-321: ``pair = [pair[1], pair[0]]; return pair[1];`` returns the
+    ORIGINAL ``pair[0]`` (the RHS evaluates before the assignment lands).
+    ExpandTuple used to sequentialize the swap into
+    ``pair@0 = pair@1; pair@1 = pair@0;``, after which BOTH components hold
+    the old ``pair[1]`` -- so the engine canonicalized the game to return
+    the wrong component and accepted an equivalence that any instantiation
+    with ``Left != Right`` refutes with advantage 1."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive P(Int n) {
+            BitString<n> Left(BitString<n> k);
+            BitString<n> Right(BitString<n> k);
+        }
+        """)
+    pre = frog_parser.parse_game("""
+        Game Pre(P PP) {
+            Void Initialize() {
+            }
+            BitString<n> Run() {
+                BitString<n> a <- BitString<n>;
+                BitString<n> b <- BitString<n>;
+                [BitString<n>, BitString<n>] pair = [PP.Left(a), PP.Right(b)];
+                pair = [pair[1], pair[0]];
+                return pair[1];
+            }
+        }
+        """)
+    post = frog_parser.parse_game("""
+        Game Post(P PP) {
+            Void Initialize() {
+            }
+            BitString<n> Run() {
+                BitString<n> b <- BitString<n>;
+                return PP.Right(b);
+            }
+        }
+        """)
+    engine = _engine_with(P=prim, PP=prim)
+    result = engine.check_equivalent(pre, post)
+    assert not result.valid

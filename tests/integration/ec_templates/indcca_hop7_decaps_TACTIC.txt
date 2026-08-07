@@ -3,7 +3,20 @@ Derived on `CG_expanded_INDCCA_PQ` against a `build_hop_probe` cut of the real
 export with the weakened conjunct written in at all four sites and
 `hop_7_initialize` admitted. Compiles EXIT 0 with ZERO admits; two negative
 controls rejected (neutering `NG_encode_inj`; dropping one slice rewrite).
-NOT YET EMITTED -- this file is the target a synthesizer must reproduce.
+NOT YET EMITTED -- this file is the target a synthesizer must reproduce. The
+coupling it consumes IS now emitted (a shape-gated builder derives it, and the
+emitted text is byte-identical to what this was derived against); the two
+consumers are what remain.
+
+TWO FORMS, BOTH EXIT 0 against the EMITTED coupling. The second is what a
+synthesizer should emit: the hand form's closing depends on an intro pattern
+(`move=> &1 &2 hagree hne hct1 hne2 r1 r2`) whose length tracks the body, which
+is exactly the kind of thing that compiles on a probe and breaks on the next
+proof. Handing the three slice laws and the injectivity axiom to `smt` closes the
+same goal and depends on nothing positional.
+
+`NG_encode_inj` is REQUEST-ONLY -- the route that emits this tactic owes the
+request, or the export fails with "unknown lemma".
 
 THE COUPLING IT CONSUMES, and it is TWO conjuncts, not one:
 
@@ -32,6 +45,7 @@ FOUR THINGS THE DERIVATION MEASURED, each of which cost a compile:
     (`ct_T{2} <> GameFreshSS.ctStar{2}.`2`), proved there by `smt` from the guard
     facts, rather than re-derived after `/>`.
 
+    (* --- form 1: hand-derived, positional closing --- *)
     (* resolution: synth-param *)
     proc.
     inline *.
@@ -62,6 +76,44 @@ FOUR THINGS THE DERIVATION MEASURED, each of which cost a compile:
     rewrite slice_concat_left_bs_ng_nelem_ng_nss_bs_ng_nelem_bs_2_ng_nelem_ng_nss.
     rewrite slice_concat_right_bs_ng_nss_bs_ng_nelem_bs_ng_nelem_ng_nss.
     by apply/negP => h; move: hne2; rewrite (NG_encode_inj _ _ h).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; skip => /#.
+
+    (* --- form 2: same peel, `smt`-closed; EMIT THIS ONE --- *)
+    proc.
+    inline *.
+    if; 1: smt().
+    auto.
+    seq 5 5 : (#pre /\ ={ct_PQ, ct_T, dec_ss_T, dk_T}
+               /\ ct_PQ{1} = ct{1}.`1 /\ ct_T{1} = ct{1}.`2).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; skip => /#.
+    if; 1: smt().
+    seq 1 1 : (#pre /\ ={_r8} /\ _r8{1} = NG_c.ev_encode ct_T{1}
+               /\ ct_T{2} <> GameFreshSS.ctStar{2}.`2).
+    + exists* (glob NG){1}, ct_T{1}; elim* => g1 a1.
+      call{1} (NG_encode_det g1 a1).
+      exists* (glob NG){2}, ct_T{2}; elim* => g2 a2.
+      call{2} (NG_encode_det g2 a2).
+      skip => /#.
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; call (_: true).
+    wp; skip => />.
+    smt(slice_concat_left_bs_2_ng_nelem_ng_nss_bs_nlabel_bs_2_ng_nelem_ng_nss_nlabel
+        slice_concat_left_bs_ng_nelem_ng_nss_bs_ng_nelem_bs_2_ng_nelem_ng_nss
+        slice_concat_right_bs_ng_nss_bs_ng_nelem_bs_ng_nelem_ng_nss
+        NG_encode_inj).
     wp; call (_: true).
     wp; call (_: true).
     wp; call (_: true).

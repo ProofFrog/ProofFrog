@@ -304,3 +304,42 @@ value nothing relates across the two sides.
 So the emission needs: this derived lemma family (no axiom), plus `Encode`'s `_inj`
 (licensed, already adjudicated, just needs requesting). `concat_slices_id` is not
 needed at all.
+
+*** UPDATE c275b: THE EMISSION IS FULLY SPECIFIED. EVERY INGREDIENT MEASURED
+*** PRESENT IN THE REAL EXPORT. ***
+
+The post's weakened conjunct replaces
+
+    GameFreshSS.rF{2} = H_c.KDFPRFSec_Random.rF{1}
+
+with, in the export's own vocabulary,
+
+    forall ct, ct <> GameFreshSS.ctStar{2} =>
+      H_c.KDFPRFSec_Random.rF{1} (kdfin ct) = GameFreshSS.rF{2} (kdfin ct)
+
+where `kdfin ct` is what `Decaps` computes:
+
+    concat3( ev_elementtosharedsecret (ev_exp ct.`2 (ev_randomscalar seed_T)),
+             ev_encode ct.`2,
+             ev_encode (ev_exp ev_generator (ev_randomscalar seed_T)),
+             ev_get )
+
+CHECKED, not assumed: every one of `ev_elementtosharedsecret`, `ev_exp`,
+`ev_encode`, `ev_generator`, `ev_randomscalar`, `ev_get` is ALREADY emitted in
+`CG_expanded_INDCCA_PQ`, as is each matching `_det` axiom (`NG_exp_det`,
+`NG_encode_det`, `NG_generator_det`, `NG_randomscalar_det`,
+`NG_elementtosharedsecret_det`, `L_get_det`). So the conjunct is writable with no
+new op, no new axiom, and no change to the game.
+
+FULL SPECIFICATION OF THE BUILD, all three parts now validated in the small:
+  (a) functionalize the left's five extra deterministic calls through those `_det`
+      axioms, so the challenge KDF input becomes a named term;
+  (b) `exists*` it and run the `Mid` transitivity -- PROVED in
+      `indcca_hop7_reprogram.ec`, admit-free, four negative controls;
+  (c) discharge the post's reachable-agreement conjunct -- PROVED there too
+      (`agree_off` / `reprogram_agree`), and its separation is derived from the
+      round-trip slice laws (`concat_injective.ec`), costing no axiom; the only
+      axiom wanted is `Encode`'s `_inj`, licensed and request-only.
+  (d) SIMULTANEOUSLY re-state `hop_7_decaps` / `hop_15_decaps` to consume the new
+      conjunct. They are closed today against `rF{2} = rF{1}`, which the repaired
+      hop will not produce, so the ordering rule forbids landing (a)-(c) alone.

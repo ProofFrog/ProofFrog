@@ -48,11 +48,19 @@ type ctxt.
 op ctStar : ctxt.
 op ssT    : cod.            (* the DH-derived component -- deliberately unrelated *)
 op decss  : ctxt -> cod.    (* what Decaps computes in that slot *)
-op mk     : cod -> ctxt -> dom.
+op enc    : ctxt -> cod.    (* `NG.Encode`, declared `deterministic injective`  *)
+op mk     : cod -> cod -> dom.   (* the KDF-input concat, both slots ALREADY encoded *)
 
-axiom mk_inj (a b : cod) (c d : ctxt) : mk a c = mk b d => a = b /\ c = d.
+(* `proj` is the slice chain that reads the `Encode(ct_T)` slot back out. In the
+   real export it is a composition of three emitted `slice_*` ops and `proj_mk` is
+   their round-trip law -- DERIVED, see `concat_injective.ec`, not an axiom. *)
+op proj : dom -> cod.
+axiom proj_mk (a b : cod) : proj (mk a b) = b.
 
-op [smt_opaque] x0 : dom = mk ssT ctStar.
+(* The licensed `_inj` family for a `deterministic injective` declaration. *)
+axiom enc_inj (c d : ctxt) : enc c = enc d => c = d.
+
+op [smt_opaque] x0 : dom = mk ssT (enc ctStar).
 
 module L = {
   var rF : dom -> cod
@@ -279,14 +287,13 @@ qed.
 (* against `decss c`) are never related -- which is exactly why no       *)
 (* Diffie-Hellman fact is needed.                                       *)
 (* ------------------------------------------------------------------ *)
-lemma agree_off (f : dom -> cod) (y : cod) (c : ctxt) :
-  c <> ctStar => f.[x0 <- y] (mk (decss c) c) = f (mk (decss c) c).
+lemma agree_off (f : dom -> cod) (y : cod) (p : dom) :
+  proj p <> enc ctStar => f.[x0 <- y] p = f p.
 proof.
-move=> hc.
-have hne : x0 <> mk (decss c) c.
+move=> hp.
+have hne : x0 <> p.
 + rewrite /x0; apply/negP => h.
-  have [_ hh] := mk_inj ssT (decss c) ctStar c h.
-  by move: hc; rewrite hh.
+  by move: hp; rewrite -h /x0 proj_mk.
 by rewrite fupdate_neq.
 qed.
 
@@ -295,9 +302,22 @@ qed.
 equiv reprogram_agree : L.init ~ R.init :
   true ==>
      ={res}
-  /\ forall (c : ctxt), c <> ctStar =>
-       L.rF{1} (mk (decss c) c) = R.rF{2} (mk (decss c) c).
+  /\ forall (p : dom), proj p <> enc ctStar => L.rF{1} p = R.rF{2} p.
 proof.
 conseq reprogram => />.
-by move=> result_R rF_R c hc; apply agree_off.
+by move=> result_R rF_R p hp; apply agree_off.
+qed.
+
+(* What the CONSUMER does with it: at its own query point `mk (decss c) (enc c)`,
+   the projection is `enc c` by the slice round-trip, and `enc_inj` separates that
+   from `enc ctStar` whenever `c <> ctStar`. Note what is NOT needed -- the first
+   slot (`decss c` against `ssT`) is never touched, so the consumer functionalizes
+   ONE call, not the whole KDF input. *)
+lemma consumer_step (rF1 rF2 : dom -> cod) (c : ctxt) :
+  (forall (p : dom), proj p <> enc ctStar => rF1 p = rF2 p) =>
+  c <> ctStar =>
+  rF1 (mk (decss c) (enc c)) = rF2 (mk (decss c) (enc c)).
+proof.
+move=> hagree hc; apply hagree; rewrite proj_mk.
+by apply/negP => h; move: hc; rewrite (enc_inj c ctStar h).
 qed.

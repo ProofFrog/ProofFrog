@@ -418,3 +418,44 @@ NOTE the asymmetry this reveals: `Encode` injectivity and the derived concat
 injectivity are needed only by `hop_7_initialize` (to prove the agreement), not by
 `hop_7_decaps` (which merely consumes it). That is a smaller obligation than the
 earlier notes implied.
+
+*** UPDATE c277: THE POST WAS OVER-SPECIFIED. SEPARATING ON A PROJECTION CUTS
+*** THE EMISSION FROM SIXTEEN `_det` DROPS TO TWO. ***
+
+The c276 shape quantified over CIPHERTEXTS and named the whole KDF input:
+
+    forall ct0, ct0 <> ctStar => rF{1} (kdfin ct0) = rF{2} (kdfin ct0)
+
+which is what forced eight calls functionalized on both sides -- every component
+of `kdfin` had to be reachable in `ev_` form so the consumer's `rest` could be
+matched against it.
+
+IT DOES NOT HAVE TO NAME THE WHOLE INPUT. The separation only ever uses ONE slot.
+Quantify over the KDF INPUT and separate on a PROJECTION of it:
+
+    forall p, proj p <> NG_c.ev_encode (GameFreshSS.ctStar{2}.`2) => rF{1} p = rF{2} p
+
+where `proj` is the slice chain that reads the `Encode(ct_T)` slot back out -- in
+the real export a composition of three already-emitted `slice_*` ops, whose
+round-trip law is DERIVED (see `concat_injective.ec`), not assumed.
+
+  * ESTABLISHING side: the reprogramming gives agreement everywhere except the
+    challenge point `x0`, and `proj x0 = ev_encode ct_T*`; so any `p` whose
+    projection differs is not `x0`. It needs ONE call functionalized -- the
+    `NG.encode(ct_T)` in `initialize` -- to know `proj x0`.
+  * CONSUMER: instantiates at its own `rest`, which is an OPAQUE term and may stay
+    opaque. `proj rest` is the slice round-trip, and the branch guard gives
+    `ct_T <> ct_T*`, so `Encode`'s `_inj` separates them. ONE call functionalized
+    (`_r8 = ev_encode ct_T`); `dec_ss_T`, `_r11` and `_r12` are never touched.
+
+That is the whole point of projecting: the first slot is the Diffie-Hellman value
+nothing relates across the two sides, and the old shape dragged it into the
+statement for no reason.
+
+PROVED in `indcca_hop7_reprogram.ec` (admit-free, ~5s): `agree_off` over `proj`,
+`reprogram_agree` with the new post, and `consumer_step` -- the consumer's own
+step, stated and proved in the small. Negative controls, both rejected: neutering
+`enc_inj`, and neutering the `proj_mk` round-trip.
+
+REVISED EMISSION COST: two one-sided `_det` drops (one `NG.encode` per side per
+lemma) instead of sixteen, plus the derived slice round-trip and `Encode`'s `_inj`.

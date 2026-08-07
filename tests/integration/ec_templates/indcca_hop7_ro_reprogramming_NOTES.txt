@@ -28,30 +28,46 @@ marginal must be the program's, where `ss{2}` is drawn INDEPENDENTLY of `RF{2}`.
 For a non-degenerate output distribution that is a contradiction. **No tactic can
 close this lemma; the statement has to change.**
 
-THE REPAIR, AND WHY THE POINT IS DERIVABLE
-==========================================
+THE REPAIR, AND WHERE THE REPROGRAMMING POINT ACTUALLY LIVES
+===========================================================
 Weaken the function conjunct from equality to "equal except at the challenge
-point", pinned by reprogramming:
+point", pinned by reprogramming. The point itself is `rest*`, the challenge KDF
+input the left's `initialize` builds.
 
-    ={res} /\ H_c.KDFPRFSec_Random.rF{1} = GameFreshSS.rF{2}.[rest* <- ss]
+**THE POINT IS NOT DERIVABLE FROM STORED STATE, and an earlier version of these
+notes said it was. That claim is withdrawn -- it is false.** Measured on
+`CG_expanded_INDCCA_PQ`: the flat states store exactly `pq_keys`, `seed_T`,
+`kem_ct`, `ctStar` and the random function, on BOTH sides. `rest*`'s first
+component is `ss_T = ElementToSharedSecret(Exp(ek_T, sk_E))`, and `sk_E` is a
+LOCAL of `initialize` that nothing stores; its only trace is `ct_T = Exp(g, sk_E)`.
+Recovering `ss_T` from `(ek_T, ct_T)` is the Diffie-Hellman problem. The earlier
+derivation route -- read `rest*` off the game's own `Decaps`, which computes
+`ElementToSharedSecret(Exp(ct_T, dk_T))` -- silently assumed
+`Exp(Exp(g,dk),sk) = Exp(Exp(g,sk),dk)`, and NominalGroup.primitive says in as many
+words that group-algebraic facts are NOT built in and must be introduced as an
+explicit assumption game. This proof assumes only KEMCorrectnessWithDK, KEM_INDCCA
+and KDFPRFSec. So the fact is not available.
 
-The earlier park claimed `rest*` is inexpressible on the right because
-`GameFreshSS.Initialize` computes no KDF input. The premise is true and the
-conclusion is false: **`rest*` is a deterministic function of fields
-`GameFreshSS` ALREADY STORES.** From its own `Decaps` challenge branch,
+**IT DOES NOT NEED TO BE DERIVABLE, and that is the actual repair.** `rest*` never
+has to appear in the hop's POST. It is a WITNESS, in scope as a local inside
+`hop_7_initialize`, where `exists*` can name it. What the post states instead is
+the CONSEQUENCE the consumer needs -- that the two random functions agree at every
+input `Decaps` can query:
 
-    rest = dec_ss_T || NG.Encode(ct_T) || NG.Encode(NG.Exp(NG.Generator(), dk_T))
-                    || L.get()
-    dk_T = NG.RandomScalar(seed_T)        seed_T  IS a field
-    ct_T = ct[1], and at the challenge point ct = ctStar, so ct_T* = ctStar[1]
-                                            ctStar IS a field
-    dec_ss_T = NG.ElementToSharedSecret(NG.Exp(ct_T, dk_T))
+    forall ct, ct <> ctStar => rF{1} (kdfin ct) = rF{2} (kdfin ct)
 
-Every operation there is DETERMINISTIC and already emitted in `ev_` form -- this
-proof's coupling already writes `NG_c.ev_exp (NG_c.ev_generator) (...)` for
-`dk.`3`, and `NG.randomscalar` has both `NG_c.ev_randomscalar` and
-`axiom NG_randomscalar_det`. So the reprogramming point is writable over stored
-state with NO change to the game.
+and `kdfin ct` IS expressible over stored fields, because it is exactly what
+`Decaps` computes: `ElementToSharedSecret(Exp(ct_T, dk_T)) || Encode(ct_T) ||
+Encode(Exp(Generator(), dk_T)) || L.get()` with `dk_T = RandomScalar(seed_T)`.
+
+THE UNREACHABILITY ARGUMENT IS CLEAN, AND IT NEEDS NO GROUP FACT. Read the two
+bodies: `GameFreshSS.Decaps` queries `RF` only in the branch `ct <> ctStar /\
+ct_PQ = kem_ct`. In that branch `ct <> ctStar = (kem_ct, ct_T*)` together with
+`ct_PQ = kem_ct` FORCES `ct_T <> ct_T*`. `Encode` is declared `deterministic
+injective`, so `Encode(ct_T) <> Encode(ct_T*)`, and that component alone separates
+`kdfin ct` from `rest*` under concat injectivity. The first components (`ss_T`
+against `dec_ss_T`) never have to be related -- which is exactly why no
+Diffie-Hellman fact is required.
 
 THE EASYCRYPT INGREDIENT IS A LEMMA, NOT AN AXIOM
 =================================================
@@ -231,3 +247,37 @@ branch 3 for two rounds. PRINT THE GOAL AT THE FAILING BRANCH FIRST. And note
 `cli_step` said "No open goals" for the very tactic `ec_compile` rejects -- the
 third time this run that the interactive driver was optimistic; its bullet
 structure does not transfer to batch either.
+
+*** UPDATE c274: THE REPROGRAMMING STEP IS PROVED; THE PLAN OF RECORD IS CORRECTED
+*** IN BOTH DIRECTIONS. ***
+
+PROVED. `tests/integration/ec_templates/indcca_hop7_reprogram.ec` now compiles
+EXIT 0 with ZERO admits and no new axiom. `reprogram` -- the statement
+`hop_7_initialize` needs -- is proved from two legs through an interposed `Mid`
+that draws the value at the challenge point FIRST and then the function PINNED to
+it. Pinning is what buys injectivity, which is what `rnd f finv` requires and what
+the un-pinned coupling cannot give.
+
+CORRECTED, DIRECTION 1 (pessimistic): the point is NOT derivable from stored
+state -- see the section above, which replaces the claim that it is.
+
+CORRECTED, DIRECTION 2 (optimistic): that does not block the hop, because the
+point does not belong in the post at all. It is an internal witness; the post
+carries the reachable-agreement consequence, which IS expressible. And the
+unreachability that justifies it needs only `Encode` injectivity plus concat
+injectivity -- no group fact, no new assumption.
+
+SO THE EXPORTER BUILD IS: emit `hop_7_initialize` as
+  (a) functionalize the left's five extra deterministic calls through their `_det`
+      axioms, so the challenge KDF input is a named term;
+  (b) `exists*` that term and run the Mid transitivity above;
+  (c) discharge the post's reachable-agreement conjunct from `Encode`'s `_inj`
+      axiom and the branch fact `ct_PQ = kem_ct /\ ct <> ctStar => ct_T <> ct_T*`;
+and simultaneously re-state `hop_7_decaps` / `hop_15_decaps` to CONSUME that
+conjunct instead of the strong `rF{2} = rF{1}` they assume today. The ordering rule
+says both together: the consumers are closed against a premise the repaired
+establishing hop will not produce.
+
+NEXT MEASUREMENT BEFORE BUILDING: extend the tripwire with a `Decaps` pair and the
+reachable-agreement post, and prove it there. That validates (c) -- the only part
+not yet exercised -- at ~5s per iteration instead of ~90s per export.

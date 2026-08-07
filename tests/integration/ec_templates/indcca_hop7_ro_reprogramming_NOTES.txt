@@ -98,3 +98,67 @@ BUILD ORDER
     firing here -- its leaf `wp; sim` relies on the strong equality.
  4. Whole-chain check: the `hop_7_pr` lemma must assemble. That is the only
     evidence that step 3 did its job.
+
+
+*** UPDATE c271: THE MATHEMATICAL CONTENT IS NOW A PROVED EC LEMMA, AND THE
+*** REMAINING OBSTRUCTION IS EXACTLY ONE TACTIC-LEVEL QUESTION. ***
+
+Tripwire: `tests/integration/ec_templates/indcca_hop7_reprogram.ec`. It mirrors
+the exporter's own shape (`dfn` is `MUF.dfun (fun _ => dcod)` behind an
+`op [smt_opaque]`, as `type_collector` emits it) and compiles in ~5s, so it is a
+fast loop for this hop. It compiles EXIT 0 with ONLY the equiv admitted; a
+one-token corruption of the proved lemma is rejected, so the EXIT 0 is real.
+
+FIRST, THE BODIES, measured on `CG_expanded_INDCCA_PQ` rather than assumed. The
+notes above are right that the right side draws `ss` independently, but the
+DIFFERENCE IS BIGGER than a sampling difference: the right's `initialize` does not
+compute `rest` at all. The left carries FIVE extra deterministic calls
+(`NG.exp`, `NG.elementtosharedsecret`, `NG.encode`, `NG.encode`, `L.get`) plus the
+`rest <- concat ...` that consumes them. So the tactic has two jobs: functionalize
+those five through their `_det` axioms (which is what makes `rest*` writable over
+stored state, as the notes predicted), and then the distribution step.
+
+SECOND, THE DISTRIBUTION STEP. `rndsem*` folds each side into ONE draw over pairs:
+
+    left    dmap dfn (fun f => (f, f x0))
+    right   dlet dfn (fun g => dmap dcod (fun y => (g, y)))
+
+and the hop's post says the LEFT pair is the RIGHT pair pushed forward through
+`h (g, y) = (g.[x0 <- y], y)`. That push-forward is now PROVED as `fold_eq`:
+
+    dlet dfn (fun g => dmap dcod (fun y => (g.[x0 <- y], y)))
+  = dmap dfn (fun f => (f, f x0))
+
+by rewriting the pair form as a `dmap` of its first marginal (the second component
+is `f x0` on both sides, since `(g.[x0<-y]) x0 = y`) and then applying
+`MUniFinFun.dlet_dfun_update` with `weight dcod = 1`. Four lines, no axiom.
+
+THIRD, THE OBSTRUCTION, and it is not "the statement is unachievable" any more --
+that was the OLD post. It is that `rnd f finv` demands a BIJECTION between the two
+supports and `h` is not injective: the right's `g` carries entropy at `x0` that
+the post discards, so every `g` agreeing with `f` off `x0` maps to one left point.
+BOTH argument orders were tried and both obligations are false:
+
+    rnd h  id  ->  forall r in dRight, r = h r        (false)
+    rnd id h   ->  mu1 dRight l = mu1 dLeft l         (false)
+
+FOURTH, THE NEXT MOVE, which is a tripwire question and not an exporter one. Make
+the surplus an EXPLICIT sample so it can be dropped one-sided:
+
+    MUniFinFun.dfunE_dlet_fix1 :  dfun d = dlet (d x0) (fun v => dfun d.[x0 <- dunit v])
+
+splits the right's draw into "the value at x0" and "the rest". The value at `x0`
+is then genuinely unused -> one-sided `rnd{2}` under `dcod_ll`. What remains is
+the PINNED form, where `(f, y) |-> f.[x0 <- y]` IS injective (`f x0` is known, so
+`f` is recoverable) and `dlet_dfun_fupdate_ll` is its distribution identity. That
+is a bijection, so `rnd f finv` applies.
+
+A CAUTION EARNED HERE: `cli_step` reported "No open goals" for a `conseq ... => />;
+first smt()` that `qed.` then rejected with "cannot prove goal (strict)". The
+interactive tool defers smt; only `qed.`/`ec_compile` settles it. Same class as
+the known `sim` batch-flakiness, and worth remembering for every `smt`-ended step.
+
+THE CONSUMER COST IS UNCHANGED and still gates the chain: `hop_7_decaps` /
+`hop_15_decaps` are closed today against the strong premise `rF{2} = rF{1}`, which
+the repaired `initialize` will not establish. They need re-proving under the weak
+one with the unreachability argument. Do both or the chain does not close.

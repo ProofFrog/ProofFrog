@@ -6978,6 +6978,288 @@ def export_proof_file(proof_path: str) -> str:
         lines += _seed_split_ladder(s_tail)
         return {"decaps": lines}
 
+    def _ident_seed_pair_spec(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> dict[str, Any] | None:
+        """Detect the IDENTITY-SEED KG seam of the two-KEM seedbased proofs
+        (CK/UK hop_4 and its hop_23 mirror), or ``None`` off-shape.
+
+        The DERIVE side holds its first keypair from a bare-forward
+        KeyGenEquiv challenger (``generate = [Return K.keygen()]``), draws the
+        second KEM's seed into a FIELD, and derives that keypair inline; the
+        CHALLENGER side takes the first keypair from a DIRECT ``keygen`` call
+        and the second from a FromDeriveKeyPair challenger. The coupling
+        (already emitted by the composite pipeline) carries the challenger
+        side's keys field as the ``ev_derivekeypair`` of the derive side's
+        seed FIELD -- this spec gates on that TEXT, so the tactics (validated
+        by the c318 probes, both EXIT 0) fire only where the establishing
+        conjunct exists."""
+        if step_a.reduction is None or step_b.reduction is None:
+            return None
+        mods: list[ec_ast.Module] = []
+        for st in (step_a, step_b):
+            assert st.reduction is not None
+            mod = next(
+                (
+                    d
+                    for d in ec_reductions
+                    if isinstance(d, ec_ast.Module) and d.name == st.reduction.name
+                ),
+                None,
+            )
+            if mod is None:
+                return None
+            mods.append(mod)
+        steps = (step_a, step_b)
+
+        def _exec_of(mod: ec_ast.Module) -> list[ec_ast.EcStmt] | None:
+            proc = next((p for p in mod.procs if p.name == "initialize"), None)
+            if proc is None:
+                return None
+            return [
+                st
+                for st in proc.body
+                if not isinstance(st, (ec_ast.VarDecl, ec_ast.Return))
+            ]
+
+        for di in (0, 1):
+            ci = 1 - di
+            d_exec, c_exec = _exec_of(mods[di]), _exec_of(mods[ci])
+            if d_exec is None or c_exec is None:
+                continue
+            d_chal = mods[di].params[-1].name if mods[di].params else None
+            c_chal = mods[ci].params[-1].name if mods[ci].params else None
+            d_fields = {v.name: v.type.text for v in mods[di].module_vars}
+            c_fields = {v.name: v.type.text for v in mods[ci].module_vars}
+            # DERIVE side: [chal-fwd -> pair field; Sample -> seed FIELD;
+            # det derive(seed field) -> local; ...]
+            if (
+                len(d_exec) < 3
+                or not isinstance(d_exec[0], ec_ast.Call)
+                or d_chal is None
+                or d_exec[0].callee.partition(".")[0] != d_chal
+                or d_exec[0].args.strip()
+                or d_exec[0].var not in d_fields
+                or " * " not in d_fields[d_exec[0].var]
+                or not isinstance(d_exec[1], ec_ast.Sample)
+                or d_exec[1].var not in d_fields
+                or not isinstance(d_exec[2], ec_ast.Call)
+            ):
+                continue
+            seed_field = d_exec[1].var
+            d_derive = d_exec[2]
+            if d_derive.args.strip() != seed_field:
+                continue
+            d_pmap = _module_pmap(mods[di], resolver.resolve(steps[di]).module_expr)
+            dmod_f, _, dmeth = d_derive.callee.partition(".")
+            der_mod = d_pmap.get(dmod_f, dmod_f)
+            der_alias = clone_alias_by_module.get(der_mod)
+            if der_alias is None or dmeth not in det_methods_by_module.get(
+                der_mod, set()
+            ):
+                continue
+            # the derive-side challenger is the BARE FORWARD
+            # pylint: disable=protected-access
+            d_chal_ast = engine._get_game_ast(steps[di].challenger, None)
+            c_chal_ast = engine._get_game_ast(steps[ci].challenger, None)
+            # pylint: enable=protected-access
+            if d_chal_ast is None or c_chal_ast is None:
+                continue
+            dm = next(
+                (
+                    x
+                    for x in d_chal_ast.methods
+                    if x.signature.name.lower()
+                    == d_exec[0].callee.partition(".")[2].lower()
+                ),
+                None,
+            )
+            if dm is None:
+                continue
+            dsts = list(dm.block.statements)
+            if (
+                len(dsts) != 1
+                or not isinstance(dsts[0], frog_ast.ReturnStatement)
+                or not isinstance(dsts[0].expression, frog_ast.FuncCall)
+            ):
+                continue
+            # CHALLENGER side: [direct keygen -> pair field; chal(FromDKP) ->
+            # pair field; ...]
+            if (
+                len(c_exec) < 2
+                or not isinstance(c_exec[0], ec_ast.Call)
+                or c_exec[0].callee.partition(".")[0] == c_chal
+                or c_exec[0].args.strip()
+                or c_exec[0].var not in c_fields
+                or not isinstance(c_exec[1], ec_ast.Call)
+                or c_chal is None
+                or c_exec[1].callee.partition(".")[0] != c_chal
+                or c_exec[1].args.strip()
+                or c_exec[1].var not in c_fields
+            ):
+                continue
+            ckeys_field = c_exec[1].var
+            cm = next(
+                (
+                    x
+                    for x in c_chal_ast.methods
+                    if x.signature.name.lower()
+                    == c_exec[1].callee.partition(".")[2].lower()
+                ),
+                None,
+            )
+            if cm is None:
+                continue
+            csts = list(cm.block.statements)
+            if (
+                len(csts) != 2
+                or not isinstance(csts[0], frog_ast.Sample)
+                or not isinstance(csts[0].var, frog_ast.Variable)
+                or not isinstance(csts[1], frog_ast.ReturnStatement)
+                or not isinstance(csts[1].expression, frog_ast.FuncCall)
+            ):
+                continue
+            c_init = next(pr for pr in mods[ci].procs if pr.name == "initialize")
+            c_locals = {d.name for d in c_init.body if isinstance(d, ec_ast.VarDecl)}
+            chal_seed = _pe_fresh(csts[0].var.name, c_locals)
+            # THE ESTABLISHING GATE: the coupling text must already carry the
+            # challenger-side keys field as the ev of the derive-side seed
+            coupling = _live_state_coupling(step_a, step_b)
+            dtag, ctag = str(di + 1), str(ci + 1)
+            want = (
+                f"{mods[ci].name}.{ckeys_field}{{{ctag}}} ="
+                f" ({der_alias}.ev_{dmeth}"
+                f" ({mods[di].name}.{seed_field}{{{dtag}}}))"
+            )
+            if want not in coupling:
+                continue
+            return {
+                "di": di,
+                "mods": mods,
+                "steps": steps,
+                "seed_field": seed_field,
+                "ckeys_field": ckeys_field,
+                "der_mod": der_mod,
+                "der_alias": der_alias,
+                "der_meth": dmeth,
+                "d_derive_var": d_derive.var,
+                "chal_seed": chal_seed,
+                "c_first_var": c_exec[0].var,
+                "d_exec": d_exec,
+            }
+        return None
+
+    def _ident_seed_pair_init_tac(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> list[str] | None:
+        """The identity-seed KG-seam init (validated: probe c318_h4i, EXIT 0):
+        a two-sided keygen couple, an identity rnd on the seed draws, a
+        two-sided derivekeypair det seam, and the matched ladder."""
+        spec = _ident_seed_pair_spec(step_a, step_b)
+        if spec is None:
+            return None
+        di = spec["di"]
+        dtag, ctag = str(di + 1), str(2 - di)
+        d_base = spec["mods"][di].name
+        c_base = spec["mods"][1 - di].name
+        globs = glob_invariant_conj
+        ev = (
+            f"{spec['der_alias']}.ev_{spec['der_meth']}"
+            f" ({d_base}.{spec['seed_field']}{{{dtag}}})"
+        )
+        det_ax = f"{spec['der_mod']}_{spec['der_meth']}_det"
+        pair_eq = (
+            f"{d_base}.{spec['d_exec'][0].var}{{{dtag}}} ="
+            f" {c_base}.{spec['c_first_var']}{{{ctag}}}"
+        )
+        seq1 = "seq 2 1" if di == 0 else "seq 1 2"
+        seq3 = "seq 1 2" if di == 0 else "seq 2 1"
+        lines = [
+            "inline *.",
+            f"{seq1} : ({globs} /\\ {pair_eq}).",
+            "+ by wp; call (_: true); skip => /#.",
+            f"seq 1 1 : (#pre /\\ {d_base}.{spec['seed_field']}{{{dtag}}} ="
+            f" {spec['chal_seed']}{{{ctag}}}).",
+            "+ by rnd; skip => />.",
+            f"{seq3} : (#pre /\\ {spec['d_derive_var']}{{{dtag}}} = {ev}"
+            f" /\\ {c_base}.{spec['ckeys_field']}{{{ctag}}} = {ev}).",
+            "+ wp.",
+            f"  exists* (glob {spec['der_mod']}){{{dtag}}},"
+            f" {d_base}.{spec['seed_field']}{{{dtag}}}; elim* => gt1 t1.",
+            f"  call{{{dtag}}} ({det_ax} gt1 t1).",
+            f"  exists* (glob {spec['der_mod']}){{{ctag}}},"
+            f" {spec['chal_seed']}{{{ctag}}}; elim* => gt2 t2.",
+            f"  call{{{ctag}}} ({det_ax} gt2 t2).",
+            "  skip => /#.",
+        ]
+        for st in reversed(spec["d_exec"][3:]):
+            if isinstance(st, ec_ast.Call):
+                lines.append("wp; call (_: true).")
+            elif isinstance(st, ec_ast.Sample):
+                lines.append("wp; rnd.")
+        lines.append("wp; skip => /#.")
+        return lines
+
+    def _ident_seed_pair_decaps_walk(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> dict[str, list[str]] | None:
+        """The identity-seed ``decaps`` consumer (validated: probe c318_h4d,
+        EXIT 0): the derive side re-derives the second keypair from its seed
+        FIELD -- drop it one-sided through the det axiom (its ev value IS the
+        challenger side's keys field, by the coupling) and walk the matched
+        tail."""
+        spec = _ident_seed_pair_spec(step_a, step_b)
+        if spec is None:
+            return None
+        di = spec["di"]
+        dtag = str(di + 1)
+        d_base = spec["mods"][di].name
+        det_ax = f"{spec['der_mod']}_{spec['der_meth']}_det"
+        d_dec = next((p for p in spec["mods"][di].procs if p.name == "decaps"), None)
+        c_dec = next(
+            (p for p in spec["mods"][1 - di].procs if p.name == "decaps"), None
+        )
+        if d_dec is None or c_dec is None:
+            return None
+        d_body = [
+            st
+            for st in d_dec.body
+            if not isinstance(st, (ec_ast.VarDecl, ec_ast.Return))
+        ]
+        if len(d_body) != 1 or not isinstance(d_body[0], ec_ast.If):
+            return None
+        d_else = [
+            st for st in d_body[0].else_body if not isinstance(st, ec_ast.VarDecl)
+        ]
+        if (
+            not d_else
+            or not isinstance(d_else[0], ec_ast.Call)
+            or d_else[0].args.strip() != spec["seed_field"]
+        ):
+            return None
+        ev = (
+            f"{spec['der_alias']}.ev_{spec['der_meth']}"
+            f" ({d_base}.{spec['seed_field']}{{{dtag}}})"
+        )
+        lines = [
+            "if.",
+            "+ move => &1 &2 /#.",
+            "+ by wp; skip => /#.",
+            f"seq {'1 0' if dtag == '1' else '0 1'} : (#pre /\\"
+            f" {d_else[0].var}{{{dtag}}} = {ev}).",
+            f"+ exists* (glob {spec['der_mod']}){{{dtag}}},"
+            f" {d_base}.{spec['seed_field']}{{{dtag}}}; elim* => gt t.",
+            f"  call{{{dtag}}} ({det_ax} gt t).",
+            "  skip => /#.",
+        ]
+        for st in reversed(d_else[1:]):
+            if isinstance(st, ec_ast.Call):
+                lines.append("wp; call (_: true).")
+            elif isinstance(st, ec_ast.Sample):
+                lines.append("wp; rnd.")
+        lines.append("wp; skip => /#.")
+        return {"decaps": lines}
+
     def _prg_expansion_game_coupling(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> str | None:
@@ -11814,9 +12096,34 @@ def export_proof_file(proof_path: str) -> str:
                 return None
             return body[0]
 
+        def _direct_kg(mod: ec_ast.Module) -> ec_ast.Call | None:
+            # the CK-shape kg side: the pair comes from a DIRECT no-arg call
+            # to a non-challenger module (``pq_keys <@ KEM_PQ.keygen()``)
+            proc = next((p for p in mod.procs if p.name == "initialize"), None)
+            if proc is None:
+                return None
+            body = [
+                st
+                for st in proc.body
+                if not isinstance(st, (ec_ast.VarDecl, ec_ast.Return))
+            ]
+            chal = mod.params[-1].name if mod.params else None
+            if (
+                not body
+                or not isinstance(body[0], ec_ast.Call)
+                or body[0].callee.partition(".")[0] == chal
+                or body[0].args.strip()
+            ):
+                return None
+            return body[0]
+
         for ki in (0, 1):
             ci = 1 - ki
             k_call, c_call = _exec0(mods[ki]), _exec0(mods[ci])
+            k_direct = False
+            if k_call is None:
+                k_call = _direct_kg(mods[ki])
+                k_direct = True
             if k_call is None or c_call is None:
                 continue
             k_fields = {v.name: v.type.text for v in mods[ki].module_vars}
@@ -11826,34 +12133,43 @@ def export_proof_file(proof_path: str) -> str:
             kf, cf = k_call.var, c_call.var
             if " * " not in k_fields[kf]:
                 continue  # the keys field must be a pair
-            # kg-side challenger: generate() = [Return K.<m>()] (a bare forward)
             # pylint: disable=protected-access
-            k_chal = engine._get_game_ast(steps[ki].challenger, None)
             c_chal_ast = engine._get_game_ast(steps[ci].challenger, None)
             # pylint: enable=protected-access
-            if k_chal is None or c_chal_ast is None:
+            if c_chal_ast is None:
                 continue
-            k_meth_name = k_call.callee.partition(".")[2]
-            km = next(
-                (
-                    x
-                    for x in k_chal.methods
-                    if x.signature.name.lower() == k_meth_name.lower()
-                ),
-                None,
-            )
-            if km is None:
-                continue
-            ksts = list(km.block.statements)
-            if (
-                len(ksts) != 1
-                or not isinstance(ksts[0], frog_ast.ReturnStatement)
-                or not isinstance(ksts[0].expression, frog_ast.FuncCall)
-                or not isinstance(ksts[0].expression.func, frog_ast.FieldAccess)
-                or ksts[0].expression.args
-            ):
-                continue
-            kg_meth = ksts[0].expression.func.name.lower()
+            if k_direct:
+                # the direct call names the keygen itself
+                kg_meth = k_call.callee.partition(".")[2].lower()
+            else:
+                # kg-side challenger: generate() = [Return K.<m>()] (a bare
+                # forward)
+                k_chal = engine._get_game_ast(  # pylint: disable=protected-access
+                    steps[ki].challenger, None
+                )
+                if k_chal is None:
+                    continue
+                k_meth_name = k_call.callee.partition(".")[2]
+                km = next(
+                    (
+                        x
+                        for x in k_chal.methods
+                        if x.signature.name.lower() == k_meth_name.lower()
+                    ),
+                    None,
+                )
+                if km is None:
+                    continue
+                ksts = list(km.block.statements)
+                if (
+                    len(ksts) != 1
+                    or not isinstance(ksts[0], frog_ast.ReturnStatement)
+                    or not isinstance(ksts[0].expression, frog_ast.FuncCall)
+                    or not isinstance(ksts[0].expression.func, frog_ast.FieldAccess)
+                    or ksts[0].expression.args
+                ):
+                    continue
+                kg_meth = ksts[0].expression.func.name.lower()
             # corr-side challenger, RENDERED: locate its module, the call to
             # the same keygen, its projection assigns, and the return tuple
             c_expr = pt.last_module_arg(resolver.resolve(steps[ci]).module_expr)
@@ -12480,6 +12796,9 @@ def export_proof_file(proof_path: str) -> str:
             # two-sided evaluate det seam. ``None`` off-shape.
             if reprogram_override is None:
                 reprogram_override = _prg_expansion_init_tac(step_a, step_b)
+            # identity-seed KG seam (two-KEM seedbased hop_4/hop_23).
+            if reprogram_override is None:
+                reprogram_override = _ident_seed_pair_init_tac(step_a, step_b)
             # Same-backbone / different-LAYOUT hop (HON_BIND hop_4 / hop_8
             # ``initialize``): batch the interleaved side, then peel. ``None``
             # off-shape, and it declines outright when both sides are already
@@ -12535,6 +12854,7 @@ def export_proof_file(proof_path: str) -> str:
                     or _keyed_reprogram_decaps_walk(step_a, step_b, _i)
                     or _seed_split_pair_decaps_walk(step_a, step_b)
                     or _prg_expansion_decaps_walk(step_a, step_b)
+                    or _ident_seed_pair_decaps_walk(step_a, step_b)
                 ),
                 # The OUTER hop lemma's glob set (see ``glob_invariant_conj``).
                 # The chain coupling must match it exactly -- see the gparams

@@ -904,6 +904,47 @@ class TypeCollector:
         resolved = self._resolve_regroup_split2(left_ops, head_op)
         return resolved[0] if resolved is not None else None
 
+    def head_op_for_regroup(
+        self, left_ops: tuple[str, ...], split2: bool
+    ) -> str | None:
+        """The right-hand HEAD op a regroup over ``left_ops`` would use.
+
+        A consumer that reads only the LEFT-NESTED side of a KDF input (the
+        rendered ``decaps`` walk, where the other side's bracketing sits inside
+        a challenger's ``lookup`` body it never renders) still knows the whole
+        law: the leaves fix the right-hand chain, and the head combines the
+        prefix -- the bare first leaf (k=1) or the first LINK's result (split2)
+        -- with that chain's result. Returns ``None`` when any link is
+        unregistered, and the caller must decline.
+        """
+        if len(left_ops) < 2:
+            return None
+        by_name = {
+            _concat_op_name(left, right, result): (left, right, result)
+            for left, right, result in self._concat_ops
+        }
+        if any(op not in by_name for op in left_ops):
+            return None
+        left = [by_name[op] for op in left_ops]
+        if any(left[i][0] != left[i - 1][2] for i in range(1, len(left))):
+            return None
+        leaves = [left[0][0], left[0][1]] + [t[1] for t in left[1:]]
+        first = 2 if split2 else 1
+        if len(leaves) <= first:
+            return None
+        by_pair = {(l, r): res for l, r, res in self._concat_ops}
+        cursor = leaves[first]
+        for leaf in leaves[first + 1 :]:
+            result = by_pair.get((cursor, leaf))
+            if result is None:
+                return None
+            cursor = result
+        head_left = left[0][2] if split2 else leaves[0]
+        result = by_pair.get((head_left, cursor))
+        if result is None:
+            return None
+        return _concat_op_name(head_left, cursor, result)
+
     def _resolve_regroup_split2(
         self, left_ops: tuple[str, ...], head_op: str
     ) -> tuple[str, list[str], list[_Triple], list[_Triple], _Triple] | None:

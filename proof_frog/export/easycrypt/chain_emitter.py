@@ -11098,6 +11098,80 @@ def _single_stmt_align_swaps(
     return swaps, cur
 
 
+_PROJ_ARG = re.compile(r"[A-Za-z_]\w*(?:\.`\d+)*")
+
+
+def _one_sided_det_steps(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    side: int,
+    stmts: list[ec_ast.EcStmt],
+    stop: ec_ast.Call,
+    q: Callable[[str], str],
+    all_vars: set[str],
+    assigned: set[str],
+    ctr: list[int],
+    clone_alias: dict[str, str],
+) -> list[str] | None:
+    """One ``seq 1 0`` / ``seq 0 1`` step per statement of ``stmts`` up to (not
+    including) ``stop``, functionalizing each det call one-sided.
+
+    A det call gets ``exists* (glob M){i}, <args>{i}; call{i} (M_m_det ...)``
+    with the resulting ``ev_`` fact in the invariant; an assignment gets a
+    ``wp``-proved step stating its rhs (side-tagged, ``q``-qualified). Each
+    call's args must already be ASSIGNED at its own cut (``exists*`` freezes at
+    the cut's initial memory) and be a plain variable or a tuple projection of
+    one -- anything else declines. The memory tag lands on the VARIABLE, before
+    any projection (``RB.t_keys{1}.`1``), which the token-wise tagger produces
+    naturally. Shared by the init twin route and the decaps consumer walk.
+    """
+
+    def _tag(expr: str) -> str:
+        return _IDENT_TOKENS.sub(
+            lambda m: (
+                f"{q(m.group(0))}{{{side}}}"
+                if m.group(0).split(".", 1)[0] in all_vars
+                else m.group(0)
+            ),
+            expr,
+        )
+
+    cut_l, cut_r = ("1", "0") if side == 1 else ("0", "1")
+    steps: list[str] = []
+    for stmt in stmts:
+        if stmt is stop:
+            break
+        if isinstance(stmt, ec_ast.Call):
+            parts = _callee_parts(stmt.callee)
+            if parts is None or parts[0] not in clone_alias:
+                return None
+            cmod, cmeth = parts
+            calias = clone_alias[cmod]
+            args = _split_top_args(stmt.args)
+            if any(not _PROJ_ARG.fullmatch(a) for a in args):
+                return None
+            if any(a.split(".", 1)[0] not in assigned for a in args):
+                return None
+            fact = f"{q(stmt.var)}{{{side}}} = {calias}.ev_{cmeth}" + "".join(
+                f" ({_tag(a)})" for a in args
+            )
+            n = ctr[0]
+            ctr[0] += 1
+            binders = " ".join([f"_g{n}"] + [f"_a{n}_{k}" for k in range(len(args))])
+            cap = ", ".join([f"(glob {cmod}){{{side}}}"] + [_tag(a) for a in args])
+            steps.append(f"seq {cut_l} {cut_r} : (#pre /\\ {fact}).")
+            steps.append(f"+ exists* {cap}; elim* => {binders}.")
+            steps.append(
+                f"  call{{{side}}} ({cmod}_{cmeth}_det {binders}); skip => /#."
+            )
+        elif isinstance(stmt, ec_ast.Assign):
+            fact = f"{q(stmt.var)}{{{side}}} = {_tag(stmt.rhs)}"
+            steps.append(f"seq {cut_l} {cut_r} : (#pre /\\ {fact}).")
+            steps.append("+ wp; skip => /#.")
+        else:
+            return None
+        assigned.add(stmt.var)
+    return steps
+
+
 def _synth_kdf_substitution_twin(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -11463,70 +11537,14 @@ def _synth_kdf_substitution_twin(  # pylint: disable=too-many-arguments,too-many
         getattr(s, "var", "") for s in oth_exec if getattr(s, "var", "")
     }
     ctr = [0]
-
-    def _suffix_steps(
-        side: int,
-        suffix: list[ec_ast.EcStmt],
-        kdf: ec_ast.Call,
-        q: Callable[[str], str],
-        all_vars: set[str],
-        assigned: set[str],
-    ) -> list[str] | None:
-        def _tag(expr: str) -> str:
-            return _IDENT_TOKENS.sub(
-                lambda m: (
-                    f"{q(m.group(0))}{{{side}}}"
-                    if m.group(0).split(".", 1)[0] in all_vars
-                    else m.group(0)
-                ),
-                expr,
-            )
-
-        cut_l, cut_r = ("1", "0") if side == 1 else ("0", "1")
-        steps: list[str] = []
-        for stmt in suffix:
-            if stmt is kdf:
-                break
-            if isinstance(stmt, ec_ast.Call):
-                parts = _callee_parts(stmt.callee)
-                if parts is None:
-                    return None
-                cmod, cmeth = parts
-                calias = clone_alias[cmod]
-                args = _split_top_args(stmt.args)
-                if any(not re.fullmatch(r"[A-Za-z_]\w*", a) for a in args):
-                    return None
-                if any(a not in assigned for a in args):
-                    return None
-                fact = f"{q(stmt.var)}{{{side}}} = {calias}.ev_{cmeth}" + "".join(
-                    f" ({q(a)}{{{side}}})" for a in args
-                )
-                n = ctr[0]
-                ctr[0] += 1
-                binders = " ".join(
-                    [f"_g{n}"] + [f"_a{n}_{k}" for k in range(len(args))]
-                )
-                cap = ", ".join(
-                    [f"(glob {cmod}){{{side}}}"] + [f"{q(a)}{{{side}}}" for a in args]
-                )
-                steps.append(f"seq {cut_l} {cut_r} : (#pre /\\ {fact}).")
-                steps.append(f"+ exists* {cap}; elim* => {binders}.")
-                steps.append(
-                    f"  call{{{side}}} ({cmod}_{cmeth}_det {binders}); skip => /#."
-                )
-            elif isinstance(stmt, ec_ast.Assign):
-                fact = f"{q(stmt.var)}{{{side}}} = {_tag(stmt.rhs)}"
-                steps.append(f"seq {cut_l} {cut_r} : (#pre /\\ {fact}).")
-                steps.append("+ wp; skip => /#.")
-            else:
-                return None
-            assigned.add(stmt.var)
-        return steps
-
     assigned_e = {getattr(s, "var", "") for s in aligned_e} | fields_e
     assigned_o = {getattr(s, "var", "") for s in aligned_o} | fields_o
-    steps_e = _suffix_steps(1, suffix_e, kdf_e, _q_e, all_vars_e, assigned_e)
-    steps_o = _suffix_steps(2, suffix_o, kdf_o, _q_o, all_vars_o, assigned_o)
+    steps_e = _one_sided_det_steps(
+        1, suffix_e, kdf_e, _q_e, all_vars_e, assigned_e, ctr, clone_alias
+    )
+    steps_o = _one_sided_det_steps(
+        2, suffix_o, kdf_o, _q_o, all_vars_o, assigned_o, ctr, clone_alias
+    )
     if steps_e is None or steps_o is None:
         return None
 
@@ -13946,6 +13964,239 @@ def _synth_kdf_substitution_decaps(  # pylint: disable=too-many-arguments,too-ma
         "wp; skip => /#.",
     ]
     return [_res_tag(SYNTH_PARAM), "proc.", *tac, "qed."]
+
+
+def kdf_substitution_decaps_walk_tacs(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+    lmod: ec_ast.Module,
+    rmod: ec_ast.Module,
+    oracle_name: str,
+    coupling: str,
+    det_methods: dict[str, set[str]],
+    clone_alias: dict[str, str],
+    types: tc.TypeCollector,
+) -> list[str] | None:
+    """The KDF-substitution ``decaps`` WALK, on the two RENDERED reduction
+    modules, or ``None`` off-shape.
+
+    The flat-state route (:func:`_synth_kdf_substitution_decaps`) cannot see
+    the two-KEM cells at all: their KDF-side flat state nests the shared-secret
+    ENCODING inside the challenger ``lookup``'s argument, a position the
+    flat-state renderer cannot express, so the whole method falls back to
+    ``return witness`` and every shape gate reads an empty body. The RENDERED
+    reduction modules carry the same bodies with the calls hoisted and NAMED --
+    the names the tactic's ``seq`` facts must use, since the lemma runs on
+    these very modules -- so this variant reads them instead (the
+    ``oracle_tac_override`` channel, same rationale as the twin-prefix binding
+    route). The challenge branch is walked one det call per ``seq`` cut
+    (:func:`_one_sided_det_steps` -- the same-module encode reorder makes any
+    aligned ladder impossible), the shared KDF call is coupled at the end
+    under the regroup law, and the non-challenge branch keeps the count-free
+    ``do ? rcondf`` + ``do !`` ladder. Derivation + negative controls:
+    ``ec_templates/indcca_kdf_substitution_twin_TACTIC.txt`` (the decaps
+    section).
+    """
+    procs = [
+        next((p for p in m.procs if p.name == oracle_name), None) for m in (lmod, rmod)
+    ]
+    if procs[0] is None or procs[1] is None:
+        return None
+    conj_all = [p.strip() for p in coupling.split(" /\\ ")]
+    params = [p.name for p in procs[0].params]
+    if not params or [p.name for p in procs[1].params] != params:
+        return None
+    fields = [{v.name for v in m.module_vars} for m in (lmod, rmod)]
+    bases = [lmod.name, rmod.name]
+    shapes = [_guarded_oracle_body(cast(ec_ast.Proc, p)) for p in procs]
+    if shapes[0] is None or shapes[1] is None:
+        return None
+    cuts = [_first_inner_if(s.body) for s in shapes]  # type: ignore[union-attr]
+    if cuts[0] is None or cuts[1] is None:
+        return None
+
+    def _guard_ok(gl: str, gr: str) -> bool:
+        def _field(g: str, flds: set[str]) -> str | None:
+            lhs, eq, rhs = g.partition(" = ")
+            if not eq:
+                return None
+            hits = [x for x in (lhs.strip(), rhs.strip()) if x in flds]
+            return hits[0] if len(hits) == 1 else None
+
+        fl, fr = _field(gl, fields[0]), _field(gr, fields[1])
+        if fl is None or fr is None:
+            return False
+        return (
+            f"{bases[1]}.{fr}{{2}} = {bases[0]}.{fl}{{1}}" in conj_all
+            or f"{bases[0]}.{fl}{{1}} = {bases[1]}.{fr}{{2}}" in conj_all
+        )
+
+    if not _guard_ok(shapes[0].guard, shapes[1].guard):  # type: ignore[union-attr]
+        return None
+    ifs = [
+        cast(ec_ast.If, shapes[i].body[cuts[i]])  # type: ignore[union-attr,index]
+        for i in (0, 1)
+    ]
+    if not _guard_ok(ifs[0].guard, ifs[1].guard):
+        return None
+
+    # --- shared prefix -------------------------------------------------------
+    pre = [shapes[i].body[: cuts[i]] for i in (0, 1)]  # type: ignore[union-attr,index]
+    ev = [[s for s in p if _is_bb_stmt(s)] for p in pre]
+    if any(not isinstance(s, ec_ast.Call) for s in ev[0] + ev[1]) or not ev[0]:
+        return None
+    if [s.callee for s in ev[0] if isinstance(s, ec_ast.Call)] != [
+        s.callee for s in ev[1] if isinstance(s, ec_ast.Call)
+    ]:
+        return None
+    if len(pre[0]) != len(pre[1]) or any(
+        type(a) is not type(b) for a, b in zip(pre[0], pre[1])
+    ):
+        return None
+    bound = [
+        (a, b)
+        for a, b in zip(pre[0], pre[1])
+        if isinstance(a, (ec_ast.Call, ec_ast.Assign))
+        and isinstance(b, (ec_ast.Call, ec_ast.Assign))
+        and a.var == b.var
+    ]
+    if not bound:
+        return None
+    pre_names = [a.var for a, _b in bound]
+    tac: list[str] = [
+        "inline *.",
+        "if; 1: smt().",
+        "auto.",
+        f"seq {len(pre[0])} {len(pre[1])} : (#pre /\\ ={{{', '.join(pre_names)}}}).",
+        "+ " + " ".join(["wp; call (_: true);"] * len(ev[0])) + " wp; skip => /#.",
+        "if; 1: smt().",
+    ]
+
+    # --- challenge branch: the per-det-call walk -----------------------------
+    thens = [list(ifs[i].then_body) for i in (0, 1)]
+    elses = [list(ifs[i].else_body) for i in (0, 1)]
+    if not elses[0] or not elses[1]:
+        return None
+    t_ev = [[s for s in t if _is_bb_stmt(s)] for t in thens]
+    if any(not isinstance(s, ec_ast.Call) for s in t_ev[0] + t_ev[1]):
+        return None
+    t_callees = [[cast(ec_ast.Call, s).callee for s in e] for e in t_ev]
+    kdf = [cast(ec_ast.Call, t_ev[i][-1]) for i in (0, 1)]
+    # Each side's TAIL call is its own spelling of the shared KDF evaluation
+    # (the encoding side calls the KDF directly, the other its challenger's
+    # ``lookup``), so it is set aside before the multisets are compared: the
+    # one surplus call left is the substitution encoding itself.
+    cnt_l = Counter(t_callees[0][:-1])
+    cnt_r = Counter(t_callees[1][:-1])
+    extra_l, extra_r = cnt_l - cnt_r, cnt_r - cnt_l
+    if sum(extra_l.values()) == 1 and not extra_r:
+        enc_side = 1
+    elif sum(extra_r.values()) == 1 and not extra_l:
+        enc_side = 2
+    else:
+        return None
+    enc_callee = next(iter((extra_l or extra_r).elements()))
+    enc_cands = [
+        cast(ec_ast.Call, s)
+        for s in t_ev[enc_side - 1][:-1]
+        if cast(ec_ast.Call, s).callee == enc_callee
+    ]
+    if len(enc_cands) != 1:
+        return None
+    enc_call = enc_cands[0]
+    parts = _callee_parts(enc_call.callee)
+    if parts is None or parts[0] not in clone_alias:
+        return None
+    enc_mod, enc_meth = parts
+    if enc_meth not in det_methods.get(enc_mod, set()):
+        return None
+    enc_args = _split_top_args(enc_call.args)
+    if len(enc_args) != 1:
+        return None
+    arg = enc_args[0].strip()
+    if arg not in fields[enc_side - 1]:
+        return None
+    arg_ref = f"{bases[enc_side - 1]}.{arg}{{{enc_side}}}"
+    want = _ws(f"{clone_alias[enc_mod]}.ev_{enc_meth} {arg_ref}")
+    if not any(want in _ws(c) for c in conj_all):
+        return None
+
+    # --- the regroup law, read off the ENC side + the lookup's arity ---------
+    # The other side's bracketing lives inside its challenger's ``lookup``
+    # body, which this builder never renders; but the enc-side chain fixes the
+    # law's leaves, and the lookup's ARITY decides between the bare-key (one
+    # argument: the rest) and first-key (two: key2 + rest) forms.
+    env_e = _assign_env(thens[enc_side - 1])
+    chain_e = _concat_chain(
+        _resolve_expr(kdf[enc_side - 1].args, env_e), types.concat_op_names()
+    )
+    if chain_e is None or chain_e[1][0] != enc_call.var:
+        return None
+    # KEYED lookups only (two arguments: key2 + rest -- the split2 law). The
+    # bare-key shape is owned by the flat-state route, which fires later in the
+    # dispatch and already closes CG/UG; accepting it here would rewrite those
+    # cells' landed tactics for nothing.
+    oth_tail = kdf[2 - enc_side]
+    if not oth_tail.callee.startswith("Challenger."):
+        return None
+    if len(_split_top_args(oth_tail.args)) != 2:
+        return None
+    head_o = types.head_op_for_regroup(tuple(chain_e[0]), split2=True)
+    if head_o is None:
+        return None
+    regroup = types.probe_concat_regroup_split2(tuple(chain_e[0]), head_o)
+    if regroup is None:
+        return None
+    types.request_concat_regroup_split2(tuple(chain_e[0]), head_o)
+
+    walk_ctr = [0]
+    walk_steps: list[str] = []
+    for w_side in (enc_side, 3 - enc_side):
+        idx = w_side - 1
+        w_flds = fields[idx]
+        w_base = bases[idx]
+
+        def _q(v: str, _f: set[str] = w_flds, _b: str = w_base) -> str:
+            return f"{_b}.{v}" if v in _f else v
+
+        w_vars = (
+            w_flds
+            | set(params)
+            | {getattr(s, "var", "") for s in pre[idx]}
+            | {getattr(s, "var", "") for s in thens[idx]}
+        )
+        w_assigned = {getattr(s, "var", "") for s in pre[idx]} | set(params) | w_flds
+        got = _one_sided_det_steps(
+            w_side,
+            thens[idx],
+            kdf[idx],
+            _q,
+            w_vars,
+            w_assigned,
+            walk_ctr,
+            clone_alias,
+        )
+        if got is None:
+            return None
+        walk_steps += got
+    tac += [
+        *walk_steps,
+        "wp. call (_: true). wp. skip => />.",
+        f"smt({regroup}).",
+    ]
+
+    # --- non-challenge branch: dead guards, then the count-free ladder -------
+    dead = [any(isinstance(s, ec_ast.If) for s in e) for e in elses]
+    if dead[0] == dead[1]:
+        return None
+    dead_side = 1 if dead[0] else 2
+    lin = [s for s in elses[2 - dead_side] if _is_bb_stmt(s)]
+    if not lin or any(not isinstance(s, ec_ast.Call) for s in lin):
+        return None
+    tac += [
+        f"do ? (rcondf{{{dead_side}}} ^if; first by auto => /#).",
+        "do ! (wp; call (_: true)).",
+        "wp; skip => /#.",
+    ]
+    return tac
 
 
 def _bd_sample_dead(

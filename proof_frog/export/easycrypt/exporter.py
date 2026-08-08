@@ -6091,6 +6091,55 @@ def export_proof_file(proof_path: str) -> str:
                 out[lproc.name] = tac
         return out or None
 
+    def _kdf_substitution_decaps_walk_tacs(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> dict[str, list[str]] | None:
+        """The KEYED KDF-substitution ``decaps`` walk, keyed by oracle name;
+        ``None`` off-shape.
+
+        Built here because the tactic's ``seq`` facts must NAME the branch
+        locals of the modules the lemma runs on, and only the RENDERED
+        reduction modules carry those names: the two-KEM cells' KDF-side flat
+        state nests the shared-secret encoding inside the challenger
+        ``lookup``'s argument, which the flat-state renderer cannot express,
+        so the whole flat method is a ``return witness`` stub and the
+        chain-emitter route reads an empty body. Every shape gate lives in
+        :func:`ce.kdf_substitution_decaps_walk_tacs`, including the
+        keyed-lookup arity gate that keeps this off the CG/UG cells the
+        flat-state route already closes.
+        """
+        if step_a.reduction is None or step_b.reduction is None:
+            return None
+        mods: list[ec_ast.Module] = []
+        for st in (step_a, step_b):
+            assert st.reduction is not None
+            mod = next(
+                (
+                    d
+                    for d in ec_reductions
+                    if isinstance(d, ec_ast.Module) and d.name == st.reduction.name
+                ),
+                None,
+            )
+            if mod is None:
+                return None
+            mods.append(mod)
+        coupling = _live_state_coupling(step_a, step_b)
+        if not coupling:
+            return None
+        body = ce.kdf_substitution_decaps_walk_tacs(
+            mods[0],
+            mods[1],
+            "decaps",
+            coupling,
+            det_methods_by_module,
+            clone_alias_by_module,
+            top_types,
+        )
+        if body is None:
+            return None
+        return {"decaps": body}
+
     def _keygenequiv_init_tac(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> list[str] | None:
@@ -10818,7 +10867,10 @@ def export_proof_file(proof_path: str) -> str:
                     step_a.reduction is not None and step_b.reduction is not None
                 ),
                 init_tac_override=reprogram_override,
-                oracle_tac_override=_twin_challenge_oracle_tacs(step_a, step_b),
+                oracle_tac_override=(
+                    _twin_challenge_oracle_tacs(step_a, step_b)
+                    or _kdf_substitution_decaps_walk_tacs(step_a, step_b)
+                ),
                 # The OUTER hop lemma's glob set (see ``glob_invariant_conj``).
                 # The chain coupling must match it exactly -- see the gparams
                 # comment in ``_make_field_aware_coupling``.

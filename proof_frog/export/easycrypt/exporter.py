@@ -11779,10 +11779,37 @@ def export_proof_file(proof_path: str) -> str:
         # the domain/codomain still have to match after concretization.
         known_dfuns = {dfn for _, dfn in top_types.function_value_modules()}
         known_dfuns |= {name for name, _, _ in top_types.function_distrs_seen()}
+        proof_clauses_: list[tuple[str, str]] = []
         for dfun_name, d_t, c_t in src_theory_types.function_distrs_seen():
-            concrete_dfun = f"dfun_{tb_map.get(d_t, d_t)}_to_{tb_map.get(c_t, c_t)}"
+            # A KEYED random function's domain is a PAIR ("bs_A * bs_B"): the
+            # concrete name joins the concretized components. Without this the
+            # pair text misses ``tb_map`` wholesale, no binding is emitted, and
+            # the theory keeps a DISTINCT abstract dfun -- which is exactly what
+            # left the CK/UK reprogramming leg with an unmatchable residue
+            # (``ec_templates/indcca_keyed_reprogramming_TACTIC.txt``, delta 2).
+            if " * " in d_t:
+                comps = [tb_map.get(p.strip(), p.strip()) for p in d_t.split(" * ")]
+                concrete_dfun = f"dfun_{'_'.join(comps)}_to_{tb_map.get(c_t, c_t)}"
+                keyed = True
+            else:
+                concrete_dfun = f"dfun_{tb_map.get(d_t, d_t)}_to_{tb_map.get(c_t, c_t)}"
+                keyed = False
             if concrete_dfun in known_dfuns and concrete_dfun != dfun_name:
                 op_bindings_.append((dfun_name, concrete_dfun))
+                # pylint: disable=protected-access
+                word_backed = top_types._word_backed_names()
+                # pylint: enable=protected-access
+                if keyed and all(
+                    tb_map.get(p.strip(), p.strip()) in word_backed
+                    for p in d_t.split(" * ")
+                ):
+                    # The pair-domain top-level dfun is DERIVED (the MUF pair
+                    # block), so the theory's three axioms about the now-bound
+                    # op discharge by the derived lemmas -- three fewer axioms.
+                    for suffix in ("_ll", "_fu", "_full"):
+                        proof_clauses_.append(
+                            (f"{dfun_name}{suffix}", f"exact {concrete_dfun}{suffix}")
+                        )
         # Concat ops ``concat_<L>_<R>_to_<Res>``: a theory concat and the SAME
         # concatenation registered at top level (e.g. a materialized ``_Mat`` lazy-RO
         # challenger) are otherwise DISTINCT uninterpreted ops, so a top-level module
@@ -11803,6 +11830,7 @@ def export_proof_file(proof_path: str) -> str:
             alias=inst.clone_alias,
             type_bindings=type_bindings_,
             op_bindings=op_bindings_,
+            proof_clauses=proof_clauses_,
         )
 
     # Statelessness foundation (gated): emit the per-method distribution ops,

@@ -873,6 +873,107 @@ class TypeCollector:
         resolved = self._resolve_regroup(left_ops, pre_op)
         return resolved[0] if resolved is not None else None
 
+    def _emit_pair_dfun(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        decls: list[ec_ast.EcTopDecl],
+        dom: str,
+        pair: list[str],
+        codom: str,
+        distr: str,
+        muf_alias: dict[str, str],
+    ) -> None:
+        """The DERIVED uniform function distribution over a PAIR domain.
+
+        The keyed random function of the two-KEM combiners
+        (``KDFFirstKeyPRF_Random.rF : bs_Nss2 * bs_rest -> bs_Nout``) needs the
+        same ``MUniFinFun`` derivation the flat domains get, but the clone's
+        ``FinT.enum`` must enumerate the PRODUCT: ``allpairs`` of the two word
+        enums, its ``enum_spec`` proved as a named lemma (``count_uniq_mem`` ->
+        ``allpairs_uniq`` -> membership via ``allpairsP`` + both ``enumP``s)
+        because the clone's inline ``proof X by <tac>`` takes a single tactic.
+        Everything downstream (the three former axioms as lemmas) mirrors the
+        flat path. Validated: ``ec_templates/muf_pair_reprogram.ec`` and the
+        zero-admit CK hop_7 probe.
+        """
+        left, right = pair
+        bw_a, bw_b = _word_clone_name(left), _word_clone_name(right)
+        alias = muf_alias.get(dom, "")
+        enum = (
+            f"allpairs (fun (a : {left}) (b : {right}) => (a, b)) "
+            f"{bw_a}.words {bw_b}.words"
+        )
+        if not alias:
+            alias = f"MUF_{_sanitize(dom)}"
+            muf_alias[dom] = alias
+            spec = f"pair_enum_spec_{_sanitize(dom)}"
+            decls.append(
+                ec_ast.ProvedLemma(
+                    f"{spec} (x : {dom})",
+                    f"count (pred1 x)\n    ({enum}) = 1",
+                    [
+                        "  case: x => a b.",
+                        "  rewrite count_uniq_mem.",
+                        f"  + apply allpairs_uniq; [exact {bw_a}.enum_uniq |"
+                        f" exact {bw_b}.enum_uniq | smt()].",
+                        f"  have -> /= : (a, b) \\in allpairs"
+                        f" (fun (a0 : {left}) (b0 : {right}) => (a0, b0))"
+                        f" {bw_a}.words {bw_b}.words",
+                        f"    by apply/allpairsP; exists (a, b);"
+                        f" rewrite /= {bw_a}.enumP {bw_b}.enumP.",
+                        "  done.",
+                    ],
+                )
+            )
+            decls.append(
+                ec_ast.Clone(
+                    "MUniFinFun",
+                    alias,
+                    type_bindings=[("t", dom)],
+                    op_bindings=[("FinT.enum", enum)],
+                    proof_clauses=[("FinT.enum_spec", f"exact {spec}")],
+                )
+            )
+        dcod = f"d{codom}"
+        decls.append(
+            ec_ast.OpDecl(
+                distr,
+                f"({dom} -> {codom}) distr",
+                definition=f"{alias}.dfun (fun _ => {dcod})",
+                tags=["smt_opaque"],
+            )
+        )
+        decls.append(
+            ec_ast.ProvedLemma(
+                f"{distr}_ll",
+                f"is_lossless {distr}",
+                [
+                    f"  by rewrite /{distr}; apply/{alias}.dfun_ll => x;"
+                    f" exact {dcod}_ll."
+                ],
+            )
+        )
+        decls.append(
+            ec_ast.ProvedLemma(
+                f"{distr}_fu",
+                f"is_funiform {distr}",
+                [
+                    f"  rewrite /{distr}; apply/{alias}.dfun_funi.",
+                    f"  - by move=> x; apply/funi_uni/{dcod}_fu.",
+                    f"  by move=> x; exact {dcod}_full.",
+                ],
+            )
+        )
+        decls.append(
+            ec_ast.ProvedLemma(
+                f"{distr}_full",
+                f"is_full {distr}",
+                [
+                    f"  by rewrite /{distr}; apply/{alias}.dfun_fu => x;"
+                    f" exact {dcod}_full."
+                ],
+            )
+        )
+
     def request_concat_regroup_split2(
         self, left_ops: tuple[str, ...], head_op: str
     ) -> str | None:
@@ -1894,6 +1995,11 @@ class TypeCollector:
         for dom, codom in self._function_types:
             distr = _function_distr_name(dom, codom)
             arrow = f"{dom} -> {codom}"
+            pair = [p.strip() for p in dom.split(" * ")] if " * " in dom else None
+            if pair is not None and len(pair) == 2 and codom in word:
+                if all(p in word for p in pair):
+                    self._emit_pair_dfun(decls, dom, pair, codom, distr, muf_alias)
+                    continue
             if dom not in word or codom not in word:
                 # Not both BitWord-backed: no FinType for the domain and no
                 # derived uniform distribution for the codomain, so the op stays

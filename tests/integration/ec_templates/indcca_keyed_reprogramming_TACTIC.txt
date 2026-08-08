@@ -1,0 +1,65 @@
+KEYED-RF RO-reprogramming -- the CK/UK `hop_7` shape, hand-validated end to end
+==============================================================================
+2026-08-08. THE FULL CK_expanded_INDCCA_PQ PROBE COMPILES AT ZERO ADMITS on
+release EasyCrypt (`.ec-tmp/hop7ck_probe.ec`, built by `.ec-tmp/mk_hop7_probe.py`
+from the committed c288 export). Negative control: deleting the Mid twin's pin
+update (`.[(_r3, rest) <- dunit _pinv]`) is REJECTED at leg1's rr7 proof term.
+Axiom delta NET -5: the 3 top-level pair-dfun axioms become lemmas, H_c's 3
+internal ones are discharged in the clone; +1 licensed
+`KEM_T_encodeciphertext_inj` (`deterministic injective` in KEM.primitive).
+
+THE SHAPE vs CG's (c283): the random function is KEYED -- domain is the PAIR
+`(key2, rest)` (`KDFFirstKeyPRF_Random.rF : bs_Nss2 * bs_rest -> bs_Nout`),
+the reader applies `rF (_r3, rest)`, and the challenge pin point is a PAIR.
+Everything mathematical is domain-generic; the derivation transferred from the
+CG template by type substitution plus SIX real deltas, each measured:
+
+ 1. FOUNDATION (validated separately: `ec_templates/muf_pair_reprogram.ec`).
+    MUniFinFun cloned at the pair type needs a product `FinT.enum`:
+    `allpairs (fun a b => (a, b)) BW_A.words BW_B.words`, with `enum_spec`
+    proved as a NAMED lemma (`count_uniq_mem` -> `allpairs_uniq` (inj side
+    condition by smt) -> membership via `allpairsP` + both `enumP`s) and
+    passed `proof FinT.enum_spec by exact <name>`. The dfun op is then DEFINED
+    (`[smt_opaque]`) with ll/funi/full as lemmas (funi via `funi_uni`).
+ 2. THE H_c THEORY'S OWN PAIR-DFUN MUST BE BOUND. The KDF theory carries an
+    ABSTRACT `dfun_bs_Nss2_t_bs_Nin_Nss1_Nss2_t_to_bs_Nout_t` + 3 axioms; the
+    reader's inlined draw uses THAT op, so leg1's rndsem residue mentions it
+    and no rr7 lemma matches. CG's clone binds its theory dfun to the
+    top-level op; CK's did not (emission gap). Fix: `op dfun_... <- <top>` +
+    three `proof dfun_..._{ll,fu,full} by exact <top>_{ll,fu,full}` clauses.
+ 3. THE PIN IS A TUPLE LITERAL, NO EXTRA LOCAL NEEDED: the twin's pinned draw
+    is `.[(_r3, rest) <- dunit _pinv]`, and leg1 binds it with
+    `exists* _r3{2}, rest{2}, (_pinv{2}); elim* => pk0 pt0 v0`, every rr7
+    lemma applied at `(pk0, pt0)`.
+ 4. THE SEPARATION PROJECTION WALKS `p.`2` BEFORE THE SLICES:
+    `slice_ct (slice_ctek (p.`2) 0 (kem_t_nct+kem_t_nek)) 0 kem_t_nct
+       <> ev_encodeciphertext (ctStar.`2)`
+    with `rr7_proj_ck` proved by the two `slice_concat_left` laws.
+ 5. LEG COUNTS (CK): the reader side after `inline{1} *` has the challenger
+    draw at stmt 1 (`swap{1} 1 17` moves it below the TWO lookup bindings) and
+    the outer cut is `seq 17 15` (twin has no bindings); nested cuts
+    `seq 11 11` (two-sided `_det` on the ct-encoding leaf) and `seq 10 10`
+    (the 4-call peel). Leg1's tail: drop `_pinv` one-sided
+    (`seq 0 1; rnd{2}; smt(dbs_kdf_nout_ll)`), then `seq 2 2` with the
+    (f,y)-bijection rnd -- the CG closing script verbatim at the pair pin --
+    and the final `wp; skip => /> *; smt(fupdate_neq)`. Leg2: `swap{2} 1 10`,
+    `seq 10 10` peel, FOUR `_pres` drops + one wp-step, then
+    `exists* _r3{1}, rest{1}`, `seq 2 1` with the identity rnd closed by
+    `dfunE_dlet_fix1` at `(pk0, pt0)` (`pin_then_draw` in the tripwire).
+ 6. THE CONSUMER (`hop_7_decaps`) IS TWO-SIDED HERE (both endpoints read
+    their own rF at the SAME coupled pair): prefix `seq 3 3` MUST carry
+    `ct_PQ{1} = ct{1}.`1 /\ ct_T{1} = ct{1}.`2` (the c283 lesson verbatim --
+    without them `ct <> ctStar` says nothing about `ct_T`); the ct-encoding
+    leaf is functionalized two-sided (`seq 1 1` + `_det` both sides); the
+    remaining three calls couple pairwise; close
+    `wp; skip => />; smt(rr7_proj_ck KEM_T_encodeciphertext_inj)`; the else
+    branch is a plain `do !`-style 7-call ladder. The pr lemma needs the c278
+    `+ by [].` bullets after `conseq hop_7_decaps`.
+
+EMISSION MAP (the remaining build; every piece's target output is in the
+probe): type_collector MUF-pair block + the H_c clone binding;
+`_ro_reprogram_shape` pair-application detection; `_reprogram_twin` pair pin;
+`_reprogram_helpers` pair types + the `p.`2` projection; `_reprogram_legs` CK
+counts (+2 bindings, not +1); `ro_reprogram_conjunct` pair forall text; the
+consumer through the RENDERED-module channel (the KDF-side flat decaps is a
+`return witness` stub -- same reason as the c288 decaps walk).

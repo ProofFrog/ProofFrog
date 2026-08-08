@@ -7260,6 +7260,497 @@ def export_proof_file(proof_path: str) -> str:
         lines.append("wp; skip => /#.")
         return {"decaps": lines}
 
+    _prf_game_mod_cache: dict[str, ec_ast.Module | None] = {}
+
+    def _prf_rendered_game(name: str) -> ec_ast.Module | None:
+        """Rendered module of a proof-local intermediate GAME, cached.
+
+        The emission loop's own intermediate-game rendering happens after the
+        hop chains run, so seam routes that need the game's statement lists
+        render their own copy with the same translator arguments. The copy is
+        only READ (statement kinds, callees, variable names); the emitted
+        module comes from the later loop as before.
+        """
+        if name not in _prf_game_mod_cache:
+            helper = next(
+                (
+                    h
+                    for h in proof.helpers
+                    if isinstance(h, frog_ast.Game)
+                    and not isinstance(h, frog_ast.Reduction)
+                    and h.name == name
+                ),
+                None,
+            )
+            if helper is None:
+                _prf_game_mod_cache[name] = None
+            else:
+                module_helper_params = [
+                    p for p in helper.parameters if p.name in instances_by_let_name
+                ]
+                _prf_game_mod_cache[name] = top_modules.translate_intermediate_game(
+                    canonical_form.hoist_game_calls(helper, method_return_types),
+                    module_name=helper.name,
+                    param_module_types={
+                        p.name: (
+                            f"{instances_by_let_name[p.name].clone_alias}"
+                            f".{scheme_type_name}"
+                        )
+                        for p in module_helper_params
+                    },
+                    param_primitive_types={
+                        p.name: instances_by_let_name[p.name].primitive_name
+                        for p in module_helper_params
+                    },
+                    emit_state_vars=bool(helper.fields),
+                )
+        return _prf_game_mod_cache[name]
+
+    def _prf_seam_spec(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> dict[str, Any] | None:
+        """Detect the keyed-KDF PRF SEAM between a plain hybrid game and a
+        PRF-forwarding reduction (the ``_T`` cells' hop_12/hop_17 family), or
+        ``None`` off-shape.
+
+        One side is a proof-local GAME whose ``initialize`` SAMPLES a field of
+        the PRF key's distribution (the random second-KEM shared secret); the
+        other is a REDUCTION whose challenger is a CONCRETE theory PRF module
+        that samples exactly ONE field in ``initialize`` and whose keyed
+        ``lookup`` applies the KDF once. The coupling equates the game's
+        sampled field with the challenger's key; init and decaps couple the
+        two draws with an identity ``rnd`` and close the KDF argument equality
+        with the SPLIT2 regroup law (validated: probes c324/c325, EXIT 0)."""
+        if step_a.reduction is None and step_b.reduction is not None:
+            gi, ri = 0, 1
+        elif step_b.reduction is None and step_a.reduction is not None:
+            gi, ri = 1, 0
+        else:
+            return None
+        steps = (step_a, step_b)
+        game_step, red_step = steps[gi], steps[ri]
+        assert red_step.reduction is not None
+        rmod = next(
+            (
+                d
+                for d in ec_reductions
+                if isinstance(d, ec_ast.Module) and d.name == red_step.reduction.name
+            ),
+            None,
+        )
+        if rmod is None:
+            return None
+        g_expr = resolver.resolve(game_step).module_expr
+        gmod = _prf_rendered_game(pt.module_base_name(g_expr).rpartition(".")[2])
+        if gmod is None:
+            return None
+        red_expr = resolver.resolve(red_step).module_expr
+        chal_expr = pt.last_module_arg(red_expr)
+        chal_path = pt.module_base_name(chal_expr)
+        if chal_expr == red_expr or "." not in chal_path:
+            return None
+        cmod = next(
+            (
+                d
+                for lst in (theory_game_decls, foreign_game_decls)
+                for d in lst
+                if isinstance(d, ec_ast.Module)
+                and d.name == chal_path.rpartition(".")[2]
+            ),
+            None,
+        )
+        if cmod is None:
+            return None
+        c_init = next((p for p in cmod.procs if p.name == "initialize"), None)
+        lu = next((p for p in cmod.procs if p.name != "initialize" and p.params), None)
+        if c_init is None or lu is None or len(lu.params) != 2:
+            return None
+        c_body = [
+            s for s in c_init.body if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+        ]
+        if (
+            len(c_body) != 1
+            or not isinstance(c_body[0], ec_ast.Sample)
+            or c_body[0].var not in {v.name for v in cmod.module_vars}
+        ):
+            return None
+        k2 = c_body[0].var
+        lu_body = [
+            s for s in lu.body if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+        ]
+        if len(lu_body) != 1 or not isinstance(lu_body[0], ec_ast.Call):
+            return None
+        g_init = next((p for p in gmod.procs if p.name == "initialize"), None)
+        if g_init is None:
+            return None
+        g_fields = {v.name for v in gmod.module_vars}
+        g_body = [
+            s for s in g_init.body if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+        ]
+        # the ONE field the game samples in init (the random shared secret);
+        # the challenger's key distr is a theory-LOCAL name (``dbs_Nss2_t``)
+        # bound to the game's global one by the clone, so distr TEXT never
+        # matches -- uniqueness of the field sample is the selector, and EC
+        # itself checks the identity ``rnd``'s distributions agree
+        g_samps = [
+            s for s in g_body if isinstance(s, ec_ast.Sample) and s.var in g_fields
+        ]
+        if len(g_samps) != 1:
+            return None
+        r_init = next((p for p in rmod.procs if p.name == "initialize"), None)
+        if r_init is None:
+            return None
+        r_body = [
+            s for s in r_init.body if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+        ]
+        r_chal = rmod.params[-1].name if rmod.params else None
+        if (
+            not r_body
+            or r_chal is None
+            or not isinstance(r_body[0], ec_ast.Call)
+            or r_body[0].callee != f"{r_chal}.initialize"
+            or r_body[0].args.strip()
+        ):
+            return None
+        return {
+            "gi": gi,
+            "gmod": gmod,
+            "rmod": rmod,
+            "r_chal": r_chal,
+            "chal_expr": chal_expr,
+            "chal_path": chal_path,
+            "k2": k2,
+            "g_field": g_samps[0].var,
+            "lu_name": lu.name,
+            "lu_params": len(lu.params),
+            "kdf_callee": lu_body[0].callee,
+            "g_body": g_body,
+            "r_body": r_body,
+        }
+
+    def _prf_seam_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
+        """``<game>.<field>{gs} = <theory>.<chal>.<key>{rs}`` for the PRF seam;
+        ``""`` off-shape. Established by the seam's own ``initialize`` (the
+        identity ``rnd``) and consumed by its ``decaps``."""
+        spec = _prf_seam_spec(step_a, step_b)
+        if spec is None:
+            return ""
+        gtag, rtag = str(spec["gi"] + 1), str(2 - spec["gi"])
+        return (
+            f"{spec['gmod'].name}.{spec['g_field']}{{{gtag}}} ="
+            f" {spec['chal_path']}.{spec['k2']}{{{rtag}}}"
+        )
+
+    def _prf_qualify(mod: ec_ast.Module, tag: str) -> Callable[[str], str]:
+        flds = {v.name for v in mod.module_vars}
+
+        def _q(v: str) -> str:
+            return f"{mod.name}.{v}{{{tag}}}" if v in flds else f"{v}{{{tag}}}"
+
+        return _q
+
+    def _prf_pair(tag_one_val: int, other: int, gtag: str) -> str:
+        """``seq``/``sp`` count pair text, side 1 first regardless of which
+        side the game is on."""
+        return f"{tag_one_val} {other}" if gtag == "1" else f"{other} {tag_one_val}"
+
+    def _prf_det_pin(
+        stmt: ec_ast.Call, tag: str, q: Callable[[str], str]
+    ) -> list[str] | None:
+        """One-sided ``_det`` pin of a single-argument deterministic call."""
+        mod, _, meth = stmt.callee.partition(".")
+        alias = clone_alias_by_module.get(mod)
+        if alias is None or meth not in det_methods_by_module.get(mod, set()):
+            return None
+        arg = stmt.args.strip()
+        if not arg or "," in arg:
+            return None
+        cnt = "1 0" if tag == "1" else "0 1"
+        return [
+            f"seq {cnt} : (#pre /\\ {q(stmt.var)} = {alias}.ev_{meth} ({q(arg)})).",
+            f"+ exists* (glob {mod}){{{tag}}}, {q(arg)}; elim* => gp ap."
+            f" call{{{tag}}} ({mod}_{meth}_det gp ap). skip => /#.",
+        ]
+
+    def _prf_regroup_name(
+        spec: dict[str, Any], g_body: list[ec_ast.EcStmt]
+    ) -> str | None:
+        """The SPLIT2 regroup law for this seam's KDF argument, requested from
+        the type collector (derived from BitWord, no axiom); ``None`` when the
+        game side's KDF argument is not a registered left-nested concat chain.
+        ``g_body`` is the game-side statement run the CALLER is walking -- the
+        init tail for the forward seam, the decaps match branch for both."""
+        g_kdf_i = next(
+            (
+                i
+                for i in range(len(g_body) - 1, -1, -1)
+                if isinstance(g_body[i], ec_ast.Call)
+                and cast(ec_ast.Call, g_body[i]).callee == spec["kdf_callee"]
+            ),
+            None,
+        )
+        if g_kdf_i is None or g_kdf_i == 0:
+            return None
+        prev = g_body[g_kdf_i - 1]
+        if not isinstance(prev, ec_ast.Assign):
+            return None
+        ops = re.findall(r"concat_\w+", prev.rhs)
+        if len(ops) < 2:
+            return None
+        left_ops = tuple(reversed(ops))
+        head_o = top_types.head_op_for_regroup(left_ops, split2=True)
+        if head_o is None:
+            return None
+        if top_types.probe_concat_regroup_split2(left_ops, head_o) is None:
+            return None
+        return top_types.request_concat_regroup_split2(left_ops, head_o)
+
+    def _prf_seam_det_block(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-arguments,too-many-positional-arguments
+        spec: dict[str, Any],
+        g_rest: list[ec_ast.EcStmt],
+        r_rest: list[ec_ast.EcStmt],
+        gtag: str,
+        rtag: str,
+        qg: Callable[[str], str],
+        qr: Callable[[str], str],
+    ) -> list[str] | None:
+        """The consumer tail shared by init and decaps: pin the game side's
+        leading unmatched det call, couple the matched det runs two-sided, pin
+        the reduction side's trailing unmatched det call, then couple the KDF
+        call under the regroup law. Statement pairing is derived from the two
+        bodies; any mismatch declines. Validated: probes c324/c325."""
+        lu_callee = f"{spec['r_chal']}.{spec['lu_name']}"
+        g_kdf_i = next(
+            (
+                i
+                for i, t in enumerate(g_rest)
+                if isinstance(t, ec_ast.Call) and t.callee == spec["kdf_callee"]
+            ),
+            None,
+        )
+        r_lu_i = next(
+            (
+                i
+                for i, t in enumerate(r_rest)
+                if isinstance(t, ec_ast.Call) and t.callee == lu_callee
+            ),
+            None,
+        )
+        if g_kdf_i is None or r_lu_i is None:
+            return None
+        g_calls = [s for s in g_rest[:g_kdf_i] if isinstance(s, ec_ast.Call)]
+        r_calls = [s for s in r_rest[:r_lu_i] if isinstance(s, ec_ast.Call)]
+        lines: list[str] = []
+        gcs = [c.callee for c in g_calls]
+        rcs = [c.callee for c in r_calls]
+        trail: ec_ast.Call | None
+        if gcs and rcs and gcs[0] == rcs[-1] and gcs[1:] == rcs[:-1]:
+            pin = _prf_det_pin(g_calls[0], gtag, qg)
+            if pin is None:
+                return None
+            lines += pin
+            matched = list(zip(g_calls[1:], r_calls[:-1]))
+            trail = r_calls[-1]
+        elif gcs == rcs:
+            matched = list(zip(g_calls, r_calls))
+            trail = None
+        else:
+            return None
+        for gc, rc in matched:
+            lines.append(f"seq 1 1 : (#pre /\\ {qg(gc.var)} = {qr(rc.var)}).")
+            lines.append("+ call (_: true); skip => /#.")
+        g_sp = sum(1 for s in g_rest[:g_kdf_i] if isinstance(s, ec_ast.Assign))
+        r_sp = sum(
+            1
+            for i, s in enumerate(r_rest[:r_lu_i])
+            if isinstance(s, ec_ast.Assign)
+            and (trail is None or i < r_rest.index(trail))
+        )
+        lines.append(f"sp {_prf_pair(g_sp, r_sp, gtag)}.")
+        if trail is not None:
+            pin = _prf_det_pin(trail, rtag, qr)
+            if pin is None:
+                return None
+            lines += pin
+        lines.append(f"sp {_prf_pair(0, spec['lu_params'], gtag)}.")
+        regroup = _prf_regroup_name(spec, g_rest)
+        if regroup is None:
+            return None
+        return lines + ["wp.", "call (_: true).", "skip => />.", f"smt({regroup})."]
+
+    def _prf_seam_init_tac(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> list[str] | None:
+        """The PRF-seam ``initialize`` (validated: probe c324, EXIT 0): inline
+        the challenger explicitly (``inline *`` does not reach a functor-
+        applied theory module), swap its key draw into the game's sample slot,
+        couple the shared prefix with a matched ladder ending in the identity
+        ``rnd``, then run the det/KDF consumer tail. When ``initialize`` has
+        no KDF consumer (the reverse seam draws the challenge fresh), the tail
+        is the remaining 1:1 matched walk instead."""
+        spec = _prf_seam_spec(step_a, step_b)
+        if spec is None:
+            return None
+        gi = spec["gi"]
+        gtag, rtag = str(gi + 1), str(2 - gi)
+        gmod, rmod = spec["gmod"], spec["rmod"]
+        qg, qr = _prf_qualify(gmod, gtag), _prf_qualify(rmod, rtag)
+        g_body = spec["g_body"]
+        r_exec = spec["r_body"][1:]
+        gs_i = next(
+            i
+            for i, s in enumerate(g_body)
+            if isinstance(s, ec_ast.Sample) and s.var == spec["g_field"]
+        )
+        if len(r_exec) < gs_i:
+            return None
+        g_pre, r_pre = g_body[:gs_i], r_exec[:gs_i]
+        conj = [glob_invariant_conj] if glob_invariant_conj else []
+        for gst, rst in zip(g_pre, r_pre):
+            if isinstance(gst, ec_ast.Call) and isinstance(rst, ec_ast.Call):
+                if gst.callee != rst.callee:
+                    return None
+                conj.append(f"{qg(gst.var)} = {qr(rst.var)}")
+            elif isinstance(gst, ec_ast.Assign) and isinstance(rst, ec_ast.Assign):
+                conj.append(f"{qg(gst.var)} = {qr(rst.var)}")
+            else:
+                return None
+        conj.append(
+            f"{gmod.name}.{spec['g_field']}{{{gtag}}} ="
+            f" {spec['chal_path']}.{spec['k2']}{{{rtag}}}"
+        )
+        ladder = ["rnd."]
+        i = len(g_pre) - 1
+        while i >= 0:
+            if isinstance(g_pre[i], ec_ast.Assign):
+                ladder.append("wp.")
+                while i >= 0 and isinstance(g_pre[i], ec_ast.Assign):
+                    i -= 1
+            else:
+                ladder.append("call (_: true).")
+                i -= 1
+        ladder.append("skip => /#.")
+        lines = [
+            "inline *.",
+            f"inline{{{rtag}}} {spec['chal_expr']}.initialize"
+            f" {spec['chal_expr']}.{spec['lu_name']}.",
+            f"swap{{{rtag}}} 1 {gs_i}.",
+            f"seq {gs_i + 1} {gs_i + 1} : ({' /\\ '.join(conj)}).",
+            "+ " + " ".join(ladder),
+        ]
+        g_rest, r_rest = g_body[gs_i + 1 :], r_exec[gs_i:]
+        if any(
+            isinstance(s, ec_ast.Call) and s.callee == spec["kdf_callee"]
+            for s in g_rest
+        ):
+            tail = _prf_seam_det_block(spec, g_rest, r_rest, gtag, rtag, qg, qr)
+            if tail is None:
+                return None
+            return lines + tail
+        if len(g_rest) != len(r_rest):
+            return None
+        for gst, rst in zip(g_rest, r_rest):
+            if isinstance(gst, ec_ast.Sample) and isinstance(rst, ec_ast.Sample):
+                if gst.distr != rst.distr:
+                    return None
+                lines.append(f"seq 1 1 : (#pre /\\ {qg(gst.var)} = {qr(rst.var)}).")
+                lines.append("+ rnd; skip => /#.")
+            elif isinstance(gst, ec_ast.Call) and isinstance(rst, ec_ast.Call):
+                if gst.callee != rst.callee:
+                    return None
+                lines.append(f"seq 1 1 : (#pre /\\ {qg(gst.var)} = {qr(rst.var)}).")
+                lines.append("+ call (_: true); skip => /#.")
+            elif isinstance(gst, ec_ast.Assign) and isinstance(rst, ec_ast.Assign):
+                continue
+            else:
+                return None
+        lines.append("wp. skip => /#.")
+        return lines
+
+    def _prf_seam_decaps_walk(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> dict[str, list[str]] | None:
+        """The PRF-seam ``decaps`` (validated: probe c325, EXIT 0): both sides
+        case-split identically (refusal guard, then the challenge-T inner
+        split); the match branch runs the det/KDF consumer tail with the
+        challenger ``lookup`` inlined, the else branch is the fully matched
+        walk. Guards discharge by ``smt()`` from the coupled fields."""
+        spec = _prf_seam_spec(step_a, step_b)
+        if spec is None:
+            return None
+        gi = spec["gi"]
+        gtag, rtag = str(gi + 1), str(2 - gi)
+        gmod, rmod = spec["gmod"], spec["rmod"]
+        qg, qr = _prf_qualify(gmod, gtag), _prf_qualify(rmod, rtag)
+        g_dec = next((p for p in gmod.procs if p.name == "decaps"), None)
+        r_dec = next((p for p in rmod.procs if p.name == "decaps"), None)
+        if g_dec is None or r_dec is None:
+            return None
+
+        def _outer(proc: ec_ast.Proc) -> ec_ast.If | None:
+            body = [
+                s
+                for s in proc.body
+                if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+            ]
+            return (
+                body[0] if len(body) == 1 and isinstance(body[0], ec_ast.If) else None
+            )
+
+        g_if, r_if = _outer(g_dec), _outer(r_dec)
+        if g_if is None or r_if is None:
+            return None
+        g_else = [s for s in g_if.else_body if not isinstance(s, ec_ast.VarDecl)]
+        r_else = [s for s in r_if.else_body if not isinstance(s, ec_ast.VarDecl)]
+        g_in = next((i for i, s in enumerate(g_else) if isinstance(s, ec_ast.If)), None)
+        r_in = next((i for i, s in enumerate(r_else) if isinstance(s, ec_ast.If)), None)
+        if g_in is None or r_in is None:
+            return None
+        g_sp = sum(1 for s in g_else[:g_in] if isinstance(s, ec_ast.Assign))
+        r_sp = sum(1 for s in r_else[:r_in] if isinstance(s, ec_ast.Assign))
+        lines = ["if; 1: smt().", "+ auto.", f"sp {_prf_pair(g_sp, r_sp, gtag)}."]
+        g_lead = [s for s in g_else[:g_in] if isinstance(s, ec_ast.Call)]
+        r_lead = [s for s in r_else[:r_in] if isinstance(s, ec_ast.Call)]
+        if [c.callee for c in g_lead] != [c.callee for c in r_lead]:
+            return None
+        for gc, rc in zip(g_lead, r_lead):
+            lines.append(f"seq 1 1 : (#pre /\\ {qg(gc.var)} = {qr(rc.var)}).")
+            lines.append("+ call (_: true); skip => /#.")
+        g_split = cast(ec_ast.If, g_else[g_in])
+        r_split = cast(ec_ast.If, r_else[r_in])
+        g_then: list[ec_ast.EcStmt] = [
+            s for s in g_split.then_body if not isinstance(s, ec_ast.VarDecl)
+        ]
+        r_then: list[ec_ast.EcStmt] = [
+            s for s in r_split.then_body if not isinstance(s, ec_ast.VarDecl)
+        ]
+        then_tail = _prf_seam_det_block(spec, g_then, r_then, gtag, rtag, qg, qr)
+        if then_tail is None:
+            return None
+        lines.append("if; 1: smt().")
+        lines.append(f"+ inline{{{rtag}}} {spec['chal_expr']}.{spec['lu_name']}.")
+        lines += ["  " + t for t in then_tail]
+        g_eb = [s for s in g_split.else_body if not isinstance(s, ec_ast.VarDecl)]
+        r_eb = [s for s in r_split.else_body if not isinstance(s, ec_ast.VarDecl)]
+        if len(g_eb) != len(r_eb):
+            return None
+        g_ec = [s for s in g_eb if isinstance(s, ec_ast.Call)]
+        r_ec = [s for s in r_eb if isinstance(s, ec_ast.Call)]
+        if not g_ec or [c.callee for c in g_ec] != [c.callee for c in r_ec]:
+            return None
+        for gc, rc in zip(g_ec[:-1], r_ec[:-1]):
+            lines.append(f"seq 1 1 : (#pre /\\ {qg(gc.var)} = {qr(rc.var)}).")
+            lines.append("+ call (_: true); skip => /#.")
+        g_a = sum(
+            1 for s in g_eb[: g_eb.index(g_ec[-1])] if isinstance(s, ec_ast.Assign)
+        )
+        r_a = sum(
+            1 for s in r_eb[: r_eb.index(r_ec[-1])] if isinstance(s, ec_ast.Assign)
+        )
+        lines.append(f"sp {_prf_pair(g_a, r_a, gtag)}.")
+        lines += ["wp.", "call (_: true).", "skip => /#."]
+        return {"decaps": lines}
+
     def _prg_expansion_game_coupling(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> str | None:
@@ -12679,6 +13170,11 @@ def export_proof_file(proof_path: str) -> str:
             fresh_kgc = [c for c in kgc.split(" /\\ ") if c not in have]
             if fresh_kgc:
                 coupled = f"{coupled} /\\ " + " /\\ ".join(fresh_kgc)
+        # PRF-seam: the game's sampled second-KEM shared secret <-> the PRF
+        # challenger's key field (the _T hop_12/17 family). Empty off-shape.
+        prfc = _prf_seam_coupling(step_a, step_b)
+        if prfc and prfc not in coupled.split(" /\\ "):
+            coupled = f"{coupled} /\\ {prfc}"
         lzk = _lazyro_derived_key_coupling(step_a, step_b)
         if lzk:
             coupled = f"{coupled} /\\ {lzk}"
@@ -12842,6 +13338,9 @@ def export_proof_file(proof_path: str) -> str:
             # identity-seed KG seam (two-KEM seedbased hop_4/hop_23).
             if reprogram_override is None:
                 reprogram_override = _ident_seed_pair_init_tac(step_a, step_b)
+            # keyed-KDF PRF seam (the _T hop_12/hop_17 family).
+            if reprogram_override is None:
+                reprogram_override = _prf_seam_init_tac(step_a, step_b)
             # Same-backbone / different-LAYOUT hop (HON_BIND hop_4 / hop_8
             # ``initialize``): batch the interleaved side, then peel. ``None``
             # off-shape, and it declines outright when both sides are already
@@ -12898,6 +13397,7 @@ def export_proof_file(proof_path: str) -> str:
                     or _seed_split_pair_decaps_walk(step_a, step_b)
                     or _prg_expansion_decaps_walk(step_a, step_b)
                     or _ident_seed_pair_decaps_walk(step_a, step_b)
+                    or _prf_seam_decaps_walk(step_a, step_b)
                 ),
                 # The OUTER hop lemma's glob set (see ``glob_invariant_conj``).
                 # The chain coupling must match it exactly -- see the gparams

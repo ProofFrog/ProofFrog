@@ -13530,6 +13530,43 @@ def _synth_correctness_decaps_casesplit(  # pylint: disable=too-many-arguments,t
     # where an honest admit was available. Tested on the coupling TEXT, the same
     # way the forwarded-oracle peel tests for its own premise: only the emitted
     # text says whether the conjunct is actually there.
+    # -- SEEDBASED leading re-derivation on BOTH sides: when the two bodies
+    # open with the SAME call (same callee) whose arguments the coupling
+    # equates verbatim, couple it TWO-SIDED and walk on. The `_expanded`
+    # cells' game reads a stored packed scalar instead, so their game body
+    # opens with assigns and this peels nothing -- byte-identical there.
+    g_body: list[ec_ast.EcStmt] = list(gshape.body)
+    while (
+        g_body
+        and r_pre
+        and isinstance(g_body[0], ec_ast.Call)
+        and isinstance(r_pre[0], ec_ast.Call)
+        and g_body[0].callee == r_pre[0].callee
+    ):
+        g_head = g_body[0]
+        r_head = r_pre[0]
+
+        # the COUPLING names the real game base, not the twin, on side 1
+        def _real1(tok: re.Match[str]) -> str:
+            t = tok.group(0)
+            return f"{game_base}.{t}{{1}}" if t in game_flds else f"{t}{{1}}"
+
+        g_args = [
+            re.sub(r"[A-Za-z_]\w*", _real1, a) for a in _split_top_args(g_head.args)
+        ]
+        r_args = [_tag(a, 2) for a in _split_top_args(r_head.args)]
+        if len(g_args) != len(r_args) or not all(
+            ga == ra or f"{ga} = {ra}" in body_conj or f"{ra} = {ga}" in body_conj
+            for ga, ra in zip(g_args, r_args)
+        ):
+            return None  # matched heads with unrelated args: honest admit
+        tac.append(
+            f"seq 1 1 : (#pre /\\ {_ref(g_head.var or '_', 1)} ="
+            f" {_ref(r_head.var or '_', 2)})."
+        )
+        tac.append("+ call (_: true); skip => /#.")
+        g_body = g_body[1:]
+        r_pre = r_pre[1:]
     r_lead = list(itertools.takewhile(lambda s: isinstance(s, ec_ast.Call), r_pre))
     r_rest = r_pre[len(r_lead) :]
     for stmt in r_lead:
@@ -13544,9 +13581,7 @@ def _synth_correctness_decaps_casesplit(  # pylint: disable=too-many-arguments,t
             return None
         if not _det_step(call, 2, 0, 1):
             return None
-    g_proj = list(
-        itertools.takewhile(lambda s: isinstance(s, ec_ast.Assign), gshape.body)
-    )
+    g_proj = list(itertools.takewhile(lambda s: isinstance(s, ec_ast.Assign), g_body))
     r_proj = list(itertools.takewhile(lambda s: isinstance(s, ec_ast.Assign), r_rest))
     if not g_proj or not r_proj:
         return None
@@ -13561,7 +13596,7 @@ def _synth_correctness_decaps_casesplit(  # pylint: disable=too-many-arguments,t
     tac.append("+ wp; skip => /#.")
 
     # --- the shared prefix, and the ONE game-side call that must cross it ---
-    g_calls = gshape.body[len(g_proj) :]
+    g_calls = g_body[len(g_proj) :]
     r_shared = r_rest[len(r_proj) :]
     if not all(isinstance(s, ec_ast.Call) for s in r_shared) or not r_shared:
         return None

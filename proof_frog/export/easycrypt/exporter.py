@@ -12096,80 +12096,123 @@ def export_proof_file(proof_path: str) -> str:
                 return None
             return body[0]
 
-        def _direct_kg(mod: ec_ast.Module) -> ec_ast.Call | None:
-            # the CK-shape kg side: the pair comes from a DIRECT no-arg call
-            # to a non-challenger module (``pq_keys <@ KEM_PQ.keygen()``)
+        def _pair_candidates(
+            mod: ec_ast.Module,
+        ) -> list[tuple[ec_ast.Call, bool]]:
+            # every no-arg call binding a PAIR-typed field, tagged
+            # challenger/direct -- the kg-side keypair may sit anywhere in the
+            # init (the two-KEM `_T` orientation puts the challenger call
+            # behind the direct first-KEM keygen)
             proc = next((p for p in mod.procs if p.name == "initialize"), None)
             if proc is None:
-                return None
-            body = [
-                st
-                for st in proc.body
-                if not isinstance(st, (ec_ast.VarDecl, ec_ast.Return))
-            ]
+                return []
             chal = mod.params[-1].name if mod.params else None
-            if (
-                not body
-                or not isinstance(body[0], ec_ast.Call)
-                or body[0].callee.partition(".")[0] == chal
-                or body[0].args.strip()
-            ):
-                return None
-            return body[0]
+            fields = {v.name: v.type.text for v in mod.module_vars}
+            return [
+                (st, chal is not None and st.callee.partition(".")[0] == chal)
+                for st in proc.body
+                if isinstance(st, ec_ast.Call)
+                and not st.args.strip()
+                and st.var in fields
+                and " * " in fields[st.var]
+            ]
+
+        def _meth_call_module(node: frog_ast.ASTNode, meth: str) -> str | None:
+            # the module name of the first ``<M>.<meth>(...)`` call under node
+            found: list[str] = []
+
+            def _grab(n: frog_ast.ASTNode) -> bool:
+                if (
+                    isinstance(n, frog_ast.FuncCall)
+                    and isinstance(n.func, frog_ast.FieldAccess)
+                    and n.func.name.lower() == meth
+                    and isinstance(n.func.the_object, frog_ast.Variable)
+                ):
+                    found.append(n.func.the_object.name)
+                    return True
+                return False
+
+            visitors.SearchVisitor(_grab).visit(node)
+            return found[0] if found else None
 
         for ki in (0, 1):
             ci = 1 - ki
-            k_call, c_call = _exec0(mods[ki]), _exec0(mods[ci])
-            k_direct = False
-            if k_call is None:
-                k_call = _direct_kg(mods[ki])
-                k_direct = True
-            if k_call is None or c_call is None:
+            c_call = _exec0(mods[ci])
+            if c_call is None:
                 continue
             k_fields = {v.name: v.type.text for v in mods[ki].module_vars}
             c_fields = {v.name: v.type.text for v in mods[ci].module_vars}
-            if k_call.var not in k_fields or c_call.var not in c_fields:
+            if c_call.var not in c_fields:
                 continue
-            kf, cf = k_call.var, c_call.var
-            if " * " not in k_fields[kf]:
-                continue  # the keys field must be a pair
+            cf = c_call.var
             # pylint: disable=protected-access
             c_chal_ast = engine._get_game_ast(steps[ci].challenger, None)
+            k_chal_ast = engine._get_game_ast(steps[ki].challenger, None)
             # pylint: enable=protected-access
             if c_chal_ast is None:
                 continue
-            if k_direct:
-                # the direct call names the keygen itself
-                kg_meth = k_call.callee.partition(".")[2].lower()
-            else:
-                # kg-side challenger: generate() = [Return K.<m>()] (a bare
-                # forward)
-                k_chal = engine._get_game_ast(  # pylint: disable=protected-access
-                    steps[ki].challenger, None
-                )
-                if k_chal is None:
+            c_meth_ast = next(
+                (
+                    x
+                    for x in c_chal_ast.methods
+                    if x.signature.name.lower()
+                    == c_call.callee.partition(".")[2].lower()
+                ),
+                None,
+            )
+            if c_meth_ast is None:
+                continue
+            k_pmap = _module_pmap(mods[ki], resolver.resolve(steps[ki]).module_expr)
+            hit: tuple[ec_ast.Call, str] | None = None
+            for k_call, k_chal_shaped in _pair_candidates(mods[ki]):
+                kg_mod: str | None
+                if k_chal_shaped:
+                    # kg-side challenger: generate() = [Return K.<m>()] (a
+                    # bare forward); the INLINED game names the module
+                    if k_chal_ast is None:
+                        continue
+                    k_meth_name = k_call.callee.partition(".")[2]
+                    km = next(
+                        (
+                            x
+                            for x in k_chal_ast.methods
+                            if x.signature.name.lower() == k_meth_name.lower()
+                        ),
+                        None,
+                    )
+                    if km is None:
+                        continue
+                    ksts = list(km.block.statements)
+                    if (
+                        len(ksts) != 1
+                        or not isinstance(ksts[0], frog_ast.ReturnStatement)
+                        or not isinstance(ksts[0].expression, frog_ast.FuncCall)
+                        or not isinstance(ksts[0].expression.func, frog_ast.FieldAccess)
+                        or ksts[0].expression.args
+                    ):
+                        continue
+                    kg_meth = ksts[0].expression.func.name.lower()
+                    fobj = ksts[0].expression.func.the_object
+                    kg_mod = fobj.name if isinstance(fobj, frog_ast.Variable) else None
+                else:
+                    # the direct call names the keygen itself
+                    kg_meth = k_call.callee.partition(".")[2].lower()
+                    k_head = k_call.callee.partition(".")[0]
+                    kg_mod = k_pmap.get(k_head, k_head)
+                if kg_mod is None:
                     continue
-                k_meth_name = k_call.callee.partition(".")[2]
-                km = next(
-                    (
-                        x
-                        for x in k_chal.methods
-                        if x.signature.name.lower() == k_meth_name.lower()
-                    ),
-                    None,
-                )
-                if km is None:
+                # THE MODULE GATE: the corr challenger must run ITS keygen on
+                # the module the kg-side pair came from -- method-name matching
+                # alone would pair the first KEM's keys with the second KEM's
+                # correctness tuple on the two-KEM `_T` orientation
+                if _meth_call_module(c_meth_ast, kg_meth) != kg_mod:
                     continue
-                ksts = list(km.block.statements)
-                if (
-                    len(ksts) != 1
-                    or not isinstance(ksts[0], frog_ast.ReturnStatement)
-                    or not isinstance(ksts[0].expression, frog_ast.FuncCall)
-                    or not isinstance(ksts[0].expression.func, frog_ast.FieldAccess)
-                    or ksts[0].expression.args
-                ):
-                    continue
-                kg_meth = ksts[0].expression.func.name.lower()
+                hit = (k_call, kg_meth)
+                break
+            if hit is None:
+                continue
+            k_call, kg_meth = hit
+            kf = k_call.var
             # corr-side challenger, RENDERED: locate its module, the call to
             # the same keygen, its projection assigns, and the return tuple
             c_expr = pt.last_module_arg(resolver.resolve(steps[ci]).module_expr)

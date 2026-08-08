@@ -13615,13 +13615,24 @@ def _synth_correctness_decaps_casesplit(  # pylint: disable=too-many-arguments,t
         isinstance(s, ec_ast.Call) for s in g_calls[: n_shared + 1]
     ):
         return None
-    extra = cast(ec_ast.Call, g_calls[0])
-    if [cast(ec_ast.Call, s).callee for s in g_calls[1 : n_shared + 1]] != [
-        cast(ec_ast.Call, s).callee for s in r_shared
-    ]:
+    # The game's EXTRA (split-consumed) call sits at the unique gap where the
+    # shared prefix embeds into the game's calls: FIRST on the `_PQ`
+    # orientation (extra PQ.decaps crosses the shared T.decaps -- the swap),
+    # LAST on the `_T` mirror (shared PQ.decaps already leads -- no swap).
+    # Ambiguity (identical callees either side of the gap) is REFUSED, not
+    # guessed, like the branch walk's own alignment.
+    heads = [cast(ec_ast.Call, s).callee for s in g_calls[: n_shared + 1]]
+    r_heads = [cast(ec_ast.Call, s).callee for s in r_shared]
+    poss = [k for k in range(n_shared + 1) if heads[:k] + heads[k + 1 :] == r_heads]
+    if len(poss) != 1:
         return None
-    tac.append(f"swap{{1}} 1 {n_shared}.")
-    g_last = cast(ec_ast.Call, g_calls[n_shared])
+    pos = poss[0]
+    extra = cast(ec_ast.Call, g_calls[pos])
+    if pos < n_shared:
+        tac.append(f"swap{{1}} {pos + 1} {n_shared - pos}.")
+    g_last = cast(
+        ec_ast.Call, [g_calls[k] for k in range(n_shared + 1) if k != pos][-1]
+    )
     r_last = cast(ec_ast.Call, r_shared[-1])
     tac.append(
         f"seq {n_shared} {n_shared} : (#pre /\\ "

@@ -6140,6 +6140,55 @@ def export_proof_file(proof_path: str) -> str:
             return None
         return {"decaps": body}
 
+    def _rendered_step_module(step: frog_ast.Step) -> ec_ast.Module | None:
+        """The RENDERED module a step's oracle bodies live in: its reduction,
+        or the bare intermediate game it names."""
+        if step.reduction is not None:
+            name = step.reduction.name
+        else:
+            name = resolver.resolve(step).module_expr.split("(", 1)[0].strip()
+        return next(
+            (
+                d
+                for d in [*ec_reductions, *ec_intermediate_games]
+                if isinstance(d, ec_ast.Module) and d.name == name
+            ),
+            None,
+        )
+
+    def _keyed_reprogram_decaps_walk(
+        step_a: frog_ast.Step, step_b: frog_ast.Step, hop_i: int
+    ) -> dict[str, list[str]] | None:
+        """The KEYED-reprogramming ``decaps`` consumer, keyed by oracle name;
+        ``None`` off-shape.
+
+        Fires only under the weakened (quantified) reprogramming coupling,
+        which the old ``sim`` closers cannot survive and the flat-state routes
+        cannot see (the KDF-side flat ``decaps`` is a ``return witness``
+        stub). All shape gates live in
+        :func:`ce.keyed_reprogram_decaps_walk_tacs`.
+        """
+        coupling = _live_state_coupling(step_a, step_b)
+        if not coupling or "forall (p :" not in coupling:
+            return None
+        lmod = _rendered_step_module(step_a)
+        rmod = _rendered_step_module(step_b)
+        if lmod is None or rmod is None:
+            return None
+        body = ce.keyed_reprogram_decaps_walk_tacs(
+            lmod,
+            rmod,
+            "decaps",
+            coupling,
+            det_methods_by_module,
+            clone_alias_by_module,
+            hop_i,
+            inj_method_requests,
+        )
+        if body is None:
+            return None
+        return {"decaps": body}
+
     def _keygenequiv_init_tac(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> list[str] | None:
@@ -10870,6 +10919,7 @@ def export_proof_file(proof_path: str) -> str:
                 oracle_tac_override=(
                     _twin_challenge_oracle_tacs(step_a, step_b)
                     or _kdf_substitution_decaps_walk_tacs(step_a, step_b)
+                    or _keyed_reprogram_decaps_walk(step_a, step_b, _i)
                 ),
                 # The OUTER hop lemma's glob set (see ``glob_invariant_conj``).
                 # The chain coupling must match it exactly -- see the gparams
@@ -10917,6 +10967,57 @@ def export_proof_file(proof_path: str) -> str:
         if cached is not None:
             return [_res_tag(CACHED_GUIDED), *cached.tactic.splitlines(), "qed."]
         return body
+
+    # HOISTED above ``pt.translate_hops``: the keyed-reprogramming decaps
+    # consumer (an ``oracle_tac_override``) reads a bare intermediate
+    # game's RENDERED module, and the hop-lemma translation is what calls
+    # it -- rendering after translation left the closure's free variable
+    # unbound (measured: NameError on the first keyed export).
+    outer_game_file_name = proof.theorem.name
+    # Emit a concrete EC module for each intermediate game defined in the
+    # proof (e.g. ``Game G_RandKey(KEM K, PRF F)`` or the single-oracle
+    # ``Game Hyb(Int q)``). A bare ``ParameterizedGame`` step (``G_RandKey(K,
+    # F)`` / ``Hyb``) resolves to a reference to this module, so it must be
+    # defined -- the Game_step wrapper and the per-hop equiv lemmas name it.
+    # The intermediate game is played against the OUTER theorem adversary and
+    # ascribes to its oracle type. Module-typed (sub-primitive instance)
+    # parameters become EC functor params; non-module parameters (``Int q``
+    # compile-time indices) are dropped, mirroring the scheme functor-param
+    # convention and ``_resolve_intermediate_game``'s module expression.
+    outer_oracle_qualified = (
+        f"{clone_alias}.{oracle_type_by_game_file[outer_game_file_name]}"
+    )
+    ec_intermediate_games: list[ec_ast.EcTopDecl] = []
+    for helper in proof.helpers:
+        # ``Reduction`` subclasses ``Game``; only true intermediate games
+        # (no challenger composition) are emitted here -- reductions are
+        # handled by the ``ec_reductions`` loop above.
+        if not isinstance(helper, frog_ast.Game) or isinstance(
+            helper, frog_ast.Reduction
+        ):
+            continue
+        module_helper_params = [
+            p for p in helper.parameters if p.name in instances_by_let_name
+        ]
+        param_module_types = {
+            p.name: f"{instances_by_let_name[p.name].clone_alias}.{scheme_type_name}"
+            for p in module_helper_params
+        }
+        param_primitive_types = {
+            p.name: instances_by_let_name[p.name].primitive_name
+            for p in module_helper_params
+        }
+        hoisted_game = canonical_form.hoist_game_calls(helper, method_return_types)
+        ec_intermediate_games.append(
+            top_modules.translate_intermediate_game(
+                hoisted_game,
+                module_name=helper.name,
+                param_module_types=param_module_types,
+                param_primitive_types=param_primitive_types,
+                implements=outer_oracle_qualified,
+                emit_state_vars=bool(helper.fields),
+            )
+        )
 
     lemmas = pt.translate_hops(
         resolver,
@@ -10977,51 +11078,6 @@ def export_proof_file(proof_path: str) -> str:
                     scheme_args=list(proof.theorem.args),
                 ),
                 method_return_types=method_return_types,
-            )
-        )
-
-    # Emit a concrete EC module for each intermediate game defined in the
-    # proof (e.g. ``Game G_RandKey(KEM K, PRF F)`` or the single-oracle
-    # ``Game Hyb(Int q)``). A bare ``ParameterizedGame`` step (``G_RandKey(K,
-    # F)`` / ``Hyb``) resolves to a reference to this module, so it must be
-    # defined -- the Game_step wrapper and the per-hop equiv lemmas name it.
-    # The intermediate game is played against the OUTER theorem adversary and
-    # ascribes to its oracle type. Module-typed (sub-primitive instance)
-    # parameters become EC functor params; non-module parameters (``Int q``
-    # compile-time indices) are dropped, mirroring the scheme functor-param
-    # convention and ``_resolve_intermediate_game``'s module expression.
-    outer_oracle_qualified = (
-        f"{clone_alias}.{oracle_type_by_game_file[outer_game_file_name]}"
-    )
-    ec_intermediate_games: list[ec_ast.EcTopDecl] = []
-    for helper in proof.helpers:
-        # ``Reduction`` subclasses ``Game``; only true intermediate games
-        # (no challenger composition) are emitted here -- reductions are
-        # handled by the ``ec_reductions`` loop above.
-        if not isinstance(helper, frog_ast.Game) or isinstance(
-            helper, frog_ast.Reduction
-        ):
-            continue
-        module_helper_params = [
-            p for p in helper.parameters if p.name in instances_by_let_name
-        ]
-        param_module_types = {
-            p.name: f"{instances_by_let_name[p.name].clone_alias}.{scheme_type_name}"
-            for p in module_helper_params
-        }
-        param_primitive_types = {
-            p.name: instances_by_let_name[p.name].primitive_name
-            for p in module_helper_params
-        }
-        hoisted_game = canonical_form.hoist_game_calls(helper, method_return_types)
-        ec_intermediate_games.append(
-            top_modules.translate_intermediate_game(
-                hoisted_game,
-                module_name=helper.name,
-                param_module_types=param_module_types,
-                param_primitive_types=param_primitive_types,
-                implements=outer_oracle_qualified,
-                emit_state_vars=bool(helper.fields),
             )
         )
 

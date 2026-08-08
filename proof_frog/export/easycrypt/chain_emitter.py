@@ -14199,6 +14199,164 @@ def kdf_substitution_decaps_walk_tacs(  # pylint: disable=too-many-arguments,too
     return tac
 
 
+def keyed_reprogram_decaps_walk_tacs(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches
+    lmod: ec_ast.Module,
+    rmod: ec_ast.Module,
+    oracle_name: str,
+    coupling: str,
+    det_methods: dict[str, set[str]],
+    clone_alias: dict[str, str],
+    hop_index: int,
+    inj_acc: set[tuple[str, str]] | None,
+) -> list[str] | None:
+    """The KEYED-reprogramming ``decaps`` consumer, on the RENDERED modules,
+    or ``None`` off-shape.
+
+    Under the weakened (quantified) hop_7 coupling the old ``sim`` closers
+    cannot run, and the flat-state consumer route cannot SEE the hop at all --
+    the KDF-side flat ``decaps`` nests the shared-secret encoding inside the
+    challenger ``lookup``'s argument and stubs to ``return witness``. Both
+    endpoints read their own random function at the SAME coupled pair, so the
+    branch closes two-sided: functionalize the CT-ENCODING leaf (its result is
+    what the separation projection reads), couple the remaining calls
+    pairwise, and discharge the off-point application from the coupling's
+    forall via the projection lemma + the licensed encode injectivity. The
+    prefix ``seq`` MUST carry the queried ciphertext's projections
+    (``ct_PQ = ct.`1``) -- without them the refusal guard says nothing about
+    the T-component. Validated on the zero-admit CK probe
+    (``ec_templates/indcca_keyed_reprogramming_TACTIC.txt``, delta 6).
+    """
+    m = re.search(r"forall \(p : [^)]*\*[^)]*\), .*?<> (\S+)\.ev_(\w+) ", coupling)
+    if m is None:
+        return None
+    enc_alias, enc_meth = m.group(1), m.group(2)
+    enc_mod = next((mod for mod, al in clone_alias.items() if al == enc_alias), None)
+    if enc_mod is None or enc_meth not in det_methods.get(enc_mod, set()):
+        return None
+    procs = [
+        next((p for p in mm.procs if p.name == oracle_name), None)
+        for mm in (lmod, rmod)
+    ]
+    if procs[0] is None or procs[1] is None:
+        return None
+    shapes = [_guarded_oracle_body(cast(ec_ast.Proc, p)) for p in procs]
+    if shapes[0] is None or shapes[1] is None:
+        return None
+    cuts = [_first_inner_if(s.body) for s in shapes]  # type: ignore[union-attr]
+    if cuts[0] is None or cuts[1] is None:
+        return None
+    pre = [shapes[i].body[: cuts[i]] for i in (0, 1)]  # type: ignore[union-attr,index]
+    if len(pre[0]) != len(pre[1]) or any(
+        type(a) is not type(b) for a, b in zip(pre[0], pre[1])
+    ):
+        return None
+    pre_names = [
+        a.var
+        for a, b in zip(pre[0], pre[1])
+        if isinstance(a, (ec_ast.Call, ec_ast.Assign))
+        and isinstance(b, (ec_ast.Call, ec_ast.Assign))
+        and a.var == b.var
+    ]
+    n_pre_calls = sum(1 for s in pre[0] if isinstance(s, ec_ast.Call))
+    if not pre_names or n_pre_calls != 1:
+        return None
+    param = procs[0].params[0].name if procs[0].params else ""
+    if not param:
+        return None
+    projs = [
+        f"{s.var}{{1}} = {param}{{1}}{mm.group(1)}"
+        for s in pre[0]
+        if isinstance(s, ec_ast.Assign)
+        and (mm := re.fullmatch(rf"{re.escape(param)}((?:\.`\d+)+)", s.rhs.strip()))
+    ]
+    if not projs:
+        return None
+    ifs = [
+        cast(ec_ast.If, shapes[i].body[cuts[i]])  # type: ignore[union-attr,index]
+        for i in (0, 1)
+    ]
+    thens = [list(ifs[i].then_body) for i in (0, 1)]
+    t_calls = [[s for s in t if isinstance(s, ec_ast.Call)] for t in thens]
+    enc_calls = [
+        [c for c in cs if c.callee == f"{enc_mod}.{enc_meth}"] for cs in t_calls
+    ]
+    if len(enc_calls[0]) != 1 or len(enc_calls[1]) != 1:
+        return None
+    if enc_calls[0][0].var != enc_calls[1][0].var:
+        return None
+    enc_var = enc_calls[0][0].var
+    enc_args = [_split_top_args(c[0].args) for c in enc_calls]
+    if any(len(a) != 1 for a in enc_args):
+        return None
+    # both sides' enc argument is a shared prefix local
+    if any(a[0].strip() not in pre_names for a in enc_args):
+        return None
+    enc_arg = enc_args[0][0].strip()
+    # remaining pairwise couples: the branch calls after the encoding on the
+    # GAME side (its read is an application, not a call, so its call list is
+    # the shorter and safer count)
+    # The branch segments BEFORE the encoding pair 1-1 (same statement kinds,
+    # same callees/vars -- UK's KDF input opens with its PQ encodes before the
+    # T-ciphertext one CK leads with), and are coupled by a plain peel; empty
+    # for the CK shape, whose emitted tactic is byte-identical.
+    enc_pos = [t.index(enc_calls[i][0]) for i, t in enumerate(thens)]
+    pre_b = [thens[i][: enc_pos[i]] for i in (0, 1)]
+    if len(pre_b[0]) != len(pre_b[1]):
+        return None
+    for a, b in zip(pre_b[0], pre_b[1]):
+        if type(a) is not type(b):
+            return None
+        if isinstance(a, ec_ast.Call) and (
+            a.callee != cast(ec_ast.Call, b).callee or a.var != cast(ec_ast.Call, b).var
+        ):
+            return None
+        if isinstance(a, ec_ast.Assign) and a.var != cast(ec_ast.Assign, b).var:
+            return None
+    n_pre_b_calls = sum(1 for x in pre_b[0] if isinstance(x, ec_ast.Call))
+    pre_b_vars = [
+        x.var for x in pre_b[0] if isinstance(x, (ec_ast.Call, ec_ast.Assign))
+    ]
+    n_rest = min(len(cs) for cs in t_calls) - n_pre_b_calls - 1
+    if n_rest < 0:
+        return None
+    if inj_acc is not None:
+        inj_acc.add((enc_mod, enc_meth))
+    tag = f"rr{hop_index}"
+    return [
+        "inline *.",
+        "if; 1: smt().",
+        "auto.",
+        f"seq {len(pre[0])} {len(pre[1])} : (#pre /\\ ={{{', '.join(pre_names)}}}"
+        + "".join(f" /\\ {pj}" for pj in projs)
+        + ").",
+        "+ wp; call (_: true).",
+        "  wp; skip => /#.",
+        "if; 1: smt().",
+        *(
+            [
+                f"seq {len(pre_b[0])} {len(pre_b[1])} : "
+                f"(#pre /\\ ={{{', '.join(pre_b_vars)}}}).",
+                "+ "
+                + " ".join(["wp; call (_: true);"] * n_pre_b_calls)
+                + " wp; skip => /#.",
+            ]
+            if pre_b[0]
+            else []
+        ),
+        f"seq 1 1 : (#pre /\\ ={{{enc_var}}} /\\ "
+        f"{enc_var}{{2}} = {enc_alias}.ev_{enc_meth} {enc_arg}{{2}}).",
+        f"+ exists* (glob {enc_mod}){{1}}, {enc_arg}{{1}}; elim* => g1 a1.",
+        f"  call{{1}} ({enc_mod}_{enc_meth}_det g1 a1).",
+        f"  exists* (glob {enc_mod}){{2}}, {enc_arg}{{2}}; elim* => g2 a2.",
+        f"  call{{2}} ({enc_mod}_{enc_meth}_det g2 a2).",
+        "  skip => /#.",
+        *["wp; call (_: true)." for _ in range(n_rest)],
+        f"wp; skip => />; smt({tag}_proj {enc_mod}_{enc_meth}_inj).",
+        "do ! (wp; call (_: true)).",
+        "wp; skip => /#.",
+    ]
+
+
 def _bd_sample_dead(
     stmts: list[ec_ast.EcStmt], pos: int, ret: str, coupling: str
 ) -> bool:
@@ -16778,16 +16936,49 @@ class _RoReprogram:
     enc_res: str
     slice_steps: tuple[tuple[str, str, str], ...]
     pin_path: tuple[tuple[str, bool], ...]
+    # A KEYED random function's domain is a PAIR (``rF (key2, rest)``): the
+    # extra KEY component's variable, and ``None`` for the flat shape -- every
+    # flat-path consumer is byte-identical when this is None.
+    pin_key_var: str | None = None
 
     @property
-    def proj_of(self) -> Callable[[str], str]:
-        """The slice chain that pulls the challenge ciphertext's ENCODING out of a
-        KDF input, applied outer-first."""
+    def pin_expr(self) -> str:
+        """The reprogramming point as the twin spells it: the rest variable
+        alone (flat), or the ``(key, rest)`` tuple (keyed)."""
+        if self.pin_key_var is None:
+            return self.pin_var
+        return f"({self.pin_key_var}, {self.pin_var})"
+
+    @property
+    def proj_arg_of(self) -> Callable[[str], str]:
+        """Where the separation projection READS: the point itself (flat) or
+        its rest COMPONENT (keyed)."""
+
+        def go(expr: str) -> str:
+            return expr if self.pin_key_var is None else f"{expr}.`2"
+
+        return go
+
+    @property
+    def proj_slices_of(self) -> Callable[[str], str]:
+        """The bare slice chain over a REST-typed expression, outer-first --
+        what the helper lemma and the legs' hproj facts apply (they hold the
+        rest component directly)."""
 
         def go(expr: str) -> str:
             for op, lo, hi in self.slice_steps:
                 expr = f"{op} {cc_paren(expr)} {cc_paren(lo)} {cc_paren(hi)}"
             return expr
+
+        return go
+
+    @property
+    def proj_of(self) -> Callable[[str], str]:
+        """The slice chain that pulls the challenge ciphertext's ENCODING out of a
+        KDF input POINT -- through the rest component first when keyed."""
+
+        def go(expr: str) -> str:
+            return self.proj_slices_of(self.proj_arg_of(expr))
 
         return go
 
@@ -16957,7 +17148,15 @@ def _ro_reprogram_shape(  # pylint: disable=too-many-arguments,too-many-position
             if not isinstance(s, ec_ast.Assign):
                 continue
             parts = _split_app(s.rhs)
-            if len(parts) == 2 and parts[0] == rf and parts[1].isidentifier():
+            if len(parts) != 2 or parts[0] != rf:
+                continue
+            arg = parts[1]
+            if arg.isidentifier():
+                hits.append(s)  # flat: ``rF rest``
+                continue
+            # keyed: ``rF (key, rest)`` -- a two-identifier tuple literal
+            inner = cc_split_top_args(_strip_parens(arg))
+            if len(inner) == 2 and all(p.strip().isidentifier() for p in inner):
                 hits.append(s)
         return hits[0] if len(hits) == 1 else None
 
@@ -16984,8 +17183,17 @@ def _ro_reprogram_shape(  # pylint: disable=too-many-arguments,too-many-position
     )
     if cod_draw is None:
         return None
-    # (4) the pin point's concat leaves, and the encoded stored component.
-    pin_var = app.rhs.split()[-1]
+    # (4) the pin point's concat leaves, and the encoded stored component. For
+    # a KEYED function the applied argument is the tuple ``(key, rest)``: the
+    # concat (and hence the separation projection) lives in the REST component,
+    # and the key rides alongside as ``pin_key_var``.
+    app_arg = _split_app(app.rhs)[1]
+    pin_key_var: str | None = None
+    if app_arg.isidentifier():
+        pin_var = app_arg
+    else:
+        inner_args = [p.strip() for p in cc_split_top_args(_strip_parens(app_arg))]
+        pin_key_var, pin_var = inner_args[0], inner_args[1]
     pin_asn = next(
         (s for s in rd_exec if isinstance(s, ec_ast.Assign) and s.var == pin_var),
         None,
@@ -17085,7 +17293,9 @@ def _ro_reprogram_shape(  # pylint: disable=too-many-arguments,too-many-position
         cod_distr=cod_draw.distr,
         dom_ty=dom_ty,
         cod_ty=cod_ty,
-        muf=f"MUF_{dom_ty}",
+        # The MUF clone alias mirrors ``type_collector``'s: the flat name for a
+        # flat domain, the sanitized pair text for a keyed one.
+        muf=f"MUF_{re.sub(_NON_IDENT, '_', dom_ty).strip('_')}",
         pin_var=pin,
         read_var=app.var,
         sample_var=sample_var,
@@ -17098,7 +17308,11 @@ def _ro_reprogram_shape(  # pylint: disable=too-many-arguments,too-many-position
         enc_res=enc_res_var,
         slice_steps=steps,
         pin_path=pin_path,
+        pin_key_var=pin_key_var,
     )
+
+
+_NON_IDENT = re.compile(r"\W+")
 
 
 def ro_reprogram_conjunct(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
@@ -17324,7 +17538,7 @@ def _reprogram_helpers(spec: _RoReprogram, tag: str, types: tc.TypeCollector) ->
 
   (* The challenge ciphertext's ENCODING, read back out of the KDF input. *)
   lemma {tag}_proj {args} :
-    {spec.proj_of(expr)} = {target}.
+    {spec.proj_slices_of(expr)} = {target}.
   proof. by rewrite {' '.join(laws)}. qed.
 """
 
@@ -17382,7 +17596,7 @@ def _reprogram_twin(  # pylint: disable=too-many-arguments,too-many-positional-a
                 ec_ast.Sample(
                     "rF",
                     f"{spec.muf}.dfun (fun (_ : {spec.dom_ty}) => "
-                    f"{spec.cod_distr}).[{spec.pin_var} <- dunit _pinv]",
+                    f"{spec.cod_distr}).[{spec.pin_expr} <- dunit _pinv]",
                 ),
                 ec_ast.Sample(spec.read_var, spec.cod_distr),
             ]
@@ -17721,8 +17935,15 @@ def _reprogram_legs(  # pylint: disable=too-many-arguments,too-many-positional-a
             l2.append("    + wp; skip => /#.")
         else:
             return None
+    pin_b1 = (
+        f"exists* {spec.pin_var}{{1}}; elim* => pt0"
+        if spec.pin_key_var is None
+        else f"exists* {spec.pin_key_var}{{1}}, {spec.pin_var}{{1}};"
+        " elim* => pk0 pt0"
+    )
+    pin_t = "pt0" if spec.pin_key_var is None else "(pk0, pt0)"
     l2 += [
-        f"    exists* {spec.pin_var}{{1}}; elim* => pt0.",
+        f"    {pin_b1}.",
         f"    seq 2 1 : (#pre /\\ {twin.name}.rF{{1}} = {sm_rf}{{2}});"
         " last by wp; rnd; skip => /#.",
         "    rndsem*{1} 0.",
@@ -17730,14 +17951,21 @@ def _reprogram_legs(  # pylint: disable=too-many-arguments,too-many-positional-a
         f"    rnd (fun (f : {fn}) => f) (fun (f : {fn}) => f); skip => />.",
         f"    have dEq : dlet {spec.cod_distr} (fun (v : {spec.cod_ty}) =>"
         f" dmap ({spec.muf}.dfun (fun (_ : {spec.dom_ty}) => {spec.cod_distr})"
-        f".[pt0 <- dunit v]) (fun (rF : {fn}) => rF)) = {spec.dfun_op}.",
+        f".[{pin_t} <- dunit v]) (fun (rF : {fn}) => rF)) = {spec.dfun_op}.",
         f"    + rewrite /{spec.dfun_op} ({spec.muf}.dfunE_dlet_fix1"
-        f" (fun (_ : {spec.dom_ty}) => {spec.cod_distr}) pt0) /=;",
+        f" (fun (_ : {spec.dom_ty}) => {spec.cod_distr}) {pin_t}) /=;",
         "      apply eq_dlet => // v; exact dmap_id.",
         "    by rewrite dEq.",
     ]
     # ---- LEG 1: reader ~ twin, the BIJECTIVE coupling -----------------------
     pair_ty = f"({fn}) * {spec.cod_ty}"
+    n_bind = 1 if spec.pin_key_var is None else 2
+    pin_b2 = (
+        f"exists* {spec.pin_var}{{2}}, (_pinv{{2}}); elim* => pt0 v0"
+        if spec.pin_key_var is None
+        else f"exists* {spec.pin_key_var}{{2}}, {spec.pin_var}{{2}},"
+        " (_pinv{2}); elim* => pk0 pt0 v0"
+    )
     enc_arg = cast(ec_ast.Call, rd_exec[enc_i]).args.strip()
     enc_res = cast(ec_ast.Call, rd_exec[enc_i]).var
     base = f"{globs}{fields_inv_l1}"
@@ -17745,7 +17973,7 @@ def _reprogram_legs(  # pylint: disable=too-many-arguments,too-many-positional-a
     inv_enc = f"{base}{_live(enc_i)} /\\ {enc_res}{{2}} = {spec.enc_op} {enc_arg}{{2}}"
     inv_full = (
         f"{base}{_live(prefix)} /\\ "
-        f"{spec.proj_of(f'{spec.pin_var}{{2}}')} = {spec.enc_op} {enc_arg}{{2}}"
+        f"{spec.proj_slices_of(f'{spec.pin_var}{{2}}')} = {spec.enc_op} {enc_arg}{{2}}"
     )
     l1: list[str] = [
         "    proc.",
@@ -17768,41 +17996,48 @@ def _reprogram_legs(  # pylint: disable=too-many-arguments,too-many-positional-a
         # The inline-introduced argument binding goes into the PRECONDITION
         # rather than being named: EasyCrypt picks that name, and a tactic that
         # spells it is one that breaks on the next proof.
-        "    swap{1} 1 1.",
-        "    sp 1 0.",
+        f"    swap{{1}} 1 {n_bind}.",
+        f"    sp {n_bind} 0.",
         f"    seq 0 1 : (#pre); first by rnd{{2}}; skip => />; smt({spec.cod_distr}_ll).",
-        f"    exists* {spec.pin_var}{{2}}, (_pinv{{2}}); elim* => pt0 v0.",
+        f"    {pin_b2}.",
         f"    seq 2 2 : (#pre /\\ ={{{spec.read_var}}} /\\ {rd_rf}{{1}} ="
-        f" {twin.name}.rF{{2}}.[pt0 <- {spec.read_var}{{2}}]).",
+        f" {twin.name}.rF{{2}}.[{pin_t} <- {spec.read_var}{{2}}]).",
         "    + rndsem*{1} 0; rndsem*{2} 0.",
-        f"      rnd (fun (p : {pair_ty}) => (p.`1.[pt0 <- v0], p.`2))",
-        f"          (fun (p : {pair_ty}) => (p.`1.[pt0 <- p.`2], p.`2)).",
+        f"      rnd (fun (p : {pair_ty}) => (p.`1.[{pin_t} <- v0], p.`2))",
+        f"          (fun (p : {pair_ty}) => (p.`1.[{pin_t} <- p.`2], p.`2)).",
         "      skip => /> &2 _.",
         "      split; [ | move=> _; split; [ | move=> _ ] ].",
         f"      + move=> r hr; rewrite {tag}_fupd2"
-        f" -({tag}_pinR_supp pt0 v0 r hr) {tag}_fupd_id; smt().",
+        f" -({tag}_pinR_supp {pin_t} v0 r hr) {tag}_fupd_id; smt().",
         "      + move=> [f y] hr /=.",
-        "        have hcol : f.[pt0 <- y].[pt0 <- v0] = f",
+        f"        have hcol : f.[{pin_t} <- y].[{pin_t} <- v0] = f",
         f"          by rewrite {tag}_fupd2"
-        f" -({tag}_pinR_supp pt0 v0 (f, y) hr) {tag}_fupd_id.",
-        f"        rewrite -({tag}_fold_eq_pin pt0 v0).",
+        f" -({tag}_pinR_supp {pin_t} v0 (f, y) hr) {tag}_fupd_id.",
+        f"        rewrite -({tag}_fold_eq_pin {pin_t} v0).",
         f"        rewrite (in_dmap1E_can _ _"
-        f" (fun (p : {pair_ty}) => (p.`1.[pt0 <- v0], p.`2))) /=.",
+        f" (fun (p : {pair_ty}) => (p.`1.[{pin_t} <- v0], p.`2))) /=.",
         f"        + by rewrite !{tag}_fupd2.",
         "        + move=> [g w] hy /= [hy1 hy2].",
-        "          have e1 : g = g.[pt0 <- w].[pt0 <- v0]",
+        f"          have e1 : g = g.[{pin_t} <- w].[{pin_t} <- v0]",
         f"            by rewrite {tag}_fupd2"
-        f" -({tag}_pinR_supp pt0 v0 (g, w) hy) {tag}_fupd_id.",
+        f" -({tag}_pinR_supp {pin_t} v0 (g, w) hy) {tag}_fupd_id.",
         "          by rewrite hcol; smt().",
         "        by rewrite hcol.",
-        f"      move=> l hl; case: ({tag}_dL_supp pt0 l hl) => h1 h2.",
+        f"      move=> l hl; case: ({tag}_dL_supp {pin_t} l hl) => h1 h2.",
         f"      split; [ by apply {tag}_pinD_mem => //; rewrite h2;"
-        f" exact ({tag}_dfn_at l.`1 pt0 h1) | move=> _ ].",
+        f" exact ({tag}_dfn_at l.`1 {pin_t} h1) | move=> _ ].",
         f"      split; [ by rewrite {tag}_fupd2 h2 {tag}_fupd_id; smt() | move=> _ ].",
         f"      by rewrite {tag}_fupd2 h2 {tag}_fupd_id.",
-        "    wp; skip => /> &2 hproj p hp.",
-        "    have hne : pt0 <> p by apply/negP => h; move: hp; rewrite -h hproj.",
-        "    by rewrite fupdate_neq.",
+        *(
+            [
+                "    wp; skip => /> &2 hproj p hp.",
+                "    have hne : pt0 <> p"
+                " by apply/negP => h; move: hp; rewrite -h hproj.",
+            ]
+            if spec.pin_key_var is None
+            else ["    wp; skip => /> *; smt(fupdate_neq)."]
+        ),
+        *(["    by rewrite fupdate_neq."] if spec.pin_key_var is None else []),
     ]
     asm = [
         f"    transitivity {twin_proc}",

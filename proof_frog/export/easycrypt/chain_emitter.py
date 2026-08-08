@@ -6006,9 +6006,19 @@ def _emit_one_oracle_chain(
             # Exporter-computed whole-init tactic (the two-KEM reprogram-equiv
             # hop, built off the RENDERED modules -- flat-state positions/names
             # provably diverge there). Validated by hand on both toolchains.
+            # A ``transitivity``-headed override is a PROC-level tactic and
+            # must not sit under ``proc.`` (the tail-gap seed-split init).
+            _o0 = init_tac_override[0].lstrip()
+            _o1 = init_tac_override[1].lstrip() if len(init_tac_override) > 1 else ""
+            hdr = (
+                []
+                if _o0.startswith("transitivity")
+                or (_o0 == "symmetry." and _o1.startswith("transitivity"))
+                else ["proc."]
+            )
             return (
                 [],
-                [_res_tag(SYNTH_PARAM), "proc.", *init_tac_override, "qed."],
+                [_res_tag(SYNTH_PARAM), *hdr, *init_tac_override, "qed."],
                 set(),
             )
         proj_l = _project_to_method(left_states[-1], oracle_name)

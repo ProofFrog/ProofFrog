@@ -6352,10 +6352,22 @@ def export_proof_file(proof_path: str) -> str:
             len_src = top_types.bs_length_for(src_ty)
             if len_l is None or len_r is None or len_src is None:
                 continue
-            # THE LENGTH-SUM GATE (fails closed; a wrong split is a wrong law)
+            # THE LENGTH-SUM GATE. Exact sum -> the 2-way split (gap None);
+            # a POSITIVE symbolic remainder -> the TAIL-GAP variant (concat3
+            # laws + Mid-twin transitivity, validated by the c311 probes).
+            # Anything else fails closed: a wrong split is a wrong law.
             # pylint: disable=protected-access
+            gap_len: str | None = None
             if not tc._sym_eq(f"({len_l}) + ({len_r})", len_src):
-                continue
+                # pylint: disable=import-outside-toplevel
+                from .parametric_tactics import (
+                    _add_canonical,
+                    _subtract_canonical,
+                )
+
+                gap_len = _subtract_canonical(len_src, _add_canonical(len_l, len_r))
+                if gap_len is None:
+                    continue
             # pylint: enable=protected-access
             # -- GROUPED side: KeyGenEquiv chal draw into a keys field + a
             #    fresh right-half seed FIELD draw
@@ -6417,6 +6429,7 @@ def export_proof_file(proof_path: str) -> str:
                 "src_ty": src_ty,
                 "l_ty": l_ty,
                 "r_ty": r_ty,
+                "gap_len": gap_len,
                 "slice_l": slice_l,
                 "slice_r": slice_r,
                 "l_end": l_end,
@@ -6540,7 +6553,13 @@ def export_proof_file(proof_path: str) -> str:
             f" {spec['det_alias']}.ev_{spec['det_meth']}"
             f" ({spec['slice_l']} {sf} 0 {spec['l_end']})"
         )
-        top_types.request_virtual_concat(spec["src_ty"])
+        if spec["gap_len"] is None:
+            top_types.request_virtual_concat(spec["src_ty"])
+        else:
+            gap_name = top_types.register_bs_by_length_str(spec["gap_len"])
+            top_types.register_concat3(
+                spec["l_ty"], spec["r_ty"], gap_name, spec["src_ty"]
+            )
         live_state_holders.update({g_base, s_base})
         # the canonical glob set (live abstract modules + RO holders) -- the
         # _T ROM cells carry ={glob <clone>.RO_H}, which declared_module_names
@@ -6549,6 +6568,179 @@ def export_proof_file(proof_path: str) -> str:
         globs = glob_invariant_conj
         body = " /\\ ".join(conj)
         return f"{globs} /\\ {body}" if globs else body
+
+    def _seed_split_gap_init_tac(  # pylint: disable=too-many-locals,too-many-statements
+        spec: dict[str, Any],
+    ) -> list[str] | None:
+        """The TAIL-GAP variant of the seed-split init (CK/UK seedbased hop_2
+        and its R-mirror), validated by the c311 hand probes: a Mid twin of
+        the SPLIT side whose challenger query is replaced by three draws + a
+        concat3, a DOUBLE-rndsem identity couple closed by the derived
+        split3(-dlet) law (the fold must include the field assign -- a wp
+        first breaks it), a dead-gap ``rnd{1}`` drop with a G-FREE slice-fact
+        invariant, the derivekeypair det seam (``skip => /#``), and matched
+        ladders. The mirror orientation prepends ``symmetry`` so the split
+        side is always {1} inside the legs."""
+        gi = spec["gi"]
+        sx = 1 - gi
+        l_ty, r_ty, src = spec["l_ty"], spec["r_ty"], spec["src_ty"]
+        gap_name = top_types.register_bs_by_length_str(spec["gap_len"])
+        c3 = f"concat3_{l_ty}_{r_ty}_{gap_name}_to_{src}"
+        split3 = f"d{src}_split3_{l_ty}_{r_ty}_{gap_name}"
+        p1 = f"slice_concat3_p1_{l_ty}_{r_ty}_{gap_name}_{src}"
+        p2 = f"slice_concat3_p2_{l_ty}_{r_ty}_{gap_name}_{src}"
+        gap_ll = f"d{gap_name}_ll"
+        smod = spec["mods"][sx]
+        gmod = spec["mods"][gi]
+        twin = f"MidSS_{smod.name}"
+        # the twin holds state (its own copies of the split side's fields), so
+        # it must join the declare-module restriction lists
+        live_state_holders.add(twin)
+        s_init = next((pr for pr in smod.procs if pr.name == "initialize"), None)
+        if s_init is None:
+            return None
+        locals_ = {d.name for d in s_init.body if isinstance(d, ec_ast.VarDecl)}
+        va = _pe_fresh("a", locals_)
+        vb = _pe_fresh("b", locals_ | {va})
+        vg = _pe_fresh("g", locals_ | {va, vb})
+        if not any(
+            isinstance(d, ec_ast.Module) and d.name == twin for d in chain_extra_decls
+        ):
+            body: list[ec_ast.EcStmt] = [
+                ec_ast.VarDecl(va, ec_ast.EcType(l_ty)),
+                ec_ast.VarDecl(vb, ec_ast.EcType(r_ty)),
+                ec_ast.VarDecl(vg, ec_ast.EcType(gap_name)),
+            ]
+            replaced = False
+            chal_name = smod.params[-1].name if smod.params else ""
+            for st in s_init.body:
+                if (
+                    not replaced
+                    and isinstance(st, ec_ast.Call)
+                    and st.callee.partition(".")[0] == chal_name
+                ):
+                    body.extend(
+                        [
+                            ec_ast.Sample(va, f"d{l_ty}"),
+                            ec_ast.Sample(vb, f"d{r_ty}"),
+                            ec_ast.Sample(vg, f"d{gap_name}"),
+                            ec_ast.Assign(st.var, f"{c3} {va} {vb} {vg}"),
+                        ]
+                    )
+                    replaced = True
+                else:
+                    body.append(st)
+            if not replaced:
+                return None
+            chain_extra_decls.append(
+                ec_ast.Module(
+                    name=twin,
+                    procs=[
+                        (
+                            ec_ast.Proc(pr.name, pr.params, pr.return_type, body)
+                            if pr.name == "initialize"
+                            else pr
+                        )
+                        for pr in smod.procs
+                    ],
+                    params=smod.params,
+                    implements=smod.implements,
+                    module_vars=smod.module_vars,
+                )
+            )
+        # -- application text and names ---------------------------------------
+        s_app = resolver.resolve(spec["steps"][sx]).module_expr
+        s_args = s_app[s_app.index("(") :] if "(" in s_app else ""
+        g_base, s_base = gmod.name, smod.name
+        globs = glob_invariant_conj
+        sf1 = f"{twin}.{spec['field']}{{1}}"
+        slice_l_t = f"{spec['slice_l']} {sf1} 0 {spec['l_end']}"
+        slice_r_t = f"{spec['slice_r']} {sf1} {spec['r_start']} {spec['r_end']}"
+        ev = f"{spec['det_alias']}.ev_{spec['det_meth']}"
+        det_ax = f"{spec['det_mod']}_{spec['det_meth']}_det"
+        shared = [
+            v.name
+            for v in smod.module_vars
+            if v.name != spec["field"]
+            and any(w.name == v.name for w in gmod.module_vars)
+        ]
+        carry1 = " /\\ ".join(
+            [f"{s_base}.{spec['field']}{{1}} = {twin}.{spec['field']}{{2}}"]
+            + [f"{s_base}.{n}{{1}} = {twin}.{n}{{2}}" for n in shared]
+        )
+        cpl_twin = " /\\ ".join(
+            [f"{twin}.{n}{{1}} = {g_base}.{n}{{2}}" for n in shared]
+            + [
+                f"{g_base}.{spec['seed_field']}{{2}} = {slice_r_t}",
+                f"{g_base}.{spec['keys_field']}{{2}} = {ev} ({slice_l_t})",
+            ]
+        )
+        parsed = _seed_split_split_tail(spec, spec["s_exec"][3:])
+        if parsed is None:
+            return None
+        _det_call, projs, s_tail = parsed
+
+        def _lad(stmts: Sequence[ec_ast.EcStmt]) -> list[str]:
+            out: list[str] = []
+            for st in reversed(list(stmts)):
+                if isinstance(st, ec_ast.Call):
+                    out.append("wp; call (_: true).")
+                elif isinstance(st, ec_ast.Sample):
+                    out.append("wp; rnd.")
+            out.append("wp; skip => /#.")
+            return out
+
+        lad1 = _lad(spec["s_exec"][1:])
+        lad2 = _lad(s_tail)
+        chal_seed = spec["chal_seed_local"]
+        lines: list[str] = ["symmetry."] if gi == 0 else []
+        lines += [
+            f"transitivity {twin}{s_args}.initialize",
+            f"  ({globs} ==> ={{res}} /\\ {globs} /\\ {carry1})",
+            f"  ({globs} ==> ={{res}} /\\ {globs} /\\ {cpl_twin}).",
+            "smt().",
+            "smt().",
+            "proc. inline *.",
+            f"seq 2 4 : ({globs} /\\ {s_base}.{spec['field']}{{1}} ="
+            f" {twin}.{spec['field']}{{2}}).",
+            "+ rndsem*{1} 0.",
+            "  rndsem*{2} 0.",
+            f"  rnd (fun (z : {src}) => z) (fun (z : {src}) => z). skip => />.",
+            f"  rewrite -{split3} /=. smt({split3}).",
+            *lad1,
+            "proc. inline *.",
+            "swap{2} 4 -2.",
+            f"seq 4 2 : ({globs} /\\ {va}{{1}} = {chal_seed}{{2}}"
+            f" /\\ {vb}{{1}} = {g_base}.{spec['seed_field']}{{2}}"
+            f" /\\ {slice_l_t} = {va}{{1}}"
+            f" /\\ {slice_r_t} = {vb}{{1}}).",
+            f"+ by wp; rnd{{1}}; auto; smt({gap_ll} {p1} {p2}).",
+            "sp.",
+        ]
+        inv2 = [
+            globs,
+            f"{g_base}.{spec['seed_field']}{{2}} = {slice_r_t}",
+            f"{spec['r_local']}{{1}} = {slice_r_t}",
+            f"{g_base}.{spec['keys_field']}{{2}} = {ev} ({slice_l_t})",
+        ]
+        for pj in projs:
+            comp = pj.rhs.split(".`")[1] if ".`" in pj.rhs else ""
+            if comp:
+                inv2.append(f"{pj.var}{{1}} = ({ev} ({slice_l_t})).`{comp}")
+        inv2_txt = " /\\ ".join(inv2)
+        lines += [
+            f"seq {1 + len(projs)} 2 : ({inv2_txt}).",
+            "+ wp.",
+            f"  exists* (glob {spec['det_mod']}){{1}}, {spec['l_local']}{{1}};"
+            " elim* => gk1 s1.",
+            f"  call{{1}} ({det_ax} gk1 s1).",
+            f"  exists* (glob {spec['det_mod']}){{2}}, {chal_seed}{{2}};"
+            " elim* => gk2 s2.",
+            f"  call{{2}} ({det_ax} gk2 s2).",
+            "  skip => /#.",
+            *lad2,
+        ]
+        return lines
 
     def _seed_split_pair_init_tac(  # pylint: disable=too-many-locals
         step_a: frog_ast.Step, step_b: frog_ast.Step
@@ -6565,6 +6757,8 @@ def export_proof_file(proof_path: str) -> str:
         spec = _seed_split_pair_spec(step_a, step_b)
         if spec is None:
             return None
+        if spec["gap_len"] is not None:
+            return _seed_split_gap_init_tac(spec)
         gi = spec["gi"]
         sx = 1 - gi
         g_base, s_base = spec["g_base"], spec["s_base"]

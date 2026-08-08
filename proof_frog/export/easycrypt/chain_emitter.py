@@ -6176,6 +6176,34 @@ def _emit_one_oracle_chain(
         )
         if substitution is not None:
             return [], [_res_tag(SYNTH_PARAM), *substitution, "qed."], set()
+        # KDF-key substitution through FLAT TWINS: the same shape when the swap
+        # aligner above cannot fire at all -- a same-module encode reorder one
+        # way, the challenger-repack travel conflict the other (the two-KEM
+        # CK/UK cells). ``None`` off-shape, so every other init and every
+        # single-KEM cell stays byte-identical.
+        twin_sub = _synth_kdf_substitution_twin(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            flat_params,
+            det_methods,
+            inj_methods_by_module or {},
+            clone_alias or {},
+            types,
+            bij_acc,
+            left_wrapper_expr,
+            right_wrapper_expr,
+            full_coupling,
+            hop_index,
+        )
+        if twin_sub is not None:
+            ks_extra, ks_body, ks_names = twin_sub
+            if state_mod_acc is not None:
+                state_mod_acc.update(ks_names)
+            return ks_extra, [_res_tag(SYNTH_PARAM), *ks_body, "qed."], set()
         # ek-twin fallback when the last states diverge. The ek-derivation twin
         # route (tried above only when ``last_states_match``) builds its
         # transitivity entirely off the FIRST flat states -- the raw-wrapper
@@ -11026,6 +11054,539 @@ def _synth_kdf_key_substitution(  # pylint: disable=too-many-arguments,too-many-
         "skip => /> *.",
         f"exact {regroup}.",
     ]
+
+
+def _single_stmt_align_swaps(
+    stmts: list[ec_ast.EcStmt], target: list[tuple[str, str]], side: int
+) -> tuple[list[str], list[ec_ast.EcStmt]] | None:
+    """``swap{side}`` hoists of SINGLE backbone statements into ``target``
+    order, or ``None``.
+
+    The travel-block aligner (:func:`_event_align_swaps`) glues a moved event
+    to its feeding and unpacking assignments, which wedges when a CONSUMER (the
+    CK challenger repack, a tuple literal over three differently-timed
+    components) is glued to a sample that must rise above the assignments
+    feeding the consumer's other components. Here only the event statement
+    itself moves -- sound exactly when it reads nothing a crossed statement
+    writes, which ``_ec_indep`` validates pairwise -- so an argless event (a
+    sample, a nullary keygen) hoists freely while everything glued around it
+    stays put. Declines on any conflict rather than emitting a swap EasyCrypt
+    would reject.
+    """
+    local = _ec_local_vars(stmts)
+    cur = list(stmts)
+    swaps: list[str] = []
+    for slot, want in enumerate(target):
+        events = [(i, s) for i, s in enumerate(cur) if _is_bb_stmt(s)]
+        if len(events) != len(target):
+            return None
+        if _bd_events([events[slot][1]])[0] == want:
+            continue
+        src = next(
+            (i for i, s in events[slot + 1 :] if _bd_events([s])[0] == want), None
+        )
+        if src is None:
+            return None
+        ins = 0 if slot == 0 else events[slot - 1][0] + 1
+        if ins > src:
+            return None
+        moved, crossed = cur[src], cur[ins:src]
+        if not all(_ec_indep(moved, x, local) for x in crossed):
+            return None
+        swaps.append(f"swap{{{side}}} {src + 1} -{src - ins}.")
+        cur = cur[:ins] + [moved] + crossed + cur[src + 1 :]
+    return swaps, cur
+
+
+def _synth_kdf_substitution_twin(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+    modules: mt.ModuleTranslator,
+    oracle_name: str,
+    left_state0: frog_ast.Game,
+    right_state0: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    det_methods: dict[str, set[str]],
+    inj_methods_by_module: dict[str, set[str]],
+    clone_alias: dict[str, str],
+    types: tc.TypeCollector | None,
+    bij_acc: set[tuple[str, str, str, str]] | None,
+    left_wrapper_expr: str,
+    right_wrapper_expr: str,
+    coupling: str | None,
+    hop_index: int,
+) -> tuple[list[str], list[str], set[str]] | None:
+    """KDF-key substitution through VERBATIM FLAT TWINS, or ``None``.
+
+    The shape :func:`_synth_kdf_key_substitution` closes when its swap aligner
+    can put the two whole backbones in one order -- which the two-KEM cells
+    (CK/UK ``hop_5_initialize``) can NEVER satisfy: one direction needs a
+    SAME-MODULE encode reorder EC's ``swap`` refuses outright, and the other
+    needs the challenger repack to rise above the encapsulation feeding its own
+    third component. Both obstructions dissolve by routing through two flat
+    twins (``left ~ FL ~ FR ~ right``):
+
+    * the outer legs couple each raw wrapper to its own verbatim flat copy --
+      same backbone, same order -- with the name-free backbone peel, so EC's
+      ``inline *`` renaming never surfaces;
+    * only the PROBABILISTIC prefixes need aligning, by hoisting SINGLE argless
+      statements (:func:`_single_stmt_align_swaps`) -- the repack never moves;
+    * the suffix det calls are functionalized ONE-SIDED through their ``_det``
+      axioms, each in its own ``seq`` cut (``exists*`` freezes at the
+      judgment's initial memory, so the args must predate the cut -- gated);
+    * the coupled draw takes the same ``rnd <ev> _bij_g`` bijection, and the
+      final goal is the KDF regrouping -- through the SPLIT2 law when the
+      drawn key is prepended one level deep (``KDFFirstKeyPRF``).
+
+    Derivation + three negative controls on the real CK export:
+    ``ec_templates/indcca_kdf_substitution_twin_TACTIC.txt``. Declines to
+    ``None`` off-shape, so every other init stays byte-identical.
+    """
+    if types is None or bij_acc is None or not coupling:
+        return None
+    lproj = _project_to_method(left_state0, oracle_name)
+    rproj = _project_to_method(right_state0, oracle_name)
+    if lproj is None or rproj is None:
+        return None
+    fl_name = f"KS_FE_{hop_index}"
+    fr_name = f"KS_FO_{hop_index}"
+    lmod = _flat_state_module(
+        modules,
+        fl_name,
+        lproj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+        emit_state_vars=True,
+        no_shadow_fields=True,
+    )
+    rmod = _flat_state_module(
+        modules,
+        fr_name,
+        rproj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+        emit_state_vars=True,
+        no_shadow_fields=True,
+    )
+    if not lmod.procs or not rmod.procs:
+        return None
+
+    def _split(mod: ec_ast.Module) -> tuple[list[ec_ast.EcStmt], str]:
+        body = _exec_stmts(mod.procs[0].body)
+        ret = next((s.expr for s in body if isinstance(s, ec_ast.Return)), "")
+        return [s for s in body if not isinstance(s, ec_ast.Return)], ret
+
+    (l_exec, l_ret), (r_exec, r_ret) = _split(lmod), _split(rmod)
+
+    def _is_det_call(stmt: ec_ast.EcStmt) -> bool:
+        if not isinstance(stmt, ec_ast.Call):
+            return False
+        parts = _callee_parts(stmt.callee)
+        return (
+            parts is not None
+            and parts[1] in det_methods.get(parts[0], set())
+            and parts[0] in clone_alias
+        )
+
+    # --- the extra encoding call (same detection as the swap route) ----------
+    l_calls = Counter(s.callee for s in l_exec if isinstance(s, ec_ast.Call))
+    r_calls = Counter(s.callee for s in r_exec if isinstance(s, ec_ast.Call))
+    extra_l, extra_r = l_calls - r_calls, r_calls - l_calls
+    if sum(extra_l.values()) != 1 or extra_r:
+        # The RIGHT-encoding orientation is a shape to derive, not to guess at
+        # -- every hop this route is validated on encodes on the left.
+        return None
+    enc_exec, oth_exec = l_exec, r_exec
+    enc_ret, oth_ret = l_ret, r_ret
+    enc_mod, oth_mod = lmod, rmod
+    callee = next(iter(extra_l.elements()))
+    enc_calls = [
+        s for s in enc_exec if isinstance(s, ec_ast.Call) and s.callee == callee
+    ]
+    if len(enc_calls) != 1:
+        return None
+    enc_call = enc_calls[0]
+    if "." not in callee:
+        return None
+    mod_name, meth = callee.rsplit(".", 1)
+    if meth not in det_methods.get(mod_name, set()):
+        return None
+    if meth not in inj_methods_by_module.get(mod_name, set()):
+        return None
+    if len(_app_args(enc_call.args.replace(",", " "))) != 1:
+        return None
+    alias = clone_alias.get(mod_name)
+    if alias is None:
+        return None
+
+    # --- prefix/suffix split: everything from the first det call on ----------
+    def _cut(ex: list[ec_ast.EcStmt]) -> int | None:
+        idx = next((i for i, s in enumerate(ex) if _is_det_call(s)), None)
+        return idx
+
+    cut_e, cut_o = _cut(enc_exec), _cut(oth_exec)
+    if cut_e is None or cut_o is None:
+        return None
+    if enc_exec.index(enc_call) < cut_e:
+        return None
+    suffix_e, suffix_o = enc_exec[cut_e:], oth_exec[cut_o:]
+    # The final shared KDF call: last Call on each side, same callee, det.
+    kdf_e = next((s for s in reversed(suffix_e) if isinstance(s, ec_ast.Call)), None)
+    kdf_o = next((s for s in reversed(suffix_o) if isinstance(s, ec_ast.Call)), None)
+    if kdf_e is None or kdf_o is None or kdf_e.callee != kdf_o.callee:
+        return None
+    for stmt in itertools.chain(suffix_e, suffix_o):
+        if isinstance(stmt, ec_ast.Sample):
+            return None
+        if isinstance(stmt, ec_ast.Call) and stmt not in (kdf_e, kdf_o):
+            if not _is_det_call(stmt):
+                return None
+    if any(
+        isinstance(s, ec_ast.Call)
+        for s in suffix_e[suffix_e.index(kdf_e) + 1 :]
+        + suffix_o[suffix_o.index(kdf_o) + 1 :]
+    ):
+        return None
+
+    # --- align the probabilistic prefixes by single-statement hoists ---------
+    pre_e, pre_o = enc_exec[:cut_e], oth_exec[:cut_o]
+    ev_pre_e, ev_pre_o = _bd_events(pre_e), _bd_events(pre_o)
+    if sorted(ev_pre_e) != sorted(ev_pre_o):
+        return None
+    enc_swap_side, oth_swap_side = 1, 2
+    aligned_e, aligned_o = pre_e, pre_o
+    swaps: list[str] = []
+    if ev_pre_e != ev_pre_o:
+        got = _single_stmt_align_swaps(pre_o, ev_pre_e, oth_swap_side)
+        if got is not None:
+            swaps, aligned_o = got
+        else:
+            got = _single_stmt_align_swaps(pre_e, ev_pre_o, enc_swap_side)
+            if got is None:
+                return None
+            swaps, aligned_e = got
+    target_events = _bd_events(aligned_e)
+    if target_events != _bd_events(aligned_o):
+        return None
+
+    # --- the coupled draw: exactly one sample per prefix, same distribution --
+    samples_e = [s for s in aligned_e if isinstance(s, ec_ast.Sample)]
+    samples_o = [s for s in aligned_o if isinstance(s, ec_ast.Sample)]
+    if len(samples_e) != 1 or len(samples_o) != 1:
+        return None
+    sample_e, sample_o = samples_e[0], samples_o[0]
+    if sample_e.distr != sample_o.distr:
+        return None
+    env_e = _assign_env(enc_exec)
+    if _resolve_expr(enc_call.args, env_e) != sample_e.var:
+        return None
+
+    # --- cross-side canonical values, numbered by the ALIGNED prefix ---------
+    # TWO maps per side: the PREFIX-ONLY one drives the seq-invariant pairing
+    # (a suffix-produced local is unassigned at the cut -- pairing it states an
+    # ill-typed or unprovable equality, both measured on the first CK compile),
+    # while the full-body one only resolves suffix det-call ARGS for the leaf
+    # correspondence below.
+    ev_stmts_e = [s for s in aligned_e if _is_bb_stmt(s)]
+    ev_stmts_o = [s for s in aligned_o if _is_bb_stmt(s)]
+    canon_e = _kdf_canonical(list(aligned_e), ev_stmts_e)
+    canon_o = _kdf_canonical(list(aligned_o), ev_stmts_o)
+    canon_full_e = _kdf_canonical(list(aligned_e) + suffix_e, ev_stmts_e)
+    canon_full_o = _kdf_canonical(list(aligned_o) + suffix_o, ev_stmts_o)
+    coupled_slot = canon_e[sample_e.var]
+    fields_e = {v.name for v in enc_mod.module_vars}
+    fields_o = {v.name for v in oth_mod.module_vars}
+
+    def _q_e(var: str) -> str:
+        return f"{fl_name}.{var}" if var in fields_e else var
+
+    def _q_o(var: str) -> str:
+        return f"{fr_name}.{var}" if var in fields_o else var
+
+    live_e = _kdf_live_vars(suffix_e, enc_ret)
+    live_o = _kdf_live_vars(suffix_o, oth_ret)
+
+    # --- the two KDF inputs and the regrouping law ---------------------------
+    op_names = types.concat_op_names()
+    env_o = _assign_env(oth_exec)
+    chain_e = _concat_chain(_resolve_expr(kdf_e.args, env_e), op_names)
+    whole_o = _resolve_expr(kdf_o.args, env_o)
+    head_o, rest_o = _app_head(whole_o)
+    if chain_e is None or head_o not in op_names:
+        return None
+    left_ops, left_leaves = chain_e
+    if left_leaves[0] != enc_call.var:
+        return None
+    pre_args = _app_args(rest_o)
+    if len(pre_args) != 2:
+        return None
+    first_o = _strip_outer_parens(pre_args[0])
+    oth_leaves: list[str]
+    if first_o == sample_o.var:
+        # k=1: the bare drawn key is prepended -- the ordinary regroup law.
+        chain_o = _concat_chain(_strip_outer_parens(pre_args[1]), op_names)
+        if chain_o is None:
+            return None
+        oth_leaves = chain_o[1]
+        split2 = False
+        regroup = types.probe_concat_regroup(tuple(left_ops), head_o)
+    else:
+        # k=2: the drawn key rides inside the innermost link (KDFFirstKeyPRF's
+        # ``Head (L1 k x) rest`` bracketing) -- the SPLIT2 law.
+        in_head, in_rest = _app_head(first_o)
+        in_args = _app_args(in_rest)
+        if in_head != left_ops[0] or len(in_args) != 2:
+            return None
+        if _strip_outer_parens(in_args[0]) != sample_o.var:
+            return None
+        chain_o = _concat_chain(_strip_outer_parens(pre_args[1]), op_names)
+        if chain_o is None:
+            return None
+        oth_leaves = [_strip_outer_parens(in_args[1])] + chain_o[1]
+        split2 = True
+        regroup = types.probe_concat_regroup_split2(tuple(left_ops), head_o)
+    if regroup is None:
+        return None
+    bs_name = next(
+        (left for op, left, _r, _res in types.concat_ops_seen() if op == left_ops[0]),
+        None,
+    )
+    if bs_name is None:
+        # The bijection lemma is emitted off ``bij_acc``; a tactic naming it
+        # without that registration references a lemma that will not exist.
+        return None
+    # Leaves correspond by the EVENT that produced them: each is a suffix det
+    # call's result, matched by callee + canonically-resolved args over the
+    # aligned prefix slots (names differ per side; slots do not).
+    by_var_e = {s.var: s for s in suffix_e if isinstance(s, ec_ast.Call)}
+    by_var_o = {s.var: s for s in suffix_o if isinstance(s, ec_ast.Call)}
+
+    def _leaf_sig(
+        var: str, by_var: dict[str, ec_ast.Call], canon: dict[str, str]
+    ) -> tuple[str, ...] | None:
+        call = by_var.get(var)
+        if call is None:
+            return None
+        args = tuple(canon.get(a, a) for a in _split_top_args(call.args))
+        return (call.callee,) + args
+
+    if len(left_leaves) != len(oth_leaves) + 1:
+        return None
+    for leaf_e, leaf_o in zip(left_leaves[1:], oth_leaves):
+        sig_e = _leaf_sig(leaf_e, by_var_e, canon_full_e)
+        sig_o = _leaf_sig(leaf_o, by_var_o, canon_full_o)
+        if sig_e is None or sig_e != sig_o:
+            return None
+
+    # --- the middle-leg seq invariant ----------------------------------------
+    globs_list = " /\\ ".join(f"={{glob {p.name}}}" for p in flat_params)
+    globs_set = "={" + ", ".join(f"glob {p.name}" for p in flat_params) + "}"
+    key_e = _kdf_holder(
+        canon_e, coupled_slot, lambda v: _q_e(v) if v in fields_e else None
+    )
+    if key_e is None or sample_o.var not in fields_o:
+        return None
+    ev_op = f"{alias}.ev_{meth}"
+    key_fact = f"{_q_o(sample_o.var)}{{2}} = {ev_op} {key_e}{{1}}"
+    conj: list[str] = [globs_set, key_fact]
+    for var_e, val in sorted(canon_e.items()):
+        if val == coupled_slot:
+            continue
+        if not (var_e in live_e or var_e in fields_e):
+            continue
+        for var_o in sorted(k for k, v in canon_o.items() if v == val):
+            if var_o in live_o or var_o in fields_o:
+                conj.append(f"{_q_e(var_e)}{{1}} = {_q_o(var_o)}{{2}}")
+                break
+        m = re.fullmatch(r"(.*?)((?:\.`\d+)+)", val)
+        if m is None or var_e not in fields_e:
+            continue
+        head_var = next(
+            (k for k in sorted(canon_o) if canon_o[k] == m.group(1) and k in fields_o),
+            None,
+        )
+        if head_var is not None:
+            conj.append(f"{_q_e(var_e)}{{1}} = {_q_o(head_var)}{{2}}{m.group(2)}")
+    for var_a, val in sorted(canon_e.items()):
+        if val == coupled_slot or var_a not in fields_e:
+            continue
+        for var_b in sorted(
+            k for k, v in canon_e.items() if v == val and k > var_a and k in fields_e
+        ):
+            conj.append(f"{_q_e(var_a)}{{1}} = {_q_e(var_b)}{{1}}")
+    inv1 = " /\\ ".join(dict.fromkeys(conj))
+
+    # --- the four leg posts --------------------------------------------------
+    def _real_pairs(
+        state0: frog_ast.Game, wrap: str, mod: ec_ast.Module, twin: str
+    ) -> list[tuple[str, str]] | None:
+        base, deleg = _module_head(wrap), _wrapper_delegate(wrap)
+        if not base or not deleg:
+            return None
+        name_map, deleg_name = _flat_name_map(state0, base, deleg)
+        if not deleg_name:
+            return None
+        out: list[tuple[str, str]] = []
+        for var in mod.module_vars:
+            real = _real_name(var.name, name_map, deleg_name)
+            if real is None:
+                return None
+            out.append((real, f"{twin}.{var.name}"))
+        return out
+
+    pairs_e = _real_pairs(left_state0, left_wrapper_expr, enc_mod, fl_name)
+    pairs_o = _real_pairs(right_state0, right_wrapper_expr, oth_mod, fr_name)
+    if pairs_e is None or pairs_o is None:
+        return None
+
+    def _sub(text: str, pairs: list[tuple[str, str]]) -> str:
+        for real, twin in sorted(pairs, key=lambda p: -len(p[0])):
+            text = text.replace(real, twin)
+        return text
+
+    p1post = " /\\ ".join(
+        ["={res}", globs_list] + [f"{r}{{1}} = {t}{{2}}" for r, t in pairs_e]
+    )
+    p3post = " /\\ ".join(
+        ["={res}", globs_list] + [f"{r}{{2}} = {t}{{1}}" for r, t in pairs_o]
+    )
+    p2post = "={res} /\\ " + _sub(coupling, pairs_e)
+    mpost = "={res} /\\ " + _sub(_sub(coupling, pairs_e), pairs_o)
+
+    # --- the middle-leg suffix steps -----------------------------------------
+    all_vars_e = fields_e | {
+        getattr(s, "var", "") for s in enc_exec if getattr(s, "var", "")
+    }
+    all_vars_o = fields_o | {
+        getattr(s, "var", "") for s in oth_exec if getattr(s, "var", "")
+    }
+    ctr = [0]
+
+    def _suffix_steps(
+        side: int,
+        suffix: list[ec_ast.EcStmt],
+        kdf: ec_ast.Call,
+        q: Callable[[str], str],
+        all_vars: set[str],
+        assigned: set[str],
+    ) -> list[str] | None:
+        def _tag(expr: str) -> str:
+            return _IDENT_TOKENS.sub(
+                lambda m: (
+                    f"{q(m.group(0))}{{{side}}}"
+                    if m.group(0).split(".", 1)[0] in all_vars
+                    else m.group(0)
+                ),
+                expr,
+            )
+
+        cut_l, cut_r = ("1", "0") if side == 1 else ("0", "1")
+        steps: list[str] = []
+        for stmt in suffix:
+            if stmt is kdf:
+                break
+            if isinstance(stmt, ec_ast.Call):
+                parts = _callee_parts(stmt.callee)
+                if parts is None:
+                    return None
+                cmod, cmeth = parts
+                calias = clone_alias[cmod]
+                args = _split_top_args(stmt.args)
+                if any(not re.fullmatch(r"[A-Za-z_]\w*", a) for a in args):
+                    return None
+                if any(a not in assigned for a in args):
+                    return None
+                fact = f"{q(stmt.var)}{{{side}}} = {calias}.ev_{cmeth}" + "".join(
+                    f" ({q(a)}{{{side}}})" for a in args
+                )
+                n = ctr[0]
+                ctr[0] += 1
+                binders = " ".join(
+                    [f"_g{n}"] + [f"_a{n}_{k}" for k in range(len(args))]
+                )
+                cap = ", ".join(
+                    [f"(glob {cmod}){{{side}}}"] + [f"{q(a)}{{{side}}}" for a in args]
+                )
+                steps.append(f"seq {cut_l} {cut_r} : (#pre /\\ {fact}).")
+                steps.append(f"+ exists* {cap}; elim* => {binders}.")
+                steps.append(
+                    f"  call{{{side}}} ({cmod}_{cmeth}_det {binders}); skip => /#."
+                )
+            elif isinstance(stmt, ec_ast.Assign):
+                fact = f"{q(stmt.var)}{{{side}}} = {_tag(stmt.rhs)}"
+                steps.append(f"seq {cut_l} {cut_r} : (#pre /\\ {fact}).")
+                steps.append("+ wp; skip => /#.")
+            else:
+                return None
+            assigned.add(stmt.var)
+        return steps
+
+    assigned_e = {getattr(s, "var", "") for s in aligned_e} | fields_e
+    assigned_o = {getattr(s, "var", "") for s in aligned_o} | fields_o
+    steps_e = _suffix_steps(1, suffix_e, kdf_e, _q_e, all_vars_e, assigned_e)
+    steps_o = _suffix_steps(2, suffix_o, kdf_o, _q_o, all_vars_o, assigned_o)
+    if steps_e is None or steps_o is None:
+        return None
+
+    # --- the prefix peel -----------------------------------------------------
+    peel: list[str] = []
+    for stmt in reversed([s for s in aligned_e if _is_bb_stmt(s)]):
+        peel.append("  wp.")
+        if isinstance(stmt, ec_ast.Call):
+            peel.append("  call (_: true).")
+        elif stmt is sample_e:
+            peel.append(f"  rnd {ev_op} _bij_g.")
+        else:
+            peel.append("  rnd.")
+
+    def _outer(mod: ec_ast.Module) -> list[str]:
+        leg = ["proc.", "inline *.", *_backbone_peel(mod.procs[0].body)]
+        if _leads_with_det(mod.procs[0].body):
+            leg.append("wp.")
+        leg.append("auto.")
+        return leg
+
+    args_txt = ", ".join(p.name for p in flat_params)
+    tactic: list[str] = [
+        f"have [_bij_g [_bij_can _bij_inv]] := {mod_name}_{meth}_bij.",
+        f"transitivity {fl_name}({args_txt}).{oracle_name}",
+        f"  ({globs_list} ==> {p1post})",
+        f"  ({globs_list} ==> {p2post}).",
+        "smt().",
+        "smt().",
+        *_outer(enc_mod),
+        f"transitivity {fr_name}({args_txt}).{oracle_name}",
+        f"  ({globs_list} ==> {mpost})",
+        f"  ({globs_list} ==> {p3post}).",
+        "smt().",
+        "smt().",
+        "proc.",
+        *swaps,
+        f"seq {cut_e} {cut_o} : ({inv1}).",
+        "+" + peel[0][1:],
+        *peel[1:],
+        "  skip => /#.",
+        *steps_e,
+        *steps_o,
+        "wp. call (_: true). wp. skip => />.",
+        f"smt({regroup}).",
+        *_outer(oth_mod),
+    ]
+    if split2:
+        types.request_concat_regroup_split2(tuple(left_ops), head_o)
+    else:
+        types.request_concat_regroup(tuple(left_ops), head_o)
+    bij_acc.add((mod_name, meth, bs_name, alias))
+    return (
+        [
+            "\n".join(_render_module_decl(enc_mod)),
+            "\n".join(_render_module_decl(oth_mod)),
+        ],
+        tactic,
+        {fl_name, fr_name},
+    )
 
 
 def kdf_substitution_key_conjunct(  # pylint: disable=too-many-arguments,too-many-positional-arguments

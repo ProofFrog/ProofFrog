@@ -175,6 +175,10 @@ class TypeCollector:
         # associativity), so requesting one does not grow the TCB; demand-driven
         # so every export with no regrouping stays byte-identical.
         self._concat_regroup_requests: set[tuple[tuple[str, ...], str]] = set()
+        # SPLIT2 regrouping requests (the head prepends the first TWO leaves
+        # already concatenated -- the KDFFirstKeyPRF bracketing); same
+        # demand-driven, proved-not-assumed contract as the k=1 family above.
+        self._concat_regroup_split2_requests: set[tuple[tuple[str, ...], str]] = set()
         # Triples that were SYNTHESIZED rather than seen as a real concat. Only
         # these get the extra dlet-form split axiom, so a real concat pair's
         # TCB is untouched.
@@ -868,6 +872,116 @@ class TypeCollector:
         """
         resolved = self._resolve_regroup(left_ops, pre_op)
         return resolved[0] if resolved is not None else None
+
+    def request_concat_regroup_split2(
+        self, left_ops: tuple[str, ...], head_op: str
+    ) -> str | None:
+        """Ask for the SPLIT2 regrouping law, returning its lemma name.
+
+        The k=1 law (:meth:`request_concat_regroup`) covers a head that prepends
+        the BARE first leaf to a separately-built rest. A first-key PRF
+        (``KDFFirstKeyPRF``) instead prepends the first TWO leaves already
+        concatenated, so the right side splits after leaf 1::
+
+            L4 (L3 (L2 (L1 p0 p1) p2) p3) p4
+              = Head (L1 p0 p1) (R2 (R1 p2 p3) p4)
+
+        Same proof recipe as the k=1 law -- unfold, ``ofwordK`` per intermediate
+        consumed word, list associativity -- so it too adds nothing to the
+        trusted base. Validated against the real ``CK_expanded_INDCCA_PQ``
+        export (``ec_templates/indcca_kdf_substitution_twin_TACTIC.txt``).
+        """
+        resolved = self._resolve_regroup_split2(left_ops, head_op)
+        if resolved is None:
+            return None
+        self._concat_regroup_split2_requests.add((left_ops, head_op))
+        return resolved[0]
+
+    def probe_concat_regroup_split2(
+        self, left_ops: tuple[str, ...], head_op: str
+    ) -> str | None:
+        """The :meth:`request_concat_regroup_split2` name, without registering."""
+        resolved = self._resolve_regroup_split2(left_ops, head_op)
+        return resolved[0] if resolved is not None else None
+
+    def _resolve_regroup_split2(
+        self, left_ops: tuple[str, ...], head_op: str
+    ) -> tuple[str, list[str], list[_Triple], list[_Triple], _Triple] | None:
+        """Recover ``(name, leaves, left, right, head)`` for a split2 request."""
+        if len(left_ops) < 3:
+            return None
+        by_name = {
+            _concat_op_name(left, right, result): (left, right, result)
+            for left, right, result in self._concat_ops
+        }
+        if head_op not in by_name or any(op not in by_name for op in left_ops):
+            return None
+        left = [by_name[op] for op in left_ops]
+        if any(left[i][0] != left[i - 1][2] for i in range(1, len(left))):
+            return None
+        leaves = [left[0][0], left[0][1]] + [t[1] for t in left[1:]]
+        head = by_name[head_op]
+        # The head consumes the FIRST LINK's result -- the two-leaf prefix --
+        # rather than the bare first leaf, which is the whole difference from
+        # the k=1 law.
+        if head[0] != left[0][2] or head[2] != left[-1][2]:
+            return None
+        by_pair = {(l, r): res for l, r, res in self._concat_ops}
+        right: list[_Triple] = []
+        cursor = leaves[2]
+        for leaf in leaves[3:]:
+            result = by_pair.get((cursor, leaf))
+            if result is None:
+                return None
+            right.append((cursor, leaf, result))
+            cursor = result
+        if cursor != head[1]:
+            return None
+        name = f"concat_regroup{len(leaves)}s2_{head_op.removeprefix('concat_')}"
+        return name, leaves, left, right, head
+
+    def _regroup_split2_lemma(
+        self, left_ops: tuple[str, ...], head_op: str
+    ) -> ec_ast.ProvedLemma | None:
+        """Build the requested split2 law. See :meth:`request_concat_regroup_split2`."""
+        resolved = self._resolve_regroup_split2(left_ops, head_op)
+        if resolved is None:
+            return None
+        name, leaves, left, right, _head = resolved
+        right_ops = [_concat_op_name(*t) for t in right]
+        binders = " ".join(f"(p{i} : {leaf})" for i, leaf in enumerate(leaves))
+        lhs = f"{left_ops[0]} p0 p1"
+        for i, op in enumerate(left_ops[1:], start=2):
+            lhs = f"{op} ({lhs}) p{i}"
+        if right_ops:
+            rest = f"{right_ops[0]} p2 p3"
+            for i, op in enumerate(right_ops[1:], start=4):
+                rest = f"{op} ({rest}) p{i}"
+            rest = f"({rest})"
+        else:
+            rest = "p2"
+        formula = f"{lhs}\n  = {head_op} ({left_ops[0]} p0 p1) {rest}"
+        unfolds = " ".join(
+            f"/{op}" for op in dict.fromkeys((*left_ops, head_op, *right_ops))
+        )
+        body = [f"  rewrite {unfolds} /=."]
+        # An ``ofwordK`` per intermediate word CONSUMED by an enclosing
+        # ``ofword``: every left link but the outermost (the first link's word
+        # is consumed twice -- by the next left link and by the head -- but both
+        # occurrences are the same instance, so one rewrite reaches both), and
+        # every right link (the head wraps them all).
+        steps = [(t[2], leaves[: i + 2]) for i, t in enumerate(left[:-1])]
+        steps += [(t[2], leaves[2 : i + 4]) for i, t in enumerate(right)]
+        for result, parts in steps:
+            cats = " ".join(["1:size_cat"] * (len(parts) - 1))
+            sizes = " ".join(
+                f"1:!{_word_clone_name(part)}.size_word" for part in _uniq(parts)
+            )
+            body.append(
+                f"  rewrite {_word_clone_name(result)}.ofwordK" f" {cats} {sizes} 1:/#."
+            )
+        body.append("  by rewrite !catA.")
+        return ec_ast.ProvedLemma(f"{name} {binders}", formula, body)
 
     def _resolve_regroup(
         self, left_ops: tuple[str, ...], pre_op: str
@@ -2147,6 +2261,10 @@ class TypeCollector:
         # so it can only be stated once every concat op above has been declared.
         for left_ops, pre_op in sorted(self._concat_regroup_requests):
             regroup = self._regroup_lemma(left_ops, pre_op)
+            if regroup is not None:
+                decls.append(regroup)
+        for left_ops, head_op in sorted(self._concat_regroup_split2_requests):
+            regroup = self._regroup_split2_lemma(left_ops, head_op)
             if regroup is not None:
                 decls.append(regroup)
         return decls

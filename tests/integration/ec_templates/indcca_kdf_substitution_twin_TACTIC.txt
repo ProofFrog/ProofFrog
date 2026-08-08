@@ -1,0 +1,67 @@
+KDF-key-substitution via FLAT TWINS -- the CK/UK `hop_5_initialize` shape
+=========================================================================
+Derived and VALIDATED 2026-08-08 against the real CK_expanded_INDCCA_PQ
+export (.ec-tmp/ks5_probe.ec, MCP ec_compile OK; probe = goal_probe cut of
+the fresh export + spliced twins/regroup/tactic).
+
+WHY THE SWAP ROUTE CANNOT DO THIS HOP (both directions measured):
+ * aligning RD toward RB's order requires KEM_T.encodesharedsecret to cross
+   KEM_T.encodeciphertext / KEM_T.encodeencapskey -- a SAME-MODULE abstract
+   call reorder EC's `swap` refuses (shared glob), independent of any travel-
+   block bundling; and
+ * aligning RB toward RD's order requires the challenger repack
+   `_tup <- (ek0, ssStar0, ctStar)` to rise above the encaps that feeds its
+   third component (the refuted direction).
+Functionalizing the encodes dissolves the first obstruction (assignments are
+wp-absorbable in any order), and cutting the alignment down to the PROBABILISTIC
+prefix dissolves the second (the repack never has to move: only single argless
+statements -- the sample and KEM_T.keygen -- hoist).
+
+SHAPE (the emission's gate):
+ * one side's initialize carries an extra `deterministic injective` ENCODING of
+   a sampled value; the other draws the encoded key directly (same distr);
+ * every backbone event from the first det call onward, on both sides, is a
+   det call with args assigned BEFORE that point (so each one-sided `_det`
+   step's `exists*` can bind them at its own cut), except the final shared
+   KDF call, which stays coupled;
+ * the two PROBABILISTIC prefixes (samples + prob calls) align by hoisting
+   SINGLE statements on one side (validated `_ec_indep` against each crossed
+   statement -- no travel block, no consumer glue);
+ * the other side's KDF argument is `Head (Inner k x) rest` -- the drawn key
+   nested ONE level (KDFFirstKey), vs CG's bare `Head k rest`. This needs the
+   SPLIT2 regroup law:
+       L4 (L3 (L2 (L1 p0 p1) p2) p3) p4
+         = Head (L1 p0 p1) (Q2 (Q1 p2 p3) p4)
+   proved exactly like the k=1 regroup (unfold ops; ofwordK per intermediate
+   consumed word; `by rewrite !catA`).
+
+STRUCTURE (one lemma body, two nested transitivity calls -- the
+_synth_delegate_correctness_init scaffold):
+    RB ~ KS_FE ~ KS_FO ~ RD
+ * KS_FE / KS_FO: VERBATIM flat copies of the two first flat states
+   (emit_state_vars=True, no_shadow_fields=True); challenger fields become
+   `challenger_*` twin fields. Both must join every `declare module`
+   restriction list (the c283 state-holder channel).
+ * outer legs: `proc; inline *;` + name-free backbone peel + `auto.` --
+   the raw wrapper and its flat copy share the same backbone order, so
+   nothing is ever named.
+ * middle leg (all names the exporter's own):
+     - swap{1} hoists aligning the prob prefix (CK: `swap{1} 7 -6. swap{1} 12 -7.`)
+     - seq <l> <r> : (globs /\ key conjunct k1{2} = ev_enc ss_PQ{1} /\
+       pairwise prefix facts) -- proved by backward (wp; call (_: true))*
+       + `rnd <ev_op> _bij_g.` at the coupled draw + skip => /#.
+     - one `seq 1 0` / `seq 0 1` per suffix det call:
+       exists* (glob M){i}, <args>{i}; elim* => g a; call{i} (M_m_det g a);
+       skip => /#.   (an interleaved assign gets its own wp-step whose
+       invariant states its rhs)
+     - close: wp. call (_: true). wp. skip => />. smt(<split2 regroup>).
+
+NEGATIVE CONTROLS (all on the real export):
+ * corrupted second swap offset (-7 -> -6): REJECTED ("KEM_T.keygen ...
+   should be equal") -- the alignment is load-bearing;
+ * regroup lemma DELETED from the file (not merely unnamed): REJECTED with
+   the residual goal printing the regroup instance verbatim;
+ * bijection rnd replaced by identity rnd: REJECTED at the prefix close
+   (residual `ssStar0 = ev_enc ssStar0`).
+ * CAUTION recorded: removing a lemma from an `smt(...)` argument list is NOT
+   a control -- smt uses in-scope lemmas without naming them.

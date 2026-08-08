@@ -1,0 +1,94 @@
+SEED-SPLIT REDUCTION PAIR — the *_seedbased IND-CCA hop_2 / hop_21 family
+=========================================================================
+(derivation record, c296, 2026-08-08; landed as _seed_split_pair_* in
+exporter.py)
+
+THE HOP. R_PRG(PRGSec_Random) ~ R_KG(KeyGenEquiv_FromDeriveKeyPair): the
+SPLIT side draws ONE uniform full seed from a bare-random challenger
+(query = [Sample; Return it]), stores it in a module FIELD (seed_full),
+and consumes it only via two complementary slices; the GROUPED side gets
+its PQ keypair from a KeyGenEquiv challenger (generate = [Sample; Return
+K.derivekeypair(it)]) into a keys FIELD (pq_keys) and draws its T-half
+seed FIELD fresh. Both inits then run an identical call/sample tail; both
+decaps re-derive from their stored state, so the hop needs a CROSS-ORACLE
+coupling (initialize establishes, decaps consumes).
+
+THE COUPLING (emitted by _seed_split_pair_coupling; the multi-oracle hop
+lemma statements and the game-level composition thread it automatically):
+  globs
+  /\ <shared same-name fields verbatim>            (ctStar)
+  /\ R_KG.seed_T{g}  = slice_R  R_PRG.seed_full{s} kem_pq_nseed (kem_pq_nseed + ng_nseed)
+  /\ R_KG.pq_keys{g} = KEM_PQ_c.ev_derivekeypair (slice_L R_PRG.seed_full{s} 0 kem_pq_nseed)
+The slice ops and offset TEXTS are read verbatim off the split side's
+rendered assignments — never reconstructed. The generator requests the
+VIRTUAL concat triple for the full-seed type (request_virtual_concat), so
+the derived 2-way split laws (round-trips, `*`-form, dlet-form) are
+emitted; both of that machinery's soundness gates (offset order read from
+recorded spans; symbolic length-sum) re-run at emission and FAIL CLOSED.
+The spec detector ALSO gates on the length-sum itself so the tactic can
+never reference a law the collector declined to emit.
+
+INIT TACTIC (validated: probe c296_h2i on the real CG export, EXIT 0).
+Post-symmetry orientation is always grouped = {1}, split = {2}:
+  symmetry.                    (only when the grouped side is step_b)
+  proc. inline *.
+  swap{1} 4 -2.                (grouped inline is ALWAYS [seed <$; derive;
+                                keys <- res; T <$] given the challenger
+                                gates — the swap makes the two draws
+                                adjacent without crossing a dependency)
+  seq 2 4 : (globs /\ seed{1} = slice_L .. /\ R_KG.seed_T{1} = slice_R ..
+             /\ seed_PQ{2} = slice_L .. /\ seed_T{2} = slice_R ..).
+  + wp. rndsem*{1} 0.
+    rnd (fun p => concat p.`1 p.`2) (fun sf => (slice_L sf .., slice_R sf ..)).
+    skip => />. rewrite <dlet-form split law>.
+    <the validated obligation script: concat_slices_id witness, dlet1E/dmap1E
+     congruence closed by smt(left right id), supp witnesses, smt(left right)>
+  seq 2 <1+#projs> : (.. /\ R_KG.pq_keys{1} = ev (slice_L ..)
+                      /\ <proj>{2} = (ev (slice_L ..)).`k for each
+                         projection the tail READS).
+  + wp.
+    exists* (glob KEM_PQ){1}, seed{1};    elim* => gk1 s1. call{1} (det gk1 s1).
+    exists* (glob KEM_PQ){2}, seed_PQ{2}; elim* => gk2 s2. call{2} (det gk2 s2).
+    skip => /#.
+  <matched-tail peel: (wp; call (_: true)) per call, (wp; rnd) per sample,
+   bottom-up; wp; skip => /#.>
+Inline names: the grouped challenger's two locals keep their PLAIN names
+unless they collide with a caller local, in which case the smallest fresh
+suffix applies (EcMemory.bindall_fresh) — computed, not guessed
+(_inline_fresh over the rendered caller's VarDecls; `seed` stays, the
+hoisted `_r0` becomes `_r00`). The renderer's hoist var is `_r0` by
+convention; a challenger whose OWN sample is named `_r0` declines.
+
+DECAPS TACTIC (validated: probe c296_h2d, EXIT 0). No symmetry — the
+lemma's own orientation; the one-sided side is the SPLIT side:
+  proc. if.
+  + move => &1 &2 /#.          (guards couple through the shared ctStar)
+  + by wp; skip => /#.
+  sp.                          (absorbs the split side's two re-slices)
+  seq 1 0 : (={ct} /\ <coupling> /\ seed_T{s} = slice_R .. /\ _tup{s} = ev (slice_L ..)).
+  + exists* (glob KEM_PQ){s}, seed_PQ{s}; elim* => gk s. call{s} (det gk s).
+    skip => /#.
+  <matched-tail peel as above>
+The det drop's ev value meets the coupling's pq_keys conjunct, which is
+what makes the two sides' KEM_PQ.decaps arguments equal (dk_PQ = _tup.`2
+= (ev ..).`2 = pq_keys.`2).
+
+NEGATIVE CONTROLS (both REJECTED, exit 1):
+  * init: the seed_T conjunct's offsets corrupted to `0 ng_nseed` (a
+    wrong-but-well-typed coupling) -> "cannot prove goal (strict)" at the
+    couple bullet. The coupling CONTENT is load-bearing, not vacuous.
+  * decaps: the one-sided det-drop seq deleted -> "left instruction list
+    is not empty" (the misaligned ladder runs out of steps).
+
+WHY NOT THE EXISTING ROUTES. _split_seed_init_tac (HON_BIND hop_14) is
+the same physics but a different shape: per-keypair segments with a
+short, call-only tail (its common-tail variant requires every non-chal
+statement to be a call), and no cross-oracle seam — hop_2's tail carries
+samples and assigns and the coupling must survive decaps. The coupling
+generator is ordered AFTER the query-delegate/PRG paths in
+_live_state_coupling_base so every HON_BIND coupling stays byte-identical.
+
+MIRROR. hop_21 (R_KG_R ~ R_PRG_R) is the same spec with grouped = step_a
+(no symmetry) and a shorter tail (the Random-game variants draw ss fresh
+instead of running the KDF chain); the generalized backbone peel covers
+both. The R-variant decaps bodies are identical to the L ones.

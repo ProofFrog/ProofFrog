@@ -6189,6 +6189,601 @@ def export_proof_file(proof_path: str) -> str:
             return None
         return {"decaps": body}
 
+    # ---- SEED-SPLIT reduction PAIR (the ``*_seedbased`` IND-CCA hop_2 /
+    # hop_21 family): R_PRG(PRGSec_Random) ~ R_KG(KeyGenEquiv_FromDKP) ------
+
+    def _seed_split_pair_spec(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> dict[str, Any] | None:
+        """Detect the SEED-SPLIT reduction pair of the ``*_seedbased`` IND-CCA
+        proofs, or ``None`` off-shape.
+
+        One reduction (the SPLIT side) draws ONE uniform full seed from a
+        bare-random challenger (``query`` = ``[Sample; Return it]``), stores it
+        in a module FIELD, and consumes it only via two complementary slices;
+        the other (the GROUPED side) obtains its keypair from a KeyGenEquiv
+        challenger (``generate`` = ``[Sample; Return K.derivekeypair(it)]``)
+        into a keys FIELD and draws its second-half seed FIELD fresh. The hop's
+        content is the exact 2-way split-uniform law over the full-seed type
+        plus the deterministic ``derivekeypair`` seam; the cross-oracle
+        coupling this pair needs is emitted by
+        :func:`_seed_split_pair_coupling` and established / consumed by
+        :func:`_seed_split_pair_init_tac` / :func:`_seed_split_pair_decaps_walk`
+        (validated on the real CG export by the ``c296_h2i``/``c296_h2d``
+        probes, each with a negative control).
+
+        Everything here is structural: challenger method shapes, rendered
+        slice/field data flow, det licences, and a symbolic length-sum gate
+        that FAILS CLOSED (the same soundness condition
+        ``_synthesize_virtual_concat_triples`` re-checks at emission).
+        """
+        if step_a.reduction is None or step_b.reduction is None:
+            return None
+        mods: list[ec_ast.Module] = []
+        for st in (step_a, step_b):
+            assert st.reduction is not None
+            mod = next(
+                (
+                    d
+                    for d in ec_reductions
+                    if isinstance(d, ec_ast.Module) and d.name == st.reduction.name
+                ),
+                None,
+            )
+            if mod is None:
+                return None
+            mods.append(mod)
+        steps = (step_a, step_b)
+
+        def _init_proc(mod: ec_ast.Module) -> ec_ast.Proc | None:
+            return next((p for p in mod.procs if p.name == "initialize"), None)
+
+        def _exec(proc: ec_ast.Proc) -> list[ec_ast.EcStmt]:
+            return [
+                st
+                for st in proc.body
+                if not isinstance(st, (ec_ast.VarDecl, ec_ast.Return))
+            ]
+
+        procs = [_init_proc(m) for m in mods]
+        if procs[0] is None or procs[1] is None:
+            return None
+        execs = [_exec(p) for p in procs if p is not None]
+        chal_of = [m.params[-1].name if m.params else None for m in mods]
+        # exactly ONE challenger call per init (n = 1; the multi-keypair
+        # HON_BIND shapes keep their existing coupling paths)
+        for body, chal in zip(execs, chal_of):
+            calls = [
+                st
+                for st in body
+                if isinstance(st, ec_ast.Call)
+                and chal is not None
+                and st.callee.partition(".")[0] == chal
+            ]
+            if len(calls) != 1 or body[0] is not calls[0]:
+                return None
+
+        def _chal_method_stmts(
+            step: frog_ast.Step, call: ec_ast.Call
+        ) -> list[frog_ast.Statement] | None:
+            # pylint: disable=protected-access
+            chal_ast = engine._get_game_ast(step.challenger, None)
+            # pylint: enable=protected-access
+            if chal_ast is None:
+                return None
+            meth = call.callee.partition(".")[2]
+            m = next(
+                (
+                    x
+                    for x in chal_ast.methods
+                    if x.signature.name.lower() == meth.lower()
+                ),
+                None,
+            )
+            return list(m.block.statements) if m is not None else None
+
+        def _inline_fresh(name: str, taken: set[str]) -> str:
+            # EC's inline rename rule (EcMemory.bindall_fresh): keep the name
+            # if free in the caller's local memory, else smallest fresh suffix.
+            if name not in taken:
+                return name
+            i = 0
+            while f"{name}{i}" in taken:
+                i += 1
+            return f"{name}{i}"
+
+        for gi in (0, 1):
+            sx = 1 - gi
+            g_exec, s_exec = execs[gi], execs[sx]
+            g_proc, s_proc = procs[gi], procs[sx]
+            assert g_proc is not None and s_proc is not None
+            # -- SPLIT side: chal draw into a field + two complementary slices
+            if len(s_exec) < 4 or not isinstance(s_exec[0], ec_ast.Call):
+                continue
+            s_call = s_exec[0]
+            if s_call.args.strip():
+                continue
+            s_fields = {v.name: v.type.text for v in mods[sx].module_vars}
+            if s_call.var not in s_fields:
+                continue
+            field = s_call.var
+            src_ty = s_fields[field]
+            sts = _chal_method_stmts(steps[sx], s_call)
+            if (
+                sts is None
+                or len(sts) != 2
+                or not isinstance(sts[0], frog_ast.Sample)
+                or not isinstance(sts[0].var, frog_ast.Variable)
+                or not isinstance(sts[1], frog_ast.ReturnStatement)
+                or not isinstance(sts[1].expression, frog_ast.Variable)
+                or sts[1].expression.name != sts[0].var.name
+            ):
+                continue
+            slices: list[tuple[str, str, str, str]] = []
+            for sl_st in s_exec[1:3]:
+                if not isinstance(sl_st, ec_ast.Assign):
+                    break
+                toks = sl_st.rhs.split()
+                if (
+                    len(toks) < 4
+                    or not toks[0].startswith("slice_")
+                    or toks[1] != field
+                ):
+                    break
+                slices.append((sl_st.var, toks[0], toks[2], " ".join(toks[3:])))
+            if len(slices) != 2:
+                continue
+            pre_sl = [x for x in slices if x[2] == "0"]
+            suf_sl = [x for x in slices if x[2] != "0"]
+            if len(pre_sl) != 1 or len(suf_sl) != 1:
+                continue
+            l_local, slice_l, _, l_end = pre_sl[0]
+            r_local, slice_r, r_start, r_end = suf_sl[0]
+            s_decl = {
+                d.name: d.type.text
+                for d in s_proc.body
+                if isinstance(d, ec_ast.VarDecl)
+            }
+            l_ty, r_ty = s_decl.get(l_local), s_decl.get(r_local)
+            if not l_ty or not r_ty:
+                continue
+            len_l = top_types.bs_length_for(l_ty)
+            len_r = top_types.bs_length_for(r_ty)
+            len_src = top_types.bs_length_for(src_ty)
+            if len_l is None or len_r is None or len_src is None:
+                continue
+            # THE LENGTH-SUM GATE (fails closed; a wrong split is a wrong law)
+            # pylint: disable=protected-access
+            if not tc._sym_eq(f"({len_l}) + ({len_r})", len_src):
+                continue
+            # pylint: enable=protected-access
+            # -- GROUPED side: KeyGenEquiv chal draw into a keys field + a
+            #    fresh right-half seed FIELD draw
+            if len(g_exec) < 2 or not isinstance(g_exec[0], ec_ast.Call):
+                continue
+            g_call = g_exec[0]
+            if g_call.args.strip():
+                continue
+            g_fields = {v.name: v.type.text for v in mods[gi].module_vars}
+            if g_call.var not in g_fields:
+                continue
+            keys_field = g_call.var
+            if not isinstance(g_exec[1], ec_ast.Sample):
+                continue
+            seed_field = g_exec[1].var
+            if seed_field not in g_fields or g_fields[seed_field] != r_ty:
+                continue
+            gsts = _chal_method_stmts(steps[gi], g_call)
+            if (
+                gsts is None
+                or len(gsts) != 2
+                or not isinstance(gsts[0], frog_ast.Sample)
+                or not isinstance(gsts[0].var, frog_ast.Variable)
+                or not isinstance(gsts[1], frog_ast.ReturnStatement)
+            ):
+                continue
+            ret = gsts[1].expression
+            if (
+                not isinstance(ret, frog_ast.FuncCall)
+                or not isinstance(ret.func, frog_ast.FieldAccess)
+                or len(ret.args) != 1
+                or not isinstance(ret.args[0], frog_ast.Variable)
+                or ret.args[0].name != gsts[0].var.name
+            ):
+                continue
+            det_meth = ret.func.name.lower()
+            chal_expr = pt.last_module_arg(resolver.resolve(steps[gi]).module_expr)
+            det_mod = pt.module_base_name(pt.last_module_arg(chal_expr))
+            det_alias = clone_alias_by_module.get(det_mod)
+            if det_alias is None or det_meth not in det_methods_by_module.get(
+                det_mod, set()
+            ):
+                continue
+            # inline names of the grouped challenger's two locals (the sample
+            # and the hoisted return-call result, ``_r0`` by the renderer's
+            # hoisting convention -- decline the degenerate collision)
+            if gsts[0].var.name == "_r0":
+                continue
+            g_taken = {d.name for d in g_proc.body if isinstance(d, ec_ast.VarDecl)}
+            chal_seed_local = _inline_fresh(gsts[0].var.name, g_taken)
+            chal_res_local = _inline_fresh("_r0", g_taken | {chal_seed_local})
+            return {
+                "gi": gi,
+                "mods": mods,
+                "steps": steps,
+                "g_base": mods[gi].name,
+                "s_base": mods[sx].name,
+                "field": field,
+                "src_ty": src_ty,
+                "l_ty": l_ty,
+                "r_ty": r_ty,
+                "slice_l": slice_l,
+                "slice_r": slice_r,
+                "l_end": l_end,
+                "r_start": r_start,
+                "r_end": r_end,
+                "l_local": l_local,
+                "r_local": r_local,
+                "keys_field": keys_field,
+                "seed_field": seed_field,
+                "det_mod": det_mod,
+                "det_alias": det_alias,
+                "det_meth": det_meth,
+                "chal_seed_local": chal_seed_local,
+                "chal_res_local": chal_res_local,
+                "g_exec": g_exec,
+                "s_exec": s_exec,
+            }
+        return None
+
+    def _seed_split_backbone(
+        body: Sequence[ec_ast.EcStmt], pmap: dict[str, str]
+    ) -> list[tuple[str, ...]]:
+        """Call/sample skeleton with callees mapped formal -> instance."""
+        out: list[tuple[str, ...]] = []
+        for st in body:
+            if isinstance(st, ec_ast.Call):
+                m, _, meth = st.callee.partition(".")
+                out.append(("call", pmap.get(m, m), meth))
+            elif isinstance(st, ec_ast.Sample):
+                out.append(("rnd",))
+            elif not isinstance(st, ec_ast.Assign):
+                out.append(("other",))
+        return out
+
+    def _seed_split_ladder(body: Sequence[ec_ast.EcStmt]) -> list[str]:
+        """Bottom-up two-sided peel of a matched call/sample tail."""
+        lines: list[str] = []
+        for st in reversed(body):
+            if isinstance(st, ec_ast.Call):
+                lines.append("wp; call (_: true).")
+            elif isinstance(st, ec_ast.Sample):
+                lines.append("wp; rnd.")
+        lines.append("wp; skip => /#.")
+        return lines
+
+    def _seed_split_split_tail(
+        spec: dict[str, Any], body: Sequence[ec_ast.EcStmt]
+    ) -> tuple[ec_ast.Call, list[ec_ast.Assign], list[ec_ast.EcStmt]] | None:
+        """Parse the split side's body after its two slice assigns: the det
+        derive call (arg = the left slice local), its contiguous projection
+        assigns, and the remaining tail. ``None`` off-shape."""
+        if not body or not isinstance(body[0], ec_ast.Call):
+            return None
+        det_call = body[0]
+        sx = 1 - spec["gi"]
+        s_pmap = _module_pmap(
+            spec["mods"][sx], resolver.resolve(spec["steps"][sx]).module_expr
+        )
+        m, _, meth = det_call.callee.partition(".")
+        if s_pmap.get(m, m) != spec["det_mod"] or meth != spec["det_meth"]:
+            return None
+        if det_call.args.strip() != spec["l_local"]:
+            return None
+        projs: list[ec_ast.Assign] = []
+        k = 1
+        while (
+            k < len(body)
+            and isinstance(body[k], ec_ast.Assign)
+            and cast(ec_ast.Assign, body[k]).rhs.startswith(det_call.var + ".")
+        ):
+            projs.append(cast(ec_ast.Assign, body[k]))
+            k += 1
+        return det_call, projs, list(body[k:])
+
+    def _seed_split_law_names(spec: dict[str, Any]) -> dict[str, str]:
+        l, r, src = spec["l_ty"], spec["r_ty"], spec["src_ty"]
+        return {
+            "concat": f"concat_{l}_{r}_to_{src}",
+            "ax_left": f"slice_concat_left_{l}_{r}_{src}",
+            "ax_right": f"slice_concat_right_{l}_{r}_{src}",
+            "ax_id": f"concat_slices_id_{l}_{r}_{src}",
+            "ax_dlet": f"d{src}_split_dlet_{l}_{r}",
+            "det_ax": f"{spec['det_mod']}_{spec['det_meth']}_det",
+        }
+
+    def _seed_split_pair_coupling(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> str | None:
+        """Cross-oracle coupling for the seed-split pair: shared same-name
+        fields verbatim, the grouped seed FIELD as the right slice of the
+        split side's full-seed FIELD, and the grouped keys FIELD as the
+        ``ev_``-form of the deterministic derive over the left slice. Also
+        requests the virtual concat triple so the split-uniform laws are
+        emitted (both soundness gates re-run at emission time)."""
+        spec = _seed_split_pair_spec(step_a, step_b)
+        if spec is None:
+            return None
+        gi = spec["gi"]
+        gtag, stag = str(gi + 1), str(2 - gi)
+        g_base, s_base = spec["g_base"], spec["s_base"]
+        g_fields = {v.name: v.type.text for v in spec["mods"][gi].module_vars}
+        s_fields = {v.name: v.type.text for v in spec["mods"][1 - gi].module_vars}
+        shared = [
+            n
+            for n in (v.name for v in spec["mods"][1 - gi].module_vars)
+            if n != spec["field"] and g_fields.get(n) == s_fields[n]
+        ]
+        # every field on either side must be accounted for, else decline
+        if set(g_fields) - set(shared) - {spec["keys_field"], spec["seed_field"]}:
+            return None
+        if set(s_fields) - set(shared) - {spec["field"]}:
+            return None
+        sf = f"{s_base}.{spec['field']}{{{stag}}}"
+        conj = [f"{s_base}.{n}{{{stag}}} = {g_base}.{n}{{{gtag}}}" for n in shared]
+        conj.append(
+            f"{g_base}.{spec['seed_field']}{{{gtag}}} ="
+            f" {spec['slice_r']} {sf} {spec['r_start']} {spec['r_end']}"
+        )
+        conj.append(
+            f"{g_base}.{spec['keys_field']}{{{gtag}}} ="
+            f" {spec['det_alias']}.ev_{spec['det_meth']}"
+            f" ({spec['slice_l']} {sf} 0 {spec['l_end']})"
+        )
+        top_types.request_virtual_concat(spec["src_ty"])
+        live_state_holders.update({g_base, s_base})
+        # the canonical glob set (live abstract modules + RO holders) -- the
+        # _T ROM cells carry ={glob <clone>.RO_H}, which declared_module_names
+        # misses (measured: dropping it loses the RF state relation and the
+        # tail /# fails)
+        globs = glob_invariant_conj
+        body = " /\\ ".join(conj)
+        return f"{globs} /\\ {body}" if globs else body
+
+    def _seed_split_pair_init_tac(  # pylint: disable=too-many-locals
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> list[str] | None:
+        """The COMPLETE init tactic for the seed-split pair, or ``None``.
+
+        Validated end-to-end on the real CG export (probe ``c296_h2i``, EXIT 0;
+        negative control with corrupted slice offsets rejected): ``symmetry``
+        when the grouped side is on the right, the split-uniform ``rndsem*`` +
+        ``rnd``-bijection couple of the ONE full draw against the TWO
+        independent draws, a two-sided ``derivekeypair`` det functionalization
+        (both sides learn the same ``ev_`` value), then the common-tail peel.
+        """
+        spec = _seed_split_pair_spec(step_a, step_b)
+        if spec is None:
+            return None
+        gi = spec["gi"]
+        sx = 1 - gi
+        g_base, s_base = spec["g_base"], spec["s_base"]
+        parsed = _seed_split_split_tail(spec, spec["s_exec"][3:])
+        if parsed is None:
+            return None
+        _det_call, projs, s_tail = parsed
+        g_tail = spec["g_exec"][2:]
+        g_pmap = _module_pmap(
+            spec["mods"][gi], resolver.resolve(spec["steps"][gi]).module_expr
+        )
+        s_pmap = _module_pmap(
+            spec["mods"][sx], resolver.resolve(spec["steps"][sx]).module_expr
+        )
+        gb = _seed_split_backbone(g_tail, g_pmap)
+        sb = _seed_split_backbone(s_tail, s_pmap)
+        if gb != sb or ("other",) in gb:
+            return None
+        # projection facts, only for targets the tail actually reads
+        read_text = " ".join(
+            (
+                st.args
+                if isinstance(st, ec_ast.Call)
+                else (
+                    st.rhs
+                    if isinstance(st, ec_ast.Assign)
+                    else st.distr if isinstance(st, ec_ast.Sample) else ""
+                )
+            )
+            for st in s_tail
+        )
+        ret = next(
+            (st for st in (spec["mods"][sx].procs) if st.name == "initialize"), None
+        )
+        ret_expr = (
+            next((st.expr for st in ret.body if isinstance(st, ec_ast.Return)), "")
+            if ret is not None
+            else ""
+        )
+        read = set(re.findall(r"[A-Za-z_]\w*", read_text + " " + ret_expr))
+        law = _seed_split_law_names(spec)
+        # post-symmetry tags: grouped = {1}, split = {2}
+        sf = f"{s_base}.{spec['field']}{{2}}"
+        slice_l_expr = f"{spec['slice_l']} {sf} 0 {spec['l_end']}"
+        slice_r_expr = f"{spec['slice_r']} {sf} {spec['r_start']} {spec['r_end']}"
+        ev = f"{spec['det_alias']}.ev_{spec['det_meth']}"
+        globs = glob_invariant_conj
+        inv1 = " /\\ ".join(
+            [
+                globs,
+                f"{spec['chal_seed_local']}{{1}} = {slice_l_expr}",
+                f"{g_base}.{spec['seed_field']}{{1}} = {slice_r_expr}",
+                f"{spec['l_local']}{{2}} = {slice_l_expr}",
+                f"{spec['r_local']}{{2}} = {slice_r_expr}",
+            ]
+        )
+        inv2_parts = [
+            globs,
+            f"{g_base}.{spec['seed_field']}{{1}} = {slice_r_expr}",
+            f"{spec['r_local']}{{2}} = {slice_r_expr}",
+            f"{g_base}.{spec['keys_field']}{{1}} = {ev} ({slice_l_expr})",
+        ]
+        for p in projs:
+            if p.var in read:
+                comp = p.rhs.split(".`")[1] if ".`" in p.rhs else ""
+                if not comp:
+                    return None
+                inv2_parts.append(f"{p.var}{{2}} = ({ev} ({slice_l_expr})).`{comp}")
+        # the chain emitter hardcodes ``proc.`` ahead of this body;
+        # ``symmetry`` composes after it (the _split_seed_init_tac precedent)
+        lines: list[str] = ["symmetry."] if gi == 1 else []
+        lines += [
+            "inline *.",
+            # grouped side after inline: [seed <$; derive; keys <- res; T <$]
+            "swap{1} 4 -2.",
+            f"seq 2 4 : ({inv1}).",
+            "+ wp.",
+            "  rndsem*{1} 0.",
+            f"  rnd (fun (p : {spec['l_ty']} * {spec['r_ty']}) =>"
+            f" {law['concat']} p.`1 p.`2)",
+            f"      (fun (sf : {spec['src_ty']}) => ({spec['slice_l']} sf 0 {spec['l_end']},"
+            f" {spec['slice_r']} sf {spec['r_start']} {spec['r_end']})).",
+            "  skip => />.",
+            f"  rewrite {law['ax_dlet']}.",
+            "  split.",
+            f"  * move => sf hsf; rewrite {law['ax_id']} //.",
+            "  move => _; split.",
+            "  * move => sf hsf.",
+            "    rewrite !dlet1E; congr; apply fun_ext => a /=.",
+            "    rewrite !dmap1E /(\\o) /pred1 /=.",
+            "    congr; apply mu_eq => b /=.",
+            f"    by rewrite eqboolP; smt({law['ax_left']} {law['ax_right']} {law['ax_id']}).",
+            "  move => _ p hp.",
+            f"  have h1 : p.`1 \\in d{spec['l_ty']} by smt(supp_dlet supp_dmap).",
+            f"  have h2 : p.`2 \\in d{spec['r_ty']} by smt(supp_dlet supp_dmap).",
+            "  split.",
+            "  * by (rewrite supp_dlet; exists p.`1; rewrite h1 /=;",
+            "        rewrite supp_dmap; exists p.`2; rewrite h2)",
+            f"       || smt({law['ax_left']} {law['ax_right']}).",
+            f"  move => _; smt({law['ax_left']} {law['ax_right']}).",
+            f"seq 2 {1 + len(projs)} : ({' /\\ '.join(inv2_parts)}).",
+            "+ wp.",
+            f"  exists* (glob {spec['det_mod']}){{1}}, {spec['chal_seed_local']}{{1}}; elim* => gk1 s1.",
+            f"  call{{1}} ({law['det_ax']} gk1 s1).",
+            f"  exists* (glob {spec['det_mod']}){{2}}, {spec['l_local']}{{2}}; elim* => gk2 s2.",
+            f"  call{{2}} ({law['det_ax']} gk2 s2).",
+            "  skip => /#.",
+        ]
+        lines += _seed_split_ladder(s_tail)
+        return lines
+
+    def _seed_split_pair_decaps_walk(  # pylint: disable=too-many-locals,too-many-return-statements
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> dict[str, list[str]] | None:
+        """The seed-split ``decaps`` consumer, keyed by oracle name; ``None``
+        off-shape. Validated on the real CG export (probe ``c296_h2d``, EXIT 0;
+        deleting the one-sided det drop rejected): guard couple from the shared
+        ``ctStar`` conjunct, ``sp`` over the split side's re-slices, ONE
+        one-sided ``derivekeypair`` det drop whose ``ev_`` value the coupling
+        equates with the grouped keys field, then the matched-tail peel."""
+        spec = _seed_split_pair_spec(step_a, step_b)
+        if spec is None:
+            return None
+        coupling = _seed_split_pair_coupling(step_a, step_b)
+        if coupling is None:
+            return None
+        gi = spec["gi"]
+        sx = 1 - gi
+        stag = str(sx + 1)
+
+        def _decaps_if(mod: ec_ast.Module) -> ec_ast.If | None:
+            proc = next((p for p in mod.procs if p.name == "decaps"), None)
+            if proc is None:
+                return None
+            body = [
+                st
+                for st in proc.body
+                if not isinstance(st, (ec_ast.VarDecl, ec_ast.Return))
+            ]
+            if len(body) != 1 or not isinstance(body[0], ec_ast.If):
+                return None
+            branch = body[0]
+            if len(branch.then_body) != 1 or not isinstance(
+                branch.then_body[0], ec_ast.Assign
+            ):
+                return None
+            return branch
+
+        g_if, s_if = _decaps_if(spec["mods"][gi]), _decaps_if(spec["mods"][sx])
+        if g_if is None or s_if is None:
+            return None
+        if (
+            cast(ec_ast.Assign, g_if.then_body[0]).rhs
+            != cast(ec_ast.Assign, s_if.then_body[0]).rhs
+        ):
+            return None
+        s_else = [st for st in s_if.else_body if not isinstance(st, ec_ast.VarDecl)]
+        g_else = [st for st in g_if.else_body if not isinstance(st, ec_ast.VarDecl)]
+        # split else: the same two complementary re-slices of the stored field
+        slices: list[tuple[str, str, str, str]] = []
+        for st in s_else[:2]:
+            if not isinstance(st, ec_ast.Assign):
+                return None
+            toks = st.rhs.split()
+            if (
+                len(toks) < 4
+                or not toks[0].startswith("slice_")
+                or toks[1] != spec["field"]
+            ):
+                return None
+            slices.append((st.var, toks[0], toks[2], " ".join(toks[3:])))
+        pre_sl = [x for x in slices if x[1] == spec["slice_l"] and x[2] == "0"]
+        suf_sl = [x for x in slices if x[1] == spec["slice_r"] and x[2] != "0"]
+        if len(pre_sl) != 1 or len(suf_sl) != 1:
+            return None
+        l_local = pre_sl[0][0]
+        r_local = suf_sl[0][0]
+        dspec = dict(spec, l_local=l_local, r_local=r_local)
+        parsed = _seed_split_split_tail(dspec, s_else[2:])
+        if parsed is None:
+            return None
+        det_call, _projs, s_tail = parsed
+        g_pmap = _module_pmap(
+            spec["mods"][gi], resolver.resolve(spec["steps"][gi]).module_expr
+        )
+        s_pmap = _module_pmap(
+            spec["mods"][sx], resolver.resolve(spec["steps"][sx]).module_expr
+        )
+        gb = _seed_split_backbone(g_else, g_pmap)
+        sb = _seed_split_backbone(s_tail, s_pmap)
+        if gb != sb or ("other",) in gb:
+            return None
+        law = _seed_split_law_names(spec)
+        sf = f"{spec['s_base']}.{spec['field']}{{{stag}}}"
+        slice_l_expr = f"{spec['slice_l']} {sf} 0 {spec['l_end']}"
+        slice_r_expr = f"{spec['slice_r']} {sf} {spec['r_start']} {spec['r_end']}"
+        ev = f"{spec['det_alias']}.ev_{spec['det_meth']}"
+        inv = " /\\ ".join(
+            [
+                "={ct}",
+                coupling,
+                f"{r_local}{{{stag}}} = {slice_r_expr}",
+                f"{det_call.var}{{{stag}}} = {ev} ({slice_l_expr})",
+            ]
+        )
+        # the chain emitter hardcodes ``proc.`` ahead of this body
+        lines = [
+            "if.",
+            "+ move => &1 &2 /#.",
+            "+ by wp; skip => /#.",
+            "sp.",
+            f"seq {'1 0' if stag == '1' else '0 1'} : ({inv}).",
+            f"+ exists* (glob {spec['det_mod']}){{{stag}}}, {l_local}{{{stag}}}; elim* => gk s.",
+            f"  call{{{stag}}} ({law['det_ax']} gk s).",
+            "  skip => /#.",
+        ]
+        lines += _seed_split_ladder(s_tail)
+        return {"decaps": lines}
+
     def _keygenequiv_init_tac(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> list[str] | None:
@@ -7974,6 +8569,12 @@ def export_proof_file(proof_path: str) -> str:
         prg_coupling = _prg_query_game_coupling(step_a, step_b)
         if prg_coupling is not None:
             return prg_coupling
+        # Seed-split reduction pair (the ``*_seedbased`` IND-CCA hop_2/hop_21
+        # family). Tried AFTER the query-delegate / PRG paths so the HON_BIND
+        # shapes those already serve keep their couplings byte-identical.
+        seed_split_coupling = _seed_split_pair_coupling(step_a, step_b)
+        if seed_split_coupling is not None:
+            return seed_split_coupling
 
         # Wall-7 composite coupling: when one side is a field-holding delegating
         # reduction, the single live-field equality cannot bridge the two
@@ -10867,6 +11468,12 @@ def export_proof_file(proof_path: str) -> str:
             # seed. ``None`` off-shape, so every other init is byte-identical.
             if reprogram_override is None:
                 reprogram_override = _split_seed_init_tac(step_a, step_b)
+            # Seed-split reduction PAIR (the ``*_seedbased`` IND-CCA
+            # hop_2/hop_21 ``initialize``): couple the one full-seed draw to
+            # the two independent draws and functionalize the derive seam.
+            # ``None`` off-shape, so every other init is byte-identical.
+            if reprogram_override is None:
+                reprogram_override = _seed_split_pair_init_tac(step_a, step_b)
             # Same-backbone / different-LAYOUT hop (HON_BIND hop_4 / hop_8
             # ``initialize``): batch the interleaved side, then peel. ``None``
             # off-shape, and it declines outright when both sides are already
@@ -10920,6 +11527,7 @@ def export_proof_file(proof_path: str) -> str:
                     _twin_challenge_oracle_tacs(step_a, step_b)
                     or _kdf_substitution_decaps_walk_tacs(step_a, step_b)
                     or _keyed_reprogram_decaps_walk(step_a, step_b, _i)
+                    or _seed_split_pair_decaps_walk(step_a, step_b)
                 ),
                 # The OUTER hop lemma's glob set (see ``glob_invariant_conj``).
                 # The chain coupling must match it exactly -- see the gparams
